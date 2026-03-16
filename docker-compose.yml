@@ -1,0 +1,54 @@
+services:
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    image: porthub_api
+    container_name: porthub_api
+    environment:
+      - API_DEBUG=True
+    env_file:
+      - ./.env
+    volumes:
+      - ./api:/app
+    restart: always
+    networks:
+      - porthub
+
+  ui:
+    build:
+      context: ./ui
+    image: porthub_ui
+    container_name: porthub_ui
+    env_file:
+      - ./.env
+    volumes:
+      - ./ui:/app
+    restart: always
+    depends_on:
+      - api
+    networks:
+      - porthub
+
+  proxy:
+    image: nginx:1.19-alpine
+    container_name: porthub_proxy
+    env_file:
+      - ./.env
+    ports:
+      - ${APP_HTTP_PORT:-80}:80
+      - ${APP_HTTPS_PORT:-443}:443
+    volumes:
+      - ./proxy/nginx.conf:/etc/nginx/templates/default.conf.template
+      - ./proxy/certificate/server.crt:/etc/ssl/certs/server.crt
+      - ./proxy/certificate/server.key:/etc/ssl/certs/server.key
+    restart: always
+    depends_on:
+      - api
+      - ui
+    networks:
+      - porthub
+
+networks:
+  porthub:
+    name: porthub

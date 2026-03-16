@@ -1,0 +1,31 @@
+services:
+  mongodb:
+    image: mongo:5.0
+    container_name: porthub_mongodb
+    ports:
+      - ${MONGO_HOST_PORT:-61228}:27017
+    env_file:
+      - ./.env
+    volumes:
+      - ./volumes/mongodb:/data/db
+    restart: always
+    networks:
+      - porthub
+
+  redis:
+    image: redis:6.2-alpine
+    container_name: porthub_redis
+    ports:
+      - ${REDIS_HOST_PORT:-62058}:6379
+    command: redis-server --save 20 1 --loglevel warning --requirepass ${REDIS_PASSWORD}
+    env_file:
+      - ./.env
+    volumes:
+      - ./volumes/redis:/data
+    restart: always
+    networks:
+      - porthub
+
+networks:
+  porthub:
+    name: porthub

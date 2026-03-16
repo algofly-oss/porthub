@@ -1,0 +1,7 @@
+**/node_modules/
+**/__MACOSX/
+**/__pycache__/
+volumes/
+.env
+.env*
+.DS_Store

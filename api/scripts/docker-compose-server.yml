@@ -1,0 +1,8 @@
+services:
+  rathole_server:
+    image: archef2000/rathole:latest
+    command: -s /app/server.toml
+    network_mode: host
+    volumes:
+      - ./server.toml:/app/server.toml
+    restart: always

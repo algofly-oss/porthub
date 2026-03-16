@@ -1,0 +1,10 @@
+[server]
+bind_addr = "0.0.0.0:2333"
+
+[server.services.jupyterlab]
+token = "test"
+bind_addr = "0.0.0.0:5202"
+
+[server.services.http_server]
+token = "test"
+bind_addr = "0.0.0.0:5203"
