@@ -32,7 +32,7 @@ const NavBarItem = ({ tab, setTab, Icon, IconFilled, text }) => {
 
 export default function UserNavBar({ tab, setTab }) {
   return (
-    <div className="w-full md:-mt-2">
+    <div className="w-full md:-mt-2 md:flex-1 md:min-h-0 flex flex-col justify-between">
       <div className="flex md:flex-col md:space-y-2 md:space-x-0 w-full justify-around">
         <NavBarItem
           tab={tab}
@@ -61,9 +61,8 @@ export default function UserNavBar({ tab, setTab }) {
 
       {/* visible only on large screens */}
       <div className="hidden md:flex flex-col">
-        <div className="w-full border-t border-neutral-200 dark:border-neutral-800 my-4" />
-        <InfoCard />
-        <DarkThemeToggle />
+        {/* <div className="w-full border-t border-neutral-200 dark:border-neutral-800 my-4" /> */}
+        {/* <DarkThemeToggle /> */}
         <div className="w-full border-t border-neutral-200 dark:border-neutral-800 my-4" />
         <Logout />
       </div>
