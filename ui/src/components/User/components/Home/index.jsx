@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useContext, useEffect, useState } from "react";
 import axios from "axios";
 import dayjs from "dayjs";
 import {
@@ -13,7 +13,9 @@ import HostItem from "./components/Host/HostItem";
 import HostConfigPopup from "./components/Host/HostConfigPopup";
 import MachineCreateModal from "./components/Host/MachineCreateModal";
 import useToast from "@/shared/hooks/useToast";
+import { SocketContext } from "@/shared/contexts/socket";
 import apiRoutes from "@/shared/routes/apiRoutes";
+import socketRoutes from "@/shared/routes/socketRoutes";
 
 const mapConnectionToForwardingConfig = (connection) => ({
   dataId: connection._id,
@@ -49,6 +51,28 @@ const mapMachineToHost = (machine) => ({
   forwardingConfigs: [],
 });
 
+const mergeMachineIntoHost = (host, machine) => {
+  const mappedHost = mapMachineToHost(machine);
+
+  return {
+    ...mappedHost,
+    numPorts: host?.numPorts ?? 0,
+    forwardingConfigs: host?.forwardingConfigs ?? [],
+  };
+};
+
+const upsertHostWithMachine = (hosts, machine) => {
+  const existingHostIndex = hosts.findIndex((host) => host.id === machine._id);
+
+  if (existingHostIndex === -1) {
+    return [...hosts, mergeMachineIntoHost(null, machine)];
+  }
+
+  return hosts.map((host) =>
+    host.id === machine._id ? mergeMachineIntoHost(host, machine) : host
+  );
+};
+
 const MACHINE_PAGE_SIZE_OPTIONS = [
   { value: "5", label: "5" },
   { value: "10", label: "10" },
@@ -59,6 +83,7 @@ const MACHINE_PAGE_SIZE_OPTIONS = [
 export default function Home() {
   const { colorScheme } = useMantineColorScheme();
   const isDark = colorScheme === "dark";
+  const socket = useContext(SocketContext);
   const [hosts, setHosts] = useState([]);
   const [selectedHostId, setSelectedHostId] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -133,6 +158,55 @@ export default function Home() {
 
     loadData();
   }, []);
+
+  useEffect(() => {
+    if (!socket) {
+      return undefined;
+    }
+
+    const requestMachineStatusSnapshot = () => {
+      socket.emit(socketRoutes.ctsMachineStatusSnapshot);
+    };
+
+    const handleMachineStatusSnapshot = (payload) => {
+      const machines = payload?.machines || [];
+
+      if (machines.length === 0) {
+        return;
+      }
+
+      setHosts((currentHosts) =>
+        machines.reduce(
+          (nextHosts, machine) => upsertHostWithMachine(nextHosts, machine),
+          currentHosts
+        )
+      );
+    };
+
+    const handleMachineStatusChanged = (payload) => {
+      const machine = payload?.machine;
+
+      if (!machine?._id) {
+        return;
+      }
+
+      setHosts((currentHosts) => upsertHostWithMachine(currentHosts, machine));
+    };
+
+    if (socket.connected) {
+      requestMachineStatusSnapshot();
+    }
+
+    socket.on("connect", requestMachineStatusSnapshot);
+    socket.on(socketRoutes.stcMachineStatusSnapshot, handleMachineStatusSnapshot);
+    socket.on(socketRoutes.stcMachineStatusChanged, handleMachineStatusChanged);
+
+    return () => {
+      socket.off("connect", requestMachineStatusSnapshot);
+      socket.off(socketRoutes.stcMachineStatusSnapshot, handleMachineStatusSnapshot);
+      socket.off(socketRoutes.stcMachineStatusChanged, handleMachineStatusChanged);
+    };
+  }, [socket]);
 
   const handleOpenConfig = (hostId) => setSelectedHostId(hostId);
 
@@ -212,7 +286,7 @@ export default function Home() {
         currentHosts.map((host) =>
           host.id === hostId
             ? {
-                ...host,
+                ...mergeMachineIntoHost(host, machineResponse.data.data),
                 numPorts: savedConfigs.filter((config) => config.enabled !== false).length,
                 forwardingConfigs: savedConfigs,
               }
