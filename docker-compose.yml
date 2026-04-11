@@ -49,6 +49,16 @@ services:
     networks:
       - porthub
 
+  rathole:
+    image: archef2000/rathole:latest
+    command: -s /app/server.toml
+    network_mode: host
+    volumes:
+      - ./api/server.toml:/app/server.toml
+    restart: always
+    depends_on:
+      - api
+
 networks:
   porthub:
     name: porthub

@@ -4,9 +4,7 @@ import typing
 class Connection(BaseModel):
     user_id: typing.Optional[str] = Field(None)
     data_id: typing.Optional[str] = Field(None)
-    host_id: typing.Optional[str] = Field(None, example="luna")
-    host_name: typing.Optional[str] = Field(None, example="luna")
-    host_ip: typing.Optional[str] = Field(None, example="192.168.0.3")
+    machine_id: str = Field(..., example="67f7d26b760bd71f4d3f3c34")
     service_name: str = Field(..., min_length=1, example="SSH")
     service_description: typing.Optional[str] = Field(
         "", example="Secure shell access for my homelab node"

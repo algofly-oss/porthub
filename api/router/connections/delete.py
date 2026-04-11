@@ -1,8 +1,7 @@
-from fastapi import APIRouter, Request, Response, HTTPException
-from shared.factory import db
-from bson import ObjectId
-from ..auth.common import authenticate_user
+from fastapi import APIRouter, Request, HTTPException
 import pydantic
+from shared.factory import db
+from ..common import get_authenticated_user, parse_object_id, serialize_connection
 
 router = APIRouter()
 
@@ -11,22 +10,24 @@ class DeleteConnection(pydantic.BaseModel):
 
 @router.post("/delete")
 async def delete_connection(data: DeleteConnection, request: Request):
-    # Check if user is logged in
-    user_id = authenticate_user(request.cookies.get("session_token"))
-    user = await db.users.find_one({"_id": ObjectId(user_id.decode("utf-8"))})
-    if not user:
-        raise HTTPException(status_code=400, detail="User not logged in")
+    user = await get_authenticated_user(request)
 
-    # Check if connection already exists
     connection = await db.connections.find_one(
-        {"_id": ObjectId(data.data_id), "user_id": user["_id"]}
+        {
+            "_id": parse_object_id(data.data_id, "Invalid connection id"),
+            "user_id": user["_id"],
+        }
     )
     if not connection:
         raise HTTPException(status_code=400, detail="Connection not found")
 
-    # Delete connection
+    machine = None
+    if connection.get("machine_id"):
+        machine = await db.machines.find_one({"_id": connection["machine_id"]})
     await db.connections.delete_one({"_id": connection["_id"]})
 
+    # This is where a later async broadcast hook can publish Rathole config changes.
     return {
         "msg": "Connection deleted successfully",
+        "data": serialize_connection(connection, machine),
     }

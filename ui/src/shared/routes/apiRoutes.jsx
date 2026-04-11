@@ -13,7 +13,13 @@ let apiRoutes = {
   updateConnection: "/connections/update",
   listConnections: "/connections/list",
   deleteConnection: "/connections/delete",
-  getConnectionCommand: "/connections/command",
+  // Machines
+  addMachine: "/machines/add",
+  updateMachine: "/machines/update",
+  listMachines: "/machines/list",
+  deleteMachine: "/machines/delete",
+  refreshMachineToken: "/machines/refresh-token",
+  syncMachine: "/machines/sync",
 };
 
 Object.entries(apiRoutes).forEach(([key, value]) => {
@@ -22,5 +28,8 @@ Object.entries(apiRoutes).forEach(([key, value]) => {
 
 apiRoutes.checkExternalPortAvailability = (port) =>
   `${API_PREFIX}/connections/external-port/${port}/availability`;
+
+apiRoutes.getMachineCommand = (machineId) =>
+  `${API_PREFIX}/machines/command/${machineId}`;
 
 export default apiRoutes;

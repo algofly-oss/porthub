@@ -1,7 +1,7 @@
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
-from router import ping, auth, connections
+from router import ping, auth, connections, machines
 from sockets import sio_app
 
 API_ROOT = "/api"
@@ -32,4 +32,5 @@ async def root():
 
 app.include_router(ping.router, prefix=API_ROOT)
 app.include_router(auth.router, prefix=API_ROOT)
+app.include_router(machines.router, prefix=API_ROOT)
 app.include_router(connections.router, prefix=API_ROOT)
