@@ -87,6 +87,9 @@ def write_server_toml(content: str) -> Path:
             temp_path = Path(temp_file.name)
 
         os.replace(temp_path, target_path)
+        # Emit a direct modification on the final path so Rathole's watcher
+        # can hot-reload service changes without a process restart.
+        target_path.touch()
         return target_path
     except Exception:
         if temp_path is not None:

@@ -560,6 +560,18 @@ PORT_HUB_SELF_PATH=$PORT_HUB_SELF_PATH
 EOF_ENV
 }
 
+write_rathole_config_file() {
+  local source_file="$1"
+  if [ -f "$PORT_HUB_CONFIG_FILE" ]; then
+    cat "$source_file" | ${SUDO:-} tee "$PORT_HUB_CONFIG_FILE" >/dev/null
+    ${SUDO:-} chmod 600 "$PORT_HUB_CONFIG_FILE"
+  else
+    ${SUDO:-} install -m 600 "$source_file" "$PORT_HUB_CONFIG_FILE"
+  fi
+  # Touch the final path so Rathole's config watcher sees a direct file modification.
+  ${SUDO:-} touch "$PORT_HUB_CONFIG_FILE"
+}
+
 validate_configuration() {
   require_value "PortHub API URL" "$PORT_HUB_API_URL"
   require_value "machine id" "$PORT_HUB_MACHINE_ID"
@@ -921,7 +933,7 @@ fetch_config_cmd() {
   version="$(extract_header "X-PortHub-Config-Version" "$tmp_headers")"
   [ -n "$version" ] || { rm -f "$tmp_body" "$tmp_headers"; fail "Missing PortHub config version header"; }
   shared_services="$(count_services_in_file "$tmp_body")"
-  ${SUDO:-} install -m 600 "$tmp_body" "$PORT_HUB_CONFIG_FILE"
+  write_rathole_config_file "$tmp_body"
   rm -f "$tmp_body" "$tmp_headers"
   write_state \
     "$version" \
@@ -1381,7 +1393,7 @@ poll_for_change() {
       version="$(extract_header "X-PortHub-Config-Version" "$tmp_headers")"
       [ -n "$version" ] || { rm -f "$tmp_body" "$tmp_headers"; fail "Missing PortHub config version header"; }
       shared_services="$(count_services_in_file "$tmp_body")"
-      ${SUDO:-} install -m 600 "$tmp_body" "$PORT_HUB_CONFIG_FILE"
+      write_rathole_config_file "$tmp_body"
       write_state \
         "$version" \
         "$(date +%s)" \
@@ -1632,7 +1644,11 @@ service_run_cmd() {
         rc="$?"
         if [ "$rc" -eq 10 ]; then
           log "INFO" "Received updated config version $(state_get PORT_HUB_CURRENT_VERSION)"
-          start_rathole
+          if [ -n "$rathole_pid" ] && kill -0 "$rathole_pid" 2>/dev/null; then
+            log "INFO" "Updated config written; waiting for Rathole hot-reload"
+          else
+            start_rathole
+          fi
         elif [ "$rc" -eq 20 ]; then
           log "WARN" "Machine was disabled in PortHub; stopping Rathole"
           stop_rathole
