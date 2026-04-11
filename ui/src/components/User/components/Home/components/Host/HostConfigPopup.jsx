@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import {
   ActionIcon,
   Badge,
@@ -15,10 +15,12 @@ import {
   useMantineColorScheme,
 } from "@mantine/core";
 import { useDebouncedValue } from "@mantine/hooks";
-import { IconArrowLeft, IconChevronDown, IconChevronUp, IconCopy, IconDotsVertical, IconPencil, IconPlus, IconRefresh, IconTrash } from "@tabler/icons-react";
+import { IconArrowLeft, IconChevronDown, IconChevronUp, IconCopy, IconDotsVertical, IconPlus, IconRefresh, IconTrash } from "@tabler/icons-react";
 import axios from "axios";
 import apiRoutes from "@/shared/routes/apiRoutes";
 import useToast from "@/shared/hooks/useToast";
+import { SocketContext } from "@/shared/contexts/socket";
+import socketRoutes from "@/shared/routes/socketRoutes";
 
 const getInputClassName = (isDark) =>
   `w-full rounded-md border px-3 py-2 text-sm outline-none transition-colors focus:!border-blue-500 focus:ring-0 ${
@@ -40,6 +42,7 @@ const createEmptyRule = (externalPort = "") => ({
   dataId: null,
   serviceName: "",
   serviceDescription: "",
+  internalIp: "0.0.0.0",
   internalPort: "3000",
   externalPort: externalPort ? String(externalPort) : "",
   enabled: true,
@@ -50,16 +53,72 @@ const mapRuleFromConfig = (config) => ({
   dataId: config.dataId || null,
   serviceName: config.serviceName || "",
   serviceDescription: config.serviceDescription || "",
+  internalIp: config.internalIp || config.internal_ip || "0.0.0.0",
   internalPort: String(config.internalPort || 3000),
   externalPort: String(config.externalPort || 3000),
   enabled: config.enabled ?? true,
 });
+
+const isValidIpv4Address = (value) => {
+  const normalized = (value || "").trim();
+  if (!normalized) {
+    return false;
+  }
+
+  const parts = normalized.split(".");
+  if (parts.length !== 4) {
+    return false;
+  }
+
+  return parts.every((part) => {
+    if (!/^\d+$/.test(part)) {
+      return false;
+    }
+    const segment = Number(part);
+    return segment >= 0 && segment <= 255;
+  });
+};
+
+const isValidHostname = (value) => {
+  const normalized = (value || "").trim();
+  if (!normalized || normalized.length > 253) {
+    return false;
+  }
+
+  if (normalized.toLowerCase() === "localhost") {
+    return true;
+  }
+
+  return normalized.split(".").every((label) => {
+    if (!label || label.length > 63) {
+      return false;
+    }
+
+    if (!/^[A-Za-z0-9-]+$/.test(label)) {
+      return false;
+    }
+
+    return !label.startsWith("-") && !label.endsWith("-");
+  });
+};
+
+const isValidInternalHost = (value) =>
+  isValidIpv4Address(value) || isValidHostname(value);
+
+const normalizeInternalHost = (value) => {
+  const normalized = (value || "").trim();
+  return normalized || "0.0.0.0";
+};
 
 const getRuleErrors = (rule) => {
   const errors = {};
 
   if (!rule.serviceName.trim()) {
     errors.serviceName = "Service name is required";
+  }
+
+  if (rule.internalIp.trim() && !isValidInternalHost(rule.internalIp)) {
+    errors.internalIp = "Use a valid IPv4 address or hostname";
   }
 
   const internalPort = Number(rule.internalPort);
@@ -79,6 +138,7 @@ const getRuleErrors = (rule) => {
 const normalizeRuleForCompare = (rule) => ({
   serviceName: (rule.serviceName || "").trim(),
   serviceDescription: (rule.serviceDescription || "").trim(),
+  internalIp: normalizeInternalHost(rule.internalIp),
   internalPort: Number(rule.internalPort) || 0,
   externalPort: Number(rule.externalPort) || 0,
   enabled: Boolean(rule.enabled),
@@ -88,6 +148,8 @@ const rulesSnapshotKey = (rules) =>
   JSON.stringify(rules.map(normalizeRuleForCompare));
 
 const RULES_PER_PAGE = 5;
+const MAX_CLIENT_LOG_LINES = 2000;
+const CLIENT_LOG_AUTO_SCROLL_THRESHOLD = 24;
 
 export default function HostConfigPopup({
   host,
@@ -95,12 +157,14 @@ export default function HostConfigPopup({
   onClose,
   onSave,
   onDeleteMachine,
+  onToggleMachine,
   onRefreshMachineToken,
   isSaving,
 }) {
   const { colorScheme } = useMantineColorScheme();
   const isDark = colorScheme === "dark";
   const { success, error } = useToast();
+  const socket = useContext(SocketContext);
 
   const [rules, setRules] = useState([]);
   const [selectedRuleId, setSelectedRuleId] = useState(null);
@@ -111,21 +175,49 @@ export default function HostConfigPopup({
   const [machineCommand, setMachineCommand] = useState("");
   const [isLoadingMachineCommand, setIsLoadingMachineCommand] = useState(false);
   const [isRefreshingMachineToken, setIsRefreshingMachineToken] = useState(false);
+  const [isTogglingMachine, setIsTogglingMachine] = useState(false);
   const [isRefreshMachineTokenConfirmOpen, setIsRefreshMachineTokenConfirmOpen] =
     useState(false);
   const [isDeleteMachineConfirmOpen, setIsDeleteMachineConfirmOpen] =
     useState(false);
   const [isDeletingMachine, setIsDeletingMachine] = useState(false);
   const [showMachineCredentials, setShowMachineCredentials] = useState(false);
+  const [showClientLogs, setShowClientLogs] = useState(false);
+  const [showVerboseClientLogs, setShowVerboseClientLogs] = useState(false);
+  const [showClientLogLineNumbers, setShowClientLogLineNumbers] = useState(false);
+  const [clientLogs, setClientLogs] = useState([]);
+  const [clientLogStartLineNumber, setClientLogStartLineNumber] = useState(1);
+  const [clientLogStreamStatus, setClientLogStreamStatus] = useState("idle");
+  const [shouldAutoScrollClientLogs, setShouldAutoScrollClientLogs] = useState(true);
   const [editingRuleSnapshot, setEditingRuleSnapshot] = useState(null);
   const [rulesPage, setRulesPage] = useState(1);
   const [debouncedRules] = useDebouncedValue(rules, 300);
   const initialRulesSnapshotRef = useRef("");
+  const clientLogsContainerRef = useRef(null);
+  const previousHostIdRef = useRef(null);
 
   const selectedRule = rules.find((rule) => rule.localId === selectedRuleId) || null;
   const hasUnsavedChanges =
     host && rulesSnapshotKey(rules) !== initialRulesSnapshotRef.current;
   const savedRuleCount = host?.forwardingConfigs?.length || 0;
+  const hostConnectionStatus =
+    host?.connectionStatus || (host?.isActive ? "online" : "offline");
+  const savedRulesById = new Map(
+    (host?.forwardingConfigs || [])
+      .filter((rule) => rule.dataId)
+      .map((rule) => [rule.dataId, rule])
+  );
+  const visibleClientLogs = clientLogs.reduce((result, line, index) => {
+    if (!showVerboseClientLogs && line.includes("[DEBUG]")) {
+      return result;
+    }
+
+    result.push({
+      number: clientLogStartLineNumber + index,
+      text: line,
+    });
+    return result;
+  }, []);
   const totalRulePages = Math.max(1, Math.ceil(rules.length / RULES_PER_PAGE));
   const paginatedRules = rules.slice(
     (rulesPage - 1) * RULES_PER_PAGE,
@@ -151,12 +243,20 @@ export default function HostConfigPopup({
 
   useEffect(() => {
     if (!host) {
+      previousHostIdRef.current = null;
       setRules([]);
       setSelectedRuleId(null);
       setErrorsByRuleId({});
       setAvailabilityByRuleId({});
       setMachineCommand("");
       setShowMachineCredentials(false);
+      setShowClientLogs(false);
+      setShowVerboseClientLogs(false);
+      setShowClientLogLineNumbers(false);
+      setClientLogs([]);
+      setClientLogStartLineNumber(1);
+      setClientLogStreamStatus("idle");
+      setShouldAutoScrollClientLogs(true);
       setIsRefreshMachineTokenConfirmOpen(false);
       setIsDeleteMachineConfirmOpen(false);
       setEditingRuleSnapshot(null);
@@ -170,17 +270,43 @@ export default function HostConfigPopup({
         ? host.forwardingConfigs.map(mapRuleFromConfig)
         : [];
 
+    const isHostSwitch = previousHostIdRef.current !== host.id;
+    previousHostIdRef.current = host.id;
+
     setRules(nextRules);
-    setSelectedRuleId(null);
     setErrorsByRuleId({});
     setAvailabilityByRuleId({});
-    setMachineCommand("");
-    setShowMachineCredentials(false);
-    setIsRefreshMachineTokenConfirmOpen(false);
-    setIsDeleteMachineConfirmOpen(false);
-    setEditingRuleSnapshot(null);
-    setRulesPage(1);
     initialRulesSnapshotRef.current = rulesSnapshotKey(nextRules);
+
+    if (isHostSwitch) {
+      setSelectedRuleId(null);
+      setShowMachineCredentials(false);
+      setShowClientLogs(false);
+      setShowVerboseClientLogs(false);
+      setShowClientLogLineNumbers(false);
+      setClientLogs([]);
+      setClientLogStartLineNumber(1);
+      setClientLogStreamStatus("idle");
+      setShouldAutoScrollClientLogs(true);
+      setIsRefreshMachineTokenConfirmOpen(false);
+      setIsDeleteMachineConfirmOpen(false);
+      setEditingRuleSnapshot(null);
+      setRulesPage(1);
+      return;
+    }
+
+    setSelectedRuleId((currentSelectedRuleId) =>
+      currentSelectedRuleId &&
+      nextRules.some((rule) => rule.localId === currentSelectedRuleId)
+        ? currentSelectedRuleId
+        : null
+    );
+    setEditingRuleSnapshot((currentSnapshot) =>
+      currentSnapshot &&
+      nextRules.some((rule) => rule.localId === currentSnapshot.localId)
+        ? currentSnapshot
+        : null
+    );
   }, [host?.id, host?.forwardingConfigs]);
 
   useEffect(() => {
@@ -201,9 +327,7 @@ export default function HostConfigPopup({
           setMachineCommand(response.data?.data?.command || "");
         }
       } catch (machineCommandError) {
-        if (isActive) {
-          setMachineCommand("");
-        }
+        // Keep the last known command instead of flashing "Unavailable" on transient failures.
       } finally {
         if (isActive) {
           setIsLoadingMachineCommand(false);
@@ -217,6 +341,109 @@ export default function HostConfigPopup({
       isActive = false;
     };
   }, [opened, host?.id]);
+
+  useEffect(() => {
+    if (!socket || !opened || !host?.id || !showClientLogs) {
+      return undefined;
+    }
+
+    const subscribeToLogs = () => {
+      socket.emit(socketRoutes.ctsMachineLogStreamSubscribe, {
+        machine_id: host.id,
+      });
+    };
+
+    setClientLogs([]);
+    setClientLogStartLineNumber(1);
+    setClientLogStreamStatus(host.isActive ? "connecting" : "offline");
+    setShouldAutoScrollClientLogs(true);
+    subscribeToLogs();
+    socket.on("connect", subscribeToLogs);
+
+    return () => {
+      socket.off("connect", subscribeToLogs);
+      socket.emit(socketRoutes.ctsMachineLogStreamUnsubscribe, {
+        machine_id: host.id,
+      });
+    };
+  }, [socket, opened, host?.id, host?.isActive, showClientLogs]);
+
+  useEffect(() => {
+    if (!socket || !host?.id) {
+      return undefined;
+    }
+
+    const handleLogStreamStatus = (payload) => {
+      if (payload?.machine_id !== host.id) {
+        return;
+      }
+
+      if (payload?.subscribed || payload?.stream_requested) {
+        setClientLogStreamStatus("streaming");
+      } else if (payload?.machine_online === false) {
+        setClientLogStreamStatus("offline");
+      } else {
+        setClientLogStreamStatus("idle");
+      }
+    };
+
+    const handleLogStreamLine = (payload) => {
+      if (payload?.machine_id !== host.id || !payload?.line) {
+        return;
+      }
+
+      setClientLogStreamStatus("streaming");
+      setClientLogs((current) => {
+        const next = [...current, payload.line];
+        const overflow = Math.max(0, next.length - MAX_CLIENT_LOG_LINES);
+        if (overflow > 0) {
+          setClientLogStartLineNumber((lineNumber) => lineNumber + overflow);
+        }
+        return overflow > 0 ? next.slice(-MAX_CLIENT_LOG_LINES) : next;
+      });
+    };
+
+    socket.on(socketRoutes.stcMachineLogStreamStatus, handleLogStreamStatus);
+    socket.on(socketRoutes.stcMachineLogStreamLine, handleLogStreamLine);
+
+    return () => {
+      socket.off(socketRoutes.stcMachineLogStreamStatus, handleLogStreamStatus);
+      socket.off(socketRoutes.stcMachineLogStreamLine, handleLogStreamLine);
+    };
+  }, [socket, host?.id]);
+
+  useEffect(() => {
+    if (
+      !showClientLogs ||
+      !clientLogsContainerRef.current ||
+      !shouldAutoScrollClientLogs
+    ) {
+      return;
+    }
+
+    clientLogsContainerRef.current.scrollTop =
+      clientLogsContainerRef.current.scrollHeight;
+  }, [showClientLogs, visibleClientLogs, shouldAutoScrollClientLogs]);
+
+  const handleClientLogsScroll = () => {
+    const element = clientLogsContainerRef.current;
+    if (!element) {
+      return;
+    }
+
+    const distanceFromBottom =
+      element.scrollHeight - element.scrollTop - element.clientHeight;
+    setShouldAutoScrollClientLogs(
+      distanceFromBottom <= CLIENT_LOG_AUTO_SCROLL_THRESHOLD
+    );
+  };
+
+  const handleRuleRowClick = (event, rule) => {
+    if (event.target instanceof Element && event.target.closest("[data-rule-toggle='true']")) {
+      return;
+    }
+    openRuleEditor(rule);
+  };
 
   useEffect(() => {
     if (!opened) {
@@ -435,9 +662,6 @@ export default function HostConfigPopup({
   };
 
   const handleRemoveRule = (localId) => {
-    const rule = rules.find((r) => r.localId === localId);
-    const serviceName = rule?.serviceName?.trim() || "Port pair";
-
     setRules((currentRules) =>
       currentRules.filter((r) => r.localId !== localId)
     );
@@ -454,8 +678,6 @@ export default function HostConfigPopup({
       delete nextAvailability[localId];
       return nextAvailability;
     });
-
-    success(`${serviceName} removed successfully`);
   };
 
   const handleGeneratePort = async (localId) => {
@@ -505,6 +727,20 @@ export default function HostConfigPopup({
 
   const handleOpenDeleteMachineConfirm = () => {
     setIsDeleteMachineConfirmOpen(true);
+  };
+
+  const handleToggleMachine = async () => {
+    if (!host || !onToggleMachine || isTogglingMachine) {
+      return;
+    }
+
+    setIsTogglingMachine(true);
+
+    try {
+      await onToggleMachine(host.id, !(host.enabled ?? true));
+    } finally {
+      setIsTogglingMachine(false);
+    }
   };
 
   const handleCloseDeleteMachineConfirm = () => {
@@ -592,10 +828,16 @@ export default function HostConfigPopup({
       return;
     }
 
-    const payload = rules.map((rule) => ({
+    const normalizedRules = rules.map((rule) => ({
+      ...rule,
+      internalIp: normalizeInternalHost(rule.internalIp),
+    }));
+
+    const payload = normalizedRules.map((rule) => ({
       dataId: rule.dataId,
       serviceName: rule.serviceName.trim(),
       serviceDescription: rule.serviceDescription.trim(),
+      internalIp: rule.internalIp,
       internalPort: Number(rule.internalPort),
       externalPort: Number(rule.externalPort),
       enabled: rule.enabled,
@@ -604,7 +846,8 @@ export default function HostConfigPopup({
     const saved = await onSave(host.id, payload);
 
     if (saved) {
-      initialRulesSnapshotRef.current = rulesSnapshotKey(rules);
+      setRules(normalizedRules);
+      initialRulesSnapshotRef.current = rulesSnapshotKey(normalizedRules);
     }
   };
 
@@ -672,12 +915,30 @@ export default function HostConfigPopup({
             <Stack spacing="md" className="min-h-0 flex-1">
             <div className="flex items-start justify-between gap-3">
               <Group spacing="xs">
-                <Badge color={host.isActive ? "green" : "red"} variant="light">
-                  {host.isActive ? "Online" : "Offline"}
+                <Badge
+                  color={
+                    hostConnectionStatus === "online"
+                      ? "green"
+                      : hostConnectionStatus === "disabled"
+                        ? "gray"
+                      : hostConnectionStatus === "auth_required"
+                        ? "yellow"
+                        : "red"
+                  }
+                  variant="light"
+                >
+                  {hostConnectionStatus === "online"
+                    ? "Online"
+                    : hostConnectionStatus === "disabled"
+                      ? "Disabled"
+                    : hostConnectionStatus === "auth_required"
+                      ? "Auth required"
+                      : "Offline"}
                 </Badge>
                 <Badge variant="outline">{host.hostname || "Awaiting hostname"}</Badge>
                 <Badge variant="outline">LAN: {host.localIp || "Pending"}</Badge>
                 <Badge variant="outline">WAN: {host.publicIp || "Pending"}</Badge>
+                <Badge variant="outline">Last seen: {host.lastSeen || "Never seen"}</Badge>
                 <Badge variant="outline">{host.numPorts} active ports</Badge>
                 <Badge variant="outline">{savedRuleCount} configured rules</Badge>
               </Group>
@@ -707,6 +968,12 @@ export default function HostConfigPopup({
                     }
                   >
                     <Menu.Item
+                      onClick={handleToggleMachine}
+                      disabled={isTogglingMachine}
+                    >
+                      {host.enabled === false ? "Enable machine" : "Disable machine"}
+                    </Menu.Item>
+                    <Menu.Item
                       color="red"
                       onClick={handleOpenDeleteMachineConfirm}
                     >
@@ -718,131 +985,242 @@ export default function HostConfigPopup({
             </div>
 
             <div
-              className={`rounded-xl border ${
+              className={`rounded-md border ${
                 isDark
                   ? "border-zinc-700 bg-zinc-950/70"
                   : "border-zinc-200 bg-zinc-50/70"
               }`}
             >
-              <button
-                type="button"
-                onClick={() => setShowMachineCredentials((current) => !current)}
-                className="flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left"
-              >
-                <span className={isDark ? "text-sm text-zinc-200" : "text-sm text-zinc-800"}>
-                  Client setup details
-                </span>
-                {showMachineCredentials ? (
-                  <IconChevronUp size={18} className={isDark ? "text-zinc-400" : "text-zinc-600"} />
-                ) : (
-                  <IconChevronDown size={18} className={isDark ? "text-zinc-400" : "text-zinc-600"} />
-                )}
-              </button>
+              <div className={isDark ? "divide-y divide-zinc-800" : "divide-y divide-zinc-200"}>
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => setShowMachineCredentials((current) => !current)}
+                    className="flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left"
+                  >
+                    <span className={isDark ? "text-sm text-zinc-200" : "text-sm text-zinc-800"}>
+                      Client setup
+                    </span>
+                    {showMachineCredentials ? (
+                      <IconChevronUp size={18} className={isDark ? "text-zinc-400" : "text-zinc-600"} />
+                    ) : (
+                      <IconChevronDown size={18} className={isDark ? "text-zinc-400" : "text-zinc-600"} />
+                    )}
+                  </button>
 
-              <Collapse in={showMachineCredentials}>
-                <div className="space-y-3 border-t px-4 py-4 dark:border-zinc-800">
-                  <div>
-                    <div className="flex items-center gap-1.5">
-                      <p className="text-xs uppercase tracking-[0.18em] text-zinc-500">
-                        Machine token
-                      </p>
-                      <Tooltip
-                        label="Refresh machine token"
-                        withArrow
-                        position="top"
-                        classNames={{
-                          tooltip: isDark
-                            ? "!border !border-zinc-700 !bg-zinc-900 !text-zinc-100"
-                            : "!border !border-zinc-200 !bg-white !text-zinc-900",
-                          arrow: isDark
-                            ? "!border-zinc-700 !bg-zinc-900"
-                            : "!border-zinc-200 !bg-white",
-                        }}
-                      >
-                        <ActionIcon
-                          type="button"
-                          variant="subtle"
-                          onClick={handleOpenRefreshMachineTokenConfirm}
-                          aria-label="Refresh machine token"
-                          className={
-                            isDark
-                              ? "!h-6 !w-6 !text-zinc-400 hover:!bg-zinc-800 hover:!text-zinc-200"
-                              : "!h-6 !w-6 !text-zinc-500 hover:!bg-zinc-200 hover:!text-zinc-700"
-                          }
-                        >
-                          <IconRefresh size={14} />
-                        </ActionIcon>
-                      </Tooltip>
-                    </div>
-                    <div className="mt-2">
-                      <div
-                        className={`relative rounded-lg ${
-                          isDark ? "bg-zinc-800/80" : "bg-zinc-100"
-                        }`}
-                      >
-                        <ActionIcon
-                          type="button"
-                          variant="subtle"
-                          onClick={() => handleCopy("Machine token", host.token)}
-                          aria-label="Copy machine token"
-                          className={`!absolute right-2 top-2 ${
-                            isDark
-                              ? "!text-zinc-300 hover:!bg-zinc-700"
-                              : "!text-zinc-600 hover:!bg-zinc-200"
-                          }`}
-                        >
-                          <IconCopy size={16} />
-                        </ActionIcon>
-                      <code
-                        className={`block break-all rounded-lg px-3 py-3 pr-12 text-xs ${
-                          isDark ? "text-zinc-100" : "text-zinc-800"
-                        }`}
-                      >
-                        {host.token || "Unavailable"}
-                      </code>
+                  <Collapse in={showMachineCredentials}>
+                    <div className="space-y-3 px-4 py-4">
+                      <div>
+                        <div className="flex items-center gap-1.5">
+                          <p className="text-xs uppercase tracking-[0.18em] text-zinc-500">
+                            Bootstrap command
+                          </p>
+                          <Tooltip
+                            label="Refresh machine token"
+                            withArrow
+                            position="top"
+                            classNames={{
+                              tooltip: isDark
+                                ? "!border !border-zinc-700 !bg-zinc-900 !text-zinc-100"
+                                : "!border !border-zinc-200 !bg-white !text-zinc-900",
+                              arrow: isDark
+                                ? "!border-zinc-700 !bg-zinc-900"
+                                : "!border-zinc-200 !bg-white",
+                            }}
+                          >
+                            <ActionIcon
+                              type="button"
+                              variant="subtle"
+                              onClick={handleOpenRefreshMachineTokenConfirm}
+                              aria-label="Refresh machine token"
+                              className={
+                                isDark
+                                  ? "!h-6 !w-6 !text-zinc-400 hover:!bg-zinc-800 hover:!text-zinc-200"
+                                  : "!h-6 !w-6 !text-zinc-500 hover:!bg-zinc-200 hover:!text-zinc-700"
+                              }
+                            >
+                              <IconRefresh size={14} />
+                            </ActionIcon>
+                          </Tooltip>
+                          <Tooltip
+                            label="Copy machine token"
+                            withArrow
+                            position="top"
+                            classNames={{
+                              tooltip: isDark
+                                ? "!border !border-zinc-700 !bg-zinc-900 !text-zinc-100"
+                                : "!border !border-zinc-200 !bg-white !text-zinc-900",
+                              arrow: isDark
+                                ? "!border-zinc-700 !bg-zinc-900"
+                                : "!border-zinc-200 !bg-white",
+                            }}
+                          >
+                            <ActionIcon
+                              type="button"
+                              variant="subtle"
+                              onClick={() => handleCopy("Machine token", host.token)}
+                              aria-label="Copy machine token"
+                              disabled={!host.token}
+                              className={
+                                isDark
+                                  ? "!h-6 !w-6 !text-zinc-400 hover:!bg-zinc-800 hover:!text-zinc-200 disabled:!bg-transparent"
+                                  : "!h-6 !w-6 !text-zinc-500 hover:!bg-zinc-200 hover:!text-zinc-700 disabled:!bg-transparent"
+                              }
+                            >
+                              <IconCopy size={14} />
+                            </ActionIcon>
+                          </Tooltip>
+                        </div>
+                        <div className="mt-2">
+                          <div
+                            className={`relative rounded-lg ${
+                              isDark ? "bg-zinc-800/80" : "bg-zinc-100"
+                            }`}
+                          >
+                            <ActionIcon
+                              type="button"
+                              variant="subtle"
+                              onClick={() => handleCopy("Bootstrap command", machineCommand)}
+                              aria-label="Copy bootstrap command"
+                              disabled={!machineCommand || isLoadingMachineCommand}
+                              className={`!absolute right-2 top-2 ${
+                                isDark
+                                  ? "!text-zinc-300 hover:!bg-zinc-700 disabled:!bg-transparent"
+                                  : "!text-zinc-600 hover:!bg-zinc-200 disabled:!bg-transparent"
+                              }`}
+                            >
+                              <IconCopy size={16} />
+                            </ActionIcon>
+                            <code
+                              className={`block break-all rounded-lg px-3 py-3 pr-12 text-xs ${
+                                isDark ? "text-zinc-100" : "text-zinc-800"
+                              }`}
+                            >
+                              {isLoadingMachineCommand
+                                ? "Loading bootstrap command..."
+                                : machineCommand || "Unavailable"}
+                            </code>
+                          </div>
+                          <p className="mt-2 text-xs text-zinc-500">
+                            Paste once to install and connect. After that use
+                            {" "}
+                            <code>porthub status</code>
+                            {", "}
+                            <code>porthub logs -f</code>
+                            {" "}
+                            and
+                            {" "}
+                            <code>porthub down</code>
+                            {" "}
+                            on the client machine.
+                          </p>
+                        </div>
                       </div>
                     </div>
-                  </div>
-
-                  <div>
-                    <p className="text-xs uppercase tracking-[0.18em] text-zinc-500">
-                      Bootstrap command
-                    </p>
-                    <div className="mt-2">
-                      <div
-                        className={`relative rounded-lg ${
-                          isDark ? "bg-zinc-800/80" : "bg-zinc-100"
-                        }`}
-                      >
-                        <ActionIcon
-                          type="button"
-                          variant="subtle"
-                          onClick={() => handleCopy("Bootstrap command", machineCommand)}
-                          aria-label="Copy bootstrap command"
-                          disabled={!machineCommand || isLoadingMachineCommand}
-                          className={`!absolute right-2 top-2 ${
-                            isDark
-                              ? "!text-zinc-300 hover:!bg-zinc-700 disabled:!bg-transparent"
-                              : "!text-zinc-600 hover:!bg-zinc-200 disabled:!bg-transparent"
-                          }`}
-                        >
-                          <IconCopy size={16} />
-                        </ActionIcon>
-                      <code
-                        className={`block break-all rounded-lg px-3 py-3 pr-12 text-xs ${
-                          isDark ? "text-zinc-100" : "text-zinc-800"
-                        }`}
-                      >
-                        {isLoadingMachineCommand
-                          ? "Loading bootstrap command..."
-                          : machineCommand || "Unavailable"}
-                      </code>
-                      </div>
-                    </div>
-                  </div>
-
+                  </Collapse>
                 </div>
-              </Collapse>
+
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => setShowClientLogs((current) => !current)}
+                    className="flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left"
+                  >
+                    <span className={isDark ? "text-sm text-zinc-200" : "text-sm text-zinc-800"}>
+                      Client logs
+                    </span>
+                    {showClientLogs ? (
+                      <IconChevronUp size={18} className={isDark ? "text-zinc-400" : "text-zinc-600"} />
+                    ) : (
+                      <IconChevronDown size={18} className={isDark ? "text-zinc-400" : "text-zinc-600"} />
+                    )}
+                  </button>
+
+                  <Collapse in={showClientLogs}>
+                    <div className="space-y-3 px-4 py-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-xs uppercase tracking-[0.18em] text-zinc-500">
+                          Live stream
+                        </p>
+                        <div className="flex items-center gap-3">
+                          <Switch
+                            size="xs"
+                            checked={showClientLogLineNumbers}
+                            onChange={(event) =>
+                              setShowClientLogLineNumbers(event.currentTarget.checked)
+                            }
+                            labelPosition="left"
+                            label="Line numbers"
+                          />
+                          <Switch
+                            size="xs"
+                            checked={showVerboseClientLogs}
+                            onChange={(event) =>
+                              setShowVerboseClientLogs(event.currentTarget.checked)
+                            }
+                            labelPosition="left"
+                            label="Verbose"
+                          />
+                        </div>
+                      </div>
+
+                      <div
+                        ref={clientLogsContainerRef}
+                        onScroll={handleClientLogsScroll}
+                        className={`max-h-72 overflow-y-auto rounded-lg border px-3 py-3 font-mono text-xs ${
+                          isDark
+                            ? "border-zinc-700 bg-zinc-900 text-zinc-100"
+                            : "border-zinc-200 bg-zinc-100 text-zinc-800"
+                        }`}
+                      >
+                        {visibleClientLogs.length > 0 ? (
+                          <div className="space-y-0.5">
+                            {visibleClientLogs.map((entry) => (
+                              <div
+                                key={entry.number}
+                                className={
+                                  showClientLogLineNumbers
+                                    ? "grid grid-cols-[42px_minmax(0,1fr)] gap-2"
+                                    : "block"
+                                }
+                              >
+                                {showClientLogLineNumbers ? (
+                                  <span
+                                    className={`select-none text-right ${
+                                      isDark ? "text-zinc-500" : "text-zinc-400"
+                                    }`}
+                                  >
+                                    {entry.number}
+                                  </span>
+                                ) : null}
+                                <span className="whitespace-pre-wrap break-words">
+                                  {entry.text}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className={isDark ? "text-zinc-400" : "text-zinc-500"}>
+                            {clientLogs.length > 0
+                              ? "Verbose logs are currently hidden. Enable the verbose toggle to view them."
+                              : clientLogStreamStatus === "offline"
+                                ? "The client must be online before logs can be streamed."
+                              : showClientLogs
+                                ? "Fetching logs from the client..."
+                                : "Fetching logs from the client..."}
+                          </p>
+                        )}
+                      </div>
+
+                      <p className="text-xs text-zinc-500">
+                        Shows the same combined PortHub client and Rathole log stream
+                        available on the client via <code>porthub logs</code>. Turn on
+                        verbose to include debug noise.
+                      </p>
+                    </div>
+                  </Collapse>
+                </div>
+              </div>
             </div>
 
             {selectedRule ? (
@@ -940,7 +1318,36 @@ export default function HostConfigPopup({
                           />
                         </div>
 
-                        <div className="grid gap-4 md:grid-cols-2">
+                        <div className="grid gap-4 md:grid-cols-3">
+                          <div>
+                            <label
+                              htmlFor={`internal-ip-${rule.localId}`}
+                              className={getLabelClassName(isDark)}
+                            >
+                              Internal host / IP
+                            </label>
+                            <input
+                              id={`internal-ip-${rule.localId}`}
+                              type="text"
+                              spellCheck={false}
+                              placeholder="0.0.0.0 or app.local"
+                              className={getInputClassName(isDark)}
+                              value={rule.internalIp}
+                              onChange={(event) =>
+                                updateRule(
+                                  rule.localId,
+                                  "internalIp",
+                                  event.currentTarget.value
+                                )
+                              }
+                            />
+                            {ruleErrors.internalIp && (
+                              <p className={errorClassName}>
+                                {ruleErrors.internalIp}
+                              </p>
+                            )}
+                          </div>
+
                           <div>
                             <label
                               htmlFor={`internal-port-${rule.localId}`}
@@ -1085,14 +1492,14 @@ export default function HostConfigPopup({
                 {rules.length > 0 ? (
                   <div className="flex min-h-0 flex-1 flex-col gap-1">
                     <div
-                      className={`flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border ${
+                      className={`flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border ${
                         isDark
                           ? "border-zinc-700"
                           : "border-zinc-200"
                       }`}
                     >
                       <div
-                        className={`grid grid-cols-[52px_minmax(0,1.4fr)_90px_90px_110px_72px] border-b px-4 py-3 text-xs font-semibold uppercase tracking-wide ${
+                        className={`grid grid-cols-[52px_minmax(0,1.3fr)_minmax(0,1fr)_90px_110px_96px] border-b px-4 py-3 text-xs font-semibold uppercase tracking-wide ${
                           isDark
                             ? "border-zinc-700 bg-zinc-800 text-zinc-400"
                             : "border-zinc-200 bg-zinc-100/80 text-zinc-600"
@@ -1103,7 +1510,7 @@ export default function HostConfigPopup({
                         <span>Internal</span>
                         <span>External</span>
                         <span>Status</span>
-                        <span className="text-right">Edit</span>
+                        <span>Toggle</span>
                       </div>
 
                       <div className="min-h-0 flex-1 overflow-y-auto">
@@ -1113,17 +1520,32 @@ export default function HostConfigPopup({
                           const isAvailabilityKnown = Boolean(availability);
                           const isInvalid =
                             isAvailabilityKnown && availability.available === false;
+                          const savedRule = rule.dataId
+                            ? savedRulesById.get(rule.dataId)
+                            : null;
+                          const persistedEnabled =
+                            savedRule?.enabled ?? rule.enabled;
                           const rowNumber =
                             (rulesPage - 1) * RULES_PER_PAGE + index + 1;
 
                           return (
                             <div
                               key={rule.localId}
-                              className={`grid grid-cols-[52px_minmax(0,1.4fr)_90px_90px_110px_72px] items-center border-b px-4 py-3 text-sm last:border-b-0 ${
+                              role="button"
+                              tabIndex={0}
+                              onClick={(event) => handleRuleRowClick(event, rule)}
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter" || event.key === " ") {
+                                  event.preventDefault();
+                                  handleRuleRowClick(event, rule);
+                                }
+                              }}
+                              className={`grid w-full grid-cols-[52px_minmax(0,1.3fr)_minmax(0,1fr)_90px_110px_96px] items-center border-b px-4 py-3 text-left text-sm last:border-b-0 ${
                                 isDark
-                                  ? "border-zinc-700 bg-zinc-900"
-                                  : "border-zinc-200 bg-white"
+                                  ? "border-zinc-700 bg-zinc-900 hover:bg-zinc-800/80"
+                                  : "border-zinc-200 bg-white hover:bg-zinc-50"
                               }`}
+                              aria-label={`Edit forwarding rule ${rule.serviceName.trim() || rowNumber}`}
                             >
                               <span
                                 className={
@@ -1182,8 +1604,8 @@ export default function HostConfigPopup({
                                   <span
                                     className={
                                       isDark
-                                        ? "inline-flex rounded-full bg-red-950/60 px-2 py-1 text-xs font-medium text-red-300"
-                                        : "inline-flex rounded-full bg-red-100 px-2 py-1 text-xs font-medium text-red-700"
+                                        ? "text-xs font-medium text-red-300"
+                                        : "text-xs font-medium text-red-700"
                                     }
                                   >
                                     Invalid
@@ -1192,18 +1614,18 @@ export default function HostConfigPopup({
                                   <span
                                     className={
                                       isDark
-                                        ? "inline-flex rounded-full bg-blue-950/60 px-2 py-1 text-xs font-medium text-blue-200"
-                                        : "inline-flex rounded-full bg-blue-100 px-2 py-1 text-xs font-medium text-blue-700"
+                                        ? "text-xs font-medium text-blue-200"
+                                        : "text-xs font-medium text-blue-700"
                                     }
                                   >
                                     Checking
                                   </span>
-                                ) : rule.enabled ? (
+                                ) : persistedEnabled ? (
                                   <span
                                     className={
                                       isDark
-                                        ? "inline-flex rounded-full bg-emerald-950/60 px-2 py-1 text-xs font-medium text-emerald-300"
-                                        : "inline-flex rounded-full bg-emerald-100 px-2 py-1 text-xs font-medium text-emerald-700"
+                                        ? "text-xs font-medium text-emerald-300"
+                                        : "text-xs font-medium text-emerald-700"
                                     }
                                   >
                                     Active
@@ -1212,8 +1634,8 @@ export default function HostConfigPopup({
                                   <span
                                     className={
                                       isDark
-                                        ? "inline-flex rounded-full bg-zinc-800 px-2 py-1 text-xs font-medium text-zinc-300"
-                                        : "inline-flex rounded-full bg-zinc-200 px-2 py-1 text-xs font-medium text-zinc-700"
+                                        ? "text-xs font-medium text-zinc-300"
+                                        : "text-xs font-medium text-zinc-700"
                                     }
                                   >
                                     Inactive
@@ -1221,20 +1643,39 @@ export default function HostConfigPopup({
                                 )}
                               </div>
 
-                              <div className="flex justify-end">
-                                <ActionIcon
-                                  type="button"
-                                  variant="subtle"
-                                  onClick={() => openRuleEditor(rule)}
-                                  className={
-                                    isDark
-                                      ? "!text-zinc-300 hover:!bg-zinc-800"
-                                      : "!text-zinc-600 hover:!bg-zinc-100"
+                              <div
+                                className="flex items-center"
+                                data-rule-toggle="true"
+                                onClick={(event) => event.stopPropagation()}
+                                onMouseDown={(event) => event.stopPropagation()}
+                                onPointerDown={(event) => event.stopPropagation()}
+                              >
+                                <Switch
+                                  size="sm"
+                                  checked={rule.enabled}
+                                  onMouseDown={(event) => event.stopPropagation()}
+                                  onClick={(event) => event.stopPropagation()}
+                                  onPointerDown={(event) => event.stopPropagation()}
+                                  onKeyDown={(event) => event.stopPropagation()}
+                                  onChangeCapture={(event) => event.stopPropagation()}
+                                  onChange={(event) =>
+                                    updateRule(
+                                      rule.localId,
+                                      "enabled",
+                                      event.currentTarget.checked
+                                    )
                                   }
-                                  aria-label="Edit forwarding rule"
-                                >
-                                  <IconPencil size={16} />
-                                </ActionIcon>
+                                  aria-label={
+                                    rule.enabled
+                                      ? "Disable forwarding rule"
+                                      : "Enable forwarding rule"
+                                  }
+                                  classNames={{
+                                    track: isDark
+                                      ? "!border-zinc-700"
+                                      : "!border-zinc-300",
+                                  }}
+                                />
                               </div>
                             </div>
                         );

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Request, HTTPException
 from shared.rathole_config import rebuild_server_toml
 from shared.factory import db
+from shared.sockets import emit_machine_config_changed
 from ..common import (
     get_authenticated_user,
     parse_object_id,
@@ -39,6 +40,7 @@ async def add_connection(data: Connection, request: Request):
             "machine_id": machine["_id"],
             "service_name": service_name,
             "service_description": (data.service_description or "").strip(),
+            "internal_ip": data.internal_ip,
             "internal_port": data.internal_port,
             "external_port": data.external_port,
             "enabled": True if data.enabled is None else data.enabled,
@@ -49,6 +51,7 @@ async def add_connection(data: Connection, request: Request):
 
     res = await db.connections.find_one({"_id": result.inserted_id})
     await rebuild_server_toml(allow_empty=True)
+    await emit_machine_config_changed(str(machine["_id"]))
 
     return {
         "msg": "Connection added successfully",

@@ -17,7 +17,7 @@ from shared.factory import get_db
 logger = logging.getLogger(__name__)
 
 DEFAULT_SERVER_TOML_PATH = (
-    Path(__file__).resolve().parent.parent / ".runtime" / "rathole" / "server.toml"
+    Path("/runtime/rathole/server.toml")
 )
 SERVICE_KEY_PATTERN = re.compile(r"[^a-zA-Z0-9_]+")
 MANAGED_HEADER = "# Managed by PortHub. Manual changes will be overwritten."
@@ -111,6 +111,7 @@ async def rebuild_server_toml(*, allow_empty: bool = False) -> Path:
     db = get_db()
     machines = await db.machines.find(
         {
+            "enabled": {"$ne": False},
             "token": {"$nin": [None, ""]},
         }
     ).to_list(length=None)

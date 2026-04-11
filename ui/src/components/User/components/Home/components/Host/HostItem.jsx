@@ -6,10 +6,17 @@ export default function HostItem({
   localIp,
   publicIp,
   isActive,
+  connectionStatus,
+  isDark,
   lastSeen,
   numPorts,
   onClick,
 }) {
+  const resolvedStatus = connectionStatus || (isActive ? "online" : "offline");
+  const isDisabled = resolvedStatus === "disabled";
+  const isAuthRequired = resolvedStatus === "auth_required";
+  const isOnline = resolvedStatus === "online";
+
   return (
       <button
         type="button"
@@ -21,9 +28,23 @@ export default function HostItem({
           <BsCircleFill
             size={8}
             className={`row-span-2 mt-1 ${
-              isActive ? "text-emerald-500" : "text-red-400"
+              isOnline
+                ? "text-emerald-500"
+                : isDisabled
+                  ? "text-zinc-400"
+                : isAuthRequired
+                  ? "text-amber-500"
+                  : "text-red-400"
             }`}
-            aria-label={isActive ? "Online" : "Offline"}
+            aria-label={
+              isOnline
+                ? "Online"
+                : isDisabled
+                  ? "Disabled"
+                  : isAuthRequired
+                    ? "Auth required"
+                    : "Offline"
+            }
           />
           <span className="truncate font-medium text-zinc-900 dark:text-zinc-100">
             {name}
@@ -47,13 +68,31 @@ export default function HostItem({
 
         <div className="text-center">
           <span
-            className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] ${
-              isActive
-                ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
-                : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+            className={`inline-flex whitespace-nowrap rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] ${
+              isOnline
+                ? isDark
+                  ? "border-emerald-400/30 bg-emerald-400/18 text-emerald-200"
+                  : "border-emerald-200 bg-emerald-50 text-emerald-700"
+                : isDisabled
+                  ? isDark
+                    ? "border-zinc-500/25 bg-zinc-500/14 text-zinc-200"
+                    : "border-zinc-300 bg-zinc-100 text-zinc-700"
+                : isAuthRequired
+                  ? isDark
+                    ? "border-amber-400/30 bg-amber-400/18 text-amber-200"
+                    : "border-amber-200 bg-amber-50 text-amber-700"
+                  : isDark
+                    ? "border-red-400/25 bg-red-400/14 text-red-200"
+                    : "border-red-200 bg-red-50 text-red-700"
             }`}
           >
-            {isActive ? "Connected" : "Offline"}
+            {isOnline
+              ? "Online"
+              : isDisabled
+                ? "Disabled"
+                : isAuthRequired
+                  ? "Auth Req"
+                  : "Offline"}
           </span>
         </div>
 

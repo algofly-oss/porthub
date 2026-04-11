@@ -7,7 +7,8 @@ class Machine(BaseModel):
     data_id: typing.Optional[str] = Field(None)
     name: str = Field(..., min_length=1, example="luna")
     hostname: typing.Optional[str] = Field("", example="luna.local")
-    is_active: typing.Optional[bool] = Field(False, example=False)
+    enabled: typing.Optional[bool] = Field(None, example=True)
+    is_active: typing.Optional[bool] = Field(None, example=False)
 
 
 class MachineSync(BaseModel):

@@ -1,6 +1,8 @@
 import { useContext, useEffect, useState } from "react";
 import axios from "axios";
 import dayjs from "dayjs";
+import relativeTime from "dayjs/plugin/relativeTime";
+import utc from "dayjs/plugin/utc";
 import {
   Button,
   Menu,
@@ -17,36 +19,97 @@ import { SocketContext } from "@/shared/contexts/socket";
 import apiRoutes from "@/shared/routes/apiRoutes";
 import socketRoutes from "@/shared/routes/socketRoutes";
 
+dayjs.extend(relativeTime);
+dayjs.extend(utc);
+
+const parseServerTimestamp = (value) => {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === "string") {
+    const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/.test(value);
+    return hasTimezone ? dayjs(value) : dayjs.utc(value);
+  }
+
+  return dayjs(value);
+};
+
+const formatRelativeFromNow = (parsed) => {
+  if (!parsed) {
+    return "Never seen";
+  }
+
+  const secondsAgo = Math.max(0, dayjs().diff(parsed, "second"));
+  if (secondsAgo < 60) {
+    return secondsAgo === 1 ? "1 second ago" : `${secondsAgo} seconds ago`;
+  }
+
+  return parsed.fromNow();
+};
+
 const mapConnectionToForwardingConfig = (connection) => ({
   dataId: connection._id,
   serviceName: connection.service_name || "",
   serviceDescription: connection.service_description || "",
+  internalIp: connection.internal_ip || connection.internalIp || "0.0.0.0",
   internalPort: connection.internal_port || 3000,
   externalPort: connection.external_port || 3000,
   enabled: connection.enabled ?? true,
 });
 
+const normalizeForwardingConfig = (config) => ({
+  serviceName: (config.serviceName || "").trim(),
+  serviceDescription: (config.serviceDescription || "").trim(),
+  internalIp:
+    (config.internalIp || config.internal_ip || "").trim() || "0.0.0.0",
+  internalPort: Number(config.internalPort),
+  externalPort: Number(config.externalPort),
+  enabled: config.enabled ?? true,
+});
+
+const forwardingConfigChanged = (currentConfig, nextConfig) => {
+  if (!currentConfig) {
+    return true;
+  }
+
+  const currentNormalized = normalizeForwardingConfig(currentConfig);
+  const nextNormalized = normalizeForwardingConfig(nextConfig);
+
+  return (
+    currentNormalized.serviceName !== nextNormalized.serviceName ||
+    currentNormalized.serviceDescription !== nextNormalized.serviceDescription ||
+    currentNormalized.internalIp !== nextNormalized.internalIp ||
+    currentNormalized.internalPort !== nextNormalized.internalPort ||
+    currentNormalized.externalPort !== nextNormalized.externalPort ||
+    currentNormalized.enabled !== nextNormalized.enabled
+  );
+};
+
 const formatLastSeen = (machine) => {
-  if (machine.is_active) {
-    return "Connected";
-  }
-
-  if (!machine.last_seen_at) {
-    return "Never seen";
-  }
-
-  return dayjs(machine.last_seen_at).format("DD MMM YYYY HH:mm");
+  const parsed = parseServerTimestamp(machine.last_seen_at);
+  return formatRelativeFromNow(parsed);
 };
 
 const mapMachineToHost = (machine) => ({
   id: machine._id,
   name: machine.name || "Untitled machine",
   hostname: machine.hostname || "",
+  enabled: machine.enabled ?? true,
   localIp: machine.local_ip || "",
   publicIp: machine.public_ip || "",
   token: machine.token || "",
+  connectionStatus:
+    machine.connection_status ||
+    (machine.enabled === false
+      ? "disabled"
+      : machine.is_active
+        ? "online"
+        : "offline"),
+  authRequired: machine.auth_required ?? false,
   isActive: machine.is_active ?? false,
   numPorts: 0,
+  lastSeenAt: machine.last_seen_at || null,
   lastSeen: formatLastSeen(machine),
   forwardingConfigs: [],
 });
@@ -93,6 +156,7 @@ export default function Home() {
   const [pageSize, setPageSize] = useState("10");
   const [page, setPage] = useState(1);
   const [statusFilter, setStatusFilter] = useState("all");
+  const [lastSeenRefreshTick, setLastSeenRefreshTick] = useState(0);
   const { success, error } = useToast();
 
   const selectedHost = hosts.find((host) => host.id === selectedHostId) || null;
@@ -116,6 +180,27 @@ export default function Home() {
       setPage(totalPages);
     }
   }, [page, totalPages]);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      setLastSeenRefreshTick((current) => current + 1);
+    }, 60 * 1000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
+  useEffect(() => {
+    setHosts((currentHosts) =>
+      currentHosts.map((host) => ({
+        ...host,
+        lastSeen: host.lastSeenAt
+          ? formatRelativeFromNow(parseServerTimestamp(host.lastSeenAt))
+          : "Never seen",
+      }))
+    );
+  }, [lastSeenRefreshTick]);
 
   useEffect(() => {
     setPage(1);
@@ -197,11 +282,18 @@ export default function Home() {
       requestMachineStatusSnapshot();
     }
 
+    const snapshotIntervalId = window.setInterval(() => {
+      if (socket.connected) {
+        requestMachineStatusSnapshot();
+      }
+    }, 30 * 1000);
+
     socket.on("connect", requestMachineStatusSnapshot);
     socket.on(socketRoutes.stcMachineStatusSnapshot, handleMachineStatusSnapshot);
     socket.on(socketRoutes.stcMachineStatusChanged, handleMachineStatusChanged);
 
     return () => {
+      window.clearInterval(snapshotIntervalId);
       socket.off("connect", requestMachineStatusSnapshot);
       socket.off(socketRoutes.stcMachineStatusSnapshot, handleMachineStatusSnapshot);
       socket.off(socketRoutes.stcMachineStatusChanged, handleMachineStatusChanged);
@@ -239,22 +331,47 @@ export default function Home() {
     }
 
     const currentConfigs = currentHost.forwardingConfigs || [];
+    const currentConfigsById = new Map(
+      currentConfigs.filter((config) => config.dataId).map((config) => [config.dataId, config])
+    );
     const nextConfigIds = new Set(
       forwardingConfigs.filter((config) => config.dataId).map((config) => config.dataId)
     );
     const configsToDelete = currentConfigs.filter(
       (config) => config.dataId && !nextConfigIds.has(config.dataId)
     );
+    const configsToCreate = forwardingConfigs.filter((config) => !config.dataId);
+    const configsToUpdate = forwardingConfigs.filter(
+      (config) =>
+        config.dataId &&
+        forwardingConfigChanged(currentConfigsById.get(config.dataId), config)
+    );
 
     setIsSaving(true);
 
     try {
-      const machineResponse = await axios.put(apiRoutes.updateMachine, {
-        data_id: currentHost.id,
-        name: currentHost.name,
-        hostname: currentHost.hostname,
-        is_active: currentHost.isActive,
-      });
+      const machineResponse = {
+        data: {
+          data: {
+            _id: currentHost.id,
+            name: currentHost.name,
+            hostname: currentHost.hostname,
+            local_ip: currentHost.localIp,
+            public_ip: currentHost.publicIp,
+            token: currentHost.token,
+            is_active: currentHost.isActive,
+            connection_status:
+              currentHost.connectionStatus ||
+              (currentHost.enabled === false
+                ? "disabled"
+                : currentHost.isActive
+                  ? "online"
+                  : "offline"),
+            auth_required: currentHost.authRequired ?? false,
+            last_seen_at: currentHost.lastSeenAt,
+          },
+        },
+      };
 
       for (const config of configsToDelete) {
         await axios.post(apiRoutes.deleteConnection, {
@@ -262,14 +379,26 @@ export default function Home() {
         });
       }
 
-      const savedConfigs = [];
+      const savedConfigs = forwardingConfigs
+        .filter((config) => config.dataId && !configsToDelete.some((deleted) => deleted.dataId === config.dataId))
+        .filter((config) => !configsToUpdate.some((updated) => updated.dataId === config.dataId))
+        .map((config) => ({
+          dataId: config.dataId,
+          serviceName: config.serviceName,
+          serviceDescription: config.serviceDescription,
+          internalIp: config.internalIp,
+          internalPort: Number(config.internalPort),
+          externalPort: Number(config.externalPort),
+          enabled: config.enabled,
+        }));
 
-      for (const config of forwardingConfigs) {
+      for (const config of configsToUpdate) {
         const payload = {
           data_id: config.dataId,
           machine_id: currentHost.id,
           service_name: config.serviceName,
           service_description: config.serviceDescription,
+          internalIp: config.internalIp,
           internal_port: Number(config.internalPort),
           external_port: Number(config.externalPort),
           enabled: config.enabled,
@@ -281,6 +410,29 @@ export default function Home() {
 
         savedConfigs.push(mapConnectionToForwardingConfig(response.data.data));
       }
+
+      for (const config of configsToCreate) {
+        const payload = {
+          data_id: config.dataId,
+          machine_id: currentHost.id,
+          service_name: config.serviceName,
+          service_description: config.serviceDescription,
+          internalIp: config.internalIp,
+          internal_port: Number(config.internalPort),
+          external_port: Number(config.externalPort),
+          enabled: config.enabled,
+        };
+
+        const response = await axios.post(apiRoutes.addConnection, payload);
+        savedConfigs.push(mapConnectionToForwardingConfig(response.data.data));
+      }
+
+      savedConfigs.sort((left, right) => {
+        if (left.externalPort !== right.externalPort) {
+          return left.externalPort - right.externalPort;
+        }
+        return (left.dataId || "").localeCompare(right.dataId || "");
+      });
 
       setHosts((currentHosts) =>
         currentHosts.map((host) =>
@@ -350,6 +502,47 @@ export default function Home() {
     } catch (refreshError) {
       error(refreshError?.response?.data?.detail || "Could not refresh machine token");
       return null;
+    }
+  };
+
+  const handleToggleMachine = async (hostId, nextEnabled) => {
+    const currentHost = hosts.find((host) => host.id === hostId);
+    if (!currentHost) {
+      return false;
+    }
+
+    try {
+      const response = await axios.put(apiRoutes.updateMachine, {
+        data_id: currentHost.id,
+        name: currentHost.name,
+        hostname: currentHost.hostname,
+        enabled: nextEnabled,
+      });
+      const updatedHost = mapMachineToHost(response.data.data);
+
+      setHosts((currentHosts) =>
+        currentHosts.map((host) =>
+          host.id === hostId
+            ? {
+                ...host,
+                ...updatedHost,
+                numPorts: host.numPorts,
+                forwardingConfigs: host.forwardingConfigs,
+              }
+            : host
+        )
+      );
+
+      success(
+        `Machine ${currentHost.name} ${nextEnabled ? "enabled" : "disabled"}`
+      );
+      return true;
+    } catch (toggleError) {
+      error(
+        toggleError?.response?.data?.detail ||
+          `Could not ${nextEnabled ? "enable" : "disable"} machine`
+      );
+      return false;
     }
   };
 
@@ -485,6 +678,8 @@ export default function Home() {
                         localIp={host.localIp}
                         publicIp={host.publicIp}
                         isActive={host.isActive}
+                        connectionStatus={host.connectionStatus}
+                        isDark={isDark}
                         numPorts={host.numPorts}
                         lastSeen={host.lastSeen}
                         onClick={() => handleOpenConfig(host.id)}
@@ -541,6 +736,7 @@ export default function Home() {
         onClose={handleCloseConfig}
         onSave={handleSaveConfig}
         onDeleteMachine={handleDeleteMachine}
+        onToggleMachine={handleToggleMachine}
         onRefreshMachineToken={handleRefreshMachineToken}
         isSaving={isSaving}
       />

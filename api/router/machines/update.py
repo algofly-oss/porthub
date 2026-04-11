@@ -2,7 +2,11 @@ from fastapi import APIRouter, HTTPException, Request
 
 from shared.factory import db
 from shared.rathole_config import rebuild_server_toml
-from shared.sockets import emit_machine_status_changed, set_cached_machine_status
+from shared.sockets import (
+    emit_machine_config_changed,
+    emit_machine_status_changed,
+    set_cached_machine_status,
+)
 from ..common import (
     get_authenticated_user,
     is_machine_online,
@@ -30,6 +34,15 @@ async def update_machine(data: Machine, request: Request):
 
     previous_serialized_machine = serialize_machine(machine)
     was_online = is_machine_online(machine)
+    next_enabled = (
+        bool(data.enabled)
+        if data.enabled is not None
+        else (
+            bool(data.is_active)
+            if data.is_active is not None
+            else machine.get("enabled", True)
+        )
+    )
 
     await db.machines.update_one(
         {"_id": machine["_id"]},
@@ -37,7 +50,7 @@ async def update_machine(data: Machine, request: Request):
             "$set": {
                 "name": machine_name,
                 "hostname": (data.hostname or "").strip(),
-                "is_active": bool(data.is_active),
+                "enabled": next_enabled,
                 "updated_at": utcnow(),
             }
         },
@@ -54,10 +67,13 @@ async def update_machine(data: Machine, request: Request):
         or previous_serialized_machine["name"] != updated_serialized_machine["name"]
         or previous_serialized_machine["hostname"]
         != updated_serialized_machine["hostname"]
+        or previous_serialized_machine.get("enabled", True)
+        != updated_serialized_machine.get("enabled", True)
     ):
         await emit_machine_status_changed(updated_machine)
 
     await rebuild_server_toml(allow_empty=True)
+    await emit_machine_config_changed(str(updated_machine["_id"]))
 
     return {
         "msg": "Machine updated successfully",

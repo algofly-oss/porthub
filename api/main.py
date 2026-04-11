@@ -22,6 +22,49 @@ machine_status_monitor_task = None
 machine_status_monitor_stop_event = None
 
 
+class QuietMachineClientAccessFilter(logging.Filter):
+    QUIET_PATHS = {
+        "/api/machines/client/auth",
+        "/api/machines/client/sync",
+        "/api/machines/client/config",
+        "/api/machines/client/config.toml",
+        "/api/machines/client/changes",
+        "/api/machines/client/changes.toml",
+        "/api/machines/client/log-stream",
+        "/api/machines/client/logs",
+    }
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = getattr(record, "args", ())
+        if not isinstance(args, tuple) or len(args) < 5:
+            return True
+
+        path = str(args[2] or "").split("?", 1)[0]
+
+        try:
+            status_code = int(args[4])
+        except (TypeError, ValueError):
+            return True
+
+        if path in self.QUIET_PATHS and status_code < 400:
+            return False
+
+        return True
+
+
+def configure_access_log_filters() -> None:
+    access_logger = logging.getLogger("uvicorn.access")
+    if any(
+        isinstance(filter_, QuietMachineClientAccessFilter)
+        for filter_ in access_logger.filters
+    ):
+        return
+    access_logger.addFilter(QuietMachineClientAccessFilter())
+
+
+configure_access_log_filters()
+
+
 async def attempt_rathole_config_rebuild(
     *, context: str, delays: tuple[int, ...]
 ) -> bool:

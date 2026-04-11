@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from shared.factory import db
 from shared.rathole_config import rebuild_server_toml
+from shared.sockets import disconnect_machine_clients
 from ..common import (
     generate_machine_token,
     get_authenticated_user,
@@ -32,11 +33,14 @@ async def refresh_machine_token(data: RefreshMachineToken, request: Request):
         raise HTTPException(status_code=400, detail="Machine not found")
 
     new_token = await generate_machine_token()
+    next_log_tokens = [machine["token"], *(machine.get("log_tokens") or [])]
+    deduped_log_tokens = list(dict.fromkeys(token for token in next_log_tokens if token))[:5]
     await db.machines.update_one(
         {"_id": machine["_id"]},
         {
             "$set": {
                 "token": new_token,
+                "log_tokens": deduped_log_tokens,
                 "updated_at": utcnow(),
             }
         },
@@ -44,6 +48,7 @@ async def refresh_machine_token(data: RefreshMachineToken, request: Request):
 
     updated_machine = await db.machines.find_one({"_id": machine["_id"]})
     await rebuild_server_toml(allow_empty=True)
+    await disconnect_machine_clients(str(updated_machine["_id"]))
 
     return {
         "msg": "Machine token refreshed successfully",

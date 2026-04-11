@@ -31,14 +31,24 @@ def utcnow():
 
 
 def is_machine_online(machine: dict) -> bool:
-    if not machine.get("is_active", False):
-        return False
+    return get_machine_connection_status(machine) in {"online", "auth_required"}
+
+
+def get_machine_connection_status(machine: dict) -> str:
+    if machine.get("enabled", True) is False:
+        return "disabled"
 
     last_seen_at = machine.get("last_seen_at")
     if not isinstance(last_seen_at, datetime):
-        return False
+        return "offline"
 
-    return last_seen_at >= utcnow() - timedelta(seconds=MACHINE_ONLINE_TTL_SECONDS)
+    if last_seen_at < utcnow() - timedelta(seconds=MACHINE_ONLINE_TTL_SECONDS):
+        return "offline"
+
+    if machine.get("auth_required", False):
+        return "auth_required"
+
+    return "online"
 
 
 async def generate_machine_token() -> str:
@@ -50,15 +60,19 @@ async def generate_machine_token() -> str:
 
 
 def serialize_machine(machine: dict):
+    connection_status = get_machine_connection_status(machine)
     return {
         "_id": str(machine["_id"]),
         "user_id": str(machine["user_id"]),
         "name": machine.get("name", ""),
         "hostname": machine.get("hostname", ""),
+        "enabled": machine.get("enabled", True),
         "local_ip": machine.get("local_ip", machine.get("ip_address", "")),
         "public_ip": machine.get("public_ip", ""),
         "token": machine.get("token", ""),
-        "is_active": is_machine_online(machine),
+        "is_active": connection_status in {"online", "auth_required"},
+        "connection_status": connection_status,
+        "auth_required": connection_status == "auth_required",
         "last_seen_at": machine.get("last_seen_at"),
         "created_at": machine.get("created_at"),
         "updated_at": machine.get("updated_at"),
@@ -67,12 +81,14 @@ def serialize_machine(machine: dict):
 
 def serialize_connection(connection: dict, machine: dict | None = None):
     machine_id = connection.get("machine_id")
+    internal_ip = connection.get("internal_ip", connection.get("internalIp", "0.0.0.0"))
     serialized = {
         "_id": str(connection["_id"]),
         "user_id": str(connection["user_id"]),
         "machine_id": str(machine_id) if machine_id else "",
         "service_name": connection.get("service_name", ""),
         "service_description": connection.get("service_description", ""),
+        "internal_ip": internal_ip,
         "internal_port": connection.get("internal_port"),
         "external_port": connection.get("external_port"),
         "enabled": connection.get("enabled", True),
