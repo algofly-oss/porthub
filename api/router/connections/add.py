@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Request, HTTPException
+from shared.rathole_config import rebuild_server_toml
 from shared.factory import db
 from ..common import (
     get_authenticated_user,
@@ -46,8 +47,8 @@ async def add_connection(data: Connection, request: Request):
         }
     )
 
-    # This is where a later async broadcast hook can publish Rathole config changes.
     res = await db.connections.find_one({"_id": result.inserted_id})
+    await rebuild_server_toml(allow_empty=True)
 
     return {
         "msg": "Connection added successfully",

@@ -7,10 +7,12 @@ services:
     container_name: porthub_api
     environment:
       - API_DEBUG=True
+      - RATHOLE_SERVER_CONFIG_PATH=/runtime/rathole/server.toml
     env_file:
       - ./.env
     volumes:
       - ./api:/app
+      - rathole_config:/runtime/rathole
     restart: always
     networks:
       - porthub
@@ -51,10 +53,11 @@ services:
 
   rathole:
     image: archef2000/rathole:latest
-    command: -s /app/server.toml
+    command: -s /runtime/rathole/server.toml
+    container_name: porthub_rathole
     network_mode: host
     volumes:
-      - ./api/server.toml:/app/server.toml
+      - rathole_config:/runtime/rathole
     restart: always
     depends_on:
       - api
@@ -62,3 +65,6 @@ services:
 networks:
   porthub:
     name: porthub
+
+volumes:
+  rathole_config:

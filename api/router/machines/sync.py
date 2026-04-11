@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 
 from shared.factory import db
+from shared.rathole_config import rebuild_server_toml
 from ..common import parse_object_id, serialize_machine, utcnow
 from .models.machine import MachineSync
 
@@ -34,6 +35,7 @@ async def sync_machine(data: MachineSync):
     )
 
     updated_machine = await db.machines.find_one({"_id": machine["_id"]})
+    await rebuild_server_toml(allow_empty=True)
 
     return {
         "msg": "Machine synced successfully",

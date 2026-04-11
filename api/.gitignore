@@ -1,2 +1,6 @@
 **/__pycache__/
 server.toml
+.runtime/*
+!.runtime/rathole/
+.runtime/rathole/*
+!.runtime/rathole/.gitkeep

@@ -8,6 +8,18 @@ if API_SECRET_KEY is None:
 # Load env configuration
 API_ALGORITHM = os.environ.get("API_ALGORITHM", "HS256")
 API_COOKIES_EXPIRE_MINUTES = int(os.environ.get("API_COOKIES_EXPIRE_MINUTES", 43200))
+RATHOLE_PORT = int(os.environ.get("RATHOLE_PORT", 2334))
+MACHINE_ONLINE_TTL_SECONDS = int(os.environ.get("MACHINE_ONLINE_TTL_SECONDS", 300))
+RATHOLE_DUMMY_SERVICE_NAME = os.environ.get("RATHOLE_DUMMY_SERVICE_NAME", "dummy")
+RATHOLE_DUMMY_SERVICE_TOKEN = os.environ.get("RATHOLE_DUMMY_SERVICE_TOKEN", "dummy")
+RATHOLE_DUMMY_SERVICE_BIND_ADDR = os.environ.get(
+    "RATHOLE_DUMMY_SERVICE_BIND_ADDR",
+    "127.0.0.1:65535",
+)
+RATHOLE_SERVER_CONFIG_PATH = os.environ.get(
+    "RATHOLE_SERVER_CONFIG_PATH",
+    "./.runtime/rathole/server.toml",
+)
 
 # Load Redis credentials
 REDIS_HOST = os.environ.get("REDIS_HOST", None)

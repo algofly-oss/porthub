@@ -2,6 +2,7 @@ import pydantic
 from fastapi import APIRouter, HTTPException, Request
 
 from shared.factory import db
+from shared.rathole_config import rebuild_server_toml
 from ..common import (
     generate_machine_token,
     get_authenticated_user,
@@ -42,6 +43,7 @@ async def refresh_machine_token(data: RefreshMachineToken, request: Request):
     )
 
     updated_machine = await db.machines.find_one({"_id": machine["_id"]})
+    await rebuild_server_toml(allow_empty=True)
 
     return {
         "msg": "Machine token refreshed successfully",

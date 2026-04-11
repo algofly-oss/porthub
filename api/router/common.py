@@ -1,11 +1,12 @@
 import secrets
 import string
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from bson import ObjectId
 from fastapi import HTTPException, Request
 
 from shared.factory import db
+from shared.env import MACHINE_ONLINE_TTL_SECONDS
 from .auth.common import authenticate_user
 
 
@@ -29,6 +30,17 @@ def utcnow():
     return datetime.utcnow()
 
 
+def is_machine_online(machine: dict) -> bool:
+    if not machine.get("is_active", False):
+        return False
+
+    last_seen_at = machine.get("last_seen_at")
+    if not isinstance(last_seen_at, datetime):
+        return False
+
+    return last_seen_at >= utcnow() - timedelta(seconds=MACHINE_ONLINE_TTL_SECONDS)
+
+
 async def generate_machine_token() -> str:
     alphabet = string.ascii_letters + string.digits
     token = "".join(secrets.choice(alphabet) for _ in range(48))
@@ -46,7 +58,7 @@ def serialize_machine(machine: dict):
         "local_ip": machine.get("local_ip", machine.get("ip_address", "")),
         "public_ip": machine.get("public_ip", ""),
         "token": machine.get("token", ""),
-        "is_active": machine.get("is_active", False),
+        "is_active": is_machine_online(machine),
         "last_seen_at": machine.get("last_seen_at"),
         "created_at": machine.get("created_at"),
         "updated_at": machine.get("updated_at"),

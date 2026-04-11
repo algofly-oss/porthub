@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Request
 
 from shared.factory import db
+from shared.rathole_config import rebuild_server_toml
 from ..common import (
     get_authenticated_user,
     parse_object_id,
@@ -38,6 +39,7 @@ async def update_machine(data: Machine, request: Request):
     )
 
     updated_machine = await db.machines.find_one({"_id": machine["_id"]})
+    await rebuild_server_toml(allow_empty=True)
 
     return {
         "msg": "Machine updated successfully",

@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Request, HTTPException
 import pydantic
+from shared.rathole_config import rebuild_server_toml
 from shared.factory import db
 from ..common import get_authenticated_user, parse_object_id, serialize_connection
 
@@ -25,8 +26,8 @@ async def delete_connection(data: DeleteConnection, request: Request):
     if connection.get("machine_id"):
         machine = await db.machines.find_one({"_id": connection["machine_id"]})
     await db.connections.delete_one({"_id": connection["_id"]})
+    await rebuild_server_toml(allow_empty=True)
 
-    # This is where a later async broadcast hook can publish Rathole config changes.
     return {
         "msg": "Connection deleted successfully",
         "data": serialize_connection(connection, machine),
