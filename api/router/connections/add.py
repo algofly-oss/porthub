@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Request, HTTPException
+from shared.env import get_external_port_range_error_message, is_external_port_allowed
 from shared.rathole_config import rebuild_server_toml
 from shared.factory import db
 from shared.sockets import emit_machine_config_changed
@@ -28,6 +29,12 @@ async def add_connection(data: Connection, request: Request):
     )
     if not machine:
         raise HTTPException(status_code=400, detail="Machine not found")
+
+    if not is_external_port_allowed(data.external_port):
+        raise HTTPException(
+            status_code=400,
+            detail=get_external_port_range_error_message(),
+        )
 
     connection = await db.connections.find_one({"external_port": data.external_port})
     if connection:

@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Response, HTTPException
 from shared.factory import db, redis
+from shared.env import SIGNUP_DISABLED
 from .common import UserSignupDto
 import datetime
 import bcrypt
@@ -23,6 +24,9 @@ async def signup(user: UserSignupDto, response: Response):
     **Returns**:
     - `msg` (str): The message of the response.
     """
+
+    if SIGNUP_DISABLED:
+        raise HTTPException(status_code=403, detail="sign up is disabled")
 
     # Check if user already exists
     if await db.users.find_one({"username": user.username}):

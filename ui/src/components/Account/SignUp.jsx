@@ -4,18 +4,15 @@ import reactState from "@/shared/hooks/reactState";
 import useAuth from "@/shared/hooks/useAuth";
 import uiRoutes from "@/shared/routes/uiRoutes";
 import GoBack from "./GoBack";
-import { useEffect, useState } from "react";
-import { useRouter } from "next/router";
+import { useState } from "react";
 import { MdLockOutline, MdOutlineMailOutline } from "react-icons/md";
-import { FcGoogle } from "react-icons/fc";
 
 export default function SignUp() {
   const auth = useAuth();
-
-  const router = useRouter();
   const data = reactState();
   const error = reactState();
   const [signUpProgress, setSignUpProgress] = useState(false);
+  const signUpDisabled = auth.authSettings?.signup_disabled === true;
 
   const validateAllInputs = () => {
     let allOk = true;
@@ -61,6 +58,11 @@ export default function SignUp() {
   };
 
   const handleSignUp = async () => {
+    if (signUpDisabled) {
+      error.set("form", "Sign up is currently disabled");
+      return;
+    }
+
     if (!validateAllInputs()) {
       return;
     }
@@ -81,6 +83,10 @@ export default function SignUp() {
         setSignUpProgress(false);
         auth.autoRoute();
         break;
+      case "sign up is disabled":
+        setSignUpProgress(false);
+        error.set("form", "Sign up is currently disabled");
+        break;
       default:
         setSignUpProgress(false);
     }
@@ -96,7 +102,14 @@ export default function SignUp() {
     <div className="rounded-lg p-6 lg:p-16 w-full 2xl:w-[45rem]">
       <GoBack />
       <p className="text-3xl font-bold">Create Account</p>
-      <p className="mb-6">Please enter your details</p>
+      <p className="mb-6">
+        {signUpDisabled
+          ? "Account creation is disabled on this server."
+          : "Please enter your details"}
+      </p>
+      {error.get("form") ? (
+        <p className="mb-4 text-sm text-red-500">{error.get("form")}</p>
+      ) : null}
       <TextBox
         label="Name"
         icon={<MdOutlineMailOutline size={20} />}
@@ -104,6 +117,7 @@ export default function SignUp() {
         value={data.get("name")}
         setValue={(val) => data.set("name", val)}
         error={error.get("name")}
+        disabled={signUpDisabled}
       />
       <TextBox
         label="Email"
@@ -112,6 +126,7 @@ export default function SignUp() {
         value={data.get("username")}
         setValue={(val) => data.set("username", val)}
         error={error.get("username")}
+        disabled={signUpDisabled}
       />
       <TextBox
         label="Password"
@@ -122,6 +137,7 @@ export default function SignUp() {
         error={error.get("password")}
         mask={true}
         onKeyDown={handleKeyPress}
+        disabled={signUpDisabled}
       />
 
       {/* <Link href={uiRoutes.forgotPassword} passHref>
@@ -130,8 +146,9 @@ export default function SignUp() {
         </p>
       </Link> */}
       <button
-        className="flex items-center justify-center bg-blue-500 dark:bg-blue-700 text-white w-full p-3 rounded-md text-sm md:text-base mt-3"
+        className="flex items-center justify-center bg-blue-500 dark:bg-blue-700 text-white w-full p-3 rounded-md text-sm md:text-base mt-3 disabled:cursor-not-allowed disabled:opacity-60"
         onClick={handleSignUp}
+        disabled={signUpDisabled || signUpProgress}
       >
         {signUpProgress ? (
           <div role="status">
@@ -163,7 +180,7 @@ export default function SignUp() {
         <button>Sign up with Google</button>
       </div> */}
       <div className="flex space-x-2 justify-center mt-4">
-        <p>Already have an account?</p>
+        <p>{signUpDisabled ? "Use your existing account?" : "Already have an account?"}</p>
         <Link href={uiRoutes.signIn} passHref>
           <p className="text-blue-500 font-medium cursor-pointer">Sign in</p>
         </Link>

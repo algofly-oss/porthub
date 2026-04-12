@@ -6,6 +6,7 @@ let apiRoutes = {
   signIn: "/auth/signin",
   signOut: "/auth/signout",
   accountInfo: "/auth/me",
+  authSettings: "/auth/settings",
 
   // Connections
   getRandomPort: "/connections/random",

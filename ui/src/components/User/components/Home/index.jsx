@@ -143,7 +143,7 @@ const MACHINE_PAGE_SIZE_OPTIONS = [
   { value: "50", label: "50" },
 ];
 
-export default function Home() {
+export default function Home({ onStatsChange }) {
   const { colorScheme } = useMantineColorScheme();
   const isDark = colorScheme === "dark";
   const socket = useContext(SocketContext);
@@ -205,6 +205,41 @@ export default function Home() {
   useEffect(() => {
     setPage(1);
   }, [pageSize, statusFilter]);
+
+  useEffect(() => {
+    if (!onStatsChange) {
+      return;
+    }
+
+    let online = 0;
+    let offline = 0;
+
+    hosts.forEach((host) => {
+      const resolvedStatus =
+        host.connectionStatus ||
+        (host.enabled === false
+          ? "disabled"
+          : host.isActive
+            ? "online"
+            : "offline");
+
+      if (resolvedStatus === "disabled") {
+        return;
+      }
+
+      if (resolvedStatus === "online" || resolvedStatus === "auth_required") {
+        online += 1;
+      } else {
+        offline += 1;
+      }
+    });
+
+    onStatsChange({
+      registered: hosts.length,
+      online,
+      offline,
+    });
+  }, [hosts, onStatsChange]);
 
   useEffect(() => {
     const loadData = async () => {

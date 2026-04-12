@@ -1,5 +1,10 @@
 from fastapi import APIRouter, Request, HTTPException
 from shared.factory import db
+from shared.env import (
+    EXTERNAL_PORT_RANGE,
+    get_external_port_range_error_message,
+    is_external_port_allowed,
+)
 from ..common import (
     get_authenticated_user,
     parse_object_id,
@@ -29,9 +34,29 @@ async def list_connections(request: Request):
 
 @router.get("/random")
 async def get_random_port(request: Request):
-    random_port = random.randint(10000, 65535)
-    while await db.connections.find_one({"external_port": random_port}):
+    if EXTERNAL_PORT_RANGE is None:
         random_port = random.randint(10000, 65535)
+        while await db.connections.find_one({"external_port": random_port}):
+            random_port = random.randint(10000, 65535)
+    else:
+        range_start, range_end = EXTERNAL_PORT_RANGE
+        used_ports = set(
+            await db.connections.distinct(
+                "external_port",
+                {"external_port": {"$gte": range_start, "$lte": range_end}},
+            )
+        )
+        available_ports = [
+            port for port in range(range_start, range_end + 1) if port not in used_ports
+        ]
+
+        if not available_ports:
+            raise HTTPException(
+                status_code=409,
+                detail="No available external ports in the configured range",
+            )
+
+        random_port = random.choice(available_ports)
 
     return {
         "port": random_port
@@ -48,6 +73,12 @@ async def external_port_availability(
 
     if port < 1 or port > 65535:
         raise HTTPException(status_code=400, detail="Invalid port")
+
+    if not is_external_port_allowed(port):
+        return {
+            "available": False,
+            "message": get_external_port_range_error_message(),
+        }
 
     query = {"external_port": port}
     if data_id:
