@@ -110,6 +110,9 @@ const normalizeInternalHost = (value) => {
   return normalized || "0.0.0.0";
 };
 
+const getApiErrorMessage = (requestError, fallbackMessage) =>
+  requestError?.response?.data?.detail || fallbackMessage;
+
 const getRuleErrors = (rule) => {
   const errors = {};
 
@@ -611,7 +614,7 @@ export default function HostConfigPopup({
       const externalPort = await getUniqueRandomPort(nextRule.localId);
       updateRule(nextRule.localId, "externalPort", externalPort);
     } catch (randomPortError) {
-      error("Could not generate a random external port");
+      error(getApiErrorMessage(randomPortError, "Could not generate a random external port"));
     } finally {
       setRandomizingRuleId(null);
     }
@@ -686,6 +689,8 @@ export default function HostConfigPopup({
     try {
       const response = await axios.get(apiRoutes.getRandomPort);
       updateRule(localId, "externalPort", String(response.data.port));
+    } catch (requestError) {
+      error(getApiErrorMessage(requestError, "Could not generate a random external port"));
     } finally {
       setRandomizingRuleId(null);
     }
