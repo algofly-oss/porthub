@@ -12,6 +12,23 @@ def _get_optional_int_env(name):
         raise BaseException(f"{name} must be an integer") from exc
 
 
+def _get_bool_env(name, default=False):
+    value = os.environ.get(name)
+    if value in (None, ""):
+        return default
+
+    normalized_value = value.strip().lower()
+    if normalized_value in {"1", "true", "yes", "on"}:
+        return True
+
+    if normalized_value in {"0", "false", "no", "off"}:
+        return False
+
+    raise BaseException(
+        f"{name} must be one of: 1, 0, true, false, yes, no, on, off"
+    )
+
+
 def _load_external_port_range():
     start = _get_optional_int_env("EXTERNAL_PORT_RANGE_START")
     end = _get_optional_int_env("EXTERNAL_PORT_RANGE_END")
@@ -64,6 +81,7 @@ if API_SECRET_KEY is None:
 # Load env configuration
 API_ALGORITHM = os.environ.get("API_ALGORITHM", "HS256")
 API_COOKIES_EXPIRE_MINUTES = int(os.environ.get("API_COOKIES_EXPIRE_MINUTES", 43200))
+SIGNUP_DISABLED = _get_bool_env("SIGNUP_DISABLED", False)
 RATHOLE_PORT = int(os.environ.get("RATHOLE_PORT", 2334))
 MACHINE_ONLINE_TTL_SECONDS = int(os.environ.get("MACHINE_ONLINE_TTL_SECONDS", 300))
 MACHINE_CONFIG_LONG_POLL_TIMEOUT_SECONDS = int(

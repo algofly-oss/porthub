@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/router";
 import { useSelector, useDispatch } from "react-redux";
 import { authSelector, authActions } from "../../redux/features/authSlice";
@@ -10,11 +10,13 @@ export default function useAuth() {
   const user = useSelector(authSelector);
   const dispatch = useDispatch();
   const router = useRouter();
+  const [authSettings, setAuthSettings] = useState(null);
 
   useEffect(() => {
     if (!user?.username) {
       getAccountInfo();
     }
+    getAuthSettings();
   }, []);
 
   const clearStorage = () => {
@@ -38,6 +40,23 @@ export default function useAuth() {
         }
       })
       .catch((err) => {});
+  };
+
+  const getAuthSettings = async () => {
+    return await axios
+      .get(apiRoutes.authSettings)
+      .then((res) => {
+        setAuthSettings(res.data || {});
+        return res.data || {};
+      })
+      .catch(() => {
+        const fallbackSettings = {
+          signup_disabled: false,
+          signup_enabled: true,
+        };
+        setAuthSettings(fallbackSettings);
+        return fallbackSettings;
+      });
   };
 
   const signUp = async (name, username, password) => {
@@ -103,10 +122,12 @@ export default function useAuth() {
 
   return {
     user,
+    authSettings,
     signUp,
     signIn,
     signOut,
     getAccountInfo,
+    getAuthSettings,
     autoRoute,
   };
 }

@@ -4,18 +4,15 @@ import reactState from "@/shared/hooks/reactState";
 import useAuth from "@/shared/hooks/useAuth";
 import uiRoutes from "@/shared/routes/uiRoutes";
 import GoBack from "./GoBack";
-import { useEffect, useState } from "react";
-import { useRouter } from "next/router";
+import { useState } from "react";
 import { MdLockOutline, MdOutlineMailOutline } from "react-icons/md";
-import { FcGoogle } from "react-icons/fc";
 
 export default function SignIn() {
   const auth = useAuth();
-
-  const router = useRouter();
   const data = reactState();
   const error = reactState();
   const [signInProgress, setSignInProgress] = useState(false);
+  const signUpDisabled = auth.authSettings?.signup_disabled === true;
 
   const validateAllInputs = () => {
     let allOk = true;
@@ -151,12 +148,14 @@ export default function SignIn() {
         <FcGoogle size={25} />
         <button>Sign in with Google</button>
       </div> */}
-      <div className="flex space-x-2 justify-center mt-4">
-        <p>Don&apos;t have an account?</p>
-        <Link href={uiRoutes.signUp} passHref>
-          <p className="text-blue-500 font-medium cursor-pointer">Sign up</p>
-        </Link>
-      </div>
+      {!signUpDisabled ? (
+        <div className="flex space-x-2 justify-center mt-4">
+          <p>Don&apos;t have an account?</p>
+          <Link href={uiRoutes.signUp} passHref>
+            <p className="text-blue-500 font-medium cursor-pointer">Sign up</p>
+          </Link>
+        </div>
+      ) : null}
     </div>
   );
 }
