@@ -71,7 +71,7 @@ def build_install_command(request: Request, machine: dict) -> str:
         f"curl -fsSL {endpoints['install_script']} -o install.sh "
         "&& chmod +x install.sh "
         "&& ./install.sh "
-        f"&& porthub status -t {machine_id}"
+        f"&& porthub status {machine_id}"
     )
 
 

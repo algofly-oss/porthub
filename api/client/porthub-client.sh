@@ -62,6 +62,38 @@ validate_tenant_name() {
   esac
 }
 
+extract_url_host() {
+  local value="${1:-}"
+  value="${value#*://}"
+  value="${value%%/*}"
+  value="${value%%:*}"
+  printf "%s" "$value"
+}
+
+slugify_tenant_part() {
+  local value="${1:-}"
+  value="$(printf "%s" "$value" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-')"
+  value="$(printf "%s" "$value" | sed 's/^-*//; s/-*$//; s/--*/-/g')"
+  printf "%s" "$value"
+}
+
+derive_default_tenant_name() {
+  local api_url="${1:-}"
+  local machine_id="${2:-}"
+  local host_slug machine_suffix
+
+  host_slug="$(slugify_tenant_part "$(extract_url_host "$api_url")")"
+  [ -n "$host_slug" ] || host_slug="porthub"
+
+  machine_suffix="$machine_id"
+  if [ "${#machine_suffix}" -gt 8 ]; then
+    machine_suffix="${machine_suffix: -8}"
+  fi
+  [ -n "$machine_suffix" ] || machine_suffix="tenant"
+
+  printf "%s-%s" "$machine_suffix" "$host_slug"
+}
+
 apply_tenant_context() {
   local requested_tenant normalized_tenant service_suffix
   requested_tenant="${1:-}"
@@ -251,6 +283,43 @@ resolve_tenant_reference() {
   esac
 }
 
+shortest_unique_tenant_prefix() {
+  local tenant="$1"
+  local min_length="${2:-4}"
+  local prefix_length other_tenant prefix is_unique
+
+  [ -n "$tenant" ] || {
+    printf ""
+    return 0
+  }
+
+  if [ "${#tenant}" -lt "$min_length" ]; then
+    min_length="${#tenant}"
+  fi
+
+  prefix_length="$min_length"
+  while [ "$prefix_length" -le "${#tenant}" ]; do
+    prefix="${tenant:0:$prefix_length}"
+    is_unique="true"
+    for other_tenant in "${CONFIGURED_TENANTS[@]}"; do
+      [ "$other_tenant" = "$tenant" ] && continue
+      case "$other_tenant" in
+        "$prefix"*)
+          is_unique="false"
+          break
+          ;;
+      esac
+    done
+    if [ "$is_unique" = "true" ]; then
+      printf "%s" "$prefix"
+      return 0
+    fi
+    prefix_length=$((prefix_length + 1))
+  done
+
+  printf "%s" "$tenant"
+}
+
 configured_tenant_count() {
   collect_configured_tenants
   printf "%s" "${#CONFIGURED_TENANTS[@]}"
@@ -272,7 +341,7 @@ resolve_selected_tenant_context() {
       apply_tenant_context "${CONFIGURED_TENANTS[0]}"
       ;;
     *)
-      fail "Multiple PortHub tenants are configured. Use --tenant <name> or 'porthub tenants list'."
+      fail "Multiple PortHub tenants are configured. Pass a tenant id prefix like 'porthub status 69db33555077' or use --tenant."
       ;;
   esac
 }
@@ -306,6 +375,17 @@ parse_global_cli_options() {
         ;;
     esac
   done
+}
+
+consume_leading_tenant_arg() {
+  PARSED_COMMAND_ARGS=()
+
+  if [ -z "${PORT_HUB_EXPLICIT_TENANT:-}" ] && [ "$#" -gt 0 ] && [ "${1#-}" = "$1" ]; then
+    PORT_HUB_EXPLICIT_TENANT="$(resolve_tenant_reference "$1")"
+    shift
+  fi
+
+  PARSED_COMMAND_ARGS=("$@")
 }
 
 ensure_dirs() {
@@ -1584,6 +1664,8 @@ service_status() {
 
 up_cmd() {
   step "Preparing persistent PortHub service"
+  consume_leading_tenant_arg "$@"
+  set -- "${PARSED_COMMAND_ARGS[@]}"
   detect_sudo
   resolve_selected_tenant_context
   load_env
@@ -1632,6 +1714,8 @@ up_cmd() {
 
 down_cmd() {
   step "Stopping PortHub service"
+  consume_leading_tenant_arg "$@"
+  set -- "${PARSED_COMMAND_ARGS[@]}"
   detect_sudo
   resolve_selected_tenant_context
   load_env
@@ -1644,6 +1728,9 @@ uninstall_cmd() {
   local remove_all="false"
   local previous_tenant="${PORT_HUB_TENANT:-}"
   local tenant_name tenant_count
+
+  consume_leading_tenant_arg "$@"
+  set -- "${PARSED_COMMAND_ARGS[@]}"
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -1736,6 +1823,8 @@ uninstall_cmd() {
 }
 
 status_cmd() {
+  consume_leading_tenant_arg "$@"
+  set -- "${PARSED_COMMAND_ARGS[@]}"
   resolve_selected_tenant_context
   load_env
   local service_state manager config_version last_sync last_auth last_contact shared_hostname
@@ -1783,18 +1872,41 @@ EOF_STATUS
 }
 
 version_cmd() {
-  resolve_selected_tenant_context
-  load_env
-  cat <<EOF_VERSION
+  consume_leading_tenant_arg "$@"
+  set -- "${PARSED_COMMAND_ARGS[@]}"
+  if [ -n "${PORT_HUB_EXPLICIT_TENANT:-}" ]; then
+    resolve_selected_tenant_context
+    load_env
+    cat <<EOF_VERSION
 PortHub Version
 tenant: $(tenant_display_name)
 client_version: $(client_version)
 rathole_version: $(rathole_version)
 EOF_VERSION
+    return
+  fi
+
+  cat <<EOF_VERSION
+PortHub Version
+client_version: $(client_version)
+rathole_version: $(rathole_version)
+EOF_VERSION
+}
+
+short_version_cmd() {
+  consume_leading_tenant_arg "$@"
+  set -- "${PARSED_COMMAND_ARGS[@]}"
+  if [ -n "${PORT_HUB_EXPLICIT_TENANT:-}" ]; then
+    resolve_selected_tenant_context
+    load_env
+  fi
+  printf "%s\n" "$(client_version)"
 }
 
 restart_cmd() {
   step "Restarting PortHub service"
+  consume_leading_tenant_arg "$@"
+  set -- "${PARSED_COMMAND_ARGS[@]}"
   detect_sudo
   resolve_selected_tenant_context
   load_env
@@ -1803,6 +1915,8 @@ restart_cmd() {
 }
 
 config_cmd() {
+  consume_leading_tenant_arg "$@"
+  set -- "${PARSED_COMMAND_ARGS[@]}"
   resolve_selected_tenant_context
   [ -f "$PORT_HUB_ENV_FILE" ] || fail "No config found at $PORT_HUB_ENV_FILE"
   cat "$PORT_HUB_ENV_FILE"
@@ -1829,6 +1943,9 @@ rathole_config_cmd() {
   local interval_seconds="2"
   local current_snapshot=""
   local next_snapshot=""
+
+  consume_leading_tenant_arg "$@"
+  set -- "${PARSED_COMMAND_ARGS[@]}"
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -1927,6 +2044,8 @@ update_token_cmd() {
 
 update_cmd() {
   step "Updating PortHub CLI from server"
+  consume_leading_tenant_arg "$@"
+  set -- "${PARSED_COMMAND_ARGS[@]}"
   detect_sudo
   require_configured_machine
   load_env
@@ -1995,6 +2114,8 @@ update_cmd() {
 
 reinstall_cmd() {
   step "Reinstalling PortHub from server"
+  consume_leading_tenant_arg "$@"
+  set -- "${PARSED_COMMAND_ARGS[@]}"
   detect_sudo
   require_configured_machine
   load_env
@@ -2016,6 +2137,8 @@ reinstall_cmd() {
 
 logs_cmd() {
   step "Reading PortHub logs"
+  consume_leading_tenant_arg "$@"
+  set -- "${PARSED_COMMAND_ARGS[@]}"
   resolve_selected_tenant_context
   local follow="false"
   local lines="100"
@@ -2053,26 +2176,25 @@ env_file_value() {
 
 tenants_list_cmd() {
   local previous_tenant="${PORT_HUB_TENANT:-}"
-  local tenant_name api_url machine_id service_state
+  local tenant_name api_url machine_id service_state short_tenant
 
   collect_configured_tenants
   if [ "${#CONFIGURED_TENANTS[@]}" -eq 0 ]; then
     cat <<EOF_TENANTS_EMPTY
-PortHub Tenants
 configured: 0
 EOF_TENANTS_EMPTY
     return 0
   fi
 
-  printf "PortHub Tenants\n"
+  printf "%-12s  %-10s  %s\n" "TENANT" "STATE" "API"
   for tenant_name in "${CONFIGURED_TENANTS[@]}"; do
     apply_tenant_context "$tenant_name"
     api_url="$(env_file_value "$PORT_HUB_ENV_FILE" PORT_HUB_API_URL)"
     machine_id="$(env_file_value "$PORT_HUB_ENV_FILE" PORT_HUB_MACHINE_ID)"
     service_state="$(service_status)"
-    printf -- "- %s machine_id=%s service=%s api=%s\n" \
-      "$(tenant_display_name "$tenant_name")" \
-      "${machine_id:-unknown}" \
+    short_tenant="$(shortest_unique_tenant_prefix "$tenant_name" 12)"
+    printf "%-12s  %-10s  %s\n" \
+      "$short_tenant" \
       "$service_state" \
       "${api_url:-unknown}"
   done
@@ -2082,11 +2204,23 @@ EOF_TENANTS_EMPTY
 tenants_add_cmd() {
   local auto_up="true"
   local machine_id="$PORT_HUB_DEFAULT_MACHINE_ID"
+  local api_url="$PORT_HUB_DEFAULT_API_URL"
   local previous_tenant="${PORT_HUB_EXPLICIT_TENANT:-}"
   local -a configure_args=()
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      --api-url|--server-url)
+        [ "$#" -ge 2 ] || fail "Missing value for $1"
+        api_url="$2"
+        configure_args+=("$1" "$2")
+        shift 2
+        ;;
+      --api-url=*|--server-url=*)
+        api_url="${1#*=}"
+        configure_args+=("$1")
+        shift
+        ;;
       --machine-id)
         [ "$#" -ge 2 ] || fail "Missing value for --machine-id"
         machine_id="$2"
@@ -2111,7 +2245,7 @@ tenants_add_cmd() {
 
   if [ -z "${PORT_HUB_EXPLICIT_TENANT:-}" ]; then
     [ -n "$machine_id" ] || fail "Missing machine id for tenant bootstrap"
-    PORT_HUB_EXPLICIT_TENANT="$machine_id"
+    PORT_HUB_EXPLICIT_TENANT="$(derive_default_tenant_name "$api_url" "$machine_id")"
   fi
 
   configure_cmd "${configure_args[@]}"
@@ -2478,6 +2612,11 @@ Commands:
   version           Show installed PortHub client and Rathole versions
   tenants           Full tenant management subcommands
   adv               Show advanced maintenance commands
+
+Examples:
+  porthub status 69db33555077
+  porthub logs 69db33555077 -f
+  porthub stop 69db33555077
 EOF_USAGE
 }
 
@@ -2533,7 +2672,8 @@ main() {
     uninstall) uninstall_cmd "$@" ;;
     restart) restart_cmd "$@" ;;
     status) status_cmd "$@" ;;
-    version|-v|--version) version_cmd "$@" ;;
+    version|--version) version_cmd "$@" ;;
+    -v) short_version_cmd "$@" ;;
     logs) logs_cmd "$@" ;;
     config) config_cmd "$@" ;;
     rathole) rathole_cmd "$@" ;;
