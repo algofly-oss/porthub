@@ -1,0 +1,73 @@
+services:
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    image: porthub_api_prod
+    container_name: porthub_api_prod
+    environment:
+      - API_DEBUG=False
+      - RATHOLE_SERVER_CONFIG_PATH=/runtime/rathole/server.toml
+    env_file:
+      - ./.env
+    volumes:
+      - ./api:/app
+      - rathole_config:/runtime/rathole
+    restart: always
+    networks:
+      - porthub
+
+  ui:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile.prod
+    image: porthub_ui_prod
+    container_name: porthub_ui_prod
+    env_file:
+      - ./.env
+    environment:
+      - BUILD_ENV=prod
+    # volumes:
+    #   - ./ui:/app
+    restart: always
+    depends_on:
+      - api
+    networks:
+      - porthub
+
+  proxy:
+    image: nginx:1.19-alpine
+    container_name: porthub_proxy
+    env_file:
+      - ./.env
+    ports:
+      - ${APP_HTTP_PORT:-80}:80
+      - ${APP_HTTPS_PORT:-443}:443
+    volumes:
+      - ./proxy/nginx.conf:/etc/nginx/templates/default.conf.template
+      - ./proxy/certificate/server.crt:/etc/ssl/certs/server.crt
+      - ./proxy/certificate/server.key:/etc/ssl/certs/server.key
+    restart: always
+    depends_on:
+      - api
+      - ui
+    networks:
+      - porthub
+
+  rathole:
+    image: archef2000/rathole:latest
+    command: -s /runtime/rathole/server.toml
+    container_name: porthub_rathole
+    network_mode: host
+    volumes:
+      - rathole_config:/runtime/rathole
+    restart: always
+    depends_on:
+      - api
+
+networks:
+  porthub:
+    name: porthub
+
+volumes:
+  rathole_config:
