@@ -1,10 +1,10 @@
 import asyncio
-import hashlib
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 
+from shared.client_release import get_client_version as get_asset_version
 from shared.factory import db
 from shared.machine_client import (
     authenticate_machine,
@@ -33,11 +33,6 @@ def get_asset_path(filename: str) -> Path:
     if not asset_path.is_file():
         raise HTTPException(status_code=404, detail=f"Asset not found: {filename}")
     return asset_path
-
-
-def get_asset_version(filename: str) -> str:
-    return hashlib.sha256(get_asset_path(filename).read_bytes()).hexdigest()[:12]
-
 def render_script_asset(script_name: str, request: Request, machine: dict) -> str:
     filename = SCRIPT_ASSET_FILENAMES.get(script_name)
     if not filename:
@@ -45,7 +40,7 @@ def render_script_asset(script_name: str, request: Request, machine: dict) -> st
 
     endpoints = build_machine_endpoints(machine, request=request)
     replacements = {
-        "__PORT_HUB_CLIENT_VERSION__": get_asset_version(filename),
+        "__PORT_HUB_CLIENT_VERSION__": get_asset_version(),
         "__PORT_HUB_API_URL__": get_api_base_url(request),
         "__PORT_HUB_MACHINE_ID__": str(machine["_id"]),
         "__PORT_HUB_MACHINE_TOKEN__": machine["token"],

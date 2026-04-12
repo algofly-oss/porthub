@@ -15,7 +15,16 @@ import {
   useMantineColorScheme,
 } from "@mantine/core";
 import { useDebouncedValue } from "@mantine/hooks";
-import { IconArrowLeft, IconChevronDown, IconChevronUp, IconCopy, IconDotsVertical, IconPlus, IconRefresh, IconTrash } from "@tabler/icons-react";
+import {
+  IconArrowLeft,
+  IconChevronDown,
+  IconChevronUp,
+  IconCopy,
+  IconDotsVertical,
+  IconPlus,
+  IconRefresh,
+  IconTrash,
+} from "@tabler/icons-react";
 import axios from "axios";
 import apiRoutes from "@/shared/routes/apiRoutes";
 import useToast from "@/shared/hooks/useToast";
@@ -33,6 +42,35 @@ const getLabelClassName = (isDark) =>
   `mb-1.5 block text-sm font-semibold ${isDark ? "text-zinc-100" : "text-zinc-900"}`;
 
 const errorClassName = "mt-1 text-xs text-red-600 dark:text-red-400";
+
+const getInfoBadgeClassName = (isDark) =>
+  isDark
+    ? "!bg-blue-500/10 !text-blue-200/75"
+    : "!bg-blue-100/45 !text-blue-900/65";
+
+const getStatusBadgeClassName = (isDark, tone) => {
+  if (tone === "success") {
+    return isDark
+      ? "!bg-emerald-500/14 !text-emerald-200/80"
+      : "!bg-emerald-100/55 !text-emerald-900/70";
+  }
+
+  if (tone === "warning") {
+    return isDark
+      ? "!bg-amber-500/14 !text-amber-200/82"
+      : "!bg-amber-100/60 !text-amber-900/72";
+  }
+
+  if (tone === "danger") {
+    return isDark
+      ? "!bg-red-500/12 !text-red-200/78"
+      : "!bg-red-100/55 !text-red-900/68";
+  }
+
+  return isDark
+    ? "!bg-zinc-500/14 !text-zinc-200/78"
+    : "!bg-zinc-100/80 !text-zinc-900/62";
+};
 
 const createRuleId = () =>
   `rule-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -162,6 +200,7 @@ export default function HostConfigPopup({
   onDeleteMachine,
   onToggleMachine,
   onRefreshMachineToken,
+  onRequestClientUpdate,
   isSaving,
 }) {
   const { colorScheme } = useMantineColorScheme();
@@ -178,6 +217,7 @@ export default function HostConfigPopup({
   const [machineCommand, setMachineCommand] = useState("");
   const [isLoadingMachineCommand, setIsLoadingMachineCommand] = useState(false);
   const [isRefreshingMachineToken, setIsRefreshingMachineToken] = useState(false);
+  const [isRequestingClientUpdate, setIsRequestingClientUpdate] = useState(false);
   const [isTogglingMachine, setIsTogglingMachine] = useState(false);
   const [isRefreshMachineTokenConfirmOpen, setIsRefreshMachineTokenConfirmOpen] =
     useState(false);
@@ -205,6 +245,13 @@ export default function HostConfigPopup({
   const savedRuleCount = host?.forwardingConfigs?.length || 0;
   const hostConnectionStatus =
     host?.connectionStatus || (host?.isActive ? "online" : "offline");
+  const showClientUpdateAction = Boolean(host?.id);
+  const clientVersionLabel = host?.clientVersion
+    ? `v${host.clientVersion}`
+    : "Awaiting heartbeat";
+  const latestClientVersionLabel = host?.latestClientVersion
+    ? `v${host.latestClientVersion}`
+    : "Unknown";
   const savedRulesById = new Map(
     (host?.forwardingConfigs || [])
       .filter((rule) => rule.dataId)
@@ -805,6 +852,20 @@ export default function HostConfigPopup({
     }
   };
 
+  const handleRequestClientUpdate = async () => {
+    if (!host || !onRequestClientUpdate || isRequestingClientUpdate) {
+      return;
+    }
+
+    setIsRequestingClientUpdate(true);
+
+    try {
+      await onRequestClientUpdate(host.id);
+    } finally {
+      setIsRequestingClientUpdate(false);
+    }
+  };
+
   const handleSubmit = async (event) => {
     event.preventDefault();
 
@@ -911,13 +972,19 @@ export default function HostConfigPopup({
         {host ? (
           <form
             onSubmit={handleSubmit}
-            className={`${isDark ? "text-zinc-100" : "text-zinc-900"} flex max-h-[calc(100vh-12rem)] flex-col transition ${
+            className={`${isDark ? "text-zinc-100" : "text-zinc-900"} flex max-h-[calc(100vh-12rem)] flex-col overflow-hidden transition ${
               isRefreshMachineTokenConfirmOpen || isDeleteMachineConfirmOpen
                 ? "pointer-events-none blur-[1px]"
                 : ""
             }`}
           >
-            <Stack spacing="md" className="min-h-0 flex-1">
+            <Stack spacing="md" className="min-h-0 flex-1 overflow-hidden">
+            <div
+              className={`min-h-0 flex-1 overflow-y-auto pr-1 ${
+                isDark ? "dark-scrollbar" : "light-scrollbar"
+              }`}
+            >
+            <div className="flex flex-col gap-3">
             <div className="flex items-start justify-between gap-3">
               <Group spacing="xs">
                 <Badge
@@ -931,6 +998,16 @@ export default function HostConfigPopup({
                         : "red"
                   }
                   variant="light"
+                  className={getStatusBadgeClassName(
+                    isDark,
+                    hostConnectionStatus === "online"
+                      ? "success"
+                      : hostConnectionStatus === "disabled"
+                        ? "neutral"
+                        : hostConnectionStatus === "auth_required"
+                          ? "warning"
+                          : "danger"
+                  )}
                 >
                   {hostConnectionStatus === "online"
                     ? "Online"
@@ -940,53 +1017,67 @@ export default function HostConfigPopup({
                       ? "Auth required"
                       : "Offline"}
                 </Badge>
-                <Badge variant="outline">{host.hostname || "Awaiting hostname"}</Badge>
-                <Badge variant="outline">LAN: {host.localIp || "Pending"}</Badge>
-                <Badge variant="outline">WAN: {host.publicIp || "Pending"}</Badge>
-                <Badge variant="outline">Last seen: {host.lastSeen || "Never seen"}</Badge>
-                <Badge variant="outline">{host.numPorts} active ports</Badge>
-                <Badge variant="outline">{savedRuleCount} configured rules</Badge>
+                <Badge color="blue" variant="light" className={getInfoBadgeClassName(isDark)}>
+                  {host.name || "Untitled machine"}
+                </Badge>
+                <Badge color="blue" variant="light" className={getInfoBadgeClassName(isDark)}>
+                  LAN: {host.localIp || "Pending"}
+                </Badge>
+                <Badge color="blue" variant="light" className={getInfoBadgeClassName(isDark)}>
+                  WAN: {host.publicIp || "Pending"}
+                </Badge>
+                <Badge color="blue" variant="light" className={getInfoBadgeClassName(isDark)}>
+                  Last seen: {host.lastSeen || "Never seen"}
+                </Badge>
+                <Badge color="blue" variant="light" className={getInfoBadgeClassName(isDark)}>
+                  {host.numPorts} active ports
+                </Badge>
+                <Badge color="blue" variant="light" className={getInfoBadgeClassName(isDark)}>
+                  {savedRuleCount} configured rules
+                </Badge>
               </Group>
 
-              {!selectedRule ? (
-                <Menu position="bottom-end" withinPortal>
-                  <Menu.Target>
-                    <ActionIcon
-                      type="button"
-                      variant="subtle"
-                      aria-label="Machine actions"
+              <div className="flex items-center gap-1">
+                {!selectedRule ? (
+                  <Menu position="bottom-end" withinPortal>
+                    <Menu.Target>
+                      <ActionIcon
+                        type="button"
+                        variant="subtle"
+                        aria-label="Machine actions"
+                        className={
+                          isDark
+                            ? "!text-zinc-300 hover:!bg-zinc-800"
+                            : "!text-zinc-600 hover:!bg-zinc-100"
+                        }
+                      >
+                        <IconDotsVertical size={16} />
+                      </ActionIcon>
+                    </Menu.Target>
+
+                    <Menu.Dropdown
                       className={
                         isDark
-                          ? "!text-zinc-300 hover:!bg-zinc-800"
-                          : "!text-zinc-600 hover:!bg-zinc-100"
+                          ? "!border-zinc-700 !bg-zinc-900"
+                          : "!border-zinc-200 !bg-white"
                       }
                     >
-                      <IconDotsVertical size={16} />
-                    </ActionIcon>
-                  </Menu.Target>
-
-                  <Menu.Dropdown
-                    className={
-                      isDark
-                        ? "!border-zinc-700 !bg-zinc-900"
-                        : "!border-zinc-200 !bg-white"
-                    }
-                  >
-                    <Menu.Item
-                      onClick={handleToggleMachine}
-                      disabled={isTogglingMachine}
-                    >
-                      {host.enabled === false ? "Enable machine" : "Disable machine"}
-                    </Menu.Item>
-                    <Menu.Item
-                      color="red"
-                      onClick={handleOpenDeleteMachineConfirm}
-                    >
-                      Delete machine
-                    </Menu.Item>
-                  </Menu.Dropdown>
-                </Menu>
-              ) : null}
+                      <Menu.Item
+                        onClick={handleToggleMachine}
+                        disabled={isTogglingMachine}
+                      >
+                        {host.enabled === false ? "Enable machine" : "Disable machine"}
+                      </Menu.Item>
+                      <Menu.Item
+                        color="red"
+                        onClick={handleOpenDeleteMachineConfirm}
+                      >
+                        Delete machine
+                      </Menu.Item>
+                    </Menu.Dropdown>
+                  </Menu>
+                ) : null}
+              </div>
             </div>
 
             <div
@@ -1014,7 +1105,7 @@ export default function HostConfigPopup({
                   </button>
 
                   <Collapse in={showMachineCredentials}>
-                    <div className="space-y-3 px-4 py-4">
+                    <div className="space-y-1 px-4 pb-2 pt-1.5">
                       <div>
                         <div className="flex items-center gap-1.5">
                           <p className="text-xs uppercase tracking-[0.18em] text-zinc-500">
@@ -1045,34 +1136,6 @@ export default function HostConfigPopup({
                               }
                             >
                               <IconRefresh size={14} />
-                            </ActionIcon>
-                          </Tooltip>
-                          <Tooltip
-                            label="Copy machine token"
-                            withArrow
-                            position="top"
-                            classNames={{
-                              tooltip: isDark
-                                ? "!border !border-zinc-700 !bg-zinc-900 !text-zinc-100"
-                                : "!border !border-zinc-200 !bg-white !text-zinc-900",
-                              arrow: isDark
-                                ? "!border-zinc-700 !bg-zinc-900"
-                                : "!border-zinc-200 !bg-white",
-                            }}
-                          >
-                            <ActionIcon
-                              type="button"
-                              variant="subtle"
-                              onClick={() => handleCopy("Machine token", host.token)}
-                              aria-label="Copy machine token"
-                              disabled={!host.token}
-                              className={
-                                isDark
-                                  ? "!h-6 !w-6 !text-zinc-400 hover:!bg-zinc-800 hover:!text-zinc-200 disabled:!bg-transparent"
-                                  : "!h-6 !w-6 !text-zinc-500 hover:!bg-zinc-200 hover:!text-zinc-700 disabled:!bg-transparent"
-                              }
-                            >
-                              <IconCopy size={14} />
                             </ActionIcon>
                           </Tooltip>
                         </div>
@@ -1119,6 +1182,55 @@ export default function HostConfigPopup({
                             {" "}
                             on the client machine.
                           </p>
+                          <div className="mt-1.5 flex items-center gap-1.5">
+                            <p
+                              className={`text-xs ${
+                                isDark ? "text-zinc-400" : "text-zinc-500"
+                              }`}
+                            >
+                              Installed client version: {clientVersionLabel}
+                            </p>
+                            {showClientUpdateAction ? (
+                              <Tooltip
+                                label={
+                                  host.clientUpdateRequested
+                                    ? "Update client"
+                                    : host.clientUpdateAvailable
+                                      ? "Update client"
+                                      : "Update client"
+                                }
+                                withArrow
+                                position="top"
+                                classNames={{
+                                  tooltip: isDark
+                                    ? "!border !border-zinc-700 !bg-zinc-900 !text-zinc-100"
+                                    : "!border !border-zinc-200 !bg-white !text-zinc-900",
+                                  arrow: isDark
+                                    ? "!border-zinc-700 !bg-zinc-900"
+                                    : "!border-zinc-200 !bg-white",
+                                }}
+                              >
+                                <ActionIcon
+                                  type="button"
+                                  variant="subtle"
+                                  onClick={handleRequestClientUpdate}
+                                  aria-label="Update client"
+                                  disabled={isRequestingClientUpdate}
+                                  className={
+                                    host.clientUpdateRequested
+                                      ? isDark
+                                        ? "!h-5 !w-5 !text-amber-300/90 hover:!bg-zinc-800"
+                                        : "!h-5 !w-5 !text-amber-700/90 hover:!bg-zinc-200"
+                                      : isDark
+                                        ? "!h-5 !w-5 !text-zinc-500 hover:!bg-zinc-800 hover:!text-zinc-300"
+                                        : "!h-5 !w-5 !text-zinc-400 hover:!bg-zinc-200 hover:!text-zinc-600"
+                                  }
+                                >
+                                  <IconRefresh size={12} />
+                                </ActionIcon>
+                              </Tooltip>
+                            ) : null}
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -1174,8 +1286,8 @@ export default function HostConfigPopup({
                         onScroll={handleClientLogsScroll}
                         className={`max-h-72 overflow-y-auto rounded-lg border px-3 py-3 font-mono text-xs ${
                           isDark
-                            ? "border-zinc-700 bg-zinc-900 text-zinc-100"
-                            : "border-zinc-200 bg-zinc-100 text-zinc-800"
+                            ? "border-zinc-700 bg-zinc-900 text-zinc-100 dark-scrollbar"
+                            : "border-zinc-200 bg-zinc-100 text-zinc-800 light-scrollbar"
                         }`}
                       >
                         {visibleClientLogs.length > 0 ? (
@@ -1711,6 +1823,8 @@ export default function HostConfigPopup({
 
               </div>
             )}
+            </div>
+            </div>
 
             <Group position="right">
               {selectedRule ? (

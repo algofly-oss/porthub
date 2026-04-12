@@ -108,6 +108,11 @@ const mapMachineToHost = (machine) => ({
         : "offline"),
   authRequired: machine.auth_required ?? false,
   isActive: machine.is_active ?? false,
+  clientVersion: machine.client_version || "",
+  latestClientVersion: machine.latest_client_version || "",
+  clientUpdateAvailable: machine.client_update_available ?? false,
+  clientUpdateRequested: machine.client_update_requested ?? false,
+  clientUpdateTargetVersion: machine.client_update_target_version || "",
   numPorts: 0,
   lastSeenAt: machine.last_seen_at || null,
   lastSeen: formatLastSeen(machine),
@@ -581,6 +586,41 @@ export default function Home({ onStatsChange }) {
     }
   };
 
+  const handleRequestClientUpdate = async (hostId) => {
+    const currentHost = hosts.find((host) => host.id === hostId);
+    if (!currentHost) {
+      return null;
+    }
+
+    try {
+      const response = await axios.post(apiRoutes.requestClientUpdate, {
+        data_id: hostId,
+      });
+      const updatedHost = mapMachineToHost(response.data.data);
+
+      setHosts((currentHosts) =>
+        currentHosts.map((host) =>
+          host.id === hostId
+            ? {
+                ...host,
+                ...updatedHost,
+                numPorts: host.numPorts,
+                forwardingConfigs: host.forwardingConfigs,
+              }
+            : host
+        )
+      );
+
+      success(`Requested client update for ${currentHost.name}`);
+      return updatedHost;
+    } catch (requestError) {
+      error(
+        requestError?.response?.data?.detail || "Could not request client update"
+      );
+      return null;
+    }
+  };
+
   return (
     <div className="flex justify-center">
       <div className="m-4 pb-16 md:pb-6 xl:m-8 relative overflow-y-auto overflow-x-hidden 2xl:w-[80rem] w-full">
@@ -773,6 +813,7 @@ export default function Home({ onStatsChange }) {
         onDeleteMachine={handleDeleteMachine}
         onToggleMachine={handleToggleMachine}
         onRefreshMachineToken={handleRefreshMachineToken}
+        onRequestClientUpdate={handleRequestClientUpdate}
         isSaving={isSaving}
       />
     </div>

@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from bson import ObjectId
 from fastapi import HTTPException, Request
 
+from shared.client_release import get_client_version as get_latest_client_version
 from shared.env import (
     MACHINE_CONFIG_LONG_POLL_INTERVAL_SECONDS,
     MACHINE_CONFIG_LONG_POLL_TIMEOUT_SECONDS,
@@ -262,6 +263,8 @@ async def sync_machine_runtime(
     local_ip: str | None = None,
     public_ip: str | None = None,
     is_active: bool | None = None,
+    client_version: str | None = None,
+    client_update_last_handled_request_id: str | None = None,
 ) -> dict:
     now = datetime.utcnow()
     resolved_public_ip = (
@@ -270,18 +273,40 @@ async def sync_machine_runtime(
         or get_request_client_ip(request)
         or ""
     )
+    resolved_client_version = (client_version or "").strip()
+    client_update_target_version = (machine.get("client_update_target_version") or "").strip()
+    resolved_client_update_last_handled_request_id = (
+        client_update_last_handled_request_id or ""
+    ).strip()
+    update_fields: dict[str, Any] = {
+        "hostname": (hostname or "").strip() or machine.get("hostname", ""),
+        "local_ip": (local_ip or "").strip(),
+        "public_ip": resolved_public_ip,
+        "auth_required": False,
+        "last_seen_at": now,
+    }
+
+    if resolved_client_update_last_handled_request_id:
+        update_fields["client_update_last_handled_request_id"] = (
+            resolved_client_update_last_handled_request_id
+        )
+
+    if resolved_client_version:
+        update_fields["client_version"] = resolved_client_version
+
+        if (
+            resolved_client_update_last_handled_request_id
+            and resolved_client_update_last_handled_request_id
+            == (machine.get("client_update_request_id") or "").strip()
+        ):
+            update_fields["client_update_target_version"] = ""
+            update_fields["client_updated_at"] = now
+        elif resolved_client_version == get_latest_client_version():
+            update_fields["client_updated_at"] = now
 
     await db.machines.update_one(
         {"_id": machine["_id"]},
-        {
-            "$set": {
-                "hostname": (hostname or "").strip() or machine.get("hostname", ""),
-                "local_ip": (local_ip or "").strip(),
-                "public_ip": resolved_public_ip,
-                "auth_required": False,
-                "last_seen_at": now,
-            }
-        },
+        {"$set": update_fields},
     )
 
     updated_machine = await db.machines.find_one({"_id": machine["_id"]})
