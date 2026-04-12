@@ -41,6 +41,32 @@ require_http_url() {
     *) fail "$label must be an http(s) URL" ;;
   esac
 }
+extract_url_host() {
+  local value="${1:-}"
+  value="${value#*://}"
+  value="${value%%/*}"
+  value="${value%%:*}"
+  printf "%s" "$value"
+}
+slugify_tenant_part() {
+  local value="${1:-}"
+  value="$(printf "%s" "$value" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-')"
+  value="$(printf "%s" "$value" | sed 's/^-*//; s/-*$//; s/--*/-/g')"
+  printf "%s" "$value"
+}
+derive_default_tenant_name() {
+  local api_url="${1:-}"
+  local machine_id="${2:-}"
+  local host_slug machine_suffix
+  host_slug="$(slugify_tenant_part "$(extract_url_host "$api_url")")"
+  [ -n "$host_slug" ] || host_slug="porthub"
+  machine_suffix="$machine_id"
+  if [ "${#machine_suffix}" -gt 8 ]; then
+    machine_suffix="${machine_suffix: -8}"
+  fi
+  [ -n "$machine_suffix" ] || machine_suffix="tenant"
+  printf "%s-%s" "$machine_suffix" "$host_slug"
+}
 step() {
   CURRENT_STEP="$1"
   log "$CURRENT_STEP"
@@ -190,7 +216,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ -z "$PORT_HUB_TENANT" ]; then
-  PORT_HUB_TENANT="$PORT_HUB_MACHINE_ID"
+  PORT_HUB_TENANT="$(derive_default_tenant_name "$PORT_HUB_API_URL" "$PORT_HUB_MACHINE_ID")"
 fi
 
 main() {
@@ -258,12 +284,12 @@ main() {
 
   step "Installation completed"
   if [ "$PORT_HUB_AUTO_UP" = "true" ]; then
-    log "PortHub tenant is up. Try: porthub status -t $PORT_HUB_TENANT"
-    log "Live logs: porthub logs -t $PORT_HUB_TENANT -f"
-    log "Stop tenant: porthub stop -t $PORT_HUB_TENANT"
-    log "Remove tenant: porthub remove -t $PORT_HUB_TENANT"
+    log "PortHub tenant is up. Try: porthub status $PORT_HUB_TENANT"
+    log "Live logs: porthub logs $PORT_HUB_TENANT -f"
+    log "Stop tenant: porthub stop $PORT_HUB_TENANT"
+    log "Remove tenant: porthub remove $PORT_HUB_TENANT"
   else
-    log "Run 'porthub start -t $PORT_HUB_TENANT' when ready."
+    log "Run 'porthub start $PORT_HUB_TENANT' when ready."
   fi
 }
 

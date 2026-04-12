@@ -1172,13 +1172,13 @@ export default function HostConfigPopup({
                           <p className="mt-2 text-xs text-zinc-500">
                             Paste once to install and connect. After that use
                             {" "}
-                            <code>porthub status</code>
+                            <code>porthub ls</code>
                             {", "}
-                            <code>porthub logs -f</code>
+                            <code>porthub status &lt;tenant&gt;</code>
                             {" "}
                             and
                             {" "}
-                            <code>porthub down</code>
+                            <code>porthub stop &lt;tenant&gt;</code>
                             {" "}
                             on the client machine.
                           </p>
