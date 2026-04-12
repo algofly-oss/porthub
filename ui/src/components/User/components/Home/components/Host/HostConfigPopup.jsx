@@ -1138,6 +1138,34 @@ export default function HostConfigPopup({
                               <IconRefresh size={14} />
                             </ActionIcon>
                           </Tooltip>
+                          <Tooltip
+                            label="Copy machine token"
+                            withArrow
+                            position="top"
+                            classNames={{
+                              tooltip: isDark
+                                ? "!border !border-zinc-700 !bg-zinc-900 !text-zinc-100"
+                                : "!border !border-zinc-200 !bg-white !text-zinc-900",
+                              arrow: isDark
+                                ? "!border-zinc-700 !bg-zinc-900"
+                                : "!border-zinc-200 !bg-white",
+                            }}
+                          >
+                            <ActionIcon
+                              type="button"
+                              variant="subtle"
+                              onClick={() => handleCopy("Machine token", host?.token || "")}
+                              aria-label="Copy machine token"
+                              disabled={!host?.token}
+                              className={
+                                isDark
+                                  ? "!h-6 !w-6 !text-zinc-400 hover:!bg-zinc-800 hover:!text-zinc-200 disabled:!opacity-40"
+                                  : "!h-6 !w-6 !text-zinc-500 hover:!bg-zinc-200 hover:!text-zinc-700 disabled:!opacity-40"
+                              }
+                            >
+                              <IconCopy size={14} />
+                            </ActionIcon>
+                          </Tooltip>
                         </div>
                         <div className="mt-2">
                           <div

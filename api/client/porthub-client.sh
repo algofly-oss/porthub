@@ -2251,7 +2251,11 @@ tenants_add_cmd() {
 
   configure_cmd "${configure_args[@]}"
   preflight_cmd
-  install_rathole_cmd
+  if [ -x "$PORT_HUB_RATHOLE_BIN" ]; then
+    log_plain "[porthub-tenants] Reusing existing shared Rathole binary at $PORT_HUB_RATHOLE_BIN"
+  else
+    install_rathole_cmd
+  fi
   if [ "$auto_up" = "true" ]; then
     up_cmd
   else
