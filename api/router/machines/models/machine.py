@@ -9,6 +9,10 @@ class Machine(BaseModel):
     hostname: typing.Optional[str] = Field("", example="luna.local")
     enabled: typing.Optional[bool] = Field(None, example=True)
     is_active: typing.Optional[bool] = Field(None, example=False)
+    group_ids: typing.Optional[typing.List[str]] = Field(
+        None,
+        example=["67f7d26b760bd71f4d3f3c34"],
+    )
 
 
 class MachineSync(BaseModel):

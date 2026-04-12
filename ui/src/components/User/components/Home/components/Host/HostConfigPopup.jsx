@@ -8,6 +8,7 @@ import {
   Menu,
   Modal,
   Pagination,
+  Select,
   Stack,
   Switch,
   Text,
@@ -24,6 +25,7 @@ import {
   IconPlus,
   IconRefresh,
   IconTrash,
+  IconX,
 } from "@tabler/icons-react";
 import axios from "axios";
 import apiRoutes from "@/shared/routes/apiRoutes";
@@ -201,6 +203,9 @@ export default function HostConfigPopup({
   onToggleMachine,
   onRefreshMachineToken,
   onRequestClientUpdate,
+  onAddMachineToGroup,
+  onRemoveMachineFromGroup,
+  groups = [],
   isSaving,
 }) {
   const { colorScheme } = useMantineColorScheme();
@@ -234,6 +239,7 @@ export default function HostConfigPopup({
   const [shouldAutoScrollClientLogs, setShouldAutoScrollClientLogs] = useState(true);
   const [editingRuleSnapshot, setEditingRuleSnapshot] = useState(null);
   const [rulesPage, setRulesPage] = useState(1);
+  const [groupSaving, setGroupSaving] = useState(false);
   const [debouncedRules] = useDebouncedValue(rules, 300);
   const initialRulesSnapshotRef = useRef("");
   const clientLogsContainerRef = useRef(null);
@@ -795,6 +801,37 @@ export default function HostConfigPopup({
     }
   };
 
+  const handleAddGroupFromSelect = async (value) => {
+    if (!host || !onAddMachineToGroup || !value || groupSaving) {
+      return;
+    }
+    if ((host.groupIds || []).includes(value)) {
+      return;
+    }
+    setGroupSaving(true);
+    try {
+      await onAddMachineToGroup(host.id, value);
+    } catch (assignError) {
+      error(getApiErrorMessage(assignError, "Could not add machine to group"));
+    } finally {
+      setGroupSaving(false);
+    }
+  };
+
+  const handleRemoveGroupChip = async (groupId) => {
+    if (!host || !onRemoveMachineFromGroup || groupSaving) {
+      return;
+    }
+    setGroupSaving(true);
+    try {
+      await onRemoveMachineFromGroup(host.id, groupId);
+    } catch (assignError) {
+      error(getApiErrorMessage(assignError, "Could not remove machine from group"));
+    } finally {
+      setGroupSaving(false);
+    }
+  };
+
   const handleCloseDeleteMachineConfirm = () => {
     if (isDeletingMachine) {
       return;
@@ -1079,6 +1116,110 @@ export default function HostConfigPopup({
                 ) : null}
               </div>
             </div>
+
+            {groups.length > 0 && onAddMachineToGroup && onRemoveMachineFromGroup ? (
+              <div
+                className={`rounded-lg border px-4 py-3 ${
+                  isDark ? "border-zinc-700 bg-zinc-950/50" : "border-zinc-200 bg-zinc-50/80"
+                }`}
+              >
+                <Text size="sm" weight={600} className={isDark ? "text-zinc-200" : "text-zinc-800"}>
+                  Groups
+                </Text>
+                <Text size="xs" className={`mt-1 ${isDark ? "text-zinc-500" : "text-zinc-500"}`}>
+                  Use the list to add a folder. Remove opens that membership only.
+                </Text>
+
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {(host.groupIds || []).length === 0 ? (
+                    <Text size="sm" className={isDark ? "text-zinc-500" : "text-zinc-500"}>
+                      Not in any group yet.
+                    </Text>
+                  ) : (
+                    (host.groupIds || []).map((gid) => {
+                      const g = groups.find((x) => x._id === gid);
+                      const label = g?.name || gid;
+                      return (
+                        <div
+                          key={gid}
+                          className={`inline-flex max-w-full items-center gap-1 rounded-md border px-2.5 py-1 text-sm font-medium ${
+                            isDark
+                              ? "border-blue-500/35 bg-blue-950/55 text-blue-100"
+                              : "border-blue-200/90 bg-blue-50 text-blue-900"
+                          }`}
+                        >
+                          <span className="min-w-0 truncate">{label}</span>
+                          <ActionIcon
+                            type="button"
+                            size="xs"
+                            radius="xl"
+                            variant="subtle"
+                            color="gray"
+                            aria-label={`Remove ${label}`}
+                            disabled={groupSaving}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              handleRemoveGroupChip(gid);
+                            }}
+                            className={
+                              isDark
+                                ? "!h-6 !w-6 shrink-0 !text-blue-200 hover:!bg-blue-900/80"
+                                : "!h-6 !w-6 shrink-0 !text-blue-800 hover:!bg-blue-100/90"
+                            }
+                          >
+                            <IconX size={14} stroke={2} />
+                          </ActionIcon>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+
+                {(() => {
+                  const assigned = host.groupIds || [];
+                  const addOptions = groups
+                    .filter((g) => !assigned.includes(g._id))
+                    .map((g) => ({ value: g._id, label: g.name }));
+                  if (addOptions.length === 0) {
+                    return null;
+                  }
+                  return (
+                    <div className="mt-4">
+                      <Text
+                        size="xs"
+                        weight={600}
+                        className={`mb-1.5 uppercase tracking-wide ${isDark ? "text-zinc-500" : "text-zinc-500"}`}
+                      >
+                        Add to group
+                      </Text>
+                      <Select
+                        key={`add-group-${host.id}-${(host.groupIds || []).join(",")}`}
+                        placeholder="Choose a group to add…"
+                        clearable
+                        searchable
+                        disabled={groupSaving}
+                        data={addOptions}
+                        onChange={(value) => {
+                          if (value) {
+                            handleAddGroupFromSelect(value);
+                          }
+                        }}
+                        classNames={{
+                          input: getInputClassName(isDark),
+                          dropdown: isDark
+                            ? "!border-zinc-700 !bg-zinc-900"
+                            : "!border-zinc-200 !bg-white",
+                          item: isDark
+                            ? "!text-zinc-100 hover:!bg-zinc-800"
+                            : "!text-zinc-900 hover:!bg-zinc-100",
+                        }}
+                      />
+                    </div>
+                  );
+                })()}
+              </div>
+            ) : null}
 
             <div
               className={`rounded-md border ${
