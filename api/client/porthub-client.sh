@@ -1263,17 +1263,41 @@ remove_dir_if_empty() {
 }
 
 stop_recorded_rathole_process() {
-  local pid=""
+  local pid="" found_pid=""
+  local -a managed_pids=()
   if [ -f "$PORT_HUB_STATE_FILE" ]; then
     pid="$(state_get PORT_HUB_RATHOLE_PID)"
+    if [ -n "$pid" ]; then
+      managed_pids+=("$pid")
+    fi
   fi
   if [ -z "$pid" ] && [ -f "$PORT_HUB_PID_FILE" ]; then
     pid="$(cat "$PORT_HUB_PID_FILE" 2>/dev/null || true)"
+    if [ -n "$pid" ]; then
+      managed_pids+=("$pid")
+    fi
   fi
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-    ${SUDO:-} kill "$pid" >/dev/null 2>&1 || true
-    log_plain "[porthub-uninstall] Stopped Rathole process $pid"
+
+  while IFS= read -r found_pid; do
+    [ -n "$found_pid" ] || continue
+    managed_pids+=("$found_pid")
+  done < <(
+    ps -eo pid=,args= 2>/dev/null | awk -v bin="$PORT_HUB_RATHOLE_BIN" -v cfg="$PORT_HUB_CONFIG_FILE" '
+      index($0, bin) > 0 && index($0, cfg) > 0 { print $1 }
+    '
+  )
+
+  if [ "${#managed_pids[@]}" -eq 0 ]; then
+    return 0
   fi
+
+  for pid in "${managed_pids[@]}"; do
+    [ -n "$pid" ] || continue
+    if kill -0 "$pid" 2>/dev/null; then
+      ${SUDO:-} kill "$pid" >/dev/null 2>&1 || true
+      log_plain "[porthub-uninstall] Stopped Rathole process $pid"
+    fi
+  done
 }
 
 remove_service_definition() {
