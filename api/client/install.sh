@@ -239,6 +239,7 @@ main() {
     log "PortHub is up. Try: porthub status"
     log "Live logs: porthub logs -f"
     log "Disconnect: porthub down"
+    log "Remove completely: porthub uninstall"
   else
     log "Run 'porthub up' when ready."
   fi

@@ -635,6 +635,17 @@ load_env() {
   refresh_derived_urls
 }
 
+load_saved_env_if_present() {
+  if [ -f "$PORT_HUB_ENV_FILE" ]; then
+    # shellcheck disable=SC1090
+    . "$PORT_HUB_ENV_FILE"
+  fi
+
+  if [ -z "${PORT_HUB_SELF_PATH:-}" ]; then
+    PORT_HUB_SELF_PATH="$(command -v porthub 2>/dev/null || printf "/usr/local/bin/porthub")"
+  fi
+}
+
 refresh_derived_urls() {
   PORT_HUB_API_URL="$(normalize_api_url "$PORT_HUB_API_URL")"
   PORT_HUB_AUTH_URL="${PORT_HUB_API_URL%/}/machines/client/auth"
@@ -1222,6 +1233,74 @@ service_disable_and_stop() {
   esac
 }
 
+remove_managed_path() {
+  local target="$1"
+  local label="$2"
+  [ -n "$target" ] || return 0
+  case "$target" in
+    /|.|..)
+      fail "Refusing to remove unsafe ${label} path: $target"
+      ;;
+  esac
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    ${SUDO:-} rm -rf "$target"
+    log_plain "[porthub-uninstall] Removed ${label}: $target"
+  fi
+}
+
+remove_dir_if_empty() {
+  local target="$1"
+  local label="$2"
+  [ -n "$target" ] || return 0
+  case "$target" in
+    /|.|..)
+      fail "Refusing to remove unsafe ${label} path: $target"
+      ;;
+  esac
+  if [ -d "$target" ]; then
+    ${SUDO:-} rmdir "$target" >/dev/null 2>&1 || true
+  fi
+}
+
+stop_recorded_rathole_process() {
+  local pid=""
+  if [ -f "$PORT_HUB_STATE_FILE" ]; then
+    pid="$(state_get PORT_HUB_RATHOLE_PID)"
+  fi
+  if [ -z "$pid" ] && [ -f "$PORT_HUB_PID_FILE" ]; then
+    pid="$(cat "$PORT_HUB_PID_FILE" 2>/dev/null || true)"
+  fi
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    ${SUDO:-} kill "$pid" >/dev/null 2>&1 || true
+    log_plain "[porthub-uninstall] Stopped Rathole process $pid"
+  fi
+}
+
+remove_service_definition() {
+  case "$(uname -s)" in
+    Linux)
+      if command -v systemctl >/dev/null 2>&1; then
+        ${SUDO:-} systemctl disable --now "$PORT_HUB_SERVICE_LABEL" >/dev/null 2>&1 || true
+      fi
+      remove_managed_path "$PORT_HUB_SERVICE_FILE" "service file"
+      if command -v systemctl >/dev/null 2>&1; then
+        ${SUDO:-} systemctl daemon-reload >/dev/null 2>&1 || true
+        ${SUDO:-} systemctl reset-failed "$PORT_HUB_SERVICE_LABEL" >/dev/null 2>&1 || true
+      fi
+      ;;
+    Darwin)
+      if command -v launchctl >/dev/null 2>&1; then
+        ${SUDO:-} launchctl bootout system "$PORT_HUB_SERVICE_FILE" >/dev/null 2>&1 || true
+        ${SUDO:-} launchctl disable "system/$PORT_HUB_SERVICE_LABEL" >/dev/null 2>&1 || true
+      fi
+      remove_managed_path "$PORT_HUB_SERVICE_FILE" "service file"
+      ;;
+    *)
+      remove_managed_path "$PORT_HUB_SERVICE_FILE" "service file"
+      ;;
+  esac
+}
+
 service_status() {
   local manager
   manager="$(service_manager)"
@@ -1300,6 +1379,38 @@ down_cmd() {
   service_disable_and_stop
   machine_post "$PORT_HUB_SYNC_URL" false || true
   log "INFO" "PortHub stopped"
+}
+
+uninstall_cmd() {
+  step "Uninstalling PortHub client"
+  detect_sudo
+  load_saved_env_if_present
+
+  if [ -f "$PORT_HUB_ENV_FILE" ]; then
+    if [ -n "${PORT_HUB_API_URL:-}" ] && [ -n "${PORT_HUB_MACHINE_ID:-}" ] && [ -n "${PORT_HUB_MACHINE_TOKEN:-}" ]; then
+      refresh_derived_urls
+      machine_post "$PORT_HUB_SYNC_URL" false || true
+    fi
+  fi
+
+  remove_service_definition
+  stop_recorded_rathole_process
+
+  remove_managed_path "$PORT_HUB_ENV_FILE" "environment file"
+  remove_managed_path "$PORT_HUB_STATE_FILE" "state file"
+  remove_managed_path "$PORT_HUB_CONFIG_FILE" "Rathole config"
+  remove_managed_path "$PORT_HUB_PID_FILE" "pid file"
+  remove_managed_path "$PORT_HUB_LOG_FILE" "log file"
+  remove_managed_path "$PORT_HUB_LOG_BACKUP_FILE" "log backup"
+  remove_managed_path "$PORT_HUB_RATHOLE_BIN" "Rathole binary"
+  remove_managed_path "$PORT_HUB_SELF_PATH" "PortHub CLI"
+
+  remove_dir_if_empty "$PORT_HUB_RUNTIME_DIR" "runtime dir"
+  remove_dir_if_empty "$PORT_HUB_LOG_DIR" "log dir"
+  remove_dir_if_empty "$PORT_HUB_BIN_DIR" "bin dir"
+  remove_dir_if_empty "$PORT_HUB_DIR" "config dir"
+
+  log_plain "[porthub-uninstall] PortHub client uninstalled"
 }
 
 status_cmd() {
@@ -1837,6 +1948,7 @@ Commands:
   install-rathole   Download Rathole from PortHub
   up                Install/update config and start the persistent PortHub service
   down              Stop the PortHub service and mark the machine inactive
+  uninstall         Stop PortHub and remove the service, CLI, config, logs, and Rathole
   restart           Restart the PortHub service
   status            Show runtime PortHub status and shared machine details
   version           Show installed PortHub client and Rathole versions
@@ -1866,6 +1978,7 @@ main() {
     install-rathole) install_rathole_cmd "$@" ;;
     up) up_cmd "$@" ;;
     down) down_cmd "$@" ;;
+    uninstall) uninstall_cmd "$@" ;;
     restart) restart_cmd "$@" ;;
     status) status_cmd "$@" ;;
     version|-v|--version) version_cmd "$@" ;;
