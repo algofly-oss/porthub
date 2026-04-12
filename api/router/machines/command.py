@@ -66,11 +66,12 @@ def render_script_asset(script_name: str, request: Request, machine: dict) -> st
 
 def build_install_command(request: Request, machine: dict) -> str:
     endpoints = build_machine_endpoints(machine, request=request)
+    machine_id = str(machine["_id"])
     return (
         f"curl -fsSL {endpoints['install_script']} -o install.sh "
         "&& chmod +x install.sh "
         "&& ./install.sh "
-        "&& porthub status"
+        f"&& porthub status -t {machine_id}"
     )
 
 

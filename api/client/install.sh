@@ -20,6 +20,7 @@ PORT_HUB_DEFAULT_HEARTBEAT_INTERVAL_SECONDS="30"
 PORT_HUB_DEFAULT_CHANGES_WAIT_SECONDS="25"
 
 PORT_HUB_INSTALL_PATH="${PORT_HUB_INSTALL_PATH:-/usr/local/bin/porthub}"
+PORT_HUB_TENANT="${PORT_HUB_TENANT:-}"
 PORT_HUB_PUBLIC_IP_OVERRIDE="${PORT_HUB_PUBLIC_IP_OVERRIDE:-}"
 PORT_HUB_AUTO_UP="true"
 CURRENT_STEP="bootstrap"
@@ -104,6 +105,7 @@ preflight() {
   log "Arch: $(uname -m)"
   log "Install path: $PORT_HUB_INSTALL_PATH"
   log "Service manager: $(service_manager_name)"
+  log "Tenant: ${PORT_HUB_TENANT:-$PORT_HUB_MACHINE_ID}"
   log "Machine id: $PORT_HUB_MACHINE_ID"
   log "PortHub endpoint configuration: OK"
 }
@@ -117,6 +119,7 @@ Options:
   --server-url URL
   --machine-id ID
   --machine-token TOKEN
+  --tenant NAME
   --auth-url URL
   --sync-url URL
   --config-url URL
@@ -161,6 +164,7 @@ while [ "$#" -gt 0 ]; do
     --api-url|--server-url) PORT_HUB_API_URL="$2"; shift 2 ;;
     --machine-id) PORT_HUB_MACHINE_ID="$2"; shift 2 ;;
     --machine-token) PORT_HUB_MACHINE_TOKEN="$2"; shift 2 ;;
+    --tenant) PORT_HUB_TENANT="$2"; shift 2 ;;
     --auth-url) PORT_HUB_AUTH_URL="$2"; shift 2 ;;
     --sync-url) PORT_HUB_SYNC_URL="$2"; shift 2 ;;
     --config-url|--config-toml-url) PORT_HUB_CONFIG_TOML_URL="$2"; shift 2 ;;
@@ -185,6 +189,10 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ -z "$PORT_HUB_TENANT" ]; then
+  PORT_HUB_TENANT="$PORT_HUB_MACHINE_ID"
+fi
+
 main() {
   preflight
 
@@ -202,46 +210,60 @@ main() {
   "$PORT_HUB_INSTALL_PATH" help >/dev/null
   log "Installed PortHub CLI at $PORT_HUB_INSTALL_PATH"
 
-  step "Writing PortHub client configuration"
-  "$PORT_HUB_INSTALL_PATH" configure \
-    --api-url "$PORT_HUB_API_URL" \
-    --machine-id "$PORT_HUB_MACHINE_ID" \
-    --machine-token "$PORT_HUB_MACHINE_TOKEN" \
-    --auth-url "$PORT_HUB_AUTH_URL" \
-    --sync-url "$PORT_HUB_SYNC_URL" \
-    --config-toml-url "$PORT_HUB_CONFIG_TOML_URL" \
-    --changes-toml-url "$PORT_HUB_CHANGES_TOML_URL" \
-    --log-stream-status-url "$PORT_HUB_LOG_STREAM_STATUS_URL" \
-    --log-stream-upload-url "$PORT_HUB_LOG_STREAM_UPLOAD_URL" \
-    --rathole-x86-64-url "$PORT_HUB_RATHOLE_X86_64_URL" \
-    --rathole-darwin-x86-64-url "$PORT_HUB_RATHOLE_DARWIN_X86_64_URL" \
-    --rathole-arm64-url "$PORT_HUB_RATHOLE_ARM64_URL" \
-    --rathole-armhf-url "$PORT_HUB_RATHOLE_ARMHF_URL" \
-    --rathole-armv7-url "$PORT_HUB_RATHOLE_ARMV7_URL" \
-    --heartbeat-seconds "$PORT_HUB_HEARTBEAT_INTERVAL_SECONDS" \
-    --changes-wait-seconds "$PORT_HUB_CHANGES_WAIT_SECONDS" \
-    --public-ip "$PORT_HUB_PUBLIC_IP_OVERRIDE" \
-    --self-path "$PORT_HUB_INSTALL_PATH"
-
-  step "Running PortHub preflight"
-  "$PORT_HUB_INSTALL_PATH" preflight
-
-  step "Installing Rathole via PortHub"
-  "$PORT_HUB_INSTALL_PATH" install-rathole
-
+  step "Configuring PortHub tenant"
   if [ "$PORT_HUB_AUTO_UP" = "true" ]; then
-    step "Starting persistent PortHub service"
-    "$PORT_HUB_INSTALL_PATH" up
+    "$PORT_HUB_INSTALL_PATH" tenants add \
+      --tenant "$PORT_HUB_TENANT" \
+      --api-url "$PORT_HUB_API_URL" \
+      --machine-id "$PORT_HUB_MACHINE_ID" \
+      --machine-token "$PORT_HUB_MACHINE_TOKEN" \
+      --auth-url "$PORT_HUB_AUTH_URL" \
+      --sync-url "$PORT_HUB_SYNC_URL" \
+      --config-toml-url "$PORT_HUB_CONFIG_TOML_URL" \
+      --changes-toml-url "$PORT_HUB_CHANGES_TOML_URL" \
+      --log-stream-status-url "$PORT_HUB_LOG_STREAM_STATUS_URL" \
+      --log-stream-upload-url "$PORT_HUB_LOG_STREAM_UPLOAD_URL" \
+      --rathole-x86-64-url "$PORT_HUB_RATHOLE_X86_64_URL" \
+      --rathole-darwin-x86-64-url "$PORT_HUB_RATHOLE_DARWIN_X86_64_URL" \
+      --rathole-arm64-url "$PORT_HUB_RATHOLE_ARM64_URL" \
+      --rathole-armhf-url "$PORT_HUB_RATHOLE_ARMHF_URL" \
+      --rathole-armv7-url "$PORT_HUB_RATHOLE_ARMV7_URL" \
+      --heartbeat-seconds "$PORT_HUB_HEARTBEAT_INTERVAL_SECONDS" \
+      --changes-wait-seconds "$PORT_HUB_CHANGES_WAIT_SECONDS" \
+      --public-ip "$PORT_HUB_PUBLIC_IP_OVERRIDE" \
+      --self-path "$PORT_HUB_INSTALL_PATH"
+  else
+    "$PORT_HUB_INSTALL_PATH" tenants add \
+      --tenant "$PORT_HUB_TENANT" \
+      --api-url "$PORT_HUB_API_URL" \
+      --machine-id "$PORT_HUB_MACHINE_ID" \
+      --machine-token "$PORT_HUB_MACHINE_TOKEN" \
+      --auth-url "$PORT_HUB_AUTH_URL" \
+      --sync-url "$PORT_HUB_SYNC_URL" \
+      --config-toml-url "$PORT_HUB_CONFIG_TOML_URL" \
+      --changes-toml-url "$PORT_HUB_CHANGES_TOML_URL" \
+      --log-stream-status-url "$PORT_HUB_LOG_STREAM_STATUS_URL" \
+      --log-stream-upload-url "$PORT_HUB_LOG_STREAM_UPLOAD_URL" \
+      --rathole-x86-64-url "$PORT_HUB_RATHOLE_X86_64_URL" \
+      --rathole-darwin-x86-64-url "$PORT_HUB_RATHOLE_DARWIN_X86_64_URL" \
+      --rathole-arm64-url "$PORT_HUB_RATHOLE_ARM64_URL" \
+      --rathole-armhf-url "$PORT_HUB_RATHOLE_ARMHF_URL" \
+      --rathole-armv7-url "$PORT_HUB_RATHOLE_ARMV7_URL" \
+      --heartbeat-seconds "$PORT_HUB_HEARTBEAT_INTERVAL_SECONDS" \
+      --changes-wait-seconds "$PORT_HUB_CHANGES_WAIT_SECONDS" \
+      --public-ip "$PORT_HUB_PUBLIC_IP_OVERRIDE" \
+      --self-path "$PORT_HUB_INSTALL_PATH" \
+      --no-start
   fi
 
   step "Installation completed"
   if [ "$PORT_HUB_AUTO_UP" = "true" ]; then
-    log "PortHub is up. Try: porthub status"
-    log "Live logs: porthub logs -f"
-    log "Disconnect: porthub down"
-    log "Remove completely: porthub uninstall"
+    log "PortHub tenant is up. Try: porthub status -t $PORT_HUB_TENANT"
+    log "Live logs: porthub logs -t $PORT_HUB_TENANT -f"
+    log "Stop tenant: porthub stop -t $PORT_HUB_TENANT"
+    log "Remove tenant: porthub remove -t $PORT_HUB_TENANT"
   else
-    log "Run 'porthub up' when ready."
+    log "Run 'porthub start -t $PORT_HUB_TENANT' when ready."
   fi
 }
 
