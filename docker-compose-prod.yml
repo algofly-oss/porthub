@@ -3,10 +3,10 @@ services:
     build:
       context: ./api
       dockerfile: Dockerfile
-    image: porthub_api
-    container_name: porthub_api
+    image: porthub_api_prod
+    container_name: porthub_api_prod
     environment:
-      - API_DEBUG=True
+      - API_DEBUG=False
       - RATHOLE_SERVER_CONFIG_PATH=/runtime/rathole/server.toml
     env_file:
       - ./.env
@@ -20,12 +20,15 @@ services:
   ui:
     build:
       context: ./ui
-    image: porthub_ui
-    container_name: porthub_ui
+      dockerfile: Dockerfile.prod
+    image: porthub_ui_prod
+    container_name: porthub_ui_prod
     env_file:
       - ./.env
-    volumes:
-      - ./ui:/app
+    environment:
+      - BUILD_ENV=prod
+    # volumes:
+    #   - ./ui:/app
     restart: always
     depends_on:
       - api
