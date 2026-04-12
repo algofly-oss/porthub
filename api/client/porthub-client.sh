@@ -236,6 +236,8 @@ resolve_tenant_reference() {
   local exact_match=""
   local match=""
   local configured_tenant=""
+  local tenant_id=""
+  local already_listed=""
   local -a prefix_matches=()
 
   requested="$(normalize_tenant_name "$requested")"
@@ -263,6 +265,21 @@ resolve_tenant_reference() {
         prefix_matches+=("$configured_tenant")
         ;;
     esac
+    tenant_id="$(tenant_short_id "$configured_tenant")"
+    case "$tenant_id" in
+      "$requested"*)
+        already_listed="false"
+        for match in "${prefix_matches[@]}"; do
+          if [ "$match" = "$configured_tenant" ]; then
+            already_listed="true"
+            break
+          fi
+        done
+        if [ "$already_listed" != "true" ]; then
+          prefix_matches+=("$configured_tenant")
+        fi
+        ;;
+    esac
   done
 
   case "${#prefix_matches[@]}" in
@@ -283,41 +300,28 @@ resolve_tenant_reference() {
   esac
 }
 
-shortest_unique_tenant_prefix() {
+tenant_short_id() {
   local tenant="$1"
-  local min_length="${2:-4}"
-  local prefix_length other_tenant prefix is_unique
+  local digest=""
 
   [ -n "$tenant" ] || {
     printf ""
     return 0
   }
 
-  if [ "${#tenant}" -lt "$min_length" ]; then
-    min_length="${#tenant}"
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest="$(printf "%s" "$tenant" | sha256sum | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    digest="$(printf "%s" "$tenant" | shasum -a 256 | awk '{print $1}')"
+  elif command -v md5sum >/dev/null 2>&1; then
+    digest="$(printf "%s" "$tenant" | md5sum | awk '{print $1}')"
+  elif command -v md5 >/dev/null 2>&1; then
+    digest="$(printf "%s" "$tenant" | md5 -q)"
+  else
+    digest="$tenant"
   fi
 
-  prefix_length="$min_length"
-  while [ "$prefix_length" -le "${#tenant}" ]; do
-    prefix="${tenant:0:$prefix_length}"
-    is_unique="true"
-    for other_tenant in "${CONFIGURED_TENANTS[@]}"; do
-      [ "$other_tenant" = "$tenant" ] && continue
-      case "$other_tenant" in
-        "$prefix"*)
-          is_unique="false"
-          break
-          ;;
-      esac
-    done
-    if [ "$is_unique" = "true" ]; then
-      printf "%s" "$prefix"
-      return 0
-    fi
-    prefix_length=$((prefix_length + 1))
-  done
-
-  printf "%s" "$tenant"
+  printf "%s" "${digest:0:12}"
 }
 
 configured_tenant_count() {
@@ -1878,7 +1882,6 @@ version_cmd() {
     resolve_selected_tenant_context
     load_env
     cat <<EOF_VERSION
-PortHub Version
 tenant: $(tenant_display_name)
 client_version: $(client_version)
 rathole_version: $(rathole_version)
@@ -1887,7 +1890,6 @@ EOF_VERSION
   fi
 
   cat <<EOF_VERSION
-PortHub Version
 client_version: $(client_version)
 rathole_version: $(rathole_version)
 EOF_VERSION
@@ -2176,7 +2178,7 @@ env_file_value() {
 
 tenants_list_cmd() {
   local previous_tenant="${PORT_HUB_TENANT:-}"
-  local tenant_name api_url machine_id service_state short_tenant
+  local tenant_name api_url service_state short_tenant
 
   collect_configured_tenants
   if [ "${#CONFIGURED_TENANTS[@]}" -eq 0 ]; then
@@ -2190,9 +2192,8 @@ EOF_TENANTS_EMPTY
   for tenant_name in "${CONFIGURED_TENANTS[@]}"; do
     apply_tenant_context "$tenant_name"
     api_url="$(env_file_value "$PORT_HUB_ENV_FILE" PORT_HUB_API_URL)"
-    machine_id="$(env_file_value "$PORT_HUB_ENV_FILE" PORT_HUB_MACHINE_ID)"
     service_state="$(service_status)"
-    short_tenant="$(shortest_unique_tenant_prefix "$tenant_name" 12)"
+    short_tenant="$(tenant_short_id "$tenant_name")"
     printf "%-12s  %-10s  %s\n" \
       "$short_tenant" \
       "$service_state" \
