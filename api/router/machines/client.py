@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Query, Request, Response, status
 from pydantic import BaseModel, Field
 
+from shared.client_release import get_client_version as get_latest_client_version
 from shared.machine_client import (
     authenticate_machine,
     authenticate_machine_for_logs,
@@ -31,6 +32,8 @@ class MachineClientSession(BaseModel):
     local_ip: str | None = Field("", example="192.168.0.3")
     public_ip: str | None = Field("", example="203.0.113.25")
     is_active: bool | None = Field(True, example=True)
+    client_version: str | None = Field("", example="2f41f3d8a1c4")
+    client_update_last_handled_request_id: str | None = Field("", example="a1b2c3d4e5f6")
 
 
 class MachineClientLogBatch(BaseModel):
@@ -38,6 +41,29 @@ class MachineClientLogBatch(BaseModel):
     token: str = Field(..., min_length=1)
     source: str | None = Field("client", example="client")
     lines: list[str] = Field(default_factory=list)
+
+
+def _apply_client_control_headers(response: Response, machine: dict) -> None:
+    latest_client_version = get_latest_client_version()
+    machine_client_version = (machine.get("client_version") or "").strip()
+    client_update_target_version = (machine.get("client_update_target_version") or "").strip()
+    client_update_request_id = (machine.get("client_update_request_id") or "").strip()
+    client_update_last_handled_request_id = (
+        machine.get("client_update_last_handled_request_id") or ""
+    ).strip()
+
+    response.headers["X-PortHub-Client-Latest-Version"] = latest_client_version
+    response.headers["X-PortHub-Client-Current-Version"] = machine_client_version
+    response.headers["X-PortHub-Client-Update-Requested"] = (
+        "true"
+        if client_update_request_id
+        and client_update_request_id != client_update_last_handled_request_id
+        else "false"
+    )
+    if client_update_target_version:
+        response.headers["X-PortHub-Client-Target-Version"] = client_update_target_version
+    if client_update_request_id:
+        response.headers["X-PortHub-Client-Update-Request-Id"] = client_update_request_id
 
 
 async def _sync_and_build_session(
@@ -56,6 +82,8 @@ async def _sync_and_build_session(
         local_ip=data.local_ip,
         public_ip=data.public_ip,
         is_active=data.is_active,
+        client_version=data.client_version,
+        client_update_last_handled_request_id=data.client_update_last_handled_request_id,
     )
 
     is_online = is_machine_online(updated_machine)
@@ -63,6 +91,7 @@ async def _sync_and_build_session(
     set_cached_machine_status(str(updated_machine["_id"]), is_online)
 
     response.headers["X-PortHub-Observed-IP"] = updated_serialized_machine["public_ip"]
+    _apply_client_control_headers(response, updated_machine)
 
     # Emit every successful heartbeat so the UI last-seen timestamp stays fresh.
     await emit_machine_status_changed(updated_machine)
@@ -91,6 +120,16 @@ async def _sync_and_build_session(
             "polling": {
                 "strategy": "long-poll",
                 "changes_query_parameter": "since",
+            },
+            "client": {
+                "current_version": updated_serialized_machine.get("client_version", ""),
+                "latest_version": updated_serialized_machine.get("latest_client_version", ""),
+                "update_requested": updated_serialized_machine.get(
+                    "client_update_requested", False
+                ),
+                "update_target_version": updated_serialized_machine.get(
+                    "client_update_target_version", ""
+                ),
             },
         },
     }
@@ -145,6 +184,7 @@ async def machine_client_config_toml(
             "Cache-Control": "no-store",
             "X-PortHub-Config-Version": config_bundle["version"],
             "X-PortHub-Machine-Id": str(machine["_id"]),
+            "X-PortHub-Client-Latest-Version": get_latest_client_version(),
         },
     )
 
@@ -200,7 +240,8 @@ async def machine_client_changes_toml(
     )
 
     if bundle is None:
-        return Response(
+        machine = await authenticate_machine(machine_id, token)
+        response = Response(
             status_code=status.HTTP_204_NO_CONTENT,
             headers={
                 "Cache-Control": "no-store",
@@ -208,8 +249,11 @@ async def machine_client_changes_toml(
                 "X-PortHub-Machine-Id": machine_id,
             },
         )
+        _apply_client_control_headers(response, machine)
+        return response
 
-    return Response(
+    machine = await authenticate_machine(machine_id, token)
+    response = Response(
         content=bundle["files"]["client.toml"],
         media_type="text/plain",
         headers={
@@ -218,6 +262,8 @@ async def machine_client_changes_toml(
             "X-PortHub-Machine-Id": bundle["machine_id"],
         },
     )
+    _apply_client_control_headers(response, machine)
+    return response
 
 
 @router.get("/client/log-stream")

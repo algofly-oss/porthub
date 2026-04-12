@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from bson import ObjectId
 from fastapi import HTTPException, Request
 
+from shared.client_release import get_client_version as get_latest_client_version
 from shared.factory import db
 from shared.env import MACHINE_ONLINE_TTL_SECONDS
 from .auth.common import authenticate_user
@@ -61,6 +62,17 @@ async def generate_machine_token() -> str:
 
 def serialize_machine(machine: dict):
     connection_status = get_machine_connection_status(machine)
+    client_version = (machine.get("client_version") or "").strip()
+    latest_client_version = get_latest_client_version()
+    client_update_target_version = (machine.get("client_update_target_version") or "").strip()
+    client_update_request_id = (machine.get("client_update_request_id") or "").strip()
+    client_update_last_handled_request_id = (
+        machine.get("client_update_last_handled_request_id") or ""
+    ).strip()
+    client_update_requested = bool(
+        client_update_request_id
+        and client_update_request_id != client_update_last_handled_request_id
+    )
     return {
         "_id": str(machine["_id"]),
         "user_id": str(machine["user_id"]),
@@ -73,6 +85,16 @@ def serialize_machine(machine: dict):
         "is_active": connection_status in {"online", "auth_required"},
         "connection_status": connection_status,
         "auth_required": connection_status == "auth_required",
+        "client_version": client_version,
+        "latest_client_version": latest_client_version,
+        "client_update_available": bool(
+            client_version and client_version != latest_client_version
+        ),
+        "client_update_requested": client_update_requested,
+        "client_update_target_version": client_update_target_version,
+        "client_update_request_id": client_update_request_id,
+        "client_update_requested_at": machine.get("client_update_requested_at"),
+        "client_updated_at": machine.get("client_updated_at"),
         "last_seen_at": machine.get("last_seen_at"),
         "created_at": machine.get("created_at"),
         "updated_at": machine.get("updated_at"),

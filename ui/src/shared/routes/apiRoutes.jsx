@@ -20,6 +20,7 @@ let apiRoutes = {
   listMachines: "/machines/list",
   deleteMachine: "/machines/delete",
   refreshMachineToken: "/machines/refresh-token",
+  requestClientUpdate: "/machines/request-client-update",
   syncMachine: "/machines/sync",
 };
 

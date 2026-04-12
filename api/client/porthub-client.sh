@@ -20,6 +20,7 @@ PORT_HUB_DEFAULT_HEARTBEAT_INTERVAL_SECONDS="30"
 PORT_HUB_DEFAULT_CHANGES_WAIT_SECONDS="25"
 PORT_HUB_DEFAULT_LOG_MAX_BYTES="1048576"
 PORT_HUB_DEFAULT_AUTH_FAILURE_RETRY_SECONDS="5"
+PORT_HUB_DEFAULT_CLIENT_UPDATE_RETRY_SECONDS="300"
 PORT_HUB_DEFAULT_PUBLIC_IP_REFRESH_SECONDS="3600"
 PORT_HUB_DEFAULT_ENABLE_DEBUG_LOGS="false"
 CURRENT_STEP="bootstrap"
@@ -185,6 +186,10 @@ build_install_script_url() {
     "$PORT_HUB_MACHINE_TOKEN"
 }
 
+client_update_retry_seconds() {
+  printf "%s" "$PORT_HUB_DEFAULT_CLIENT_UPDATE_RETRY_SECONDS"
+}
+
 json_escape() {
   local value="${1:-}"
   value="${value//\\/\\\\}"
@@ -305,6 +310,10 @@ write_state() {
   local cached_public_ip="${13:-$(state_get PORT_HUB_CACHED_PUBLIC_IP)}"
   local cached_public_ip_fetched_at="${14:-$(state_get PORT_HUB_CACHED_PUBLIC_IP_FETCHED_AT)}"
   local machine_disabled="${15:-$(state_get PORT_HUB_MACHINE_DISABLED)}"
+  local client_update_target_version="${16:-$(state_get PORT_HUB_CLIENT_UPDATE_TARGET_VERSION)}"
+  local client_update_request_id="${17:-$(state_get PORT_HUB_CLIENT_UPDATE_REQUEST_ID)}"
+  local client_update_last_attempt_epoch="${18:-$(state_get PORT_HUB_CLIENT_UPDATE_LAST_ATTEMPT_EPOCH)}"
+  local client_update_last_handled_request_id="${19:-$(state_get PORT_HUB_CLIENT_UPDATE_LAST_HANDLED_REQUEST_ID)}"
   cat <<EOF_STATE | ${SUDO:-} tee "$PORT_HUB_STATE_FILE" >/dev/null
 PORT_HUB_CURRENT_VERSION=$version
 PORT_HUB_LAST_SYNC_EPOCH=$last_sync
@@ -321,6 +330,10 @@ PORT_HUB_AUTH_REQUIRED=$auth_required
 PORT_HUB_CACHED_PUBLIC_IP=$cached_public_ip
 PORT_HUB_CACHED_PUBLIC_IP_FETCHED_AT=$cached_public_ip_fetched_at
 PORT_HUB_MACHINE_DISABLED=$machine_disabled
+PORT_HUB_CLIENT_UPDATE_TARGET_VERSION=$client_update_target_version
+PORT_HUB_CLIENT_UPDATE_REQUEST_ID=$client_update_request_id
+PORT_HUB_CLIENT_UPDATE_LAST_ATTEMPT_EPOCH=$client_update_last_attempt_epoch
+PORT_HUB_CLIENT_UPDATE_LAST_HANDLED_REQUEST_ID=$client_update_last_handled_request_id
 EOF_STATE
 }
 
@@ -481,6 +494,111 @@ client_version() {
   printf "%s" "$PORT_HUB_CLIENT_VERSION"
 }
 
+installed_cli_version() {
+  local cli_path="${1:-$PORT_HUB_SELF_PATH}" embedded
+  [ -f "$cli_path" ] || {
+    printf "unknown"
+    return
+  }
+  embedded="$(awk -F'"' '/^PORT_HUB_CLIENT_VERSION=/ { print $2; exit }' "$cli_path" 2>/dev/null || true)"
+  if [ -n "$embedded" ]; then
+    printf "%s" "$embedded"
+  else
+    printf "unknown"
+  fi
+}
+
+clear_client_update_request_state() {
+  write_state \
+    "$(state_get PORT_HUB_CURRENT_VERSION)" \
+    "$(state_get PORT_HUB_LAST_SYNC_EPOCH)" \
+    "$(state_get PORT_HUB_SERVICE_MANAGER)" \
+    "$(state_get PORT_HUB_LAST_AUTH_EPOCH)" \
+    "$(state_get PORT_HUB_SHARED_HOSTNAME)" \
+    "$(state_get PORT_HUB_SHARED_LOCAL_IP)" \
+    "$(state_get PORT_HUB_SHARED_PUBLIC_IP)" \
+    "$(state_get PORT_HUB_RATHOLE_PID)" \
+    "$(state_get PORT_HUB_RATHOLE_STARTED_AT)" \
+    "$(state_get PORT_HUB_SHARED_SERVICES)" \
+    "$(state_get PORT_HUB_LAST_CONTACT_EPOCH)" \
+    "$(state_get PORT_HUB_AUTH_REQUIRED)" \
+    "$(state_get PORT_HUB_CACHED_PUBLIC_IP)" \
+    "$(state_get PORT_HUB_CACHED_PUBLIC_IP_FETCHED_AT)" \
+    "$(state_get PORT_HUB_MACHINE_DISABLED)" \
+    "" \
+    "" \
+    "" \
+    "$(state_get PORT_HUB_CLIENT_UPDATE_LAST_HANDLED_REQUEST_ID)"
+}
+
+request_client_update_if_needed() {
+  local request_id="${1:-}" target_version="${2:-}"
+  local last_attempt now retry_seconds pending_request_id
+  [ -n "$request_id" ] || return 0
+  [ "$request_id" != "$(state_get PORT_HUB_CLIENT_UPDATE_LAST_HANDLED_REQUEST_ID)" ] || {
+    clear_client_update_request_state
+    return 0
+  }
+
+  pending_request_id="$(state_get PORT_HUB_CLIENT_UPDATE_REQUEST_ID)"
+  last_attempt="$(state_get PORT_HUB_CLIENT_UPDATE_LAST_ATTEMPT_EPOCH)"
+  now="$(date +%s)"
+  retry_seconds="$(client_update_retry_seconds)"
+  if [ -n "$last_attempt" ] && ! [ "$last_attempt" -ge 0 ] 2>/dev/null; then
+    log "WARN" "Resetting invalid client update retry state: $last_attempt"
+    last_attempt=""
+  fi
+  if [ "$pending_request_id" = "$request_id" ] && [ -n "$last_attempt" ] && [ $((now - last_attempt)) -lt "$retry_seconds" ]; then
+    return 0
+  fi
+
+  write_state \
+    "$(state_get PORT_HUB_CURRENT_VERSION)" \
+    "$(state_get PORT_HUB_LAST_SYNC_EPOCH)" \
+    "$(state_get PORT_HUB_SERVICE_MANAGER)" \
+    "$(state_get PORT_HUB_LAST_AUTH_EPOCH)" \
+    "$(state_get PORT_HUB_SHARED_HOSTNAME)" \
+    "$(state_get PORT_HUB_SHARED_LOCAL_IP)" \
+    "$(state_get PORT_HUB_SHARED_PUBLIC_IP)" \
+    "$(state_get PORT_HUB_RATHOLE_PID)" \
+    "$(state_get PORT_HUB_RATHOLE_STARTED_AT)" \
+    "$(state_get PORT_HUB_SHARED_SERVICES)" \
+    "$(state_get PORT_HUB_LAST_CONTACT_EPOCH)" \
+    "$(state_get PORT_HUB_AUTH_REQUIRED)" \
+    "$(state_get PORT_HUB_CACHED_PUBLIC_IP)" \
+    "$(state_get PORT_HUB_CACHED_PUBLIC_IP_FETCHED_AT)" \
+    "$(state_get PORT_HUB_MACHINE_DISABLED)" \
+    "$target_version" \
+    "$request_id" \
+    "$now" \
+    "$(state_get PORT_HUB_CLIENT_UPDATE_LAST_HANDLED_REQUEST_ID)"
+
+  if [ -n "$target_version" ] && [ "$target_version" = "$(client_version)" ]; then
+    log "INFO" "Server requested PortHub client reinstall for current version $target_version (request $request_id)"
+  else
+    log "INFO" "Server requested PortHub client update (request $request_id target ${target_version:-latest})"
+  fi
+  "$PORT_HUB_SELF_PATH" update >/dev/null 2>&1 &
+}
+
+handle_client_control_headers() {
+  local header_file="$1"
+  local update_requested target_version request_id
+
+  update_requested="$(extract_header "X-PortHub-Client-Update-Requested" "$header_file")"
+  target_version="$(extract_header "X-PortHub-Client-Target-Version" "$header_file")"
+  request_id="$(extract_header "X-PortHub-Client-Update-Request-Id" "$header_file")"
+
+  if [ "$update_requested" = "true" ] && [ -n "$request_id" ]; then
+    request_client_update_if_needed "$request_id" "$target_version"
+    return
+  fi
+
+  if [ -n "$(state_get PORT_HUB_CLIENT_UPDATE_TARGET_VERSION)" ]; then
+    clear_client_update_request_state
+  fi
+}
+
 load_env() {
   if [ -f "$PORT_HUB_ENV_FILE" ]; then
     # shellcheck disable=SC1090
@@ -602,7 +720,7 @@ build_sync_payload() {
   local_ip="$(detect_local_ip)"
   public_ip="$(detect_public_ip)"
   cat <<EOF_JSON
-{"machine_id":"$(json_escape "$PORT_HUB_MACHINE_ID")","token":"$(json_escape "$PORT_HUB_MACHINE_TOKEN")","hostname":"$(json_escape "$host_name")","local_ip":"$(json_escape "$local_ip")","public_ip":"$(json_escape "$public_ip")","is_active":$active}
+{"machine_id":"$(json_escape "$PORT_HUB_MACHINE_ID")","token":"$(json_escape "$PORT_HUB_MACHINE_TOKEN")","hostname":"$(json_escape "$host_name")","local_ip":"$(json_escape "$local_ip")","public_ip":"$(json_escape "$public_ip")","is_active":$active,"client_version":"$(json_escape "$(client_version)")","client_update_last_handled_request_id":"$(json_escape "$(state_get PORT_HUB_CLIENT_UPDATE_LAST_HANDLED_REQUEST_ID)")"}
 EOF_JSON
 }
 
@@ -636,6 +754,7 @@ machine_post() {
   now="$(date +%s)"
   case "$http_code" in
     200|201)
+      handle_client_control_headers "$tmp_headers_file"
       persist_shared_runtime
       observed_public_ip="$(extract_header "X-PortHub-Observed-IP" "$tmp_headers_file")"
       debug_log "Machine sync posted to $endpoint (active=$active observed_ip=${observed_public_ip:-unknown})"
@@ -1307,8 +1426,13 @@ update_cmd() {
   need_cmd curl
   need_cmd install
   need_cmd mktemp
-  local cli_url tmp_file service_state
+  local cli_url tmp_file service_state pending_request_id previous_version installed_version
   cli_url="$(build_cli_download_url)"
+  pending_request_id="$(state_get PORT_HUB_CLIENT_UPDATE_REQUEST_ID)"
+  previous_version="$(client_version)"
+  if [ -n "$pending_request_id" ]; then
+    log "INFO" "Starting client reinstall for request $pending_request_id"
+  fi
   tmp_file="$(mktemp)"
   if ! curl --fail --show-error --location "$cli_url" -o "$tmp_file"; then
     rm -f "$tmp_file"
@@ -1316,7 +1440,12 @@ update_cmd() {
   fi
   ${SUDO:-} install -m 755 "$tmp_file" "$PORT_HUB_SELF_PATH"
   rm -f "$tmp_file"
-  log "INFO" "Updated PortHub CLI at $PORT_HUB_SELF_PATH"
+  installed_version="$(installed_cli_version "$PORT_HUB_SELF_PATH")"
+  if [ "$installed_version" = "$previous_version" ]; then
+    log "INFO" "Reinstalled PortHub CLI version $installed_version at $PORT_HUB_SELF_PATH"
+  else
+    log "INFO" "Updated PortHub CLI from version $previous_version to $installed_version at $PORT_HUB_SELF_PATH"
+  fi
   if ! "$PORT_HUB_SELF_PATH" preflight; then
     log "WARN" "PortHub CLI was updated, but preflight could not complete. If the machine token changed, run 'porthub update-token <new-token>' and retry."
     return 0
@@ -1324,6 +1453,29 @@ update_cmd() {
   if ! "$PORT_HUB_SELF_PATH" install-rathole; then
     log "WARN" "PortHub CLI was updated, but Rathole could not be refreshed. If the machine token changed, run 'porthub update-token <new-token>' and retry."
     return 0
+  fi
+  write_state \
+    "$(state_get PORT_HUB_CURRENT_VERSION)" \
+    "$(state_get PORT_HUB_LAST_SYNC_EPOCH)" \
+    "$(state_get PORT_HUB_SERVICE_MANAGER)" \
+    "$(state_get PORT_HUB_LAST_AUTH_EPOCH)" \
+    "$(state_get PORT_HUB_SHARED_HOSTNAME)" \
+    "$(state_get PORT_HUB_SHARED_LOCAL_IP)" \
+    "$(state_get PORT_HUB_SHARED_PUBLIC_IP)" \
+    "$(state_get PORT_HUB_RATHOLE_PID)" \
+    "$(state_get PORT_HUB_RATHOLE_STARTED_AT)" \
+    "$(state_get PORT_HUB_SHARED_SERVICES)" \
+    "$(state_get PORT_HUB_LAST_CONTACT_EPOCH)" \
+    "$(state_get PORT_HUB_AUTH_REQUIRED)" \
+    "$(state_get PORT_HUB_CACHED_PUBLIC_IP)" \
+    "$(state_get PORT_HUB_CACHED_PUBLIC_IP_FETCHED_AT)" \
+    "$(state_get PORT_HUB_MACHINE_DISABLED)" \
+    "" \
+    "" \
+    "" \
+    "$pending_request_id"
+  if [ -n "$pending_request_id" ]; then
+    log "INFO" "Client reinstall completed for request $pending_request_id"
   fi
   service_state="$(service_status)"
   if [ "$service_state" = "running" ]; then
@@ -1390,6 +1542,7 @@ poll_for_change() {
   http_code="$(curl --silent --show-error -D "$tmp_headers" -o "$tmp_body" -w "%{http_code}" "$url" || true)"
   case "$http_code" in
     200)
+      handle_client_control_headers "$tmp_headers"
       version="$(extract_header "X-PortHub-Config-Version" "$tmp_headers")"
       [ -n "$version" ] || { rm -f "$tmp_body" "$tmp_headers"; fail "Missing PortHub config version header"; }
       shared_services="$(count_services_in_file "$tmp_body")"
@@ -1415,6 +1568,7 @@ poll_for_change() {
       return 10
       ;;
     204)
+      handle_client_control_headers "$tmp_headers"
       version="$(extract_header "X-PortHub-Config-Version" "$tmp_headers")"
       [ -n "$version" ] && save_state "$version" "$(date +%s)" "$(state_get PORT_HUB_SERVICE_MANAGER)"
       debug_log "No config change detected (version ${version:-$current_version})"
