@@ -23,39 +23,119 @@ PORT_HUB_DEFAULT_AUTH_FAILURE_RETRY_SECONDS="5"
 PORT_HUB_DEFAULT_CLIENT_UPDATE_RETRY_SECONDS="300"
 PORT_HUB_DEFAULT_PUBLIC_IP_REFRESH_SECONDS="3600"
 PORT_HUB_DEFAULT_ENABLE_DEBUG_LOGS="false"
+PORT_HUB_EXPLICIT_TENANT="${PORT_HUB_TENANT:-}"
 CURRENT_STEP="bootstrap"
+
+normalize_tenant_name() {
+  case "${1:-}" in
+    ""|default) printf "" ;;
+    *) printf "%s" "$1" ;;
+  esac
+}
+
+tenant_display_name() {
+  local tenant="${1:-$PORT_HUB_TENANT}"
+  if [ -n "$tenant" ]; then
+    printf "%s" "$tenant"
+  else
+    printf "default"
+  fi
+}
+
+tenant_service_suffix() {
+  local tenant="${1:-$PORT_HUB_TENANT}"
+  if [ -z "$tenant" ]; then
+    printf "default"
+    return
+  fi
+  printf "%s" "$tenant" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9._-' '-'
+}
+
+validate_tenant_name() {
+  local tenant="$1"
+  case "$tenant" in
+    ""|default) return 0 ;;
+    *[!A-Za-z0-9._-]*)
+      printf "[porthub] Invalid tenant name: %s\n" "$tenant" >&2
+      exit 1
+      ;;
+  esac
+}
+
+apply_tenant_context() {
+  local requested_tenant normalized_tenant service_suffix
+  requested_tenant="${1:-}"
+  normalized_tenant="$(normalize_tenant_name "$requested_tenant")"
+  validate_tenant_name "$normalized_tenant"
+
+  PORT_HUB_TENANT="$normalized_tenant"
+  PORT_HUB_BIN_DIR="$PORT_HUB_SHARED_BIN_DIR"
+  service_suffix="$(tenant_service_suffix "$normalized_tenant")"
+
+  if [ -n "$normalized_tenant" ]; then
+    PORT_HUB_DIR="$PORT_HUB_TENANTS_DIR/$normalized_tenant"
+    PORT_HUB_RUNTIME_DIR="$PORT_HUB_RUNTIME_ROOT/$normalized_tenant"
+    PORT_HUB_LOG_DIR="$PORT_HUB_LOG_ROOT/$normalized_tenant"
+    case "$(uname -s)" in
+      Darwin)
+        PORT_HUB_SERVICE_LABEL="${PORT_HUB_SERVICE_BASE_LABEL}.${service_suffix}"
+        PORT_HUB_SERVICE_FILE="$PORT_HUB_SERVICE_ROOT/${PORT_HUB_SERVICE_LABEL}.plist"
+        ;;
+      *)
+        PORT_HUB_SERVICE_LABEL="${PORT_HUB_SERVICE_BASE_LABEL}-${service_suffix}.service"
+        PORT_HUB_SERVICE_FILE="$PORT_HUB_SERVICE_ROOT/${PORT_HUB_SERVICE_LABEL}"
+        ;;
+    esac
+  else
+    PORT_HUB_DIR="$PORT_HUB_ROOT_DIR"
+    PORT_HUB_RUNTIME_DIR="$PORT_HUB_RUNTIME_ROOT"
+    PORT_HUB_LOG_DIR="$PORT_HUB_LOG_ROOT"
+    case "$(uname -s)" in
+      Darwin)
+        PORT_HUB_SERVICE_LABEL="$PORT_HUB_SERVICE_BASE_LABEL"
+        PORT_HUB_SERVICE_FILE="$PORT_HUB_SERVICE_ROOT/${PORT_HUB_SERVICE_BASE_LABEL}.plist"
+        ;;
+      *)
+        PORT_HUB_SERVICE_LABEL="${PORT_HUB_SERVICE_BASE_LABEL}.service"
+        PORT_HUB_SERVICE_FILE="$PORT_HUB_SERVICE_ROOT/${PORT_HUB_SERVICE_LABEL}"
+        ;;
+    esac
+  fi
+
+  PORT_HUB_ENV_FILE="$PORT_HUB_DIR/client.env"
+  PORT_HUB_STATE_FILE="$PORT_HUB_DIR/state.env"
+  PORT_HUB_CONFIG_FILE="$PORT_HUB_DIR/rathole-client.toml"
+  PORT_HUB_RATHOLE_BIN="$PORT_HUB_BIN_DIR/rathole"
+  PORT_HUB_PID_FILE="$PORT_HUB_RUNTIME_DIR/porthub.pid"
+  PORT_HUB_LOG_FILE="$PORT_HUB_LOG_DIR/porthub.log"
+  PORT_HUB_LOG_BACKUP_FILE="$PORT_HUB_LOG_DIR/porthub.log.1"
+  PORT_HUB_SELF_PATH="${PORT_HUB_SELF_PATH:-$(command -v porthub 2>/dev/null || printf "/usr/local/bin/porthub")}"
+}
 
 detect_platform_defaults() {
   case "$(uname -s)" in
     Darwin)
-      PORT_HUB_DIR="${PORT_HUB_DIR:-/usr/local/etc/porthub}"
-      PORT_HUB_BIN_DIR="${PORT_HUB_BIN_DIR:-/usr/local/libexec/porthub}"
-      PORT_HUB_RUNTIME_DIR="${PORT_HUB_RUNTIME_DIR:-/usr/local/var/run/porthub}"
-      PORT_HUB_LOG_DIR="${PORT_HUB_LOG_DIR:-/usr/local/var/log/porthub}"
-      PORT_HUB_SERVICE_LABEL="${PORT_HUB_SERVICE_LABEL:-com.porthub.client}"
-      PORT_HUB_SERVICE_FILE="${PORT_HUB_SERVICE_FILE:-/Library/LaunchDaemons/com.porthub.client.plist}"
+      PORT_HUB_ROOT_DIR="${PORT_HUB_ROOT_DIR:-/usr/local/etc/porthub}"
+      PORT_HUB_SHARED_BIN_DIR="${PORT_HUB_SHARED_BIN_DIR:-/usr/local/libexec/porthub}"
+      PORT_HUB_RUNTIME_ROOT="${PORT_HUB_RUNTIME_ROOT:-/usr/local/var/run/porthub}"
+      PORT_HUB_LOG_ROOT="${PORT_HUB_LOG_ROOT:-/usr/local/var/log/porthub}"
+      PORT_HUB_SERVICE_BASE_LABEL="${PORT_HUB_SERVICE_BASE_LABEL:-com.porthub.client}"
+      PORT_HUB_SERVICE_ROOT="${PORT_HUB_SERVICE_ROOT:-/Library/LaunchDaemons}"
       ;;
     *)
-      PORT_HUB_DIR="${PORT_HUB_DIR:-/etc/porthub}"
-      PORT_HUB_BIN_DIR="${PORT_HUB_BIN_DIR:-/opt/porthub/bin}"
-      PORT_HUB_RUNTIME_DIR="${PORT_HUB_RUNTIME_DIR:-/var/run/porthub}"
-      PORT_HUB_LOG_DIR="${PORT_HUB_LOG_DIR:-/var/log/porthub}"
-      PORT_HUB_SERVICE_LABEL="${PORT_HUB_SERVICE_LABEL:-porthub.service}"
-      PORT_HUB_SERVICE_FILE="${PORT_HUB_SERVICE_FILE:-/etc/systemd/system/porthub.service}"
+      PORT_HUB_ROOT_DIR="${PORT_HUB_ROOT_DIR:-/etc/porthub}"
+      PORT_HUB_SHARED_BIN_DIR="${PORT_HUB_SHARED_BIN_DIR:-/opt/porthub/bin}"
+      PORT_HUB_RUNTIME_ROOT="${PORT_HUB_RUNTIME_ROOT:-/var/run/porthub}"
+      PORT_HUB_LOG_ROOT="${PORT_HUB_LOG_ROOT:-/var/log/porthub}"
+      PORT_HUB_SERVICE_BASE_LABEL="${PORT_HUB_SERVICE_BASE_LABEL:-porthub}"
+      PORT_HUB_SERVICE_ROOT="${PORT_HUB_SERVICE_ROOT:-/etc/systemd/system}"
       ;;
   esac
 
-  PORT_HUB_ENV_FILE="${PORT_HUB_ENV_FILE:-$PORT_HUB_DIR/client.env}"
-  PORT_HUB_STATE_FILE="${PORT_HUB_STATE_FILE:-$PORT_HUB_DIR/state.env}"
-  PORT_HUB_CONFIG_FILE="${PORT_HUB_CONFIG_FILE:-$PORT_HUB_DIR/rathole-client.toml}"
-  PORT_HUB_RATHOLE_BIN="${PORT_HUB_RATHOLE_BIN:-$PORT_HUB_BIN_DIR/rathole}"
-  PORT_HUB_PID_FILE="${PORT_HUB_PID_FILE:-$PORT_HUB_RUNTIME_DIR/porthub.pid}"
-  PORT_HUB_LOG_FILE="${PORT_HUB_LOG_FILE:-$PORT_HUB_LOG_DIR/porthub.log}"
-  PORT_HUB_LOG_BACKUP_FILE="${PORT_HUB_LOG_BACKUP_FILE:-$PORT_HUB_LOG_DIR/porthub.log.1}"
+  PORT_HUB_TENANTS_DIR="${PORT_HUB_TENANTS_DIR:-$PORT_HUB_ROOT_DIR/tenants}"
   PORT_HUB_SELF_PATH="${PORT_HUB_SELF_PATH:-$(command -v porthub 2>/dev/null || printf "/usr/local/bin/porthub")}"
+  apply_tenant_context "${PORT_HUB_EXPLICIT_TENANT:-}"
 }
-
-detect_platform_defaults
 
 log_plain() { printf "%s\n" "$*" >&2; }
 fail() { log "ERROR" "$*"; exit 1; }
@@ -79,6 +159,8 @@ step() {
 }
 trap 'rc=$?; log "ERROR" "Command failed during: ${CURRENT_STEP} (exit ${rc})"' ERR
 
+detect_platform_defaults
+
 detect_sudo() {
   if [ "$(id -u)" -eq 0 ]; then
     SUDO=""
@@ -98,6 +180,132 @@ detect_supported_platform() {
       fail "Unsupported operating system: $(uname -s). Supported: Linux, macOS."
       ;;
   esac
+}
+
+collect_configured_tenants() {
+  CONFIGURED_TENANTS=()
+
+  if [ -f "$PORT_HUB_ROOT_DIR/client.env" ]; then
+    CONFIGURED_TENANTS+=("default")
+  fi
+
+  if [ -d "$PORT_HUB_TENANTS_DIR" ]; then
+    local tenant_dir
+    for tenant_dir in "$PORT_HUB_TENANTS_DIR"/*; do
+      [ -d "$tenant_dir" ] || continue
+      [ -f "$tenant_dir/client.env" ] || continue
+      CONFIGURED_TENANTS+=("$(basename "$tenant_dir")")
+    done
+  fi
+}
+
+resolve_tenant_reference() {
+  local requested="${1:-}"
+  local exact_match=""
+  local match=""
+  local configured_tenant=""
+  local -a prefix_matches=()
+
+  requested="$(normalize_tenant_name "$requested")"
+  if [ -z "$requested" ]; then
+    printf ""
+    return 0
+  fi
+
+  collect_configured_tenants
+
+  for configured_tenant in "${CONFIGURED_TENANTS[@]}"; do
+    if [ "$configured_tenant" = "$requested" ]; then
+      exact_match="$configured_tenant"
+      break
+    fi
+  done
+  if [ -n "$exact_match" ]; then
+    printf "%s" "$exact_match"
+    return 0
+  fi
+
+  for configured_tenant in "${CONFIGURED_TENANTS[@]}"; do
+    case "$configured_tenant" in
+      "$requested"*)
+        prefix_matches+=("$configured_tenant")
+        ;;
+    esac
+  done
+
+  case "${#prefix_matches[@]}" in
+    0)
+      printf "%s" "$requested"
+      ;;
+    1)
+      printf "%s" "${prefix_matches[0]}"
+      ;;
+    *)
+      printf "[porthub] Tenant reference '%s' is ambiguous. Matches:" "$requested" >&2
+      for match in "${prefix_matches[@]}"; do
+        printf " %s" "$match" >&2
+      done
+      printf "\n" >&2
+      exit 1
+      ;;
+  esac
+}
+
+configured_tenant_count() {
+  collect_configured_tenants
+  printf "%s" "${#CONFIGURED_TENANTS[@]}"
+}
+
+resolve_selected_tenant_context() {
+  collect_configured_tenants
+
+  if [ -n "${PORT_HUB_EXPLICIT_TENANT:-}" ]; then
+    apply_tenant_context "$PORT_HUB_EXPLICIT_TENANT"
+    return 0
+  fi
+
+  case "${#CONFIGURED_TENANTS[@]}" in
+    0)
+      apply_tenant_context ""
+      ;;
+    1)
+      apply_tenant_context "${CONFIGURED_TENANTS[0]}"
+      ;;
+    *)
+      fail "Multiple PortHub tenants are configured. Use --tenant <name> or 'porthub tenants list'."
+      ;;
+  esac
+}
+
+parse_global_cli_options() {
+  PARSED_GLOBAL_ARGS=()
+  PORT_HUB_EXPLICIT_TENANT="${PORT_HUB_TENANT:-}"
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -t)
+        [ "$#" -ge 2 ] || fail "Missing value for -t"
+        PORT_HUB_EXPLICIT_TENANT="$(resolve_tenant_reference "$2")"
+        validate_tenant_name "$PORT_HUB_EXPLICIT_TENANT"
+        shift 2
+        ;;
+      --tenant)
+        [ "$#" -ge 2 ] || fail "Missing value for --tenant"
+        PORT_HUB_EXPLICIT_TENANT="$(resolve_tenant_reference "$2")"
+        validate_tenant_name "$PORT_HUB_EXPLICIT_TENANT"
+        shift 2
+        ;;
+      --tenant=*)
+        PORT_HUB_EXPLICIT_TENANT="$(resolve_tenant_reference "${1#*=}")"
+        validate_tenant_name "$PORT_HUB_EXPLICIT_TENANT"
+        shift
+        ;;
+      *)
+        PARSED_GLOBAL_ARGS+=("$1")
+        shift
+        ;;
+    esac
+  done
 }
 
 ensure_dirs() {
@@ -578,7 +786,7 @@ request_client_update_if_needed() {
   else
     log "INFO" "Server requested PortHub client update (request $request_id target ${target_version:-latest})"
   fi
-  "$PORT_HUB_SELF_PATH" update >/dev/null 2>&1 &
+  run_self_cmd update >/dev/null 2>&1 &
 }
 
 handle_client_control_headers() {
@@ -603,6 +811,7 @@ load_env() {
   if [ -f "$PORT_HUB_ENV_FILE" ]; then
     # shellcheck disable=SC1090
     . "$PORT_HUB_ENV_FILE"
+    apply_tenant_context "${PORT_HUB_TENANT:-$PORT_HUB_EXPLICIT_TENANT}"
   fi
 
   PORT_HUB_API_URL="${PORT_HUB_API_URL:-$PORT_HUB_DEFAULT_API_URL}"
@@ -635,6 +844,28 @@ load_env() {
   refresh_derived_urls
 }
 
+load_saved_env_if_present() {
+  if [ -f "$PORT_HUB_ENV_FILE" ]; then
+    # shellcheck disable=SC1090
+    . "$PORT_HUB_ENV_FILE"
+    apply_tenant_context "${PORT_HUB_TENANT:-$PORT_HUB_EXPLICIT_TENANT}"
+  fi
+
+  if [ -z "${PORT_HUB_SELF_PATH:-}" ]; then
+    PORT_HUB_SELF_PATH="$(command -v porthub 2>/dev/null || printf "/usr/local/bin/porthub")"
+  fi
+}
+
+run_self_cmd() {
+  local command="$1"
+  shift
+  if [ -n "$PORT_HUB_TENANT" ]; then
+    "$PORT_HUB_SELF_PATH" "$command" --tenant "$PORT_HUB_TENANT" "$@"
+  else
+    "$PORT_HUB_SELF_PATH" "$command" "$@"
+  fi
+}
+
 refresh_derived_urls() {
   PORT_HUB_API_URL="$(normalize_api_url "$PORT_HUB_API_URL")"
   PORT_HUB_AUTH_URL="${PORT_HUB_API_URL%/}/machines/client/auth"
@@ -653,6 +884,7 @@ refresh_derived_urls() {
 write_env_file() {
   ensure_dirs
   cat <<EOF_ENV | ${SUDO:-} tee "$PORT_HUB_ENV_FILE" >/dev/null
+PORT_HUB_TENANT=$PORT_HUB_TENANT
 PORT_HUB_API_URL=$PORT_HUB_API_URL
 PORT_HUB_MACHINE_ID=$PORT_HUB_MACHINE_ID
 PORT_HUB_MACHINE_TOKEN=$PORT_HUB_MACHINE_TOKEN
@@ -710,6 +942,7 @@ validate_configuration() {
 }
 
 require_configured_machine() {
+  resolve_selected_tenant_context
   [ -f "$PORT_HUB_ENV_FILE" ] || fail "PortHub is not configured on this machine. Run the bootstrap/install command from the PortHub server first."
 }
 
@@ -854,6 +1087,7 @@ upload_log_batch() {
 }
 
 stream_logs_worker_cmd() {
+  resolve_selected_tenant_context
   load_env
   validate_configuration
   touch "$PORT_HUB_LOG_FILE" 2>/dev/null || true
@@ -894,6 +1128,7 @@ stream_logs_worker_cmd() {
 }
 
 log_stream_supervisor_cmd() {
+  resolve_selected_tenant_context
   load_env
   validate_configuration
 
@@ -913,7 +1148,7 @@ log_stream_supervisor_cmd() {
   while true; do
     if machine_log_stream_requested; then
       if [ -z "$log_stream_pid" ] || ! kill -0 "$log_stream_pid" 2>/dev/null; then
-        "$PORT_HUB_SELF_PATH" stream-logs-worker "$batch_size" "$flush_seconds" "$initial_lines" >/dev/null 2>&1 &
+        run_self_cmd __stream-logs-worker "$batch_size" "$flush_seconds" "$initial_lines" >/dev/null 2>&1 &
         log_stream_pid="$!"
       fi
     else
@@ -931,6 +1166,7 @@ log_stream_supervisor_cmd() {
 configure_cmd() {
   step "Configuring PortHub client"
   detect_sudo
+  resolve_selected_tenant_context
   load_env
 
   while [ "$#" -gt 0 ]; do
@@ -996,6 +1232,7 @@ ensure_rosetta_if_needed() {
 install_rathole_cmd() {
   step "Installing Rathole"
   detect_sudo
+  resolve_selected_tenant_context
   load_env
   validate_configuration
   ensure_dirs
@@ -1018,6 +1255,7 @@ install_rathole_cmd() {
 fetch_config_cmd() {
   step "Fetching PortHub machine config"
   detect_sudo
+  resolve_selected_tenant_context
   load_env
   validate_configuration
   ensure_dirs
@@ -1076,6 +1314,7 @@ fetch_config_cmd() {
 preflight_cmd() {
   step "Checking installation prerequisites"
   detect_sudo
+  resolve_selected_tenant_context
   load_env
   validate_configuration
   detect_supported_platform
@@ -1134,13 +1373,18 @@ service_manager() {
 }
 
 write_service_file() {
-  local manager
+  local manager exec_start launchd_tenant_arguments=""
   manager="$(service_manager)"
+  exec_start="$PORT_HUB_SELF_PATH __service-run"
+  if [ -n "$PORT_HUB_TENANT" ]; then
+    exec_start="$exec_start --tenant $PORT_HUB_TENANT"
+    launchd_tenant_arguments="$(printf '    <string>--tenant</string>\n    <string>%s</string>\n' "$PORT_HUB_TENANT")"
+  fi
   case "$manager" in
     systemd)
       cat <<EOF_SYSTEMD | ${SUDO:-} tee "$PORT_HUB_SERVICE_FILE" >/dev/null
 [Unit]
-Description=PortHub client
+Description=PortHub client ($(tenant_display_name))
 After=network-online.target
 Wants=network-online.target
 
@@ -1148,7 +1392,7 @@ Wants=network-online.target
 Type=simple
 Restart=always
 RestartSec=5
-ExecStart=$PORT_HUB_SELF_PATH service-run
+ExecStart=$exec_start
 
 [Install]
 WantedBy=multi-user.target
@@ -1165,8 +1409,8 @@ EOF_SYSTEMD
   <key>ProgramArguments</key>
   <array>
     <string>$PORT_HUB_SELF_PATH</string>
-    <string>service-run</string>
-  </array>
+    <string>__service-run</string>
+$launchd_tenant_arguments  </array>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -1222,6 +1466,98 @@ service_disable_and_stop() {
   esac
 }
 
+remove_managed_path() {
+  local target="$1"
+  local label="$2"
+  [ -n "$target" ] || return 0
+  case "$target" in
+    /|.|..)
+      fail "Refusing to remove unsafe ${label} path: $target"
+      ;;
+  esac
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    ${SUDO:-} rm -rf "$target"
+    log_plain "[porthub-uninstall] Removed ${label}: $target"
+  fi
+}
+
+remove_dir_if_empty() {
+  local target="$1"
+  local label="$2"
+  [ -n "$target" ] || return 0
+  case "$target" in
+    /|.|..)
+      fail "Refusing to remove unsafe ${label} path: $target"
+      ;;
+  esac
+  if [ -d "$target" ]; then
+    ${SUDO:-} rmdir "$target" >/dev/null 2>&1 || true
+  fi
+}
+
+stop_recorded_rathole_process() {
+  local pid="" found_pid=""
+  local -a managed_pids=()
+  if [ -f "$PORT_HUB_STATE_FILE" ]; then
+    pid="$(state_get PORT_HUB_RATHOLE_PID)"
+    if [ -n "$pid" ]; then
+      managed_pids+=("$pid")
+    fi
+  fi
+  if [ -z "$pid" ] && [ -f "$PORT_HUB_PID_FILE" ]; then
+    pid="$(cat "$PORT_HUB_PID_FILE" 2>/dev/null || true)"
+    if [ -n "$pid" ]; then
+      managed_pids+=("$pid")
+    fi
+  fi
+
+  while IFS= read -r found_pid; do
+    [ -n "$found_pid" ] || continue
+    managed_pids+=("$found_pid")
+  done < <(
+    ps -eo pid=,args= 2>/dev/null | awk -v bin="$PORT_HUB_RATHOLE_BIN" -v cfg="$PORT_HUB_CONFIG_FILE" '
+      index($0, bin) > 0 && index($0, cfg) > 0 { print $1 }
+    '
+  )
+
+  if [ "${#managed_pids[@]}" -eq 0 ]; then
+    return 0
+  fi
+
+  for pid in "${managed_pids[@]}"; do
+    [ -n "$pid" ] || continue
+    if kill -0 "$pid" 2>/dev/null; then
+      ${SUDO:-} kill "$pid" >/dev/null 2>&1 || true
+      log_plain "[porthub-uninstall] Stopped Rathole process $pid"
+    fi
+  done
+}
+
+remove_service_definition() {
+  case "$(uname -s)" in
+    Linux)
+      if command -v systemctl >/dev/null 2>&1; then
+        ${SUDO:-} systemctl disable --now "$PORT_HUB_SERVICE_LABEL" >/dev/null 2>&1 || true
+      fi
+      remove_managed_path "$PORT_HUB_SERVICE_FILE" "service file"
+      if command -v systemctl >/dev/null 2>&1; then
+        ${SUDO:-} systemctl daemon-reload >/dev/null 2>&1 || true
+        ${SUDO:-} systemctl reset-failed "$PORT_HUB_SERVICE_LABEL" >/dev/null 2>&1 || true
+      fi
+      ;;
+    Darwin)
+      if command -v launchctl >/dev/null 2>&1; then
+        ${SUDO:-} launchctl bootout system "$PORT_HUB_SERVICE_FILE" >/dev/null 2>&1 || true
+        ${SUDO:-} launchctl disable "system/$PORT_HUB_SERVICE_LABEL" >/dev/null 2>&1 || true
+      fi
+      remove_managed_path "$PORT_HUB_SERVICE_FILE" "service file"
+      ;;
+    *)
+      remove_managed_path "$PORT_HUB_SERVICE_FILE" "service file"
+      ;;
+  esac
+}
+
 service_status() {
   local manager
   manager="$(service_manager)"
@@ -1249,6 +1585,7 @@ service_status() {
 up_cmd() {
   step "Preparing persistent PortHub service"
   detect_sudo
+  resolve_selected_tenant_context
   load_env
   validate_configuration
   need_cmd curl
@@ -1296,13 +1633,110 @@ up_cmd() {
 down_cmd() {
   step "Stopping PortHub service"
   detect_sudo
+  resolve_selected_tenant_context
   load_env
   service_disable_and_stop
   machine_post "$PORT_HUB_SYNC_URL" false || true
   log "INFO" "PortHub stopped"
 }
 
+uninstall_cmd() {
+  local remove_all="false"
+  local previous_tenant="${PORT_HUB_TENANT:-}"
+  local tenant_name tenant_count
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --all) remove_all="true"; shift ;;
+      *) fail "Unknown uninstall option: $1" ;;
+    esac
+  done
+
+  step "Uninstalling PortHub client"
+  detect_sudo
+
+  if [ "$remove_all" = "true" ]; then
+    collect_configured_tenants
+    for tenant_name in "${CONFIGURED_TENANTS[@]}"; do
+      PORT_HUB_EXPLICIT_TENANT="$tenant_name"
+      apply_tenant_context "$tenant_name"
+      load_saved_env_if_present
+
+      if [ -f "$PORT_HUB_ENV_FILE" ] && [ -n "${PORT_HUB_API_URL:-}" ] && [ -n "${PORT_HUB_MACHINE_ID:-}" ] && [ -n "${PORT_HUB_MACHINE_TOKEN:-}" ]; then
+        refresh_derived_urls
+        machine_post "$PORT_HUB_SYNC_URL" false || true
+      fi
+
+      remove_service_definition
+      stop_recorded_rathole_process
+      remove_managed_path "$PORT_HUB_ENV_FILE" "environment file"
+      remove_managed_path "$PORT_HUB_STATE_FILE" "state file"
+      remove_managed_path "$PORT_HUB_CONFIG_FILE" "Rathole config"
+      remove_managed_path "$PORT_HUB_PID_FILE" "pid file"
+      remove_managed_path "$PORT_HUB_LOG_FILE" "log file"
+      remove_managed_path "$PORT_HUB_LOG_BACKUP_FILE" "log backup"
+      remove_dir_if_empty "$PORT_HUB_RUNTIME_DIR" "runtime dir"
+      remove_dir_if_empty "$PORT_HUB_LOG_DIR" "log dir"
+      remove_dir_if_empty "$PORT_HUB_DIR" "config dir"
+    done
+
+    apply_tenant_context ""
+    remove_managed_path "$PORT_HUB_RATHOLE_BIN" "Rathole binary"
+    remove_managed_path "$PORT_HUB_SELF_PATH" "PortHub CLI"
+    remove_dir_if_empty "$PORT_HUB_BIN_DIR" "bin dir"
+    remove_dir_if_empty "$PORT_HUB_TENANTS_DIR" "tenants dir"
+    remove_dir_if_empty "$PORT_HUB_RUNTIME_ROOT" "runtime root"
+    remove_dir_if_empty "$PORT_HUB_LOG_ROOT" "log root"
+    remove_dir_if_empty "$PORT_HUB_ROOT_DIR" "config root"
+    log_plain "[porthub-uninstall] PortHub client fully uninstalled"
+    return 0
+  fi
+
+  resolve_selected_tenant_context
+  load_saved_env_if_present
+
+  if [ -f "$PORT_HUB_ENV_FILE" ]; then
+    if [ -n "${PORT_HUB_API_URL:-}" ] && [ -n "${PORT_HUB_MACHINE_ID:-}" ] && [ -n "${PORT_HUB_MACHINE_TOKEN:-}" ]; then
+      refresh_derived_urls
+      machine_post "$PORT_HUB_SYNC_URL" false || true
+    fi
+  fi
+
+  remove_service_definition
+  stop_recorded_rathole_process
+
+  remove_managed_path "$PORT_HUB_ENV_FILE" "environment file"
+  remove_managed_path "$PORT_HUB_STATE_FILE" "state file"
+  remove_managed_path "$PORT_HUB_CONFIG_FILE" "Rathole config"
+  remove_managed_path "$PORT_HUB_PID_FILE" "pid file"
+  remove_managed_path "$PORT_HUB_LOG_FILE" "log file"
+  remove_managed_path "$PORT_HUB_LOG_BACKUP_FILE" "log backup"
+
+  remove_dir_if_empty "$PORT_HUB_RUNTIME_DIR" "runtime dir"
+  remove_dir_if_empty "$PORT_HUB_LOG_DIR" "log dir"
+  remove_dir_if_empty "$PORT_HUB_DIR" "config dir"
+
+  tenant_count="$(configured_tenant_count)"
+  if [ "$tenant_count" -eq 0 ] 2>/dev/null; then
+    apply_tenant_context ""
+    remove_managed_path "$PORT_HUB_RATHOLE_BIN" "Rathole binary"
+    remove_managed_path "$PORT_HUB_SELF_PATH" "PortHub CLI"
+    remove_dir_if_empty "$PORT_HUB_BIN_DIR" "bin dir"
+    remove_dir_if_empty "$PORT_HUB_TENANTS_DIR" "tenants dir"
+    remove_dir_if_empty "$PORT_HUB_RUNTIME_ROOT" "runtime root"
+    remove_dir_if_empty "$PORT_HUB_LOG_ROOT" "log root"
+    remove_dir_if_empty "$PORT_HUB_ROOT_DIR" "config root"
+    log_plain "[porthub-uninstall] PortHub client fully uninstalled"
+  else
+    log_plain "[porthub-uninstall] Tenant $(tenant_display_name "$PORT_HUB_TENANT") uninstalled; shared PortHub CLI remains for other tenants"
+  fi
+
+  PORT_HUB_EXPLICIT_TENANT="$previous_tenant"
+  apply_tenant_context "$previous_tenant"
+}
+
 status_cmd() {
+  resolve_selected_tenant_context
   load_env
   local service_state manager config_version last_sync last_auth last_contact shared_hostname
   local shared_local_ip shared_public_ip rathole_state rathole_pid rathole_started_at
@@ -1324,6 +1758,7 @@ status_cmd() {
   machine_disabled="$(state_get PORT_HUB_MACHINE_DISABLED)"
   cat <<EOF_STATUS
 PortHub Status
+tenant: $(tenant_display_name)
 machine_id: $PORT_HUB_MACHINE_ID
 client_version: $(client_version)
 rathole_version: $(rathole_version)
@@ -1348,9 +1783,11 @@ EOF_STATUS
 }
 
 version_cmd() {
+  resolve_selected_tenant_context
   load_env
   cat <<EOF_VERSION
 PortHub Version
+tenant: $(tenant_display_name)
 client_version: $(client_version)
 rathole_version: $(rathole_version)
 EOF_VERSION
@@ -1359,17 +1796,20 @@ EOF_VERSION
 restart_cmd() {
   step "Restarting PortHub service"
   detect_sudo
+  resolve_selected_tenant_context
   load_env
   service_enable_and_start
   log "INFO" "PortHub service restarted"
 }
 
 config_cmd() {
+  resolve_selected_tenant_context
   [ -f "$PORT_HUB_ENV_FILE" ] || fail "No config found at $PORT_HUB_ENV_FILE"
   cat "$PORT_HUB_ENV_FILE"
 }
 
-rathole_config_cmd() {
+print_rathole_config() {
+  resolve_selected_tenant_context
   load_env
   if [ ! -f "$PORT_HUB_CONFIG_FILE" ]; then
     fail "No Rathole config found at $PORT_HUB_CONFIG_FILE"
@@ -1382,6 +1822,74 @@ rathole_config_cmd() {
 
   detect_sudo
   ${SUDO:-} cat "$PORT_HUB_CONFIG_FILE"
+}
+
+rathole_config_cmd() {
+  local watch_mode="false"
+  local interval_seconds="2"
+  local current_snapshot=""
+  local next_snapshot=""
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -w|--watch) watch_mode="true"; shift ;;
+      --interval)
+        [ "$#" -ge 2 ] || fail "Missing value for --interval"
+        interval_seconds="$2"
+        shift 2
+        ;;
+      --interval=*)
+        interval_seconds="${1#*=}"
+        shift
+        ;;
+      *)
+        fail "Unknown rathole config option: $1"
+        ;;
+    esac
+  done
+
+  if [ "$watch_mode" != "true" ]; then
+    print_rathole_config
+    return
+  fi
+
+  current_snapshot="$(print_rathole_config)"
+  printf "%s\n" "$current_snapshot"
+  while true; do
+    sleep "$interval_seconds"
+    next_snapshot="$(print_rathole_config)"
+    if [ "$next_snapshot" != "$current_snapshot" ]; then
+      printf "\n# Updated %s\n" "$(date '+%Y-%m-%d %H:%M:%S')"
+      printf "%s\n" "$next_snapshot"
+      current_snapshot="$next_snapshot"
+    fi
+  done
+}
+
+rathole_cmd() {
+  local subcommand="${1:-config}"
+  if [ "$#" -gt 0 ]; then
+    shift
+  fi
+
+  case "$subcommand" in
+    config) rathole_config_cmd "$@" ;;
+    help|-h|--help|"")
+      cat <<EOF_RATHOLE_USAGE
+Usage: porthub rathole <subcommand> [options]
+
+Subcommands:
+  config            Print the tenant Rathole config
+
+Options for 'porthub rathole config':
+  -w, --watch       Watch the config and print updates when it changes
+  --interval N      Poll interval in seconds for watch mode (default: 2)
+EOF_RATHOLE_USAGE
+      ;;
+    *)
+      fail "Unknown rathole subcommand: $subcommand"
+      ;;
+  esac
 }
 
 update_token_cmd() {
@@ -1446,11 +1954,11 @@ update_cmd() {
   else
     log "INFO" "Updated PortHub CLI from version $previous_version to $installed_version at $PORT_HUB_SELF_PATH"
   fi
-  if ! "$PORT_HUB_SELF_PATH" preflight; then
+  if ! run_self_cmd preflight; then
     log "WARN" "PortHub CLI was updated, but preflight could not complete. If the machine token changed, run 'porthub update-token <new-token>' and retry."
     return 0
   fi
-  if ! "$PORT_HUB_SELF_PATH" install-rathole; then
+  if ! run_self_cmd install-rathole; then
     log "WARN" "PortHub CLI was updated, but Rathole could not be refreshed. If the machine token changed, run 'porthub update-token <new-token>' and retry."
     return 0
   fi
@@ -1479,7 +1987,7 @@ update_cmd() {
   fi
   service_state="$(service_status)"
   if [ "$service_state" = "running" ]; then
-    "$PORT_HUB_SELF_PATH" restart
+    run_self_cmd restart
   else
     log "INFO" "PortHub service is not running. Run 'porthub up' when ready."
   fi
@@ -1498,12 +2006,17 @@ reinstall_cmd() {
   tmp_file="$(mktemp)"
   curl --fail --show-error --location "$install_url" -o "$tmp_file"
   chmod +x "$tmp_file"
-  "$tmp_file" --install-path "$PORT_HUB_SELF_PATH"
+  if [ -n "$PORT_HUB_TENANT" ]; then
+    "$tmp_file" --install-path "$PORT_HUB_SELF_PATH" --tenant "$PORT_HUB_TENANT"
+  else
+    "$tmp_file" --install-path "$PORT_HUB_SELF_PATH"
+  fi
   rm -f "$tmp_file"
 }
 
 logs_cmd() {
   step "Reading PortHub logs"
+  resolve_selected_tenant_context
   local follow="false"
   local lines="100"
   local verbose="false"
@@ -1529,6 +2042,124 @@ logs_cmd() {
   else
     tail -n "$lines" "$PORT_HUB_LOG_FILE" | awk '!/\[DEBUG\]/ { print }'
   fi
+}
+
+env_file_value() {
+  local file_path="$1"
+  local key="$2"
+  [ -f "$file_path" ] || return 0
+  awk -F= -v key="$key" '$1 == key {print substr($0, index($0, "=") + 1); exit}' "$file_path"
+}
+
+tenants_list_cmd() {
+  local previous_tenant="${PORT_HUB_TENANT:-}"
+  local tenant_name api_url machine_id service_state
+
+  collect_configured_tenants
+  if [ "${#CONFIGURED_TENANTS[@]}" -eq 0 ]; then
+    cat <<EOF_TENANTS_EMPTY
+PortHub Tenants
+configured: 0
+EOF_TENANTS_EMPTY
+    return 0
+  fi
+
+  printf "PortHub Tenants\n"
+  for tenant_name in "${CONFIGURED_TENANTS[@]}"; do
+    apply_tenant_context "$tenant_name"
+    api_url="$(env_file_value "$PORT_HUB_ENV_FILE" PORT_HUB_API_URL)"
+    machine_id="$(env_file_value "$PORT_HUB_ENV_FILE" PORT_HUB_MACHINE_ID)"
+    service_state="$(service_status)"
+    printf -- "- %s machine_id=%s service=%s api=%s\n" \
+      "$(tenant_display_name "$tenant_name")" \
+      "${machine_id:-unknown}" \
+      "$service_state" \
+      "${api_url:-unknown}"
+  done
+  apply_tenant_context "$previous_tenant"
+}
+
+tenants_add_cmd() {
+  local auto_up="true"
+  local machine_id="$PORT_HUB_DEFAULT_MACHINE_ID"
+  local previous_tenant="${PORT_HUB_EXPLICIT_TENANT:-}"
+  local -a configure_args=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --machine-id)
+        [ "$#" -ge 2 ] || fail "Missing value for --machine-id"
+        machine_id="$2"
+        configure_args+=("$1" "$2")
+        shift 2
+        ;;
+      --machine-id=*)
+        machine_id="${1#*=}"
+        configure_args+=("$1")
+        shift
+        ;;
+      --no-start)
+        auto_up="false"
+        shift
+        ;;
+      *)
+        configure_args+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  if [ -z "${PORT_HUB_EXPLICIT_TENANT:-}" ]; then
+    [ -n "$machine_id" ] || fail "Missing machine id for tenant bootstrap"
+    PORT_HUB_EXPLICIT_TENANT="$machine_id"
+  fi
+
+  configure_cmd "${configure_args[@]}"
+  preflight_cmd
+  install_rathole_cmd
+  if [ "$auto_up" = "true" ]; then
+    up_cmd
+  else
+    log_plain "[porthub-tenants] Tenant $(tenant_display_name "$PORT_HUB_EXPLICIT_TENANT") configured. Run 'porthub start -t $(tenant_display_name "$PORT_HUB_EXPLICIT_TENANT")' when ready."
+  fi
+
+  PORT_HUB_EXPLICIT_TENANT="$previous_tenant"
+  apply_tenant_context "$previous_tenant"
+}
+
+tenants_remove_cmd() {
+  local tenant_name="${1:-${PORT_HUB_EXPLICIT_TENANT:-}}"
+  [ -n "$tenant_name" ] || fail "Usage: porthub tenants remove <tenant>"
+  PORT_HUB_EXPLICIT_TENANT="$(resolve_tenant_reference "$tenant_name")"
+  uninstall_cmd
+}
+
+tenants_cmd() {
+  local subcommand="${1:-list}"
+  if [ "$#" -gt 0 ]; then
+    shift
+  fi
+
+  case "$subcommand" in
+    list|ls) tenants_list_cmd "$@" ;;
+    add) tenants_add_cmd "$@" ;;
+    remove|rm|delete) tenants_remove_cmd "$@" ;;
+    help|-h|--help|"")
+      cat <<EOF_TENANTS_USAGE
+Usage: porthub tenants <subcommand> [options]
+
+Subcommands:
+  list              Show configured PortHub tenants
+  add               Configure and optionally start a tenant
+  remove <tenant>   Remove one tenant; use 'porthub uninstall --all' to remove everything
+
+Tenant references accept exact names or unique prefixes.
+EOF_TENANTS_USAGE
+      ;;
+    *)
+      fail "Unknown tenants subcommand: $subcommand"
+      ;;
+  esac
 }
 
 poll_for_change() {
@@ -1611,6 +2242,7 @@ poll_for_change() {
 service_run_cmd() {
   step "Running PortHub background service"
   detect_sudo
+  resolve_selected_tenant_context
   load_env
   validate_configuration
   need_cmd curl
@@ -1732,7 +2364,7 @@ service_run_cmd() {
       fail "Could not authenticate machine against PortHub server"
     fi
   fi
-  "$PORT_HUB_SELF_PATH" log-stream-supervisor 5 8 2 3 >/dev/null 2>&1 &
+  run_self_cmd __log-stream-supervisor 5 8 2 3 >/dev/null 2>&1 &
   log_stream_supervisor_pid="$!"
   last_sync="$(date +%s)"
 
@@ -1830,57 +2462,100 @@ usage() {
   cat <<EOF_USAGE
 Usage: porthub <command> [options]
 
+Global options:
+  -t, --tenant NAME  Operate on a tenant by exact name or unique prefix
+
 Commands:
-  configure         Write or update PortHub machine settings
-  update-token      Save a new machine token locally and restart the service
-  preflight         Check whether this machine can run PortHub reliably
-  install-rathole   Download Rathole from PortHub
-  up                Install/update config and start the persistent PortHub service
-  down              Stop the PortHub service and mark the machine inactive
-  restart           Restart the PortHub service
-  status            Show runtime PortHub status and shared machine details
+  ls, list          Show configured tenants
+  add               Add a tenant and start it
+  remove            Remove one tenant; use 'uninstall --all' to remove everything
+  start             Start the selected tenant
+  stop              Stop the selected tenant
+  restart           Restart the selected tenant
+  status            Show status for the selected tenant
+  logs              Show logs for the selected tenant
+  update            Update the shared PortHub CLI and Rathole using the selected tenant
   version           Show installed PortHub client and Rathole versions
-  logs              Show PortHub logs (-f to follow)
-  config            Print the saved PortHub configuration
+  tenants           Full tenant management subcommands
+  adv               Show advanced maintenance commands
+EOF_USAGE
+}
+
+advanced_usage() {
+  cat <<EOF_ADVANCED
+PortHub Advanced Commands
+
+Public maintenance:
+  configure         Write or update the selected tenant settings
+  update-token      Save a new machine token for the selected tenant
+  preflight         Check prerequisites for the selected tenant
+  install-rathole   Download or refresh the shared Rathole binary
+  config            Print the saved tenant config
+  rathole config    Print the local Rathole client config (-w to watch)
   rathole-config    Print the local Rathole client config
-  update            Download the latest PortHub CLI and restart if running
-  reinstall         Re-run the latest server installer using saved machine config
+  reinstall         Re-run the server installer for the selected tenant
+  uninstall         Remove the selected tenant; use --all to remove everything
   sync              Send an immediate active heartbeat
   sync-inactive     Send an immediate inactive heartbeat
   fetch-config      Download the current Rathole client config
-  service-run       Internal long-running service entrypoint
-  stream-logs-worker Internal log streaming worker
-  log-stream-supervisor Internal log streaming supervisor
-EOF_USAGE
+EOF_ADVANCED
 }
 
 main() {
   local command="${1:-}"
+  local help_topic=""
   if [ "$#" -gt 0 ]; then
     shift
   fi
+  if [ "$command" = "help" ] && [ "$#" -gt 0 ]; then
+    help_topic="${1:-}"
+    shift
+  fi
+  parse_global_cli_options "$@"
+  set -- "${PARSED_GLOBAL_ARGS[@]}"
   case "$command" in
+    list|ls) tenants_list_cmd "$@" ;;
+    tenant|tenants) tenants_cmd "$@" ;;
+    add) tenants_add_cmd "$@" ;;
+    remove|rm)
+      if [ "$#" -gt 0 ] && [ "${1#-}" = "$1" ]; then
+        tenants_remove_cmd "$@"
+      else
+        uninstall_cmd "$@"
+      fi
+      ;;
+    start|up) up_cmd "$@" ;;
+    stop|down) down_cmd "$@" ;;
     configure) configure_cmd "$@" ;;
     update-token) update_token_cmd "$@" ;;
     preflight) preflight_cmd "$@" ;;
     install-rathole) install_rathole_cmd "$@" ;;
-    up) up_cmd "$@" ;;
-    down) down_cmd "$@" ;;
+    uninstall) uninstall_cmd "$@" ;;
     restart) restart_cmd "$@" ;;
     status) status_cmd "$@" ;;
     version|-v|--version) version_cmd "$@" ;;
     logs) logs_cmd "$@" ;;
     config) config_cmd "$@" ;;
+    rathole) rathole_cmd "$@" ;;
     rathole-config) rathole_config_cmd "$@" ;;
     update) update_cmd "$@" ;;
     reinstall) reinstall_cmd "$@" ;;
-    sync) load_env; machine_post "$PORT_HUB_SYNC_URL" true ;;
-    sync-inactive) load_env; machine_post "$PORT_HUB_SYNC_URL" false ;;
+    sync) resolve_selected_tenant_context; load_env; machine_post "$PORT_HUB_SYNC_URL" true ;;
+    sync-inactive) resolve_selected_tenant_context; load_env; machine_post "$PORT_HUB_SYNC_URL" false ;;
     fetch-config) fetch_config_cmd "$@" ;;
-    service-run) service_run_cmd "$@" ;;
-    stream-logs-worker) stream_logs_worker_cmd "$@" ;;
-    log-stream-supervisor) log_stream_supervisor_cmd "$@" ;;
-    help|-h|--help|"") usage ;;
+    __service-run) service_run_cmd "$@" ;;
+    __stream-logs-worker) stream_logs_worker_cmd "$@" ;;
+    __log-stream-supervisor) log_stream_supervisor_cmd "$@" ;;
+    adv) advanced_usage ;;
+    help)
+      case "$help_topic" in
+        advanced) advanced_usage ;;
+        tenants|tenant) tenants_cmd help ;;
+        "" ) usage ;;
+        *) fail "Unknown help topic: $help_topic" ;;
+      esac
+      ;;
+    -h|--help|"") usage ;;
     *) fail "Unknown command: $command" ;;
   esac
 }
