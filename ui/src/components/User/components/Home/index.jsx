@@ -163,10 +163,10 @@ const upsertHostWithMachine = (hosts, machine) => {
 };
 
 const MACHINE_PAGE_SIZE_OPTIONS = [
-  { value: "5", label: "5" },
   { value: "10", label: "10" },
-  { value: "20", label: "20" },
+  { value: "25", label: "25" },
   { value: "50", label: "50" },
+  { value: "100", label: "100" },
 ];
 
 const ALL_GROUPS_FILTER = "all";
@@ -976,17 +976,19 @@ export default function Home({ onStatsChange }) {
                   </div>
 
                   <div className="overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-                    <div className="w-full">
+                    <div className="hidden border-b border-zinc-200 bg-zinc-50/80 py-3 pl-6 pr-6 text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-500 md:grid md:grid-cols-[minmax(0,1.45fr)_minmax(5.5rem,0.8fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(7rem,0.85fr)] md:items-center md:gap-3">
+                      <span>Machine</span>
+                      <span className="text-center">Ports</span>
+                      <span>Local IP</span>
+                      <span>Groups</span>
+                      <span className="pr-3 text-right">Last seen</span>
+                    </div>
 
-                      <div className="hidden border-b border-zinc-200 bg-zinc-50/80 py-3 pl-6 pr-6 text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-500 md:grid md:grid-cols-[minmax(0,1.45fr)_minmax(5.5rem,0.8fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(7rem,0.85fr)] md:items-center md:gap-3">
-                        <span>Machine</span>
-                        <span className="text-center">Ports</span>
-                        <span>Local IP</span>
-                        <span>Groups</span>
-                        <span className="pr-3 text-right">Last seen</span>
-                      </div>
-
-                      {paginatedHosts.length > 0 ? (
+                    {paginatedHosts.length > 0 ? (
+                      <div
+                        className="max-h-[calc(100dvh-22rem)] overflow-y-auto"
+                        style={{ scrollbarGutter: "stable" }}
+                      >
                         <div className="divide-y divide-zinc-200 dark:divide-zinc-800">
                           {paginatedHosts.map((host) => (
                             <HostItem
@@ -1011,40 +1013,40 @@ export default function Home({ onStatsChange }) {
                             />
                           ))}
                         </div>
-                      ) : (
-                        <div className="px-5 py-10 text-center">
-                          <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
-                            No machines match the current filters
-                          </p>
-                          <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
-                            Adjust the status filter to see more machines.
-                          </p>
-                        </div>
-                      )}
                       </div>
+                    ) : (
+                      <div className="px-5 py-10 text-center">
+                        <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                          No machines match the current filters
+                        </p>
+                        <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
+                          Adjust the status filter to see more machines.
+                        </p>
+                      </div>
+                    )}
+
+                    {filteredHosts.length > 0 ? (
+                      <div className="flex flex-col gap-3 border-t border-zinc-200 px-5 py-4 dark:border-zinc-800 md:flex-row md:items-center md:justify-between">
+                        <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                          Showing {visibleStart} to {visibleEnd} of {filteredHosts.length} machines
+                        </p>
+
+                        <Pagination
+                          value={page}
+                          onChange={setPage}
+                          total={totalPages}
+                          size="sm"
+                          radius="md"
+                          withEdges
+                          siblings={1}
+                          classNames={{
+                            control:
+                              "!border-zinc-300 !bg-white !text-zinc-700 hover:!bg-zinc-50 data-[active=true]:!border-blue-600 data-[active=true]:!bg-blue-600 data-[active=true]:!text-blue-50 dark:!border-zinc-700 dark:!bg-zinc-900 dark:!text-zinc-200 dark:hover:!bg-zinc-800 dark:data-[active=true]:!border-blue-500 dark:data-[active=true]:!bg-blue-600",
+                          }}
+                        />
+                      </div>
+                    ) : null}
                   </div>
-
-                  {filteredHosts.length > 0 ? (
-                    <div className="mt-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                      <p className="text-sm text-zinc-500 dark:text-zinc-400">
-                        Showing {visibleStart} to {visibleEnd} of {filteredHosts.length} machines
-                      </p>
-
-                      <Pagination
-                        value={page}
-                        onChange={setPage}
-                        total={totalPages}
-                        size="sm"
-                        radius="md"
-                        withEdges
-                        siblings={1}
-                        classNames={{
-                          control:
-                            "!border-zinc-300 !bg-white !text-zinc-700 hover:!bg-zinc-50 data-[active=true]:!border-blue-600 data-[active=true]:!bg-blue-600 data-[active=true]:!text-blue-50 dark:!border-zinc-700 dark:!bg-zinc-900 dark:!text-zinc-200 dark:hover:!bg-zinc-800 dark:data-[active=true]:!border-blue-500 dark:data-[active=true]:!bg-blue-600",
-                        }}
-                      />
-                    </div>
-                  ) : null}
                 </>
               )}
             </>
