@@ -33,6 +33,9 @@ class QuietMachineClientAccessFilter(logging.Filter):
         "/api/machines/client/log-stream",
         "/api/machines/client/logs",
     }
+    QUIET_STATUS_CODES_BY_PATH = {
+        "/api/machines/client/auth": {403},
+    }
 
     def filter(self, record: logging.LogRecord) -> bool:
         args = getattr(record, "args", ())
@@ -47,6 +50,9 @@ class QuietMachineClientAccessFilter(logging.Filter):
             return True
 
         if path in self.QUIET_PATHS and status_code < 400:
+            return False
+
+        if status_code in self.QUIET_STATUS_CODES_BY_PATH.get(path, set()):
             return False
 
         return True
