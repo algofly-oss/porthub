@@ -1,22 +1,17 @@
-import { useContext, useEffect, useMemo, useRef, useState } from "react";
+import { useContext, useEffect, useMemo, useState } from "react";
 import axios from "axios";
-import toast from "react-hot-toast";
 import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
 import utc from "dayjs/plugin/utc";
 import {
   Button,
-  Group,
   Menu,
-  Modal,
   Pagination,
   SegmentedControl,
-  Text,
   useMantineColorScheme,
 } from "@mantine/core";
 import {
   IconChevronDown,
-  IconFolder,
   IconPlus,
   IconSettings,
 } from "@tabler/icons-react";
@@ -31,8 +26,6 @@ import socketRoutes from "@/shared/routes/socketRoutes";
 
 dayjs.extend(relativeTime);
 dayjs.extend(utc);
-
-const DND_MACHINE_ID_MIME = "application/x-porthub-machine-id";
 
 const parseServerTimestamp = (value) => {
   if (!value) {
@@ -53,11 +46,22 @@ const formatRelativeFromNow = (parsed) => {
   }
 
   const secondsAgo = Math.max(0, dayjs().diff(parsed, "second"));
-  if (secondsAgo < 60) {
-    return secondsAgo === 1 ? "1 second ago" : `${secondsAgo} seconds ago`;
+  if (secondsAgo <= 30) {
+    return "Just now";
   }
 
-  return parsed.fromNow();
+  const minutesAgo = Math.floor(secondsAgo / 60);
+  if (minutesAgo < 60) {
+    return minutesAgo <= 1 ? "1 min ago" : `${minutesAgo} min ago`;
+  }
+
+  const hoursAgo = Math.floor(minutesAgo / 60);
+  if (hoursAgo < 24) {
+    return hoursAgo === 1 ? "1 hr ago" : `${hoursAgo} hr ago`;
+  }
+
+  const daysAgo = Math.floor(hoursAgo / 24);
+  return daysAgo === 1 ? "1 day ago" : `${daysAgo} days ago`;
 };
 
 const mapConnectionToForwardingConfig = (connection) => ({
@@ -165,6 +169,7 @@ const MACHINE_PAGE_SIZE_OPTIONS = [
   { value: "50", label: "50" },
 ];
 
+const ALL_GROUPS_FILTER = "all";
 export default function Home({ onStatsChange }) {
   const { colorScheme } = useMantineColorScheme();
   const isDark = colorScheme === "dark";
@@ -178,43 +183,55 @@ export default function Home({ onStatsChange }) {
   const [pageSize, setPageSize] = useState("10");
   const [page, setPage] = useState(1);
   const [statusFilter, setStatusFilter] = useState("all");
-  const [selectedBrowseGroupId, setSelectedBrowseGroupId] = useState(null);
+  const [groupFilter, setGroupFilter] = useState(ALL_GROUPS_FILTER);
   const [machineGroups, setMachineGroups] = useState([]);
   const [isGroupsModalOpen, setIsGroupsModalOpen] = useState(false);
   const [lastSeenRefreshTick, setLastSeenRefreshTick] = useState(0);
-  const [dragOverGroupId, setDragOverGroupId] = useState(null);
-  const [addToGroupConfirm, setAddToGroupConfirm] = useState(null);
-  const [removeFromGroupConfirm, setRemoveFromGroupConfirm] = useState(null);
-  const [moveSubmitting, setMoveSubmitting] = useState(false);
-  const suppressFolderClickRef = useRef(false);
   const { success, error } = useToast();
 
+  const selectedHost = hosts.find((host) => host.id === selectedHostId) || null;
+  const selectedGroupFilterLabel = useMemo(() => {
+    if (groupFilter === ALL_GROUPS_FILTER) {
+      return "All groups";
+    }
+    return machineGroups.find((group) => group._id === groupFilter)?.name || "Group";
+  }, [groupFilter, machineGroups]);
   const groupLabelById = useMemo(
-    () => Object.fromEntries(machineGroups.map((g) => [g._id, g.name])),
+    () => Object.fromEntries(machineGroups.map((group) => [group._id, group.name])),
     [machineGroups]
   );
-
-  const selectedHost = hosts.find((host) => host.id === selectedHostId) || null;
-  const filteredHosts = hosts.filter((host) => {
-    return (
-      statusFilter === "all" ||
-      (statusFilter === "online" ? host.isActive : !host.isActive)
-    );
-  });
-
-  const hostsInSelectedBrowseGroup = useMemo(() => {
-    if (!selectedBrowseGroupId) {
-      return [];
-    }
-    return hosts.filter((host) =>
-      (host.groupIds || []).includes(selectedBrowseGroupId)
-    );
-  }, [hosts, selectedBrowseGroupId]);
-
-  const selectedBrowseGroup = useMemo(
-    () => machineGroups.find((g) => g._id === selectedBrowseGroupId) || null,
-    [machineGroups, selectedBrowseGroupId]
+  const groupsWithMachineCounts = useMemo(
+    () =>
+      machineGroups.map((group) => ({
+        ...group,
+        machineCount: hosts.filter((host) =>
+          (host.groupIds || []).includes(group._id)
+        ).length,
+      })),
+    [hosts, machineGroups]
   );
+
+  const filteredHosts = useMemo(
+    () =>
+      hosts.filter((host) => {
+        const matchesStatus =
+          statusFilter === "all" ||
+          (statusFilter === "online" ? host.isActive : !host.isActive);
+
+        if (!matchesStatus) {
+          return false;
+        }
+
+        if (groupFilter === ALL_GROUPS_FILTER) {
+          return true;
+        }
+
+        const hostGroupIds = Array.isArray(host.groupIds) ? host.groupIds : [];
+        return hostGroupIds.includes(groupFilter);
+      }),
+    [groupFilter, hosts, statusFilter]
+  );
+
   const numericPageSize = Number(pageSize);
   const totalPages = Math.max(1, Math.ceil(filteredHosts.length / numericPageSize));
   const visibleStart = filteredHosts.length === 0 ? 0 : (page - 1) * numericPageSize + 1;
@@ -253,16 +270,16 @@ export default function Home({ onStatsChange }) {
 
   useEffect(() => {
     setPage(1);
-  }, [pageSize, statusFilter]);
+  }, [groupFilter, pageSize, statusFilter]);
 
   useEffect(() => {
     if (
-      selectedBrowseGroupId &&
-      !machineGroups.some((g) => g._id === selectedBrowseGroupId)
+      groupFilter !== ALL_GROUPS_FILTER &&
+      !machineGroups.some((group) => group._id === groupFilter)
     ) {
-      setSelectedBrowseGroupId(null);
+      setGroupFilter(ALL_GROUPS_FILTER);
     }
-  }, [machineGroups, selectedBrowseGroupId]);
+  }, [groupFilter, machineGroups]);
 
   useEffect(() => {
     if (!onStatsChange) {
@@ -716,114 +733,6 @@ export default function Home({ onStatsChange }) {
     mergeHostAfterMachineResponse(hostId, response.data.data);
   };
 
-  const readDragMachineId = (dataTransfer) => {
-    const fromMime = dataTransfer.getData(DND_MACHINE_ID_MIME);
-    if (fromMime) {
-      return fromMime;
-    }
-    return dataTransfer.getData("text/plain") || "";
-  };
-
-  const handleMachineRowDragEnd = () => {
-    setDragOverGroupId(null);
-  };
-
-  const handleFolderDragOver = (event, groupId) => {
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "move";
-    setDragOverGroupId(groupId);
-  };
-
-  const handleFolderDragLeave = (event) => {
-    const next = event.relatedTarget;
-    if (next && event.currentTarget.contains(next)) {
-      return;
-    }
-    setDragOverGroupId(null);
-  };
-
-  const handleFolderDrop = (event, group) => {
-    event.preventDefault();
-    event.stopPropagation();
-    suppressFolderClickRef.current = true;
-    setDragOverGroupId(null);
-
-    const machineId = readDragMachineId(event.dataTransfer);
-    if (!machineId) {
-      return;
-    }
-
-    const host = hosts.find((h) => h.id === machineId);
-    if (!host) {
-      error("Could not find that machine.");
-      return;
-    }
-
-    if ((host.groupIds || []).includes(group._id)) {
-      toast(`"${host.name}" is already in "${group.name}".`);
-      return;
-    }
-
-    setAddToGroupConfirm({
-      hostId: machineId,
-      groupId: group._id,
-      machineName: host.name || "Machine",
-      groupName: group.name || "Group",
-    });
-  };
-
-  const handleFolderClick = (groupId) => {
-    if (suppressFolderClickRef.current) {
-      suppressFolderClickRef.current = false;
-      return;
-    }
-    setSelectedBrowseGroupId((prev) => (prev === groupId ? null : groupId));
-  };
-
-  const handleConfirmAddMachineToGroup = async () => {
-    if (!addToGroupConfirm) {
-      return;
-    }
-    setMoveSubmitting(true);
-    try {
-      await handleAddMachineToGroup(
-        addToGroupConfirm.hostId,
-        addToGroupConfirm.groupId
-      );
-      success(
-        `Added "${addToGroupConfirm.machineName}" to "${addToGroupConfirm.groupName}".`
-      );
-      setAddToGroupConfirm(null);
-    } catch (moveErr) {
-      error(moveErr?.response?.data?.detail || "Could not add machine to group");
-    } finally {
-      setMoveSubmitting(false);
-    }
-  };
-
-  const handleConfirmRemoveFromGroup = async () => {
-    if (!removeFromGroupConfirm) {
-      return;
-    }
-    setMoveSubmitting(true);
-    try {
-      await handleRemoveMachineFromGroup(
-        removeFromGroupConfirm.hostId,
-        removeFromGroupConfirm.groupId
-      );
-      success(
-        `Removed "${removeFromGroupConfirm.machineName}" from "${removeFromGroupConfirm.groupName}".`
-      );
-      setRemoveFromGroupConfirm(null);
-    } catch (removeErr) {
-      error(
-        removeErr?.response?.data?.detail || "Could not remove machine from group"
-      );
-    } finally {
-      setMoveSubmitting(false);
-    }
-  };
-
   const reloadMachineGroups = async () => {
     const res = await axios.get(apiRoutes.listGroups);
     setMachineGroups(res.data?.data || []);
@@ -831,10 +740,10 @@ export default function Home({ onStatsChange }) {
 
   const handleCreateGroup = async (name) => {
     try {
-      await axios.post(apiRoutes.addGroup, { name });
+      const response = await axios.post(apiRoutes.addGroup, { name });
       await reloadMachineGroups();
       success(`Group "${name}" created`);
-      return true;
+      return response.data?.data || { name };
     } catch (createGroupError) {
       error(createGroupError?.response?.data?.detail || "Could not create group");
       return false;
@@ -856,9 +765,6 @@ export default function Home({ onStatsChange }) {
   const handleDeleteGroup = async (groupId) => {
     try {
       await axios.post(apiRoutes.deleteGroup, { data_id: groupId });
-      setSelectedBrowseGroupId((current) =>
-        current === groupId ? null : current
-      );
       setHosts((currentHosts) =>
         currentHosts.map((host) => ({
           ...host,
@@ -887,19 +793,6 @@ export default function Home({ onStatsChange }) {
           <div className="flex flex-wrap items-center justify-end gap-2">
             <Button
               type="button"
-              variant="default"
-              leftIcon={<IconFolder size={16} />}
-              onClick={() => setIsGroupsModalOpen(true)}
-              classNames={{
-                root: isDark
-                  ? "!border-zinc-700 !bg-zinc-900 !text-zinc-100 hover:!bg-zinc-800"
-                  : "!border-zinc-300 !bg-white !text-zinc-900 hover:!bg-zinc-50",
-              }}
-            >
-              Groups
-            </Button>
-            <Button
-              type="button"
               leftIcon={<IconPlus size={16} />}
               onClick={() => setIsCreateModalOpen(true)}
               classNames={{
@@ -919,203 +812,6 @@ export default function Home({ onStatsChange }) {
             </p>
           ) : (
             <>
-              {machineGroups.length > 0 ? (
-                <section
-                  className={`mb-10 rounded-2xl border px-5 py-5 sm:px-6 ${isDark
-                      ? "border-zinc-700 bg-zinc-900/40"
-                      : "border-zinc-200 bg-zinc-50/80"
-                    }`}
-                >
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                    <div>
-                      <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">
-                        Groups
-                      </h2>
-                      <div className="flex flex-col">
-                        <Text size="sm" className="max-w-xl text-zinc-600 dark:text-zinc-400">
-                          Open a group to see machines in that group here.
-                        </Text>
-                        <Text size="xs" className="max-w-xl text-zinc-500 dark:text-zinc-600">Tip: You can also drag a row from the table below onto a group to move it.</Text>
-                      </div>
-                    </div>
-                    <Button
-                      type="button"
-                      variant="default"
-                      size="xs"
-                      leftIcon={<IconSettings size={14} />}
-                      onClick={() => setIsGroupsModalOpen(true)}
-                      classNames={{
-                        root: isDark
-                          ? "!shrink-0 !border-zinc-600 !bg-zinc-800 !text-zinc-100"
-                          : "!shrink-0 !border-zinc-300 !bg-white !text-zinc-900",
-                      }}
-                    >
-                      Manage groups
-                    </Button>
-                  </div>
-
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    {machineGroups.map((g) => {
-                      const isOpen = selectedBrowseGroupId === g._id;
-                      const isDropTarget = dragOverGroupId === g._id;
-                      return (
-                        <button
-                          key={g._id}
-                          type="button"
-                          onClick={() => handleFolderClick(g._id)}
-                          onDragOver={(event) => handleFolderDragOver(event, g._id)}
-                          onDragLeave={handleFolderDragLeave}
-                          onDrop={(event) => handleFolderDrop(event, g)}
-                          className={`inline-flex min-h-[2.75rem] items-center gap-2 rounded-xl border px-4 py-2 text-left text-sm font-medium transition ${isDropTarget
-                              ? isDark
-                                ? "border-amber-400/70 bg-amber-950/40 text-amber-100 ring-2 ring-amber-500/50"
-                                : "border-amber-400 bg-amber-50 text-amber-950 ring-2 ring-amber-400/60"
-                              : isOpen
-                                ? isDark
-                                  ? "border-blue-500/60 bg-blue-950/50 text-blue-100 shadow-sm ring-1 ring-blue-500/40"
-                                  : "border-blue-400 bg-blue-50 text-blue-900 shadow-sm ring-1 ring-blue-400/50"
-                                : isDark
-                                  ? "border-zinc-600 bg-zinc-900 text-zinc-100 hover:border-zinc-500 hover:bg-zinc-800"
-                                  : "border-zinc-200 bg-white text-zinc-800 hover:border-zinc-300 hover:bg-zinc-50"
-                            }`}
-                        >
-                          <IconFolder
-                            size={18}
-                            className={
-                              isOpen
-                                ? isDark
-                                  ? "text-blue-300"
-                                  : "text-blue-600"
-                                : isDark
-                                  ? "text-zinc-400"
-                                  : "text-zinc-500"
-                            }
-                          />
-                          <span className="max-w-[12rem] truncate">{g.name}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  {selectedBrowseGroupId && selectedBrowseGroup ? (
-                    <div
-                      className={`mt-6 overflow-hidden rounded-xl border ${isDark
-                          ? "border-zinc-600 bg-zinc-950/60"
-                          : "border-zinc-200 bg-white"
-                        }`}
-                    >
-                      <div
-                        className={`border-b px-4 py-3 sm:px-5 ${isDark
-                            ? "border-zinc-700 bg-zinc-900/80"
-                            : "border-zinc-200 bg-zinc-50/90"
-                          }`}
-                      >
-                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                          <div>
-                            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">
-                              Open folder
-                            </p>
-                            <p className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
-                              {selectedBrowseGroup.name}
-                            </p>
-                            <p className="text-sm text-zinc-500 dark:text-zinc-400">
-                              {hostsInSelectedBrowseGroup.length} machine
-                              {hostsInSelectedBrowseGroup.length === 1 ? "" : "s"} in
-                              this group
-                            </p>
-                          </div>
-                          <Button
-                            type="button"
-                            variant="subtle"
-                            size="xs"
-                            onClick={() => setSelectedBrowseGroupId(null)}
-                            classNames={{
-                              root: isDark
-                                ? "!text-zinc-400 hover:!bg-zinc-800"
-                                : "!text-zinc-600 hover:!bg-zinc-100",
-                            }}
-                          >
-                            Close folder
-                          </Button>
-                        </div>
-                      </div>
-
-                      {hostsInSelectedBrowseGroup.length === 0 ? (
-                        <div className="px-4 py-10 text-center sm:px-5">
-                          <p className="text-sm text-zinc-600 dark:text-zinc-400">
-                            No machines in this group yet. Drag a machine here, use host
-                            settings &quot;Groups&quot;, or pick an initial group when creating a
-                            machine.
-                          </p>
-                        </div>
-                      ) : (
-                        <div className="divide-y divide-zinc-200 dark:divide-zinc-700">
-                          {hostsInSelectedBrowseGroup.map((host) => (
-                            <div
-                              key={`browse-${host.id}`}
-                              className={`flex w-full items-stretch ${isDark ? "bg-zinc-950/40" : "bg-white"
-                                }`}
-                            >
-                              <div className="min-w-0 flex-1">
-                                <HostItem
-                                  machineId={host.id}
-                                  draggable={machineGroups.length > 0}
-                                  dndMimeType={DND_MACHINE_ID_MIME}
-                                  onMachineDragEnd={handleMachineRowDragEnd}
-                                  name={host.name}
-                                  hostname={host.hostname}
-                                  groupLabels={[]}
-                                  localIp={host.localIp}
-                                  publicIp={host.publicIp}
-                                  isActive={host.isActive}
-                                  connectionStatus={host.connectionStatus}
-                                  isDark={isDark}
-                                  numPorts={host.numPorts}
-                                  lastSeen={host.lastSeen}
-                                  onClick={() => handleOpenConfig(host.id)}
-                                />
-                              </div>
-                              <div
-                                className={`flex shrink-0 items-center border-l px-2 py-2 sm:px-3 ${isDark ? "border-zinc-700" : "border-zinc-200"
-                                  }`}
-                              >
-                                <Button
-                                  type="button"
-                                  variant="subtle"
-                                  color="red"
-                                  size="xs"
-                                  compact
-                                  onClick={(e) => {
-                                    e.preventDefault();
-                                    e.stopPropagation();
-                                    if (!selectedBrowseGroup) {
-                                      return;
-                                    }
-                                    setRemoveFromGroupConfirm({
-                                      hostId: host.id,
-                                      groupId: selectedBrowseGroup._id,
-                                      machineName: host.name || "Machine",
-                                      groupName: selectedBrowseGroup.name || "Group",
-                                    });
-                                  }}
-                                  classNames={{
-                                    root: isDark
-                                      ? "!text-red-300 hover:!bg-red-950/50"
-                                      : "!text-red-700 hover:!bg-red-50",
-                                  }}
-                                >
-                                  Remove from group
-                                </Button>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  ) : null}
-                </section>
-              ) : null}
-
               {hosts.length === 0 ? (
                 <div className="rounded-2xl border border-dashed border-zinc-300 bg-zinc-50 px-6 py-10 text-center dark:border-zinc-700 dark:bg-zinc-900/60">
                   <p className="text-lg font-medium text-zinc-900 dark:text-zinc-100">
@@ -1156,7 +852,84 @@ export default function Home({ onStatsChange }) {
                           }}
                         />
                       </div>
-                      <div className="flex items-center justify-start lg:justify-end">
+                      <div className="flex flex-wrap items-center justify-start gap-2 lg:justify-end">
+                        <div
+                          className={`inline-flex items-stretch overflow-hidden rounded-md border ${
+                            isDark
+                              ? "border-zinc-700 bg-zinc-900"
+                              : "border-zinc-300 bg-white"
+                          }`}
+                        >
+                          <Menu
+                            withinPortal
+                            position="bottom-end"
+                            shadow="md"
+                            offset={6}
+                            classNames={{
+                              dropdown:
+                                "!min-w-[11rem] !border !border-zinc-200 !bg-white !p-1 dark:!border-zinc-700 dark:!bg-zinc-900",
+                              item:
+                                "!rounded-md !text-zinc-900 hover:!bg-zinc-100 dark:!text-zinc-100 dark:hover:!bg-zinc-800",
+                            }}
+                          >
+                            <Menu.Target>
+                              <button
+                                type="button"
+                                className={`inline-flex items-center gap-2 px-3 py-2 text-sm ${
+                                  isDark
+                                    ? "text-zinc-100 hover:bg-zinc-800"
+                                    : "text-zinc-900 hover:bg-zinc-50"
+                                }`}
+                              >
+                                <span>{selectedGroupFilterLabel}</span>
+                                <IconChevronDown
+                                  size={14}
+                                  className={isDark ? "text-zinc-500" : "text-zinc-400"}
+                                />
+                              </button>
+                            </Menu.Target>
+                            <Menu.Dropdown>
+                              <Menu.Item
+                                onClick={() => setGroupFilter(ALL_GROUPS_FILTER)}
+                                className={
+                                  groupFilter === ALL_GROUPS_FILTER
+                                    ? "!bg-blue-600 !text-blue-50 hover:!bg-blue-600 dark:!bg-blue-600 dark:!text-blue-50 dark:hover:!bg-blue-600"
+                                    : undefined
+                                }
+                            >
+                              All groups
+                            </Menu.Item>
+                            {machineGroups.length > 0 ? <Menu.Divider /> : null}
+                              {machineGroups.map((group) => (
+                                <Menu.Item
+                                  key={group._id}
+                                  onClick={() => setGroupFilter(group._id)}
+                                  className={
+                                    groupFilter === group._id
+                                      ? "!bg-blue-600 !text-blue-50 hover:!bg-blue-600 dark:!bg-blue-600 dark:!text-blue-50 dark:hover:!bg-blue-600"
+                                      : undefined
+                                  }
+                                >
+                                  {group.name}
+                                </Menu.Item>
+                              ))}
+                            </Menu.Dropdown>
+                          </Menu>
+                          <Button
+                            type="button"
+                            variant="default"
+                            onClick={() => setIsGroupsModalOpen(true)}
+                            aria-label="Manage groups"
+                            title="Manage groups"
+                            classNames={{
+                              root: isDark
+                                ? "!min-w-0 !rounded-none !border-0 !border-l !border-zinc-700 !bg-zinc-900 !px-3 !text-zinc-100 hover:!bg-zinc-800"
+                                : "!min-w-0 !rounded-none !border-0 !border-l !border-zinc-300 !bg-white !px-3 !text-zinc-900 hover:!bg-zinc-50",
+                            }}
+                          >
+                            <IconSettings size={16} />
+                          </Button>
+                        </div>
                         <Menu
                           withinPortal
                           position="bottom-end"
@@ -1203,52 +976,52 @@ export default function Home({ onStatsChange }) {
                   </div>
 
                   <div className="overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+                    <div className="w-full">
 
-                    <div className="hidden border-b border-zinc-200 bg-zinc-50/80 px-5 py-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-500 md:grid md:grid-cols-[minmax(0,1.3fr)_110px_minmax(0,0.85fr)_minmax(0,0.85fr)_120px_160px] md:items-center md:gap-3">
-                      <span>Machine</span>
-                      <span className="text-center">Ports</span>
-                      <span>Local IP</span>
-                      <span>Public IP</span>
-                      <span className="text-center">Status</span>
-                      <span className="text-right">Last seen</span>
-                    </div>
-
-                    {paginatedHosts.length > 0 ? (
-                      <div className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                        {paginatedHosts.map((host) => (
-                          <HostItem
-                            key={host.id}
-                            machineId={host.id}
-                            draggable={machineGroups.length > 0}
-                            dndMimeType={DND_MACHINE_ID_MIME}
-                            onMachineDragEnd={handleMachineRowDragEnd}
-                            name={host.name}
-                            hostname={host.hostname}
-                            groupLabels={(host.groupIds || [])
-                              .map((id) => groupLabelById[id])
-                              .filter(Boolean)}
-                            localIp={host.localIp}
-                            publicIp={host.publicIp}
-                            isActive={host.isActive}
-                            connectionStatus={host.connectionStatus}
-                            isDark={isDark}
-                            numPorts={host.numPorts}
-                            lastSeen={host.lastSeen}
-                            onClick={() => handleOpenConfig(host.id)}
-                          />
-                        ))}
+                      <div className="hidden border-b border-zinc-200 bg-zinc-50/80 py-3 pl-6 pr-6 text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-500 md:grid md:grid-cols-[minmax(0,1.45fr)_minmax(5.5rem,0.8fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(7rem,0.85fr)] md:items-center md:gap-3">
+                        <span>Machine</span>
+                        <span className="text-center">Ports</span>
+                        <span>Local IP</span>
+                        <span>Groups</span>
+                        <span className="pr-3 text-right">Last seen</span>
                       </div>
-                    ) : (
-                      <div className="px-5 py-10 text-center">
-                        <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
-                          No machines match the current filters
-                        </p>
-                        <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
-                          Adjust the status filter to see more machines.
-                        </p>
-                      </div>
-                    )}
 
+                      {paginatedHosts.length > 0 ? (
+                        <div className="divide-y divide-zinc-200 dark:divide-zinc-800">
+                          {paginatedHosts.map((host) => (
+                            <HostItem
+                              key={host.id}
+                              machineId={host.id}
+                              name={host.name}
+                              hostname={host.hostname}
+                              groupLabels={(host.groupIds || [])
+                                .map((id) => groupLabelById[id])
+                                .filter(Boolean)}
+                              localIp={host.localIp}
+                              isActive={host.isActive}
+                              connectionStatus={host.connectionStatus}
+                              isDark={isDark}
+                              numPorts={host.numPorts}
+                              showGroupColumn
+                              showPublicIp={false}
+                              showStatus={false}
+                              showLastSeen
+                              lastSeen={host.lastSeen}
+                              onClick={() => handleOpenConfig(host.id)}
+                            />
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="px-5 py-10 text-center">
+                          <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                            No machines match the current filters
+                          </p>
+                          <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
+                            Adjust the status filter to see more machines.
+                          </p>
+                        </div>
+                      )}
+                      </div>
                   </div>
 
                   {filteredHosts.length > 0 ? (
@@ -1278,138 +1051,6 @@ export default function Home({ onStatsChange }) {
           )}
         </div>
       </div>
-      <Modal
-        opened={Boolean(addToGroupConfirm)}
-        onClose={() => {
-          if (!moveSubmitting) {
-            setAddToGroupConfirm(null);
-          }
-        }}
-        closeOnClickOutside={!moveSubmitting}
-        closeOnEscape={!moveSubmitting}
-        title="Add machine to group"
-        centered
-        radius="md"
-        overlayProps={{ blur: 3 }}
-        classNames={{
-          content: isDark
-            ? "!border !border-zinc-700 !bg-zinc-900"
-            : "!border !border-zinc-200 !bg-white",
-          header: isDark ? "!bg-zinc-900" : "!bg-white",
-          title: isDark ? "!text-zinc-100" : "!text-zinc-900",
-          body: isDark ? "!bg-zinc-900" : "!bg-white",
-        }}
-      >
-        {addToGroupConfirm ? (
-          <>
-            <Text size="sm" className={isDark ? "!text-zinc-300" : "!text-zinc-600"}>
-              Add{" "}
-              <span className="font-semibold text-zinc-900 dark:text-zinc-100">
-                {addToGroupConfirm.machineName}
-              </span>{" "}
-              to{" "}
-              <span className="font-semibold text-zinc-900 dark:text-zinc-100">
-                {addToGroupConfirm.groupName}
-              </span>
-              ? It can stay in other groups as well.
-            </Text>
-            <Group justify="flex-end" mt="lg" spacing="sm">
-              <Button
-                type="button"
-                variant="default"
-                disabled={moveSubmitting}
-                onClick={() => setAddToGroupConfirm(null)}
-                classNames={{
-                  root: isDark
-                    ? "!border-zinc-600 !bg-zinc-800 !text-zinc-100"
-                    : "!border-zinc-300 !bg-white !text-zinc-900",
-                }}
-              >
-                Cancel
-              </Button>
-              <Button
-                type="button"
-                loading={moveSubmitting}
-                onClick={handleConfirmAddMachineToGroup}
-                classNames={{
-                  root:
-                    "!bg-blue-600 !text-blue-50 hover:!bg-blue-700 disabled:!bg-blue-400",
-                }}
-              >
-                Add to group
-              </Button>
-            </Group>
-          </>
-        ) : null}
-      </Modal>
-
-      <Modal
-        opened={Boolean(removeFromGroupConfirm)}
-        onClose={() => {
-          if (!moveSubmitting) {
-            setRemoveFromGroupConfirm(null);
-          }
-        }}
-        closeOnClickOutside={!moveSubmitting}
-        closeOnEscape={!moveSubmitting}
-        title="Remove from group"
-        centered
-        radius="md"
-        overlayProps={{ blur: 3 }}
-        classNames={{
-          content: isDark
-            ? "!border !border-zinc-700 !bg-zinc-900"
-            : "!border !border-zinc-200 !bg-white",
-          header: isDark ? "!bg-zinc-900" : "!bg-white",
-          title: isDark ? "!text-zinc-100" : "!text-zinc-900",
-          body: isDark ? "!bg-zinc-900" : "!bg-white",
-        }}
-      >
-        {removeFromGroupConfirm ? (
-          <>
-            <Text size="sm" className={isDark ? "!text-zinc-300" : "!text-zinc-600"}>
-              Remove{" "}
-              <span className="font-semibold text-zinc-900 dark:text-zinc-100">
-                {removeFromGroupConfirm.machineName}
-              </span>{" "}
-              from{" "}
-              <span className="font-semibold text-zinc-900 dark:text-zinc-100">
-                {removeFromGroupConfirm.groupName}
-              </span>
-              ? Other groups for this machine stay unchanged.
-            </Text>
-            <Group justify="flex-end" mt="lg" spacing="sm">
-              <Button
-                type="button"
-                variant="default"
-                disabled={moveSubmitting}
-                onClick={() => setRemoveFromGroupConfirm(null)}
-                classNames={{
-                  root: isDark
-                    ? "!border-zinc-600 !bg-zinc-800 !text-zinc-100"
-                    : "!border-zinc-300 !bg-white !text-zinc-900",
-                }}
-              >
-                Cancel
-              </Button>
-              <Button
-                type="button"
-                color="red"
-                variant="filled"
-                loading={moveSubmitting}
-                onClick={handleConfirmRemoveFromGroup}
-                classNames={{
-                  root:
-                    "!bg-red-600 !text-red-50 hover:!bg-red-700 disabled:!bg-red-400",
-                }}
-              >
-                Remove from group
-              </Button>
-            </Group>
-          </>
-        ) : null}
-      </Modal>
-
       <MachineCreateModal
         opened={isCreateModalOpen}
         onClose={() => setIsCreateModalOpen(false)}
@@ -1421,9 +1062,12 @@ export default function Home({ onStatsChange }) {
         opened={isGroupsModalOpen}
         onClose={() => setIsGroupsModalOpen(false)}
         groups={machineGroups}
+        machines={hosts}
         onCreateGroup={handleCreateGroup}
         onRenameGroup={handleRenameGroup}
         onDeleteGroup={handleDeleteGroup}
+        onAddMachineToGroup={handleAddMachineToGroup}
+        onRemoveMachineFromGroup={handleRemoveMachineFromGroup}
       />
       <HostConfigPopup
         host={selectedHost}
@@ -1434,9 +1078,10 @@ export default function Home({ onStatsChange }) {
         onToggleMachine={handleToggleMachine}
         onRefreshMachineToken={handleRefreshMachineToken}
         onRequestClientUpdate={handleRequestClientUpdate}
+        onCreateGroup={handleCreateGroup}
         onAddMachineToGroup={handleAddMachineToGroup}
         onRemoveMachineFromGroup={handleRemoveMachineFromGroup}
-        groups={machineGroups}
+        groups={groupsWithMachineCounts}
         isSaving={isSaving}
       />
     </div>

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { BsCircleFill } from "react-icons/bs";
+import { IconClock, IconFolder } from "@tabler/icons-react";
 
 export default function HostItem({
   machineId,
@@ -15,6 +16,10 @@ export default function HostItem({
   connectionStatus,
   isDark,
   lastSeen,
+  showGroupColumn = false,
+  showPublicIp = true,
+  showLastSeen = true,
+  showStatus = true,
   numPorts,
   onClick,
 }) {
@@ -48,11 +53,27 @@ export default function HostItem({
       onDragStart={handleDragStart}
       onDragEnd={handleDragEnd}
       onClick={onClick}
-      className={`w-full bg-white px-5 py-4 text-left hover:bg-zinc-50 focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0 dark:bg-zinc-900 dark:hover:bg-zinc-800/70 ${
+      className={`w-full bg-white py-4 pl-6 pr-6 text-left hover:bg-zinc-50 focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0 dark:bg-zinc-900 dark:hover:bg-zinc-800/70 ${
         canDrag ? "cursor-grab active:cursor-grabbing" : ""
       } ${isDragging ? "opacity-60" : ""}`}
     >
-      <div className="grid gap-3 md:grid-cols-[minmax(0,1.3fr)_110px_minmax(0,0.85fr)_minmax(0,0.85fr)_120px_160px] md:items-center">
+      <div
+        className={`grid gap-3 md:items-center ${
+          showLastSeen
+            ? showPublicIp
+              ? "md:grid-cols-[minmax(0,1.3fr)_110px_minmax(0,0.85fr)_minmax(0,0.85fr)_120px_160px]"
+            : showGroupColumn
+                ? showStatus
+                  ? "md:grid-cols-[repeat(6,minmax(0,1fr))]"
+                  : "md:grid-cols-[minmax(0,1.45fr)_minmax(5.5rem,0.8fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(7rem,0.85fr)]"
+                : "md:grid-cols-[minmax(0,1.5fr)_110px_minmax(0,1fr)_120px_160px]"
+            : showPublicIp
+              ? "md:grid-cols-5"
+              : showGroupColumn
+                ? "md:grid-cols-[repeat(5,minmax(0,1fr))]"
+                : "md:grid-cols-4"
+        }`}
+      >
         <div className="grid min-w-0 grid-cols-[8px_minmax(0,1fr)] items-start gap-x-2">
           <BsCircleFill
             size={8}
@@ -81,7 +102,7 @@ export default function HostItem({
           <div className="text-xs font-mono text-zinc-400">
             {hostname || "Awaiting hostname"}
           </div>
-          {labels.length > 0 ? (
+          {labels.length > 0 && !showGroupColumn ? (
             <div className="col-start-2 mt-1 flex flex-wrap gap-1">
               {labels.slice(0, 4).map((label, idx) => (
                 <span
@@ -108,43 +129,80 @@ export default function HostItem({
           {localIp || "Awaiting local IP"}
         </div>
 
-        <div className="text-xs font-mono text-zinc-500 dark:text-zinc-400">
-          {publicIp || "Awaiting public IP"}
-        </div>
+        {showGroupColumn ? (
+          <div className="min-w-0">
+            {labels.length > 0 ? (
+              <div className="flex flex-wrap gap-2">
+                <span
+                  className="inline-flex max-w-full items-center gap-1.5 truncate rounded-md bg-zinc-100/80 px-2.5 py-2 text-[10px] font-medium tracking-wide text-zinc-600 ring-1 ring-zinc-200 dark:bg-zinc-800/70 dark:text-zinc-300 dark:ring-zinc-700"
+                >
+                  <IconFolder size={12} stroke={1.8} />
+                  <span className="truncate">{labels[0]}</span>
+                </span>
+                {labels.length > 1 ? (
+                  <span
+                    className="inline-flex items-center rounded-md bg-zinc-100/80 px-2.5 py-2 text-[10px] font-medium tracking-wide text-zinc-600 ring-1 ring-zinc-200 dark:bg-zinc-800/70 dark:text-zinc-300 dark:ring-zinc-700"
+                  >
+                    +{labels.length - 1}
+                  </span>
+                ) : null}
+              </div>
+            ) : (
+              <div className="text-xs text-zinc-400">No groups</div>
+            )}
+          </div>
+        ) : null}
 
-        <div className="text-center">
-          <span
-            className={`inline-flex whitespace-nowrap rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] ${
-              isOnline
-                ? isDark
-                  ? "border-emerald-400/30 bg-emerald-400/18 text-emerald-200"
-                  : "border-emerald-200 bg-emerald-50 text-emerald-700"
-                : isDisabled
+        {showPublicIp ? (
+          <div className="text-xs font-mono text-zinc-500 dark:text-zinc-400">
+            {publicIp || "Awaiting public IP"}
+          </div>
+        ) : null}
+
+        {showLastSeen && showGroupColumn && !showPublicIp ? (
+          <div className="inline-flex items-center gap-1.5 pr-3 text-xs font-mono text-zinc-400 md:justify-self-end">
+            <IconClock size={12} stroke={1.8} />
+            <span>{lastSeen || "Never seen"}</span>
+          </div>
+        ) : null}
+
+        {showStatus ? (
+          <div className="text-center">
+            <span
+              className={`inline-flex whitespace-nowrap rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] ${
+                isOnline
                   ? isDark
-                    ? "border-zinc-500/25 bg-zinc-500/14 text-zinc-200"
-                    : "border-zinc-300 bg-zinc-100 text-zinc-700"
-                  : isAuthRequired
+                    ? "border-emerald-400/30 bg-emerald-400/18 text-emerald-200"
+                    : "border-emerald-200 bg-emerald-50 text-emerald-700"
+                  : isDisabled
                     ? isDark
-                      ? "border-amber-400/30 bg-amber-400/18 text-amber-200"
-                      : "border-amber-200 bg-amber-50 text-amber-700"
-                    : isDark
-                      ? "border-red-400/25 bg-red-400/14 text-red-200"
-                      : "border-red-200 bg-red-50 text-red-700"
-            }`}
-          >
-            {isOnline
-              ? "Online"
-              : isDisabled
-                ? "Disabled"
-                : isAuthRequired
-                  ? "Auth Req"
-                  : "Offline"}
-          </span>
-        </div>
+                      ? "border-zinc-500/25 bg-zinc-500/14 text-zinc-200"
+                      : "border-zinc-300 bg-zinc-100 text-zinc-700"
+                    : isAuthRequired
+                      ? isDark
+                        ? "border-amber-400/30 bg-amber-400/18 text-amber-200"
+                        : "border-amber-200 bg-amber-50 text-amber-700"
+                      : isDark
+                        ? "border-red-400/25 bg-red-400/14 text-red-200"
+                        : "border-red-200 bg-red-50 text-red-700"
+              }`}
+            >
+              {isOnline
+                ? "Online"
+                : isDisabled
+                  ? "Disabled"
+                  : isAuthRequired
+                    ? "Auth Req"
+                    : "Offline"}
+            </span>
+          </div>
+        ) : null}
 
-        <div className="text-xs font-mono text-zinc-400 md:text-right">
-          {lastSeen || "Never seen"}
-        </div>
+        {showLastSeen && !(showGroupColumn && !showPublicIp) ? (
+          <div className="text-xs font-mono text-zinc-400 md:text-right">
+            {lastSeen || "Never seen"}
+          </div>
+        ) : null}
       </div>
     </button>
   );
