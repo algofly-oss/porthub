@@ -14,6 +14,12 @@ let apiRoutes = {
   updateConnection: "/connections/update",
   listConnections: "/connections/list",
   deleteConnection: "/connections/delete",
+  // Machine groups
+  listGroups: "/groups/list",
+  addGroup: "/groups/add",
+  updateGroup: "/groups/update",
+  deleteGroup: "/groups/delete",
+
   // Machines
   addMachine: "/machines/add",
   updateMachine: "/machines/update",
@@ -22,6 +28,8 @@ let apiRoutes = {
   refreshMachineToken: "/machines/refresh-token",
   requestClientUpdate: "/machines/request-client-update",
   syncMachine: "/machines/sync",
+  addMachineToGroup: "/machines/groups/add",
+  removeMachineFromGroup: "/machines/groups/remove",
 };
 
 Object.entries(apiRoutes).forEach(([key, value]) => {

@@ -1,4 +1,4 @@
-import { useContext, useEffect, useState } from "react";
+import { useContext, useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
@@ -10,10 +10,15 @@ import {
   SegmentedControl,
   useMantineColorScheme,
 } from "@mantine/core";
-import { IconChevronDown, IconPlus } from "@tabler/icons-react";
+import {
+  IconChevronDown,
+  IconPlus,
+  IconSettings,
+} from "@tabler/icons-react";
 import HostItem from "./components/Host/HostItem";
 import HostConfigPopup from "./components/Host/HostConfigPopup";
 import MachineCreateModal from "./components/Host/MachineCreateModal";
+import MachineGroupsModal from "./components/MachineGroupsModal";
 import useToast from "@/shared/hooks/useToast";
 import { SocketContext } from "@/shared/contexts/socket";
 import apiRoutes from "@/shared/routes/apiRoutes";
@@ -41,11 +46,22 @@ const formatRelativeFromNow = (parsed) => {
   }
 
   const secondsAgo = Math.max(0, dayjs().diff(parsed, "second"));
-  if (secondsAgo < 60) {
-    return secondsAgo === 1 ? "1 second ago" : `${secondsAgo} seconds ago`;
+  if (secondsAgo <= 30) {
+    return "Just now";
   }
 
-  return parsed.fromNow();
+  const minutesAgo = Math.floor(secondsAgo / 60);
+  if (minutesAgo < 60) {
+    return minutesAgo <= 1 ? "1 min ago" : `${minutesAgo} min ago`;
+  }
+
+  const hoursAgo = Math.floor(minutesAgo / 60);
+  if (hoursAgo < 24) {
+    return hoursAgo === 1 ? "1 hr ago" : `${hoursAgo} hr ago`;
+  }
+
+  const daysAgo = Math.floor(hoursAgo / 24);
+  return daysAgo === 1 ? "1 day ago" : `${daysAgo} days ago`;
 };
 
 const mapConnectionToForwardingConfig = (connection) => ({
@@ -95,6 +111,11 @@ const mapMachineToHost = (machine) => ({
   id: machine._id,
   name: machine.name || "Untitled machine",
   hostname: machine.hostname || "",
+  groupIds: Array.isArray(machine.group_ids)
+    ? machine.group_ids
+    : machine.group_id
+      ? [machine.group_id]
+      : [],
   enabled: machine.enabled ?? true,
   localIp: machine.local_ip || "",
   publicIp: machine.public_ip || "",
@@ -142,12 +163,13 @@ const upsertHostWithMachine = (hosts, machine) => {
 };
 
 const MACHINE_PAGE_SIZE_OPTIONS = [
-  { value: "5", label: "5" },
   { value: "10", label: "10" },
-  { value: "20", label: "20" },
+  { value: "25", label: "25" },
   { value: "50", label: "50" },
+  { value: "100", label: "100" },
 ];
 
+const ALL_GROUPS_FILTER = "all";
 export default function Home({ onStatsChange }) {
   const { colorScheme } = useMantineColorScheme();
   const isDark = colorScheme === "dark";
@@ -161,16 +183,55 @@ export default function Home({ onStatsChange }) {
   const [pageSize, setPageSize] = useState("10");
   const [page, setPage] = useState(1);
   const [statusFilter, setStatusFilter] = useState("all");
+  const [groupFilter, setGroupFilter] = useState(ALL_GROUPS_FILTER);
+  const [machineGroups, setMachineGroups] = useState([]);
+  const [isGroupsModalOpen, setIsGroupsModalOpen] = useState(false);
   const [lastSeenRefreshTick, setLastSeenRefreshTick] = useState(0);
   const { success, error } = useToast();
 
   const selectedHost = hosts.find((host) => host.id === selectedHostId) || null;
-  const filteredHosts = hosts.filter((host) => {
-    return (
-      statusFilter === "all" ||
-      (statusFilter === "online" ? host.isActive : !host.isActive)
-    );
-  });
+  const selectedGroupFilterLabel = useMemo(() => {
+    if (groupFilter === ALL_GROUPS_FILTER) {
+      return "All groups";
+    }
+    return machineGroups.find((group) => group._id === groupFilter)?.name || "Group";
+  }, [groupFilter, machineGroups]);
+  const groupLabelById = useMemo(
+    () => Object.fromEntries(machineGroups.map((group) => [group._id, group.name])),
+    [machineGroups]
+  );
+  const groupsWithMachineCounts = useMemo(
+    () =>
+      machineGroups.map((group) => ({
+        ...group,
+        machineCount: hosts.filter((host) =>
+          (host.groupIds || []).includes(group._id)
+        ).length,
+      })),
+    [hosts, machineGroups]
+  );
+
+  const filteredHosts = useMemo(
+    () =>
+      hosts.filter((host) => {
+        const matchesStatus =
+          statusFilter === "all" ||
+          (statusFilter === "online" ? host.isActive : !host.isActive);
+
+        if (!matchesStatus) {
+          return false;
+        }
+
+        if (groupFilter === ALL_GROUPS_FILTER) {
+          return true;
+        }
+
+        const hostGroupIds = Array.isArray(host.groupIds) ? host.groupIds : [];
+        return hostGroupIds.includes(groupFilter);
+      }),
+    [groupFilter, hosts, statusFilter]
+  );
+
   const numericPageSize = Number(pageSize);
   const totalPages = Math.max(1, Math.ceil(filteredHosts.length / numericPageSize));
   const visibleStart = filteredHosts.length === 0 ? 0 : (page - 1) * numericPageSize + 1;
@@ -209,7 +270,16 @@ export default function Home({ onStatsChange }) {
 
   useEffect(() => {
     setPage(1);
-  }, [pageSize, statusFilter]);
+  }, [groupFilter, pageSize, statusFilter]);
+
+  useEffect(() => {
+    if (
+      groupFilter !== ALL_GROUPS_FILTER &&
+      !machineGroups.some((group) => group._id === groupFilter)
+    ) {
+      setGroupFilter(ALL_GROUPS_FILTER);
+    }
+  }, [groupFilter, machineGroups]);
 
   useEffect(() => {
     if (!onStatsChange) {
@@ -251,13 +321,15 @@ export default function Home({ onStatsChange }) {
       setIsLoading(true);
 
       try {
-        const [machinesResponse, connectionsResponse] = await Promise.all([
+        const [machinesResponse, connectionsResponse, groupsResponse] = await Promise.all([
           axios.get(apiRoutes.listMachines),
           axios.get(apiRoutes.listConnections),
+          axios.get(apiRoutes.listGroups).catch(() => ({ data: { data: [] } })),
         ]);
 
         const machines = machinesResponse.data?.data || [];
         const connections = connectionsResponse.data?.data || [];
+        setMachineGroups(groupsResponse.data?.data || []);
 
         setHosts(
           machines.map((machine) => {
@@ -348,7 +420,14 @@ export default function Home({ onStatsChange }) {
     setIsCreatingMachine(true);
 
     try {
-      const response = await axios.post(apiRoutes.addMachine, machine);
+      const payload = {
+        name: machine.name,
+        hostname: machine.hostname || "",
+      };
+      if (machine.group_ids?.length) {
+        payload.group_ids = machine.group_ids;
+      }
+      const response = await axios.post(apiRoutes.addMachine, payload);
       const createdHost = mapMachineToHost(response.data.data);
 
       setHosts((currentHosts) => [...currentHosts, createdHost]);
@@ -409,6 +488,7 @@ export default function Home({ onStatsChange }) {
                   : "offline"),
             auth_required: currentHost.authRequired ?? false,
             last_seen_at: currentHost.lastSeenAt,
+            group_ids: currentHost.groupIds || [],
           },
         },
       };
@@ -478,10 +558,10 @@ export default function Home({ onStatsChange }) {
         currentHosts.map((host) =>
           host.id === hostId
             ? {
-                ...mergeMachineIntoHost(host, machineResponse.data.data),
-                numPorts: savedConfigs.filter((config) => config.enabled !== false).length,
-                forwardingConfigs: savedConfigs,
-              }
+              ...mergeMachineIntoHost(host, machineResponse.data.data),
+              numPorts: savedConfigs.filter((config) => config.enabled !== false).length,
+              forwardingConfigs: savedConfigs,
+            }
             : host
         )
       );
@@ -530,9 +610,9 @@ export default function Home({ onStatsChange }) {
         currentHosts.map((host) =>
           host.id === hostId
             ? {
-                ...host,
-                token: refreshedHost.token,
-              }
+              ...host,
+              token: refreshedHost.token,
+            }
             : host
         )
       );
@@ -564,11 +644,11 @@ export default function Home({ onStatsChange }) {
         currentHosts.map((host) =>
           host.id === hostId
             ? {
-                ...host,
-                ...updatedHost,
-                numPorts: host.numPorts,
-                forwardingConfigs: host.forwardingConfigs,
-              }
+              ...host,
+              ...updatedHost,
+              numPorts: host.numPorts,
+              forwardingConfigs: host.forwardingConfigs,
+            }
             : host
         )
       );
@@ -580,7 +660,7 @@ export default function Home({ onStatsChange }) {
     } catch (toggleError) {
       error(
         toggleError?.response?.data?.detail ||
-          `Could not ${nextEnabled ? "enable" : "disable"} machine`
+        `Could not ${nextEnabled ? "enable" : "disable"} machine`
       );
       return false;
     }
@@ -602,11 +682,11 @@ export default function Home({ onStatsChange }) {
         currentHosts.map((host) =>
           host.id === hostId
             ? {
-                ...host,
-                ...updatedHost,
-                numPorts: host.numPorts,
-                forwardingConfigs: host.forwardingConfigs,
-              }
+              ...host,
+              ...updatedHost,
+              numPorts: host.numPorts,
+              forwardingConfigs: host.forwardingConfigs,
+            }
             : host
         )
       );
@@ -618,6 +698,83 @@ export default function Home({ onStatsChange }) {
         requestError?.response?.data?.detail || "Could not request client update"
       );
       return null;
+    }
+  };
+
+  const mergeHostAfterMachineResponse = (hostId, machinePayload) => {
+    const updated = mapMachineToHost(machinePayload);
+    setHosts((currentHosts) =>
+      currentHosts.map((host) =>
+        host.id === hostId
+          ? {
+            ...host,
+            ...updated,
+            numPorts: host.numPorts,
+            forwardingConfigs: host.forwardingConfigs,
+          }
+          : host
+      )
+    );
+  };
+
+  const handleAddMachineToGroup = async (hostId, groupId) => {
+    const response = await axios.post(apiRoutes.addMachineToGroup, {
+      machine_id: hostId,
+      group_id: groupId,
+    });
+    mergeHostAfterMachineResponse(hostId, response.data.data);
+  };
+
+  const handleRemoveMachineFromGroup = async (hostId, groupId) => {
+    const response = await axios.post(apiRoutes.removeMachineFromGroup, {
+      machine_id: hostId,
+      group_id: groupId,
+    });
+    mergeHostAfterMachineResponse(hostId, response.data.data);
+  };
+
+  const reloadMachineGroups = async () => {
+    const res = await axios.get(apiRoutes.listGroups);
+    setMachineGroups(res.data?.data || []);
+  };
+
+  const handleCreateGroup = async (name) => {
+    try {
+      const response = await axios.post(apiRoutes.addGroup, { name });
+      await reloadMachineGroups();
+      success(`Group "${name}" created`);
+      return response.data?.data || { name };
+    } catch (createGroupError) {
+      error(createGroupError?.response?.data?.detail || "Could not create group");
+      return false;
+    }
+  };
+
+  const handleRenameGroup = async (groupId, name) => {
+    try {
+      await axios.put(apiRoutes.updateGroup, { data_id: groupId, name });
+      await reloadMachineGroups();
+      success("Group renamed");
+      return true;
+    } catch (renameError) {
+      error(renameError?.response?.data?.detail || "Could not rename group");
+      return false;
+    }
+  };
+
+  const handleDeleteGroup = async (groupId) => {
+    try {
+      await axios.post(apiRoutes.deleteGroup, { data_id: groupId });
+      setHosts((currentHosts) =>
+        currentHosts.map((host) => ({
+          ...host,
+          groupIds: (host.groupIds || []).filter((id) => id !== groupId),
+        }))
+      );
+      await reloadMachineGroups();
+      success("Group deleted");
+    } catch (deleteGroupError) {
+      error(deleteGroupError?.response?.data?.detail || "Could not delete group");
     }
   };
 
@@ -633,7 +790,7 @@ export default function Home({ onStatsChange }) {
               Registered clients
             </h1>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <Button
               type="button"
               leftIcon={<IconPlus size={16} />}
@@ -653,148 +810,245 @@ export default function Home({ onStatsChange }) {
             <p className="text-sm text-zinc-500 dark:text-zinc-400">
               Loading machines...
             </p>
-          ) : hosts.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-zinc-300 bg-zinc-50 px-6 py-10 text-center dark:border-zinc-700 dark:bg-zinc-900/60">
-              <p className="text-lg font-medium text-zinc-900 dark:text-zinc-100">
-                No machines yet
-              </p>
-              <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
-                Create the first machine, copy its token or bootstrap command, then
-                start adding port pairs.
-              </p>
-            </div>
           ) : (
             <>
-              <div className="mb-4 flex flex-col gap-3">
-                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                  <SegmentedControl
-                    value={statusFilter}
-                    onChange={setStatusFilter}
-                    data={[
-                      { value: "all", label: "All" },
-                      { value: "online", label: "Online" },
-                      { value: "offline", label: "Offline" },
-                    ]}
-                    classNames={{
-                      root:
-                        "!rounded-lg !bg-zinc-100 !p-1 dark:!bg-zinc-800",
-                      control:
-                        "!border-transparent",
-                      label:
-                        "!text-zinc-600 dark:!text-zinc-300 data-[active=true]:!text-blue-50",
-                      indicator:
-                        "!rounded-md !bg-blue-600 !shadow-sm dark:!bg-blue-600",
-                    }}
-                  />
-                  <div className="flex items-center justify-start md:justify-end">
-                    <Menu
-                      withinPortal
-                      position="bottom-end"
-                      shadow="md"
-                      offset={6}
-                      classNames={{
-                        dropdown:
-                          "!min-w-[7rem] !border !border-zinc-200 !bg-white !p-1 dark:!border-zinc-700 dark:!bg-zinc-900",
-                        item:
-                          "!rounded-md !text-zinc-900 hover:!bg-zinc-100 dark:!text-zinc-100 dark:hover:!bg-zinc-800",
-                      }}
-                    >
-                      <Menu.Target>
-                        <button
-                          type="button"
-                          className="inline-flex items-center gap-2 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800"
-                        >
-                          <span>{pageSize} rows per page</span>
-                          <IconChevronDown
-                            size={14}
-                            className={isDark ? "text-zinc-500" : "text-zinc-400"}
-                          />
-                        </button>
-                      </Menu.Target>
-                      <Menu.Dropdown>
-                        {MACHINE_PAGE_SIZE_OPTIONS.map((option) => (
-                          <Menu.Item
-                            key={option.value}
-                            onClick={() => setPageSize(option.value)}
-                            className={
-                              option.value === pageSize
-                                ? "!bg-blue-600 !text-blue-50 hover:!bg-blue-600 dark:!bg-blue-600 dark:!text-blue-50 dark:hover:!bg-blue-600"
-                                : undefined
-                            }
-                          >
-                            {option.value}
-                          </Menu.Item>
-                        ))}
-                      </Menu.Dropdown>
-                    </Menu>
-                  </div>
-                </div>
-
-              </div>
-
-              <div className="overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-
-                <div className="hidden border-b border-zinc-200 bg-zinc-50/80 px-5 py-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-500 md:grid md:grid-cols-[minmax(0,1.3fr)_110px_minmax(0,0.85fr)_minmax(0,0.85fr)_120px_160px] md:items-center md:gap-3">
-                  <span>Machine</span>
-                  <span className="text-center">Ports</span>
-                  <span>Local IP</span>
-                  <span>Public IP</span>
-                  <span className="text-center">Status</span>
-                  <span className="text-right">Last seen</span>
-                </div>
-
-                {paginatedHosts.length > 0 ? (
-                  <div className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                    {paginatedHosts.map((host) => (
-                      <HostItem
-                        key={host.id}
-                        name={host.name}
-                        hostname={host.hostname}
-                        localIp={host.localIp}
-                        publicIp={host.publicIp}
-                        isActive={host.isActive}
-                        connectionStatus={host.connectionStatus}
-                        isDark={isDark}
-                        numPorts={host.numPorts}
-                        lastSeen={host.lastSeen}
-                        onClick={() => handleOpenConfig(host.id)}
-                      />
-                    ))}
-                  </div>
-                ) : (
-                  <div className="px-5 py-10 text-center">
-                    <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
-                      No machines match the current filters
-                    </p>
-                    <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
-                      Adjust the name filter or status filter to see more machines.
-                    </p>
-                  </div>
-                )}
-
-              </div>
-
-              {filteredHosts.length > 0 ? (
-                <div className="mt-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                  <p className="text-sm text-zinc-500 dark:text-zinc-400">
-                    Showing {visibleStart} to {visibleEnd} of {filteredHosts.length} machines
+              {hosts.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-zinc-300 bg-zinc-50 px-6 py-10 text-center dark:border-zinc-700 dark:bg-zinc-900/60">
+                  <p className="text-lg font-medium text-zinc-900 dark:text-zinc-100">
+                    No machines yet
                   </p>
-
-                  <Pagination
-                    value={page}
-                    onChange={setPage}
-                    total={totalPages}
-                    size="sm"
-                    radius="md"
-                    withEdges
-                    siblings={1}
-                    classNames={{
-                      control:
-                        "!border-zinc-300 !bg-white !text-zinc-700 hover:!bg-zinc-50 data-[active=true]:!border-blue-600 data-[active=true]:!bg-blue-600 data-[active=true]:!text-blue-50 dark:!border-zinc-700 dark:!bg-zinc-900 dark:!text-zinc-200 dark:hover:!bg-zinc-800 dark:data-[active=true]:!border-blue-500 dark:data-[active=true]:!bg-blue-600",
-                    }}
-                  />
+                  <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
+                    Create the first machine, copy its token or bootstrap command, then
+                    start adding port pairs.
+                  </p>
                 </div>
-              ) : null}
+              ) : (
+                <>
+                  <div className="mb-1">
+                    <p className="text-sm font-semibold uppercase tracking-[0.2em] text-zinc-500 dark:text-zinc-500">
+                      All machines
+                    </p>
+                  </div>
+                  <div className="mb-4 flex flex-col gap-3">
+                    <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                      <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
+                        <SegmentedControl
+                          value={statusFilter}
+                          onChange={setStatusFilter}
+                          data={[
+                            { value: "all", label: "All" },
+                            { value: "online", label: "Online" },
+                            { value: "offline", label: "Offline" },
+                          ]}
+                          classNames={{
+                            root:
+                              "!rounded-lg !bg-zinc-100 !p-1 dark:!bg-zinc-800",
+                            control:
+                              "!border-transparent",
+                            label:
+                              "!text-zinc-600 dark:!text-zinc-300 data-[active=true]:!text-blue-50",
+                            indicator:
+                              "!rounded-md !bg-blue-600 !shadow-sm dark:!bg-blue-600",
+                          }}
+                        />
+                      </div>
+                      <div className="flex flex-wrap items-center justify-start gap-2 lg:justify-end">
+                        <div
+                          className={`inline-flex items-stretch overflow-hidden rounded-md border ${
+                            isDark
+                              ? "border-zinc-700 bg-zinc-900"
+                              : "border-zinc-300 bg-white"
+                          }`}
+                        >
+                          <Menu
+                            withinPortal
+                            position="bottom-end"
+                            shadow="md"
+                            offset={6}
+                            classNames={{
+                              dropdown:
+                                "!min-w-[11rem] !border !border-zinc-200 !bg-white !p-1 dark:!border-zinc-700 dark:!bg-zinc-900",
+                              item:
+                                "!rounded-md !text-zinc-900 hover:!bg-zinc-100 dark:!text-zinc-100 dark:hover:!bg-zinc-800",
+                            }}
+                          >
+                            <Menu.Target>
+                              <button
+                                type="button"
+                                className={`inline-flex items-center gap-2 px-3 py-2 text-sm ${
+                                  isDark
+                                    ? "text-zinc-100 hover:bg-zinc-800"
+                                    : "text-zinc-900 hover:bg-zinc-50"
+                                }`}
+                              >
+                                <span>{selectedGroupFilterLabel}</span>
+                                <IconChevronDown
+                                  size={14}
+                                  className={isDark ? "text-zinc-500" : "text-zinc-400"}
+                                />
+                              </button>
+                            </Menu.Target>
+                            <Menu.Dropdown>
+                              <Menu.Item
+                                onClick={() => setGroupFilter(ALL_GROUPS_FILTER)}
+                                className={
+                                  groupFilter === ALL_GROUPS_FILTER
+                                    ? "!bg-blue-600 !text-blue-50 hover:!bg-blue-600 dark:!bg-blue-600 dark:!text-blue-50 dark:hover:!bg-blue-600"
+                                    : undefined
+                                }
+                            >
+                              All groups
+                            </Menu.Item>
+                            {machineGroups.length > 0 ? <Menu.Divider /> : null}
+                              {machineGroups.map((group) => (
+                                <Menu.Item
+                                  key={group._id}
+                                  onClick={() => setGroupFilter(group._id)}
+                                  className={
+                                    groupFilter === group._id
+                                      ? "!bg-blue-600 !text-blue-50 hover:!bg-blue-600 dark:!bg-blue-600 dark:!text-blue-50 dark:hover:!bg-blue-600"
+                                      : undefined
+                                  }
+                                >
+                                  {group.name}
+                                </Menu.Item>
+                              ))}
+                            </Menu.Dropdown>
+                          </Menu>
+                          <Button
+                            type="button"
+                            variant="default"
+                            onClick={() => setIsGroupsModalOpen(true)}
+                            aria-label="Manage groups"
+                            title="Manage groups"
+                            classNames={{
+                              root: isDark
+                                ? "!min-w-0 !rounded-none !border-0 !border-l !border-zinc-700 !bg-zinc-900 !px-3 !text-zinc-100 hover:!bg-zinc-800"
+                                : "!min-w-0 !rounded-none !border-0 !border-l !border-zinc-300 !bg-white !px-3 !text-zinc-900 hover:!bg-zinc-50",
+                            }}
+                          >
+                            <IconSettings size={16} />
+                          </Button>
+                        </div>
+                        <Menu
+                          withinPortal
+                          position="bottom-end"
+                          shadow="md"
+                          offset={6}
+                          classNames={{
+                            dropdown:
+                              "!min-w-[7rem] !border !border-zinc-200 !bg-white !p-1 dark:!border-zinc-700 dark:!bg-zinc-900",
+                            item:
+                              "!rounded-md !text-zinc-900 hover:!bg-zinc-100 dark:!text-zinc-100 dark:hover:!bg-zinc-800",
+                          }}
+                        >
+                          <Menu.Target>
+                            <button
+                              type="button"
+                              className="inline-flex items-center gap-2 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800"
+                            >
+                              <span>{pageSize} rows per page</span>
+                              <IconChevronDown
+                                size={14}
+                                className={isDark ? "text-zinc-500" : "text-zinc-400"}
+                              />
+                            </button>
+                          </Menu.Target>
+                          <Menu.Dropdown>
+                            {MACHINE_PAGE_SIZE_OPTIONS.map((option) => (
+                              <Menu.Item
+                                key={option.value}
+                                onClick={() => setPageSize(option.value)}
+                                className={
+                                  option.value === pageSize
+                                    ? "!bg-blue-600 !text-blue-50 hover:!bg-blue-600 dark:!bg-blue-600 dark:!text-blue-50 dark:hover:!bg-blue-600"
+                                    : undefined
+                                }
+                              >
+                                {option.value}
+                              </Menu.Item>
+                            ))}
+                          </Menu.Dropdown>
+                        </Menu>
+                      </div>
+                    </div>
+
+                  </div>
+
+                  <div className="overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+                    <div className="hidden border-b border-zinc-200 bg-zinc-50/80 py-3 pl-6 pr-6 text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-500 md:grid md:grid-cols-[minmax(0,1.45fr)_minmax(5.5rem,0.8fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(7rem,0.85fr)] md:items-center md:gap-3">
+                      <span>Machine</span>
+                      <span className="text-center">Ports</span>
+                      <span>Local IP</span>
+                      <span>Groups</span>
+                      <span className="pr-3 text-right">Last seen</span>
+                    </div>
+
+                    {paginatedHosts.length > 0 ? (
+                      <div
+                        className="max-h-[calc(100dvh-22rem)] overflow-y-auto"
+                        style={{ scrollbarGutter: "stable" }}
+                      >
+                        <div className="divide-y divide-zinc-200 dark:divide-zinc-800">
+                          {paginatedHosts.map((host) => (
+                            <HostItem
+                              key={host.id}
+                              machineId={host.id}
+                              name={host.name}
+                              hostname={host.hostname}
+                              groupLabels={(host.groupIds || [])
+                                .map((id) => groupLabelById[id])
+                                .filter(Boolean)}
+                              localIp={host.localIp}
+                              isActive={host.isActive}
+                              connectionStatus={host.connectionStatus}
+                              isDark={isDark}
+                              numPorts={host.numPorts}
+                              showGroupColumn
+                              showPublicIp={false}
+                              showStatus={false}
+                              showLastSeen
+                              lastSeen={host.lastSeen}
+                              onClick={() => handleOpenConfig(host.id)}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="px-5 py-10 text-center">
+                        <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                          No machines match the current filters
+                        </p>
+                        <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
+                          Adjust the status filter to see more machines.
+                        </p>
+                      </div>
+                    )}
+
+                    {filteredHosts.length > 0 ? (
+                      <div className="flex flex-col gap-3 border-t border-zinc-200 px-5 py-4 dark:border-zinc-800 md:flex-row md:items-center md:justify-between">
+                        <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                          Showing {visibleStart} to {visibleEnd} of {filteredHosts.length} machines
+                        </p>
+
+                        <Pagination
+                          value={page}
+                          onChange={setPage}
+                          total={totalPages}
+                          size="sm"
+                          radius="md"
+                          withEdges
+                          siblings={1}
+                          classNames={{
+                            control:
+                              "!border-zinc-300 !bg-white !text-zinc-700 hover:!bg-zinc-50 data-[active=true]:!border-blue-600 data-[active=true]:!bg-blue-600 data-[active=true]:!text-blue-50 dark:!border-zinc-700 dark:!bg-zinc-900 dark:!text-zinc-200 dark:hover:!bg-zinc-800 dark:data-[active=true]:!border-blue-500 dark:data-[active=true]:!bg-blue-600",
+                          }}
+                        />
+                      </div>
+                    ) : null}
+                  </div>
+                </>
+              )}
             </>
           )}
         </div>
@@ -804,6 +1058,18 @@ export default function Home({ onStatsChange }) {
         onClose={() => setIsCreateModalOpen(false)}
         onCreate={handleCreateMachine}
         isCreating={isCreatingMachine}
+        groups={machineGroups}
+      />
+      <MachineGroupsModal
+        opened={isGroupsModalOpen}
+        onClose={() => setIsGroupsModalOpen(false)}
+        groups={machineGroups}
+        machines={hosts}
+        onCreateGroup={handleCreateGroup}
+        onRenameGroup={handleRenameGroup}
+        onDeleteGroup={handleDeleteGroup}
+        onAddMachineToGroup={handleAddMachineToGroup}
+        onRemoveMachineFromGroup={handleRemoveMachineFromGroup}
       />
       <HostConfigPopup
         host={selectedHost}
@@ -814,6 +1080,10 @@ export default function Home({ onStatsChange }) {
         onToggleMachine={handleToggleMachine}
         onRefreshMachineToken={handleRefreshMachineToken}
         onRequestClientUpdate={handleRequestClientUpdate}
+        onCreateGroup={handleCreateGroup}
+        onAddMachineToGroup={handleAddMachineToGroup}
+        onRemoveMachineFromGroup={handleRemoveMachineFromGroup}
+        groups={groupsWithMachineCounts}
         isSaving={isSaving}
       />
     </div>

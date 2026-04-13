@@ -274,7 +274,7 @@ async def connect(sid, environ, auth):
     user_id = _get_user_id_from_session_token(_get_session_token(environ))
     if user_id:
         await sio.save_session(sid, {"user_id": user_id})
-        await sio.enter_room(sid, user_id)
+        sio.enter_room(sid, user_id)
     elif auth and auth.get("role") == "machine":
         try:
             machine = await authenticate_machine(auth.get("machine_id"), auth.get("token"))
@@ -290,7 +290,7 @@ async def connect(sid, environ, auth):
                 "user_id": str(machine["user_id"]),
             },
         )
-        await sio.enter_room(sid, get_machine_room(machine_id))
+        sio.enter_room(sid, get_machine_room(machine_id))
         register_machine_sid(machine_id, sid)
 
     await sio.emit("join", {"sid": sid}, room=sid)
@@ -350,7 +350,7 @@ async def handle_machine_log_stream_subscribe(sid, data=None):
     if not machine:
         return
 
-    await sio.enter_room(sid, get_machine_log_room(machine_id))
+    sio.enter_room(sid, get_machine_log_room(machine_id))
     register_log_stream_subscriber(machine_id, sid)
     await emit_machine_log_stream_status(machine, room=sid, subscribed=True)
 
@@ -373,7 +373,7 @@ async def handle_machine_log_stream_unsubscribe(sid, data=None):
     if not machine:
         return
 
-    await sio.leave_room(sid, get_machine_log_room(machine_id))
+    sio.leave_room(sid, get_machine_log_room(machine_id))
     unregister_log_stream_subscriber(machine_id, sid)
     await emit_machine_log_stream_status(machine, room=sid, subscribed=False)
 

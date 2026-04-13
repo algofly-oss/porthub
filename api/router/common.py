@@ -11,6 +11,29 @@ from shared.env import MACHINE_ONLINE_TTL_SECONDS
 from .auth.common import authenticate_user
 
 
+def get_machine_group_object_ids(machine: dict) -> list[ObjectId]:
+    """Effective group memberships (supports legacy single group_id)."""
+    raw = machine.get("group_ids")
+    if isinstance(raw, list) and raw:
+        out: list[ObjectId] = []
+        for item in raw:
+            oid: ObjectId | None = None
+            if isinstance(item, ObjectId):
+                oid = item
+            elif isinstance(item, str) and ObjectId.is_valid(item):
+                oid = ObjectId(item)
+            if oid is not None and oid not in out:
+                out.append(oid)
+        if out:
+            return out
+    legacy = machine.get("group_id")
+    if isinstance(legacy, ObjectId):
+        return [legacy]
+    if isinstance(legacy, str) and ObjectId.is_valid(legacy):
+        return [ObjectId(legacy)]
+    return []
+
+
 def parse_object_id(value: str, detail: str) -> ObjectId:
     if not value or not ObjectId.is_valid(value):
         raise HTTPException(status_code=400, detail=detail)
@@ -73,11 +96,13 @@ def serialize_machine(machine: dict):
         client_update_request_id
         and client_update_request_id != client_update_last_handled_request_id
     )
+    group_ids = get_machine_group_object_ids(machine)
     return {
         "_id": str(machine["_id"]),
         "user_id": str(machine["user_id"]),
         "name": machine.get("name", ""),
         "hostname": machine.get("hostname", ""),
+        "group_ids": [str(oid) for oid in group_ids],
         "enabled": machine.get("enabled", True),
         "local_ip": machine.get("local_ip", machine.get("ip_address", "")),
         "public_ip": machine.get("public_ip", ""),
