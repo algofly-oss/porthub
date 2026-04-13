@@ -54,6 +54,18 @@ def utcnow():
     return datetime.utcnow()
 
 
+def resolve_machine_hostname(machine: dict) -> str:
+    override = (machine.get("hostname_override") or "").strip()
+    if override:
+        return override
+
+    client_hostname = (machine.get("client_hostname") or "").strip()
+    if client_hostname:
+        return client_hostname
+
+    return (machine.get("hostname") or "").strip()
+
+
 def is_machine_online(machine: dict) -> bool:
     return get_machine_connection_status(machine) in {"online", "auth_required"}
 
@@ -97,11 +109,14 @@ def serialize_machine(machine: dict):
         and client_update_request_id != client_update_last_handled_request_id
     )
     group_ids = get_machine_group_object_ids(machine)
+    resolved_hostname = resolve_machine_hostname(machine)
     return {
         "_id": str(machine["_id"]),
         "user_id": str(machine["user_id"]),
         "name": machine.get("name", ""),
-        "hostname": machine.get("hostname", ""),
+        "hostname": resolved_hostname,
+        "client_hostname": (machine.get("client_hostname") or "").strip(),
+        "hostname_override": (machine.get("hostname_override") or "").strip(),
         "group_ids": [str(oid) for oid in group_ids],
         "enabled": machine.get("enabled", True),
         "local_ip": machine.get("local_ip", machine.get("ip_address", "")),
@@ -145,7 +160,7 @@ def serialize_connection(connection: dict, machine: dict | None = None):
 
     if machine:
         serialized["machine_name"] = machine.get("name", "")
-        serialized["machine_hostname"] = machine.get("hostname", "")
+        serialized["machine_hostname"] = resolve_machine_hostname(machine)
         serialized["machine_local_ip"] = machine.get("local_ip", machine.get("ip_address", ""))
         serialized["machine_public_ip"] = machine.get("public_ip", "")
     else:
