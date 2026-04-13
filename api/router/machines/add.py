@@ -5,6 +5,7 @@ from shared.rathole_config import rebuild_server_toml
 from ..common import (
     generate_machine_token,
     get_authenticated_user,
+    parse_object_id,
     serialize_machine,
     utcnow,
 )
@@ -21,6 +22,19 @@ async def add_machine(data: Machine, request: Request):
 
     if not machine_name:
         raise HTTPException(status_code=400, detail="Machine name is required")
+
+    group_oids: list = []
+    raw_ids = data.group_ids if getattr(data, "group_ids", None) is not None else None
+    if raw_ids:
+        for item in raw_ids:
+            if item is None or (isinstance(item, str) and not str(item).strip()):
+                continue
+            oid = parse_object_id(str(item).strip(), "Invalid group id")
+            grp = await db.machine_groups.find_one({"_id": oid, "user_id": user["_id"]})
+            if not grp:
+                raise HTTPException(status_code=400, detail="Group not found")
+            if oid not in group_oids:
+                group_oids.append(oid)
 
     machine = {
         "user_id": user["_id"],
@@ -42,6 +56,8 @@ async def add_machine(data: Machine, request: Request):
         "created_at": now,
         "updated_at": now,
     }
+    if group_oids:
+        machine["group_ids"] = group_oids
 
     result = await db.machines.insert_one(machine)
     created_machine = await db.machines.find_one({"_id": result.inserted_id})

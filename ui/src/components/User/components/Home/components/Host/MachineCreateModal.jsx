@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Button, Modal, Stack, Text } from "@mantine/core";
+import { Button, Modal, Select, Stack, Text } from "@mantine/core";
 import { useMantineColorScheme } from "@mantine/core";
 
 const getInputClassName = (isDark) =>
@@ -17,6 +17,7 @@ const errorClassName = "mt-1 text-xs text-red-600 dark:text-red-400";
 const initialForm = {
   name: "",
   hostname: "",
+  groupId: "",
 };
 
 export default function MachineCreateModal({
@@ -24,6 +25,7 @@ export default function MachineCreateModal({
   onClose,
   onCreate,
   isCreating,
+  groups = [],
 }) {
   const { colorScheme } = useMantineColorScheme();
   const isDark = colorScheme === "dark";
@@ -53,6 +55,7 @@ export default function MachineCreateModal({
     const created = await onCreate({
       name: form.name.trim(),
       hostname: form.hostname.trim(),
+      group_ids: form.groupId ? [form.groupId] : [],
     });
 
     if (created) {
@@ -135,6 +138,33 @@ export default function MachineCreateModal({
               }
             />
           </div>
+
+          {groups.length > 0 ? (
+            <div>
+              <label htmlFor="machine-group" className={getLabelClassName(isDark)}>
+                Group (optional)
+              </label>
+              <Select
+                id="machine-group"
+                placeholder="Ungrouped"
+                clearable
+                data={groups.map((g) => ({ value: g._id, label: g.name }))}
+                value={form.groupId || null}
+                onChange={(value) =>
+                  setForm((current) => ({ ...current, groupId: value || "" }))
+                }
+                classNames={{
+                  input: getInputClassName(isDark),
+                  dropdown: isDark
+                    ? "!border-zinc-700 !bg-zinc-900"
+                    : "!border-zinc-200 !bg-white",
+                  item: isDark
+                    ? "!text-zinc-100 hover:!bg-zinc-800"
+                    : "!text-zinc-900 hover:!bg-zinc-100",
+                }}
+              />
+            </div>
+          ) : null}
 
           <div className="flex justify-end gap-3">
             <Button
