@@ -199,6 +199,43 @@ const normalizeInternalHost = (value) => {
   return normalized || "0.0.0.0";
 };
 
+const getPublicBaseUrl = () => {
+  const configuredBaseUrl =
+    (process.env.NEXT_PUBLIC_PORT_HUB_PUBLIC_BASE_URL ||
+      process.env.PORT_HUB_PUBLIC_BASE_URL ||
+      "").trim();
+
+  if (configuredBaseUrl) {
+    return configuredBaseUrl;
+  }
+
+  if (typeof window === "undefined") {
+    return "";
+  }
+
+  return window.location.origin;
+};
+
+const buildExternalPortUrl = (externalPort) => {
+  const normalizedPort = Number(externalPort);
+  if (!Number.isInteger(normalizedPort) || normalizedPort < 1 || normalizedPort > 65535) {
+    return "";
+  }
+
+  const publicBaseUrl = getPublicBaseUrl();
+  if (!publicBaseUrl) {
+    return "";
+  }
+
+  try {
+    const url = new URL(publicBaseUrl);
+    url.port = String(normalizedPort);
+    return url.toString();
+  } catch {
+    return "";
+  }
+};
+
 const getApiErrorMessage = (requestError, fallbackMessage) =>
   requestError?.response?.data?.detail || fallbackMessage;
 
@@ -2032,11 +2069,22 @@ export default function HostConfigPopup({
                           const isAvailabilityKnown = Boolean(availability);
                           const isInvalid =
                             isAvailabilityKnown && availability.available === false;
+                          const externalPortNumber = Number(rule.externalPort);
                           const savedRule = rule.dataId
                             ? savedRulesById.get(rule.dataId)
                             : null;
                           const persistedEnabled =
                             savedRule?.enabled ?? rule.enabled;
+                          const externalPortUrl =
+                            Number.isInteger(externalPortNumber) &&
+                            externalPortNumber >= 1 &&
+                            externalPortNumber <= 65535
+                              ? buildExternalPortUrl(externalPortNumber)
+                              : "";
+                          const canOpenExternalPort =
+                            persistedEnabled &&
+                            !isInvalid &&
+                            Boolean(externalPortUrl);
                           const rowNumber =
                             (rulesPage - 1) * RULES_PER_PAGE + index + 1;
 
@@ -2101,15 +2149,35 @@ export default function HostConfigPopup({
                                 {rule.internalPort || "-"}
                               </span>
 
-                              <span
-                                className={
-                                  isDark
-                                    ? "font-mono text-zinc-300"
-                                    : "font-mono text-zinc-700"
-                                }
-                              >
-                                {rule.externalPort || "-"}
-                              </span>
+                              {canOpenExternalPort ? (
+                                <a
+                                  href={externalPortUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className={`cursor-pointer font-mono text-left underline decoration-dotted underline-offset-2 transition-colors ${
+                                    isDark
+                                      ? "text-blue-300 hover:text-blue-200"
+                                      : "text-blue-700 hover:text-blue-800"
+                                  }`}
+                                  onClick={(event) => event.stopPropagation()}
+                                  onKeyDown={(event) => event.stopPropagation()}
+                                  onMouseDown={(event) => event.stopPropagation()}
+                                  onPointerDown={(event) => event.stopPropagation()}
+                                  aria-label={`Open external port ${externalPortNumber} in a new window`}
+                                >
+                                  {rule.externalPort || "-"}
+                                </a>
+                              ) : (
+                                <span
+                                  className={
+                                    isDark
+                                      ? "font-mono text-zinc-300"
+                                      : "font-mono text-zinc-700"
+                                  }
+                                >
+                                  {rule.externalPort || "-"}
+                                </span>
+                              )}
 
                               <div>
                                 {isInvalid ? (
