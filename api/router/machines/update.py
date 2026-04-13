@@ -11,6 +11,7 @@ from ..common import (
     get_authenticated_user,
     is_machine_online,
     parse_object_id,
+    resolve_machine_hostname,
     serialize_machine,
     utcnow,
 )
@@ -40,6 +41,7 @@ async def update_machine(data: Machine, request: Request):
         raise HTTPException(status_code=400, detail="Machine not found")
 
     previous_serialized_machine = serialize_machine(machine)
+    previous_effective_hostname = resolve_machine_hostname(machine)
     was_online = is_machine_online(machine)
     next_enabled = (
         bool(data.enabled)
@@ -52,9 +54,17 @@ async def update_machine(data: Machine, request: Request):
     )
 
     incoming = data.dict(exclude_unset=True)
+    next_hostname_override = (data.hostname or "").strip()
+    next_client_hostname = (machine.get("client_hostname") or "").strip()
+    next_effective_hostname = (
+        next_hostname_override
+        or next_client_hostname
+        or (machine.get("hostname") or "").strip()
+    )
     mongo_set = {
         "name": machine_name,
-        "hostname": (data.hostname or "").strip(),
+        "hostname": next_effective_hostname,
+        "hostname_override": next_hostname_override,
         "enabled": next_enabled,
         "updated_at": utcnow(),
     }
@@ -87,14 +97,14 @@ async def update_machine(data: Machine, request: Request):
 
     updated_machine = await db.machines.find_one({"_id": machine["_id"]})
     updated_serialized_machine = serialize_machine(updated_machine)
+    updated_effective_hostname = resolve_machine_hostname(updated_machine)
     is_online = is_machine_online(updated_machine)
 
     set_cached_machine_status(str(updated_machine["_id"]), is_online)
 
     rathole_fields_changed = (
         previous_serialized_machine["name"] != updated_serialized_machine["name"]
-        or previous_serialized_machine["hostname"]
-        != updated_serialized_machine["hostname"]
+        or previous_effective_hostname != updated_effective_hostname
         or previous_serialized_machine.get("enabled", True)
         != updated_serialized_machine.get("enabled", True)
     )
@@ -106,8 +116,7 @@ async def update_machine(data: Machine, request: Request):
     if (
         was_online != is_online
         or previous_serialized_machine["name"] != updated_serialized_machine["name"]
-        or previous_serialized_machine["hostname"]
-        != updated_serialized_machine["hostname"]
+        or previous_effective_hostname != updated_effective_hostname
         or previous_serialized_machine.get("enabled", True)
         != updated_serialized_machine.get("enabled", True)
         or group_changed

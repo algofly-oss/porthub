@@ -18,6 +18,7 @@ from shared.env import (
     RATHOLE_SERVER_ADDRESS,
 )
 from shared.factory import db
+from router.common import resolve_machine_hostname
 
 
 def parse_machine_object_id(value: str, detail: str = "Invalid machine id") -> ObjectId:
@@ -244,7 +245,7 @@ async def build_machine_config_bundle(
         "version": version,
         "machine_id": str(machine["_id"]),
         "machine_name": machine.get("name", ""),
-        "hostname": machine.get("hostname", ""),
+        "hostname": resolve_machine_hostname(machine),
         "enabled": bool(machine.get("enabled", True)),
         "rathole_server_address": get_rathole_server_address(request),
         "connections": serialized_connections,
@@ -278,8 +279,16 @@ async def sync_machine_runtime(
     resolved_client_update_last_handled_request_id = (
         client_update_last_handled_request_id or ""
     ).strip()
+    resolved_client_hostname = (hostname or "").strip()
+    resolved_effective_hostname = (
+        (machine.get("hostname_override") or "").strip()
+        or resolved_client_hostname
+        or (machine.get("client_hostname") or "").strip()
+        or (machine.get("hostname") or "").strip()
+    )
     update_fields: dict[str, Any] = {
-        "hostname": (hostname or "").strip() or machine.get("hostname", ""),
+        "hostname": resolved_effective_hostname,
+        "client_hostname": resolved_client_hostname or (machine.get("client_hostname") or "").strip(),
         "local_ip": (local_ip or "").strip(),
         "public_ip": resolved_public_ip,
         "auth_required": False,

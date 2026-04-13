@@ -111,6 +111,8 @@ const mapMachineToHost = (machine) => ({
   id: machine._id,
   name: machine.name || "Untitled machine",
   hostname: machine.hostname || "",
+  clientHostname: machine.client_hostname || "",
+  hostnameOverride: machine.hostname_override || "",
   groupIds: Array.isArray(machine.group_ids)
     ? machine.group_ids
     : machine.group_id
@@ -475,6 +477,8 @@ export default function Home({ onStatsChange }) {
             _id: currentHost.id,
             name: currentHost.name,
             hostname: currentHost.hostname,
+            client_hostname: currentHost.clientHostname,
+            hostname_override: currentHost.hostnameOverride,
             local_ip: currentHost.localIp,
             public_ip: currentHost.publicIp,
             token: currentHost.token,
@@ -635,7 +639,7 @@ export default function Home({ onStatsChange }) {
       const response = await axios.put(apiRoutes.updateMachine, {
         data_id: currentHost.id,
         name: currentHost.name,
-        hostname: currentHost.hostname,
+        hostname: currentHost.hostnameOverride || "",
         enabled: nextEnabled,
       });
       const updatedHost = mapMachineToHost(response.data.data);
@@ -662,6 +666,42 @@ export default function Home({ onStatsChange }) {
         toggleError?.response?.data?.detail ||
         `Could not ${nextEnabled ? "enable" : "disable"} machine`
       );
+      return false;
+    }
+  };
+
+  const handleUpdateMachineDetails = async (hostId, details) => {
+    const currentHost = hosts.find((host) => host.id === hostId);
+    if (!currentHost) {
+      return false;
+    }
+
+    try {
+      const response = await axios.put(apiRoutes.updateMachine, {
+        data_id: currentHost.id,
+        name: details.name,
+        hostname: details.hostname,
+        enabled: currentHost.enabled,
+      });
+      const updatedHost = mapMachineToHost(response.data.data);
+
+      setHosts((currentHosts) =>
+        currentHosts.map((host) =>
+          host.id === hostId
+            ? {
+                ...host,
+                ...updatedHost,
+                numPorts: host.numPorts,
+                forwardingConfigs: host.forwardingConfigs,
+              }
+            : host
+        )
+      );
+
+      success(`Updated machine details for ${details.name}`);
+      return true;
+    } catch (updateError) {
+      error(updateError?.response?.data?.detail || "Could not update machine details");
       return false;
     }
   };
@@ -1076,6 +1116,7 @@ export default function Home({ onStatsChange }) {
         opened={Boolean(selectedHost)}
         onClose={handleCloseConfig}
         onSave={handleSaveConfig}
+        onUpdateMachineDetails={handleUpdateMachineDetails}
         onDeleteMachine={handleDeleteMachine}
         onToggleMachine={handleToggleMachine}
         onRefreshMachineToken={handleRefreshMachineToken}

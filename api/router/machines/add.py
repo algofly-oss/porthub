@@ -40,6 +40,8 @@ async def add_machine(data: Machine, request: Request):
         "user_id": user["_id"],
         "name": machine_name,
         "hostname": (data.hostname or "").strip(),
+        "hostname_override": (data.hostname or "").strip(),
+        "client_hostname": "",
         "enabled": True if data.enabled is None else bool(data.enabled),
         "local_ip": "",
         "public_ip": "",
