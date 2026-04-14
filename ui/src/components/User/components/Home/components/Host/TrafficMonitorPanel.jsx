@@ -414,15 +414,19 @@ export default function TrafficMonitorPanel({
                   ) : null}
                 </div>
                 {showIncoming && incomingHoverSample ? (
-                  <div className="mt-1 inline-flex items-center gap-1.5">
-                    <span className="h-2 w-2 rounded-full bg-emerald-400" />
-                    <span>From {formatIncomingIpLabel(incomingHoverSample.incoming_ips)}</span>
+                  <div className="mt-1 grid grid-cols-[0.5rem_minmax(0,1fr)] items-start gap-x-1.5">
+                    <span className="mt-[0.28rem] h-2 w-2 rounded-full bg-emerald-400" />
+                    <span className="break-all leading-4">
+                      From {formatIncomingIpLabel(incomingHoverSample.incoming_ips)}
+                    </span>
                   </div>
                 ) : null}
                 {showBlocked && blockedHoverSample ? (
-                  <div className="mt-1 inline-flex items-center gap-1.5">
-                    <span className="h-2 w-2 rounded-full bg-rose-400" />
-                    <span>Blocked {formatBlockedIpLabel(blockedHoverSample.blocked_ips)}</span>
+                  <div className="mt-1 grid grid-cols-[0.5rem_minmax(0,1fr)] items-start gap-x-1.5">
+                    <span className="mt-[0.28rem] h-2 w-2 rounded-full bg-rose-400" />
+                    <span className="break-all leading-4">
+                      Blocked {formatBlockedIpLabel(blockedHoverSample.blocked_ips)}
+                    </span>
                   </div>
                 ) : null}
               </div>

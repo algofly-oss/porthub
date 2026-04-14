@@ -9,6 +9,7 @@ from fastapi.encoders import jsonable_encoder
 from router.common import is_machine_online, serialize_machine
 from shared.machine_client import authenticate_machine, build_machine_config_bundle
 from shared.env import MACHINE_ONLINE_TTL_SECONDS
+from shared.env import SESSION_COOKIE_NAME
 from shared.factory import db, redis
 
 sio = socketio.AsyncServer(
@@ -35,7 +36,7 @@ _log_stream_machine_ids_by_sid: dict[str, set[str]] = {}
 
 
 def _get_session_token(environ: dict[str, Any]) -> str | None:
-    pattern = r"session_token=([^;]+)"
+    pattern = rf"{re.escape(SESSION_COOKIE_NAME)}=([^;]+)"
     match = re.search(pattern, environ.get("HTTP_COOKIE", ""))
     return match.group(1) if match else None
 
