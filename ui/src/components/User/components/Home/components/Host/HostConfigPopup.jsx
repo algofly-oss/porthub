@@ -177,6 +177,11 @@ const normalizeTrafficSamples = (samples) =>
             .map((value) => String(value || "").trim())
             .filter(Boolean)
         : [],
+      incoming_ips: Array.isArray(sample?.incoming_ips)
+        ? sample.incoming_ips
+            .map((value) => String(value || "").trim())
+            .filter(Boolean)
+        : [],
     }))
     .filter((sample) => sample.timestamp > 0)
     .sort((left, right) => left.timestamp - right.timestamp)
@@ -184,18 +189,27 @@ const normalizeTrafficSamples = (samples) =>
 
 const buildTrafficWindow = (samples, windowSeconds = 60) => {
   const now = Math.floor(Date.now() / 1000);
-  const byTimestamp = new Map(
-    normalizeTrafficSamples(samples).map((sample) => [
-      Math.floor(sample.timestamp),
-      {
-        timestamp: Math.floor(sample.timestamp),
-        in_bytes: sample.in_bytes,
-        out_bytes: sample.out_bytes,
-        drop_bytes: sample.drop_bytes,
-        blocked_ips: sample.blocked_ips,
-      },
-    ])
-  );
+  const byTimestamp = new Map();
+  normalizeTrafficSamples(samples).forEach((sample) => {
+    const timestamp = Math.floor(sample.timestamp);
+    const current = byTimestamp.get(timestamp) || {
+      timestamp,
+      in_bytes: 0,
+      out_bytes: 0,
+      drop_bytes: 0,
+      blocked_ips: [],
+      incoming_ips: [],
+    };
+
+    byTimestamp.set(timestamp, {
+      timestamp,
+      in_bytes: current.in_bytes + sample.in_bytes,
+      out_bytes: current.out_bytes + sample.out_bytes,
+      drop_bytes: current.drop_bytes + sample.drop_bytes,
+      blocked_ips: [...new Set([...current.blocked_ips, ...sample.blocked_ips])],
+      incoming_ips: [...new Set([...current.incoming_ips, ...sample.incoming_ips])],
+    });
+  });
 
   return Array.from({ length: windowSeconds }, (_, index) => {
     const timestamp = now - (windowSeconds - 1 - index);
@@ -207,6 +221,7 @@ const buildTrafficWindow = (samples, windowSeconds = 60) => {
         out_bytes: 0,
         drop_bytes: 0,
         blocked_ips: [],
+        incoming_ips: [],
       }
     );
   });
@@ -241,6 +256,24 @@ const formatBlockedIpLabel = (ips) => {
   }`;
 };
 
+const formatIncomingIpLabel = (ips) => {
+  const normalized = (Array.isArray(ips) ? ips : [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+
+  if (normalized.length === 0) {
+    return null;
+  }
+
+  if (normalized.length === 1) {
+    return normalized[0];
+  }
+
+  return `${normalized[0]} +${normalized.length - 1} other${
+    normalized.length - 1 === 1 ? "" : "s"
+  }`;
+};
+
 const getNearestBlockedSample = (samples, activeIndex) => {
   if (!Array.isArray(samples) || samples.length === 0 || activeIndex === null) {
     return null;
@@ -256,6 +289,30 @@ const getNearestBlockedSample = (samples, activeIndex) => {
         Number(candidate.drop_bytes) > 0 &&
         Array.isArray(candidate.blocked_ips) &&
         candidate.blocked_ips.length > 0
+      ) {
+        return candidate;
+      }
+    }
+  }
+
+  return null;
+};
+
+const getNearestIncomingSample = (samples, activeIndex) => {
+  if (!Array.isArray(samples) || samples.length === 0 || activeIndex === null) {
+    return null;
+  }
+
+  const maxDistance = 2;
+  for (let distance = 0; distance <= maxDistance; distance += 1) {
+    const offsets = distance === 0 ? [0] : [-distance, distance];
+    for (const offset of offsets) {
+      const candidate = samples[activeIndex + offset];
+      if (
+        candidate &&
+        Number(candidate.in_bytes) > 0 &&
+        Array.isArray(candidate.incoming_ips) &&
+        candidate.incoming_ips.length > 0
       ) {
         return candidate;
       }
@@ -319,6 +376,7 @@ const TrafficMonitor = ({ isDark, samples, isLoading }) => {
       ? Math.min(Math.max(hoveredIndex, 0), windowedSamples.length - 1)
       : null;
   const activeSample = activeIndex !== null ? windowedSamples[activeIndex] : null;
+  const incomingHoverSample = getNearestIncomingSample(windowedSamples, activeIndex);
   const blockedHoverSample = getNearestBlockedSample(windowedSamples, activeIndex);
   const activeX =
     activeIndex !== null && windowedSamples.length > 1
@@ -386,6 +444,12 @@ const TrafficMonitor = ({ isDark, samples, isLoading }) => {
                     Out {formatTrafficRate(activeSample.out_bytes)}
                   </span>
                 </div>
+                {incomingHoverSample ? (
+                  <div className="mt-1 inline-flex items-center gap-1.5">
+                    <span className="h-2 w-2 rounded-full bg-emerald-400" />
+                    <span>From {formatIncomingIpLabel(incomingHoverSample.incoming_ips)}</span>
+                  </div>
+                ) : null}
                 {blockedHoverSample ? (
                   <div className="mt-1 inline-flex items-center gap-1.5">
                     <span className="h-2 w-2 rounded-full bg-rose-400" />
@@ -2730,36 +2794,34 @@ export default function HostConfigPopup({
                             >
                               External port
                             </label>
-                            <div className="flex items-end gap-2">
-                              <div className="flex-1">
-                                <input
-                                  id={`external-port-${rule.localId}`}
-                                  type="text"
-                                  inputMode="numeric"
-                                  placeholder="50022"
-                                  className={getDetailInputClassName(isDark)}
-                                  value={rule.externalPort}
-                                  onChange={(event) =>
-                                    updateRule(
-                                      rule.localId,
-                                      "externalPort",
-                                      event.currentTarget.value
-                                    )
-                                  }
-                                />
-                              </div>
+                            <div className="relative">
+                              <input
+                                id={`external-port-${rule.localId}`}
+                                type="text"
+                                inputMode="numeric"
+                                placeholder="50022"
+                                className={`${getDetailInputClassName(isDark)} pr-12`}
+                                value={rule.externalPort}
+                                onChange={(event) =>
+                                  updateRule(
+                                    rule.localId,
+                                    "externalPort",
+                                    event.currentTarget.value
+                                  )
+                                }
+                              />
                               <ActionIcon
                                 type="button"
-                                variant="light"
-                                size={36}
+                                variant="subtle"
+                                size={30}
                                 onClick={() => handleGeneratePort(rule.localId)}
                                 loading={randomizingRuleId === rule.localId}
                                 aria-label="Generate random external port"
-                                className={
+                                className={`!absolute right-1.5 top-1/2 -translate-y-1/2 ${
                                   isDark
-                                    ? "mb-0.5 !border-zinc-700 !bg-zinc-800 !text-blue-200 hover:!bg-zinc-700"
-                                    : "mb-0.5 !border-blue-300 !bg-blue-100 !text-blue-700 hover:!bg-blue-200"
-                                }
+                                    ? "!text-zinc-400 hover:!bg-zinc-800 hover:!text-blue-200"
+                                    : "!text-zinc-500 hover:!bg-zinc-100 hover:!text-blue-700"
+                                }`}
                               >
                                 <IconRefresh size={18} />
                               </ActionIcon>

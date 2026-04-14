@@ -26,7 +26,8 @@ async def init_db():
                 in_bytes INTEGER NOT NULL,
                 out_bytes INTEGER NOT NULL,
                 drop_bytes INTEGER NOT NULL DEFAULT 0,
-                blocked_ips TEXT NOT NULL DEFAULT '[]'
+                blocked_ips TEXT NOT NULL DEFAULT '[]',
+                incoming_ips TEXT NOT NULL DEFAULT '[]'
             )
             """
         )
@@ -41,6 +42,10 @@ async def init_db():
         if "blocked_ips" not in traffic_buffer_columns:
             await db.execute(
                 "ALTER TABLE traffic_buffer ADD COLUMN blocked_ips TEXT NOT NULL DEFAULT '[]'"
+            )
+        if "incoming_ips" not in traffic_buffer_columns:
+            await db.execute(
+                "ALTER TABLE traffic_buffer ADD COLUMN incoming_ips TEXT NOT NULL DEFAULT '[]'"
             )
 
         await db.execute(

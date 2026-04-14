@@ -29,8 +29,9 @@ async def snapshot(data: TrafficSnapshotRequest):
                 "out_bytes": out_bytes,
                 "drop_bytes": drop_bytes,
                 "blocked_ips": blocked_ips,
+                "incoming_ips": incoming_ips,
             }
-            for ts, in_bytes, out_bytes, drop_bytes, blocked_ips in stat["history"]
+            for ts, in_bytes, out_bytes, drop_bytes, blocked_ips, incoming_ips in stat["history"]
             if ts >= cutoff
         ]
 
@@ -53,7 +54,7 @@ async def ws_traffic(ws: WebSocket):
                 if not stat["history"]:
                     continue
 
-                ts, in_bytes, out_bytes, drop_bytes, blocked_ips = stat["history"][-1]
+                ts, in_bytes, out_bytes, drop_bytes, blocked_ips, incoming_ips = stat["history"][-1]
                 if ts < cutoff:
                     continue
 
@@ -63,6 +64,7 @@ async def ws_traffic(ws: WebSocket):
                     "out_bytes": out_bytes,
                     "drop_bytes": drop_bytes,
                     "blocked_ips": blocked_ips,
+                    "incoming_ips": incoming_ips,
                 }
 
             if payload:
