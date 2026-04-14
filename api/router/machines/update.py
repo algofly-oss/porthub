@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Request
 
 from shared.factory import db
+from shared.firewall_client import sync_machine_connection_firewall_policies
 from shared.rathole_config import rebuild_server_toml
 from shared.sockets import (
     emit_machine_config_changed,
@@ -126,6 +127,11 @@ async def update_machine(data: Machine, request: Request):
     if rathole_fields_changed:
         await rebuild_server_toml(allow_empty=True)
         await emit_machine_config_changed(str(updated_machine["_id"]))
+
+    if previous_serialized_machine.get("enabled", True) != updated_serialized_machine.get(
+        "enabled", True
+    ):
+        await sync_machine_connection_firewall_policies(updated_machine["_id"])
 
     return {
         "msg": "Machine updated successfully",

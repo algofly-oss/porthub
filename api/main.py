@@ -11,15 +11,18 @@ from shared.rathole_config import (
     is_dummy_only_config,
     rebuild_server_toml,
 )
+from shared.firewall_client import reconcile_firewall_state_from_db
 from shared.sockets import initialize_machine_status_cache, monitor_machine_statuses, sio
 
 API_ROOT = "/api"
 logger = logging.getLogger(__name__)
 STARTUP_REBUILD_DELAYS_SECONDS = (0, 2, 5, 10, 20)
 POST_STARTUP_REBUILD_DELAYS_SECONDS = (30, 60, 120)
+FIREWALL_RECONCILE_DELAYS_SECONDS = (0, 2, 5, 10, 20)
 retry_task = None
 machine_status_monitor_task = None
 machine_status_monitor_stop_event = None
+firewall_reconcile_task = None
 
 
 class QuietMachineClientAccessFilter(logging.Filter):
@@ -120,8 +123,29 @@ async def retry_rathole_config_rebuild() -> None:
         )
 
 
+async def reconcile_firewall_state_with_retries() -> None:
+    for attempt, delay_seconds in enumerate(FIREWALL_RECONCILE_DELAYS_SECONDS, start=1):
+        if delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)
+
+        try:
+            await reconcile_firewall_state_from_db()
+            logger.warning(
+                "Firewall state reconciled from Mongo during startup attempt %s",
+                attempt,
+            )
+            return
+        except Exception:
+            logger.exception(
+                "Failed to reconcile firewall state during startup attempt %s",
+                attempt,
+            )
+
+    logger.warning("Firewall state reconciliation did not complete during startup retries")
+
+
 async def handle_startup() -> None:
-    global retry_task, machine_status_monitor_task, machine_status_monitor_stop_event
+    global retry_task, machine_status_monitor_task, machine_status_monitor_stop_event, firewall_reconcile_task
     rebuilt = await attempt_rathole_config_rebuild(
         context="startup",
         delays=STARTUP_REBUILD_DELAYS_SECONDS,
@@ -138,13 +162,18 @@ async def handle_startup() -> None:
     machine_status_monitor_task = asyncio.create_task(
         monitor_machine_statuses(machine_status_monitor_stop_event)
     )
+    firewall_reconcile_task = asyncio.create_task(reconcile_firewall_state_with_retries())
 
 
 async def handle_shutdown() -> None:
-    global retry_task, machine_status_monitor_task, machine_status_monitor_stop_event
+    global retry_task, machine_status_monitor_task, machine_status_monitor_stop_event, firewall_reconcile_task
     if retry_task is not None:
         retry_task.cancel()
         retry_task = None
+
+    if firewall_reconcile_task is not None:
+        firewall_reconcile_task.cancel()
+        firewall_reconcile_task = None
 
     if machine_status_monitor_stop_event is not None:
         machine_status_monitor_stop_event.set()

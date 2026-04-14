@@ -2,6 +2,7 @@ import pydantic
 from fastapi import APIRouter, HTTPException, Request
 
 from shared.factory import db
+from shared.firewall_client import delete_machine_connection_firewall_policies
 from shared.rathole_config import rebuild_server_toml
 from shared.sockets import disconnect_machine_clients
 from ..common import get_authenticated_user, parse_object_id, serialize_machine
@@ -26,6 +27,7 @@ async def delete_machine(data: DeleteMachine, request: Request):
     if not machine:
         raise HTTPException(status_code=400, detail="Machine not found")
 
+    await delete_machine_connection_firewall_policies(machine["_id"])
     await db.connections.delete_many({"machine_id": machine["_id"]})
     await db.machines.delete_one({"_id": machine["_id"]})
     await rebuild_server_toml(allow_empty=True)
