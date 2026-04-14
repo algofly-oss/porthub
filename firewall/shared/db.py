@@ -24,10 +24,24 @@ async def init_db():
                 port INTEGER NOT NULL,
                 ts INTEGER NOT NULL,
                 in_bytes INTEGER NOT NULL,
-                out_bytes INTEGER NOT NULL
+                out_bytes INTEGER NOT NULL,
+                drop_bytes INTEGER NOT NULL DEFAULT 0,
+                blocked_ips TEXT NOT NULL DEFAULT '[]'
             )
             """
         )
+
+        cursor = await db.execute("PRAGMA table_info(traffic_buffer)")
+        traffic_buffer_columns = {row[1] for row in await cursor.fetchall()}
+        await cursor.close()
+        if "drop_bytes" not in traffic_buffer_columns:
+            await db.execute(
+                "ALTER TABLE traffic_buffer ADD COLUMN drop_bytes INTEGER NOT NULL DEFAULT 0"
+            )
+        if "blocked_ips" not in traffic_buffer_columns:
+            await db.execute(
+                "ALTER TABLE traffic_buffer ADD COLUMN blocked_ips TEXT NOT NULL DEFAULT '[]'"
+            )
 
         await db.execute(
             """

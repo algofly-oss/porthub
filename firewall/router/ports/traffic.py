@@ -23,8 +23,14 @@ async def snapshot(data: TrafficSnapshotRequest):
             continue
 
         response[port] = [
-            {"timestamp": ts, "in_bytes": in_bytes, "out_bytes": out_bytes}
-            for ts, in_bytes, out_bytes in stat["history"]
+            {
+                "timestamp": ts,
+                "in_bytes": in_bytes,
+                "out_bytes": out_bytes,
+                "drop_bytes": drop_bytes,
+                "blocked_ips": blocked_ips,
+            }
+            for ts, in_bytes, out_bytes, drop_bytes, blocked_ips in stat["history"]
             if ts >= cutoff
         ]
 
@@ -47,7 +53,7 @@ async def ws_traffic(ws: WebSocket):
                 if not stat["history"]:
                     continue
 
-                ts, in_bytes, out_bytes = stat["history"][-1]
+                ts, in_bytes, out_bytes, drop_bytes, blocked_ips = stat["history"][-1]
                 if ts < cutoff:
                     continue
 
@@ -55,6 +61,8 @@ async def ws_traffic(ws: WebSocket):
                     "timestamp": ts,
                     "in_bytes": in_bytes,
                     "out_bytes": out_bytes,
+                    "drop_bytes": drop_bytes,
+                    "blocked_ips": blocked_ips,
                 }
 
             if payload:

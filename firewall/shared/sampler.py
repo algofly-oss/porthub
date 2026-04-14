@@ -45,9 +45,9 @@ async def traffic_loop():
                 delta = max(0, bytes_value - stat["last_in"])
                 stat["last_in"] = bytes_value
                 if delta > 0:
-                    stat["history"].append((now, delta, 0))
+                    stat["history"].append((now, delta, 0, 0, []))
                     ACTIVE_PORTS[port] = now
-                    pending.append((port, now, delta, 0))
+                    pending.append((port, now, delta, 0, 0, "[]"))
                 continue
 
             if name.startswith("cnt_out_"):
@@ -56,9 +56,25 @@ async def traffic_loop():
                 delta = max(0, bytes_value - stat["last_out"])
                 stat["last_out"] = bytes_value
                 if delta > 0:
-                    stat["history"].append((now, 0, delta))
+                    stat["history"].append((now, 0, delta, 0, []))
                     ACTIVE_PORTS[port] = now
-                    pending.append((port, now, 0, delta))
+                    pending.append((port, now, 0, delta, 0, "[]"))
+                continue
+
+            if name.startswith("cnt_drop_"):
+                port = int(name.split("_")[-1])
+                stat = PORT_STATS[port]
+                delta = max(0, bytes_value - stat["last_drop"])
+                stat["last_drop"] = bytes_value
+                if delta > 0:
+                    blocked_ips = [
+                        str(item["ip"])
+                        for item in list_blocked_source_ip_hits(port)
+                        if int(item["last_seen"]) >= now - 2
+                    ]
+                    stat["history"].append((now, 0, 0, delta, blocked_ips))
+                    ACTIVE_PORTS[port] = now
+                    pending.append((port, now, 0, 0, delta, json.dumps(blocked_ips)))
 
         cleanup_ports(now)
         await asyncio.sleep(1)
@@ -71,10 +87,10 @@ def cleanup_ports(now: int) -> None:
             PORT_STATS.pop(port, None)
 
 
-def list_recent_source_ip_hits(port: int) -> list[dict[str, int | str]]:
+def _list_source_ip_hits_for_set(set_name: str) -> list[dict[str, int | str]]:
     try:
         output = subprocess.check_output(
-            ["nft", "-j", "list", "set", *NFT_TABLE.split(), f"recent_{port}"],
+            ["nft", "-j", "list", "set", *NFT_TABLE.split(), set_name],
             text=True,
             stderr=subprocess.DEVNULL,
         )
@@ -135,6 +151,14 @@ def list_recent_source_ip_hits(port: int) -> list[dict[str, int | str]]:
     return seen
 
 
+def list_recent_source_ip_hits(port: int) -> list[dict[str, int | str]]:
+    return _list_source_ip_hits_for_set(f"recent_{port}")
+
+
+def list_blocked_source_ip_hits(port: int) -> list[dict[str, int | str]]:
+    return _list_source_ip_hits_for_set(f"blocked_{port}")
+
+
 def list_recent_source_ips(port: int) -> list[str]:
     return [str(item["ip"]) for item in list_recent_source_ip_hits(port)]
 
@@ -164,7 +188,7 @@ async def db_writer():
         batch = pending[:]
         pending.clear()
         prune_before = int(time.time()) - BUFFER_SECONDS
-        tracked_ports = {port for port, _, _, _ in batch}
+        tracked_ports = {port for port, _, _, _, _, _ in batch}
         recent_hits = []
         for port in tracked_ports:
             for item in list_recent_source_ip_hits(port):
@@ -172,12 +196,15 @@ async def db_writer():
 
         async with aiosqlite.connect(DB_PATH) as db:
             await db.executemany(
-                "INSERT INTO traffic_buffer (port, ts, in_bytes, out_bytes) VALUES (?,?,?,?)",
+                """
+                INSERT INTO traffic_buffer (port, ts, in_bytes, out_bytes, drop_bytes, blocked_ips)
+                VALUES (?,?,?,?,?,?)
+                """,
                 batch,
             )
             await db.executemany(
                 "INSERT OR REPLACE INTO active_ports (port, last_seen) VALUES (?, ?)",
-                [(port, timestamp) for port, timestamp, _, _ in batch],
+                [(port, timestamp) for port, timestamp, _, _, _, _ in batch],
             )
             if recent_hits:
                 await db.executemany(

@@ -42,6 +42,12 @@ def build_rules(state: dict[str, dict]) -> str:
                     f"        elements = {{ {ip_elements} }}",
                     "    }",
                     "",
+                    f"    set blocked_{port} {{",
+                    "        type ipv4_addr;",
+                    "        flags dynamic, timeout;",
+                    f"        timeout {RECENT_IP_TTL}s;",
+                    "    }",
+                    "",
                 ]
             )
             input_lines.append(
@@ -51,7 +57,7 @@ def build_rules(state: dict[str, dict]) -> str:
                 f'        tcp dport {port} ip saddr @allow_{port} counter name "cnt_in_{port}" accept'
             )
             input_lines.append(
-                f'        tcp dport {port} ct state new counter name "cnt_drop_{port}" drop'
+                f'        tcp dport {port} ct state new update @blocked_{port} {{ ip saddr timeout {RECENT_IP_TTL}s }} counter name "cnt_drop_{port}" drop'
             )
         else:
             input_lines.append(
