@@ -32,9 +32,13 @@ import {
 } from "@tabler/icons-react";
 import axios from "axios";
 import apiRoutes from "@/shared/routes/apiRoutes";
+import uiRoutes from "@/shared/routes/uiRoutes";
 import useToast from "@/shared/hooks/useToast";
 import { SocketContext } from "@/shared/contexts/socket";
 import socketRoutes from "@/shared/routes/socketRoutes";
+import TrafficMonitorPanel, {
+  normalizeTrafficSamples,
+} from "./TrafficMonitorPanel";
 
 const getInputClassName = (isDark) =>
   `w-full rounded-md border px-3 py-2 text-sm outline-none transition-colors focus:!border-blue-500 focus:ring-0 ${
@@ -163,407 +167,6 @@ const formatRelativeUnixTimestamp = (value) => {
 
   const daysAgo = Math.floor(hoursAgo / 24);
   return daysAgo === 1 ? "1d ago" : `${daysAgo}d ago`;
-};
-
-const normalizeTrafficSamples = (samples) =>
-  (Array.isArray(samples) ? samples : [])
-    .map((sample) => ({
-      timestamp: Number(sample?.timestamp) || 0,
-      in_bytes: Math.max(0, Number(sample?.in_bytes) || 0),
-      out_bytes: Math.max(0, Number(sample?.out_bytes) || 0),
-      drop_bytes: Math.max(0, Number(sample?.drop_bytes) || 0),
-      blocked_ips: Array.isArray(sample?.blocked_ips)
-        ? sample.blocked_ips
-            .map((value) => String(value || "").trim())
-            .filter(Boolean)
-        : [],
-      incoming_ips: Array.isArray(sample?.incoming_ips)
-        ? sample.incoming_ips
-            .map((value) => String(value || "").trim())
-            .filter(Boolean)
-        : [],
-    }))
-    .filter((sample) => sample.timestamp > 0)
-    .sort((left, right) => left.timestamp - right.timestamp)
-    .slice(-60);
-
-const buildTrafficWindow = (samples, windowSeconds = 60) => {
-  const now = Math.floor(Date.now() / 1000);
-  const byTimestamp = new Map();
-  normalizeTrafficSamples(samples).forEach((sample) => {
-    const timestamp = Math.floor(sample.timestamp);
-    const current = byTimestamp.get(timestamp) || {
-      timestamp,
-      in_bytes: 0,
-      out_bytes: 0,
-      drop_bytes: 0,
-      blocked_ips: [],
-      incoming_ips: [],
-    };
-
-    byTimestamp.set(timestamp, {
-      timestamp,
-      in_bytes: current.in_bytes + sample.in_bytes,
-      out_bytes: current.out_bytes + sample.out_bytes,
-      drop_bytes: current.drop_bytes + sample.drop_bytes,
-      blocked_ips: [...new Set([...current.blocked_ips, ...sample.blocked_ips])],
-      incoming_ips: [...new Set([...current.incoming_ips, ...sample.incoming_ips])],
-    });
-  });
-
-  return Array.from({ length: windowSeconds }, (_, index) => {
-    const timestamp = now - (windowSeconds - 1 - index);
-    const existing = byTimestamp.get(timestamp);
-    return (
-      existing || {
-        timestamp,
-        in_bytes: 0,
-        out_bytes: 0,
-        drop_bytes: 0,
-        blocked_ips: [],
-        incoming_ips: [],
-      }
-    );
-  });
-};
-
-const formatTrafficRate = (value) => {
-  const normalized = Math.max(0, Number(value) || 0);
-  if (normalized >= 1024 * 1024) {
-    return `${(normalized / (1024 * 1024)).toFixed(normalized >= 10 * 1024 * 1024 ? 0 : 1)} MB/s`;
-  }
-  if (normalized >= 1024) {
-    return `${(normalized / 1024).toFixed(normalized >= 10 * 1024 ? 0 : 1)} KB/s`;
-  }
-  return `${Math.round(normalized)} B/s`;
-};
-
-const formatBlockedIpLabel = (ips) => {
-  const normalized = (Array.isArray(ips) ? ips : [])
-    .map((value) => String(value || "").trim())
-    .filter(Boolean);
-
-  if (normalized.length === 0) {
-    return "attempt";
-  }
-
-  if (normalized.length === 1) {
-    return normalized[0];
-  }
-
-  return `${normalized[0]} +${normalized.length - 1} other${
-    normalized.length - 1 === 1 ? "" : "s"
-  }`;
-};
-
-const formatIncomingIpLabel = (ips) => {
-  const normalized = (Array.isArray(ips) ? ips : [])
-    .map((value) => String(value || "").trim())
-    .filter(Boolean);
-
-  if (normalized.length === 0) {
-    return null;
-  }
-
-  if (normalized.length === 1) {
-    return normalized[0];
-  }
-
-  return `${normalized[0]} +${normalized.length - 1} other${
-    normalized.length - 1 === 1 ? "" : "s"
-  }`;
-};
-
-const getNearestBlockedSample = (samples, activeIndex) => {
-  if (!Array.isArray(samples) || samples.length === 0 || activeIndex === null) {
-    return null;
-  }
-
-  const maxDistance = 2;
-  for (let distance = 0; distance <= maxDistance; distance += 1) {
-    const offsets = distance === 0 ? [0] : [-distance, distance];
-    for (const offset of offsets) {
-      const candidate = samples[activeIndex + offset];
-      if (
-        candidate &&
-        Number(candidate.drop_bytes) > 0 &&
-        Array.isArray(candidate.blocked_ips) &&
-        candidate.blocked_ips.length > 0
-      ) {
-        return candidate;
-      }
-    }
-  }
-
-  return null;
-};
-
-const getNearestIncomingSample = (samples, activeIndex) => {
-  if (!Array.isArray(samples) || samples.length === 0 || activeIndex === null) {
-    return null;
-  }
-
-  const maxDistance = 2;
-  for (let distance = 0; distance <= maxDistance; distance += 1) {
-    const offsets = distance === 0 ? [0] : [-distance, distance];
-    for (const offset of offsets) {
-      const candidate = samples[activeIndex + offset];
-      if (
-        candidate &&
-        Number(candidate.in_bytes) > 0 &&
-        Array.isArray(candidate.incoming_ips) &&
-        candidate.incoming_ips.length > 0
-      ) {
-        return candidate;
-      }
-    }
-  }
-
-  return null;
-};
-
-const buildTrafficLinePath = (samples, valueKey, width, height, maxValue) => {
-  if (!samples.length || maxValue <= 0) {
-    return "";
-  }
-
-  const lastIndex = Math.max(1, samples.length - 1);
-  return samples
-    .map((sample, index) => {
-      const x = (index / lastIndex) * width;
-      const y = height - (Number(sample[valueKey]) / maxValue) * height;
-      return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
-    })
-    .join(" ");
-};
-
-const TrafficMonitor = ({ isDark, samples, isLoading }) => {
-  const chartWidth = 560;
-  const chartHeight = 132;
-  const [hoveredIndex, setHoveredIndex] = useState(null);
-  const normalizedSamples = normalizeTrafficSamples(samples);
-  const windowedSamples = buildTrafficWindow(samples);
-  const peakValue = windowedSamples.reduce(
-    (maxValue, sample) =>
-      Math.max(maxValue, sample.in_bytes, sample.out_bytes, sample.drop_bytes),
-    0
-  );
-  const chartMax = peakValue > 0 ? peakValue * 1.15 : 1;
-  const ingressPath = buildTrafficLinePath(
-    windowedSamples,
-    "in_bytes",
-    chartWidth,
-    chartHeight,
-    chartMax
-  );
-  const egressPath = buildTrafficLinePath(
-    windowedSamples,
-    "out_bytes",
-    chartWidth,
-    chartHeight,
-    chartMax
-  );
-  const blockedPath = buildTrafficLinePath(
-    windowedSamples,
-    "drop_bytes",
-    chartWidth,
-    chartHeight,
-    chartMax
-  );
-  const yAxisLabels = [chartMax, chartMax / 2, 0].map((value) => formatTrafficRate(value));
-  const activeIndex =
-    hoveredIndex !== null
-      ? Math.min(Math.max(hoveredIndex, 0), windowedSamples.length - 1)
-      : null;
-  const activeSample = activeIndex !== null ? windowedSamples[activeIndex] : null;
-  const incomingHoverSample = getNearestIncomingSample(windowedSamples, activeIndex);
-  const blockedHoverSample = getNearestBlockedSample(windowedSamples, activeIndex);
-  const activeX =
-    activeIndex !== null && windowedSamples.length > 1
-      ? (activeIndex / (windowedSamples.length - 1)) * chartWidth
-      : 0;
-
-  return (
-    <div
-      className={`rounded-lg border p-3 ${
-        isDark ? "border-zinc-800 bg-zinc-950/70" : "border-zinc-200 bg-zinc-50/80"
-      }`}
-    >
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <div>
-          <p className={`text-sm font-semibold ${isDark ? "text-zinc-100" : "text-zinc-900"}`}>
-            Traffic monitor
-          </p>
-          <p className="text-[11px] text-zinc-500">
-            Live incoming and outgoing traffic for this forwarded port
-          </p>
-        </div>
-        <div className="flex items-center gap-3 text-[11px] text-zinc-500">
-          <span className="inline-flex items-center gap-1.5">
-            <span className="h-2.5 w-2.5 rounded-full bg-emerald-400" />
-            Incoming
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            <span className="h-2.5 w-2.5 rounded-full bg-sky-400" />
-            Outgoing
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            <span className="h-2.5 w-2.5 rounded-full bg-rose-400" />
-            Blocked
-          </span>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-[auto_minmax(0,1fr)] gap-2">
-        <div className="flex h-[132px] flex-col justify-between pb-6 text-[10px] text-zinc-500">
-          {yAxisLabels.map((label) => (
-            <span key={label}>{label}</span>
-          ))}
-        </div>
-
-        <div>
-          <div className="relative h-[132px] w-full overflow-hidden rounded-md">
-            {activeSample ? (
-              <div
-                className={`pointer-events-none absolute left-2 top-2 z-10 rounded-md border px-2 py-1 text-[11px] shadow-md backdrop-blur-sm ${
-                  isDark
-                    ? "border-zinc-700 bg-zinc-950 text-zinc-100"
-                    : "border-zinc-200 bg-white text-zinc-900"
-                }`}
-              >
-                <div className="text-zinc-500">
-                  {Math.max(0, Math.floor(Date.now() / 1000) - activeSample.timestamp)}s ago
-                </div>
-                <div className="mt-0.5 flex items-center gap-3">
-                  <span className="inline-flex items-center gap-1.5">
-                    <span className="h-2 w-2 rounded-full bg-emerald-400" />
-                    In {formatTrafficRate(activeSample.in_bytes)}
-                  </span>
-                  <span className="inline-flex items-center gap-1.5">
-                    <span className="h-2 w-2 rounded-full bg-sky-400" />
-                    Out {formatTrafficRate(activeSample.out_bytes)}
-                  </span>
-                </div>
-                {incomingHoverSample ? (
-                  <div className="mt-1 inline-flex items-center gap-1.5">
-                    <span className="h-2 w-2 rounded-full bg-emerald-400" />
-                    <span>From {formatIncomingIpLabel(incomingHoverSample.incoming_ips)}</span>
-                  </div>
-                ) : null}
-                {blockedHoverSample ? (
-                  <div className="mt-1 inline-flex items-center gap-1.5">
-                    <span className="h-2 w-2 rounded-full bg-rose-400" />
-                    <span>Blocked {formatBlockedIpLabel(blockedHoverSample.blocked_ips)}</span>
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-            <svg
-              viewBox={`0 0 ${chartWidth} ${chartHeight}`}
-              preserveAspectRatio="none"
-              className="h-[132px] w-full"
-              onMouseLeave={() => setHoveredIndex(null)}
-              onMouseMove={(event) => {
-                const bounds = event.currentTarget.getBoundingClientRect();
-                if (!bounds.width || windowedSamples.length <= 1) {
-                  return;
-                }
-                const x = Math.min(Math.max(event.clientX - bounds.left, 0), bounds.width);
-                const nextIndex = Math.round((x / bounds.width) * (windowedSamples.length - 1));
-                setHoveredIndex(nextIndex);
-              }}
-            >
-              {[0, 0.5, 1].map((ratio) => (
-                <line
-                  key={ratio}
-                  x1="0"
-                  x2={chartWidth}
-                  y1={chartHeight * ratio}
-                  y2={chartHeight * ratio}
-                  stroke={isDark ? "rgba(63,63,70,0.65)" : "rgba(228,228,231,1)"}
-                  strokeDasharray="4 4"
-                  strokeWidth="1"
-                />
-              ))}
-              {ingressPath ? (
-                <path
-                  d={ingressPath}
-                  fill="none"
-                  stroke="rgb(52, 211, 153)"
-                  strokeWidth="2.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              ) : null}
-              {egressPath ? (
-                <path
-                  d={egressPath}
-                  fill="none"
-                  stroke="rgb(56, 189, 248)"
-                  strokeWidth="2.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              ) : null}
-              {blockedPath ? (
-                <path
-                  d={blockedPath}
-                  fill="none"
-                  stroke="rgb(251, 113, 133)"
-                  strokeWidth="2.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              ) : null}
-              {activeSample ? (
-                <>
-                  <line
-                    x1={activeX}
-                    x2={activeX}
-                    y1="0"
-                    y2={chartHeight}
-                    stroke={isDark ? "rgba(244,244,245,0.22)" : "rgba(24,24,27,0.15)"}
-                    strokeDasharray="4 4"
-                    strokeWidth="1"
-                  />
-                  <circle
-                    cx={activeX}
-                    cy={chartHeight - (activeSample.in_bytes / chartMax) * chartHeight}
-                    r="3.5"
-                    fill="rgb(52, 211, 153)"
-                  />
-                  <circle
-                    cx={activeX}
-                    cy={chartHeight - (activeSample.out_bytes / chartMax) * chartHeight}
-                    r="3.5"
-                    fill="rgb(56, 189, 248)"
-                  />
-                  <circle
-                    cx={activeX}
-                    cy={chartHeight - (activeSample.drop_bytes / chartMax) * chartHeight}
-                    r="3.5"
-                    fill="rgb(251, 113, 133)"
-                  />
-                </>
-              ) : null}
-            </svg>
-
-            {isLoading && !normalizedSamples.length ? (
-              <div className="absolute inset-0 flex items-center justify-center text-xs text-zinc-500">
-                Loading live traffic...
-              </div>
-            ) : null}
-          </div>
-
-          <div className="mt-2 flex items-center justify-between text-[10px] text-zinc-500">
-            <span>60s ago</span>
-            <span>30s ago</span>
-            <span>Now</span>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
 };
 
 const createRuleId = () =>
@@ -880,6 +483,22 @@ export default function HostConfigPopup({
   const clientHostnameValue = (host?.clientHostname || "").trim();
   const machineDetailsChanged =
     machineNameValue !== hostNameValue || machineHostnameValue !== hostHostnameValue;
+
+  const openTrafficMonitorWindow = (rule) => {
+    if (!rule?.dataId || typeof window === "undefined") {
+      return;
+    }
+
+    const nextUrl = uiRoutes.getTrafficMonitor({
+      dataId: rule.dataId,
+      hostName: host?.name || host?.hostname || host?.clientHostname || "",
+      hostDescription: host?.hostname || "",
+      localIp: host?.localIp || "",
+      serviceName: rule.serviceName || "",
+      externalPort: rule.externalPort || "",
+    });
+    window.open(nextUrl, "_blank", "noopener,noreferrer");
+  };
 
   useEffect(() => {
     if (rulesPage > totalRulePages) {
@@ -3008,10 +2627,11 @@ export default function HostConfigPopup({
                                 </Popover.Dropdown>
                               </Popover>
 
-                              <TrafficMonitor
+                              <TrafficMonitorPanel
                                 isDark={isDark}
                                 samples={trafficSamplesByRuleId[rule.localId] || []}
                                 isLoading={isLoadingTrafficSamples}
+                                onOpenExternal={() => openTrafficMonitorWindow(rule)}
                               />
                             </div>
                           </Collapse>

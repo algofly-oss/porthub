@@ -1,6 +1,171 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { BsCircleFill } from "react-icons/bs";
-import { IconClock, IconFolder } from "@tabler/icons-react";
+import { IconFolder } from "@tabler/icons-react";
+
+const normalizeMachineTrafficSamples = (samples) =>
+  (Array.isArray(samples) ? samples : [])
+    .map((sample) => ({
+      timestamp: Number(sample?.timestamp) || 0,
+      in_bytes: Math.max(0, Number(sample?.in_bytes) || 0),
+      out_bytes: Math.max(0, Number(sample?.out_bytes) || 0),
+      drop_bytes: Math.max(0, Number(sample?.drop_bytes) || 0),
+    }))
+    .filter((sample) => sample.timestamp > 0)
+    .sort((left, right) => left.timestamp - right.timestamp)
+    .slice(-30);
+
+const buildMiniTrafficWindow = (samples, windowSeconds = 30) => {
+  const now = Math.floor(Date.now() / 1000);
+  const byTimestamp = new Map();
+
+  normalizeMachineTrafficSamples(samples).forEach((sample) => {
+    const timestamp = Math.floor(sample.timestamp);
+    const current = byTimestamp.get(timestamp) || {
+      timestamp,
+      in_bytes: 0,
+      out_bytes: 0,
+      drop_bytes: 0,
+    };
+
+    byTimestamp.set(timestamp, {
+      timestamp,
+      in_bytes: current.in_bytes + sample.in_bytes,
+      out_bytes: current.out_bytes + sample.out_bytes,
+      drop_bytes: current.drop_bytes + sample.drop_bytes,
+    });
+  });
+
+  return Array.from({ length: windowSeconds }, (_, index) => {
+    const timestamp = now - (windowSeconds - 1 - index);
+    return (
+      byTimestamp.get(timestamp) || {
+        timestamp,
+        in_bytes: 0,
+        out_bytes: 0,
+        drop_bytes: 0,
+      }
+    );
+  });
+};
+
+const buildMiniTrafficPath = (samples, valueKey, width, height, maxValue) => {
+  if (!samples.length || maxValue <= 0) {
+    return "";
+  }
+
+  const lastIndex = Math.max(1, samples.length - 1);
+  const points = samples
+    .map((sample, index) => {
+      const x = (index / lastIndex) * width;
+      const y = height - (Number(sample[valueKey]) / maxValue) * height;
+      return { x, y };
+    })
+    .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
+
+  if (points.length === 0) {
+    return "";
+  }
+
+  if (points.length === 1) {
+    return `M ${points[0].x.toFixed(2)} ${points[0].y.toFixed(2)}`;
+  }
+
+  const path = [`M ${points[0].x.toFixed(2)} ${points[0].y.toFixed(2)}`];
+
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const current = points[index];
+    const next = points[index + 1];
+    const controlX = ((current.x + next.x) / 2).toFixed(2);
+
+    path.push(
+      `C ${controlX} ${current.y.toFixed(2)}, ${controlX} ${next.y.toFixed(2)}, ${next.x.toFixed(2)} ${next.y.toFixed(2)}`
+    );
+  }
+
+  return path.join(" ");
+};
+
+function MachineTrafficSparkline({ samples = [], isDark }) {
+  const chartWidth = 120;
+  const chartHeight = 28;
+  const windowedSamples = useMemo(() => buildMiniTrafficWindow(samples), [samples]);
+  const peakValue = windowedSamples.reduce(
+    (maxValue, sample) =>
+      Math.max(maxValue, sample.in_bytes, sample.out_bytes, sample.drop_bytes),
+    0
+  );
+  const chartMax = peakValue > 0 ? peakValue * 1.12 : 1;
+  const incomingPath = buildMiniTrafficPath(
+    windowedSamples,
+    "in_bytes",
+    chartWidth,
+    chartHeight,
+    chartMax
+  );
+  const outgoingPath = buildMiniTrafficPath(
+    windowedSamples,
+    "out_bytes",
+    chartWidth,
+    chartHeight,
+    chartMax
+  );
+  const blockedPath = buildMiniTrafficPath(
+    windowedSamples,
+    "drop_bytes",
+    chartWidth,
+    chartHeight,
+    chartMax
+  );
+
+  return (
+    <div className="px-1 py-1">
+      <svg
+        viewBox={`0 0 ${chartWidth} ${chartHeight}`}
+        preserveAspectRatio="none"
+        className="h-7 w-full"
+      >
+        <line
+          x1="0"
+          x2={chartWidth}
+          y1={chartHeight}
+          y2={chartHeight}
+          stroke={isDark ? "rgba(63,63,70,0.55)" : "rgba(228,228,231,1)"}
+          strokeWidth="1"
+        />
+        {incomingPath ? (
+          <path
+            d={incomingPath}
+            fill="none"
+            stroke="rgb(52, 211, 153)"
+            strokeWidth="1"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        ) : null}
+        {outgoingPath ? (
+          <path
+            d={outgoingPath}
+            fill="none"
+            stroke="rgb(56, 189, 248)"
+            strokeWidth="1"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        ) : null}
+        {blockedPath ? (
+          <path
+            d={blockedPath}
+            fill="none"
+            stroke="rgb(251, 113, 133)"
+            strokeWidth="1"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        ) : null}
+      </svg>
+    </div>
+  );
+}
 
 export default function HostItem({
   machineId,
@@ -21,6 +186,7 @@ export default function HostItem({
   showLastSeen = true,
   showStatus = true,
   numPorts,
+  trafficSamples = [],
   onClick,
 }) {
   const [isDragging, setIsDragging] = useState(false);
@@ -57,15 +223,15 @@ export default function HostItem({
         canDrag ? "cursor-grab active:cursor-grabbing" : ""
       } ${isDragging ? "opacity-60" : ""}`}
     >
-      <div
-        className={`grid gap-3 md:items-center ${
+        <div
+        className={`grid gap-4 md:items-center md:gap-4 ${
           showLastSeen
             ? showPublicIp
               ? "md:grid-cols-[minmax(0,1.3fr)_110px_minmax(0,0.85fr)_minmax(0,0.85fr)_120px_160px]"
             : showGroupColumn
                 ? showStatus
                   ? "md:grid-cols-[repeat(6,minmax(0,1fr))]"
-                  : "md:grid-cols-[minmax(0,1.45fr)_minmax(5.5rem,0.8fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(7rem,0.85fr)]"
+                  : "md:grid-cols-[minmax(0,1.2fr)_minmax(5.75rem,0.9fr)_minmax(8.5rem,1fr)_minmax(9.5rem,1fr)]"
                 : "md:grid-cols-[minmax(0,1.5fr)_110px_minmax(0,1fr)_120px_160px]"
             : showPublicIp
               ? "md:grid-cols-5"
@@ -125,10 +291,6 @@ export default function HostItem({
           {numPorts} ports
         </div>
 
-        <div className="text-xs font-mono text-zinc-500 dark:text-zinc-400">
-          {localIp || "Awaiting local IP"}
-        </div>
-
         {showGroupColumn ? (
           <div className="min-w-0">
             {labels.length > 0 ? (
@@ -153,16 +315,18 @@ export default function HostItem({
           </div>
         ) : null}
 
-        {showPublicIp ? (
-          <div className="text-xs font-mono text-zinc-500 dark:text-zinc-400">
-            {publicIp || "Awaiting public IP"}
+        {showGroupColumn ? (
+          <div className="min-w-0">
+            <MachineTrafficSparkline
+              samples={trafficSamples}
+              isDark={isDark}
+            />
           </div>
         ) : null}
 
-        {showLastSeen && showGroupColumn && !showPublicIp ? (
-          <div className="inline-flex items-center gap-1.5 pr-3 text-xs font-mono text-zinc-400 md:justify-self-end">
-            <IconClock size={12} stroke={1.8} />
-            <span>{lastSeen || "Never seen"}</span>
+        {showPublicIp ? (
+          <div className="text-xs font-mono text-zinc-500 dark:text-zinc-400">
+            {publicIp || "Awaiting public IP"}
           </div>
         ) : null}
 

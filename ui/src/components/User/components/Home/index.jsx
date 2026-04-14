@@ -80,6 +80,43 @@ const mapConnectionToForwardingConfig = (connection) => ({
   },
 });
 
+const normalizeMachineTrafficSample = (sample) => ({
+  timestamp: Number(sample?.timestamp) || 0,
+  in_bytes: Math.max(0, Number(sample?.in_bytes) || 0),
+  out_bytes: Math.max(0, Number(sample?.out_bytes) || 0),
+  drop_bytes: Math.max(0, Number(sample?.drop_bytes) || 0),
+});
+
+const mergeMachineTrafficSamples = (samples) => {
+  const byTimestamp = new Map();
+
+  (Array.isArray(samples) ? samples : []).forEach((sample) => {
+    const normalized = normalizeMachineTrafficSample(sample);
+    if (normalized.timestamp <= 0) {
+      return;
+    }
+
+    const timestamp = Math.floor(normalized.timestamp);
+    const current = byTimestamp.get(timestamp) || {
+      timestamp,
+      in_bytes: 0,
+      out_bytes: 0,
+      drop_bytes: 0,
+    };
+
+    byTimestamp.set(timestamp, {
+      timestamp,
+      in_bytes: current.in_bytes + normalized.in_bytes,
+      out_bytes: current.out_bytes + normalized.out_bytes,
+      drop_bytes: current.drop_bytes + normalized.drop_bytes,
+    });
+  });
+
+  return [...byTimestamp.values()]
+    .sort((left, right) => left.timestamp - right.timestamp)
+    .slice(-30);
+};
+
 const normalizeFirewallPolicy = (config) => {
   const allowedIps = Array.isArray(config?.firewall?.allowedIps)
     ? [...config.firewall.allowedIps]
@@ -225,6 +262,7 @@ export default function Home({ onStatsChange }) {
   const [machineGroups, setMachineGroups] = useState([]);
   const [isGroupsModalOpen, setIsGroupsModalOpen] = useState(false);
   const [lastSeenRefreshTick, setLastSeenRefreshTick] = useState(0);
+  const [machineTrafficByHostId, setMachineTrafficByHostId] = useState({});
   const { success, error } = useToast();
 
   const selectedHost = hosts.find((host) => host.id === selectedHostId) || null;
@@ -274,9 +312,13 @@ export default function Home({ onStatsChange }) {
   const totalPages = Math.max(1, Math.ceil(filteredHosts.length / numericPageSize));
   const visibleStart = filteredHosts.length === 0 ? 0 : (page - 1) * numericPageSize + 1;
   const visibleEnd = Math.min(page * numericPageSize, filteredHosts.length);
-  const paginatedHosts = filteredHosts.slice(
-    (page - 1) * numericPageSize,
-    page * numericPageSize
+  const paginatedHosts = useMemo(
+    () =>
+      filteredHosts.slice(
+        (page - 1) * numericPageSize,
+        page * numericPageSize
+      ),
+    [filteredHosts, numericPageSize, page]
   );
 
   useEffect(() => {
@@ -449,6 +491,84 @@ export default function Home({ onStatsChange }) {
       socket.off(socketRoutes.stcMachineStatusChanged, handleMachineStatusChanged);
     };
   }, [socket]);
+
+  useEffect(() => {
+    if (paginatedHosts.length === 0) {
+      setMachineTrafficByHostId({});
+      return;
+    }
+
+    const hostIdByConnectionId = {};
+    const dataIds = [];
+
+    paginatedHosts.forEach((host) => {
+      (host.forwardingConfigs || []).forEach((config) => {
+        if (!config.dataId) {
+          return;
+        }
+        hostIdByConnectionId[config.dataId] = host.id;
+        dataIds.push(config.dataId);
+      });
+    });
+
+    if (dataIds.length === 0) {
+      setMachineTrafficByHostId(
+        Object.fromEntries(paginatedHosts.map((host) => [host.id, []]))
+      );
+      return;
+    }
+
+    let isActive = true;
+
+    const loadMachineTraffic = async () => {
+      try {
+        const response = await axios.post(apiRoutes.trafficSnapshot, {
+          data_ids: dataIds,
+        });
+
+        if (!isActive) {
+          return;
+        }
+
+        const nextTrafficByHostId = Object.fromEntries(
+          paginatedHosts.map((host) => [host.id, []])
+        );
+
+        (Array.isArray(response.data?.data) ? response.data.data : []).forEach((item) => {
+          const connectionId = item?.connection?._id;
+          const hostId = hostIdByConnectionId[connectionId];
+          if (!hostId) {
+            return;
+          }
+
+          nextTrafficByHostId[hostId] = mergeMachineTrafficSamples([
+            ...(nextTrafficByHostId[hostId] || []),
+            ...(Array.isArray(item?.traffic) ? item.traffic : []),
+          ]);
+        });
+
+        setMachineTrafficByHostId(nextTrafficByHostId);
+      } catch {
+        if (!isActive) {
+          return;
+        }
+
+        setMachineTrafficByHostId((current) =>
+          Object.fromEntries(
+            paginatedHosts.map((host) => [host.id, current[host.id] || []])
+          )
+        );
+      }
+    };
+
+    loadMachineTraffic();
+    const intervalId = window.setInterval(loadMachineTraffic, 2000);
+
+    return () => {
+      isActive = false;
+      window.clearInterval(intervalId);
+    };
+  }, [paginatedHosts]);
 
   const handleOpenConfig = (hostId) => setSelectedHostId(hostId);
 
@@ -1084,12 +1204,11 @@ export default function Home({ onStatsChange }) {
                   </div>
 
                   <div className="overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-                    <div className="hidden border-b border-zinc-200 bg-zinc-50/80 py-3 pl-6 pr-6 text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-500 md:grid md:grid-cols-[minmax(0,1.45fr)_minmax(5.5rem,0.8fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(7rem,0.85fr)] md:items-center md:gap-3">
+                    <div className="hidden min-h-16 border-b border-zinc-200 bg-zinc-50/80 py-4 pl-6 pr-6 text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-500 md:grid md:grid-cols-[minmax(0,1.2fr)_minmax(5.75rem,0.9fr)_minmax(8.5rem,1fr)_minmax(9.5rem,1fr)] md:items-center md:gap-4">
                       <span>Machine</span>
                       <span className="text-center">Ports</span>
-                      <span>Local IP</span>
                       <span>Groups</span>
-                      <span className="pr-3 text-right">Last seen</span>
+                      <span>Traffic</span>
                     </div>
 
                     {paginatedHosts.length > 0 ? (
@@ -1117,6 +1236,7 @@ export default function Home({ onStatsChange }) {
                               showStatus={false}
                               showLastSeen
                               lastSeen={host.lastSeen}
+                              trafficSamples={machineTrafficByHostId[host.id] || []}
                               onClick={() => handleOpenConfig(host.id)}
                             />
                           ))}
@@ -1134,7 +1254,7 @@ export default function Home({ onStatsChange }) {
                     )}
 
                     {filteredHosts.length > 0 ? (
-                      <div className="flex flex-col gap-3 border-t border-zinc-200 px-5 py-4 dark:border-zinc-800 md:flex-row md:items-center md:justify-between">
+                      <div className="flex min-h-16 flex-col gap-3 border-t border-zinc-200 px-5 py-4 dark:border-zinc-800 md:flex-row md:items-center md:justify-between">
                         <p className="text-sm text-zinc-500 dark:text-zinc-400">
                           Showing {visibleStart} to {visibleEnd} of {filteredHosts.length} machines
                         </p>
