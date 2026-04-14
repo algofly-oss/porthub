@@ -662,15 +662,23 @@ export default function Home({ onStatsChange }) {
       const savedConfigs = forwardingConfigs
         .filter((config) => config.dataId && !configsToDelete.some((deleted) => deleted.dataId === config.dataId))
         .filter((config) => !configsToUpdate.some((updated) => updated.dataId === config.dataId))
-        .map((config) => ({
-          dataId: config.dataId,
-          serviceName: config.serviceName,
-          serviceDescription: config.serviceDescription,
-          internalIp: config.internalIp,
-          internalPort: Number(config.internalPort),
-          externalPort: Number(config.externalPort),
-          enabled: config.enabled,
-        }));
+        .map((config) => {
+          const normalizedFirewall = normalizeFirewallPolicy(config);
+
+          return {
+            dataId: config.dataId,
+            serviceName: config.serviceName,
+            serviceDescription: config.serviceDescription,
+            internalIp: config.internalIp,
+            internalPort: Number(config.internalPort),
+            externalPort: Number(config.externalPort),
+            enabled: config.enabled,
+            firewall: {
+              isPublic: normalizedFirewall.isPublic,
+              allowedIps: normalizedFirewall.allowedIps,
+            },
+          };
+        });
 
       for (const config of configsToUpdate) {
         const payload = {
