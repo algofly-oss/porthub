@@ -81,6 +81,7 @@ if API_SECRET_KEY is None:
 # Load env configuration
 API_ALGORITHM = os.environ.get("API_ALGORITHM", "HS256")
 API_COOKIES_EXPIRE_MINUTES = int(os.environ.get("API_COOKIES_EXPIRE_MINUTES", 43200))
+SESSION_COOKIE_NAME = os.environ.get("SESSION_COOKIE_NAME", "porthub_session")
 SIGNUP_DISABLED = _get_bool_env("SIGNUP_DISABLED", False)
 RATHOLE_PORT = int(os.environ.get("RATHOLE_PORT", 2334))
 MACHINE_ONLINE_TTL_SECONDS = int(os.environ.get("MACHINE_ONLINE_TTL_SECONDS", 300))

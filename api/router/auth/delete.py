@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Request, Response, HTTPException
 from shared.factory import db, redis
+from shared.env import SESSION_COOKIE_NAME
 import bcrypt
 from bson import ObjectId
 from .common import UserSigninDto
@@ -21,9 +22,9 @@ async def delete_account(user: UserSigninDto, request: Request, response: Respon
         await db.users.delete_one({"_id": ObjectId(username.get("_id"))})
 
         # delete session token
-        session_token = request.cookies.get("session_token", "")
+        session_token = request.cookies.get(SESSION_COOKIE_NAME, "")
         redis.delete(session_token)
-        response.delete_cookie(key="session_token")
+        response.delete_cookie(key=SESSION_COOKIE_NAME)
 
         return {"msg": "user deleted"}
 
