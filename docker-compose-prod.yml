@@ -10,6 +10,8 @@ services:
       - RATHOLE_SERVER_CONFIG_PATH=/runtime/rathole/server.toml
     env_file:
       - ./.env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./api:/app
       - rathole_config:/runtime/rathole
@@ -27,8 +29,6 @@ services:
       - ./.env
     environment:
       - BUILD_ENV=prod
-    # volumes:
-    #   - ./ui:/app
     restart: always
     depends_on:
       - api
@@ -65,9 +65,28 @@ services:
     depends_on:
       - api
 
+  firewall:
+    build:
+      context: ./firewall
+      dockerfile: Dockerfile
+    image: porthub_firewall_prod
+    container_name: porthub_firewall_prod
+    env_file:
+      - ./.env
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      - FW_DEBUG=False
+    volumes:
+      - firewall_state:/state
+    restart: always
+
 networks:
   porthub:
     name: porthub
 
 volumes:
   rathole_config:
+  firewall_state:

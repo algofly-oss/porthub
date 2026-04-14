@@ -25,6 +25,7 @@ import {
   IconFolder,
   IconPlus,
   IconRefresh,
+  IconShieldLock,
   IconTrash,
   IconUsers,
   IconX,
@@ -130,6 +131,40 @@ const formatCompactLastSeen = (value) => {
   return `${daysAgo}d ago`;
 };
 
+const formatRelativeUnixTimestamp = (value) => {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return "Unknown";
+  }
+
+  const secondsAgo = Math.max(0, Math.floor(Date.now() / 1000 - seconds));
+  if (secondsAgo <= 1) {
+    return "1s ago";
+  }
+  if (secondsAgo < 60) {
+    return `${secondsAgo}s ago`;
+  }
+
+  const minutesAgo = Math.floor(secondsAgo / 60);
+  if (minutesAgo === 1) {
+    return "1m ago";
+  }
+  if (minutesAgo < 60) {
+    return `${minutesAgo}m ago`;
+  }
+
+  const hoursAgo = Math.floor(minutesAgo / 60);
+  if (hoursAgo === 1) {
+    return "1h ago";
+  }
+  if (hoursAgo < 24) {
+    return `${hoursAgo}h ago`;
+  }
+
+  const daysAgo = Math.floor(hoursAgo / 24);
+  return daysAgo === 1 ? "1d ago" : `${daysAgo}d ago`;
+};
+
 const createRuleId = () =>
   `rule-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 
@@ -142,6 +177,10 @@ const createEmptyRule = (externalPort = "") => ({
   internalPort: "3000",
   externalPort: externalPort ? String(externalPort) : "",
   enabled: true,
+  firewall: {
+    isPublic: true,
+    allowedIps: [],
+  },
 });
 
 const mapRuleFromConfig = (config) => ({
@@ -153,7 +192,27 @@ const mapRuleFromConfig = (config) => ({
   internalPort: String(config.internalPort || 3000),
   externalPort: String(config.externalPort || 3000),
   enabled: config.enabled ?? true,
+  firewall: {
+    isPublic:
+      typeof config.firewall?.isPublic === "boolean"
+        ? config.firewall.isPublic
+        : typeof config.firewall?.is_public === "boolean"
+          ? config.firewall.is_public
+          : true,
+    allowedIps: Array.isArray(config.firewall?.allowedIps)
+      ? config.firewall.allowedIps
+      : Array.isArray(config.firewall?.allowed_ips)
+        ? config.firewall.allowed_ips
+        : [],
+  },
 });
+
+const normalizeAllowedIps = (values) =>
+  [...new Set(
+    (Array.isArray(values) ? values : [])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+  )].sort((left, right) => left.localeCompare(right));
 
 const isValidIpv4Address = (value) => {
   const normalized = (value || "").trim();
@@ -278,6 +337,12 @@ const normalizeRuleForCompare = (rule) => ({
   internalPort: Number(rule.internalPort) || 0,
   externalPort: Number(rule.externalPort) || 0,
   enabled: Boolean(rule.enabled),
+  firewall: {
+    isPublic:
+      rule.firewall?.isPublic !== false ||
+      normalizeAllowedIps(rule.firewall?.allowedIps).length === 0,
+    allowedIps: normalizeAllowedIps(rule.firewall?.allowedIps),
+  },
 });
 
 const rulesSnapshotKey = (rules) =>
@@ -341,11 +406,18 @@ export default function HostConfigPopup({
   const [machineDetails, setMachineDetails] = useState({ name: "", hostname: "" });
   const [machineDetailsErrors, setMachineDetailsErrors] = useState({});
   const [isSavingMachineDetails, setIsSavingMachineDetails] = useState(false);
+  const [showRuleAdvanced, setShowRuleAdvanced] = useState(false);
+  const [allowIpDraft, setAllowIpDraft] = useState("");
+  const [allowIpRecentHitsByRuleId, setAllowIpRecentHitsByRuleId] = useState({});
+  const [isLoadingAllowIpSuggestions, setIsLoadingAllowIpSuggestions] = useState(false);
+  const [isAllowIpPickerOpen, setIsAllowIpPickerOpen] = useState(false);
   const [debouncedRules] = useDebouncedValue(rules, 300);
   const initialRulesSnapshotRef = useRef("");
   const clientLogsContainerRef = useRef(null);
   const groupInputRef = useRef(null);
+  const allowIpInputRef = useRef(null);
   const previousHostIdRef = useRef(null);
+  const loadRecentHitsRef = useRef(null);
 
   const selectedRule = rules.find((rule) => rule.localId === selectedRuleId) || null;
   const hasUnsavedChanges =
@@ -448,6 +520,10 @@ export default function HostConfigPopup({
       setMachineDetails({ name: "", hostname: "" });
       setMachineDetailsErrors({});
       setIsSavingMachineDetails(false);
+      setShowRuleAdvanced(false);
+      setAllowIpDraft("");
+      setAllowIpRecentHitsByRuleId({});
+      setIsAllowIpPickerOpen(false);
       initialRulesSnapshotRef.current = "";
       return;
     }
@@ -486,6 +562,9 @@ export default function HostConfigPopup({
       setGroupQuery("");
       setEditingRuleSnapshot(null);
       setRulesPage(1);
+      setShowRuleAdvanced(false);
+      setAllowIpDraft("");
+      setIsAllowIpPickerOpen(false);
       return;
     }
 
@@ -502,6 +581,78 @@ export default function HostConfigPopup({
         : null
     );
   }, [host?.id, host?.forwardingConfigs, host?.name, host?.hostname, host?.clientHostname]);
+
+  useEffect(() => {
+    if (!selectedRule) {
+      setShowRuleAdvanced(false);
+      setAllowIpDraft("");
+      setIsAllowIpPickerOpen(false);
+      return;
+    }
+
+    setAllowIpDraft("");
+    setShowRuleAdvanced(
+      normalizeAllowedIps(selectedRule.firewall?.allowedIps).length > 0
+    );
+  }, [selectedRule?.localId]);
+
+  useEffect(() => {
+    if (!opened || !selectedRule?.dataId || (!showRuleAdvanced && !isAllowIpPickerOpen)) {
+      return;
+    }
+
+    let isActive = true;
+
+    const loadRecentHits = async ({ showLoading = false } = {}) => {
+      if (showLoading) {
+        setIsLoadingAllowIpSuggestions(true);
+      }
+
+      try {
+        const response = await axios.get(
+          apiRoutes.getConnectionRecentIpHits(selectedRule.dataId, 10)
+        );
+        if (!isActive) {
+          return;
+        }
+
+        setAllowIpRecentHitsByRuleId((current) => ({
+          ...current,
+          [selectedRule.localId]: response.data?.data || [],
+        }));
+      } catch {
+        if (!isActive) {
+          return;
+        }
+        setAllowIpRecentHitsByRuleId((current) => ({
+          ...current,
+          [selectedRule.localId]: current[selectedRule.localId] || [],
+        }));
+      } finally {
+        if (isActive) {
+          setIsLoadingAllowIpSuggestions(false);
+        }
+      }
+    };
+    loadRecentHitsRef.current = loadRecentHits;
+
+    loadRecentHits({ showLoading: true });
+    const intervalId = window.setInterval(() => {
+      loadRecentHits();
+    }, 5000);
+
+    return () => {
+      isActive = false;
+      window.clearInterval(intervalId);
+      loadRecentHitsRef.current = null;
+    };
+  }, [
+    opened,
+    selectedRule?.dataId,
+    selectedRule?.localId,
+    showRuleAdvanced,
+    isAllowIpPickerOpen,
+  ]);
 
   useEffect(() => {
     if (!opened || !host?.id) {
@@ -822,6 +973,67 @@ export default function HostConfigPopup({
           ...currentErrors[localId],
           [field]: null,
         },
+      };
+    });
+  };
+
+  const updateRuleFirewall = (localId, updater) => {
+    setRules((currentRules) =>
+      currentRules.map((rule) => {
+        if (rule.localId !== localId) {
+          return rule;
+        }
+
+        const currentFirewall = {
+          isPublic: rule.firewall?.isPublic ?? true,
+          allowedIps: normalizeAllowedIps(rule.firewall?.allowedIps),
+        };
+        const nextFirewall = updater(currentFirewall);
+        const normalizedAllowedIps = normalizeAllowedIps(nextFirewall.allowedIps);
+
+        return {
+          ...rule,
+          firewall: {
+            isPublic:
+              typeof nextFirewall.isPublic === "boolean"
+                ? nextFirewall.isPublic
+                : normalizedAllowedIps.length === 0,
+            allowedIps:
+              (typeof nextFirewall.isPublic === "boolean"
+                ? nextFirewall.isPublic
+                : normalizedAllowedIps.length === 0)
+                ? []
+                : normalizedAllowedIps,
+          },
+        };
+      })
+    );
+  };
+
+  const addAllowedIpToRule = (localId, value) => {
+    const normalized = String(value || "").trim();
+    if (!isValidIpv4Address(normalized)) {
+      error("Use a valid IPv4 address");
+      return false;
+    }
+
+    updateRuleFirewall(localId, (currentFirewall) => ({
+      isPublic: false,
+      allowedIps: [...currentFirewall.allowedIps, normalized],
+    }));
+    setAllowIpDraft("");
+    setIsAllowIpPickerOpen(false);
+    return true;
+  };
+
+  const removeAllowedIpFromRule = (localId, value) => {
+    updateRuleFirewall(localId, (currentFirewall) => {
+      const nextAllowedIps = normalizeAllowedIps(currentFirewall.allowedIps).filter(
+        (item) => item !== value
+      );
+      return {
+        isPublic: nextAllowedIps.length === 0,
+        allowedIps: nextAllowedIps,
       };
     });
   };
@@ -1183,6 +1395,11 @@ export default function HostConfigPopup({
       internalPort: Number(rule.internalPort),
       externalPort: Number(rule.externalPort),
       enabled: rule.enabled,
+      firewall: {
+        isPublic:
+          normalizeAllowedIps(rule.firewall?.allowedIps).length === 0,
+        allowedIps: normalizeAllowedIps(rule.firewall?.allowedIps),
+      },
     }));
 
     const saved = await onSave(host.id, payload);
@@ -1953,6 +2170,13 @@ export default function HostConfigPopup({
                 const rule = selectedRule;
                 const ruleErrors = errorsByRuleId[rule.localId] || {};
                 const availability = availabilityByRuleId[rule.localId];
+                const allowedIps = normalizeAllowedIps(rule.firewall?.allowedIps);
+                const recentIpHits = allowIpRecentHitsByRuleId[rule.localId] || [];
+                const filteredRecentIpHits = recentIpHits.filter(
+                  (item) =>
+                    !allowedIps.includes(item.ip) &&
+                    (!allowIpDraft.trim() || item.ip.includes(allowIpDraft.trim()))
+                );
 
                 return (
                   <>
@@ -2002,7 +2226,7 @@ export default function HostConfigPopup({
                             id={`service-name-${rule.localId}`}
                             type="text"
                             placeholder="SSH"
-                            className={getInputClassName(isDark)}
+                            className={getDetailInputClassName(isDark)}
                             value={rule.serviceName}
                             onChange={(event) =>
                               updateRule(
@@ -2030,7 +2254,7 @@ export default function HostConfigPopup({
                             id={`service-description-${rule.localId}`}
                             placeholder="Secure access to this host over SSH"
                             rows={3}
-                            className={`${getInputClassName(isDark)} resize-y`}
+                            className={`${getDetailInputClassName(isDark)} resize-y`}
                             value={rule.serviceDescription}
                             onChange={(event) =>
                               updateRule(
@@ -2055,7 +2279,7 @@ export default function HostConfigPopup({
                               type="text"
                               spellCheck={false}
                               placeholder="0.0.0.0 or app.local"
-                              className={getInputClassName(isDark)}
+                              className={getDetailInputClassName(isDark)}
                               value={rule.internalIp}
                               onChange={(event) =>
                                 updateRule(
@@ -2084,7 +2308,7 @@ export default function HostConfigPopup({
                               type="text"
                               inputMode="numeric"
                               placeholder="22"
-                              className={getInputClassName(isDark)}
+                              className={getDetailInputClassName(isDark)}
                               value={rule.internalPort}
                               onChange={(event) =>
                                 updateRule(
@@ -2115,7 +2339,7 @@ export default function HostConfigPopup({
                                   type="text"
                                   inputMode="numeric"
                                   placeholder="50022"
-                                  className={getInputClassName(isDark)}
+                                  className={getDetailInputClassName(isDark)}
                                   value={rule.externalPort}
                                   onChange={(event) =>
                                     updateRule(
@@ -2157,33 +2381,181 @@ export default function HostConfigPopup({
                           </div>
                         </div>
 
-                        <Text
-                          size="xs"
-                          className={isDark ? "!text-zinc-400" : "!text-zinc-500"}
+                        <div
+                          className={`rounded-lg border ${
+                            isDark
+                              ? "border-zinc-700 bg-zinc-900/60"
+                              : "border-zinc-200 bg-white"
+                          }`}
                         >
-                          External ports must be unique across all configured
-                          services.
-                        </Text>
+                          <button
+                            type="button"
+                            onClick={() => setShowRuleAdvanced((current) => !current)}
+                            className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left"
+                          >
+                            <span className="inline-flex items-center gap-2 text-sm font-medium">
+                              <IconShieldLock size={16} />
+                              Advanced
+                            </span>
+                            {showRuleAdvanced ? (
+                              <IconChevronUp size={16} />
+                            ) : (
+                              <IconChevronDown size={16} />
+                            )}
+                          </button>
 
-                        <Switch
-                          label="Enable forwarding rule"
-                          checked={rule.enabled}
-                          onChange={(event) =>
-                            updateRule(
-                              rule.localId,
-                              "enabled",
-                              event.currentTarget.checked
-                            )
-                          }
-                          classNames={{
-                            label: isDark
-                              ? "!text-zinc-100"
-                              : "!text-zinc-900",
-                            track: isDark
-                              ? "!border-zinc-700"
-                              : "!border-zinc-300",
-                          }}
-                        />
+                          <Collapse in={showRuleAdvanced}>
+                            <div className="space-y-3 border-t px-3 pb-3 pt-2 dark:border-zinc-800">
+                              <p className="text-xs text-zinc-500">
+                                Add allowed source IPs to restrict public access for this
+                                port. Leave the list empty to keep the service publicly
+                                reachable without IP filtering.
+                              </p>
+
+                              <Popover
+                                opened={isAllowIpPickerOpen}
+                                onChange={setIsAllowIpPickerOpen}
+                                position="bottom-start"
+                                offset={4}
+                                width="target"
+                                withinPortal
+                                shadow="md"
+                              >
+                                <Popover.Target>
+                                  <div
+                                    onClick={() => {
+                                      setIsAllowIpPickerOpen(true);
+                                      allowIpInputRef.current?.focus();
+                                      loadRecentHitsRef.current?.({ showLoading: true });
+                                    }}
+                                    className={`flex min-h-[2.7rem] w-full items-center justify-between gap-3 rounded-md border px-3 py-2 text-left transition ${
+                                      isDark
+                                        ? "border-zinc-700 bg-zinc-950 text-zinc-100"
+                                        : "border-zinc-200 bg-white text-zinc-900"
+                                    }`}
+                                  >
+                                    <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+                                      {allowedIps.map((ip) => (
+                                        <span
+                                          key={ip}
+                                          className={`inline-flex max-w-full items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium ${
+                                            isDark
+                                              ? "border-blue-500/25 bg-blue-500/10 text-blue-100"
+                                              : "border-blue-200 bg-blue-50 text-blue-900"
+                                          }`}
+                                        >
+                                          <span className="truncate">{ip}</span>
+                                          <ActionIcon
+                                            type="button"
+                                            size="xs"
+                                            radius="xl"
+                                            variant="subtle"
+                                            aria-label={`Remove ${ip}`}
+                                        onClick={(event) => {
+                                          event.preventDefault();
+                                          event.stopPropagation();
+                                          removeAllowedIpFromRule(rule.localId, ip);
+                                          loadRecentHitsRef.current?.();
+                                        }}
+                                            className={
+                                              isDark
+                                                ? "!h-4 !w-4 !text-blue-200 hover:!bg-blue-400/15"
+                                                : "!h-4 !w-4 !text-blue-700 hover:!bg-blue-100"
+                                            }
+                                          >
+                                            <IconX size={11} stroke={2} />
+                                          </ActionIcon>
+                                        </span>
+                                      ))}
+                                      <input
+                                        ref={allowIpInputRef}
+                                        type="text"
+                                        value={allowIpDraft}
+                                        onFocus={() => setIsAllowIpPickerOpen(true)}
+                                        onChange={(event) => {
+                                          setAllowIpDraft(event.currentTarget.value);
+                                          setIsAllowIpPickerOpen(true);
+                                        }}
+                                        onKeyDown={(event) => {
+                                          if (event.key === "Enter" || event.key === ",") {
+                                            event.preventDefault();
+                                            if (!allowIpDraft.trim()) {
+                                              return;
+                                            }
+                                            addAllowedIpToRule(rule.localId, allowIpDraft);
+                                          }
+
+                                          if (event.key === "Escape") {
+                                            setIsAllowIpPickerOpen(false);
+                                          }
+                                        }}
+                                        placeholder="Type IP and press Enter"
+                                        className={`min-w-[9rem] flex-1 appearance-none border-0 bg-transparent p-0 text-sm shadow-none outline-none ring-0 placeholder:text-xs focus:border-0 focus:outline-none focus:ring-0 ${
+                                          isDark
+                                            ? "text-zinc-100 placeholder:text-zinc-500"
+                                            : "text-zinc-900 placeholder:text-zinc-400"
+                                        }`}
+                                      />
+                                    </div>
+                                    <IconChevronDown
+                                      size={16}
+                                      className={isDark ? "text-zinc-500" : "text-zinc-400"}
+                                    />
+                                  </div>
+                                </Popover.Target>
+
+                                <Popover.Dropdown
+                                  className={
+                                    isDark
+                                      ? "!border-zinc-700 !bg-zinc-950 !p-1.5"
+                                      : "!border-zinc-200 !bg-white !p-1.5"
+                                  }
+                                >
+                                  <div className="mb-1 px-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500">
+                                    Recent source IPs
+                                  </div>
+                                  {isLoadingAllowIpSuggestions ? (
+                                    <div className="px-2 py-2 text-sm text-zinc-500">
+                                      Loading recent hits...
+                                    </div>
+                                  ) : filteredRecentIpHits.length === 0 ? (
+                                    <div className="px-2 py-2 text-sm text-zinc-500">
+                                      No recent IP suggestions yet.
+                                    </div>
+                                  ) : (
+                                    <div className="flex max-h-56 flex-col gap-0.5 overflow-y-auto">
+                                      {filteredRecentIpHits.slice(0, 10).map((item) => (
+                                        <button
+                                          key={item.ip}
+                                          type="button"
+                                          onClick={() => addAllowedIpToRule(rule.localId, item.ip)}
+                                          className={`flex w-full items-center justify-between rounded-lg border px-3 py-1.5 text-left text-sm transition ${
+                                            isDark
+                                              ? "border-zinc-800 bg-transparent text-zinc-100 hover:border-blue-500/30 hover:bg-blue-500/10 hover:text-blue-100"
+                                              : "border-zinc-200 bg-white text-zinc-900 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-900"
+                                          }`}
+                                        >
+                                          <span className="truncate font-medium">
+                                            {item.ip}
+                                          </span>
+                                          <span className="text-xs text-zinc-500">
+                                            {formatRelativeUnixTimestamp(item.last_seen)}
+                                          </span>
+                                        </button>
+                                      ))}
+                                    </div>
+                                  )}
+                                </Popover.Dropdown>
+                              </Popover>
+
+                              <p className="text-[11px] text-zinc-500">
+                                Enter adds an IP to the allow list. Selecting a recent hit
+                                does the same. Removing all tags returns the port to public
+                                access without firewall filtering.
+                              </p>
+                            </div>
+                          </Collapse>
+                        </div>
                       </div>
                     </div>
                   </>
@@ -2223,18 +2595,18 @@ export default function HostConfigPopup({
                       }`}
                     >
                       <div
-                        className={`grid grid-cols-[52px_minmax(0,1.3fr)_minmax(0,1fr)_90px_110px_96px] border-b px-4 py-3 text-xs font-semibold uppercase tracking-wide ${
+                        className={`grid grid-cols-[minmax(0,1.45fr)_minmax(0,1.05fr)_minmax(0,0.95fr)_minmax(0,0.72fr)_minmax(0,0.78fr)_64px] gap-x-4 border-b px-4 py-3 text-xs font-semibold uppercase tracking-wide ${
                           isDark
                             ? "border-zinc-700 bg-zinc-800 text-zinc-400"
                             : "border-zinc-200 bg-zinc-100/80 text-zinc-600"
                         }`}
                       >
-                        <span className="text-center">#</span>
                         <span>Service</span>
                         <span>Internal</span>
                         <span>External</span>
                         <span>Status</span>
-                        <span>Toggle</span>
+                        <span>IP filter</span>
+                        <span className="text-center">Toggle</span>
                       </div>
 
                       <div className="min-h-0 flex-1 overflow-y-auto">
@@ -2244,6 +2616,10 @@ export default function HostConfigPopup({
                           const isAvailabilityKnown = Boolean(availability);
                           const isInvalid =
                             isAvailabilityKnown && availability.available === false;
+                          const allowedIpCount = normalizeAllowedIps(
+                            rule.firewall?.allowedIps
+                          ).length;
+                          const ipFilteringEnabled = allowedIpCount > 0;
                           const externalPortNumber = Number(rule.externalPort);
                           const savedRule = rule.dataId
                             ? savedRulesById.get(rule.dataId)
@@ -2260,9 +2636,6 @@ export default function HostConfigPopup({
                             persistedEnabled &&
                             !isInvalid &&
                             Boolean(externalPortUrl);
-                          const rowNumber =
-                            (rulesPage - 1) * RULES_PER_PAGE + index + 1;
-
                           return (
                             <div
                               key={rule.localId}
@@ -2275,23 +2648,13 @@ export default function HostConfigPopup({
                                   handleRuleRowClick(event, rule);
                                 }
                               }}
-                              className={`grid w-full grid-cols-[52px_minmax(0,1.3fr)_minmax(0,1fr)_90px_110px_96px] items-center border-b px-4 py-3 text-left text-sm last:border-b-0 ${
+                              className={`grid w-full grid-cols-[minmax(0,1.45fr)_minmax(0,1.05fr)_minmax(0,0.95fr)_minmax(0,0.72fr)_minmax(0,0.78fr)_64px] gap-x-4 items-center border-b px-4 py-3 text-left text-sm last:border-b-0 ${
                                 isDark
                                   ? "border-zinc-700 bg-zinc-900 hover:bg-zinc-800/80"
                                   : "border-zinc-200 bg-white hover:bg-zinc-50"
                               }`}
-                              aria-label={`Edit forwarding rule ${rule.serviceName.trim() || rowNumber}`}
+                              aria-label={`Edit forwarding rule ${rule.serviceName.trim() || "untitled rule"}`}
                             >
-                              <span
-                                className={
-                                  isDark
-                                    ? "text-center font-mono text-zinc-400"
-                                    : "text-center font-mono text-zinc-500"
-                                }
-                              >
-                                {rowNumber}
-                              </span>
-
                               <div className="min-w-0">
                                 <p
                                   className={
@@ -2354,52 +2717,78 @@ export default function HostConfigPopup({
                                 </span>
                               )}
 
-                              <div>
+                              <div className="min-w-0">
                                 {isInvalid ? (
                                   <span
-                                    className={
+                                    className={`truncate ${
                                       isDark
                                         ? "text-xs font-medium text-red-300"
                                         : "text-xs font-medium text-red-700"
-                                    }
+                                    }`}
                                   >
                                     Invalid
                                   </span>
                                 ) : !isAvailabilityKnown && isCheckingAvailability ? (
                                   <span
-                                    className={
+                                    className={`truncate ${
                                       isDark
                                         ? "text-xs font-medium text-blue-200"
                                         : "text-xs font-medium text-blue-700"
-                                    }
+                                    }`}
                                   >
                                     Checking
                                   </span>
                                 ) : persistedEnabled ? (
                                   <span
-                                    className={
+                                    className={`truncate ${
                                       isDark
                                         ? "text-xs font-medium text-emerald-300"
                                         : "text-xs font-medium text-emerald-700"
-                                    }
+                                    }`}
                                   >
                                     Active
                                   </span>
                                 ) : (
                                   <span
-                                    className={
+                                    className={`truncate ${
                                       isDark
                                         ? "text-xs font-medium text-zinc-300"
                                         : "text-xs font-medium text-zinc-700"
-                                    }
+                                    }`}
                                   >
                                     Inactive
                                   </span>
                                 )}
                               </div>
 
+                              <div className="min-w-0">
+                                {ipFilteringEnabled ? (
+                                  <span
+                                    className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] ${
+                                      isDark
+                                        ? "border-blue-500/25 bg-blue-500/10 text-blue-200"
+                                        : "border-blue-200 bg-blue-50 text-blue-800"
+                                    }`}
+                                    title={`${allowedIpCount} allowed IP${allowedIpCount === 1 ? "" : "s"}`}
+                                  >
+                                    <IconShieldLock size={11} />
+                                    {allowedIpCount}
+                                  </span>
+                                ) : (
+                                  <span
+                                    className={
+                                      isDark
+                                        ? "text-xs font-medium text-zinc-500"
+                                        : "text-xs font-medium text-zinc-400"
+                                    }
+                                  >
+                                    Public
+                                  </span>
+                                )}
+                              </div>
+
                               <div
-                                className="flex items-center"
+                                className="flex items-center justify-center"
                                 data-rule-toggle="true"
                                 onClick={(event) => event.stopPropagation()}
                                 onMouseDown={(event) => event.stopPropagation()}

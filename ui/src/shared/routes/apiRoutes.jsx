@@ -14,6 +14,8 @@ let apiRoutes = {
   updateConnection: "/connections/update",
   listConnections: "/connections/list",
   deleteConnection: "/connections/delete",
+  updateConnectionFirewallPolicy: "/connections/firewall/policy",
+  trafficSnapshot: "/connections/firewall/traffic/snapshot",
   // Machine groups
   listGroups: "/groups/list",
   addGroup: "/groups/add",
@@ -38,6 +40,12 @@ Object.entries(apiRoutes).forEach(([key, value]) => {
 
 apiRoutes.checkExternalPortAvailability = (port) =>
   `${API_PREFIX}/connections/external-port/${port}/availability`;
+apiRoutes.getConnectionFirewallPolicy = (dataId) =>
+  `${API_PREFIX}/connections/firewall/policy/${dataId}`;
+apiRoutes.deleteConnectionFirewallPolicy = (dataId) =>
+  `${API_PREFIX}/connections/firewall/policy/${dataId}`;
+apiRoutes.getConnectionRecentIpHits = (dataId, limit = 10) =>
+  `${API_PREFIX}/connections/firewall/recent-ip-hits/${dataId}?limit=${limit}`;
 
 apiRoutes.getMachineCommand = (machineId) =>
   `${API_PREFIX}/machines/command/${machineId}`;

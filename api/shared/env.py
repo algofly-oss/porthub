@@ -126,3 +126,10 @@ REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD", None)
 # Load mongodb credentials
 MONGO_DATABASE_URI = os.environ.get("MONGO_DATABASE_URI", None)
 MONGO_DATABASE_NAME = os.environ.get("MONGO_DATABASE_NAME", None)
+
+# Firewall microservice configuration
+FIREWALL_BASE_URL = os.environ.get("FIREWALL_BASE_URL", "").rstrip("/")
+FIREWALL_API_KEY = os.environ.get("FIREWALL_API_KEY", "")
+FIREWALL_REQUEST_TIMEOUT_SECONDS = float(
+    os.environ.get("FIREWALL_REQUEST_TIMEOUT_SECONDS", 5)
+)

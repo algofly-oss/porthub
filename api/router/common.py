@@ -7,6 +7,7 @@ from fastapi import HTTPException, Request
 
 from shared.client_release import get_client_version as get_latest_client_version
 from shared.factory import db
+from shared.firewall_client import get_stored_connection_firewall_policy
 from shared.env import MACHINE_ONLINE_TTL_SECONDS
 from .auth.common import authenticate_user
 
@@ -154,6 +155,7 @@ def serialize_connection(connection: dict, machine: dict | None = None):
         "internal_port": connection.get("internal_port"),
         "external_port": connection.get("external_port"),
         "enabled": connection.get("enabled", True),
+        "firewall": get_stored_connection_firewall_policy(connection),
         "created_at": connection.get("created_at"),
         "updated_at": connection.get("updated_at"),
     }

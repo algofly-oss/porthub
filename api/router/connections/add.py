@@ -2,6 +2,7 @@ from fastapi import APIRouter, Request, HTTPException
 from shared.env import get_external_port_range_error_message, is_external_port_allowed
 from shared.rathole_config import rebuild_server_toml
 from shared.factory import db
+from shared.firewall_client import sync_connection_firewall_policy
 from shared.sockets import emit_machine_config_changed
 from ..common import (
     get_authenticated_user,
@@ -51,12 +52,17 @@ async def add_connection(data: Connection, request: Request):
             "internal_port": data.internal_port,
             "external_port": data.external_port,
             "enabled": True if data.enabled is None else data.enabled,
+            "firewall": {
+                "is_public": True,
+                "allowed_ips": [],
+            },
             "created_at": now,
             "updated_at": now,
         }
     )
 
     res = await db.connections.find_one({"_id": result.inserted_id})
+    await sync_connection_firewall_policy(res)
     await rebuild_server_toml(allow_empty=True)
     await emit_machine_config_changed(str(machine["_id"]))
 

@@ -72,7 +72,39 @@ const mapConnectionToForwardingConfig = (connection) => ({
   internalPort: connection.internal_port || 3000,
   externalPort: connection.external_port || 3000,
   enabled: connection.enabled ?? true,
+  firewall: {
+    isPublic: connection.firewall?.is_public ?? true,
+    allowedIps: Array.isArray(connection.firewall?.allowed_ips)
+      ? connection.firewall.allowed_ips
+      : [],
+  },
 });
+
+const normalizeFirewallPolicy = (config) => {
+  const allowedIps = Array.isArray(config?.firewall?.allowedIps)
+    ? [...config.firewall.allowedIps]
+    : Array.isArray(config?.firewall?.allowed_ips)
+      ? [...config.firewall.allowed_ips]
+      : [];
+
+  const normalizedAllowedIps = [...new Set(
+    allowedIps
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+  )].sort((left, right) => left.localeCompare(right));
+
+  const isPublic =
+    typeof config?.firewall?.isPublic === "boolean"
+      ? config.firewall.isPublic
+      : typeof config?.firewall?.is_public === "boolean"
+        ? config.firewall.is_public
+        : normalizedAllowedIps.length === 0;
+
+  return {
+    isPublic: isPublic || normalizedAllowedIps.length === 0,
+    allowedIps: isPublic ? [] : normalizedAllowedIps,
+  };
+};
 
 const normalizeForwardingConfig = (config) => ({
   serviceName: (config.serviceName || "").trim(),
@@ -82,6 +114,7 @@ const normalizeForwardingConfig = (config) => ({
   internalPort: Number(config.internalPort),
   externalPort: Number(config.externalPort),
   enabled: config.enabled ?? true,
+  firewall: normalizeFirewallPolicy(config),
 });
 
 const forwardingConfigChanged = (currentConfig, nextConfig) => {
@@ -98,7 +131,10 @@ const forwardingConfigChanged = (currentConfig, nextConfig) => {
     currentNormalized.internalIp !== nextNormalized.internalIp ||
     currentNormalized.internalPort !== nextNormalized.internalPort ||
     currentNormalized.externalPort !== nextNormalized.externalPort ||
-    currentNormalized.enabled !== nextNormalized.enabled
+    currentNormalized.enabled !== nextNormalized.enabled ||
+    currentNormalized.firewall.isPublic !== nextNormalized.firewall.isPublic ||
+    JSON.stringify(currentNormalized.firewall.allowedIps) !==
+      JSON.stringify(nextNormalized.firewall.allowedIps)
   );
 };
 
@@ -532,7 +568,23 @@ export default function Home({ onStatsChange }) {
           ? await axios.put(apiRoutes.updateConnection, payload)
           : await axios.post(apiRoutes.addConnection, payload);
 
-        savedConfigs.push(mapConnectionToForwardingConfig(response.data.data));
+        const savedConfig = mapConnectionToForwardingConfig(response.data.data);
+        const normalizedFirewall = normalizeFirewallPolicy(config);
+        const firewallResponse = await axios.put(apiRoutes.updateConnectionFirewallPolicy, {
+          data_id: savedConfig.dataId,
+          is_public: normalizedFirewall.isPublic,
+          allowed_ips: normalizedFirewall.allowedIps,
+        });
+
+        savedConfigs.push({
+          ...savedConfig,
+          firewall: {
+            isPublic: firewallResponse.data?.data?.firewall?.is_public ?? normalizedFirewall.isPublic,
+            allowedIps:
+              firewallResponse.data?.data?.firewall?.allowed_ips ??
+              normalizedFirewall.allowedIps,
+          },
+        });
       }
 
       for (const config of configsToCreate) {
@@ -548,7 +600,23 @@ export default function Home({ onStatsChange }) {
         };
 
         const response = await axios.post(apiRoutes.addConnection, payload);
-        savedConfigs.push(mapConnectionToForwardingConfig(response.data.data));
+        const savedConfig = mapConnectionToForwardingConfig(response.data.data);
+        const normalizedFirewall = normalizeFirewallPolicy(config);
+        const firewallResponse = await axios.put(apiRoutes.updateConnectionFirewallPolicy, {
+          data_id: savedConfig.dataId,
+          is_public: normalizedFirewall.isPublic,
+          allowed_ips: normalizedFirewall.allowedIps,
+        });
+
+        savedConfigs.push({
+          ...savedConfig,
+          firewall: {
+            isPublic: firewallResponse.data?.data?.firewall?.is_public ?? normalizedFirewall.isPublic,
+            allowedIps:
+              firewallResponse.data?.data?.firewall?.allowed_ips ??
+              normalizedFirewall.allowedIps,
+          },
+        });
       }
 
       savedConfigs.sort((left, right) => {
