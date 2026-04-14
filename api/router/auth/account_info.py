@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Request, Response, HTTPException
 from shared.factory import db
+from shared.env import SESSION_COOKIE_NAME
 from bson import ObjectId
 from .common import authenticate_user
 
@@ -9,7 +10,7 @@ router = APIRouter()
 @router.get("/me")
 async def account_info(request: Request, response: Response):
     # Check if user is logged in
-    user_id = authenticate_user(request.cookies.get("session_token"))
+    user_id = authenticate_user(request.cookies.get(SESSION_COOKIE_NAME))
 
     user = await db.users.find_one({"_id": ObjectId(user_id.decode("utf-8"))})
 
