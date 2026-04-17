@@ -410,7 +410,7 @@ export default function HostConfigPopup({
   const [machineDetails, setMachineDetails] = useState({ name: "", hostname: "" });
   const [machineDetailsErrors, setMachineDetailsErrors] = useState({});
   const [isSavingMachineDetails, setIsSavingMachineDetails] = useState(false);
-  const [showRuleAdvanced, setShowRuleAdvanced] = useState(false);
+  const [showRuleAdvanced, setShowRuleAdvanced] = useState(true);
   const [allowIpDraft, setAllowIpDraft] = useState("");
   const [allowIpRecentHitsByRuleId, setAllowIpRecentHitsByRuleId] = useState({});
   const [isLoadingAllowIpSuggestions, setIsLoadingAllowIpSuggestions] = useState(false);
@@ -542,7 +542,7 @@ export default function HostConfigPopup({
       setMachineDetails({ name: "", hostname: "" });
       setMachineDetailsErrors({});
       setIsSavingMachineDetails(false);
-      setShowRuleAdvanced(false);
+      setShowRuleAdvanced(true);
       setAllowIpDraft("");
       setAllowIpRecentHitsByRuleId({});
       setTrafficSamplesByRuleId({});
@@ -585,7 +585,7 @@ export default function HostConfigPopup({
       setGroupQuery("");
       setEditingRuleSnapshot(null);
       setRulesPage(1);
-      setShowRuleAdvanced(false);
+      setShowRuleAdvanced(true);
       setAllowIpDraft("");
       setTrafficSamplesByRuleId({});
       setIsAllowIpPickerOpen(false);
@@ -608,16 +608,14 @@ export default function HostConfigPopup({
 
   useEffect(() => {
     if (!selectedRule) {
-      setShowRuleAdvanced(false);
+      setShowRuleAdvanced(true);
       setAllowIpDraft("");
       setIsAllowIpPickerOpen(false);
       return;
     }
 
     setAllowIpDraft("");
-    setShowRuleAdvanced(
-      normalizeAllowedIps(selectedRule.firewall?.allowedIps).length > 0
-    );
+    setShowRuleAdvanced(true);
   }, [selectedRule?.localId]);
 
   useEffect(() => {
@@ -2253,11 +2251,17 @@ export default function HostConfigPopup({
                 const availability = availabilityByRuleId[rule.localId];
                 const allowedIps = normalizeAllowedIps(rule.firewall?.allowedIps);
                 const recentIpHits = allowIpRecentHitsByRuleId[rule.localId] || [];
-                const filteredRecentIpHits = recentIpHits.filter(
-                  (item) =>
-                    !allowedIps.includes(item.ip) &&
-                    (!allowIpDraft.trim() || item.ip.includes(allowIpDraft.trim()))
-                );
+                const filteredRecentIpHits = [
+                  ...(!allowedIps.includes("127.0.0.1")
+                    ? [{ ip: "127.0.0.1", last_seen: null }]
+                    : []),
+                  ...recentIpHits.filter(
+                    (item) =>
+                      item.ip !== "127.0.0.1" &&
+                      !allowedIps.includes(item.ip) &&
+                      (!allowIpDraft.trim() || item.ip.includes(allowIpDraft.trim()))
+                  ),
+                ];
 
                 return (
                   <>
@@ -2474,7 +2478,7 @@ export default function HostConfigPopup({
                           >
                             <span className="inline-flex items-center gap-2 text-sm font-medium">
                               <IconShieldLock size={16} />
-                              Advanced
+                              IP Filter
                             </span>
                             {showRuleAdvanced ? (
                               <IconChevronUp size={16} />
@@ -2618,7 +2622,9 @@ export default function HostConfigPopup({
                                             {item.ip}
                                           </span>
                                           <span className="text-xs text-zinc-500">
-                                            {formatRelativeUnixTimestamp(item.last_seen)}
+                                            {item.last_seen
+                                              ? formatRelativeUnixTimestamp(item.last_seen)
+                                              : "localhost"}
                                           </span>
                                         </button>
                                       ))}
@@ -2713,9 +2719,7 @@ export default function HostConfigPopup({
                               ? buildExternalPortUrl(externalPortNumber)
                               : "";
                           const canOpenExternalPort =
-                            persistedEnabled &&
-                            !isInvalid &&
-                            Boolean(externalPortUrl);
+                            !isInvalid && Boolean(externalPortUrl);
                           return (
                             <div
                               key={rule.localId}

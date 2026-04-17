@@ -30,6 +30,12 @@ def build_rules(state: dict[str, dict]) -> str:
                 f"        timeout {RECENT_IP_TTL}s;",
                 "    }",
                 "",
+                f"    set recent_out_{port} {{",
+                "        type ipv4_addr;",
+                "        flags dynamic, timeout;",
+                f"        timeout {RECENT_IP_TTL}s;",
+                "    }",
+                "",
             ]
         )
 
@@ -67,7 +73,9 @@ def build_rules(state: dict[str, dict]) -> str:
                 f'        tcp dport {port} counter name "cnt_in_{port}" accept'
             )
 
-        output_lines.append(f'        tcp sport {port} counter name "cnt_out_{port}" accept')
+        output_lines.append(
+            f'        tcp sport {port} update @recent_out_{port} {{ ip daddr timeout {RECENT_IP_TTL}s }} counter name "cnt_out_{port}" accept'
+        )
 
     lines = [f"table {NFT_TABLE} {{"]
     lines.extend(counter_lines)

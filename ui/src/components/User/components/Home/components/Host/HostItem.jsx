@@ -15,10 +15,10 @@ const normalizeMachineTrafficSamples = (samples) =>
     .slice(-30);
 
 const buildMiniTrafficWindow = (samples, windowSeconds = 30) => {
-  const now = Math.floor(Date.now() / 1000);
   const byTimestamp = new Map();
+  const normalizedSamples = normalizeMachineTrafficSamples(samples);
 
-  normalizeMachineTrafficSamples(samples).forEach((sample) => {
+  normalizedSamples.forEach((sample) => {
     const timestamp = Math.floor(sample.timestamp);
     const current = byTimestamp.get(timestamp) || {
       timestamp,
@@ -35,16 +35,38 @@ const buildMiniTrafficWindow = (samples, windowSeconds = 30) => {
     });
   });
 
+  const now = Math.floor(Date.now() / 1000);
+  const earliestTimestamp = normalizedSamples[0]?.timestamp
+    ? Math.floor(normalizedSamples[0].timestamp)
+    : null;
+  const latestTimestamp = normalizedSamples[normalizedSamples.length - 1]?.timestamp
+    ? Math.floor(normalizedSamples[normalizedSamples.length - 1].timestamp)
+    : now;
+  const windowEndTimestamp = Math.max(now, latestTimestamp);
+
   return Array.from({ length: windowSeconds }, (_, index) => {
-    const timestamp = now - (windowSeconds - 1 - index);
-    return (
-      byTimestamp.get(timestamp) || {
-        timestamp,
-        in_bytes: 0,
-        out_bytes: 0,
-        drop_bytes: 0,
+    const timestamp = windowEndTimestamp - (windowSeconds - 1 - index);
+    const existing = byTimestamp.get(timestamp);
+    if (existing) {
+      return existing;
+    }
+
+    if (earliestTimestamp !== null && timestamp < earliestTimestamp) {
+      const earliestSample = byTimestamp.get(earliestTimestamp);
+      if (earliestSample) {
+        return {
+          ...earliestSample,
+          timestamp,
+        };
       }
-    );
+    }
+
+    return {
+      timestamp,
+      in_bytes: 0,
+      out_bytes: 0,
+      drop_bytes: 0,
+    };
   });
 };
 

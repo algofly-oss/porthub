@@ -4,6 +4,7 @@ import apiRoutes from "@/shared/routes/apiRoutes";
 import uiRoutes from "@/shared/routes/uiRoutes";
 import { Alert, Loader, useMantineColorScheme } from "@mantine/core";
 import axios from "axios";
+import Head from "next/head";
 import { useRouter } from "next/router";
 import { useEffect, useMemo, useState } from "react";
 
@@ -14,6 +15,7 @@ type TrafficSample = {
   drop_bytes?: number;
   blocked_ips?: string[];
   incoming_ips?: string[];
+  outgoing_ips?: string[];
 };
 
 type ConnectionDetails = {
@@ -212,6 +214,51 @@ export default function TrafficMonitorPage() {
         : "",
     [activeConnection]
   );
+  const pageTitleActivityPrefix = useMemo(() => {
+    const now = Math.floor(Date.now() / 1000);
+    const recentSamples = (Array.isArray(samples) ? samples : []).filter(
+      (sample) => Number(sample?.timestamp) >= now - 3
+    );
+
+    const hasRecentBlocked = recentSamples.some(
+      (sample) => Math.max(0, Number(sample?.drop_bytes) || 0) > 0
+    );
+    if (hasRecentBlocked) {
+      return "[BLOCKED]";
+    }
+
+    const hasRecentIncoming = recentSamples.some(
+      (sample) => Math.max(0, Number(sample?.in_bytes) || 0) > 0
+    );
+    const hasRecentOutgoing = recentSamples.some(
+      (sample) => Math.max(0, Number(sample?.out_bytes) || 0) > 0
+    );
+
+    if (hasRecentIncoming && hasRecentOutgoing) {
+      return "[LIVE]";
+    }
+
+    if (hasRecentIncoming) {
+      return "[IN]";
+    }
+
+    if (hasRecentOutgoing) {
+      return "[OUT]";
+    }
+
+    return "";
+  }, [samples]);
+  const pageTitle = useMemo(() => {
+    const titleParts = [resolvedServiceName, resolvedMachineName].filter(Boolean);
+    const baseTitle =
+      titleParts.length > 0
+        ? `${titleParts.join(" - ")} | Traffic Monitor | PortHub`
+        : "Traffic Monitor | PortHub";
+    if (pageTitleActivityPrefix) {
+      return `${pageTitleActivityPrefix} ${baseTitle}`;
+    }
+    return baseTitle;
+  }, [pageTitleActivityPrefix, resolvedMachineName, resolvedServiceName]);
 
   if (isCheckingAuth) {
     return (
@@ -223,6 +270,9 @@ export default function TrafficMonitorPage() {
 
   return (
     <div className="min-h-screen bg-neutral-100 px-4 py-6 dark:bg-zinc-900 md:px-8">
+      <Head>
+        <title>{pageTitle}</title>
+      </Head>
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-6">
         <div className="space-y-3">
           <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">
@@ -313,7 +363,7 @@ export default function TrafficMonitorPage() {
           samples={samples}
           isLoading={isLoading}
           title="Traffic monitor"
-          subtitle="Dedicated live monitor for this forwarded port. Hover points to inspect recent accepted and blocked source IPs."
+          subtitle="Dedicated live monitor for this forwarded port. Hover points to inspect recent incoming, outgoing, and blocked IP activity."
           onOpenExternal={undefined}
           hostName={resolvedMachineName}
           serviceName={resolvedServiceName}
