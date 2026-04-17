@@ -1653,454 +1653,69 @@ export default function HostConfigPopup({
 
             </div>
 
-            <div
-              className={`rounded-md border ${
-                isDark
-                  ? "border-zinc-700 bg-zinc-950/70"
-                  : "border-zinc-200 bg-zinc-50/70"
-              }`}
-            >
-              <div className={isDark ? "divide-y divide-zinc-800" : "divide-y divide-zinc-200"}>
-                <div>
-                  <button
-                    type="button"
-                    onClick={() => toggleAccordionSection("groups")}
-                    className="flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left"
-                  >
-                    <span className={isDark ? "text-sm text-zinc-200" : "text-sm text-zinc-800"}>
-                      Machine details
-                    </span>
-                    {showGroups ? (
-                      <IconChevronUp size={18} className={isDark ? "text-zinc-400" : "text-zinc-600"} />
-                    ) : (
-                      <IconChevronDown size={18} className={isDark ? "text-zinc-400" : "text-zinc-600"} />
-                    )}
-                  </button>
+            {!selectedRule ? (
+              <div
+                className={`rounded-md border ${
+                  isDark
+                    ? "border-zinc-700 bg-zinc-950/70"
+                    : "border-zinc-200 bg-zinc-50/70"
+                }`}
+              >
+                <div className={isDark ? "divide-y divide-zinc-800" : "divide-y divide-zinc-200"}>
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => toggleAccordionSection("groups")}
+                      className="flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left"
+                    >
+                      <span className={isDark ? "text-sm text-zinc-200" : "text-sm text-zinc-800"}>
+                        Machine details
+                      </span>
+                      {showGroups ? (
+                        <IconChevronUp size={18} className={isDark ? "text-zinc-400" : "text-zinc-600"} />
+                      ) : (
+                        <IconChevronDown size={18} className={isDark ? "text-zinc-400" : "text-zinc-600"} />
+                      )}
+                    </button>
 
-                  <Collapse in={showGroups}>
-                    <div className="space-y-4 px-4 pb-4 pt-1.5">
-                      <p className="text-xs text-zinc-500">
-                        Rename the machine and add a description. The reset icon fills this
-                        field with the latest hostname reported by the client.
-                      </p>
+                    <Collapse in={showGroups}>
+                      <div className="space-y-4 px-4 pb-4 pt-1.5">
+                        <p className="text-xs text-zinc-500">
+                          Rename the machine and add a description. The reset icon fills this
+                          field with the latest hostname reported by the client.
+                        </p>
 
-                      <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
-                        <div>
-                          <input
-                            type="text"
-                            aria-label="Machine name"
-                            placeholder="Machine name"
-                            className={getDetailInputClassName(isDark)}
-                            value={machineDetails.name}
-                            onChange={(event) =>
-                              handleMachineDetailsChange("name", event.currentTarget.value)
-                            }
-                          />
-                          {machineDetailsErrors.name ? (
-                            <p className={errorClassName}>{machineDetailsErrors.name}</p>
-                          ) : null}
-                        </div>
-
-                        <div>
-                          <div className="relative">
+                        <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+                          <div>
                             <input
                               type="text"
-                              aria-label="Machine description"
-                              placeholder="Description"
-                              className={`${getDetailInputClassName(isDark)} pr-11`}
-                              value={machineDetails.hostname}
+                              aria-label="Machine name"
+                              placeholder="Machine name"
+                              className={getDetailInputClassName(isDark)}
+                              value={machineDetails.name}
                               onChange={(event) =>
-                                handleMachineDetailsChange("hostname", event.currentTarget.value)
+                                handleMachineDetailsChange("name", event.currentTarget.value)
                               }
                             />
-                            <Tooltip
-                              label="Reset to client hostname"
-                              withArrow
-                              position="top"
-                              classNames={{
-                                tooltip: isDark
-                                  ? "!border !border-zinc-700 !bg-zinc-900 !text-zinc-100"
-                                  : "!border !border-zinc-200 !bg-white !text-zinc-900",
-                                arrow: isDark
-                                  ? "!border-zinc-700 !bg-zinc-900"
-                                  : "!border-zinc-200 !bg-white",
-                              }}
-                            >
-                              <ActionIcon
-                                type="button"
-                                variant="subtle"
-                                radius="md"
-                                aria-label="Reset description to client hostname"
-                                onClick={handleResetHostnameToClient}
-                                disabled={!clientHostnameValue || isSavingMachineDetails}
-                                className={`!absolute right-1.5 top-1/2 -translate-y-1/2 ${
-                                  isDark
-                                    ? "!text-zinc-400 hover:!bg-zinc-800 hover:!text-zinc-200 disabled:!opacity-35"
-                                    : "!text-zinc-500 hover:!bg-zinc-100 hover:!text-zinc-700 disabled:!opacity-35"
-                                }`}
-                              >
-                                <IconRefresh size={15} />
-                              </ActionIcon>
-                            </Tooltip>
+                            {machineDetailsErrors.name ? (
+                              <p className={errorClassName}>{machineDetailsErrors.name}</p>
+                            ) : null}
                           </div>
-                          {machineDetailsErrors.hostname ? (
-                            <p className={errorClassName}>{machineDetailsErrors.hostname}</p>
-                          ) : null}
-                        </div>
 
-                        <div className="flex items-start gap-2 md:justify-end">
-                          <Button
-                            type="button"
-                            onClick={handleSaveMachineDetails}
-                            loading={isSavingMachineDetails}
-                            disabled={!machineDetailsChanged}
-                            classNames={{
-                              root:
-                                "!bg-blue-600 !text-blue-50 hover:!bg-blue-700 disabled:!bg-blue-400",
-                            }}
-                          >
-                            Save
-                          </Button>
-                        </div>
-                      </div>
-
-                      {groups.length > 0 && onAddMachineToGroup && onRemoveMachineFromGroup ? (
-                        <div>
-                          <p className="mb-2 text-xs text-zinc-500">
-                            Search existing groups, add new ones, or remove assignments for this machine.
-                          </p>
-                          <Popover
-                          opened={isGroupPickerOpen}
-                          onChange={setIsGroupPickerOpen}
-                          position="bottom-start"
-                          offset={2}
-                          width="target"
-                          withinPortal
-                          shadow="md"
-                          >
-                            <Popover.Target>
-                              <div
-                                onClick={() => {
-                                  if (groupSaving) {
-                                    return;
-                                  }
-                                  setIsGroupPickerOpen(true);
-                                  groupInputRef.current?.focus();
-                                }}
-                                className={`flex min-h-[2.7rem] w-full items-center justify-between gap-3 rounded-md border px-3 py-2 text-left transition ${
-                                  isDark
-                                    ? "border-zinc-700 bg-zinc-900/70 text-zinc-100"
-                                    : "border-zinc-200 bg-white text-zinc-900"
-                                } ${groupSaving ? "cursor-not-allowed opacity-70" : ""}`}
-                              >
-                                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
-                                  {assignedGroups.length > 0 ? (
-                                    assignedGroups.map((group) => (
-                                      <span
-                                        key={group._id}
-                                        className={`inline-flex max-w-full items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium ${
-                                          isDark
-                                            ? "border-blue-500/25 bg-blue-500/10 text-blue-100"
-                                            : "border-blue-200 bg-blue-50 text-blue-900"
-                                        }`}
-                                      >
-                                        <span className="truncate">{group.name}</span>
-                                        <ActionIcon
-                                          type="button"
-                                          size="xs"
-                                          radius="xl"
-                                          variant="subtle"
-                                          aria-label={`Remove ${group.name}`}
-                                          disabled={groupSaving}
-                                          onClick={(event) => {
-                                            event.preventDefault();
-                                            event.stopPropagation();
-                                            handleRemoveGroupChip(group._id);
-                                          }}
-                                          className={
-                                            isDark
-                                              ? "!h-4 !w-4 !text-blue-200 hover:!bg-blue-400/15"
-                                              : "!h-4 !w-4 !text-blue-700 hover:!bg-blue-100"
-                                          }
-                                        >
-                                          <IconX size={11} stroke={2} />
-                                        </ActionIcon>
-                                      </span>
-                                    ))
-                                  ) : null}
-                            <input
-                              ref={groupInputRef}
-                              type="text"
-                              value={groupQuery}
-                              disabled={groupSaving}
-                              onFocus={() => setIsGroupPickerOpen(true)}
-                              onChange={(event) => {
-                                setGroupQuery(event.currentTarget.value);
-                                setIsGroupPickerOpen(true);
-                              }}
-                              onKeyDown={(event) => {
-                                if (event.key === "Enter") {
-                                  event.preventDefault();
-                                  if (filteredAvailableGroups.length > 0) {
-                                    handleAddGroupFromSelect(filteredAvailableGroups[0]._id);
-                                  } else if (canCreateGroupFromQuery) {
-                                    handleCreateGroupFromQuery();
-                                  }
+                          <div>
+                            <div className="relative">
+                              <input
+                                type="text"
+                                aria-label="Machine description"
+                                placeholder="Description"
+                                className={`${getDetailInputClassName(isDark)} pr-11`}
+                                value={machineDetails.hostname}
+                                onChange={(event) =>
+                                  handleMachineDetailsChange("hostname", event.currentTarget.value)
                                 }
-
-                                if (event.key === "Escape") {
-                                  setIsGroupPickerOpen(false);
-                                }
-                              }}
-                              placeholder="Search groups or add new group by pressing Enter"
-                              className={`min-w-[7rem] flex-1 appearance-none border-0 bg-transparent p-0 text-sm shadow-none outline-none ring-0 placeholder:text-xs focus:border-0 focus:outline-none focus:ring-0 ${
-                                isDark
-                                  ? "text-zinc-100 placeholder:text-zinc-500"
-                                  : "text-zinc-900 placeholder:text-zinc-400"
-                              }`}
-                            />
-                                </div>
-                                <IconChevronDown
-                                  size={16}
-                                  className={`shrink-0 ${isDark ? "text-zinc-500" : "text-zinc-400"}`}
-                                />
-                              </div>
-                            </Popover.Target>
-
-                            <Popover.Dropdown
-                              className={
-                                isDark
-                                  ? "!border-zinc-700 !bg-zinc-950 !p-1.5"
-                                  : "!border-zinc-200 !bg-white !p-1.5"
-                              }
-                            >
-                              {canCreateGroupFromQuery ? (
-                                <button
-                                  type="button"
-                                  disabled={groupSaving}
-                                  onClick={handleCreateGroupFromQuery}
-                                  className={`mb-1 flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left text-sm transition ${
-                                    isDark
-                                      ? "border-zinc-800 bg-zinc-900/70 text-zinc-100 hover:border-blue-500/30 hover:bg-blue-500/10 hover:text-blue-100"
-                                      : "border-zinc-200 bg-zinc-50 text-zinc-900 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-900"
-                                  }`}
-                                >
-                                  <span className="flex min-w-0 items-center gap-2 truncate">
-                                    <span
-                                      className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${
-                                        isDark ? "bg-zinc-800 text-zinc-300" : "bg-white text-zinc-500"
-                                      }`}
-                                    >
-                                      <IconFolder size={14} />
-                                    </span>
-                                    <span className="truncate font-medium">{groupQuery.trim()}</span>
-                                  </span>
-                                  <span className="shrink-0 text-xs text-zinc-500">
-                                    Add this group by pressing{" "}
-                                    <span
-                                      className={`inline-flex rounded border px-1.5 py-0.5 text-[10px] font-semibold ${
-                                        isDark
-                                          ? "border-zinc-600 bg-zinc-800 text-zinc-200"
-                                          : "border-zinc-300 bg-white text-zinc-700"
-                                      }`}
-                                    >
-                                      Enter
-                                    </span>
-                                  </span>
-                                </button>
-                              ) : null}
-
-                              {filteredAvailableGroups.length === 0 ? (
-                                canCreateGroupFromQuery ? null : (
-                                  <div
-                                    className={`px-2 py-2 text-sm ${
-                                      isDark ? "text-zinc-500" : "text-zinc-500"
-                                    }`}
-                                  >
-                                    {availableGroups.length === 0
-                                      ? "All groups already assigned."
-                                      : "No matching groups."}
-                                  </div>
-                                )
-                              ) : (
-                                <div className="flex max-h-52 flex-col gap-1 overflow-y-auto">
-                                  {filteredAvailableGroups.map((group) => (
-                                    <button
-                                      key={group._id}
-                                      type="button"
-                                      disabled={groupSaving}
-                                      onClick={() => handleAddGroupFromSelect(group._id)}
-                                      className={`flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left text-sm transition ${
-                                        isDark
-                                          ? "border-zinc-800 bg-zinc-900/70 text-zinc-100 hover:border-blue-500/30 hover:bg-blue-500/10 hover:text-blue-100"
-                                          : "border-zinc-200 bg-zinc-50 text-zinc-900 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-900"
-                                      }`}
-                                    >
-                                      <span className="flex min-w-0 items-center gap-2 truncate">
-                                        <span
-                                          className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${
-                                            isDark ? "bg-zinc-800 text-zinc-300" : "bg-white text-zinc-500"
-                                          }`}
-                                        >
-                                          <IconFolder size={14} />
-                                        </span>
-                                        <span className="truncate">{group.name}</span>
-                                      </span>
-                                      <span className="flex shrink-0 items-center gap-1.5 text-xs text-zinc-500">
-                                        <IconUsers size={13} />
-                                        <span>{group.machineCount || 0} Peer(s)</span>
-                                      </span>
-                                    </button>
-                                  ))}
-                                </div>
-                              )}
-                            </Popover.Dropdown>
-                          </Popover>
-                        </div>
-                      ) : null}
-                    </div>
-                  </Collapse>
-                </div>
-
-                <div>
-                  <button
-                    type="button"
-                    onClick={() => toggleAccordionSection("credentials")}
-                    className="flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left"
-                  >
-                    <span className={isDark ? "text-sm text-zinc-200" : "text-sm text-zinc-800"}>
-                      Client setup
-                    </span>
-                    {showMachineCredentials ? (
-                      <IconChevronUp size={18} className={isDark ? "text-zinc-400" : "text-zinc-600"} />
-                    ) : (
-                      <IconChevronDown size={18} className={isDark ? "text-zinc-400" : "text-zinc-600"} />
-                    )}
-                  </button>
-
-                  <Collapse in={showMachineCredentials}>
-                    <div className="space-y-1 px-4 pb-2 pt-1.5">
-                      <div>
-                        <div className="flex items-center gap-1.5">
-                          <p className="text-xs uppercase tracking-[0.18em] text-zinc-500">
-                            Bootstrap command
-                          </p>
-                          <Tooltip
-                            label="Refresh machine token"
-                            withArrow
-                            position="top"
-                            classNames={{
-                              tooltip: isDark
-                                ? "!border !border-zinc-700 !bg-zinc-900 !text-zinc-100"
-                                : "!border !border-zinc-200 !bg-white !text-zinc-900",
-                              arrow: isDark
-                                ? "!border-zinc-700 !bg-zinc-900"
-                                : "!border-zinc-200 !bg-white",
-                            }}
-                          >
-                            <ActionIcon
-                              type="button"
-                              variant="subtle"
-                              onClick={handleOpenRefreshMachineTokenConfirm}
-                              aria-label="Refresh machine token"
-                              className={
-                                isDark
-                                  ? "!h-6 !w-6 !text-zinc-400 hover:!bg-zinc-800 hover:!text-zinc-200"
-                                  : "!h-6 !w-6 !text-zinc-500 hover:!bg-zinc-200 hover:!text-zinc-700"
-                              }
-                            >
-                              <IconRefresh size={14} />
-                            </ActionIcon>
-                          </Tooltip>
-                          <Tooltip
-                            label="Copy machine token"
-                            withArrow
-                            position="top"
-                            classNames={{
-                              tooltip: isDark
-                                ? "!border !border-zinc-700 !bg-zinc-900 !text-zinc-100"
-                                : "!border !border-zinc-200 !bg-white !text-zinc-900",
-                              arrow: isDark
-                                ? "!border-zinc-700 !bg-zinc-900"
-                                : "!border-zinc-200 !bg-white",
-                            }}
-                          >
-                            <ActionIcon
-                              type="button"
-                              variant="subtle"
-                              onClick={() => handleCopy("Machine token", host?.token || "")}
-                              aria-label="Copy machine token"
-                              disabled={!host?.token}
-                              className={
-                                isDark
-                                  ? "!h-6 !w-6 !text-zinc-400 hover:!bg-zinc-800 hover:!text-zinc-200 disabled:!opacity-40"
-                                  : "!h-6 !w-6 !text-zinc-500 hover:!bg-zinc-200 hover:!text-zinc-700 disabled:!opacity-40"
-                              }
-                            >
-                              <IconCopy size={14} />
-                            </ActionIcon>
-                          </Tooltip>
-                        </div>
-                        <div className="mt-2">
-                          <div
-                            className={`relative rounded-lg ${
-                              isDark ? "bg-zinc-800/80" : "bg-zinc-100"
-                            }`}
-                          >
-                            <ActionIcon
-                              type="button"
-                              variant="subtle"
-                              onClick={() => handleCopy("Bootstrap command", machineCommand)}
-                              aria-label="Copy bootstrap command"
-                              disabled={!machineCommand || isLoadingMachineCommand}
-                              className={`!absolute right-2 top-2 ${
-                                isDark
-                                  ? "!text-zinc-300 hover:!bg-zinc-700 disabled:!bg-transparent"
-                                  : "!text-zinc-600 hover:!bg-zinc-200 disabled:!bg-transparent"
-                              }`}
-                            >
-                              <IconCopy size={16} />
-                            </ActionIcon>
-                            <code
-                              className={`block break-all rounded-lg px-3 py-3 pr-12 text-xs ${
-                                isDark ? "text-zinc-100" : "text-zinc-800"
-                              }`}
-                            >
-                              {isLoadingMachineCommand
-                                ? "Loading bootstrap command..."
-                                : machineCommand || "Unavailable"}
-                            </code>
-                          </div>
-                          <p className="mt-2 text-xs text-zinc-500">
-                            Paste once to install and connect. After that use
-                            {" "}
-                            <code>porthub ls</code>
-                            {", "}
-                            <code>porthub status &lt;tenant&gt;</code>
-                            {" "}
-                            and
-                            {" "}
-                            <code>porthub stop &lt;tenant&gt;</code>
-                            {" "}
-                            on the client machine.
-                          </p>
-                          <div className="mt-1.5 flex items-center gap-1.5">
-                            <p
-                              className={`text-xs ${
-                                isDark ? "text-zinc-400" : "text-zinc-500"
-                              }`}
-                            >
-                              Installed client version: {clientVersionLabel}
-                            </p>
-                            {showClientUpdateAction ? (
+                              />
                               <Tooltip
-                                label={
-                                  host.clientUpdateRequested
-                                    ? "Update client"
-                                    : host.clientUpdateAvailable
-                                      ? "Update client"
-                                      : "Update client"
-                                }
+                                label="Reset to client hostname"
                                 withArrow
                                 position="top"
                                 classNames={{
@@ -2115,133 +1730,520 @@ export default function HostConfigPopup({
                                 <ActionIcon
                                   type="button"
                                   variant="subtle"
-                                  onClick={handleRequestClientUpdate}
-                                  aria-label="Update client"
-                                  disabled={isRequestingClientUpdate}
-                                  className={
-                                    host.clientUpdateRequested
-                                      ? isDark
-                                        ? "!h-5 !w-5 !text-amber-300/90 hover:!bg-zinc-800"
-                                        : "!h-5 !w-5 !text-amber-700/90 hover:!bg-zinc-200"
-                                      : isDark
-                                        ? "!h-5 !w-5 !text-zinc-500 hover:!bg-zinc-800 hover:!text-zinc-300"
-                                        : "!h-5 !w-5 !text-zinc-400 hover:!bg-zinc-200 hover:!text-zinc-600"
-                                  }
+                                  radius="md"
+                                  aria-label="Reset description to client hostname"
+                                  onClick={handleResetHostnameToClient}
+                                  disabled={!clientHostnameValue || isSavingMachineDetails}
+                                  className={`!absolute right-1.5 top-1/2 -translate-y-1/2 ${
+                                    isDark
+                                      ? "!text-zinc-400 hover:!bg-zinc-800 hover:!text-zinc-200 disabled:!opacity-35"
+                                      : "!text-zinc-500 hover:!bg-zinc-100 hover:!text-zinc-700 disabled:!opacity-35"
+                                  }`}
                                 >
-                                  <IconRefresh size={12} />
+                                  <IconRefresh size={15} />
                                 </ActionIcon>
                               </Tooltip>
+                            </div>
+                            {machineDetailsErrors.hostname ? (
+                              <p className={errorClassName}>{machineDetailsErrors.hostname}</p>
                             ) : null}
                           </div>
+
+                          <div className="flex items-start gap-2 md:justify-end">
+                            <Button
+                              type="button"
+                              onClick={handleSaveMachineDetails}
+                              loading={isSavingMachineDetails}
+                              disabled={!machineDetailsChanged}
+                              classNames={{
+                                root:
+                                  "!bg-blue-600 !text-blue-50 hover:!bg-blue-700 disabled:!bg-blue-400",
+                              }}
+                            >
+                              Save
+                            </Button>
+                          </div>
                         </div>
-                      </div>
-                    </div>
-                  </Collapse>
-                </div>
 
-                <div>
-                  <button
-                    type="button"
-                    onClick={() => toggleAccordionSection("logs")}
-                    className="flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left"
-                  >
-                    <span className={isDark ? "text-sm text-zinc-200" : "text-sm text-zinc-800"}>
-                      Client logs
-                    </span>
-                    {showClientLogs ? (
-                      <IconChevronUp size={18} className={isDark ? "text-zinc-400" : "text-zinc-600"} />
-                    ) : (
-                      <IconChevronDown size={18} className={isDark ? "text-zinc-400" : "text-zinc-600"} />
-                    )}
-                  </button>
+                        {groups.length > 0 && onAddMachineToGroup && onRemoveMachineFromGroup ? (
+                          <div>
+                            <p className="mb-2 text-xs text-zinc-500">
+                              Search existing groups, add new ones, or remove assignments for this machine.
+                            </p>
+                            <Popover
+                            opened={isGroupPickerOpen}
+                            onChange={setIsGroupPickerOpen}
+                            position="bottom-start"
+                            offset={2}
+                            width="target"
+                            withinPortal
+                            shadow="md"
+                            >
+                              <Popover.Target>
+                                <div
+                                  onClick={() => {
+                                    if (groupSaving) {
+                                      return;
+                                    }
+                                    setIsGroupPickerOpen(true);
+                                    groupInputRef.current?.focus();
+                                  }}
+                                  className={`flex min-h-[2.7rem] w-full items-center justify-between gap-3 rounded-md border px-3 py-2 text-left transition ${
+                                    isDark
+                                      ? "border-zinc-700 bg-zinc-900/70 text-zinc-100"
+                                      : "border-zinc-200 bg-white text-zinc-900"
+                                  } ${groupSaving ? "cursor-not-allowed opacity-70" : ""}`}
+                                >
+                                  <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+                                    {assignedGroups.length > 0 ? (
+                                      assignedGroups.map((group) => (
+                                        <span
+                                          key={group._id}
+                                          className={`inline-flex max-w-full items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium ${
+                                            isDark
+                                              ? "border-blue-500/25 bg-blue-500/10 text-blue-100"
+                                              : "border-blue-200 bg-blue-50 text-blue-900"
+                                          }`}
+                                        >
+                                          <span className="truncate">{group.name}</span>
+                                          <ActionIcon
+                                            type="button"
+                                            size="xs"
+                                            radius="xl"
+                                            variant="subtle"
+                                            aria-label={`Remove ${group.name}`}
+                                            disabled={groupSaving}
+                                            onClick={(event) => {
+                                              event.preventDefault();
+                                              event.stopPropagation();
+                                              handleRemoveGroupChip(group._id);
+                                            }}
+                                            className={
+                                              isDark
+                                                ? "!h-4 !w-4 !text-blue-200 hover:!bg-blue-400/15"
+                                                : "!h-4 !w-4 !text-blue-700 hover:!bg-blue-100"
+                                            }
+                                          >
+                                            <IconX size={11} stroke={2} />
+                                          </ActionIcon>
+                                        </span>
+                                      ))
+                                    ) : null}
+                              <input
+                                ref={groupInputRef}
+                                type="text"
+                                value={groupQuery}
+                                disabled={groupSaving}
+                                onFocus={() => setIsGroupPickerOpen(true)}
+                                onChange={(event) => {
+                                  setGroupQuery(event.currentTarget.value);
+                                  setIsGroupPickerOpen(true);
+                                }}
+                                onKeyDown={(event) => {
+                                  if (event.key === "Enter") {
+                                    event.preventDefault();
+                                    if (filteredAvailableGroups.length > 0) {
+                                      handleAddGroupFromSelect(filteredAvailableGroups[0]._id);
+                                    } else if (canCreateGroupFromQuery) {
+                                      handleCreateGroupFromQuery();
+                                    }
+                                  }
 
-                  <Collapse in={showClientLogs}>
-                    <div className="space-y-3 px-4 py-4">
-                      <div className="flex items-center justify-between gap-3">
-                        <p className="text-xs uppercase tracking-[0.18em] text-zinc-500">
-                          Live stream
-                        </p>
-                        <div className="flex items-center gap-3">
-                          <Switch
-                            size="xs"
-                            checked={showClientLogLineNumbers}
-                            onChange={(event) =>
-                              setShowClientLogLineNumbers(event.currentTarget.checked)
-                            }
-                            labelPosition="left"
-                            label="Line numbers"
-                          />
-                          <Switch
-                            size="xs"
-                            checked={showVerboseClientLogs}
-                            onChange={(event) =>
-                              setShowVerboseClientLogs(event.currentTarget.checked)
-                            }
-                            labelPosition="left"
-                            label="Verbose"
-                          />
-                        </div>
-                      </div>
+                                  if (event.key === "Escape") {
+                                    setIsGroupPickerOpen(false);
+                                  }
+                                }}
+                                placeholder="Search groups or add new group by pressing Enter"
+                                className={`min-w-[7rem] flex-1 appearance-none border-0 bg-transparent p-0 text-sm shadow-none outline-none ring-0 placeholder:text-xs focus:border-0 focus:outline-none focus:ring-0 ${
+                                  isDark
+                                    ? "text-zinc-100 placeholder:text-zinc-500"
+                                    : "text-zinc-900 placeholder:text-zinc-400"
+                                }`}
+                              />
+                                  </div>
+                                  <IconChevronDown
+                                    size={16}
+                                    className={`shrink-0 ${isDark ? "text-zinc-500" : "text-zinc-400"}`}
+                                  />
+                                </div>
+                              </Popover.Target>
 
-                      <div
-                        ref={clientLogsContainerRef}
-                        onScroll={handleClientLogsScroll}
-                        className={`max-h-72 overflow-y-auto rounded-lg border px-3 py-3 font-mono text-xs ${
-                          isDark
-                            ? "border-zinc-700 bg-zinc-900 text-zinc-100 dark-scrollbar"
-                            : "border-zinc-200 bg-zinc-100 text-zinc-800 light-scrollbar"
-                        }`}
-                      >
-                        {visibleClientLogs.length > 0 ? (
-                          <div className="space-y-0.5">
-                            {visibleClientLogs.map((entry) => (
-                              <div
-                                key={entry.number}
+                              <Popover.Dropdown
                                 className={
-                                  showClientLogLineNumbers
-                                    ? "grid grid-cols-[42px_minmax(0,1fr)] gap-2"
-                                    : "block"
+                                  isDark
+                                    ? "!border-zinc-700 !bg-zinc-950 !p-1.5"
+                                    : "!border-zinc-200 !bg-white !p-1.5"
                                 }
                               >
-                                {showClientLogLineNumbers ? (
-                                  <span
-                                    className={`select-none text-right ${
-                                      isDark ? "text-zinc-500" : "text-zinc-400"
+                                {canCreateGroupFromQuery ? (
+                                  <button
+                                    type="button"
+                                    disabled={groupSaving}
+                                    onClick={handleCreateGroupFromQuery}
+                                    className={`mb-1 flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left text-sm transition ${
+                                      isDark
+                                        ? "border-zinc-800 bg-zinc-900/70 text-zinc-100 hover:border-blue-500/30 hover:bg-blue-500/10 hover:text-blue-100"
+                                        : "border-zinc-200 bg-zinc-50 text-zinc-900 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-900"
                                     }`}
                                   >
-                                    {entry.number}
-                                  </span>
+                                    <span className="flex min-w-0 items-center gap-2 truncate">
+                                      <span
+                                        className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${
+                                          isDark ? "bg-zinc-800 text-zinc-300" : "bg-white text-zinc-500"
+                                        }`}
+                                      >
+                                        <IconFolder size={14} />
+                                      </span>
+                                      <span className="truncate font-medium">{groupQuery.trim()}</span>
+                                    </span>
+                                    <span className="shrink-0 text-xs text-zinc-500">
+                                      Add this group by pressing{" "}
+                                      <span
+                                        className={`inline-flex rounded border px-1.5 py-0.5 text-[10px] font-semibold ${
+                                          isDark
+                                            ? "border-zinc-600 bg-zinc-800 text-zinc-200"
+                                            : "border-zinc-300 bg-white text-zinc-700"
+                                        }`}
+                                      >
+                                        Enter
+                                      </span>
+                                    </span>
+                                  </button>
                                 ) : null}
-                                <span className="whitespace-pre-wrap break-words">
-                                  {entry.text}
-                                </span>
-                              </div>
-                            ))}
+
+                                {filteredAvailableGroups.length === 0 ? (
+                                  canCreateGroupFromQuery ? null : (
+                                    <div
+                                      className={`px-2 py-2 text-sm ${
+                                        isDark ? "text-zinc-500" : "text-zinc-500"
+                                      }`}
+                                    >
+                                      {availableGroups.length === 0
+                                        ? "All groups already assigned."
+                                        : "No matching groups."}
+                                    </div>
+                                  )
+                                ) : (
+                                  <div className="flex max-h-52 flex-col gap-1 overflow-y-auto">
+                                    {filteredAvailableGroups.map((group) => (
+                                      <button
+                                        key={group._id}
+                                        type="button"
+                                        disabled={groupSaving}
+                                        onClick={() => handleAddGroupFromSelect(group._id)}
+                                        className={`flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left text-sm transition ${
+                                          isDark
+                                            ? "border-zinc-800 bg-zinc-900/70 text-zinc-100 hover:border-blue-500/30 hover:bg-blue-500/10 hover:text-blue-100"
+                                            : "border-zinc-200 bg-zinc-50 text-zinc-900 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-900"
+                                        }`}
+                                      >
+                                        <span className="flex min-w-0 items-center gap-2 truncate">
+                                          <span
+                                            className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${
+                                              isDark ? "bg-zinc-800 text-zinc-300" : "bg-white text-zinc-500"
+                                            }`}
+                                          >
+                                            <IconFolder size={14} />
+                                          </span>
+                                          <span className="truncate">{group.name}</span>
+                                        </span>
+                                        <span className="flex shrink-0 items-center gap-1.5 text-xs text-zinc-500">
+                                          <IconUsers size={13} />
+                                          <span>{group.machineCount || 0} Peer(s)</span>
+                                        </span>
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                              </Popover.Dropdown>
+                            </Popover>
                           </div>
-                        ) : (
-                          <p className={isDark ? "text-zinc-400" : "text-zinc-500"}>
-                            {clientLogs.length > 0
-                              ? "Verbose logs are currently hidden. Enable the verbose toggle to view them."
-                              : clientLogStreamStatus === "offline"
-                                ? "The client must be online before logs can be streamed."
-                              : showClientLogs
-                                ? "Fetching logs from the client..."
-                                : "Fetching logs from the client..."}
-                          </p>
-                        )}
+                        ) : null}
                       </div>
+                    </Collapse>
+                  </div>
 
-                      <p className="text-xs text-zinc-500">
-                        Shows the same combined PortHub client and Rathole log stream
-                        available on the client via <code>porthub logs</code>. Turn on
-                        verbose to include debug noise.
-                      </p>
-                    </div>
-                  </Collapse>
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => toggleAccordionSection("credentials")}
+                      className="flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left"
+                    >
+                      <span className={isDark ? "text-sm text-zinc-200" : "text-sm text-zinc-800"}>
+                        Client setup
+                      </span>
+                      {showMachineCredentials ? (
+                        <IconChevronUp size={18} className={isDark ? "text-zinc-400" : "text-zinc-600"} />
+                      ) : (
+                        <IconChevronDown size={18} className={isDark ? "text-zinc-400" : "text-zinc-600"} />
+                      )}
+                    </button>
+
+                    <Collapse in={showMachineCredentials}>
+                      <div className="space-y-1 px-4 pb-2 pt-1.5">
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <p className="text-xs uppercase tracking-[0.18em] text-zinc-500">
+                              Bootstrap command
+                            </p>
+                            <Tooltip
+                              label="Refresh machine token"
+                              withArrow
+                              position="top"
+                              classNames={{
+                                tooltip: isDark
+                                  ? "!border !border-zinc-700 !bg-zinc-900 !text-zinc-100"
+                                  : "!border !border-zinc-200 !bg-white !text-zinc-900",
+                                arrow: isDark
+                                  ? "!border-zinc-700 !bg-zinc-900"
+                                  : "!border-zinc-200 !bg-white",
+                              }}
+                            >
+                              <ActionIcon
+                                type="button"
+                                variant="subtle"
+                                onClick={handleOpenRefreshMachineTokenConfirm}
+                                aria-label="Refresh machine token"
+                                className={
+                                  isDark
+                                    ? "!h-6 !w-6 !text-zinc-400 hover:!bg-zinc-800 hover:!text-zinc-200"
+                                    : "!h-6 !w-6 !text-zinc-500 hover:!bg-zinc-200 hover:!text-zinc-700"
+                                }
+                              >
+                                <IconRefresh size={14} />
+                              </ActionIcon>
+                            </Tooltip>
+                            <Tooltip
+                              label="Copy machine token"
+                              withArrow
+                              position="top"
+                              classNames={{
+                                tooltip: isDark
+                                  ? "!border !border-zinc-700 !bg-zinc-900 !text-zinc-100"
+                                  : "!border !border-zinc-200 !bg-white !text-zinc-900",
+                                arrow: isDark
+                                  ? "!border-zinc-700 !bg-zinc-900"
+                                  : "!border-zinc-200 !bg-white",
+                              }}
+                            >
+                              <ActionIcon
+                                type="button"
+                                variant="subtle"
+                                onClick={() => handleCopy("Machine token", host?.token || "")}
+                                aria-label="Copy machine token"
+                                disabled={!host?.token}
+                                className={
+                                  isDark
+                                    ? "!h-6 !w-6 !text-zinc-400 hover:!bg-zinc-800 hover:!text-zinc-200 disabled:!opacity-40"
+                                    : "!h-6 !w-6 !text-zinc-500 hover:!bg-zinc-200 hover:!text-zinc-700 disabled:!opacity-40"
+                                }
+                              >
+                                <IconCopy size={14} />
+                              </ActionIcon>
+                            </Tooltip>
+                          </div>
+                          <div className="mt-2">
+                            <div
+                              className={`relative rounded-lg ${
+                                isDark ? "bg-zinc-800/80" : "bg-zinc-100"
+                              }`}
+                            >
+                              <ActionIcon
+                                type="button"
+                                variant="subtle"
+                                onClick={() => handleCopy("Bootstrap command", machineCommand)}
+                                aria-label="Copy bootstrap command"
+                                disabled={!machineCommand || isLoadingMachineCommand}
+                                className={`!absolute right-2 top-2 ${
+                                  isDark
+                                    ? "!text-zinc-300 hover:!bg-zinc-700 disabled:!bg-transparent"
+                                    : "!text-zinc-600 hover:!bg-zinc-200 disabled:!bg-transparent"
+                                }`}
+                              >
+                                <IconCopy size={16} />
+                              </ActionIcon>
+                              <code
+                                className={`block break-all rounded-lg px-3 py-3 pr-12 text-xs ${
+                                  isDark ? "text-zinc-100" : "text-zinc-800"
+                                }`}
+                              >
+                                {isLoadingMachineCommand
+                                  ? "Loading bootstrap command..."
+                                  : machineCommand || "Unavailable"}
+                              </code>
+                            </div>
+                            <p className="mt-2 text-xs text-zinc-500">
+                              Paste once to install and connect. After that use
+                              {" "}
+                              <code>porthub ls</code>
+                              {", "}
+                              <code>porthub status &lt;tenant&gt;</code>
+                              {" "}
+                              and
+                              {" "}
+                              <code>porthub stop &lt;tenant&gt;</code>
+                              {" "}
+                              on the client machine.
+                            </p>
+                            <div className="mt-1.5 flex items-center gap-1.5">
+                              <p
+                                className={`text-xs ${
+                                  isDark ? "text-zinc-400" : "text-zinc-500"
+                                }`}
+                              >
+                                Installed client version: {clientVersionLabel}
+                              </p>
+                              {showClientUpdateAction ? (
+                                <Tooltip
+                                  label={
+                                    host.clientUpdateRequested
+                                      ? "Update client"
+                                      : host.clientUpdateAvailable
+                                        ? "Update client"
+                                        : "Update client"
+                                  }
+                                  withArrow
+                                  position="top"
+                                  classNames={{
+                                    tooltip: isDark
+                                      ? "!border !border-zinc-700 !bg-zinc-900 !text-zinc-100"
+                                      : "!border !border-zinc-200 !bg-white !text-zinc-900",
+                                    arrow: isDark
+                                      ? "!border-zinc-700 !bg-zinc-900"
+                                      : "!border-zinc-200 !bg-white",
+                                  }}
+                                >
+                                  <ActionIcon
+                                    type="button"
+                                    variant="subtle"
+                                    onClick={handleRequestClientUpdate}
+                                    aria-label="Update client"
+                                    disabled={isRequestingClientUpdate}
+                                    className={
+                                      host.clientUpdateRequested
+                                        ? isDark
+                                          ? "!h-5 !w-5 !text-amber-300/90 hover:!bg-zinc-800"
+                                          : "!h-5 !w-5 !text-amber-700/90 hover:!bg-zinc-200"
+                                        : isDark
+                                          ? "!h-5 !w-5 !text-zinc-500 hover:!bg-zinc-800 hover:!text-zinc-300"
+                                          : "!h-5 !w-5 !text-zinc-400 hover:!bg-zinc-200 hover:!text-zinc-600"
+                                    }
+                                  >
+                                    <IconRefresh size={12} />
+                                  </ActionIcon>
+                                </Tooltip>
+                              ) : null}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </Collapse>
+                  </div>
+
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => toggleAccordionSection("logs")}
+                      className="flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left"
+                    >
+                      <span className={isDark ? "text-sm text-zinc-200" : "text-sm text-zinc-800"}>
+                        Client logs
+                      </span>
+                      {showClientLogs ? (
+                        <IconChevronUp size={18} className={isDark ? "text-zinc-400" : "text-zinc-600"} />
+                      ) : (
+                        <IconChevronDown size={18} className={isDark ? "text-zinc-400" : "text-zinc-600"} />
+                      )}
+                    </button>
+
+                    <Collapse in={showClientLogs}>
+                      <div className="space-y-3 px-4 py-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="text-xs uppercase tracking-[0.18em] text-zinc-500">
+                            Live stream
+                          </p>
+                          <div className="flex items-center gap-3">
+                            <Switch
+                              size="xs"
+                              checked={showClientLogLineNumbers}
+                              onChange={(event) =>
+                                setShowClientLogLineNumbers(event.currentTarget.checked)
+                              }
+                              labelPosition="left"
+                              label="Line numbers"
+                            />
+                            <Switch
+                              size="xs"
+                              checked={showVerboseClientLogs}
+                              onChange={(event) =>
+                                setShowVerboseClientLogs(event.currentTarget.checked)
+                              }
+                              labelPosition="left"
+                              label="Verbose"
+                            />
+                          </div>
+                        </div>
+
+                        <div
+                          ref={clientLogsContainerRef}
+                          onScroll={handleClientLogsScroll}
+                          className={`max-h-72 overflow-y-auto rounded-lg border px-3 py-3 font-mono text-xs ${
+                            isDark
+                              ? "border-zinc-700 bg-zinc-900 text-zinc-100 dark-scrollbar"
+                              : "border-zinc-200 bg-zinc-100 text-zinc-800 light-scrollbar"
+                          }`}
+                        >
+                          {visibleClientLogs.length > 0 ? (
+                            <div className="space-y-0.5">
+                              {visibleClientLogs.map((entry) => (
+                                <div
+                                  key={entry.number}
+                                  className={
+                                    showClientLogLineNumbers
+                                      ? "grid grid-cols-[42px_minmax(0,1fr)] gap-2"
+                                      : "block"
+                                  }
+                                >
+                                  {showClientLogLineNumbers ? (
+                                    <span
+                                      className={`select-none text-right ${
+                                        isDark ? "text-zinc-500" : "text-zinc-400"
+                                      }`}
+                                    >
+                                      {entry.number}
+                                    </span>
+                                  ) : null}
+                                  <span className="whitespace-pre-wrap break-words">
+                                    {entry.text}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className={isDark ? "text-zinc-400" : "text-zinc-500"}>
+                              {clientLogs.length > 0
+                                ? "Verbose logs are currently hidden. Enable the verbose toggle to view them."
+                                : clientLogStreamStatus === "offline"
+                                  ? "The client must be online before logs can be streamed."
+                                : showClientLogs
+                                  ? "Fetching logs from the client..."
+                                  : "Fetching logs from the client..."}
+                            </p>
+                          )}
+                        </div>
+
+                        <p className="text-xs text-zinc-500">
+                          Shows the same combined PortHub client and Rathole log stream
+                          available on the client via <code>porthub logs</code>. Turn on
+                          verbose to include debug noise.
+                        </p>
+                      </div>
+                    </Collapse>
+                  </div>
+
                 </div>
-
               </div>
-            </div>
+            ) : null}
 
             {selectedRule ? (
               /* Edit view: only the form for the selected rule */
