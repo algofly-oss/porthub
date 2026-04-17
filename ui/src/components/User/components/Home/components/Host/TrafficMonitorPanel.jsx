@@ -19,15 +19,21 @@ export const normalizeTrafficSamples = (samples) =>
             .map((value) => String(value || "").trim())
             .filter(Boolean)
         : [],
+      outgoing_ips: Array.isArray(sample?.outgoing_ips)
+        ? sample.outgoing_ips
+            .map((value) => String(value || "").trim())
+            .filter(Boolean)
+        : [],
     }))
     .filter((sample) => sample.timestamp > 0)
     .sort((left, right) => left.timestamp - right.timestamp)
     .slice(-120);
 
 const buildTrafficWindow = (samples, windowSeconds = 60) => {
-  const now = Math.floor(Date.now() / 1000);
   const byTimestamp = new Map();
-  normalizeTrafficSamples(samples).forEach((sample) => {
+  const normalizedSamples = normalizeTrafficSamples(samples);
+
+  normalizedSamples.forEach((sample) => {
     const timestamp = Math.floor(sample.timestamp);
     const current = byTimestamp.get(timestamp) || {
       timestamp,
@@ -36,6 +42,7 @@ const buildTrafficWindow = (samples, windowSeconds = 60) => {
       drop_bytes: 0,
       blocked_ips: [],
       incoming_ips: [],
+      outgoing_ips: [],
     };
 
     byTimestamp.set(timestamp, {
@@ -45,23 +52,56 @@ const buildTrafficWindow = (samples, windowSeconds = 60) => {
       drop_bytes: current.drop_bytes + sample.drop_bytes,
       blocked_ips: [...new Set([...current.blocked_ips, ...sample.blocked_ips])],
       incoming_ips: [...new Set([...current.incoming_ips, ...sample.incoming_ips])],
+      outgoing_ips: [...new Set([...current.outgoing_ips, ...sample.outgoing_ips])],
     });
   });
 
-  return Array.from({ length: windowSeconds }, (_, index) => {
-    const timestamp = now - (windowSeconds - 1 - index);
+  const now = Math.floor(Date.now() / 1000);
+  const earliestTimestamp = normalizedSamples[0]?.timestamp
+    ? Math.floor(normalizedSamples[0].timestamp)
+    : null;
+  const latestTimestamp = normalizedSamples[normalizedSamples.length - 1]?.timestamp
+    ? Math.floor(normalizedSamples[normalizedSamples.length - 1].timestamp)
+    : now;
+  const windowEndTimestamp = Math.max(now, latestTimestamp);
+
+  const samplesWindow = Array.from({ length: windowSeconds }, (_, index) => {
+    const timestamp = windowEndTimestamp - (windowSeconds - 1 - index);
     const existing = byTimestamp.get(timestamp);
-    return (
-      existing || {
-        timestamp,
-        in_bytes: 0,
-        out_bytes: 0,
-        drop_bytes: 0,
-        blocked_ips: [],
-        incoming_ips: [],
+    if (existing) {
+      return existing;
+    }
+
+    if (earliestTimestamp !== null && timestamp < earliestTimestamp) {
+      const earliestSample = byTimestamp.get(earliestTimestamp);
+      if (earliestSample) {
+        return {
+          timestamp,
+          in_bytes: earliestSample.in_bytes,
+          out_bytes: earliestSample.out_bytes,
+          drop_bytes: earliestSample.drop_bytes,
+          blocked_ips: [],
+          incoming_ips: [],
+          outgoing_ips: [],
+        };
       }
-    );
+    }
+
+    return {
+      timestamp,
+      in_bytes: 0,
+      out_bytes: 0,
+      drop_bytes: 0,
+      blocked_ips: [],
+      incoming_ips: [],
+      outgoing_ips: [],
+    };
   });
+
+  return {
+    samples: samplesWindow,
+    windowEndTimestamp,
+  };
 };
 
 const formatTrafficRate = (value) => {
@@ -75,7 +115,7 @@ const formatTrafficRate = (value) => {
   return `${Math.round(normalized)} B/s`;
 };
 
-const formatBlockedIpLabel = (ips) => {
+const formatIpLabel = (ips) => {
   const normalized = (Array.isArray(ips) ? ips : [])
     .map((value) => String(value || "").trim())
     .filter(Boolean);
@@ -91,72 +131,6 @@ const formatBlockedIpLabel = (ips) => {
   return `${normalized[0]} +${normalized.length - 1} other${
     normalized.length - 1 === 1 ? "" : "s"
   }`;
-};
-
-const formatIncomingIpLabel = (ips) => {
-  const normalized = (Array.isArray(ips) ? ips : [])
-    .map((value) => String(value || "").trim())
-    .filter(Boolean);
-
-  if (normalized.length === 0) {
-    return null;
-  }
-
-  if (normalized.length === 1) {
-    return normalized[0];
-  }
-
-  return `${normalized[0]} +${normalized.length - 1} other${
-    normalized.length - 1 === 1 ? "" : "s"
-  }`;
-};
-
-const getNearestBlockedSample = (samples, activeIndex) => {
-  if (!Array.isArray(samples) || samples.length === 0 || activeIndex === null) {
-    return null;
-  }
-
-  const maxDistance = 2;
-  for (let distance = 0; distance <= maxDistance; distance += 1) {
-    const offsets = distance === 0 ? [0] : [-distance, distance];
-    for (const offset of offsets) {
-      const candidate = samples[activeIndex + offset];
-      if (
-        candidate &&
-        Number(candidate.drop_bytes) > 0 &&
-        Array.isArray(candidate.blocked_ips) &&
-        candidate.blocked_ips.length > 0
-      ) {
-        return candidate;
-      }
-    }
-  }
-
-  return null;
-};
-
-const getNearestIncomingSample = (samples, activeIndex) => {
-  if (!Array.isArray(samples) || samples.length === 0 || activeIndex === null) {
-    return null;
-  }
-
-  const maxDistance = 2;
-  for (let distance = 0; distance <= maxDistance; distance += 1) {
-    const offsets = distance === 0 ? [0] : [-distance, distance];
-    for (const offset of offsets) {
-      const candidate = samples[activeIndex + offset];
-      if (
-        candidate &&
-        Number(candidate.in_bytes) > 0 &&
-        Array.isArray(candidate.incoming_ips) &&
-        candidate.incoming_ips.length > 0
-      ) {
-        return candidate;
-      }
-    }
-  }
-
-  return null;
 };
 
 const buildTrafficLinePath = (samples, valueKey, width, height, maxValue) => {
@@ -234,7 +208,7 @@ export default function TrafficMonitorPanel({
   const [showBlocked, setShowBlocked] = useState(true);
 
   const normalizedSamples = useMemo(() => normalizeTrafficSamples(samples), [samples]);
-  const windowedSamples = useMemo(
+  const { samples: windowedSamples, windowEndTimestamp } = useMemo(
     () => buildTrafficWindow(samples, windowSeconds),
     [samples, windowSeconds]
   );
@@ -269,12 +243,43 @@ export default function TrafficMonitorPanel({
       ? Math.min(Math.max(hoveredIndex, 0), windowedSamples.length - 1)
       : null;
   const activeSample = activeIndex !== null ? windowedSamples[activeIndex] : null;
-  const incomingHoverSample = getNearestIncomingSample(windowedSamples, activeIndex);
-  const blockedHoverSample = getNearestBlockedSample(windowedSamples, activeIndex);
+  const incomingHoverIps =
+    activeSample &&
+    Number(activeSample.in_bytes) > 0 &&
+    Array.isArray(activeSample.incoming_ips) &&
+    activeSample.incoming_ips.length > 0
+      ? activeSample.incoming_ips
+      : null;
+  const outgoingHoverIps =
+    activeSample &&
+    Number(activeSample.out_bytes) > 0 &&
+    Array.isArray(activeSample.outgoing_ips) &&
+    activeSample.outgoing_ips.length > 0
+      ? activeSample.outgoing_ips
+      : null;
+  const blockedHoverIps =
+    activeSample &&
+    Number(activeSample.drop_bytes) > 0 &&
+    Array.isArray(activeSample.blocked_ips) &&
+    activeSample.blocked_ips.length > 0
+      ? activeSample.blocked_ips
+      : null;
+  const incomingHoverLabel = incomingHoverIps ? formatIpLabel(incomingHoverIps) : null;
+  const outgoingHoverLabel = outgoingHoverIps ? formatIpLabel(outgoingHoverIps) : null;
+  const blockedHoverLabel = blockedHoverIps ? formatIpLabel(blockedHoverIps) : null;
+  const shouldShowOutgoingLabel =
+    Boolean(outgoingHoverLabel) && outgoingHoverLabel !== incomingHoverLabel;
   const activeX =
     activeIndex !== null && windowedSamples.length > 1
       ? (activeIndex / (windowedSamples.length - 1)) * chartWidth
       : 0;
+  const secondsSinceWindowEnd = Math.max(
+    0,
+    Math.floor(Date.now() / 1000) - windowEndTimestamp
+  );
+  const endLabel = secondsSinceWindowEnd <= 1 ? "Now" : `${secondsSinceWindowEnd}s ago`;
+  const midpointSecondsAgo = secondsSinceWindowEnd + Math.floor(windowSeconds / 2);
+  const startSecondsAgo = secondsSinceWindowEnd + windowSeconds;
 
   return (
     <div
@@ -413,19 +418,27 @@ export default function TrafficMonitorPanel({
                     </span>
                   ) : null}
                 </div>
-                {showIncoming && incomingHoverSample ? (
+                {showIncoming && incomingHoverLabel ? (
                   <div className="mt-1 grid grid-cols-[0.5rem_minmax(0,1fr)] items-start gap-x-1.5">
                     <span className="mt-[0.28rem] h-2 w-2 rounded-full bg-emerald-400" />
                     <span className="break-all leading-4">
-                      From {formatIncomingIpLabel(incomingHoverSample.incoming_ips)}
+                      From {incomingHoverLabel}
                     </span>
                   </div>
                 ) : null}
-                {showBlocked && blockedHoverSample ? (
+                {showOutgoing && shouldShowOutgoingLabel ? (
+                  <div className="mt-1 grid grid-cols-[0.5rem_minmax(0,1fr)] items-start gap-x-1.5">
+                    <span className="mt-[0.28rem] h-2 w-2 rounded-full bg-sky-400" />
+                    <span className="break-all leading-4">
+                      To {outgoingHoverLabel}
+                    </span>
+                  </div>
+                ) : null}
+                {showBlocked && blockedHoverLabel ? (
                   <div className="mt-1 grid grid-cols-[0.5rem_minmax(0,1fr)] items-start gap-x-1.5">
                     <span className="mt-[0.28rem] h-2 w-2 rounded-full bg-rose-400" />
                     <span className="break-all leading-4">
-                      Blocked {formatBlockedIpLabel(blockedHoverSample.blocked_ips)}
+                      Blocked {blockedHoverLabel}
                     </span>
                   </div>
                 ) : null}
@@ -535,9 +548,9 @@ export default function TrafficMonitorPanel({
           </div>
 
           <div className="mt-2 flex items-center justify-between text-[10px] text-zinc-500">
-            <span>{windowSeconds}s ago</span>
-            <span>{Math.floor(windowSeconds / 2)}s ago</span>
-            <span>Now</span>
+            <span>{startSecondsAgo}s ago</span>
+            <span>{midpointSecondsAgo}s ago</span>
+            <span>{endLabel}</span>
           </div>
 
           {mode === "standalone" ? (

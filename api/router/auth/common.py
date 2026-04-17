@@ -14,6 +14,11 @@ class UserSigninDto(BaseModel):
     password: str
 
 
+class UserPasswordUpdateDto(BaseModel):
+    current_password: str
+    new_password: str
+
+
 def authenticate_user(session_token):
     login_error = HTTPException(status_code=400, detail="User not logged in")
     # Check if session token exists

@@ -50,10 +50,10 @@ async def traffic_loop():
                         for item in list_recent_source_ip_hits(port)
                         if int(item["last_seen"]) >= now - 2
                     ]
-                    stat["history"].append((now, delta, 0, 0, [], incoming_ips))
+                    stat["history"].append((now, delta, 0, 0, [], incoming_ips, []))
                     ACTIVE_PORTS[port] = now
                     pending.append(
-                        (port, now, delta, 0, 0, "[]", json.dumps(incoming_ips))
+                        (port, now, delta, 0, 0, "[]", json.dumps(incoming_ips), "[]")
                     )
                 continue
 
@@ -63,9 +63,16 @@ async def traffic_loop():
                 delta = max(0, bytes_value - stat["last_out"])
                 stat["last_out"] = bytes_value
                 if delta > 0:
-                    stat["history"].append((now, 0, delta, 0, [], []))
+                    outgoing_ips = [
+                        str(item["ip"])
+                        for item in list_recent_destination_ip_hits(port)
+                        if int(item["last_seen"]) >= now - 2
+                    ]
+                    stat["history"].append((now, 0, delta, 0, [], [], outgoing_ips))
                     ACTIVE_PORTS[port] = now
-                    pending.append((port, now, 0, delta, 0, "[]", "[]"))
+                    pending.append(
+                        (port, now, 0, delta, 0, "[]", "[]", json.dumps(outgoing_ips))
+                    )
                 continue
 
             if name.startswith("cnt_drop_"):
@@ -79,9 +86,11 @@ async def traffic_loop():
                         for item in list_blocked_source_ip_hits(port)
                         if int(item["last_seen"]) >= now - 2
                     ]
-                    stat["history"].append((now, 0, 0, delta, blocked_ips, []))
+                    stat["history"].append((now, 0, 0, delta, blocked_ips, [], []))
                     ACTIVE_PORTS[port] = now
-                    pending.append((port, now, 0, 0, delta, json.dumps(blocked_ips), "[]"))
+                    pending.append(
+                        (port, now, 0, 0, delta, json.dumps(blocked_ips), "[]", "[]")
+                    )
 
         cleanup_ports(now)
         await asyncio.sleep(1)
@@ -162,6 +171,10 @@ def list_recent_source_ip_hits(port: int) -> list[dict[str, int | str]]:
     return _list_source_ip_hits_for_set(f"recent_{port}")
 
 
+def list_recent_destination_ip_hits(port: int) -> list[dict[str, int | str]]:
+    return _list_source_ip_hits_for_set(f"recent_out_{port}")
+
+
 def list_blocked_source_ip_hits(port: int) -> list[dict[str, int | str]]:
     return _list_source_ip_hits_for_set(f"blocked_{port}")
 
@@ -195,7 +208,7 @@ async def db_writer():
         batch = pending[:]
         pending.clear()
         prune_before = int(time.time()) - BUFFER_SECONDS
-        tracked_ports = {port for port, _, _, _, _, _, _ in batch}
+        tracked_ports = {port for port, _, _, _, _, _, _, _ in batch}
         recent_hits = []
         for port in tracked_ports:
             for item in list_recent_source_ip_hits(port):
@@ -211,15 +224,16 @@ async def db_writer():
                     out_bytes,
                     drop_bytes,
                     blocked_ips,
-                    incoming_ips
+                    incoming_ips,
+                    outgoing_ips
                 )
-                VALUES (?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?)
                 """,
                 batch,
             )
             await db.executemany(
                 "INSERT OR REPLACE INTO active_ports (port, last_seen) VALUES (?, ?)",
-                [(port, timestamp) for port, timestamp, _, _, _, _, _ in batch],
+                [(port, timestamp) for port, timestamp, _, _, _, _, _, _ in batch],
             )
             if recent_hits:
                 await db.executemany(

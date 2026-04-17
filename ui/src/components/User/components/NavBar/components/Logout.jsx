@@ -1,17 +1,22 @@
+import { useState } from "react";
+import { Button, Modal, Text } from "@mantine/core";
 import { BiLogOut } from "react-icons/bi";
 import useAuth from "@/shared/hooks/useAuth";
 
 export default function Logout() {
   const auth = useAuth();
   const profilePictureShort = null;
+  const [isLogoutConfirmOpen, setIsLogoutConfirmOpen] = useState(false);
+
+  const handleConfirmLogout = async () => {
+    await auth.signOut({ redirect: true });
+    setIsLogoutConfirmOpen(false);
+  };
 
   return (
     <>
       <div>
-        <div
-          className="flex items-center my-4 space-x-4 cursor-pointer drop-shadow-md"
-          onClick={() => setSelectedItem("profile")}
-        >
+        <div className="flex items-center my-4 space-x-4 drop-shadow-md">
           {profilePictureShort ? (
             <Image
               src={profilePictureShort}
@@ -36,12 +41,34 @@ export default function Logout() {
         </div>
         <div
           className="flex items-center space-x-4 bg-zinc-200 dark:bg-zinc-900 p-4 rounded-lg text-sm mt-2 justify-center cursor-pointer"
-          onClick={() => auth.signOut({ redirect: true })}
+          onClick={() => setIsLogoutConfirmOpen(true)}
         >
           <BiLogOut size={20} />
           <p className="font-medium">Log out</p>
         </div>
       </div>
+
+      <Modal
+        opened={isLogoutConfirmOpen}
+        onClose={() => setIsLogoutConfirmOpen(false)}
+        title="Log out?"
+        centered
+      >
+        <Text size="sm" c="dimmed">
+          You will be signed out of your current session.
+        </Text>
+        <div className="mt-5 flex justify-end gap-3">
+          <Button variant="default" onClick={() => setIsLogoutConfirmOpen(false)}>
+            Cancel
+          </Button>
+          <Button
+            onClick={handleConfirmLogout}
+            className="!bg-red-600 !text-red-50 hover:!bg-red-700"
+          >
+            Log out
+          </Button>
+        </div>
+      </Modal>
     </>
   );
 }

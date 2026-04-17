@@ -36,6 +36,8 @@ export default function App({ Component, pageProps }: AppProps) {
       <Toaster />
       <Head>
         <title>PortHub</title>
+        <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+        <link rel="shortcut icon" href="/favicon.svg" />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" />
         <link rel="manifest" href="/manifest.json" />

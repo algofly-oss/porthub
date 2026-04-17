@@ -1060,11 +1060,6 @@ export default function Home({ onStatsChange }) {
                 </div>
               ) : (
                 <>
-                  <div className="mb-1">
-                    <p className="text-sm font-semibold uppercase tracking-[0.2em] text-zinc-500 dark:text-zinc-500">
-                      All machines
-                    </p>
-                  </div>
                   <div className="mb-4 flex flex-col gap-3">
                     <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                       <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
