@@ -92,6 +92,7 @@ MACHINE_CONFIG_LONG_POLL_INTERVAL_SECONDS = float(
     os.environ.get("MACHINE_CONFIG_LONG_POLL_INTERVAL_SECONDS", 1.0)
 )
 PORT_HUB_PUBLIC_BASE_URL = os.environ.get("PORT_HUB_PUBLIC_BASE_URL", "")
+WEB_PROXY_DOMAIN_SUFFIX = os.environ.get("WEB_PROXY_DOMAIN_SUFFIX", "").strip().lower()
 RATHOLE_SERVER_ADDRESS = os.environ.get("RATHOLE_SERVER_ADDRESS", "")
 RATHOLE_RELEASE_GITHUB_REPOSITORY = os.environ.get(
     "RATHOLE_RELEASE_GITHUB_REPOSITORY",
@@ -117,6 +118,10 @@ RATHOLE_DUMMY_SERVICE_BIND_ADDR = os.environ.get(
 RATHOLE_SERVER_CONFIG_PATH = os.environ.get(
     "RATHOLE_SERVER_CONFIG_PATH",
     "/runtime/rathole/server.toml",
+)
+TRAEFIK_DYNAMIC_CONFIG_PATH = os.environ.get(
+    "TRAEFIK_DYNAMIC_CONFIG_PATH",
+    "/runtime/traefik/traffic-routes.yml",
 )
 
 # Load Redis credentials

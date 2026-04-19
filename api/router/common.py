@@ -166,10 +166,16 @@ def serialize_connection(connection: dict, machine: dict | None = None):
         serialized["machine_hostname"] = resolve_machine_hostname(machine)
         serialized["machine_local_ip"] = machine.get("local_ip", machine.get("ip_address", ""))
         serialized["machine_public_ip"] = machine.get("public_ip", "")
+        serialized["machine_enabled"] = machine.get("enabled", True)
+        serialized["machine_is_active"] = is_machine_online(machine)
+        serialized["machine_connection_status"] = get_machine_connection_status(machine)
     else:
         serialized["machine_name"] = connection.get("host_name", "")
         serialized["machine_hostname"] = connection.get("host_id", "")
         serialized["machine_local_ip"] = connection.get("host_ip", "")
         serialized["machine_public_ip"] = ""
+        serialized["machine_enabled"] = True
+        serialized["machine_is_active"] = False
+        serialized["machine_connection_status"] = "unknown"
 
     return serialized

@@ -5,12 +5,13 @@ import socketio
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
-from router import ping, auth, connections, groups, machines
+from router import ping, auth, connections, groups, machines, traffic_routes
 from shared.rathole_config import (
     get_server_toml_path,
     is_dummy_only_config,
     rebuild_server_toml,
 )
+from shared.traffic_config import rebuild_traffic_config, write_base_traffic_config
 from shared.firewall_client import reconcile_firewall_state_from_db
 from shared.sockets import initialize_machine_status_cache, monitor_machine_statuses, sio
 
@@ -20,6 +21,7 @@ STARTUP_REBUILD_DELAYS_SECONDS = (0, 2, 5, 10, 20)
 POST_STARTUP_REBUILD_DELAYS_SECONDS = (30, 60, 120)
 FIREWALL_RECONCILE_DELAYS_SECONDS = (0, 2, 5, 10, 20)
 retry_task = None
+traffic_retry_task = None
 machine_status_monitor_task = None
 machine_status_monitor_stop_event = None
 firewall_reconcile_task = None
@@ -123,6 +125,28 @@ async def retry_rathole_config_rebuild() -> None:
         )
 
 
+async def retry_traffic_config_rebuild() -> None:
+    for attempt, delay_seconds in enumerate(POST_STARTUP_REBUILD_DELAYS_SECONDS, start=1):
+        if delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)
+
+        try:
+            path = await rebuild_traffic_config()
+            logger.warning(
+                "Traefik traffic config rebuilt during post-startup retry attempt %s at %s",
+                attempt,
+                path,
+            )
+            return
+        except Exception:
+            logger.exception(
+                "Failed to rebuild Traefik traffic config during post-startup retry attempt %s",
+                attempt,
+            )
+
+    logger.warning("Traefik traffic config rebuild did not complete during startup retries")
+
+
 async def reconcile_firewall_state_with_retries() -> None:
     for attempt, delay_seconds in enumerate(FIREWALL_RECONCILE_DELAYS_SECONDS, start=1):
         if delay_seconds > 0:
@@ -145,7 +169,7 @@ async def reconcile_firewall_state_with_retries() -> None:
 
 
 async def handle_startup() -> None:
-    global retry_task, machine_status_monitor_task, machine_status_monitor_stop_event, firewall_reconcile_task
+    global retry_task, traffic_retry_task, machine_status_monitor_task, machine_status_monitor_stop_event, firewall_reconcile_task
     rebuilt = await attempt_rathole_config_rebuild(
         context="startup",
         delays=STARTUP_REBUILD_DELAYS_SECONDS,
@@ -157,6 +181,21 @@ async def handle_startup() -> None:
         )
         retry_task = asyncio.create_task(retry_rathole_config_rebuild())
 
+    try:
+        path = await rebuild_traffic_config()
+        logger.warning("Traefik traffic config rebuilt during startup at %s", path)
+    except Exception:
+        logger.exception("Failed to rebuild Traefik traffic config during startup")
+        try:
+            path = write_base_traffic_config()
+            logger.warning(
+                "Continuing API startup with bootstrap Traefik traffic config at %s",
+                path,
+            )
+        except Exception:
+            logger.exception("Failed to write bootstrap Traefik traffic config during startup")
+        traffic_retry_task = asyncio.create_task(retry_traffic_config_rebuild())
+
     await initialize_machine_status_cache()
     machine_status_monitor_stop_event = asyncio.Event()
     machine_status_monitor_task = asyncio.create_task(
@@ -166,10 +205,14 @@ async def handle_startup() -> None:
 
 
 async def handle_shutdown() -> None:
-    global retry_task, machine_status_monitor_task, machine_status_monitor_stop_event, firewall_reconcile_task
+    global retry_task, traffic_retry_task, machine_status_monitor_task, machine_status_monitor_stop_event, firewall_reconcile_task
     if retry_task is not None:
         retry_task.cancel()
         retry_task = None
+
+    if traffic_retry_task is not None:
+        traffic_retry_task.cancel()
+        traffic_retry_task = None
 
     if firewall_reconcile_task is not None:
         firewall_reconcile_task.cancel()
@@ -216,6 +259,7 @@ fastapi_app.include_router(auth.router, prefix=API_ROOT)
 fastapi_app.include_router(groups.router, prefix=API_ROOT)
 fastapi_app.include_router(machines.router, prefix=API_ROOT)
 fastapi_app.include_router(connections.router, prefix=API_ROOT)
+fastapi_app.include_router(traffic_routes.router, prefix=API_ROOT)
 
 app = socketio.ASGIApp(
     socketio_server=sio,

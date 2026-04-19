@@ -69,8 +69,18 @@ const mapConnectionToForwardingConfig = (connection) => ({
   serviceName: connection.service_name || "",
   serviceDescription: connection.service_description || "",
   internalIp: connection.internal_ip || connection.internalIp || "0.0.0.0",
-  internalPort: connection.internal_port || 3000,
-  externalPort: connection.external_port || 3000,
+  internalPort:
+    connection.internal_port === undefined ||
+    connection.internal_port === null ||
+    connection.internal_port === ""
+      ? ""
+      : connection.internal_port,
+  externalPort:
+    connection.external_port === undefined ||
+    connection.external_port === null ||
+    connection.external_port === ""
+      ? ""
+      : connection.external_port,
   enabled: connection.enabled ?? true,
   firewall: {
     isPublic: connection.firewall?.is_public ?? true,

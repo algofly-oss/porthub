@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException, Request
 import bcrypt
 import re
 from shared.factory import db
-from shared.env import SIGNUP_DISABLED, SESSION_COOKIE_NAME
+from shared.env import SIGNUP_DISABLED, SESSION_COOKIE_NAME, WEB_PROXY_DOMAIN_SUFFIX
 from .common import UserPasswordUpdateDto, authenticate_user
 
 router = APIRouter()
@@ -15,6 +15,7 @@ async def auth_settings():
     return {
         "signup_disabled": SIGNUP_DISABLED,
         "signup_enabled": not SIGNUP_DISABLED,
+        "web_proxy_domain_suffix": WEB_PROXY_DOMAIN_SUFFIX,
     }
 
 

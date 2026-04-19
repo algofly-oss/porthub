@@ -16,6 +16,11 @@ let apiRoutes = {
   deleteConnection: "/connections/delete",
   updateConnectionFirewallPolicy: "/connections/firewall/policy",
   trafficSnapshot: "/connections/firewall/traffic/snapshot",
+  // Traffic routes / proxies
+  listTrafficRoutes: "/traffic-routes/list",
+  addTrafficRoute: "/traffic-routes/add",
+  updateTrafficRoute: "/traffic-routes/update",
+  deleteTrafficRoute: "/traffic-routes/delete",
   // Machine groups
   listGroups: "/groups/list",
   addGroup: "/groups/add",
