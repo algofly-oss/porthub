@@ -279,36 +279,22 @@ const normalizeInternalHost = (value) => {
   return normalized || "0.0.0.0";
 };
 
-const getPublicBaseUrl = () => {
-  const configuredBaseUrl =
-    (process.env.NEXT_PUBLIC_PORT_HUB_PUBLIC_BASE_URL ||
-      process.env.PORT_HUB_PUBLIC_BASE_URL ||
-      "").trim();
-
-  if (configuredBaseUrl) {
-    return configuredBaseUrl;
-  }
-
-  if (typeof window === "undefined") {
-    return "";
-  }
-
-  return window.location.origin;
-};
-
-const buildExternalPortUrl = (externalPort) => {
+const buildExternalPortUrl = (serviceDomain, externalPort) => {
   const normalizedPort = Number(externalPort);
   if (!Number.isInteger(normalizedPort) || normalizedPort < 1 || normalizedPort > 65535) {
     return "";
   }
 
-  const publicBaseUrl = getPublicBaseUrl();
-  if (!publicBaseUrl) {
+  const normalizedServiceDomain = String(serviceDomain || "").trim();
+  if (!normalizedServiceDomain) {
     return "";
   }
 
   try {
-    const url = new URL(publicBaseUrl);
+    const rootUrl = /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(normalizedServiceDomain)
+      ? normalizedServiceDomain
+      : `${typeof window !== "undefined" ? window.location.protocol : "http:"}//${normalizedServiceDomain}`;
+    const url = new URL(rootUrl);
     url.port = String(normalizedPort);
     return url.toString();
   } catch {
@@ -427,6 +413,7 @@ export default function HostConfigPopup({
   const [isAllowIpPickerOpen, setIsAllowIpPickerOpen] = useState(false);
   const [trafficSamplesByRuleId, setTrafficSamplesByRuleId] = useState({});
   const [isLoadingTrafficSamples, setIsLoadingTrafficSamples] = useState(false);
+  const [serviceDomain, setServiceDomain] = useState("");
   const [debouncedRules] = useDebouncedValue(rules, 300);
   const initialRulesSnapshotRef = useRef("");
   const clientLogsContainerRef = useRef(null);
@@ -776,6 +763,36 @@ export default function HostConfigPopup({
       isActive = false;
     };
   }, [opened, host?.id]);
+
+  useEffect(() => {
+    if (!opened) {
+      setServiceDomain("");
+      return;
+    }
+
+    let isActive = true;
+
+    const loadAuthSettings = async () => {
+      try {
+        const response = await axios.get(apiRoutes.authSettings);
+        if (isActive) {
+          setServiceDomain(
+            String(response.data?.port_hub_service_domain || "").trim()
+          );
+        }
+      } catch {
+        if (isActive) {
+          setServiceDomain("");
+        }
+      }
+    };
+
+    loadAuthSettings();
+
+    return () => {
+      isActive = false;
+    };
+  }, [opened]);
 
   useEffect(() => {
     if (!socket || !opened || !host?.id || !showClientLogs) {
@@ -2728,7 +2745,7 @@ export default function HostConfigPopup({
                             Number.isInteger(externalPortNumber) &&
                             externalPortNumber >= 1 &&
                             externalPortNumber <= 65535
-                              ? buildExternalPortUrl(externalPortNumber)
+                              ? buildExternalPortUrl(serviceDomain, externalPortNumber)
                               : "";
                           const canOpenExternalPort =
                             !isInvalid && Boolean(externalPortUrl);
