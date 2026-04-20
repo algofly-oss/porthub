@@ -80,6 +80,7 @@ export default function Proxy() {
   const [connections, setConnections] = useState([]);
   const [machines, setMachines] = useState([]);
   const [defaultDomainSuffix, setDefaultDomainSuffix] = useState("");
+  const [serviceDomain, setServiceDomain] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -134,6 +135,9 @@ export default function Proxy() {
           String(authSettingsResponse.data?.web_proxy_domain_suffix || "")
             .trim()
             .toLowerCase()
+        );
+        setServiceDomain(
+          String(authSettingsResponse.data?.port_hub_service_domain || "").trim()
         );
       } catch (loadError) {
         if (loadError?.response?.data?.detail !== "User not logged in") {
@@ -492,6 +496,7 @@ export default function Proxy() {
         connections={connections}
         machines={machines}
         defaultDomainSuffix={defaultDomainSuffix}
+        serviceDomain={serviceDomain}
         isSaving={isSaving}
         isDeleting={isDeleting}
       />

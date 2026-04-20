@@ -41,7 +41,19 @@ const HTTP_TARGET_SCHEME_RE = /^https?:\/\//i;
 const hostnameRe =
   /^(?=.{1,253}$)(?:localhost|(?:(?!-)[A-Za-z0-9-]{1,63}(?<!-))(?:\.(?:(?!-)[A-Za-z0-9-]{1,63}(?<!-)))*)$/i;
 
-const buildTargetHost = () => {
+const buildTargetHost = (serviceDomain = "") => {
+  const normalizedServiceDomain = String(serviceDomain || "").trim();
+  if (normalizedServiceDomain) {
+    try {
+      const rootUrl = /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(normalizedServiceDomain)
+        ? normalizedServiceDomain
+        : `${typeof window !== "undefined" ? window.location.protocol : "http:"}//${normalizedServiceDomain}`;
+      return new URL(rootUrl).hostname;
+    } catch {
+      // Fall back to the existing public base URL / current host resolution below.
+    }
+  }
+
   const configuredBaseUrl =
     (process.env.NEXT_PUBLIC_PORT_HUB_PUBLIC_BASE_URL ||
       process.env.PORT_HUB_PUBLIC_BASE_URL ||
@@ -62,8 +74,8 @@ const buildTargetHost = () => {
   return window.location.hostname || "";
 };
 
-const buildConnectionTargetUrl = (connection) => {
-  const host = buildTargetHost();
+const buildConnectionTargetUrl = (connection, serviceDomain = "") => {
+  const host = buildTargetHost(serviceDomain);
   const externalPort = Number(connection?.external_port);
   if (!host || !Number.isInteger(externalPort) || externalPort < 1 || externalPort > 65535) {
     return "";
@@ -198,6 +210,7 @@ export default function ProxyConfigModal({
   connections = [],
   machines = [],
   defaultDomainSuffix = "",
+  serviceDomain = "",
   isSaving = false,
   isDeleting = false,
 }) {
@@ -309,8 +322,8 @@ export default function ProxyConfigModal({
   );
 
   const derivedConnectionTargetUrl = useMemo(
-    () => buildConnectionTargetUrl(selectedConnection),
-    [selectedConnection]
+    () => buildConnectionTargetUrl(selectedConnection, serviceDomain),
+    [selectedConnection, serviceDomain]
   );
 
   const selectedMachineFromConnection = useMemo(
@@ -522,7 +535,7 @@ export default function ProxyConfigModal({
   const handleSelectConnection = (connection) => {
     setSelectedMachineId(connection.machine_id || selectedMachineId);
     handleChange("connectionDataId", connection._id);
-    handleChange("targetUrl", buildConnectionTargetUrl(connection));
+    handleChange("targetUrl", buildConnectionTargetUrl(connection, serviceDomain));
   };
 
   const validate = () => {
