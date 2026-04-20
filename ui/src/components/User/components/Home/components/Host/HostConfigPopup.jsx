@@ -178,7 +178,7 @@ const createEmptyRule = (externalPort = "") => ({
   serviceName: "",
   serviceDescription: "",
   internalIp: "0.0.0.0",
-  internalPort: "3000",
+  internalPort: "",
   externalPort: externalPort ? String(externalPort) : "",
   enabled: true,
   firewall: {
@@ -193,8 +193,18 @@ const mapRuleFromConfig = (config) => ({
   serviceName: config.serviceName || "",
   serviceDescription: config.serviceDescription || "",
   internalIp: config.internalIp || config.internal_ip || "0.0.0.0",
-  internalPort: String(config.internalPort || 3000),
-  externalPort: String(config.externalPort || 3000),
+  internalPort:
+    config.internalPort === undefined ||
+    config.internalPort === null ||
+    config.internalPort === ""
+      ? ""
+      : String(config.internalPort),
+  externalPort:
+    config.externalPort === undefined ||
+    config.externalPort === null ||
+    config.externalPort === ""
+      ? ""
+      : String(config.externalPort),
   enabled: config.enabled ?? true,
   firewall: {
     isPublic:

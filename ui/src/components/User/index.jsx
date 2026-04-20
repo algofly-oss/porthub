@@ -2,6 +2,7 @@ import { useState } from "react";
 import UserNavBar from "./components/NavBar";
 import { VscRemoteExplorer } from "react-icons/vsc";
 import Home from "./components/Home";
+import Proxy from "./components/Proxy";
 import { useRouter } from "next/router";
 import uiRoutes from "@/shared/routes/uiRoutes";
 
@@ -32,6 +33,7 @@ export default function UserHome() {
       </aside>
       <div className="w-full md:ml-60 2xl:ml-84 md:h-screen md:overflow-y-auto md:light-scrollbar dark:md:dark-scrollbar">
         {tab === "Home" && <Home onStatsChange={setMachineStats} />}
+        {tab === "Proxy" && <Proxy />}
       </div>
       {/* <div className="hidden lg:block w-[26rem] 2xl:w-[25%]- 2xl:w-[30rem] h-screen bg-neutral-100 dark:bg-black overflow-y-hidden md:light-scrollbar dark:md:dark-scrollbar"></div> */}
     </div>

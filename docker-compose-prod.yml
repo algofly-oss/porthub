@@ -8,6 +8,7 @@ services:
     environment:
       - API_DEBUG=False
       - RATHOLE_SERVER_CONFIG_PATH=/runtime/rathole/server.toml
+      - TRAEFIK_DYNAMIC_CONFIG_PATH=/runtime/traefik/traffic-routes.yml
     env_file:
       - ./.env
     extra_hosts:
@@ -15,6 +16,7 @@ services:
     volumes:
       - ./api:/app
       - rathole_config:/runtime/rathole
+      - traefik_routes:/runtime/traefik
     restart: always
     networks:
       - porthub
@@ -65,6 +67,25 @@ services:
     depends_on:
       - api
 
+  traefik:
+    image: traefik:v3.0
+    container_name: porthub_traefik_prod
+    command:
+      - "--api.dashboard=true"
+      - "--entrypoints.web.address=:80"
+      - "--providers.file.directory=/dynamic"
+      - "--providers.file.watch=true"
+      - "--accesslog.filepath=/shared/access.log"
+      - "--accesslog.format=json"
+    ports:
+      - "80:80"
+    volumes:
+      - traefik_routes:/dynamic
+      - traefik_shared:/shared
+    restart: always
+    networks:
+      - porthub
+
   firewall:
     build:
       context: ./firewall
@@ -90,3 +111,5 @@ networks:
 volumes:
   rathole_config:
   firewall_state:
+  traefik_routes:
+  traefik_shared:
