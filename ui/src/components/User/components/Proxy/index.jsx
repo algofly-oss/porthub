@@ -364,6 +364,7 @@ export default function Proxy() {
                     <div className="divide-y divide-zinc-200 dark:divide-zinc-800">
                       {paginatedProxies.map((proxy) => {
                         const primaryHost = proxy.hosts[0] || "No hostname";
+                        const aliasHosts = proxy.hosts.slice(1);
                         const sourceConnection = proxy.connection;
                         return (
                           <button
@@ -383,7 +384,9 @@ export default function Proxy() {
                                 {primaryHost}
                               </a>
                               <p className="truncate text-xs text-zinc-500 dark:text-zinc-400">
-                                {proxy.description || "No description"}
+                                {aliasHosts.length > 0
+                                  ? `+${aliasHosts.length} alias${aliasHosts.length > 1 ? "es" : ""}: ${aliasHosts.join(", ")}`
+                                  : proxy.description || "No description"}
                               </p>
                             </div>
 
