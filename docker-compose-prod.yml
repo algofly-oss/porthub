@@ -43,8 +43,8 @@ services:
     env_file:
       - ./.env
     ports:
-      - ${APP_HTTP_PORT:-80}:80
-      - ${APP_HTTPS_PORT:-443}:443
+      - "8345:80"
+      - "8346:443"
     volumes:
       - ./proxy/nginx.conf:/etc/nginx/templates/default.conf.template
       - ./proxy/certificate/server.crt:/etc/ssl/certs/server.crt
@@ -73,12 +73,14 @@ services:
     command:
       - "--api.dashboard=true"
       - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
       - "--providers.file.directory=/dynamic"
       - "--providers.file.watch=true"
       - "--accesslog.filepath=/shared/access.log"
       - "--accesslog.format=json"
     ports:
       - "80:80"
+      - "443:443"
     volumes:
       - traefik_routes:/dynamic
       - traefik_shared:/shared
