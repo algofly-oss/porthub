@@ -10,7 +10,13 @@ import {
   Text,
   useMantineColorScheme,
 } from "@mantine/core";
-import { IconArrowLeft, IconDotsVertical, IconFilter, IconTrash } from "@tabler/icons-react";
+import {
+  IconArrowLeft,
+  IconDotsVertical,
+  IconFilter,
+  IconPlus,
+  IconTrash,
+} from "@tabler/icons-react";
 
 const getInputClassName = (isDark) =>
   `w-full rounded-md border px-3 py-2 text-sm outline-none transition-colors focus:!border-blue-500 focus:ring-0 ${
@@ -138,6 +144,19 @@ const getConnectionStatusMeta = (connection) => {
 const normalizeIdentityValue = (value) =>
   String(value || "").trim().toLowerCase();
 
+let aliasIdCounter = 0;
+
+const createAliasId = () => {
+  aliasIdCounter += 1;
+  return `alias-${aliasIdCounter}`;
+};
+
+const createEmptyAlias = (domainSuffix = "") => ({
+  id: createAliasId(),
+  subdomainKey: "",
+  domainSuffix: String(domainSuffix || "").trim().toLowerCase(),
+});
+
 const splitHostForForm = (host) => {
   const normalized = String(host || "").trim().toLowerCase();
   if (!normalized) {
@@ -184,15 +203,59 @@ const buildHostsFromForm = ({ subdomainKey, domainSuffix }) => {
   ]);
 };
 
+const buildHostFromEntry = ({ subdomainKey, domainSuffix }) =>
+  buildHostsFromForm({ subdomainKey, domainSuffix })[0] || "";
+
+const collectHostsFromForm = (form) =>
+  normalizeHostList([
+    buildHostFromEntry(form),
+    ...(Array.isArray(form?.aliases)
+      ? form.aliases.map((alias) => buildHostFromEntry(alias))
+      : []),
+  ]);
+
+const validateHostEntry = ({ subdomainKey, domainSuffix }) => {
+  const normalizedSubdomainKey = String(subdomainKey || "").trim().toLowerCase();
+  const normalizedDomainSuffix = String(domainSuffix || "").trim().toLowerCase();
+
+  if (!normalizedSubdomainKey && !normalizedDomainSuffix) {
+    return null;
+  }
+
+  if (
+    normalizedSubdomainKey &&
+    !normalizedDomainSuffix &&
+    !normalizedSubdomainKey.includes(".")
+  ) {
+    return "Domain suffix is required when using a subdomain key";
+  }
+
+  const host = buildHostFromEntry({ subdomainKey, domainSuffix });
+  if (!host) {
+    return "At least one hostname is required";
+  }
+
+  if (!hostnameRe.test(host)) {
+    return `Invalid hostname: ${host}`;
+  }
+
+  return null;
+};
+
 const createInitialForm = (proxy, defaultDomainSuffix = "") => {
   const hosts = Array.isArray(proxy?.hosts) ? proxy.hosts : [];
   const primaryHost = hosts[0] || "";
   const splitHost = splitHostForForm(primaryHost);
+  const aliasHosts = hosts.slice(1).map((host) => ({
+    id: createAliasId(),
+    ...splitHostForForm(host),
+  }));
 
   return {
     dataId: proxy?._id || "",
     subdomainKey: splitHost.subdomainKey,
     domainSuffix: splitHost.domainSuffix || String(defaultDomainSuffix || "").trim().toLowerCase(),
+    aliases: aliasHosts,
     description: proxy?.description || "",
     targetMode: proxy?.target_mode || (proxy?.connection?.data_id ? "connection" : "manual"),
     connectionDataId: proxy?.connection?.data_id || "",
@@ -512,6 +575,45 @@ export default function ProxyConfigModal({
     });
   };
 
+  const handleAliasChange = (index, field, value) => {
+    setForm((current) => ({
+      ...current,
+      aliases: current.aliases.map((alias, aliasIndex) =>
+        aliasIndex === index ? { ...alias, [field]: value } : alias
+      ),
+    }));
+    setErrors((current) => {
+      if (!current.aliases) {
+        return current;
+      }
+      const next = { ...current };
+      delete next.aliases;
+      return next;
+    });
+  };
+
+  const handleAddAlias = () => {
+    setForm((current) => ({
+      ...current,
+      aliases: [...current.aliases, createEmptyAlias(current.domainSuffix)],
+    }));
+  };
+
+  const handleRemoveAlias = (index) => {
+    setForm((current) => ({
+      ...current,
+      aliases: current.aliases.filter((_, aliasIndex) => aliasIndex !== index),
+    }));
+    setErrors((current) => {
+      if (!current.aliases) {
+        return current;
+      }
+      const next = { ...current };
+      delete next.aliases;
+      return next;
+    });
+  };
+
   const handleSelectMachine = (machineId) => {
     setSelectedMachineId(machineId);
     setServicePage(1);
@@ -540,23 +642,26 @@ export default function ProxyConfigModal({
 
   const validate = () => {
     const nextErrors = {};
-    const hosts = buildHostsFromForm(form);
+    const hosts = collectHostsFromForm(form);
 
-    if (!form.subdomainKey.trim() && !form.domainSuffix.trim()) {
-      nextErrors.subdomainKey = "Enter a subdomain key or full hostname";
+    const primaryError = validateHostEntry(form);
+    if (primaryError) {
+      if (primaryError.includes("Domain suffix is required")) {
+        nextErrors.domainSuffix = primaryError;
+      } else {
+        nextErrors.subdomainKey = primaryError;
+      }
     }
 
-    if (form.subdomainKey.trim() && !form.domainSuffix.trim() && !form.subdomainKey.includes(".")) {
-      nextErrors.domainSuffix = "Domain suffix is required when using a subdomain key";
+    const aliasErrorIndex = (Array.isArray(form.aliases) ? form.aliases : []).findIndex(
+      (alias) => Boolean(validateHostEntry(alias))
+    );
+    if (aliasErrorIndex >= 0) {
+      nextErrors.aliases = `Alias ${aliasErrorIndex + 1}: ${validateHostEntry(form.aliases[aliasErrorIndex])}`;
     }
 
     if (hosts.length === 0) {
       nextErrors.subdomainKey = "At least one hostname is required";
-    } else {
-      const invalidHost = hosts.find((host) => !hostnameRe.test(host));
-      if (invalidHost) {
-        nextErrors.subdomainKey = `Invalid hostname: ${invalidHost}`;
-      }
     }
 
     if (form.targetMode === "connection") {
@@ -626,7 +731,7 @@ export default function ProxyConfigModal({
     }
   };
 
-  const previewHosts = buildHostsFromForm(form);
+  const previewHosts = collectHostsFromForm(form);
   const primaryPreviewHost = previewHosts[0] || "preview.domain";
   const isPersisted = Boolean(form.dataId || proxy?._id);
 
@@ -711,7 +816,7 @@ export default function ProxyConfigModal({
           <div className="mt-3 grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)]">
             <div>
               <label className={getLabelClassName(isDark)} htmlFor="proxy-subdomain">
-                Subdomain
+                Primary subdomain
               </label>
               <input
                 id="proxy-subdomain"
@@ -744,6 +849,93 @@ export default function ProxyConfigModal({
             </div>
           </div>
 
+          <div className="mt-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className={getLabelClassName(isDark)}>Aliases</p>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                  Add extra hostnames that should route to this same target.
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="default"
+                size="xs"
+                leftIcon={<IconPlus size={14} />}
+                onClick={handleAddAlias}
+                classNames={{ root: btnSecondary }}
+              >
+                Add alias
+              </Button>
+            </div>
+
+            <div className="mt-3 space-y-3">
+              {form.aliases.length > 0 ? (
+                form.aliases.map((alias, index) => (
+                  <div
+                    key={alias.id}
+                    className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)_auto] md:items-end"
+                  >
+                    <div>
+                      <label
+                        className={`mb-1 block text-xs font-medium ${
+                          isDark ? "text-zinc-400" : "text-zinc-500"
+                        }`}
+                        htmlFor={`proxy-alias-subdomain-${index}`}
+                      >
+                        Alias {index + 1}
+                      </label>
+                      <input
+                        id={`proxy-alias-subdomain-${index}`}
+                        type="text"
+                        placeholder="app-alt"
+                        className={getInputClassName(isDark)}
+                        value={alias.subdomainKey}
+                        onChange={(event) =>
+                          handleAliasChange(index, "subdomainKey", event.currentTarget.value)
+                        }
+                      />
+                    </div>
+
+                    <div>
+                      <label
+                        className={`mb-1 block text-xs font-medium ${
+                          isDark ? "text-zinc-400" : "text-zinc-500"
+                        }`}
+                        htmlFor={`proxy-alias-domain-${index}`}
+                      >
+                        Domain suffix
+                      </label>
+                      <input
+                        id={`proxy-alias-domain-${index}`}
+                        type="text"
+                        placeholder="luna.lan"
+                        className={getInputClassName(isDark)}
+                        value={alias.domainSuffix}
+                        onChange={(event) =>
+                          handleAliasChange(index, "domainSuffix", event.currentTarget.value)
+                        }
+                      />
+                    </div>
+
+                    <ActionIcon
+                      type="button"
+                      variant="subtle"
+                      color="red"
+                      onClick={() => handleRemoveAlias(index)}
+                      aria-label={`Remove alias ${index + 1}`}
+                      className="md:mb-1"
+                    >
+                      <IconTrash size={16} />
+                    </ActionIcon>
+                  </div>
+                ))
+              ) : null}
+            </div>
+
+            {errors.aliases ? <p className={errorClassName}>{errors.aliases}</p> : null}
+          </div>
+
           <div className="mt-3">
             <label className={getLabelClassName(isDark)} htmlFor="proxy-description">
               Description
@@ -758,12 +950,22 @@ export default function ProxyConfigModal({
             />
           </div>
 
-          <p className="mt-3 text-xs text-zinc-500 dark:text-zinc-400">
-            Final address:
-            <span className="ml-1 break-all font-medium text-zinc-900 dark:text-zinc-100">
-              {`http://${primaryPreviewHost}`}
-            </span>
-          </p>
+          <div className="mt-3 space-y-1">
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              Primary address:
+              <span className="ml-1 break-all font-medium text-zinc-900 dark:text-zinc-100">
+                {`http://${primaryPreviewHost}`}
+              </span>
+            </p>
+            {previewHosts.length > 1 ? (
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                Aliases:
+                <span className="ml-1 break-all font-medium text-zinc-900 dark:text-zinc-100">
+                  {previewHosts.slice(1).map((host) => `http://${host}`).join(", ")}
+                </span>
+              </p>
+            ) : null}
+          </div>
         </div>
 
         <div className={getPanelClassName(isDark)}>
