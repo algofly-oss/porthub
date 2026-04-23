@@ -33,6 +33,8 @@ def get_asset_path(filename: str) -> Path:
     if not asset_path.is_file():
         raise HTTPException(status_code=404, detail=f"Asset not found: {filename}")
     return asset_path
+
+
 def render_script_asset(script_name: str, request: Request, machine: dict) -> str:
     filename = SCRIPT_ASSET_FILENAMES.get(script_name)
     if not filename:

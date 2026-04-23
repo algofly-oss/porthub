@@ -185,6 +185,18 @@ require_http_url() {
     *) fail "$label must be an http(s) URL" ;;
   esac
 }
+require_port_number() {
+  local label="$1"
+  local value="${2:-}"
+  case "$value" in
+    ''|*[!0-9]*)
+      fail "$label must be a numeric TCP port"
+      ;;
+  esac
+  if [ "$value" -lt 1 ] || [ "$value" -gt 65535 ]; then
+    fail "$label must be between 1 and 65535"
+  fi
+}
 step() {
   CURRENT_STEP="$1"
   log "INFO" "$CURRENT_STEP"
@@ -2169,6 +2181,124 @@ logs_cmd() {
   fi
 }
 
+http_server_cmd() {
+  local port="8000"
+  local bind_address="0.0.0.0"
+  local document_root
+  local config_file
+  local -a positional_args=()
+
+  document_root="$(pwd -P)"
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -h|--help)
+        http_server_usage
+        return 0
+        ;;
+      -p|--port)
+        [ "$#" -ge 2 ] || fail "Missing value for $1"
+        port="$2"
+        shift 2
+        ;;
+      --port=*)
+        port="${1#*=}"
+        shift
+        ;;
+      --path)
+        [ "$#" -ge 2 ] || fail "Missing value for --path"
+        document_root="$2"
+        shift 2
+        ;;
+      --path=*)
+        document_root="${1#*=}"
+        shift
+        ;;
+      --bind)
+        [ "$#" -ge 2 ] || fail "Missing value for --bind"
+        bind_address="$2"
+        shift 2
+        ;;
+      --bind=*)
+        bind_address="${1#*=}"
+        shift
+        ;;
+      --)
+        shift
+        while [ "$#" -gt 0 ]; do
+          positional_args+=("$1")
+          shift
+        done
+        ;;
+      -*)
+        fail "Unknown http.server option: $1"
+        ;;
+      *)
+        positional_args+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  case "${#positional_args[@]}" in
+    0) ;;
+    1)
+      if printf "%s" "${positional_args[0]}" | grep -Eq '^[0-9]+$'; then
+        port="${positional_args[0]}"
+      else
+        document_root="${positional_args[0]}"
+      fi
+      ;;
+    2)
+      port="${positional_args[0]}"
+      document_root="${positional_args[1]}"
+      ;;
+    *)
+      fail "Usage: porthub http.server [port] [path]"
+      ;;
+  esac
+
+  step "Starting temporary HTTP file server"
+  [ -d "$document_root" ] || fail "Document root does not exist: $document_root"
+  require_port_number "HTTP server port" "$port"
+  require_value "Bind address" "$bind_address"
+  need_cmd lighttpd
+  need_cmd mktemp
+
+  document_root="$(cd "$document_root" && pwd -P)"
+
+  config_file="$(mktemp /tmp/porthub-lighttpd.XXXXXX.conf)"
+  cat >"$config_file" <<EOF_LIGHTTPD
+server.modules += ( "mod_dirlisting", "mod_accesslog" )
+server.document-root = "$document_root"
+server.port = $port
+server.bind = "$bind_address"
+dir-listing.activate = "enable"
+accesslog.filename = "/dev/stderr"
+EOF_LIGHTTPD
+
+  cleanup_http_server() {
+    rm -f "$config_file"
+  }
+
+  trap cleanup_http_server EXIT INT TERM
+  log_plain "[porthub-http.server] Serving $document_root on $bind_address:$port"
+  lighttpd -D -f "$config_file"
+}
+
+get_cmd() {
+  step "Downloading file with aria2c"
+  local url="${1:-}"
+
+  [ "$#" -eq 1 ] || fail "Usage: porthub get <http(s)-url>"
+  require_value "Download URL" "$url"
+  require_http_url "Download URL" "$url"
+  need_cmd aria2c
+
+  log_plain "[porthub-get] Starting download: $url"
+  aria2c -c -x 16 -s 16 -k 1M "$url"
+}
+
 env_file_value() {
   local file_path="$1"
   local key="$2"
@@ -2613,6 +2743,8 @@ Commands:
   restart           Restart the selected tenant
   status            Show status for the selected tenant
   logs              Show logs for the selected tenant
+  http.server       Serve the current directory with a blocking lighttpd process
+  get               Download a file with aria2c using parallel segments
   update            Update the shared PortHub CLI and Rathole using the selected tenant
   version           Show installed PortHub client and Rathole versions
   tenants           Full tenant management subcommands
@@ -2622,6 +2754,8 @@ Examples:
   porthub status 69db33555077
   porthub logs 69db33555077 -f
   porthub stop 69db33555077
+  porthub http.server 8000
+  porthub get http://example.com/file.bin
 EOF_USAGE
 }
 
@@ -2642,7 +2776,30 @@ Public maintenance:
   sync              Send an immediate active heartbeat
   sync-inactive     Send an immediate inactive heartbeat
   fetch-config      Download the current Rathole client config
+  http.server       Start a blocking lighttpd file server
+  get               Download a file with aria2c
 EOF_ADVANCED
+}
+
+http_server_usage() {
+  cat <<EOF_HTTP_SERVER_USAGE
+Usage: porthub http.server [port] [path]
+       porthub http.server [options]
+
+Start a blocking lighttpd file server.
+
+Options:
+  -p, --port PORT   Listen on this TCP port (default: 8000)
+  --path PATH       Serve files from this directory (default: current directory)
+  --bind ADDRESS    Bind interface/address (default: 0.0.0.0)
+  -h, --help        Show this help
+
+Examples:
+  porthub http.server
+  porthub http.server 8000
+  porthub http.server 8000 /app
+  porthub http.server --port 8000 --path /app --bind 0.0.0.0
+EOF_HTTP_SERVER_USAGE
 }
 
 main() {
@@ -2680,6 +2837,8 @@ main() {
     version|--version) version_cmd "$@" ;;
     -v) short_version_cmd "$@" ;;
     logs) logs_cmd "$@" ;;
+    http.server|http-server) http_server_cmd "$@" ;;
+    get) get_cmd "$@" ;;
     config) config_cmd "$@" ;;
     rathole) rathole_cmd "$@" ;;
     rathole-config) rathole_config_cmd "$@" ;;
@@ -2695,6 +2854,7 @@ main() {
     help)
       case "$help_topic" in
         advanced) advanced_usage ;;
+        http.server|http-server) http_server_usage ;;
         tenants|tenant) tenants_cmd help ;;
         "" ) usage ;;
         *) fail "Unknown help topic: $help_topic" ;;
