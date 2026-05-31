@@ -4,6 +4,8 @@ from shared.rathole_config import rebuild_server_toml
 from shared.factory import db
 from shared.firewall_client import sync_connection_firewall_policy
 from shared.sockets import emit_machine_config_changed
+from datetime import timedelta
+
 from ..common import (
     get_authenticated_user,
     parse_object_id,
@@ -42,6 +44,10 @@ async def add_connection(data: Connection, request: Request):
         raise HTTPException(status_code=400, detail="Port already in use")
 
     now = utcnow()
+    auto_refresh_enabled = bool(data.auto_refresh_enabled)
+    auto_refresh_interval_minutes = (
+        (data.auto_refresh_interval_minutes or 60) if auto_refresh_enabled else None
+    )
     result = await db.connections.insert_one(
         {
             "user_id": user["_id"],
@@ -52,6 +58,13 @@ async def add_connection(data: Connection, request: Request):
             "internal_port": data.internal_port,
             "external_port": data.external_port,
             "enabled": True if data.enabled is None else data.enabled,
+            "auto_refresh_enabled": auto_refresh_enabled,
+            "auto_refresh_interval_minutes": auto_refresh_interval_minutes,
+            "auto_refresh_next_at": (
+                now + timedelta(minutes=auto_refresh_interval_minutes)
+                if auto_refresh_enabled and auto_refresh_interval_minutes
+                else None
+            ),
             "firewall": {
                 "is_public": True,
                 "allowed_ips": [],
