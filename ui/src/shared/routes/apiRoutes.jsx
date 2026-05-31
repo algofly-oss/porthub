@@ -12,6 +12,7 @@ let apiRoutes = {
   getRandomPort: "/connections/random",
   addConnection: "/connections/add",
   updateConnection: "/connections/update",
+  refreshConnection: "/connections/refresh",
   listConnections: "/connections/list",
   deleteConnection: "/connections/delete",
   updateConnectionFirewallPolicy: "/connections/firewall/policy",

@@ -118,6 +118,7 @@ detect_platform() {
 install_runtime_dependencies() {
   local missing=()
   local brew_cmd=""
+  local installed_lighttpd="false"
 
   if ! command -v lighttpd >/dev/null 2>&1; then
     missing+=("lighttpd")
@@ -130,6 +131,10 @@ install_runtime_dependencies() {
     log "Runtime helpers already installed: lighttpd, aria2c"
     return 0
   fi
+
+  case " ${missing[*]} " in
+    *" lighttpd "*) installed_lighttpd="true" ;;
+  esac
 
   step "Installing runtime helper packages (${missing[*]})"
   case "$(uname -s)" in
@@ -163,7 +168,25 @@ install_runtime_dependencies() {
 
   command -v lighttpd >/dev/null 2>&1 || fail "lighttpd install completed but the binary is still unavailable"
   command -v aria2c >/dev/null 2>&1 || fail "aria2 install completed but the aria2c binary is still unavailable"
+
+  if [ "$installed_lighttpd" = "true" ] && [ "$(uname -s)" = "Linux" ]; then
+    disable_runtime_helper_services
+  fi
+
   log "Runtime helpers installed successfully"
+}
+
+disable_runtime_helper_services() {
+  local load_state
+
+  command -v systemctl >/dev/null 2>&1 || return 0
+
+  # Some distros auto-start helper web servers after package install.
+  load_state="$(systemctl show -p LoadState --value lighttpd.service 2>/dev/null || true)"
+  [ -n "$load_state" ] || return 0
+  [ "$load_state" = "not-found" ] && return 0
+  $SUDO systemctl stop lighttpd.service >/dev/null 2>&1 || true
+  $SUDO systemctl disable lighttpd.service >/dev/null 2>&1 || true
 }
 
 check_service_manager() {

@@ -13,6 +13,7 @@ from shared.rathole_config import (
 )
 from shared.traffic_config import rebuild_traffic_config, write_base_traffic_config
 from shared.firewall_client import reconcile_firewall_state_from_db
+from shared.connection_refresh import monitor_connection_auto_refresh
 from shared.sockets import initialize_machine_status_cache, monitor_machine_statuses, sio
 
 API_ROOT = "/api"
@@ -25,6 +26,8 @@ traffic_retry_task = None
 machine_status_monitor_task = None
 machine_status_monitor_stop_event = None
 firewall_reconcile_task = None
+connection_auto_refresh_task = None
+connection_auto_refresh_stop_event = None
 
 
 class QuietMachineClientAccessFilter(logging.Filter):
@@ -169,7 +172,7 @@ async def reconcile_firewall_state_with_retries() -> None:
 
 
 async def handle_startup() -> None:
-    global retry_task, traffic_retry_task, machine_status_monitor_task, machine_status_monitor_stop_event, firewall_reconcile_task
+    global retry_task, traffic_retry_task, machine_status_monitor_task, machine_status_monitor_stop_event, firewall_reconcile_task, connection_auto_refresh_task, connection_auto_refresh_stop_event
     rebuilt = await attempt_rathole_config_rebuild(
         context="startup",
         delays=STARTUP_REBUILD_DELAYS_SECONDS,
@@ -202,10 +205,14 @@ async def handle_startup() -> None:
         monitor_machine_statuses(machine_status_monitor_stop_event)
     )
     firewall_reconcile_task = asyncio.create_task(reconcile_firewall_state_with_retries())
+    connection_auto_refresh_stop_event = asyncio.Event()
+    connection_auto_refresh_task = asyncio.create_task(
+        monitor_connection_auto_refresh(connection_auto_refresh_stop_event)
+    )
 
 
 async def handle_shutdown() -> None:
-    global retry_task, traffic_retry_task, machine_status_monitor_task, machine_status_monitor_stop_event, firewall_reconcile_task
+    global retry_task, traffic_retry_task, machine_status_monitor_task, machine_status_monitor_stop_event, firewall_reconcile_task, connection_auto_refresh_task, connection_auto_refresh_stop_event
     if retry_task is not None:
         retry_task.cancel()
         retry_task = None
@@ -217,6 +224,17 @@ async def handle_shutdown() -> None:
     if firewall_reconcile_task is not None:
         firewall_reconcile_task.cancel()
         firewall_reconcile_task = None
+
+    if connection_auto_refresh_stop_event is not None:
+        connection_auto_refresh_stop_event.set()
+        connection_auto_refresh_stop_event = None
+
+    if connection_auto_refresh_task is not None:
+        try:
+            await asyncio.wait_for(connection_auto_refresh_task, timeout=15)
+        except asyncio.TimeoutError:
+            connection_auto_refresh_task.cancel()
+        connection_auto_refresh_task = None
 
     if machine_status_monitor_stop_event is not None:
         machine_status_monitor_stop_event.set()

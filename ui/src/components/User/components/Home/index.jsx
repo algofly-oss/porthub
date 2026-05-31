@@ -82,6 +82,15 @@ const mapConnectionToForwardingConfig = (connection) => ({
       ? ""
       : connection.external_port,
   enabled: connection.enabled ?? true,
+  autoRefreshEnabled: connection.auto_refresh_enabled ?? false,
+  autoRefreshIntervalMinutes:
+    connection.auto_refresh_interval_minutes === undefined ||
+    connection.auto_refresh_interval_minutes === null ||
+    connection.auto_refresh_interval_minutes === ""
+      ? 60
+      : connection.auto_refresh_interval_minutes,
+  autoRefreshedAt: connection.auto_refreshed_at || null,
+  autoRefreshNextAt: connection.auto_refresh_next_at || null,
   firewall: {
     isPublic: connection.firewall?.is_public ?? true,
     allowedIps: Array.isArray(connection.firewall?.allowed_ips)
@@ -161,6 +170,13 @@ const normalizeForwardingConfig = (config) => ({
   internalPort: Number(config.internalPort),
   externalPort: Number(config.externalPort),
   enabled: config.enabled ?? true,
+  autoRefreshEnabled: config.autoRefreshEnabled ?? config.auto_refresh_enabled ?? false,
+  autoRefreshIntervalMinutes:
+    Number(
+      config.autoRefreshIntervalMinutes ??
+        config.auto_refresh_interval_minutes ??
+        60
+    ) || 60,
   firewall: normalizeFirewallPolicy(config),
 });
 
@@ -179,6 +195,9 @@ const forwardingConfigChanged = (currentConfig, nextConfig) => {
     currentNormalized.internalPort !== nextNormalized.internalPort ||
     currentNormalized.externalPort !== nextNormalized.externalPort ||
     currentNormalized.enabled !== nextNormalized.enabled ||
+    currentNormalized.autoRefreshEnabled !== nextNormalized.autoRefreshEnabled ||
+    currentNormalized.autoRefreshIntervalMinutes !==
+      nextNormalized.autoRefreshIntervalMinutes ||
     currentNormalized.firewall.isPublic !== nextNormalized.firewall.isPublic ||
     JSON.stringify(currentNormalized.firewall.allowedIps) !==
       JSON.stringify(nextNormalized.firewall.allowedIps)
@@ -669,13 +688,16 @@ export default function Home({ onStatsChange }) {
         });
       }
 
-      const savedConfigs = forwardingConfigs
+      const savedConfigsById = new Map();
+      const createdSavedConfigs = [];
+
+      forwardingConfigs
         .filter((config) => config.dataId && !configsToDelete.some((deleted) => deleted.dataId === config.dataId))
         .filter((config) => !configsToUpdate.some((updated) => updated.dataId === config.dataId))
-        .map((config) => {
+        .forEach((config) => {
           const normalizedFirewall = normalizeFirewallPolicy(config);
 
-          return {
+          savedConfigsById.set(config.dataId, {
             dataId: config.dataId,
             serviceName: config.serviceName,
             serviceDescription: config.serviceDescription,
@@ -683,11 +705,15 @@ export default function Home({ onStatsChange }) {
             internalPort: Number(config.internalPort),
             externalPort: Number(config.externalPort),
             enabled: config.enabled,
+            autoRefreshEnabled: config.autoRefreshEnabled ?? false,
+            autoRefreshIntervalMinutes: Number(config.autoRefreshIntervalMinutes) || 60,
+            autoRefreshedAt: config.autoRefreshedAt || null,
+            autoRefreshNextAt: config.autoRefreshNextAt || null,
             firewall: {
               isPublic: normalizedFirewall.isPublic,
               allowedIps: normalizedFirewall.allowedIps,
             },
-          };
+          });
         });
 
       for (const config of configsToUpdate) {
@@ -700,6 +726,8 @@ export default function Home({ onStatsChange }) {
           internal_port: Number(config.internalPort),
           external_port: Number(config.externalPort),
           enabled: config.enabled,
+          auto_refresh_enabled: config.autoRefreshEnabled ?? false,
+          auto_refresh_interval_minutes: Number(config.autoRefreshIntervalMinutes) || 60,
         };
 
         const response = config.dataId
@@ -714,7 +742,7 @@ export default function Home({ onStatsChange }) {
           allowed_ips: normalizedFirewall.allowedIps,
         });
 
-        savedConfigs.push({
+        savedConfigsById.set(savedConfig.dataId, {
           ...savedConfig,
           firewall: {
             isPublic: firewallResponse.data?.data?.firewall?.is_public ?? normalizedFirewall.isPublic,
@@ -735,6 +763,8 @@ export default function Home({ onStatsChange }) {
           internal_port: Number(config.internalPort),
           external_port: Number(config.externalPort),
           enabled: config.enabled,
+          auto_refresh_enabled: config.autoRefreshEnabled ?? false,
+          auto_refresh_interval_minutes: Number(config.autoRefreshIntervalMinutes) || 60,
         };
 
         const response = await axios.post(apiRoutes.addConnection, payload);
@@ -746,7 +776,7 @@ export default function Home({ onStatsChange }) {
           allowed_ips: normalizedFirewall.allowedIps,
         });
 
-        savedConfigs.push({
+        createdSavedConfigs.push({
           ...savedConfig,
           firewall: {
             isPublic: firewallResponse.data?.data?.firewall?.is_public ?? normalizedFirewall.isPublic,
@@ -757,12 +787,18 @@ export default function Home({ onStatsChange }) {
         });
       }
 
-      savedConfigs.sort((left, right) => {
-        if (left.externalPort !== right.externalPort) {
-          return left.externalPort - right.externalPort;
-        }
-        return (left.dataId || "").localeCompare(right.dataId || "");
-      });
+      let createdConfigIndex = 0;
+      const savedConfigs = forwardingConfigs
+        .map((config) => {
+          if (config.dataId) {
+            return savedConfigsById.get(config.dataId);
+          }
+
+          const createdConfig = createdSavedConfigs[createdConfigIndex];
+          createdConfigIndex += 1;
+          return createdConfig;
+        })
+        .filter(Boolean);
 
       setHosts((currentHosts) =>
         currentHosts.map((host) =>
@@ -943,6 +979,44 @@ export default function Home({ onStatsChange }) {
       error(
         requestError?.response?.data?.detail || "Could not request client update"
       );
+      return null;
+    }
+  };
+
+  const handleRefreshConnection = async (hostId, connectionId) => {
+    const currentHost = hosts.find((host) => host.id === hostId);
+    if (!currentHost || !connectionId) {
+      return null;
+    }
+
+    try {
+      const response = await axios.post(apiRoutes.refreshConnection, {
+        data_id: connectionId,
+      });
+      const refreshedConfig = mapConnectionToForwardingConfig(response.data.data);
+
+      setHosts((currentHosts) =>
+        currentHosts.map((host) =>
+          host.id === hostId
+            ? {
+              ...host,
+              numPorts: (host.forwardingConfigs || []).filter((config) =>
+                config.dataId === refreshedConfig.dataId
+                  ? refreshedConfig.enabled !== false
+                  : config.enabled !== false
+              ).length,
+              forwardingConfigs: (host.forwardingConfigs || []).map((config) =>
+                config.dataId === refreshedConfig.dataId ? refreshedConfig : config
+              ),
+            }
+            : host
+        )
+      );
+
+      success(`Refreshed ${refreshedConfig.serviceName || "service"}`);
+      return refreshedConfig;
+    } catch (refreshError) {
+      error(refreshError?.response?.data?.detail || "Could not refresh service");
       return null;
     }
   };
@@ -1322,6 +1396,7 @@ export default function Home({ onStatsChange }) {
         onToggleMachine={handleToggleMachine}
         onRefreshMachineToken={handleRefreshMachineToken}
         onRequestClientUpdate={handleRequestClientUpdate}
+        onRefreshConnection={handleRefreshConnection}
         onCreateGroup={handleCreateGroup}
         onAddMachineToGroup={handleAddMachineToGroup}
         onRemoveMachineFromGroup={handleRemoveMachineFromGroup}

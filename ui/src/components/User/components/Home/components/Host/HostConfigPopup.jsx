@@ -181,6 +181,8 @@ const createEmptyRule = (externalPort = "") => ({
   internalPort: "",
   externalPort: externalPort ? String(externalPort) : "",
   enabled: true,
+  autoRefreshEnabled: false,
+  autoRefreshIntervalMinutes: "60",
   firewall: {
     isPublic: true,
     allowedIps: [],
@@ -206,6 +208,15 @@ const mapRuleFromConfig = (config) => ({
       ? ""
       : String(config.externalPort),
   enabled: config.enabled ?? true,
+  autoRefreshEnabled: config.autoRefreshEnabled ?? config.auto_refresh_enabled ?? false,
+  autoRefreshIntervalMinutes:
+    config.autoRefreshIntervalMinutes === undefined ||
+    config.autoRefreshIntervalMinutes === null ||
+    config.autoRefreshIntervalMinutes === ""
+      ? String(config.auto_refresh_interval_minutes || 60)
+      : String(config.autoRefreshIntervalMinutes),
+  autoRefreshedAt: config.autoRefreshedAt || config.auto_refreshed_at || null,
+  autoRefreshNextAt: config.autoRefreshNextAt || config.auto_refresh_next_at || null,
   firewall: {
     isPublic:
       typeof config.firewall?.isPublic === "boolean"
@@ -326,6 +337,17 @@ const getRuleErrors = (rule) => {
     errors.externalPort = "Use a valid external port";
   }
 
+  if (rule.autoRefreshEnabled) {
+    const intervalMinutes = Number(rule.autoRefreshIntervalMinutes);
+    if (
+      !Number.isInteger(intervalMinutes) ||
+      intervalMinutes < 1 ||
+      intervalMinutes > 10080
+    ) {
+      errors.autoRefreshIntervalMinutes = "Use 1 to 10080 minutes";
+    }
+  }
+
   return errors;
 };
 
@@ -337,6 +359,8 @@ const normalizeRuleForCompare = (rule) => ({
   internalPort: Number(rule.internalPort) || 0,
   externalPort: Number(rule.externalPort) || 0,
   enabled: Boolean(rule.enabled),
+  autoRefreshEnabled: Boolean(rule.autoRefreshEnabled),
+  autoRefreshIntervalMinutes: Number(rule.autoRefreshIntervalMinutes) || 60,
   firewall: {
     isPublic:
       rule.firewall?.isPublic !== false ||
@@ -362,6 +386,7 @@ export default function HostConfigPopup({
   onToggleMachine,
   onRefreshMachineToken,
   onRequestClientUpdate,
+  onRefreshConnection,
   onCreateGroup,
   onAddMachineToGroup,
   onRemoveMachineFromGroup,
@@ -383,6 +408,7 @@ export default function HostConfigPopup({
   const [isLoadingMachineCommand, setIsLoadingMachineCommand] = useState(false);
   const [isRefreshingMachineToken, setIsRefreshingMachineToken] = useState(false);
   const [isRequestingClientUpdate, setIsRequestingClientUpdate] = useState(false);
+  const [refreshingRuleId, setRefreshingRuleId] = useState(null);
   const [isTogglingMachine, setIsTogglingMachine] = useState(false);
   const [isRefreshMachineTokenConfirmOpen, setIsRefreshMachineTokenConfirmOpen] =
     useState(false);
@@ -532,6 +558,7 @@ export default function HostConfigPopup({
       setClientLogStreamStatus("idle");
       setShouldAutoScrollClientLogs(true);
       setIsRefreshMachineTokenConfirmOpen(false);
+      setRefreshingRuleId(null);
       setIsDeleteMachineConfirmOpen(false);
       setGroupQuery("");
       setEditingRuleSnapshot(null);
@@ -579,6 +606,7 @@ export default function HostConfigPopup({
       setShouldAutoScrollClientLogs(true);
       setIsRefreshMachineTokenConfirmOpen(false);
       setIsDeleteMachineConfirmOpen(false);
+      setRefreshingRuleId(null);
       setGroupQuery("");
       setEditingRuleSnapshot(null);
       setRulesPage(1);
@@ -1459,6 +1487,28 @@ export default function HostConfigPopup({
     }
   };
 
+  const handleRefreshRuleNow = async (rule) => {
+    if (!host || !rule?.dataId || !onRefreshConnection || refreshingRuleId) {
+      return;
+    }
+
+    setRefreshingRuleId(rule.localId);
+    try {
+      const refreshedConfig = await onRefreshConnection(host.id, rule.dataId);
+      if (refreshedConfig) {
+        setRules((currentRules) =>
+          currentRules.map((currentRule) =>
+            currentRule.localId === rule.localId
+              ? mapRuleFromConfig(refreshedConfig)
+              : currentRule
+          )
+        );
+      }
+    } finally {
+      setRefreshingRuleId(null);
+    }
+  };
+
   const handleSubmit = async (event) => {
     event.preventDefault();
 
@@ -1500,6 +1550,8 @@ export default function HostConfigPopup({
       internalPort: Number(rule.internalPort),
       externalPort: Number(rule.externalPort),
       enabled: rule.enabled,
+      autoRefreshEnabled: rule.autoRefreshEnabled ?? false,
+      autoRefreshIntervalMinutes: Number(rule.autoRefreshIntervalMinutes) || 60,
       firewall: {
         isPublic:
           normalizeAllowedIps(rule.firewall?.allowedIps).length === 0,
@@ -2278,6 +2330,10 @@ export default function HostConfigPopup({
                 const rule = selectedRule;
                 const ruleErrors = errorsByRuleId[rule.localId] || {};
                 const availability = availabilityByRuleId[rule.localId];
+                const persistedRule = rule.dataId ? savedRulesById.get(rule.dataId) : null;
+                const ruleHasUnsavedChanges = !persistedRule ||
+                  JSON.stringify(normalizeRuleForCompare(persistedRule)) !==
+                    JSON.stringify(normalizeRuleForCompare(rule));
                 const allowedIps = normalizeAllowedIps(rule.firewall?.allowedIps);
                 const recentIpHits = allowIpRecentHitsByRuleId[rule.localId] || [];
                 const filteredRecentIpHits = [
@@ -2490,6 +2546,113 @@ export default function HostConfigPopup({
                                   {availability.message}
                                 </p>
                               )}
+                          </div>
+                        </div>
+
+                        <div
+                          className={`rounded-lg border px-3 py-3 ${
+                            isDark
+                              ? "border-zinc-700 bg-zinc-900/60"
+                              : "border-zinc-200 bg-white"
+                          }`}
+                        >
+                          <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                            <div className="min-w-0">
+                              <p
+                                className={
+                                  isDark
+                                    ? "text-sm font-medium text-zinc-100"
+                                    : "text-sm font-medium text-zinc-900"
+                                }
+                              >
+                                Auto refresh
+                              </p>
+                              <p className="mt-1 text-xs text-zinc-500">
+                                Periodically disables and re-enables this service config.
+                              </p>
+                            </div>
+
+                            <Switch
+                              size="sm"
+                              checked={rule.autoRefreshEnabled ?? false}
+                              onChange={(event) =>
+                                updateRule(
+                                  rule.localId,
+                                  "autoRefreshEnabled",
+                                  event.currentTarget.checked
+                                )
+                              }
+                              aria-label={
+                                rule.autoRefreshEnabled
+                                  ? "Disable service auto refresh"
+                                  : "Enable service auto refresh"
+                              }
+                              classNames={{
+                                track: isDark
+                                  ? "!border-zinc-700"
+                                  : "!border-zinc-300",
+                              }}
+                            />
+                          </div>
+
+                          <div className="mt-3 grid gap-3 sm:grid-cols-[minmax(0,18rem)_auto] sm:items-end">
+                            {rule.autoRefreshEnabled ? (
+                              <div className="w-full max-w-xs">
+                                <label
+                                  htmlFor={`auto-refresh-interval-${rule.localId}`}
+                                  className={getLabelClassName(isDark)}
+                                >
+                                  Refresh interval (minutes)
+                                </label>
+                                <input
+                                  id={`auto-refresh-interval-${rule.localId}`}
+                                  type="text"
+                                  inputMode="numeric"
+                                  placeholder="60"
+                                  className={getDetailInputClassName(isDark)}
+                                  value={rule.autoRefreshIntervalMinutes}
+                                  onChange={(event) =>
+                                    updateRule(
+                                      rule.localId,
+                                      "autoRefreshIntervalMinutes",
+                                      event.currentTarget.value
+                                    )
+                                  }
+                                />
+                                {ruleErrors.autoRefreshIntervalMinutes ? (
+                                  <p className={errorClassName}>
+                                    {ruleErrors.autoRefreshIntervalMinutes}
+                                  </p>
+                                ) : null}
+                              </div>
+                            ) : (
+                              <div
+                                className={`rounded-md border px-3 py-2 text-sm ${
+                                  isDark
+                                    ? "border-zinc-800 bg-zinc-950/60 text-zinc-400"
+                                    : "border-zinc-200 bg-zinc-50 text-zinc-500"
+                                }`}
+                              >
+                                Scheduled refresh off
+                              </div>
+                            )}
+
+                            <Button
+                              type="button"
+                              variant="default"
+                              leftIcon={<IconRefresh size={15} />}
+                              onClick={() => handleRefreshRuleNow(rule)}
+                              loading={refreshingRuleId === rule.localId}
+                              disabled={
+                                !rule.dataId ||
+                                rule.enabled === false ||
+                                ruleHasUnsavedChanges ||
+                                Boolean(refreshingRuleId)
+                              }
+                              classNames={{ root: `${btnSecondary} sm:self-end` }}
+                            >
+                              Refresh now
+                            </Button>
                           </div>
                         </div>
 

@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Request, HTTPException
+from datetime import timedelta
 from shared.env import get_external_port_range_error_message, is_external_port_allowed
 from shared.rathole_config import rebuild_server_toml
 from shared.factory import db
@@ -52,20 +53,49 @@ async def update_connection(data: Connection, request: Request):
     if existing_port:
         raise HTTPException(status_code=400, detail="Port already in use")
 
+    now = utcnow()
+    auto_refresh_enabled = bool(data.auto_refresh_enabled)
+    auto_refresh_interval_minutes = (
+        (data.auto_refresh_interval_minutes or 60) if auto_refresh_enabled else None
+    )
+    existing_auto_refresh_enabled = bool(connection.get("auto_refresh_enabled", False))
+    existing_auto_refresh_interval_minutes = connection.get(
+        "auto_refresh_interval_minutes"
+    )
+    existing_auto_refresh_next_at = connection.get("auto_refresh_next_at")
+    next_enabled = True if data.enabled is None else data.enabled
+    should_reset_auto_refresh_schedule = (
+        auto_refresh_enabled
+        and (
+            not existing_auto_refresh_enabled
+            or existing_auto_refresh_interval_minutes != auto_refresh_interval_minutes
+            or not existing_auto_refresh_next_at
+            or (connection.get("enabled", True) is False and next_enabled)
+        )
+    )
+    update_fields = {
+        "machine_id": machine["_id"],
+        "service_name": service_name,
+        "service_description": (data.service_description or "").strip(),
+        "internal_ip": data.internal_ip,
+        "internal_port": data.internal_port,
+        "external_port": data.external_port,
+        "enabled": next_enabled,
+        "auto_refresh_enabled": auto_refresh_enabled,
+        "auto_refresh_interval_minutes": auto_refresh_interval_minutes,
+        "updated_at": now,
+    }
+
+    if should_reset_auto_refresh_schedule and auto_refresh_interval_minutes:
+        update_fields["auto_refresh_next_at"] = now + timedelta(
+            minutes=auto_refresh_interval_minutes
+        )
+    elif not auto_refresh_enabled:
+        update_fields["auto_refresh_next_at"] = None
+
     await db.connections.update_one(
         {"_id": connection["_id"]},
-        {
-            "$set": {
-                "machine_id": machine["_id"],
-                "service_name": service_name,
-                "service_description": (data.service_description or "").strip(),
-                "internal_ip": data.internal_ip,
-                "internal_port": data.internal_port,
-                "external_port": data.external_port,
-                "enabled": True if data.enabled is None else data.enabled,
-                "updated_at": utcnow(),
-            }
-        },
+        {"$set": update_fields},
     )
 
     res = await db.connections.find_one({"_id": connection["_id"]})

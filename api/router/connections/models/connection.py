@@ -30,6 +30,18 @@ class Connection(BaseModel):
     internal_port: int = Field(..., ge=1, le=65535, example=22)
     external_port: int = Field(..., ge=1, le=65535, example=54312)
     enabled: typing.Optional[bool] = Field(True, example=True)
+    auto_refresh_enabled: typing.Optional[bool] = Field(
+        False,
+        alias="autoRefreshEnabled",
+        example=False,
+    )
+    auto_refresh_interval_minutes: typing.Optional[int] = Field(
+        None,
+        alias="autoRefreshIntervalMinutes",
+        ge=1,
+        le=10080,
+        example=60,
+    )
 
     if ConfigDict is None:
         class Config:
