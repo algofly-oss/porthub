@@ -64,40 +64,57 @@ const formatRelativeFromNow = (parsed) => {
   return daysAgo === 1 ? "1 day ago" : `${daysAgo} days ago`;
 };
 
-const mapConnectionToForwardingConfig = (connection) => ({
-  dataId: connection._id,
-  serviceName: connection.service_name || "",
-  serviceDescription: connection.service_description || "",
-  internalIp: connection.internal_ip || connection.internalIp || "0.0.0.0",
-  internalPort:
-    connection.internal_port === undefined ||
-    connection.internal_port === null ||
-    connection.internal_port === ""
-      ? ""
-      : connection.internal_port,
-  externalPort:
-    connection.external_port === undefined ||
-    connection.external_port === null ||
-    connection.external_port === ""
-      ? ""
-      : connection.external_port,
-  enabled: connection.enabled ?? true,
-  autoRefreshEnabled: connection.auto_refresh_enabled ?? false,
-  autoRefreshIntervalMinutes:
-    connection.auto_refresh_interval_minutes === undefined ||
-    connection.auto_refresh_interval_minutes === null ||
-    connection.auto_refresh_interval_minutes === ""
-      ? 60
-      : connection.auto_refresh_interval_minutes,
-  autoRefreshedAt: connection.auto_refreshed_at || null,
-  autoRefreshNextAt: connection.auto_refresh_next_at || null,
-  firewall: {
-    isPublic: connection.firewall?.is_public ?? true,
-    allowedIps: Array.isArray(connection.firewall?.allowed_ips)
-      ? connection.firewall.allowed_ips
-      : [],
-  },
-});
+const readConnectionValue = (connection, snakeKey, camelKey, fallback = "") => {
+  const snakeValue = connection[snakeKey];
+  if (snakeValue !== undefined && snakeValue !== null && snakeValue !== "") {
+    return snakeValue;
+  }
+
+  const camelValue = connection[camelKey];
+  if (camelValue !== undefined && camelValue !== null && camelValue !== "") {
+    return camelValue;
+  }
+
+  return fallback;
+};
+
+const mapConnectionToForwardingConfig = (connection) => {
+  const autoRefreshIntervalMinutes =
+    connection.autoRefreshIntervalMinutes ??
+    connection.auto_refresh_interval_minutes;
+
+  return {
+    dataId: connection._id || connection.dataId,
+    serviceName: connection.service_name || connection.serviceName || "",
+    serviceDescription:
+      connection.service_description || connection.serviceDescription || "",
+    internalIp: connection.internal_ip || connection.internalIp || "0.0.0.0",
+    internalPort: readConnectionValue(connection, "internal_port", "internalPort"),
+    externalPort: readConnectionValue(connection, "external_port", "externalPort"),
+    enabled: connection.enabled ?? true,
+    autoRefreshEnabled:
+      connection.autoRefreshEnabled ?? connection.auto_refresh_enabled ?? false,
+    autoRefreshIntervalMinutes:
+      autoRefreshIntervalMinutes === undefined ||
+      autoRefreshIntervalMinutes === null ||
+      autoRefreshIntervalMinutes === ""
+        ? 60
+        : autoRefreshIntervalMinutes,
+    autoRefreshedAt:
+      connection.autoRefreshedAt || connection.auto_refreshed_at || null,
+    autoRefreshNextAt:
+      connection.autoRefreshNextAt || connection.auto_refresh_next_at || null,
+    firewall: {
+      isPublic:
+        connection.firewall?.isPublic ?? connection.firewall?.is_public ?? true,
+      allowedIps: Array.isArray(connection.firewall?.allowedIps)
+        ? connection.firewall.allowedIps
+        : Array.isArray(connection.firewall?.allowed_ips)
+          ? connection.firewall.allowed_ips
+          : [],
+    },
+  };
+};
 
 const normalizeMachineTrafficSample = (sample) => ({
   timestamp: Number(sample?.timestamp) || 0,
@@ -726,6 +743,9 @@ export default function Home({ onStatsChange }) {
           internal_port: Number(config.internalPort),
           external_port: Number(config.externalPort),
           enabled: config.enabled,
+          autoRefreshEnabled: config.autoRefreshEnabled ?? false,
+          autoRefreshIntervalMinutes:
+            Number(config.autoRefreshIntervalMinutes) || 60,
           auto_refresh_enabled: config.autoRefreshEnabled ?? false,
           auto_refresh_interval_minutes: Number(config.autoRefreshIntervalMinutes) || 60,
         };
@@ -744,6 +764,12 @@ export default function Home({ onStatsChange }) {
 
         savedConfigsById.set(savedConfig.dataId, {
           ...savedConfig,
+          autoRefreshEnabled:
+            config.autoRefreshEnabled ?? savedConfig.autoRefreshEnabled ?? false,
+          autoRefreshIntervalMinutes:
+            Number(config.autoRefreshIntervalMinutes) ||
+            Number(savedConfig.autoRefreshIntervalMinutes) ||
+            60,
           firewall: {
             isPublic: firewallResponse.data?.data?.firewall?.is_public ?? normalizedFirewall.isPublic,
             allowedIps:
@@ -763,6 +789,9 @@ export default function Home({ onStatsChange }) {
           internal_port: Number(config.internalPort),
           external_port: Number(config.externalPort),
           enabled: config.enabled,
+          autoRefreshEnabled: config.autoRefreshEnabled ?? false,
+          autoRefreshIntervalMinutes:
+            Number(config.autoRefreshIntervalMinutes) || 60,
           auto_refresh_enabled: config.autoRefreshEnabled ?? false,
           auto_refresh_interval_minutes: Number(config.autoRefreshIntervalMinutes) || 60,
         };
@@ -778,6 +807,12 @@ export default function Home({ onStatsChange }) {
 
         createdSavedConfigs.push({
           ...savedConfig,
+          autoRefreshEnabled:
+            config.autoRefreshEnabled ?? savedConfig.autoRefreshEnabled ?? false,
+          autoRefreshIntervalMinutes:
+            Number(config.autoRefreshIntervalMinutes) ||
+            Number(savedConfig.autoRefreshIntervalMinutes) ||
+            60,
           firewall: {
             isPublic: firewallResponse.data?.data?.firewall?.is_public ?? normalizedFirewall.isPublic,
             allowedIps:
