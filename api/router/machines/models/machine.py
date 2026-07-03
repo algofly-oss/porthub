@@ -9,6 +9,18 @@ class Machine(BaseModel):
     hostname: typing.Optional[str] = Field("", example="luna.local")
     enabled: typing.Optional[bool] = Field(None, example=True)
     is_active: typing.Optional[bool] = Field(None, example=False)
+    client_setup_public_base_url: typing.Optional[str] = Field(
+        None,
+        example="https://porthub.example.com",
+    )
+    client_setup_rathole_server_address: typing.Optional[str] = Field(
+        None,
+        example="rathole.example.com:2334",
+    )
+    client_setup_service_domain: typing.Optional[str] = Field(
+        None,
+        example="services.example.com",
+    )
     group_ids: typing.Optional[typing.List[str]] = Field(
         None,
         example=["67f7d26b760bd71f4d3f3c34"],

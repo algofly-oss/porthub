@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Request
+from urllib.parse import urlsplit
 
 from shared.factory import db
 from shared.firewall_client import sync_machine_connection_firewall_policies
@@ -19,6 +20,30 @@ from ..common import (
 from .models.machine import Machine
 
 router = APIRouter()
+
+
+def _clean_optional_text(value: str | None, field_label: str, *, max_length: int = 255) -> str:
+    cleaned = (value or "").strip()
+    if len(cleaned) > max_length:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_label} must be {max_length} characters or fewer",
+        )
+    return cleaned
+
+
+def _clean_public_base_url(value: str | None) -> str:
+    cleaned = _clean_optional_text(value, "PortHub public base URL", max_length=512)
+    if not cleaned:
+        return ""
+
+    parsed = urlsplit(cleaned)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(
+            status_code=400,
+            detail="PortHub public base URL must be an http(s) URL",
+        )
+    return cleaned.rstrip("/")
 
 
 def _sorted_group_id_tuple(serialized: dict) -> tuple[str, ...]:
@@ -90,6 +115,23 @@ async def update_machine(data: Machine, request: Request):
         mongo_set["group_ids"] = validated
         mongo_unset.append("group_id")
 
+    if "client_setup_public_base_url" in incoming:
+        mongo_set["client_setup_public_base_url"] = _clean_public_base_url(
+            data.client_setup_public_base_url
+        )
+
+    if "client_setup_rathole_server_address" in incoming:
+        mongo_set["client_setup_rathole_server_address"] = _clean_optional_text(
+            data.client_setup_rathole_server_address,
+            "Rathole server address",
+        )
+
+    if "client_setup_service_domain" in incoming:
+        mongo_set["client_setup_service_domain"] = _clean_optional_text(
+            data.client_setup_service_domain,
+            "Service domain",
+        )
+
     update_doc: dict = {"$set": mongo_set}
     if mongo_unset:
         update_doc["$unset"] = {field: "" for field in mongo_unset}
@@ -108,6 +150,8 @@ async def update_machine(data: Machine, request: Request):
         or previous_effective_hostname != updated_effective_hostname
         or previous_serialized_machine.get("enabled", True)
         != updated_serialized_machine.get("enabled", True)
+        or previous_serialized_machine.get("client_setup_rathole_server_address", "")
+        != updated_serialized_machine.get("client_setup_rathole_server_address", "")
     )
 
     prev_groups = _sorted_group_id_tuple(previous_serialized_machine)

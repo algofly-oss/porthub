@@ -4,7 +4,7 @@ import json
 import time
 from datetime import datetime
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 from bson import ObjectId
 from fastapi import HTTPException, Request
@@ -14,6 +14,7 @@ from shared.env import (
     MACHINE_CONFIG_LONG_POLL_INTERVAL_SECONDS,
     MACHINE_CONFIG_LONG_POLL_TIMEOUT_SECONDS,
     PORT_HUB_PUBLIC_BASE_URL,
+    PORT_HUB_SERVICE_DOMAIN,
     RATHOLE_PORT,
     RATHOLE_SERVER_ADDRESS,
 )
@@ -35,7 +36,17 @@ async def authenticate_machine(machine_id: str, token: str) -> dict:
         }
     )
     if not machine:
-        raise HTTPException(status_code=401, detail="Invalid machine credentials")
+        raise HTTPException(
+            status_code=410,
+            detail="Machine deleted",
+            headers={"X-PortHub-Machine-Deleted": "true"},
+        )
+    if machine.get("deletion_pending", False):
+        raise HTTPException(
+            status_code=410,
+            detail="Machine deleted",
+            headers={"X-PortHub-Machine-Deleted": "true"},
+        )
     if machine.get("enabled", True) is False:
         raise HTTPException(
             status_code=403,
@@ -49,7 +60,17 @@ async def authenticate_machine_for_logs(machine_id: str, token: str) -> dict:
     machine_object_id = parse_machine_object_id(machine_id)
     machine = await db.machines.find_one({"_id": machine_object_id})
     if not machine:
-        raise HTTPException(status_code=401, detail="Invalid machine credentials")
+        raise HTTPException(
+            status_code=410,
+            detail="Machine deleted",
+            headers={"X-PortHub-Machine-Deleted": "true"},
+        )
+    if machine.get("deletion_pending", False):
+        raise HTTPException(
+            status_code=410,
+            detail="Machine deleted",
+            headers={"X-PortHub-Machine-Deleted": "true"},
+        )
     return machine
 
 
@@ -73,6 +94,39 @@ def _normalize_base_url(base_url: str) -> str:
     return base_url.rstrip("/")
 
 
+CLIENT_SETUP_QUERY_TO_FIELD = {
+    "public_base_url": "client_setup_public_base_url",
+    "rathole_server_address": "client_setup_rathole_server_address",
+    "service_domain": "client_setup_service_domain",
+}
+
+
+def get_client_setup_request_overrides(request: Request | None = None) -> dict[str, str]:
+    if request is None:
+        return {}
+
+    overrides: dict[str, str] = {}
+    for query_key, field in CLIENT_SETUP_QUERY_TO_FIELD.items():
+        value = (request.query_params.get(query_key) or "").strip()
+        if value:
+            overrides[field] = value
+    return overrides
+
+
+def _machine_override(
+    machine: dict | None,
+    field: str,
+    overrides: dict[str, str] | None = None,
+) -> str:
+    if overrides:
+        value = (overrides.get(field) or "").strip()
+        if value:
+            return value
+    if not machine:
+        return ""
+    return (machine.get(field) or "").strip()
+
+
 def get_public_base_url(request: Request | None = None) -> str:
     configured_base_url = (PORT_HUB_PUBLIC_BASE_URL or "").strip()
     if configured_base_url:
@@ -84,16 +138,49 @@ def get_public_base_url(request: Request | None = None) -> str:
     return _normalize_base_url(str(request.base_url))
 
 
-def get_api_base_url(request: Request | None = None) -> str:
-    return f"{get_public_base_url(request)}/api"
+def get_machine_public_base_url(
+    machine: dict | None = None,
+    request: Request | None = None,
+    overrides: dict[str, str] | None = None,
+) -> str:
+    configured_base_url = _machine_override(
+        machine, "client_setup_public_base_url", overrides
+    )
+    if configured_base_url:
+        return _normalize_base_url(configured_base_url)
+    return get_public_base_url(request)
 
 
-def get_rathole_server_address(request: Request | None = None) -> str:
-    configured_address = (RATHOLE_SERVER_ADDRESS or "").strip()
+def get_api_base_url(
+    request: Request | None = None,
+    machine: dict | None = None,
+    overrides: dict[str, str] | None = None,
+) -> str:
+    return f"{get_machine_public_base_url(machine, request, overrides)}/api"
+
+
+def get_client_setup_service_domain(
+    machine: dict | None = None,
+    overrides: dict[str, str] | None = None,
+) -> str:
+    return (
+        _machine_override(machine, "client_setup_service_domain", overrides)
+        or PORT_HUB_SERVICE_DOMAIN
+    )
+
+
+def get_rathole_server_address(
+    request: Request | None = None,
+    machine: dict | None = None,
+    overrides: dict[str, str] | None = None,
+) -> str:
+    configured_address = _machine_override(
+        machine, "client_setup_rathole_server_address", overrides
+    ) or (RATHOLE_SERVER_ADDRESS or "").strip()
     if configured_address:
         return configured_address
 
-    public_base_url = get_public_base_url(request)
+    public_base_url = get_machine_public_base_url(machine, request, overrides)
     parsed = urlsplit(public_base_url)
     hostname = parsed.hostname
     if not hostname:
@@ -148,6 +235,9 @@ def build_machine_config_version(machine: dict, connections: list[dict]) -> str:
         "machine_id": str(machine["_id"]),
         "token": machine.get("token", ""),
         "enabled": bool(machine.get("enabled", True)),
+        "client_setup_rathole_server_address": _machine_override(
+            machine, "client_setup_rathole_server_address"
+        ),
         "connections": [
             {
                 "_id": str(connection["_id"]),
@@ -175,11 +265,12 @@ def render_client_toml(
     connections: list[dict],
     *,
     request: Request | None = None,
+    overrides: dict[str, str] | None = None,
 ) -> str:
     lines = [
         "# Managed by PortHub. Manual changes will be overwritten.",
         "[client]",
-        f'remote_addr = "{get_rathole_server_address(request)}"',
+        f'remote_addr = "{get_rathole_server_address(request, machine, overrides)}"',
         "",
     ]
 
@@ -200,13 +291,30 @@ def render_client_toml(
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _with_client_setup_query(url: str, overrides: dict[str, str]) -> str:
+    if not overrides:
+        return url
+
+    query_values = {
+        query_key: overrides[field]
+        for query_key, field in CLIENT_SETUP_QUERY_TO_FIELD.items()
+        if (overrides.get(field) or "").strip()
+    }
+    if not query_values:
+        return url
+
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}{urlencode(query_values)}"
+
+
 def build_machine_endpoints(machine: dict, *, request: Request | None = None) -> dict[str, str]:
-    api_base_url = get_api_base_url(request)
+    overrides = get_client_setup_request_overrides(request)
+    api_base_url = get_api_base_url(request, machine, overrides)
     machine_id = str(machine["_id"])
     token = machine["token"]
     machine_api_base_url = f"{api_base_url}/machines/{machine_id}/{token}"
 
-    return {
+    endpoints = {
         "auth": f"{api_base_url}/machines/client/auth",
         "sync": f"{api_base_url}/machines/client/sync",
         "config": f"{api_base_url}/machines/client/config?machine_id={machine_id}&token={token}",
@@ -227,6 +335,23 @@ def build_machine_endpoints(machine: dict, *, request: Request | None = None) ->
         "rathole_armv7": f"{machine_api_base_url}/downloads/rathole/armv7",
         "socket_path": "/socket.io",
     }
+    for key in (
+        "config",
+        "config_toml",
+        "changes",
+        "changes_toml",
+        "install_script",
+        "bootstrap_script",
+        "client_cli",
+        "client_script",
+        "rathole_x86_64",
+        "rathole_darwin_x86_64",
+        "rathole_arm64",
+        "rathole_armhf",
+        "rathole_armv7",
+    ):
+        endpoints[key] = _with_client_setup_query(endpoints[key], overrides)
+    return endpoints
 
 
 async def build_machine_config_bundle(
@@ -234,6 +359,7 @@ async def build_machine_config_bundle(
     *,
     request: Request | None = None,
 ) -> dict[str, Any]:
+    overrides = get_client_setup_request_overrides(request)
     connections = await load_machine_connections(machine)
     serialized_connections = [
         serialize_machine_connection(connection, machine)
@@ -247,10 +373,18 @@ async def build_machine_config_bundle(
         "machine_name": machine.get("name", ""),
         "hostname": resolve_machine_hostname(machine),
         "enabled": bool(machine.get("enabled", True)),
-        "rathole_server_address": get_rathole_server_address(request),
+        "rathole_server_address": get_rathole_server_address(
+            request, machine, overrides
+        ),
+        "service_domain": get_client_setup_service_domain(machine, overrides),
         "connections": serialized_connections,
         "files": {
-            "client.toml": render_client_toml(machine, connections, request=request),
+            "client.toml": render_client_toml(
+                machine,
+                connections,
+                request=request,
+                overrides=overrides,
+            ),
         },
         "generated_at": datetime.utcnow(),
     }

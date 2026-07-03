@@ -5,7 +5,7 @@ import useAuth from "@/shared/hooks/useAuth";
 
 export default function Logout() {
   const auth = useAuth();
-  const profilePictureShort = null;
+  const profilePictureShort = auth?.user?.profile_picture?.data_url || null;
   const [isLogoutConfirmOpen, setIsLogoutConfirmOpen] = useState(false);
 
   const handleConfirmLogout = async () => {
@@ -18,11 +18,9 @@ export default function Logout() {
       <div>
         <div className="flex items-center my-4 space-x-4 drop-shadow-md">
           {profilePictureShort ? (
-            <Image
+            <img
               src={profilePictureShort}
               alt="profile"
-              width="50px"
-              height="50px"
               className="h-12 w-12 object-cover rounded-full"
             />
           ) : (

@@ -190,7 +190,7 @@ async def emit_machine_status_changed(machine: dict, room: str | None = None) ->
 
 async def emit_machine_status_snapshot(user_id: str, room: str | None = None) -> None:
     machines = await db.machines.find(
-        {"user_id": ObjectId(user_id)}
+        {"user_id": ObjectId(user_id), "deletion_pending": {"$ne": True}}
     ).sort("created_at", 1).to_list(None)
     await emit(
         STC_MACHINE_STATUS_SNAPSHOT,
@@ -237,7 +237,7 @@ async def disconnect_machine_clients(machine_id: str) -> None:
 
 
 async def initialize_machine_status_cache() -> None:
-    machines = await db.machines.find({}).to_list(None)
+    machines = await db.machines.find({"deletion_pending": {"$ne": True}}).to_list(None)
     _machine_status_cache.clear()
     for machine in machines:
         set_cached_machine_status(str(machine["_id"]), is_machine_online(machine))
@@ -245,7 +245,9 @@ async def initialize_machine_status_cache() -> None:
 
 async def monitor_machine_statuses(stop_event: asyncio.Event) -> None:
     while not stop_event.is_set():
-        machines = await db.machines.find({}).to_list(None)
+        machines = await db.machines.find(
+            {"deletion_pending": {"$ne": True}}
+        ).to_list(None)
         next_machine_status_cache: dict[str, bool] = {}
 
         for machine in machines:

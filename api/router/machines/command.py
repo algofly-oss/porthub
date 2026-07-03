@@ -10,8 +10,13 @@ from shared.machine_client import (
     authenticate_machine,
     authenticate_machine_for_logs,
     build_machine_endpoints,
+    get_client_setup_request_overrides,
     get_api_base_url,
+    get_client_setup_service_domain,
+    get_public_base_url,
+    get_rathole_server_address,
 )
+from shared.env import PORT_HUB_SERVICE_DOMAIN
 from shared.rathole_release import get_cached_rathole_metadata, get_rathole_binary_path, normalize_target
 from ..common import (
     get_authenticated_user,
@@ -77,11 +82,56 @@ def build_install_command(request: Request, machine: dict) -> str:
     )
 
 
+def build_client_setup_values(request: Request, machine: dict) -> dict:
+    request_overrides = get_client_setup_request_overrides(request)
+    default_public_base_url = get_public_base_url(request)
+    default_rathole_server_address = get_rathole_server_address(request)
+    default_service_domain = (PORT_HUB_SERVICE_DOMAIN or "").strip()
+    overrides = {
+        "public_base_url": (
+            request_overrides.get("client_setup_public_base_url")
+            or machine.get("client_setup_public_base_url")
+            or ""
+        ).strip(),
+        "rathole_server_address": (
+            request_overrides.get("client_setup_rathole_server_address")
+            or machine.get("client_setup_rathole_server_address")
+            or ""
+        ).strip(),
+        "service_domain": (
+            request_overrides.get("client_setup_service_domain")
+            or machine.get("client_setup_service_domain")
+            or ""
+        ).strip(),
+    }
+    return {
+        "defaults": {
+            "public_base_url": default_public_base_url,
+            "rathole_server_address": default_rathole_server_address,
+            "service_domain": default_service_domain,
+        },
+        "overrides": overrides,
+        "effective": {
+            "public_base_url": overrides["public_base_url"] or default_public_base_url,
+            "rathole_server_address": get_rathole_server_address(
+                request, machine, request_overrides
+            ),
+            "service_domain": get_client_setup_service_domain(
+                machine, request_overrides
+            ),
+        },
+    }
+
+
 @router.get("/command/{machine_id}")
 async def machine_command(machine_id: str, request: Request):
     user = await get_authenticated_user(request)
     machine = await db.machines.find_one(
-        {"_id": parse_object_id(machine_id, "Invalid machine id"), "user_id": user["_id"]}
+        {
+            "_id": parse_object_id(machine_id, "Invalid machine id"),
+            "user_id": user["_id"],
+            "deletion_pending": {"$ne": True},
+        }
     )
 
     if not machine:
@@ -92,6 +142,7 @@ async def machine_command(machine_id: str, request: Request):
         "data": {
             "machine": serialize_machine(machine),
             "command": build_install_command(request, machine),
+            "client_setup": build_client_setup_values(request, machine),
         },
     }
 

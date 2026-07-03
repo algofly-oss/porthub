@@ -592,6 +592,11 @@ extract_header() {
   ' "$header_file"
 }
 
+is_machine_deleted_response() {
+  local header_file="$1"
+  [ "$(extract_header "X-PortHub-Machine-Deleted" "$header_file")" = "true" ]
+}
+
 state_get() {
   local key="$1"
   [ -f "$PORT_HUB_STATE_FILE" ] || return 0
@@ -1083,6 +1088,10 @@ machine_post() {
   now="$(date +%s)"
   case "$http_code" in
     200|201)
+      if is_machine_deleted_response "$tmp_headers_file"; then
+        rm -f "$tmp_headers_file" "$tmp_body"
+        return 30
+      fi
       handle_client_control_headers "$tmp_headers_file"
       persist_shared_runtime
       observed_public_ip="$(extract_header "X-PortHub-Observed-IP" "$tmp_headers_file")"
@@ -1105,6 +1114,12 @@ machine_post() {
         "false"
       rm -f "$tmp_headers_file" "$tmp_body"
       return 0
+      ;;
+    410)
+      if is_machine_deleted_response "$tmp_headers_file"; then
+        rm -f "$tmp_headers_file" "$tmp_body"
+        return 30
+      fi
       ;;
     403)
       if [ "$(extract_header "X-PortHub-Machine-Disabled" "$tmp_headers_file")" = "true" ]; then
@@ -1131,6 +1146,15 @@ machine_post() {
   esac
   rm -f "$tmp_headers_file" "$tmp_body"
   return 1
+}
+
+ack_machine_deleted() {
+  local ack_url payload
+  ack_url="${PORT_HUB_API_URL%/}/machines/client/deletion-ack"
+  payload="$(printf '{"machine_id":"%s","token":"%s"}' "$PORT_HUB_MACHINE_ID" "$PORT_HUB_MACHINE_TOKEN")"
+  curl --silent --show-error --location -o /dev/null -X POST "$ack_url" \
+    -H "Content-Type: application/json" \
+    --data "$payload" >/dev/null 2>&1 || true
 }
 
 machine_log_stream_requested() {
@@ -1362,6 +1386,10 @@ fetch_config_cmd() {
   tmp_body="$(mktemp)"
   tmp_headers="$(mktemp)"
   http_code="$(curl --silent --show-error --location -D "$tmp_headers" -o "$tmp_body" -w "%{http_code}" "$PORT_HUB_CONFIG_TOML_URL" || true)"
+  if [ "$http_code" = "410" ] && is_machine_deleted_response "$tmp_headers"; then
+    rm -f "$tmp_body" "$tmp_headers"
+    return 30
+  fi
   if [ "$http_code" = "403" ] && [ "$(extract_header "X-PortHub-Machine-Disabled" "$tmp_headers")" = "true" ]; then
     write_state \
       "$(state_get PORT_HUB_CURRENT_VERSION)" \
@@ -2442,6 +2470,10 @@ poll_for_change() {
   http_code="$(curl --silent --show-error -D "$tmp_headers" -o "$tmp_body" -w "%{http_code}" "$url" || true)"
   case "$http_code" in
     200)
+      if is_machine_deleted_response "$tmp_headers"; then
+        rm -f "$tmp_body" "$tmp_headers"
+        return 30
+      fi
       handle_client_control_headers "$tmp_headers"
       version="$(extract_header "X-PortHub-Config-Version" "$tmp_headers")"
       [ -n "$version" ] || { rm -f "$tmp_body" "$tmp_headers"; fail "Missing PortHub config version header"; }
@@ -2468,12 +2500,25 @@ poll_for_change() {
       return 10
       ;;
     204)
+      if is_machine_deleted_response "$tmp_headers"; then
+        rm -f "$tmp_body" "$tmp_headers"
+        return 30
+      fi
       handle_client_control_headers "$tmp_headers"
       version="$(extract_header "X-PortHub-Config-Version" "$tmp_headers")"
       [ -n "$version" ] && save_state "$version" "$(date +%s)" "$(state_get PORT_HUB_SERVICE_MANAGER)"
       debug_log "No config change detected (version ${version:-$current_version})"
       rm -f "$tmp_body" "$tmp_headers"
       return 0
+      ;;
+    410)
+      if is_machine_deleted_response "$tmp_headers"; then
+        rm -f "$tmp_body" "$tmp_headers"
+        return 30
+      fi
+      debug_log "Config poll reported machine deletion"
+      rm -f "$tmp_body" "$tmp_headers"
+      return 30
       ;;
     403)
       if [ "$(extract_header "X-PortHub-Machine-Disabled" "$tmp_headers")" = "true" ]; then
@@ -2594,6 +2639,19 @@ service_run_cmd() {
     exit 0
   }
 
+  handle_machine_deleted() {
+    log "WARN" "Machine was deleted in PortHub; acknowledging deletion and uninstalling this tenant"
+    trap - INT TERM
+    if [ -n "$log_stream_supervisor_pid" ] && kill -0 "$log_stream_supervisor_pid" 2>/dev/null; then
+      kill "$log_stream_supervisor_pid" 2>/dev/null || true
+      wait "$log_stream_supervisor_pid" 2>/dev/null || true
+    fi
+    stop_rathole
+    ack_machine_deleted
+    uninstall_cmd
+    exit 0
+  }
+
   trap shutdown_service INT TERM
 
   [ -x "$PORT_HUB_RATHOLE_BIN" ] || install_rathole_cmd
@@ -2619,7 +2677,9 @@ service_run_cmd() {
       start_rathole
     else
       rc="$?"
-      if [ "$rc" -eq 20 ]; then
+      if [ "$rc" -eq 30 ]; then
+        handle_machine_deleted
+      elif [ "$rc" -eq 20 ]; then
       log "WARN" "Machine is disabled in PortHub; Rathole will stay stopped until it is re-enabled"
       else
         fail "Could not fetch PortHub machine config"
@@ -2627,7 +2687,9 @@ service_run_cmd() {
     fi
   else
     rc="$?"
-    if [ "$rc" -eq 20 ]; then
+    if [ "$rc" -eq 30 ]; then
+      handle_machine_deleted
+    elif [ "$rc" -eq 20 ]; then
     log "WARN" "Machine is disabled in PortHub; Rathole will stay stopped until it is re-enabled"
     else
       fail "Could not authenticate machine against PortHub server"
@@ -2666,7 +2728,9 @@ service_run_cmd() {
           last_sync="$now"
         else
           rc="$?"
-          if [ "$rc" -ne 20 ]; then
+          if [ "$rc" -eq 30 ]; then
+            handle_machine_deleted
+          elif [ "$rc" -ne 20 ]; then
           log "WARN" "Disabled-machine retry failed"
           sleep "$auth_retry_seconds"
           fi
@@ -2682,13 +2746,18 @@ service_run_cmd() {
         save_state "$(state_get PORT_HUB_CURRENT_VERSION)" "$now" "$(state_get PORT_HUB_SERVICE_MANAGER)"
         last_sync="$now"
         debug_log "Heartbeat succeeded at $(format_epoch "$now")"
-      elif [ "$?" -eq 20 ]; then
-        log "WARN" "Machine was disabled in PortHub; stopping Rathole"
-        stop_rathole
-        last_sync="$now"
       else
-        log "WARN" "Heartbeat failed"
-        sleep "$auth_retry_seconds"
+        rc="$?"
+        if [ "$rc" -eq 30 ]; then
+          handle_machine_deleted
+        elif [ "$rc" -eq 20 ]; then
+          log "WARN" "Machine was disabled in PortHub; stopping Rathole"
+          stop_rathole
+          last_sync="$now"
+        else
+          log "WARN" "Heartbeat failed"
+          sleep "$auth_retry_seconds"
+        fi
       fi
     fi
 
@@ -2707,6 +2776,8 @@ service_run_cmd() {
         elif [ "$rc" -eq 20 ]; then
           log "WARN" "Machine was disabled in PortHub; stopping Rathole"
           stop_rathole
+        elif [ "$rc" -eq 30 ]; then
+          handle_machine_deleted
         else
           log "WARN" "Config poll failed; retrying"
           sleep "$auth_retry_seconds"

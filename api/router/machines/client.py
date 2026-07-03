@@ -2,11 +2,13 @@ from fastapi import APIRouter, Query, Request, Response, status
 from pydantic import BaseModel, Field
 
 from shared.client_release import get_client_version as get_latest_client_version
+from shared.factory import db
 from shared.machine_client import (
     authenticate_machine,
     authenticate_machine_for_logs,
     build_machine_config_bundle,
     build_machine_endpoints,
+    parse_machine_object_id,
     sync_machine_runtime,
     touch_machine_client_presence,
     wait_for_machine_config_change,
@@ -41,6 +43,11 @@ class MachineClientLogBatch(BaseModel):
     token: str = Field(..., min_length=1)
     source: str | None = Field("client", example="client")
     lines: list[str] = Field(default_factory=list)
+
+
+class MachineClientDeletionAck(BaseModel):
+    machine_id: str = Field(..., example="67f7d26b760bd71f4d3f3c34")
+    token: str = Field(..., min_length=1)
 
 
 def _apply_client_control_headers(response: Response, machine: dict) -> None:
@@ -153,6 +160,26 @@ async def machine_client_sync(data: MachineClientSession, request: Request, resp
         response=response,
         action="synced",
     )
+
+
+@router.post("/client/deletion-ack")
+async def machine_client_deletion_ack(data: MachineClientDeletionAck):
+    machine = await db.machines.find_one(
+        {
+            "_id": parse_machine_object_id(data.machine_id),
+            "token": data.token,
+        }
+    )
+    if machine and machine.get("deletion_pending", False):
+        await db.machines.delete_one({"_id": machine["_id"]})
+
+    return {
+        "msg": "Machine deletion acknowledged",
+        "data": {
+            "machine_id": data.machine_id,
+            "removed": bool(machine and machine.get("deletion_pending", False)),
+        },
+    }
 
 
 @router.get("/client/config")

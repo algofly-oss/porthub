@@ -10,7 +10,11 @@ router = APIRouter()
 async def list_machines(request: Request):
     user = await get_authenticated_user(request)
     machines = (
-        await db.machines.find({"user_id": user["_id"]}).sort("created_at", 1).to_list(None)
+        await db.machines.find(
+            {"user_id": user["_id"], "deletion_pending": {"$ne": True}}
+        )
+        .sort("created_at", 1)
+        .to_list(None)
     )
 
     return {

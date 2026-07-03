@@ -23,6 +23,7 @@ import {
   IconCopy,
   IconDotsVertical,
   IconFolder,
+  IconInfoCircle,
   IconPlus,
   IconRefresh,
   IconShieldLock,
@@ -316,6 +317,41 @@ const buildExternalPortUrl = (serviceDomain, externalPort) => {
 const getApiErrorMessage = (requestError, fallbackMessage) =>
   requestError?.response?.data?.detail || fallbackMessage;
 
+const createEmptyClientSetupValues = () => ({
+  publicBaseUrl: "",
+  ratholeServerAddress: "",
+  serviceDomain: "",
+});
+
+const mapClientSetupValues = (values = {}) => ({
+  publicBaseUrl: String(values.public_base_url || values.publicBaseUrl || "").trim(),
+  ratholeServerAddress: String(
+    values.rathole_server_address || values.ratholeServerAddress || ""
+  ).trim(),
+  serviceDomain: String(values.service_domain || values.serviceDomain || "").trim(),
+});
+
+const valuesDiffer = (left, right) =>
+  left.publicBaseUrl !== right.publicBaseUrl ||
+  left.ratholeServerAddress !== right.ratholeServerAddress ||
+  left.serviceDomain !== right.serviceDomain;
+
+const getChangedClientSetupValues = (fields, defaults) => ({
+  publicBaseUrl:
+    fields.publicBaseUrl.trim() && fields.publicBaseUrl.trim() !== defaults.publicBaseUrl
+      ? fields.publicBaseUrl.trim()
+      : "",
+  ratholeServerAddress:
+    fields.ratholeServerAddress.trim() &&
+    fields.ratholeServerAddress.trim() !== defaults.ratholeServerAddress
+      ? fields.ratholeServerAddress.trim()
+      : "",
+  serviceDomain:
+    fields.serviceDomain.trim() && fields.serviceDomain.trim() !== defaults.serviceDomain
+      ? fields.serviceDomain.trim()
+      : "",
+});
+
 const getRuleErrors = (rule) => {
   const errors = {};
 
@@ -382,6 +418,7 @@ export default function HostConfigPopup({
   onClose,
   onSave,
   onUpdateMachineDetails,
+  onUpdateClientSetup,
   onDeleteMachine,
   onToggleMachine,
   onRefreshMachineToken,
@@ -406,6 +443,14 @@ export default function HostConfigPopup({
   const [randomizingRuleId, setRandomizingRuleId] = useState(null);
   const [machineCommand, setMachineCommand] = useState("");
   const [isLoadingMachineCommand, setIsLoadingMachineCommand] = useState(false);
+  const [showClientSetupAdvanced, setShowClientSetupAdvanced] = useState(false);
+  const [clientSetupDefaults, setClientSetupDefaults] = useState(
+    createEmptyClientSetupValues
+  );
+  const [clientSetupFields, setClientSetupFields] = useState(
+    createEmptyClientSetupValues
+  );
+  const [isSavingClientSetup, setIsSavingClientSetup] = useState(false);
   const [isRefreshingMachineToken, setIsRefreshingMachineToken] = useState(false);
   const [isRequestingClientUpdate, setIsRequestingClientUpdate] = useState(false);
   const [refreshingRuleId, setRefreshingRuleId] = useState(null);
@@ -441,6 +486,7 @@ export default function HostConfigPopup({
   const [isLoadingTrafficSamples, setIsLoadingTrafficSamples] = useState(false);
   const [serviceDomain, setServiceDomain] = useState("");
   const [debouncedRules] = useDebouncedValue(rules, 300);
+  const [debouncedClientSetupFields] = useDebouncedValue(clientSetupFields, 300);
   const initialRulesSnapshotRef = useRef("");
   const clientLogsContainerRef = useRef(null);
   const groupInputRef = useRef(null);
@@ -506,6 +552,25 @@ export default function HostConfigPopup({
   const clientHostnameValue = (host?.clientHostname || "").trim();
   const machineDetailsChanged =
     machineNameValue !== hostNameValue || machineHostnameValue !== hostHostnameValue;
+  const savedClientSetupFields = {
+    publicBaseUrl:
+      (host?.clientSetupPublicBaseUrl || "").trim() ||
+      clientSetupDefaults.publicBaseUrl,
+    ratholeServerAddress:
+      (host?.clientSetupRatholeServerAddress || "").trim() ||
+      clientSetupDefaults.ratholeServerAddress,
+    serviceDomain:
+      (host?.clientSetupServiceDomain || "").trim() ||
+      clientSetupDefaults.serviceDomain,
+  };
+  const clientSetupChanged = valuesDiffer(clientSetupFields, savedClientSetupFields);
+  const hasSavedClientSetupOverrides = Boolean(
+    (host?.clientSetupPublicBaseUrl || "").trim() ||
+      (host?.clientSetupRatholeServerAddress || "").trim() ||
+      (host?.clientSetupServiceDomain || "").trim()
+  );
+  const effectiveServiceDomain =
+    (host?.clientSetupServiceDomain || "").trim() || serviceDomain;
 
   const openTrafficMonitorWindow = (rule) => {
     if (!rule?.dataId || typeof window === "undefined") {
@@ -548,6 +613,10 @@ export default function HostConfigPopup({
       setErrorsByRuleId({});
       setAvailabilityByRuleId({});
       setMachineCommand("");
+      setShowClientSetupAdvanced(false);
+      setClientSetupDefaults(createEmptyClientSetupValues());
+      setClientSetupFields(createEmptyClientSetupValues());
+      setIsSavingClientSetup(false);
       setShowGroups(false);
       setShowMachineCredentials(false);
       setShowClientLogs(false);
@@ -597,6 +666,7 @@ export default function HostConfigPopup({
       setSelectedRuleId(null);
       setShowGroups(false);
       setShowMachineCredentials(false);
+      setShowClientSetupAdvanced(false);
       setShowClientLogs(false);
       setShowVerboseClientLogs(false);
       setShowClientLogLineNumbers(false);
@@ -629,7 +699,13 @@ export default function HostConfigPopup({
         ? currentSnapshot
         : null
     );
-  }, [host?.id, host?.forwardingConfigs, host?.name, host?.hostname, host?.clientHostname]);
+  }, [
+    host?.id,
+    host?.forwardingConfigs,
+    host?.name,
+    host?.hostname,
+    host?.clientHostname,
+  ]);
 
   useEffect(() => {
     if (!selectedRule) {
@@ -774,7 +850,17 @@ export default function HostConfigPopup({
       try {
         const response = await axios.get(apiRoutes.getMachineCommand(host.id));
         if (isActive) {
+          const setup = response.data?.data?.client_setup || {};
+          const defaults = mapClientSetupValues(setup.defaults);
+          const overrides = mapClientSetupValues(setup.overrides);
           setMachineCommand(response.data?.data?.command || "");
+          setClientSetupDefaults(defaults);
+          setClientSetupFields({
+            publicBaseUrl: overrides.publicBaseUrl || defaults.publicBaseUrl,
+            ratholeServerAddress:
+              overrides.ratholeServerAddress || defaults.ratholeServerAddress,
+            serviceDomain: overrides.serviceDomain || defaults.serviceDomain,
+          });
         }
       } catch (machineCommandError) {
         // Keep the last known command instead of flashing "Unavailable" on transient failures.
@@ -791,6 +877,48 @@ export default function HostConfigPopup({
       isActive = false;
     };
   }, [opened, host?.id]);
+
+  useEffect(() => {
+    if (!opened || !host?.id || !showClientSetupAdvanced) {
+      return undefined;
+    }
+
+    let isActive = true;
+    const commandOverrides = getChangedClientSetupValues(
+      debouncedClientSetupFields,
+      clientSetupDefaults
+    );
+
+    const loadPreviewCommand = async () => {
+      setIsLoadingMachineCommand(true);
+      try {
+        const response = await axios.get(
+          apiRoutes.getMachineCommand(host.id, commandOverrides)
+        );
+        if (isActive) {
+          setMachineCommand(response.data?.data?.command || "");
+        }
+      } catch {
+        // Keep the last known command while the user is editing advanced values.
+      } finally {
+        if (isActive) {
+          setIsLoadingMachineCommand(false);
+        }
+      }
+    };
+
+    loadPreviewCommand();
+
+    return () => {
+      isActive = false;
+    };
+  }, [
+    opened,
+    host?.id,
+    showClientSetupAdvanced,
+    debouncedClientSetupFields,
+    clientSetupDefaults,
+  ]);
 
   useEffect(() => {
     if (!opened) {
@@ -1473,6 +1601,62 @@ export default function HostConfigPopup({
     }
   };
 
+  const handleClientSetupFieldChange = (field, value) => {
+    setClientSetupFields((current) => ({
+      ...current,
+      [field]: value,
+    }));
+  };
+
+  const reloadMachineCommand = async () => {
+    if (!host?.id) {
+      return;
+    }
+
+    setIsLoadingMachineCommand(true);
+    try {
+      const response = await axios.get(apiRoutes.getMachineCommand(host.id));
+      const setup = response.data?.data?.client_setup || {};
+      const defaults = mapClientSetupValues(setup.defaults);
+      const overrides = mapClientSetupValues(setup.overrides);
+      setMachineCommand(response.data?.data?.command || "");
+      setClientSetupDefaults(defaults);
+      setClientSetupFields({
+        publicBaseUrl: overrides.publicBaseUrl || defaults.publicBaseUrl,
+        ratholeServerAddress:
+          overrides.ratholeServerAddress || defaults.ratholeServerAddress,
+        serviceDomain: overrides.serviceDomain || defaults.serviceDomain,
+      });
+    } finally {
+      setIsLoadingMachineCommand(false);
+    }
+  };
+
+  const handleSaveClientSetup = async () => {
+    if (!host || !onUpdateClientSetup || isSavingClientSetup) {
+      return;
+    }
+
+    const payload = getChangedClientSetupValues(
+      clientSetupFields,
+      clientSetupDefaults
+    );
+
+    setIsSavingClientSetup(true);
+    try {
+      const updatedHost = await onUpdateClientSetup(host.id, payload);
+      if (updatedHost) {
+        await reloadMachineCommand();
+      }
+    } finally {
+      setIsSavingClientSetup(false);
+    }
+  };
+
+  const handleResetClientSetup = async () => {
+    setClientSetupFields(clientSetupDefaults);
+  };
+
   const handleRequestClientUpdate = async () => {
     if (!host || !onRequestClientUpdate || isRequestingClientUpdate) {
       return;
@@ -1586,6 +1770,41 @@ export default function HostConfigPopup({
   const btnSecondary = isDark
     ? "!border-zinc-700 !bg-zinc-800 !text-zinc-100 hover:!bg-zinc-700"
     : "!border-zinc-300 !bg-white !text-zinc-900 hover:!bg-zinc-50";
+  const renderAdvancedLabel = (htmlFor, label, tooltip) => (
+    <div className="mb-1.5 flex items-center gap-1.5">
+      <label
+        className={getLabelClassName(isDark).replace("mb-1.5 ", "")}
+        htmlFor={htmlFor}
+      >
+        {label}
+      </label>
+      <Tooltip
+        label={tooltip}
+        withArrow
+        multiline
+        width={260}
+        position="top"
+        classNames={{
+          tooltip: isDark
+            ? "!border !border-zinc-700 !bg-zinc-900 !text-zinc-100"
+            : "!border !border-zinc-200 !bg-white !text-zinc-900",
+          arrow: isDark
+            ? "!border-zinc-700 !bg-zinc-900"
+            : "!border-zinc-200 !bg-white",
+        }}
+      >
+        <span
+          className={
+            isDark
+              ? "inline-flex text-zinc-500 hover:text-zinc-300"
+              : "inline-flex text-zinc-400 hover:text-zinc-600"
+          }
+        >
+          <IconInfoCircle size={14} />
+        </span>
+      </Tooltip>
+    </div>
+  );
 
   return (
     <>
@@ -1659,8 +1878,18 @@ export default function HostConfigPopup({
         size="lg"
         overlayProps={{ blur: 3 }}
         classNames={modalClassNames}
-        closeOnClickOutside={false}
-        closeOnEscape={false}
+        closeOnClickOutside={
+          !isSaving &&
+          !isSavingMachineDetails &&
+          !isSavingClientSetup &&
+          !isCheckingAvailability
+        }
+        closeOnEscape={
+          !isSaving &&
+          !isSavingMachineDetails &&
+          !isSavingClientSetup &&
+          !isCheckingAvailability
+        }
       >
         {host ? (
           <form
@@ -2164,6 +2393,154 @@ export default function HostConfigPopup({
                               {" "}
                               on the client machine.
                             </p>
+                            <div
+                              className={`mt-3 rounded-md border px-3 py-2.5 ${
+                                isDark
+                                  ? "border-zinc-700 bg-zinc-900/40"
+                                  : "border-zinc-200 bg-white"
+                              }`}
+                            >
+                              <button
+                                type="button"
+                                className="flex w-full items-center justify-between gap-3 text-left"
+                                onClick={() =>
+                                  setShowClientSetupAdvanced((current) => !current)
+                                }
+                                aria-expanded={showClientSetupAdvanced}
+                              >
+                                <div className="min-w-0">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <p
+                                      className={`text-sm font-medium ${
+                                        isDark ? "text-zinc-100" : "text-zinc-900"
+                                      }`}
+                                    >
+                                      Advanced settings
+                                    </p>
+                                    {hasSavedClientSetupOverrides ? (
+                                      <Badge
+                                        size="xs"
+                                        className={getInfoBadgeClassName(isDark)}
+                                      >
+                                        Enabled
+                                      </Badge>
+                                    ) : null}
+                                  </div>
+                                  <p className="mt-0.5 text-xs text-zinc-500">
+                                    Override install and Rathole endpoints for this machine.
+                                  </p>
+                                </div>
+                                {showClientSetupAdvanced ? (
+                                  <IconChevronUp
+                                    size={18}
+                                    className={
+                                      isDark ? "text-zinc-400" : "text-zinc-600"
+                                    }
+                                  />
+                                ) : (
+                                  <IconChevronDown
+                                    size={18}
+                                    className={
+                                      isDark ? "text-zinc-400" : "text-zinc-600"
+                                    }
+                                  />
+                                )}
+                              </button>
+
+                              <Collapse in={showClientSetupAdvanced}>
+                                <div className="mt-3 space-y-3">
+                                  <div>
+                                    {renderAdvancedLabel(
+                                      "client-setup-public-base-url",
+                                      "PortHub public base URL",
+                                      "Changes the base URL used in the bootstrap command and generated client API/download endpoints."
+                                    )}
+                                    <input
+                                      id="client-setup-public-base-url"
+                                      type="url"
+                                      value={clientSetupFields.publicBaseUrl}
+                                      onChange={(event) =>
+                                        handleClientSetupFieldChange(
+                                          "publicBaseUrl",
+                                          event.target.value
+                                        )
+                                      }
+                                      placeholder={clientSetupDefaults.publicBaseUrl}
+                                      className={getDetailInputClassName(isDark)}
+                                    />
+                                  </div>
+
+                                  <div>
+                                    {renderAdvancedLabel(
+                                      "client-setup-rathole-address",
+                                      "Rathole server address",
+                                      "Changes the Rathole client remote_addr written into this machine's generated client config."
+                                    )}
+                                    <input
+                                      id="client-setup-rathole-address"
+                                      type="text"
+                                      value={clientSetupFields.ratholeServerAddress}
+                                      onChange={(event) =>
+                                        handleClientSetupFieldChange(
+                                          "ratholeServerAddress",
+                                          event.target.value
+                                        )
+                                      }
+                                      placeholder={clientSetupDefaults.ratholeServerAddress}
+                                      className={getDetailInputClassName(isDark)}
+                                    />
+                                  </div>
+
+                                  <div>
+                                    {renderAdvancedLabel(
+                                      "client-setup-service-domain",
+                                      "Service domain",
+                                      "Changes service links shown for this machine's exposed ports. It does not change the installer fetch URL."
+                                    )}
+                                    <input
+                                      id="client-setup-service-domain"
+                                      type="text"
+                                      value={clientSetupFields.serviceDomain}
+                                      onChange={(event) =>
+                                        handleClientSetupFieldChange(
+                                          "serviceDomain",
+                                          event.target.value
+                                        )
+                                      }
+                                      placeholder={clientSetupDefaults.serviceDomain}
+                                      className={getDetailInputClassName(isDark)}
+                                    />
+                                  </div>
+
+                                  <div className="flex flex-wrap justify-end gap-2">
+                                    <Button
+                                      type="button"
+                                      variant="default"
+                                      size="xs"
+                                      onClick={handleResetClientSetup}
+                                      disabled={isSavingClientSetup}
+                                      classNames={{ root: btnSecondary }}
+                                    >
+                                      Reset
+                                    </Button>
+                                    <Button
+                                      type="button"
+                                      variant="filled"
+                                      size="xs"
+                                      onClick={handleSaveClientSetup}
+                                      loading={isSavingClientSetup}
+                                      disabled={!clientSetupChanged}
+                                      classNames={{
+                                        root:
+                                          "!bg-blue-600 !text-blue-50 hover:!bg-blue-700 disabled:!bg-blue-400",
+                                      }}
+                                    >
+                                      Save settings
+                                    </Button>
+                                  </div>
+                                </div>
+                              </Collapse>
+                            </div>
                             <div className="mt-1.5 flex items-center gap-1.5">
                               <p
                                 className={`text-xs ${
@@ -2908,7 +3285,7 @@ export default function HostConfigPopup({
                             Number.isInteger(externalPortNumber) &&
                             externalPortNumber >= 1 &&
                             externalPortNumber <= 65535
-                              ? buildExternalPortUrl(serviceDomain, externalPortNumber)
+                              ? buildExternalPortUrl(effectiveServiceDomain, externalPortNumber)
                               : "";
                           const canOpenExternalPort =
                             !isInvalid && Boolean(externalPortUrl);
