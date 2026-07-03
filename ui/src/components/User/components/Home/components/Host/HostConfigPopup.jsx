@@ -564,6 +564,11 @@ export default function HostConfigPopup({
       clientSetupDefaults.serviceDomain,
   };
   const clientSetupChanged = valuesDiffer(clientSetupFields, savedClientSetupFields);
+  const hasSavedClientSetupOverrides = Boolean(
+    (host?.clientSetupPublicBaseUrl || "").trim() ||
+      (host?.clientSetupRatholeServerAddress || "").trim() ||
+      (host?.clientSetupServiceDomain || "").trim()
+  );
   const effectiveServiceDomain =
     (host?.clientSetupServiceDomain || "").trim() || serviceDomain;
 
@@ -694,7 +699,13 @@ export default function HostConfigPopup({
         ? currentSnapshot
         : null
     );
-  }, [host?.id, host?.forwardingConfigs, host?.name, host?.hostname, host?.clientHostname]);
+  }, [
+    host?.id,
+    host?.forwardingConfigs,
+    host?.name,
+    host?.hostname,
+    host?.clientHostname,
+  ]);
 
   useEffect(() => {
     if (!selectedRule) {
@@ -2389,35 +2400,52 @@ export default function HostConfigPopup({
                                   : "border-zinc-200 bg-white"
                               }`}
                             >
-                              <div className="flex items-center justify-between gap-3">
+                              <button
+                                type="button"
+                                className="flex w-full items-center justify-between gap-3 text-left"
+                                onClick={() =>
+                                  setShowClientSetupAdvanced((current) => !current)
+                                }
+                                aria-expanded={showClientSetupAdvanced}
+                              >
                                 <div className="min-w-0">
-                                  <p
-                                    className={`text-sm font-medium ${
-                                      isDark ? "text-zinc-100" : "text-zinc-900"
-                                    }`}
-                                  >
-                                    Advanced settings
-                                  </p>
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <p
+                                      className={`text-sm font-medium ${
+                                        isDark ? "text-zinc-100" : "text-zinc-900"
+                                      }`}
+                                    >
+                                      Advanced settings
+                                    </p>
+                                    {hasSavedClientSetupOverrides ? (
+                                      <Badge
+                                        size="xs"
+                                        className={getInfoBadgeClassName(isDark)}
+                                      >
+                                        Enabled
+                                      </Badge>
+                                    ) : null}
+                                  </div>
                                   <p className="mt-0.5 text-xs text-zinc-500">
                                     Override install and Rathole endpoints for this machine.
                                   </p>
                                 </div>
-                                <Switch
-                                  size="sm"
-                                  checked={showClientSetupAdvanced}
-                                  onChange={(event) =>
-                                    setShowClientSetupAdvanced(
-                                      event.currentTarget.checked
-                                    )
-                                  }
-                                  aria-label="Toggle advanced client setup settings"
-                                  classNames={{
-                                    track: isDark
-                                      ? "!border-zinc-700"
-                                      : "!border-zinc-300",
-                                  }}
-                                />
-                              </div>
+                                {showClientSetupAdvanced ? (
+                                  <IconChevronUp
+                                    size={18}
+                                    className={
+                                      isDark ? "text-zinc-400" : "text-zinc-600"
+                                    }
+                                  />
+                                ) : (
+                                  <IconChevronDown
+                                    size={18}
+                                    className={
+                                      isDark ? "text-zinc-400" : "text-zinc-600"
+                                    }
+                                  />
+                                )}
+                              </button>
 
                               <Collapse in={showClientSetupAdvanced}>
                                 <div className="mt-3 space-y-3">
@@ -2493,7 +2521,7 @@ export default function HostConfigPopup({
                                       disabled={isSavingClientSetup}
                                       classNames={{ root: btnSecondary }}
                                     >
-                                      Use defaults
+                                      Reset
                                     </Button>
                                     <Button
                                       type="button"
