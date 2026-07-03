@@ -119,6 +119,15 @@ def serialize_machine(machine: dict):
         "hostname": resolved_hostname,
         "client_hostname": (machine.get("client_hostname") or "").strip(),
         "hostname_override": (machine.get("hostname_override") or "").strip(),
+        "client_setup_public_base_url": (
+            machine.get("client_setup_public_base_url") or ""
+        ).strip(),
+        "client_setup_rathole_server_address": (
+            machine.get("client_setup_rathole_server_address") or ""
+        ).strip(),
+        "client_setup_service_domain": (
+            machine.get("client_setup_service_domain") or ""
+        ).strip(),
         "group_ids": [str(oid) for oid in group_ids],
         "enabled": machine.get("enabled", True),
         "local_ip": machine.get("local_ip", machine.get("ip_address", "")),

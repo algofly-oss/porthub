@@ -232,6 +232,10 @@ const mapMachineToHost = (machine) => ({
   hostname: machine.hostname || "",
   clientHostname: machine.client_hostname || "",
   hostnameOverride: machine.hostname_override || "",
+  clientSetupPublicBaseUrl: machine.client_setup_public_base_url || "",
+  clientSetupRatholeServerAddress:
+    machine.client_setup_rathole_server_address || "",
+  clientSetupServiceDomain: machine.client_setup_service_domain || "",
   groupIds: Array.isArray(machine.group_ids)
     ? machine.group_ids
     : machine.group_id
@@ -983,6 +987,46 @@ export default function Home({ onStatsChange }) {
     }
   };
 
+  const handleUpdateClientSetup = async (hostId, clientSetup) => {
+    const currentHost = hosts.find((host) => host.id === hostId);
+    if (!currentHost) {
+      return null;
+    }
+
+    try {
+      const response = await axios.put(apiRoutes.updateMachine, {
+        data_id: currentHost.id,
+        name: currentHost.name,
+        hostname: currentHost.hostnameOverride || "",
+        enabled: currentHost.enabled,
+        client_setup_public_base_url: clientSetup.publicBaseUrl || "",
+        client_setup_rathole_server_address:
+          clientSetup.ratholeServerAddress || "",
+        client_setup_service_domain: clientSetup.serviceDomain || "",
+      });
+      const updatedHost = mapMachineToHost(response.data.data);
+
+      setHosts((currentHosts) =>
+        currentHosts.map((host) =>
+          host.id === hostId
+            ? {
+                ...host,
+                ...updatedHost,
+                numPorts: host.numPorts,
+                forwardingConfigs: host.forwardingConfigs,
+              }
+            : host
+        )
+      );
+
+      success(`Updated client setup for ${currentHost.name}`);
+      return updatedHost;
+    } catch (updateError) {
+      error(updateError?.response?.data?.detail || "Could not update client setup");
+      return null;
+    }
+  };
+
   const handleRequestClientUpdate = async (hostId) => {
     const currentHost = hosts.find((host) => host.id === hostId);
     if (!currentHost) {
@@ -1427,6 +1471,7 @@ export default function Home({ onStatsChange }) {
         onClose={handleCloseConfig}
         onSave={handleSaveConfig}
         onUpdateMachineDetails={handleUpdateMachineDetails}
+        onUpdateClientSetup={handleUpdateClientSetup}
         onDeleteMachine={handleDeleteMachine}
         onToggleMachine={handleToggleMachine}
         onRefreshMachineToken={handleRefreshMachineToken}

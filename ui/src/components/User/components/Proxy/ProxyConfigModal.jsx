@@ -782,8 +782,8 @@ export default function ProxyConfigModal({
           </div>
         }
         centered
-        closeOnClickOutside={false}
-        closeOnEscape={false}
+        closeOnClickOutside={!isSaving && !isDeleteConfirmOpen}
+        closeOnEscape={!isSaving && !isDeleteConfirmOpen}
         radius="md"
         size={760}
         overlayProps={{ blur: 3 }}

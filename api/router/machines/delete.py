@@ -5,7 +5,7 @@ from shared.factory import db
 from shared.firewall_client import delete_machine_connection_firewall_policies
 from shared.rathole_config import rebuild_server_toml
 from shared.sockets import disconnect_machine_clients
-from ..common import get_authenticated_user, parse_object_id, serialize_machine
+from ..common import get_authenticated_user, parse_object_id, serialize_machine, utcnow
 
 router = APIRouter()
 
@@ -27,9 +27,28 @@ async def delete_machine(data: DeleteMachine, request: Request):
     if not machine:
         raise HTTPException(status_code=400, detail="Machine not found")
 
+    now = utcnow()
     await delete_machine_connection_firewall_policies(machine["_id"])
     await db.connections.delete_many({"machine_id": machine["_id"]})
-    await db.machines.delete_one({"_id": machine["_id"]})
+    await db.machines.update_one(
+        {"_id": machine["_id"]},
+        {
+            "$set": {
+                "deletion_pending": True,
+                "deleted_at": now,
+                "enabled": False,
+                "auth_required": False,
+                "last_seen_at": None,
+                "updated_at": now,
+            },
+            "$unset": {
+                "log_tokens": "",
+                "client_setup_public_base_url": "",
+                "client_setup_rathole_server_address": "",
+                "client_setup_service_domain": "",
+            },
+        },
+    )
     await rebuild_server_toml(allow_empty=True)
     await disconnect_machine_clients(str(machine["_id"]))
 

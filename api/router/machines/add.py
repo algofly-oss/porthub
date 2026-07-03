@@ -41,6 +41,15 @@ async def add_machine(data: Machine, request: Request):
         "name": machine_name,
         "hostname": (data.hostname or "").strip(),
         "hostname_override": (data.hostname or "").strip(),
+        "client_setup_public_base_url": (
+            data.client_setup_public_base_url or ""
+        ).strip(),
+        "client_setup_rathole_server_address": (
+            data.client_setup_rathole_server_address or ""
+        ).strip(),
+        "client_setup_service_domain": (
+            data.client_setup_service_domain or ""
+        ).strip(),
         "client_hostname": "",
         "enabled": True if data.enabled is None else bool(data.enabled),
         "local_ip": "",

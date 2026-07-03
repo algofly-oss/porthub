@@ -53,7 +53,19 @@ apiRoutes.deleteConnectionFirewallPolicy = (dataId) =>
 apiRoutes.getConnectionRecentIpHits = (dataId, limit = 10) =>
   `${API_PREFIX}/connections/firewall/recent-ip-hits/${dataId}?limit=${limit}`;
 
-apiRoutes.getMachineCommand = (machineId) =>
-  `${API_PREFIX}/machines/command/${machineId}`;
+apiRoutes.getMachineCommand = (machineId, clientSetup = {}) => {
+  const params = new URLSearchParams();
+  if (clientSetup.publicBaseUrl) {
+    params.set("public_base_url", clientSetup.publicBaseUrl);
+  }
+  if (clientSetup.ratholeServerAddress) {
+    params.set("rathole_server_address", clientSetup.ratholeServerAddress);
+  }
+  if (clientSetup.serviceDomain) {
+    params.set("service_domain", clientSetup.serviceDomain);
+  }
+  const query = params.toString();
+  return `${API_PREFIX}/machines/command/${machineId}${query ? `?${query}` : ""}`;
+};
 
 export default apiRoutes;
