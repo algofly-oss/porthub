@@ -10,6 +10,8 @@ let apiRoutes = {
   updatePassword: "/auth/password",
   authSettings: "/auth/settings",
   listSessions: "/auth/sessions",
+  telegramSettings: "/auth/telegram",
+  testTelegramSettings: "/auth/telegram/test",
 
   // Connections
   getRandomPort: "/connections/random",
@@ -41,6 +43,9 @@ let apiRoutes = {
   syncMachine: "/machines/sync",
   addMachineToGroup: "/machines/groups/add",
   removeMachineFromGroup: "/machines/groups/remove",
+
+  // Admin
+  adminOverview: "/admin/overview",
 };
 
 Object.entries(apiRoutes).forEach(([key, value]) => {
@@ -55,6 +60,9 @@ apiRoutes.deleteConnectionFirewallPolicy = (dataId) =>
   `${API_PREFIX}/connections/firewall/policy/${dataId}`;
 apiRoutes.getConnectionRecentIpHits = (dataId, limit = 10) =>
   `${API_PREFIX}/connections/firewall/recent-ip-hits/${dataId}?limit=${limit}`;
+
+apiRoutes.getMachineStatusHistory = (machineId, days = 365) =>
+  `${API_PREFIX}/machines/${machineId}/status-history?days=${days}`;
 
 apiRoutes.getMachineCommand = (machineId, clientSetup = {}) => {
   const params = new URLSearchParams();

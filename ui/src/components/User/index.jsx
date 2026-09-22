@@ -4,11 +4,15 @@ import { VscRemoteExplorer } from "react-icons/vsc";
 import Home from "./components/Home";
 import Proxy from "./components/Proxy";
 import Settings from "./components/Settings";
+import PlatformOverview from "./components/PlatformOverview";
 import { useRouter } from "next/router";
 import uiRoutes from "@/shared/routes/uiRoutes";
+import useAuth from "@/shared/hooks/useAuth";
 
 export default function UserHome() {
   const router = useRouter();
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
   const [tab, setTab] = useState("Home");
   const [machineStats, setMachineStats] = useState({
     registered: 0,
@@ -30,12 +34,18 @@ export default function UserHome() {
           <VscRemoteExplorer size={30} />
           <p className="font-bold md:text-lg">PortHub</p>
         </div>
-        <UserNavBar tab={tab} setTab={setTab} machineStats={machineStats} />
+        <UserNavBar
+          tab={tab}
+          setTab={setTab}
+          machineStats={machineStats}
+          isAdmin={isAdmin}
+        />
       </aside>
       <div className="w-full md:ml-60 2xl:ml-84 md:h-screen md:overflow-y-auto md:light-scrollbar dark:md:dark-scrollbar">
         {tab === "Home" && <Home onStatsChange={setMachineStats} />}
         {tab === "Proxy" && <Proxy />}
         {tab === "Settings" && <Settings />}
+        {tab === "Platform" && isAdmin && <PlatformOverview />}
       </div>
       {/* <div className="hidden lg:block w-[26rem] 2xl:w-[25%]- 2xl:w-[30rem] h-screen bg-neutral-100 dark:bg-black overflow-y-hidden md:light-scrollbar dark:md:dark-scrollbar"></div> */}
     </div>

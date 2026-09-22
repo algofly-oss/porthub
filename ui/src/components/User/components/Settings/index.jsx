@@ -3,7 +3,7 @@ import axios from "axios";
 import { useDispatch } from "react-redux";
 import { AiOutlineEye, AiOutlineEyeInvisible } from "react-icons/ai";
 import { FaSignOutAlt } from "react-icons/fa";
-import { FiEdit3, FiRefreshCw, FiTrash2, FiUpload } from "react-icons/fi";
+import { FiEdit3, FiPlus, FiRefreshCw, FiSend, FiTrash2, FiUpload } from "react-icons/fi";
 import apiRoutes from "@/shared/routes/apiRoutes";
 import uiRoutes from "@/shared/routes/uiRoutes";
 import useAuth from "@/shared/hooks/useAuth";
@@ -22,6 +22,40 @@ const primaryButtonClass =
   "inline-flex items-center justify-center gap-2 rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60";
 const dangerButtonClass =
   "inline-flex items-center justify-center gap-2 rounded-md border border-red-300 bg-white px-3 py-2 text-sm font-medium text-red-600 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-900/70 dark:bg-zinc-900 dark:text-red-300 dark:hover:bg-red-950/30";
+const toggleTrackClass = (checked) =>
+  `relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+    checked ? "bg-blue-600" : "bg-zinc-300 dark:bg-zinc-700"
+  }`;
+const toggleThumbClass = (checked) =>
+  `inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+    checked ? "translate-x-4" : "translate-x-0.5"
+  }`;
+const DIGEST_INTERVAL_OPTIONS = [1, 3, 6, 12, 24];
+
+const SettingsToggle = ({ checked, onChange, label, description, disabled }) => (
+  <label
+    className={`flex items-center justify-between gap-4 py-2 ${
+      disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer"
+    }`}
+  >
+    <span>
+      <span className="block text-sm font-medium">{label}</span>
+      {description ? (
+        <span className="block text-xs text-zinc-500 dark:text-zinc-400">{description}</span>
+      ) : null}
+    </span>
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className={toggleTrackClass(checked)}
+    >
+      <span className={toggleThumbClass(checked)} />
+    </button>
+  </label>
+);
 
 const MAX_PROFILE_PICTURE_BYTES = 10 * 1024 * 1024;
 const ALLOWED_PROFILE_PICTURE_TYPES = new Set([
@@ -150,6 +184,20 @@ export default function Settings() {
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [sessionPendingSignOut, setSessionPendingSignOut] = useState(null);
 
+  const [telegramSettings, setTelegramSettings] = useState(null);
+  const [telegramEditing, setTelegramEditing] = useState(false);
+  const [telegramForm, setTelegramForm] = useState({
+    botToken: "",
+    chatIds: [""],
+    alertsEnabled: false,
+    instantAlertsEnabled: true,
+    digestEnabled: true,
+    digestIntervalHours: 6,
+  });
+  const [isLoadingTelegram, setIsLoadingTelegram] = useState(true);
+  const [isSavingTelegram, setIsSavingTelegram] = useState(false);
+  const [isSendingTelegramTest, setIsSendingTelegramTest] = useState(false);
+
   useEffect(() => {
     setProfileForm({
       name: user?.name || "",
@@ -177,6 +225,108 @@ export default function Settings() {
       loadSessions();
     }
   }, [user?.username]);
+
+  const applyTelegramSettings = (data) => {
+    setTelegramSettings(data);
+    setTelegramForm({
+      botToken: "",
+      chatIds: data.chat_ids?.length ? data.chat_ids : [""],
+      alertsEnabled: Boolean(data.alerts_enabled),
+      instantAlertsEnabled: Boolean(data.instant_alerts_enabled),
+      digestEnabled: Boolean(data.digest_enabled),
+      digestIntervalHours: data.digest_interval_hours || 6,
+    });
+  };
+
+  const loadTelegramSettings = async () => {
+    setIsLoadingTelegram(true);
+    try {
+      const response = await axios.get(apiRoutes.telegramSettings);
+      applyTelegramSettings(response.data || {});
+    } catch (requestError) {
+      toast.error(
+        requestError?.response?.data?.detail || "Failed to load Telegram alert settings."
+      );
+    } finally {
+      setIsLoadingTelegram(false);
+    }
+  };
+
+  useEffect(() => {
+    if (user?.username) {
+      loadTelegramSettings();
+    }
+  }, [user?.username]);
+
+  const handleTelegramChatIdChange = (index, value) => {
+    setTelegramForm((current) => {
+      const chatIds = [...current.chatIds];
+      chatIds[index] = value;
+      return { ...current, chatIds };
+    });
+  };
+
+  const handleAddTelegramChatId = () => {
+    setTelegramForm((current) => ({ ...current, chatIds: [...current.chatIds, ""] }));
+  };
+
+  const handleRemoveTelegramChatId = (index) => {
+    setTelegramForm((current) => ({
+      ...current,
+      chatIds: current.chatIds.filter((_, itemIndex) => itemIndex !== index),
+    }));
+  };
+
+  const handleSaveTelegramSettings = async () => {
+    const chatIds = telegramForm.chatIds.map((id) => id.trim()).filter(Boolean);
+
+    if (telegramForm.alertsEnabled && (!telegramForm.botToken.trim() && !telegramSettings?.has_bot_token)) {
+      toast.error("Add a bot token before enabling Telegram alerts.");
+      return;
+    }
+    if (telegramForm.alertsEnabled && chatIds.length === 0) {
+      toast.error("Add at least one chat or channel ID before enabling Telegram alerts.");
+      return;
+    }
+
+    setIsSavingTelegram(true);
+    try {
+      const payload = {
+        chat_ids: chatIds,
+        alerts_enabled: telegramForm.alertsEnabled,
+        instant_alerts_enabled: telegramForm.instantAlertsEnabled,
+        digest_enabled: telegramForm.digestEnabled,
+        digest_interval_hours: telegramForm.digestIntervalHours,
+      };
+      if (telegramForm.botToken.trim()) {
+        payload.bot_token = telegramForm.botToken.trim();
+      }
+      const response = await axios.patch(apiRoutes.telegramSettings, payload);
+      applyTelegramSettings(response.data || {});
+      setTelegramEditing(false);
+      toast.success("Telegram alert settings updated.");
+    } catch (requestError) {
+      toast.error(
+        requestError?.response?.data?.detail || "Failed to update Telegram alert settings."
+      );
+    } finally {
+      setIsSavingTelegram(false);
+    }
+  };
+
+  const handleSendTelegramTest = async () => {
+    setIsSendingTelegramTest(true);
+    try {
+      await axios.post(apiRoutes.testTelegramSettings);
+      toast.success("Test message sent. Check your Telegram chat.");
+    } catch (requestError) {
+      toast.error(
+        requestError?.response?.data?.detail || "Failed to send Telegram test message."
+      );
+    } finally {
+      setIsSendingTelegramTest(false);
+    }
+  };
 
   const savedProfilePictureSource = user?.profile_picture?.data_url || "";
   const profilePictureSource =
@@ -587,6 +737,218 @@ export default function Settings() {
           ) : (
             <div className="px-5 py-4 text-sm text-zinc-500 dark:text-zinc-400">
               Password fields are hidden until you choose to update them.
+            </div>
+          )}
+        </section>
+
+        <section className={panelClass}>
+          <div className={`flex items-center justify-between gap-4 border-b px-5 py-4 ${dividerClass}`}>
+            <div>
+              <p className="text-sm font-semibold">Telegram alerts</p>
+              <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
+                Get notified on Telegram when a machine goes offline or comes back online.
+              </p>
+            </div>
+            <button
+              type="button"
+              className={secondaryButtonClass}
+              onClick={() => {
+                if (telegramEditing) {
+                  applyTelegramSettings(telegramSettings || {});
+                }
+                setTelegramEditing((editing) => !editing);
+              }}
+              disabled={isSavingTelegram || isLoadingTelegram}
+            >
+              {!telegramEditing ? <FiEdit3 size={14} /> : null}
+              {telegramEditing ? "Cancel" : "Edit"}
+            </button>
+          </div>
+
+          {isLoadingTelegram ? (
+            <div className="px-5 py-6 text-sm text-zinc-500 dark:text-zinc-400">
+              Loading Telegram alert settings...
+            </div>
+          ) : (
+            <div className="space-y-4 p-5">
+              <label className="block">
+                <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                  Bot token
+                </span>
+                {telegramEditing ? (
+                  <input
+                    type="password"
+                    className={inputClass}
+                    placeholder={
+                      telegramSettings?.has_bot_token
+                        ? telegramSettings.bot_token_masked
+                        : "123456789:AAExampleTelegramBotToken"
+                    }
+                    value={telegramForm.botToken}
+                    onChange={(event) =>
+                      setTelegramForm((current) => ({
+                        ...current,
+                        botToken: event.target.value,
+                      }))
+                    }
+                  />
+                ) : (
+                  <p className="mt-1 text-sm text-zinc-700 dark:text-zinc-300">
+                    {telegramSettings?.has_bot_token
+                      ? telegramSettings.bot_token_masked
+                      : "Not configured"}
+                  </p>
+                )}
+              </label>
+
+              <div>
+                <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                  Chat / user / channel IDs
+                </span>
+                {telegramEditing ? (
+                  <div className="mt-1 space-y-2">
+                    {telegramForm.chatIds.map((chatId, index) => (
+                      <div key={index} className="flex items-center gap-2">
+                        <input
+                          className={inputClass}
+                          placeholder="e.g. 123456789 or -1001234567890"
+                          value={chatId}
+                          onChange={(event) =>
+                            handleTelegramChatIdChange(index, event.target.value)
+                          }
+                        />
+                        <button
+                          type="button"
+                          className={dangerButtonClass}
+                          onClick={() => handleRemoveTelegramChatId(index)}
+                          disabled={telegramForm.chatIds.length <= 1}
+                        >
+                          <FiTrash2 size={14} />
+                        </button>
+                      </div>
+                    ))}
+                    <button
+                      type="button"
+                      className={secondaryButtonClass}
+                      onClick={handleAddTelegramChatId}
+                    >
+                      <FiPlus size={14} />
+                      Add another
+                    </button>
+                  </div>
+                ) : (
+                  <p className="mt-1 text-sm text-zinc-700 dark:text-zinc-300">
+                    {telegramSettings?.chat_ids?.length
+                      ? telegramSettings.chat_ids.join(", ")
+                      : "Not configured"}
+                  </p>
+                )}
+              </div>
+
+              <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                <SettingsToggle
+                  checked={
+                    telegramEditing
+                      ? telegramForm.alertsEnabled
+                      : Boolean(telegramSettings?.alerts_enabled)
+                  }
+                  disabled={!telegramEditing}
+                  onChange={(next) =>
+                    setTelegramForm((current) => ({ ...current, alertsEnabled: next }))
+                  }
+                  label="Enable Telegram alerts"
+                  description="Master switch for all Telegram notifications."
+                />
+                <SettingsToggle
+                  checked={
+                    telegramEditing
+                      ? telegramForm.instantAlertsEnabled
+                      : Boolean(telegramSettings?.instant_alerts_enabled)
+                  }
+                  disabled={!telegramEditing}
+                  onChange={(next) =>
+                    setTelegramForm((current) => ({
+                      ...current,
+                      instantAlertsEnabled: next,
+                    }))
+                  }
+                  label="Instant online/offline alerts"
+                  description="Send a message the moment a machine's status changes."
+                />
+                <SettingsToggle
+                  checked={
+                    telegramEditing
+                      ? telegramForm.digestEnabled
+                      : Boolean(telegramSettings?.digest_enabled)
+                  }
+                  disabled={!telegramEditing}
+                  onChange={(next) =>
+                    setTelegramForm((current) => ({ ...current, digestEnabled: next }))
+                  }
+                  label="Periodic offline digest"
+                  description="Send a recurring summary of machines that are still offline."
+                />
+
+                <div className="flex items-center justify-between gap-4 py-2">
+                  <span>
+                    <span className="block text-sm font-medium">Digest interval</span>
+                    <span className="block text-xs text-zinc-500 dark:text-zinc-400">
+                      How often the offline digest is sent.
+                    </span>
+                  </span>
+                  {telegramEditing ? (
+                    <select
+                      className="rounded-md border border-zinc-300 bg-zinc-50 px-2 py-1.5 text-sm text-zinc-900 outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                      value={telegramForm.digestIntervalHours}
+                      onChange={(event) =>
+                        setTelegramForm((current) => ({
+                          ...current,
+                          digestIntervalHours: Number(event.target.value),
+                        }))
+                      }
+                    >
+                      {DIGEST_INTERVAL_OPTIONS.map((hours) => (
+                        <option key={hours} value={hours}>
+                          Every {hours}h
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span className="text-sm text-zinc-700 dark:text-zinc-300">
+                      Every {telegramSettings?.digest_interval_hours || 6}h
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <p className="text-xs text-zinc-500">
+                Disabled machines and machines marked "Exclude from Telegram alerts" never
+                trigger a notification.
+              </p>
+
+              <div className="flex flex-wrap justify-end gap-2 border-t border-zinc-100 pt-4 dark:border-zinc-800">
+                <button
+                  type="button"
+                  className={secondaryButtonClass}
+                  onClick={handleSendTelegramTest}
+                  disabled={
+                    isSendingTelegramTest || !telegramSettings?.has_bot_token || !telegramSettings?.chat_ids?.length
+                  }
+                >
+                  <FiSend size={14} />
+                  {isSendingTelegramTest ? "Sending..." : "Send test message"}
+                </button>
+                {telegramEditing ? (
+                  <button
+                    type="button"
+                    className={primaryButtonClass}
+                    onClick={handleSaveTelegramSettings}
+                    disabled={isSavingTelegram}
+                  >
+                    {isSavingTelegram ? "Saving..." : "Save Telegram settings"}
+                  </button>
+                ) : null}
+              </div>
             </div>
           )}
         </section>

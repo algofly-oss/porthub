@@ -1,5 +1,6 @@
 import asyncio
 import re
+from datetime import datetime
 from typing import Any
 
 import socketio
@@ -11,6 +12,7 @@ from shared.machine_client import authenticate_machine, build_machine_config_bun
 from shared.env import MACHINE_ONLINE_TTL_SECONDS
 from shared.env import SESSION_COOKIE_NAME
 from shared.factory import db, redis
+from shared.telegram_alerts import send_instant_status_alert
 
 sio = socketio.AsyncServer(
     async_mode="asgi", cors_allowed_origins=[]
@@ -243,6 +245,17 @@ async def initialize_machine_status_cache() -> None:
         set_cached_machine_status(str(machine["_id"]), is_machine_online(machine))
 
 
+async def _record_machine_status_event(machine: dict, *, is_online: bool) -> None:
+    await db.machine_status_events.insert_one(
+        {
+            "machine_id": machine["_id"],
+            "user_id": machine["user_id"],
+            "status": "online" if is_online else "offline",
+            "changed_at": datetime.utcnow(),
+        }
+    )
+
+
 async def monitor_machine_statuses(stop_event: asyncio.Event) -> None:
     while not stop_event.is_set():
         machines = await db.machines.find(
@@ -258,7 +271,11 @@ async def monitor_machine_statuses(stop_event: asyncio.Event) -> None:
             next_machine_status_cache[machine_id] = is_online
 
             if previous_status is not None and previous_status != is_online:
+                await _record_machine_status_event(machine, is_online=is_online)
                 await emit_machine_status_changed(machine)
+                await send_instant_status_alert(machine, is_online=is_online)
+            elif previous_status is None:
+                await _record_machine_status_event(machine, is_online=is_online)
 
         _machine_status_cache.clear()
         _machine_status_cache.update(next_machine_status_cache)

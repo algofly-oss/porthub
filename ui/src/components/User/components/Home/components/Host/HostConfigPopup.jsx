@@ -40,6 +40,7 @@ import socketRoutes from "@/shared/routes/socketRoutes";
 import TrafficMonitorPanel, {
   normalizeTrafficSamples,
 } from "./TrafficMonitorPanel";
+import UptimeHistoryPanel from "./UptimeHistoryPanel";
 
 const getInputClassName = (isDark) =>
   `w-full rounded-md border px-3 py-2 text-sm outline-none transition-colors focus:!border-blue-500 focus:ring-0 ${
@@ -421,6 +422,7 @@ export default function HostConfigPopup({
   onUpdateClientSetup,
   onDeleteMachine,
   onToggleMachine,
+  onToggleTelegramAlerts,
   onRefreshMachineToken,
   onRequestClientUpdate,
   onRefreshConnection,
@@ -455,6 +457,10 @@ export default function HostConfigPopup({
   const [isRequestingClientUpdate, setIsRequestingClientUpdate] = useState(false);
   const [refreshingRuleId, setRefreshingRuleId] = useState(null);
   const [isTogglingMachine, setIsTogglingMachine] = useState(false);
+  const [isTogglingTelegramAlerts, setIsTogglingTelegramAlerts] = useState(false);
+  const [showUptimeHistory, setShowUptimeHistory] = useState(false);
+  const [uptimeEvents, setUptimeEvents] = useState([]);
+  const [isLoadingUptimeHistory, setIsLoadingUptimeHistory] = useState(false);
   const [isRefreshMachineTokenConfirmOpen, setIsRefreshMachineTokenConfirmOpen] =
     useState(false);
   const [isDeleteMachineConfirmOpen, setIsDeleteMachineConfirmOpen] =
@@ -977,6 +983,37 @@ export default function HostConfigPopup({
   }, [socket, opened, host?.id, host?.isActive, showClientLogs]);
 
   useEffect(() => {
+    if (!opened || !host?.id || !showUptimeHistory) {
+      return;
+    }
+
+    let isActive = true;
+    setIsLoadingUptimeHistory(true);
+
+    axios
+      .get(apiRoutes.getMachineStatusHistory(host.id, 365))
+      .then((response) => {
+        if (isActive) {
+          setUptimeEvents(response.data?.data || []);
+        }
+      })
+      .catch(() => {
+        if (isActive) {
+          setUptimeEvents([]);
+        }
+      })
+      .finally(() => {
+        if (isActive) {
+          setIsLoadingUptimeHistory(false);
+        }
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, [opened, host?.id, showUptimeHistory]);
+
+  useEffect(() => {
     if (!socket || !host?.id) {
       return undefined;
     }
@@ -1467,6 +1504,7 @@ export default function HostConfigPopup({
       section === "credentials" ? !current : false
     );
     setShowClientLogs((current) => (section === "logs" ? !current : false));
+    setShowUptimeHistory((current) => (section === "uptime" ? !current : false));
   };
 
   const handleToggleMachine = async () => {
@@ -1480,6 +1518,20 @@ export default function HostConfigPopup({
       await onToggleMachine(host.id, !(host.enabled ?? true));
     } finally {
       setIsTogglingMachine(false);
+    }
+  };
+
+  const handleToggleTelegramAlerts = async () => {
+    if (!host || !onToggleTelegramAlerts || isTogglingTelegramAlerts) {
+      return;
+    }
+
+    setIsTogglingTelegramAlerts(true);
+
+    try {
+      await onToggleTelegramAlerts(host.id, !(host.telegramAlertsExcluded ?? false));
+    } finally {
+      setIsTogglingTelegramAlerts(false);
     }
   };
 
@@ -1858,6 +1910,14 @@ export default function HostConfigPopup({
                       disabled={isTogglingMachine}
                     >
                       {host.enabled === false ? "Enable machine" : "Disable machine"}
+                    </Menu.Item>
+                    <Menu.Item
+                      onClick={handleToggleTelegramAlerts}
+                      disabled={isTogglingTelegramAlerts}
+                    >
+                      {host.telegramAlertsExcluded
+                        ? "Include in Telegram alerts"
+                        : "Exclude from Telegram alerts"}
                     </Menu.Item>
                     <Menu.Item
                       color="red"
@@ -2693,6 +2753,34 @@ export default function HostConfigPopup({
                           available on the client via <code>porthub logs</code>. Turn on
                           verbose to include debug noise.
                         </p>
+                      </div>
+                    </Collapse>
+                  </div>
+
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => toggleAccordionSection("uptime")}
+                      className="flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left"
+                    >
+                      <span className={isDark ? "text-sm text-zinc-200" : "text-sm text-zinc-800"}>
+                        Uptime history
+                      </span>
+                      {showUptimeHistory ? (
+                        <IconChevronUp size={18} className={isDark ? "text-zinc-400" : "text-zinc-600"} />
+                      ) : (
+                        <IconChevronDown size={18} className={isDark ? "text-zinc-400" : "text-zinc-600"} />
+                      )}
+                    </button>
+
+                    <Collapse in={showUptimeHistory}>
+                      <div className="px-4 py-4">
+                        <UptimeHistoryPanel
+                          isDark={isDark}
+                          events={uptimeEvents}
+                          isLoading={isLoadingUptimeHistory}
+                          days={365}
+                        />
                       </div>
                     </Collapse>
                   </div>

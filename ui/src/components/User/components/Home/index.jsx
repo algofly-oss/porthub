@@ -242,6 +242,7 @@ const mapMachineToHost = (machine) => ({
       ? [machine.group_id]
       : [],
   enabled: machine.enabled ?? true,
+  telegramAlertsExcluded: machine.telegram_alerts_excluded ?? false,
   localIp: machine.local_ip || "",
   publicIp: machine.public_ip || "",
   token: machine.token || "",
@@ -951,6 +952,47 @@ export default function Home({ onStatsChange }) {
     }
   };
 
+  const handleToggleTelegramAlerts = async (hostId, nextExcluded) => {
+    const currentHost = hosts.find((host) => host.id === hostId);
+    if (!currentHost) {
+      return false;
+    }
+
+    try {
+      const response = await axios.put(apiRoutes.updateMachine, {
+        data_id: currentHost.id,
+        name: currentHost.name,
+        hostname: currentHost.hostnameOverride || "",
+        enabled: currentHost.enabled,
+        telegram_alerts_excluded: nextExcluded,
+      });
+      const updatedHost = mapMachineToHost(response.data.data);
+
+      setHosts((currentHosts) =>
+        currentHosts.map((host) =>
+          host.id === hostId
+            ? {
+              ...host,
+              ...updatedHost,
+              numPorts: host.numPorts,
+              forwardingConfigs: host.forwardingConfigs,
+            }
+            : host
+        )
+      );
+
+      success(
+        `Telegram alerts ${nextExcluded ? "excluded" : "included"} for ${currentHost.name}`
+      );
+      return true;
+    } catch (toggleError) {
+      error(
+        toggleError?.response?.data?.detail || "Could not update Telegram alert settings"
+      );
+      return false;
+    }
+  };
+
   const handleUpdateMachineDetails = async (hostId, details) => {
     const currentHost = hosts.find((host) => host.id === hostId);
     if (!currentHost) {
@@ -1474,6 +1516,7 @@ export default function Home({ onStatsChange }) {
         onUpdateClientSetup={handleUpdateClientSetup}
         onDeleteMachine={handleDeleteMachine}
         onToggleMachine={handleToggleMachine}
+        onToggleTelegramAlerts={handleToggleTelegramAlerts}
         onRefreshMachineToken={handleRefreshMachineToken}
         onRequestClientUpdate={handleRequestClientUpdate}
         onRefreshConnection={handleRefreshConnection}

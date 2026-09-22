@@ -130,6 +130,7 @@ def serialize_machine(machine: dict):
         ).strip(),
         "group_ids": [str(oid) for oid in group_ids],
         "enabled": machine.get("enabled", True),
+        "telegram_alerts_excluded": bool(machine.get("telegram_alerts_excluded", False)),
         "local_ip": machine.get("local_ip", machine.get("ip_address", "")),
         "public_ip": machine.get("public_ip", ""),
         "token": machine.get("token", ""),

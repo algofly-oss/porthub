@@ -132,6 +132,9 @@ async def update_machine(data: Machine, request: Request):
             "Service domain",
         )
 
+    if "telegram_alerts_excluded" in incoming and data.telegram_alerts_excluded is not None:
+        mongo_set["telegram_alerts_excluded"] = bool(data.telegram_alerts_excluded)
+
     update_doc: dict = {"$set": mongo_set}
     if mongo_unset:
         update_doc["$unset"] = {field: "" for field in mongo_unset}
