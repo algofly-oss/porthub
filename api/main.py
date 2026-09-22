@@ -5,7 +5,7 @@ import socketio
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
-from router import ping, auth, connections, groups, machines, traffic_routes
+from router import admin, ping, auth, connections, groups, machines, traffic_routes
 from shared.rathole_config import (
     get_server_toml_path,
     is_dummy_only_config,
@@ -14,7 +14,9 @@ from shared.rathole_config import (
 from shared.traffic_config import rebuild_traffic_config, write_base_traffic_config
 from shared.firewall_client import reconcile_firewall_state_from_db
 from shared.connection_refresh import monitor_connection_auto_refresh
+from shared.factory import db
 from shared.sockets import initialize_machine_status_cache, monitor_machine_statuses, sio
+from shared.telegram_digest import monitor_offline_digest
 
 API_ROOT = "/api"
 logger = logging.getLogger(__name__)
@@ -28,6 +30,8 @@ machine_status_monitor_stop_event = None
 firewall_reconcile_task = None
 connection_auto_refresh_task = None
 connection_auto_refresh_stop_event = None
+telegram_digest_task = None
+telegram_digest_stop_event = None
 
 
 class QuietMachineClientAccessFilter(logging.Filter):
@@ -171,8 +175,21 @@ async def reconcile_firewall_state_with_retries() -> None:
     logger.warning("Firewall state reconciliation did not complete during startup retries")
 
 
+async def ensure_machine_status_event_indexes() -> None:
+    try:
+        await db.machine_status_events.create_index(
+            [("machine_id", 1), ("changed_at", -1)]
+        )
+        await db.machine_status_events.create_index(
+            "changed_at", expireAfterSeconds=370 * 24 * 60 * 60
+        )
+    except Exception:
+        logger.exception("Failed to ensure machine_status_events indexes")
+
+
 async def handle_startup() -> None:
-    global retry_task, traffic_retry_task, machine_status_monitor_task, machine_status_monitor_stop_event, firewall_reconcile_task, connection_auto_refresh_task, connection_auto_refresh_stop_event
+    global retry_task, traffic_retry_task, machine_status_monitor_task, machine_status_monitor_stop_event, firewall_reconcile_task, connection_auto_refresh_task, connection_auto_refresh_stop_event, telegram_digest_task, telegram_digest_stop_event
+    await ensure_machine_status_event_indexes()
     rebuilt = await attempt_rathole_config_rebuild(
         context="startup",
         delays=STARTUP_REBUILD_DELAYS_SECONDS,
@@ -209,10 +226,14 @@ async def handle_startup() -> None:
     connection_auto_refresh_task = asyncio.create_task(
         monitor_connection_auto_refresh(connection_auto_refresh_stop_event)
     )
+    telegram_digest_stop_event = asyncio.Event()
+    telegram_digest_task = asyncio.create_task(
+        monitor_offline_digest(telegram_digest_stop_event)
+    )
 
 
 async def handle_shutdown() -> None:
-    global retry_task, traffic_retry_task, machine_status_monitor_task, machine_status_monitor_stop_event, firewall_reconcile_task, connection_auto_refresh_task, connection_auto_refresh_stop_event
+    global retry_task, traffic_retry_task, machine_status_monitor_task, machine_status_monitor_stop_event, firewall_reconcile_task, connection_auto_refresh_task, connection_auto_refresh_stop_event, telegram_digest_task, telegram_digest_stop_event
     if retry_task is not None:
         retry_task.cancel()
         retry_task = None
@@ -243,6 +264,17 @@ async def handle_shutdown() -> None:
     if machine_status_monitor_task is not None:
         machine_status_monitor_task.cancel()
         machine_status_monitor_task = None
+
+    if telegram_digest_stop_event is not None:
+        telegram_digest_stop_event.set()
+        telegram_digest_stop_event = None
+
+    if telegram_digest_task is not None:
+        try:
+            await asyncio.wait_for(telegram_digest_task, timeout=15)
+        except asyncio.TimeoutError:
+            telegram_digest_task.cancel()
+        telegram_digest_task = None
 
 
 fastapi_app = FastAPI(
@@ -278,6 +310,7 @@ fastapi_app.include_router(groups.router, prefix=API_ROOT)
 fastapi_app.include_router(machines.router, prefix=API_ROOT)
 fastapi_app.include_router(connections.router, prefix=API_ROOT)
 fastapi_app.include_router(traffic_routes.router, prefix=API_ROOT)
+fastapi_app.include_router(admin.router, prefix=API_ROOT)
 
 app = socketio.ASGIApp(
     socketio_server=sio,

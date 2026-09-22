@@ -1,6 +1,7 @@
 import { HiOutlineHome, HiHome } from "react-icons/hi";
 import { BiShuffle } from "react-icons/bi";
 import { RiSettings4Line, RiSettings4Fill } from "react-icons/ri";
+import { HiOutlineShieldCheck, HiShieldCheck } from "react-icons/hi";
 import DarkThemeToggle from "./components/DarkThemeToggle";
 import InfoCard from "./components/InfoCard";
 import Logout from "./components/Logout";
@@ -30,7 +31,7 @@ const NavBarItem = ({ tab, setTab, Icon, IconFilled, text }) => {
   );
 };
 
-export default function UserNavBar({ tab, setTab, machineStats }) {
+export default function UserNavBar({ tab, setTab, machineStats, isAdmin }) {
   return (
     <div className="w-full md:-mt-2">
       <div className="flex md:flex-col md:space-y-2 md:space-x-0 w-full justify-around">
@@ -57,6 +58,16 @@ export default function UserNavBar({ tab, setTab, machineStats }) {
           IconFilled={RiSettings4Fill}
           text="Settings"
         />
+
+        {isAdmin ? (
+          <NavBarItem
+            tab={tab}
+            setTab={setTab}
+            Icon={HiOutlineShieldCheck}
+            IconFilled={HiShieldCheck}
+            text="Platform"
+          />
+        ) : null}
       </div>
 
       {/* visible only on large screens */}

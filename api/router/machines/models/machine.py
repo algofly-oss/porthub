@@ -25,6 +25,7 @@ class Machine(BaseModel):
         None,
         example=["67f7d26b760bd71f4d3f3c34"],
     )
+    telegram_alerts_excluded: typing.Optional[bool] = Field(None, example=False)
 
 
 class MachineSync(BaseModel):
