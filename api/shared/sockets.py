@@ -1,5 +1,8 @@
 import asyncio
+import logging
+import os
 import re
+import socket
 from datetime import datetime
 from typing import Any
 
@@ -12,7 +15,9 @@ from shared.machine_client import authenticate_machine, build_machine_config_bun
 from shared.env import MACHINE_ONLINE_TTL_SECONDS
 from shared.env import SESSION_COOKIE_NAME
 from shared.factory import db, redis
-from shared.telegram_alerts import send_instant_status_alert
+from shared.telegram_alerts import process_machine_status_alert
+
+logger = logging.getLogger(__name__)
 
 sio = socketio.AsyncServer(
     async_mode="asgi", cors_allowed_origins=[]
@@ -30,6 +35,9 @@ STC_MACHINE_LOG_STREAM_STATUS = "/stc/machines/log-stream-status"
 STC_MACHINE_LOG_STREAM_LINE = "/stc/machines/log-stream-line"
 
 _MACHINE_STATUS_MONITOR_INTERVAL_SECONDS = max(5, min(30, MACHINE_ONLINE_TTL_SECONDS // 2 or 5))
+_MONITOR_LEADER_KEY = "porthub:machine-status-monitor-leader"
+_MONITOR_LEADER_TTL_SECONDS = _MACHINE_STATUS_MONITOR_INTERVAL_SECONDS * 3
+_WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
 _machine_status_cache: dict[str, bool] = {}
 _machine_sids_by_machine_id: dict[str, set[str]] = {}
 _machine_id_by_sid: dict[str, str] = {}
@@ -245,12 +253,34 @@ async def initialize_machine_status_cache() -> None:
         set_cached_machine_status(str(machine["_id"]), is_machine_online(machine))
 
 
-async def _record_machine_status_event(machine: dict, *, is_online: bool) -> None:
+def hold_background_leadership() -> bool:
+    """Every API worker runs the background monitors, but side effects that must
+    happen once (status events, Telegram alerts) run only in the worker that
+    holds this Redis lease."""
+    if redis.set(_MONITOR_LEADER_KEY, _WORKER_ID, nx=True, ex=_MONITOR_LEADER_TTL_SECONDS):
+        return True
+    current_leader = redis.get(_MONITOR_LEADER_KEY)
+    if current_leader and current_leader.decode() == _WORKER_ID:
+        redis.expire(_MONITOR_LEADER_KEY, _MONITOR_LEADER_TTL_SECONDS)
+        return True
+    return False
+
+
+async def _sync_machine_status_events(machine: dict, *, is_online: bool) -> None:
+    """Records an event whenever the machine's status differs from the last
+    recorded one; this also seeds a baseline for machines never recorded."""
+    status = "online" if is_online else "offline"
+    latest_event = await db.machine_status_events.find_one(
+        {"machine_id": machine["_id"]}, sort=[("changed_at", -1)]
+    )
+    if latest_event and latest_event.get("status") == status:
+        return
+
     await db.machine_status_events.insert_one(
         {
             "machine_id": machine["_id"],
             "user_id": machine["user_id"],
-            "status": "online" if is_online else "offline",
+            "status": status,
             "changed_at": datetime.utcnow(),
         }
     )
@@ -270,15 +300,24 @@ async def monitor_machine_statuses(stop_event: asyncio.Event) -> None:
 
             next_machine_status_cache[machine_id] = is_online
 
+            # Socket clients are attached to individual workers, so every
+            # worker emits to its own connections.
             if previous_status is not None and previous_status != is_online:
-                await _record_machine_status_event(machine, is_online=is_online)
                 await emit_machine_status_changed(machine)
-                await send_instant_status_alert(machine, is_online=is_online)
-            elif previous_status is None:
-                await _record_machine_status_event(machine, is_online=is_online)
 
         _machine_status_cache.clear()
         _machine_status_cache.update(next_machine_status_cache)
+
+        if hold_background_leadership():
+            now = datetime.utcnow()
+            for machine in machines:
+                try:
+                    await _sync_machine_status_events(
+                        machine, is_online=next_machine_status_cache[str(machine["_id"])]
+                    )
+                    await process_machine_status_alert(machine, now=now)
+                except Exception:
+                    logger.exception("Failed to process status for machine %s", machine["_id"])
 
         try:
             await asyncio.wait_for(

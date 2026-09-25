@@ -85,6 +85,11 @@ SESSION_COOKIE_NAME = os.environ.get("SESSION_COOKIE_NAME", "porthub_session")
 SIGNUP_DISABLED = _get_bool_env("SIGNUP_DISABLED", False)
 RATHOLE_PORT = int(os.environ.get("RATHOLE_PORT", 2334))
 MACHINE_ONLINE_TTL_SECONDS = int(os.environ.get("MACHINE_ONLINE_TTL_SECONDS", 300))
+# Extra time a machine must stay offline (beyond MACHINE_ONLINE_TTL_SECONDS)
+# before a Telegram offline alert is sent, to filter out short blips.
+MACHINE_OFFLINE_ALERT_GRACE_SECONDS = int(
+    os.environ.get("MACHINE_OFFLINE_ALERT_GRACE_SECONDS", 60)
+)
 MACHINE_CONFIG_LONG_POLL_TIMEOUT_SECONDS = int(
     os.environ.get("MACHINE_CONFIG_LONG_POLL_TIMEOUT_SECONDS", 25)
 )

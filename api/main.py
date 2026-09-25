@@ -16,6 +16,7 @@ from shared.firewall_client import reconcile_firewall_state_from_db
 from shared.connection_refresh import monitor_connection_auto_refresh
 from shared.factory import db
 from shared.sockets import initialize_machine_status_cache, monitor_machine_statuses, sio
+from shared.telegram_alerts import mark_existing_offline_machines_alerted
 from shared.telegram_digest import monitor_offline_digest
 
 API_ROOT = "/api"
@@ -217,6 +218,7 @@ async def handle_startup() -> None:
         traffic_retry_task = asyncio.create_task(retry_traffic_config_rebuild())
 
     await initialize_machine_status_cache()
+    await mark_existing_offline_machines_alerted()
     machine_status_monitor_stop_event = asyncio.Event()
     machine_status_monitor_task = asyncio.create_task(
         monitor_machine_statuses(machine_status_monitor_stop_event)

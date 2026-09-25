@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Query, Request
 
 from shared.factory import db
-from ..common import get_authenticated_user, parse_object_id
+from ..common import get_authenticated_user, is_machine_online, parse_object_id
 
 router = APIRouter()
 
@@ -33,6 +33,13 @@ async def get_machine_status_history(
         .sort("changed_at", 1)
         .to_list(None)
     )
+    # The last change before the window tells us the state the window opens in.
+    previous_event = await db.machine_status_events.find_one(
+        {"machine_id": machine_object_id, "changed_at": {"$lt": since}},
+        sort=[("changed_at", -1)],
+    )
+    if previous_event:
+        events.insert(0, {**previous_event, "changed_at": since})
 
     return {
         "msg": "Machine status history loaded successfully",
@@ -40,4 +47,5 @@ async def get_machine_status_history(
             {"status": event.get("status"), "changed_at": event.get("changed_at")}
             for event in events
         ],
+        "current_status": "online" if is_machine_online(machine) else "offline",
     }

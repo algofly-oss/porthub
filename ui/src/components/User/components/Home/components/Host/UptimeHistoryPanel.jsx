@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
@@ -19,99 +19,81 @@ const parseEventDate = (value) => {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 };
 
-/**
- * TradingView-style granularity presets. `windowMs` is the default span shown
- * per "page" — finer timeframes page backwards/forwards through history,
- * coarser ones already span the full retained history in one page.
- */
-// Each timeframe targets ~90 bars per page, so a bar always has enough
-// width to read as its own distinct line no matter the panel size; finer
-// timeframes page backwards/forwards through history to cover the rest.
+// Each option is the total span the chart shows, ending now. The chart always
+// has BAR_COUNT bars, so bars keep the same width and each bar covers
+// span / BAR_COUNT (e.g. 1 minute per bar for the last hour).
+const BAR_COUNT = 60;
+
 const TIMEFRAMES = [
-  { key: "15m", label: "15m", bucketMs: 15 * MINUTE_MS, windowMs: DAY_MS },
-  { key: "1h", label: "1H", bucketMs: HOUR_MS, windowMs: 4 * DAY_MS },
-  { key: "4h", label: "4H", bucketMs: 4 * HOUR_MS, windowMs: 15 * DAY_MS },
-  { key: "1d", label: "1D", bucketMs: DAY_MS, windowMs: 90 * DAY_MS },
-  { key: "1w", label: "1W", bucketMs: 7 * DAY_MS, windowMs: 365 * DAY_MS },
+  { key: "15m", label: "15m", spanMs: 15 * MINUTE_MS },
+  { key: "1h", label: "1H", spanMs: HOUR_MS },
+  { key: "6h", label: "6H", spanMs: 6 * HOUR_MS },
+  { key: "24h", label: "24H", spanMs: DAY_MS },
+  { key: "7d", label: "7D", spanMs: 7 * DAY_MS },
+  { key: "30d", label: "30D", spanMs: 30 * DAY_MS },
+  { key: "1y", label: "1Y", spanMs: 365 * DAY_MS },
 ];
 
+const DEFAULT_TIMEFRAME_KEY = "1h";
+
 /** Turns raw ordered status-change events into contiguous [start, end, status) segments. */
-const buildStatusSegments = (events) => {
+const buildStatusSegments = (events, now) => {
   const sorted = (Array.isArray(events) ? events : [])
     .map((event) => ({ status: event.status, changedAt: parseEventDate(event.changed_at) }))
     .filter((event) => event.changedAt && (event.status === "online" || event.status === "offline"))
     .sort((left, right) => left.changedAt - right.changedAt);
 
-  if (sorted.length === 0) {
-    return [];
-  }
-
-  const now = new Date();
   const segments = [];
   for (let i = 0; i < sorted.length; i += 1) {
-    const start = sorted[i].changedAt;
-    const end = i + 1 < sorted.length ? sorted[i + 1].changedAt : now;
-    if (end > start) {
-      segments.push({ start, end, status: sorted[i].status });
+    // Skip repeated events of the same status so segments stay contiguous.
+    if (segments.length && segments[segments.length - 1].status === sorted[i].status) {
+      continue;
     }
+    if (segments.length) {
+      segments[segments.length - 1].end = sorted[i].changedAt;
+    }
+    segments.push({ start: sorted[i].changedAt, end: now, status: sorted[i].status });
   }
-  return segments;
+  return segments.filter((segment) => segment.end > segment.start);
 };
 
-/**
- * Buckets [windowStart, windowEnd) into `bucketMs`-wide slots, computing the
- * online/offline/no-data time fraction of each slot via a two-pointer sweep
- * over the (sorted, contiguous) status segments.
- */
-const buildBuckets = (segments, windowStart, windowEnd, bucketMs) => {
-  const bucketCount = Math.max(1, Math.round((windowEnd - windowStart) / bucketMs));
+/** Splits [windowStart, windowEnd) into BAR_COUNT bars measuring online/offline time in each. */
+const buildBuckets = (segments, windowStart, windowEnd, now) => {
+  const bucketMs = (windowEnd - windowStart) / BAR_COUNT;
   const buckets = [];
-  let segIndex = 0;
-  while (segIndex < segments.length && segments[segIndex].end <= windowStart) {
-    segIndex += 1;
-  }
 
-  for (let i = 0; i < bucketCount; i += 1) {
-    const bucketStart = new Date(windowStart.getTime() + i * bucketMs);
-    const bucketEnd = new Date(bucketStart.getTime() + bucketMs);
+  for (let i = 0; i < BAR_COUNT; i += 1) {
+    const start = new Date(windowStart.getTime() + i * bucketMs);
+    const end = new Date(start.getTime() + bucketMs);
+    const measuredEnd = end > now ? now : end;
     let onlineMs = 0;
     let offlineMs = 0;
 
-    let scan = segIndex;
-    while (scan < segments.length && segments[scan].start < bucketEnd) {
-      const overlapStart = Math.max(segments[scan].start.getTime(), bucketStart.getTime());
-      const overlapEnd = Math.min(segments[scan].end.getTime(), bucketEnd.getTime());
-      const overlap = overlapEnd - overlapStart;
-      if (overlap > 0) {
-        if (segments[scan].status === "online") onlineMs += overlap;
-        else offlineMs += overlap;
-      }
-      if (segments[scan].end <= bucketEnd) {
-        segIndex = scan + 1;
-      }
-      scan += 1;
+    for (const segment of segments) {
+      if (segment.end <= start || segment.start >= measuredEnd) continue;
+      const overlap =
+        Math.min(segment.end.getTime(), measuredEnd.getTime()) -
+        Math.max(segment.start.getTime(), start.getTime());
+      if (overlap <= 0) continue;
+      if (segment.status === "online") onlineMs += overlap;
+      else offlineMs += overlap;
     }
 
-    const bucketSpan = bucketEnd.getTime() - bucketStart.getTime();
-    const onlineFrac = bucketSpan > 0 ? onlineMs / bucketSpan : 0;
-    const offlineFrac = bucketSpan > 0 ? offlineMs / bucketSpan : 0;
-    const noDataFrac = Math.max(0, 1 - onlineFrac - offlineFrac);
-    const hasData = onlineFrac + offlineFrac > 0.0001;
-
+    const knownMs = onlineMs + offlineMs;
     let status = "no-data";
-    if (hasData) {
-      if (onlineFrac >= 0.999) status = "online";
-      else if (offlineFrac >= 0.999) status = "offline";
+    if (knownMs > 0) {
+      if (offlineMs === 0) status = "online";
+      else if (onlineMs === 0) status = "offline";
       else status = "mixed";
     }
 
     buckets.push({
-      start: bucketStart,
-      end: bucketEnd,
-      onlineFrac,
-      offlineFrac,
-      noDataFrac,
-      hasData,
+      start,
+      end,
+      onlineMs,
+      offlineMs,
+      uptime: knownMs > 0 ? onlineMs / knownMs : null,
+      hasData: knownMs > 0,
       status,
     });
   }
@@ -119,81 +101,118 @@ const buildBuckets = (segments, windowStart, windowEnd, bucketMs) => {
   return buckets;
 };
 
-const STATUS_COLORS = {
-  online: "rgb(52, 211, 153)",
-  offline: "rgb(251, 113, 133)",
-  mixed: "rgb(251, 191, 36)",
+const formatDuration = (ms) => {
+  if (ms < MINUTE_MS) return `${Math.max(1, Math.round(ms / 1000))}s`;
+  const totalMinutes = Math.round(ms / MINUTE_MS);
+  const days = Math.floor(totalMinutes / (24 * 60));
+  const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+  const minutes = totalMinutes % 60;
+  return [days && `${days}d`, hours && `${hours}h`, minutes && `${minutes}m`]
+    .filter(Boolean)
+    .join(" ");
 };
 
-const STATUS_LABELS = {
-  online: "Online",
-  offline: "Offline",
-  mixed: "Online & offline",
-  "no-data": "No data",
+const formatPercent = (fraction) => {
+  const percent = fraction * 100;
+  return `${percent >= 99.95 || percent <= 0.05 ? percent.toFixed(0) : percent.toFixed(1)}%`;
 };
 
-const formatTimeLabel = (date, timeframeKey) => {
-  if (timeframeKey === "1d" || timeframeKey === "1w") {
-    return date.toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" });
+const ONLINE_COLOR = "rgb(52, 211, 153)";
+const OFFLINE_COLOR = "rgb(251, 113, 133)";
+const LIVE_REFRESH_MS = 15 * 1000;
+
+const formatBarTime = (date, spanMs) => {
+  if (spanMs >= 7 * DAY_MS) {
+    return date.toLocaleString(undefined, {
+      day: "2-digit",
+      month: "short",
+      year: spanMs >= 30 * DAY_MS ? "numeric" : undefined,
+      hour: spanMs >= 30 * DAY_MS ? undefined : "2-digit",
+      minute: spanMs >= 30 * DAY_MS ? undefined : "2-digit",
+    });
   }
   return date.toLocaleString(undefined, {
-    day: "2-digit",
-    month: "short",
+    day: spanMs >= DAY_MS ? "2-digit" : undefined,
+    month: spanMs >= DAY_MS ? "short" : undefined,
     hour: "2-digit",
     minute: "2-digit",
+    second: spanMs <= HOUR_MS ? "2-digit" : undefined,
   });
 };
 
-const formatExactLabel = (date) =>
-  date.toLocaleString(undefined, {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+const describeBucket = (bucket) => {
+  if (!bucket.hasData) return "No data";
+  if (bucket.status === "online") return `Online · ${formatDuration(bucket.onlineMs)}`;
+  if (bucket.status === "offline") return `Offline · ${formatDuration(bucket.offlineMs)}`;
+  return `${formatPercent(bucket.uptime)} uptime · online ${formatDuration(
+    bucket.onlineMs
+  )}, offline ${formatDuration(bucket.offlineMs)}`;
+};
 
-export default function UptimeHistoryPanel({ isDark, events, isLoading, days = 365 }) {
-  const [timeframeKey, setTimeframeKey] = useState("1h");
+export default function UptimeHistoryPanel({
+  isDark,
+  events,
+  isLoading,
+  currentStatus,
+  days = 365,
+}) {
+  const [timeframeKey, setTimeframeKey] = useState(DEFAULT_TIMEFRAME_KEY);
   const [pageOffset, setPageOffset] = useState(0);
   const [hoveredIndex, setHoveredIndex] = useState(null);
+  const [now, setNow] = useState(() => new Date());
 
-  const timeframe = TIMEFRAMES.find((tf) => tf.key === timeframeKey) || TIMEFRAMES[1];
+  // Keep the window sliding with the clock so the latest bars stay live.
+  useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), LIVE_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, []);
 
-  const segments = useMemo(() => buildStatusSegments(events), [events]);
+  const timeframe =
+    TIMEFRAMES.find((tf) => tf.key === timeframeKey) ||
+    TIMEFRAMES.find((tf) => tf.key === DEFAULT_TIMEFRAME_KEY);
 
-  const retentionStart = useMemo(() => {
-    const cutoff = new Date();
-    cutoff.setTime(cutoff.getTime() - days * DAY_MS);
-    return cutoff;
-  }, [days]);
+  const segments = useMemo(() => buildStatusSegments(events, now), [events, now]);
 
-  const { windowStart, windowEnd, canGoOlder, canGoNewer } = useMemo(() => {
-    const now = new Date();
-    const end = new Date(now.getTime() - pageOffset * timeframe.windowMs);
-    const start = new Date(end.getTime() - timeframe.windowMs);
-    const clampedStart = start < retentionStart ? retentionStart : start;
-    return {
-      windowStart: clampedStart,
-      windowEnd: end,
-      canGoOlder: clampedStart > retentionStart,
-      canGoNewer: pageOffset > 0,
-    };
-  }, [pageOffset, timeframe, retentionStart]);
+  const retentionStart = new Date(now.getTime() - days * DAY_MS);
+  const windowEnd = new Date(now.getTime() - pageOffset * timeframe.spanMs);
+  const windowStart = new Date(windowEnd.getTime() - timeframe.spanMs);
+  const canGoOlder = windowStart > retentionStart;
+  const canGoNewer = pageOffset > 0;
 
   const buckets = useMemo(
-    () => buildBuckets(segments, windowStart, windowEnd, timeframe.bucketMs),
-    [segments, windowStart, windowEnd, timeframe]
+    () => buildBuckets(segments, windowStart, windowEnd, now),
+    // windowStart/windowEnd are derived from these values.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [segments, timeframe, pageOffset, now]
   );
 
   const hoveredBucket = hoveredIndex !== null ? buckets[hoveredIndex] : null;
-  const hasAnyData = buckets.some((bucket) => bucket.hasData);
-  const isPaged = timeframe.windowMs < 365 * DAY_MS;
+  const totals = buckets.reduce(
+    (acc, bucket) => ({
+      onlineMs: acc.onlineMs + bucket.onlineMs,
+      offlineMs: acc.offlineMs + bucket.offlineMs,
+    }),
+    { onlineMs: 0, offlineMs: 0 }
+  );
+  const knownMs = totals.onlineMs + totals.offlineMs;
+  const hasAnyData = knownMs > 0;
+  const windowUptime = hasAnyData ? totals.onlineMs / knownMs : null;
+  const isOnline = currentStatus === "online";
 
   const handleTimeframeChange = (key) => {
     setTimeframeKey(key);
     setPageOffset(0);
+    setHoveredIndex(null);
   };
+
+  const pagerClassName = (enabled) =>
+    `shrink-0 rounded-md px-1.5 text-xs ${
+      enabled
+        ? isDark
+          ? "text-zinc-300 hover:bg-zinc-800"
+          : "text-zinc-600 hover:bg-zinc-200"
+        : "cursor-not-allowed text-zinc-600/30"
+    }`;
 
   return (
     <div
@@ -202,21 +221,40 @@ export default function UptimeHistoryPanel({ isDark, events, isLoading, days = 3
       }`}
     >
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-        <div>
+        <div className="flex flex-wrap items-center gap-3">
           <p className={`text-sm font-semibold ${isDark ? "text-zinc-100" : "text-zinc-900"}`}>
             Uptime history
           </p>
-          <p className="text-[11px] text-zinc-500">Hover a bar for details</p>
+          {currentStatus ? (
+            <span
+              className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium ${
+                isOnline
+                  ? "bg-emerald-500/15 text-emerald-500"
+                  : "bg-rose-500/15 text-rose-500"
+              }`}
+            >
+              <span
+                className={`h-2 w-2 rounded-full ${isOnline ? "bg-emerald-400" : "bg-rose-400"}`}
+              />
+              {isOnline ? "Online now" : "Offline now"}
+            </span>
+          ) : null}
+          {windowUptime !== null ? (
+            <span className={`text-[11px] ${isDark ? "text-zinc-300" : "text-zinc-700"}`}>
+              <span className="font-semibold">{formatPercent(windowUptime)}</span> uptime
+              {totals.offlineMs > 0 ? ` · ${formatDuration(totals.offlineMs)} offline` : ""}
+            </span>
+          ) : null}
         </div>
 
-        <div className="flex items-center gap-1">
+        <div className="flex flex-wrap items-center gap-1">
           {TIMEFRAMES.map((tf) => (
             <button
               key={tf.key}
               type="button"
               onClick={() => handleTimeframeChange(tf.key)}
               className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
-                tf.key === timeframeKey
+                tf.key === timeframe.key
                   ? "bg-emerald-500 text-white"
                   : isDark
                     ? "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
@@ -227,114 +265,108 @@ export default function UptimeHistoryPanel({ isDark, events, isLoading, days = 3
             </button>
           ))}
         </div>
-
-        <div className="flex shrink-0 items-center gap-3 text-[11px] text-zinc-500">
-          <span className="inline-flex items-center gap-1.5">
-            <span className="h-2.5 w-2.5 rounded-sm bg-emerald-400" />
-            Online
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            <span className="h-2.5 w-2.5 rounded-sm bg-rose-400" />
-            Offline
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            <span className="h-2.5 w-2.5 rounded-sm bg-amber-400" />
-            Mixed
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            <span className={`h-2.5 w-2.5 rounded-sm ${isDark ? "bg-zinc-700" : "bg-zinc-300"}`} />
-            No data
-          </span>
-        </div>
       </div>
 
       <div
-        className={`mb-2 flex h-6 items-center gap-2 rounded-md border px-2 text-[11px] ${
+        className={`mb-2 flex h-6 items-center gap-2 overflow-hidden whitespace-nowrap rounded-md border px-2 text-[11px] ${
           hoveredBucket
             ? isDark
               ? "border-zinc-700 bg-zinc-950 text-zinc-100 shadow-sm"
               : "border-zinc-200 bg-white text-zinc-900 shadow-sm"
-            : "border-transparent"
+            : "border-transparent text-zinc-500"
         }`}
       >
         {hoveredBucket ? (
           <>
-            <span>{formatExactLabel(hoveredBucket.start)}</span>
-            <span className="text-zinc-500">
-              {STATUS_LABELS[hoveredBucket.status]}
-              {hoveredBucket.status === "mixed"
-                ? ` (${Math.round(hoveredBucket.onlineFrac * 100)}% online)`
-                : ""}
+            <span>
+              {formatBarTime(hoveredBucket.start, timeframe.spanMs)} –{" "}
+              {formatBarTime(hoveredBucket.end > now ? now : hoveredBucket.end, timeframe.spanMs)}
             </span>
+            <span className="text-zinc-500">{describeBucket(hoveredBucket)}</span>
           </>
-        ) : null}
+        ) : (
+          <span>
+            {BAR_COUNT} bars · {formatDuration(timeframe.spanMs / BAR_COUNT)} each · hover a bar
+            for details
+          </span>
+        )}
       </div>
 
       <div className="flex min-w-0 items-stretch gap-2">
-        {isPaged ? (
-          <button
-            type="button"
-            disabled={!canGoOlder}
-            onClick={() => setPageOffset((prev) => prev + 1)}
-            className={`shrink-0 rounded-md px-1.5 text-xs ${
-              canGoOlder
-                ? isDark
-                  ? "text-zinc-300 hover:bg-zinc-800"
-                  : "text-zinc-600 hover:bg-zinc-200"
-                : "cursor-not-allowed text-zinc-600/30"
-            }`}
-            aria-label="Older"
-          >
-            ‹
-          </button>
-        ) : null}
+        <button
+          type="button"
+          disabled={!canGoOlder}
+          onClick={() => setPageOffset((prev) => prev + 1)}
+          className={pagerClassName(canGoOlder)}
+          aria-label="Older"
+        >
+          ‹
+        </button>
 
         <div
           className="grid h-32 min-w-0 flex-1 gap-px overflow-hidden"
-          style={{ gridTemplateColumns: `repeat(${buckets.length}, minmax(0, 1fr))` }}
+          style={{ gridTemplateColumns: `repeat(${BAR_COUNT}, minmax(0, 1fr))` }}
           onMouseLeave={() => setHoveredIndex(null)}
         >
           {buckets.map((bucket, index) => (
             <div
-              key={bucket.start.toISOString()}
+              key={index}
               onMouseEnter={() => setHoveredIndex(index)}
-              className="h-full min-w-0 rounded-[1px] transition-opacity hover:opacity-80"
-              style={{
-                backgroundColor:
-                  STATUS_COLORS[bucket.status] || (isDark ? "#27272a" : "#e4e4e7"),
-              }}
-            />
+              className={`flex h-full min-w-0 flex-col overflow-hidden rounded-[1px] transition-opacity hover:opacity-80 ${
+                bucket.hasData ? "" : isDark ? "bg-zinc-800" : "bg-zinc-200"
+              }`}
+            >
+              {bucket.hasData ? (
+                <>
+                  <div style={{ flexGrow: bucket.onlineMs, backgroundColor: ONLINE_COLOR }} />
+                  <div
+                    style={{
+                      flexGrow: bucket.offlineMs,
+                      // Keep short outages visible even inside long bars.
+                      minHeight: bucket.offlineMs > 0 ? "15%" : 0,
+                      backgroundColor: OFFLINE_COLOR,
+                    }}
+                  />
+                </>
+              ) : null}
+            </div>
           ))}
         </div>
 
-        {isPaged ? (
-          <button
-            type="button"
-            disabled={!canGoNewer}
-            onClick={() => setPageOffset((prev) => Math.max(0, prev - 1))}
-            className={`shrink-0 rounded-md px-1.5 text-xs ${
-              canGoNewer
-                ? isDark
-                  ? "text-zinc-300 hover:bg-zinc-800"
-                  : "text-zinc-600 hover:bg-zinc-200"
-                : "cursor-not-allowed text-zinc-600/30"
-            }`}
-            aria-label="Newer"
-          >
-            ›
-          </button>
-        ) : null}
+        <button
+          type="button"
+          disabled={!canGoNewer}
+          onClick={() => setPageOffset((prev) => Math.max(0, prev - 1))}
+          className={pagerClassName(canGoNewer)}
+          aria-label="Newer"
+        >
+          ›
+        </button>
       </div>
 
-      <div className="mt-2 flex items-center justify-between text-[10px] text-zinc-500">
-        <span>{formatTimeLabel(windowStart, timeframeKey)}</span>
-        <span>{pageOffset === 0 ? "Now" : formatTimeLabel(windowEnd, timeframeKey)}</span>
+      <div className="mt-2 flex items-center justify-between px-6 text-[10px] text-zinc-500">
+        <span>{formatBarTime(windowStart, timeframe.spanMs)}</span>
+        <span className="flex items-center gap-3">
+          <span className="inline-flex items-center gap-1.5">
+            <span className="h-2 w-2 rounded-sm bg-emerald-400" />
+            Online
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span className="h-2 w-2 rounded-sm bg-rose-400" />
+            Offline
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span className={`h-2 w-2 rounded-sm ${isDark ? "bg-zinc-700" : "bg-zinc-300"}`} />
+            No data
+          </span>
+        </span>
+        <span>{pageOffset === 0 ? "Now" : formatBarTime(windowEnd, timeframe.spanMs)}</span>
       </div>
 
-      {isLoading ? (
+      {isLoading && !hasAnyData ? (
         <p className="mt-2 text-xs text-zinc-500">Loading uptime history...</p>
       ) : !hasAnyData ? (
-        <p className="mt-2 text-xs text-zinc-500">No status history recorded yet for this machine.</p>
+        <p className="mt-2 text-xs text-zinc-500">No status recorded for this period yet.</p>
       ) : null}
     </div>
   );

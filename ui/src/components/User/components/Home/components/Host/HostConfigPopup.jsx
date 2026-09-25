@@ -460,6 +460,7 @@ export default function HostConfigPopup({
   const [isTogglingTelegramAlerts, setIsTogglingTelegramAlerts] = useState(false);
   const [showUptimeHistory, setShowUptimeHistory] = useState(false);
   const [uptimeEvents, setUptimeEvents] = useState([]);
+  const [uptimeCurrentStatus, setUptimeCurrentStatus] = useState(null);
   const [isLoadingUptimeHistory, setIsLoadingUptimeHistory] = useState(false);
   const [isRefreshMachineTokenConfirmOpen, setIsRefreshMachineTokenConfirmOpen] =
     useState(false);
@@ -988,30 +989,40 @@ export default function HostConfigPopup({
     }
 
     let isActive = true;
-    setIsLoadingUptimeHistory(true);
+    const loadUptimeHistory = (showLoading) => {
+      if (showLoading) {
+        setIsLoadingUptimeHistory(true);
+      }
+      axios
+        .get(apiRoutes.getMachineStatusHistory(host.id, 365))
+        .then((response) => {
+          if (isActive) {
+            setUptimeEvents(response.data?.data || []);
+            setUptimeCurrentStatus(response.data?.current_status || null);
+          }
+        })
+        .catch(() => {
+          if (isActive && showLoading) {
+            setUptimeEvents([]);
+            setUptimeCurrentStatus(null);
+          }
+        })
+        .finally(() => {
+          if (isActive && showLoading) {
+            setIsLoadingUptimeHistory(false);
+          }
+        });
+    };
 
-    axios
-      .get(apiRoutes.getMachineStatusHistory(host.id, 365))
-      .then((response) => {
-        if (isActive) {
-          setUptimeEvents(response.data?.data || []);
-        }
-      })
-      .catch(() => {
-        if (isActive) {
-          setUptimeEvents([]);
-        }
-      })
-      .finally(() => {
-        if (isActive) {
-          setIsLoadingUptimeHistory(false);
-        }
-      });
+    loadUptimeHistory(true);
+    // Refresh while open so newly recorded status changes show up live.
+    const refreshTimer = setInterval(() => loadUptimeHistory(false), 30 * 1000);
 
     return () => {
       isActive = false;
+      clearInterval(refreshTimer);
     };
-  }, [opened, host?.id, showUptimeHistory]);
+  }, [opened, host?.id, showUptimeHistory, host?.isActive]);
 
   useEffect(() => {
     if (!socket || !host?.id) {
@@ -2778,6 +2789,13 @@ export default function HostConfigPopup({
                         <UptimeHistoryPanel
                           isDark={isDark}
                           events={uptimeEvents}
+                          currentStatus={
+                            host?.isActive === undefined
+                              ? uptimeCurrentStatus
+                              : host.isActive
+                                ? "online"
+                                : "offline"
+                          }
                           isLoading={isLoadingUptimeHistory}
                           days={365}
                         />

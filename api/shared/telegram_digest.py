@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 
 from router.common import get_machine_connection_status
 from shared.factory import db
+from shared.sockets import hold_background_leadership
 from shared.telegram_alerts import is_machine_excluded_from_alerts, user_telegram_config
 from shared.telegram_client import format_last_seen, send_telegram_message
 
@@ -59,6 +60,13 @@ async def _send_offline_digest_for_user(user: dict, config: dict, now: datetime)
 
 async def monitor_offline_digest(stop_event: asyncio.Event) -> None:
     while not stop_event.is_set():
+        if not hold_background_leadership():
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=DIGEST_POLL_INTERVAL_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+            continue
+
         now = _utcnow()
         users = await db.users.find(
             {
