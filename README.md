@@ -107,6 +107,58 @@ Notes:
 - `EXTERNAL_PORT_RANGE_START` and `EXTERNAL_PORT_RANGE_END` limit which public ports PortHub can assign.
 - `FIREWALL_API_KEY` and `FW_API_KEY` must match.
 
+### Local deployment and custom local hostnames
+
+For a local deployment, keep the PortHub UI on its application ports and let
+Traefik receive web-proxy traffic on the standard HTTP/HTTPS ports:
+
+```env
+APP_HTTP_PORT=8345
+APP_HTTPS_PORT=8346
+TRAEFIK_HTTP_PORT=80
+TRAEFIK_HTTPS_PORT=443
+```
+
+The UI is then available at `http://<host>:8345`. To use hostnames such as
+`porthub.example.local` or `app.example.local`, choose a local domain and set
+the matching values in `.env`, including `WEB_PROXY_DOMAIN_SUFFIX`,
+`PORT_HUB_SERVICE_DOMAIN`, and `PORT_HUB_PUBLIC_BASE_URL` where applicable.
+Then configure a DNS service on the host with a wildcard record pointing
+`*.example.local` to the host's LAN IP. For example, dnsmasq uses:
+
+```ini
+address=/.example.local/<host-lan-ip>
+```
+
+The host and other local clients must use that machine as their DNS server.
+After DNS is configured, create a PortHub web-proxy entry for the UI if
+desired:
+
+- Host: `porthub.example.local`
+- Target URL: `http://<host-lan-ip>:8345`
+- Entry point: `web`
+
+Other web-proxy entries can then use `*.example.local` on port 80, while PortHub
+itself remains available directly on port 8345.
+
+Direct port-based access remains available independently of web proxies and does
+not pass through Traefik. A request to `http://<service-domain>:<port>` reaches
+the host directly: the port may be served by a host-native service or by a
+Rathole-forwarded service. Rathole binds its assigned external ports directly
+on the host, while Traefik is only used for HTTP hostname-based proxy entries
+on ports 80/443.
+Use the configured `PORT_HUB_SERVICE_DOMAIN` with the assigned external port:
+
+```text
+http://<service-domain>:<external-port>
+```
+
+For example, if `PORT_HUB_SERVICE_DOMAIN=luna.local` and PortHub assigns port
+`10000`, the forwarded service remains available at
+`http://luna.local:10000`. The local DNS wildcard should resolve the service
+domain to the PortHub host, and the assigned external port must be allowed by
+the host firewall.
+
 ### 2. Generate the proxy certificate
 
 ```bash
