@@ -34,7 +34,7 @@ const TIMEFRAMES = [
   { key: "1y", label: "1Y", spanMs: 365 * DAY_MS },
 ];
 
-const DEFAULT_TIMEFRAME_KEY = "1h";
+const DEFAULT_TIMEFRAME_KEY = "24h";
 
 /** Turns raw ordered status-change events into contiguous [start, end, status) segments. */
 const buildStatusSegments = (events, now) => {
