@@ -252,8 +252,8 @@ export default function TrafficMonitorPanel({
           className="flex flex-col justify-between text-[11px] leading-none text-muted-foreground"
           style={{ height: `${chartHeight}px` }}
         >
-          {yAxisLabels.map((label) => (
-            <span key={label}>{label}</span>
+          {yAxisLabels.map((label, index) => (
+            <span key={index}>{label}</span>
           ))}
         </div>
 
