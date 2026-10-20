@@ -37,6 +37,25 @@ PortHub can apply an IP filter to each forwarding rule.
 
 This is backed by the `firewall/` service, which stores per-port policies and programs nftables rules on the host. If firewall integration is not configured, the rest of PortHub still works, but IP filtering and firewall traffic visibility will not be available.
 
+## Proxy Request Activity and Log Retention
+
+The dashboard shows the five most recently requested proxy addresses. Proxy rows
+show HTTP request counts and the time of the latest request. Counts include bots,
+assets and repeat requests: they are not unique visitors. Tracking starts when
+this feature is first enabled, not when a proxy was originally created.
+
+The API reads Traefik's shared access log read-only and atomically persists totals
+with its checkpoint in MongoDB. Only registered hostnames, counts and timestamps
+are retained; client IPs, paths and query strings are not copied into analytics.
+Results are restricted to the authenticated account's proxies. Counters survive
+API restarts and log rotation; no historical multi-gigabyte log scan is needed.
+
+The Traefik wrapper rotates the access log at 2 MiB, checked every five seconds,
+and retains one previous segment (approximately 4 MiB total plus a short burst).
+Traefik reopens logs on USR1 without a restart. Docker's Traefik console logs are
+also limited to two 2 MiB files. Deploy with the provided Compose files so the
+rotation wrapper and read-only analytics volume are included.
+
 ## Architecture
 
 PortHub is made of a few small pieces:

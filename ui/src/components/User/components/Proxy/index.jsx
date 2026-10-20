@@ -18,9 +18,13 @@ import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell } from "@
 import useTrafficSnapshot from "@/shared/hooks/useTrafficSnapshot";
 import TrafficSparkline from "@/components/ui/traffic-sparkline";
 import useCreateFromUrl from "@/shared/hooks/useCreateFromUrl";
+import useProxyActivity from "@/shared/hooks/useProxyActivity";
+import ProxyActivity from "@/components/ui/proxy-activity";
 
 export default function Proxy({ machineId = "", compact = false, connectionId = "", onEditorOpenChange }) {
   const router = useRouter();
+  const activity = useProxyActivity();
+  const activityById = new Map(activity.data.map(metric=>[metric.route_id,metric]));
   const { success, error } = useToast();
   const [proxies, setProxies] = useState([]);
   const [connections, setConnections] = useState([]);
@@ -145,12 +149,12 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
       : <div className="proxy-results overflow-hidden rounded-xl bg-surface"><div className="data-scroll">{[...sections].map(([label, entries]) => <section key={label}>
         {groupBy !== "none" && <h2 className="flex items-center gap-2 bg-muted px-4 py-2 text-xs font-semibold"><IconFolder size={14} />{label}<span className="ml-auto text-muted-foreground">{entries.length}</span></h2>}
         <div className="hidden md:block"><Table aria-label="Web proxies"><TableHeader><TableRow><TableHead className="w-[30%]">Hostname</TableHead><TableHead className="w-[25%]">Machine / service</TableHead><TableHead>Target</TableHead><TableHead className="hidden w-48 lg:table-cell"><span title="All traffic on the linked machine port; not individual HTTP requests">Linked port traffic</span></TableHead></TableRow></TableHeader><TableBody>{entries.map(p => <TableRow key={p._id} {...rowInteraction(p)} className="cursor-pointer focus-visible:bg-accent/40">
-          <TableCell>{host(p)}{p.group && <p className="mt-1 truncate pl-4 text-[13px] text-muted-foreground">{p.group}</p>}</TableCell>
+          <TableCell>{host(p)}<div className="pl-4"><ProxyActivity group={p.group} metric={activityById.get(p._id)} activity={activity} /></div></TableCell>
           <TableCell><p className="truncate font-medium">{p.connection?.machine_name || "Manual target"}</p><p className="mt-0.5 truncate text-[13px] text-muted-foreground">{p.connection?.service_name || p.description || "HTTP endpoint"}</p></TableCell>
           <TableCell><p className="truncate font-mono text-[13px]" title={p.target_url}>{p.target_url}</p></TableCell>
           <TableCell className="hidden lg:table-cell">{p.connection ? <TrafficSparkline samples={trafficById.get(p.connection.data_id || p.connection._id) || []} label="Linked port traffic" /> : <span className="text-xs text-muted-foreground">Standalone target</span>}</TableCell>
         </TableRow>)}</TableBody></Table></div>
-        <div className="md:hidden">{entries.map(p => <div className="proxy-row-mobile cursor-pointer focus-visible:bg-accent/40" key={p._id} {...rowInteraction(p)}><div className="min-w-0 flex-1">{host(p)}<p className="mt-1 truncate pl-4 text-[13px] text-muted-foreground">{p.connection?.machine_name || "Manual target"} · {p.connection?.service_name || p.target_url}</p></div></div>)}</div>
+        <div className="md:hidden">{entries.map(p => <div className="proxy-row-mobile cursor-pointer focus-visible:bg-accent/40" key={p._id} {...rowInteraction(p)}><div className="min-w-0 flex-1">{host(p)}<div className="pl-4"><ProxyActivity metric={activityById.get(p._id)} activity={activity} /></div><p className="mt-1 truncate pl-4 text-[13px] text-muted-foreground">{p.connection?.machine_name || "Manual target"} · {p.connection?.service_name || p.target_url}</p></div></div>)}</div>
       </section>)}</div>
       <footer className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-2"><p className="text-[13px] text-muted-foreground">{filtered.length} proxies · {currentPage}/{totalPages}</p><SearchSelect className="w-36 sm:ml-auto" label="Proxies per page" value={pageSize} onChange={value=>setPageSize(Number(value))} options={[10,25,50].map(n=>({value:n,label:`${n} per page`}))} /><Pagination value={currentPage} onChange={setPage} total={totalPages} size="sm" siblings={0} /></footer>
     </div>}

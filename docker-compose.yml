@@ -17,6 +17,7 @@ services:
       - ./api:/app
       - rathole_config:/runtime/rathole
       - traefik_routes:/runtime/traefik
+      - traefik_shared:/runtime/traefik-access:ro
     restart: always
     networks:
       - porthub
@@ -67,7 +68,13 @@ services:
       - api
 
   traefik:
-    image: traefik:v3.0
+    build: ./traefik
+    image: porthub_traefik
+    logging:
+      driver: json-file
+      options:
+        max-size: "2m"
+        max-file: "2"
     container_name: porthub_traefik
     command:
       - "--api.dashboard=true"

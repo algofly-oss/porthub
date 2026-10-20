@@ -11,6 +11,8 @@ import TrafficSparkline from "@/components/ui/traffic-sparkline";
 import { Button } from "@/components/ui/button";
 import { PageHeader, EmptyState } from "@/components/ui/workspace";
 import { StatusTabs } from "@/components/ui/status-tabs";
+import useProxyActivity from "@/shared/hooks/useProxyActivity";
+import ProxyActivity from "@/components/ui/proxy-activity";
 
 export default function Dashboard() {
   const router = useRouter();
@@ -19,6 +21,8 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true), [error, setError] = useState("");
   const [seconds, setSeconds] = useState("60");
   const traffic = useTrafficSnapshot();
+  const activity = useProxyActivity();
+  const activityById = useMemo(()=>new Map(activity.data.map(metric=>[metric.route_id,metric])),[activity.data]);
   async function load(signal) {
     try {
       const responses = await Promise.all([apiRoutes.listMachines, apiRoutes.listTrafficRoutes, apiRoutes.listConnections].map(url => axios.get(url, { signal })));
@@ -43,7 +47,7 @@ export default function Dashboard() {
   const busiest = useMemo(() => traffic.rows.map(row => ({ ...row, summary: trafficSummary(row.traffic, Number(seconds), (traffic.updated || Date.now()) / 1000) })).sort((a,b) => b.summary.volume - a.summary.volume).slice(0, 5), [traffic.rows, seconds, traffic.updated]);
   const peak = Math.max(1, ...busiest.map(row => row.summary.volume));
   const ratio = data.machines.length ? online.length / data.machines.length : 0;
-  const recentlyUpdated = useMemo(() => [...data.proxies].sort((a,b) => (Date.parse(b.updated_at) || 0) - (Date.parse(a.updated_at) || 0)).slice(0, 5), [data.proxies]);
+  const recentlyVisited = useMemo(() => data.proxies.filter(proxy=>activityById.get(proxy._id)?.last_requested_at).sort((a,b) => Date.parse(activityById.get(b._id).last_requested_at)-Date.parse(activityById.get(a._id).last_requested_at)).slice(0,5),[data.proxies,activityById]);
   return <div className="workspace-page"><div className="data-scroll pb-1" aria-label="Dashboard content">
     <PageHeader title="Dashboard" actions={<div className="flex items-center gap-2"><span className="hidden items-center gap-1.5 text-xs text-muted-foreground sm:flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />Live workspace</span><Button variant="ghost" size="icon" aria-label="Refresh dashboard" onClick={()=>load()}><IconRefresh size={17} /></Button></div>} />
     {error && <p role="alert" className="mb-3 rounded-lg bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">{error}</p>}
@@ -68,7 +72,15 @@ export default function Dashboard() {
           <div className="grid grid-cols-[minmax(0,1fr)_100px_80px] gap-3 bg-muted/40 px-5 py-2 text-[11px] text-muted-foreground"><span>Service / machine</span><span>Activity</span><span className="text-right">Transferred</span></div>
           <div>{busiest.length ? busiest.map(row=><button key={row.connection._id} onClick={()=>navigate("machines",{machine:row.connection.machine_id})} className="grid w-full grid-cols-[minmax(0,1fr)_100px_80px] items-center gap-3 px-5 py-3 text-left hover:bg-muted/50"><div className="min-w-0"><p className="truncate text-sm font-medium">{row.connection.service_name || `Port ${row.connection.external_port}`}</p><p className="mt-1 truncate text-xs text-muted-foreground">{row.connection.machine_name} · :{row.connection.external_port}</p></div><div><TrafficSparkline samples={row.traffic} showRates={false} label={row.connection.service_name} /><div className="mt-1 h-0.5 rounded-full bg-muted"><div className="h-full rounded-full bg-primary/50" style={{width:`${row.summary.volume / peak * 100}%`}} /></div></div><p className="text-right text-xs font-medium tabular-nums">{formatBytes(row.summary.volume)}</p></button>) : <p className="p-5 text-sm text-muted-foreground">Traffic appears when a forwarded port is used.</p>}</div>
         </section>
-        <section aria-label="Recent Web Addresses" className="flex min-w-0 flex-col overflow-hidden rounded-xl bg-surface"><PanelHeading title="Web Addresses" description={data.proxies.length > 5 ? `5 most recent of ${data.proxies.length} proxies` : "Recently configured services"} onClick={()=>navigate("proxies")} /><div>{recentlyUpdated.map(proxy=><button key={proxy._id} onClick={()=>navigate("proxies",{search:proxy.hosts?.[0] || proxy.name})} className="flex w-full min-w-0 items-center gap-3 px-5 py-3 text-left hover:bg-accent/40"><span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-muted"><IconWorld size={17} className="text-muted-foreground" /></span><div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{proxy.hosts?.[0] || proxy.name}</p><p className="mt-1 truncate text-xs text-muted-foreground">{proxy.connection?.machine_name || proxy.target_url || "Standalone target"}</p></div><span className={`h-1.5 w-1.5 shrink-0 rounded-full ${proxy.enabled ? "bg-emerald-500" : "bg-zinc-500"}`} /><IconArrowUpRight size={14} className="shrink-0 text-muted-foreground" /></button>)}</div>{recentlyUpdated.length ? <button type="button" onClick={()=>navigate("proxies")} className="mt-auto flex w-full items-center justify-between border-t border-border px-5 py-3 text-left text-xs font-medium text-muted-foreground hover:bg-accent/40 hover:text-foreground">View All Proxies<IconArrowUpRight size={15} /></button> : <p className="p-5 text-sm text-muted-foreground">Create a proxy to give a service its own web address.</p>}</section>
+        <section aria-label="Recent Web Addresses" className="flex min-w-0 flex-col overflow-hidden rounded-xl bg-surface">
+          <PanelHeading title="Web Addresses" description="Most recently requested services" onClick={()=>navigate("proxies")} />
+          <div>{recentlyVisited.map(proxy=><a key={proxy._id} href={`${proxy.entry_points?.includes("websecure")?"https":"http"}://${proxy.hosts?.includes(activityById.get(proxy._id)?.last_host)?activityById.get(proxy._id).last_host:proxy.hosts?.[0]}`} target="_blank" rel="noreferrer" className="flex w-full min-w-0 items-center gap-3 px-5 py-3 text-left hover:bg-accent/40">
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-muted"><IconWorld size={17} className="text-muted-foreground" /></span>
+            <div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{activityById.get(proxy._id)?.last_host || proxy.hosts?.[0] || proxy.name}</p><ProxyActivity metric={activityById.get(proxy._id)} activity={activity} /></div>
+            <IconArrowUpRight size={14} className="shrink-0 text-muted-foreground" />
+          </a>)}</div>
+          {recentlyVisited.length ? <button type="button" onClick={()=>navigate("proxies")} className="mt-auto flex w-full items-center justify-between border-t border-border px-5 py-3 text-left text-xs font-medium text-muted-foreground hover:bg-accent/40 hover:text-foreground">View All Proxies<IconArrowUpRight size={15} /></button> : <p className="p-5 text-sm text-muted-foreground">{activity.error ? "Request activity is temporarily unavailable." : activity.available ? "No proxy requests recorded yet. Counts start when tracking is enabled." : "Request tracking is starting. Recent addresses will appear here."}</p>}
+        </section>
       </div>
     </div>}
   </div></div>;

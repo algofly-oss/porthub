@@ -25,6 +25,7 @@ let apiRoutes = {
   trafficSnapshot: "/connections/firewall/traffic/snapshot",
   // Traffic routes / proxies
   listTrafficRoutes: "/traffic-routes/list",
+  proxyActivity: "/traffic-routes/activity",
   addTrafficRoute: "/traffic-routes/add",
   updateTrafficRoute: "/traffic-routes/update",
   deleteTrafficRoute: "/traffic-routes/delete",

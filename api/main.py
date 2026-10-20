@@ -18,6 +18,7 @@ from shared.factory import db
 from shared.sockets import initialize_machine_status_cache, monitor_machine_statuses, sio
 from shared.telegram_alerts import mark_existing_offline_machines_alerted
 from shared.telegram_digest import monitor_offline_digest
+from shared.proxy_activity import monitor_proxy_activity
 
 API_ROOT = "/api"
 logger = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ connection_auto_refresh_task = None
 connection_auto_refresh_stop_event = None
 telegram_digest_task = None
 telegram_digest_stop_event = None
+proxy_activity_task = None
 
 
 class QuietMachineClientAccessFilter(logging.Filter):
@@ -189,8 +191,10 @@ async def ensure_machine_status_event_indexes() -> None:
 
 
 async def handle_startup() -> None:
+    global proxy_activity_task
     global retry_task, traffic_retry_task, machine_status_monitor_task, machine_status_monitor_stop_event, firewall_reconcile_task, connection_auto_refresh_task, connection_auto_refresh_stop_event, telegram_digest_task, telegram_digest_stop_event
     await ensure_machine_status_event_indexes()
+    proxy_activity_task = asyncio.create_task(monitor_proxy_activity())
     rebuilt = await attempt_rathole_config_rebuild(
         context="startup",
         delays=STARTUP_REBUILD_DELAYS_SECONDS,
@@ -235,6 +239,11 @@ async def handle_startup() -> None:
 
 
 async def handle_shutdown() -> None:
+    global proxy_activity_task
+    if proxy_activity_task is not None:
+        proxy_activity_task.cancel()
+        await asyncio.gather(proxy_activity_task, return_exceptions=True)
+        proxy_activity_task = None
     global retry_task, traffic_retry_task, machine_status_monitor_task, machine_status_monitor_stop_event, firewall_reconcile_task, connection_auto_refresh_task, connection_auto_refresh_stop_event, telegram_digest_task, telegram_digest_stop_event
     if retry_task is not None:
         retry_task.cancel()
