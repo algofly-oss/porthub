@@ -8,22 +8,19 @@ import PlatformOverview from "./components/PlatformOverview";
 import Traffic from "./components/Traffic";
 import Dashboard from "./components/Dashboard";
 import { useRouter } from "next/router";
-import { IconSun, IconMoon } from "@tabler/icons-react";
-import useTheme from "@/shared/hooks/useTheme";
 import axios from "axios";
 import toast from "react-hot-toast";
 import { useDispatch } from "react-redux";
 import { authActions } from "@/redux/features/authSlice";
-import useNavigationPreference from "@/shared/hooks/useNavigationPreference";
 import apiRoutes from "@/shared/routes/apiRoutes";
 import useAuth from "@/shared/hooks/useAuth";
+import useNavigationPreference from "@/shared/hooks/useNavigationPreference";
 import { motion, useReducedMotion } from "framer-motion";
 import { DemoNotice } from "@/shared/demo/DemoProvider";
 
 export default function UserHome() {
   const dispatch = useDispatch();
   const router = useRouter();
-  const theme = useTheme();
   const reducedMotion = useReducedMotion();
   const { user } = useAuth();
   const { collapsed, ready: navigationReady, setCollapsed } = useNavigationPreference(user);
@@ -60,11 +57,11 @@ export default function UserHome() {
   }
 
   return (
-    <div className="workspace flex">
+    <div className="workspace flex flex-col-reverse md:flex-row">
       <a href="#workspace-content" className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-lg focus:bg-blue-600 focus:p-3 focus:text-white">Skip to content</a>
       <aside
         aria-label="Main navigation"
-        className={`workspace-sidebar flex items-center w-full md:flex-col md:items-stretch fixed inset-x-0 bottom-0 z-20 md:h-dvh md:py-5 md:overflow-y-auto md:light-scrollbar dark:md:dark-scrollbar ${collapsed ? "md:w-16 md:px-2" : "md:w-56 md:px-4"}`}
+        className={`workspace-sidebar relative z-20 flex w-full shrink-0 items-center md:fixed md:inset-y-0 md:left-0 md:flex-col md:items-stretch md:h-dvh md:py-5 md:overflow-y-auto md:light-scrollbar dark:md:dark-scrollbar ${collapsed ? "md:w-16 md:px-2" : "md:w-56 md:px-4"}`}
       >
         <button
           type="button"
@@ -89,10 +86,6 @@ export default function UserHome() {
       </aside>
       <div className={`workspace-body w-full min-w-0 ${collapsed ? "md:ml-16" : "md:ml-56"}`}>
         <DemoNotice />
-        <div className="workspace-topbar">
-          <div className="flex items-center gap-2"><VscRemoteExplorer size={22} /><span className="text-sm font-semibold">PortHub</span></div>
-          <button type="button" className="flex h-9 w-9 items-center justify-center rounded-md text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800" aria-label="Toggle color theme" onClick={() => theme.toggleColorScheme()}>{theme.isDarkTheme ? <IconSun size={19} /> : <IconMoon size={19} />}</button>
-        </div>
         <main id="workspace-content" tabIndex={-1}>
         <motion.div key={tab} initial={reducedMotion ? false : { opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.16 }} className="h-full min-h-0">
         {tab === "Dashboard" && <Dashboard />}
@@ -104,7 +97,6 @@ export default function UserHome() {
         </motion.div>
         </main>
       </div>
-      {/* <div className="hidden lg:block w-[26rem] 2xl:w-[25%]- 2xl:w-[30rem] h-screen bg-neutral-100 dark:bg-black overflow-y-hidden md:light-scrollbar dark:md:dark-scrollbar"></div> */}
     </div>
   );
 }

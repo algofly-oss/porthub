@@ -2,12 +2,14 @@ import Pagination from "@/components/ui/pagination";
 import { useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { useRouter } from "next/router";
-import { Popover } from "@mantine/core";
 import { IconPlus, IconWorld, IconPlugConnected, IconFolder, IconArrowUpRight, IconRefresh, IconCheck } from "@tabler/icons-react";
 import apiRoutes from "@/shared/routes/apiRoutes";
 import useToast from "@/shared/hooks/useToast";
 import { PageHeader, SearchField, EmptyState } from "@/components/ui/workspace";
 import { selectProxies } from "@/shared/utils/search.mjs";
+import { INVENTORY_SORT_OPTIONS, isTrafficSort } from "@/shared/utils/inventory-sort.mjs";
+import { trafficSummary } from "@/shared/utils/traffic.mjs";
+import InventoryToolbar from "@/components/ui/inventory-toolbar";
 import ProxyConfigModal from "./ProxyConfigModal";
 import { Button } from "@/components/ui/button";
 import SearchSelect from "@/components/ui/search-select";
@@ -35,7 +37,6 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
   const [sort, setSort] = useState("name");
   const [groupBy, setGroupBy] = useState("none");
   const [pageSize, setPageSize] = useState(25);
-  const [showFilters, setShowFilters] = useState(false);
   const [page, setPage] = useState(1);
   const [editing, setEditing] = useState(null);
   const [opened, setOpened] = useState(false);
@@ -65,18 +66,16 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
   const scoped = useMemo(() => proxies.filter(p => (!machineId || p.connection?.machine_id === machineId)
     && (!connectionId || p.connection?.data_id === connectionId)), [proxies, machineId, connectionId]);
   const groups = [...new Set(scoped.map(p => p.group || "").filter(Boolean))].sort();
-  const filtered = useMemo(() => selectProxies(scoped, { query, status, group, machine, sort }), [scoped, query, status, group, machine, sort]);
-  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const candidates = useMemo(() => selectProxies(scoped, { query, status, group, machine, sort: isTrafficSort(sort) ? "name" : sort }), [scoped, query, status, group, machine, sort]);
+  const totalPages = Math.max(1, Math.ceil(candidates.length / pageSize));
   const currentPage = Math.min(page, totalPages);
-  const visible = filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize);
-  const traffic = useTrafficSnapshot({ ids: visible.map(proxy => proxy.connection?.data_id || proxy.connection?._id), enabled: !loading });
+  const trafficTargets = isTrafficSort(sort) ? candidates : candidates.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const traffic = useTrafficSnapshot({ ids: trafficTargets.map(proxy => proxy.connection?.data_id || proxy.connection?._id), enabled: !loading });
   const trafficById = new Map(traffic.rows.map(row=>[row.connection?._id,row.traffic]));
+  const trafficMetrics = useMemo(()=>new Map(traffic.rows.map(row=>[row.connection?._id,trafficSummary(row.traffic,30)])),[traffic.rows]);
+  const filtered = useMemo(()=>isTrafficSort(sort) ? selectProxies(scoped,{query,status,group,machine,sort,trafficById:trafficMetrics}) : candidates,[sort,scoped,query,status,group,machine,trafficMetrics,candidates]);
+  const visible = filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize);
   const sections = new Map();
-  visible.forEach(p => {
-    const key = groupBy === "group" ? p.group || "Ungrouped" : groupBy === "machine" ? p.connection?.machine_name || "Manual targets"
-      : groupBy === "domain" ? (p.hosts?.[0] || "").split(".").slice(-2).join(".") : "All proxies";
-    sections.set(key, [...(sections.get(key) || []), p]);
-  });
   const rowInteraction = proxy => ({
     tabIndex: 0,
     "aria-label": `Edit proxy ${proxy.hosts?.[0] || proxy.name}`,
@@ -88,6 +87,11 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
     },
   });
   const host = proxy => <ProxyHost proxy={proxy} connection={connections.find(connection => connection._id === (proxy.connection?.data_id || proxy.connection?._id))} machine={machines.find(machine => machine._id === proxy.connection?.machine_id)} />;
+  visible.forEach(p => {
+    const key = groupBy === "group" ? p.group || "Ungrouped" : groupBy === "machine" ? p.connection?.machine_name || "Manual targets"
+      : groupBy === "domain" ? (p.hosts?.[0] || "").split(".").slice(-2).join(".") : "All proxies";
+    sections.set(key, [...(sections.get(key) || []), p]);
+  });
   function create() {
     const port = connections.find(c => c._id === connectionId) || connections.find(c => c.machine_id === machineId);
     setEditing(machineId && port ? { target_mode: "connection", connection: { data_id: port._id } } : null);
@@ -112,31 +116,29 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
     } catch (err) { error(err?.response?.data?.detail || "Could not delete proxy"); return false; }
     finally { setDeleting(false); }
   }
-  const createButton = <Button type="button" onClick={create} disabled={loading}><IconPlus size={16} />Create proxy</Button>;
+  const createButton = <Button type="button" aria-label="Create proxy" onClick={create} disabled={loading}><IconPlus size={16} /><span className="md:hidden">Create</span><span className="hidden md:inline">Create proxy</span></Button>;
   const edit = p => { setEditing(p); changeEditor(true); };
   const reset = () => { setQuery(""); setStatus("all"); setGroup("all"); setMachine("all"); };
   return <div className={compact ? "flex min-h-0 max-h-[75dvh] flex-col gap-3" : "workspace-page"}>
     {compact ? <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="text-sm font-semibold">Linked web proxies</h3><p className="mt-1 text-xs text-muted-foreground">Create and edit addresses for this {connectionId ? "port" : "machine"} here.</p></div>{createButton}</div>
       : <PageHeader eyebrow="Routing" title="Web Proxies" description="Find, organize, and route your services from one place." />}
-    <div className="mb-2 flex shrink-0 flex-wrap items-center gap-2">
+    {!compact ? <InventoryToolbar label="Proxy tools"
+      search={<SearchField value={query} onChange={setQuery} label="Search proxies" placeholder="Search proxies…" />}
+      status={<StatusTabs label="Proxy status" value={status} onChange={setStatus} options={[{value:"all",label:"All"},{value:"enabled",label:"Enabled"},{value:"disabled",label:"Disabled"}]} />}
+      filtered={group !== "all" || machine !== "all" || sort !== "name" || groupBy !== "none"}
+      filters={[
+        {label:"Group",control:<SearchSelect label="Filter proxy group" value={group} onChange={setGroup} options={[{value:"all",label:"All groups"},{value:"",label:"Ungrouped"},...groups.map(g=>({value:g,label:g}))]} />},
+        {label:"Sort proxies",control:<SearchSelect label="Sort proxies" value={sort} onChange={setSort} options={[...INVENTORY_SORT_OPTIONS,{value:"updated",label:"Recently updated"},{value:"status",label:"Enabled first"}]} />},
+        {label:"Machine",advanced:true,control:<SearchSelect label="Filter proxy machine" value={machine} onChange={setMachine} options={[{value:"all",label:"All machines"},{value:"manual",label:"Manual targets"},...machines.map(m=>({value:m._id,label:m.name}))]} />},
+        {label:"Group rows",advanced:true,control:<SearchSelect label="Group proxies by" value={groupBy} onChange={setGroupBy} options={[{value:"none",label:"No grouping"},{value:"group",label:"Group by project"},{value:"machine",label:"Group by machine"},{value:"domain",label:"Group by domain"}]} />},
+      ]}
+      primaryActions={<><Button variant="secondary" size="icon" aria-label="Refresh proxies" onClick={load} disabled={loading}><IconRefresh size={17} /></Button>{createButton}</>}
+    /> : <div className="mb-2 flex shrink-0 flex-wrap items-center gap-2">
       <div className="contents">
         <div className="min-w-0 basis-full md:flex-1 md:basis-48"><SearchField value={query} onChange={setQuery} label="Search proxies" placeholder="Search proxies…" /></div>
         <StatusTabs label="Proxy status" value={status} onChange={setStatus} options={[{value:"all",label:"All"},{value:"enabled",label:"Enabled"},{value:"disabled",label:"Disabled"}]} />
       </div>
-      {!compact && <>
-        <SearchSelect className="w-40" label="Filter proxy group" value={group} onChange={setGroup} options={[{value:"all",label:"All groups"},{value:"",label:"Ungrouped"},...groups.map(g=>({value:g,label:g}))]} />
-        <Popover opened={showFilters} onChange={setShowFilters} position="bottom-end" width={280} shadow="sm">
-          <Popover.Target><Button variant="secondary" aria-expanded={showFilters} onClick={()=>setShowFilters(value=>!value)}>Filters{(machine !== "all" || sort !== "name" || groupBy !== "none") && <span className="h-1.5 w-1.5 rounded-full bg-primary" />}</Button></Popover.Target>
-          <Popover.Dropdown className="!rounded-xl !border-border !bg-dialog !p-4 !text-foreground"><div className="space-y-4">
-            <div><p className="mb-2 text-xs font-medium text-muted-foreground">Machine</p><SearchSelect label="Filter proxy machine" value={machine} onChange={setMachine} withinPortal={false} options={[{value:"all",label:"All machines"},{value:"manual",label:"Manual targets"},...machines.map(m=>({value:m._id,label:m.name}))]} /></div>
-            <div><p className="mb-2 text-xs font-medium text-muted-foreground">Sort</p><SearchSelect label="Sort proxies" value={sort} onChange={setSort} withinPortal={false} options={[{value:"name",label:"Hostname A–Z"},{value:"updated",label:"Recently updated"},{value:"status",label:"Enabled first"}]} /></div>
-            <div><p className="mb-2 text-xs font-medium text-muted-foreground">Group rows</p><SearchSelect label="Group proxies by" value={groupBy} onChange={setGroupBy} withinPortal={false} options={[{value:"none",label:"No grouping"},{value:"group",label:"Group by project"},{value:"machine",label:"Group by machine"},{value:"domain",label:"Group by domain"}]} /></div>
-            <Button variant="ghost" onClick={()=>{setMachine("all");setSort("name");setGroupBy("none");}}>Reset filters</Button>
-          </div></Popover.Dropdown>
-        </Popover>
-      </>}
-      {!compact && <div className="ml-auto flex items-center gap-2"><Button variant="secondary" size="icon" aria-label="Refresh proxies" onClick={load} disabled={loading}><IconRefresh size={17} /></Button>{createButton}</div>}
-    </div>
+    </div>}
     {loadError ? <EmptyState icon={IconWorld} title="Proxies unavailable" description={loadError} action={<button className="action-secondary" onClick={load}>Try again</button>} />
       : loading ? <div role="status" className="surface p-8 text-sm text-muted-foreground">Loading proxies…</div>
       : !filtered.length ? <EmptyState icon={IconWorld} title={scoped.length ? "No matching proxies" : "Your services, one address away"} description={scoped.length ? "Try another hostname, service, machine, or port, or clear your filters." : "Create a public address linked to a machine port or an HTTP target."} action={scoped.length ? <button className="action-secondary" onClick={reset}>Clear filters</button> : undefined} />

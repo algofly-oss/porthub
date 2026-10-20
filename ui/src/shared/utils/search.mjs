@@ -1,3 +1,5 @@
+import { compareInventoryEntries, isTrafficSort } from "./inventory-sort.mjs";
+
 const normalize = value => String(value ?? "").normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 
 // A single-edit match catches missing, extra, substituted and transposed letters.
@@ -42,16 +44,20 @@ export function proxySearchValues(proxy) {
     ...Object.values(proxy.connection || {})];
 }
 
-export function selectProxies(proxies, { query = "", status = "all", group = "all", machine = "all", sort = "name" } = {}) {
+export function selectProxies(proxies, { query = "", status = "all", group = "all", machine = "all", sort = "name", trafficById = new Map() } = {}) {
   return proxies.map(proxy => ({ proxy, score: searchScore(query, proxySearchValues(proxy)) }))
     .filter(({ proxy, score }) => Number.isFinite(score)
       && (status === "all" || (status === "enabled" ? proxy.enabled : !proxy.enabled))
       && (group === "all" || (proxy.group || "") === group)
       && (machine === "all" || (proxy.connection?.machine_id || "manual") === machine))
     .sort((a, b) => {
-      if (query.trim() && a.score !== b.score) return a.score - b.score;
+      if (sort === "name" && query.trim() && a.score !== b.score) return a.score - b.score;
       if (sort === "updated") return (Date.parse(b.proxy.updated_at) || 0) - (Date.parse(a.proxy.updated_at) || 0);
       if (sort === "status" && a.proxy.enabled !== b.proxy.enabled) return Number(b.proxy.enabled) - Number(a.proxy.enabled);
+      if (["newest", "oldest", "name-desc"].includes(sort) || isTrafficSort(sort)) {
+        const entry = proxy => ({ id: proxy._id, name: proxy.hosts?.[0] || proxy.name, createdAt: proxy.created_at, traffic: trafficById.get(proxy.connection?.data_id || proxy.connection?._id) });
+        return compareInventoryEntries(entry(a.proxy), entry(b.proxy), sort);
+      }
       return (a.proxy.hosts?.[0] || a.proxy.name || "").localeCompare(b.proxy.hosts?.[0] || b.proxy.name || "", undefined, { numeric: true });
     }).map(({ proxy }) => proxy);
 }

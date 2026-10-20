@@ -2,6 +2,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { searchScore, selectProxies } from "../src/shared/utils/search.mjs";
 import { aggregateTraffic, trafficSummary, formatBytes, normalizeTrafficSamples, buildTrafficWindow, trafficLinePath } from "../src/shared/utils/traffic.mjs";
+import { compareInventoryEntries } from "../src/shared/utils/inventory-sort.mjs";
+
+test("inventory ordering supports names, registration and directional traffic with stable ties", () => {
+  const entries = [
+    {id:"a",name:"Machine 2",createdAt:"2026-01-01",traffic:{volume:90,incomingVolume:80,outgoingVolume:10}},
+    {id:"b",name:"Machine 10",createdAt:"2026-02-01",traffic:{volume:120,incomingVolume:20,outgoingVolume:100}},
+  ];
+  for (const [sort,first] of [["name","a"],["name-desc","b"],["oldest","a"],["newest","b"],["traffic","b"],["incoming","a"],["outgoing","b"]]) {
+    assert.equal([...entries].sort((a,b)=>compareInventoryEntries(a,b,sort))[0].id,first);
+  }
+  assert(compareInventoryEntries({id:"a",name:"Same"},{id:"b",name:"Same"},"traffic")<0);
+});
 
 const proxies = [
   { _id: "1", hosts: ["docs.example.com", "wiki.example.com"], name: "Docs", enabled: true, group: "Work", updated_at: "2026-10-19T10:00:00Z", connection: { machine_id: "a", machine_name: "Atlas", external_port: 8080 } },

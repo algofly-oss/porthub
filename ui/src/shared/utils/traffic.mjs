@@ -90,6 +90,8 @@ export function trafficSummary(samples, seconds = 60, now = Date.now() / 1000) {
     incoming: live.in_rate || 0, outgoing: live.out_rate || 0,
     blocked: live.drop_rate || 0,
     volume: recent.reduce((sum, s) => sum + (Number(s.in_bytes) || 0) + (Number(s.out_bytes) || 0), 0),
+    incomingVolume: recent.reduce((sum, s) => sum + s.in_bytes, 0),
+    outgoingVolume: recent.reduce((sum, s) => sum + s.out_bytes, 0),
     blockedVolume: recent.reduce((sum, s) => sum + (Number(s.drop_bytes) || 0), 0),
     ips: [...new Set(recent.flatMap(s => [...(s.incoming_ips || []), ...(s.outgoing_ips || [])]))],
     blockedIps: [...new Set(recent.flatMap(s => s.blocked_ips || []))],

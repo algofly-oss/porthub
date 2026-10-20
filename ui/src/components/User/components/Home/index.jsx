@@ -1,5 +1,6 @@
 import Pagination from "@/components/ui/pagination";
-import { normalizeTrafficSamples } from "@/shared/utils/traffic.mjs";
+import { normalizeTrafficSamples, trafficSummary } from "@/shared/utils/traffic.mjs";
+import { compareInventoryEntries, INVENTORY_SORT_OPTIONS, isTrafficSort } from "@/shared/utils/inventory-sort.mjs";
 import { useContext, useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { useRouter } from "next/router";
@@ -31,6 +32,7 @@ import socketRoutes from "@/shared/routes/socketRoutes";
 import { PageHeader, SearchField } from "@/components/ui/workspace";
 import { searchScore } from "@/shared/utils/search.mjs";
 import SearchSelect from "@/components/ui/search-select";
+import InventoryToolbar from "@/components/ui/inventory-toolbar";
 import { Table, TableHeader, TableHead, TableRow, TableBody } from "@/components/ui/table";
 import { IconServer, IconCircleCheck, IconPlugConnected, IconFolder } from "@tabler/icons-react";
 
@@ -204,6 +206,7 @@ const formatLastSeen = (machine) => {
 const mapMachineToHost = (machine) => ({
   id: machine._id,
   name: machine.name || "Untitled machine",
+  createdAt: machine.created_at || "",
   hostname: machine.hostname || "",
   clientHostname: machine.client_hostname || "",
   hostnameOverride: machine.hostname_override || "",
@@ -287,6 +290,7 @@ export default function Home({ onStatsChange }) {
   const [page, setPage] = useState(1);
   const [statusFilter, setStatusFilter] = useState("all");
   const [query, setQuery] = useState("");
+  const [sort, setSort] = useState("name");
   const [groupFilter, setGroupFilter] = useState(ALL_GROUPS_FILTER);
   const [machineGroups, setMachineGroups] = useState([]);
   const [isGroupsModalOpen, setIsGroupsModalOpen] = useState(false);
@@ -321,6 +325,9 @@ export default function Home({ onStatsChange }) {
     [hosts, machineGroups]
   );
 
+  const machineTrafficMetrics = useMemo(() => isTrafficSort(sort)
+    ? new Map(hosts.map(host => [host.id, trafficSummary(machineTrafficByHostId[host.id] || [], 30)]))
+    : new Map(), [hosts, machineTrafficByHostId, sort]);
   const filteredHosts = useMemo(
     () =>
       hosts.filter((host) => {
@@ -339,8 +346,11 @@ export default function Home({ onStatsChange }) {
 
         const hostGroupIds = Array.isArray(host.groupIds) ? host.groupIds : [];
         return hostGroupIds.includes(groupFilter);
+      }).sort((a, b) => {
+        const entry = host => ({ id: host.id, name: host.name, createdAt: host.createdAt, traffic: machineTrafficMetrics.get(host.id) });
+        return compareInventoryEntries(entry(a), entry(b), sort);
       }),
-    [groupFilter, hosts, statusFilter, query]
+    [groupFilter, hosts, statusFilter, query, sort, machineTrafficMetrics]
   );
 
   const numericPageSize = Number(pageSize);
@@ -385,7 +395,7 @@ export default function Home({ onStatsChange }) {
 
   useEffect(() => {
     setPage(1);
-  }, [groupFilter, pageSize, statusFilter, query]);
+  }, [groupFilter, pageSize, statusFilter, query, sort]);
 
   useEffect(() => {
     if (
@@ -527,8 +537,14 @@ export default function Home({ onStatsChange }) {
     };
   }, [socket]);
 
+  // Traffic ordering must rank the entire fleet, not only the current page.
+  // Key requests by stable IDs so sorting a fresh snapshot cannot restart polls.
+  const trafficTargets = (isTrafficSort(sort) ? hosts : paginatedHosts).flatMap(host =>
+    (host.forwardingConfigs || []).filter(config => config.dataId).map(config => [config.dataId, host.id]));
+  const trafficTargetKey = JSON.stringify(trafficTargets.sort(([a], [b]) => a.localeCompare(b)));
   useEffect(() => {
-    if (paginatedHosts.length === 0) {
+    const targets = JSON.parse(trafficTargetKey);
+    if (targets.length === 0) {
       setMachineTrafficByHostId({});
       return;
     }
@@ -536,19 +552,14 @@ export default function Home({ onStatsChange }) {
     const hostIdByConnectionId = {};
     const dataIds = [];
 
-    paginatedHosts.forEach((host) => {
-      (host.forwardingConfigs || []).forEach((config) => {
-        if (!config.dataId) {
-          return;
-        }
-        hostIdByConnectionId[config.dataId] = host.id;
-        dataIds.push(config.dataId);
-      });
+    targets.forEach(([connectionId, hostId]) => {
+      hostIdByConnectionId[connectionId] = hostId;
+      dataIds.push(connectionId);
     });
 
     if (dataIds.length === 0) {
       setMachineTrafficByHostId(
-        Object.fromEntries(paginatedHosts.map((host) => [host.id, []]))
+        {}
       );
       return;
     }
@@ -568,7 +579,7 @@ export default function Home({ onStatsChange }) {
         }
 
         const nextTrafficByHostId = Object.fromEntries(
-          paginatedHosts.map((host) => [host.id, []])
+          [...new Set(targets.map(([, hostId]) => hostId))].map(id => [id, []])
         );
 
         (Array.isArray(response.data?.data) ? response.data.data : []).forEach((item) => {
@@ -592,7 +603,7 @@ export default function Home({ onStatsChange }) {
 
         setMachineTrafficByHostId((current) =>
           Object.fromEntries(
-            paginatedHosts.map((host) => [host.id, current[host.id] || []])
+            [...new Set(targets.map(([, hostId]) => hostId))].map(id => [id, current[id] || []])
           )
         );
       } finally {
@@ -607,7 +618,7 @@ export default function Home({ onStatsChange }) {
       clearTimeout(timeout);
       controller.abort();
     };
-  }, [paginatedHosts]);
+  }, [trafficTargetKey]);
 
   const handleOpenConfig = (hostId) => { setConfigStartSection("ports"); setSelectedHostId(hostId); };
 
@@ -1233,28 +1244,17 @@ export default function Home({ onStatsChange }) {
                 </div>
               ) : (
                 <>
-                  <div className="mb-2 flex shrink-0 flex-col gap-2">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
-                        <StatusTabs label="Machine status"
-                          value={statusFilter}
-                          onChange={setStatusFilter}
-                          options={[
-                            { value: "all", label: "All" },
-                            { value: "online", label: "Online" },
-                            { value: "offline", label: "Offline" },
-                          ]}
-                        />
-                      </div>
-                      <div className="order-first min-w-0 basis-full md:flex-1 md:basis-48"><SearchField label="Search machines" value={query} onChange={setQuery} placeholder="Search machines…" /></div>
-                      <div className="flex flex-wrap items-center justify-start gap-2 lg:justify-end">
-                        <SearchSelect label="Filter machine group" value={groupFilter} onChange={setGroupFilter} className="w-44" options={[{value: ALL_GROUPS_FILTER, label: "All groups"}, ...machineGroups.map(group => ({value: group._id, label: group.name}))]} />
-                        <WorkspaceButton variant="secondary" onClick={() => setIsGroupsModalOpen(true)}><IconFolder size={16} />Groups</WorkspaceButton>
-                        <WorkspaceButton onClick={() => setIsCreateModalOpen(true)}><IconPlus size={16} />Create machine</WorkspaceButton>
-                      </div>
-                    </div>
-
-                  </div>
+                  <InventoryToolbar label="Machine tools"
+                    search={<SearchField label="Search machines" value={query} onChange={setQuery} placeholder="Search machines…" />}
+                    status={<StatusTabs label="Machine status" value={statusFilter} onChange={setStatusFilter} options={[{value:"all",label:"All"},{value:"online",label:"Online"},{value:"offline",label:"Offline"}]} />}
+                    filtered={groupFilter !== ALL_GROUPS_FILTER || sort !== "name"}
+                    filters={[
+                      {label:"Group",control:<SearchSelect label="Filter machine group" value={groupFilter} onChange={setGroupFilter} options={[{value:ALL_GROUPS_FILTER,label:"All groups"},...machineGroups.map(group=>({value:group._id,label:group.name}))]} />},
+                      {label:"Sort machines",control:<SearchSelect label="Sort machines" value={sort} onChange={setSort} options={INVENTORY_SORT_OPTIONS} />},
+                    ]}
+                    secondaryActions={<WorkspaceButton variant="secondary" aria-label="Groups" onClick={()=>setIsGroupsModalOpen(true)}><IconFolder size={16} />Groups</WorkspaceButton>}
+                    primaryActions={<WorkspaceButton aria-label="Create machine" onClick={()=>setIsCreateModalOpen(true)}><IconPlus size={16} /><span className="md:hidden">Create</span><span className="hidden md:inline">Create machine</span></WorkspaceButton>}
+                  />
 
                   <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-surface">
 
