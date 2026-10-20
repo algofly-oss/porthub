@@ -1,4 +1,4 @@
-import Pagination from "@/components/ui/pagination";
+import ResultsPagination from "@/components/ui/results-pagination";
 import SearchSelect from "@/components/ui/search-select";
 import { useEffect, useMemo, useState } from "react";
 import axios from "axios";
@@ -94,7 +94,7 @@ export default function Traffic() {
             <Button asChild variant="secondary"><a href={uiRoutes.getTrafficMonitor({dataId:c._id,demo})} target="_blank" rel="noreferrer">Open Dedicated Monitor<IconArrowUpRight size={15} /></a></Button>
           </div>}
         </div>;
-      })}</div></section></div><footer className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-border px-3 py-2"><span className="text-xs text-muted-foreground">{filtered.length} ports · {currentPage}/{pages}</span><Pagination total={pages} value={currentPage} onChange={setPage} size="sm" siblings={0} /></footer></section>}
+      })}</div></section></div><ResultsPagination count={filtered.length} noun="Ports" page={currentPage} pages={pages} pageSize={10} onPage={setPage} /></section>}
   </div>;
 }
 

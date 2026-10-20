@@ -40,7 +40,11 @@ This is backed by the `firewall/` service, which stores per-port policies and pr
 ## Proxy Request Activity and Log Retention
 
 The dashboard shows the five most recently requested proxy addresses. Proxy rows
-show HTTP request counts and the time of the latest request. Counts include bots,
+show compact calendar-month (UTC) and lifetime HTTP request counts, plus the time
+of the latest request. Hover for exact totals and tracking dates. Monthly counts
+reset automatically; lifetime totals survive month changes. On upgrade, old
+totals are assigned to a month only if their entire tracking history is within
+that month; otherwise monthly tracking starts at the upgrade. Counts include bots,
 assets and repeat requests: they are not unique visitors. Tracking starts when
 this feature is first enabled, not when a proxy was originally created.
 

@@ -422,8 +422,8 @@ export default function TrafficMonitorPanel({
           </div>
 
           <div className="mt-2 flex items-center justify-between text-[10px] text-muted-foreground">
-            <span>{startSecondsAgo}s ago</span>
-            <span>{midpointSecondsAgo}s ago</span>
+            <span>{windowSeconds >= 180 ? `${Number((startSecondsAgo / 60).toFixed(1))}m` : `${startSecondsAgo}s`} ago</span>
+            <span>{windowSeconds >= 180 ? `${Number((midpointSecondsAgo / 60).toFixed(1))}m` : `${midpointSecondsAgo}s`} ago</span>
             <span>{endLabel}</span>
           </div>
 

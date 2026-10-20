@@ -1,4 +1,4 @@
-import Pagination from "@/components/ui/pagination";
+import ResultsPagination from "@/components/ui/results-pagination";
 import { useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { useRouter } from "next/router";
@@ -156,7 +156,7 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
         </TableRow>)}</TableBody></Table></div>
         <div className="md:hidden">{entries.map(p => <div className="proxy-row-mobile cursor-pointer focus-visible:bg-accent/40" key={p._id} {...rowInteraction(p)}><div className="min-w-0 flex-1">{host(p)}<div className="pl-4"><ProxyActivity metric={activityById.get(p._id)} activity={activity} /></div><p className="mt-1 truncate pl-4 text-[13px] text-muted-foreground">{p.connection?.machine_name || "Manual target"} · {p.connection?.service_name || p.target_url}</p></div></div>)}</div>
       </section>)}</div>
-      <footer className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-2"><p className="text-[13px] text-muted-foreground">{filtered.length} proxies · {currentPage}/{totalPages}</p><SearchSelect className="w-36 sm:ml-auto" label="Proxies per page" value={pageSize} onChange={value=>setPageSize(Number(value))} options={[10,25,50].map(n=>({value:n,label:`${n} per page`}))} /><Pagination value={currentPage} onChange={setPage} total={totalPages} size="sm" siblings={0} /></footer>
+      <ResultsPagination count={filtered.length} noun="Proxies" page={currentPage} pages={totalPages} pageSize={pageSize} onPage={setPage} onPageSize={setPageSize} />
     </div>}
     <ProxyConfigModal opened={opened} onClose={() => changeEditor(false)} onSubmit={save} onDelete={remove} proxy={editing} connections={machineId ? connections.filter(c => c.machine_id === machineId) : connections} machines={machineId ? machines.filter(m => m._id === machineId) : machines} defaultDomainSuffix={settings.web_proxy_domain_suffix || ""} serviceDomain={settings.port_hub_service_domain || ""} isSaving={saving} isDeleting={deleting} />
   </div>;

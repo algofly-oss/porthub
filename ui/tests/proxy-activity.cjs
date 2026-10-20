@@ -4,7 +4,7 @@ const {launchBrowser}=require("./browser.cjs");
 (async()=>{
  const {makeDemoData}=await import("../src/shared/demo/data.mjs");
  const state=makeDemoData(),chosen=state.proxies.slice(-7).reverse();
- state.proxyActivity={available:true,tracking_since:new Date(Date.now()-86400000).toISOString(),data:chosen.map((proxy,index)=>({route_id:proxy._id,requests:700-index,last_requested_at:new Date(Date.now()-index*60000).toISOString(),last_host:proxy.hosts[0]}))};
+ state.proxyActivity={available:true,tracking_since:new Date(Date.now()-86400000).toISOString(),data:chosen.map((proxy,index)=>({route_id:proxy._id,requests:7000000-index,monthly_requests:12500-index,last_requested_at:new Date(Date.now()-index*60000).toISOString(),last_host:proxy.hosts[0]}))};
  const browser=await launchBrowser();
  try{
   for(const width of [1512,402]){
@@ -13,13 +13,14 @@ const {launchBrowser}=require("./browser.cjs");
    const page=await context.newPage();const errors=[];page.on("pageerror",error=>errors.push(error.message));
    await page.goto(`${process.env.REVIEW_ORIGIN||"http://luna.local:8345"}/home?demo=1&view=dashboard`);
    const recent=page.getByRole("region",{name:"Recent Web Addresses",exact:true});
-   await recent.getByText("700 requests",{exact:true}).waitFor();
+   await recent.getByText("7M lifetime",{exact:true}).first().waitFor();
+   await recent.getByText("12.5K this month",{exact:true}).first().waitFor();
    const links=recent.getByRole("link");assert.equal(await links.count(),5);
    assert.deepEqual(await links.evaluateAll(links=>links.map(link=>new URL(link.href).hostname)),chosen.slice(0,5).map(proxy=>proxy.hosts[0]));
    assert.equal(await links.first().getAttribute("target"),"_blank");
    await page.getByRole("button",{name:"Proxies",exact:true}).click();
    await page.getByLabel("Search proxies",{exact:true}).fill(chosen[0].hosts[0]);
-   await page.locator('[aria-label^="Edit proxy "]:visible').getByText("700 requests",{exact:true}).waitFor();
+   await page.locator('[aria-label^="Edit proxy "]:visible').getByText("7M lifetime",{exact:true}).waitFor();
    assert.deepEqual(errors,[]);await context.close();
    console.log(`PASS proxy activity ${width}: five actual most-recent requests, counts, direct URL links, shared proxy-list usage`);
   }

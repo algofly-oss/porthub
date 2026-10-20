@@ -22,8 +22,8 @@ export function makeDemoData() {
 
 function traffic(connection, index) {
   const now = Math.floor(Date.now() / 1000);
-  return { connection, traffic: Array.from({ length: 120 }, (_, i) => {
-    const timestamp = now - 119 + i;
+  return { connection, traffic: Array.from({ length: 300 }, (_, i) => {
+    const timestamp = now - 299 + i;
     const signal = Math.max(0.05, 0.55 + Math.sin((timestamp + index * 17) / 7) * 0.3 + Math.sin(timestamp / 2) * 0.12);
     const scale = connection.enabled && connection.machine_is_active ? (index % 9 + 1) * 24000 : 0;
     const blocked = scale && index % 5 === 0 ? 64 : 0;
@@ -36,7 +36,7 @@ export function handleDemoRequest(state, method, rawPath, payload = {}) {
   const read = method === "get";
   const body = typeof payload === "string" ? JSON.parse(payload) : payload || {};
   if (path === "/auth/me") return state.user;
-  if (path === "/traffic-routes/activity") return state.proxyActivity || {available:true,tracking_since:new Date(Date.now()-86400000).toISOString(),data:state.proxies.map((proxy,index)=>({route_id:proxy._id,requests:(index+1)*27,last_requested_at:new Date(Date.now()-index*60000).toISOString(),last_host:proxy.hosts[0]}))};
+  if (path === "/traffic-routes/activity") return state.proxyActivity || {available:true,tracking_since:new Date(Date.now()-86400000).toISOString(),data:state.proxies.map((proxy,index)=>({route_id:proxy._id,requests:(index+1)*27000,monthly_requests:(index+1)*1200,last_requested_at:new Date(Date.now()-index*60000).toISOString(),last_host:proxy.hosts[0]}))};
   if (path === "/auth/settings") return { signup_disabled: true, web_proxy_domain_suffix: "preview.invalid", port_hub_service_domain: "preview.invalid" };
   if (path === "/auth/preferences") { state.user.preferences = { ...state.user.preferences, ...body }; return state.user.preferences; }
   if (path === "/auth/account") { Object.assign(state.user, { name: body.name || state.user.name, email: body.email || state.user.email }); if(body.profile_picture)state.user.profile_picture=body.profile_picture; if(body.remove_profile_picture)delete state.user.profile_picture; return state.user; }

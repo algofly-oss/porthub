@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -68,7 +69,8 @@ class ProxyActivityTest(unittest.IsolatedAsyncioTestCase):
         result = apply_records({}, [("docs.example.com", "2026-10-20T10:00:00+00:00"), ("wiki.example.com", "2026-10-20T11:00:00+00:00"), ("other.example.com", "later")], routes)
         self.assertEqual(result["a"]["requests"], 2)
         self.assertEqual(result["a"]["last_host"], "wiki.example.com")
-        self.assertEqual(set(result["a"]), {"requests", "last_requested_at", "last_host"})
+        self.assertEqual(result["a"]["monthly_requests"], 2)
+        self.assertEqual(set(result["a"]), {"requests", "last_requested_at", "last_host", "month", "monthly_requests"})
         self.assertEqual(apply_records(result, [], []), {})
 
     async def test_checkpoint_and_counts_use_one_compare_and_swap_update(self):
@@ -88,4 +90,30 @@ class ProxyActivityTest(unittest.IsolatedAsyncioTestCase):
         routes = SimpleNamespace(find=lambda query, fields: SimpleNamespace(to_list=AsyncMock(return_value=[{"_id":"owned"}])) if query=={"user_id":"user"} else self.fail("Missing owner filter"))
         with patch.object(activity,"db",SimpleNamespace(proxy_activity=SimpleNamespace(find_one=find),traffic_routes=routes)), patch.object(activity,"get_authenticated_user",AsyncMock(return_value={"_id":"user"})):
             result=await activity.proxy_activity(None)
-        self.assertEqual(result["data"],[{"route_id":"owned","requests":2}])
+        self.assertEqual(result["data"],[{"route_id":"owned","requests":2,"monthly_requests":0}])
+
+    def test_month_rollover_keeps_lifetime_and_counts_only_new_month(self):
+        routes = [{"_id": "a", "hosts": ["docs.example.com"]}]
+        previous = {"a": {"requests": 9000, "month": "2026-10", "monthly_requests": 3000, "last_requested_at": "2026-10-31T23:59:59+00:00"}}
+        result = apply_records(previous, [("docs.example.com", "2026-11-01T00:00:00+00:00"), ("docs.example.com", "2026-10-31T23:59:58+00:00")], routes)
+        self.assertEqual(result["a"]["requests"], 9002)
+        self.assertEqual(result["a"]["monthly_requests"], 1)
+        self.assertEqual(result["a"]["month"], "2026-11")
+        self.assertEqual(previous["a"]["monthly_requests"], 3000)
+
+    def test_upgrade_seeds_only_unambiguous_single_month_history(self):
+        routes = [{"_id": "a", "hosts": ["docs.example.com"]}]
+        legacy = {"a": {"requests": 100, "last_requested_at": "2026-10-20T10:00:00+00:00"}}
+        batch = [("docs.example.com", "2026-10-20T10:00:01+00:00")]
+        self.assertEqual(apply_records(legacy, batch, routes, "2026-10-01")["a"]["monthly_requests"], 101)
+        self.assertEqual(apply_records(legacy, batch, routes, "2026-09-01")["a"]["monthly_requests"], 1)
+
+    async def test_endpoint_resets_monthly_display_even_without_new_requests(self):
+        state = {"metrics": {"owned": {"requests": 500, "month": "2026-10", "monthly_requests": 40}}, "tracking_since": "2026-09-01"}
+        routes = SimpleNamespace(find=lambda *args: SimpleNamespace(to_list=AsyncMock(return_value=[{"_id": "owned"}])))
+        clock = SimpleNamespace(now=lambda tz: datetime(2026, 11, 1, tzinfo=timezone.utc))
+        with patch.object(activity, "datetime", clock), patch.object(activity, "db", SimpleNamespace(proxy_activity=SimpleNamespace(find_one=AsyncMock(return_value=state)), traffic_routes=routes)), patch.object(activity, "get_authenticated_user", AsyncMock(return_value={"_id": "user"})):
+            result = await activity.proxy_activity(None)
+        self.assertEqual(result["month"], "2026-11")
+        self.assertEqual(result["data"][0]["monthly_requests"], 0)
+        self.assertEqual(result["data"][0]["requests"], 500)

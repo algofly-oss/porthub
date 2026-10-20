@@ -65,18 +65,29 @@ def read_batch(path, checkpoint):
         return None
 
 
-def apply_records(metrics, records, routes):
+def apply_records(metrics, records, routes, tracking_since=None):
     # Map only registered hosts. Never persist IPs, paths, queries, identities,
     # arbitrary Host headers, or raw log records.
     by_host = {host.lower(): str(route["_id"]) for route in routes for host in route.get("hosts", [])}
     valid_ids = {str(route["_id"]) for route in routes}
     result = {key: copy.deepcopy(value) for key, value in metrics.items() if key in valid_ids}
+    # Upgrade old lifetime-only counters without inventing monthly history.
+    # A total is assignable only when the entire observed history is one month.
+    for metric in result.values():
+        last_month = (metric.get("last_requested_at") or "")[:7]
+        if "month" not in metric and tracking_since and last_month == tracking_since[:7]:
+            metric.update(month=last_month, monthly_requests=metric.get("requests", 0))
     for host, timestamp in records:
         route_id = by_host.get(host)
         if not route_id:
             continue
         metric = result.setdefault(route_id, {"requests": 0, "last_requested_at": None})
         metric["requests"] += 1
+        month = timestamp[:7]
+        if month > metric.get("month", ""):
+            metric.update(month=month, monthly_requests=0)
+        if month == metric.get("month"):
+            metric["monthly_requests"] = metric.get("monthly_requests", 0) + 1
         if not metric["last_requested_at"] or timestamp > metric["last_requested_at"]:
             metric.update(last_requested_at=timestamp, last_host=host)
     return result
@@ -106,12 +117,13 @@ async def collect_proxy_activity():
     if identity == state["identity"] and offset == state["offset"]:
         return
     routes = await db.traffic_routes.find({}, {"_id": 1, "hosts": 1}).to_list(None)
-    metrics = apply_records(state.get("metrics", {}), records, routes)
+    metrics = apply_records(state.get("metrics", {}), records, routes, state.get("tracking_since"))
     gap = identity == state["identity"] and offset < state["offset"]
     if identity != state["identity"]:
         gap = not await asyncio.to_thread(previous_segment_available, LOG_PATH, state["identity"], state["offset"])
     await db.proxy_activity.update_one({"_id": STATE_ID, "revision": state["revision"]}, {"$set": {
         "identity": identity, "offset": offset, "metrics": metrics, "updated_at": now,
+        "monthly_tracking_since": state.get("monthly_tracking_since") or (state.get("tracking_since") if str(state.get("tracking_since", ""))[:7] == now[:7] else now),
         "coverage_warning": bool(state.get("coverage_warning") or gap),
     }, "$inc": {"revision": 1}})
 

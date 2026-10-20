@@ -1,4 +1,4 @@
-import Pagination from "@/components/ui/pagination";
+import ResultsPagination from "@/components/ui/results-pagination";
 import { normalizeTrafficSamples, trafficSummary } from "@/shared/utils/traffic.mjs";
 import { compareInventoryEntries, INVENTORY_SORT_OPTIONS, isTrafficSort } from "@/shared/utils/inventory-sort.mjs";
 import { useContext, useEffect, useMemo, useState } from "react";
@@ -355,8 +355,6 @@ export default function Home({ onStatsChange }) {
 
   const numericPageSize = Number(pageSize);
   const totalPages = Math.max(1, Math.ceil(filteredHosts.length / numericPageSize));
-  const visibleStart = filteredHosts.length === 0 ? 0 : (page - 1) * numericPageSize + 1;
-  const visibleEnd = Math.min(page * numericPageSize, filteredHosts.length);
   const paginatedHosts = useMemo(
     () =>
       filteredHosts.slice(
@@ -1304,25 +1302,7 @@ export default function Home({ onStatsChange }) {
                     )}
 
                     {filteredHosts.length > 0 ? (
-                      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-2">
-                        <p className="text-xs text-muted-foreground">
-                          Showing {visibleStart} to {visibleEnd} of {filteredHosts.length} machines
-                        </p>
-
-                        <SearchSelect className="w-36 sm:ml-auto" label="Machines per page" value={pageSize} onChange={value => setPageSize(Number(value))} options={MACHINE_PAGE_SIZE_OPTIONS.map(option => ({value: option.value, label: `${option.value} per page`}))} />
-                        <Pagination
-                          value={page}
-                          onChange={setPage}
-                          total={totalPages}
-                          size="sm"
-                          radius="md"
-                          siblings={0}
-                          classNames={{
-                            control:
-                              "!border-zinc-300 !bg-white !text-zinc-700 hover:!bg-zinc-50 data-[active=true]:!border-blue-600 data-[active=true]:!bg-blue-600 data-[active=true]:!text-blue-50 dark:!border-zinc-700 dark:!bg-zinc-900 dark:!text-zinc-200 dark:hover:!bg-zinc-800 dark:data-[active=true]:!border-blue-500 dark:data-[active=true]:!bg-blue-600",
-                          }}
-                        />
-                      </div>
+                      <ResultsPagination count={filteredHosts.length} noun="Machines" page={page} pages={totalPages} pageSize={numericPageSize} onPage={setPage} onPageSize={setPageSize} sizes={MACHINE_PAGE_SIZE_OPTIONS.map(option => Number(option.value))} />
                     ) : null}
                   </div>
                 </>

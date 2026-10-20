@@ -10,7 +10,6 @@ import TrafficMonitorPanel from "../Home/components/Host/TrafficMonitorPanel";
 import TrafficSparkline from "@/components/ui/traffic-sparkline";
 import { Button } from "@/components/ui/button";
 import { PageHeader, EmptyState } from "@/components/ui/workspace";
-import { StatusTabs } from "@/components/ui/status-tabs";
 import useProxyActivity from "@/shared/hooks/useProxyActivity";
 import ProxyActivity from "@/components/ui/proxy-activity";
 
@@ -19,7 +18,7 @@ export default function Dashboard() {
   const { colorScheme } = useMantineColorScheme();
   const [data, setData] = useState({ machines: [], proxies: [], ports: [] });
   const [loading, setLoading] = useState(true), [error, setError] = useState("");
-  const [seconds, setSeconds] = useState("60");
+  const seconds = 300;
   const traffic = useTrafficSnapshot();
   const activity = useProxyActivity();
   const activityById = useMemo(()=>new Map(activity.data.map(metric=>[metric.route_id,metric])),[activity.data]);
@@ -54,7 +53,7 @@ export default function Dashboard() {
     {loading ? <p role="status" className="p-6 text-sm text-muted-foreground">Loading your workspace…</p> : !data.machines.length && !data.proxies.length ? <EmptyState icon={IconServer} title="Your workspace starts here" description="Enroll a machine to expose its ports, or create a standalone web proxy." action={<div className="flex flex-wrap justify-center gap-2"><Button onClick={()=>navigate("machines", {create:"1"})}><IconPlus size={16} />Enroll a Machine</Button><Button variant="secondary" onClick={()=>navigate("proxies", {create:"1"})}>Create a Proxy</Button></div>} /> : <div className="space-y-4 pb-1">
       <div className="grid items-stretch gap-4 lg:grid-cols-[minmax(0,1.8fr)_minmax(290px,1fr)]">
         <section className="flex min-w-0 flex-col overflow-hidden rounded-xl bg-surface">
-          <div className="flex flex-col gap-3 px-5 pt-5 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between"><div><h2 className="text-base font-semibold">Network Activity</h2><p className="mt-1 text-xs text-muted-foreground">All forwarded ports · bytes per second</p></div><StatusTabs className="w-full [&_button]:flex-1 sm:w-auto sm:[&_button]:flex-initial" label="Dashboard traffic window" value={seconds} onChange={setSeconds} options={[{value:"60",label:"1 minute"},{value:"120",label:"2 minutes"}]} /></div>
+          <div className="px-5 pt-5"><h2 className="text-base font-semibold">Network Activity</h2><p className="mt-1 text-xs text-muted-foreground">Last 5 minutes · all forwarded ports · bytes per second</p></div>
           <div className="grid grid-cols-3 gap-3 px-5 py-4"><Metric label="Incoming" value={formatBytes(summary.incoming)} suffix="/s" color="text-emerald-700 dark:text-emerald-400" /><Metric label="Outgoing" value={formatBytes(summary.outgoing)} suffix="/s" color="text-blue-600 dark:text-blue-400" /><Metric label="Transferred" value={formatBytes(summary.volume)} /></div>
           <TrafficMonitorPanel isDark={colorScheme === "dark"} samples={samples} isLoading={traffic.loading} title="Network Activity" showTitle={false} plotHeight={160} className="!px-5 !pt-0" windowSeconds={Number(seconds)} />
           {traffic.error && <p role="status" className="px-5 pb-3 text-xs text-amber-600">{traffic.error}</p>}
@@ -68,7 +67,7 @@ export default function Dashboard() {
         </section>
       </div>
       <div className="grid items-stretch gap-4 lg:grid-cols-[minmax(0,1.8fr)_minmax(290px,1fr)]">
-        <section className="min-w-0 overflow-hidden rounded-xl bg-surface"><PanelHeading title="Busiest Ports" description={`Transferred in the last ${seconds} seconds`} onClick={()=>navigate("traffic")} />
+        <section className="min-w-0 overflow-hidden rounded-xl bg-surface"><PanelHeading title="Busiest Ports" description="Transferred in the last 5 minutes" onClick={()=>navigate("traffic")} />
           <div className="grid grid-cols-[minmax(0,1fr)_100px_80px] gap-3 bg-muted/40 px-5 py-2 text-[11px] text-muted-foreground"><span>Service / machine</span><span>Activity</span><span className="text-right">Transferred</span></div>
           <div>{busiest.length ? busiest.map(row=><button key={row.connection._id} onClick={()=>navigate("machines",{machine:row.connection.machine_id})} className="grid w-full grid-cols-[minmax(0,1fr)_100px_80px] items-center gap-3 px-5 py-3 text-left hover:bg-muted/50"><div className="min-w-0"><p className="truncate text-sm font-medium">{row.connection.service_name || `Port ${row.connection.external_port}`}</p><p className="mt-1 truncate text-xs text-muted-foreground">{row.connection.machine_name} · :{row.connection.external_port}</p></div><div><TrafficSparkline samples={row.traffic} showRates={false} label={row.connection.service_name} /><div className="mt-1 h-0.5 rounded-full bg-muted"><div className="h-full rounded-full bg-primary/50" style={{width:`${row.summary.volume / peak * 100}%`}} /></div></div><p className="text-right text-xs font-medium tabular-nums">{formatBytes(row.summary.volume)}</p></button>) : <p className="p-5 text-sm text-muted-foreground">Traffic appears when a forwarded port is used.</p>}</div>
         </section>

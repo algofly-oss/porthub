@@ -20,7 +20,7 @@ const {launchBrowser}=require("./browser.cjs");
     assert.equal(geometry.overflow,false,view);
     assert(Math.abs(geometry.nav.bottom-874)<1,`${view}: navbar at viewport bottom`);
     assert(Math.abs(geometry.body.bottom-geometry.nav.top)<1,`${view}: no gap between content and navbar`);
-    assert.equal(geometry.pagePadding,"0px",`${view}: no dead area below page`);
+    assert.equal(geometry.pagePadding,"8px",`${view}: small intentional inset separates panels from navigation`);
     assert(["none","normal"].includes(geometry.line),`${view}: no blue active line on phone`);
     if(["machines","proxies"].includes(view)){
      const search=page.getByRole("textbox",{name:view==="machines"?"Search machines":"Search proxies",exact:true});

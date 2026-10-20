@@ -1,5 +1,5 @@
 import SearchSelect from "@/components/ui/search-select";
-import Pagination from "@/components/ui/pagination";
+import ResultsPagination from "@/components/ui/results-pagination";
 import { useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { IconChevronDown, IconRefresh, IconUsers, IconServer } from "@tabler/icons-react";
@@ -36,11 +36,7 @@ export default function PlatformOverview() {
         <div className="hidden lg:block"><Table aria-label="Platform accounts"><TableHeader><TableRow><TableHead className="w-[40%]">Account</TableHead><TableHead>Role</TableHead><TableHead>Machines</TableHead><TableHead>Online</TableHead><TableHead className="w-40"><span className="sr-only">Details</span></TableHead></TableRow></TableHeader><TableBody>{visible.map(entry => <AccountRow key={entry.user.id} entry={entry} expanded={expanded === entry.user.id} toggle={() => setExpanded(expanded === entry.user.id ? "" : entry.user.id)} reduced={reduced} />)}</TableBody></Table></div>
         <div className="lg:hidden">{visible.map(entry => <div key={entry.user.id} className="border-b border-border/60"><button type="button" aria-label={`View machines for ${entry.user.name || entry.user.email}`} aria-expanded={expanded === entry.user.id} className="flex w-full items-center justify-between gap-3 p-3 text-left hover:bg-accent/40" onClick={() => setExpanded(expanded === entry.user.id ? "" : entry.user.id)}><div className="min-w-0"><p className="truncate text-sm font-medium">{entry.user.name}</p><p className="mt-1 truncate text-[11px] text-muted-foreground">{entry.user.email}</p><p className="mt-1 text-[11px] text-muted-foreground">{entry.user.role === "admin" ? "Admin" : "Member"} · {entry.machines.length} machines</p></div><IconChevronDown size={16} className={`shrink-0 transition-transform ${expanded === entry.user.id ? "rotate-180" : ""}`} /></button>{expanded === entry.user.id && <Fleet machines={entry.machines} />}</div>)}</div>
       </div>
-      <footer className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-2">
-        <p className="text-xs text-muted-foreground">Showing {visibleStart + 1} to {Math.min(visibleStart + pageSize, filtered.length)} of {filtered.length} accounts</p>
-        <SearchSelect className="w-36 sm:ml-auto" label="Accounts per page" value={pageSize} onChange={value => setPageSize(Number(value))} options={[10,25,50].map(value => ({value,label:`${value} per page`}))} />
-        <Pagination value={currentPage} onChange={setPage} total={totalPages} size="sm" siblings={0} />
-      </footer>
+      <ResultsPagination count={filtered.length} noun="Accounts" page={currentPage} pages={totalPages} pageSize={pageSize} onPage={setPage} onPageSize={setPageSize} />
     </section>}
   </div>;
 }
