@@ -1,264 +1,73 @@
-import { useEffect, useState } from "react";
+import SearchSelect from "@/components/ui/search-select";
+import Pagination from "@/components/ui/pagination";
+import { useEffect, useMemo, useState } from "react";
 import axios from "axios";
-import { FiChevronDown, FiChevronUp, FiRefreshCw } from "react-icons/fi";
+import { IconChevronDown, IconRefresh, IconUsers, IconServer } from "@tabler/icons-react";
+import { motion, useReducedMotion } from "framer-motion";
 import apiRoutes from "@/shared/routes/apiRoutes";
-import useToast from "@/shared/hooks/useToast";
-
-const panelClass =
-  "overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-700 dark:bg-zinc-900";
-const secondaryButtonClass =
-  "inline-flex items-center justify-center gap-2 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800";
-
-const STATUS_BADGE_CLASSES = {
-  online: "bg-emerald-100 text-emerald-800 dark:bg-emerald-500/10 dark:text-emerald-300",
-  offline: "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
-  disabled: "bg-amber-100 text-amber-800 dark:bg-amber-500/10 dark:text-amber-300",
-  auth_required: "bg-sky-100 text-sky-800 dark:bg-sky-500/10 dark:text-sky-300",
-};
-
-const formatStatusLabel = (status) => {
-  switch (status) {
-    case "online":
-      return "Online";
-    case "auth_required":
-      return "Auth required";
-    case "disabled":
-      return "Disabled";
-    default:
-      return "Offline";
-  }
-};
-
-const StatusBadge = ({ status }) => (
-  <span
-    className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
-      STATUS_BADGE_CLASSES[status] || STATUS_BADGE_CLASSES.offline
-    }`}
-  >
-    {formatStatusLabel(status)}
-  </span>
-);
+import { PageHeader, SearchField, EmptyState } from "@/components/ui/workspace";
+import { Button } from "@/components/ui/button";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
+import { searchScore } from "@/shared/utils/search.mjs";
 
 export default function PlatformOverview() {
-  const toast = useToast();
-  const [overview, setOverview] = useState([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [expandedUserIds, setExpandedUserIds] = useState(new Set());
-  const [expandedMachineIds, setExpandedMachineIds] = useState(new Set());
-
-  const loadOverview = async () => {
-    setIsLoading(true);
-    try {
-      const response = await axios.get(apiRoutes.adminOverview);
-      setOverview(response?.data?.data || []);
-    } catch (requestError) {
-      toast.error(
-        requestError?.response?.data?.detail || "Failed to load platform overview."
-      );
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadOverview();
-  }, []);
-
-  const toggleUserExpanded = (userId) => {
-    setExpandedUserIds((current) => {
-      const next = new Set(current);
-      if (next.has(userId)) {
-        next.delete(userId);
-      } else {
-        next.add(userId);
-      }
-      return next;
-    });
-  };
-
-  const toggleMachineExpanded = (machineId) => {
-    setExpandedMachineIds((current) => {
-      const next = new Set(current);
-      if (next.has(machineId)) {
-        next.delete(machineId);
-      } else {
-        next.add(machineId);
-      }
-      return next;
-    });
-  };
-
-  const totalMachines = overview.reduce((sum, entry) => sum + entry.machines.length, 0);
-  const totalOnline = overview.reduce(
-    (sum, entry) =>
-      sum + entry.machines.filter((machine) => machine.connection_status === "online").length,
-    0
-  );
-
-  return (
-    <div className="flex justify-center">
-      <div className="m-4 flex w-full flex-col gap-5 pb-16 md:pb-6 xl:m-8 2xl:w-[80rem]">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <p className="text-sm font-semibold uppercase tracking-[0.2em] text-zinc-500">
-              Admin
-            </p>
-            <h1 className="mt-1 text-2xl font-semibold text-zinc-900 dark:text-zinc-100">
-              Platform overview
-            </h1>
-            <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
-              {overview.length} users · {totalMachines} machines · {totalOnline} online
-            </p>
-          </div>
-          <button
-            type="button"
-            className={secondaryButtonClass}
-            onClick={loadOverview}
-            disabled={isLoading}
-          >
-            <FiRefreshCw size={14} />
-            Refresh
-          </button>
-        </div>
-
-        {isLoading ? (
-          <div className={`${panelClass} px-5 py-6 text-sm text-zinc-500 dark:text-zinc-400`}>
-            Loading platform overview...
-          </div>
-        ) : overview.length === 0 ? (
-          <div className={`${panelClass} px-5 py-6 text-sm text-zinc-500 dark:text-zinc-400`}>
-            No users found.
-          </div>
-        ) : (
-          <div className="flex flex-col gap-3">
-            {overview.map((entry) => {
-              const isExpanded = expandedUserIds.has(entry.user.id);
-              const onlineCount = entry.machines.filter(
-                (machine) => machine.connection_status === "online"
-              ).length;
-
-              return (
-                <section key={entry.user.id} className={panelClass}>
-                  <button
-                    type="button"
-                    onClick={() => toggleUserExpanded(entry.user.id)}
-                    className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left"
-                  >
-                    <div>
-                      <p className="text-sm font-semibold">
-                        {entry.user.name || entry.user.email}
-                        {entry.user.role === "admin" ? (
-                          <span className="ml-2 rounded-full bg-blue-100 px-2 py-0.5 text-[11px] font-medium text-blue-700 dark:bg-blue-500/10 dark:text-blue-300">
-                            Admin
-                          </span>
-                        ) : null}
-                      </p>
-                      <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-                        {entry.user.email}
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-4 text-sm text-zinc-500 dark:text-zinc-400">
-                      <span>
-                        {entry.machines.length} machine{entry.machines.length === 1 ? "" : "s"}
-                        {" · "}
-                        {onlineCount} online
-                      </span>
-                      {isExpanded ? <FiChevronUp size={16} /> : <FiChevronDown size={16} />}
-                    </div>
-                  </button>
-
-                  {isExpanded ? (
-                    <div className="divide-y divide-zinc-100 border-t border-zinc-200 dark:divide-zinc-800 dark:border-zinc-700">
-                      {entry.machines.length === 0 ? (
-                        <div className="px-5 py-4 text-sm text-zinc-500 dark:text-zinc-400">
-                          No machines registered.
-                        </div>
-                      ) : (
-                        entry.machines.map((machine) => {
-                          const isMachineExpanded = expandedMachineIds.has(machine._id);
-                          const ports = machine.ports || [];
-
-                          return (
-                            <div key={machine._id}>
-                              <button
-                                type="button"
-                                onClick={() => toggleMachineExpanded(machine._id)}
-                                disabled={ports.length === 0}
-                                className="flex w-full flex-wrap items-center justify-between gap-3 px-5 py-3 text-left disabled:cursor-default"
-                              >
-                                <div className="min-w-0">
-                                  <p className="truncate text-sm font-medium">{machine.name}</p>
-                                  <p className="mt-0.5 truncate text-xs text-zinc-500 dark:text-zinc-400">
-                                    {machine.hostname || "No hostname"}
-                                  </p>
-                                </div>
-                                <div className="flex items-center gap-3 text-xs text-zinc-500 dark:text-zinc-400">
-                                  <span>
-                                    {ports.length} port{ports.length === 1 ? "" : "s"}
-                                  </span>
-                                  <StatusBadge status={machine.connection_status} />
-                                  {ports.length > 0 ? (
-                                    isMachineExpanded ? (
-                                      <FiChevronUp size={14} />
-                                    ) : (
-                                      <FiChevronDown size={14} />
-                                    )
-                                  ) : null}
-                                </div>
-                              </button>
-
-                              {isMachineExpanded && ports.length > 0 ? (
-                                <div className="overflow-x-auto px-5 pb-3">
-                                  <table className="w-full min-w-[480px] border-collapse text-xs">
-                                    <thead>
-                                      <tr className="text-left text-zinc-500 dark:text-zinc-400">
-                                        <th className="py-1.5 pr-4 font-medium">Service</th>
-                                        <th className="py-1.5 pr-4 font-medium">External port</th>
-                                        <th className="py-1.5 pr-4 font-medium">Internal target</th>
-                                        <th className="py-1.5 pr-4 font-medium">State</th>
-                                      </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
-                                      {ports.map((port) => (
-                                        <tr key={port._id}>
-                                          <td className="py-1.5 pr-4 text-zinc-700 dark:text-zinc-300">
-                                            {port.service_name || "Unnamed"}
-                                          </td>
-                                          <td className="py-1.5 pr-4 font-mono text-zinc-700 dark:text-zinc-300">
-                                            {port.external_port ?? "—"}
-                                          </td>
-                                          <td className="py-1.5 pr-4 font-mono text-zinc-700 dark:text-zinc-300">
-                                            {port.internal_ip}:{port.internal_port ?? "—"}
-                                          </td>
-                                          <td className="py-1.5 pr-4">
-                                            <span
-                                              className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium ${
-                                                port.enabled
-                                                  ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-500/10 dark:text-emerald-300"
-                                                  : "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-                                              }`}
-                                            >
-                                              {port.enabled ? "Enabled" : "Disabled"}
-                                            </span>
-                                          </td>
-                                        </tr>
-                                      ))}
-                                    </tbody>
-                                  </table>
-                                </div>
-                              ) : null}
-                            </div>
-                          );
-                        })
-                      )}
-                    </div>
-                  ) : null}
-                </section>
-              );
-            })}
-          </div>
-        )}
+  const [overview, setOverview] = useState([]), [loading, setLoading] = useState(true), [error, setError] = useState("");
+  const [query, setQuery] = useState(""), [role, setRole] = useState("all"), [sort, setSort] = useState("name"), [expanded, setExpanded] = useState("");
+  const [page, setPage] = useState(1), [pageSize, setPageSize] = useState(25);
+  const reduced = useReducedMotion();
+  async function load() {
+    setLoading(true);
+    try { const response = await axios.get(apiRoutes.adminOverview); setOverview(response.data?.data || []); setError(""); }
+    catch (err) { setError(err?.response?.data?.detail || "Could not load platform overview."); }
+    finally { setLoading(false); }
+  }
+  useEffect(() => { load(); }, []);
+  useEffect(() => { setPage(1); }, [query, role, sort, pageSize]);
+  const filtered = useMemo(() => overview.filter(entry => (role === "all" || entry.user.role === role) && Number.isFinite(searchScore(query, [entry.user.name, entry.user.email, ...entry.machines.flatMap(m => [m.name, m.hostname, m.local_ip, m.public_ip, ...(m.ports || []).flatMap(p => [p.service_name, p.external_port])])]))).sort((a, b) => sort === "machines" ? b.machines.length - a.machines.length : (a.user.name || a.user.email).localeCompare(b.user.name || b.user.email)), [overview, query, role, sort]);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const visibleStart = (currentPage - 1) * pageSize;
+  const visible = filtered.slice(visibleStart, visibleStart + pageSize);
+  return <div className="workspace-page">
+    <PageHeader title="Platform Overview" />
+    <div className="toolbar flex-row flex-wrap items-center"><div className="min-w-0 basis-full sm:mr-auto sm:basis-72"><SearchField value={query} onChange={setQuery} label="Search platform" placeholder="Search users or machines…" /></div><SearchSelect className="min-w-0 flex-1 sm:w-44 sm:flex-none" label="Filter account role" value={role} onChange={setRole} options={[{value:"all",label:"All roles"},{value:"admin",label:"Administrators"},{value:"user",label:"Members"}]} /><SearchSelect className="min-w-0 flex-1 sm:w-44 sm:flex-none" label="Sort accounts" value={sort} onChange={setSort} options={[{value:"name",label:"Name A–Z"},{value:"machines",label:"Most machines"}]} /><Button type="button" variant="outline" onClick={load} disabled={loading} aria-label="Refresh platform"><IconRefresh size={15} /><span className="hidden sm:inline">Refresh</span></Button></div>
+    {error ? <EmptyState icon={IconServer} title="Platform unavailable" description={error} action={<Button onClick={load}>Try again</Button>} /> : loading ? <p role="status" className="p-6 text-xs text-muted-foreground">Loading accounts…</p> : !filtered.length ? <EmptyState icon={IconUsers} title="No matching accounts" description="Try a different name, email, machine, or port." /> : <section aria-label="Platform results" className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-surface">
+      <div className="data-scroll">
+        <div className="hidden lg:block"><Table aria-label="Platform accounts"><TableHeader><TableRow><TableHead className="w-[40%]">Account</TableHead><TableHead>Role</TableHead><TableHead>Machines</TableHead><TableHead>Online</TableHead><TableHead className="w-40"><span className="sr-only">Details</span></TableHead></TableRow></TableHeader><TableBody>{visible.map(entry => <AccountRow key={entry.user.id} entry={entry} expanded={expanded === entry.user.id} toggle={() => setExpanded(expanded === entry.user.id ? "" : entry.user.id)} reduced={reduced} />)}</TableBody></Table></div>
+        <div className="lg:hidden">{visible.map(entry => <div key={entry.user.id} className="border-b border-border/60"><button type="button" aria-label={`View machines for ${entry.user.name || entry.user.email}`} aria-expanded={expanded === entry.user.id} className="flex w-full items-center justify-between gap-3 p-3 text-left hover:bg-accent/40" onClick={() => setExpanded(expanded === entry.user.id ? "" : entry.user.id)}><div className="min-w-0"><p className="truncate text-sm font-medium">{entry.user.name}</p><p className="mt-1 truncate text-[11px] text-muted-foreground">{entry.user.email}</p><p className="mt-1 text-[11px] text-muted-foreground">{entry.user.role === "admin" ? "Admin" : "Member"} · {entry.machines.length} machines</p></div><IconChevronDown size={16} className={`shrink-0 transition-transform ${expanded === entry.user.id ? "rotate-180" : ""}`} /></button>{expanded === entry.user.id && <Fleet machines={entry.machines} />}</div>)}</div>
       </div>
-    </div>
-  );
+      <footer className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-2">
+        <p className="text-xs text-muted-foreground">Showing {visibleStart + 1} to {Math.min(visibleStart + pageSize, filtered.length)} of {filtered.length} accounts</p>
+        <SearchSelect className="w-36 sm:ml-auto" label="Accounts per page" value={pageSize} onChange={value => setPageSize(Number(value))} options={[10,25,50].map(value => ({value,label:`${value} per page`}))} />
+        <Pagination value={currentPage} onChange={setPage} total={totalPages} size="sm" siblings={0} />
+      </footer>
+    </section>}
+  </div>;
+}
+
+function AccountRow({ entry, expanded, toggle, reduced }) {
+  const online = entry.machines.filter(machine => machine.connection_status === "online").length;
+  return <>
+    <TableRow>
+      <TableCell>
+        <div className="flex items-center gap-3">
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-medium">{(entry.user.name || entry.user.email || "U").slice(0, 1)}</span>
+          <div className="min-w-0"><p className="truncate font-medium">{entry.user.name}</p><p className="mt-0.5 truncate text-[11px] text-muted-foreground">{entry.user.email}</p></div>
+        </div>
+      </TableCell>
+      <TableCell>{entry.user.role === "admin" ? "Administrator" : "Member"}</TableCell>
+      <TableCell>{entry.machines.length}</TableCell>
+      <TableCell><span className={online ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground"}>{online}</span></TableCell>
+      <TableCell>
+        <Button type="button" size="sm" variant="outline" aria-label={`View machines for ${entry.user.name || entry.user.email}`} aria-expanded={expanded} onClick={toggle}>
+          Machines<IconChevronDown size={13} className={expanded ? "rotate-180" : ""} />
+        </Button>
+      </TableCell>
+    </TableRow>
+    {expanded && <TableRow><TableCell colSpan={5} className="p-0"><motion.div initial={reduced ? false : { opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.15 }}><Fleet machines={entry.machines} /></motion.div></TableCell></TableRow>}
+  </>;
+}
+
+function Fleet({ machines }) {
+  return <div className="bg-muted/40 px-3 py-2 sm:px-6">{!machines.length ? <p className="py-4 text-xs text-muted-foreground">No registered machines.</p> : machines.map(m => <details key={m._id} className="border-b border-border/50 last:border-0"><summary className="flex cursor-pointer list-none items-center justify-between gap-3 py-3"><div className="min-w-0"><p className="truncate text-xs font-medium">{m.name}</p><p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">{m.hostname || m.local_ip || "Awaiting client"}</p></div><div className="flex shrink-0 items-center gap-2 text-[10px] text-muted-foreground"><span className={`h-1.5 w-1.5 rounded-full ${m.connection_status === "online" ? "bg-emerald-500" : "bg-zinc-500"}`} />{m.connection_status === "online" ? "Online" : m.connection_status === "disabled" ? "Disabled" : "Offline"}<span className="hidden sm:inline">· {m.ports?.length || 0} ports</span><IconChevronDown size={13} /></div></summary><div className="pb-3">{(m.ports || []).map(p => <div key={p._id} className="flex flex-wrap items-center justify-between gap-2 rounded-md px-2 py-2 text-[11px] hover:bg-muted"><span className="font-medium">{p.service_name || "Unnamed service"}</span><span className="font-mono text-muted-foreground">:{p.external_port} → {p.internal_ip}:{p.internal_port}</span><span className="text-muted-foreground">{p.enabled ? "Enabled" : "Disabled"}</span></div>)}{!m.ports?.length && <p className="text-xs text-muted-foreground">No mapped ports.</p>}</div></details>)}</div>;
 }

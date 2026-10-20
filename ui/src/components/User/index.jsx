@@ -5,47 +5,100 @@ import Home from "./components/Home";
 import Proxy from "./components/Proxy";
 import Settings from "./components/Settings";
 import PlatformOverview from "./components/PlatformOverview";
+import Traffic from "./components/Traffic";
+import Dashboard from "./components/Dashboard";
 import { useRouter } from "next/router";
-import uiRoutes from "@/shared/routes/uiRoutes";
+import { IconSun, IconMoon } from "@tabler/icons-react";
+import useTheme from "@/shared/hooks/useTheme";
+import axios from "axios";
+import toast from "react-hot-toast";
+import { useDispatch } from "react-redux";
+import { authActions } from "@/redux/features/authSlice";
+import apiRoutes from "@/shared/routes/apiRoutes";
 import useAuth from "@/shared/hooks/useAuth";
+import { motion, useReducedMotion } from "framer-motion";
+import { DemoNotice } from "@/shared/demo/DemoProvider";
 
 export default function UserHome() {
+  const dispatch = useDispatch();
   const router = useRouter();
+  const theme = useTheme();
+  const reducedMotion = useReducedMotion();
   const { user } = useAuth();
+  const collapsed = user?.preferences?.nav_collapsed === true;
+  const [savingNavigation, setSavingNavigation] = useState(false);
+  const toggleNavigation = async () => {
+    const previousPreferences = user?.preferences || {};
+    setSavingNavigation(true);
+    dispatch(authActions.updateAccountInfo({
+      preferences: { ...previousPreferences, nav_collapsed: !collapsed },
+    }));
+    try {
+      await axios.patch(apiRoutes.userPreferences, { nav_collapsed: !collapsed });
+    } catch {
+      dispatch(authActions.updateAccountInfo({ preferences: previousPreferences }));
+      toast.error("Could not save navigation preference. Please try again.");
+    } finally {
+      setSavingNavigation(false);
+    }
+  };
   const isAdmin = user?.role === "admin";
-  const [tab, setTab] = useState("Home");
-  const [machineStats, setMachineStats] = useState({
-    registered: 0,
-    online: 0,
-    offline: 0,
-  });
+  const views = { dashboard: "Dashboard", machines: "Home", proxies: "Proxy", traffic: "Traffic", settings: "Settings", platform: "Platform" };
+  const tab = views[router.query.view] || "Dashboard";
+  const setTab = (nextTab) => {
+    const view = Object.keys(views).find(key => views[key] === nextTab) || "machines";
+    router.push({ pathname: "/home", query: { ...(router.query.demo === "1" ? { demo: "1" } : {}), view } }, undefined, { shallow: true, scroll: false });
+  };
+  const [machineStats, setMachineStats] = useState(null);
+
+  if (!router.isReady) {
+    return <div className="workspace flex min-h-screen items-center justify-center text-sm text-zinc-500" role="status">Loading workspace…</div>;
+  }
 
   return (
-    <div className="flex">
+    <div className="workspace flex">
+      <a href="#workspace-content" className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-lg focus:bg-blue-600 focus:p-3 focus:text-white">Skip to content</a>
       <aside
-        className="bg-neutral-100 dark:bg-black flex items-center w-full md:flex-col md:items-stretch md:px-4 fixed inset-x-0 bottom-0 z-10 h-16 md:h-screen md:w-60 2xl:w-84 md:p-4 md:overflow-y-auto md:light-scrollbar dark:md:dark-scrollbar"
+        aria-label="Main navigation"
+        className={`workspace-sidebar flex items-center w-full md:flex-col md:items-stretch fixed inset-x-0 bottom-0 z-20 md:h-dvh md:py-5 md:overflow-y-auto md:light-scrollbar dark:md:dark-scrollbar ${collapsed ? "md:w-16 md:px-2" : "md:w-56 md:px-4"}`}
       >
-        <div
-          className="hidden md:flex flex-shrink-0 space-x-3 items-center mt-2 mb-6 dark:text-neutral-300 cursor-pointer"
-          onClick={() => {
-            // router.push(uiRoutes.root);
-          }}
+        <button
+          type="button"
+          className={`hidden md:flex h-10 flex-shrink-0 items-center mb-5 dark:text-neutral-200 cursor-pointer rounded-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500 ${collapsed ? "justify-center" : "space-x-3"}`}
+          onClick={toggleNavigation}
+          disabled={savingNavigation || !user?.username}
+          aria-label={collapsed ? "Expand navigation" : "Collapse navigation"}
+          aria-expanded={!collapsed}
+          aria-controls="user-navigation"
+          title={collapsed ? "Expand navigation" : "Collapse navigation"}
         >
-          <VscRemoteExplorer size={30} />
-          <p className="font-bold md:text-lg">PortHub</p>
-        </div>
+          <VscRemoteExplorer size={30} className="shrink-0" />
+          {!collapsed && <span className="text-lg font-bold">PortHub</span>}
+        </button>
         <UserNavBar
+          collapsed={collapsed}
           tab={tab}
           setTab={setTab}
           machineStats={machineStats}
           isAdmin={isAdmin}
         />
       </aside>
-      <div className="w-full md:ml-60 2xl:ml-84 md:h-screen md:overflow-y-auto md:light-scrollbar dark:md:dark-scrollbar">
+      <div className={`workspace-body w-full min-w-0 ${collapsed ? "md:ml-16" : "md:ml-56"}`}>
+        <DemoNotice />
+        <div className="workspace-topbar">
+          <div className="flex items-center gap-2"><VscRemoteExplorer size={22} /><span className="text-sm font-semibold">PortHub</span></div>
+          <button type="button" className="flex h-9 w-9 items-center justify-center rounded-md text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800" aria-label="Toggle color theme" onClick={() => theme.toggleColorScheme()}>{theme.isDarkTheme ? <IconSun size={19} /> : <IconMoon size={19} />}</button>
+        </div>
+        <main id="workspace-content" tabIndex={-1}>
+        <motion.div key={tab} initial={reducedMotion ? false : { opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.16 }} className="h-full min-h-0">
+        {tab === "Dashboard" && <Dashboard />}
         {tab === "Home" && <Home onStatsChange={setMachineStats} />}
         {tab === "Proxy" && <Proxy />}
+        {tab === "Traffic" && <Traffic />}
         {tab === "Settings" && <Settings />}
         {tab === "Platform" && isAdmin && <PlatformOverview />}
+        </motion.div>
+        </main>
       </div>
       {/* <div className="hidden lg:block w-[26rem] 2xl:w-[25%]- 2xl:w-[30rem] h-screen bg-neutral-100 dark:bg-black overflow-y-hidden md:light-scrollbar dark:md:dark-scrollbar"></div> */}
     </div>

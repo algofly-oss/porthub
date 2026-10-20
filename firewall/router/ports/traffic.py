@@ -22,27 +22,7 @@ async def snapshot(data: TrafficSnapshotRequest):
             response[port] = []
             continue
 
-        response[port] = [
-            {
-                "timestamp": ts,
-                "in_bytes": in_bytes,
-                "out_bytes": out_bytes,
-                "drop_bytes": drop_bytes,
-                "blocked_ips": blocked_ips,
-                "incoming_ips": incoming_ips,
-                "outgoing_ips": outgoing_ips,
-            }
-            for (
-                ts,
-                in_bytes,
-                out_bytes,
-                drop_bytes,
-                blocked_ips,
-                incoming_ips,
-                outgoing_ips,
-            ) in stat["history"]
-            if ts >= cutoff
-        ]
+        response[port] = [sample for sample in stat["history"] if sample["timestamp"] >= cutoff]
 
     return {
         "msg": "Traffic snapshot fetched successfully",
@@ -63,27 +43,11 @@ async def ws_traffic(ws: WebSocket):
                 if not stat["history"]:
                     continue
 
-                (
-                    ts,
-                    in_bytes,
-                    out_bytes,
-                    drop_bytes,
-                    blocked_ips,
-                    incoming_ips,
-                    outgoing_ips,
-                ) = stat["history"][-1]
-                if ts < cutoff:
+                sample = stat["history"][-1]
+                if sample["timestamp"] < cutoff:
                     continue
 
-                payload[port] = {
-                    "timestamp": ts,
-                    "in_bytes": in_bytes,
-                    "out_bytes": out_bytes,
-                    "drop_bytes": drop_bytes,
-                    "blocked_ips": blocked_ips,
-                    "incoming_ips": incoming_ips,
-                    "outgoing_ips": outgoing_ips,
-                }
+                payload[port] = sample
 
             if payload:
                 await ws.send_json(payload)

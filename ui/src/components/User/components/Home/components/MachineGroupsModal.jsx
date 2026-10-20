@@ -1,662 +1,80 @@
-import { useEffect, useMemo, useState } from "react";
-import {
-  Button,
-  Modal,
-  Pagination,
-  Stack,
-  Text,
-  TextInput,
-  Group,
-} from "@mantine/core";
-import { useMantineColorScheme } from "@mantine/core";
-import {
-  IconTrash,
-  IconArrowLeft,
-  IconFolder,
-  IconUsers,
-} from "@tabler/icons-react";
-import { BsCircleFill } from "react-icons/bs";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { motion, useReducedMotion } from "framer-motion";
+import { IconFolder, IconTrash } from "@tabler/icons-react";
+import WorkspaceDrawer from "@/components/ui/workspace-drawer";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import SearchSelect from "@/components/ui/search-select";
 
-const GROUPS_PER_PAGE = 5;
-const MACHINES_PER_PAGE = 5;
-
-const getInputClassName = (isDark) =>
-  `w-full rounded-md !border-0 px-3 py-2 text-sm !shadow-none !outline-none !ring-0 transition-colors focus:!border-0 focus:!shadow-none focus:!outline-none focus:!ring-0 ${
-    isDark
-      ? "!bg-zinc-800 !text-zinc-100 placeholder:!text-zinc-500"
-      : "!bg-zinc-50 !text-zinc-900 placeholder:!text-zinc-400"
-  }`;
-
-const getLabelClassName = (isDark) =>
-  `mb-1.5 block text-sm font-semibold ${isDark ? "text-zinc-100" : "text-zinc-900"}`;
-
-export default function MachineGroupsModal({
-  opened,
-  onClose,
-  groups,
-  machines = [],
-  onCreateGroup,
-  onRenameGroup,
-  onDeleteGroup,
-  onAddMachineToGroup,
-  onRemoveMachineFromGroup,
-}) {
-  const { colorScheme } = useMantineColorScheme();
-  const isDark = colorScheme === "dark";
-  const [selectedGroupId, setSelectedGroupId] = useState(null);
-  const [isCreatingGroupView, setIsCreatingGroupView] = useState(false);
-  const [editName, setEditName] = useState("");
-  const [savingId, setSavingId] = useState(null);
-  const [deletingId, setDeletingId] = useState(null);
-  const [groupPendingDelete, setGroupPendingDelete] = useState(null);
-  const [machineQuery, setMachineQuery] = useState("");
+export default function MachineGroupsModal({ opened, onClose, groups = [], machines = [], onCreateGroup, onRenameGroup, onDeleteGroup, onAddMachineToGroup, onRemoveMachineFromGroup }) {
+  const [selectedId, setSelectedId] = useState(null);
+  const [name, setName] = useState("");
+  const [newName, setNewName] = useState("");
+  const [query, setQuery] = useState("");
   const [groupQuery, setGroupQuery] = useState("");
-  const [membershipSavingMachineId, setMembershipSavingMachineId] = useState(null);
-  const [groupsPage, setGroupsPage] = useState(1);
-  const [machinesPage, setMachinesPage] = useState(1);
-
+  const [busy, setBusy] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [error, setError] = useState("");
+  const reducedMotion = useReducedMotion();
+  const groupList = useRef(null);
+  const selected = groups.find(group => group._id === selectedId);
   useEffect(() => {
-    if (!opened) {
-      setSelectedGroupId(null);
-      setIsCreatingGroupView(false);
-      setEditName("");
-      setGroupPendingDelete(null);
-      setMachineQuery("");
-      setGroupQuery("");
-      setMembershipSavingMachineId(null);
-      setGroupsPage(1);
-      setMachinesPage(1);
-    }
-  }, [opened]);
-
-  useEffect(() => {
-    if (
-      selectedGroupId &&
-      !groups.some((group) => group._id === selectedGroupId)
-    ) {
-      setSelectedGroupId(null);
-      setIsCreatingGroupView(false);
-      setEditName("");
-      setMachineQuery("");
-      setGroupQuery("");
-      setMachinesPage(1);
-    }
-  }, [groups, selectedGroupId]);
-
-  const modalClassNames = isDark
-    ? {
-        content: "!border !border-zinc-700 !bg-zinc-900",
-        header: "!border-b !border-zinc-800 !bg-zinc-900",
-        title: "font-bold !text-zinc-100",
-        close: "!text-zinc-400 hover:!bg-zinc-800",
-        body: "!bg-zinc-900 !pt-3",
-      }
-    : {
-        content: "!border !border-zinc-200 !bg-white",
-        header: "!border-b !border-zinc-200 !bg-white",
-        title: "font-bold !text-zinc-900",
-        close: "!text-zinc-500 hover:!bg-zinc-100",
-        body: "!bg-white !pt-3",
-      };
-
-  const btnSecondary = isDark
-    ? "!border-zinc-700 !bg-zinc-800 !text-zinc-100 hover:!bg-zinc-700"
-    : "!border-zinc-300 !bg-white !text-zinc-900 hover:!bg-zinc-50";
-
-  const selectedGroup =
-    groups.find((group) => group._id === selectedGroupId) || null;
-  const groupMachineCountById = useMemo(
-    () =>
-      Object.fromEntries(
-        groups.map((group) => [
-          group._id,
-          machines.filter((machine) => (machine.groupIds || []).includes(group._id)).length,
-        ])
-      ),
-    [groups, machines]
-  );
-  const filteredMachines = useMemo(() => {
-    const normalizedQuery = machineQuery.trim().toLowerCase();
-    if (!normalizedQuery) {
-      return machines;
-    }
-
-    return machines.filter((machine) => {
-      const name = (machine.name || "").toLowerCase();
-      const hostname = (machine.hostname || "").toLowerCase();
-      return name.includes(normalizedQuery) || hostname.includes(normalizedQuery);
-    });
-  }, [machineQuery, machines]);
-  const filteredGroups = useMemo(() => {
-    const normalizedQuery = groupQuery.trim().toLowerCase();
-    if (!normalizedQuery) {
-      return groups;
-    }
-
-    return groups.filter((group) =>
-      (group.name || "").toLowerCase().includes(normalizedQuery)
-    );
-  }, [groupQuery, groups]);
-  const totalGroupPages = Math.max(1, Math.ceil(filteredGroups.length / GROUPS_PER_PAGE));
-  const paginatedGroups = filteredGroups.slice(
-    (groupsPage - 1) * GROUPS_PER_PAGE,
-    groupsPage * GROUPS_PER_PAGE
-  );
-  const totalMachinePages = Math.max(
-    1,
-    Math.ceil(filteredMachines.length / MACHINES_PER_PAGE)
-  );
-  const paginatedMachines = filteredMachines.slice(
-    (machinesPage - 1) * MACHINES_PER_PAGE,
-    machinesPage * MACHINES_PER_PAGE
-  );
-
-  useEffect(() => {
-    if (groupsPage > totalGroupPages) {
-      setGroupsPage(totalGroupPages);
-    }
-  }, [groupsPage, totalGroupPages]);
-
-  useEffect(() => {
-    if (machinesPage > totalMachinePages) {
-      setMachinesPage(totalMachinePages);
-    }
-  }, [machinesPage, totalMachinePages]);
-
-  const startEdit = (g) => {
-    setSelectedGroupId(g._id);
-    setIsCreatingGroupView(false);
-    setEditName(g.name || "");
-    setMachineQuery("");
-    setMachinesPage(1);
-  };
-
-  const startCreate = () => {
-    setSelectedGroupId(null);
-    setIsCreatingGroupView(true);
-    setEditName("");
-    setMachineQuery("");
-    setMachinesPage(1);
-  };
-
-  const cancelEdit = () => {
-    setSelectedGroupId(null);
-    setIsCreatingGroupView(false);
-    setEditName("");
-    setMachineQuery("");
-    setMachinesPage(1);
-  };
-
-  const saveEdit = async () => {
-    const trimmed = editName.trim();
-    if (!trimmed) {
-      return;
-    }
-    setSavingId(selectedGroupId || "__new__");
-    try {
-      if (!selectedGroupId) {
-        const createdGroup = await onCreateGroup(trimmed);
-        if (createdGroup?._id) {
-          setSelectedGroupId(createdGroup._id);
-          setIsCreatingGroupView(false);
-          setEditName(createdGroup.name || trimmed);
-        }
-        return;
-      }
-
-      const ok = await onRenameGroup(selectedGroupId, trimmed);
-      if (ok && selectedGroupId) {
-        setEditName(trimmed);
-      }
-    } finally {
-      setSavingId(null);
+    if (opened && !groups.some(group => group._id === selectedId)) setSelectedId(groups[0]?._id || null);
+  }, [opened, groups, selectedId]);
+  useEffect(() => { setName(selected?.name || ""); setConfirmDelete(false); setError(""); }, [selected?._id, selected?.name]);
+  const assigned = machines.filter(machine => (machine.groupIds || []).includes(selectedId)).length;
+  const visible = machines.filter(machine => `${machine.name} ${machine.hostname}`.toLowerCase().includes(query.toLowerCase()));
+  const visibleGroups = groups.filter(group => group.name.toLowerCase().includes(groupQuery.trim().toLowerCase()));
+  const groupCounts = useMemo(() => {
+    const counts = new Map();
+    machines.forEach(machine => (machine.groupIds || []).forEach(id => counts.set(id, (counts.get(id) || 0) + 1)));
+    return counts;
+  }, [machines]);
+  const run = async (key, action) => {
+    const focused = document.activeElement;
+    setBusy(key); setError("");
+    try { await action(); } catch (err) { setError(err?.response?.data?.detail || "Could not save. Please try again."); }
+    finally {
+      setBusy(null);
+      requestAnimationFrame(() => {
+        const dialog = groupList.current?.closest('[role="dialog"]');
+        if (focused?.isConnected && dialog?.contains(focused)) focused.focus();
+        else dialog?.focus();
+      });
     }
   };
-
-  const handleToggleMachineMembership = async (machineId, isAssigned) => {
-    if (!selectedGroupId || membershipSavingMachineId) {
-      return;
-    }
-
-    setMembershipSavingMachineId(machineId);
-    try {
-      if (isAssigned) {
-        await onRemoveMachineFromGroup(machineId, selectedGroupId);
-      } else {
-        await onAddMachineToGroup(machineId, selectedGroupId);
-      }
-    } finally {
-      setMembershipSavingMachineId(null);
-    }
-  };
-
-  const handleDelete = async () => {
-    if (!groupPendingDelete?._id) {
-      return;
-    }
-
-    setDeletingId(groupPendingDelete._id);
-    try {
-      await onDeleteGroup(groupPendingDelete._id);
-      setGroupPendingDelete(null);
-    } finally {
-      setDeletingId(null);
-    }
-  };
-
-  return (
-    <Modal
-      opened={opened}
-      onClose={onClose}
-      title={
-        selectedGroup
-          ? `Edit ${selectedGroup.name}`
-          : isCreatingGroupView
-            ? "Create group"
-            : "Machine groups"
-      }
-      centered
-      radius="md"
-      size="md"
-      overlayProps={{ blur: 3 }}
-      classNames={modalClassNames}
-      closeOnEscape={false}
-    >
-      <div
-        className={`transition-all duration-150 ${
-          groupPendingDelete ? "pointer-events-none scale-[0.985] blur-[2px] opacity-60" : ""
-        }`}
-      >
-        <Stack spacing="xs">
-        {selectedGroup || isCreatingGroupView ? (
-          <>
-            <div className="flex items-center justify-between gap-3">
-              <Button
-                type="button"
-                variant="subtle"
-                leftIcon={<IconArrowLeft size={14} />}
-                onClick={cancelEdit}
-                classNames={{
-                  root: isDark
-                    ? "!px-0 !text-zinc-400 hover:!bg-transparent hover:!text-zinc-200"
-                    : "!px-0 !text-zinc-600 hover:!bg-transparent hover:!text-zinc-900",
-                }}
-                >
-                  Back to groups
-                </Button>
-              {selectedGroup ? (
-                <Button
-                  type="button"
-                  color="red"
-                  variant="subtle"
-                  leftIcon={<IconTrash size={14} />}
-                onClick={() => setGroupPendingDelete(selectedGroup)}
-                classNames={{
-                  root: isDark
-                    ? "!px-0 !text-red-700 hover:!bg-transparent hover:!text-red-600"
-                    : "!px-0 !text-red-700 hover:!bg-transparent hover:!text-red-800",
-                }}
-              >
-                  Delete group
-                </Button>
-              ) : <span />}
-            </div>
-
-            <div>
-              <label htmlFor="edit-group-name" className={getLabelClassName(isDark)}>
-                Group name
-              </label>
-              <Group spacing="xs" align="flex-end" noWrap>
-                <TextInput
-                  id="edit-group-name"
-                  value={editName}
-                  onChange={(e) => setEditName(e.currentTarget.value)}
-                  classNames={{ input: getInputClassName(isDark) }}
-                  className="flex-1 min-w-0"
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      saveEdit();
-                    }
-                  }}
-                />
-                <Button
-                  type="button"
-                  onClick={saveEdit}
-                  loading={savingId === (selectedGroup?._id || "__new__")}
-                  disabled={
-                    !editName.trim() ||
-                    (selectedGroup ? editName.trim() === (selectedGroup.name || "") : false)
-                  }
-                  classNames={{
-                    root:
-                      isDark
-                        ? "!bg-blue-600 !text-blue-50 hover:!bg-blue-700 disabled:!border disabled:!border-zinc-700 disabled:!bg-zinc-900 disabled:!text-zinc-500 disabled:!opacity-100 shrink-0"
-                        : "!bg-blue-600 !text-blue-50 hover:!bg-blue-700 disabled:!border disabled:!border-zinc-300 disabled:!bg-zinc-100 disabled:!text-zinc-500 disabled:!opacity-100 shrink-0",
-                  }}
-                >
-                  {selectedGroup ? "Save" : "Create"}
-                </Button>
-              </Group>
-            </div>
-
-            <div>
-              <label htmlFor="group-machine-search" className={getLabelClassName(isDark)}>
-                Machines
-              </label>
-              <TextInput
-                id="group-machine-search"
-                placeholder="Search machines"
-                value={machineQuery}
-                onChange={(e) => {
-                  setMachineQuery(e.currentTarget.value);
-                  setMachinesPage(1);
-                }}
-                classNames={{ input: getInputClassName(isDark) }}
-              />
-            </div>
-
-            <div
-              className={`rounded-lg border ${
-                isDark ? "border-zinc-700 divide-zinc-800" : "border-zinc-200 divide-zinc-200"
-              } divide-y max-h-80 overflow-y-auto pr-1`}
-              style={{ scrollbarGutter: "stable" }}
-            >
-              {!selectedGroup ? (
-                <p className={`px-3 py-4 text-sm ${isDark ? "text-zinc-500" : "text-zinc-500"}`}>
-                  Create the group first, then you can assign machines here.
-                </p>
-              ) : filteredMachines.length === 0 ? (
-                <p className={`px-3 py-4 text-sm ${isDark ? "text-zinc-500" : "text-zinc-500"}`}>
-                  No machines match this search.
-                </p>
-              ) : (
-                paginatedMachines.map((machine) => {
-                  const isAssigned = (machine.groupIds || []).includes(selectedGroup._id);
-                  const isWorking = membershipSavingMachineId === machine.id;
-                  const resolvedStatus =
-                    machine.connectionStatus ||
-                    (machine.enabled === false
-                      ? "disabled"
-                      : machine.isActive
-                        ? "online"
-                        : "offline");
-                  const isDisabled = resolvedStatus === "disabled";
-                  const isAuthRequired = resolvedStatus === "auth_required";
-                  const isOnline = resolvedStatus === "online";
-
-                  return (
-                    <div
-                      key={machine.id}
-                      className={`flex items-center gap-3 px-3 py-2.5 ${
-                        isDark ? "bg-zinc-900/50" : "bg-white"
-                      }`}
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="grid min-w-0 grid-cols-[8px_minmax(0,1fr)] items-start gap-x-2">
-                          <BsCircleFill
-                            size={8}
-                            className={`row-span-2 mt-1.5 ${
-                              isOnline
-                                ? "text-emerald-500"
-                                : isDisabled
-                                  ? "text-zinc-400"
-                                  : isAuthRequired
-                                    ? "text-amber-500"
-                                    : "text-red-400"
-                            }`}
-                            aria-label={
-                              isOnline
-                                ? "Online"
-                                : isDisabled
-                                  ? "Disabled"
-                                  : isAuthRequired
-                                    ? "Auth required"
-                                : "Offline"
-                            }
-                          />
-                          <div
-                            className={`truncate text-sm font-medium ${
-                              isDark ? "text-zinc-100" : "text-zinc-900"
-                            }`}
-                          >
-                            {machine.name || "Untitled machine"}
-                          </div>
-                          <div
-                            className={`truncate text-xs ${
-                              isDark ? "text-zinc-500" : "text-zinc-500"
-                            }`}
-                          >
-                          {machine.hostname || "No hostname"}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="flex shrink-0 flex-col items-end gap-2">
-                        <Button
-                          type="button"
-                          size="xs"
-                          variant="filled"
-                          loading={isWorking}
-                          onClick={() =>
-                            handleToggleMachineMembership(machine.id, isAssigned)
-                          }
-                          classNames={{
-                            root: isAssigned
-                              ? isDark
-                                ? "!min-w-[5.5rem] !justify-center !bg-red-800 !text-red-50 hover:!bg-red-700"
-                                : "!min-w-[5.5rem] !justify-center !bg-red-200 !text-red-800 hover:!bg-red-300"
-                              : isDark
-                                ? "!min-w-[5.5rem] !justify-center !bg-blue-800 !text-blue-50 hover:!bg-blue-700"
-                                : "!min-w-[5.5rem] !justify-center !bg-blue-200 !text-blue-800 hover:!bg-blue-300",
-                          }}
-                        >
-                          {isAssigned ? "Remove" : "Add"}
-                        </Button>
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-
-            {selectedGroup && filteredMachines.length > MACHINES_PER_PAGE ? (
-              <div className="flex justify-end">
-                <Pagination
-                  value={machinesPage}
-                  onChange={setMachinesPage}
-                  total={totalMachinePages}
-                  size="sm"
-                  radius="md"
-                  withEdges
-                  siblings={1}
-                  classNames={{
-                    control:
-                      "!border-zinc-300 !bg-white !text-zinc-700 hover:!bg-zinc-50 data-[active=true]:!border-blue-600 data-[active=true]:!bg-blue-600 data-[active=true]:!text-blue-50 dark:!border-zinc-700 dark:!bg-zinc-900 dark:!text-zinc-200 dark:hover:!bg-zinc-800 dark:data-[active=true]:!border-blue-500 dark:data-[active=true]:!bg-blue-600",
-                  }}
-                />
-              </div>
-            ) : null}
-
-            <div className="flex justify-end">
-              <Button
-                type="button"
-                variant="default"
-                onClick={cancelEdit}
-                classNames={{ root: btnSecondary }}
-              >
-                Done
-              </Button>
-            </div>
-          </>
-        ) : (
-          <>
-        <Text size="sm" className={isDark ? "!text-zinc-400" : "!text-zinc-600"}>
-          Groups help organize machines. Deleting a group does not delete machines; they
-          become ungrouped.
-        </Text>
-
-        <div className="flex items-center justify-between gap-3">
-          <Text size="sm" className={isDark ? "!text-zinc-500" : "!text-zinc-500"}>
-            Select a group to manage its machines.
-          </Text>
-          <Button
-            type="button"
-            onClick={startCreate}
-            classNames={{
-              root:
-                "!bg-blue-600 !text-blue-50 hover:!bg-blue-700",
-            }}
-          >
-            Create group
-          </Button>
+  return <WorkspaceDrawer opened={opened} onClose={onClose} title="Machine Groups" size="xl" closeOnEscape={!busy} closeOnClickOutside={!busy}>
+    <p className="mb-4 text-sm text-muted-foreground">Choose a group and check the machines that belong to it.</p>
+    <div className="group-workspace">
+      <aside className="flex min-h-0 min-w-0 flex-col gap-3 p-3">
+        <form className="space-y-2" onSubmit={event => { event.preventDefault(); if (newName.trim()) run("create", async () => { const created = await onCreateGroup(newName.trim()); if (created?._id) { setSelectedId(created._id); setNewName(""); setGroupQuery(""); } }); }}>
+          <label htmlFor="new-group-name" className="text-xs font-medium text-muted-foreground">Create a group</label>
+          <Input id="new-group-name" aria-label="New group name" placeholder="Group name…" maxLength={80} value={newName} onChange={event => setNewName(event.target.value)} />
+          <Button type="submit" size="sm" className="w-full" disabled={!!busy || !newName.trim()}>Create group</Button>
+        </form>
+        <div className="md:hidden"><SearchSelect label="Choose a group" value={selectedId || ""} onChange={setSelectedId} disabled={!!busy} options={groups.map(group => ({value:group._id,label:group.name}))} /></div>
+        <Input aria-label="Search groups" placeholder="Search groups…" className="hidden md:flex" value={groupQuery} onChange={event=>setGroupQuery(event.target.value)} />
+        <nav ref={groupList} aria-label="Machine groups" className="hidden min-h-0 flex-1 flex-col gap-1 overflow-y-auto overscroll-contain md:flex">
+          {visibleGroups.map(group => <button key={group._id} type="button" title={group.name} disabled={!!busy} onClick={() => setSelectedId(group._id)} aria-pressed={selectedId === group._id} className={`flex shrink-0 items-center gap-2 rounded-md px-3 py-2 text-left text-sm ${selectedId === group._id ? "bg-control text-foreground" : "text-muted-foreground hover:bg-accent"}`}><IconFolder size={16} className="shrink-0" /><span className="min-w-0 flex-1 truncate">{group.name}</span><span className="text-xs text-muted-foreground">{groupCounts.get(group._id) || 0}</span></button>)}
+          {!visibleGroups.length && <p className="p-2 text-sm text-muted-foreground">No matching groups.</p>}
+        </nav>
+      </aside>
+      {selected ? <motion.section key={selectedId} initial={{ opacity: reducedMotion ? 1 : 0, y: reducedMotion ? 0 : 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: .2 }} className="flex min-h-0 min-w-0 flex-col gap-3">
+        <form className="flex items-center gap-2" onSubmit={event => { event.preventDefault(); if (name.trim()) run("rename", () => onRenameGroup(selectedId, name.trim())); }}>
+          <Input aria-label="Group name" value={name} maxLength={80} onChange={event => setName(event.target.value)} />
+          {name.trim() !== selected.name && <Button variant="secondary" disabled={!!busy || !name.trim()} type="submit">Save</Button>}
+          <Button type="button" variant="ghost" size="icon" aria-label="Delete group" onClick={() => setConfirmDelete(value => !value)} disabled={!!busy}><IconTrash size={17} /></Button>
+        </form>
+        {confirmDelete && <div className="rounded-lg bg-red-500/10 p-3 text-sm"><p className="mb-2">Delete this group? Its machines and ports will stay untouched.</p><div className="flex gap-2"><Button variant="destructive" disabled={!!busy} onClick={() => run("delete", async () => { await onDeleteGroup(selectedId); setConfirmDelete(false); requestAnimationFrame(() => groupList.current?.closest('[role="dialog"]')?.focus()); })}>Delete group</Button><Button variant="ghost" onClick={() => setConfirmDelete(false)}>Cancel</Button></div></div>}
+        <div className="flex flex-wrap items-center justify-between gap-1 text-xs text-muted-foreground"><span>{assigned} of {machines.length} machines selected</span><span role="status">{busy ? "Saving…" : "Changes save automatically"}</span></div>
+        <Input aria-label="Search group machines" placeholder="Find a machine…" value={query} onChange={event => setQuery(event.target.value)} />
+        <div className="data-scroll" aria-label="Group membership">
+          {visible.map(machine => { const checked = (machine.groupIds || []).includes(selectedId); return <label key={machine.id} className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-3 transition-colors hover:bg-muted"><Checkbox aria-label={`Include ${machine.name || machine.hostname}`} checked={checked} disabled={!!busy} onCheckedChange={() => run(machine.id, () => checked ? onRemoveMachineFromGroup(machine.id, selectedId) : onAddMachineToGroup(machine.id, selectedId))} /><span className="min-w-0"><span className="block truncate text-sm font-medium">{machine.name || machine.hostname}</span><span className="block truncate text-xs text-muted-foreground">{machine.hostname}</span></span></label>; })}
+          {!visible.length && <p className="p-4 text-sm text-muted-foreground">No machines found.</p>}
         </div>
-
-        <TextInput
-          placeholder="Search groups"
-          value={groupQuery}
-          onChange={(e) => {
-            setGroupQuery(e.currentTarget.value);
-            setGroupsPage(1);
-          }}
-          classNames={{ input: getInputClassName(isDark) }}
-        />
-
-        <div
-          className={`rounded-lg border ${
-            isDark ? "border-zinc-700 divide-zinc-800" : "border-zinc-200 divide-zinc-200"
-          } divide-y max-h-80 overflow-y-auto pr-1`}
-          style={{ scrollbarGutter: "stable" }}
-        >
-          {filteredGroups.length === 0 ? (
-            <p className={`px-3 py-4 text-sm ${isDark ? "text-zinc-500" : "text-zinc-500"}`}>
-              {groups.length === 0 ? "No groups yet. Create one above." : "No groups match this search."}
-            </p>
-          ) : (
-            paginatedGroups.map((g) => (
-              <button
-                key={g._id}
-                type="button"
-                onClick={() => startEdit(g)}
-                className={`flex w-full items-center justify-between gap-3 px-3 py-3 text-left transition ${
-                  isDark
-                    ? "bg-transparent hover:bg-zinc-800/50"
-                    : "bg-transparent hover:bg-zinc-50"
-                }`}
-              >
-                <span className="flex min-w-0 items-center gap-2 truncate">
-                  <span
-                    className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${
-                      isDark ? "bg-zinc-800/80 text-zinc-300" : "bg-zinc-100 text-zinc-500"
-                    }`}
-                  >
-                    <IconFolder size={15} />
-                  </span>
-                  <span
-                    className={`truncate text-sm font-medium ${
-                      isDark ? "text-zinc-100" : "text-zinc-900"
-                    }`}
-                  >
-                    {g.name}
-                  </span>
-                </span>
-                <span className="flex shrink-0 items-center gap-1.5 text-xs text-zinc-500">
-                  <IconUsers size={13} />
-                  <span>{groupMachineCountById[g._id] || 0} Peer(s)</span>
-                </span>
-              </button>
-            ))
-          )}
-        </div>
-
-        {filteredGroups.length > GROUPS_PER_PAGE ? (
-          <div className="flex justify-end">
-            <Pagination
-              value={groupsPage}
-              onChange={setGroupsPage}
-              total={totalGroupPages}
-              size="sm"
-              radius="md"
-              withEdges
-              siblings={1}
-              classNames={{
-                control:
-                  "!border-zinc-300 !bg-white !text-zinc-700 hover:!bg-zinc-50 data-[active=true]:!border-blue-600 data-[active=true]:!bg-blue-600 data-[active=true]:!text-blue-50 dark:!border-zinc-700 dark:!bg-zinc-900 dark:!text-zinc-200 dark:hover:!bg-zinc-800 dark:data-[active=true]:!border-blue-500 dark:data-[active=true]:!bg-blue-600",
-              }}
-            />
-          </div>
-        ) : null}
-
-        <div className="flex justify-end">
-          <Button
-            type="button"
-            variant="default"
-            onClick={onClose}
-            classNames={{ root: btnSecondary }}
-          >
-            Close
-          </Button>
-        </div>
-          </>
-        )}
-        </Stack>
-      </div>
-
-      <Modal
-        opened={Boolean(groupPendingDelete)}
-        onClose={() => {
-          if (!deletingId) {
-            setGroupPendingDelete(null);
-          }
-        }}
-        closeOnClickOutside={!deletingId}
-        closeOnEscape={!deletingId}
-        title="Delete group"
-        centered
-        radius="md"
-        size="sm"
-        overlayProps={{ blur: 3 }}
-        classNames={modalClassNames}
-        withinPortal
-      >
-        {groupPendingDelete ? (
-          <Stack spacing="md">
-            <Text size="sm" className={isDark ? "!text-zinc-300" : "!text-zinc-700"}>
-              Delete{" "}
-              <span className="font-semibold text-zinc-900 dark:text-zinc-100">
-                {groupPendingDelete.name}
-              </span>
-              ?
-            </Text>
-            <Text size="sm" className={isDark ? "!text-zinc-400" : "!text-zinc-600"}>
-              This deletes only the group. Machines inside it are not deleted, but they
-              will become ungrouped.
-            </Text>
-            <div className="flex justify-end gap-2">
-              <Button
-                type="button"
-                variant="default"
-                disabled={Boolean(deletingId)}
-                onClick={() => setGroupPendingDelete(null)}
-                classNames={{ root: btnSecondary }}
-              >
-                Cancel
-              </Button>
-              <Button
-                type="button"
-                color="red"
-                loading={Boolean(deletingId)}
-                onClick={handleDelete}
-                classNames={{
-                  root:
-                    "!bg-red-600 !text-red-50 hover:!bg-red-700 disabled:!bg-red-400",
-                }}
-              >
-                Delete group
-              </Button>
-            </div>
-          </Stack>
-        ) : null}
-      </Modal>
-    </Modal>
-  );
+      </motion.section> : <div className="flex items-center justify-center text-sm text-muted-foreground">Create a group to organize your machines.</div>}
+    </div>
+    {error && <p role="alert" className="mt-3 text-sm text-red-600 dark:text-red-400">{error}</p>}
+  </WorkspaceDrawer>;
 }

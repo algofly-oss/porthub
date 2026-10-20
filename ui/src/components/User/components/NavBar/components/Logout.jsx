@@ -1,9 +1,11 @@
 import { useState } from "react";
-import { Button, Modal, Text } from "@mantine/core";
+import { Button } from "@/components/ui/button";
+import { Dialog as Modal } from "@/components/ui/dialog";
 import { BiLogOut } from "react-icons/bi";
 import useAuth from "@/shared/hooks/useAuth";
+import DarkThemeToggle from "./DarkThemeToggle";
 
-export default function Logout() {
+export default function Logout({ collapsed = false }) {
   const auth = useAuth();
   const profilePictureShort = auth?.user?.profile_picture?.data_url || null;
   const [isLogoutConfirmOpen, setIsLogoutConfirmOpen] = useState(false);
@@ -15,34 +17,36 @@ export default function Logout() {
 
   return (
     <>
-      <div>
-        <div className="flex items-center my-4 space-x-4 drop-shadow-md">
+      <div className="flex min-w-0 items-center gap-1">
+        <div className="flex min-w-0 flex-1 items-center gap-2" title={auth?.user?.username}>
           {profilePictureShort ? (
             <img
               src={profilePictureShort}
               alt="profile"
-              className="h-12 w-12 object-cover rounded-full"
+              className="h-7 w-7 shrink-0 object-cover rounded-full"
             />
           ) : (
-            <div className="flex items-center justify-center h-12 w-12 rounded-full bg-blue-500 dark:bg-blue-700">
-              <p className="text-2xl text-white">
+            <div className="flex shrink-0 items-center justify-center h-7 w-7 rounded-full bg-primary">
+              <p className="text-base text-white">
                 {(auth?.user?.name || " ").slice(0, 1)}
               </p>
             </div>
           )}
-          <div>
-            <p className="text-sm font-bold">{auth?.user?.name}</p>
-            <p className="text-xs text-neutral-500 dark:text-neutral-400">
-              {auth?.user?.username}
-            </p>
+          <div className={collapsed ? "hidden" : "min-w-0"}>
+            <p className="truncate text-xs font-semibold" title={auth?.user?.name}>{auth?.user?.name}</p>
           </div>
         </div>
-        <div
-          className="flex items-center space-x-4 bg-zinc-200 dark:bg-zinc-900 p-4 rounded-lg text-sm mt-2 justify-center cursor-pointer"
+        <div className="flex shrink-0 items-center">
+        <DarkThemeToggle compact />
+        <button
+          type="button"
+          title="Log out"
+          aria-label="Log out"
+          className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
           onClick={() => setIsLogoutConfirmOpen(true)}
         >
           <BiLogOut size={20} />
-          <p className="font-medium">Log out</p>
+        </button>
         </div>
       </div>
 
@@ -52,16 +56,16 @@ export default function Logout() {
         title="Log out?"
         centered
       >
-        <Text size="sm" c="dimmed">
+        <p className="text-sm leading-6 text-muted-foreground">
           You will be signed out of your current session.
-        </Text>
+        </p>
         <div className="mt-5 flex justify-end gap-3">
-          <Button variant="default" onClick={() => setIsLogoutConfirmOpen(false)}>
+          <Button variant="secondary" onClick={() => setIsLogoutConfirmOpen(false)}>
             Cancel
           </Button>
           <Button
             onClick={handleConfirmLogout}
-            className="!bg-red-600 !text-red-50 hover:!bg-red-700"
+            variant="destructive"
           >
             Log out
           </Button>

@@ -35,6 +35,7 @@ async def update_traffic_route(data: TrafficRoute, request: Request):
         {
             "$set": {
                 "name": name,
+                "group": data.group.strip(),
                 "description": (data.description or "").strip(),
                 "hosts": hosts,
                 "target_mode": data.target_mode,

@@ -6,6 +6,7 @@ let apiRoutes = {
   signIn: "/auth/signin",
   signOut: "/auth/signout",
   accountInfo: "/auth/me",
+  userPreferences: "/auth/preferences",
   updateAccount: "/auth/account",
   updatePassword: "/auth/password",
   authSettings: "/auth/settings",

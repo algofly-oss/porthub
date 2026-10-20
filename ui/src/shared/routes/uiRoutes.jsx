@@ -21,8 +21,10 @@ uiRoutes.getTrafficMonitor = ({
   localIp,
   serviceName,
   externalPort,
+  demo = false,
 }) => {
   const params = new URLSearchParams();
+  if (demo) params.set("demo", "1");
   if (dataId) {
     params.set("data_id", dataId);
   }

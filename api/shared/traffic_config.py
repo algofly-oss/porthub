@@ -37,6 +37,7 @@ def serialize_traffic_route_document(route: dict) -> dict:
         "_id": str(route["_id"]),
         "user_id": str(route["user_id"]),
         "name": (route.get("name") or "").strip(),
+        "group": (route.get("group") or "").strip(),
         "description": (route.get("description") or "").strip(),
         "hosts": [str(host).strip().lower() for host in (route.get("hosts") or []) if str(host).strip()],
         "target_mode": (route.get("target_mode") or "manual").strip() or "manual",

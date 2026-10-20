@@ -1,12 +1,16 @@
+import Pagination from "@/components/ui/pagination";
+import { normalizeTrafficSamples } from "@/shared/utils/traffic.mjs";
 import { useContext, useEffect, useMemo, useState } from "react";
 import axios from "axios";
+import { useRouter } from "next/router";
+import { Button as WorkspaceButton } from "@/components/ui/button";
+import { StatusTabs } from "@/components/ui/status-tabs";
 import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
 import utc from "dayjs/plugin/utc";
 import {
   Button,
   Menu,
-  Pagination,
   SegmentedControl,
   useMantineColorScheme,
 } from "@mantine/core";
@@ -19,10 +23,16 @@ import HostItem from "./components/Host/HostItem";
 import HostConfigPopup from "./components/Host/HostConfigPopup";
 import MachineCreateModal from "./components/Host/MachineCreateModal";
 import MachineGroupsModal from "./components/MachineGroupsModal";
+import useCreateFromUrl from "@/shared/hooks/useCreateFromUrl";
 import useToast from "@/shared/hooks/useToast";
 import { SocketContext } from "@/shared/contexts/socket";
 import apiRoutes from "@/shared/routes/apiRoutes";
 import socketRoutes from "@/shared/routes/socketRoutes";
+import { PageHeader, SearchField } from "@/components/ui/workspace";
+import { searchScore } from "@/shared/utils/search.mjs";
+import SearchSelect from "@/components/ui/search-select";
+import { Table, TableHeader, TableHead, TableRow, TableBody } from "@/components/ui/table";
+import { IconServer, IconCircleCheck, IconPlugConnected, IconFolder } from "@tabler/icons-react";
 
 dayjs.extend(relativeTime);
 dayjs.extend(utc);
@@ -116,42 +126,7 @@ const mapConnectionToForwardingConfig = (connection) => {
   };
 };
 
-const normalizeMachineTrafficSample = (sample) => ({
-  timestamp: Number(sample?.timestamp) || 0,
-  in_bytes: Math.max(0, Number(sample?.in_bytes) || 0),
-  out_bytes: Math.max(0, Number(sample?.out_bytes) || 0),
-  drop_bytes: Math.max(0, Number(sample?.drop_bytes) || 0),
-});
-
-const mergeMachineTrafficSamples = (samples) => {
-  const byTimestamp = new Map();
-
-  (Array.isArray(samples) ? samples : []).forEach((sample) => {
-    const normalized = normalizeMachineTrafficSample(sample);
-    if (normalized.timestamp <= 0) {
-      return;
-    }
-
-    const timestamp = Math.floor(normalized.timestamp);
-    const current = byTimestamp.get(timestamp) || {
-      timestamp,
-      in_bytes: 0,
-      out_bytes: 0,
-      drop_bytes: 0,
-    };
-
-    byTimestamp.set(timestamp, {
-      timestamp,
-      in_bytes: current.in_bytes + normalized.in_bytes,
-      out_bytes: current.out_bytes + normalized.out_bytes,
-      drop_bytes: current.drop_bytes + normalized.drop_bytes,
-    });
-  });
-
-  return [...byTimestamp.values()]
-    .sort((left, right) => left.timestamp - right.timestamp)
-    .slice(-30);
-};
+const mergeMachineTrafficSamples = samples => normalizeTrafficSamples(samples, 30);
 
 const normalizeFirewallPolicy = (config) => {
   const allowedIps = Array.isArray(config?.firewall?.allowedIps)
@@ -297,24 +272,32 @@ const MACHINE_PAGE_SIZE_OPTIONS = [
 
 const ALL_GROUPS_FILTER = "all";
 export default function Home({ onStatsChange }) {
+  const router = useRouter();
   const { colorScheme } = useMantineColorScheme();
   const isDark = colorScheme === "dark";
   const socket = useContext(SocketContext);
   const [hosts, setHosts] = useState([]);
   const [selectedHostId, setSelectedHostId] = useState(null);
+  const [configStartSection, setConfigStartSection] = useState("ports");
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isCreatingMachine, setIsCreatingMachine] = useState(false);
-  const [pageSize, setPageSize] = useState("10");
+  const [pageSize, setPageSize] = useState("25");
   const [page, setPage] = useState(1);
   const [statusFilter, setStatusFilter] = useState("all");
+  const [query, setQuery] = useState("");
   const [groupFilter, setGroupFilter] = useState(ALL_GROUPS_FILTER);
   const [machineGroups, setMachineGroups] = useState([]);
   const [isGroupsModalOpen, setIsGroupsModalOpen] = useState(false);
   const [lastSeenRefreshTick, setLastSeenRefreshTick] = useState(0);
   const [machineTrafficByHostId, setMachineTrafficByHostId] = useState({});
   const { success, error } = useToast();
+  useCreateFromUrl("machines", () => setIsCreateModalOpen(true));
+  useEffect(() => {
+    if (router.query.machine) setSelectedHostId(String(router.query.machine));
+    if (["online", "offline", "disabled"].includes(router.query.status)) setStatusFilter(String(router.query.status));
+  }, [router.query.machine, router.query.status]);
 
   const selectedHost = hosts.find((host) => host.id === selectedHostId) || null;
   const selectedGroupFilterLabel = useMemo(() => {
@@ -341,9 +324,10 @@ export default function Home({ onStatsChange }) {
   const filteredHosts = useMemo(
     () =>
       hosts.filter((host) => {
+        if (!Number.isFinite(searchScore(query, [host.name, host.hostname, host.localIp, host.publicIp, ...(host.forwardingConfigs || []).flatMap(c => [c.serviceName, c.internalPort, c.externalPort])]))) return false;
         const matchesStatus =
           statusFilter === "all" ||
-          (statusFilter === "online" ? host.isActive : !host.isActive);
+          (statusFilter === "online" ? host.isActive : statusFilter === "disabled" ? host.enabled === false : host.enabled !== false && !host.isActive);
 
         if (!matchesStatus) {
           return false;
@@ -356,7 +340,7 @@ export default function Home({ onStatsChange }) {
         const hostGroupIds = Array.isArray(host.groupIds) ? host.groupIds : [];
         return hostGroupIds.includes(groupFilter);
       }),
-    [groupFilter, hosts, statusFilter]
+    [groupFilter, hosts, statusFilter, query]
   );
 
   const numericPageSize = Number(pageSize);
@@ -401,7 +385,7 @@ export default function Home({ onStatsChange }) {
 
   useEffect(() => {
     setPage(1);
-  }, [groupFilter, pageSize, statusFilter]);
+  }, [groupFilter, pageSize, statusFilter, query]);
 
   useEffect(() => {
     if (
@@ -570,12 +554,14 @@ export default function Home({ onStatsChange }) {
     }
 
     let isActive = true;
+    const controller = new AbortController();
+    let timeout;
 
     const loadMachineTraffic = async () => {
       try {
         const response = await axios.post(apiRoutes.trafficSnapshot, {
           data_ids: dataIds,
-        });
+        }, { signal: controller.signal });
 
         if (!isActive) {
           return;
@@ -609,21 +595,23 @@ export default function Home({ onStatsChange }) {
             paginatedHosts.map((host) => [host.id, current[host.id] || []])
           )
         );
+      } finally {
+        if (isActive) timeout = setTimeout(loadMachineTraffic, 2000);
       }
     };
 
     loadMachineTraffic();
-    const intervalId = window.setInterval(loadMachineTraffic, 2000);
 
     return () => {
       isActive = false;
-      window.clearInterval(intervalId);
+      clearTimeout(timeout);
+      controller.abort();
     };
   }, [paginatedHosts]);
 
-  const handleOpenConfig = (hostId) => setSelectedHostId(hostId);
+  const handleOpenConfig = (hostId) => { setConfigStartSection("ports"); setSelectedHostId(hostId); };
 
-  const handleCloseConfig = () => setSelectedHostId(null);
+  const handleCloseConfig = () => { setSelectedHostId(null); setConfigStartSection("ports"); };
 
   const handleCreateMachine = async (machine) => {
     setIsCreatingMachine(true);
@@ -640,6 +628,7 @@ export default function Home({ onStatsChange }) {
       const createdHost = mapMachineToHost(response.data.data);
 
       setHosts((currentHosts) => [...currentHosts, createdHost]);
+      setConfigStartSection("credentials");
       setSelectedHostId(createdHost.id);
       setIsCreateModalOpen(false);
       success(`Machine ${createdHost.name} created`);
@@ -1220,33 +1209,11 @@ export default function Home({ onStatsChange }) {
   };
 
   return (
-    <div className="flex justify-center">
-      <div className="m-4 pb-16 md:pb-6 xl:m-8 relative overflow-y-auto overflow-x-hidden 2xl:w-[80rem] w-full">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <p className="text-sm font-semibold uppercase tracking-[0.2em] text-zinc-500">
-              Machines
-            </p>
-            <h1 className="mt-1 text-2xl font-semibold text-zinc-900 dark:text-zinc-100">
-              Registered clients
-            </h1>
-          </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            <Button
-              type="button"
-              leftIcon={<IconPlus size={16} />}
-              onClick={() => setIsCreateModalOpen(true)}
-              classNames={{
-                root:
-                  "!bg-blue-600 !text-blue-50 hover:!bg-blue-700 disabled:!bg-blue-400",
-              }}
-            >
-              Create machine
-            </Button>
-          </div>
-        </div>
+    <div className="flex h-full min-h-0 justify-center">
+      <div className="workspace-page">
+        <PageHeader eyebrow="Infrastructure" title="Machines" description="Your fleet at a glance. Manage ports, public addresses, and client connections." />
 
-        <div className="mt-6">
+        <div className="machine-list-pane flex min-h-0 flex-1 flex-col">
           {isLoading ? (
             <p className="text-sm text-zinc-500 dark:text-zinc-400">
               Loading machines...
@@ -1262,169 +1229,41 @@ export default function Home({ onStatsChange }) {
                     Create the first machine, copy its token or bootstrap command, then
                     start adding port pairs.
                   </p>
+                  <WorkspaceButton className="mt-4" onClick={() => setIsCreateModalOpen(true)}><IconPlus size={16} />Create machine</WorkspaceButton>
                 </div>
               ) : (
                 <>
-                  <div className="mb-4 flex flex-col gap-3">
-                    <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                  <div className="mb-2 flex shrink-0 flex-col gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
-                        <SegmentedControl
+                        <StatusTabs label="Machine status"
                           value={statusFilter}
                           onChange={setStatusFilter}
-                          data={[
+                          options={[
                             { value: "all", label: "All" },
                             { value: "online", label: "Online" },
                             { value: "offline", label: "Offline" },
                           ]}
-                          classNames={{
-                            root:
-                              "!rounded-lg !bg-zinc-100 !p-1 dark:!bg-zinc-800",
-                            control:
-                              "!border-transparent",
-                            label:
-                              "!text-zinc-600 dark:!text-zinc-300 data-[active=true]:!text-blue-50",
-                            indicator:
-                              "!rounded-md !bg-blue-600 !shadow-sm dark:!bg-blue-600",
-                          }}
                         />
                       </div>
+                      <div className="order-first min-w-0 basis-full md:flex-1 md:basis-48"><SearchField label="Search machines" value={query} onChange={setQuery} placeholder="Search machines…" /></div>
                       <div className="flex flex-wrap items-center justify-start gap-2 lg:justify-end">
-                        <div
-                          className={`inline-flex items-stretch overflow-hidden rounded-md border ${
-                            isDark
-                              ? "border-zinc-700 bg-zinc-900"
-                              : "border-zinc-300 bg-white"
-                          }`}
-                        >
-                          <Menu
-                            withinPortal
-                            position="bottom-end"
-                            shadow="md"
-                            offset={6}
-                            classNames={{
-                              dropdown:
-                                "!min-w-[11rem] !border !border-zinc-200 !bg-white !p-1 dark:!border-zinc-700 dark:!bg-zinc-900",
-                              item:
-                                "!rounded-md !text-zinc-900 hover:!bg-zinc-100 dark:!text-zinc-100 dark:hover:!bg-zinc-800",
-                            }}
-                          >
-                            <Menu.Target>
-                              <button
-                                type="button"
-                                className={`inline-flex items-center gap-2 px-3 py-2 text-sm ${
-                                  isDark
-                                    ? "text-zinc-100 hover:bg-zinc-800"
-                                    : "text-zinc-900 hover:bg-zinc-50"
-                                }`}
-                              >
-                                <span>{selectedGroupFilterLabel}</span>
-                                <IconChevronDown
-                                  size={14}
-                                  className={isDark ? "text-zinc-500" : "text-zinc-400"}
-                                />
-                              </button>
-                            </Menu.Target>
-                            <Menu.Dropdown>
-                              <Menu.Item
-                                onClick={() => setGroupFilter(ALL_GROUPS_FILTER)}
-                                className={
-                                  groupFilter === ALL_GROUPS_FILTER
-                                    ? "!bg-blue-600 !text-blue-50 hover:!bg-blue-600 dark:!bg-blue-600 dark:!text-blue-50 dark:hover:!bg-blue-600"
-                                    : undefined
-                                }
-                            >
-                              All groups
-                            </Menu.Item>
-                            {machineGroups.length > 0 ? <Menu.Divider /> : null}
-                              {machineGroups.map((group) => (
-                                <Menu.Item
-                                  key={group._id}
-                                  onClick={() => setGroupFilter(group._id)}
-                                  className={
-                                    groupFilter === group._id
-                                      ? "!bg-blue-600 !text-blue-50 hover:!bg-blue-600 dark:!bg-blue-600 dark:!text-blue-50 dark:hover:!bg-blue-600"
-                                      : undefined
-                                  }
-                                >
-                                  {group.name}
-                                </Menu.Item>
-                              ))}
-                            </Menu.Dropdown>
-                          </Menu>
-                          <Button
-                            type="button"
-                            variant="default"
-                            onClick={() => setIsGroupsModalOpen(true)}
-                            aria-label="Manage groups"
-                            title="Manage groups"
-                            classNames={{
-                              root: isDark
-                                ? "!min-w-0 !rounded-none !border-0 !border-l !border-zinc-700 !bg-zinc-900 !px-3 !text-zinc-100 hover:!bg-zinc-800"
-                                : "!min-w-0 !rounded-none !border-0 !border-l !border-zinc-300 !bg-white !px-3 !text-zinc-900 hover:!bg-zinc-50",
-                            }}
-                          >
-                            <IconSettings size={16} />
-                          </Button>
-                        </div>
-                        <Menu
-                          withinPortal
-                          position="bottom-end"
-                          shadow="md"
-                          offset={6}
-                          classNames={{
-                            dropdown:
-                              "!min-w-[7rem] !border !border-zinc-200 !bg-white !p-1 dark:!border-zinc-700 dark:!bg-zinc-900",
-                            item:
-                              "!rounded-md !text-zinc-900 hover:!bg-zinc-100 dark:!text-zinc-100 dark:hover:!bg-zinc-800",
-                          }}
-                        >
-                          <Menu.Target>
-                            <button
-                              type="button"
-                              className="inline-flex items-center gap-2 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800"
-                            >
-                              <span>{pageSize} rows per page</span>
-                              <IconChevronDown
-                                size={14}
-                                className={isDark ? "text-zinc-500" : "text-zinc-400"}
-                              />
-                            </button>
-                          </Menu.Target>
-                          <Menu.Dropdown>
-                            {MACHINE_PAGE_SIZE_OPTIONS.map((option) => (
-                              <Menu.Item
-                                key={option.value}
-                                onClick={() => setPageSize(option.value)}
-                                className={
-                                  option.value === pageSize
-                                    ? "!bg-blue-600 !text-blue-50 hover:!bg-blue-600 dark:!bg-blue-600 dark:!text-blue-50 dark:hover:!bg-blue-600"
-                                    : undefined
-                                }
-                              >
-                                {option.value}
-                              </Menu.Item>
-                            ))}
-                          </Menu.Dropdown>
-                        </Menu>
+                        <SearchSelect label="Filter machine group" value={groupFilter} onChange={setGroupFilter} className="w-44" options={[{value: ALL_GROUPS_FILTER, label: "All groups"}, ...machineGroups.map(group => ({value: group._id, label: group.name}))]} />
+                        <WorkspaceButton variant="secondary" onClick={() => setIsGroupsModalOpen(true)}><IconFolder size={16} />Groups</WorkspaceButton>
+                        <WorkspaceButton onClick={() => setIsCreateModalOpen(true)}><IconPlus size={16} />Create machine</WorkspaceButton>
                       </div>
                     </div>
 
                   </div>
 
-                  <div className="overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-                    <div className="hidden min-h-16 border-b border-zinc-200 bg-zinc-50/80 py-4 pl-6 pr-6 text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-500 md:grid md:grid-cols-[minmax(0,1.2fr)_minmax(5.75rem,0.9fr)_minmax(8.5rem,1fr)_minmax(9.5rem,1fr)] md:items-center md:gap-4">
-                      <span>Machine</span>
-                      <span className="text-center">Ports</span>
-                      <span>Groups</span>
-                      <span>Traffic</span>
-                    </div>
+                  <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-surface">
 
                     {paginatedHosts.length > 0 ? (
                       <div
-                        className="max-h-[calc(100dvh-22rem)] overflow-y-auto"
+                        className="data-scroll"
                         style={{ scrollbarGutter: "stable" }}
                       >
-                        <div className="divide-y divide-zinc-200 dark:divide-zinc-800">
+                        <Table aria-label="Machines"><TableHeader><TableRow><TableHead>Machine</TableHead><TableHead className="hidden w-[22%] lg:table-cell">Connection</TableHead><TableHead className="hidden w-[20%] md:table-cell">Group</TableHead><TableHead className="w-20 text-right">Ports</TableHead><TableHead className="hidden w-56 text-right lg:table-cell">Traffic · 30s</TableHead></TableRow></TableHeader><TableBody>
                           {paginatedHosts.map((host) => (
                             <HostItem
                               key={host.id}
@@ -1435,6 +1274,9 @@ export default function Home({ onStatsChange }) {
                                 .map((id) => groupLabelById[id])
                                 .filter(Boolean)}
                               localIp={host.localIp}
+                              publicIp={host.publicIp}
+                              clientVersion={host.clientVersion}
+                              forwardingConfigs={host.forwardingConfigs}
                               isActive={host.isActive}
                               connectionStatus={host.connectionStatus}
                               isDark={isDark}
@@ -1448,7 +1290,7 @@ export default function Home({ onStatsChange }) {
                               onClick={() => handleOpenConfig(host.id)}
                             />
                           ))}
-                        </div>
+                        </TableBody></Table>
                       </div>
                     ) : (
                       <div className="px-5 py-10 text-center">
@@ -1462,19 +1304,19 @@ export default function Home({ onStatsChange }) {
                     )}
 
                     {filteredHosts.length > 0 ? (
-                      <div className="flex min-h-16 flex-col gap-3 border-t border-zinc-200 px-5 py-4 dark:border-zinc-800 md:flex-row md:items-center md:justify-between">
-                        <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-2">
+                        <p className="text-xs text-muted-foreground">
                           Showing {visibleStart} to {visibleEnd} of {filteredHosts.length} machines
                         </p>
 
+                        <SearchSelect className="w-36 sm:ml-auto" label="Machines per page" value={pageSize} onChange={value => setPageSize(Number(value))} options={MACHINE_PAGE_SIZE_OPTIONS.map(option => ({value: option.value, label: `${option.value} per page`}))} />
                         <Pagination
                           value={page}
                           onChange={setPage}
                           total={totalPages}
                           size="sm"
                           radius="md"
-                          withEdges
-                          siblings={1}
+                          siblings={0}
                           classNames={{
                             control:
                               "!border-zinc-300 !bg-white !text-zinc-700 hover:!bg-zinc-50 data-[active=true]:!border-blue-600 data-[active=true]:!bg-blue-600 data-[active=true]:!text-blue-50 dark:!border-zinc-700 dark:!bg-zinc-900 dark:!text-zinc-200 dark:hover:!bg-zinc-800 dark:data-[active=true]:!border-blue-500 dark:data-[active=true]:!bg-blue-600",
@@ -1508,6 +1350,7 @@ export default function Home({ onStatsChange }) {
         onRemoveMachineFromGroup={handleRemoveMachineFromGroup}
       />
       <HostConfigPopup
+        initialSection={configStartSection}
         host={selectedHost}
         opened={Boolean(selectedHost)}
         onClose={handleCloseConfig}

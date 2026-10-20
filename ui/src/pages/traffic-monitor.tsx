@@ -115,6 +115,8 @@ export default function TrafficMonitorPage() {
     }
 
     let isActive = true;
+    const controller = new AbortController();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
 
     const loadTrafficSamples = async ({ showLoading = false } = {}) => {
       if (showLoading) {
@@ -124,7 +126,7 @@ export default function TrafficMonitorPage() {
       try {
         const response = await axios.post(apiRoutes.trafficSnapshot, {
           data_ids: [dataId],
-        });
+        }, { signal: controller.signal });
         if (!isActive) {
           return;
         }
@@ -147,18 +149,17 @@ export default function TrafficMonitorPage() {
       } finally {
         if (isActive) {
           setIsLoading(false);
+          timeout = setTimeout(loadTrafficSamples, 1000);
         }
       }
     };
 
     loadTrafficSamples({ showLoading: true });
-    const intervalId = window.setInterval(() => {
-      loadTrafficSamples();
-    }, 1000);
 
     return () => {
       isActive = false;
-      window.clearInterval(intervalId);
+      clearTimeout(timeout);
+      controller.abort();
     };
   }, [dataId, isCheckingAuth]);
 
@@ -262,29 +263,29 @@ export default function TrafficMonitorPage() {
 
   if (isCheckingAuth) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-neutral-100 dark:bg-zinc-900">
+      <div className="flex min-h-screen items-center justify-center bg-background text-foreground ">
         <Loader size="sm" color="blue" />
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-neutral-100 px-4 py-6 dark:bg-zinc-900 md:px-8">
+    <div className="min-h-screen bg-background text-foreground px-4 py-6  md:px-8">
       <Head>
         <title>{pageTitle}</title>
       </Head>
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-6">
         <div className="space-y-3">
-          <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">
+          <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
             Traffic Monitor
           </div>
-          <div
-            className={`text-3xl font-semibold tracking-tight ${
+          <h1
+            className={`break-words text-2xl font-semibold tracking-tight sm:text-3xl ${
               isDark ? "text-zinc-100" : "text-zinc-900"
             }`}
           >
             {resolvedMachineName}
-          </div>
+          </h1>
           {resolvedMachineDescription ? (
             <div
               className={`max-w-3xl text-sm leading-6 ${
@@ -296,7 +297,7 @@ export default function TrafficMonitorPage() {
           ) : null}
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
             <div className="min-w-0">
-              <span className="mr-2 text-[11px] uppercase tracking-[0.16em] text-zinc-500">
+              <span className="mr-2 text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
                 Local IP
               </span>
               <span
@@ -308,7 +309,7 @@ export default function TrafficMonitorPage() {
               </span>
             </div>
             <div className="min-w-0">
-              <span className="mr-2 text-[11px] uppercase tracking-[0.16em] text-zinc-500">
+              <span className="mr-2 text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
                 Service
               </span>
               <span
@@ -320,7 +321,7 @@ export default function TrafficMonitorPage() {
               </span>
             </div>
             <div className="min-w-0">
-              <span className="mr-2 text-[11px] uppercase tracking-[0.16em] text-zinc-500">
+              <span className="mr-2 text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
                 Mapping
               </span>
               <span
@@ -338,7 +339,7 @@ export default function TrafficMonitorPage() {
           {resolvedServiceDescription ? (
             <div
               className={`text-sm ${
-                isDark ? "text-zinc-500" : "text-zinc-600"
+                isDark ? "text-muted-foreground" : "text-zinc-600"
               }`}
             >
               {resolvedServiceDescription}

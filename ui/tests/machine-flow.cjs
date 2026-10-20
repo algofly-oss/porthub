@@ -1,0 +1,75 @@
+const {launchBrowser}=require("./browser.cjs");
+const assert=require("node:assert/strict");
+
+(async()=>{
+ const browser=await launchBrowser();
+ try {
+  for(const theme of ["dark","light"]) for(const [width,height] of [[1512,982],[402,874]]) {
+   const context=await browser.newContext({viewport:{width,height}});
+   await context.addInitScript(theme=>localStorage.setItem("mantine-color-scheme",JSON.stringify(theme)),theme);
+   const page=await context.newPage();
+   const errors=[],requests=[];
+   page.on("pageerror",e=>errors.push(e.message));
+   page.on("request",r=>{if(new URL(r.url()).pathname.startsWith("/api/"))requests.push(r.url());});
+   await page.goto("http://luna.local/home?demo=1&view=machines");
+   await page.getByRole("button",{name:"Create machine",exact:true}).click();
+   let create=page.getByRole("dialog",{name:"Create Machine",exact:true});
+   await create.getByLabel("Machine name",{exact:true}).fill("Flow Review Machine");
+   await create.getByLabel("Machine group",{exact:true}).click();
+   await page.getByRole("option",{name:"Development",exact:true}).click();
+   await create.getByRole("button",{name:"Create Machine",exact:true}).click();
+   let machine=page.getByRole("dialog",{name:/^Configure Flow Review Machine/});
+   await machine.getByRole("heading",{name:"Client Setup",exact:true}).waitFor();
+   assert.equal(await machine.getByRole("button",{name:"Client",exact:true}).getAttribute("aria-pressed"),"true","New machine goes straight to client installation");
+   await machine.getByRole("button",{name:"Close",exact:true}).click();
+   await page.getByRole("button",{name:"Configure orion-dev-02",exact:true}).click();
+   machine=page.getByRole("dialog",{name:/^Configure orion-dev-02/});
+   const navigation=await machine.getByRole("group",{name:"Machine configuration sections",exact:true}).boundingBox();
+   const metadata=await machine.getByText("LAN: 192.168.2.21",{exact:true}).boundingBox();
+   assert(navigation.y+navigation.height<=metadata.y,"Machine navigation stays above its status/IP badges");
+   await machine.getByRole("button",{name:"Edit forwarding rule API",exact:true}).click();
+   await machine.getByLabel("Service name",{exact:true}).fill("Reviewed API");
+   await machine.getByRole("button",{name:"Access",exact:true}).click();
+   await machine.getByLabel("Allowed source IP",{exact:true}).fill("192.0.2.42");
+   await machine.getByRole("button",{name:"Add IP",exact:true}).click();
+   const save=machine.getByRole("button",{name:"Save Changes",exact:true});
+   await page.waitForFunction(()=>[...document.querySelectorAll('button')].some(b=>b.textContent==="Save Changes"&&!b.disabled));
+   await save.click();
+   await machine.getByRole("button",{name:"Edit forwarding rule Reviewed API",exact:true}).waitFor();
+   assert.equal(await machine.getByRole("button",{name:"Save Changes",exact:true}).count(),0,"No second save step remains");
+   await machine.getByRole("button",{name:"Close",exact:true}).click();
+   await page.reload();await page.getByRole("button",{name:"Configure orion-dev-02",exact:true}).click();
+   await machine.getByRole("button",{name:"Edit forwarding rule Reviewed API",exact:true}).click();
+   await machine.getByRole("button",{name:"Access",exact:true}).click();
+   await machine.getByRole("button",{name:"Remove 192.0.2.42",exact:true}).waitFor();
+   await machine.getByRole("button",{name:"Connection",exact:true}).click();
+   await machine.getByLabel("Description",{exact:true}).fill("Unsaved draft retained across sections");
+   await machine.getByRole("button",{name:"All Ports",exact:true}).click();
+   await machine.getByRole("button",{name:"Details",exact:true}).click();
+   await machine.getByLabel("Machine name",{exact:true}).fill("Renamed Review Machine");
+   await machine.getByRole("button",{name:"Save Details",exact:true}).click();
+   machine=page.getByRole("dialog",{name:/^Configure Renamed Review Machine/});
+   await machine.waitFor();
+   await machine.getByRole("button",{name:"Ports",exact:true}).click();
+   await machine.getByRole("button",{name:"Edit forwarding rule Reviewed API",exact:true}).click();
+   assert.equal(await machine.getByLabel("Description",{exact:true}).inputValue(),"Unsaved draft retained across sections","Saving details must not erase draft port changes");
+   await page.keyboard.press("Escape");
+   const discard=page.getByRole("dialog",{name:"Discard Unsaved Changes?",exact:true});
+   await discard.waitFor();await discard.getByRole("button",{name:"Keep Editing",exact:true}).click();
+   await discard.waitFor({state:"hidden"});
+   await page.waitForFunction(()=>document.activeElement?.closest('[role="dialog"]')?.textContent.includes("Configure"));
+   assert.equal(await machine.getByLabel("Description",{exact:true}).inputValue(),"Unsaved draft retained across sections");
+   await page.keyboard.press("Escape");await discard.getByRole("button",{name:"Discard Changes",exact:true}).click();
+   await page.getByRole("button",{name:"Configure Renamed Review Machine",exact:true}).click();
+   await machine.getByRole("button",{name:"Edit forwarding rule Reviewed API",exact:true}).click();
+   assert.notEqual(await machine.getByLabel("Description",{exact:true}).inputValue(),"Unsaved draft retained across sections");
+   await machine.getByRole("button",{name:"Cancel",exact:true}).click();
+   await machine.getByRole("button",{name:"Client",exact:true}).click();
+   await machine.getByRole("button",{name:/^Advanced settings/}).click();
+   assert.equal(await machine.evaluate(element=>element.getAnimations({subtree:true}).filter(animation=>animation.effect.getKeyframes().some(frame=>frame.height!==undefined||frame.opacity!==undefined||frame.transform!==undefined)).length),0,"Host sections must not animate their reveal");
+   await page.screenshot({path:`/tmp/porthub-machine-flow-${theme}-${width}.png`});
+   assert.deepEqual(errors,[]);assert.deepEqual(requests,[]);
+   await context.close();console.log(`PASS ${theme} ${width}: enrollment→client setup, direct port/access save and reload, section-specific saves, preserved drafts, keep/discard confirmation`);
+  }
+ } finally {await browser.close();}
+})().catch(error=>{console.error(error);process.exitCode=1;});

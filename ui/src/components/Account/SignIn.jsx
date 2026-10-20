@@ -1,6 +1,6 @@
 import Link from "next/link";
 import TextBox from "@/shared/components/TextBox";
-import reactState from "@/shared/hooks/reactState";
+import useReactState from "@/shared/hooks/reactState";
 import useAuth from "@/shared/hooks/useAuth";
 import uiRoutes from "@/shared/routes/uiRoutes";
 import GoBack from "./GoBack";
@@ -9,8 +9,8 @@ import { MdLockOutline, MdOutlineMailOutline } from "react-icons/md";
 
 export default function SignIn() {
   const auth = useAuth();
-  const data = reactState();
-  const error = reactState();
+  const data = useReactState();
+  const error = useReactState();
   const [signInProgress, setSignInProgress] = useState(false);
   const signUpDisabled = auth.authSettings?.signup_disabled === true;
 

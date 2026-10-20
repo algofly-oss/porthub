@@ -108,10 +108,10 @@ export default function useAuth() {
     await getAccountInfo().then((data) => {
       switch (data?.role) {
         case "admin":
-          router.push(uiRoutes.home);
+          if (router.pathname !== uiRoutes.home) router.push(uiRoutes.home);
           break;
         case "user":
-          router.push(uiRoutes.home);
+          if (router.pathname !== uiRoutes.home) router.push(uiRoutes.home);
           break;
         default:
           router.push(redirectUrl || uiRoutes.signIn);

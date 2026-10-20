@@ -6,7 +6,7 @@ from typing import Optional
 import bcrypt
 from bson import ObjectId
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 from pymongo.errors import DuplicateKeyError
 
 from shared.factory import db
@@ -43,6 +43,22 @@ class PasswordUpdate(BaseModel):
     new_password: str
 
 
+class NavigationPreferences(BaseModel):
+    nav_collapsed: StrictBool
+
+
+@router.patch("/preferences")
+async def update_preferences(preferences: NavigationPreferences, request: Request):
+    user_id = _user_object_id(request)
+    result = await db.users.update_one(
+        {"_id": user_id},
+        {"$set": {"preferences.nav_collapsed": preferences.nav_collapsed}},
+    )
+    if not result.matched_count:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"nav_collapsed": preferences.nav_collapsed}
+
+
 def _user_object_id(request: Request):
     user_id = authenticate_user(request)
     if isinstance(user_id, bytes):
@@ -59,6 +75,9 @@ def serialize_user(user):
         "created_at": user["created_at"],
         "profile_picture": user.get("profile_picture"),
         "has_password": bool(user.get("password")),
+        "preferences": {
+            "nav_collapsed": (user.get("preferences") or {}).get("nav_collapsed", False),
+        },
     }
 
 

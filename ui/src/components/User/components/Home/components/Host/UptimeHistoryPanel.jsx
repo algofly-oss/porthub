@@ -1,4 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
+import { IconChevronLeft, IconChevronRight } from "@tabler/icons-react";
+import { Button } from "@/components/ui/button";
+import { StatusTabs } from "@/components/ui/status-tabs";
 
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
@@ -117,8 +120,6 @@ const formatPercent = (fraction) => {
   return `${percent >= 99.95 || percent <= 0.05 ? percent.toFixed(0) : percent.toFixed(1)}%`;
 };
 
-const ONLINE_COLOR = "rgb(52, 211, 153)";
-const OFFLINE_COLOR = "rgb(251, 113, 133)";
 const LIVE_REFRESH_MS = 15 * 1000;
 
 const formatBarTime = (date, spanMs) => {
@@ -150,7 +151,6 @@ const describeBucket = (bucket) => {
 };
 
 export default function UptimeHistoryPanel({
-  isDark,
   events,
   isLoading,
   currentStatus,
@@ -205,75 +205,47 @@ export default function UptimeHistoryPanel({
     setHoveredIndex(null);
   };
 
-  const pagerClassName = (enabled) =>
-    `shrink-0 rounded-md px-1.5 text-xs ${
-      enabled
-        ? isDark
-          ? "text-zinc-300 hover:bg-zinc-800"
-          : "text-zinc-600 hover:bg-zinc-200"
-        : "cursor-not-allowed text-zinc-600/30"
-    }`;
-
   return (
-    <div
-      className={`min-w-0 rounded-lg border p-3 ${
-        isDark ? "border-zinc-800 bg-zinc-950/70" : "border-zinc-200 bg-zinc-50/80"
-      }`}
+    <section
+      aria-label="Uptime History"
+      className="min-w-0 rounded-lg bg-surface p-4 [--uptime-online:5_150_105] [--uptime-offline:225_29_72] dark:[--uptime-online:52_211_153] dark:[--uptime-offline:251_113_133]"
     >
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3">
-          <p className={`text-sm font-semibold ${isDark ? "text-zinc-100" : "text-zinc-900"}`}>
-            Uptime history
-          </p>
+          <h2 className="text-sm font-semibold text-foreground">Uptime History</h2>
           {currentStatus ? (
             <span
               className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium ${
                 isOnline
-                  ? "bg-emerald-500/15 text-emerald-500"
-                  : "bg-rose-500/15 text-rose-500"
+                  ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                  : "bg-rose-500/10 text-rose-700 dark:text-rose-300"
               }`}
             >
               <span
-                className={`h-2 w-2 rounded-full ${isOnline ? "bg-emerald-400" : "bg-rose-400"}`}
+                className={`h-1.5 w-1.5 rounded-full ${isOnline ? "bg-[rgb(var(--uptime-online))]" : "bg-[rgb(var(--uptime-offline))]"}`}
               />
               {isOnline ? "Online now" : "Offline now"}
             </span>
           ) : null}
           {windowUptime !== null ? (
-            <span className={`text-[11px] ${isDark ? "text-zinc-300" : "text-zinc-700"}`}>
+            <span className="text-xs text-muted-foreground">
               <span className="font-semibold">{formatPercent(windowUptime)}</span> uptime
               {totals.offlineMs > 0 ? ` · ${formatDuration(totals.offlineMs)} offline` : ""}
             </span>
           ) : null}
         </div>
 
-        <div className="flex flex-wrap items-center gap-1">
-          {TIMEFRAMES.map((tf) => (
-            <button
-              key={tf.key}
-              type="button"
-              onClick={() => handleTimeframeChange(tf.key)}
-              className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
-                tf.key === timeframe.key
-                  ? "bg-emerald-500 text-white"
-                  : isDark
-                    ? "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
-                    : "bg-zinc-200 text-zinc-600 hover:bg-zinc-300"
-              }`}
-            >
-              {tf.label}
-            </button>
-          ))}
+        <div className="max-w-full overflow-x-auto pb-1">
+          <StatusTabs label="Uptime history timeframe" value={timeframe.key} onChange={handleTimeframeChange} options={TIMEFRAMES.map(tf => ({value:tf.key,label:tf.label}))} />
         </div>
       </div>
 
       <div
-        className={`mb-2 flex h-6 items-center gap-2 overflow-hidden whitespace-nowrap rounded-md border px-2 text-[11px] ${
+        aria-live="polite"
+        className={`mb-3 flex min-h-[44px] flex-wrap items-center gap-x-3 gap-y-1 rounded-md px-3 py-2 text-xs leading-5 ${
           hoveredBucket
-            ? isDark
-              ? "border-zinc-700 bg-zinc-950 text-zinc-100 shadow-sm"
-              : "border-zinc-200 bg-white text-zinc-900 shadow-sm"
-            : "border-transparent text-zinc-500"
+            ? "bg-control text-foreground"
+            : "text-muted-foreground"
         }`}
       >
         {hoveredBucket ? (
@@ -282,7 +254,7 @@ export default function UptimeHistoryPanel({
               {formatBarTime(hoveredBucket.start, timeframe.spanMs)} –{" "}
               {formatBarTime(hoveredBucket.end > now ? now : hoveredBucket.end, timeframe.spanMs)}
             </span>
-            <span className="text-zinc-500">{describeBucket(hoveredBucket)}</span>
+            <span className={hoveredBucket.status === "online" ? "text-emerald-700 dark:text-emerald-400" : hoveredBucket.status === "offline" ? "text-rose-700 dark:text-rose-300" : "text-muted-foreground"}>{describeBucket(hoveredBucket)}</span>
           </>
         ) : (
           <span>
@@ -293,39 +265,42 @@ export default function UptimeHistoryPanel({
       </div>
 
       <div className="flex min-w-0 items-stretch gap-2">
-        <button
+        <Button
           type="button"
+          variant="secondary"
+          size="icon"
           disabled={!canGoOlder}
           onClick={() => setPageOffset((prev) => prev + 1)}
-          className={pagerClassName(canGoOlder)}
+          className="h-9 w-7 self-center"
           aria-label="Older"
         >
-          ‹
-        </button>
+          <IconChevronLeft size={16} />
+        </Button>
 
         <div
-          className="grid h-32 min-w-0 flex-1 gap-px overflow-hidden"
+          className="grid h-24 min-w-0 flex-1 gap-px overflow-hidden sm:h-32"
           style={{ gridTemplateColumns: `repeat(${BAR_COUNT}, minmax(0, 1fr))` }}
           onMouseLeave={() => setHoveredIndex(null)}
         >
           {buckets.map((bucket, index) => (
             <div
               key={index}
+              data-uptime-status={bucket.status}
               onMouseEnter={() => setHoveredIndex(index)}
-              className={`flex h-full min-w-0 flex-col overflow-hidden rounded-[1px] transition-opacity hover:opacity-80 ${
-                bucket.hasData ? "" : isDark ? "bg-zinc-800" : "bg-zinc-200"
+              className={`flex h-full min-w-0 flex-col overflow-hidden rounded-sm hover:opacity-75 ${
+                bucket.hasData ? "" : "bg-border"
               }`}
             >
               {bucket.hasData ? (
                 <>
-                  <div style={{ flexGrow: bucket.onlineMs, backgroundColor: ONLINE_COLOR }} />
+                  <div className="bg-[rgb(var(--uptime-online))]" style={{ flexGrow: bucket.onlineMs }} />
                   <div
                     style={{
                       flexGrow: bucket.offlineMs,
                       // Keep short outages visible even inside long bars.
                       minHeight: bucket.offlineMs > 0 ? "15%" : 0,
-                      backgroundColor: OFFLINE_COLOR,
                     }}
+                    className="bg-[rgb(var(--uptime-offline))]"
                   />
                 </>
               ) : null}
@@ -333,30 +308,32 @@ export default function UptimeHistoryPanel({
           ))}
         </div>
 
-        <button
+        <Button
           type="button"
+          variant="secondary"
+          size="icon"
           disabled={!canGoNewer}
           onClick={() => setPageOffset((prev) => Math.max(0, prev - 1))}
-          className={pagerClassName(canGoNewer)}
+          className="h-9 w-7 self-center"
           aria-label="Newer"
         >
-          ›
-        </button>
+          <IconChevronRight size={16} />
+        </Button>
       </div>
 
-      <div className="mt-2 flex items-center justify-between px-6 text-[10px] text-zinc-500">
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 text-[11px] text-muted-foreground">
         <span>{formatBarTime(windowStart, timeframe.spanMs)}</span>
-        <span className="flex items-center gap-3">
+        <span className="order-3 flex w-full flex-wrap justify-center gap-3 sm:order-none sm:w-auto">
           <span className="inline-flex items-center gap-1.5">
-            <span className="h-2 w-2 rounded-sm bg-emerald-400" />
+            <span className="h-2 w-2 rounded-sm bg-[rgb(var(--uptime-online))]" />
             Online
           </span>
           <span className="inline-flex items-center gap-1.5">
-            <span className="h-2 w-2 rounded-sm bg-rose-400" />
+            <span className="h-2 w-2 rounded-sm bg-[rgb(var(--uptime-offline))]" />
             Offline
           </span>
           <span className="inline-flex items-center gap-1.5">
-            <span className={`h-2 w-2 rounded-sm ${isDark ? "bg-zinc-700" : "bg-zinc-300"}`} />
+            <span className="h-2 w-2 rounded-sm bg-border" />
             No data
           </span>
         </span>
@@ -364,10 +341,10 @@ export default function UptimeHistoryPanel({
       </div>
 
       {isLoading && !hasAnyData ? (
-        <p className="mt-2 text-xs text-zinc-500">Loading uptime history...</p>
+        <p className="mt-2 text-xs text-muted-foreground">Loading uptime history...</p>
       ) : !hasAnyData ? (
-        <p className="mt-2 text-xs text-zinc-500">No status recorded for this period yet.</p>
+        <p className="mt-2 text-xs text-muted-foreground">No status recorded for this period yet.</p>
       ) : null}
-    </div>
+    </section>
   );
 }

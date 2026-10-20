@@ -1,44 +1,23 @@
+import WorkspaceDrawer from "@/components/ui/workspace-drawer";
+import { Dialog as Modal } from "@/components/ui/dialog";
+import { Menu } from "@/components/ui/menu";
+import { Button as WorkspaceButton } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import SearchSelect from "@/components/ui/search-select";
+import { StatusTabs } from "@/components/ui/status-tabs";
 import { useEffect, useMemo, useState } from "react";
 import {
   ActionIcon,
-  Button,
-  Group,
-  Menu,
-  Modal,
-  Pagination,
   Switch,
   Text,
   useMantineColorScheme,
 } from "@mantine/core";
 import {
-  IconArrowLeft,
   IconDotsVertical,
-  IconFilter,
   IconPlus,
   IconTrash,
 } from "@tabler/icons-react";
 
-const getInputClassName = (isDark) =>
-  `w-full rounded-md border px-3 py-2 text-sm outline-none transition-colors focus:!border-blue-500 focus:ring-0 ${
-    isDark
-      ? "!border-zinc-700 !bg-zinc-900 !text-zinc-100 placeholder:!text-zinc-500"
-      : "!border-zinc-300 !bg-white !text-zinc-900 placeholder:!text-zinc-400"
-  }`;
-
-const getLabelClassName = (isDark) =>
-  `mb-1.5 block text-sm font-semibold ${isDark ? "text-zinc-100" : "text-zinc-900"}`;
-
-const getPanelClassName = (isDark) =>
-  `rounded-lg border p-3 ${
-    isDark ? "border-zinc-700 bg-zinc-900/70" : "border-zinc-200 bg-zinc-50"
-  }`;
-
-const getSectionTitleClassName = (isDark) =>
-  `text-[11px] font-semibold uppercase tracking-[0.18em] ${
-    isDark ? "text-zinc-500" : "text-zinc-500"
-  }`;
-
-const errorClassName = "mt-1 text-xs text-red-600 dark:text-red-400";
 const MACHINE_PAGE_SIZE = 5;
 const SERVICE_PAGE_SIZE = 6;
 const TARGET_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
@@ -257,6 +236,7 @@ const createInitialForm = (proxy, defaultDomainSuffix = "") => {
     domainSuffix: splitHost.domainSuffix || String(defaultDomainSuffix || "").trim().toLowerCase(),
     aliases: aliasHosts,
     description: proxy?.description || "",
+    group: proxy?.group || "",
     targetMode: proxy?.target_mode || (proxy?.connection?.data_id ? "connection" : "manual"),
     connectionDataId: proxy?.connection?.data_id || "",
     targetUrl: proxy?.target_url || "",
@@ -281,6 +261,7 @@ export default function ProxyConfigModal({
   const isDark = colorScheme === "dark";
   const [form, setForm] = useState(createInitialForm(proxy, defaultDomainSuffix));
   const [errors, setErrors] = useState({});
+  const [section, setSection] = useState("address");
   const [selectedMachineId, setSelectedMachineId] = useState("");
   const [machinePage, setMachinePage] = useState(1);
   const [servicePage, setServicePage] = useState(1);
@@ -294,6 +275,7 @@ export default function ProxyConfigModal({
     }
     setForm(createInitialForm(proxy, defaultDomainSuffix));
     setErrors({});
+    setSection("address");
     setIsDeleteConfirmOpen(false);
   }, [opened, proxy, defaultDomainSuffix]);
 
@@ -543,25 +525,7 @@ export default function ProxyConfigModal({
     }
   }, [form.connectionDataId, selectedMachine]);
 
-  const modalClassNames = isDark
-    ? {
-        content: "!border !border-zinc-700 !bg-zinc-900",
-        header: "!border-b !border-zinc-800 !bg-zinc-900",
-        title: "flex-1 font-bold !text-zinc-100",
-        close: "!h-7 !w-7 !text-zinc-400 hover:!bg-zinc-800",
-        body: "!bg-zinc-900 !pt-3",
-      }
-    : {
-        content: "!border !border-zinc-200 !bg-white",
-        header: "!border-b !border-zinc-200 !bg-white",
-        title: "flex-1 font-bold !text-zinc-900",
-        close: "!h-7 !w-7 !text-zinc-500 hover:!bg-zinc-100",
-        body: "!bg-white !pt-3",
-      };
-
-  const btnSecondary = isDark
-    ? "!border-zinc-700 !bg-zinc-800 !text-zinc-100 hover:!bg-zinc-700"
-    : "!border-zinc-300 !bg-white !text-zinc-900 hover:!bg-zinc-50";
+  const modalClassNames = { title: "flex-1", body: "!pt-0" };
 
   const handleChange = (field, value) => {
     setForm((current) => ({ ...current, [field]: value }));
@@ -686,14 +650,19 @@ export default function ProxyConfigModal({
     return {
       isValid: Object.keys(nextErrors).length === 0,
       hosts,
+      validationErrors: nextErrors,
     };
   };
 
   const handleSubmit = async (event) => {
     event.preventDefault();
+    // This editor can be rendered from a machine form through a portal. React
+    // still bubbles submit events through that parent: never save its port draft.
+    event.stopPropagation();
 
-    const { isValid, hosts } = validate();
+    const { isValid, hosts, validationErrors } = validate();
     if (!isValid) {
+      setSection(validationErrors.subdomainKey || validationErrors.domainSuffix || validationErrors.aliases ? "address" : "destination");
       return;
     }
 
@@ -701,6 +670,7 @@ export default function ProxyConfigModal({
       data_id: form.dataId || undefined,
       name: primaryPreviewHost,
       description: form.description.trim(),
+      group: form.group.trim(),
       hosts,
       targetMode: form.targetMode,
       targetUrl:
@@ -737,8 +707,10 @@ export default function ProxyConfigModal({
 
   return (
     <>
-      <Modal
+      <WorkspaceDrawer
         opened={opened}
+        zIndex={220}
+        trapFocus={!isDeleteConfirmOpen}
         onClose={onClose}
         title={
           <div className="flex w-full items-center justify-between gap-2 pr-2">
@@ -747,7 +719,7 @@ export default function ProxyConfigModal({
             </span>
 
             {isPersisted ? (
-              <Menu position="bottom-end" withinPortal>
+              <Menu position="bottom-end" withinPortal={false}>
                 <Menu.Target>
                   <ActionIcon
                     type="button"
@@ -755,8 +727,8 @@ export default function ProxyConfigModal({
                     aria-label="Proxy actions"
                     className={
                       isDark
-                        ? "!h-7 !w-7 !text-zinc-300 hover:!bg-zinc-800"
-                        : "!h-7 !w-7 !text-zinc-600 hover:!bg-zinc-100"
+                        ? "!h-7 !w-7 !text-zinc-300 hover:!bg-accent"
+                        : "!h-7 !w-7 !text-zinc-600 hover:!bg-accent"
                     }
                   >
                     <IconDotsVertical size={16} />
@@ -766,8 +738,8 @@ export default function ProxyConfigModal({
                 <Menu.Dropdown
                   className={
                     isDark
-                      ? "!border-zinc-700 !bg-zinc-900"
-                      : "!border-zinc-200 !bg-white"
+                      ? "!border-border !bg-dialog"
+                      : "!border-border !bg-dialog"
                   }
                 >
                   <Menu.Item
@@ -786,568 +758,34 @@ export default function ProxyConfigModal({
         closeOnEscape={!isSaving && !isDeleteConfirmOpen}
         radius="md"
         size={760}
-        overlayProps={{ blur: 3 }}
+        fixedHeight="min(680px, calc(100dvh - 64px))"
         classNames={modalClassNames}
       >
-        <div className={isDeleteConfirmOpen ? "pointer-events-none blur-sm" : ""}>
-          <form onSubmit={handleSubmit} className="space-y-4">
-        <div className={getPanelClassName(isDark)}>
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <p className={getSectionTitleClassName(isDark)}>Public Address</p>
-              <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-                Choose the domain people will open in their browser.
-              </p>
+        <div className={`flex min-h-0 flex-1 flex-col ${isDeleteConfirmOpen ? "pointer-events-none blur-sm" : ""}`}>
+          <form onSubmit={handleSubmit} className="flex h-full min-h-0 flex-col">
+            <div className="mb-5 overflow-x-auto"><StatusTabs label="Proxy configuration sections" value={section} onChange={setSection} options={[{value:"address",label:"Address"},{value:"destination",label:"Destination"},{value:"options",label:"Options"}]} /></div>
+            <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+              {section === "address" && <div className="space-y-5"><div><h2 className="text-base font-semibold">Public Address</h2><p className="mt-2 text-sm leading-6 text-muted-foreground">Choose the hostname people use to open this service.</p></div><div className="grid gap-4 sm:grid-cols-2"><label className="block text-sm font-medium" htmlFor="proxy-subdomain">Primary subdomain<Input id="proxy-subdomain" className="mt-2 bg-control" placeholder="app" value={form.subdomainKey} onChange={event=>handleChange("subdomainKey",event.target.value)} />{errors.subdomainKey && <p className="mt-1 text-xs text-red-500">{errors.subdomainKey}</p>}</label><label className="block text-sm font-medium" htmlFor="proxy-domain">Domain suffix<Input id="proxy-domain" className="mt-2 bg-control" placeholder="example.com" value={form.domainSuffix} onChange={event=>handleChange("domainSuffix",event.target.value)} />{errors.domainSuffix && <p className="mt-1 text-xs text-red-500">{errors.domainSuffix}</p>}</label></div>
+              <div className="rounded-lg bg-control p-4"><p className="text-xs text-muted-foreground">Address preview</p><p className="mt-2 break-all text-sm font-medium">http://{primaryPreviewHost}</p></div>
+              <div><div className="mb-3 flex items-center justify-between gap-3"><div><h3 className="text-sm font-medium">Additional Hostnames</h3><p className="mt-1 text-xs text-muted-foreground">Aliases route to the same destination.</p></div><WorkspaceButton type="button" size="sm" variant="secondary" onClick={handleAddAlias}><IconPlus size={14} />Add Alias</WorkspaceButton></div><div className="space-y-3">{form.aliases.map((alias,index)=><div key={alias.id} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_36px] items-end gap-2"><label className="block text-xs font-medium" htmlFor={`proxy-alias-subdomain-${index}`}>Alias {index+1}<Input id={`proxy-alias-subdomain-${index}`} className="mt-2 bg-control" value={alias.subdomainKey} onChange={event=>handleAliasChange(index,"subdomainKey",event.target.value)} /></label><label className="block text-xs font-medium" htmlFor={`proxy-alias-domain-${index}`}>Domain suffix<Input id={`proxy-alias-domain-${index}`} className="mt-2 bg-control" value={alias.domainSuffix} onChange={event=>handleAliasChange(index,"domainSuffix",event.target.value)} /></label><WorkspaceButton type="button" variant="ghost" size="icon" aria-label={`Remove alias ${index+1}`} onClick={()=>handleRemoveAlias(index)}><IconTrash size={15} /></WorkspaceButton></div>)}</div>{errors.aliases && <p className="mt-2 text-xs text-red-500">{errors.aliases}</p>}</div></div>}
+              {section === "destination" && <div className="space-y-5"><div><h2 className="text-base font-semibold">Destination</h2><p className="mt-2 text-sm leading-6 text-muted-foreground">Route to a machine’s forwarded port or an independent HTTP service.</p></div><StatusTabs label="Proxy destination type" value={form.targetMode} onChange={value=>handleChange("targetMode",value)} options={[{value:"connection",label:"Machine Port"},{value:"manual",label:"Standalone URL"}]} />
+                {form.targetMode === "connection" ? <div className="space-y-4"><div><label className="mb-2 block text-sm font-medium">Machine</label><SearchSelect label="Proxy machine" value={selectedMachine?.machine_id || ""} onChange={handleSelectMachine} options={machineOptions.map(machine=>({value:machine.machine_id,label:machine.machine_name}))} placeholder="Search machines…" /></div><div><label className="mb-2 block text-sm font-medium">Forwarded port</label><SearchSelect label="Proxy port" value={form.connectionDataId} onChange={value=>{const connection=connections.find(connection=>connection._id===value);if(connection)handleSelectConnection(connection);}} disabled={!selectedMachine} options={(selectedMachine?.connections || []).map(connection=>({value:connection._id,label:`${connection.service_name || "Port"} · :${connection.external_port} → :${connection.internal_port}`}))} placeholder={selectedMachine ? "Search ports…" : "Choose a machine first"} />{errors.connectionDataId && <p className="mt-2 text-xs text-red-500">{errors.connectionDataId}</p>}</div>{selectedConnection && <div className="rounded-lg bg-control p-4"><p className="text-xs text-muted-foreground">Resolved target</p><p className="mt-2 break-all font-mono text-sm">{derivedConnectionTargetUrl}</p><p className="mt-2 text-xs text-muted-foreground">{getMachineStatusMeta(selectedMachine || {}).label} · {selectedConnection.service_description || "Forwarded machine port"}</p></div>}</div> : <label className="block text-sm font-medium" htmlFor="proxy-target-url">Target URL<Input aria-label="Target URL" id="proxy-target-url" className="mt-2 bg-control" placeholder="http://192.168.1.10:8080" value={form.targetUrl} onChange={event=>handleChange("targetUrl",event.target.value)} /><span className="mt-2 block text-xs font-normal text-muted-foreground">Include http:// or https:// and a port if required.</span></label>}{errors.targetUrl && <p className="text-xs text-red-500">{errors.targetUrl}</p>}
+              </div>}
+              {section === "options" && <div className="space-y-5"><div><h2 className="text-base font-semibold">Proxy Options</h2><p className="mt-2 text-sm leading-6 text-muted-foreground">Organise the address and choose whether routing is enabled.</p></div><label className="block text-sm font-medium" htmlFor="proxy-group">Project group<Input id="proxy-group" className="mt-2 bg-control" maxLength={80} value={form.group} onChange={event=>handleChange("group",event.target.value)} placeholder="e.g. Production or Internal tools" /></label><label className="block text-sm font-medium" htmlFor="proxy-description">Description<textarea aria-label="Description" id="proxy-description" rows={3} className="mt-2 w-full rounded-lg border-0 bg-control p-3 text-sm text-foreground !outline-none" value={form.description} onChange={event=>handleChange("description",event.target.value)} placeholder="What is this address used for?" /></label><div className="flex items-center justify-between gap-3 rounded-lg bg-control p-4"><div><p className="text-sm font-medium">Routing Enabled</p><p className="mt-1 text-xs text-muted-foreground">Accept requests for this hostname.</p></div><Switch aria-label="Proxy enabled" checked={form.enabled} onChange={event=>handleChange("enabled",event.currentTarget.checked)} size="sm" /></div></div>}
             </div>
-
-            <Switch
-              id="proxy-enabled"
-              size="sm"
-              checked={form.enabled}
-              onChange={(event) => handleChange("enabled", event.currentTarget.checked)}
-              label="Enabled"
-              classNames={{
-                track: isDark ? "!border-zinc-700" : "!border-zinc-300",
-                label: isDark ? "!text-zinc-200" : "!text-zinc-800",
-              }}
-            />
-          </div>
-
-          <div className="mt-3 grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)]">
-            <div>
-              <label className={getLabelClassName(isDark)} htmlFor="proxy-subdomain">
-                Primary subdomain
-              </label>
-              <input
-                id="proxy-subdomain"
-                type="text"
-                placeholder="app"
-                className={getInputClassName(isDark)}
-                value={form.subdomainKey}
-                onChange={(event) => handleChange("subdomainKey", event.currentTarget.value)}
-              />
-              {errors.subdomainKey ? (
-                <p className={errorClassName}>{errors.subdomainKey}</p>
-              ) : null}
-            </div>
-
-            <div>
-              <label className={getLabelClassName(isDark)} htmlFor="proxy-domain">
-                Domain suffix
-              </label>
-              <input
-                id="proxy-domain"
-                type="text"
-                placeholder="luna.lan"
-                className={getInputClassName(isDark)}
-                value={form.domainSuffix}
-                onChange={(event) => handleChange("domainSuffix", event.currentTarget.value)}
-              />
-              {errors.domainSuffix ? (
-                <p className={errorClassName}>{errors.domainSuffix}</p>
-              ) : null}
-            </div>
-          </div>
-
-          <div className="mt-4">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <p className={getLabelClassName(isDark)}>Aliases</p>
-                <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                  Add extra hostnames that should route to this same target.
-                </p>
-              </div>
-              <Button
-                type="button"
-                variant="default"
-                size="xs"
-                leftIcon={<IconPlus size={14} />}
-                onClick={handleAddAlias}
-                classNames={{ root: btnSecondary }}
-              >
-                Add alias
-              </Button>
-            </div>
-
-            <div className="mt-3 space-y-3">
-              {form.aliases.length > 0 ? (
-                form.aliases.map((alias, index) => (
-                  <div
-                    key={alias.id}
-                    className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)_auto] md:items-end"
-                  >
-                    <div>
-                      <label
-                        className={`mb-1 block text-xs font-medium ${
-                          isDark ? "text-zinc-400" : "text-zinc-500"
-                        }`}
-                        htmlFor={`proxy-alias-subdomain-${index}`}
-                      >
-                        Alias {index + 1}
-                      </label>
-                      <input
-                        id={`proxy-alias-subdomain-${index}`}
-                        type="text"
-                        placeholder="app-alt"
-                        className={getInputClassName(isDark)}
-                        value={alias.subdomainKey}
-                        onChange={(event) =>
-                          handleAliasChange(index, "subdomainKey", event.currentTarget.value)
-                        }
-                      />
-                    </div>
-
-                    <div>
-                      <label
-                        className={`mb-1 block text-xs font-medium ${
-                          isDark ? "text-zinc-400" : "text-zinc-500"
-                        }`}
-                        htmlFor={`proxy-alias-domain-${index}`}
-                      >
-                        Domain suffix
-                      </label>
-                      <input
-                        id={`proxy-alias-domain-${index}`}
-                        type="text"
-                        placeholder="luna.lan"
-                        className={getInputClassName(isDark)}
-                        value={alias.domainSuffix}
-                        onChange={(event) =>
-                          handleAliasChange(index, "domainSuffix", event.currentTarget.value)
-                        }
-                      />
-                    </div>
-
-                    <ActionIcon
-                      type="button"
-                      variant="subtle"
-                      color="red"
-                      onClick={() => handleRemoveAlias(index)}
-                      aria-label={`Remove alias ${index + 1}`}
-                      className="md:mb-1"
-                    >
-                      <IconTrash size={16} />
-                    </ActionIcon>
-                  </div>
-                ))
-              ) : null}
-            </div>
-
-            {errors.aliases ? <p className={errorClassName}>{errors.aliases}</p> : null}
-          </div>
-
-          <div className="mt-3">
-            <label className={getLabelClassName(isDark)} htmlFor="proxy-description">
-              Description
-            </label>
-            <textarea
-              id="proxy-description"
-              rows={3}
-              placeholder="Short note about this web proxy"
-              className={getInputClassName(isDark)}
-              value={form.description}
-              onChange={(event) => handleChange("description", event.currentTarget.value)}
-            />
-          </div>
-
-          <div className="mt-3 space-y-1">
-            <p className="text-xs text-zinc-500 dark:text-zinc-400">
-              Primary address:
-              <span className="ml-1 break-all font-medium text-zinc-900 dark:text-zinc-100">
-                {`http://${primaryPreviewHost}`}
-              </span>
-            </p>
-            {previewHosts.length > 1 ? (
-              <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                Aliases:
-                <span className="ml-1 break-all font-medium text-zinc-900 dark:text-zinc-100">
-                  {previewHosts.slice(1).map((host) => `http://${host}`).join(", ")}
-                </span>
-              </p>
-            ) : null}
-          </div>
-        </div>
-
-        <div className={getPanelClassName(isDark)}>
-          <p className={getSectionTitleClassName(isDark)}>Destination</p>
-          <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-            Choose where requests for this domain should be sent.
-          </p>
-
-          <div className="mt-3 grid gap-2 md:grid-cols-2">
-            <button
-              type="button"
-              onClick={() => handleChange("targetMode", "connection")}
-              aria-pressed={form.targetMode === "connection"}
-              className={`rounded-md border px-3 py-3 text-left transition ${
-                form.targetMode === "connection"
-                  ? isDark
-                    ? "border-blue-500 bg-blue-500/10"
-                    : "border-blue-500 bg-blue-50"
-                  : isDark
-                    ? "border-zinc-700 bg-zinc-900 hover:bg-zinc-800"
-                    : "border-zinc-300 bg-white hover:bg-zinc-50"
-              }`}
-            >
-              <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-                Existing mapped service
-              </p>
-              <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-                Use a service that already has an external port.
-              </p>
-            </button>
-            <button
-              type="button"
-              onClick={() => handleChange("targetMode", "manual")}
-              aria-pressed={form.targetMode === "manual"}
-              className={`rounded-md border px-3 py-3 text-left transition ${
-                form.targetMode === "manual"
-                  ? isDark
-                    ? "border-blue-500 bg-blue-500/10"
-                    : "border-blue-500 bg-blue-50"
-                  : isDark
-                    ? "border-zinc-700 bg-zinc-900 hover:bg-zinc-800"
-                    : "border-zinc-300 bg-white hover:bg-zinc-50"
-              }`}
-            >
-              <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-                Custom target address
-              </p>
-              <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-                Send traffic to any HTTP or HTTPS endpoint.
-              </p>
-            </button>
-          </div>
-
-          {form.targetMode === "connection" ? (
-            <div className="mt-3 space-y-3">
-              {machineOptions.length === 0 ? (
-                <div
-                  className={`rounded-md border px-3 py-4 text-sm ${
-                    isDark ? "border-zinc-700 bg-zinc-950 text-zinc-300" : "border-zinc-200 bg-white text-zinc-600"
-                  }`}
-                >
-                  No mapped services are available yet.
-                </div>
-              ) : (
-                <>
-                  {!selectedMachine ? (
-                    <div>
-                      <div className="mb-3 flex items-center gap-1.5">
-                        <p className={`text-sm font-semibold ${isDark ? "text-zinc-100" : "text-zinc-900"}`}>
-                          Step 1: Choose a machine
-                        </p>
-                        <Menu
-                          withinPortal={false}
-                          position="bottom-end"
-                          shadow="md"
-                          offset={6}
-                          classNames={{
-                            dropdown:
-                              "!min-w-[10rem] !border !border-zinc-200 !bg-white !p-2 dark:!border-zinc-700 dark:!bg-zinc-900",
-                          }}
-                        >
-                          <Menu.Target>
-                            <button
-                              type="button"
-                              className={`inline-flex h-5 w-5 items-center justify-center ${
-                                isDark
-                                  ? "text-zinc-400 hover:text-zinc-200"
-                                  : "text-zinc-500 hover:text-zinc-700"
-                              }`}
-                              aria-label="Filter machines"
-                            >
-                              <IconFilter size={16} />
-                            </button>
-                          </Menu.Target>
-                          <Menu.Dropdown>
-                            <div className="space-y-2 text-sm">
-                              <div>
-                                <p className="mb-1 text-[11px] text-zinc-500">
-                                  Ports
-                                </p>
-                                <div className="flex gap-2">
-                                  <button
-                                    type="button"
-                                    onClick={() => setMachinePortFilter("all")}
-                                    className={`rounded-md px-2 py-1 text-xs ${
-                                      machinePortFilter === "all"
-                                        ? "bg-blue-600 text-blue-50"
-                                        : isDark
-                                          ? "bg-zinc-800 text-zinc-200"
-                                          : "bg-zinc-100 text-zinc-700"
-                                    }`}
-                                  >
-                                    All
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => setMachinePortFilter("with_ports")}
-                                    className={`rounded-md px-2 py-1 text-xs ${
-                                      machinePortFilter === "with_ports"
-                                        ? "bg-blue-600 text-blue-50"
-                                        : isDark
-                                          ? "bg-zinc-800 text-zinc-200"
-                                          : "bg-zinc-100 text-zinc-700"
-                                    }`}
-                                  >
-                                    With ports
-                                  </button>
-                                </div>
-                              </div>
-                              <div>
-                                <p className="mb-1 text-[11px] text-zinc-500">
-                                  Status
-                                </p>
-                                <div className="flex gap-2">
-                                  <button
-                                    type="button"
-                                    onClick={() => setMachineOnlineFilter("all")}
-                                    className={`rounded-md px-2 py-1 text-xs ${
-                                      machineOnlineFilter === "all"
-                                        ? "bg-blue-600 text-blue-50"
-                                        : isDark
-                                          ? "bg-zinc-800 text-zinc-200"
-                                          : "bg-zinc-100 text-zinc-700"
-                                    }`}
-                                  >
-                                    All
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => setMachineOnlineFilter("online_only")}
-                                    className={`rounded-md px-2 py-1 text-xs ${
-                                      machineOnlineFilter === "online_only"
-                                        ? "bg-blue-600 text-blue-50"
-                                        : isDark
-                                          ? "bg-zinc-800 text-zinc-200"
-                                          : "bg-zinc-100 text-zinc-700"
-                                    }`}
-                                  >
-                                    Online
-                                  </button>
-                                </div>
-                              </div>
-                            </div>
-                          </Menu.Dropdown>
-                        </Menu>
-                      </div>
-                      <div className={`overflow-hidden rounded-md border ${
-                        isDark ? "border-zinc-700 bg-zinc-950" : "border-zinc-200 bg-white"
-                      }`}>
-                        <div className="hidden border-b border-zinc-200 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500 dark:border-zinc-800 md:grid md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(6rem,0.7fr)_minmax(6rem,0.7fr)] md:gap-3">
-                          <span>Machine</span>
-                          <span>Host</span>
-                          <span>Mapped ports</span>
-                          <span>Status</span>
-                        </div>
-                        {visibleMachines.length > 0 ? (
-                          <div className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                            {visibleMachines.map((machine) => {
-                              const machineStatus = getMachineStatusMeta(machine);
-                              const activePortCount = machine.connections.filter(
-                                (connection) => connection.enabled
-                              ).length;
-                              return (
-                                <button
-                                  key={machine.machine_id}
-                                  type="button"
-                                  onClick={() => handleSelectMachine(machine.machine_id)}
-                                  className={`grid w-full gap-2 px-3 py-3 text-left transition-colors duration-150 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(6rem,0.7fr)_minmax(6rem,0.7fr)] md:items-center md:gap-3 ${
-                                    isDark ? "hover:bg-zinc-800/80" : "hover:bg-zinc-100"
-                                  }`}
-                                >
-                                  <div className="min-w-0">
-                                    <p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">
-                                      {machine.machine_name}
-                                    </p>
-                                    <p className="truncate text-xs text-zinc-500 dark:text-zinc-400">
-                                      {machine.machine_local_ip || machine.machine_public_ip || "No IP recorded"}
-                                    </p>
-                                  </div>
-                                  <div className="min-w-0">
-                                    <p className="truncate text-sm text-zinc-900 dark:text-zinc-100">
-                                      {machine.machine_hostname || "No hostname"}
-                                    </p>
-                                    <p className="truncate text-xs text-zinc-500 dark:text-zinc-400">
-                                      {machine.machine_public_ip || "No public IP"}
-                                    </p>
-                                  </div>
-                                  <div className="text-sm text-zinc-900 dark:text-zinc-100">
-                                    {activePortCount}/{machine.connections.length}
-                                  </div>
-                                  <div>
-                                    <span className={getStatusTextClassName(isDark, machineStatus.tone)}>
-                                      {machineStatus.label}
-                                    </span>
-                                  </div>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        ) : (
-                          <div className="px-3 py-6 text-sm text-zinc-500 dark:text-zinc-400">
-                            No machines match the current filters.
-                          </div>
-                        )}
-                      </div>
-                      {machineTotalPages > 1 ? (
-                        <div className="mt-3 flex justify-end">
-                          <Pagination
-                            value={machinePage}
-                            onChange={setMachinePage}
-                            total={machineTotalPages}
-                            size="sm"
-                            radius="md"
-                            siblings={1}
-                            classNames={{
-                              control:
-                                "!border-zinc-300 !bg-white !text-zinc-700 hover:!bg-zinc-50 data-[active=true]:!border-blue-600 data-[active=true]:!bg-blue-600 data-[active=true]:!text-blue-50 dark:!border-zinc-700 dark:!bg-zinc-900 dark:!text-zinc-200 dark:hover:!bg-zinc-800 dark:data-[active=true]:!border-blue-500 dark:data-[active=true]:!bg-blue-600",
-                            }}
-                          />
-                        </div>
-                      ) : null}
-                    </div>
-                  ) : (
-                    <div>
-                      <div className="mb-3 flex items-center justify-between gap-3">
-                        <p className={getLabelClassName(isDark)}>Step 2: Choose a mapped port</p>
-                        <Button
-                          type="button"
-                          variant="subtle"
-                          size="xs"
-                          onClick={() => handleSelectMachine("")}
-                          leftIcon={<IconArrowLeft size={14} />}
-                        >
-                          Back to machines
-                        </Button>
-                      </div>
-                      <div className={`overflow-hidden rounded-md border ${
-                        isDark ? "border-zinc-700 bg-zinc-950" : "border-zinc-200 bg-white"
-                      }`}>
-                        <div className="hidden border-b border-zinc-200 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500 dark:border-zinc-800 md:grid md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(6rem,0.7fr)_minmax(8rem,0.8fr)] md:gap-3">
-                          <span>Service</span>
-                          <span>Internal</span>
-                          <span>External</span>
-                          <span>Status</span>
-                        </div>
-                        <div className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                          {visibleServices.map((connection) => {
-                            const connectionStatus = getConnectionStatusMeta(connection);
-                            return (
-                              <button
-                                key={connection._id}
-                                type="button"
-                                onClick={() => handleSelectConnection(connection)}
-                                className={`grid w-full gap-2 px-3 py-3 text-left transition-colors duration-150 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(6rem,0.7fr)_minmax(8rem,0.8fr)] md:items-center md:gap-3 ${
-                                  form.connectionDataId === connection._id
-                                    ? isDark
-                                      ? "bg-blue-500/10"
-                                      : "bg-blue-50"
-                                    : isDark
-                                      ? "hover:bg-zinc-800/80"
-                                      : "hover:bg-zinc-100"
-                                }`}
-                              >
-                                <div className="min-w-0">
-                                  <p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">
-                                    {connection.service_name || "Unnamed service"}
-                                  </p>
-                                  <p className="truncate text-xs text-zinc-500 dark:text-zinc-400">
-                                    {connection.service_description || "No description"}
-                                  </p>
-                                </div>
-                                <div className="min-w-0">
-                                  <p className="truncate text-sm text-zinc-900 dark:text-zinc-100">
-                                    {connection.internal_ip || "0.0.0.0"}:{connection.internal_port || "-"}
-                                  </p>
-                                </div>
-                                <div className="text-sm text-zinc-900 dark:text-zinc-100">
-                                  :{connection.external_port || "-"}
-                                </div>
-                                <div>
-                                  <span className={getStatusTextClassName(isDark, connectionStatus.tone)}>
-                                    {connectionStatus.label}
-                                  </span>
-                                </div>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                      {serviceTotalPages > 1 ? (
-                        <div className="mt-3 flex justify-end">
-                          <Pagination
-                            value={servicePage}
-                            onChange={setServicePage}
-                            total={serviceTotalPages}
-                            size="sm"
-                            radius="md"
-                            siblings={1}
-                            classNames={{
-                              control:
-                                "!border-zinc-300 !bg-white !text-zinc-700 hover:!bg-zinc-50 data-[active=true]:!border-blue-600 data-[active=true]:!bg-blue-600 data-[active=true]:!text-blue-50 dark:!border-zinc-700 dark:!bg-zinc-900 dark:!text-zinc-200 dark:hover:!bg-zinc-800 dark:data-[active=true]:!border-blue-500 dark:data-[active=true]:!bg-blue-600",
-                            }}
-                          />
-                        </div>
-                      ) : null}
-                    </div>
-                  )}
-                </>
-              )}
-              {errors.targetUrl ? <p className={errorClassName}>{errors.targetUrl}</p> : null}
-              {errors.connectionDataId ? (
-                <p className={errorClassName}>{errors.connectionDataId}</p>
-              ) : null}
-            </div>
-          ) : (
-            <div className="mt-3">
-              <label className={getLabelClassName(isDark)} htmlFor="proxy-target-url">
-                Target URL
-              </label>
-              <input
-                id="proxy-target-url"
-                type="text"
-                placeholder="http://192.168.0.3:8089"
-                className={getInputClassName(isDark)}
-                value={form.targetUrl}
-                onChange={(event) => handleChange("targetUrl", event.currentTarget.value)}
-              />
-              {errors.targetUrl ? <p className={errorClassName}>{errors.targetUrl}</p> : null}
-            </div>
-          )}
-        </div>
-
-        <Group position="apart" className="px-1">
-          <div />
-          <Group>
-            <Button type="button" variant="default" onClick={onClose} classNames={{ root: btnSecondary }}>
-              Cancel
-            </Button>
-            <Button
-              type="submit"
-              loading={isSaving}
-              classNames={{
-                root:
-                  "!bg-blue-600 !text-blue-50 hover:!bg-blue-700 disabled:!bg-blue-400",
-              }}
-            >
-              {isPersisted ? "Save proxy" : "Create proxy"}
-            </Button>
-          </Group>
-        </Group>
+            <div className="mt-5 flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-border pt-4"><WorkspaceButton type="button" variant="secondary" onClick={onClose} disabled={isSaving}>Cancel</WorkspaceButton><div className="flex gap-2">{section !== "address" && <WorkspaceButton type="button" variant="secondary" onClick={()=>setSection(section === "options" ? "destination" : "address")}>Back</WorkspaceButton>}{!isPersisted && section !== "options" ? <WorkspaceButton key="continue" type="button" onClick={event=>{event.preventDefault();setSection(section === "address" ? "destination" : "options");}}>Continue</WorkspaceButton> : <WorkspaceButton key="submit" type="submit" disabled={isSaving}>{isSaving ? "Saving…" : isPersisted ? "Save Proxy" : "Create Proxy"}</WorkspaceButton>}</div></div>
           </form>
         </div>
-      </Modal>
+      </WorkspaceDrawer>
 
       <Modal
         opened={isDeleteConfirmOpen}
+        zIndex={230}
         onClose={() => setIsDeleteConfirmOpen(false)}
         title="Delete proxy"
         centered
         radius="md"
         size="sm"
-        overlayProps={{ backgroundOpacity: 0, blur: 0 }}
         classNames={modalClassNames}
         closeOnClickOutside={!isDeleting}
         closeOnEscape={!isDeleting}
@@ -1367,27 +805,22 @@ export default function ProxyConfigModal({
           </Text>
 
           <div className="mt-5 flex justify-end gap-3">
-            <Button
+            <WorkspaceButton
               type="button"
-              variant="default"
+              variant="secondary"
               onClick={() => setIsDeleteConfirmOpen(false)}
               disabled={isDeleting}
-              classNames={{ root: btnSecondary }}
             >
               Cancel
-            </Button>
-            <Button
+            </WorkspaceButton>
+            <WorkspaceButton
               type="button"
-              variant="filled"
+              variant="destructive"
               onClick={handleDelete}
-              loading={isDeleting}
-              classNames={{
-                root:
-                  "!bg-red-600 !text-red-50 hover:!bg-red-700 disabled:!bg-red-400",
-              }}
+              disabled={isDeleting}
             >
               Delete proxy
-            </Button>
+            </WorkspaceButton>
           </div>
         </div>
       </Modal>

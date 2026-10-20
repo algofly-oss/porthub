@@ -10,6 +10,9 @@
 
 # next.js
 /.next/
+/.next-review/
+/.next-dev-local/
+/.next-verify-*/
 /out/
 
 # production

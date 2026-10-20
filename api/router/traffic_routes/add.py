@@ -76,6 +76,7 @@ async def add_traffic_route(data: TrafficRoute, request: Request):
         {
             "user_id": user["_id"],
             "name": name,
+            "group": data.group.strip(),
             "description": (data.description or "").strip(),
             "hosts": hosts,
             "target_mode": data.target_mode,

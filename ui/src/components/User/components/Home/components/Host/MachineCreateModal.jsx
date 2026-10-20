@@ -1,194 +1,29 @@
 import { useEffect, useState } from "react";
-import { Button, Modal, Select, Stack, Text } from "@mantine/core";
-import { useMantineColorScheme } from "@mantine/core";
+import WorkspaceDrawer from "@/components/ui/workspace-drawer";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import SearchSelect from "@/components/ui/search-select";
 
-const getInputClassName = (isDark) =>
-  `w-full rounded-md border px-3 py-2 text-sm outline-none transition-colors focus:!border-blue-500 focus:ring-0 ${
-    isDark
-      ? "!border-zinc-600 !bg-zinc-800 !text-zinc-100 placeholder:!text-zinc-500"
-      : "!border-zinc-300 !bg-zinc-50 !text-zinc-900 placeholder:!text-zinc-400"
-  }`;
-
-const getLabelClassName = (isDark) =>
-  `mb-1.5 block text-sm font-semibold ${isDark ? "text-zinc-100" : "text-zinc-900"}`;
-
-const errorClassName = "mt-1 text-xs text-red-600 dark:text-red-400";
-
-const initialForm = {
-  name: "",
-  hostname: "",
-  groupId: "",
-};
-
-export default function MachineCreateModal({
-  opened,
-  onClose,
-  onCreate,
-  isCreating,
-  groups = [],
-}) {
-  const { colorScheme } = useMantineColorScheme();
-  const isDark = colorScheme === "dark";
-  const [form, setForm] = useState(initialForm);
-  const [errors, setErrors] = useState({});
-
-  useEffect(() => {
-    if (!opened) {
-      setForm(initialForm);
-      setErrors({});
-    }
-  }, [opened]);
-
-  const handleSubmit = async (event) => {
+const initialForm = {name:"",hostname:"",groupId:""};
+export default function MachineCreateModal({opened,onClose,onCreate,isCreating,groups=[]}) {
+  const [form,setForm] = useState(initialForm);
+  const [error,setError] = useState("");
+  useEffect(()=>{if(!opened){setForm(initialForm);setError("");}},[opened]);
+  async function submit(event) {
     event.preventDefault();
-    const nextErrors = {};
-
-    if (!form.name.trim()) {
-      nextErrors.name = "Machine name is required";
-    }
-
-    if (Object.keys(nextErrors).length > 0) {
-      setErrors(nextErrors);
-      return;
-    }
-
-    const created = await onCreate({
-      name: form.name.trim(),
-      hostname: form.hostname.trim(),
-      group_ids: form.groupId ? [form.groupId] : [],
-    });
-
-    if (created) {
-      setForm(initialForm);
-      setErrors({});
-    }
-  };
-
-  const modalClassNames = isDark
-    ? {
-        content: "!border !border-zinc-700 !bg-zinc-900",
-        header: "!border-b !border-zinc-800 !bg-zinc-900",
-        title: "font-bold !text-zinc-100",
-        close: "!text-zinc-400 hover:!bg-zinc-800",
-        body: "!bg-zinc-900 !pt-3",
-      }
-    : {
-        content: "!border !border-zinc-200 !bg-white",
-        header: "!border-b !border-zinc-200 !bg-white",
-        title: "font-bold !text-zinc-900",
-        close: "!text-zinc-500 hover:!bg-zinc-100",
-        body: "!bg-white !pt-3",
-      };
-
-  const btnSecondary = isDark
-    ? "!border-zinc-700 !bg-zinc-800 !text-zinc-100 hover:!bg-zinc-700"
-    : "!border-zinc-300 !bg-white !text-zinc-900 hover:!bg-zinc-50";
-
-  return (
-    <Modal
-      opened={opened}
-      onClose={onClose}
-      title="Create machine"
-      centered
-      radius="md"
-      size="md"
-      overlayProps={{ blur: 3 }}
-      classNames={modalClassNames}
-      closeOnClickOutside={!isCreating}
-    >
-      <form onSubmit={handleSubmit}>
-        <Stack spacing="md">
-          <Text size="sm" className={isDark ? "!text-zinc-400" : "!text-zinc-600"}>
-            Create a machine record now. The client will publish its local and public
-            IPs automatically after it connects.
-          </Text>
-
-          <div>
-            <label htmlFor="machine-name" className={getLabelClassName(isDark)}>
-              Machine name
-            </label>
-            <input
-              id="machine-name"
-              type="text"
-              placeholder="edge-node-1"
-              className={getInputClassName(isDark)}
-              value={form.name}
-              onChange={(event) =>
-                setForm((current) => ({ ...current, name: event.currentTarget.value }))
-              }
-            />
-            {errors.name && <p className={errorClassName}>{errors.name}</p>}
-          </div>
-
-          <div>
-            <label htmlFor="machine-hostname" className={getLabelClassName(isDark)}>
-              Hostname
-            </label>
-            <input
-              id="machine-hostname"
-              type="text"
-              placeholder="edge-node-1.local"
-              className={getInputClassName(isDark)}
-              value={form.hostname}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  hostname: event.currentTarget.value,
-                }))
-              }
-            />
-          </div>
-
-          {groups.length > 0 ? (
-            <div>
-              <label htmlFor="machine-group" className={getLabelClassName(isDark)}>
-                Group (optional)
-              </label>
-              <Select
-                id="machine-group"
-                placeholder="Ungrouped"
-                clearable
-                data={groups.map((g) => ({ value: g._id, label: g.name }))}
-                value={form.groupId || null}
-                onChange={(value) =>
-                  setForm((current) => ({ ...current, groupId: value || "" }))
-                }
-                classNames={{
-                  input: getInputClassName(isDark),
-                  dropdown: isDark
-                    ? "!border-zinc-700 !bg-zinc-900"
-                    : "!border-zinc-200 !bg-white",
-                  item: isDark
-                    ? "!text-zinc-100 hover:!bg-zinc-800"
-                    : "!text-zinc-900 hover:!bg-zinc-100",
-                }}
-              />
-            </div>
-          ) : null}
-
-          <div className="flex justify-end gap-3">
-            <Button
-              type="button"
-              variant="default"
-              onClick={onClose}
-              disabled={isCreating}
-              classNames={{ root: btnSecondary }}
-            >
-              Cancel
-            </Button>
-            <Button
-              type="submit"
-              loading={isCreating}
-              classNames={{
-                root:
-                  "!bg-blue-600 !text-blue-50 hover:!bg-blue-700 disabled:!bg-blue-400",
-              }}
-            >
-              Create machine
-            </Button>
-          </div>
-        </Stack>
-      </form>
-    </Modal>
-  );
+    if(!form.name.trim()){setError("Machine name is required");return;}
+    const created = await onCreate({name:form.name.trim(),hostname:form.hostname.trim(),group_ids:form.groupId ? [form.groupId] : []});
+    if(created){setForm(initialForm);setError("");}
+  }
+  return <WorkspaceDrawer opened={opened} onClose={onClose} title="Create Machine" size="lg" fixedHeight="min(560px, calc(100dvh - 64px))" closeOnClickOutside={!isCreating} closeOnEscape={!isCreating}>
+    <form onSubmit={submit} className="flex h-full min-h-0 flex-1 flex-col">
+      <div className="min-h-0 flex-1 space-y-5 overflow-y-auto pb-5">
+        <p className="text-sm leading-6 text-muted-foreground">Name your machine, then install its client. IP addresses and connection details appear automatically when it connects.</p>
+        <label htmlFor="machine-name" className="block text-sm font-medium">Machine name<Input id="machine-name" className="mt-2" placeholder="e.g. edge-node-1" value={form.name} onChange={event=>setForm(current=>({...current,name:event.target.value}))} required aria-invalid={!!error} />{error && <span className="mt-1 block text-xs text-red-500">{error}</span>}</label>
+        <label htmlFor="machine-hostname" className="block text-sm font-medium">Hostname <span className="font-normal text-muted-foreground">(optional)</span><Input id="machine-hostname" className="mt-2" placeholder="Reported by the client when left empty" value={form.hostname} onChange={event=>setForm(current=>({...current,hostname:event.target.value}))} /></label>
+        <div><label htmlFor="machine-group" className="mb-2 block text-sm font-medium">Group <span className="font-normal text-muted-foreground">(optional)</span></label><SearchSelect id="machine-group" label="Machine group" value={form.groupId} onChange={value=>setForm(current=>({...current,groupId:value}))} options={[{value:"",label:"Ungrouped"},...groups.map(group=>({value:group._id,label:group.name}))]} /></div>
+      </div>
+      <div className="flex shrink-0 justify-end gap-2 border-t border-border pt-4"><Button type="button" variant="secondary" onClick={onClose} disabled={isCreating}>Cancel</Button><Button type="submit" disabled={isCreating}>{isCreating ? "Creating…" : "Create Machine"}</Button></div>
+    </form>
+  </WorkspaceDrawer>;
 }

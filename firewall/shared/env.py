@@ -28,4 +28,6 @@ RECENT_IP_HISTORY_LIMIT = _get_int_env("FW_RECENT_IP_HISTORY_LIMIT", 10)
 NFT_TABLE = os.getenv("FW_NFT_TABLE", "inet rathole")
 HOST = os.getenv("FW_HOST", "0.0.0.0")
 PORT = _get_int_env("FW_PORT", 8001)
-NUM_WORKERS = _get_int_env("FW_NUM_WORKERS", 2)
+# Each worker would otherwise start its own nft sampler and own a different
+# in-memory snapshot. Keep one owner for counter baselines and SQLite writes.
+NUM_WORKERS = 1

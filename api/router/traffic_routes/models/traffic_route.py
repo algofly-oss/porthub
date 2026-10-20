@@ -31,6 +31,7 @@ class TrafficRoute(BaseModel):
     user_id: typing.Optional[str] = Field(None)
     data_id: typing.Optional[str] = Field(None)
     name: str = Field(..., min_length=1, example="Primary Docs Route")
+    group: str = Field("", max_length=80)
     description: typing.Optional[str] = Field(
         "", example="Routes docs.example.com traffic to the internal docs server"
     )

@@ -1,3 +1,4 @@
+import SearchSelect from "@/components/ui/search-select";
 import { useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { useDispatch } from "react-redux";
@@ -9,22 +10,17 @@ import uiRoutes from "@/shared/routes/uiRoutes";
 import useAuth from "@/shared/hooks/useAuth";
 import useToast from "@/shared/hooks/useToast";
 import { authActions } from "@/redux/features/authSlice";
+import Link from "next/link";
+import { PageHeader } from "@/components/ui/workspace";
+import { IconUser, IconShieldLock, IconBell, IconPalette, IconSun, IconMoon, IconDeviceMobile, IconCheck, IconDeviceDesktop, IconArrowUpRight } from "@tabler/icons-react";
+import useTheme from "@/shared/hooks/useTheme";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Dialog } from "@/components/ui/dialog";
 
-const panelClass =
-  "overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-700 dark:bg-zinc-900";
-const dividerClass = "border-zinc-200 dark:border-zinc-700";
-const inputClass =
-  "mt-1 w-full rounded-md border border-zinc-300 bg-zinc-50 px-3 py-2 text-sm text-zinc-900 outline-none ring-0 transition-colors focus:border-blue-500 focus:ring-0 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100";
-const passwordInputClass = `${inputClass} pr-10`;
-const secondaryButtonClass =
-  "inline-flex items-center justify-center gap-2 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800";
-const primaryButtonClass =
-  "inline-flex items-center justify-center gap-2 rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60";
-const dangerButtonClass =
-  "inline-flex items-center justify-center gap-2 rounded-md border border-red-300 bg-white px-3 py-2 text-sm font-medium text-red-600 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-900/70 dark:bg-zinc-900 dark:text-red-300 dark:hover:bg-red-950/30";
 const toggleTrackClass = (checked) =>
   `relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
-    checked ? "bg-blue-600" : "bg-zinc-300 dark:bg-zinc-700"
+    checked ? "bg-primary" : "bg-control"
   }`;
 const toggleThumbClass = (checked) =>
   `inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
@@ -41,12 +37,13 @@ const SettingsToggle = ({ checked, onChange, label, description, disabled }) => 
     <span>
       <span className="block text-sm font-medium">{label}</span>
       {description ? (
-        <span className="block text-xs text-zinc-500 dark:text-zinc-400">{description}</span>
+        <span className="block text-xs text-muted-foreground dark:text-zinc-400">{description}</span>
       ) : null}
     </span>
     <button
       type="button"
       role="switch"
+      aria-label={label}
       aria-checked={checked}
       disabled={disabled}
       onClick={() => onChange(!checked)}
@@ -58,6 +55,18 @@ const SettingsToggle = ({ checked, onChange, label, description, disabled }) => 
 );
 
 const MAX_PROFILE_PICTURE_BYTES = 10 * 1024 * 1024;
+
+function SettingsIntro({ title, description }) {
+  return <div className="pb-6"><h2 className="text-xl font-semibold tracking-tight">{title}</h2><p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">{description}</p></div>;
+}
+
+function SettingsRow({ title, description, children }) {
+  return <div className="grid min-w-0 gap-4 border-t border-border/70 py-6 xl:grid-cols-[190px_minmax(0,1fr)] xl:gap-8"><div><h3 className="text-sm font-semibold">{title}</h3>{description && <p className="mt-2 text-sm leading-6 text-muted-foreground">{description}</p>}</div><div className="min-w-0">{children}</div></div>;
+}
+
+function PasswordField({ label, field, visibilityKey, passwordForm, setPasswordForm, passwordVisibility, renderPasswordToggle, autoComplete }) {
+  return <label className="block text-sm font-medium">{label}<div className="relative mt-2"><Input type={passwordVisibility[visibilityKey] ? "text" : "password"} autoComplete={autoComplete} required className="pr-10" value={passwordForm[field]} onChange={event=>setPasswordForm(current=>({...current,[field]:event.target.value}))} />{renderPasswordToggle(visibilityKey,passwordVisibility[visibilityKey])}</div></label>;
+}
 const ALLOWED_PROFILE_PICTURE_TYPES = new Set([
   "image/png",
   "image/jpeg",
@@ -151,6 +160,9 @@ const readProfilePictureFile = async (file) => {
 };
 
 export default function Settings() {
+  const theme = useTheme();
+  const [category, setCategory] = useState("profile");
+  const [savingNavigation, setSavingNavigation] = useState(false);
   const auth = useAuth();
   const toast = useToast();
   const dispatch = useDispatch();
@@ -173,7 +185,6 @@ export default function Settings() {
     accountNew: false,
     accountConfirm: false,
   });
-  const [profileEditing, setProfileEditing] = useState(false);
   const [passwordEditing, setPasswordEditing] = useState(false);
   const [profilePicturePayload, setProfilePicturePayload] = useState(null);
   const [profilePictureRemoved, setProfilePictureRemoved] = useState(false);
@@ -350,7 +361,7 @@ export default function Settings() {
   const renderPasswordToggle = (key, isVisible) => (
     <button
       type="button"
-      className="absolute right-2 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+      className="absolute right-2 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition hover:bg-accent hover:text-foreground"
       onClick={() => togglePasswordVisibility(key)}
       aria-label={isVisible ? "Hide password" : "Show password"}
       title={isVisible ? "Hide password" : "Show password"}
@@ -383,13 +394,6 @@ export default function Settings() {
     });
   };
 
-  const handleToggleProfileEditing = () => {
-    if (profileEditing) {
-      resetProfileForm();
-    }
-    setProfileEditing((editing) => !editing);
-  };
-
   const handleSaveProfile = async () => {
     const name = profileForm.name.trim();
     const email = profileForm.email.trim().toLowerCase();
@@ -416,7 +420,6 @@ export default function Settings() {
       setProfileForm((current) => ({ ...current, currentPassword: "" }));
       setProfilePicturePayload(null);
       setProfilePictureRemoved(false);
-      setProfileEditing(false);
       toast.success("Account updated.");
     } catch (requestError) {
       toast.error(requestError?.response?.data?.detail || "Failed to update account.");
@@ -486,586 +489,76 @@ export default function Settings() {
   };
 
   return (
-    <div className="flex justify-center">
-      <div className="m-4 flex w-full flex-col gap-5 pb-16 md:pb-6 xl:m-8 2xl:w-[80rem]">
-        <div>
-          <p className="text-sm font-semibold uppercase tracking-[0.2em] text-zinc-500">
-            Settings
-          </p>
-          <h1 className="mt-1 text-2xl font-semibold text-zinc-900 dark:text-zinc-100">
-            Account settings
-          </h1>
-          <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
-            Manage your profile, password, and active sessions.
-          </p>
+    <div className="flex h-full min-h-0 justify-center">
+      <div className="workspace-page">
+        <PageHeader eyebrow="Your workspace" title="Settings" description="Make PortHub yours. Manage your account, security, notifications, and preferences." />
+        <div className="grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)] gap-4 lg:grid-cols-[190px_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)] lg:gap-7">
+        <nav aria-label="Settings categories" className="grid grid-cols-4 gap-1 self-start rounded-lg bg-muted/50 p-1 lg:grid-cols-1 lg:bg-transparent lg:p-0">
+          {[["profile", "Profile", "Account details", IconUser], ["security", "Security", "Passwords & devices", IconShieldLock], ["notifications", "Notifications", "Machine status alerts", IconBell], ["appearance", "Appearance", "Theme & navigation", IconPalette]].map(([id, label, description, Icon]) => <button key={id} type="button" aria-label={label} aria-pressed={category === id} className={`flex min-w-0 flex-col items-center gap-2 rounded-lg px-1 py-3 text-left text-[11px] lg:flex-row lg:items-start lg:gap-3 lg:px-3 lg:text-sm ${category === id ? "bg-surface text-foreground lg:bg-muted" : "text-muted-foreground hover:bg-muted/70 hover:text-foreground"}`} onClick={() => setCategory(id)}><Icon size={18} className={`shrink-0 lg:mt-0.5 ${category === id ? "text-blue-600 dark:text-blue-400" : ""}`} /><span className="min-w-0 lg:flex-1"><span className="block font-medium">{label}</span><span className="mt-1 hidden text-xs font-normal text-muted-foreground lg:block">{description}</span></span></button>)}
+        </nav>
+        <div className="data-scroll min-w-0 rounded-xl bg-surface p-5 sm:p-7">
+
+        <section hidden={category !== "profile"}>
+          <SettingsIntro title="Profile" description="Manage your identity and the email you use to access PortHub." />
+          <form onSubmit={event=>{event.preventDefault();handleSaveProfile();}}>
+            <SettingsRow title="Profile Photo" description="Personalise your account. PNG, JPEG or WebP, up to 10 MB.">
+              <div className="flex flex-wrap items-center gap-4"><div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-full bg-primary text-xl font-semibold text-white">{profilePictureSource ? <img src={profilePictureSource} alt="Profile" className="h-full w-full object-cover" /> : initials}</div><input ref={profilePictureInputRef} type="file" accept="image/png,image/jpeg,image/webp" className="hidden" onChange={handleProfilePictureChange} /><Button type="button" variant="secondary" onClick={()=>profilePictureInputRef.current?.click()}><FiUpload size={15} />Upload Photo</Button>{(profilePictureSource || savedProfilePictureSource) && <Button type="button" variant="ghost" onClick={()=>{setProfilePicturePayload(null);setProfilePictureRemoved(true);}}>Remove</Button>}</div>
+            </SettingsRow>
+            <SettingsRow title="Account Details" description="Your display name appears in the workspace. Your email is used to sign in.">
+              <div className="space-y-5"><label className="block text-sm font-medium">Display name<Input required autoComplete="name" className="mt-2" value={profileForm.name} onChange={event=>setProfileForm(current=>({...current,name:event.target.value}))} /></label><label className="block text-sm font-medium">Email address<Input required type="email" autoComplete="email" className="mt-2" value={profileForm.email} onChange={event=>setProfileForm(current=>({...current,email:event.target.value}))} /></label></div>
+            </SettingsRow>
+            {emailChanged && <SettingsRow title="Confirm Email Change" description="Enter your current password to update the email used to sign in."><label className="block text-sm font-medium">Current password<div className="relative mt-2"><Input required type={passwordVisibility.profileCurrent ? "text" : "password"} autoComplete="current-password" className="pr-10" value={profileForm.currentPassword} onChange={event=>setProfileForm(current=>({...current,currentPassword:event.target.value}))} />{renderPasswordToggle("profileCurrent",passwordVisibility.profileCurrent)}</div></label></SettingsRow>}
+            <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border pt-5"><Button type="button" variant="ghost" onClick={resetProfileForm} disabled={isSavingProfile}>Discard Changes</Button><Button type="submit" disabled={isSavingProfile}>{isSavingProfile ? "Saving…" : "Save Profile"}</Button></div>
+          </form>
+        </section>
+
+        <section hidden={category !== "security"}>
+          <SettingsIntro title="Security" description="Keep your account secure and review the devices that can access your workspace." />
+          <SettingsRow title="Change Password" description="Use a unique password that you do not use for other accounts.">
+            <form className="space-y-4" onSubmit={event=>{event.preventDefault();handleSavePassword();}}>
+              <PasswordField label="Current password" field="currentPassword" visibilityKey="accountCurrent" autoComplete="current-password" {...{passwordForm,setPasswordForm,passwordVisibility,renderPasswordToggle}} />
+              <div className="grid gap-4 sm:grid-cols-2"><PasswordField label="New password" field="newPassword" visibilityKey="accountNew" autoComplete="new-password" {...{passwordForm,setPasswordForm,passwordVisibility,renderPasswordToggle}} /><PasswordField label="Confirm new password" field="confirmPassword" visibilityKey="accountConfirm" autoComplete="new-password" {...{passwordForm,setPasswordForm,passwordVisibility,renderPasswordToggle}} /></div>
+              <div className="flex justify-end"><Button type="submit" disabled={isSavingPassword || !passwordForm.currentPassword || !passwordForm.newPassword || !passwordForm.confirmPassword}>{isSavingPassword ? "Updating…" : "Update Password"}</Button></div>
+            </form>
+          </SettingsRow>
+          <SettingsRow title="Signed-in Devices" description="Review active sessions. Signing out a device requires it to log in again.">
+            <div className="mb-3 flex items-center justify-between"><p className="text-xs text-muted-foreground">{sessions.length} active {sessions.length === 1 ? "session" : "sessions"}</p><Button type="button" variant="ghost" size="sm" onClick={loadSessions} disabled={isLoadingSessions}><FiRefreshCw size={14} />Refresh</Button></div>
+            <div className="space-y-2">{isLoadingSessions ? <p role="status" className="py-4 text-sm text-muted-foreground">Loading devices…</p> : sessions.length ? sessions.map(session=><div key={session.id} className="flex flex-wrap items-center gap-3 rounded-lg bg-muted/60 p-4"><IconDeviceDesktop size={21} className="shrink-0 text-muted-foreground" /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><p className="text-sm font-medium">{session.device_name}</p>{session.current && <span className="rounded bg-primary/10 px-2 py-0.5 text-[11px] text-blue-600 dark:text-blue-300">This device</span>}</div><p className="mt-1 text-xs leading-5 text-muted-foreground">{session.ip || "Unknown IP"} · Active {formatRelativeTime(session.last_accessed_at,Date.now())}</p></div><Button type="button" variant="ghost" size="sm" onClick={()=>setSessionPendingSignOut(session)} disabled={activeSessionId === session.id}>{activeSessionId === session.id ? "Signing out…" : "Sign Out"}</Button></div>) : <p className="text-sm text-muted-foreground">No active devices.</p>}</div>
+          </SettingsRow>
+        </section>
+
+        <section hidden={category !== "notifications"}>
+          <SettingsIntro title="Notifications" description="Choose how PortHub lets you know when a machine disconnects or comes back online." />
+          {isLoadingTelegram ? <p role="status" className="p-4 text-sm text-muted-foreground">Loading notification settings…</p> : <form onSubmit={event=>{event.preventDefault();handleSaveTelegramSettings();}}>
+            <SettingsRow title="Telegram Connection" description="Connect a bot and choose the chats or channels that receive alerts.">
+              <div className="space-y-5"><label className="block text-sm font-medium">Bot token<Input aria-label="Bot token" type="password" autoComplete="new-password" className="mt-2" placeholder={telegramSettings?.has_bot_token ? telegramSettings.bot_token_masked : "Paste your Telegram bot token"} value={telegramForm.botToken} onChange={event=>setTelegramForm(current=>({...current,botToken:event.target.value}))} /><span className="mt-2 block text-xs font-normal leading-5 text-muted-foreground">{telegramSettings?.has_bot_token ? "A token is saved. Leave this empty to keep it." : "Create a bot with BotFather on Telegram, then paste its token here."}</span></label>
+              <div><p className="mb-2 text-sm font-medium">Recipient IDs</p><div className="space-y-2">{telegramForm.chatIds.map((chatId,index)=><div key={index} className="flex items-center gap-2"><Input aria-label={`Telegram recipient ${index+1}`} placeholder="Chat, user or channel ID" value={chatId} onChange={event=>handleTelegramChatIdChange(index,event.target.value)} /><Button type="button" variant="ghost" size="icon" aria-label={`Remove Telegram recipient ${index+1}`} disabled={telegramForm.chatIds.length <= 1} onClick={()=>handleRemoveTelegramChatId(index)}><FiTrash2 size={15} /></Button></div>)}</div><Button type="button" className="mt-2" variant="ghost" size="sm" onClick={handleAddTelegramChatId}><FiPlus size={14} />Add Recipient</Button></div></div>
+            </SettingsRow>
+            <SettingsRow title="Alert Delivery" description="Changes apply after you save. Disabled machines are excluded from alerts.">
+              <div className="space-y-2"><SettingsToggle checked={telegramForm.alertsEnabled} onChange={value=>setTelegramForm(current=>({...current,alertsEnabled:value}))} label="Enable Telegram alerts" description="Allow this workspace to send machine-status messages." /><SettingsToggle checked={telegramForm.instantAlertsEnabled} onChange={value=>setTelegramForm(current=>({...current,instantAlertsEnabled:value}))} label="Instant status alerts" description="Notify when a machine goes online or offline." /><SettingsToggle checked={telegramForm.digestEnabled} onChange={value=>setTelegramForm(current=>({...current,digestEnabled:value}))} label="Offline digest" description="Send a recurring summary of machines that remain offline." /><div className="flex flex-wrap items-center justify-between gap-3 pt-3"><label htmlFor="digest-interval" className="text-sm font-medium">Digest interval</label><SearchSelect id="digest-interval" className="w-40" label="Digest interval" value={telegramForm.digestIntervalHours} onChange={value=>setTelegramForm(current=>({...current,digestIntervalHours:Number(value)}))} options={DIGEST_INTERVAL_OPTIONS.map(hours=>({value:hours,label:`Every ${hours}h`}))} /></div></div>
+            </SettingsRow>
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-5"><Button type="button" variant="secondary" onClick={handleSendTelegramTest} disabled={isSendingTelegramTest || !telegramSettings?.has_bot_token || !telegramSettings?.chat_ids?.length}><FiSend size={14} />{isSendingTelegramTest ? "Sending…" : "Send Test"}</Button><div className="flex flex-wrap gap-2"><Button type="button" variant="ghost" onClick={()=>applyTelegramSettings(telegramSettings || {})} disabled={isSavingTelegram}>Discard Changes</Button><Button type="submit" disabled={isSavingTelegram}>{isSavingTelegram ? "Saving…" : "Save Notifications"}</Button></div></div>
+          </form>}
+        </section>
+
+        <section hidden={category !== "appearance"}>
+          <SettingsIntro title="Appearance" description="Choose a comfortable theme and the way you move around your workspace." />
+          <SettingsRow title="Color Theme" description="Switch instantly between light and dark. This preference is saved on this device.">
+            <div className="grid max-w-lg grid-cols-2 gap-4">{[["light","Light",IconSun],["dark","Dark",IconMoon]].map(([value,label,Icon])=><button key={value} type="button" aria-pressed={theme.colorScheme === value} onClick={()=>theme.toggleColorScheme(value)} className={`overflow-hidden rounded-xl p-2 text-left ${theme.colorScheme === value ? "bg-primary/10" : "bg-muted/60 hover:bg-accent"}`}><div aria-hidden="true" className={`flex h-24 overflow-hidden rounded-lg ${value === "light" ? "bg-[#f4f5f7]" : "bg-[#17181c]"}`}><div className={`w-8 shrink-0 space-y-2 p-2 ${value === "light" ? "bg-[#e4e6eb]" : "bg-[#0d0e10]"}`}>{[0,1,2,3].map(item=><span key={item} className={`block h-1.5 rounded ${item===0 ? "bg-blue-600" : value === "light" ? "bg-[#bfc4cd]" : "bg-[#41434a]"}`} />)}</div><div className="flex-1 space-y-2 p-3"><div className={`h-2 w-2/3 rounded ${value === "light" ? "bg-[#c6cbd4]" : "bg-[#51535b]"}`} /><div className={`h-11 rounded ${value === "light" ? "bg-white" : "bg-[#2b2d32]"}`} /><div className="h-1.5 w-1/3 rounded bg-blue-600" /></div></div><span className="flex items-center gap-2 px-1 pb-1 pt-3 text-sm font-medium"><Icon size={16} />{label}{theme.colorScheme === value && <IconCheck size={16} className="ml-auto text-blue-600 dark:text-blue-300" />}</span></button>)}</div>
+          </SettingsRow>
+          <SettingsRow title="Navigation" description="Your sidebar preference follows your account across devices."><SettingsToggle label="Compact sidebar" description="Show icons to leave more room for your machines and services." checked={user?.preferences?.nav_collapsed === true} disabled={savingNavigation} onChange={async value=>{const previous=user.preferences || {};setSavingNavigation(true);dispatch(authActions.updateAccountInfo({preferences:{...previous,nav_collapsed:value}}));try{await axios.patch(apiRoutes.userPreferences,{nav_collapsed:value});}catch{dispatch(authActions.updateAccountInfo({preferences:previous}));toast.error("Could not save navigation preference.");}finally{setSavingNavigation(false);}}} /></SettingsRow>
+          <SettingsRow title="Install PortHub" description="Keep your workspace close at hand."><div className="flex items-start gap-3 rounded-lg bg-muted/60 p-4"><IconDeviceMobile size={22} className="shrink-0 text-muted-foreground" /><div><p className="text-sm font-medium">Use PortHub as an App</p><p className="mt-2 text-sm leading-6 text-muted-foreground">On iPhone, use Safari’s Share menu and choose Add to Home Screen. On desktop, choose Install App in your browser when available.</p></div></div></SettingsRow>
+          <SettingsRow title="Sample Workspace" description="Explore the interface with sample data."><div className="flex flex-wrap items-center justify-between gap-3"><p className="max-w-sm text-sm leading-6 text-muted-foreground">Try machines, addresses, and traffic without changing your account.</p><Button variant="secondary" asChild><Link href="/home?demo=1">Open Sample Workspace<IconArrowUpRight size={15} /></Link></Button></div></SettingsRow>
+        </section>
         </div>
-
-        <section className={panelClass}>
-          <div className={`flex items-center justify-between gap-4 border-b px-5 py-4 ${dividerClass}`}>
-            <div>
-              <p className="text-sm font-semibold">Profile</p>
-              <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-                Update your photo, display name, and email address.
-              </p>
-            </div>
-            <button
-              type="button"
-              className={secondaryButtonClass}
-              onClick={handleToggleProfileEditing}
-              disabled={isSavingProfile}
-            >
-              {!profileEditing ? <FiEdit3 size={14} /> : null}
-              {profileEditing ? "Cancel" : "Edit"}
-            </button>
-          </div>
-
-          <div className="space-y-5 p-5">
-            <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
-              <div className="flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-full bg-blue-600 text-2xl font-semibold text-white">
-                {profilePictureSource ? (
-                  <img
-                    src={profilePictureSource}
-                    alt="Profile"
-                    className="h-full w-full object-cover"
-                  />
-                ) : (
-                  initials
-                )}
-              </div>
-
-              {profileEditing ? (
-                <div className="min-w-0 flex-1 space-y-3">
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <label className="block">
-                      <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
-                        Name
-                      </span>
-                      <input
-                        className={inputClass}
-                        value={profileForm.name}
-                        onChange={(event) =>
-                          setProfileForm((current) => ({
-                            ...current,
-                            name: event.target.value,
-                          }))
-                        }
-                      />
-                    </label>
-                    <label className="block">
-                      <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
-                        Email
-                      </span>
-                      <input
-                        className={inputClass}
-                        value={profileForm.email}
-                        onChange={(event) =>
-                          setProfileForm((current) => ({
-                            ...current,
-                            email: event.target.value,
-                          }))
-                        }
-                      />
-                    </label>
-                  </div>
-
-                  <div className="flex flex-wrap gap-2">
-                    <input
-                      ref={profilePictureInputRef}
-                      type="file"
-                      accept="image/png,image/jpeg,image/webp"
-                      className="hidden"
-                      onChange={handleProfilePictureChange}
-                    />
-                    <button
-                      type="button"
-                      className={secondaryButtonClass}
-                      onClick={() => profilePictureInputRef.current?.click()}
-                    >
-                      <FiUpload size={14} />
-                      Upload
-                    </button>
-                    {(profilePictureSource || savedProfilePictureSource) ? (
-                      <button
-                        type="button"
-                        className={dangerButtonClass}
-                        onClick={() => {
-                          setProfilePicturePayload(null);
-                          setProfilePictureRemoved(true);
-                        }}
-                      >
-                        <FiTrash2 size={14} />
-                        Remove
-                      </button>
-                    ) : null}
-                  </div>
-                </div>
-              ) : (
-                <div>
-                  <p className="text-sm font-medium">{user?.name || "Account"}</p>
-                  <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-                    {user?.email || user?.username}
-                  </p>
-                </div>
-              )}
-            </div>
-
-            {profileEditing ? (
-              <>
-                {emailChanged ? (
-                  <label className="block">
-                    <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
-                      Current password
-                    </span>
-                    <div className="relative">
-                      <input
-                        type={passwordVisibility.profileCurrent ? "text" : "password"}
-                        className={passwordInputClass}
-                        value={profileForm.currentPassword}
-                        onChange={(event) =>
-                          setProfileForm((current) => ({
-                            ...current,
-                            currentPassword: event.target.value,
-                          }))
-                        }
-                      />
-                      {renderPasswordToggle(
-                        "profileCurrent",
-                        passwordVisibility.profileCurrent
-                      )}
-                    </div>
-                  </label>
-                ) : null}
-
-                <div className="flex justify-end gap-2 border-t border-zinc-100 pt-4 dark:border-zinc-800">
-                  <button
-                    type="button"
-                    className={secondaryButtonClass}
-                    onClick={resetProfileForm}
-                    disabled={isSavingProfile}
-                  >
-                    Reset
-                  </button>
-                  <button
-                    type="button"
-                    className={primaryButtonClass}
-                    onClick={handleSaveProfile}
-                    disabled={isSavingProfile}
-                  >
-                    {isSavingProfile ? "Saving..." : "Save profile"}
-                  </button>
-                </div>
-              </>
-            ) : null}
-          </div>
-        </section>
-
-        <section className={panelClass}>
-          <div className={`flex items-center justify-between gap-4 border-b px-5 py-4 ${dividerClass}`}>
-            <div>
-              <p className="text-sm font-semibold">Password</p>
-              <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-                Change the password used to sign in.
-              </p>
-            </div>
-            <button
-              type="button"
-              className={secondaryButtonClass}
-              onClick={() => setPasswordEditing((editing) => !editing)}
-              disabled={isSavingPassword}
-            >
-              {!passwordEditing ? <FiEdit3 size={14} /> : null}
-              {passwordEditing ? "Cancel" : "Update"}
-            </button>
-          </div>
-
-          {passwordEditing ? (
-            <div className="grid gap-3 p-5 md:grid-cols-[1fr_1fr_1fr_auto] md:items-end">
-              <div className="relative">
-                <input
-                  type={passwordVisibility.accountCurrent ? "text" : "password"}
-                  placeholder="Current password"
-                  className={passwordInputClass}
-                  value={passwordForm.currentPassword}
-                  onChange={(event) =>
-                    setPasswordForm((current) => ({
-                      ...current,
-                      currentPassword: event.target.value,
-                    }))
-                  }
-                />
-                {renderPasswordToggle("accountCurrent", passwordVisibility.accountCurrent)}
-              </div>
-              <div className="relative">
-                <input
-                  type={passwordVisibility.accountNew ? "text" : "password"}
-                  placeholder="New password"
-                  className={passwordInputClass}
-                  value={passwordForm.newPassword}
-                  onChange={(event) =>
-                    setPasswordForm((current) => ({
-                      ...current,
-                      newPassword: event.target.value,
-                    }))
-                  }
-                />
-                {renderPasswordToggle("accountNew", passwordVisibility.accountNew)}
-              </div>
-              <div className="relative">
-                <input
-                  type={passwordVisibility.accountConfirm ? "text" : "password"}
-                  placeholder="Confirm new password"
-                  className={passwordInputClass}
-                  value={passwordForm.confirmPassword}
-                  onChange={(event) =>
-                    setPasswordForm((current) => ({
-                      ...current,
-                      confirmPassword: event.target.value,
-                    }))
-                  }
-                />
-                {renderPasswordToggle("accountConfirm", passwordVisibility.accountConfirm)}
-              </div>
-              <button
-                type="button"
-                className={primaryButtonClass}
-                onClick={handleSavePassword}
-                disabled={isSavingPassword}
-              >
-                {isSavingPassword ? "Updating..." : "Update"}
-              </button>
-            </div>
-          ) : (
-            <div className="px-5 py-4 text-sm text-zinc-500 dark:text-zinc-400">
-              Password fields are hidden until you choose to update them.
-            </div>
-          )}
-        </section>
-
-        <section className={panelClass}>
-          <div className={`flex items-center justify-between gap-4 border-b px-5 py-4 ${dividerClass}`}>
-            <div>
-              <p className="text-sm font-semibold">Telegram alerts</p>
-              <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-                Get notified on Telegram when a machine goes offline or comes back online.
-              </p>
-            </div>
-            <button
-              type="button"
-              className={secondaryButtonClass}
-              onClick={() => {
-                if (telegramEditing) {
-                  applyTelegramSettings(telegramSettings || {});
-                }
-                setTelegramEditing((editing) => !editing);
-              }}
-              disabled={isSavingTelegram || isLoadingTelegram}
-            >
-              {!telegramEditing ? <FiEdit3 size={14} /> : null}
-              {telegramEditing ? "Cancel" : "Edit"}
-            </button>
-          </div>
-
-          {isLoadingTelegram ? (
-            <div className="px-5 py-6 text-sm text-zinc-500 dark:text-zinc-400">
-              Loading Telegram alert settings...
-            </div>
-          ) : (
-            <div className="space-y-4 p-5">
-              <label className="block">
-                <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
-                  Bot token
-                </span>
-                {telegramEditing ? (
-                  <input
-                    type="password"
-                    className={inputClass}
-                    placeholder={
-                      telegramSettings?.has_bot_token
-                        ? telegramSettings.bot_token_masked
-                        : "123456789:AAExampleTelegramBotToken"
-                    }
-                    value={telegramForm.botToken}
-                    onChange={(event) =>
-                      setTelegramForm((current) => ({
-                        ...current,
-                        botToken: event.target.value,
-                      }))
-                    }
-                  />
-                ) : (
-                  <p className="mt-1 text-sm text-zinc-700 dark:text-zinc-300">
-                    {telegramSettings?.has_bot_token
-                      ? telegramSettings.bot_token_masked
-                      : "Not configured"}
-                  </p>
-                )}
-              </label>
-
-              <div>
-                <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
-                  Chat / user / channel IDs
-                </span>
-                {telegramEditing ? (
-                  <div className="mt-1 space-y-2">
-                    {telegramForm.chatIds.map((chatId, index) => (
-                      <div key={index} className="flex items-center gap-2">
-                        <input
-                          className={inputClass}
-                          placeholder="e.g. 123456789 or -1001234567890"
-                          value={chatId}
-                          onChange={(event) =>
-                            handleTelegramChatIdChange(index, event.target.value)
-                          }
-                        />
-                        <button
-                          type="button"
-                          className={dangerButtonClass}
-                          onClick={() => handleRemoveTelegramChatId(index)}
-                          disabled={telegramForm.chatIds.length <= 1}
-                        >
-                          <FiTrash2 size={14} />
-                        </button>
-                      </div>
-                    ))}
-                    <button
-                      type="button"
-                      className={secondaryButtonClass}
-                      onClick={handleAddTelegramChatId}
-                    >
-                      <FiPlus size={14} />
-                      Add another
-                    </button>
-                  </div>
-                ) : (
-                  <p className="mt-1 text-sm text-zinc-700 dark:text-zinc-300">
-                    {telegramSettings?.chat_ids?.length
-                      ? telegramSettings.chat_ids.join(", ")
-                      : "Not configured"}
-                  </p>
-                )}
-              </div>
-
-              <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
-                <SettingsToggle
-                  checked={
-                    telegramEditing
-                      ? telegramForm.alertsEnabled
-                      : Boolean(telegramSettings?.alerts_enabled)
-                  }
-                  disabled={!telegramEditing}
-                  onChange={(next) =>
-                    setTelegramForm((current) => ({ ...current, alertsEnabled: next }))
-                  }
-                  label="Enable Telegram alerts"
-                  description="Master switch for all Telegram notifications."
-                />
-                <SettingsToggle
-                  checked={
-                    telegramEditing
-                      ? telegramForm.instantAlertsEnabled
-                      : Boolean(telegramSettings?.instant_alerts_enabled)
-                  }
-                  disabled={!telegramEditing}
-                  onChange={(next) =>
-                    setTelegramForm((current) => ({
-                      ...current,
-                      instantAlertsEnabled: next,
-                    }))
-                  }
-                  label="Instant online/offline alerts"
-                  description="Send a message the moment a machine's status changes."
-                />
-                <SettingsToggle
-                  checked={
-                    telegramEditing
-                      ? telegramForm.digestEnabled
-                      : Boolean(telegramSettings?.digest_enabled)
-                  }
-                  disabled={!telegramEditing}
-                  onChange={(next) =>
-                    setTelegramForm((current) => ({ ...current, digestEnabled: next }))
-                  }
-                  label="Periodic offline digest"
-                  description="Send a recurring summary of machines that are still offline."
-                />
-
-                <div className="flex items-center justify-between gap-4 py-2">
-                  <span>
-                    <span className="block text-sm font-medium">Digest interval</span>
-                    <span className="block text-xs text-zinc-500 dark:text-zinc-400">
-                      How often the offline digest is sent.
-                    </span>
-                  </span>
-                  {telegramEditing ? (
-                    <select
-                      className="rounded-md border border-zinc-300 bg-zinc-50 px-2 py-1.5 text-sm text-zinc-900 outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-                      value={telegramForm.digestIntervalHours}
-                      onChange={(event) =>
-                        setTelegramForm((current) => ({
-                          ...current,
-                          digestIntervalHours: Number(event.target.value),
-                        }))
-                      }
-                    >
-                      {DIGEST_INTERVAL_OPTIONS.map((hours) => (
-                        <option key={hours} value={hours}>
-                          Every {hours}h
-                        </option>
-                      ))}
-                    </select>
-                  ) : (
-                    <span className="text-sm text-zinc-700 dark:text-zinc-300">
-                      Every {telegramSettings?.digest_interval_hours || 6}h
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              <p className="text-xs text-zinc-500">
-                Disabled machines and machines marked "Exclude from Telegram alerts" never
-                trigger a notification.
-              </p>
-
-              <div className="flex flex-wrap justify-end gap-2 border-t border-zinc-100 pt-4 dark:border-zinc-800">
-                <button
-                  type="button"
-                  className={secondaryButtonClass}
-                  onClick={handleSendTelegramTest}
-                  disabled={
-                    isSendingTelegramTest || !telegramSettings?.has_bot_token || !telegramSettings?.chat_ids?.length
-                  }
-                >
-                  <FiSend size={14} />
-                  {isSendingTelegramTest ? "Sending..." : "Send test message"}
-                </button>
-                {telegramEditing ? (
-                  <button
-                    type="button"
-                    className={primaryButtonClass}
-                    onClick={handleSaveTelegramSettings}
-                    disabled={isSavingTelegram}
-                  >
-                    {isSavingTelegram ? "Saving..." : "Save Telegram settings"}
-                  </button>
-                ) : null}
-              </div>
-            </div>
-          )}
-        </section>
-
-        <section className={panelClass}>
-          <div className={`flex items-center justify-between gap-4 border-b px-5 py-4 ${dividerClass}`}>
-            <div>
-              <p className="text-sm font-semibold">Active sessions</p>
-              <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-                Review signed-in devices and revoke access when needed.
-              </p>
-            </div>
-            <button
-              type="button"
-              className={secondaryButtonClass}
-              onClick={loadSessions}
-              disabled={isLoadingSessions}
-            >
-              <FiRefreshCw size={14} />
-              Refresh
-            </button>
-          </div>
-
-          <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
-            {isLoadingSessions ? (
-              <div className="px-5 py-6 text-sm text-zinc-500 dark:text-zinc-400">
-                Loading sessions...
-              </div>
-            ) : sessions.length ? (
-              sessions.map((session) => (
-                <div
-                  key={session.id}
-                  className="flex items-center justify-between gap-4 px-5 py-4"
-                >
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <p className="truncate text-sm font-medium">
-                        {session.device_name}
-                      </p>
-                      {session.current ? (
-                        <span className="rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700 dark:border-blue-500/20 dark:bg-blue-500/10 dark:text-blue-300">
-                          Current
-                        </span>
-                      ) : null}
-                    </div>
-                    <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-                      {session.ip || "Unknown IP"} · Last active{" "}
-                      {formatRelativeTime(session.last_accessed_at, Date.now())}
-                    </p>
-                    <p className="mt-1 text-xs text-zinc-500">
-                      Created {formatCreatedAt(session.created_at)}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    className={secondaryButtonClass}
-                    onClick={() => setSessionPendingSignOut(session)}
-                    disabled={activeSessionId === session.id}
-                  >
-                    <FaSignOutAlt size={14} />
-                    {activeSessionId === session.id ? "Signing out..." : "Sign out"}
-                  </button>
-                </div>
-              ))
-            ) : (
-              <div className="px-5 py-6 text-sm text-zinc-500 dark:text-zinc-400">
-                No active sessions found.
-              </div>
-            )}
-          </div>
-        </section>
+        </div>
       </div>
 
-      {sessionPendingSignOut ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4 backdrop-blur-[1px]">
-          <div className="w-full max-w-sm rounded-lg border border-zinc-200 bg-white p-4 shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
-            <p className="text-sm font-semibold">
-              {sessionPendingSignOut.current
-                ? "Sign out current session?"
-                : "Sign out this session?"}
-            </p>
-            <p className="mt-2 text-sm leading-6 text-zinc-500 dark:text-zinc-400">
-              {sessionPendingSignOut.current
-                ? "You will be signed out of this browser."
-                : "That device will need to sign in again."}
-            </p>
-            <div className="mt-4 rounded-md bg-zinc-50 px-3 py-2 dark:bg-zinc-900">
-              <p className="truncate text-sm font-medium">
-                {sessionPendingSignOut.device_name}
-              </p>
-              <p className="mt-1 truncate text-xs text-zinc-500 dark:text-zinc-400">
-                {sessionPendingSignOut.ip || "Unknown IP"}
-              </p>
-            </div>
-            <div className="mt-4 flex items-center justify-end gap-2">
-              <button
-                type="button"
-                className={secondaryButtonClass}
-                onClick={() => setSessionPendingSignOut(null)}
-                disabled={activeSessionId === sessionPendingSignOut.id}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="rounded-md bg-red-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
-                onClick={confirmSessionSignOut}
-                disabled={activeSessionId === sessionPendingSignOut.id}
-              >
-                {activeSessionId === sessionPendingSignOut.id
-                  ? "Signing out..."
-                  : "Sign out"}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <Dialog opened={!!sessionPendingSignOut} onClose={()=>setSessionPendingSignOut(null)} title={sessionPendingSignOut?.current ? "Sign Out This Device?" : "Sign Out Device?"} size="sm" closeOnEscape={!activeSessionId} closeOnClickOutside={!activeSessionId}>
+        <p className="text-sm leading-6 text-muted-foreground">{sessionPendingSignOut?.current ? "You will be signed out of this browser." : "This device will need to sign in again."}</p>
+        <div className="my-4 rounded-lg bg-control p-3"><p className="truncate text-sm font-medium">{sessionPendingSignOut?.device_name}</p><p className="mt-1 text-xs text-muted-foreground">{sessionPendingSignOut?.ip || "Unknown IP"}</p></div>
+        <div className="flex justify-end gap-2"><Button type="button" variant="secondary" disabled={!!activeSessionId} onClick={()=>setSessionPendingSignOut(null)}>Cancel</Button><Button type="button" variant="destructive" disabled={!!activeSessionId} onClick={confirmSessionSignOut}>{activeSessionId ? "Signing out…" : "Sign Out"}</Button></div>
+      </Dialog>
     </div>
   );
 }

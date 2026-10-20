@@ -11,5 +11,8 @@ if [ "${FW_DEBUG:-False}" = "True" ]; then
     exec uvicorn main:app --reload --host "${FW_HOST:-0.0.0.0}" --port "${FW_PORT:-8001}"
 else
     echo "Running Firewall Production Server"
-    exec uvicorn main:app --host "${FW_HOST:-0.0.0.0}" --port "${FW_PORT:-8001}" --workers "${FW_NUM_WORKERS:-2}"
+    if [ "${FW_NUM_WORKERS:-1}" != "1" ]; then
+        echo "Firewall uses one worker to keep traffic snapshots and counter baselines consistent; FW_NUM_WORKERS is ignored."
+    fi
+    exec uvicorn main:app --host "${FW_HOST:-0.0.0.0}" --port "${FW_PORT:-8001}" --workers 1
 fi

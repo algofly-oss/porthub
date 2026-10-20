@@ -10,7 +10,15 @@
 
 # next.js
 /.next/
+/.next-review/
+/.next-dev-local/
+/.next-verify-*/
 /out/
+/public/sw.js
+/public/sw.js.map
+/public/workbox-*.js*
+/public/worker-*.js*
+/public/fallback-*.js*
 
 # production
 /build

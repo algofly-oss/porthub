@@ -1,108 +1,10 @@
 import { useMemo, useState } from "react";
-import { ActionIcon, Badge, Tooltip } from "@mantine/core";
+import { ActionIcon, Badge } from "@mantine/core";
+import { Tooltip } from "@/components/ui/tooltip";
 import { IconExternalLink } from "@tabler/icons-react";
 
-export const normalizeTrafficSamples = (samples) =>
-  (Array.isArray(samples) ? samples : [])
-    .map((sample) => ({
-      timestamp: Number(sample?.timestamp) || 0,
-      in_bytes: Math.max(0, Number(sample?.in_bytes) || 0),
-      out_bytes: Math.max(0, Number(sample?.out_bytes) || 0),
-      drop_bytes: Math.max(0, Number(sample?.drop_bytes) || 0),
-      blocked_ips: Array.isArray(sample?.blocked_ips)
-        ? sample.blocked_ips
-            .map((value) => String(value || "").trim())
-            .filter(Boolean)
-        : [],
-      incoming_ips: Array.isArray(sample?.incoming_ips)
-        ? sample.incoming_ips
-            .map((value) => String(value || "").trim())
-            .filter(Boolean)
-        : [],
-      outgoing_ips: Array.isArray(sample?.outgoing_ips)
-        ? sample.outgoing_ips
-            .map((value) => String(value || "").trim())
-            .filter(Boolean)
-        : [],
-    }))
-    .filter((sample) => sample.timestamp > 0)
-    .sort((left, right) => left.timestamp - right.timestamp)
-    .slice(-120);
-
-const buildTrafficWindow = (samples, windowSeconds = 60) => {
-  const byTimestamp = new Map();
-  const normalizedSamples = normalizeTrafficSamples(samples);
-
-  normalizedSamples.forEach((sample) => {
-    const timestamp = Math.floor(sample.timestamp);
-    const current = byTimestamp.get(timestamp) || {
-      timestamp,
-      in_bytes: 0,
-      out_bytes: 0,
-      drop_bytes: 0,
-      blocked_ips: [],
-      incoming_ips: [],
-      outgoing_ips: [],
-    };
-
-    byTimestamp.set(timestamp, {
-      timestamp,
-      in_bytes: current.in_bytes + sample.in_bytes,
-      out_bytes: current.out_bytes + sample.out_bytes,
-      drop_bytes: current.drop_bytes + sample.drop_bytes,
-      blocked_ips: [...new Set([...current.blocked_ips, ...sample.blocked_ips])],
-      incoming_ips: [...new Set([...current.incoming_ips, ...sample.incoming_ips])],
-      outgoing_ips: [...new Set([...current.outgoing_ips, ...sample.outgoing_ips])],
-    });
-  });
-
-  const now = Math.floor(Date.now() / 1000);
-  const earliestTimestamp = normalizedSamples[0]?.timestamp
-    ? Math.floor(normalizedSamples[0].timestamp)
-    : null;
-  const latestTimestamp = normalizedSamples[normalizedSamples.length - 1]?.timestamp
-    ? Math.floor(normalizedSamples[normalizedSamples.length - 1].timestamp)
-    : now;
-  const windowEndTimestamp = Math.max(now, latestTimestamp);
-
-  const samplesWindow = Array.from({ length: windowSeconds }, (_, index) => {
-    const timestamp = windowEndTimestamp - (windowSeconds - 1 - index);
-    const existing = byTimestamp.get(timestamp);
-    if (existing) {
-      return existing;
-    }
-
-    if (earliestTimestamp !== null && timestamp < earliestTimestamp) {
-      const earliestSample = byTimestamp.get(earliestTimestamp);
-      if (earliestSample) {
-        return {
-          timestamp,
-          in_bytes: earliestSample.in_bytes,
-          out_bytes: earliestSample.out_bytes,
-          drop_bytes: earliestSample.drop_bytes,
-          blocked_ips: [],
-          incoming_ips: [],
-          outgoing_ips: [],
-        };
-      }
-    }
-
-    return {
-      timestamp,
-      in_bytes: 0,
-      out_bytes: 0,
-      drop_bytes: 0,
-      blocked_ips: [],
-      incoming_ips: [],
-      outgoing_ips: [],
-    };
-  });
-
-  return {
-    samples: samplesWindow,
-    windowEndTimestamp,
-  };
-};
+import { normalizeTrafficSamples, buildTrafficWindow, trafficLinePath as buildTrafficLinePath } from "@/shared/utils/traffic.mjs";
+export { normalizeTrafficSamples } from "@/shared/utils/traffic.mjs";
 
 const formatTrafficRate = (value) => {
   const normalized = Math.max(0, Number(value) || 0);
@@ -133,43 +35,6 @@ const formatIpLabel = (ips) => {
   }`;
 };
 
-const buildTrafficLinePath = (samples, valueKey, width, height, maxValue) => {
-  if (!samples.length || maxValue <= 0) {
-    return "";
-  }
-
-  const lastIndex = Math.max(1, samples.length - 1);
-  const points = samples
-    .map((sample, index) => {
-      const x = (index / lastIndex) * width;
-      const y = height - (Number(sample[valueKey]) / maxValue) * height;
-      return { x, y };
-    })
-    .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
-
-  if (points.length === 0) {
-    return "";
-  }
-
-  if (points.length === 1) {
-    return `M ${points[0].x.toFixed(2)} ${points[0].y.toFixed(2)}`;
-  }
-
-  const path = [`M ${points[0].x.toFixed(2)} ${points[0].y.toFixed(2)}`];
-
-  for (let index = 0; index < points.length - 1; index += 1) {
-    const current = points[index];
-    const next = points[index + 1];
-    const controlX = ((current.x + next.x) / 2).toFixed(2);
-
-    path.push(
-      `C ${controlX} ${current.y.toFixed(2)}, ${controlX} ${next.y.toFixed(2)}, ${next.x.toFixed(2)} ${next.y.toFixed(2)}`
-    );
-  }
-
-  return path.join(" ");
-};
-
 /**
  * @param {{
  *   isDark: boolean,
@@ -184,6 +49,9 @@ const buildTrafficLinePath = (samples, valueKey, width, height, maxValue) => {
  *   mode?: string,
  *   windowSeconds?: number,
  *   showStandaloneMeta?: boolean,
+ *   showTitle?: boolean,
+ *   plotHeight?: number,
+ *   className?: string,
  * }} props
  */
 export default function TrafficMonitorPanel({
@@ -199,9 +67,12 @@ export default function TrafficMonitorPanel({
   mode = "compact",
   windowSeconds = 60,
   showStandaloneMeta = true,
+  showTitle = true,
+  plotHeight,
+  className = "",
 }) {
   const chartWidth = mode === "standalone" ? 960 : 560;
-  const chartHeight = mode === "standalone" ? 340 : 132;
+  const chartHeight = plotHeight || (mode === "standalone" ? 340 : 132);
   const [hoveredIndex, setHoveredIndex] = useState(null);
   const [showIncoming, setShowIncoming] = useState(true);
   const [showOutgoing, setShowOutgoing] = useState(true);
@@ -216,50 +87,50 @@ export default function TrafficMonitorPanel({
   const peakValue = windowedSamples.reduce((maxValue, sample) => {
     const nextValues = [];
     if (showIncoming) {
-      nextValues.push(sample.in_bytes);
+      nextValues.push(sample.in_rate);
     }
     if (showOutgoing) {
-      nextValues.push(sample.out_bytes);
+      nextValues.push(sample.out_rate);
     }
     if (showBlocked) {
-      nextValues.push(sample.drop_bytes);
+      nextValues.push(sample.drop_rate);
     }
     return Math.max(maxValue, ...nextValues, 0);
   }, 0);
 
   const chartMax = peakValue > 0 ? peakValue * 1.15 : 1;
   const incomingPath = showIncoming
-    ? buildTrafficLinePath(windowedSamples, "in_bytes", chartWidth, chartHeight, chartMax)
+    ? buildTrafficLinePath(windowedSamples, "in_rate", chartWidth, chartHeight, chartMax)
     : "";
   const outgoingPath = showOutgoing
-    ? buildTrafficLinePath(windowedSamples, "out_bytes", chartWidth, chartHeight, chartMax)
+    ? buildTrafficLinePath(windowedSamples, "out_rate", chartWidth, chartHeight, chartMax)
     : "";
   const blockedPath = showBlocked
-    ? buildTrafficLinePath(windowedSamples, "drop_bytes", chartWidth, chartHeight, chartMax)
+    ? buildTrafficLinePath(windowedSamples, "drop_rate", chartWidth, chartHeight, chartMax)
     : "";
   const yAxisLabels = [chartMax, chartMax / 2, 0].map((value) => formatTrafficRate(value));
   const activeIndex =
     hoveredIndex !== null
       ? Math.min(Math.max(hoveredIndex, 0), windowedSamples.length - 1)
       : null;
-  const activeSample = activeIndex !== null ? windowedSamples[activeIndex] : null;
+  const activeSample = activeIndex !== null && windowedSamples[activeIndex]?.observed ? windowedSamples[activeIndex] : null;
   const incomingHoverIps =
     activeSample &&
-    Number(activeSample.in_bytes) > 0 &&
+    Number(activeSample.in_rate) > 0 &&
     Array.isArray(activeSample.incoming_ips) &&
     activeSample.incoming_ips.length > 0
       ? activeSample.incoming_ips
       : null;
   const outgoingHoverIps =
     activeSample &&
-    Number(activeSample.out_bytes) > 0 &&
+    Number(activeSample.out_rate) > 0 &&
     Array.isArray(activeSample.outgoing_ips) &&
     activeSample.outgoing_ips.length > 0
       ? activeSample.outgoing_ips
       : null;
   const blockedHoverIps =
     activeSample &&
-    Number(activeSample.drop_bytes) > 0 &&
+    Number(activeSample.drop_rate) > 0 &&
     Array.isArray(activeSample.blocked_ips) &&
     activeSample.blocked_ips.length > 0
       ? activeSample.blocked_ips
@@ -283,9 +154,7 @@ export default function TrafficMonitorPanel({
 
   return (
     <div
-      className={`rounded-lg border p-3 ${
-        isDark ? "border-zinc-800 bg-zinc-950/70" : "border-zinc-200 bg-zinc-50/80"
-      }`}
+      className={`rounded-xl bg-surface p-4 ${className}`}
     >
       <div
         className={`mb-3 flex ${
@@ -294,8 +163,8 @@ export default function TrafficMonitorPanel({
             : "items-start justify-between gap-3"
         }`}
       >
-        <div className="flex min-w-0 flex-1 items-start justify-between gap-3">
-          <div className="min-w-0">
+        <div className="flex min-w-0 flex-1 flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0" hidden={!showTitle}>
             <div className="flex items-center gap-2">
               <p className={`text-sm font-semibold ${isDark ? "text-zinc-100" : "text-zinc-900"}`}>
                 {title}
@@ -327,8 +196,8 @@ export default function TrafficMonitorPanel({
                     onClick={onOpenExternal}
                     className={
                       isDark
-                        ? "!text-zinc-400 hover:!bg-zinc-800 hover:!text-blue-200"
-                        : "!text-zinc-500 hover:!bg-zinc-100 hover:!text-blue-700"
+                        ? "!text-zinc-400 hover:!bg-accent hover:!text-blue-200"
+                        : "!text-muted-foreground hover:!bg-accent hover:!text-blue-700"
                     }
                   >
                     <IconExternalLink size={16} />
@@ -336,23 +205,23 @@ export default function TrafficMonitorPanel({
                 </Tooltip>
               ) : null}
             </div>
-            {subtitle ? <p className="text-[11px] text-zinc-500">{subtitle}</p> : null}
+            {subtitle ? <p className="text-[11px] text-muted-foreground">{subtitle}</p> : null}
           </div>
 
           {mode === "compact" ? (
-            <div className="flex shrink-0 items-center gap-3 text-[11px] text-zinc-500">
-              <span className="inline-flex items-center gap-1.5">
+            <div className="flex shrink-0 items-center gap-3 text-[11px] text-muted-foreground">
+              <button type="button" aria-pressed={showIncoming} onClick={()=>setShowIncoming(value=>!value)} className={`inline-flex items-center gap-1.5 ${showIncoming ? "" : "opacity-40"}`}>
                 <span className="h-2.5 w-2.5 rounded-full bg-emerald-400" />
                 Incoming
-              </span>
-              <span className="inline-flex items-center gap-1.5">
+              </button>
+              <button type="button" aria-pressed={showOutgoing} onClick={()=>setShowOutgoing(value=>!value)} className={`inline-flex items-center gap-1.5 ${showOutgoing ? "" : "opacity-40"}`}>
                 <span className="h-2.5 w-2.5 rounded-full bg-sky-400" />
                 Outgoing
-              </span>
-              <span className="inline-flex items-center gap-1.5">
+              </button>
+              <button type="button" aria-pressed={showBlocked} onClick={()=>setShowBlocked(value=>!value)} className={`inline-flex items-center gap-1.5 ${showBlocked ? "" : "opacity-40"}`}>
                 <span className="h-2.5 w-2.5 rounded-full bg-rose-400" />
                 Blocked
-              </span>
+              </button>
             </div>
           ) : null}
         </div>
@@ -380,7 +249,7 @@ export default function TrafficMonitorPanel({
 
       <div className="grid grid-cols-[auto_minmax(0,1fr)] gap-2">
         <div
-          className="flex flex-col justify-between pb-6 text-[10px] text-zinc-500"
+          className="flex flex-col justify-between text-[11px] leading-none text-muted-foreground"
           style={{ height: `${chartHeight}px` }}
         >
           {yAxisLabels.map((label) => (
@@ -395,26 +264,22 @@ export default function TrafficMonitorPanel({
           >
             {activeSample ? (
               <div
-                className={`pointer-events-none absolute left-2 top-2 z-10 rounded-md border px-2 py-1 text-[11px] shadow-md backdrop-blur-sm ${
-                  isDark
-                    ? "border-zinc-700 bg-zinc-950 text-zinc-100"
-                    : "border-zinc-200 bg-white text-zinc-900"
-                }`}
+                className="pointer-events-none absolute left-2 top-2 z-10 rounded-lg border border-border bg-dialog px-2 py-1 text-[11px] text-foreground shadow-md"
               >
-                <div className="text-zinc-500">
+                <div className="text-muted-foreground">
                   {Math.max(0, Math.floor(Date.now() / 1000) - activeSample.timestamp)}s ago
                 </div>
                 <div className="mt-0.5 flex items-center gap-3">
                   {showIncoming ? (
                     <span className="inline-flex items-center gap-1.5">
                       <span className="h-2 w-2 rounded-full bg-emerald-400" />
-                      In {formatTrafficRate(activeSample.in_bytes)}
+                      In {formatTrafficRate(activeSample.in_rate)}
                     </span>
                   ) : null}
                   {showOutgoing ? (
                     <span className="inline-flex items-center gap-1.5">
                       <span className="h-2 w-2 rounded-full bg-sky-400" />
-                      Out {formatTrafficRate(activeSample.out_bytes)}
+                      Out {formatTrafficRate(activeSample.out_rate)}
                     </span>
                   ) : null}
                 </div>
@@ -445,6 +310,9 @@ export default function TrafficMonitorPanel({
               </div>
             ) : null}
             <svg
+              role="img"
+              aria-label={`${title} chart`}
+              data-window-end={windowEndTimestamp}
               viewBox={`0 0 ${chartWidth} ${chartHeight}`}
               preserveAspectRatio="none"
               className="h-full w-full"
@@ -515,7 +383,7 @@ export default function TrafficMonitorPanel({
                   {showIncoming ? (
                     <circle
                       cx={activeX}
-                      cy={chartHeight - (activeSample.in_bytes / chartMax) * chartHeight}
+                      cy={chartHeight - (activeSample.in_rate / chartMax) * chartHeight}
                       r={mode === "standalone" ? "4" : "3.5"}
                       fill="rgb(52, 211, 153)"
                     />
@@ -523,7 +391,7 @@ export default function TrafficMonitorPanel({
                   {showOutgoing ? (
                     <circle
                       cx={activeX}
-                      cy={chartHeight - (activeSample.out_bytes / chartMax) * chartHeight}
+                      cy={chartHeight - (activeSample.out_rate / chartMax) * chartHeight}
                       r={mode === "standalone" ? "4" : "3.5"}
                       fill="rgb(56, 189, 248)"
                     />
@@ -531,7 +399,7 @@ export default function TrafficMonitorPanel({
                   {showBlocked ? (
                     <circle
                       cx={activeX}
-                      cy={chartHeight - (activeSample.drop_bytes / chartMax) * chartHeight}
+                      cy={chartHeight - (activeSample.drop_rate / chartMax) * chartHeight}
                       r={mode === "standalone" ? "4" : "3.5"}
                       fill="rgb(251, 113, 133)"
                     />
@@ -541,13 +409,13 @@ export default function TrafficMonitorPanel({
             </svg>
 
             {isLoading && !normalizedSamples.length ? (
-              <div className="absolute inset-0 flex items-center justify-center text-xs text-zinc-500">
+              <div className="absolute inset-0 flex items-center justify-center text-xs text-muted-foreground">
                 Loading live traffic...
               </div>
             ) : null}
           </div>
 
-          <div className="mt-2 flex items-center justify-between text-[10px] text-zinc-500">
+          <div className="mt-2 flex items-center justify-between text-[10px] text-muted-foreground">
             <span>{startSecondsAgo}s ago</span>
             <span>{midpointSecondsAgo}s ago</span>
             <span>{endLabel}</span>
@@ -564,8 +432,8 @@ export default function TrafficMonitorPanel({
                       ? "text-zinc-100"
                       : "text-zinc-900"
                     : isDark
-                      ? "text-zinc-500"
-                      : "text-zinc-500"
+                      ? "text-muted-foreground"
+                      : "text-muted-foreground"
                 }`}
               >
                 <span className="h-2.5 w-2.5 rounded-full bg-emerald-400" />
@@ -580,8 +448,8 @@ export default function TrafficMonitorPanel({
                       ? "text-zinc-100"
                       : "text-zinc-900"
                     : isDark
-                      ? "text-zinc-500"
-                      : "text-zinc-500"
+                      ? "text-muted-foreground"
+                      : "text-muted-foreground"
                 }`}
               >
                 <span className="h-2.5 w-2.5 rounded-full bg-sky-400" />
@@ -596,8 +464,8 @@ export default function TrafficMonitorPanel({
                       ? "text-zinc-100"
                       : "text-zinc-900"
                     : isDark
-                      ? "text-zinc-500"
-                      : "text-zinc-500"
+                      ? "text-muted-foreground"
+                      : "text-muted-foreground"
                 }`}
               >
                 <span className="h-2.5 w-2.5 rounded-full bg-rose-400" />
