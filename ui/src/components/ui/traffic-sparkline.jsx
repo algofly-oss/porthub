@@ -9,7 +9,7 @@ export default function TrafficSparkline({ samples = [], now, showRates = true, 
   return <div className={`min-w-0 ${className}`} aria-label={`${label}: incoming ${formatBytes(summary.incoming)}/s, outgoing ${formatBytes(summary.outgoing)}/s`}>
     <svg aria-hidden="true" viewBox="0 0 120 26" preserveAspectRatio="none" className={`${dense ? "h-[18px]" : "h-6"} w-full`}>
       <line x1="0" y1="25" x2="120" y2="25" className="stroke-border" strokeWidth="1" />
-      {series.map(([key, color]) => <path key={key} d={trafficLinePath(windowed, key, 120, 24, peak)} fill="none" className={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />)}
+      {series.map(([key, color]) => <path key={key} d={trafficLinePath(windowed, key, 120, 24, peak)} fill="none" className={color} strokeWidth="1.5" vectorEffect="non-scaling-stroke" strokeLinecap="round" strokeLinejoin="round" />)}
     </svg>
     {showRates && <div className="mt-1 flex items-center justify-between gap-2 whitespace-nowrap text-[11px] tabular-nums"><span className="text-emerald-700 dark:text-emerald-400" title="Incoming">↓ {formatBytes(summary.incoming)}/s</span><span className="text-blue-700 dark:text-blue-400" title="Outgoing">↑ {formatBytes(summary.outgoing)}/s</span></div>}
   </div>;

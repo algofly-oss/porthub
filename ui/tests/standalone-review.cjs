@@ -15,6 +15,12 @@ const {launchBrowser}=require("./browser.cjs");
       await page.goto(`http://luna.local:8345/traffic-monitor?demo=1&data_id=${connection._id}`);
       await page.getByRole("heading",{name:connection.machine_name,exact:true}).waitFor();
       const chart=page.getByRole("img",{name:/Traffic monitor chart/i});await chart.waitFor();
+      const lines=await chart.locator('path[stroke]').evaluateAll(paths=>paths.map(path=>({width:path.getAttribute("stroke-width"),effect:path.getAttribute("vector-effect")})));
+      assert(lines.length>=2,"Traffic series are rendered");
+      for(const line of lines){
+        assert.equal(line.width,"1.5","Traffic lines match the small charts");
+        assert.equal(line.effect,"non-scaling-stroke","Line weight stays constant at every viewport size");
+      }
       assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),"Dedicated monitor fits without horizontal scrolling");
       if(width>=1512)assert(await page.evaluate(()=>document.documentElement.scrollHeight<=innerHeight+1),"Desktop dedicated monitor fits the viewport");
       await page.screenshot({path:`/tmp/porthub-monitor-${process.env.REVIEW_BROWSER||"chromium"}-${theme}-${width}.png`});

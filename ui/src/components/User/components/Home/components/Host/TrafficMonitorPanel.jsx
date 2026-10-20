@@ -344,7 +344,8 @@ export default function TrafficMonitorPanel({
                   d={incomingPath}
                   fill="none"
                   stroke="rgb(52, 211, 153)"
-                  strokeWidth={mode === "standalone" ? "2.75" : "2.5"}
+                  strokeWidth="1.5"
+                  vectorEffect="non-scaling-stroke"
                   strokeLinecap="round"
                   strokeLinejoin="round"
                 />
@@ -354,7 +355,8 @@ export default function TrafficMonitorPanel({
                   d={outgoingPath}
                   fill="none"
                   stroke="rgb(56, 189, 248)"
-                  strokeWidth={mode === "standalone" ? "2.75" : "2.5"}
+                  strokeWidth="1.5"
+                  vectorEffect="non-scaling-stroke"
                   strokeLinecap="round"
                   strokeLinejoin="round"
                 />
@@ -364,7 +366,8 @@ export default function TrafficMonitorPanel({
                   d={blockedPath}
                   fill="none"
                   stroke="rgb(251, 113, 133)"
-                  strokeWidth={mode === "standalone" ? "2.75" : "2.5"}
+                  strokeWidth="1.5"
+                  vectorEffect="non-scaling-stroke"
                   strokeLinecap="round"
                   strokeLinejoin="round"
                 />
