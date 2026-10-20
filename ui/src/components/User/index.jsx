@@ -15,10 +15,12 @@ import { authActions } from "@/redux/features/authSlice";
 import apiRoutes from "@/shared/routes/apiRoutes";
 import useAuth from "@/shared/hooks/useAuth";
 import useNavigationPreference from "@/shared/hooks/useNavigationPreference";
+import useWorkspaceViewport from "@/shared/hooks/useWorkspaceViewport";
 import { motion, useReducedMotion } from "framer-motion";
 import { DemoNotice } from "@/shared/demo/DemoProvider";
 
 export default function UserHome() {
+  useWorkspaceViewport();
   const dispatch = useDispatch();
   const router = useRouter();
   const reducedMotion = useReducedMotion();
@@ -53,7 +55,7 @@ export default function UserHome() {
   const [machineStats, setMachineStats] = useState(null);
 
   if (!router.isReady || !navigationReady) {
-    return <div className="workspace flex min-h-screen items-center justify-center text-sm text-zinc-500" role="status">Loading workspace…</div>;
+    return <div className="workspace flex items-center justify-center text-sm text-zinc-500" role="status">Loading workspace…</div>;
   }
 
   return (
