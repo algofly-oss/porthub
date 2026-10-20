@@ -39,6 +39,15 @@ class ProxyActivityTest(unittest.IsolatedAsyncioTestCase):
             path.write_text("bad json\n" + self.line())
             self.assertEqual(len(read_batch(path, {"identity": identity, "offset": offset})[2]), 1)
 
+    def test_traefik_fractional_timestamps_work_on_python_310(self):
+        with tempfile.TemporaryDirectory() as root:
+            path=Path(root)/"access.log"
+            path.write_text("".join(self.line(stamp=f"2026-10-20T10:00:00.{fraction}Z") for fraction in ["1","1234","123456789"]))
+            stat=path.stat()
+            rows=read_batch(path,{"identity":f"{stat.st_dev}:{stat.st_ino}","offset":0})[2]
+            self.assertEqual(len(rows),3)
+            self.assertEqual(rows[-1][1],"2026-10-20T10:00:00.123456+00:00")
+
     def test_unread_rotated_segment_is_drained_before_new_log(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "access.log"

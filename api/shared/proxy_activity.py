@@ -9,6 +9,7 @@ import copy
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -49,7 +50,11 @@ def read_batch(path, checkpoint):
                 try:
                     record = json.loads(line)
                     host = str(record.get("RequestHost", "")).lower().split(":", 1)[0].rstrip(".")
-                    timestamp = datetime.fromisoformat(str(record.get("StartUTC", "")).replace("Z", "+00:00"))
+                    stamp = str(record.get("StartUTC", "")).replace("Z", "+00:00")
+                    # Go emits RFC3339 nanoseconds; Python 3.10's parser only
+                    # accepts three or six fractional digits.
+                    stamp = re.sub(r"\.(\d+)", lambda match: "."+match[1][:6].ljust(6,"0"), stamp)
+                    timestamp = datetime.fromisoformat(stamp)
                     if timestamp.tzinfo is None or not record.get("RouterName"):
                         continue
                     records.append((host, timestamp.astimezone(timezone.utc).isoformat()))

@@ -29,6 +29,7 @@ const {launchBrowser}=require("./browser.cjs");
      await page.getByRole("button",{name:"Filters",exact:true}).click();
      const sort=page.getByLabel(view==="machines"?"Sort machines":"Sort proxies",{exact:true});
      await sort.click();await page.getByRole("option",{name:"Incoming Traffic · 30s",exact:true}).click();
+     await page.waitForFunction(label=>document.querySelector(`input[aria-label="${label}"]`)?.value==="Incoming Traffic · 30s",view==="machines"?"Sort machines":"Sort proxies");
      assert.equal(await sort.inputValue(),"Incoming Traffic · 30s");
      assert(await sort.isVisible(),"Selecting a nested dropdown keeps the filter panel available");
      await page.keyboard.press("Escape");
