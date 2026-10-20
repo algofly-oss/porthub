@@ -77,7 +77,6 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
       : groupBy === "domain" ? (p.hosts?.[0] || "").split(".").slice(-2).join(".") : "All proxies";
     sections.set(key, [...(sections.get(key) || []), p]);
   });
-  function create() {
   const rowInteraction = proxy => ({
     tabIndex: 0,
     "aria-label": `Edit proxy ${proxy.hosts?.[0] || proxy.name}`,
@@ -89,6 +88,7 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
     },
   });
   const host = proxy => <ProxyHost proxy={proxy} connection={connections.find(connection => connection._id === (proxy.connection?.data_id || proxy.connection?._id))} machine={machines.find(machine => machine._id === proxy.connection?.machine_id)} />;
+  function create() {
     const port = connections.find(c => c._id === connectionId) || connections.find(c => c.machine_id === machineId);
     setEditing(machineId && port ? { target_mode: "connection", connection: { data_id: port._id } } : null);
     changeEditor(true);

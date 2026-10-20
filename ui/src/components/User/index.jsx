@@ -27,19 +27,19 @@ export default function UserHome() {
   const reducedMotion = useReducedMotion();
   const { user } = useAuth();
   const { collapsed, ready: navigationReady, setCollapsed } = useNavigationPreference(user);
-    const previousCollapsed = collapsed;
   const [savingNavigation, setSavingNavigation] = useState(false);
-    setCollapsed(!collapsed);
   const toggleNavigation = async () => {
     const previousPreferences = user?.preferences || {};
+    const previousCollapsed = collapsed;
     setSavingNavigation(true);
+    setCollapsed(!collapsed);
     dispatch(authActions.updateAccountInfo({
       preferences: { ...previousPreferences, nav_collapsed: !collapsed },
     }));
-      setCollapsed(previousCollapsed);
     try {
       await axios.patch(apiRoutes.userPreferences, { nav_collapsed: !collapsed });
     } catch {
+      setCollapsed(previousCollapsed);
       dispatch(authActions.updateAccountInfo({ preferences: previousPreferences }));
       toast.error("Could not save navigation preference. Please try again.");
     } finally {
