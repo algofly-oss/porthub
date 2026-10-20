@@ -23,6 +23,12 @@ const {launchBrowser}=require("./browser.cjs");
     assert.equal(geometry.pagePadding,"8px",`${view}: small intentional inset separates panels from navigation`);
     assert(["none","normal"].includes(geometry.line),`${view}: no blue active line on phone`);
     if(["machines","proxies"].includes(view)){
+     const insets=await page.locator('[aria-label$="tools"] [role="group"]').evaluateAll(groups=>groups.map(group=>{
+      const box=group.getBoundingClientRect(),buttons=group.querySelectorAll("button"),first=buttons[0].getBoundingClientRect(),last=buttons[buttons.length-1].getBoundingClientRect();
+      return [first.top-box.top,box.bottom-first.bottom,first.left-box.left,box.right-last.right];
+     }));
+     assert(insets.length>0,"Status control is present");
+     insets.forEach(inset=>inset.forEach(value=>assert(Math.abs(value-4)<1,`Even status-control padding: ${inset}`)));
      const search=page.getByRole("textbox",{name:view==="machines"?"Search machines":"Search proxies",exact:true});
      const create=page.getByRole("button",{name:view==="machines"?"Create machine":"Create proxy",exact:true});
      assert(Math.abs((await search.boundingBox()).y-(await create.boundingBox()).y)<8,"Search/create share the first row");

@@ -10,6 +10,7 @@ export default function useWorkspaceViewport() {
     let frame;
     const update = () => {
       if (window.innerWidth >= 768) {
+        root.classList.remove("workspace-standalone", "workspace-keyboard");
         root.style.removeProperty("--workspace-height");
         root.style.removeProperty("--workspace-top");
         return;
@@ -18,12 +19,20 @@ export default function useWorkspaceViewport() {
       if (viewport && Math.abs(viewport.scale - 1) > 0.01) return;
       const installed = standalone.matches || window.navigator.standalone === true;
       const typing = document.activeElement?.matches("input, textarea, [contenteditable=true]");
-      const keyboardOpen = typing && viewport && viewport.height < window.innerHeight - 120;
-      // iOS standalone dvh can exclude the home-indicator area at launch.
-      // Use the full window there, but the visible viewport for the keyboard.
-      const fullWindow = installed && !keyboardOpen;
-      const height = fullWindow ? window.innerHeight : viewport?.height || window.innerHeight;
-      const top = fullWindow ? 0 : viewport?.offsetTop || 0;
+      const layoutHeight = Math.max(window.innerHeight, root.clientHeight);
+      const keyboardOpen = Boolean(typing && viewport && viewport.height < layoutHeight - 120);
+      root.classList.toggle("workspace-standalone", installed);
+      root.classList.toggle("workspace-keyboard", keyboardOpen);
+      // Installed iOS can retain a shortened innerHeight as well as an
+      // undersized visualViewport. Anchor the shell to all four viewport edges
+      // in CSS instead of trusting either cached number for its bottom edge.
+      if (installed && !keyboardOpen) {
+        root.style.removeProperty("--workspace-height");
+        root.style.removeProperty("--workspace-top");
+        return;
+      }
+      const height = viewport?.height || window.innerHeight;
+      const top = viewport?.offsetTop || 0;
       root.style.setProperty("--workspace-height", `${height}px`);
       root.style.setProperty("--workspace-top", `${top}px`);
     };
@@ -34,17 +43,23 @@ export default function useWorkspaceViewport() {
     window.addEventListener("orientationchange", schedule);
     window.addEventListener("pageshow", schedule);
     document.addEventListener("visibilitychange", schedule);
+    document.addEventListener("focusin", schedule);
+    document.addEventListener("focusout", schedule);
+    standalone.addEventListener("change", schedule);
     viewport?.addEventListener("resize", schedule);
     viewport?.addEventListener("scroll", schedule);
     return () => {
       cancelAnimationFrame(frame);
-      root.classList.remove("workspace-active");
+      root.classList.remove("workspace-active", "workspace-standalone", "workspace-keyboard");
       root.style.removeProperty("--workspace-height");
       root.style.removeProperty("--workspace-top");
       window.removeEventListener("resize", schedule);
       window.removeEventListener("orientationchange", schedule);
       window.removeEventListener("pageshow", schedule);
       document.removeEventListener("visibilitychange", schedule);
+      document.removeEventListener("focusin", schedule);
+      document.removeEventListener("focusout", schedule);
+      standalone.removeEventListener("change", schedule);
       viewport?.removeEventListener("resize", schedule);
       viewport?.removeEventListener("scroll", schedule);
     };

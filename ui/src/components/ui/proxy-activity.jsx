@@ -11,14 +11,14 @@ export function compactRequests(value) {
   return new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(Math.max(0, Number(value) || 0));
 }
 
-export default function ProxyActivity({metric,activity,group}) {
+export default function ProxyActivity({metric,activity,group,compact=false}) {
   const monthly = Number(metric?.monthly_requests || 0), lifetime = Number(metric?.requests || 0);
-  const title = activity.tracking_since ? `${monthly.toLocaleString()} requests this calendar month (UTC); ${lifetime.toLocaleString()} lifetime requests observed since ${new Date(activity.tracking_since).toLocaleString()}. Monthly tracking available since ${new Date(activity.monthly_tracking_since || activity.tracking_since).toLocaleString()}. Includes bots and repeat requests; not unique visitors.${activity.coverage_warning ? " Some requests during a logging interruption may not be counted." : ""}` : "Request tracking is starting";
+  const title = activity.tracking_since ? `${monthly.toLocaleString()} requests this calendar month (UTC); ${lifetime.toLocaleString()} lifetime requests observed since ${new Date(activity.tracking_since).toLocaleString()}. Monthly tracking available since ${new Date(activity.monthly_tracking_since || activity.tracking_since).toLocaleString()}. ${metric?.last_requested_at ? `Last requested ${new Date(metric.last_requested_at).toLocaleString()}. ` : ""}Includes bots and repeat requests; not unique visitors.${activity.coverage_warning ? " Some requests during a logging interruption may not be counted." : ""}` : "Request tracking is starting";
   return <div title={title} className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
     {group && <><span>{group}</span><span aria-hidden="true">·</span></>}
     {activity.coverage_warning && <span className="text-amber-700 dark:text-amber-400">Partial history</span>}
     {activity.error ? <span>Usage unavailable</span> : !activity.available ? <span>{activity.loading ? "Loading usage…" : "Tracking unavailable"}</span> : <>
-      <span className="whitespace-nowrap tabular-nums">{compactRequests(monthly)} this month</span><span aria-hidden="true">·</span><span className="whitespace-nowrap tabular-nums">{compactRequests(lifetime)} lifetime</span><span aria-hidden="true">·</span><span className="whitespace-nowrap">{metric?.last_requested_at ? activityAge(metric.last_requested_at) : "Not requested yet"}</span>
+      <span className="whitespace-nowrap tabular-nums" aria-label={compact ? `${compactRequests(monthly)} this month` : undefined}>{compactRequests(monthly)}{compact ? "/mo" : " this month"}</span><span aria-hidden="true">·</span><span className="whitespace-nowrap tabular-nums">{compactRequests(lifetime)} lifetime</span>{!compact && <><span aria-hidden="true">·</span><span className="whitespace-nowrap">{metric?.last_requested_at ? activityAge(metric.last_requested_at) : "Not requested yet"}</span></>}
     </>}
   </div>;
 }

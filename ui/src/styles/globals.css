@@ -61,9 +61,8 @@ html.workspace-active, html.workspace-active body { height: 100%; overflow: hidd
   html.dark.workspace-active, html.dark.workspace-active body { background: #000; }
   html.workspace-active body { position: fixed; inset: 0; width: 100%; }
   .workspace { position: fixed; inset-inline: 0; top: var(--workspace-top, 0px); }
-}
-@media (display-mode: standalone) and (max-width: 767px) {
-  .workspace { height: var(--workspace-height, 100%); }
+  .workspace-standalone .workspace { inset: 0; height: auto; }
+  .workspace-standalone.workspace-keyboard .workspace { top: var(--workspace-top, 0px); bottom: auto; height: var(--workspace-height); }
 }
 html.theme-changing *, html.theme-changing *::before, html.theme-changing *::after {
   transition: none !important;
