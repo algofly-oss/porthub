@@ -269,6 +269,7 @@ export default function TrafficMonitorPanel({
                 <div className="text-muted-foreground">
                   {Math.max(0, Math.floor(Date.now() / 1000) - activeSample.timestamp)}s ago
                 </div>
+                {activeSample.intervalAverage && <div className="text-muted-foreground">Measured average over {activeSample.interval_seconds.toFixed(1)}s</div>}
                 <div className="mt-0.5 flex items-center gap-3">
                   {showIncoming ? (
                     <span className="inline-flex items-center gap-1.5">
@@ -312,6 +313,8 @@ export default function TrafficMonitorPanel({
             <svg
               role="img"
               aria-label={`${title} chart`}
+              data-window-seconds={windowSeconds}
+              data-observed-seconds={windowedSamples.filter(sample => sample.observed).length}
               data-window-end={windowEndTimestamp}
               viewBox={`0 0 ${chartWidth} ${chartHeight}`}
               preserveAspectRatio="none"

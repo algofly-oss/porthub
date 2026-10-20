@@ -20,6 +20,9 @@ export function normalizeTrafficSamples(samples, limit = 300) {
     if (!Number.isFinite(timestamp) || timestamp <= 0) continue;
     const bucket = buckets.get(timestamp) || emptySample(timestamp);
     const duration = nonnegative(sample.interval_seconds) || 1;
+    // Preserve coverage through repeated per-port/per-machine aggregation.
+    // Durations overlap across ports; unlike bytes, they must not be added.
+    bucket.interval_seconds = Math.max(bucket.interval_seconds || 0, duration);
     byteKeys.forEach((key, index) => {
       bucket[key] += nonnegative(sample[key]);
       bucket[rateKeys[index]] += sample[rateKeys[index]] === undefined ? nonnegative(sample[key]) / duration : nonnegative(sample[rateKeys[index]]);
@@ -33,9 +36,24 @@ export function normalizeTrafficSamples(samples, limit = 300) {
   return [...buckets.values()].sort((a, b) => a.timestamp - b.timestamp).slice(-limit);
 }
 
-export function buildTrafficWindow(samples, windowSeconds = 60, now = Date.now() / 1000) {
-  const windowEndTimestamp = Math.floor(now);
-  const buckets = new Map(normalizeTrafficSamples(samples).map(sample => [sample.timestamp, sample]));
+export function buildTrafficWindow(samples, windowSeconds = 60, now) {
+  const normalized = normalizeTrafficSamples(samples);
+  // Plot the most recent completed measurements, rather than leaving the last
+  // few seconds blank while a snapshot is in transit. Labels show its real age.
+  const windowEndTimestamp = Math.floor(now ?? normalized[normalized.length - 1]?.timestamp ?? Date.now() / 1000);
+  const buckets = new Map(normalized.map(sample => [sample.timestamp, sample]));
+  for (const sample of normalized) {
+    // A delayed counter read still measures ALL bytes since the previous read.
+    // Render its measured average across that interval. This is not a zero-fill
+    // or interpolation across an outage: uncovered history remains unknown.
+    const span = Math.min(windowSeconds, Math.ceil(sample.interval_seconds || 1));
+    for (let offset = 1; offset < span; offset++) {
+      const timestamp = sample.timestamp - offset;
+      if (timestamp <= windowEndTimestamp - windowSeconds || timestamp > windowEndTimestamp || buckets.has(timestamp)) continue;
+      buckets.set(timestamp, { ...emptySample(timestamp), in_rate: sample.in_rate, out_rate: sample.out_rate, drop_rate: sample.drop_rate,
+        interval_seconds: sample.interval_seconds, intervalAverage: true });
+    }
+  }
   return {
     windowEndTimestamp,
     samples: Array.from({ length: windowSeconds }, (_, index) => {

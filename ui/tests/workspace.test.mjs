@@ -86,3 +86,37 @@ test("rate accounts for a slow sampling interval while transferred volume remain
   assert.equal(summary.volume, 750);
   assert.equal(trafficSummary(normalizeTrafficSamples(raw), 60, 101).incoming, 200);
 });
+
+test("measured sampling intervals cover integer-second jitter without inventing bytes", () => {
+  const raw = [{timestamp: 100, interval_seconds: 1, in_bytes: 100}, {timestamp: 102, interval_seconds: 1.2, in_bytes: 240}, {timestamp: 104, interval_seconds: 1.8, in_bytes: 540}];
+  const normalized = normalizeTrafficSamples(normalizeTrafficSamples(raw));
+  assert.equal(normalized[1].interval_seconds, 1.2);
+  const window = buildTrafficWindow(normalized, 5, 104).samples;
+  assert(window.every(sample => sample.observed));
+  assert.equal(window[1].in_rate, 200);
+  assert.equal(window[1].intervalAverage, true);
+  assert.equal(window[1].in_bytes, 0);
+  assert.equal((trafficLinePath(window, "in_rate", 100, 20, 600).match(/M /g) || []).length, 1);
+  assert.equal(trafficSummary(raw, 60, 104).volume, 880);
+  assert.equal(window.reduce((sum, sample) => sum + sample.in_bytes, 0), 880);
+});
+
+test("aggregation preserves overlapping coverage rather than adding interval durations", () => {
+  const aggregate = aggregateTraffic([{traffic:[{timestamp:102,interval_seconds:1.2,in_bytes:120}]}, {traffic:[{timestamp:102,interval_seconds:1.2,in_bytes:240}]}]);
+  assert.equal(aggregate[0].interval_seconds, 1.2);
+  assert.equal(aggregate[0].in_rate, 300);
+  const window = buildTrafficWindow(aggregate, 5, 102).samples;
+  assert.equal(window.filter(sample => sample.observed).length, 2);
+});
+
+test("full 90-second history follows the latest measurement and leaves genuine outages visible", () => {
+  const raw = Array.from({length: 61}, (_, index) => ({timestamp: 100 + index * 2, interval_seconds: 1.8, in_bytes: 180}));
+  const {samples, windowEndTimestamp} = buildTrafficWindow(raw, 90);
+  assert.equal(windowEndTimestamp, 220);
+  assert.equal(samples.length, 90);
+  assert.equal(samples[0].timestamp, 131);
+  assert(samples.every(sample => sample.observed));
+  const outage = buildTrafficWindow([{timestamp:100,in_bytes:100,interval_seconds:1}, {timestamp:105,in_bytes:100,interval_seconds:1.2}], 6, 105).samples;
+  assert.equal(outage.filter(sample => !sample.observed).length, 3);
+  assert.equal((trafficLinePath(outage, "in_rate", 100, 20, 200).match(/M /g) || []).length, 2);
+});

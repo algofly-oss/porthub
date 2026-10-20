@@ -78,6 +78,17 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
     sections.set(key, [...(sections.get(key) || []), p]);
   });
   function create() {
+  const rowInteraction = proxy => ({
+    tabIndex: 0,
+    "aria-label": `Edit proxy ${proxy.hosts?.[0] || proxy.name}`,
+    onClick: event => { if (!event.target.closest("a,button,input")) edit(proxy); },
+    onKeyDown: event => {
+      if (event.target === event.currentTarget && ["Enter", " "].includes(event.key)) {
+        event.preventDefault(); edit(proxy);
+      }
+    },
+  });
+  const host = proxy => <ProxyHost proxy={proxy} connection={connections.find(connection => connection._id === (proxy.connection?.data_id || proxy.connection?._id))} machine={machines.find(machine => machine._id === proxy.connection?.machine_id)} />;
     const port = connections.find(c => c._id === connectionId) || connections.find(c => c.machine_id === machineId);
     setEditing(machineId && port ? { target_mode: "connection", connection: { data_id: port._id } } : null);
     changeEditor(true);
@@ -131,15 +142,13 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
       : !filtered.length ? <EmptyState icon={IconWorld} title={scoped.length ? "No matching proxies" : "Your services, one address away"} description={scoped.length ? "Try another hostname, service, machine, or port, or clear your filters." : "Create a public address linked to a machine port or an HTTP target."} action={scoped.length ? <button className="action-secondary" onClick={reset}>Clear filters</button> : undefined} />
       : <div className="proxy-results overflow-hidden rounded-xl bg-surface"><div className="data-scroll">{[...sections].map(([label, entries]) => <section key={label}>
         {groupBy !== "none" && <h2 className="flex items-center gap-2 bg-muted px-4 py-2 text-xs font-semibold"><IconFolder size={14} />{label}<span className="ml-auto text-muted-foreground">{entries.length}</span></h2>}
-        <div className="hidden md:block"><Table aria-label="Web proxies"><TableHeader><TableRow><TableHead className="w-[25%]">Hostname</TableHead><TableHead className="w-[20%]">Machine / service</TableHead><TableHead>Target</TableHead><TableHead className="hidden w-48 lg:table-cell"><span title="All traffic on the linked machine port; not individual HTTP requests">Linked port traffic</span></TableHead><TableHead className="w-24">Status</TableHead><TableHead className="w-24"><span className="sr-only">Actions</span></TableHead></TableRow></TableHeader><TableBody>{entries.map(p => <TableRow key={p._id}>
-          <TableCell><ProxyHost proxy={p} />{p.group && <p className="mt-1 truncate text-[13px] text-muted-foreground">{p.group}</p>}</TableCell>
+        <div className="hidden md:block"><Table aria-label="Web proxies"><TableHeader><TableRow><TableHead className="w-[30%]">Hostname</TableHead><TableHead className="w-[25%]">Machine / service</TableHead><TableHead>Target</TableHead><TableHead className="hidden w-48 lg:table-cell"><span title="All traffic on the linked machine port; not individual HTTP requests">Linked port traffic</span></TableHead></TableRow></TableHeader><TableBody>{entries.map(p => <TableRow key={p._id} {...rowInteraction(p)} className="cursor-pointer focus-visible:bg-accent/40">
+          <TableCell>{host(p)}{p.group && <p className="mt-1 truncate pl-4 text-[13px] text-muted-foreground">{p.group}</p>}</TableCell>
           <TableCell><p className="truncate font-medium">{p.connection?.machine_name || "Manual target"}</p><p className="mt-0.5 truncate text-[13px] text-muted-foreground">{p.connection?.service_name || p.description || "HTTP endpoint"}</p></TableCell>
           <TableCell><p className="truncate font-mono text-[13px]" title={p.target_url}>{p.target_url}</p></TableCell>
           <TableCell className="hidden lg:table-cell">{p.connection ? <TrafficSparkline samples={trafficById.get(p.connection.data_id || p.connection._id) || []} label="Linked port traffic" /> : <span className="text-xs text-muted-foreground">Standalone target</span>}</TableCell>
-          <TableCell><span className={`status-badge ${p.enabled ? "" : "muted"}`}>{p.enabled ? "Enabled" : "Disabled"}</span></TableCell>
-          <TableCell><Button type="button" variant="outline" size="sm" aria-label={`Edit proxy ${p.hosts?.[0] || p.name}`} onClick={() => edit(p)}>Edit</Button></TableCell>
         </TableRow>)}</TableBody></Table></div>
-        <div className="md:hidden">{entries.map(p => <div className="proxy-row-mobile" key={p._id}><div className="min-w-0"><div className="flex items-center gap-2"><span title={p.enabled ? "Enabled" : "Disabled"} className={`h-1.5 w-1.5 shrink-0 rounded-full ${p.enabled ? "bg-emerald-500" : "bg-zinc-500"}`} /><ProxyHost proxy={p} /></div><p className="mt-1 truncate text-[13px] text-muted-foreground">{p.connection?.machine_name || "Manual target"} · {p.connection?.service_name || p.target_url}</p></div><Button type="button" size="sm" variant="outline" aria-label={`Edit proxy ${p.hosts?.[0] || p.name}`} onClick={() => edit(p)}>Edit</Button></div>)}</div>
+        <div className="md:hidden">{entries.map(p => <div className="proxy-row-mobile cursor-pointer focus-visible:bg-accent/40" key={p._id} {...rowInteraction(p)}><div className="min-w-0 flex-1">{host(p)}<p className="mt-1 truncate pl-4 text-[13px] text-muted-foreground">{p.connection?.machine_name || "Manual target"} · {p.connection?.service_name || p.target_url}</p></div></div>)}</div>
       </section>)}</div>
       <footer className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-2"><p className="text-[13px] text-muted-foreground">{filtered.length} proxies · {currentPage}/{totalPages}</p><SearchSelect className="w-36 sm:ml-auto" label="Proxies per page" value={pageSize} onChange={value=>setPageSize(Number(value))} options={[10,25,50].map(n=>({value:n,label:`${n} per page`}))} /><Pagination value={currentPage} onChange={setPage} total={totalPages} size="sm" siblings={0} /></footer>
     </div>}
@@ -147,6 +156,16 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
   </div>;
 }
 
-function ProxyHost({ proxy: p }) {
-  return <a className="inline-flex max-w-full items-center gap-1 truncate text-[15px] font-medium text-blue-600 hover:underline dark:text-blue-400" href={`${p.entry_points?.includes("websecure") ? "https" : "http"}://${p.hosts?.[0]}`} target="_blank" rel="noreferrer"><span className="truncate">{p.hosts?.[0] || p.name}</span>{p.hosts?.length > 1 && <span className="text-[10px] text-muted-foreground">+{p.hosts.length - 1}</span>}<IconArrowUpRight size={12} className="shrink-0 opacity-60" /></a>;
+function ProxyHost({ proxy: p, connection, machine }) {
+  const port = connection || p.connection;
+  const machineStatus = machine?.connection_status || port?.machine_connection_status;
+  let status = "Enabled · Target health is not monitored", color = "bg-emerald-600 dark:bg-emerald-400";
+  if (p.enabled === false) { status = "Disabled"; color = "bg-zinc-500 dark:bg-zinc-400"; }
+  else if (machine?.enabled === false || port?.machine_enabled === false) { status = "Machine disabled"; color = "bg-zinc-500 dark:bg-zinc-400"; }
+  else if (port?.enabled === false) { status = "Port disabled"; color = "bg-amber-600 dark:bg-amber-400"; }
+  else if (machineStatus === "offline") { status = "Machine offline"; color = "bg-red-600 dark:bg-red-400"; }
+  else if (machineStatus === "auth_required") { status = "Machine authentication required"; color = "bg-amber-600 dark:bg-amber-400"; }
+  else if (machineStatus === "online") status = "Enabled · Machine online";
+  else if (port) { status = "Machine status unknown"; color = "bg-amber-600 dark:bg-amber-400"; }
+  return <div className="flex min-w-0 items-center gap-2"><span role="img" aria-label={status} title={status} className={`h-2 w-2 shrink-0 rounded-full ${color}`} /><a className="inline-flex min-w-0 max-w-full items-center gap-1 truncate text-[15px] font-medium text-blue-600 hover:underline dark:text-blue-400" href={`${p.entry_points?.includes("websecure") ? "https" : "http"}://${p.hosts?.[0]}`} target="_blank" rel="noreferrer"><span className="truncate">{p.hosts?.[0] || p.name}</span>{p.hosts?.length > 1 && <span className="text-[10px] text-muted-foreground">+{p.hosts.length - 1}</span>}<IconArrowUpRight size={12} className="shrink-0 opacity-60" /></a></div>;
 }

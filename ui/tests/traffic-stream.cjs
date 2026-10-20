@@ -19,8 +19,8 @@ const assert = require("node:assert/strict");
       if (request.url().includes("/traffic/snapshot")) {
         const now = Math.floor(Date.now()/1000);
         latestRaw = Array.from({length:180}, (_,index) => {
-          const timestamp = now - 179 + index, incoming = 800 + timestamp % 17 * 80;
-          return [{timestamp,in_bytes:incoming}, {timestamp,out_bytes:incoming/2}, {timestamp,drop_bytes:10}];
+          const timestamp = now - 358 + index * 2, incoming = 800 + timestamp % 17 * 80;
+          return [{timestamp,interval_seconds:1.8,in_bytes:incoming}, {timestamp,interval_seconds:1.8,out_bytes:incoming/2}, {timestamp,interval_seconds:1.8,drop_bytes:10}];
         }).flat();
         data = {data:[{connection,traffic:latestRaw}]}; snapshots++;
       } else data = handleDemoRequest(state, request.method().toLowerCase(), request.url(), body);
@@ -41,6 +41,7 @@ const assert = require("node:assert/strict");
       const peak = Math.max(...window.flatMap(sample=>[sample.in_rate,sample.out_rate,sample.drop_rate])) * 1.15;
       assert.equal(rendered.incoming,trafficLinePath(window,"in_rate",560,132,peak));
       assert.equal(window.filter(sample=>sample.observed).length,60);
+      assert.equal((rendered.incoming.match(/M /g)||[]).length,1,"Measured intervals must produce a continuous line");
       console.log(`PASS ${Math.round(elapsed/1000)}s: complete 60-second chart matches directional source records; ${snapshots} refreshes`);
     }
     assert(snapshots >= 30);

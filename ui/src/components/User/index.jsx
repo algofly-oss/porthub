@@ -14,6 +14,7 @@ import axios from "axios";
 import toast from "react-hot-toast";
 import { useDispatch } from "react-redux";
 import { authActions } from "@/redux/features/authSlice";
+import useNavigationPreference from "@/shared/hooks/useNavigationPreference";
 import apiRoutes from "@/shared/routes/apiRoutes";
 import useAuth from "@/shared/hooks/useAuth";
 import { motion, useReducedMotion } from "framer-motion";
@@ -25,14 +26,17 @@ export default function UserHome() {
   const theme = useTheme();
   const reducedMotion = useReducedMotion();
   const { user } = useAuth();
-  const collapsed = user?.preferences?.nav_collapsed === true;
+  const { collapsed, ready: navigationReady, setCollapsed } = useNavigationPreference(user);
+    const previousCollapsed = collapsed;
   const [savingNavigation, setSavingNavigation] = useState(false);
+    setCollapsed(!collapsed);
   const toggleNavigation = async () => {
     const previousPreferences = user?.preferences || {};
     setSavingNavigation(true);
     dispatch(authActions.updateAccountInfo({
       preferences: { ...previousPreferences, nav_collapsed: !collapsed },
     }));
+      setCollapsed(previousCollapsed);
     try {
       await axios.patch(apiRoutes.userPreferences, { nav_collapsed: !collapsed });
     } catch {
@@ -51,7 +55,7 @@ export default function UserHome() {
   };
   const [machineStats, setMachineStats] = useState(null);
 
-  if (!router.isReady) {
+  if (!router.isReady || !navigationReady) {
     return <div className="workspace flex min-h-screen items-center justify-center text-sm text-zinc-500" role="status">Loading workspace…</div>;
   }
 
