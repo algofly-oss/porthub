@@ -20,6 +20,7 @@ import (
 	"github.com/algofly-oss/porthub/client/internal/download"
 	"github.com/algofly-oss/porthub/client/internal/fileserver"
 	"github.com/algofly-oss/porthub/client/internal/relay"
+	"github.com/algofly-oss/porthub/client/internal/service"
 	"github.com/algofly-oss/porthub/client/internal/tunnel"
 )
 
@@ -30,6 +31,7 @@ const usage = `usage: porthub <command>
   http.server stop [PORT|--all]                stop servers from any terminal
   http.server list                             list running servers
   tunnel --config client.toml                  public port tunnels (rathole protocol)
+  service install --profile FILE | uninstall | status   boot-time service
   relay-server [--listen ADDR]                 gateway relay (PORTHUB_RELAY_SECRET)
   get <http(s)-url>                            parallel, resumable download
   enroll --server URL --profile FILE           private network enrollment
@@ -162,6 +164,45 @@ func run() error {
 	switch os.Args[1] {
 	case "http.server", "http-server":
 		return httpServer(ctx, os.Args[2:])
+	case "service":
+		// Boot-time service for the private-network agent.
+		if len(os.Args) < 3 {
+			return errors.New("usage: porthub service install --profile FILE | uninstall [--purge] | status")
+		}
+		switch os.Args[2] {
+		case "install":
+			flags := flag.NewFlagSet("service install", flag.ContinueOnError)
+			profile := flags.String("profile", "", "enrolled private profile")
+			if err := flags.Parse(os.Args[3:]); err != nil {
+				return err
+			}
+			if *profile == "" {
+				return errors.New("--profile is required")
+			}
+			if _, err := agent.ReadConfig(*profile); err != nil {
+				return err
+			}
+			if err := service.Install(*profile); err != nil {
+				return err
+			}
+			fmt.Printf("Installed and started %s; it starts at boot and restarts if it exits.\n", service.Unit)
+			return nil
+		case "uninstall":
+			purge := len(os.Args) > 3 && os.Args[3] == "--purge"
+			if err := service.Uninstall(purge); err != nil {
+				return err
+			}
+			fmt.Printf("Removed %s.\n", service.Unit)
+			return nil
+		case "status":
+			active, enabled, err := service.Status()
+			if err != nil {
+				return err
+			}
+			fmt.Printf("%s: %s (boot: %s)\n", service.Unit, active, enabled)
+			return nil
+		}
+		return errors.New("usage: porthub service install --profile FILE | uninstall [--purge] | status")
 	case "relay-server":
 		// Gateway side of the private-network relay; reached through the
 		// PortHub web address (see internal/relay). Secret from the env only.
