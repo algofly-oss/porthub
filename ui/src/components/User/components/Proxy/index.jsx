@@ -125,7 +125,7 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
   const reset = () => { setQuery(""); setStatus("all"); setGroup("all"); setMachine("all"); };
   return <div className={compact ? "flex min-h-0 max-h-[75dvh] flex-col gap-3" : "workspace-page"}>
     {compact ? <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="text-sm font-semibold">Linked web proxies</h3><p className="mt-1 text-xs text-muted-foreground">Create and edit addresses for this {connectionId ? "port" : "machine"} here.</p></div>{createButton}</div>
-      : <PageHeader eyebrow="Routing" title="Web Proxies" description="Find, organize, and route your services from one place." />}
+      : <PageHeader eyebrow="Routing" title="Public Web Proxies" description="Manage publicly reachable web addresses separately from private machine access." />}
     {!compact ? <InventoryToolbar label="Proxy tools"
       search={<SearchField value={query} onChange={setQuery} label="Search proxies" placeholder="Search proxies…" />}
       status={<StatusTabs label="Proxy status" value={status} onChange={setStatus} options={[{value:"all",label:"All"},{value:"enabled",label:"Enabled"},{value:"disabled",label:"Disabled"}]} />}

@@ -78,7 +78,7 @@ const fields = 'input:not([type="hidden"]):not([type="checkbox"]):not([type="rad
       }
       async function go(view) {
         await page.goto(`${origin}/home?demo=1&view=${view}`);
-        const titles = { dashboard: "Dashboard", machines: "Machines", proxies: "Web Proxies", traffic: "Traffic Explorer", platform: "Platform Overview", settings: "Settings" };
+        const titles = { dashboard: "Dashboard", machines: "Machines", proxies: "Public Web Proxies", traffic: "Traffic Explorer", platform: "Platform Overview", settings: "Settings" };
         await page.getByRole("heading", { name: titles[view], exact: true }).waitFor();
         await page.waitForFunction(view => window.next?.router?.isReady && window.next.router.query.view === view, view);
       }

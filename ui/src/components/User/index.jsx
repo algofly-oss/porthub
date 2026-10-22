@@ -7,6 +7,7 @@ import Settings from "./components/Settings";
 import PlatformOverview from "./components/PlatformOverview";
 import Traffic from "./components/Traffic";
 import Dashboard from "./components/Dashboard";
+import AccessRules from "./components/AccessRules";
 import { useRouter } from "next/router";
 import axios from "axios";
 import toast from "react-hot-toast";
@@ -46,7 +47,7 @@ export default function UserHome() {
     }
   };
   const isAdmin = user?.role === "admin";
-  const views = { dashboard: "Dashboard", machines: "Home", proxies: "Proxy", traffic: "Traffic", settings: "Settings", platform: "Platform" };
+  const views = { dashboard: "Dashboard", machines: "Home", access: "Access", proxies: "Proxy", traffic: "Traffic", settings: "Settings", platform: "Platform" };
   const tab = views[router.query.view] || "Dashboard";
   const setTab = (nextTab) => {
     const view = Object.keys(views).find(key => views[key] === nextTab) || "machines";
@@ -92,6 +93,7 @@ export default function UserHome() {
         <motion.div key={tab} initial={reducedMotion ? false : { opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.16 }} className="h-full min-h-0">
         {tab === "Dashboard" && <Dashboard />}
         {tab === "Home" && <Home onStatsChange={setMachineStats} />}
+        {tab === "Access" && <AccessRules />}
         {tab === "Proxy" && <Proxy />}
         {tab === "Traffic" && <Traffic />}
         {tab === "Settings" && <Settings />}

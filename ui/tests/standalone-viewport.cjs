@@ -1,5 +1,5 @@
 const assert=require("node:assert/strict");
-const {launchBrowser}=require("./browser.cjs");
+const {launchBrowser,navigateWorkspace}=require("./browser.cjs");
 
 (async()=>{
  const browser=await launchBrowser();
@@ -31,7 +31,7 @@ const {launchBrowser}=require("./browser.cjs");
   await page.waitForTimeout(100);
   assert(Math.abs((await nav.boundingBox()).y+(await nav.boundingBox()).height-874)<1,"Full height is restored after keyboard closes");
   for (const view of ["Proxies", "Settings", "Machines"]) {
-   await page.getByRole("button",{name:view,exact:true}).click();
+   await navigateWorkspace(page,view);
    assert(Math.abs((await nav.boundingBox()).y+(await nav.boundingBox()).height-874)<1,`${view}: changing pages cannot lift the installed navigation`);
   }
   assert.equal(await page.evaluate(()=>scrollY),0);

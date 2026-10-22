@@ -4,7 +4,7 @@ const {launchBrowser} = require("./browser.cjs");
 const origin=process.env.REVIEW_URL||"http://luna.local:8345";
 const engine=process.env.REVIEW_BROWSER||"chromium";
 const output=process.env.REVIEW_OUTPUT||`/tmp/porthub-goal-audit/${engine}`;
-const views=[["dashboard","Dashboard"],["machines","Machines"],["proxies","Web Proxies"],["traffic","Traffic Explorer"],["settings","Settings"],["platform","Platform Overview"]];
+const views=[["dashboard","Dashboard"],["machines","Machines"],["proxies","Public Web Proxies"],["traffic","Traffic Explorer"],["settings","Settings"],["platform","Platform Overview"]];
 
 (async()=>{
   fs.mkdirSync(output,{recursive:true});

@@ -8,6 +8,7 @@ class UserSignupDto(BaseModel):
     name: str
     username: str
     password: str
+    invitation_token: str | None = None
 
 
 class UserSigninDto(BaseModel):

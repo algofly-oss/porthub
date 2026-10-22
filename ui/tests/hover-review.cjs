@@ -115,7 +115,7 @@ async function colours(locator) {
       await recent.scrollIntoViewIfNeeded();
       await page.screenshot({path:`/tmp/porthub-hover-${theme}-dashboard-scale.png`});
       await recent.getByRole("button",{name:"View All Proxies",exact:true}).click();
-      await page.getByRole("heading",{name:"Web Proxies",exact:true}).waitFor();
+      await page.getByRole("heading",{name:"Public Web Proxies",exact:true}).waitFor();
       await page.getByText("200 proxies · 1/8",{exact:true}).waitFor();
       assert.equal(await page.getByRole("table",{name:"Web proxies",exact:true}).locator("tbody > tr").count(),25);
       await hover(page.getByRole("button",{name:"Create proxy",exact:true}),"proxy primary",{blue:true});
@@ -144,7 +144,7 @@ async function colours(locator) {
       assert(Math.abs(footer.y+footer.height-card.y-card.height)<2,"Platform pagination stays attached to table");
       for(const [width,height] of [[820,1180],[402,874],[320,700]]) {
         await page.setViewportSize({width,height});
-        await go("proxies","Web Proxies");
+        await go("proxies","Public Web Proxies");
         await page.getByText("200 proxies · 1/8",{exact:true}).waitFor();
         const pagerBounds=await page.locator('.proxy-results footer .mantine-Pagination-control').evaluateAll(elements=>elements.map(element=>({left:element.getBoundingClientRect().left,right:element.getBoundingClientRect().right})));
         assert(pagerBounds.every(bounds=>bounds.left>=0 && bounds.right<=width),`Large proxy list pagination fits at ${width}px`);

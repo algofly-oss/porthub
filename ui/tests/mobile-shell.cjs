@@ -7,7 +7,7 @@ const {launchBrowser}=require("./browser.cjs");
    const context=await browser.newContext({viewport:{width,height:874},isMobile:true,hasTouch:true});
    await context.addInitScript(theme=>localStorage.setItem("mantine-color-scheme",JSON.stringify(theme)),theme);
    const page=await context.newPage();const errors=[];page.on("pageerror",error=>errors.push(error.message));
-   for(const view of ["dashboard","machines","proxies","traffic","settings","platform"]){
+   for(const view of ["dashboard","machines","access","proxies","traffic","settings","platform"]){
     await page.goto(`${process.env.REVIEW_ORIGIN||"http://luna.local:8345"}/home?demo=1&view=${view}`);
     const nav=page.getByRole("complementary",{name:"Main navigation"});await nav.waitFor();
     await page.waitForTimeout(200);

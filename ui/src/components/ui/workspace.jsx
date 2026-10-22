@@ -30,8 +30,8 @@ export function SearchField({ value, onChange, placeholder = "Search…", label 
 }
 
 export function EmptyState({ icon: Icon, title, description, action }) {
-  return <div className="empty-state">
-    {Icon && <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-blue-50 text-blue-600 dark:bg-blue-500/10 dark:text-blue-400"><Icon size={24} stroke={1.5} /></div>}
+  return <div className="rounded-xl bg-surface px-5 py-10 text-center">
+    {Icon && <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center text-muted-foreground"><Icon size={24} stroke={1.5} /></div>}
     <h2 className="text-base font-semibold">{title}</h2>
     <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-zinc-500 dark:text-zinc-400">{description}</p>
     {action && <div className="mt-5">{action}</div>}

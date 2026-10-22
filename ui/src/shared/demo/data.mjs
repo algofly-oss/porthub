@@ -1,3 +1,4 @@
+import { demoAccess } from "./access.mjs";
 const id = value => value.toString(16).padStart(24, "0");
 const stamp = () => new Date().toISOString();
 
@@ -35,6 +36,7 @@ export function handleDemoRequest(state, method, rawPath, payload = {}) {
   const path = rawPath.split("?")[0].replace(/^.*\/api/, "");
   const read = method === "get";
   const body = typeof payload === "string" ? JSON.parse(payload) : payload || {};
+  if (path.startsWith("/access/")) return demoAccess(state,method,path,body,id);
   if (path === "/auth/me") return state.user;
   if (path === "/traffic-routes/activity") return state.proxyActivity || {available:true,tracking_since:new Date(Date.now()-86400000).toISOString(),data:state.proxies.map((proxy,index)=>({route_id:proxy._id,requests:(index+1)*27000,monthly_requests:(index+1)*1200,last_requested_at:new Date(Date.now()-index*60000).toISOString(),last_host:proxy.hosts[0]}))};
   if (path === "/auth/settings") return { signup_disabled: true, web_proxy_domain_suffix: "preview.invalid", port_hub_service_domain: "preview.invalid" };

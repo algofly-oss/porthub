@@ -5,7 +5,7 @@ import socketio
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
-from router import admin, ping, auth, connections, groups, machines, traffic_routes
+from router import admin, ping, auth, connections, groups, machines, traffic_routes, access
 from shared.rathole_config import (
     get_server_toml_path,
     is_dummy_only_config,
@@ -318,6 +318,7 @@ fastapi_app.add_event_handler("shutdown", handle_shutdown)
 fastapi_app.include_router(ping.router, prefix=API_ROOT)
 fastapi_app.include_router(auth.router, prefix=API_ROOT)
 fastapi_app.include_router(groups.router, prefix=API_ROOT)
+fastapi_app.include_router(access.router, prefix=API_ROOT)
 fastapi_app.include_router(machines.router, prefix=API_ROOT)
 fastapi_app.include_router(connections.router, prefix=API_ROOT)
 fastapi_app.include_router(traffic_routes.router, prefix=API_ROOT)

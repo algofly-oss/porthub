@@ -10,6 +10,7 @@ import { searchScore } from "@/shared/utils/search.mjs";
 import { aggregateTraffic, trafficSummary, formatBytes } from "@/shared/utils/traffic.mjs";
 import TrafficMonitorPanel from "../Home/components/Host/TrafficMonitorPanel";
 import { Button } from "@/components/ui/button";
+import TrafficSparkline from "@/components/ui/traffic-sparkline";
 import { useDemo } from "@/shared/demo/DemoProvider";
 import uiRoutes from "@/shared/routes/uiRoutes";
 
@@ -76,13 +77,14 @@ export default function Traffic() {
     {loading ? <div role="status" className="surface p-8 text-sm text-muted-foreground">Loading traffic…</div>
       : error && !rows.length ? <div role="alert"><EmptyState icon={IconActivity} title="Traffic Unavailable" description={error} action={<Button type="button" variant="secondary" onClick={()=>setRefresh(value=>value+1)}><IconRefresh size={16} />Try Again</Button>} /></div>
       : !filtered.length ? <EmptyState icon={IconActivity} title={rows.length ? "No matching services" : "No port traffic to explore yet"} description={rows.length ? "Change your search or machine filter." : "Traffic appears here when a machine has a forwarded port and the firewall service is available."} />
-      : <section aria-label="Traffic results" className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-surface"><div className="data-scroll"><details open className="border-b border-border"><summary className="cursor-pointer px-4 py-3 text-sm font-medium">Combined traffic · {filtered.length} ports</summary><div className="p-3"><TrafficMonitorPanel isDark={colorScheme === "dark"} samples={samples} isLoading={false} title="Combined traffic" subtitle="Bytes per second" windowSeconds={seconds} /></div></details>
+      : <section aria-label="Traffic results" className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-surface"><div className="data-scroll"><details className="border-b border-border"><summary className="cursor-pointer px-4 py-3 text-sm font-medium">Combined traffic · {filtered.length} ports</summary><div className="p-3"><TrafficMonitorPanel isDark={colorScheme === "dark"} samples={samples} isLoading={false} title="Combined traffic" subtitle="Bytes per second" windowSeconds={seconds} /></div></details>
       <section><div className="border-b border-border px-4 py-3"><h2 className="text-sm font-semibold">Port Activity</h2></div>
       <div className="divide-y divide-border/60">{filtered.slice((currentPage - 1) * 10, currentPage * 10).map(row => {
         const c = row.connection, s = row.summary, open = expanded === c._id;
         return <div key={c._id}>
-          <button type="button" aria-expanded={open} aria-controls={`traffic-${c._id}`} onClick={() => setExpanded(open ? "" : c._id)} className="relative grid w-full grid-cols-3 gap-3 px-4 py-3 text-left hover:bg-accent/40 md:grid-cols-[minmax(0,1.4fr)_repeat(3,minmax(0,1fr))_20px] md:items-center">
-            <div className="col-span-3 min-w-0 pr-6 md:col-span-1"><p className="truncate text-sm font-medium">{c.service_name || `Port ${c.external_port}`}</p><p className="mt-1 truncate text-xs text-muted-foreground">{c.machine_name || "Unknown machine"} · :{c.external_port} → :{c.internal_port}</p></div>
+          <button type="button" aria-expanded={open} aria-controls={`traffic-${c._id}`} onClick={() => setExpanded(open ? "" : c._id)} className="relative grid w-full grid-cols-3 items-center gap-3 px-4 py-3 text-left hover:bg-accent/40 md:grid-cols-[minmax(0,1.4fr)_minmax(70px,120px)_repeat(3,minmax(0,1fr))_20px]">
+            <div className="col-span-2 min-w-0 md:col-span-1"><p className="truncate text-sm font-medium">{c.service_name || `Port ${c.external_port}`}</p><p className="mt-1 truncate text-xs text-muted-foreground">{c.machine_name || "Unknown machine"} · :{c.external_port} → :{c.internal_port}</p></div>
+            <TrafficSparkline samples={row.traffic} now={(updated || Date.now()) / 1000} showRates={false} label={`${c.machine_name || "Machine"} · ${c.service_name || `Port ${c.external_port}`}`} className="mr-5 md:mr-0" />
             <div><p className="text-[11px] text-muted-foreground">Incoming</p><p className="mt-1 font-mono text-xs text-emerald-700 dark:text-emerald-400">{formatBytes(s.incoming)}/s</p></div>
             <div><p className="text-[11px] text-muted-foreground">Outgoing</p><p className="mt-1 font-mono text-xs text-blue-700 dark:text-blue-400">{formatBytes(s.outgoing)}/s</p></div>
             <div><p className="text-[11px] text-muted-foreground">Transferred / blocked</p><p className="mt-1 font-mono text-xs">{formatBytes(s.volume)} / <span className="text-rose-700 dark:text-rose-300">{formatBytes(s.blockedVolume)}</span></p></div>
