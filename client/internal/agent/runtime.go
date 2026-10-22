@@ -432,9 +432,14 @@ func (r *Runtime) chooseRelayRoute(ctx context.Context, response syncResponse) {
 				best, bestScore = route, score
 			}
 		}
+		measured := time.Now()
+		if bestScore < 0 {
+			// No route answered (e.g. gateway restarting): retry in a minute.
+			measured = measured.Add(time.Minute - relayRemeasure)
+		}
 		r.mu.Lock()
 		changed := best != r.relayRoute
-		r.relayRoute, r.relayMeasured, r.measuring = best, time.Now(), false
+		r.relayRoute, r.relayMeasured, r.measuring = best, measured, false
 		r.mu.Unlock()
 		if changed {
 			log.Printf("relay route: %s (%s)", best, strings.Join(report, "; "))

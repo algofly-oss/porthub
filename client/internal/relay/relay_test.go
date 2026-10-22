@@ -18,7 +18,7 @@ func TestSpeedTestNeedsValidCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer server.Close()
-	web := httptest.NewServer(server)
+	web := httptest.NewServer(server.Handler())
 	defer web.Close()
 	user, pass, _ := turn.GenerateLongTermTURNRESTCredentials(secret, "w:p", time.Hour)
 	if score, err := Measure(context.Background(), web.URL, user, pass); err != nil || score <= 0 {

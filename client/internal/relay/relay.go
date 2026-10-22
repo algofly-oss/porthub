@@ -116,6 +116,14 @@ func (s *Server) Close() error {
 	return s.turn.Close()
 }
 
+// Handler routes the relay WebSocket and the route speed test.
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle(Path, s)
+	mux.Handle(SpeedPath, s)
+	return mux
+}
+
 // SpeedPath measures a route to the relay: GET downloads, POST uploads.
 const SpeedPath = Path + "/speedtest"
 

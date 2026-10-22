@@ -217,9 +217,7 @@ func run() error {
 			return err
 		}
 		defer server.Close()
-		mux := http.NewServeMux()
-		mux.Handle(relay.Path, server)
-		httpServer := &http.Server{Addr: *listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+		httpServer := &http.Server{Addr: *listen, Handler: server.Handler(), ReadHeaderTimeout: 10 * time.Second}
 		go func() { <-ctx.Done(); _ = httpServer.Close() }()
 		log.Printf("private relay listening on %s%s", *listen, relay.Path)
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
