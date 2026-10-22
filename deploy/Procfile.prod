@@ -1,0 +1,10 @@
+# name: [after=HOST:PORT] command   (run by `porthub supervise`)
+# Internal services listen on uncommon loopback ports (47xxx) so they never
+# clash with anything else on a host-networked server.
+mongod: mongod --bind_ip 127.0.0.1 --port 47017 --dbpath /data/mongo --auth --quiet --logpath /data/mongo/mongod.log --logappend
+api: after=127.0.0.1:47017 cd /app/api && API_HOST=127.0.0.1 API_PORT=47080 PORTHUB_RELAY_SUPERVISED=1 sh entrypoint.sh
+relay: porthub relay-server --listen 127.0.0.1:47091
+ui: cd /app/ui && NODE_ENV=production exec node node_modules/.bin/next start -H 127.0.0.1 -p 47030
+firewall: cd /app/firewall && FW_HOST=127.0.0.1 FW_PORT=47001 FW_DB_PATH=/data/firewall/firewall.db sh entrypoint.sh
+rathole: after=127.0.0.1:47080 exec rathole -s /runtime/rathole/server.toml
+traefik: exec sh /app/deploy/traefik.sh

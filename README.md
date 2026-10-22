@@ -80,148 +80,35 @@ PortHub is made of a few small pieces:
 ├── firewall/                    Firewall service for port policy and traffic sampling
 ├── ui/                          Next.js frontend
 ├── proxy/certificate/           TLS certificate for the app's HTTPS port
-├── docker-compose.yml           Development app stack
-├── docker-compose-prod.yml      Production app stack
-├── docker-compose-services.yml  MongoDB and Redis
+├── docker-compose.yml           The single PortHub server container
+├── Dockerfile                   Server image (API, UI, MongoDB, Traefik, Rathole, firewall, relay)
+├── deploy/                      Container entrypoint and process lists (Procfile.prod / .dev)
 ├── env.example                  Example environment configuration
 └── deploy.sh                    Production app redeploy helper
 ```
 
-## Getting Started
+## Running the server
 
-### Prerequisites
-
-- Docker
-- Docker Compose
-- OpenSSL
-- A Linux host if you want to use the firewall/IP filtering service, since it applies nftables rules with host networking
-
-### 1. Create `.env`
+PortHub runs as one container (`porthub`) with host networking. It contains
+the API, the web app, MongoDB, Traefik (web proxies on 80/443 and the app on
+8345/8346), the Rathole tunnel server, the firewall service and the
+private-network relay, supervised by the `porthub` binary.
 
 ```bash
-cp env.example .env
+cp env.example .env   # set secrets; PORTHUB_MODE=prod (default) or dev
+docker compose up -d --build
 ```
 
-Review these settings first:
+`PORTHUB_MODE=dev` runs the API with auto-reload and the Next.js dev server
+from the mounted `./ui` checkout (run `yarn install` there first).
 
-- `HOST`
-- `APP_HTTP_PORT`
-- `APP_HTTPS_PORT`
-- `PORT_HUB_PUBLIC_BASE_URL`
-- `RATHOLE_SERVER_ADDRESS`
-- `RATHOLE_PORT`
-- `EXTERNAL_PORT_RANGE_START`
-- `EXTERNAL_PORT_RANGE_END`
+Internal services listen only on loopback ports 47001-47091. Data lives in
+the `porthub_data` volume (`/data`): MongoDB, firewall state.
 
-If you want IP filtering enabled, also review:
-
-- `FIREWALL_BASE_URL`
-- `FIREWALL_API_KEY`
-- `FW_API_KEY`
-- `FW_DB_PATH`
-- `FW_RECENT_IP_TTL`
-- `FW_RECENT_IP_HISTORY_LIMIT`
-- `FW_NFT_TABLE`
-
-Notes:
-
-- `PORT_HUB_PUBLIC_BASE_URL` should be the public URL users and clients reach.
-- `RATHOLE_SERVER_ADDRESS` should be the address remote Rathole clients connect to.
-- `EXTERNAL_PORT_RANGE_START` and `EXTERNAL_PORT_RANGE_END` limit which public ports PortHub can assign.
-- `FIREWALL_API_KEY` and `FW_API_KEY` must match.
-
-### Local deployment and custom local hostnames
-
-For a local deployment, keep the PortHub UI on its application ports and let
-Traefik receive web-proxy traffic on the standard HTTP/HTTPS ports:
-
-```env
-APP_HTTP_PORT=8345
-APP_HTTPS_PORT=8346
-TRAEFIK_HTTP_PORT=80
-TRAEFIK_HTTPS_PORT=443
-```
-
-The UI is then available at `http://<host>:8345`. To use hostnames such as
-`porthub.example.local` or `app.example.local`, choose a local domain and set
-the matching values in `.env`, including `WEB_PROXY_DOMAIN_SUFFIX`,
-`PORT_HUB_SERVICE_DOMAIN`, and `PORT_HUB_PUBLIC_BASE_URL` where applicable.
-Then configure a DNS service on the host with a wildcard record pointing
-`*.example.local` to the host's LAN IP. For example, dnsmasq uses:
-
-```ini
-address=/.example.local/<host-lan-ip>
-```
-
-The host and other local clients must use that machine as their DNS server.
-After DNS is configured, create a PortHub web-proxy entry for the UI if
-desired:
-
-- Host: `porthub.example.local`
-- Target URL: `http://<host-lan-ip>:8345`
-- Entry point: `web`
-
-Other web-proxy entries can then use `*.example.local` on port 80, while PortHub
-itself remains available directly on port 8345.
-
-Direct port-based access remains available independently of web proxies and does
-not pass through Traefik. A request to `http://<service-domain>:<port>` reaches
-the host directly: the port may be served by a host-native service or by a
-Rathole-forwarded service. Rathole binds its assigned external ports directly
-on the host, while Traefik is only used for HTTP hostname-based proxy entries
-on ports 80/443.
-Use the configured `PORT_HUB_SERVICE_DOMAIN` with the assigned external port:
-
-```text
-http://<service-domain>:<external-port>
-```
-
-For example, if `PORT_HUB_SERVICE_DOMAIN=luna.local` and PortHub assigns port
-`10000`, the forwarded service remains available at
-`http://luna.local:10000`. The local DNS wildcard should resolve the service
-domain to the PortHub host, and the assigned external port must be allowed by
-the host firewall.
-
-### 2. Generate the proxy certificate
-
-```bash
-cd proxy
-bash generate_certificate.sh
-cd ..
-```
-
-### 3. Start the backing services
-
-```bash
-docker compose -f docker-compose-services.yml up -d
-```
-
-### 4. Start PortHub
-
-For development:
-
-```bash
-docker compose -f docker-compose-services.yml -f docker-compose.yml up -d --build
-```
-
-For production-style runtime:
-
-```bash
-docker compose -f docker-compose-services.yml -f docker-compose-prod.yml up -d --build
-```
-
-`deploy.sh` rebuilds and restarts only the app stack from `docker-compose-prod.yml`, so MongoDB and Redis still need to be running separately.
-
-### 5. Open the app
-
-Visit:
-
-- `http://<host>:<APP_HTTP_PORT>`
-- `https://<host>:<APP_HTTPS_PORT>`
-
-API docs are available at:
-
-- `/api/docs`
+To move an existing multi-container installation's database into the new
+container, place a `mongodump --archive --gzip` of it at
+`/data/restore/mongo.archive.gz` in the volume before the first start; it is
+restored once and a new MongoDB root user is created from `.env`.
 
 ## Typical Workflow
 

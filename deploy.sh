@@ -1,4 +1,6 @@
-docker compose -f docker-compose-prod.yml build --parallel && \
-docker compose -f docker-compose-prod.yml down -t 0 && \
-docker compose -f docker-compose-prod.yml up -d &&
-docker compose -f docker-compose-prod.yml logs -f
+#!/bin/sh
+# Build and (re)start the single PortHub server container.
+set -e
+docker compose build porthub
+docker compose up -d porthub
+docker compose logs -f --tail 50 porthub

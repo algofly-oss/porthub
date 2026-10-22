@@ -21,6 +21,7 @@ import (
 	"github.com/algofly-oss/porthub/client/internal/fileserver"
 	"github.com/algofly-oss/porthub/client/internal/relay"
 	"github.com/algofly-oss/porthub/client/internal/service"
+	"github.com/algofly-oss/porthub/client/internal/supervise"
 	"github.com/algofly-oss/porthub/client/internal/tunnel"
 )
 
@@ -203,6 +204,23 @@ func run() error {
 			return nil
 		}
 		return errors.New("usage: porthub service install --profile FILE | uninstall [--purge] | status")
+	case "supervise":
+		// PID 1 of the single server container (see Dockerfile at repo root).
+		flags := flag.NewFlagSet("supervise", flag.ContinueOnError)
+		procfile := flags.String("procfile", "/etc/porthub/Procfile", "processes to run")
+		if err := flags.Parse(os.Args[2:]); err != nil {
+			return err
+		}
+		f, err := os.Open(*procfile)
+		if err != nil {
+			return err
+		}
+		procs, err := supervise.Parse(f)
+		f.Close()
+		if err != nil {
+			return err
+		}
+		return supervise.Run(ctx, procs, 20*time.Second)
 	case "relay-server":
 		// Gateway side of the private-network relay; reached through the
 		// PortHub web address (see internal/relay). Secret from the env only.

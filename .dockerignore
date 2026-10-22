@@ -1,8 +1,17 @@
-# Only the API and the Go client are part of the API image build context.
+# Server image build context: only what the Dockerfiles copy.
 *
 !api
 !client
+!ui
+!firewall
+!traefik
+!proxy/certificate
+!deploy
 api/**/__pycache__
 api/.env
 api/downloads
 api/data
+firewall/**/__pycache__
+ui/node_modules
+ui/.next
+ui/.next-*

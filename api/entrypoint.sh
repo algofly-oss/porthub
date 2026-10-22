@@ -28,7 +28,7 @@ EOF
 
 # Private-network relay (WebSocket TURN) beside the API; restarted if it
 # exits. Enabled only when a relay secret is configured.
-if [ -n "${PORTHUB_RELAY_SECRET:-}" ] && command -v porthub >/dev/null 2>&1; then
+if [ -n "${PORTHUB_RELAY_SECRET:-}" ] && [ "${PORTHUB_RELAY_SUPERVISED:-0}" != "1" ] && command -v porthub >/dev/null 2>&1; then
     (
         while true; do
             porthub relay-server --listen 0.0.0.0:8091 || true
@@ -40,8 +40,8 @@ fi
 
 if [ "${API_DEBUG:-False}" = "True" ]; then
     echo "Running Development Server"
-    exec uvicorn main:app --reload --host 0.0.0.0 --port 8080
+    exec uvicorn main:app --reload --host "${API_HOST:-0.0.0.0}" --port "${API_PORT:-8080}"
 else
     echo "Running Production Server"
-    exec uvicorn main:app --host 0.0.0.0 --port 8080 --workers "${API_NUM_WORKERS:-4}"
+    exec uvicorn main:app --host "${API_HOST:-0.0.0.0}" --port "${API_PORT:-8080}" --workers "${API_NUM_WORKERS:-4}"
 fi

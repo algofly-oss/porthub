@@ -1,113 +1,35 @@
+# PortHub server: a single container running the API, web app, database,
+# web proxy, tunnel server, firewall and private-network relay.
+# Mode: PORTHUB_MODE=prod (default) or dev in .env.
+#   docker compose up -d --build
 services:
-  api:
-    build:
-      context: .
-      dockerfile: api/Dockerfile
-    image: porthub_api
-    container_name: porthub_api
+  porthub:
+    build: .
+    image: porthub:latest
+    container_name: porthub
+    network_mode: host # binds 80/443 (web), 8345/8346 (app), tunnel ports
+    cap_add:
+      - NET_ADMIN # firewall rules and traffic counters
+      - NET_RAW
+    env_file:
+      - ./.env
     environment:
-      - API_DEBUG=True
-      - RATHOLE_SERVER_CONFIG_PATH=/runtime/rathole/server.toml
-      - TRAEFIK_DYNAMIC_CONFIG_PATH=/runtime/traefik/traffic-routes.yml
-    env_file:
-      - ./.env
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      PORTHUB_MODE: ${PORTHUB_MODE:-prod}
+      MONGO_DATABASE_URI: mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@127.0.0.1:47017/${MONGO_DATABASE_NAME}?authSource=admin
+      FIREWALL_BASE_URL: http://127.0.0.1:47001/api
+      RATHOLE_SERVER_CONFIG_PATH: /runtime/rathole/server.toml
+      TRAEFIK_DYNAMIC_CONFIG_PATH: /runtime/traefik/traffic-routes.yml
+      FW_DB_PATH: /data/firewall/firewall.db
     volumes:
-      - ./api:/app
-      - rathole_config:/runtime/rathole
-      - traefik_routes:/runtime/traefik
-      - traefik_shared:/runtime/traefik-access:ro
+      - porthub_data:/data
+      - ./api:/app/api # API runs from the checkout (as before)
+      - ./ui:/app/ui-src # used only in dev mode
     restart: always
-    networks:
-      - porthub
-
-  ui:
-    build:
-      context: ./ui
-    image: porthub_ui
-    container_name: porthub_ui
-    env_file:
-      - ./.env
-    volumes:
-      - ./ui:/app
-    restart: always
-    depends_on:
-      - api
-    networks:
-      - porthub
-
-  rathole:
-    image: archef2000/rathole:latest
-    command: -s /runtime/rathole/server.toml
-    container_name: porthub_rathole
-    network_mode: host
-    volumes:
-      - rathole_config:/runtime/rathole
-    restart: always
-    depends_on:
-      - api
-
-  traefik:
-    build: ./traefik
-    image: porthub_traefik
     logging:
       driver: json-file
       options:
-        max-size: "2m"
-        max-file: "2"
-    container_name: porthub_traefik
-    command:
-      - "--api.dashboard=true"
-      - "--entrypoints.web.address=:80"
-      - "--entrypoints.websecure.address=:443"
-      # PortHub web app and API (formerly the nginx proxy container).
-      - "--entrypoints.porthub.address=:8345"
-      - "--entrypoints.porthubsecure.address=:8346"
-      - "--entrypoints.porthub.transport.respondingTimeouts.readTimeout=0"
-      - "--entrypoints.porthubsecure.transport.respondingTimeouts.readTimeout=0"
-      - "--providers.file.directory=/dynamic"
-      - "--providers.file.watch=true"
-      - "--accesslog.filepath=/shared/access.log"
-      - "--accesslog.format=json"
-    ports:
-      - "${TRAEFIK_HTTP_PORT:-80}:80"
-      - "${TRAEFIK_HTTPS_PORT:-443}:443"
-      - "${APP_HTTP_PORT:-8345}:8345"
-      - "${APP_HTTPS_PORT:-8346}:8346"
-    volumes:
-      - traefik_routes:/dynamic
-      - traefik_shared:/shared
-      - ./proxy/certificate:/porthub/certificate:ro
-    restart: always
-    networks:
-      - porthub
-
-  firewall:
-    build:
-      context: ./firewall
-      dockerfile: Dockerfile
-    image: porthub_firewall
-    container_name: porthub_firewall
-    env_file:
-      - ./.env
-    network_mode: host
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
-    environment:
-      - FW_DEBUG=True
-    volumes:
-      - ./firewall:/app
-      - firewall_state:/state
-    restart: always
-
-networks:
-  porthub:
-    name: porthub
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
-  rathole_config:
-  firewall_state:
-  traefik_routes:
-  traefik_shared:
+  porthub_data:
