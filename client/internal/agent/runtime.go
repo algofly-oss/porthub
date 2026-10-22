@@ -19,7 +19,6 @@ import (
 	"github.com/algofly-oss/porthub/client/internal/names"
 	"github.com/algofly-oss/porthub/client/internal/policy"
 	"github.com/algofly-oss/porthub/client/internal/relay"
-	"github.com/pion/webrtc/v4"
 )
 
 // Device is the private packet interface. Production uses an owned Linux TUN;
@@ -52,7 +51,7 @@ type Runtime struct {
 	config                Config
 	control               *Control
 	engine                *policy.Engine
-	cert                  *webrtc.Certificate
+	cert                  *mesh.Cert
 	fingerprint, instance string
 	open                  func(name string, self netip.Addr, routes []netip.Addr) (Device, error)
 	loopback              bool
@@ -307,7 +306,7 @@ func (r *Runtime) configure(ctx context.Context, response syncResponse) error {
 	}
 	return nil
 }
-func (r *Runtime) handleSignal(ctx context.Context, self string, signal Signal, servers []webrtc.ICEServer) error {
+func (r *Runtime) handleSignal(ctx context.Context, self string, signal Signal, servers []mesh.ICEServer) error {
 	r.mu.Lock()
 	_, seen := r.seen[signal.ID]
 	current := r.peers[signal.From]
@@ -324,14 +323,14 @@ func (r *Runtime) handleSignal(ctx context.Context, self string, signal Signal, 
 		return nil
 	}
 	switch {
-	case signal.Description.Type == webrtc.SDPTypeAnswer && self < signal.From:
+	case signal.Description.Type == "answer" && self < signal.From:
 		if signal.Session != session {
 			return nil
 		}
 		if err := current.peer.Remote(signal.Description, current.info.Fingerprint); err != nil {
 			log.Printf("private answer rejected: %v", err)
 		}
-	case signal.Description.Type == webrtc.SDPTypeOffer && self > signal.From:
+	case signal.Description.Type == "offer" && self > signal.From:
 		if session != "" {
 			// The offerer restarted its side; answer on a fresh connection.
 			replacement, err := r.newPeer(current.info, servers)
@@ -367,7 +366,7 @@ func (r *Runtime) handleSignal(ctx context.Context, self string, signal Signal, 
 
 // relayOptions routes TURN-over-TCP through the gateway's WebSocket relay on
 // the same address the agent syncs with (no extra port; CDN friendly).
-func (r *Runtime) relayOptions(servers []webrtc.ICEServer) []mesh.Option {
+func (r *Runtime) relayOptions(servers []mesh.ICEServer) []mesh.Option {
 	for _, server := range servers {
 		for _, u := range server.URLs {
 			if strings.HasPrefix(u, "turn:") {
@@ -380,7 +379,7 @@ func (r *Runtime) relayOptions(servers []webrtc.ICEServer) []mesh.Option {
 	return r.meshOptions
 }
 
-func (r *Runtime) newPeer(info policy.Peer, servers []webrtc.ICEServer) (*peerSession, error) {
+func (r *Runtime) newPeer(info policy.Peer, servers []mesh.ICEServer) (*peerSession, error) {
 	p, err := mesh.New(r.cert, servers, r.loopback, func(packet []byte) {
 		if !r.engine.Check(packet, info.ID, true) {
 			return
@@ -407,7 +406,7 @@ func (r *Runtime) makeOffer(ctx context.Context, id string, current *peerSession
 	}
 	r.queue(id, current, Signal{To: id, Session: session, Description: description})
 }
-func (r *Runtime) makeAnswer(ctx context.Context, id string, current *peerSession, session string, offer webrtc.SessionDescription) {
+func (r *Runtime) makeAnswer(ctx context.Context, id string, current *peerSession, session string, offer mesh.Description) {
 	ctx, cancel := context.WithTimeout(ctx, gatherTimeout)
 	defer cancel()
 	description, err := current.peer.Answer(ctx, offer, current.info.Fingerprint)

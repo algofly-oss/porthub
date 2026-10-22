@@ -90,7 +90,7 @@ func NewServer(secret string, maxConnections int) (*Server, error) {
 		AuthHandler: turn.LongTermTURNRESTAuthHandler(secret, nil),
 		ListenerConfigs: []turn.ListenerConfig{{
 			Listener:              l,
-			RelayAddressGenerator: &turn.RelayAddressGeneratorStatic{RelayAddress: net.IPv4(127, 0, 0, 1), Address: "127.0.0.1"},
+			RelayAddressGenerator: newMemoryNet(),
 			PermissionHandler:     loopbackOnly,
 		}},
 	})

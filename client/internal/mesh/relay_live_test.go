@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/algofly-oss/porthub/client/internal/relay"
-	"github.com/pion/webrtc/v4"
 )
 
 // TestLiveRelay checks a deployed relay end to end. Skipped unless
@@ -18,7 +17,7 @@ func TestLiveRelay(t *testing.T) {
 	if endpoint == "" {
 		t.Skip("no live relay configured")
 	}
-	servers := []webrtc.ICEServer{{URLs: []string{"turn:relay.porthub.invalid:443?transport=tcp"}, Username: user, Credential: pass}}
+	servers := []ICEServer{{URLs: []string{"turn:relay.porthub.invalid:443?transport=tcp"}, Username: user, Credential: pass}}
 	options := []Option{RelayOnly(), WithRelay(relay.Dialer{URL: endpoint})}
 	ca, _ := Certificate()
 	cb, _ := Certificate()

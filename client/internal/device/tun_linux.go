@@ -25,6 +25,9 @@ type TUN struct {
 
 var validName = regexp.MustCompile(`^ph[a-f0-9]{8}$`)
 
+// MTU of the private interface; equals mesh.MaxPacket (checked in agent tests).
+const MTU = 1380
+
 // Open owns a non-persistent interface. Closing it removes only this process's
 // interface and routes. Existing interfaces are never adopted or overwritten.
 func Open(name string, self netip.Addr, peers []netip.Addr) (*TUN, error) {
@@ -64,7 +67,7 @@ func Open(name string, self netip.Addr, peers []netip.Addr) (*TUN, error) {
 	if err = netlink.AddrAdd(device.link, &netlink.Addr{IPNet: hostNet(self)}); err != nil {
 		return fail("address", err)
 	}
-	if err = netlink.LinkSetMTU(device.link, 1200); err != nil {
+	if err = netlink.LinkSetMTU(device.link, MTU); err != nil {
 		return fail("mtu", err)
 	}
 	if err = netlink.LinkSetUp(device.link); err != nil {

@@ -10,7 +10,6 @@ import (
 
 	"github.com/algofly-oss/porthub/client/internal/relay"
 	"github.com/pion/turn/v5"
-	"github.com/pion/webrtc/v4"
 )
 
 const secret = "relay-test-secret-0123456789abcdefghij"
@@ -24,7 +23,7 @@ func relayPair(t *testing.T, credential func() (string, string)) (*Peer, *Peer, 
 	web := httptest.NewServer(server)
 	endpoint := "ws" + strings.TrimPrefix(web.URL, "http") + relay.Path
 	user, pass := credential()
-	servers := []webrtc.ICEServer{{URLs: []string{"turn:relay.porthub.invalid:443?transport=tcp"}, Username: user, Credential: pass}}
+	servers := []ICEServer{{URLs: []string{"turn:relay.porthub.invalid:443?transport=tcp"}, Username: user, Credential: pass}}
 	options := []Option{RelayOnly(), WithRelay(relay.Dialer{URL: endpoint})}
 	ca, _ := Certificate()
 	cb, _ := Certificate()

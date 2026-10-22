@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/algofly-oss/porthub/client/internal/mesh"
 	"github.com/algofly-oss/porthub/client/internal/policy"
-	"github.com/pion/webrtc/v4"
 )
 
 type Config struct {
@@ -25,11 +25,11 @@ type Config struct {
 	AllowInsecureHTTP bool   `json:"allow_insecure_http_for_tests,omitempty"`
 }
 type Signal struct {
-	ID          string                    `json:"id,omitempty"`
-	From        string                    `json:"from,omitempty"`
-	To          string                    `json:"to,omitempty"`
-	Session     string                    `json:"session"`
-	Description webrtc.SessionDescription `json:"description"`
+	ID          string           `json:"id,omitempty"`
+	From        string           `json:"from,omitempty"`
+	To          string           `json:"to,omitempty"`
+	Session     string           `json:"session"`
+	Description mesh.Description `json:"description"`
 }
 type syncRequest struct {
 	PeerID      string            `json:"peer_id"`
@@ -41,9 +41,9 @@ type syncRequest struct {
 	Paths       map[string]string `json:"paths"`
 }
 type syncResponse struct {
-	Snapshot   policy.Snapshot    `json:"snapshot"`
-	Signals    []Signal           `json:"signals"`
-	ICEServers []webrtc.ICEServer `json:"ice_servers"`
+	Snapshot   policy.Snapshot  `json:"snapshot"`
+	Signals    []Signal         `json:"signals"`
+	ICEServers []mesh.ICEServer `json:"ice_servers"`
 }
 type Control struct {
 	config Config

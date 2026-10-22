@@ -8,6 +8,8 @@ import (
 	"os"
 )
 
+const MTU = 1380
+
 type TUN struct {
 	*os.File
 	Name string

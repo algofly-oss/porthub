@@ -3,7 +3,6 @@ package mesh
 import (
 	"bytes"
 	"context"
-	"github.com/pion/webrtc/v4"
 	"strings"
 	"testing"
 	"time"
@@ -88,7 +87,7 @@ func TestMismatchedIdentityRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer p.Close()
-	s := webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: "a=fingerprint:sha-256 " + strings.Repeat("AA:", 31) + "AA\r\n"}
+	s := Description{Type: "offer", SDP: "a=fingerprint:sha-256 " + strings.Repeat("AA:", 31) + "AA\r\n"}
 	if p.Remote(s, fp) == nil {
 		t.Fatal("untrusted certificate accepted")
 	}

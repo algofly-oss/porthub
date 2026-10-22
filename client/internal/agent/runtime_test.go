@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/algofly-oss/porthub/client/internal/device"
+	"github.com/algofly-oss/porthub/client/internal/mesh"
 	"github.com/algofly-oss/porthub/client/internal/policy"
 )
 
@@ -98,11 +100,11 @@ func (f *fakeControl) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		if !reachable[s.To] || target == nil || target.fingerprint == "" {
 			continue
 		}
-		if (s.Description.Type.String() == "offer") != (in.PeerID < s.To) {
+		if (s.Description.Type == "offer") != (in.PeerID < s.To) {
 			http.Error(w, "direction", 400)
 			return
 		}
-		id := in.PeerID + ":" + in.Instance + ":" + s.To + ":" + s.Session + ":" + s.Description.Type.String()
+		id := in.PeerID + ":" + in.Instance + ":" + s.To + ":" + s.Session + ":" + s.Description.Type
 		if _, ok := f.signals[id]; !ok {
 			s.ID, s.From = id, in.PeerID
 			f.signals[id] = fakeSignal{s, in.Instance, target.instance}
@@ -381,5 +383,11 @@ func TestQueueRejectsSignalsForReplacedSessions(t *testing.T) {
 	r.pending = append(r.pending, queuedSignal{r.seq, Signal{To: "d"}})
 	if got := removeSent(r.pending, sent); len(got) != 1 || got[0].signal.To != "d" {
 		t.Fatal("unsent signal lost")
+	}
+}
+
+func TestInterfaceMTUMatchesTunnelPacketSize(t *testing.T) {
+	if device.MTU != mesh.MaxPacket {
+		t.Fatalf("private interface MTU %d != tunnel packet size %d", device.MTU, mesh.MaxPacket)
 	}
 }
