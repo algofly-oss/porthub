@@ -106,7 +106,10 @@ func New(cert *webrtc.Certificate, servers []webrtc.ICEServer, loopback bool, on
 	return p, nil
 }
 func (p *Peer) attach(dc *webrtc.DataChannel) {
-	if dc.Label() != "porthub-ip-v1" || dc.Ordered() || dc.MaxRetransmits() == nil || *dc.MaxRetransmits() != 0 {
+	// Unordered, so one lost packet never stalls the others. Retransmission
+	// is allowed: on lossy internet paths a retransmitted packet looks like
+	// delay to the TCP flows inside instead of loss, which keeps them fast.
+	if dc.Label() != "porthub-ip-v1" || dc.Ordered() {
 		_ = dc.Close()
 		return
 	}
@@ -130,8 +133,8 @@ func (p *Peer) description(ctx context.Context, offer bool) (webrtc.SessionDescr
 	var s webrtc.SessionDescription
 	var err error
 	if offer {
-		ordered, retries := false, uint16(0)
-		dc, e := p.pc.CreateDataChannel("porthub-ip-v1", &webrtc.DataChannelInit{Ordered: &ordered, MaxRetransmits: &retries})
+		ordered := false
+		dc, e := p.pc.CreateDataChannel("porthub-ip-v1", &webrtc.DataChannelInit{Ordered: &ordered})
 		if e != nil {
 			return s, e
 		}

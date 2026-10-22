@@ -233,6 +233,17 @@ API docs are available at:
 
 After bootstrap, the machine client authenticates with PortHub, downloads its managed `client.toml`, starts Rathole locally, and keeps checking for config changes.
 
+## Upgrading from a release that used Redis
+
+Login sessions now live in MongoDB and the Redis container is no longer part
+of the stack. Before removing Redis from an existing installation, move the
+live sessions once so nobody is signed out:
+
+```bash
+docker exec -w /app porthub_api_prod python scripts/migrate_redis_sessions.py
+docker stop porthub_redis && docker rm porthub_redis
+```
+
 ## Runtime Notes
 
 - Traefik serves the app on 8345/8346: `/` goes to the UI, `/api` and `/socket.io` to the API (`traefik/internal.yml`)
