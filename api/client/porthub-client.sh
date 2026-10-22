@@ -137,7 +137,11 @@ apply_tenant_context() {
   PORT_HUB_ENV_FILE="$PORT_HUB_DIR/client.env"
   PORT_HUB_STATE_FILE="$PORT_HUB_DIR/state.env"
   PORT_HUB_CONFIG_FILE="$PORT_HUB_DIR/rathole-client.toml"
-  PORT_HUB_RATHOLE_BIN="$PORT_HUB_BIN_DIR/rathole"
+  PORT_HUB_RATHOLE_BIN="$PORT_HUB_BIN_DIR/porthub-tunnel"
+  # Read existing installs until the next update installs the renamed binary.
+  if [ ! -x "$PORT_HUB_RATHOLE_BIN" ] && [ -x "$PORT_HUB_BIN_DIR/rathole" ]; then
+    PORT_HUB_RATHOLE_BIN="$PORT_HUB_BIN_DIR/rathole"
+  fi
   PORT_HUB_PID_FILE="$PORT_HUB_RUNTIME_DIR/porthub.pid"
   PORT_HUB_LOG_FILE="$PORT_HUB_LOG_DIR/porthub.log"
   PORT_HUB_LOG_BACKUP_FILE="$PORT_HUB_LOG_DIR/porthub.log.1"
@@ -260,7 +264,7 @@ resolve_tenant_reference() {
 
   collect_configured_tenants
 
-  for configured_tenant in "${CONFIGURED_TENANTS[@]}"; do
+  for configured_tenant in ${CONFIGURED_TENANTS[@]+"${CONFIGURED_TENANTS[@]}"}; do
     if [ "$configured_tenant" = "$requested" ]; then
       exact_match="$configured_tenant"
       break
@@ -271,7 +275,7 @@ resolve_tenant_reference() {
     return 0
   fi
 
-  for configured_tenant in "${CONFIGURED_TENANTS[@]}"; do
+  for configured_tenant in ${CONFIGURED_TENANTS[@]+"${CONFIGURED_TENANTS[@]}"}; do
     case "$configured_tenant" in
       "$requested"*)
         prefix_matches+=("$configured_tenant")
@@ -281,7 +285,7 @@ resolve_tenant_reference() {
     case "$tenant_id" in
       "$requested"*)
         already_listed="false"
-        for match in "${prefix_matches[@]}"; do
+        for match in ${prefix_matches[@]+"${prefix_matches[@]}"}; do
           if [ "$match" = "$configured_tenant" ]; then
             already_listed="true"
             break
@@ -303,7 +307,7 @@ resolve_tenant_reference() {
       ;;
     *)
       printf "[porthub] Tenant reference '%s' is ambiguous. Matches:" "$requested" >&2
-      for match in "${prefix_matches[@]}"; do
+      for match in ${prefix_matches[@]+"${prefix_matches[@]}"}; do
         printf " %s" "$match" >&2
       done
       printf "\n" >&2
@@ -551,7 +555,7 @@ detect_public_ip() {
   fi
 
   if command -v curl >/dev/null 2>&1; then
-    detected="$(curl --fail --silent --show-error --max-time 5 ifconfig.me 2>/dev/null || true)"
+    detected="$(curl --connect-timeout 10 --max-time 60 --fail --silent --show-error --max-time 5 ifconfig.me 2>/dev/null || true)"
     detected="$(printf "%s" "$detected" | tr -d '\r\n' | awk '{print $1}')"
   fi
   if [ -n "$detected" ]; then
@@ -623,6 +627,7 @@ write_state() {
   local client_update_request_id="${17:-$(state_get PORT_HUB_CLIENT_UPDATE_REQUEST_ID)}"
   local client_update_last_attempt_epoch="${18:-$(state_get PORT_HUB_CLIENT_UPDATE_LAST_ATTEMPT_EPOCH)}"
   local client_update_last_handled_request_id="${19:-$(state_get PORT_HUB_CLIENT_UPDATE_LAST_HANDLED_REQUEST_ID)}"
+  local private_ips="${PORT_HUB_PRIVATE_IPS-$(state_get PORT_HUB_PRIVATE_IPS)}"
   cat <<EOF_STATE | ${SUDO:-} tee "$PORT_HUB_STATE_FILE" >/dev/null
 PORT_HUB_CURRENT_VERSION=$version
 PORT_HUB_LAST_SYNC_EPOCH=$last_sync
@@ -631,6 +636,7 @@ PORT_HUB_LAST_AUTH_EPOCH=$last_auth
 PORT_HUB_SHARED_HOSTNAME=$shared_hostname
 PORT_HUB_SHARED_LOCAL_IP=$shared_local_ip
 PORT_HUB_SHARED_PUBLIC_IP=$shared_public_ip
+PORT_HUB_PRIVATE_IPS=$private_ips
 PORT_HUB_RATHOLE_PID=$rathole_pid
 PORT_HUB_RATHOLE_STARTED_AT=$rathole_started_at
 PORT_HUB_SHARED_SERVICES=$shared_services
@@ -1019,7 +1025,7 @@ write_rathole_config_file() {
   else
     ${SUDO:-} install -m 600 "$source_file" "$PORT_HUB_CONFIG_FILE"
   fi
-  # Touch the final path so Rathole's config watcher sees a direct file modification.
+  # Touch the final path so PortHub tunnel's config watcher sees a direct file modification.
   ${SUDO:-} touch "$PORT_HUB_CONFIG_FILE"
 }
 
@@ -1082,7 +1088,7 @@ machine_post() {
   tmp_headers_file="${TMPDIR:-/tmp}/porthub-machine-post.$$.$RANDOM.headers"
   tmp_body="${TMPDIR:-/tmp}/porthub-machine-post.$$.$RANDOM.body"
   : >"$tmp_headers_file"
-  http_code="$(curl --silent --show-error --location -D "$tmp_headers_file" -o "$tmp_body" -w "%{http_code}" -X POST "$endpoint" \
+  http_code="$(curl --connect-timeout 10 --max-time 60 --silent --show-error --location -D "$tmp_headers_file" -o "$tmp_body" -w "%{http_code}" -X POST "$endpoint" \
     -H "Content-Type: application/json" \
     --data "$(build_sync_payload "$active")" || true)"
   now="$(date +%s)"
@@ -1093,6 +1099,7 @@ machine_post() {
         return 30
       fi
       handle_client_control_headers "$tmp_headers_file"
+      PORT_HUB_PRIVATE_IPS="$(extract_header "X-PortHub-Private-IPs" "$tmp_headers_file")"
       persist_shared_runtime
       observed_public_ip="$(extract_header "X-PortHub-Observed-IP" "$tmp_headers_file")"
       debug_log "Machine sync posted to $endpoint (active=$active observed_ip=${observed_public_ip:-unknown})"
@@ -1152,7 +1159,7 @@ ack_machine_deleted() {
   local ack_url payload
   ack_url="${PORT_HUB_API_URL%/}/machines/client/deletion-ack"
   payload="$(printf '{"machine_id":"%s","token":"%s"}' "$PORT_HUB_MACHINE_ID" "$PORT_HUB_MACHINE_TOKEN")"
-  curl --silent --show-error --location -o /dev/null -X POST "$ack_url" \
+  curl --connect-timeout 10 --max-time 60 --silent --show-error --location -o /dev/null -X POST "$ack_url" \
     -H "Content-Type: application/json" \
     --data "$payload" >/dev/null 2>&1 || true
 }
@@ -1160,7 +1167,7 @@ ack_machine_deleted() {
 machine_log_stream_requested() {
   local tmp_headers active auth_required now
   tmp_headers="$(mktemp)"
-  if ! curl --silent --show-error --location -D "$tmp_headers" -o /dev/null "$PORT_HUB_LOG_STREAM_STATUS_URL"; then
+  if ! curl --connect-timeout 10 --max-time 60 --silent --show-error --location -D "$tmp_headers" -o /dev/null "$PORT_HUB_LOG_STREAM_STATUS_URL"; then
     rm -f "$tmp_headers"
     return 1
   fi
@@ -1199,7 +1206,7 @@ upload_log_batch() {
     count=$((count + 1))
   done
   [ "$count" -gt 0 ] || return 0
-  curl --silent --show-error --fail --location \
+  curl --connect-timeout 10 --max-time 60 --silent --show-error --fail --location \
     -X POST "$PORT_HUB_LOG_STREAM_UPLOAD_URL" \
     -H "Content-Type: application/json" \
     --data "{\"machine_id\":\"$(json_escape "$PORT_HUB_MACHINE_ID")\",\"token\":\"$(json_escape "$PORT_HUB_MACHINE_TOKEN")\",\"source\":\"client\",\"lines\":[${payload}]}" \
@@ -1220,13 +1227,13 @@ stream_logs_worker_cmd() {
       [ -n "$line" ] || continue
       batch+=("$line")
       if [ "${#batch[@]}" -ge "$batch_size" ]; then
-        upload_log_batch "${batch[@]}"
+        upload_log_batch ${batch[@]+"${batch[@]}"}
         batch=()
       fi
     done < <(tail -n "$initial_lines" "$PORT_HUB_LOG_FILE" 2>/dev/null || true)
 
     if [ "${#batch[@]}" -gt 0 ]; then
-      upload_log_batch "${batch[@]}"
+      upload_log_batch ${batch[@]+"${batch[@]}"}
       batch=()
     fi
   fi
@@ -1235,12 +1242,12 @@ stream_logs_worker_cmd() {
     if IFS= read -r -t "$flush_seconds" line; then
       batch+=("$line")
       if [ "${#batch[@]}" -ge "$batch_size" ]; then
-        upload_log_batch "${batch[@]}"
+        upload_log_batch ${batch[@]+"${batch[@]}"}
         batch=()
       fi
     else
       if [ "${#batch[@]}" -gt 0 ]; then
-        upload_log_batch "${batch[@]}"
+        upload_log_batch ${batch[@]+"${batch[@]}"}
         batch=()
       fi
     fi
@@ -1346,6 +1353,24 @@ ensure_rosetta_if_needed() {
   return 0
 }
 
+# Every registered machine joins its private network during install or update.
+install_pending_private_access() {
+  local script_file code payload
+  script_file="$(mktemp)"
+  payload="$(printf '{"machine_id":"%s","token":"%s"}' "$PORT_HUB_MACHINE_ID" "$PORT_HUB_MACHINE_TOKEN")"
+  code="$(curl --connect-timeout 10 --max-time 60 --silent --show-error --location -o "$script_file" -w "%{http_code}" \
+    -X POST -H "Content-Type: application/json" --data "$payload" "${PORT_HUB_API_URL%/}/machines/client/private-install" || true)"
+  case "$code" in
+    204) rm -f "$script_file" ;;
+    200)
+      log "INFO" "Setting up PortHub private networking"
+      if ! ${SUDO:-} bash "$script_file"; then rm -f "$script_file"; return 1; fi
+      rm -f "$script_file"
+      ;;
+    *) rm -f "$script_file"; log "WARN" "Private enrollment could not be checked; run 'porthub update' to retry"; return 1 ;;
+  esac
+}
+
 install_rathole_cmd() {
   step "Installing the PortHub tunnel binary"
   detect_sudo
@@ -1358,15 +1383,33 @@ install_rathole_cmd() {
   need_cmd mktemp
   ensure_rosetta_if_needed
   local download_url tmp_file
+  PORT_HUB_RATHOLE_BIN="$PORT_HUB_BIN_DIR/porthub-tunnel"
   download_url="$(select_rathole_url)"
-  require_value "Rathole download URL" "$download_url"
-  require_http_url "Rathole download URL" "$download_url"
+  require_value "PortHub tunnel download URL" "$download_url"
+  require_http_url "PortHub tunnel download URL" "$download_url"
   tmp_file="$(mktemp)"
-  log "INFO" "Rathole target: $(uname -s) $(uname -m)"
-  curl --fail --show-error --location "$download_url" -o "$tmp_file"
+  log "INFO" "PortHub tunnel target: $(uname -s) $(uname -m)"
+  curl --connect-timeout 10 --max-time 300 --fail --show-error --location "$download_url" -o "$tmp_file"
   ${SUDO:-} install -m 755 "$tmp_file" "$PORT_HUB_RATHOLE_BIN"
+  # Refresh an existing private agent in the same shared directory as well.
+  # Its profile stays in place; only the PortHub service is restarted.
+  local private_bin="$PORT_HUB_SHARED_BIN_DIR/porthub" private_version=""
+  if [ -x "$private_bin" ]; then
+    private_version="$("$private_bin" version 2>/dev/null || true)"
+    case "$private_version" in
+      ""|*[!A-Za-z0-9._-]*) ;;
+      *)
+        ${SUDO:-} install -m 755 "$tmp_file" "$private_bin"
+        case "$(service_manager)" in
+          systemd) ${SUDO:-} systemctl try-restart porthub-private.service >/dev/null 2>&1 || true ;;
+          launchd) ${SUDO:-} launchctl kickstart -k system/com.porthub.private >/dev/null 2>&1 || true ;;
+        esac
+        ;;
+    esac
+  fi
   rm -f "$tmp_file"
   log "INFO" "Installed the PortHub tunnel binary to $PORT_HUB_RATHOLE_BIN"
+  install_pending_private_access
 }
 
 fetch_config_cmd() {
@@ -1382,7 +1425,7 @@ fetch_config_cmd() {
   local tmp_body tmp_headers version shared_services http_code
   tmp_body="$(mktemp)"
   tmp_headers="$(mktemp)"
-  http_code="$(curl --silent --show-error --location -D "$tmp_headers" -o "$tmp_body" -w "%{http_code}" "$PORT_HUB_CONFIG_TOML_URL" || true)"
+  http_code="$(curl --connect-timeout 10 --max-time 60 --silent --show-error --location -D "$tmp_headers" -o "$tmp_body" -w "%{http_code}" "$PORT_HUB_CONFIG_TOML_URL" || true)"
   if [ "$http_code" = "410" ] && is_machine_deleted_response "$tmp_headers"; then
     rm -f "$tmp_body" "$tmp_headers"
     return 30
@@ -1460,10 +1503,10 @@ preflight_cmd() {
   ensure_dirs
   local rathole_url tmp_headers version
   rathole_url="$(select_rathole_url)"
-  require_value "Rathole download URL" "$rathole_url"
-  require_http_url "Rathole download URL" "$rathole_url"
+  require_value "PortHub tunnel download URL" "$rathole_url"
+  require_http_url "PortHub tunnel download URL" "$rathole_url"
   tmp_headers="$(mktemp)"
-  curl --fail --show-error --location -D "$tmp_headers" -o /dev/null "$PORT_HUB_CONFIG_TOML_URL"
+  curl --connect-timeout 10 --max-time 60 --fail --show-error --location -D "$tmp_headers" -o /dev/null "$PORT_HUB_CONFIG_TOML_URL"
   version="$(extract_header "X-PortHub-Config-Version" "$tmp_headers")"
   rm -f "$tmp_headers"
   [ -n "$version" ] || fail "PortHub config endpoint did not return a config version"
@@ -1474,7 +1517,7 @@ preflight_cmd() {
   log "INFO" "Log file: $PORT_HUB_LOG_FILE"
   log "INFO" "Machine id: $PORT_HUB_MACHINE_ID"
   log "INFO" "Config endpoint: OK (version $version)"
-  log "INFO" "Rathole download endpoint: configured"
+  log "INFO" "PortHub tunnel download endpoint: configured"
 }
 
 service_manager() {
@@ -1536,6 +1579,12 @@ $launchd_tenant_arguments  </array>
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>StandardOutPath</key>
+  <string>$PORT_HUB_LOG_DIR/service.log</string>
+  <key>StandardErrorPath</key>
+  <string>$PORT_HUB_LOG_DIR/service.log</string>
   <key>WorkingDirectory</key>
   <string>$PORT_HUB_DIR</string>
 </dict>
@@ -1558,9 +1607,12 @@ service_enable_and_start() {
       ${SUDO:-} systemctl restart "$PORT_HUB_SERVICE_LABEL"
       ;;
     launchd)
-      ${SUDO:-} launchctl bootout system "$PORT_HUB_SERVICE_FILE" >/dev/null 2>&1 || true
-      ${SUDO:-} launchctl bootstrap system "$PORT_HUB_SERVICE_FILE"
+      # An updater may itself belong to this job. Unloading it would kill
+      # the updater before it could register the replacement daemon.
       ${SUDO:-} launchctl enable "system/$PORT_HUB_SERVICE_LABEL" >/dev/null 2>&1 || true
+      if ! ${SUDO:-} launchctl print "system/$PORT_HUB_SERVICE_LABEL" >/dev/null 2>&1; then
+        ${SUDO:-} launchctl bootstrap system "$PORT_HUB_SERVICE_FILE"
+      fi
       ${SUDO:-} launchctl kickstart -k "system/$PORT_HUB_SERVICE_LABEL"
       ;;
     *)
@@ -1645,11 +1697,11 @@ stop_recorded_rathole_process() {
     return 0
   fi
 
-  for pid in "${managed_pids[@]}"; do
+  for pid in ${managed_pids[@]+"${managed_pids[@]}"}; do
     [ -n "$pid" ] || continue
     if kill -0 "$pid" 2>/dev/null; then
       ${SUDO:-} kill "$pid" >/dev/null 2>&1 || true
-      log_plain "[porthub-uninstall] Stopped Rathole process $pid"
+      log_plain "[porthub-uninstall] Stopped PortHub tunnel process $pid"
     fi
   done
 }
@@ -1680,7 +1732,7 @@ remove_service_definition() {
 }
 
 service_status() {
-  local manager
+  local manager state
   manager="$(service_manager)"
   case "$manager" in
     systemd)
@@ -1691,11 +1743,8 @@ service_status() {
       fi
       ;;
     launchd)
-      if launchctl print "system/$PORT_HUB_SERVICE_LABEL" >/dev/null 2>&1; then
-        printf "running"
-      else
-        printf "stopped"
-      fi
+      state="$(launchctl print "system/$PORT_HUB_SERVICE_LABEL" 2>/dev/null | awk '$1 == "state" && $2 == "=" {print $3; exit}' || true)"
+      if [ "$state" = "running" ]; then printf "running"; else printf "stopped"; fi
       ;;
     *)
       printf "unsupported"
@@ -1706,7 +1755,7 @@ service_status() {
 up_cmd() {
   step "Preparing persistent PortHub service"
   consume_leading_tenant_arg "$@"
-  set -- "${PARSED_COMMAND_ARGS[@]}"
+  set -- ${PARSED_COMMAND_ARGS[@]+"${PARSED_COMMAND_ARGS[@]}"}
   detect_sudo
   resolve_selected_tenant_context
   load_env
@@ -1756,7 +1805,7 @@ up_cmd() {
 down_cmd() {
   step "Stopping PortHub service"
   consume_leading_tenant_arg "$@"
-  set -- "${PARSED_COMMAND_ARGS[@]}"
+  set -- ${PARSED_COMMAND_ARGS[@]+"${PARSED_COMMAND_ARGS[@]}"}
   detect_sudo
   resolve_selected_tenant_context
   load_env
@@ -1771,7 +1820,7 @@ uninstall_cmd() {
   local tenant_name tenant_count
 
   consume_leading_tenant_arg "$@"
-  set -- "${PARSED_COMMAND_ARGS[@]}"
+  set -- ${PARSED_COMMAND_ARGS[@]+"${PARSED_COMMAND_ARGS[@]}"}
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -1785,7 +1834,7 @@ uninstall_cmd() {
 
   if [ "$remove_all" = "true" ]; then
     collect_configured_tenants
-    for tenant_name in "${CONFIGURED_TENANTS[@]}"; do
+    for tenant_name in ${CONFIGURED_TENANTS[@]+"${CONFIGURED_TENANTS[@]}"}; do
       PORT_HUB_EXPLICIT_TENANT="$tenant_name"
       apply_tenant_context "$tenant_name"
       load_saved_env_if_present
@@ -1799,7 +1848,7 @@ uninstall_cmd() {
       stop_recorded_rathole_process
       remove_managed_path "$PORT_HUB_ENV_FILE" "environment file"
       remove_managed_path "$PORT_HUB_STATE_FILE" "state file"
-      remove_managed_path "$PORT_HUB_CONFIG_FILE" "Rathole config"
+      remove_managed_path "$PORT_HUB_CONFIG_FILE" "PortHub tunnel config"
       remove_managed_path "$PORT_HUB_PID_FILE" "pid file"
       remove_managed_path "$PORT_HUB_LOG_FILE" "log file"
       remove_managed_path "$PORT_HUB_LOG_BACKUP_FILE" "log backup"
@@ -1809,7 +1858,7 @@ uninstall_cmd() {
     done
 
     apply_tenant_context ""
-    remove_managed_path "$PORT_HUB_RATHOLE_BIN" "Rathole binary"
+    remove_managed_path "$PORT_HUB_RATHOLE_BIN" "PortHub tunnel binary"
     remove_managed_path "$PORT_HUB_SELF_PATH" "PortHub CLI"
     remove_dir_if_empty "$PORT_HUB_BIN_DIR" "bin dir"
     remove_dir_if_empty "$PORT_HUB_TENANTS_DIR" "tenants dir"
@@ -1835,7 +1884,7 @@ uninstall_cmd() {
 
   remove_managed_path "$PORT_HUB_ENV_FILE" "environment file"
   remove_managed_path "$PORT_HUB_STATE_FILE" "state file"
-  remove_managed_path "$PORT_HUB_CONFIG_FILE" "Rathole config"
+  remove_managed_path "$PORT_HUB_CONFIG_FILE" "PortHub tunnel config"
   remove_managed_path "$PORT_HUB_PID_FILE" "pid file"
   remove_managed_path "$PORT_HUB_LOG_FILE" "log file"
   remove_managed_path "$PORT_HUB_LOG_BACKUP_FILE" "log backup"
@@ -1847,7 +1896,7 @@ uninstall_cmd() {
   tenant_count="$(configured_tenant_count)"
   if [ "$tenant_count" -eq 0 ] 2>/dev/null; then
     apply_tenant_context ""
-    remove_managed_path "$PORT_HUB_RATHOLE_BIN" "Rathole binary"
+    remove_managed_path "$PORT_HUB_RATHOLE_BIN" "PortHub tunnel binary"
     remove_managed_path "$PORT_HUB_SELF_PATH" "PortHub CLI"
     remove_dir_if_empty "$PORT_HUB_BIN_DIR" "bin dir"
     remove_dir_if_empty "$PORT_HUB_TENANTS_DIR" "tenants dir"
@@ -1865,12 +1914,12 @@ uninstall_cmd() {
 
 status_cmd() {
   consume_leading_tenant_arg "$@"
-  set -- "${PARSED_COMMAND_ARGS[@]}"
+  set -- ${PARSED_COMMAND_ARGS[@]+"${PARSED_COMMAND_ARGS[@]}"}
   resolve_selected_tenant_context
   load_env
   local service_state manager config_version last_sync last_auth last_contact shared_hostname
   local shared_local_ip shared_public_ip rathole_state rathole_pid rathole_started_at
-  local shared_services auth_required machine_disabled
+  local shared_services auth_required machine_disabled shared_private_ip
   manager="$(service_manager)"
   service_state="$(service_status)"
   config_version="$(state_get PORT_HUB_CURRENT_VERSION)"
@@ -1880,6 +1929,7 @@ status_cmd() {
   shared_hostname="$(state_get PORT_HUB_SHARED_HOSTNAME)"
   shared_local_ip="$(state_get PORT_HUB_SHARED_LOCAL_IP)"
   shared_public_ip="$(state_get PORT_HUB_SHARED_PUBLIC_IP)"
+  shared_private_ip="$(state_get PORT_HUB_PRIVATE_IPS)"
   rathole_state="$(rathole_runtime_status)"
   rathole_pid="$(state_get PORT_HUB_RATHOLE_PID)"
   rathole_started_at="$(state_get PORT_HUB_RATHOLE_STARTED_AT)"
@@ -1889,17 +1939,18 @@ status_cmd() {
   cat <<EOF_STATUS
 PortHub Status
 tenant: $(tenant_display_name)
+server: $PORT_HUB_API_URL
 machine_id: $PORT_HUB_MACHINE_ID
 client_version: $(client_version)
-rathole_version: $(rathole_version)
+tunnel_version: $(rathole_version)
 connection_status: $(connection_status)
 auth_required: ${auth_required:-false}
 machine_disabled: ${machine_disabled:-false}
 service_manager: $manager
 service_state: $service_state
-rathole_state: $rathole_state
-rathole_pid: ${rathole_pid:-n/a}
-rathole_started_at: $(format_epoch_with_relative "$rathole_started_at")
+tunnel_state: $rathole_state
+tunnel_pid: ${rathole_pid:-n/a}
+tunnel_started_at: $(format_epoch_with_relative "$rathole_started_at")
 last_successful_auth: $(format_epoch_with_relative "$last_auth")
 last_successful_sync: $(format_epoch_with_relative "$last_sync")
 last_server_contact: $(format_epoch_with_relative "$last_contact")
@@ -1908,33 +1959,34 @@ shared_services: $shared_services
 shared_hostname: ${shared_hostname:-unknown}
 shared_local_ip: ${shared_local_ip:-unknown}
 shared_public_ip: ${shared_public_ip:-not set}
+private_ip: ${shared_private_ip:-not enrolled}
 log_file: $PORT_HUB_LOG_FILE
 EOF_STATUS
 }
 
 version_cmd() {
   consume_leading_tenant_arg "$@"
-  set -- "${PARSED_COMMAND_ARGS[@]}"
+  set -- ${PARSED_COMMAND_ARGS[@]+"${PARSED_COMMAND_ARGS[@]}"}
   if [ -n "${PORT_HUB_EXPLICIT_TENANT:-}" ]; then
     resolve_selected_tenant_context
     load_env
     cat <<EOF_VERSION
 tenant: $(tenant_display_name)
 client_version: $(client_version)
-rathole_version: $(rathole_version)
+tunnel_version: $(rathole_version)
 EOF_VERSION
     return
   fi
 
   cat <<EOF_VERSION
 client_version: $(client_version)
-rathole_version: $(rathole_version)
+tunnel_version: $(rathole_version)
 EOF_VERSION
 }
 
 short_version_cmd() {
   consume_leading_tenant_arg "$@"
-  set -- "${PARSED_COMMAND_ARGS[@]}"
+  set -- ${PARSED_COMMAND_ARGS[@]+"${PARSED_COMMAND_ARGS[@]}"}
   if [ -n "${PORT_HUB_EXPLICIT_TENANT:-}" ]; then
     resolve_selected_tenant_context
     load_env
@@ -1942,20 +1994,34 @@ short_version_cmd() {
   printf "%s\n" "$(client_version)"
 }
 
+# A downloaded release carries the server URL for its own machine. Migrate
+# that tenant only; a shared CLI may serve tenants on other PortHub servers.
+migrate_release_server() {
+  [ "$PORT_HUB_MACHINE_ID" = "$PORT_HUB_DEFAULT_MACHINE_ID" ] || return 0
+  case "$PORT_HUB_DEFAULT_API_URL" in http://*|https://*) ;; *) return 0 ;; esac
+  [ "$PORT_HUB_API_URL" != "$PORT_HUB_DEFAULT_API_URL" ] || return 0
+  PORT_HUB_API_URL="$PORT_HUB_DEFAULT_API_URL"
+  refresh_derived_urls
+  write_env_file
+}
+
 restart_cmd() {
   step "Restarting PortHub service"
   consume_leading_tenant_arg "$@"
-  set -- "${PARSED_COMMAND_ARGS[@]}"
+  set -- ${PARSED_COMMAND_ARGS[@]+"${PARSED_COMMAND_ARGS[@]}"}
   detect_sudo
   resolve_selected_tenant_context
   load_env
+  migrate_release_server
+  ensure_dirs
+  write_service_file
   service_enable_and_start
   log "INFO" "PortHub service restarted"
 }
 
 config_cmd() {
   consume_leading_tenant_arg "$@"
-  set -- "${PARSED_COMMAND_ARGS[@]}"
+  set -- ${PARSED_COMMAND_ARGS[@]+"${PARSED_COMMAND_ARGS[@]}"}
   resolve_selected_tenant_context
   [ -f "$PORT_HUB_ENV_FILE" ] || fail "No config found at $PORT_HUB_ENV_FILE"
   cat "$PORT_HUB_ENV_FILE"
@@ -1965,7 +2031,7 @@ print_rathole_config() {
   resolve_selected_tenant_context
   load_env
   if [ ! -f "$PORT_HUB_CONFIG_FILE" ]; then
-    fail "No Rathole config found at $PORT_HUB_CONFIG_FILE"
+    fail "No PortHub tunnel config found at $PORT_HUB_CONFIG_FILE"
   fi
 
   if [ -r "$PORT_HUB_CONFIG_FILE" ]; then
@@ -1984,7 +2050,7 @@ rathole_config_cmd() {
   local next_snapshot=""
 
   consume_leading_tenant_arg "$@"
-  set -- "${PARSED_COMMAND_ARGS[@]}"
+  set -- ${PARSED_COMMAND_ARGS[@]+"${PARSED_COMMAND_ARGS[@]}"}
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -2032,10 +2098,10 @@ rathole_cmd() {
     config) rathole_config_cmd "$@" ;;
     help|-h|--help|"")
       cat <<EOF_RATHOLE_USAGE
-Usage: porthub rathole <subcommand> [options]
+Usage: porthub tunnel <subcommand> [options]
 
 Subcommands:
-  config            Print the tenant Rathole config
+  config            Print the tenant PortHub tunnel config
 
 Options for 'porthub rathole config':
   -w, --watch       Watch the config and print updates when it changes
@@ -2084,7 +2150,7 @@ update_token_cmd() {
 update_cmd() {
   step "Updating PortHub CLI from server"
   consume_leading_tenant_arg "$@"
-  set -- "${PARSED_COMMAND_ARGS[@]}"
+  set -- ${PARSED_COMMAND_ARGS[@]+"${PARSED_COMMAND_ARGS[@]}"}
   detect_sudo
   require_configured_machine
   load_env
@@ -2100,7 +2166,7 @@ update_cmd() {
     log "INFO" "Starting client reinstall for request $pending_request_id"
   fi
   tmp_file="$(mktemp)"
-  if ! curl --fail --show-error --location "$cli_url" -o "$tmp_file"; then
+  if ! curl --connect-timeout 10 --max-time 60 --fail --show-error --location "$cli_url" -o "$tmp_file"; then
     rm -f "$tmp_file"
     fail "Could not download the latest PortHub CLI. If this machine token was refreshed, run 'porthub update-token <new-token>' or 'porthub reinstall' with the refreshed installer."
   fi
@@ -2117,7 +2183,7 @@ update_cmd() {
     return 0
   fi
   if ! run_self_cmd install-rathole; then
-    log "WARN" "PortHub CLI was updated, but Rathole could not be refreshed. If the machine token changed, run 'porthub update-token <new-token>' and retry."
+    log "WARN" "PortHub CLI was updated, but PortHub tunnel could not be refreshed. If the machine token changed, run 'porthub update-token <new-token>' and retry."
     return 0
   fi
   write_state \
@@ -2143,18 +2209,13 @@ update_cmd() {
   if [ -n "$pending_request_id" ]; then
     log "INFO" "Client reinstall completed for request $pending_request_id"
   fi
-  service_state="$(service_status)"
-  if [ "$service_state" = "running" ]; then
-    run_self_cmd restart
-  else
-    log "INFO" "PortHub service is not running. Run 'porthub up' when ready."
-  fi
+  run_self_cmd restart
 }
 
 reinstall_cmd() {
   step "Reinstalling PortHub from server"
   consume_leading_tenant_arg "$@"
-  set -- "${PARSED_COMMAND_ARGS[@]}"
+  set -- ${PARSED_COMMAND_ARGS[@]+"${PARSED_COMMAND_ARGS[@]}"}
   detect_sudo
   require_configured_machine
   load_env
@@ -2164,7 +2225,7 @@ reinstall_cmd() {
   local install_url tmp_file
   install_url="$(build_install_script_url)"
   tmp_file="$(mktemp)"
-  curl --fail --show-error --location "$install_url" -o "$tmp_file"
+  curl --connect-timeout 10 --max-time 60 --fail --show-error --location "$install_url" -o "$tmp_file"
   chmod +x "$tmp_file"
   if [ -n "$PORT_HUB_TENANT" ]; then
     "$tmp_file" --install-path "$PORT_HUB_SELF_PATH" --tenant "$PORT_HUB_TENANT"
@@ -2177,7 +2238,7 @@ reinstall_cmd() {
 logs_cmd() {
   step "Reading PortHub logs"
   consume_leading_tenant_arg "$@"
-  set -- "${PARSED_COMMAND_ARGS[@]}"
+  set -- ${PARSED_COMMAND_ARGS[@]+"${PARSED_COMMAND_ARGS[@]}"}
   resolve_selected_tenant_context
   local follow="false"
   local lines="100"
@@ -2209,7 +2270,7 @@ logs_cmd() {
 # The PortHub Go binary (installed as the shared "rathole" tunnel binary)
 # provides the file server and downloader; no lighttpd or aria2c needed.
 porthub_core_bin() {
-  local bin="${PORT_HUB_SHARED_BIN_DIR}/rathole"
+  local bin="$PORT_HUB_RATHOLE_BIN"
   if [ -x "$bin" ] && "$bin" -V 2>/dev/null | grep -q '^porthub '; then
     printf "%s" "$bin"
     return 0
@@ -2251,7 +2312,7 @@ EOF_TENANTS_EMPTY
   fi
 
   printf "%-12s  %-10s  %s\n" "TENANT" "STATE" "API"
-  for tenant_name in "${CONFIGURED_TENANTS[@]}"; do
+  for tenant_name in ${CONFIGURED_TENANTS[@]+"${CONFIGURED_TENANTS[@]}"}; do
     apply_tenant_context "$tenant_name"
     api_url="$(env_file_value "$PORT_HUB_ENV_FILE" PORT_HUB_API_URL)"
     service_state="$(service_status)"
@@ -2311,10 +2372,10 @@ tenants_add_cmd() {
     PORT_HUB_EXPLICIT_TENANT="$(derive_default_tenant_name "$api_url" "$machine_id")"
   fi
 
-  configure_cmd "${configure_args[@]}"
+  configure_cmd ${configure_args[@]+"${configure_args[@]}"}
   preflight_cmd
   if [ -x "$PORT_HUB_RATHOLE_BIN" ]; then
-    log_plain "[porthub-tenants] Reusing existing shared Rathole binary at $PORT_HUB_RATHOLE_BIN"
+    log_plain "[porthub-tenants] Reusing existing shared PortHub tunnel binary at $PORT_HUB_RATHOLE_BIN"
   else
     install_rathole_cmd
   fi
@@ -2371,7 +2432,7 @@ poll_for_change() {
   tmp_headers="$(mktemp)"
   url="${PORT_HUB_CHANGES_TOML_URL}&since=${current_version}&wait_seconds=${PORT_HUB_CHANGES_WAIT_SECONDS:-25}"
   debug_log "Polling for config changes since version ${current_version}"
-  http_code="$(curl --silent --show-error -D "$tmp_headers" -o "$tmp_body" -w "%{http_code}" "$url" || true)"
+  http_code="$(curl --connect-timeout 10 --max-time "$(( ${PORT_HUB_CHANGES_WAIT_SECONDS:-25} + 15 ))" --silent --show-error -D "$tmp_headers" -o "$tmp_body" -w "%{http_code}" "$url" || true)"
   case "$http_code" in
     200)
       if is_machine_deleted_response "$tmp_headers"; then
@@ -2489,7 +2550,7 @@ service_run_cmd() {
       "$(state_get PORT_HUB_SHARED_PUBLIC_IP)" \
       "$rathole_pid" \
       "$(date +%s)"
-    log "INFO" "Started Rathole with pid $rathole_pid"
+    log "INFO" "Started PortHub tunnel with pid $rathole_pid"
   }
 
   stop_rathole() {
@@ -2584,7 +2645,7 @@ service_run_cmd() {
       if [ "$rc" -eq 30 ]; then
         handle_machine_deleted
       elif [ "$rc" -eq 20 ]; then
-      log "WARN" "Machine is disabled in PortHub; Rathole will stay stopped until it is re-enabled"
+      log "WARN" "Machine is disabled in PortHub; PortHub tunnel will stay stopped until it is re-enabled"
       else
         fail "Could not fetch PortHub machine config"
       fi
@@ -2594,7 +2655,7 @@ service_run_cmd() {
     if [ "$rc" -eq 30 ]; then
       handle_machine_deleted
     elif [ "$rc" -eq 20 ]; then
-    log "WARN" "Machine is disabled in PortHub; Rathole will stay stopped until it is re-enabled"
+    log "WARN" "Machine is disabled in PortHub; PortHub tunnel will stay stopped until it is re-enabled"
     else
       fail "Could not authenticate machine against PortHub server"
     fi
@@ -2620,7 +2681,7 @@ service_run_cmd() {
       stop_rathole
       if [ $((now - last_sync)) -ge "${PORT_HUB_HEARTBEAT_INTERVAL_SECONDS:-30}" ]; then
         if machine_post "$PORT_HUB_AUTH_URL" true; then
-          log "INFO" "Machine was re-enabled in PortHub; resuming Rathole"
+          log "INFO" "Machine was re-enabled in PortHub; resuming PortHub tunnel"
           if fetch_config_cmd; then
             start_rathole
           else
@@ -2655,7 +2716,7 @@ service_run_cmd() {
         if [ "$rc" -eq 30 ]; then
           handle_machine_deleted
         elif [ "$rc" -eq 20 ]; then
-          log "WARN" "Machine was disabled in PortHub; stopping Rathole"
+          log "WARN" "Machine was disabled in PortHub; stopping PortHub tunnel"
           stop_rathole
           last_sync="$now"
         else
@@ -2673,12 +2734,12 @@ service_run_cmd() {
         if [ "$rc" -eq 10 ]; then
           log "INFO" "Received updated config version $(state_get PORT_HUB_CURRENT_VERSION)"
           if [ -n "$rathole_pid" ] && kill -0 "$rathole_pid" 2>/dev/null; then
-            log "INFO" "Updated config written; waiting for Rathole hot-reload"
+            log "INFO" "Updated config written; waiting for PortHub tunnel hot-reload"
           else
             start_rathole
           fi
         elif [ "$rc" -eq 20 ]; then
-          log "WARN" "Machine was disabled in PortHub; stopping Rathole"
+          log "WARN" "Machine was disabled in PortHub; stopping PortHub tunnel"
           stop_rathole
         elif [ "$rc" -eq 30 ]; then
           handle_machine_deleted
@@ -2696,7 +2757,7 @@ service_run_cmd() {
     fi
 
     if [ -n "$rathole_pid" ] && ! kill -0 "$rathole_pid" 2>/dev/null; then
-      log "WARN" "Rathole exited unexpectedly; restarting"
+      log "WARN" "PortHub tunnel exited unexpectedly; restarting"
       start_rathole
     fi
   done
@@ -2720,8 +2781,8 @@ Commands:
   logs              Show logs for the selected tenant
   http.server       Serve the current directory (built-in file server)
   get               Download a file with parallel segments (built-in)
-  update            Update the shared PortHub CLI and Rathole using the selected tenant
-  version           Show installed PortHub client and Rathole versions
+  update            Update the shared PortHub CLI and PortHub tunnel using the selected tenant
+  version           Show installed PortHub client and PortHub tunnel versions
   tenants           Full tenant management subcommands
   adv               Show advanced maintenance commands
 
@@ -2742,15 +2803,15 @@ Public maintenance:
   configure         Write or update the selected tenant settings
   update-token      Save a new machine token for the selected tenant
   preflight         Check prerequisites for the selected tenant
-  install-rathole   Download or refresh the shared Rathole binary
+  install-tunnel   Download or refresh the shared PortHub tunnel binary
   config            Print the saved tenant config
-  rathole config    Print the local Rathole client config (-w to watch)
-  rathole-config    Print the local Rathole client config
+  tunnel config     Print the local PortHub tunnel client config (-w to watch)
+  tunnel-config     Print the local PortHub tunnel client config
   reinstall         Re-run the server installer for the selected tenant
   uninstall         Remove the selected tenant; use --all to remove everything
   sync              Send an immediate active heartbeat
   sync-inactive     Send an immediate inactive heartbeat
-  fetch-config      Download the current Rathole client config
+  fetch-config      Download the current PortHub tunnel client config
   http.server       Start a built-in file server
   get               Download a file (parallel segments)
 EOF_ADVANCED
@@ -2788,7 +2849,7 @@ main() {
     shift
   fi
   parse_global_cli_options "$@"
-  set -- "${PARSED_GLOBAL_ARGS[@]}"
+  set -- ${PARSED_GLOBAL_ARGS[@]+"${PARSED_GLOBAL_ARGS[@]}"}
   case "$command" in
     list|ls) tenants_list_cmd "$@" ;;
     tenant|tenants) tenants_cmd "$@" ;;
@@ -2805,7 +2866,7 @@ main() {
     configure) configure_cmd "$@" ;;
     update-token) update_token_cmd "$@" ;;
     preflight) preflight_cmd "$@" ;;
-    install-rathole) install_rathole_cmd "$@" ;;
+    install-rathole|install-tunnel) install_rathole_cmd "$@" ;;
     uninstall) uninstall_cmd "$@" ;;
     restart) restart_cmd "$@" ;;
     status) status_cmd "$@" ;;
@@ -2815,7 +2876,7 @@ main() {
     http.server|http-server) http_server_cmd "$@" ;;
     get) get_cmd "$@" ;;
     config) config_cmd "$@" ;;
-    rathole) rathole_cmd "$@" ;;
+    rathole|tunnel) rathole_cmd "$@" ;;
     rathole-config) rathole_config_cmd "$@" ;;
     update) update_cmd "$@" ;;
     reinstall) reinstall_cmd "$@" ;;

@@ -1,0 +1,338 @@
+[
+  {
+    "method": "POST",
+    "path": "/api/access/books"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/access/books/{book_id}"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/access/books/{book_id}"
+  },
+  {
+    "method": "POST",
+    "path": "/api/access/groups"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/access/groups/{group_id}/members"
+  },
+  {
+    "method": "POST",
+    "path": "/api/access/invitations"
+  },
+  {
+    "method": "POST",
+    "path": "/api/access/invitations/accept"
+  },
+  {
+    "method": "POST",
+    "path": "/api/access/invitations/preview"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/access/invitations/{invitation_id}"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/access/members/{user_id}"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/access/network"
+  },
+  {
+    "method": "POST",
+    "path": "/api/access/private/bootstrap"
+  },
+  {
+    "method": "POST",
+    "path": "/api/access/private/peers"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/access/private/peers/{peer_id}"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/access/private/peers/{peer_id}"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/access/private/peers/{peer_id}/hostname"
+  },
+  {
+    "method": "POST",
+    "path": "/api/access/private/sync"
+  },
+  {
+    "method": "GET",
+    "path": "/api/access/snapshot"
+  },
+  {
+    "method": "POST",
+    "path": "/api/access/test"
+  },
+  {
+    "method": "GET",
+    "path": "/api/access/workspaces"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/overview"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/auth/account"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/auth/delete"
+  },
+  {
+    "method": "GET",
+    "path": "/api/auth/me"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/auth/password"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/auth/preferences"
+  },
+  {
+    "method": "GET",
+    "path": "/api/auth/sessions"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/auth/sessions/{session_id}"
+  },
+  {
+    "method": "GET",
+    "path": "/api/auth/settings"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/auth/settings/password"
+  },
+  {
+    "method": "POST",
+    "path": "/api/auth/signin"
+  },
+  {
+    "method": "POST",
+    "path": "/api/auth/signout"
+  },
+  {
+    "method": "POST",
+    "path": "/api/auth/signup"
+  },
+  {
+    "method": "GET",
+    "path": "/api/auth/telegram"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/auth/telegram"
+  },
+  {
+    "method": "POST",
+    "path": "/api/auth/telegram/test"
+  },
+  {
+    "method": "POST",
+    "path": "/api/connections/add"
+  },
+  {
+    "method": "GET",
+    "path": "/api/connections/command/{_id}"
+  },
+  {
+    "method": "POST",
+    "path": "/api/connections/delete"
+  },
+  {
+    "method": "GET",
+    "path": "/api/connections/external-port/{port}/availability"
+  },
+  {
+    "method": "GET",
+    "path": "/api/connections/firewall/active"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/connections/firewall/policy"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/connections/firewall/policy/{data_id}"
+  },
+  {
+    "method": "GET",
+    "path": "/api/connections/firewall/policy/{data_id}"
+  },
+  {
+    "method": "GET",
+    "path": "/api/connections/firewall/recent-ip-hits/{data_id}"
+  },
+  {
+    "method": "POST",
+    "path": "/api/connections/firewall/traffic/snapshot"
+  },
+  {
+    "method": "GET",
+    "path": "/api/connections/list"
+  },
+  {
+    "method": "GET",
+    "path": "/api/connections/random"
+  },
+  {
+    "method": "POST",
+    "path": "/api/connections/refresh"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/connections/update"
+  },
+  {
+    "method": "POST",
+    "path": "/api/groups/add"
+  },
+  {
+    "method": "POST",
+    "path": "/api/groups/delete"
+  },
+  {
+    "method": "GET",
+    "path": "/api/groups/list"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/groups/update"
+  },
+  {
+    "method": "POST",
+    "path": "/api/machines/add"
+  },
+  {
+    "method": "POST",
+    "path": "/api/machines/client/auth"
+  },
+  {
+    "method": "GET",
+    "path": "/api/machines/client/changes"
+  },
+  {
+    "method": "GET",
+    "path": "/api/machines/client/changes.toml"
+  },
+  {
+    "method": "GET",
+    "path": "/api/machines/client/config"
+  },
+  {
+    "method": "GET",
+    "path": "/api/machines/client/config.toml"
+  },
+  {
+    "method": "POST",
+    "path": "/api/machines/client/deletion-ack"
+  },
+  {
+    "method": "GET",
+    "path": "/api/machines/client/log-stream"
+  },
+  {
+    "method": "POST",
+    "path": "/api/machines/client/logs"
+  },
+  {
+    "method": "POST",
+    "path": "/api/machines/client/sync"
+  },
+  {
+    "method": "GET",
+    "path": "/api/machines/command/{machine_id}"
+  },
+  {
+    "method": "POST",
+    "path": "/api/machines/delete"
+  },
+  {
+    "method": "POST",
+    "path": "/api/machines/groups/add"
+  },
+  {
+    "method": "POST",
+    "path": "/api/machines/groups/remove"
+  },
+  {
+    "method": "GET",
+    "path": "/api/machines/list"
+  },
+  {
+    "method": "POST",
+    "path": "/api/machines/refresh-token"
+  },
+  {
+    "method": "POST",
+    "path": "/api/machines/request-client-update"
+  },
+  {
+    "method": "POST",
+    "path": "/api/machines/sync"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/machines/update"
+  },
+  {
+    "method": "GET",
+    "path": "/api/machines/{machine_id}/status-history"
+  },
+  {
+    "method": "GET",
+    "path": "/api/machines/{machine_id}/{token}/client.sh"
+  },
+  {
+    "method": "GET",
+    "path": "/api/machines/{machine_id}/{token}/downloads/porthub"
+  },
+  {
+    "method": "GET",
+    "path": "/api/machines/{machine_id}/{token}/downloads/rathole/{target}"
+  },
+  {
+    "method": "GET",
+    "path": "/api/machines/{machine_id}/{token}/install.sh"
+  },
+  {
+    "method": "GET",
+    "path": "/api/ping"
+  },
+  {
+    "method": "GET",
+    "path": "/api/traffic-routes/activity"
+  },
+  {
+    "method": "POST",
+    "path": "/api/traffic-routes/add"
+  },
+  {
+    "method": "POST",
+    "path": "/api/traffic-routes/delete"
+  },
+  {
+    "method": "GET",
+    "path": "/api/traffic-routes/list"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/traffic-routes/update"
+  }
+]

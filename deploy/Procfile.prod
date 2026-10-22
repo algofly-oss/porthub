@@ -2,11 +2,9 @@
 # Internal services listen on uncommon loopback ports (47xxx) so they never
 # clash with anything else on a host-networked server.
 mongod: mongod --bind_ip 127.0.0.1 --port 47017 --dbpath /data/mongo --auth --quiet --logpath /data/mongo/mongod.log --logappend
-api: after=127.0.0.1:47017 cd /app/api && API_HOST=127.0.0.1 API_PORT=47081 PORTHUB_RELAY_SUPERVISED=1 sh entrypoint.sh
-# Go API on the public API port; routes not yet ported go to Python (47081).
-goapi: after=127.0.0.1:47081 PORTHUB_API_LISTEN=127.0.0.1:47080 PORTHUB_PYTHON_API_URL=http://127.0.0.1:47081 exec porthub-api
+# Go API: all routes, Socket.IO, background workers and the firewall service (127.0.0.1:47001).
+api: after=127.0.0.1:47017 PORTHUB_API_LISTEN=127.0.0.1:47080 exec porthub-api
 relay: porthub relay-server --listen 127.0.0.1:47091
 ui: cd /app/ui && NODE_ENV=production HOSTNAME=127.0.0.1 PORT=47030 exec node server.js
-firewall: cd /app/firewall && FW_HOST=127.0.0.1 FW_PORT=47001 FW_DB_PATH=/data/firewall/firewall.db sh entrypoint.sh
 rathole: after=127.0.0.1:47080 exec rathole -s /runtime/rathole/server.toml
 traefik: exec sh /app/deploy/traefik.sh

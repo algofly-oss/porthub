@@ -253,3 +253,57 @@ func TestHeartbeatTimeoutReconnects(t *testing.T) {
 type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(b []byte) (int, error) { return f(b) }
+
+// Rathole keeps prewarmed data channels idle until a public visitor arrives.
+// A handshake read deadline must not expire a valid pool entry during that wait.
+type poolConn struct {
+	net.Conn
+	mu       sync.Mutex
+	deadline time.Time
+	waiting  chan time.Time
+}
+
+func (c *poolConn) SetDeadline(t time.Time) error {
+	c.mu.Lock()
+	c.deadline = t
+	c.mu.Unlock()
+	return c.Conn.SetDeadline(t)
+}
+func (c *poolConn) Read(p []byte) (int, error) {
+	c.mu.Lock()
+	d := c.deadline
+	c.mu.Unlock()
+	select {
+	case c.waiting <- d:
+	default:
+	}
+	return c.Conn.Read(p)
+}
+func TestIdleDataPoolAndCancellation(t *testing.T) {
+	client, server := net.Pipe()
+	defer server.Close()
+	conn := &poolConn{Conn: client, waiting: make(chan time.Time, 1)}
+	cl := New(log.New(io.Discard, "", 0))
+	cl.dialer = func(context.Context, string, string) (net.Conn, error) { return conn, nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- cl.data(ctx, "gateway:2334", digest{}, Service{Name: "test"}) }()
+	if _, _, err := readHello(server); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case deadline := <-conn.waiting:
+		if !deadline.IsZero() {
+			t.Fatal("idle pool channel has a read deadline")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("client never waited for a visitor")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cancellation did not close idle data channel")
+	}
+}

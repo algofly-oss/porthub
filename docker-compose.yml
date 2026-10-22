@@ -6,6 +6,7 @@ services:
   porthub:
     build:
       context: .
+      dockerfile: Dockerfile
       args:
         PORTHUB_VERSION: ${PORTHUB_VERSION:-dev} # set by deploy.sh (git commit)
     image: porthub:latest
@@ -23,9 +24,10 @@ services:
       RATHOLE_SERVER_CONFIG_PATH: /runtime/rathole/server.toml
       TRAEFIK_DYNAMIC_CONFIG_PATH: /runtime/traefik/traffic-routes.yml
       FW_DB_PATH: /data/firewall/firewall.db
+      FW_HOST: 127.0.0.1
+      FW_PORT: "47001"
     volumes:
       - porthub_data:/data
-      - ./api:/app/api # API runs from the checkout (as before)
       - ./ui:/app/ui-src # used only in dev mode
     restart: always
     logging:

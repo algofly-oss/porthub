@@ -475,6 +475,18 @@ export default function HostConfigPopup({
   const [groupSaving, setGroupSaving] = useState(false);
   const [isGroupPickerOpen, setIsGroupPickerOpen] = useState(false);
   const [groupQuery, setGroupQuery] = useState("");
+  const [privateAddresses, setPrivateAddresses] = useState(null);
+  const [privateAddressError, setPrivateAddressError] = useState(false);
+  useEffect(() => {
+    setPrivateAddresses(null);
+    setPrivateAddressError(false);
+    if (!opened || !host?.id) return;
+    let active = true;
+    axios.get(`/api/machines/private-addresses/${host.id}`)
+      .then(({ data }) => { if (active) setPrivateAddresses(data.data || []); })
+      .catch(() => { if (active) setPrivateAddressError(true); });
+    return () => { active = false; };
+  }, [opened, host?.id]);
   const [machineDetails, setMachineDetails] = useState({ name: "", hostname: "" });
   const [machineDetailsErrors, setMachineDetailsErrors] = useState({});
   const [isSavingMachineDetails, setIsSavingMachineDetails] = useState(false);
@@ -2045,6 +2057,19 @@ export default function HostConfigPopup({
                 <Badge color="blue" variant="light" className={getInfoBadgeClassName(isDark)}>
                   WAN: {host.publicIp || "Pending"}
                 </Badge>
+                {privateAddresses?.length ? privateAddresses.map((ip) => (
+                  <Badge key={ip} component="button" type="button" color="blue" variant="light"
+                    onClick={() => handleCopy("Private IP", ip)}
+                    aria-label={`Copy private IP ${ip}`} title="Copy private IP"
+                    rightSection={<IconCopy size={12} />}
+                    className={`${getInfoBadgeClassName(isDark)} cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2`}>
+                    PAN: {ip}
+                  </Badge>
+                )) : (
+                  <Badge color="blue" variant="light" className={getInfoBadgeClassName(isDark)}>
+                    PAN: {privateAddressError ? "Unavailable" : privateAddresses ? "Not enrolled" : "Loading…"}
+                  </Badge>
+                )}
                 <Badge color="blue" variant="light" className={getInfoBadgeClassName(isDark)}>
                   Last seen: {formatCompactLastSeen(host.lastSeenAt)}
                 </Badge>

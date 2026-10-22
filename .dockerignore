@@ -1,18 +1,14 @@
-# Server image build context: only what the Dockerfiles copy.
+# Root Dockerfile build context: include only current server components.
 *
 !api
+api/*
+!api/client
 !client
 !server
 !ui
-!firewall
 !traefik
 !proxy/certificate
 !deploy
-api/**/__pycache__
-api/.env
-api/downloads
-api/data
-firewall/**/__pycache__
 ui/node_modules
 ui/.next
 ui/.next-*

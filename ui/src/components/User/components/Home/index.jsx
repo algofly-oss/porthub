@@ -224,6 +224,7 @@ const mapMachineToHost = (machine) => ({
   telegramAlertsExcluded: machine.telegram_alerts_excluded ?? false,
   localIp: machine.local_ip || "",
   publicIp: machine.public_ip || "",
+  ...(Array.isArray(machine.private_ips) ? { privateIps: machine.private_ips } : {}),
   token: machine.token || "",
   connectionStatus:
     machine.connection_status ||
@@ -250,6 +251,7 @@ const mergeMachineIntoHost = (host, machine) => {
 
   return {
     ...mappedHost,
+    privateIps: Array.isArray(machine.private_ips) ? machine.private_ips : (host?.privateIps || []),
     numPorts: host?.numPorts ?? 0,
     forwardingConfigs: host?.forwardingConfigs ?? [],
   };
@@ -332,7 +334,7 @@ export default function Home({ onStatsChange }) {
   const filteredHosts = useMemo(
     () =>
       hosts.filter((host) => {
-        if (!Number.isFinite(searchScore(query, [host.name, host.hostname, host.localIp, host.publicIp, ...(host.forwardingConfigs || []).flatMap(c => [c.serviceName, c.internalPort, c.externalPort])]))) return false;
+        if (!Number.isFinite(searchScore(query, [host.name, host.hostname, host.localIp, host.publicIp, ...(host.privateIps || []), ...(host.forwardingConfigs || []).flatMap(c => [c.serviceName, c.internalPort, c.externalPort])]))) return false;
         const matchesStatus =
           statusFilter === "all" ||
           (statusFilter === "online" ? host.isActive : statusFilter === "disabled" ? host.enabled === false : host.enabled !== false && !host.isActive);
@@ -1273,7 +1275,7 @@ export default function Home({ onStatsChange }) {
                                 .map((id) => groupLabelById[id])
                                 .filter(Boolean)}
                               localIp={host.localIp}
-                              publicIp={host.publicIp}
+                              privateIps={host.privateIps}
                               clientVersion={host.clientVersion}
                               clientUpdateAvailable={host.clientUpdateAvailable}
                               latestClientVersion={host.latestClientVersion}

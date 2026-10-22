@@ -1,8 +1,10 @@
 package names
 
 import (
+	"net"
 	"net/netip"
 	"testing"
+	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
 )
@@ -53,5 +55,35 @@ func TestAnswersOnlyPrivateNames(t *testing.T) {
 	}
 	if h, _ = parse(t, s.Answer(query(t, "miro.ph.io.", dnsmessage.TypeA))); h.RCode != dnsmessage.RCodeRefused {
 		t.Fatal("old suffix still answered")
+	}
+}
+
+func TestLoopbackResolver(t *testing.T) {
+	s, err := Listen(netip.MustParseAddrPort("127.0.0.1:0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.Update("phub", map[string]netip.Addr{"miro.phub": netip.MustParseAddr("10.203.0.217")})
+	if !s.Address().Addr().IsLoopback() || s.Address().Port() == 0 {
+		t.Fatalf("bad resolver address: %s", s.Address())
+	}
+	conn, err := net.DialUDP("udp", nil, net.UDPAddrFromAddrPort(s.Address()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(time.Second))
+	if _, err = conn.Write(query(t, "miro.phub.", dnsmessage.TypeA)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 1500)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, answers := parse(t, buf[:n])
+	if h.RCode != dnsmessage.RCodeSuccess || len(answers) != 1 || answers[0].Body.(*dnsmessage.AResource).A != [4]byte{10, 203, 0, 217} {
+		t.Fatalf("bad loopback answer: %v", answers)
 	}
 }

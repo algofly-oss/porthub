@@ -6,6 +6,7 @@ package names
 import (
 	"net"
 	"net/netip"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -27,6 +28,11 @@ func canonical(name string) string {
 
 // Listen starts answering on address (the private interface address, port 53).
 func Listen(address netip.AddrPort) (*Server, error) {
+	// macOS resolves through loopback: traffic to a utun interface's own
+	// address may enter the tunnel instead of returning to a local socket.
+	if runtime.GOOS == "darwin" {
+		address = netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), 0)
+	}
 	conn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(address))
 	if err != nil {
 		return nil, err
@@ -50,6 +56,8 @@ func (s *Server) Update(suffix string, records map[string]netip.Addr) {
 	s.suffix, s.records = suffix, next
 	s.mu.Unlock()
 }
+func (s *Server) Address() netip.AddrPort { return s.conn.LocalAddr().(*net.UDPAddr).AddrPort() }
+
 func (s *Server) Close() error { return s.conn.Close() }
 
 func (s *Server) serve() {

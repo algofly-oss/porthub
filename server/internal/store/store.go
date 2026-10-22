@@ -4,6 +4,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"go.mongodb.org/mongo-driver/v2/bson"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -11,7 +12,8 @@ import (
 )
 
 func Connect(ctx context.Context, uri, database string) (*mongo.Database, func(), error) {
-	client, err := mongo.Connect(options.Client().ApplyURI(uri).SetTimeout(15 * time.Second))
+	client, err := mongo.Connect(options.Client().ApplyURI(uri).SetTimeout(15 * time.Second).
+		SetBSONOptions(&options.BSONOptions{DefaultDocumentM: true})) // nested documents decode as bson.M, like Python dicts
 	if err != nil {
 		return nil, nil, err
 	}
@@ -32,4 +34,74 @@ func PyTime(t time.Time) string {
 		s += fmt.Sprintf(".%06d", us)
 	}
 	return s
+}
+
+// JSON converts Mongo values into what FastAPI's jsonable_encoder produces:
+// ObjectId -> hex string, datetime -> naive ISO string, nested containers.
+func JSON(v any) any {
+	switch x := v.(type) {
+	case nil:
+		return nil
+	case bson.ObjectID:
+		return x.Hex()
+	case bson.DateTime:
+		return PyTime(x.Time())
+	case time.Time:
+		if x.IsZero() {
+			return nil
+		}
+		return PyTime(x)
+	case *time.Time:
+		if x == nil {
+			return nil
+		}
+		return PyTime(*x)
+	case bson.M:
+		out := make(map[string]any, len(x))
+		for k, val := range x {
+			out[k] = JSON(val)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, val := range x {
+			out[k] = JSON(val)
+		}
+		return out
+	case bson.D:
+		out := make(map[string]any, len(x))
+		for _, e := range x {
+			out[e.Key] = JSON(e.Value)
+		}
+		return out
+	case bson.A:
+		out := make([]any, len(x))
+		for i, val := range x {
+			out[i] = JSON(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, val := range x {
+			out[i] = JSON(val)
+		}
+		return out
+	case []bson.M:
+		out := make([]any, len(x))
+		for i, val := range x {
+			out[i] = JSON(val)
+		}
+		return out
+	case []string:
+		out := make([]any, len(x))
+		for i, val := range x {
+			out[i] = val
+		}
+		return out
+	case int32:
+		return int64(x)
+	case bson.Decimal128:
+		return x.String()
+	}
+	return v
 }

@@ -1,3 +1,0 @@
-fastapi==0.79.0
-uvicorn[standard]==0.18.2
-aiosqlite==0.22.1

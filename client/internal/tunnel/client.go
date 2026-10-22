@@ -280,10 +280,15 @@ func (cl *Client) data(ctx context.Context, remote string, session digest, s Ser
 		time.Sleep(100 * time.Millisecond)
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(dialTimeout))
+	stopRemote := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stopRemote()
+	_ = conn.SetWriteDeadline(time.Now().Add(dialTimeout))
 	if _, err = conn.Write(encodeHello(helloData, session)); err != nil {
 		return err
 	}
+	// Rathole prewarms pooled data channels before a visitor arrives. They
+	// may remain idle indefinitely; only the hello write has a deadline.
+	_ = conn.SetDeadline(time.Time{})
 	cmd, err := readU32(conn)
 	if err != nil {
 		return fmt.Errorf("read data command: %w", err)
@@ -300,7 +305,7 @@ func (cl *Client) data(ctx context.Context, remote string, session digest, s Ser
 		return fmt.Errorf("connect to %s: %w", s.LocalAddr, err)
 	}
 	defer local.Close()
-	stop := context.AfterFunc(ctx, func() { conn.Close(); local.Close() })
+	stop := context.AfterFunc(ctx, func() { local.Close() })
 	defer stop()
 	pipe(conn, local)
 	return nil

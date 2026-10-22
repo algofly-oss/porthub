@@ -9,6 +9,6 @@ sed -e 's#http://api:8080#http://127.0.0.1:47080#' -e 's#http://ui:3000#http://1
     /app/traefik/internal.yml > /runtime/traefik/porthub-internal.yml
 # First start: create the database root user (restoring a migration archive once).
 if [ ! -f /data/mongo/.porthub-initialized ]; then
-    python3 /app/deploy/mongo_init.py
+    porthub-api init-db
 fi
 exec porthub supervise --procfile "/app/deploy/Procfile.$MODE"

@@ -14,7 +14,7 @@ import (
 // so other names, VPNs and the machine's resolvers are unaffected. resolved
 // forgets the settings when the interface disappears; Unregister reverts
 // them earlier on a clean shutdown.
-func RegisterLink(ifindex int, dns netip.Addr, suffix string) error {
+func RegisterLink(ifindex int, dns netip.AddrPort, suffix string) error {
 	conn, err := dbus.ConnectSystemBus()
 	if err != nil {
 		return err
@@ -29,14 +29,14 @@ func RegisterLink(ifindex int, dns netip.Addr, suffix string) error {
 		Domain      string
 		RoutingOnly bool
 	}
-	if !dns.Is4() {
+	if !dns.Addr().Is4() || dns.Port() != 53 {
 		return errors.New("private DNS address must be IPv4")
 	}
 	calls := []struct {
 		method string
 		args   []any
 	}{
-		{"SetLinkDNS", []any{int32(ifindex), []address{{2, dns.AsSlice()}}}},
+		{"SetLinkDNS", []any{int32(ifindex), []address{{2, dns.Addr().AsSlice()}}}},
 		{"SetLinkDomains", []any{int32(ifindex), []domain{{suffix, true}}}},
 		{"SetLinkDefaultRoute", []any{int32(ifindex), false}},
 	}

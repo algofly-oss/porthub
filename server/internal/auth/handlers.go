@@ -192,7 +192,7 @@ func Register(api huma.API, h *Handlers) {
 			email = u.Username
 		}
 		return map[string]any{"name": u.Name, "username": u.Username, "email": email, "role": u.Role,
-			"created_at": store.PyTime(u.CreatedAt), "profile_picture": u.ProfilePicture,
+			"created_at": store.PyTime(u.CreatedAt), "profile_picture": store.JSON(u.ProfilePicture),
 			"has_password": len(u.Password) > 0, "preferences": map[string]any{"nav_collapsed": u.Preferences.NavCollapsed}}
 	}
 	huma.Register(api, huma.Operation{OperationID: "account-info", Method: http.MethodGet, Path: "/api/auth/me", Summary: "Account Info", Tags: tag},

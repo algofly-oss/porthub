@@ -35,7 +35,7 @@ PortHub can apply an IP filter to each forwarding rule.
 - The UI exposes this in the forwarding rule editor as `IP Filter`.
 - The firewall service applies the policy at the external port level and keeps recent hit / blocked-IP data for traffic monitoring.
 
-This is backed by the `firewall/` service, which stores per-port policies and programs nftables rules on the host. If firewall integration is not configured, the rest of PortHub still works, but IP filtering and firewall traffic visibility will not be available.
+This is backed by the Go firewall service in `server/internal/firewall/`, which stores per-port policies and programs nftables rules on the host. If firewall integration is not configured, the rest of PortHub still works, but IP filtering and firewall traffic visibility will not be available.
 
 ## Proxy Request Activity and Log Retention
 
@@ -64,20 +64,22 @@ rotation wrapper and read-only analytics volume are included.
 
 PortHub is made of a few small pieces:
 
-- `api/`: FastAPI backend for auth, machines, connections, bootstrap endpoints, and Rathole config generation
+- `server/`: Go API for auth, machines, connections, private access, Socket.IO, firewall policies, and configuration generation
+- `api/client/`: client bootstrap and service-management shell assets
 - `ui/`: Next.js dashboard for users, machines, groups, and forwarding rules
 - `proxy/certificate/`: TLS certificate Traefik uses for the app on port 8346
-- `rathole`: managed server container that runs the generated `server.toml`
-- `firewall/`: optional per-port firewall service for IP filtering and traffic sampling
+- `rathole`: tunnel server supervised inside the PortHub container, using the generated `server.toml`
+- `server/internal/firewall/`: per-port firewall policies and traffic sampling, running inside the Go API
 - `mongodb`: persistent app data
-- `redis`: session storage and lightweight runtime coordination
+- MongoDB also stores login sessions; Redis is no longer required
 
 ## Repository Layout
 
 ```text
 .
-├── api/                         FastAPI app and client bootstrap assets
-├── firewall/                    Firewall service for port policy and traffic sampling
+├── server/                      Go API, firewall, realtime events and background workers
+├── client/                      Go tunnel, relay and private-network client
+├── api/client/                  Bootstrap and tenant service management
 ├── ui/                          Next.js frontend
 ├── proxy/certificate/           TLS certificate for the app's HTTPS port
 ├── docker-compose.yml           The single PortHub server container
@@ -99,7 +101,7 @@ cp env.example .env   # set secrets; PORTHUB_MODE=prod (default) or dev
 docker compose up -d --build
 ```
 
-`PORTHUB_MODE=dev` runs the API with auto-reload and the Next.js dev server
+`PORTHUB_MODE=dev` runs the Go API and the Next.js dev server
 from the mounted `./ui` checkout (run `yarn install` there first).
 
 Internal services listen only on loopback ports 47001-47091. Data lives in
@@ -118,24 +120,57 @@ restored once and a new MongoDB root user is created from `.env`.
 4. Optionally add an `IP Filter` allowlist for any port that should not be public.
 5. Run the install command on the remote machine and let the client fetch config automatically.
 
-After bootstrap, the machine client authenticates with PortHub, downloads its managed `client.toml`, starts Rathole locally, and keeps checking for config changes.
+The setup page provides a short machine-specific command:
+
+```bash
+curl -fsSL https://your-porthub.example/install/<short-code> | bash
+```
+
+The installer configures a persistent systemd service on Linux or a launchd
+LaunchDaemon on macOS. Tenant service management currently uses the shell CLI;
+public tunnels, file serving and downloads run in the bundled Go PortHub binary.
+Updates install the tunnel binary as `porthub-tunnel`; old `rathole` paths are
+read only until migration. Installer codes contain 16 random alphanumeric characters and expire
+after 24 hours, without exposing the machine authentication token.
+Server-side Rathole remains the public tunnel gateway.
+
+Private networking is a separate, opt-in enrollment. Its short installer sets up
+a native interface, workspace-only DNS, and a persistent systemd or macOS launchd
+service. The Mac client uses an automatically allocated utun interface and a
+managed `/etc/resolver/<workspace-suffix>` file. It adds only private peer host
+routes and preserves other DNS and VPN configuration.
+
+Clients authenticate with PortHub, download their managed `client.toml`, and
+check for configuration changes. Control requests have bounded timeouts so a
+stalled connection can recover. Updating a tenant refreshes its service definition
+and migrates its saved API URL to the address embedded in its server's release.
+Other tenants keep their own server URLs. On macOS, daemon startup errors are
+written beside the tenant log in `service.log`; a loaded but crashed launchd job
+is reported as stopped.
+
+## Go API
+
+The root `Dockerfile` is the single server build definition, explicitly selected
+by `docker-compose.yml`. Run `docker compose up -d --build porthub` from the
+repository root. There are no separate API, UI, or firewall Dockerfiles.
+
+The Go API serves all routes directly, including Socket.IO, background workers,
+and firewall policies. It has no Python fallback or Python runtime dependency.
+OpenAPI is available at `/api/openapi.json` and Swagger UI at `/api/docs`.
+See [Go API development and deployment checks](docs/go-api.md).
 
 ## Upgrading from a release that used Redis
 
-Login sessions now live in MongoDB and the Redis container is no longer part
-of the stack. Before removing Redis from an existing installation, move the
-live sessions once so nobody is signed out:
-
-```bash
-docker exec -w /app porthub_api_prod python scripts/migrate_redis_sessions.py
-docker stop porthub_redis && docker rm porthub_redis
-```
+Login sessions now live in MongoDB; Redis is no longer part of the stack.
+Installations upgrading directly from an old Redis release should migrate their
+sessions using that release's migration script before upgrading. The retired
+script is available in Git history. Current deployments need no Redis migration.
 
 ## Runtime Notes
 
 - Traefik serves the app on 8345/8346: `/` goes to the UI, `/api` and `/socket.io` to the API (`traefik/internal.yml`)
 - The Rathole server reads `/runtime/rathole/server.toml`
-- The `rathole` and `firewall` services use host networking in the provided Compose files
+- The single PortHub container uses host networking; MongoDB, the API, UI, relay, and firewall bind to separate loopback ports
 - The API can run without firewall integration, but connection-level IP filtering depends on the `firewall` service being reachable
 
 ## Useful Environment Variables
@@ -154,3 +189,5 @@ docker stop porthub_redis && docker rm porthub_redis
 ## Why Use It
 
 PortHub does not replace Rathole. It makes Rathole easier to operate once you have more than one machine, more than one tunnel, or stricter operational requirements around bootstrap, visibility, and access control.
+
+Every new machine is automatically enrolled in its owner’s private network. Installation and `porthub update` install the persistent private agent; existing access rules control connectivity. Offline machines complete installation when they reconnect and update.

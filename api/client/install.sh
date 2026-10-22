@@ -235,6 +235,7 @@ fi
 
 main() {
   preflight
+  if [ -n "$SUDO" ]; then sudo -v </dev/tty; fi
 
   local tmp_file install_dir
   step "Downloading PortHub CLI from server"
@@ -244,7 +245,7 @@ main() {
   fi
   $SUDO mkdir -p "$install_dir"
   tmp_file="$(mktemp)"
-  curl --fail --show-error --location "$PORT_HUB_CLI_URL" -o "$tmp_file"
+  curl --connect-timeout 10 --max-time 300 --fail --show-error --location "$PORT_HUB_CLI_URL" -o "$tmp_file"
   $SUDO install -m 755 "$tmp_file" "$PORT_HUB_INSTALL_PATH"
   rm -f "$tmp_file"
   "$PORT_HUB_INSTALL_PATH" help >/dev/null

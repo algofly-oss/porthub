@@ -558,15 +558,15 @@ func (r *Runtime) startNames(tun Device, self netip.Addr, s policy.Snapshot) {
 		log.Printf("private names unavailable (use addresses): %v", err)
 		return
 	}
-	if err = names.RegisterLink(link.Index(), self, domain); err != nil {
-		log.Printf("private names unavailable; systemd-resolved did not accept the link (use addresses): %v", err)
+	if err = names.RegisterLink(link.Index(), server.Address(), domain); err != nil {
+		log.Printf("private names unavailable; OS resolver registration failed (use addresses): %v", err)
 		server.Close()
 		return
 	}
 	r.mu.Lock()
 	r.names, r.ifindex, r.domain = server, link.Index(), domain
 	r.mu.Unlock()
-	log.Printf("private names *.%s resolved on %s; other DNS unchanged", domain, self)
+	log.Printf("private names *.%s resolved on %s; other DNS unchanged", domain, server.Address())
 }
 func (r *Runtime) updateNames(s policy.Snapshot) {
 	r.mu.Lock()
@@ -577,7 +577,7 @@ func (r *Runtime) updateNames(s policy.Snapshot) {
 	}
 	// The workspace may rename its suffix; re-route the new one only.
 	if domain := suffix(s); domain != "" && domain != previous {
-		if err := names.RegisterLink(ifindex, r.selfIP, domain); err != nil {
+		if err := names.RegisterLink(ifindex, server.Address(), domain); err != nil {
 			log.Printf("private names: could not switch to *.%s: %v", domain, err)
 		} else {
 			r.mu.Lock()

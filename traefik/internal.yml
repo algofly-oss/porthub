@@ -16,7 +16,7 @@ http:
       tls: {}
     porthub_internal_api:
       entryPoints: ["porthub"]
-      rule: "PathPrefix(`/api`) || PathPrefix(`/socket.io`)"
+      rule: "PathPrefix(`/api`) || PathPrefix(`/socket.io`) || PathPrefix(`/install/`)"
       priority: 100
       service: porthub_internal_api
     porthub_internal_ui:
@@ -26,7 +26,7 @@ http:
       service: porthub_internal_ui
     porthub_internal_api_tls:
       entryPoints: ["porthubsecure"]
-      rule: "PathPrefix(`/api`) || PathPrefix(`/socket.io`)"
+      rule: "PathPrefix(`/api`) || PathPrefix(`/socket.io`) || PathPrefix(`/install/`)"
       priority: 100
       service: porthub_internal_api
       tls: {}
