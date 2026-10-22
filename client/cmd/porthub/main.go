@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 	"github.com/algofly-oss/porthub/client/internal/agent"
 	"github.com/algofly-oss/porthub/client/internal/download"
 	"github.com/algofly-oss/porthub/client/internal/fileserver"
+	"github.com/algofly-oss/porthub/client/internal/relay"
 	"github.com/algofly-oss/porthub/client/internal/tunnel"
 )
 
@@ -28,6 +30,7 @@ const usage = `usage: porthub <command>
   http.server stop [PORT|--all]                stop servers from any terminal
   http.server list                             list running servers
   tunnel --config client.toml                  public port tunnels (rathole protocol)
+  relay-server [--listen ADDR]                 gateway relay (PORTHUB_RELAY_SECRET)
   get <http(s)-url>                            parallel, resumable download
   enroll --server URL --profile FILE           private network enrollment
   run --profile FILE                           run the private network client
@@ -159,6 +162,29 @@ func run() error {
 	switch os.Args[1] {
 	case "http.server", "http-server":
 		return httpServer(ctx, os.Args[2:])
+	case "relay-server":
+		// Gateway side of the private-network relay; reached through the
+		// PortHub web address (see internal/relay). Secret from the env only.
+		flags := flag.NewFlagSet("relay-server", flag.ContinueOnError)
+		listen := flags.String("listen", "127.0.0.1:8091", "HTTP listen address for the relay WebSocket")
+		maxConnections := flags.Int("max-connections", 1024, "concurrent relay connections")
+		if err := flags.Parse(os.Args[2:]); err != nil {
+			return err
+		}
+		server, err := relay.NewServer(os.Getenv("PORTHUB_RELAY_SECRET"), *maxConnections)
+		if err != nil {
+			return err
+		}
+		defer server.Close()
+		mux := http.NewServeMux()
+		mux.Handle(relay.Path, server)
+		httpServer := &http.Server{Addr: *listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+		go func() { <-ctx.Done(); _ = httpServer.Close() }()
+		log.Printf("private relay listening on %s%s", *listen, relay.Path)
+		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
 	case "tunnel":
 		flags := flag.NewFlagSet("tunnel", flag.ContinueOnError)
 		config := flags.String("config", "", "rathole-format client TOML")

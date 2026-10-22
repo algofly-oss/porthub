@@ -26,6 +26,18 @@ token = "${RATHOLE_DUMMY_SERVICE_TOKEN}"
 bind_addr = "${RATHOLE_DUMMY_SERVICE_BIND_ADDR}"
 EOF
 
+# Private-network relay (WebSocket TURN) beside the API; restarted if it
+# exits. Enabled only when a relay secret is configured.
+if [ -n "${PORTHUB_RELAY_SECRET:-}" ] && command -v porthub >/dev/null 2>&1; then
+    (
+        while true; do
+            porthub relay-server --listen 0.0.0.0:8091 || true
+            echo "PortHub relay exited; restarting in 2s" >&2
+            sleep 2
+        done
+    ) &
+fi
+
 if [ "${API_DEBUG:-False}" = "True" ]; then
     echo "Running Development Server"
     exec uvicorn main:app --reload --host 0.0.0.0 --port 8080

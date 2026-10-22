@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/pion/webrtc/v4"
+	"golang.org/x/net/proxy"
 )
 
 const MaxPacket = 1200
@@ -68,7 +69,22 @@ func Fingerprint(c *webrtc.Certificate) (string, error) {
 	return "", errors.New("SHA-256 certificate fingerprint missing")
 }
 
-func New(cert *webrtc.Certificate, servers []webrtc.ICEServer, loopback bool, onPacket func([]byte)) (*Peer, error) {
+// Option adjusts how a peer connection reaches its peer.
+type Option func(*webrtc.SettingEngine, *webrtc.Configuration)
+
+// WithRelay sends TURN-over-TCP connections through d (the gateway relay).
+func WithRelay(d proxy.Dialer) Option {
+	return func(s *webrtc.SettingEngine, _ *webrtc.Configuration) { s.SetICEProxyDialer(d) }
+}
+
+// RelayOnly forces the relay path (used to test and to measure it).
+func RelayOnly() Option {
+	return func(_ *webrtc.SettingEngine, c *webrtc.Configuration) {
+		c.ICETransportPolicy = webrtc.ICETransportPolicyRelay
+	}
+}
+
+func New(cert *webrtc.Certificate, servers []webrtc.ICEServer, loopback bool, onPacket func([]byte), options ...Option) (*Peer, error) {
 	if cert == nil || onPacket == nil {
 		return nil, errors.New("certificate and packet receiver required")
 	}
@@ -80,8 +96,12 @@ func New(cert *webrtc.Certificate, servers []webrtc.ICEServer, loopback bool, on
 	settings.SetInterfaceFilter(func(name string) bool { return !privateInterface.MatchString(name) })
 	settings.SetICETimeouts(5*time.Second, 12*time.Second, 2*time.Second)
 	settings.SetSCTPMaxMessageSize(MaxPacket)
+	config := webrtc.Configuration{ICEServers: servers, Certificates: []webrtc.Certificate{*cert}}
+	for _, option := range options {
+		option(&settings, &config)
+	}
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(settings))
-	pc, err := api.NewPeerConnection(webrtc.Configuration{ICEServers: servers, Certificates: []webrtc.Certificate{*cert}})
+	pc, err := api.NewPeerConnection(config)
 	if err != nil {
 		return nil, err
 	}

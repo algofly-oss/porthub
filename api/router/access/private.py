@@ -4,8 +4,12 @@ All writes are limited to private_* collections. Existing enrollment tokens,
 public ports, Rathole configuration and proxies are deliberately untouched.
 """
 
+import base64
+import hashlib
+import hmac
 import json
 import os
+import time
 import re
 import secrets
 from datetime import timedelta, timezone
@@ -29,7 +33,21 @@ router = APIRouter(prefix="/private", tags=["Private peers"])
 LEASE_SECONDS = 15
 
 
-def ice_servers():
+RELAY_URL = "turn:relay.porthub.invalid:443?transport=tcp"  # host unused: agents dial the relay WebSocket
+RELAY_CREDENTIAL_SECONDS = 12 * 3600
+
+
+def relay_server(peer_id):
+    """Time-limited TURN REST credential for the gateway relay, if enabled."""
+    secret = os.environ.get("PORTHUB_RELAY_SECRET", "")
+    if len(secret) < 32:
+        return None
+    username = f"{int(time.time()) + RELAY_CREDENTIAL_SECONDS}:{peer_id}"
+    password = base64.b64encode(hmac.new(secret.encode(), username.encode(), hashlib.sha1).digest()).decode()
+    return {"urls": [RELAY_URL], "username": username, "credential": password}
+
+
+def ice_servers(peer_id=None):
     """STUN/TURN servers for peer connectivity, from PORTHUB_PRIVATE_ICE_SERVERS.
 
     JSON list in WebRTC form, e.g. [{"urls": ["stun:stun.example.org:3478"]}].
@@ -39,11 +57,13 @@ def ice_servers():
     try:
         servers = json.loads(os.environ.get("PORTHUB_PRIVATE_ICE_SERVERS", "[]"))
     except ValueError:
-        return []
+        servers = []
     if not isinstance(servers, list):
-        return []
-    return [s for s in servers if isinstance(s, dict) and isinstance(s.get("urls"), list)
-            and all(isinstance(u, str) and u.split(":", 1)[0] in {"stun", "turn", "turns"} for u in s["urls"])]
+        servers = []
+    servers = [s for s in servers if isinstance(s, dict) and isinstance(s.get("urls"), list)
+               and all(isinstance(u, str) and u.split(":", 1)[0] in {"stun", "turn", "turns"} for u in s["urls"])]
+    relay = relay_server(peer_id) if peer_id else None
+    return servers + ([relay] if relay else [])
 
 
 async def browser_context(request, manage=False):
@@ -345,4 +365,4 @@ async def sync(data: ClientSync, response: Response):
                    "instance": p.get("instance", ""), "hostname": f"{labels[p['_id']]}.{preferences.dns_suffix}"} for p in peer_by_id.values()],
         "grants": grants,
     }, "signals": [{"id": s["_id"], "from": s["from"], "session": s["session"], "description": s["description"]} for s in incoming],
-        "ice_servers": ice_servers(), "poll_seconds": 1}
+        "ice_servers": ice_servers(data.peer_id), "poll_seconds": 1}

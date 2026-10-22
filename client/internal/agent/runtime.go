@@ -18,6 +18,7 @@ import (
 	"github.com/algofly-oss/porthub/client/internal/mesh"
 	"github.com/algofly-oss/porthub/client/internal/names"
 	"github.com/algofly-oss/porthub/client/internal/policy"
+	"github.com/algofly-oss/porthub/client/internal/relay"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -51,6 +52,7 @@ type Runtime struct {
 	fingerprint, instance string
 	open                  func(name string, self netip.Addr, routes []netip.Addr) (Device, error)
 	loopback              bool
+	meshOptions           []mesh.Option // tests only
 	mu                    sync.Mutex
 	tun                   Device
 	selfIP                netip.Addr
@@ -358,6 +360,22 @@ func (r *Runtime) handleSignal(ctx context.Context, self string, signal Signal, 
 	}
 	return nil
 }
+
+// relayOptions routes TURN-over-TCP through the gateway's WebSocket relay on
+// the same address the agent syncs with (no extra port; CDN friendly).
+func (r *Runtime) relayOptions(servers []webrtc.ICEServer) []mesh.Option {
+	for _, server := range servers {
+		for _, u := range server.URLs {
+			if strings.HasPrefix(u, "turn:") {
+				if endpoint, err := relay.URLFor(r.config.Server); err == nil {
+					return append(r.meshOptions, mesh.WithRelay(relay.Dialer{URL: endpoint}))
+				}
+			}
+		}
+	}
+	return r.meshOptions
+}
+
 func (r *Runtime) newPeer(info policy.Peer, servers []webrtc.ICEServer) (*peerSession, error) {
 	p, err := mesh.New(r.cert, servers, r.loopback, func(packet []byte) {
 		if !r.engine.Check(packet, info.ID, true) {
@@ -369,7 +387,7 @@ func (r *Runtime) newPeer(info policy.Peer, servers []webrtc.ICEServer) (*peerSe
 		if tun != nil {
 			_, _ = tun.Write(packet)
 		}
-	})
+	}, r.relayOptions(servers)...)
 	if err != nil {
 		return nil, err
 	}
