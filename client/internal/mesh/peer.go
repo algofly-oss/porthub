@@ -20,7 +20,18 @@ import (
 
 const MaxPacket = 1200
 
+const (
+	maxBuffered      = 4 << 20
+	sctpReceiveBytes = 8 << 20
+	sctpMinCwnd      = 256 << 10
+	sctpCwndStep     = 64 << 10
+)
+
 var privateInterface = regexp.MustCompile(`^ph[a-f0-9]{8}$`)
+
+// Container and VM bridges only reach this host's own guests: never useful
+// to another machine, and each one slows candidate gathering.
+var hostOnlyInterface = regexp.MustCompile(`^(docker\d*|br-[0-9a-f]+|veth.*|virbr\d*|cni\d*|flannel.*|cali.*|lxcbr\d*|lxdbr\d*)$`)
 
 var ErrNotReady = errors.New("private peer is not connected")
 
@@ -93,9 +104,17 @@ func New(cert *webrtc.Certificate, servers []webrtc.ICEServer, loopback bool, on
 	settings.SetIncludeLoopbackCandidate(loopback)
 	// Never gather candidates on PortHub's own private interfaces: a peer
 	// connection carried inside the overlay it provides would recurse.
-	settings.SetInterfaceFilter(func(name string) bool { return !privateInterface.MatchString(name) })
+	settings.SetInterfaceFilter(func(name string) bool {
+		return !privateInterface.MatchString(name) && !hostOnlyInterface.MatchString(name)
+	})
 	settings.SetICETimeouts(5*time.Second, 12*time.Second, 2*time.Second)
 	settings.SetSCTPMaxMessageSize(MaxPacket)
+	settings.SetSCTPMaxReceiveBufferSize(sctpReceiveBytes)
+	// Pion starts SCTP with a tiny congestion window that grows slowly; on a
+	// ~100 ms relay or internet path that alone caps throughput. The tunnel
+	// carries TCP flows with their own congestion control, so start wide.
+	settings.SetSCTPMinCwnd(sctpMinCwnd)
+	settings.SetSCTPCwndCAStep(sctpCwndStep)
 	config := webrtc.Configuration{ICEServers: servers, Certificates: []webrtc.Certificate{*cert}}
 	for _, option := range options {
 		option(&settings, &config)
@@ -235,7 +254,9 @@ func (p *Peer) Send(b []byte) error {
 	if dc == nil || dc.ReadyState() != webrtc.DataChannelStateOpen {
 		return ErrNotReady
 	}
-	if dc.BufferedAmount() > 256*1024 {
+	// Enough in flight to fill a ~100 ms internet or relay path at hundreds
+	// of Mbit/s; beyond this, drop so TCP inside the tunnel backs off.
+	if dc.BufferedAmount() > maxBuffered {
 		return errors.New("private peer congested")
 	}
 	return dc.Send(b)

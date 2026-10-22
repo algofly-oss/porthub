@@ -30,8 +30,12 @@ type Device interface {
 }
 
 // A negotiation that has not opened its data channel within this window is
-// restarted. ICE itself gives up after 12 seconds without connectivity.
-const negotiationTimeout = 25 * time.Second
+// restarted (gathering may take up to gatherTimeout on each side).
+const negotiationTimeout = 40 * time.Second
+
+// gatherTimeout bounds candidate gathering (STUN and relay allocation)
+// before an offer or answer is sent.
+const gatherTimeout = 20 * time.Second
 
 // peerSession fields other than info and peer are guarded by Runtime.mu.
 type peerSession struct {
@@ -394,16 +398,17 @@ func (r *Runtime) newPeer(info policy.Peer, servers []webrtc.ICEServer) (*peerSe
 	return &peerSession{info: info, peer: p, started: time.Now()}, nil
 }
 func (r *Runtime) makeOffer(ctx context.Context, id string, current *peerSession, session string) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, gatherTimeout)
 	defer cancel()
 	description, err := current.peer.Offer(ctx)
 	if err != nil {
+		log.Printf("private offer to %s not sent: %v", id, err)
 		return
 	}
 	r.queue(id, current, Signal{To: id, Session: session, Description: description})
 }
 func (r *Runtime) makeAnswer(ctx context.Context, id string, current *peerSession, session string, offer webrtc.SessionDescription) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, gatherTimeout)
 	defer cancel()
 	description, err := current.peer.Answer(ctx, offer, current.info.Fingerprint)
 	if err != nil {
