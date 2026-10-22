@@ -10,11 +10,13 @@ import (
 	"io"
 	"log"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/algofly-oss/porthub/client/internal/device"
 	"github.com/algofly-oss/porthub/client/internal/mesh"
+	"github.com/algofly-oss/porthub/client/internal/names"
 	"github.com/algofly-oss/porthub/client/internal/policy"
 	"github.com/pion/webrtc/v4"
 )
@@ -60,6 +62,9 @@ type Runtime struct {
 	seen                  map[string]time.Time
 	err                   chan error
 	wake                  chan struct{}
+	names                 *names.Server
+	ifindex               int
+	domain                string
 }
 
 func randomID() (string, error) {
@@ -227,6 +232,7 @@ func (r *Runtime) configure(ctx context.Context, response syncResponse) error {
 		r.mu.Unlock()
 		log.Printf("private interface %s ready at %s; no default route or public mappings changed", name, self)
 		go r.readPackets(ctx, tun)
+		r.startNames(tun, self, s)
 	} else {
 		if self != oldIP {
 			return errors.New("private address changed; restart the private client to reconfigure safely")
@@ -235,6 +241,7 @@ func (r *Runtime) configure(ctx context.Context, response syncResponse) error {
 			return err
 		}
 	}
+	r.updateNames(s)
 	var closePeers []*mesh.Peer
 	r.mu.Lock()
 	r.byIP = make(map[netip.Addr]string)
@@ -432,8 +439,80 @@ func (r *Runtime) readPackets(ctx context.Context, tun Device) {
 		}
 	}
 }
+
+// suffix is the private DNS domain: everything after the first label of the
+// controller-assigned hostname of this machine.
+func suffix(s policy.Snapshot) string {
+	for _, p := range s.Peers {
+		if p.ID == s.Self {
+			if _, rest, ok := strings.Cut(p.Hostname, "."); ok {
+				return rest
+			}
+		}
+	}
+	return ""
+}
+
+// startNames serves private peer names on the interface address and routes
+// only the private suffix there. Failure leaves IP access fully working.
+func (r *Runtime) startNames(tun Device, self netip.Addr, s policy.Snapshot) {
+	link, ok := tun.(interface{ Index() int })
+	domain := suffix(s)
+	if !ok || domain == "" {
+		return
+	}
+	server, err := names.Listen(netip.AddrPortFrom(self, 53))
+	if err != nil {
+		log.Printf("private names unavailable (use addresses): %v", err)
+		return
+	}
+	if err = names.RegisterLink(link.Index(), self, domain); err != nil {
+		log.Printf("private names unavailable; systemd-resolved did not accept the link (use addresses): %v", err)
+		server.Close()
+		return
+	}
+	r.mu.Lock()
+	r.names, r.ifindex, r.domain = server, link.Index(), domain
+	r.mu.Unlock()
+	log.Printf("private names *.%s resolved on %s; other DNS unchanged", domain, self)
+}
+func (r *Runtime) updateNames(s policy.Snapshot) {
+	r.mu.Lock()
+	server, ifindex, previous := r.names, r.ifindex, r.domain
+	r.mu.Unlock()
+	if server == nil {
+		return
+	}
+	// The workspace may rename its suffix; re-route the new one only.
+	if domain := suffix(s); domain != "" && domain != previous {
+		if err := names.RegisterLink(ifindex, r.selfIP, domain); err != nil {
+			log.Printf("private names: could not switch to *.%s: %v", domain, err)
+		} else {
+			r.mu.Lock()
+			r.domain = domain
+			r.mu.Unlock()
+			log.Printf("private names now *.%s", domain)
+		}
+	}
+	records := make(map[string]netip.Addr)
+	for _, p := range s.Peers {
+		if p.Hostname != "" {
+			records[p.Hostname] = netip.MustParseAddr(p.IP)
+		}
+	}
+	server.Update(suffix(s), records)
+}
+
 func (r *Runtime) close() {
 	r.engine.Revoke()
+	r.mu.Lock()
+	server, ifindex := r.names, r.ifindex
+	r.names = nil
+	r.mu.Unlock()
+	if server != nil {
+		names.Unregister(ifindex)
+		server.Close()
+	}
 	r.mu.Lock()
 	tun := r.tun
 	peers := r.peers

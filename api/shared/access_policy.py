@@ -84,9 +84,12 @@ class RuleBook(BaseModel):
         return rules
 
 
+SINGLE_LABEL_SUFFIXES = {"phub", "internal"}
+
+
 class NetworkPreferences(BaseModel):
     cidr: str = "10.203.0.0/24"
-    dns_suffix: str = Field("ph.io", min_length=3, max_length=120)
+    dns_suffix: str = Field("phub", min_length=3, max_length=120)
 
     @validator("cidr")
     def private_ipv4(cls, value):
@@ -109,11 +112,15 @@ class NetworkPreferences(BaseModel):
     @validator("dns_suffix")
     def valid_suffix(cls, value):
         value = value.strip().lower().rstrip(".")
-        if "." not in value or any(
+        # A single label would capture a whole top-level domain on every
+        # enrolled machine (e.g. "com"), so only private-use labels qualify.
+        if "." not in value and value not in SINGLE_LABEL_SUFFIXES:
+            raise ValueError("Use phub, internal, or a full domain you own such as lan.example.com")
+        if any(
             not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", part)
             for part in value.split(".")
         ):
-            raise ValueError("Enter a domain suffix such as ph.io")
+            raise ValueError("Enter a domain suffix such as phub")
         if value in {"localhost", "local"} or value.endswith((".localhost", ".local")):
             raise ValueError("This suffix is reserved for local OS networking")
         return value

@@ -59,7 +59,7 @@ export default function NetworkSettings({ data, manage, params, onSaved }) {
             disabled={!manage}
           />
           <span className="mt-2 block text-xs font-normal leading-5 text-muted-foreground">
-            Example: luna.{form.dns_suffix || "ph.io"}. Only exact registered
+            Example: luna.{form.dns_suffix || "phub"}. Only exact registered
             names resolve privately. Unknown names keep normal DNS; known
             offline names never fall back publicly.
           </span>

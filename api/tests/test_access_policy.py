@@ -172,6 +172,11 @@ class AccessPolicyTest(unittest.TestCase):
             with self.assertRaises(ValidationError):
                 NetworkPreferences(cidr=cidr)
         self.assertEqual(NetworkPreferences(dns_suffix=" PH.IO. ").dns_suffix, "ph.io")
+        self.assertEqual(NetworkPreferences().dns_suffix, "phub")
+        self.assertEqual(NetworkPreferences(dns_suffix="Internal").dns_suffix, "internal")
+        for top_level in ("com", "io", "dev"):
+            with self.assertRaises(ValueError):
+                NetworkPreferences(dns_suffix=top_level)
         for suffix in [
             "localhost",
             "ph.local",

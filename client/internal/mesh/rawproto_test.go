@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/pion/dtls/v3"
-	dtlsnet "github.com/pion/dtls/v3/pkg/net"
 	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
+	dtlsnet "github.com/pion/dtls/v3/pkg/net"
 	"github.com/pion/ice/v4"
 )
 
@@ -62,8 +62,22 @@ func TestRawDTLSOverICEThroughput(t *testing.T) {
 	pinA, pinB := sha256.Sum256(ca.Certificate[0]), sha256.Sum256(cb.Certificate[0])
 	var ia, ib net.Conn
 	wg.Add(2)
-	go func() { defer wg.Done(); c, err := a.Dial(ctx, ub, pb); if err != nil { t.Error(err) }; ia = c }()
-	go func() { defer wg.Done(); c, err := b.Accept(ctx, ua, pa); if err != nil { t.Error(err) }; ib = c }()
+	go func() {
+		defer wg.Done()
+		c, err := a.Dial(ctx, ub, pb)
+		if err != nil {
+			t.Error(err)
+		}
+		ia = c
+	}()
+	go func() {
+		defer wg.Done()
+		c, err := b.Accept(ctx, ua, pa)
+		if err != nil {
+			t.Error(err)
+		}
+		ib = c
+	}()
 	wg.Wait()
 	var da, db *dtls.Conn
 	wg.Add(2)

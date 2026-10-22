@@ -80,6 +80,10 @@ func Open(name string, self netip.Addr, peers []netip.Addr) (*TUN, error) {
 	}
 	return device, nil
 }
+
+// Index is the kernel interface index (used for per-link DNS registration).
+func (t *TUN) Index() int { return t.link.Attrs().Index }
+
 func hostNet(a netip.Addr) *net.IPNet {
 	return &net.IPNet{IP: net.IP(a.AsSlice()), Mask: net.CIDRMask(32, 32)}
 }

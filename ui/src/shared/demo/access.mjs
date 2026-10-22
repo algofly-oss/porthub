@@ -68,7 +68,7 @@ function sampleAccess(state) {
         expires_at: new Date(Date.now() + 3 * 86400000).toISOString(),
       },
     ],
-    network: { cidr: "10.203.0.0/24", dns_suffix: "ph.io" },
+    network: { cidr: "10.203.0.0/24", dns_suffix: "phub" },
   };
 }
 export function demoAccess(state, method, path, body, id) {

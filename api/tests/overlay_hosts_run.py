@@ -34,8 +34,14 @@ CONTROLLER = lab_run.CONTROLLER
 MIRO, URM2 = "miro", "urm2"
 REMOTE_DIR = "porthub-overlay-test"  # under the remote user's home
 TUNNEL_PORT = 18089
+HP = int(os.environ.get("PORTHUB_LAB_HTTP_PORT", "18080"))  # test service port on b
 STUN = [{"urls": ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"]}]
 PASSWORD = os.environ.get("PORTHUB_TEST_SUDO_PASSWORD", "")
+PASSWORD_B = os.environ.get("PORTHUB_TEST_SUDO_PASSWORD_B", PASSWORD)  # remote b, if different
+
+
+def password(where):
+    return (PASSWORD if where == "luna" else PASSWORD_B) + "\n"
 background, cleanups = [], []
 
 
@@ -47,7 +53,9 @@ def run(cmd, input=None, timeout=120, check=False):
 
 
 def ssh(host, script, input=None, timeout=120, check=False):
-    return run(["ssh", "-o", "BatchMode=yes", host, script], input=input, timeout=timeout, check=check)
+    # Password hosts authenticate through SSH_ASKPASS (value from the environment).
+    batch = [] if os.environ.get("SSH_ASKPASS") else ["-o", "BatchMode=yes"]
+    return run(["ssh", *batch, host, script], input=input, timeout=timeout, check=check)
 
 
 def local(script, input=None, timeout=120, check=False):
@@ -58,14 +66,14 @@ def sudo_bg(where, command):
     """Start command as root in the background; the password goes to stdin."""
     # Output is detached: a backgrounded child holding our pipes would hang us.
     script = f"sudo -S -p '' -b sh -c {shlex.quote(command)} >/dev/null 2>&1"
-    r = (local(script, input=PASSWORD + "\n") if where == "luna" else ssh(where, script, input=PASSWORD + "\n"))
+    r = (local(script, input=password(where)) if where == "luna" else ssh(where, script, input=password(where)))
     if r.returncode:
         raise RuntimeError(f"start on {where} failed: {r.stderr.strip()[-300:]}")
 
 
 def sudo(where, command):
     script = f"sudo -S -p '' sh -c {shlex.quote(command)}"
-    return local(script, input=PASSWORD + "\n") if where == "luna" else ssh(where, script, input=PASSWORD + "\n")
+    return local(script, input=password(where)) if where == "luna" else ssh(where, script, input=password(where))
 
 
 def pattern(text):
@@ -98,7 +106,8 @@ def start_controller(scratch):
 
 
 def reverse_tunnel(host, port, bind="127.0.0.1"):
-    p = subprocess.Popen(["ssh", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-N",
+    batch = [] if os.environ.get("SSH_ASKPASS") else ["-o", "BatchMode=yes"]
+    p = subprocess.Popen(["ssh", *batch, "-o", "ExitOnForwardFailure=yes", "-N",
                           "-R", f"{bind}:{TUNNEL_PORT}:127.0.0.1:{port}", host],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     background.append(p)
@@ -139,7 +148,11 @@ def mbit(parts):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--with-urm2", action="store_true")
+    parser.add_argument("--b-host", default="miro", help="ssh alias of machine b")
+    parser.add_argument("--b-lan-ip", default="192.168.0.166", help="b's LAN IP for baselines; empty if not on Luna's LAN")
     args = parser.parse_args()
+    global MIRO
+    MIRO = args.b_host
     if not PASSWORD:
         raise SystemExit("PORTHUB_TEST_SUDO_PASSWORD is required")
     scratch = tempfile.mkdtemp(prefix="porthub-hosts-")
@@ -163,7 +176,7 @@ def main():
         cleanups.append(lambda: ssh(MIRO, f"pkill -f {pattern(REMOTE_DIR + '/service.py')}; rm -rf ~/{REMOTE_DIR}"))
         run(["scp", "-q", binary, f"{MIRO}:{REMOTE_DIR}/porthub"], check=True)
         run(["scp", "-q", f"{ROOT}/api/tests/overlay_lab_service.py", f"{MIRO}:{REMOTE_DIR}/service.py"], check=True)
-        ssh(MIRO, f"nohup python3 $HOME/{REMOTE_DIR}/service.py </dev/null >$HOME/{REMOTE_DIR}/service.log 2>&1 &", check=True)
+        ssh(MIRO, f"PORTHUB_LAB_HTTP_PORT={HP} nohup python3 $HOME/{REMOTE_DIR}/service.py </dev/null >$HOME/{REMOTE_DIR}/service.log 2>&1 &", check=True)
         reverse_tunnel(MIRO, port)
         enroll(lab, "b", lambda t: ssh(MIRO, f"~/{REMOTE_DIR}/porthub enroll --server http://127.0.0.1:{TUNNEL_PORT} --profile ~/{REMOTE_DIR}/b.json --allow-insecure-http-for-tests", input=t))
         home = ssh(MIRO, "echo $HOME").stdout.strip()
@@ -204,21 +217,21 @@ def main():
         ip = {k: v["ip"] for k, v in p.items()}
         record("real hosts enrolled", True, " ".join(f"{k}={v}" for k, v in sorted(ip.items())))
 
-        ok, parts = curl("luna", f"http://{ip['b']}:18080/", 3)
+        ok, parts = curl("luna", f"http://{ip['b']}:{HP}/", 3)
         record("default deny Luna->Miro", not ok, " ".join(parts))
 
-        lab.policy(enabled=True, protocol="tcp", ports="18080")
+        lab.policy(enabled=True, protocol="tcp", ports=str(HP))
         began = time.time()
-        wait("Luna-Miro path", lambda: path(lab, "a", "b") in {"direct", "relay"}, timeout=45)
+        wait("Luna-b path", lambda: path(lab, "a", "b") in {"direct", "relay"}, timeout=60)
         record("Luna<->Miro connected", True, f"{path(lab, 'a', 'b')} after {time.time() - began:.1f}s")
-        ok, parts = wait("Luna->Miro HTTP", lambda: (lambda r: r if r[0] else None)(curl("luna", f"http://{ip['b']}:18080/")), timeout=20)
+        ok, parts = wait("Luna->Miro HTTP", lambda: (lambda r: r if r[0] else None)(curl("luna", f"http://{ip['b']}:{HP}/")), timeout=20)
         record("Luna host curl -> Miro private service", ok, " ".join(parts))
-        ok, parts = curl("luna", f"http://{ip['b']}:18081/", 3)
-        record("Miro tcp/18081 denied (service alive on LAN)", not ok and curl("luna", "http://192.168.0.166:18081/", 3)[0])
-        ok, _ = curl(MIRO, f"http://{ip['a']}:18080/", 3)
+        ok, parts = curl("luna", f"http://{ip['b']}:{HP + 1}/", 3)
+        record("b tcp/18081 denied", not ok and (not args.b_lan_ip or curl("luna", f"http://{args.b_lan_ip}:{HP + 1}/", 3)[0]))
+        ok, _ = curl(MIRO, f"http://{ip['a']}:{HP}/", 3)
         record("reverse Miro->Luna denied", not ok)
-        ok, overlay = curl("luna", f"http://{ip['b']}:18080/bulk", 120)
-        ok2, lan = curl("luna", "http://192.168.0.166:18080/bulk", 120)
+        ok, overlay = curl("luna", f"http://{ip['b']}:{HP}/bulk", 120)
+        ok2, lan = curl("luna", f"http://{args.b_lan_ip}:{HP}/bulk", 120) if args.b_lan_ip else (False, [])
         record("32 MiB Luna<-Miro over overlay", ok, f"overlay {mbit(overlay) if ok else '-'} vs plain LAN {mbit(lan) if ok2 else '-'}")
         record("icmp blocked by tcp-only policy", "100% packet loss" in local(f"ping -c 2 -W 1 {ip['b']}").stdout)
 
@@ -227,31 +240,31 @@ def main():
             try:
                 wait("Luna-urm2 path", lambda: path(lab, "a", "c") in {"direct", "relay"}, timeout=60)
                 record("Luna<->urm2 container connected across NAT", True, f"{path(lab, 'a', 'c')} after {time.time() - began:.1f}s")
-                ok, parts = wait("Luna->urm2", lambda: (lambda r: r if r[0] else None)(curl("luna", f"http://{ip['c']}:18080/")), timeout=20)
+                ok, parts = wait("Luna->urm2", lambda: (lambda r: r if r[0] else None)(curl("luna", f"http://{ip['c']}:{HP}/")), timeout=20)
                 record("Luna host curl -> urm2 private service", ok, " ".join(parts))
-                ok, parts = curl("luna", f"http://{ip['c']}:18080/bulk", 180)
+                ok, parts = curl("luna", f"http://{ip['c']}:{HP}/bulk", 180)
                 record("32 MiB Luna<-urm2 over overlay", ok, mbit(parts) if ok else " ".join(parts))
             except TimeoutError:
                 record("Luna<->urm2 container connected across NAT", False, f"path={path(lab, 'a', 'c')} (no relay implemented yet)")
-            ok, _ = curl(MIRO, f"http://{ip['c']}:18080/", 3)
+            ok, _ = curl(MIRO, f"http://{ip['c']}:{HP}/", 3)
             record("Miro->urm2 denied (no rule between destinations)", not ok)
 
         lab.policy(enabled=True, protocol="icmp", ports="")
         wait("icmp", lambda: " 0% packet loss" in local(f"ping -c 2 -W 1 {ip['b']}").stdout, timeout=30)
         rtt = local(f"ping -c 20 -i 0.2 -q {ip['b']} | tail -1").stdout.strip()
-        lan_rtt = local("ping -c 20 -i 0.2 -q 192.168.0.166 | tail -1").stdout.strip()
+        lan_rtt = local(f"ping -c 20 -i 0.2 -q {args.b_lan_ip} | tail -1").stdout.strip() if args.b_lan_ip else "-"
         record("icmp allowed by icmp policy", True, f"overlay {rtt} | LAN {lan_rtt}")
         lab.policy(enabled=False)
         wait("revocation", lambda: "100% packet loss" in local(f"ping -c 2 -W 1 {ip['b']}").stdout, timeout=30)
         record("policy removal revokes on real hosts", True)
 
-        lab.policy(enabled=True, protocol="tcp", ports="18080")
+        lab.policy(enabled=True, protocol="tcp", ports=str(HP))
         sudo(MIRO, f"pkill -TERM -f {pattern(REMOTE_DIR + '/porthub run')}")
         time.sleep(2)
         record("Miro interface removed on stop", "ph" not in ssh(MIRO, "ip -o link | awk -F': ' '{print $2}' | grep '^ph' || true").stdout)
         sudo_bg(MIRO, f"exec {home}/{REMOTE_DIR}/porthub run --profile {home}/{REMOTE_DIR}/b.json >>{home}/{REMOTE_DIR}/b.log 2>&1")
         began = time.time()
-        wait("reconnect", lambda: curl("luna", f"http://{ip['b']}:18080/", 3)[0], timeout=60)
+        wait("reconnect", lambda: curl("luna", f"http://{ip['b']}:{HP}/", 3)[0], timeout=60)
         record("Miro agent restart reconnects", True, f"{time.time() - began:.1f}s")
         state = lab.state()
         record("no public ports or proxies written", (state["public_ports"], state["public_proxies"]) == public_before)

@@ -40,8 +40,9 @@ def udp():
         sock.sendto(payload, address)
 
 
+HTTP_PORT = int(os.environ.get("PORTHUB_LAB_HTTP_PORT", "18080"))
 threading.Thread(target=udp, daemon=True).start()
-# 18081 stays reachable locally so a denied connection proves policy, not a
+# HTTP_PORT + 1 stays reachable locally so a denied connection proves policy, not a
 # missing service.
-threading.Thread(target=ThreadingHTTPServer(("0.0.0.0", 18081), Handler).serve_forever, daemon=True).start()
-ThreadingHTTPServer(("0.0.0.0", 18080), Handler).serve_forever()
+threading.Thread(target=ThreadingHTTPServer(("0.0.0.0", HTTP_PORT + 1), Handler).serve_forever, daemon=True).start()
+ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), Handler).serve_forever()
