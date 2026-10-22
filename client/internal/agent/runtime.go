@@ -441,9 +441,11 @@ func (r *Runtime) chooseRelayRoute(ctx context.Context, response syncResponse) {
 		changed := best != r.relayRoute
 		r.relayRoute, r.relayMeasured, r.measuring = best, measured, false
 		r.mu.Unlock()
+		state := "kept"
 		if changed {
-			log.Printf("relay route: %s (%s)", best, strings.Join(report, "; "))
+			state = "switched to"
 		}
+		log.Printf("relay route %s %s (%s)", state, best, strings.Join(report, "; "))
 	}()
 }
 
