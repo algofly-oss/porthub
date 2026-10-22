@@ -1,10 +1,9 @@
 from fastapi import APIRouter, Request, Response, HTTPException
-from shared.factory import db, redis
+from shared.factory import db
+from shared.sessions import session_user_id, start_session
 from shared.env import SESSION_COOKIE_NAME
 from .common import UserSigninDto
-from .session_utils import create_session_record
 import bcrypt
-import uuid
 
 router = APIRouter()
 
@@ -24,7 +23,7 @@ async def signin(user: UserSigninDto, request: Request, response: Response):
     """
 
     # Check if user is already logged in
-    if redis.get(request.cookies.get(SESSION_COOKIE_NAME, "")):
+    if await session_user_id(request.cookies.get(SESSION_COOKIE_NAME, "")):
         return {"msg": "success"}
 
     # Check if user exists
@@ -36,10 +35,7 @@ async def signin(user: UserSigninDto, request: Request, response: Response):
     # Check if password is correct
     if bcrypt.checkpw(user.password.encode("utf-8"), existing_user["password"]):
         # create a new session token
-        session_token = str(uuid.uuid4())
-        redis.set(session_token, str(existing_user.get("_id")))
-        await create_session_record(db, existing_user.get("_id"), session_token, request)
-        response.set_cookie(key=SESSION_COOKIE_NAME, value=session_token, httponly=True)
+        await start_session(existing_user.get("_id"), request, response)
         return {"msg": "success"}
 
     raise HTTPException(status_code=400, detail="incorrect password")

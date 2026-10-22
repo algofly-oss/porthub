@@ -23,8 +23,8 @@ class TelegramSettingsUpdate(BaseModel):
     digest_interval_hours: typing.Optional[int] = Field(None)
 
 
-def _user_object_id(request: Request) -> ObjectId:
-    user_id = authenticate_user(request)
+async def _user_object_id(request: Request) -> ObjectId:
+    user_id = await authenticate_user(request)
     if isinstance(user_id, bytes):
         user_id = user_id.decode("utf-8")
     return ObjectId(str(user_id))
@@ -53,7 +53,7 @@ def _serialize_telegram_settings(user: dict) -> dict:
 
 @router.get("/telegram")
 async def get_telegram_settings(request: Request):
-    user_object_id = _user_object_id(request)
+    user_object_id = await _user_object_id(request)
     user = await db.users.find_one({"_id": user_object_id})
     if not user:
         raise HTTPException(status_code=400, detail="User not logged in")
@@ -62,7 +62,7 @@ async def get_telegram_settings(request: Request):
 
 @router.patch("/telegram")
 async def update_telegram_settings(data: TelegramSettingsUpdate, request: Request):
-    user_object_id = _user_object_id(request)
+    user_object_id = await _user_object_id(request)
     user = await db.users.find_one({"_id": user_object_id})
     if not user:
         raise HTTPException(status_code=400, detail="User not logged in")
@@ -107,7 +107,7 @@ async def update_telegram_settings(data: TelegramSettingsUpdate, request: Reques
 
 @router.post("/telegram/test")
 async def send_test_telegram_message(request: Request):
-    user_object_id = _user_object_id(request)
+    user_object_id = await _user_object_id(request)
     user = await db.users.find_one({"_id": user_object_id})
     if not user:
         raise HTTPException(status_code=400, detail="User not logged in")

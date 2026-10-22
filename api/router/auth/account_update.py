@@ -49,7 +49,7 @@ class NavigationPreferences(BaseModel):
 
 @router.patch("/preferences")
 async def update_preferences(preferences: NavigationPreferences, request: Request):
-    user_id = _user_object_id(request)
+    user_id = await _user_object_id(request)
     result = await db.users.update_one(
         {"_id": user_id},
         {"$set": {"preferences.nav_collapsed": preferences.nav_collapsed}},
@@ -59,8 +59,8 @@ async def update_preferences(preferences: NavigationPreferences, request: Reques
     return {"nav_collapsed": preferences.nav_collapsed}
 
 
-def _user_object_id(request: Request):
-    user_id = authenticate_user(request)
+async def _user_object_id(request: Request):
+    user_id = await authenticate_user(request)
     if isinstance(user_id, bytes):
         user_id = user_id.decode("utf-8")
     return ObjectId(str(user_id))
@@ -122,7 +122,7 @@ def _normalize_profile_picture(payload: ProfilePicturePayload):
 
 @router.patch("/account")
 async def update_account(account: AccountUpdate, request: Request):
-    user_object_id = _user_object_id(request)
+    user_object_id = await _user_object_id(request)
     user = await db.users.find_one({"_id": user_object_id})
     if not user:
         raise HTTPException(status_code=400, detail="User not logged in")
@@ -180,7 +180,7 @@ async def update_account(account: AccountUpdate, request: Request):
 
 @router.patch("/password")
 async def update_account_password(password: PasswordUpdate, request: Request):
-    user_object_id = _user_object_id(request)
+    user_object_id = await _user_object_id(request)
     user = await db.users.find_one({"_id": user_object_id})
     if not user:
         raise HTTPException(status_code=400, detail="User not logged in")

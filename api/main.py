@@ -2,7 +2,7 @@ import logging
 import asyncio
 import socketio
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from router import admin, ping, auth, connections, groups, machines, traffic_routes, access
@@ -15,6 +15,8 @@ from shared.traffic_config import rebuild_traffic_config, write_base_traffic_con
 from shared.firewall_client import reconcile_firewall_state_from_db
 from shared.connection_refresh import monitor_connection_auto_refresh
 from shared.factory import db
+from shared.env import SESSION_COOKIE_NAME
+from shared.sessions import renew_if_due
 from shared.sockets import initialize_machine_status_cache, monitor_machine_statuses, sio
 from shared.telegram_alerts import mark_existing_offline_machines_alerted
 from shared.telegram_digest import monitor_offline_digest
@@ -180,6 +182,7 @@ async def reconcile_firewall_state_with_retries() -> None:
 
 async def ensure_machine_status_event_indexes() -> None:
     try:
+        await db.user_sessions.create_index("user_id")
         await db.machine_status_events.create_index(
             [("machine_id", 1), ("changed_at", -1)]
         )
@@ -304,6 +307,19 @@ fastapi_app.add_middleware(
     allow_headers=["*"],
     allow_credentials=True,
 )
+
+
+@fastapi_app.middleware("http")
+async def renew_browser_session(request: Request, call_next):
+    """Keep active sessions signed in: slide the expiry at most once a day."""
+    response = await call_next(request)
+    token = request.cookies.get(SESSION_COOKIE_NAME)
+    if token and response.status_code < 400:
+        try:
+            await renew_if_due(token, request, response)
+        except Exception:
+            logger.exception("Session renewal failed")
+    return response
 
 
 # Redirect root to docs

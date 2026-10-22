@@ -27,8 +27,8 @@ async def auth_settings():
 
 @router.put("/settings/password")
 async def update_password(data: UserPasswordUpdateDto, request: Request):
-    user_id = authenticate_user(request.cookies.get(SESSION_COOKIE_NAME))
-    user = await db.users.find_one({"_id": ObjectId(user_id.decode("utf-8"))})
+    user_id = await authenticate_user(request.cookies.get(SESSION_COOKIE_NAME))
+    user = await db.users.find_one({"_id": ObjectId(user_id)})
 
     if not user:
         raise HTTPException(status_code=400, detail="User not logged in")

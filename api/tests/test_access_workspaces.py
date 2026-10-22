@@ -356,9 +356,7 @@ class AccessWorkspaceTest(unittest.IsolatedAsyncioTestCase):
         )
         with patch.object(signup, "db", self.db), patch.object(
             signup, "SIGNUP_DISABLED", True
-        ), patch.object(signup, "redis", SimpleNamespace(set=Mock())), patch.object(
-            signup, "create_session_record", AsyncMock()
-        ):
+        ), patch.object(signup, "start_session", AsyncMock()):
             response = await signup.signup(data, request(), Response())
             self.assertEqual(response["workspace_id"], str(self.owner))
             created = await self.db.users.find_one({"username": "new@example.test"})

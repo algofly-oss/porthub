@@ -123,11 +123,10 @@ async def touch_session_record(db, session_token, request):
     return result.matched_count
 
 
-async def revoke_session_record(db, redis, session_token):
+async def revoke_session_record(db, session_token):
     if not session_token:
         return
 
-    redis.delete(session_token)
     await db.user_sessions.update_one(
         {"_id": session_token},
         {"$set": {"revoked_at": datetime.datetime.utcnow()}},

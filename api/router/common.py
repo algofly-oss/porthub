@@ -43,9 +43,9 @@ def parse_object_id(value: str, detail: str) -> ObjectId:
 
 
 async def get_authenticated_user(request: Request):
-    user_id = authenticate_user(request.cookies.get(SESSION_COOKIE_NAME))
+    user_id = await authenticate_user(request.cookies.get(SESSION_COOKIE_NAME))
     user = await db.users.find_one(
-        {"_id": parse_object_id(user_id.decode("utf-8"), "User not logged in")}
+        {"_id": parse_object_id(user_id, "User not logged in")}
     )
     if not user:
         raise HTTPException(status_code=400, detail="User not logged in")

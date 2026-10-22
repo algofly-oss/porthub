@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Request, Response, HTTPException
-from shared.factory import db, redis
+from shared.factory import db
 from shared.env import SESSION_COOKIE_NAME
 from bson import ObjectId
 from .account_update import serialize_user
@@ -17,7 +17,7 @@ router = APIRouter()
 @router.get("/me")
 async def account_info(request: Request, response: Response):
     # Check if user is logged in
-    user_id = authenticate_user(request.cookies.get(SESSION_COOKIE_NAME))
+    user_id = await authenticate_user(request.cookies.get(SESSION_COOKIE_NAME))
     user_id_string = user_id.decode("utf-8") if isinstance(user_id, bytes) else str(user_id)
     session_token = get_session_token(request, "")
     if await touch_session_record(db, session_token, request) == 0:
@@ -33,7 +33,7 @@ async def account_info(request: Request, response: Response):
 
 @router.get("/sessions")
 async def list_sessions(request: Request):
-    user_id = authenticate_user(request.cookies.get(SESSION_COOKIE_NAME))
+    user_id = await authenticate_user(request.cookies.get(SESSION_COOKIE_NAME))
     user_id_string = user_id.decode("utf-8") if isinstance(user_id, bytes) else str(user_id)
     session_token = get_session_token(request, "")
     if await touch_session_record(db, session_token, request) == 0:
@@ -60,7 +60,7 @@ async def list_sessions(request: Request):
 
 @router.delete("/sessions/{session_id}")
 async def revoke_session(session_id: str, request: Request, response: Response):
-    user_id = authenticate_user(request.cookies.get(SESSION_COOKIE_NAME))
+    user_id = await authenticate_user(request.cookies.get(SESSION_COOKIE_NAME))
     user_id_string = user_id.decode("utf-8") if isinstance(user_id, bytes) else str(user_id)
 
     session = await db.user_sessions.find_one(
@@ -73,7 +73,7 @@ async def revoke_session(session_id: str, request: Request, response: Response):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    await revoke_session_record(db, redis, session_id)
+    await revoke_session_record(db, session_id)
     if session_id == get_session_token(request, ""):
         response.delete_cookie(key=SESSION_COOKIE_NAME)
 

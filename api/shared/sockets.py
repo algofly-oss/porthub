@@ -14,7 +14,8 @@ from router.common import is_machine_online, serialize_machine
 from shared.machine_client import authenticate_machine, build_machine_config_bundle
 from shared.env import MACHINE_ONLINE_TTL_SECONDS
 from shared.env import SESSION_COOKIE_NAME
-from shared.factory import db, redis
+from shared.factory import db
+from shared.sessions import hold_lease, session_user_id
 from shared.telegram_alerts import process_machine_status_alert
 
 logger = logging.getLogger(__name__)
@@ -51,15 +52,8 @@ def _get_session_token(environ: dict[str, Any]) -> str | None:
     return match.group(1) if match else None
 
 
-def _get_user_id_from_session_token(session_token: str | None) -> str | None:
-    if not session_token:
-        return None
-
-    user_id = redis.get(session_token)
-    if not user_id:
-        return None
-
-    return user_id.decode()
+async def _get_user_id_from_session_token(session_token: str | None) -> str | None:
+    return await session_user_id(session_token)
 
 
 def _serialize_machine_status_payload(machine: dict) -> dict[str, Any]:
@@ -253,17 +247,11 @@ async def initialize_machine_status_cache() -> None:
         set_cached_machine_status(str(machine["_id"]), is_machine_online(machine))
 
 
-def hold_background_leadership() -> bool:
+async def hold_background_leadership() -> bool:
     """Every API worker runs the background monitors, but side effects that must
     happen once (status events, Telegram alerts) run only in the worker that
-    holds this Redis lease."""
-    if redis.set(_MONITOR_LEADER_KEY, _WORKER_ID, nx=True, ex=_MONITOR_LEADER_TTL_SECONDS):
-        return True
-    current_leader = redis.get(_MONITOR_LEADER_KEY)
-    if current_leader and current_leader.decode() == _WORKER_ID:
-        redis.expire(_MONITOR_LEADER_KEY, _MONITOR_LEADER_TTL_SECONDS)
-        return True
-    return False
+    holds this lease."""
+    return await hold_lease(_MONITOR_LEADER_KEY, _WORKER_ID, _MONITOR_LEADER_TTL_SECONDS)
 
 
 async def _sync_machine_status_events(machine: dict, *, is_online: bool) -> None:
@@ -308,7 +296,7 @@ async def monitor_machine_statuses(stop_event: asyncio.Event) -> None:
         _machine_status_cache.clear()
         _machine_status_cache.update(next_machine_status_cache)
 
-        if hold_background_leadership():
+        if await hold_background_leadership():
             now = datetime.utcnow()
             for machine in machines:
                 try:
@@ -330,7 +318,7 @@ async def monitor_machine_statuses(stop_event: asyncio.Event) -> None:
 
 @sio.event
 async def connect(sid, environ, auth):
-    user_id = _get_user_id_from_session_token(_get_session_token(environ))
+    user_id = await _get_user_id_from_session_token(_get_session_token(environ))
     if user_id:
         await sio.save_session(sid, {"user_id": user_id})
         await sio.enter_room(sid, user_id)

@@ -1,15 +1,6 @@
 import os
 import motor.motor_asyncio
-from redis import Redis
 from .env import *
-
-# Initialize Redis
-redis = Redis(
-    host=REDIS_HOST,
-    password=REDIS_PASSWORD,
-    port=REDIS_PORT,
-    db=0,
-)
 
 
 def get_db():

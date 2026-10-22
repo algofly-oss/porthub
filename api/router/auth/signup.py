@@ -1,13 +1,12 @@
 from fastapi import APIRouter, Request, Response, HTTPException
-from shared.factory import db, redis
+from shared.factory import db
+from shared.sessions import start_session
 from shared.env import SESSION_COOKIE_NAME, SIGNUP_DISABLED
 from .common import UserSignupDto
-from .session_utils import create_session_record
 from shared.workspaces import valid_invitation, accept_invitation
 import re
 import datetime
 import bcrypt
-import uuid
 
 
 router = APIRouter()
@@ -70,9 +69,6 @@ async def signup(user: UserSignupDto, request: Request, response: Response):
     user_id = str(user.get("_id"))
 
     # create a new session token
-    session_token = str(uuid.uuid4())
-    redis.set(session_token, user_id)
-    await create_session_record(db, user_id, session_token, request)
-    response.set_cookie(key=SESSION_COOKIE_NAME, value=session_token, httponly=True)
+    await start_session(user_id, request, response)
 
     return {"msg": "success", **({"workspace_id": workspace_id} if workspace_id else {})}
