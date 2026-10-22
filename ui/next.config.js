@@ -21,6 +21,8 @@ const withPWA = require("next-pwa")({
 
 module.exports = withPWA({
   reactStrictMode: true,
+  // Self-contained server with only the modules it uses (small image).
+  output: "standalone",
   distDir: process.env.NEXT_BUILD_DIR || ".next",
   async rewrites() {
     const backend = process.env.PORTHUB_DEV_BACKEND_URL;

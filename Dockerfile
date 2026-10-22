@@ -22,22 +22,26 @@ FROM traefik:v3.0 AS traefik
 FROM archef2000/rathole:latest AS rathole
 FROM node:19.8.1-slim AS node
 
-FROM python:3.10
-ENV DEBIAN_FRONTEND=noninteractive PYTHONDONTWRITEBYTECODE=1
-RUN apt-get update && apt-get install -y --no-install-recommends nftables libcurl4t64 ca-certificates && rm -rf /var/lib/apt/lists/*
+# Python packages built with the full toolchain, run on the slim image.
+FROM python:3.10 AS python
 COPY api/requirements.txt /tmp/req/api.txt
 COPY api/constraints.txt /tmp/req/constraints.txt
 COPY firewall/requirements.txt /tmp/req/firewall.txt
-RUN pip install --no-cache-dir -r /tmp/req/api.txt -r /tmp/req/firewall.txt -c /tmp/req/constraints.txt
+RUN python -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir -r /tmp/req/api.txt -r /tmp/req/firewall.txt -c /tmp/req/constraints.txt
+
+FROM python:3.10-slim
+ENV DEBIAN_FRONTEND=noninteractive PYTHONDONTWRITEBYTECODE=1 PATH=/opt/venv/bin:$PATH
+RUN apt-get update && apt-get install -y --no-install-recommends nftables libcurl4t64 ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=python /opt/venv /opt/venv
 COPY --from=porthub /out/porthub /usr/local/bin/porthub
 COPY --from=mongo /usr/bin/mongod /usr/bin/mongodump /usr/bin/mongorestore /usr/local/bin/
 COPY --from=traefik /usr/local/bin/traefik /usr/local/bin/traefik
 COPY --from=rathole /rathole /usr/local/bin/rathole
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
-COPY --from=ui /app/next.config.js /app/package.json /app/ui/
+# Next.js standalone server: only the traced modules, plus static assets.
+COPY --from=ui /app/.next/standalone /app/ui/
+COPY --from=ui /app/.next/static /app/ui/.next/static
 COPY --from=ui /app/public /app/ui/public
-COPY --from=ui /app/.next /app/ui/.next
-COPY --from=ui /app/node_modules /app/ui/node_modules
 COPY api/ /app/api/
 COPY firewall/ /app/firewall/
 COPY traefik/internal.yml /app/traefik/internal.yml
