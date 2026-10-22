@@ -1,4 +1,5 @@
 import asyncio
+import os
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -17,7 +18,7 @@ from shared.machine_client import (
     get_rathole_server_address,
 )
 from shared.env import PORT_HUB_SERVICE_DOMAIN
-from shared.rathole_release import get_cached_rathole_metadata, get_rathole_binary_path, normalize_target
+from shared.rathole_release import normalize_target
 from ..common import (
     get_authenticated_user,
     parse_object_id,
@@ -178,12 +179,20 @@ async def machine_cli_download(machine_id: str, token: str, request: Request):
     )
 
 
+CLIENT_BINARY_DIR = Path(os.environ.get("PORTHUB_CLIENT_BINARY_DIR", "/app/client-bin"))
+
+
 @router.get("/{machine_id}/{token}/downloads/rathole/{target}")
 async def machine_rathole_download(machine_id: str, token: str, target: str):
+    """The PortHub Go binary for the target. It replaces the Rathole client
+    (same `-c client.toml` usage) and provides http.server and get."""
     await authenticate_machine(machine_id, token)
     normalized_target = normalize_target(target)
-    asset_path = await asyncio.to_thread(get_rathole_binary_path, normalized_target)
-    metadata = get_cached_rathole_metadata(normalized_target) or {}
+    asset_path = CLIENT_BINARY_DIR / f"porthub-{normalized_target}"
+    if not asset_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Asset not found: porthub-{normalized_target}")
+    version_path = CLIENT_BINARY_DIR / f"porthub-{normalized_target}.version"
+    version = version_path.read_text().strip() if version_path.is_file() else ""
     return FileResponse(
         asset_path,
         media_type="application/octet-stream",
@@ -191,7 +200,7 @@ async def machine_rathole_download(machine_id: str, token: str, target: str):
         headers={
             "Cache-Control": "no-store",
             "X-PortHub-Rathole-Target": normalized_target,
-            "X-PortHub-Rathole-Release": metadata.get("tag_name", ""),
-            "X-PortHub-Rathole-Asset": metadata.get("asset_name", ""),
+            "X-PortHub-Rathole-Release": version,
+            "X-PortHub-Rathole-Asset": f"porthub-{normalized_target}",
         },
     )

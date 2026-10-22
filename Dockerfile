@@ -8,7 +8,18 @@ WORKDIR /src
 COPY client/go.mod client/go.sum ./
 RUN go mod download
 COPY client/ ./
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/porthub ./cmd/porthub
+ARG PORTHUB_VERSION=dev
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$PORTHUB_VERSION" -o /out/porthub ./cmd/porthub
+# Client binaries for every supported machine; machines download them in
+# place of Rathole (drop-in tunnel client, file server, downloader).
+RUN set -e; mkdir -p /out/client-bin; \
+    for t in x86_64,linux,amd64,0 arm64,linux,arm64,0 armv7,linux,arm,7 armhf,linux,arm,6 \
+             darwin_x86_64,darwin,amd64,0 darwin_arm64,darwin,arm64,0; do \
+      set -- $(echo "$t" | tr , ' '); \
+      CGO_ENABLED=0 GOOS=$2 GOARCH=$3 GOARM=$4 go build -trimpath -ldflags "-s -w -X main.version=$PORTHUB_VERSION" \
+        -o /out/client-bin/porthub-$1 ./cmd/porthub; \
+      echo "$PORTHUB_VERSION" > /out/client-bin/porthub-$1.version; \
+    done
 
 FROM golang:1.27 AS server
 WORKDIR /src
@@ -41,6 +52,7 @@ ENV DEBIAN_FRONTEND=noninteractive PYTHONDONTWRITEBYTECODE=1 PATH=/opt/venv/bin:
 RUN apt-get update && apt-get install -y --no-install-recommends nftables libcurl4t64 ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=python /opt/venv /opt/venv
 COPY --from=porthub /out/porthub /usr/local/bin/porthub
+COPY --from=porthub /out/client-bin /app/client-bin
 COPY --from=server /out/porthub-api /usr/local/bin/porthub-api
 COPY --from=mongo /usr/bin/mongod /usr/bin/mongodump /usr/bin/mongorestore /usr/local/bin/
 COPY --from=traefik /usr/local/bin/traefik /usr/local/bin/traefik

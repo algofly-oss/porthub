@@ -28,6 +28,7 @@ TARGET_ASSET_CANDIDATES = {
     "darwin_x86_64": [
         "rathole-x86_64-apple-darwin.zip",
     ],
+    "darwin_arm64": [],
     "arm64": [
         "rathole-aarch64-unknown-linux-musl.zip",
         "rathole-aarch64-unknown-linux-gnu.zip",
@@ -48,7 +49,6 @@ TARGET_ALIASES = {
     "aarch64": "arm64",
     "arm": "armhf",
     "darwin_amd64": "darwin_x86_64",
-    "darwin_arm64": "darwin_x86_64",
 }
 
 

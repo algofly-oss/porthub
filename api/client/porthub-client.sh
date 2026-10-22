@@ -1334,7 +1334,7 @@ select_rathole_url() {
     Linux:armv7l) printf "%s" "$PORT_HUB_RATHOLE_ARMV7_URL" ;;
     Linux:armv6l|Linux:armhf|Linux:arm) printf "%s" "$PORT_HUB_RATHOLE_ARMHF_URL" ;;
     Darwin:x86_64) printf "%s" "$PORT_HUB_RATHOLE_DARWIN_X86_64_URL" ;;
-    Darwin:arm64) printf "%s" "$PORT_HUB_RATHOLE_DARWIN_X86_64_URL" ;;
+    Darwin:arm64) printf "%s" "${PORT_HUB_RATHOLE_DARWIN_X86_64_URL/darwin_x86_64/darwin_arm64}" ;;
     *)
       fail "Unsupported platform: $os_name $arch"
       ;;
@@ -1342,15 +1342,12 @@ select_rathole_url() {
 }
 
 ensure_rosetta_if_needed() {
-  if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
-    if ! /usr/sbin/pkgutil --pkg-info com.apple.pkg.RosettaUpdateAuto >/dev/null 2>&1; then
-      fail "Apple Silicon macOS currently needs Rosetta 2 for Rathole. Install it with: softwareupdate --install-rosetta --agree-to-license"
-    fi
-  fi
+  # The PortHub binary is native on Apple Silicon; Rosetta is not needed.
+  return 0
 }
 
 install_rathole_cmd() {
-  step "Installing Rathole"
+  step "Installing the PortHub tunnel binary"
   detect_sudo
   resolve_selected_tenant_context
   load_env
@@ -1369,7 +1366,7 @@ install_rathole_cmd() {
   curl --fail --show-error --location "$download_url" -o "$tmp_file"
   ${SUDO:-} install -m 755 "$tmp_file" "$PORT_HUB_RATHOLE_BIN"
   rm -f "$tmp_file"
-  log "INFO" "Installed Rathole to $PORT_HUB_RATHOLE_BIN"
+  log "INFO" "Installed the PortHub tunnel binary to $PORT_HUB_RATHOLE_BIN"
 }
 
 fetch_config_cmd() {
@@ -2209,122 +2206,29 @@ logs_cmd() {
   fi
 }
 
+# The PortHub Go binary (installed as the shared "rathole" tunnel binary)
+# provides the file server and downloader; no lighttpd or aria2c needed.
+porthub_core_bin() {
+  local bin="${PORT_HUB_SHARED_BIN_DIR}/rathole"
+  if [ -x "$bin" ] && "$bin" -V 2>/dev/null | grep -q '^porthub '; then
+    printf "%s" "$bin"
+    return 0
+  fi
+  fail "The PortHub binary is not installed yet. Run 'porthub update' (or 'porthub install-rathole') first."
+}
+
 http_server_cmd() {
-  local port="8000"
-  local bind_address="0.0.0.0"
-  local document_root
-  local config_file
-  local -a positional_args=()
-
-  document_root="$(pwd -P)"
-
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      -h|--help)
-        http_server_usage
-        return 0
-        ;;
-      -p|--port)
-        [ "$#" -ge 2 ] || fail "Missing value for $1"
-        port="$2"
-        shift 2
-        ;;
-      --port=*)
-        port="${1#*=}"
-        shift
-        ;;
-      --path)
-        [ "$#" -ge 2 ] || fail "Missing value for --path"
-        document_root="$2"
-        shift 2
-        ;;
-      --path=*)
-        document_root="${1#*=}"
-        shift
-        ;;
-      --bind)
-        [ "$#" -ge 2 ] || fail "Missing value for --bind"
-        bind_address="$2"
-        shift 2
-        ;;
-      --bind=*)
-        bind_address="${1#*=}"
-        shift
-        ;;
-      --)
-        shift
-        while [ "$#" -gt 0 ]; do
-          positional_args+=("$1")
-          shift
-        done
-        ;;
-      -*)
-        fail "Unknown http.server option: $1"
-        ;;
-      *)
-        positional_args+=("$1")
-        shift
-        ;;
-    esac
-  done
-
-  case "${#positional_args[@]}" in
-    0) ;;
-    1)
-      if printf "%s" "${positional_args[0]}" | grep -Eq '^[0-9]+$'; then
-        port="${positional_args[0]}"
-      else
-        document_root="${positional_args[0]}"
-      fi
-      ;;
-    2)
-      port="${positional_args[0]}"
-      document_root="${positional_args[1]}"
-      ;;
-    *)
-      fail "Usage: porthub http.server [port] [path]"
-      ;;
-  esac
-
-  step "Starting temporary HTTP file server"
-  [ -d "$document_root" ] || fail "Document root does not exist: $document_root"
-  require_port_number "HTTP server port" "$port"
-  require_value "Bind address" "$bind_address"
-  need_cmd lighttpd
-  need_cmd mktemp
-
-  document_root="$(cd "$document_root" && pwd -P)"
-
-  config_file="$(mktemp /tmp/porthub-lighttpd.XXXXXX.conf)"
-  cat >"$config_file" <<EOF_LIGHTTPD
-server.modules += ( "mod_dirlisting", "mod_accesslog" )
-server.document-root = "$document_root"
-server.port = $port
-server.bind = "$bind_address"
-dir-listing.activate = "enable"
-accesslog.filename = "/dev/stderr"
-EOF_LIGHTTPD
-
-  cleanup_http_server() {
-    rm -f "$config_file"
-  }
-
-  trap cleanup_http_server EXIT INT TERM
-  log_plain "[porthub-http.server] Serving $document_root on $bind_address:$port"
-  lighttpd -D -f "$config_file"
+  local bin
+  bin="$(porthub_core_bin)"
+  exec "$bin" http.server "$@"
 }
 
 get_cmd() {
-  step "Downloading file with aria2c"
-  local url="${1:-}"
-
+  local bin
   [ "$#" -eq 1 ] || fail "Usage: porthub get <http(s)-url>"
-  require_value "Download URL" "$url"
-  require_http_url "Download URL" "$url"
-  need_cmd aria2c
-
-  log_plain "[porthub-get] Starting download: $url"
-  aria2c -c -x 16 -s 16 -k 1M "$url"
+  require_http_url "Download URL" "$1"
+  bin="$(porthub_core_bin)"
+  exec "$bin" get "$1"
 }
 
 env_file_value() {
@@ -2814,8 +2718,8 @@ Commands:
   restart           Restart the selected tenant
   status            Show status for the selected tenant
   logs              Show logs for the selected tenant
-  http.server       Serve the current directory with a blocking lighttpd process
-  get               Download a file with aria2c using parallel segments
+  http.server       Serve the current directory (built-in file server)
+  get               Download a file with parallel segments (built-in)
   update            Update the shared PortHub CLI and Rathole using the selected tenant
   version           Show installed PortHub client and Rathole versions
   tenants           Full tenant management subcommands
@@ -2847,8 +2751,8 @@ Public maintenance:
   sync              Send an immediate active heartbeat
   sync-inactive     Send an immediate inactive heartbeat
   fetch-config      Download the current Rathole client config
-  http.server       Start a blocking lighttpd file server
-  get               Download a file with aria2c
+  http.server       Start a built-in file server
+  get               Download a file (parallel segments)
 EOF_ADVANCED
 }
 
@@ -2857,7 +2761,7 @@ http_server_usage() {
 Usage: porthub http.server [port] [path]
        porthub http.server [options]
 
-Start a blocking lighttpd file server.
+Start a built-in file server (stop it with: porthub http.server stop PORT).
 
 Options:
   -p, --port PORT   Listen on this TCP port (default: 8000)

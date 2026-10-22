@@ -115,80 +115,6 @@ detect_platform() {
   esac
 }
 
-install_runtime_dependencies() {
-  local missing=()
-  local brew_cmd=""
-  local installed_lighttpd="false"
-
-  if ! command -v lighttpd >/dev/null 2>&1; then
-    missing+=("lighttpd")
-  fi
-  if ! command -v aria2c >/dev/null 2>&1; then
-    missing+=("aria2")
-  fi
-
-  if [ "${#missing[@]}" -eq 0 ]; then
-    log "Runtime helpers already installed: lighttpd, aria2c"
-    return 0
-  fi
-
-  case " ${missing[*]} " in
-    *" lighttpd "*) installed_lighttpd="true" ;;
-  esac
-
-  step "Installing runtime helper packages (${missing[*]})"
-  case "$(uname -s)" in
-    Darwin)
-      brew_cmd="$(command -v brew || true)"
-      [ -n "$brew_cmd" ] || fail "Missing required command: brew. Install Homebrew to provision lighttpd and aria2."
-      "$brew_cmd" install "${missing[@]}"
-      ;;
-    Linux)
-      if command -v apt-get >/dev/null 2>&1; then
-        $SUDO apt-get update
-        $SUDO apt-get install -y "${missing[@]}"
-      elif command -v dnf >/dev/null 2>&1; then
-        $SUDO dnf install -y "${missing[@]}"
-      elif command -v yum >/dev/null 2>&1; then
-        $SUDO yum install -y "${missing[@]}"
-      elif command -v zypper >/dev/null 2>&1; then
-        $SUDO zypper --non-interactive install "${missing[@]}"
-      elif command -v pacman >/dev/null 2>&1; then
-        $SUDO pacman -Sy --noconfirm "${missing[@]}"
-      elif command -v apk >/dev/null 2>&1; then
-        $SUDO apk add --no-cache "${missing[@]}"
-      else
-        fail "Could not find a supported package manager to install lighttpd and aria2."
-      fi
-      ;;
-    *)
-      fail "Unsupported operating system: $(uname -s). Supported: Linux, macOS."
-      ;;
-  esac
-
-  command -v lighttpd >/dev/null 2>&1 || fail "lighttpd install completed but the binary is still unavailable"
-  command -v aria2c >/dev/null 2>&1 || fail "aria2 install completed but the aria2c binary is still unavailable"
-
-  if [ "$installed_lighttpd" = "true" ] && [ "$(uname -s)" = "Linux" ]; then
-    disable_runtime_helper_services
-  fi
-
-  log "Runtime helpers installed successfully"
-}
-
-disable_runtime_helper_services() {
-  local load_state
-
-  command -v systemctl >/dev/null 2>&1 || return 0
-
-  # Some distros auto-start helper web servers after package install.
-  load_state="$(systemctl show -p LoadState --value lighttpd.service 2>/dev/null || true)"
-  [ -n "$load_state" ] || return 0
-  [ "$load_state" = "not-found" ] && return 0
-  $SUDO systemctl stop lighttpd.service >/dev/null 2>&1 || true
-  $SUDO systemctl disable lighttpd.service >/dev/null 2>&1 || true
-}
-
 check_service_manager() {
   case "$(uname -s)" in
     Linux)
@@ -311,7 +237,6 @@ main() {
   preflight
 
   local tmp_file install_dir
-  install_runtime_dependencies
   step "Downloading PortHub CLI from server"
   install_dir="${PORT_HUB_INSTALL_PATH%/*}"
   if [ -z "$install_dir" ] || [ "$install_dir" = "$PORT_HUB_INSTALL_PATH" ]; then

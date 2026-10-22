@@ -163,6 +163,16 @@ func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer cancel()
 	switch os.Args[1] {
+	// Drop-in for the rathole client binary the shell client used to run
+	// ("rathole -c client.toml", "rathole -V").
+	case "-c", "--client":
+		if len(os.Args) != 3 {
+			return errors.New("usage: porthub -c client.toml")
+		}
+		return tunnel.RunFile(ctx, os.Args[2])
+	case "-V":
+		fmt.Println("porthub " + version)
+		return nil
 	case "http.server", "http-server":
 		return httpServer(ctx, os.Args[2:])
 	case "service":

@@ -4,7 +4,10 @@
 #   docker compose up -d --build
 services:
   porthub:
-    build: .
+    build:
+      context: .
+      args:
+        PORTHUB_VERSION: ${PORTHUB_VERSION:-dev} # set by deploy.sh (git commit)
     image: porthub:latest
     container_name: porthub
     network_mode: host # binds 80/443 (web), 8345/8346 (app), tunnel ports
