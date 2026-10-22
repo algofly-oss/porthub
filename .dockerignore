@@ -1,13 +1,8 @@
 # Root Dockerfile build context: include only current server components.
 *
 !api
-api/*
-!api/client
 !client
-!server
 !ui
-!traefik
-!proxy/certificate
 !deploy
 ui/node_modules
 ui/.next

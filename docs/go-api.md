@@ -1,6 +1,6 @@
 # Go API
 
-`server/cmd/porthub-api` serves the entire API in Go. It also runs authenticated
+`api/cmd/porthub-api` serves the entire API in Go. It also runs authenticated
 Socket.IO events, configuration generation, machine monitoring, proxy analytics,
 connection refresh, Telegram workers, and the firewall service. Production and
 development process lists start this binary directly. There is no Python proxy;
@@ -13,16 +13,17 @@ The old `PORTHUB_PYTHON_API_URL` environment variable has no effect.
 The root `Dockerfile` is the only server build definition and is explicitly
 selected by `docker-compose.yml`. The retired Python API, Python firewall,
 requirements, entrypoints, and separate component Dockerfiles have been removed.
-`api/` now contains only client shell assets under `api/client/`. Historical code
-remains available in Git history. Rathole, Traefik, MongoDB, and the Next.js UI
+`api/` contains the Go backend and `api/assets/client/` contains its client shell
+assets. See [the API package guide](../api/README.md). Historical code remains
+available in Git history. Rathole, Traefik, MongoDB, and the Next.js UI
 remain separate supervised processes inside the same container.
 
 ## Development checks
 
-Use the Go toolchain declared by `server/go.mod`:
+Use the Go toolchain declared by `api/go.mod`:
 
 ```sh
-cd server
+cd api
 go test ./...
 go vet ./...
 ```
@@ -71,3 +72,12 @@ rollback image separately; the report is not a database backup.
 By default the audit connects to `http://127.0.0.1:47080`. An optional
 `--base-url` accepts loopback HTTP(S) addresses only. Redirects are not followed,
 so audit sessions cannot be sent to an external host by an API redirect.
+
+## Deployment assets
+
+`deploy/traefik.yml` defines the app routes; `deploy/traefik.sh` starts Traefik
+and rotates its access log. Container startup copies the routing file to the
+runtime configuration directory. Certificates belong in `deploy/certificates/`
+and are ignored by Git. For a new development installation, create a self-signed
+certificate with `sh deploy/generate-certificates.sh localhost` from the repository
+root before building the image. The helper refuses to overwrite existing files.

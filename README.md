@@ -1,8 +1,8 @@
 # PortHub
 
-PortHub is a self-hosted control plane for [Rathole](https://github.com/rathole-org/rathole). It gives you a web UI and API to register machines, create forwarding rules, generate Rathole config automatically, and bootstrap remote clients with a single install command.
+PortHub is a self-hosted networking control plane with a Go API, Go clients, and a web dashboard. Register machines in a private network, reach services through private hostnames or PAN addresses, and publish selected services through managed tunnels and web proxies.
 
-Instead of hand-editing `server.toml` and `client.toml` files across multiple systems, PortHub keeps the tunnel state in one place and handles the repetitive operational work for you.
+Each machine receives a private address automatically. Access rules control which machines can communicate. PortHub also manages [Rathole](https://github.com/rathole-org/rathole) gateway configuration for public forwarding, so tunnel settings stay in one place.
 
 ## UI Preview
 
@@ -19,6 +19,8 @@ Instead of hand-editing `server.toml` and `client.toml` files across multiple sy
 ## What PortHub Handles
 
 - Machine inventory, tokens, grouping, and status tracking
+- Automatic private-network enrollment, PAN addresses, and private DNS names
+- Workspace access rules for private connections
 - Forwarding rules that map one public port to one machine and one local service
 - Automatic generation of Rathole `server.toml` and per-machine `client.toml`
 - Remote machine bootstrap for Linux (`systemd`) and macOS (`launchd`)
@@ -35,7 +37,7 @@ PortHub can apply an IP filter to each forwarding rule.
 - The UI exposes this in the forwarding rule editor as `IP Filter`.
 - The firewall service applies the policy at the external port level and keeps recent hit / blocked-IP data for traffic monitoring.
 
-This is backed by the Go firewall service in `server/internal/firewall/`, which stores per-port policies and programs nftables rules on the host. If firewall integration is not configured, the rest of PortHub still works, but IP filtering and firewall traffic visibility will not be available.
+This is backed by the Go firewall service in `api/internal/firewall/`, which stores per-port policies and programs nftables rules on the host. If firewall integration is not configured, the rest of PortHub still works, but IP filtering and firewall traffic visibility will not be available.
 
 ## Proxy Request Activity and Log Retention
 
@@ -64,12 +66,13 @@ rotation wrapper and read-only analytics volume are included.
 
 PortHub is made of a few small pieces:
 
-- `server/`: Go API for auth, machines, connections, private access, Socket.IO, firewall policies, and configuration generation
-- `api/client/`: client bootstrap and service-management shell assets
+- `api/`: Go backend, including auth, machines, connections, private access, realtime events, firewall policies, and background workers
+- `api/assets/client/`: client bootstrap and service-management shell assets
+- `client/`: Go tunnel, private-network client, relay, and process supervisor
 - `ui/`: Next.js dashboard for users, machines, groups, and forwarding rules
-- `proxy/certificate/`: TLS certificate Traefik uses for the app on port 8346
+- `deploy/`: process lists, routing configuration, certificates, and container startup scripts
 - `rathole`: tunnel server supervised inside the PortHub container, using the generated `server.toml`
-- `server/internal/firewall/`: per-port firewall policies and traffic sampling, running inside the Go API
+- `api/internal/firewall/`: per-port firewall policies and traffic sampling, running inside the Go API
 - `mongodb`: persistent app data
 - MongoDB also stores login sessions; Redis is no longer required
 
@@ -77,14 +80,15 @@ PortHub is made of a few small pieces:
 
 ```text
 .
-├── server/                      Go API, firewall, realtime events and background workers
+├── api/                         Go backend (see api/README.md)
+│   ├── cmd/porthub-api/          API entrypoint, initialization and audit commands
+│   ├── internal/                Backend packages and feature routes
+│   └── assets/client/           Bootstrap and tenant service management scripts
 ├── client/                      Go tunnel, relay and private-network client
-├── api/client/                  Bootstrap and tenant service management
 ├── ui/                          Next.js frontend
-├── proxy/certificate/           TLS certificate for the app's HTTPS port
 ├── docker-compose.yml           The single PortHub server container
 ├── Dockerfile                   Server image (API, UI, MongoDB, Traefik, Rathole, firewall, relay)
-├── deploy/                      Container entrypoint and process lists (Procfile.prod / .dev)
+├── deploy/                      Startup scripts, process lists, routing config and certificates
 ├── env.example                  Example environment configuration
 └── deploy.sh                    Production app redeploy helper
 ```
@@ -98,11 +102,16 @@ private-network relay, supervised by the `porthub` binary.
 
 ```bash
 cp env.example .env   # set secrets; PORTHUB_MODE=prod (default) or dev
+sh deploy/generate-certificates.sh localhost  # new development installs only
 docker compose up -d --build
 ```
 
 `PORTHUB_MODE=dev` runs the Go API and the Next.js dev server
 from the mounted `./ui` checkout (run `yarn install` there first).
+
+Existing installations should keep their certificates in `deploy/certificates/`.
+The generation helper refuses to overwrite them. Certificates and private keys
+are ignored by Git.
 
 Internal services listen only on loopback ports 47001-47091. Data lives in
 the `porthub_data` volume (`/data`): MongoDB, firewall state.
@@ -116,9 +125,9 @@ restored once and a new MongoDB root user is created from `.env`.
 
 1. Create an account and sign in.
 2. Add a machine and copy its generated install command.
-3. Create one or more forwarding rules for that machine.
-4. Optionally add an `IP Filter` allowlist for any port that should not be public.
-5. Run the install command on the remote machine and let the client fetch config automatically.
+3. Run the command on the machine to install its persistent tunnel and private-network services.
+4. Add workspace access rules for private communication, then connect using its PAN address or private hostname.
+5. Add public forwarding rules or web proxies for services you want to publish, with an optional `IP Filter` allowlist.
 
 The setup page provides a short machine-specific command:
 
@@ -134,9 +143,13 @@ read only until migration. Installer codes contain 16 random alphanumeric charac
 after 24 hours, without exposing the machine authentication token.
 Server-side Rathole remains the public tunnel gateway.
 
-Private networking is a separate, opt-in enrollment. Its short installer sets up
-a native interface, workspace-only DNS, and a persistent systemd or macOS launchd
-service. The Mac client uses an automatically allocated utun interface and a
+Private-network enrollment is automatic for every registered machine. Installation
+and `porthub update` set up the native interface, workspace-only DNS, and a
+persistent systemd or macOS launchd service. Access rules govern connectivity;
+enrollment alone does not grant access to other machines. Offline clients finish
+installation when they reconnect and update.
+
+The Mac client uses an automatically allocated utun interface and a
 managed `/etc/resolver/<workspace-suffix>` file. It adds only private peer host
 routes and preserves other DNS and VPN configuration.
 
@@ -168,7 +181,7 @@ script is available in Git history. Current deployments need no Redis migration.
 
 ## Runtime Notes
 
-- Traefik serves the app on 8345/8346: `/` goes to the UI, `/api` and `/socket.io` to the API (`traefik/internal.yml`)
+- Traefik serves the app on 8345/8346: `/` goes to the UI, `/api` and `/socket.io` to the API (`deploy/traefik.yml`)
 - The Rathole server reads `/runtime/rathole/server.toml`
 - The single PortHub container uses host networking; MongoDB, the API, UI, relay, and firewall bind to separate loopback ports
 - The API can run without firewall integration, but connection-level IP filtering depends on the `firewall` service being reachable
@@ -186,8 +199,10 @@ script is available in Git history. Current deployments need no Redis migration.
 - `FIREWALL_BASE_URL`: API URL the main backend uses to reach the firewall service
 - `FW_NFT_TABLE`: nftables table name managed by the firewall service
 
-## Why Use It
+## Client Management
 
-PortHub does not replace Rathole. It makes Rathole easier to operate once you have more than one machine, more than one tunnel, or stricter operational requirements around bootstrap, visibility, and access control.
-
-Every new machine is automatically enrolled in its owner’s private network. Installation and `porthub update` install the persistent private agent; existing access rules control connectivity. Offline machines complete installation when they reconnect and update.
+Use `porthub status` to inspect the connection and private address, `porthub update`
+to refresh the installed client, and `porthub restart` to restart its managed
+service. PAN addresses also appear in the machine table and configuration popup,
+with copy controls. Public tunnel forwarding and private access rules are managed
+separately in the dashboard.

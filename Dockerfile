@@ -21,11 +21,11 @@ RUN set -e; mkdir -p /out/client-bin; \
       echo "$PORTHUB_VERSION" > /out/client-bin/porthub-$1.version; \
     done
 
-FROM golang:1.27 AS server
+FROM golang:1.27 AS api
 WORKDIR /src
-COPY server/go.mod server/go.sum ./
+COPY api/go.mod api/go.sum ./
 RUN go mod download
-COPY server/ ./
+COPY api/ ./
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/porthub-api ./cmd/porthub-api
 
 FROM node:19.8.1-slim AS ui
@@ -46,7 +46,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends nftables libcurl4t64 ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=porthub /out/porthub /usr/local/bin/porthub
 COPY --from=porthub /out/client-bin /app/client-bin
-COPY --from=server /out/porthub-api /usr/local/bin/porthub-api
+COPY --from=api /out/porthub-api /usr/local/bin/porthub-api
 COPY --from=mongo /usr/bin/mongod /usr/bin/mongodump /usr/bin/mongorestore /usr/local/bin/
 COPY --from=traefik /usr/local/bin/traefik /usr/local/bin/traefik
 COPY --from=rathole /rathole /usr/local/bin/rathole
@@ -55,9 +55,7 @@ COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=ui /app/.next/standalone /app/ui/
 COPY --from=ui /app/.next/static /app/ui/.next/static
 COPY --from=ui /app/public /app/ui/public
-COPY api/client/ /app/client/
-COPY traefik/internal.yml /app/traefik/internal.yml
-COPY proxy/certificate/ /app/traefik/certificate/
+COPY api/assets/client/ /app/client/
 COPY deploy/ /app/deploy/
 VOLUME ["/data"]
 ENTRYPOINT ["/bin/sh", "/app/deploy/entrypoint.sh"]
