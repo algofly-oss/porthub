@@ -10,6 +10,13 @@ RUN go mod download
 COPY client/ ./
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/porthub ./cmd/porthub
 
+FROM golang:1.27 AS server
+WORKDIR /src
+COPY server/go.mod server/go.sum ./
+RUN go mod download
+COPY server/ ./
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/porthub-api ./cmd/porthub-api
+
 FROM node:19.8.1-slim AS ui
 WORKDIR /app
 COPY ui/package.json ui/yarn.lock ./
@@ -34,6 +41,7 @@ ENV DEBIAN_FRONTEND=noninteractive PYTHONDONTWRITEBYTECODE=1 PATH=/opt/venv/bin:
 RUN apt-get update && apt-get install -y --no-install-recommends nftables libcurl4t64 ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=python /opt/venv /opt/venv
 COPY --from=porthub /out/porthub /usr/local/bin/porthub
+COPY --from=server /out/porthub-api /usr/local/bin/porthub-api
 COPY --from=mongo /usr/bin/mongod /usr/bin/mongodump /usr/bin/mongorestore /usr/local/bin/
 COPY --from=traefik /usr/local/bin/traefik /usr/local/bin/traefik
 COPY --from=rathole /rathole /usr/local/bin/rathole

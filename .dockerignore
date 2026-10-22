@@ -2,6 +2,7 @@
 *
 !api
 !client
+!server
 !ui
 !firewall
 !traefik
