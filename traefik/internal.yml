@@ -1,0 +1,40 @@
+# PortHub's own web app and API on ports 8345 (HTTP) and 8346 (HTTPS).
+# Replaces the former nginx "proxy" container; clients keep using the same
+# URLs. Copied into the dynamic config directory at container start.
+http:
+  routers:
+    porthub_internal_api:
+      entryPoints: ["porthub"]
+      rule: "PathPrefix(`/api`) || PathPrefix(`/socket.io`)"
+      priority: 100
+      service: porthub_internal_api
+    porthub_internal_ui:
+      entryPoints: ["porthub"]
+      rule: "PathPrefix(`/`)"
+      priority: 1
+      service: porthub_internal_ui
+    porthub_internal_api_tls:
+      entryPoints: ["porthubsecure"]
+      rule: "PathPrefix(`/api`) || PathPrefix(`/socket.io`)"
+      priority: 100
+      service: porthub_internal_api
+      tls: {}
+    porthub_internal_ui_tls:
+      entryPoints: ["porthubsecure"]
+      rule: "PathPrefix(`/`)"
+      priority: 1
+      service: porthub_internal_ui
+      tls: {}
+  services:
+    porthub_internal_api:
+      loadBalancer:
+        servers:
+          - url: "http://api:8080"
+    porthub_internal_ui:
+      loadBalancer:
+        servers:
+          - url: "http://ui:3000"
+tls:
+  certificates:
+    - certFile: /porthub/certificate/server.crt
+      keyFile: /porthub/certificate/server.key

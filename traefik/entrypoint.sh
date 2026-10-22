@@ -1,5 +1,8 @@
 #!/bin/sh
 set -eu
+# PortHub's own app/API routes (ports 8345/8346) live beside the generated
+# proxy routes in the watched dynamic directory.
+cp /porthub/internal.yml /dynamic/porthub-internal.yml
 
 # Keep only the active 2 MiB log and one previous segment. The small overshoot
 # between checks is bounded by five seconds of traffic. USR1 reopens the file

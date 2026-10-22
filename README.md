@@ -66,7 +66,7 @@ PortHub is made of a few small pieces:
 
 - `api/`: FastAPI backend for auth, machines, connections, bootstrap endpoints, and Rathole config generation
 - `ui/`: Next.js dashboard for users, machines, groups, and forwarding rules
-- `proxy/`: nginx entry point for the UI, API, and WebSocket traffic
+- `proxy/certificate/`: TLS certificate Traefik uses for the app on port 8346
 - `rathole`: managed server container that runs the generated `server.toml`
 - `firewall/`: optional per-port firewall service for IP filtering and traffic sampling
 - `mongodb`: persistent app data
@@ -79,7 +79,7 @@ PortHub is made of a few small pieces:
 ├── api/                         FastAPI app and client bootstrap assets
 ├── firewall/                    Firewall service for port policy and traffic sampling
 ├── ui/                          Next.js frontend
-├── proxy/                       nginx config and certificate helper
+├── proxy/certificate/           TLS certificate for the app's HTTPS port
 ├── docker-compose.yml           Development app stack
 ├── docker-compose-prod.yml      Production app stack
 ├── docker-compose-services.yml  MongoDB and Redis
@@ -235,7 +235,7 @@ After bootstrap, the machine client authenticates with PortHub, downloads its ma
 
 ## Runtime Notes
 
-- nginx proxies `/` to the UI and `/api` plus `/socket.io` to the API
+- Traefik serves the app on 8345/8346: `/` goes to the UI, `/api` and `/socket.io` to the API (`traefik/internal.yml`)
 - The Rathole server reads `/runtime/rathole/server.toml`
 - The `rathole` and `firewall` services use host networking in the provided Compose files
 - The API can run without firewall integration, but connection-level IP filtering depends on the `firewall` service being reachable

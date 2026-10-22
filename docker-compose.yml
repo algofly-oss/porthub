@@ -37,25 +37,6 @@ services:
     networks:
       - porthub
 
-  proxy:
-    image: nginx:1.19-alpine
-    container_name: porthub_proxy
-    env_file:
-      - ./.env
-    ports:
-      - "${APP_HTTP_PORT:-8345}:80"
-      - "${APP_HTTPS_PORT:-8346}:443"
-    volumes:
-      - ./proxy/nginx.conf:/etc/nginx/templates/default.conf.template
-      - ./proxy/certificate/server.crt:/etc/ssl/certs/server.crt
-      - ./proxy/certificate/server.key:/etc/ssl/certs/server.key
-    restart: always
-    depends_on:
-      - api
-      - ui
-    networks:
-      - porthub
-
   rathole:
     image: archef2000/rathole:latest
     command: -s /runtime/rathole/server.toml
@@ -80,6 +61,11 @@ services:
       - "--api.dashboard=true"
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
+      # PortHub web app and API (formerly the nginx proxy container).
+      - "--entrypoints.porthub.address=:8345"
+      - "--entrypoints.porthubsecure.address=:8346"
+      - "--entrypoints.porthub.transport.respondingTimeouts.readTimeout=0"
+      - "--entrypoints.porthubsecure.transport.respondingTimeouts.readTimeout=0"
       - "--providers.file.directory=/dynamic"
       - "--providers.file.watch=true"
       - "--accesslog.filepath=/shared/access.log"
@@ -87,9 +73,12 @@ services:
     ports:
       - "${TRAEFIK_HTTP_PORT:-80}:80"
       - "${TRAEFIK_HTTPS_PORT:-443}:443"
+      - "${APP_HTTP_PORT:-8345}:8345"
+      - "${APP_HTTPS_PORT:-8346}:8346"
     volumes:
       - traefik_routes:/dynamic
       - traefik_shared:/shared
+      - ./proxy/certificate:/porthub/certificate:ro
     restart: always
     networks:
       - porthub
