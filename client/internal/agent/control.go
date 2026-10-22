@@ -44,6 +44,9 @@ type syncResponse struct {
 	Snapshot   policy.Snapshot  `json:"snapshot"`
 	Signals    []Signal         `json:"signals"`
 	ICEServers []mesh.ICEServer `json:"ice_servers"`
+	// Extra base URLs of the same gateway (e.g. direct, bypassing a CDN);
+	// the agent measures each and relays through the fastest.
+	RelayRoutes []string `json:"relay_routes"`
 }
 type Control struct {
 	config Config

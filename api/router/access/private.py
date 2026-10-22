@@ -47,6 +47,13 @@ def relay_server(peer_id):
     return {"urls": [RELAY_URL], "username": username, "credential": password}
 
 
+def relay_routes():
+    """Extra base URLs of this gateway (e.g. a direct address beside a CDN
+    one), from PORTHUB_RELAY_ROUTES; agents measure each and use the fastest."""
+    routes = [r.strip().rstrip("/") for r in os.environ.get("PORTHUB_RELAY_ROUTES", "").split(",")]
+    return [r for r in routes if r.startswith(("http://", "https://"))][:4]
+
+
 def ice_servers(peer_id=None):
     """STUN/TURN servers for peer connectivity, from PORTHUB_PRIVATE_ICE_SERVERS.
 
@@ -367,4 +374,4 @@ async def sync(data: ClientSync, response: Response):
                    "aliases": [f"{a}.{preferences.dns_suffix}" for a in alias_labels.get(p["_id"], [])]} for p in peer_by_id.values()],
         "grants": grants,
     }, "signals": [{"id": s["_id"], "from": s["from"], "session": s["session"], "description": s["description"]} for s in incoming],
-        "ice_servers": ice_servers(data.peer_id), "poll_seconds": 1}
+        "ice_servers": ice_servers(data.peer_id), "relay_routes": relay_routes(), "poll_seconds": 1}

@@ -67,6 +67,9 @@ type Runtime struct {
 	seen                  map[string]time.Time
 	err                   chan error
 	wake                  chan struct{}
+	relayRoute            string    // chosen base URL for relay traffic
+	relayMeasured         time.Time // when routes were last compared
+	measuring             bool
 	names                 *names.Server
 	ifindex               int
 	domain                string
@@ -172,6 +175,7 @@ func (r *Runtime) step(ctx context.Context) error {
 	}
 	r.acks = acks
 	r.mu.Unlock()
+	r.chooseRelayRoute(ctx, response)
 	if err = r.configure(ctx, response); err != nil {
 		r.engine.Revoke()
 		select {
@@ -364,19 +368,78 @@ func (r *Runtime) handleSignal(ctx context.Context, self string, signal Signal, 
 	return nil
 }
 
-// relayOptions routes TURN-over-TCP through the gateway's WebSocket relay on
-// the same address the agent syncs with (no extra port; CDN friendly).
-func (r *Runtime) relayOptions(servers []mesh.ICEServer) []mesh.Option {
-	for _, server := range servers {
+func relayServer(servers []mesh.ICEServer) *mesh.ICEServer {
+	for i, server := range servers {
 		for _, u := range server.URLs {
 			if strings.HasPrefix(u, "turn:") {
-				if endpoint, err := relay.URLFor(r.config.Server); err == nil {
-					return append(r.meshOptions, mesh.WithRelay(relay.Dialer{URL: endpoint}))
-				}
+				return &servers[i]
 			}
 		}
 	}
+	return nil
+}
+
+// relayOptions routes TURN-over-TCP through the gateway's WebSocket relay,
+// over whichever route to the gateway measured fastest from this machine.
+func (r *Runtime) relayOptions(servers []mesh.ICEServer) []mesh.Option {
+	if relayServer(servers) == nil {
+		return r.meshOptions
+	}
+	r.mu.Lock()
+	route := r.relayRoute
+	r.mu.Unlock()
+	if route == "" {
+		route = r.config.Server
+	}
+	if endpoint, err := relay.URLFor(route); err == nil {
+		return append(r.meshOptions, mesh.WithRelay(relay.Dialer{URL: endpoint}))
+	}
 	return r.meshOptions
+}
+
+const relayRemeasure = 30 * time.Minute
+
+// chooseRelayRoute compares the agent's own server address with any extra
+// routes to the same gateway (e.g. direct instead of via a CDN) and keeps
+// the fastest. Runs in the background; existing connections are untouched.
+func (r *Runtime) chooseRelayRoute(ctx context.Context, response syncResponse) {
+	turn := relayServer(response.ICEServers)
+	r.mu.Lock()
+	due := turn != nil && !r.measuring && time.Since(r.relayMeasured) > relayRemeasure
+	if due {
+		r.measuring = true
+	}
+	r.mu.Unlock()
+	if !due {
+		return
+	}
+	routes := append([]string{r.config.Server}, response.RelayRoutes...)
+	user, credential := turn.Username, turn.Credential
+	go func() {
+		best, bestScore := r.config.Server, -1.0
+		var report []string
+		for _, route := range routes {
+			if _, err := relay.URLFor(route); err != nil {
+				continue
+			}
+			score, err := relay.Measure(ctx, route, user, credential)
+			if err != nil {
+				report = append(report, fmt.Sprintf("%s unavailable", route))
+				continue
+			}
+			report = append(report, fmt.Sprintf("%s %.0f Mbit/s", route, score))
+			if score > bestScore {
+				best, bestScore = route, score
+			}
+		}
+		r.mu.Lock()
+		changed := best != r.relayRoute
+		r.relayRoute, r.relayMeasured, r.measuring = best, time.Now(), false
+		r.mu.Unlock()
+		if changed {
+			log.Printf("relay route: %s (%s)", best, strings.Join(report, "; "))
+		}
+	}()
 }
 
 func (r *Runtime) newPeer(info policy.Peer, servers []mesh.ICEServer) (*peerSession, error) {

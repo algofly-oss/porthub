@@ -11,12 +11,19 @@ package relay
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha1"
+	"encoding/base64"
 	"errors"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -73,6 +80,8 @@ type Server struct {
 	turn     *turn.Server
 	listener *listener
 	sem      chan struct{}
+	secret   string
+	noise    []byte
 }
 
 // loopbackOnly lets allocations reach only other allocations of this relay.
@@ -97,7 +106,9 @@ func NewServer(secret string, maxConnections int) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{turn: t, listener: l, sem: make(chan struct{}, maxConnections)}, nil
+	noise := make([]byte, 1<<20)
+	_, _ = rand.Read(noise) // incompressible, so a CDN cannot shortcut the test
+	return &Server{turn: t, listener: l, sem: make(chan struct{}, maxConnections), secret: secret, noise: noise}, nil
 }
 
 func (s *Server) Close() error {
@@ -105,9 +116,18 @@ func (s *Server) Close() error {
 	return s.turn.Close()
 }
 
-// ServeHTTP upgrades to a WebSocket and hands it to the TURN server, which
-// authenticates every allocation itself.
+// SpeedPath measures a route to the relay: GET downloads, POST uploads.
+const SpeedPath = Path + "/speedtest"
+
+const maxSpeedBytes = 32 << 20
+
+// ServeHTTP serves the relay WebSocket, and the route speed test for holders
+// of a valid relay credential.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == SpeedPath {
+		s.speedTest(w, r)
+		return
+	}
 	select {
 	case s.sem <- struct{}{}:
 	default:
@@ -133,6 +153,51 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	<-done
+}
+
+// speedTest lets an agent compare routes (CDN vs direct) to this relay. It
+// requires the same short-lived credential as the relay so it cannot be used
+// as an open bandwidth sink.
+func (s *Server) speedTest(w http.ResponseWriter, r *http.Request) {
+	user, credential := r.Header.Get("X-Relay-User"), r.Header.Get("X-Relay-Credential")
+	if !ValidCredential(s.secret, user, credential) {
+		http.Error(w, "relay credential required", http.StatusForbidden)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	switch r.Method {
+	case http.MethodGet:
+		n, _ := strconv.Atoi(r.URL.Query().Get("bytes"))
+		n = min(max(n, 0), maxSpeedBytes)
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", strconv.Itoa(n))
+		for n > 0 {
+			chunk := s.noise[:min(n, len(s.noise))]
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+			n -= len(chunk)
+		}
+	case http.MethodPost:
+		read, _ := io.Copy(io.Discard, io.LimitReader(r.Body, maxSpeedBytes))
+		fmt.Fprint(w, read)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ValidCredential checks a TURN REST credential ("expiry:user", base64
+// HMAC-SHA1 of it with the shared secret) and its expiry.
+func ValidCredential(secret, user, credential string) bool {
+	expiry, _, ok := strings.Cut(user, ":")
+	t, err := strconv.ParseInt(expiry, 10, 64)
+	if !ok || err != nil || t < time.Now().Unix() {
+		return false
+	}
+	mac := hmac.New(sha1.New, []byte(secret))
+	mac.Write([]byte(user))
+	want := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+	return hmac.Equal([]byte(want), []byte(credential))
 }
 
 // closeNotify lets ServeHTTP return once the TURN server closes the stream.

@@ -24,3 +24,11 @@ class RelayCredentialTest(unittest.TestCase):
             servers = private.ice_servers("p")
         self.assertEqual(servers[0]["urls"], ["stun:stun.example.org:3478"])
         self.assertGreater(int(servers[1]["username"].split(":")[0]), time.time() + 3600)
+
+
+class RelayRouteTest(unittest.TestCase):
+    def test_routes_from_environment(self):
+        with patch.dict(os.environ, {"PORTHUB_RELAY_ROUTES": " http://gw.example:8345/, ftp://bad , https://x.example "}):
+            self.assertEqual(private.relay_routes(), ["http://gw.example:8345", "https://x.example"])
+        with patch.dict(os.environ, {"PORTHUB_RELAY_ROUTES": ""}):
+            self.assertEqual(private.relay_routes(), [])
