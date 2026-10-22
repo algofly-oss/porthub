@@ -9,7 +9,7 @@ import os
 import re
 import secrets
 from datetime import timedelta, timezone
-from typing import Literal
+from typing import Literal, Optional
 
 from bson import ObjectId
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -20,7 +20,9 @@ from pymongo.errors import DuplicateKeyError
 from router.common import parse_object_id, utcnow
 from shared.access_policy import NetworkPreferences
 from shared.factory import db
-from shared.private_overlay import FINGERPRINT, compile_grants, private_address
+from shared.private_overlay import (
+    FINGERPRINT, HOSTNAME, assign_hostnames, compile_grants, hostname_conflict, private_address,
+)
 from shared.workspaces import token_digest
 
 router = APIRouter(prefix="/private", tags=["Private peers"])
@@ -49,21 +51,40 @@ async def browser_context(request, manage=False):
     return await context(request, manage)
 
 
+def custom_hostname(value):
+    if value is None or not value.strip():
+        return None
+    value = value.strip().lower().rstrip(".")
+    if not HOSTNAME.fullmatch(value):
+        raise ValueError("Use up to 48 letters, numbers or hyphens, not starting or ending with a hyphen")
+    return value
+
+
 class PeerEnrollment(BaseModel):
     machine_id: str
-    alias: str = Field(..., min_length=1, max_length=48)
+    # Optional custom private name; by default the registered machine name is
+    # used (alias is the earlier field name, still accepted).
+    hostname: Optional[str] = Field(None, max_length=48)
+    alias: Optional[str] = Field(None, max_length=48)
 
-    @validator("alias")
-    def hostname(cls, value):
-        value = value.strip().lower()
-        if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", value):
-            raise ValueError("Use a short hostname containing letters, numbers or hyphens")
-        return value
+    _hostname = validator("hostname", "alias", allow_reuse=True)(custom_hostname)
+
+
+class HostnameChange(BaseModel):
+    hostname: Optional[str] = Field(None, max_length=48)  # empty/None = machine name
+
+    _hostname = validator("hostname", allow_reuse=True)(custom_hostname)
 
 
 async def indexes():
     await db.private_peers.create_index([("workspace_id", 1), ("ip", 1)], unique=True)
-    await db.private_peers.create_index([("workspace_id", 1), ("alias", 1)], unique=True)
+    # Private names are derived from machine names; only custom names are stored.
+    if "workspace_id_1_alias_1" in await db.private_peers.index_information():
+        await db.private_peers.drop_index("workspace_id_1_alias_1")
+    await db.private_peers.create_index(
+        [("workspace_id", 1), ("hostname", 1)], unique=True, name="workspace_custom_hostname",
+        partialFilterExpression={"hostname": {"$type": "string"}},
+    )
     await db.private_install_tickets.create_index("expires_at", expireAfterSeconds=0)
     await db.private_signals.create_index("expires_at", expireAfterSeconds=0)
 
@@ -89,6 +110,12 @@ async def enroll_peer(data: PeerEnrollment, request: Request):
         # Issuing a new installer must not silently invalidate a running client.
         raise HTTPException(409, "This machine already has a private client; revoke it before reinstalling")
     preferences = NetworkPreferences(**(await db.private_networks.find_one({"_id": str(owner)}) or {}))
+    custom = data.hostname or data.alias
+    if custom:
+        machines, peers = await workspace_names(owner)
+        clash = hostname_conflict(custom, machine_id, machines, peers)
+        if clash:
+            raise HTTPException(409, f"{custom} is already used by {clash}")
     for attempt in range(8):
         used = await db.private_peers.find({"workspace_id": owner}, {"ip": 1}).to_list(None)
         try:
@@ -96,8 +123,8 @@ async def enroll_peer(data: PeerEnrollment, request: Request):
             await db.private_peers.update_one(
                 {"_id": peer_id},
                 {"$set": {"workspace_id": owner, "machine_id": machine_id,
-                          "owner_id": machine["user_id"], "alias": data.alias, "ip": address,
-                          "enabled": True, "updated_at": utcnow()},
+                          "owner_id": machine["user_id"], "ip": address,
+                          "enabled": True, "updated_at": utcnow(), **({"hostname": custom} if custom else {})},
                  "$setOnInsert": {"created_at": utcnow(), "revision": 0}},
                 upsert=True,
             )
@@ -105,7 +132,7 @@ async def enroll_peer(data: PeerEnrollment, request: Request):
         except ValueError as error:
             raise HTTPException(409, str(error))
         except DuplicateKeyError:
-            if await db.private_peers.find_one({"workspace_id": owner, "alias": data.alias, "_id": {"$ne": peer_id}}):
+            if custom and await db.private_peers.find_one({"workspace_id": owner, "hostname": custom, "_id": {"$ne": peer_id}}):
                 raise HTTPException(409, "This private hostname is already in use")
             if attempt == 7:
                 raise HTTPException(409, "Address allocation changed; retry enrollment")
@@ -115,8 +142,46 @@ async def enroll_peer(data: PeerEnrollment, request: Request):
         "_id": token_digest(ticket), "peer_id": peer_id, "created_by": user["_id"],
         "consumed_at": None, "expires_at": utcnow() + timedelta(minutes=10),
     })
-    return {"peer_id": peer_id, "ip": address, "hostname": f"{data.alias}.{preferences.dns_suffix}",
+    machines, peers = await workspace_names(owner)
+    return {"peer_id": peer_id, "ip": address,
+            "hostname": f"{assign_hostnames(machines, peers)[peer_id]}.{preferences.dns_suffix}",
             "ticket": ticket, "expires_in": 600}
+
+
+async def workspace_names(owner):
+    """Machines whose names reserve private hostnames, and the workspace peers.
+
+    Includes every registered workspace machine (enrolled or not) and machines
+    of members attached as private peers.
+    """
+    peers = await db.private_peers.find({"workspace_id": owner}).to_list(None)
+    machines = await db.machines.find(
+        {"$or": [{"user_id": owner}, {"_id": {"$in": [p["machine_id"] for p in peers]}}],
+         "deletion_pending": {"$ne": True}}, {"name": 1}).to_list(None)
+    return machines, peers
+
+
+@router.put("/peers/{peer_id}/hostname")
+async def rename_peer(peer_id: str, data: HostnameChange, request: Request):
+    user, owner, role = await browser_context(request)
+    peer = await db.private_peers.find_one({"_id": peer_id, "workspace_id": owner})
+    if not peer or (role not in {"owner", "admin"} and peer["owner_id"] != user["_id"]):
+        raise HTTPException(404, "Private peer not found")
+    await indexes()
+    machines, peers = await workspace_names(owner)
+    if data.hostname:
+        clash = hostname_conflict(data.hostname, peer["machine_id"], machines, peers)
+        if clash:
+            raise HTTPException(409, f"{data.hostname} is already used by {clash}")
+        change = {"$set": {"hostname": data.hostname, "updated_at": utcnow()}}
+    else:
+        change = {"$unset": {"hostname": ""}, "$set": {"updated_at": utcnow()}}
+    try:
+        await db.private_peers.update_one({"_id": peer_id}, change)
+    except DuplicateKeyError:
+        raise HTTPException(409, "This private hostname is already in use")
+    machines, peers = await workspace_names(owner)
+    return {"hostname": assign_hostnames(machines, peers)[peer_id]}
 
 
 class Bootstrap(BaseModel):
@@ -271,11 +336,13 @@ async def sync(data: ClientSync, response: Response):
     # Filter messages invalidated by the source's restart/certificate rotation.
     incoming = [s for s in incoming if s["from"] in peer_by_id and s["source_instance"] == peer_by_id[s["from"]].get("instance") and s["fingerprint"] == peer_by_id[s["from"]].get("fingerprint")]
     preferences = NetworkPreferences(**(await db.private_networks.find_one({"_id": str(owner)}) or {}))
+    all_machines, all_peers = await workspace_names(owner)
+    labels = assign_hostnames(all_machines, all_peers)
     return {"snapshot": {
         "workspace": str(owner), "self": data.peer_id, "revision": updated["revision"],
         "expires_at": (now + timedelta(seconds=LEASE_SECONDS)).replace(tzinfo=timezone.utc),
         "peers": [{"id": p["_id"], "ip": p["ip"], "fingerprint": p.get("fingerprint", ""),
-                   "instance": p.get("instance", ""), "hostname": f"{p['alias']}.{preferences.dns_suffix}"} for p in peer_by_id.values()],
+                   "instance": p.get("instance", ""), "hostname": f"{labels[p['_id']]}.{preferences.dns_suffix}"} for p in peer_by_id.values()],
         "grants": grants,
     }, "signals": [{"id": s["_id"], "from": s["from"], "session": s["session"], "description": s["description"]} for s in incoming],
         "ice_servers": ice_servers(), "poll_seconds": 1}

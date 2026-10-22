@@ -2,8 +2,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/router";
 import axios from "axios";
 import {
-  IconArrowRight,
-  IconArrowsLeftRight,
   IconPlus,
   IconShieldLock,
   IconTrash,
@@ -13,16 +11,17 @@ import {
 } from "@tabler/icons-react";
 import { Button } from "@/components/ui/button";
 import SearchSelect from "@/components/ui/search-select";
-import { StatusTabs } from "@/components/ui/status-tabs";
 import { PageHeader, SearchField, EmptyState } from "@/components/ui/workspace";
 import { Dialog } from "@/components/ui/dialog";
 import useToast from "@/shared/hooks/useToast";
-import { API, blankRule, errorText, key, EntityLabel } from "./shared";
+import { API, blankRule, errorText, key } from "./shared";
 import BookEditor from "./BookEditor";
 import GroupList from "./GroupList";
 import GroupEditor from "./GroupEditor";
 import NetworkSettings from "./NetworkSettings";
 import InviteEditor from "./InviteEditor";
+import PolicyTable from "./PolicyTable";
+import PrivateMachines from "./PrivateMachines";
 
 export default function AccessRules() {
   const router = useRouter(),
@@ -34,8 +33,7 @@ export default function AccessRules() {
     [busy, setBusy] = useState(false);
   const [section, setSection] = useState("rules"),
     [query, setQuery] = useState(""),
-    [group, setGroup] = useState("all"),
-    [mode, setMode] = useState("list");
+    [group, setGroup] = useState("all");
   const [editor, setEditor] = useState(null),
     [confirmation, setConfirmation] = useState(null);
   const [invite, setInvite] = useState(false);
@@ -126,6 +124,13 @@ export default function AccessRules() {
     } finally {
       setBusy(false);
     }
+  }
+  async function toggle(book) {
+    const { name, group_id, rules, revision } = book;
+    await mutate(
+      () => axios.put(`${API}/books/${book._id}`, { name, group_id, rules, revision, enabled: !book.enabled }, { params }),
+      book.enabled ? `Paused ${book.name}` : `Resumed ${book.name}`,
+    );
   }
   async function remove(item) {
     const ok = await mutate(
@@ -243,17 +248,6 @@ export default function AccessRules() {
                     })),
                   ]}
                 />
-                {filtered.some((book) => book.rules.length) && (
-                  <StatusTabs
-                    label="Rule display"
-                    value={mode}
-                    onChange={setMode}
-                    options={[
-                      { value: "list", label: "List" },
-                      { value: "map", label: "Flow" },
-                    ]}
-                  />
-                )}
               </div>
               <section
                 aria-label="Private policies"
@@ -282,121 +276,18 @@ export default function AccessRules() {
                     }
                   />
                 ) : (
-                  filtered.map((book) => (
-                    <article
-                      key={book._id}
-                      className="border-b border-border/70 last:border-0"
-                    >
-                      <div className="flex items-center gap-3 px-4 py-3">
-                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-control">
-                          <IconShieldLock
-                            size={18}
-                            className={
-                              book.enabled
-                                ? "text-primary"
-                                : "text-muted-foreground"
-                            }
-                          />
-                        </span>
-                        <button
-                          type="button"
-                          className="min-w-0 flex-1 text-left"
-                          aria-label={`${manage ? "Edit" : "View"} policy ${book.name}`}
-                          onClick={() =>
-                            setEditor({ kind: "book", data: book })
-                          }
-                        >
-                          <p className="truncate text-sm font-medium">
-                            {book.name}
-                          </p>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            {data.groups.find((g) => g._id === book.group_id)
-                              ?.name || "Deleted group · inactive"}{" "}
-                            · {book.rules.length}{" "}
-                            {book.rules.length === 1 ? "rule" : "rules"}
-                          </p>
-                        </button>
-                        <span
-                          className={`text-xs ${book.enabled ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground"}`}
-                        >
-                          {book.enabled ? "Enabled" : "Paused"}
-                        </span>
-                        {manage && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            aria-label={`Delete ${book.name}`}
-                            onClick={() =>
-                              setConfirmation({
-                                kind: "book",
-                                id: book._id,
-                                revision: book.revision,
-                                name: book.name,
-                              })
-                            }
-                          >
-                            <IconTrash size={16} />
-                          </Button>
-                        )}
-                      </div>
-                      {book.rules.map((rule, index) => (
-                        <button
-                          key={rule.id}
-                          type="button"
-                          aria-label={`${manage ? "Edit" : "View"} rule ${rule.name}`}
-                          onClick={() =>
-                            setEditor({ kind: "book", data: book, index })
-                          }
-                          className={`block w-full px-4 py-3 text-left hover:bg-accent/35 ${!book.enabled || !rule.enabled ? "opacity-55" : ""}`}
-                        >
-                          <div className="mb-2 flex items-center gap-2 text-xs">
-                            <span className="font-medium">{rule.name}</span>
-                            <span className="ml-auto shrink-0 rounded-md bg-control px-2 py-1 font-mono text-[11px] uppercase">
-                              {rule.protocol}
-                              {rule.ports
-                                ? ` · ${rule.ports}`
-                                : rule.protocol === "icmp"
-                                  ? ""
-                                  : " · all ports"}
-                            </span>
-                          </div>
-                          <div
-                            className={`grid items-center gap-2 ${mode === "map" ? "grid-cols-[minmax(0,1fr)_36px_minmax(0,1fr)]" : "grid-cols-[minmax(0,1fr)_20px_minmax(0,1fr)]"}`}
-                          >
-                            <EntityLabel
-                              selectors={rule.sources}
-                              names={names}
-                              map={mode === "map"}
-                            />
-                            {rule.bidirectional ? (
-                              <IconArrowsLeftRight
-                                size={mode === "map" ? 25 : 17}
-                                className="mx-auto text-primary"
-                              />
-                            ) : (
-                              <IconArrowRight
-                                size={mode === "map" ? 25 : 17}
-                                className="mx-auto text-primary"
-                              />
-                            )}
-                            <EntityLabel
-                              selectors={rule.destinations}
-                              names={names}
-                              map={mode === "map"}
-                            />
-                          </div>
-                          {mode === "map" && (
-                            <p className="mt-2 text-center text-[11px] text-muted-foreground">
-                              {rule.bidirectional
-                                ? "Both sides can initiate"
-                                : "Source initiates · replies allowed"}{" "}
-                              · click to inspect
-                            </p>
-                          )}
-                        </button>
-                      ))}
-                    </article>
-                  ))
+                  <PolicyTable
+                    books={filtered}
+                    groups={data.groups}
+                    names={names}
+                    manage={manage}
+                    busy={busy}
+                    onOpen={(book) => setEditor({ kind: "book", data: book })}
+                    onToggle={toggle}
+                    onDelete={(book) =>
+                      setConfirmation({ kind: "book", id: book._id, revision: book.revision, name: book.name })
+                    }
+                  />
                 )}
               </section>
             </>
@@ -501,12 +392,20 @@ export default function AccessRules() {
             </section>
           )}
           {section === "network" && (
-            <NetworkSettings
-              data={data}
-              manage={manage}
-              params={params}
-              onSaved={load}
-            />
+            <div className="data-scroll overflow-auto">
+              <PrivateMachines
+                data={data}
+                manage={manage}
+                params={params}
+                onSaved={load}
+              />
+              <NetworkSettings
+                data={data}
+                manage={manage}
+                params={params}
+                onSaved={load}
+              />
+            </div>
           )}
         </>
       )}

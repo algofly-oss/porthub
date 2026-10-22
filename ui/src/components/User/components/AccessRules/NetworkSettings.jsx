@@ -24,11 +24,11 @@ export default function NetworkSettings({ data, manage, params, onSaved }) {
     }
   }
   return (
-    <section className="data-scroll rounded-xl bg-surface p-4 sm:p-6">
+    <section className="rounded-xl bg-surface p-4 sm:p-6">
       <h2 className="text-base font-semibold">Private Network Preferences</h2>
       <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-        Prepare addressing and names. Activation remains unavailable until the
-        compiled agent and transport pass isolation and coexistence tests.
+        Addressing and names for this workspace. Every workspace has its own
+        suffix; machines follow the workspace they joined.
       </p>
       <form onSubmit={save} className="mt-6 max-w-xl space-y-5">
         <label className="block text-sm font-medium">
@@ -59,9 +59,9 @@ export default function NetworkSettings({ data, manage, params, onSaved }) {
             disabled={!manage}
           />
           <span className="mt-2 block text-xs font-normal leading-5 text-muted-foreground">
-            Example: luna.{form.dns_suffix || "phub"}. Only exact registered
-            names resolve privately. Unknown names keep normal DNS; known
-            offline names never fall back publicly.
+            Example: luna.{form.dns_suffix || "phub"}. Only names under this
+            suffix are answered privately; every other name keeps the
+            machine&apos;s normal DNS.
           </span>
         </label>
         <div className="rounded-lg bg-control p-4 text-sm leading-6 text-muted-foreground">

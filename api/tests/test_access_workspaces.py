@@ -93,6 +93,7 @@ class AccessWorkspaceTest(unittest.IsolatedAsyncioTestCase):
         )
         self.patches = [
             patch.object(access, "db", self.db),
+            patch.object(access.private, "db", self.db),
             patch.object(workspaces, "db", self.db),
             patch.object(
                 access,

@@ -101,6 +101,32 @@ export function demoAccess(state, method, path, body, id) {
     user_id: owner,
     private_owner_id: [owner, "demo-person-alex", "demo-person-jamie"][index % 3],
   }));
+  // Private names mirror the API: registered machine name unless customised,
+  // and never a name another machine already uses.
+  const label = (name) => String(name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "machine";
+  access.hostnames = access.hostnames || {};
+  const privatePeers = machines.slice(0, 3).map((m, index) => ({
+    _id: `${owner}:${m._id}`, machine_id: m._id, machine_name: m.name, ip: `10.203.0.${11 + index}`,
+    hostname: access.hostnames[m._id] || label(m.name), custom_hostname: Boolean(access.hostnames[m._id]),
+    enabled: true, installed: true, online: index < 2, paths: index < 2 ? ["direct"] : [],
+  }));
+  const rename = path.match(/^\/access\/private\/peers\/([^/]+)\/hostname$/);
+  if (rename) {
+    const peer = privatePeers.find((p) => p._id === decodeURIComponent(rename[1]));
+    if (!peer) throw Error("Private peer not found");
+    const wanted = String(body.hostname || "").trim().toLowerCase();
+    if (!wanted) {
+      delete access.hostnames[peer.machine_id];
+      return { hostname: label(peer.machine_name) };
+    }
+    if (!/^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/.test(wanted))
+      throw Error("Use up to 48 letters, numbers or hyphens, not starting or ending with a hyphen");
+    const clash = machines.find((m) => m._id !== peer.machine_id && label(m.name) === wanted) ||
+      privatePeers.find((p) => p.machine_id !== peer.machine_id && p.hostname === wanted);
+    if (clash) throw Error(`${wanted} is already used by ${clash.name || clash.machine_name}`);
+    access.hostnames[peer.machine_id] = wanted;
+    return { hostname: wanted };
+  }
   if (path === "/access/snapshot")
     return {
       workspace_id: owner,
@@ -112,6 +138,7 @@ export function demoAccess(state, method, path, body, id) {
       groups: state.groups.map((g) => ({ ...g, user_ids: g.user_ids || [] })),
       books: access.books,
       invitations: access.invitations,
+      private_peers: privatePeers,
     };
   if (method === "delete" && path.startsWith("/access/members/")) {
     const member = path.split("/").pop();
@@ -163,7 +190,10 @@ export function demoAccess(state, method, path, body, id) {
       user_id: owner,
       revision: (existing?.revision || 0) + 1,
     };
-    access.books = [...access.books.filter((b) => b !== existing), book];
+    // Updates keep their position so a paused policy does not jump.
+    access.books = existing
+      ? access.books.map((b) => (b === existing ? book : b))
+      : [...access.books, book];
     return { data: book };
   }
   if (path === "/access/network") {

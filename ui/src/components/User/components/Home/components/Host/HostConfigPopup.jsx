@@ -585,6 +585,16 @@ export default function HostConfigPopup({
   const effectiveServiceDomain =
     (host?.clientSetupServiceDomain || "").trim() || serviceDomain;
 
+  // Ports without a web proxy are still reachable directly on the gateway.
+  const gatewayLink = (rule) => {
+    const url = rule.dataId && rule.enabled ? buildExternalPortUrl(effectiveServiceDomain, rule.externalPort) : "";
+    return url ? (
+      <a href={url} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()} className="block truncate font-mono text-xs text-blue-700 hover:underline dark:text-blue-300" title="Open directly on the gateway">
+        {url.replace(/^https?:\/\//, "").replace(/\/$/, "")}
+      </a>
+    ) : null;
+  };
+
   const openTrafficMonitorWindow = (rule) => {
     if (!rule?.dataId || typeof window === "undefined") {
       return;
@@ -2467,7 +2477,7 @@ export default function HostConfigPopup({
                                     ) : null}
                                   </div>
                                   <p className="mt-0.5 text-xs text-muted-foreground">
-                                    Override install and Rathole endpoints for this machine.
+                                    Use a different PortHub address for this machine.
                                   </p>
                                 </div>
                                 {showClientSetupAdvanced ? (
@@ -2492,8 +2502,8 @@ export default function HostConfigPopup({
                                   <div>
                                     {renderAdvancedLabel(
                                       "client-setup-public-base-url",
-                                      "PortHub public base URL",
-                                      "Changes the base URL used in the bootstrap command and generated client API/download endpoints."
+                                      "PortHub access URL",
+                                      "The address this machine uses to reach PortHub. Tunnel and other endpoints are provided by the server automatically."
                                     )}
                                     <input
                                       id="client-setup-public-base-url"
@@ -2506,48 +2516,6 @@ export default function HostConfigPopup({
                                         )
                                       }
                                       placeholder={clientSetupDefaults.publicBaseUrl}
-                                      className={getDetailInputClassName(isDark)}
-                                    />
-                                  </div>
-
-                                  <div>
-                                    {renderAdvancedLabel(
-                                      "client-setup-rathole-address",
-                                      "Rathole server address",
-                                      "Changes the Rathole client remote_addr written into this machine's generated client config."
-                                    )}
-                                    <input
-                                      id="client-setup-rathole-address"
-                                      type="text"
-                                      value={clientSetupFields.ratholeServerAddress}
-                                      onChange={(event) =>
-                                        handleClientSetupFieldChange(
-                                          "ratholeServerAddress",
-                                          event.target.value
-                                        )
-                                      }
-                                      placeholder={clientSetupDefaults.ratholeServerAddress}
-                                      className={getDetailInputClassName(isDark)}
-                                    />
-                                  </div>
-
-                                  <div>
-                                    {renderAdvancedLabel(
-                                      "client-setup-service-domain",
-                                      "Service domain",
-                                      "Changes service links shown for this machine's exposed ports. It does not change the installer fetch URL."
-                                    )}
-                                    <input
-                                      id="client-setup-service-domain"
-                                      type="text"
-                                      value={clientSetupFields.serviceDomain}
-                                      onChange={(event) =>
-                                        handleClientSetupFieldChange(
-                                          "serviceDomain",
-                                          event.target.value
-                                        )
-                                      }
-                                      placeholder={clientSetupDefaults.serviceDomain}
                                       className={getDetailInputClassName(isDark)}
                                     />
                                   </div>
@@ -2574,6 +2542,24 @@ export default function HostConfigPopup({
                                 }`}
                               >
                                 Installed client version: {clientVersionLabel}
+                                {host?.latestClientVersion ? (
+                                  <>
+                                    {" · "}
+                                    {host.clientVersion === host.latestClientVersion ? (
+                                      <span className="text-emerald-700 dark:text-emerald-400">
+                                        Up to date
+                                      </span>
+                                    ) : host.clientUpdateRequested ? (
+                                      <span className="text-amber-700 dark:text-amber-400">
+                                        Updating to {latestClientVersionLabel}
+                                      </span>
+                                    ) : (
+                                      <span className="text-amber-700 dark:text-amber-400">
+                                        Latest is {latestClientVersionLabel}
+                                      </span>
+                                    )}
+                                  </>
+                                ) : null}
                               </p>
                               {showClientUpdateAction ? (
                                 <Tooltip
@@ -2781,10 +2767,10 @@ export default function HostConfigPopup({
                       const addresses = linkedProxies.filter(proxy => (proxy.connection?.data_id || proxy.connection?._id) === rule.dataId);
                       const openAddresses = event => { event.stopPropagation(); openRuleEditor(rule); setPortSection("web"); };
                       return <TableRow key={rule.localId} className="cursor-pointer" onClick={()=>openRuleEditor(rule)}>
-                        <TableCell className="!py-2"><button type="button" aria-label={`Edit forwarding rule ${rule.serviceName.trim() || "untitled rule"}`} className="block max-w-full text-left"><span className="block truncate text-sm font-medium">{rule.serviceName || "Untitled service"}</span><span className="mt-1 hidden truncate text-xs text-muted-foreground md:block">{rule.serviceDescription || `Port ${rule.externalPort}`}</span></button><p className="mt-1 text-xs text-muted-foreground md:hidden">:{rule.externalPort} → :{rule.internalPort}</p><button type="button" onClick={openAddresses} className="mt-1 max-w-full truncate text-left text-xs text-blue-700 dark:text-blue-300 md:hidden">{addresses[0]?.hosts?.[0] || "Add web address"}</button></TableCell>
+                        <TableCell className="!py-2"><button type="button" aria-label={`Edit forwarding rule ${rule.serviceName.trim() || "untitled rule"}`} className="block max-w-full text-left"><span className="block truncate text-sm font-medium">{rule.serviceName || "Untitled service"}</span><span className="mt-1 hidden truncate text-xs text-muted-foreground md:block">{rule.serviceDescription || `Port ${rule.externalPort}`}</span></button><p className="mt-1 text-xs text-muted-foreground md:hidden">:{rule.externalPort} → :{rule.internalPort}</p>{!addresses.length && <div className="md:hidden">{gatewayLink(rule)}</div>}<button type="button" onClick={openAddresses} className="mt-1 max-w-full truncate text-left text-xs text-blue-700 dark:text-blue-300 md:hidden">{addresses[0]?.hosts?.[0] || "Add web address"}</button></TableCell>
                         <TableCell className="hidden md:table-cell !py-2"><p className="font-mono text-xs">:{rule.externalPort || "—"} → :{rule.internalPort || "—"}</p><p className="mt-1 truncate text-[11px] text-muted-foreground" title={rule.internalIp}>{normalizeAllowedIps(rule.firewall?.allowedIps).length ? "IP restricted" : "Public access"} · {rule.internalIp || "127.0.0.1"}</p></TableCell>
                         <TableCell className="!py-2"><TrafficSparkline dense samples={samplesByConnection.get(rule.dataId) || []} label={`${rule.serviceName} port traffic`} /></TableCell>
-                        <TableCell className="hidden md:table-cell"><div className="space-y-1">{addresses.slice(0,2).map(proxy=><a key={proxy._id} href={`${proxy.entry_points?.includes("websecure") ? "https" : "http"}://${proxy.hosts?.[0]}`} target="_blank" rel="noreferrer" onClick={event=>event.stopPropagation()} className="block truncate text-xs text-blue-700 hover:underline dark:text-blue-300" title={proxy.hosts?.join(", ")}>{proxy.hosts?.[0] || proxy.name}</a>)}<button type="button" onClick={openAddresses} className="text-xs text-muted-foreground hover:text-foreground">{addresses.length ? addresses.length > 2 ? `Manage ${addresses.length} addresses` : "Manage addresses" : "+ Add web address"}</button></div></TableCell>
+                        <TableCell className="hidden md:table-cell"><div className="space-y-1">{!addresses.length && gatewayLink(rule)}{addresses.slice(0,2).map(proxy=><a key={proxy._id} href={`${proxy.entry_points?.includes("websecure") ? "https" : "http"}://${proxy.hosts?.[0]}`} target="_blank" rel="noreferrer" onClick={event=>event.stopPropagation()} className="block truncate text-xs text-blue-700 hover:underline dark:text-blue-300" title={proxy.hosts?.join(", ")}>{proxy.hosts?.[0] || proxy.name}</a>)}<button type="button" onClick={openAddresses} className="text-xs text-muted-foreground hover:text-foreground">{addresses.length ? addresses.length > 2 ? `Manage ${addresses.length} addresses` : "Manage addresses" : "+ Add web address"}</button></div></TableCell>
                         <TableCell><div onClick={event=>event.stopPropagation()}><Switch size="sm" checked={rule.enabled} onChange={event=>updateRule(rule.localId,"enabled",event.currentTarget.checked)} aria-label={rule.enabled ? "Disable forwarding rule" : "Enable forwarding rule"} /></div></TableCell>
                       </TableRow>;
                     })}

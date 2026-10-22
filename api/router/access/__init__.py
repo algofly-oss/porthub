@@ -122,6 +122,12 @@ async def snapshot(request: Request):
         .to_list(None)
     )
     preferences = await db.private_networks.find_one({"_id": str(owner)})
+    from .private import workspace_names
+    from shared.private_overlay import assign_hostnames
+    name_machines, peers = await workspace_names(owner)
+    labels = assign_hostnames(name_machines, peers)
+    machine_names = {m["_id"]: m.get("name", "") for m in name_machines}
+    now = utcnow()
     invites = (
         await db.workspace_invites.find(
             {
@@ -172,6 +178,23 @@ async def snapshot(request: Request):
             for g in groups
         ],
         "books": [clean_doc(book) for book in books],
+        # Whitelisted private peer fields only: never credentials or SDP.
+        "private_peers": [
+            {
+                "_id": p["_id"],
+                "machine_id": str(p["machine_id"]),
+                "machine_name": machine_names.get(p["machine_id"], ""),
+                "ip": p["ip"],
+                "hostname": labels[p["_id"]],
+                "custom_hostname": bool(p.get("hostname")),
+                "enabled": p.get("enabled", True),
+                "installed": bool(p.get("credential_hash")),
+                "online": bool(p.get("last_seen_at") and (now - p["last_seen_at"]).total_seconds() < 30),
+                "last_seen_at": p.get("last_seen_at"),
+                "paths": sorted(set((p.get("paths") or {}).values())),
+            }
+            for p in sorted(peers, key=lambda p: labels[p["_id"]])
+        ],
         "invitations": [clean_doc(invite) for invite in invites],
     }
 

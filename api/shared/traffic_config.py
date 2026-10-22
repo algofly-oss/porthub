@@ -124,6 +124,21 @@ def render_traffic_config(routes: list[dict], source: str) -> str:
                 f"      service: {_yaml_scalar(route_key)}",
             ]
         )
+        if "websecure" in route["entry_points"]:
+            lines.append("      tls: {}")
+        else:
+            # Every proxy also answers HTTPS so Cloudflare "Full" zones work.
+            # Traefik's default certificate is used; plain HTTP is unchanged.
+            lines.extend(
+                [
+                    f"    {route_key}_tls:",
+                    "      entryPoints:",
+                    '        - "websecure"',
+                    f"      rule: {_yaml_scalar(host_rule)}",
+                    f"      service: {_yaml_scalar(route_key)}",
+                    "      tls: {}",
+                ]
+            )
 
     lines.append("  services:")
     for route in routes:

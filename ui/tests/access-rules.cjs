@@ -30,18 +30,27 @@ const {launchBrowser, navigateWorkspace, seedEmptyPolicies} = require("./browser
       await page.screenshot({path:`/tmp/porthub-access-editor-${theme}-${width}.png`});
       await editor.getByRole("button",{name:"Save Policy",exact:true}).click();
       await editor.waitFor({state:"hidden"});
-      await page.getByRole("button",{name:"Edit policy Developer Access",exact:true}).waitFor();
+      await page.locator('[aria-label="Edit policy Developer Access"]:visible').waitFor();
       assert.equal(await page.getByRole("button",{name:"Test Access",exact:true}).count(),0);
-      await page.getByRole("button",{name:"Edit rule SSH to production",exact:true}).click();
+      assert.equal(await page.getByRole("button",{name:"Flow",exact:true}).count(),0,"single policy view only");
+      // Click the policy name: the row centre can be the pause switch on phones.
+      await page.locator('[aria-label="Edit policy Developer Access"]:visible').getByText("Developer Access",{exact:true}).click();
       editor=page.getByRole("dialog",{name:"Edit Policy",exact:true});
       await editor.getByLabel("Allow both directions",{exact:true}).check({force:true});
       await editor.getByRole("button",{name:"Save Policy",exact:true}).click();
       await editor.waitFor({state:"hidden"});
-      await page.getByRole("button",{name:"Flow",exact:true}).click();
-      await page.getByText("Both sides can initiate · click to inspect",{exact:true}).waitFor();
-      await page.waitForTimeout(200);
-      await page.screenshot({path:`/tmp/porthub-access-map-${theme}-${width}.png`});
-      await page.getByRole("button",{name:"Edit policy Developer Access",exact:true}).click();
+      await page.locator('[aria-label="Edit policy Developer Access"]:visible').getByLabel("both directions").waitFor();
+      const toggle=page.getByRole("switch",{name:"Pause policy Developer Access",exact:true}).locator("visible=true");
+      await toggle.click();
+      await page.getByRole("switch",{name:"Resume policy Developer Access",exact:true}).locator("visible=true").waitFor();
+      await page.getByRole("switch",{name:"Resume policy Developer Access",exact:true}).locator("visible=true").click();
+      await page.getByRole("switch",{name:"Pause policy Developer Access",exact:true}).locator("visible=true").waitFor();
+      const policyRow=page.locator('[aria-label="Edit policy Developer Access"]:visible');
+      const before=await policyRow.evaluate(e=>getComputedStyle(e).backgroundColor);
+      await policyRow.hover();await page.waitForTimeout(250);
+      assert.notEqual(await policyRow.evaluate(e=>getComputedStyle(e).backgroundColor),before,"policy row hover");
+      await page.screenshot({path:`/tmp/porthub-access-list-${theme}-${width}.png`});
+      await policyRow.getByText("Developer Access",{exact:true}).click();
       await editor.getByLabel("Policy name",{exact:true}).fill("Unsaved change");
       await editor.getByRole("button",{name:"Cancel",exact:true}).click();
       const guard=page.getByRole("dialog",{name:"Discard unsaved changes?",exact:true});
@@ -76,7 +85,7 @@ const {launchBrowser, navigateWorkspace, seedEmptyPolicies} = require("./browser
       await page.getByRole("heading",{name:"Settings",exact:true}).waitFor();
       assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
       assert.deepEqual(errors,[]);
-      await context.close();console.log(`PASS access controls ${theme} ${width}: empty policies, policy editing, flow view, group tags, invites, persistence, safe navigation`);
+      await context.close();console.log(`PASS access controls ${theme} ${width}: empty policies, policy editing, single list with hover and pause, group tags, invites, persistence, safe navigation`);
     }
   } finally {await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

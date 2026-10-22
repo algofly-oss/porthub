@@ -115,6 +115,45 @@ class PrivatePeerTests(AccessWorkspaceTest):
             await private.enroll_peer(private.PeerEnrollment(machine_id=str(foreign), alias="foreign"), request())
         self.assertEqual(error.exception.status_code, 403)
 
+    async def names(self, credential, letter):
+        snapshot = (await private.sync(self.payload(credential, letter), Response()))["snapshot"]
+        return {p["id"]: p["hostname"] for p in snapshot["peers"]}
+
+    async def test_private_names_follow_machine_names(self):
+        _, a = await self.enroll(self.a, None)
+        self.assertEqual((await self.names(a, "A"))[a["peer_id"]], "laptop.phub")
+        await self.db.machines.update_one({"_id": self.a}, {"$set": {"name": "Luna Box!"}})
+        self.assertEqual((await self.names(a, "A"))[a["peer_id"]], "luna-box.phub")
+        # Each workspace's own suffix applies to its machines.
+        await self.db.private_networks.insert_one({"_id": str(self.owner), "cidr": "10.203.0.0/24", "dns_suffix": "internal"})
+        self.assertEqual((await self.names(a, "A"))[a["peer_id"]], "luna-box.internal")
+
+    async def test_custom_names_cannot_take_another_machines_name(self):
+        _, a = await self.enroll(self.a, None)
+        # "server" is the registered name of machine b, even though b is not enrolled.
+        with self.assertRaises(HTTPException) as error:
+            await private.rename_peer(a["peer_id"], private.HostnameChange(hostname="Server"), request())
+        self.assertEqual(error.exception.status_code, 409)
+        self.assertEqual((await private.rename_peer(a["peer_id"], private.HostnameChange(hostname="workstation"), request()))["hostname"], "workstation")
+        self.assertEqual((await self.names(a, "A"))[a["peer_id"]], "workstation.phub")
+        for custom in ("workstation", "laptop"):  # b cannot take a's custom or registered name
+            with self.assertRaises(HTTPException) as error:
+                await private.enroll_peer(private.PeerEnrollment(machine_id=str(self.b), hostname=custom), request())
+            self.assertEqual(error.exception.status_code, 409)
+        with self.assertRaises(ValueError):
+            private.HostnameChange(hostname="-bad-")
+        self.assertEqual((await private.rename_peer(a["peer_id"], private.HostnameChange(hostname=""), request()))["hostname"], "laptop")
+
+    async def test_duplicate_machine_names_get_distinct_private_names(self):
+        await self.db.machines.update_one({"_id": self.b}, {"$set": {"name": "Laptop"}})
+        _, a = await self.enroll(self.a, None)
+        _, b = await self.enroll(self.b, None)
+        await self.allow()
+        await self.names(b, "B")
+        names = await self.names(a, "A")
+        self.assertEqual(names[a["peer_id"]], "laptop.phub")
+        self.assertEqual(names[b["peer_id"]], f"laptop-{str(self.b)[-4:]}.phub")
+
     async def test_removed_inviter_cannot_bootstrap(self):
         from router import access
         await self.db.workspace_members.insert_one({"_id": f"{self.owner}:{self.alice}", "workspace_id": self.owner, "user_id": self.alice, "role": "admin"})

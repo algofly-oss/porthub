@@ -32,31 +32,6 @@ export const selector = (value) => ({
   id: value.slice(value.indexOf(":") + 1),
 });
 
-export function EntityLabel({ selectors, names, map }) {
-  return (
-    <div
-      title={selectors
-        .map((s) => names.get(key(s)) || "Deleted entity")
-        .join(", ")}
-      className={`min-w-0 ${map ? "rounded-lg bg-control p-3" : ""}`}
-    >
-      {selectors.slice(0, 2).map((item) => (
-        <p key={key(item)} className="truncate text-xs leading-5">
-          <span className="mr-1 text-muted-foreground">
-            {item.kind === "group" ? "#" : item.kind === "user" ? "@" : ""}
-          </span>
-          {names.get(key(item)) || "Deleted entity"}
-        </p>
-      ))}
-      {selectors.length > 2 && (
-        <p className="text-[11px] text-muted-foreground">
-          +{selectors.length - 2} more
-        </p>
-      )}
-    </div>
-  );
-}
-
 export function MultiEntities({ label, value, onChange, options, disabled }) {
   const [opened, setOpened] = useState(false);
   return (
