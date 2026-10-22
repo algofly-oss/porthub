@@ -84,6 +84,8 @@ export default function AccessRules() {
     () =>
       data
         ? [
+            // Every machine in the workspace, including ones added later.
+            { value: "all:machines", label: "All machines" },
             ...data.groups.map((g) => ({
               value: `group:${g._id}`,
               label: `Group · ${g.name}`,

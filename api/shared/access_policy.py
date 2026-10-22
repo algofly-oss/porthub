@@ -14,8 +14,16 @@ from pydantic import BaseModel, Field, validator, root_validator
 
 
 class Selector(BaseModel):
-    kind: Literal["machine", "user", "group"]
+    # kind "all" (id "machines") means every machine in the workspace,
+    # including machines added later.
+    kind: Literal["machine", "user", "group", "all"]
     id: str = Field(..., min_length=1, max_length=64)
+
+    @validator("id")
+    def all_machines_id(cls, value, values):
+        if values.get("kind") == "all" and value != "machines":
+            raise ValueError('Use id "machines" for all machines')
+        return value
 
 
 def parse_ports(value):
@@ -128,6 +136,8 @@ class NetworkPreferences(BaseModel):
 
 def entity_matches(selector, machine, groups):
     kind, entity_id = selector["kind"], str(selector["id"])
+    if kind == "all":
+        return True
     if kind == "machine":
         return str(machine["_id"]) == entity_id
     owner = str(machine.get("private_owner_id") or machine.get("user_id") or "")

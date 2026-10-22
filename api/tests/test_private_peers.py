@@ -154,6 +154,19 @@ class PrivatePeerTests(AccessWorkspaceTest):
         self.assertEqual(names[a["peer_id"]], "laptop.phub")
         self.assertEqual(names[b["peer_id"]], f"laptop-{str(self.b)[-4:]}.phub")
 
+    async def test_machine_aliases_become_private_names(self):
+        await self.db.machines.update_one({"_id": self.a}, {"$set": {"name": "Luna", "aliases": ["lunabox", "Server", "lb"]}})
+        _, a = await self.enroll(self.a, None)
+        peers = (await private.sync(self.payload(a, "A"), Response()))["snapshot"]["peers"]
+        me = next(p for p in peers if p["id"] == a["peer_id"])
+        self.assertEqual(me["hostname"], "luna.phub")
+        # "Server" is machine b's registered name, so that alias is skipped.
+        self.assertEqual(me["aliases"], ["lunabox.phub", "lb.phub"])
+        _, b = await self.enroll(self.b, None)
+        with self.assertRaises(HTTPException) as error:  # b cannot take a's alias as a custom name
+            await private.rename_peer(b["peer_id"], private.HostnameChange(hostname="lunabox"), request())
+        self.assertEqual(error.exception.status_code, 409)
+
     async def test_removed_inviter_cannot_bootstrap(self):
         from router import access
         await self.db.workspace_members.insert_one({"_id": f"{self.owner}:{self.alice}", "workspace_id": self.owner, "user_id": self.alice, "role": "admin"})

@@ -123,9 +123,10 @@ async def snapshot(request: Request):
     )
     preferences = await db.private_networks.find_one({"_id": str(owner)})
     from .private import workspace_names
-    from shared.private_overlay import assign_hostnames
+    from shared.private_overlay import alias_hostnames, assign_hostnames
     name_machines, peers = await workspace_names(owner)
     labels = assign_hostnames(name_machines, peers)
+    alias_labels = alias_hostnames(name_machines, peers, labels)
     machine_names = {m["_id"]: m.get("name", "") for m in name_machines}
     now = utcnow()
     invites = (
@@ -187,6 +188,7 @@ async def snapshot(request: Request):
                 "ip": p["ip"],
                 "hostname": labels[p["_id"]],
                 "custom_hostname": bool(p.get("hostname")),
+                "aliases": alias_labels.get(p["_id"], []),
                 "enabled": p.get("enabled", True),
                 "installed": bool(p.get("credential_hash")),
                 "online": bool(p.get("last_seen_at") and (now - p["last_seen_at"]).total_seconds() < 30),

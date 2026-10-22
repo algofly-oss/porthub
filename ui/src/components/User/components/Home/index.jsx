@@ -206,6 +206,7 @@ const formatLastSeen = (machine) => {
 const mapMachineToHost = (machine) => ({
   id: machine._id,
   name: machine.name || "Untitled machine",
+  aliases: machine.aliases || [],
   createdAt: machine.created_at || "",
   hostname: machine.hostname || "",
   clientHostname: machine.client_hostname || "",

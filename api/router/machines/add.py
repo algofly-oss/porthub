@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException, Request
 from shared.factory import db
 from shared.rathole_config import rebuild_server_toml
 from ..common import (
+    split_machine_names,
     generate_machine_token,
     get_authenticated_user,
     parse_object_id,
@@ -18,7 +19,7 @@ router = APIRouter()
 async def add_machine(data: Machine, request: Request):
     user = await get_authenticated_user(request)
     now = utcnow()
-    machine_name = data.name.strip()
+    machine_name, machine_aliases = split_machine_names(data.name)
 
     if not machine_name:
         raise HTTPException(status_code=400, detail="Machine name is required")
@@ -39,6 +40,7 @@ async def add_machine(data: Machine, request: Request):
     machine = {
         "user_id": user["_id"],
         "name": machine_name,
+        "aliases": machine_aliases,
         "hostname": (data.hostname or "").strip(),
         "hostname_override": (data.hostname or "").strip(),
         "client_setup_public_base_url": (

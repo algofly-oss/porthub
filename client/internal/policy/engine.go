@@ -8,11 +8,12 @@ import (
 )
 
 type Peer struct {
-	ID          string `json:"id"`
-	IP          string `json:"ip"`
-	Fingerprint string `json:"fingerprint"`
-	Instance    string `json:"instance"`
-	Hostname    string `json:"hostname"`
+	ID          string   `json:"id"`
+	IP          string   `json:"ip"`
+	Fingerprint string   `json:"fingerprint"`
+	Instance    string   `json:"instance"`
+	Hostname    string   `json:"hostname"`
+	Aliases     []string `json:"aliases,omitempty"`
 }
 
 func (e *Engine) Revoke() {

@@ -10,6 +10,7 @@ from shared.sockets import (
     set_cached_machine_status,
 )
 from ..common import (
+    split_machine_names,
     get_authenticated_user,
     is_machine_online,
     parse_object_id,
@@ -57,7 +58,7 @@ def _sorted_group_id_tuple(serialized: dict) -> tuple[str, ...]:
 async def update_machine(data: Machine, request: Request):
     user = await get_authenticated_user(request)
     machine_id = parse_object_id(data.data_id, "Invalid machine id")
-    machine_name = data.name.strip()
+    machine_name, machine_aliases = split_machine_names(data.name)
     if not machine_name:
         raise HTTPException(status_code=400, detail="Machine name is required")
 
@@ -89,6 +90,7 @@ async def update_machine(data: Machine, request: Request):
     )
     mongo_set = {
         "name": machine_name,
+        "aliases": machine_aliases,
         "hostname": next_effective_hostname,
         "hostname_override": next_hostname_override,
         "enabled": next_enabled,

@@ -48,3 +48,32 @@ class PrivateOverlayTests(unittest.TestCase):
         self.assertTrue(FINGERPRINT.fullmatch(":".join(["AB"] * 32)))
         self.assertIsNone(FINGERPRINT.fullmatch("AB:" * 32))
         self.assertIsNone(FINGERPRINT.fullmatch("sha1:insecure"))
+
+    def test_all_machines_selector_reaches_every_workspace_machine(self):
+        machines = [
+            {"_id": "luna", "user_id": "ws", "group_ids": ["home"]},
+            {"_id": "miro", "user_id": "ws", "group_ids": ["home"]},
+            {"_id": "condor", "user_id": "ws", "group_ids": ["lab"]},
+            {"_id": "foreign", "user_id": "other", "group_ids": ["lab"]},
+        ]
+        groups = {"home": {"user_ids": []}, "lab": {"user_ids": []}}
+        rule = {"id": "r", "name": "Luna to everything", "sources": [{"kind": "machine", "id": "luna"}],
+                "destinations": [{"kind": "all", "id": "machines"}], "protocol": "any", "ports": ""}
+        grants = compile_grants(machines, [{"_id": "b", "user_id": "ws", "group_id": "home", "rules": [rule]}], groups)
+        # Luna reaches every machine of its workspace, across groups, and never
+        # another workspace's machine; nothing is granted in reverse.
+        self.assertEqual({(g["source"], g["destination"]) for g in grants}, {("luna", "miro"), ("luna", "condor")})
+        everyone = dict(rule, sources=[{"kind": "all", "id": "machines"}], bidirectional=True)
+        grants = compile_grants(machines, [{"_id": "b", "user_id": "ws", "group_id": "home", "rules": [everyone]}], groups)
+        self.assertEqual(len({(g["source"], g["destination"]) for g in grants}), 6)  # every ordered pair of 3
+        from shared.access_policy import Selector
+        with self.assertRaises(ValueError):
+            Selector(kind="all", id="something-else")
+
+
+class MachineNameTests(unittest.TestCase):
+    def test_comma_separated_names_are_cleaned(self):
+        from router.common import split_machine_names
+        self.assertEqual(split_machine_names(" Luna ,lunabox,  lb ,, LUNA "), ("Luna", ["lunabox", "lb"]))
+        with self.assertRaises(Exception):
+            split_machine_names(" , ")

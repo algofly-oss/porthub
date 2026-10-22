@@ -558,7 +558,9 @@ export default function HostConfigPopup({
   );
   const machineNameValue = machineDetails.name.trim();
   const machineHostnameValue = machineDetails.hostname.trim();
-  const hostNameValue = (host?.name || "").trim();
+  // The name field holds "name, alias, alias"; the server splits and cleans it.
+  const hostAliasesKey = (host?.aliases || []).join(",");
+  const hostNameValue = [host?.name || "", ...(host?.aliases || [])].join(", ").trim();
   const hostHostnameValue = (host?.hostname || "").trim();
   const clientHostnameValue = (host?.clientHostname || "").trim();
   const machineDetailsChanged =
@@ -726,9 +728,9 @@ export default function HostConfigPopup({
 
   // Metadata saves must not reset draft port edits, or vice versa.
   useEffect(() => {
-    setMachineDetails({ name: host?.name || "", hostname: host?.hostname || "" });
+    setMachineDetails({ name: [host?.name || "", ...(host?.aliases || [])].join(", "), hostname: host?.hostname || "" });
     setMachineDetailsErrors({});
-  }, [host?.id, host?.name, host?.hostname]);
+  }, [host?.id, host?.name, hostAliasesKey, host?.hostname]);
 
   useEffect(() => {
     setShowGroups(machineSection === "groups");
@@ -2076,7 +2078,7 @@ export default function HostConfigPopup({
                             <input
                               type="text"
                               aria-label="Machine name"
-                              placeholder="Machine name"
+                              placeholder="Machine name, then optional aliases separated by commas"
                               className={getDetailInputClassName(isDark)}
                               value={machineDetails.name}
                               onChange={(event) =>

@@ -52,6 +52,22 @@ async def get_authenticated_user(request: Request):
     return user
 
 
+def split_machine_names(value):
+    """'luna, lunabox ,lb' -> ('luna', ['lunabox', 'lb']). The first name is
+    shown everywhere; the rest are aliases (also private DNS names)."""
+    names, seen = [], set()
+    for part in str(value or "").split(","):
+        part = part.strip()
+        if part and part.lower() not in seen:
+            seen.add(part.lower())
+            names.append(part[:64])
+    if not names:
+        raise HTTPException(status_code=400, detail="Machine name is required")
+    if len(names) > 11:
+        raise HTTPException(status_code=400, detail="Use at most 10 aliases")
+    return names[0], names[1:]
+
+
 def utcnow():
     return datetime.utcnow()
 
@@ -116,6 +132,7 @@ def serialize_machine(machine: dict):
         "_id": str(machine["_id"]),
         "user_id": str(machine["user_id"]),
         "name": machine.get("name", ""),
+        "aliases": [str(a) for a in machine.get("aliases") or []],
         "hostname": resolved_hostname,
         "client_hostname": (machine.get("client_hostname") or "").strip(),
         "hostname_override": (machine.get("hostname_override") or "").strip(),

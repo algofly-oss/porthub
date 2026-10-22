@@ -25,7 +25,7 @@ from router.common import parse_object_id, utcnow
 from shared.access_policy import NetworkPreferences
 from shared.factory import db
 from shared.private_overlay import (
-    FINGERPRINT, HOSTNAME, assign_hostnames, compile_grants, hostname_conflict, private_address,
+    FINGERPRINT, HOSTNAME, alias_hostnames, assign_hostnames, compile_grants, hostname_conflict, private_address,
 )
 from shared.workspaces import token_digest
 
@@ -177,7 +177,7 @@ async def workspace_names(owner):
     peers = await db.private_peers.find({"workspace_id": owner}).to_list(None)
     machines = await db.machines.find(
         {"$or": [{"user_id": owner}, {"_id": {"$in": [p["machine_id"] for p in peers]}}],
-         "deletion_pending": {"$ne": True}}, {"name": 1}).to_list(None)
+         "deletion_pending": {"$ne": True}}, {"name": 1, "aliases": 1}).to_list(None)
     return machines, peers
 
 
@@ -358,11 +358,13 @@ async def sync(data: ClientSync, response: Response):
     preferences = NetworkPreferences(**(await db.private_networks.find_one({"_id": str(owner)}) or {}))
     all_machines, all_peers = await workspace_names(owner)
     labels = assign_hostnames(all_machines, all_peers)
+    alias_labels = alias_hostnames(all_machines, all_peers, labels)
     return {"snapshot": {
         "workspace": str(owner), "self": data.peer_id, "revision": updated["revision"],
         "expires_at": (now + timedelta(seconds=LEASE_SECONDS)).replace(tzinfo=timezone.utc),
         "peers": [{"id": p["_id"], "ip": p["ip"], "fingerprint": p.get("fingerprint", ""),
-                   "instance": p.get("instance", ""), "hostname": f"{labels[p['_id']]}.{preferences.dns_suffix}"} for p in peer_by_id.values()],
+                   "instance": p.get("instance", ""), "hostname": f"{labels[p['_id']]}.{preferences.dns_suffix}",
+                   "aliases": [f"{a}.{preferences.dns_suffix}" for a in alias_labels.get(p["_id"], [])]} for p in peer_by_id.values()],
         "grants": grants,
     }, "signals": [{"id": s["_id"], "from": s["from"], "session": s["session"], "description": s["description"]} for s in incoming],
         "ice_servers": ice_servers(data.peer_id), "poll_seconds": 1}

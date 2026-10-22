@@ -94,6 +94,27 @@ def assign_hostnames(machines, peers):
     return names
 
 
+def alias_hostnames(machines, peers, primary=None):
+    """Return {peer_id: [labels]} for machine aliases ("luna, lunabox").
+
+    An alias never takes a label already used by any machine's name, any
+    peer's private name, or an earlier peer's alias (enrollment order).
+    """
+    primary = primary if primary is not None else assign_hostnames(machines, peers)
+    taken = set(primary.values()) | {hostname_label(m.get("name")) for m in machines}
+    by_id = {m["_id"]: m for m in machines}
+    result = {}
+    for peer in sorted(peers, key=lambda p: (str(p.get("created_at") or ""), p["_id"])):
+        labels = []
+        for alias in (by_id.get(peer["machine_id"]) or {}).get("aliases") or []:
+            label = hostname_label(alias)
+            if label not in taken:
+                taken.add(label)
+                labels.append(label)
+        result[peer["_id"]] = labels
+    return result
+
+
 def hostname_conflict(label, machine_id, machines, peers):
     """Name of the other machine that already owns label, or None.
 
@@ -101,7 +122,7 @@ def hostname_conflict(label, machine_id, machines, peers):
     or not) nor any other peer's current private name.
     """
     for machine in machines:
-        if machine["_id"] != machine_id and hostname_label(machine.get("name")) == label:
+        if machine["_id"] != machine_id and label in {hostname_label(n) for n in [machine.get("name"), *(machine.get("aliases") or [])]}:
             return machine.get("name")
     current = assign_hostnames(machines, peers)
     names = {m["_id"]: m.get("name") for m in machines}

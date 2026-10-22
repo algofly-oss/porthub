@@ -6,7 +6,7 @@ import { key } from "./shared";
 // One compact row per policy. A row opens the editor; the switch pauses or
 // resumes the whole policy without leaving the list.
 const entityText = (selectors, names) =>
-  selectors.map((s) => `${s.kind === "group" ? "#" : s.kind === "user" ? "@" : ""}${names.get(key(s)) || "Deleted entity"}`).join(", ");
+  selectors.map((s) => s.kind === "all" ? "All machines" : `${s.kind === "group" ? "#" : s.kind === "user" ? "@" : ""}${names.get(key(s)) || "Deleted entity"}`).join(", ");
 
 export const protocolText = (rule) =>
   rule.protocol === "any" ? (rule.ports ? `Any · ${rule.ports}` : "Any traffic")

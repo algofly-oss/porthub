@@ -223,7 +223,9 @@ export function demoAccess(state, method, path, body, id) {
     const source = machines.find((m) => m._id === body.source_id),
       destination = machines.find((m) => m._id === body.destination_id);
     const match = (selector, machine) =>
-      selector.kind === "machine"
+      selector.kind === "all"
+        ? Boolean(machine)
+        : selector.kind === "machine"
         ? selector.id === machine?._id
         : selector.kind === "user"
           ? selector.id === machine?.private_owner_id && users.some(user => user._id === selector.id)

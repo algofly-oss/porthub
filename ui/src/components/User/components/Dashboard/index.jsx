@@ -13,6 +13,20 @@ import { PageHeader, EmptyState } from "@/components/ui/workspace";
 import useProxyActivity from "@/shared/hooks/useProxyActivity";
 import ProxyActivity from "@/components/ui/proxy-activity";
 
+// Placeholder cards shaped like the dashboard so the layout does not jump.
+function DashboardSkeleton() {
+  const bar = "animate-pulse rounded bg-control";
+  const card = (rows, tall) => <section className="flex min-w-0 flex-col gap-3 rounded-xl bg-surface p-5">
+    <div className={`${bar} h-4 w-40`} /><div className={`${bar} h-3 w-56 max-w-full opacity-70`} />
+    {tall ? <div className={`${bar} mt-2 h-[180px] w-full opacity-60`} /> : Array.from({ length: rows }, (_, i) => <div key={i} className="flex items-center gap-3 pt-2"><div className="min-w-0 flex-1 space-y-2"><div className={`${bar} h-3 w-3/5`} /><div className={`${bar} h-3 w-2/5 opacity-70`} /></div><div className={`${bar} h-6 w-20 opacity-60`} /></div>)}
+  </section>;
+  return <div role="status" aria-label="Loading your workspace" className="space-y-4 pb-1">
+    <span className="sr-only">Loading your workspace…</span>
+    <div className="grid items-stretch gap-4 lg:grid-cols-[minmax(0,1.8fr)_minmax(290px,1fr)]">{card(0, true)}{card(3)}</div>
+    <div className="grid items-stretch gap-4 lg:grid-cols-[minmax(0,1.8fr)_minmax(290px,1fr)]">{card(4)}{card(4)}</div>
+  </div>;
+}
+
 export default function Dashboard() {
   const router = useRouter();
   const { colorScheme } = useMantineColorScheme();
@@ -51,7 +65,7 @@ export default function Dashboard() {
   return <div className="h-full min-h-0 overflow-y-auto overscroll-contain" aria-label="Dashboard content"><div className="workspace-page !h-auto !min-h-full !overflow-visible">
     <PageHeader title="Dashboard" actions={<div className="flex items-center gap-2"><span className="hidden items-center gap-1.5 text-xs text-muted-foreground sm:flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />Live workspace</span><Button variant="ghost" size="icon" aria-label="Refresh dashboard" onClick={()=>load()}><IconRefresh size={17} /></Button></div>} />
     {error && <p role="alert" className="mb-3 rounded-lg bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">{error}</p>}
-    {loading ? <p role="status" className="p-6 text-sm text-muted-foreground">Loading your workspace…</p> : !data.machines.length && !data.proxies.length ? <EmptyState icon={IconServer} title="Your workspace starts here" description="Enroll a machine to expose its ports, or create a standalone web proxy." action={<div className="flex flex-wrap justify-center gap-2"><Button onClick={()=>navigate("machines", {create:"1"})}><IconPlus size={16} />Enroll a Machine</Button><Button variant="secondary" onClick={()=>navigate("proxies", {create:"1"})}>Create a Proxy</Button></div>} /> : <div className="space-y-4 pb-1">
+    {loading ? <DashboardSkeleton /> : !data.machines.length && !data.proxies.length ? <EmptyState icon={IconServer} title="Your workspace starts here" description="Enroll a machine to expose its ports, or create a standalone web proxy." action={<div className="flex flex-wrap justify-center gap-2"><Button onClick={()=>navigate("machines", {create:"1"})}><IconPlus size={16} />Enroll a Machine</Button><Button variant="secondary" onClick={()=>navigate("proxies", {create:"1"})}>Create a Proxy</Button></div>} /> : <div className="space-y-4 pb-1">
       <div className="grid items-stretch gap-4 lg:grid-cols-[minmax(0,1.8fr)_minmax(290px,1fr)]">
         <section className="flex min-w-0 flex-col overflow-hidden rounded-xl bg-surface">
           <div className="px-5 pt-5"><h2 className="text-base font-semibold">Network Activity</h2><p className="mt-1 text-xs text-muted-foreground">Last 5 minutes · all forwarded ports · bytes per second</p></div>

@@ -519,8 +519,12 @@ func (r *Runtime) updateNames(s policy.Snapshot) {
 	}
 	records := make(map[string]netip.Addr)
 	for _, p := range s.Peers {
+		ip := netip.MustParseAddr(p.IP)
 		if p.Hostname != "" {
-			records[p.Hostname] = netip.MustParseAddr(p.IP)
+			records[p.Hostname] = ip
+		}
+		for _, alias := range p.Aliases {
+			records[alias] = ip
 		}
 	}
 	server.Update(suffix(s), records)
