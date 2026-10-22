@@ -9,7 +9,7 @@ export function makeDemoData() {
     const name = `${["atlas", "orion", "luna", "nova", "edge", "worker"][i % 6]}-${["prod", "dev", "home"][environment]}-${String(i + 1).padStart(2, "0")}`;
     return { _id: id(1000 + i), name, hostname: `${name}.local`, group_ids: [groups[environment]._id], enabled, is_active: online && enabled,
       connection_status: !enabled ? "disabled" : online ? "online" : "offline", local_ip: `192.168.${environment + 1}.${20 + i}`, public_ip: `203.0.113.${i + 1}`,
-      client_version: "1.2.0", latest_client_version: "1.2.0", token: "demo-token-not-valid-for-real-clients", created_at: stamp(), updated_at: stamp(), last_seen_at: new Date(Date.now() - (online ? 2000 : 3600000 * (i + 1))).toISOString() };
+      client_version: i % 4 === 3 ? "1.1.0" : "1.2.0", latest_client_version: "1.2.0", client_update_available: i % 4 === 3, token: "demo-token-not-valid-for-real-clients", created_at: stamp(), updated_at: stamp(), last_seen_at: new Date(Date.now() - (online ? 2000 : 3600000 * (i + 1))).toISOString() };
   });
   const connections = machines.flatMap((m, i) => [0, 1].map(index => ({ _id: id(2000 + i * 2 + index), machine_id: m._id, machine_name: m.name, machine_hostname: m.hostname,
     machine_enabled: m.enabled, machine_is_active: m.is_active, machine_connection_status: m.connection_status,

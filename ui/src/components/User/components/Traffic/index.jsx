@@ -14,6 +14,18 @@ import TrafficSparkline from "@/components/ui/traffic-sparkline";
 import { useDemo } from "@/shared/demo/DemoProvider";
 import uiRoutes from "@/shared/routes/uiRoutes";
 
+// Placeholder rows shaped like the results so the page does not jump.
+function TrafficSkeleton() {
+  return <section role="status" aria-label="Loading traffic" className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-surface">
+    <span className="sr-only">Loading traffic…</span>
+    <div className="h-11 border-b border-border" />
+    {Array.from({ length: 6 }, (_, i) => <div key={i} className="flex items-center gap-4 border-b border-border/60 px-4 py-3 last:border-0">
+      <div className="min-w-0 flex-1 space-y-2"><div className="h-3.5 w-40 max-w-full animate-pulse rounded bg-control" /><div className="h-3 w-24 animate-pulse rounded bg-control/70" /></div>
+      <div className="h-8 w-32 animate-pulse rounded bg-control/70 sm:w-56" />
+    </div>)}
+  </section>;
+}
+
 export default function Traffic() {
   const demo = useDemo();
   const { colorScheme } = useMantineColorScheme();
@@ -74,7 +86,7 @@ export default function Traffic() {
       </div>
     </div><p role="status" className="text-xs text-muted-foreground">{paused ? "Paused · showing the last snapshot" : "Live · refreshes every 2 seconds"}{updated ? ` · Updated ${new Date(updated).toLocaleTimeString()}` : ""}</p></div>
     {error && rows.length > 0 && <div role="alert" className="mb-3 rounded-lg bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-300">{error} Showing the last successful snapshot.</div>}
-    {loading ? <div role="status" className="surface p-8 text-sm text-muted-foreground">Loading traffic…</div>
+    {loading ? <TrafficSkeleton />
       : error && !rows.length ? <div role="alert"><EmptyState icon={IconActivity} title="Traffic Unavailable" description={error} action={<Button type="button" variant="secondary" onClick={()=>setRefresh(value=>value+1)}><IconRefresh size={16} />Try Again</Button>} /></div>
       : !filtered.length ? <EmptyState icon={IconActivity} title={rows.length ? "No matching services" : "No port traffic to explore yet"} description={rows.length ? "Change your search or machine filter." : "Traffic appears here when a machine has a forwarded port and the firewall service is available."} />
       : <section aria-label="Traffic results" className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-surface"><div className="data-scroll"><details className="border-b border-border"><summary className="cursor-pointer px-4 py-3 text-sm font-medium">Combined traffic · {filtered.length} ports</summary><div className="p-3"><TrafficMonitorPanel isDark={colorScheme === "dark"} samples={samples} isLoading={false} title="Combined traffic" subtitle="Bytes per second" windowSeconds={seconds} /></div></details>

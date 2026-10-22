@@ -45,6 +45,9 @@
   .settings-nav button { @apply flex min-h-[44px] min-w-0 items-center gap-2 rounded-lg px-3 py-2 text-left text-xs font-medium text-zinc-500 hover:bg-zinc-50 dark:text-zinc-400 dark:hover:bg-zinc-800; }
   .settings-nav button.active { @apply bg-zinc-200 text-zinc-950 dark:bg-zinc-700 dark:text-white; }
   .data-scroll { @apply min-h-0 flex-1 overflow-auto overscroll-contain; scrollbar-width: thin; scrollbar-color: #71717a transparent; }
+  /* The scrollbar track is transparent, so paint the strip beside the sticky
+     table header (h-11) in the header colour; it stays put while scrolling. */
+  .data-scroll:has(> table:first-child > thead), .data-scroll:has(> div:first-child > table:first-child > thead) { background: linear-gradient(hsl(var(--muted)) 2.75rem, transparent 2.75rem) no-repeat; }
   .metric-strip { @apply mb-5 flex shrink-0 flex-wrap items-center gap-x-5 gap-y-2 text-sm; }
   .metric-item { @apply inline-flex items-center gap-2; }
   .proxy-results { @apply flex min-h-0 flex-1 flex-col; }

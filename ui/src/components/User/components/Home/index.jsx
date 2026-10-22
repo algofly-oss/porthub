@@ -1274,6 +1274,8 @@ export default function Home({ onStatsChange }) {
                               localIp={host.localIp}
                               publicIp={host.publicIp}
                               clientVersion={host.clientVersion}
+                              clientUpdateAvailable={host.clientUpdateAvailable}
+                              latestClientVersion={host.latestClientVersion}
                               forwardingConfigs={host.forwardingConfigs}
                               isActive={host.isActive}
                               connectionStatus={host.connectionStatus}
