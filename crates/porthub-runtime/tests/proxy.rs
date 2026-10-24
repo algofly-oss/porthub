@@ -15,6 +15,45 @@ use tokio::{
 };
 
 #[tokio::test]
+async fn http2_ingress_is_translated_for_unix_and_tcp_upstreams() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("api.sock");
+    let (unix, _lease) = socket::bind(&path).await?;
+    let tcp = TcpListener::bind("127.0.0.1:0").await?;
+    let address = tcp.local_addr()?;
+    let upstream = Router::new().fallback(|request: Request| async move {
+        assert_eq!(request.version(), axum::http::Version::HTTP_11);
+        assert_eq!(
+            request.uri().path_and_query().unwrap().as_str(),
+            "/probe?q=1"
+        );
+        "upstream reached"
+    });
+    let unix_router = upstream.clone();
+    let unix_task = tokio::spawn(async move { axum::serve(unix, unix_router).await });
+    let tcp_task = tokio::spawn(async move { axum::serve(tcp, upstream).await });
+    for proxy in [
+        HttpProxy::unix(path),
+        HttpProxy::tcp(&format!("http://{address}"))?,
+    ] {
+        let request = Request::builder()
+            .version(axum::http::Version::HTTP_2)
+            .uri("https://porthub.test/probe?q=1")
+            .header(header::HOST, "porthub.test")
+            .body(Body::empty())?;
+        let response = proxy.forward(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 1024).await?,
+            "upstream reached"
+        );
+    }
+    unix_task.abort();
+    tcp_task.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn unix_proxy_streams_without_waiting_for_complete_response() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("api.sock");

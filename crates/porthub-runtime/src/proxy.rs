@@ -194,6 +194,9 @@ impl HttpProxy {
             }
         };
         *request.uri_mut() = uri;
+        // The ingress may negotiate HTTP/2 (for example with Cloudflare),
+        // while both upstream pools deliberately speak HTTP/1.1.
+        *request.version_mut() = axum::http::Version::HTTP_11;
         let protocol = upgrade
             .then(|| request.headers().get(header::UPGRADE).cloned())
             .flatten();
