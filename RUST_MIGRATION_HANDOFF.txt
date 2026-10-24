@@ -395,3 +395,70 @@ Never mark the goal complete merely because local tests or a checkpoint pass.
   and services, PMTU, scalable idle discovery/backoff, all enabled fleet updates
   and route/policy verification, then retire obsolete Go runtime sources safely.
   Cross-platform file-tool CI success is not proof of those missing runtimes.
+
+2026-10-24 17:16 UTC deployment/fleet continuation (supersedes old pending notes):
+- Production URM2 core/edge/firewall are now 1.1.1, OCI source
+  b3d935b22fb00494e00bb15e5893d9d8a9372a65. All healthy; HTTP8345 and
+  Cloudflare canonical API verified200; eight unrelated container IDs/start/
+  restart counts unchanged. rollout-1.1.1.log ends SUCCESS. New cold backup
+  upgrade-before-1.1.1-* retained. Image tags porthub:core/edge/firewall.
+  Old native image IDs/env snapshots retained in that private upgrade directory.
+- Complete immutable CI bundle1.1.1, sourceb3d935b, ten jobs run40108027347
+  ALL successful, 30files. Local ~/.cache/porthub-native-releases/1.1.1-b3d935b/
+  bundle; URM2 client-artifacts volume /1.1.1-b3d935b. Actual packaged ARM agent
+  byte-identical toCI. API PORTHUB_CLIENT_BINARY_DIR points at this subdir.
+- Luna,Condor,Miro native updates to1.1.1 completed independently via update
+  workers and report1.1.1. User correctly insists subsequent fleet upgrades
+  MUST use gateway instructions instead of SSH, which is itself over PortHub.
+- Actual gateway request-client-update verified with Clear: request
+  042d2241bd551362, updated and ACKNOWLEDGED1.1.1 withoutSSH. Then issued1.1.1
+  requests Deep2289d24c1255edef, OTSIReid41a63c14e9ad4beb, HarshithaAGX
+  fa267ded301098de, CondorDGXSparkc23aebaf11633280. Deep/OTSI now1.1.1 and
+  acknowledged. Both ARM clients remain old2a1ed8c24540, pending despite online.
+  Diagnose through gateway log streaming; do not silently replace withSSH.
+- Mac nitin-mbp online but old; no update requested because legacy bridge
+  explicitly refuses Darwin migration. Finish native Mac adoption support.
+  Clearsight lastseenJuly22; test noheartbeat. Disabled registrations untouched.
+- Gateway audit script: owned stage/audit-fleet.py writes private600
+  fleet-update-audit.json and prints only safe version/request status. Run via
+  SSH urm2 (gateway SSH is permitted; avoid client SSH for upgrades).
+- ARM diagnostics collection running exec19280, via officialSocketIO client in
+  ephemeral read-only Node build image, gateway user session scoped to owner,
+  subscription35s for the two pendingARMclients. Private output:
+  stage/arm-update-diagnostics.jsonl. Script capture-arm-diagnostics.py cleans
+  only its labelled container and its newly created temporary session. Do not
+  print full raw logs/tokens; inspect and redact relevant error evidence.
+- New strategy source6210c3c4140e03be7e5af012afe80ee690df0b58 is committed/pushed.
+  Version1.2.0 (newfeature, published1.1.1 never rewritten). CLI path show/set/
+  reset supports private registration ID or --profile, --json, auto/prefer-direct/
+  prefer-gateway. Preferences affect newflows, preserve active pins, retain
+  fallback. Native FS notifications, bounded events, blocking file reads outside
+  packetloop, slow60s fallback only if watcher unavailable; corrupt settings keep
+  lastgood, explicitreset repairs ownedcorruptfile. Nine targeted tests passed;
+  full253passed0failed0ignored /tmp/porthub-path-strategy-1.2-full-tests.log;
+  Clippyincludingroot-dns-test passed. Earlier fulltest failed ONLY because
+  Cargo version changed1.1.1->1.2.0 concurrently; rerun253passed fixes evidence.
+- Candidate1.2.0 three-image build is RUNNING exec99076 onURM2, singleCargojob,
+  logs release-1.2.0-{core,edge,firewall}-build.log. Its source is6210c3c, so it
+  DOES NOT yet contain laterUI changes or LANmetadata heartbeatfix. Poll handle/
+  actualprocess; don't restart solelybecauseoutputquiet. Later build must
+  include finalsource/releasebundlematchingrevision beforeproductionpromotion.
+- UI requests committed/pushed after6210:
+  60eb712 remove redundant Publicaccess/internalIP secondline;
+  6590bac publicmappedendpoint displays portonly, internal keepsIP:port;
+  a98e078 gatewayaddress shown for ALL savedports includingdisabled (title says
+  disabled), customwebaddresses remainadditional. Stage.env publicservice domain
+  now http://algofly.duckdns.org for NEXTcoreactivation (backup retained).
+  This envchange notactive in currentcore; don'tclaimcurrentUIupdated.
+  99283d3 nativeheartbeat reportsdefault-routeIPv4LANsource throughUDPconnect
+  with NOpacket/DNSsent, tinycostonlyonheartbeat; tests4runtimepass+Clippy;
+  LAN Pendinglabel changedNotreported (missingmetadata isnotLANdiscovery).
+  e4fbaa2 LAN/WANbadges copyclick+icon/keyboardfocus likePAN; disabledifempty.
+  AllUI changes still require finalimagebuild/renderverification/deployment.
+- Remaining major requirements STILL incomplete: measuredcapacity/latency path
+  strategy, lowdemanddirectpreference/heavydemandcomparison, hysteresis/holdtime,
+  transparent stablemake-before-break handover with longlivedappsockets; current
+  strategy is readytransportpreference/pinning, NOTcomplete smartswitching.
+  PublicTCP mappings throughgateway are expected; privateLANoffload proved.
+  NonLinuxprivatedevices/routes/DNS/security/serviceadoption, allfleetupdates
+  and routechecks, PMTU and scaling stillrequired. Keep fullgoalactive.
