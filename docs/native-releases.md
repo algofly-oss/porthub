@@ -12,6 +12,18 @@ retain it independently of `org.opencontainers.image.version`. Assemble a bundle
 from one verified CI run and promote matching images from that same revision.
 Build-only version overrides remain available for isolated updater fixtures.
 
+CI assembles `porthub-release-bundle` only after every platform job succeeds.
+All ten targets must have the same workspace version and valid checksums; a
+missing target or mixed version fails the release. Use this aggregate artifact
+from a single CI run rather than mixing individual builds from different runs.
+The shared version identifies the same source release; operating-system-specific
+capabilities and limitations still apply.
+
+Deployment keeps the stable current-release tags `porthub:core`, `porthub:edge`
+and `porthub:firewall`. It also tags the same images with the release, for example
+`porthub:core-1.2.0`, and records that version in their OCI labels. All three
+labels must match before deployment starts any containers.
+
 The Rust API serves release metadata and binaries from a read-only bundle. It
 does not run a downloader, shell script or Go handler to deliver these assets.
 The production core image embeds exactly the latest release for all ten

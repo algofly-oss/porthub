@@ -15,6 +15,18 @@ if [ "$PORTHUB_MODE" = prod ] && [ -n "${PORTHUB_RELEASE_BUNDLE:-}" ]; then
 fi
 docker compose config --quiet
 docker compose build core edge firewall
+# Stable role tags select the current build; version aliases identify the release.
+# Check every role before starting any container or publishing release aliases.
+for role in core edge firewall; do
+  image_version=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "porthub:$role")
+  if [ "$image_version" != "$PORTHUB_VERSION" ]; then
+    echo "porthub:$role does not match release $PORTHUB_VERSION" >&2
+    exit 1
+  fi
+done
+for role in core edge firewall; do
+  docker image tag "porthub:$role" "porthub:$role-$PORTHUB_VERSION"
+done
 if [ "$PORTHUB_MODE" = dev ]; then
   docker compose up -d --wait core edge firewall
   docker compose watch --no-up --prune=false core edge firewall

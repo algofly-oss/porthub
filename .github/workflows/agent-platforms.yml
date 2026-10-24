@@ -7,6 +7,25 @@ on:
 permissions:
   contents: read
 jobs:
+  release-bundle:
+    name: Validate complete release bundle
+    needs: [native, linux-32]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: porthub-*
+          merge-multiple: true
+          path: release-input
+      - name: Validate all platforms against the workspace release
+        shell: bash
+        run: python3 deploy/native/stage_client_bundle.py --source release-input --version "$(sh scripts/release-version.sh)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: porthub-release-bundle
+          path: deploy/native/client-bin/
+          if-no-files-found: error
   native:
     name: ${{ matrix.artifact }}
     strategy:

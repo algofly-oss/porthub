@@ -588,3 +588,24 @@ Never mark the goal complete merely because local tests or a checkpoint pass.
   binaryforreadonlypreflight. Nextfinal1.2imagebuildmustusetheNEWpackagingand
   stagedcompleteverifiedCIbundle. Agentcodeunchangedsince363, so thatCIbundle
   canbeembeddedwithlaterAPIpackagingcode; retainseparateprecisebuildprovenance.
+
+2026-10-24 coordinated release versions and image aliases:
+- User requires identical release numbers across all platforms and current image
+  tags plus optional internal release version. CI now publishes aggregate
+  porthub-release-bundle only after BOTH platform matrices succeed. It validates
+  all ten targets/checksums against root workspace version using the existing
+  strict staging utility. Assemble from one run; never mix run revisions.
+- deploy.sh verifies all three built OCI version labels before tagging or
+  starting containers, then adds porthub:core-VERSION, edge-VERSION and
+  firewall-VERSION alongside stable porthub:core/edge/firewall tags. Stable
+  role tags continue selecting the current release. No extra image copies.
+- Verification: all 15 maintenance tests pass; mixed one-platform metadata
+  negative case added, preserves current bundle. Shell syntax/diff checks pass.
+  Isolated mock-Docker deployment check passes correct three aliases; mixed
+  role version exits before ANY tag/activation. Workflow YAML parses.
+- Run40116880718 now COMPLETED SUCCESS (all10 platform jobs). ARM artifact
+  downloaded and SHA verified under localcache1.2.0-363cf04/arm64. Attempted
+  diagnostic-only SCP failed; SSH harshithaagx's saved gatewayport21063 refuses
+  connection. NO remote binary copied/service edited/upgraded by that attempt.
+  Need discover current reachable ARM endpoint, then read-only preflight before
+  gateway-driven adoption. Never use SSH to apply an agent upgrade.

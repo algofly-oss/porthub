@@ -38,6 +38,13 @@ class ImageBundleStaging(unittest.TestCase):
             before = {path.name: path.read_bytes() for path in destination.iterdir()}
             with self.assertRaises(RuntimeError):
                 stage(source, destination, "1.1.1")
+            # One stale platform must reject the entire release, even when the
+            # other nine targets have the requested version.
+            (source / "porthub-arm64.version").write_text("1.1.1\n")
+            with self.assertRaises(RuntimeError):
+                stage(source, destination, "1.2.0")
+            self.assertEqual(before, {path.name: path.read_bytes() for path in destination.iterdir()})
+            (source / "porthub-arm64.version").write_text("1.2.0\n")
             (source / "porthub-arm64.sha256").unlink()
             with self.assertRaises(RuntimeError):
                 stage(source, destination, "1.2.0")
