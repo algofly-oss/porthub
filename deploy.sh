@@ -13,8 +13,8 @@ export PORTHUB_VERSION PORTHUB_SOURCE_REVISION PORTHUB_MODE PORTHUB_CORE_READ_ON
 if [ "$PORTHUB_MODE" = prod ] && [ -n "${PORTHUB_RELEASE_BUNDLE:-}" ]; then
   python3 "$(dirname "$0")/deploy/native/stage_client_bundle.py" --source "$PORTHUB_RELEASE_BUNDLE" --version "$PORTHUB_VERSION"
 fi
-docker compose config --quiet
-docker compose build core edge firewall
+docker compose --project-name porthub config --quiet
+docker compose --project-name porthub build core edge firewall
 # Stable role tags select the current build; version aliases identify the release.
 # Check every role before starting any container or publishing release aliases.
 for role in core edge firewall; do
@@ -28,9 +28,9 @@ for role in core edge firewall; do
   docker image tag "porthub:$role" "porthub:$role-$PORTHUB_VERSION"
 done
 if [ "$PORTHUB_MODE" = dev ]; then
-  docker compose up -d --wait core edge firewall
-  docker compose watch --no-up --prune=false core edge firewall
+  docker compose --project-name porthub up -d --wait core edge firewall
+  docker compose --project-name porthub watch --no-up --prune=false core edge firewall
 else
-  docker compose up -d --wait core edge firewall
-  docker compose logs --tail 50 core edge firewall
+  docker compose --project-name porthub up -d --wait core edge firewall
+  docker compose --project-name porthub logs --tail 50 core edge firewall
 fi
