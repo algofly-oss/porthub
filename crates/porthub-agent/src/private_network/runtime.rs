@@ -74,11 +74,11 @@ pub async fn run(path: PathBuf, cancel: CancellationToken) -> Result<()> {
                     ensure!(own.hostname.split_once('.').is_some_and(|(_,suffix)|suffix==registered_suffix),"private DNS suffix changed; restart required");
                 } else {
                     let tun=Arc::new(Tun::open(&name,own.ip,&routes).await?);
-                    let server=dns::Server::bind().await?;let port=server.port()?;
+                    let server=dns::Server::bind(own.ip).await?;let port=server.port()?;
                     zone=Some(server.zone.clone()); tasks.spawn(server.serve(work.clone()));
                     // Resolver registration is tied only to this owned link.
                     let (_,suffix)=own.hostname.split_once('.').ok_or_else(||anyhow::anyhow!("private DNS suffix missing"))?;
-                    dns::register(tun.index,port,suffix).await?;registered_suffix=suffix.into();
+                    dns::register(tun.index,own.ip,port,suffix).await?;registered_suffix=suffix.into();
                     device=Some(tun);
                 }
                 by_ip=snapshot.peers.iter().map(|p|(p.ip,p.id.clone())).collect();

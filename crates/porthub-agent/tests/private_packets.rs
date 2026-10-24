@@ -200,7 +200,7 @@ async fn linux_private_dns_resolves_through_the_owned_link_without_claiming_port
         "explicit root DNS test required"
     );
     let tun = Tun::open("phc0d3fa01", Ipv4Addr::new(10, 234, 251, 1), &[]).await?;
-    let server = dns::Server::bind().await?;
+    let server = dns::Server::bind(Ipv4Addr::new(10, 234, 251, 1)).await?;
     let port = server.port()?;
     let mut policy = snapshot();
     policy.peers.truncate(1);
@@ -210,7 +210,13 @@ async fn linux_private_dns_resolves_through_the_owned_link_without_claiming_port
     server.zone.write().await.update(&policy)?;
     let cancel = tokio_util::sync::CancellationToken::new();
     let task = tokio::spawn(server.serve(cancel.clone()));
-    dns::register(tun.index, port, "ph-native-test").await?;
+    dns::register(
+        tun.index,
+        Ipv4Addr::new(10, 234, 251, 1),
+        port,
+        "ph-native-test",
+    )
+    .await?;
     let connection = zbus::Connection::system().await?;
     let proxy = zbus::Proxy::new(
         &connection,

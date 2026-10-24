@@ -96,9 +96,15 @@ pub struct Server {
     pub zone: Arc<RwLock<Zone>>,
 }
 impl Server {
-    pub async fn bind() -> Result<Self> {
+    pub async fn bind(own: Ipv4Addr) -> Result<Self> {
+        ensure!(
+            own.is_private(),
+            "private DNS requires the assigned address"
+        );
         Ok(Self {
-            socket: UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?,
+            // resolved binds per-link queries to that link. A loopback target
+            // would consequently leave through TUN instead of reaching lo.
+            socket: UdpSocket::bind((own, 0)).await?,
             zone: Default::default(),
         })
     }
@@ -106,10 +112,11 @@ impl Server {
         Ok(self.socket.local_addr()?.port())
     }
     pub async fn serve(self, cancel: CancellationToken) -> Result<()> {
+        let own = self.socket.local_addr()?.ip();
         let mut buffer = [0; 1501];
         loop {
             tokio::select! {_=cancel.cancelled()=>return Ok(()), packet=self.socket.recv_from(&mut buffer)=>{
-                let (n,remote)=packet?; if !remote.ip().is_loopback() {continue;}
+                let (n,remote)=packet?; if remote.ip()!=own && !remote.ip().is_loopback() {continue;}
                 let answer=self.zone.read().await.answer(&buffer[..n]);
                 if let Some(answer)=answer {tokio::select! {_=cancel.cancelled()=>return Ok(()),result=self.socket.send_to(&answer,remote)=>{result?;}}}
             }}
@@ -117,7 +124,7 @@ impl Server {
     }
 }
 #[cfg(target_os = "linux")]
-pub async fn register(index: u32, port: u16, suffix: &str) -> Result<()> {
+pub async fn register(index: u32, own: Ipv4Addr, port: u16, suffix: &str) -> Result<()> {
     let connection = zbus::Connection::system()
         .await
         .map_err(|_| anyhow::anyhow!("private DNS system bus unavailable"))?;
@@ -133,7 +140,7 @@ pub async fn register(index: u32, port: u16, suffix: &str) -> Result<()> {
             "SetLinkDNSEx",
             &(
                 index as i32,
-                vec![(libc::AF_INET, vec![127u8, 0, 0, 1], port, "")],
+                vec![(libc::AF_INET, own.octets().to_vec(), port, "")],
             ),
         )
         .await
