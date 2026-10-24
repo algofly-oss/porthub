@@ -546,3 +546,45 @@ Never mark the goal complete merely because local tests or a checkpoint pass.
   (includesallrecentUIchanges), private.envpreserved. Waitforrealprocess/terminal
   evidence; thenreadonlyARMpreflightontwoactualhosts, fullmatchingCIbundle,
   gatewaypromotionandgateway-issuedupdates. Currentproductionhealthy1.1.1+newUI.
+
+2026-10-24 image-embedded latest-only binaries completed for active production:
+- User explicitly requested binaries INSIDE production image and ONLY latest.
+  Active core image2b11311c8bd085d1484e828224f6f29d8f8e5a4dd11b4b55115946432d8500d8
+  now embeds30files/10platforms, exactly1.1.1, at /app/client-bin. No version
+  subdirectory/history and NO client-artifacts volume mount. LatestUIretained.
+  API/runtime/Mongo binaries byte-identical toprior1.1.1. Onlycore restarted;
+  edge/firewall and8unrelatedcontainers unchanged. HTTP+Cloudflare200 verified.
+  Authenticated releasecatalog returns10targets, missing_targets=[], allversions
+  1.1.1, everySHA matchesverifiedCIbundle. Evidence:
+  docs/verification/2026-10-24-embedded-production-release.json.
+- Hostoldartifactvolume retained ONLY forrollback outsideactiveimage, notmounted.
+  Stage.env+Compose now forcePORTHUB_CLIENT_BINARY_DIR=/app/client-bin. Rollback
+  requires BOTH priorimage andoldCompose artifactmount: saved
+  docker-compose.before-embedded-client-release.yml, .env.before-embedded-client-
+  release, image port hub:core-before-embedded-1.1.1 (actualtagwithoutspace:
+  porthub:core-before-embedded-1.1.1). Imagebuildcontext
+  embedded-release-1.1.1-image retainsDockerfileandbefore.json. Buildversions
+  WindowsmetadataCRLF: nativevalidator trims; temporaryoldAPIimagebuildcheck
+  neededtr-d-CRbeforegrep. Thatintermediatebuildfailure NEVERchangedproduction.
+- Permanent packaging source5993178 embedsfullbundle in prod-core, new
+  core-runtime sharedbase, dev-core buildsownhostagent. Production no longer
+  recompiles agent duringimagebuild: consumesverifiedprebuiltmatrixinstead.
+  buildcontext deploy/native/client-bin (only.gitkeep tracked; binariesignored).
+  stage_client_bundle.py validatescompleteness/hash/version, atomicallyreplaces
+  priorrelease, retainsnohistory, refusesunknowncontextfiles. deploy.sh accepts
+  PORTHUB_RELEASE_BUNDLE=/verified/bundle. ProductionDockerRUN uses native
+  porthub-api --check-artifacts /app/client-bin VERSION; noDB/network/configneeded.
+  Requires EXACT30regularfiles, all10targets/sideshash/version, rejectsoldfolder,
+  missingplatform, corruptfiles. Labelio.porthub.image-client-bundle=complete-v1.
+  NewAPI'sofflinecommand testpassed;15maintenancetests+ClippyAPIalltargetspassed.
+- Composeclient_artifactsvolume removed and imagecatalogrootexplicit. Initial
+  migrationnowrequiresnativeimageembedded-releasepreflight anddoesNOTcreate/
+  populateartifactvolume. Extra-artifacts optionalcomparisononly. Existing
+  interrupted-stop/rollbacktests passed. Isolationverifier nowselectshostarch
+  executableexplicitly, avoidingARMfirstfilenameonx86withfullbundle.
+  Maintenanceworkflow3a1b1f1 covers allnativePythonutilities/test_*.py.
+- IMPORTANT remainingrunning1.2candidatebuildexec26896 is source363cf04 with
+  OLDhost-onlypackaging, soDO NOTpromoteit asfinal. ItcanproduceARMdiagnostic
+  binaryforreadonlypreflight. Nextfinal1.2imagebuildmustusetheNEWpackagingand
+  stagedcompleteverifiedCIbundle. Agentcodeunchangedsince363, so thatCIbundle
+  canbeembeddedwithlaterAPIpackagingcode; retainseparateprecisebuildprovenance.

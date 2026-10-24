@@ -1,0 +1,11 @@
+{
+  "version": "1.1.1",
+  "core_image": "sha256:2b11311c8bd085d1484e828224f6f29d8f8e5a4dd11b4b55115946432d8500d8",
+  "client_artifact_mount": false,
+  "embedded_targets": 10,
+  "embedded_release_count": 1,
+  "server_binaries_unchanged": true,
+  "unrelated_containers_unchanged": 8,
+  "authenticated_catalog_verified": true,
+  "all_hashes_match_verified_ci_bundle": true
+}
