@@ -49,7 +49,8 @@ COPY --from=agent-build /out/client-bin/ /
 FROM node:22-bookworm-slim AS ui-build
 WORKDIR /src/ui
 COPY ui/package.json ui/yarn.lock ./
-RUN corepack enable && yarn install --frozen-lockfile
+RUN --mount=type=cache,id=porthub-ui-yarn,target=/usr/local/share/.cache/yarn,sharing=locked \
+    corepack enable && yarn install --frozen-lockfile --network-timeout 120000 --network-concurrency 4
 COPY ui/ ./
 RUN yarn build && yarn next export --outdir /out/ui && \
     find /out/ui -type f \( -name '*.html' -o -name '*.js' -o -name '*.css' -o -name '*.json' -o -name '*.svg' \) -exec gzip --keep -9 {} +

@@ -1,0 +1,14 @@
+{
+  "sample_seconds": 12.00012841699936,
+  "scope": "Luna registered public/private agents with no application payload flowing through those agents; unrelated native get public download active separately",
+  "measurements": {
+    "public_agent": {
+      "cpu_percent_one_core": 0.083,
+      "rss_MiB": 11.76
+    },
+    "private_agent": {
+      "cpu_percent_one_core": 0.083,
+      "rss_MiB": 13.01
+    }
+  }
+}

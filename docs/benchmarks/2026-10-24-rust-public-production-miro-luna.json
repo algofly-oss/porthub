@@ -1,0 +1,16 @@
+{
+  "date": "2026-10-24",
+  "source": "Miro",
+  "destination": "Luna",
+  "path": "PortHub production gateway public mapped port",
+  "public_agent_version": "f7fd18cee2a242ccd189bb4822f5d33a682f17c2",
+  "complete": true,
+  "size_bytes": 10737418240,
+  "connections": 16,
+  "transfer_MB_per_second": 10.15,
+  "sha256_verified": true,
+  "sha256": "732377e7f4a2abdc13ddfa1eb4c9c497fd2a2b294674d056cf51581b47dd586d",
+  "wall_seconds_including_sha256": 1065.3800463676453,
+  "gateway_transport": "explicit direct HTTP origin, confirmed public-agent status origin",
+  "shared_WAN": "Both endpoints share 400 Mbps up/down internet connection. Cause of lower public throughput not yet isolated."
+}

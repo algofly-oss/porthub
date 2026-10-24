@@ -328,3 +328,70 @@ Never mark the goal complete merely because local tests or a checkpoint pass.
 - URM2 final edge image 7891b9d3 replaces recovery-layer image; all roles healthy.
   Core/firewall still source4fa, release B81; complete matching new-release
   images/artifact bundle before whole-fleet latest-version rollout.
+
+2026-10-24 completed physical benchmarks / numeric version checkpoint:
+- Current source checkpoint 00430f0a669b6efd193431dd44fe06aa3d4e5987 switches
+  workspace/binary/release versions to 1.1.1 (major.minor.patch). Normal version
+  and --version show only the release; version --verbose separately shows build
+  revision and target. CI reads Cargo's numeric workspace version, passes Git
+  through PORTHUB_SOURCE_REVISION, and enforces LF for portable shell scripts.
+  All TEN platform jobs passed run 40105528501. Local static Linux artifact:
+  ~/.cache/porthub-native-releases/1.1.1-00430f0/local-linux/porthub-x86_64.
+- Full 1.1.1 workspace verification completed: 249 passed, zero failed/ignored,
+  /tmp/porthub-1.1.1-full-tests.log (exec52559 terminal0). Targeted agent/API
+  Clippy including root-dns-test passed; 12 maintenance tests passed. Actual
+  privileged DNS test passed earlier using the new assigned-address listener.
+- Production is STILL the healthy initial native deployment, not 1.1.1 yet.
+  Core/firewall source4fa; edge f975 full final image7891b9d3; release B81.
+  Luna/Condor public services and CLI B81; Miro public and CLI f7fd18c.
+  ALL THREE pilot private services now f4669526dfa9756b5f4ba9a72b3014f0270f821b
+  with the DNS fix and selective connection-state invalidation. Other eight
+  enabled machines remain to be upgraded/verified; disabled machines stay off.
+- Preserved active connections on unrelated peer identity changes (f466952):
+  invalidate only flows involving changed old/new addresses, retaining other
+  peers' TCP state. Regression covers fingerprint, process, IP and removal;
+  still revokes changed endpoint flows. O(peers + flows), replacing O(peers^2).
+- COMPLETED and SHA256 verified with built-in HTTP/get, 16 connections:
+  Luna->Condor private IP 10 GiB 41.82 MB/s (relay), domain before flow fix
+  29.56 MB/s with Miro-adoption-induced stall; clean post-fix repeat remains.
+  Miro->Luna via miro.phub 10 GiB 109.82 MB/s, confirmed 1 Gbps LAN.
+  Simultaneous 12s: payload111.86 MB/s, ALL gateway default-interface Rx+Tx
+  only0.795 MB/s; both peers reported direct. This proves gateway offload.
+  Miro->Luna public gateway port 10 GiB 10.15 MB/s, both on shared400 up/down
+  ISP. SAME mapping Miro->Condor 1 GiB 48.49 MB/s, demonstrating mapping/source
+  upload can saturate400; exact shared-WAN/router bottleneck not isolated.
+  Luna->Condor PRODUCTION public port 10 GiB 45.41 MB/s (363.28 Mbps).
+- Independent existing iperf3 (not a product dependency): private TCP894.38Mbps;
+  public TCP reverse105.17Mbps/forward105.19Mbps; private UDP at100Mbps
+  received99.97Mbps, zero loss, jitter0.01681ms. Reports in docs/benchmarks.
+- Idle Luna sample, 12s with no app payload through registered agents:
+  public0.083% of one core /11.76MiB RSS; private0.083% /13.01MiB.
+  New strategy controls must be checked again, not claimed covered by this.
+- ALL benchmark HTTP servers on Luna/Miro stopped using native http.server
+  management; owned Miro iperf process stopped after exact executable/argv check.
+  All three temporary public mappings deleted; task-owned maintenance session
+  deleted. Registry restored:16 machines/11enabled,65connections/20enabled,
+  27enabled web routes. No user session reused or removed. Private operator
+  receipt is stage/miro-public-benchmark/state.json, with session secret removed.
+  Verified/completed/cancelled benchmark payload downloads removed from owned
+  run/data directories; logs/reports retained. Do not expect old payload files
+  or old benchmark listener PIDs to remain usable. Luna descriptor marks stopped.
+- Numeric core candidate builds failed at Yarn @tabler fetch timeouts (not Rust
+  tests); host GET succeeds in0.22s. Dockerfile now caches Yarn downloads and
+  uses120s timeout/concurrency4 with frozen lock. Actual ui-build target then
+  SUCCEEDED on URM2 (exec72097 terminal0, semver-ui-cache-build.log). This
+  build-only fix and benchmark evidence are being committed next. Build final
+  images from the final committed revision and its matching CI bundle. Old
+  candidate build60089 and5998 terminal1; don't restart obsolete f466 builds.
+- New explicit requirements to implement, NOT DONE: CLI path-strategy show/set/
+  reset to defaults with persisted overrides; efficient background candidate
+  latency/capacity scoring and demand-aware policy (favor adequate direct for
+  everyday traffic; gateway can win heavy traffic if faster/lower latency);
+  hysteresis, hold times, recovery stability; transparent make-before-break
+  migration preserving long-lived app sockets. Current Pinned chooses ready
+  RTC first, fallback on failure, then pins fallback until new flow. Do not call
+  this completed measured smart switching. LAN direct discovery IS verified.
+- Continue full scope: complete non-Linux private runtimes/credential handling
+  and services, PMTU, scalable idle discovery/backoff, all enabled fleet updates
+  and route/policy verification, then retire obsolete Go runtime sources safely.
+  Cross-platform file-tool CI success is not proof of those missing runtimes.
