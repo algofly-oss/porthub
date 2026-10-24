@@ -485,3 +485,26 @@ Never mark the goal complete merely because local tests or a checkpoint pass.
   ThelatterthreegatewayupdatedandacknowledgedwithoutSSH. HarshithaAGX/DGXSpark
   oldonlinepending; Macoldonlineunsupportedlegacyadoption; Clearsight/test
   offline. All11enabledregistrationsremaininscope. audit-fleet.py retained.
+
+2026-10-24 UI deployment completed (supersedes pending UI notes):
+- ui-build-candidate-e4fbaa2 compiled/exported successfully. Exported static UI
+  reviewed locally with isolated Playwright1.56.1/systemChrome; actual
+  check-badges.cjs verified LAN/WAN copy values, gatewaylinks on everytested
+  mapping, internaladdresses, noerrors. Existingtab-data-cache.cjs passed with
+  delayedrefresh preservingcachedcontent and updatedpublicportlabels.
+  Logs/screenshot under /tmp/porthub-ui-address-review; no productiondata used.
+- Deployed UI-only corevariant onURM2, keeping1.1.1server/runtime/Mongo binaries
+  byte-identical. Coretag porthub:core, label io.porthub.ui.revision=e4fbaa26...
+  Stage/ui-e4fbaa2-image/{Dockerfile,core-before.json} records build and rollback.
+  Previouscoretag porthub:core-before-ui-e4fbaa2. Final1.2standardDockerbuild
+  will replace this temporaryUIvariant. Onlycore restarted; edge/firewall and
+  ALL8unrelatedcontainers verified unchanged. HTTP+CloudflareAPI200; service
+  domain http://algofly.duckdns.org is NOWactive. Publiclisteners unchanged.
+- Cloudflare servedexact byte-identical renderedasset
+  _next/static/chunks/pages/home-df4eb7cda8257cde.js. Evidence:
+  docs/verification/2026-10-24-ui-addresses-deployed.json.
+- LAN metadata heartbeatfix99283d3 stillawaits1.2agents. UI Notreportedlabel
+  doesnotmean discoverypending. Do notclaimLANmetadata alreadyfilledby1.1.
+- Mainolder6210candidate1.2buildexec99076 stillactive atlastpoll; UIbuild36596
+  completed0. CurrentprodAPIversion1.1.1. Await/buildfinalsourcewithLAN+failover
+  fixes and matchingcompleteCIbundle beforepromoting1.2.

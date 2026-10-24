@@ -1,0 +1,17 @@
+{
+  "ui_revision": "e4fbaa26c97ff819a7c918da7b35be453b1804e5",
+  "runtime_version": "1.1.1",
+  "rendered_browser_checks": [
+    "LAN and WAN copy exact addresses",
+    "Gateway links visible for every tested mapping",
+    "Internal IP:port retained",
+    "Public labels omit bind IP",
+    "Cached tabs show content during background refresh",
+    "No browser exceptions"
+  ],
+  "cloudflare_asset_byte_identical": true,
+  "cloudflare_asset_sha256": "18526de37f18acbf02e03fa1cae0004073a0eaa46a7e57817b6dc20853cd96f2",
+  "server_binaries_unchanged": true,
+  "edge_and_firewall_not_restarted": true,
+  "unrelated_containers_unchanged": 8
+}
