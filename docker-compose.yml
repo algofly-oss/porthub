@@ -26,6 +26,7 @@ services:
     env_file: [.env]
     environment:
       PORTHUB_MODE: ${PORTHUB_MODE:-prod}
+      PORTHUB_CLIENT_BINARY_DIR: /app/client-bin
       PORTHUB_API_SOCKET: /run/porthub-api/api.sock
       PORTHUB_EDGE_SOCKET: /run/porthub-edge/control.sock
       PORTHUB_DB_INITIALIZE: "true"
@@ -36,7 +37,6 @@ services:
       PORTHUB_WEB_ACTIVITY_LOG_PATH: /run/porthub-activity/web-activity.log
     volumes:
       - porthub_data:/data
-      - client_artifacts:/app/client-bin:ro
       - api_socket:/run/porthub-api
       - edge_socket:/run/porthub-edge:ro
       - firewall_socket:/run/porthub-firewall
@@ -130,7 +130,6 @@ services:
 
 volumes:
   porthub_data:
-  client_artifacts:
   firewall_data:
   api_socket:
   edge_socket:

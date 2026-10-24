@@ -90,6 +90,23 @@ def artifact_bundle(directory, expected_version, initial):
     return result
 
 
+def image_release_preflight(version):
+    image = inspect("image", "porthub:core")
+    if (image["Config"].get("Labels") or {}).get("io.porthub.image-client-bundle") != "complete-v1":
+        raise RuntimeError("production core must embed its complete client release")
+    report = json.loads(run(["docker", "run", "--rm", "--network", "none", "--read-only",
+                            "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+                            "--entrypoint", "porthub-api", "porthub:core", "--check-artifacts",
+                            "/app/client-bin", version]))
+    releases = report.get("releases", [])
+    if (report.get("version") != version or len(releases) != len(ASSETS)
+            or {entry.get("asset") for entry in releases} != ASSETS
+            or any(entry.get("version") != version or not re.fullmatch(r"[0-9a-f]{64}", entry.get("sha256", ""))
+                   for entry in releases)):
+        raise RuntimeError("invalid embedded client release receipt")
+    return {entry["asset"]: entry for entry in releases}
+
+
 def run(arguments, *, binary=False):
     result = subprocess.run(arguments, capture_output=True, text=not binary)
     if result.returncode:
@@ -243,6 +260,10 @@ def main():
                   "--entrypoint", "/bin/cat", "porthub:core", "/app/client-bin/" + artifact + suffix], binary=True)
              for suffix in ("", ".version", ".sha256")]
     artifacts = artifact_bundle(args.extra_artifacts, version, artifact_files(artifact, *parts, version))
+    embedded = image_release_preflight(version)
+    for name in ASSETS & artifacts.keys():
+        if hashlib.sha256(artifacts[name]).hexdigest() != embedded[name]["sha256"]:
+            raise RuntimeError("external client bundle differs from the embedded production release")
     edge_environment = configured["services"].get("edge", {}).get("environment", {})
     tls_enabled = bool(edge_environment.get("PORTHUB_EDGE_TLS_LISTEN", ""))
     allow_self_signed = str(edge_environment.get("PORTHUB_ALLOW_SELF_SIGNED", "false")).lower() in ("1", "true", "yes", "on")
@@ -288,7 +309,7 @@ def main():
         private_file(backup / "mongo-ownership.json", json.dumps(owners).encode())
         print("PortHub stopped; cold MongoDB/firewall backups verified", flush=True)
         volumes = {}
-        for name in ("firewall_data", "certificates", "client_artifacts"):
+        for name in ("firewall_data", "certificates"):
             volume = args.project + "_" + name
             run(["docker", "volume", "create", volume])
             path = pathlib.Path(inspect("volume", volume)["Mountpoint"])
@@ -303,12 +324,6 @@ def main():
         owner_tree(volumes["certificates"], 0, 10001)
         os.chmod(volumes["certificates"], 0o770)
         owner_tree(data / "mongo", 10001, 10001)
-        artifact_dir = volumes["client_artifacts"]
-        for filename, content in artifacts.items():
-            private_file(artifact_dir / filename, content)
-        for path in artifact_dir.iterdir():
-            os.chmod(path, 0o555 if path.suffix not in (".version", ".sha256") else 0o444)
-        os.chmod(artifact_dir, 0o755)
         run([*compose, "up", "--detach", "--no-build", "--wait", "--wait-timeout", "180", "firewall", "core", "edge"])
         after = set(run(["docker", "ps", "--quiet"]).split())
         if not others.issubset(after):

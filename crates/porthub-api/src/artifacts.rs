@@ -33,6 +33,57 @@ pub const TARGETS: &[(&str, &str, &str)] = &[
     ("windows_x86", "windows", "x86"),
     ("windows_arm64", "windows", "aarch64"),
 ];
+/// Build-time/offline validation of the single release embedded in an image.
+/// No database, credentials, network, or running API is needed.
+pub async fn verify_complete(root: &Path, version: &str) -> anyhow::Result<Vec<Release>> {
+    use std::collections::BTreeSet;
+    anyhow::ensure!(!version.is_empty(), "release version is required");
+    let mut expected = BTreeSet::new();
+    for (target, _, _) in TARGETS {
+        let asset = format!(
+            "porthub-{target}{}",
+            if target.starts_with("windows_") {
+                ".exe"
+            } else {
+                ""
+            }
+        );
+        for suffix in ["", ".version", ".sha256"] {
+            expected.insert(format!("{asset}{suffix}"));
+        }
+    }
+    let mut actual = BTreeSet::new();
+    let mut entries = tokio::fs::read_dir(root).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        anyhow::ensure!(
+            entry.file_type().await?.is_file(),
+            "release directory must contain only regular files"
+        );
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("invalid release filename"))?;
+        actual.insert(name);
+    }
+    anyhow::ensure!(
+        actual == expected,
+        "production image requires exactly one complete ten-platform release"
+    );
+    let catalog = Catalog::new(Some(root.into()));
+    let mut releases = Vec::new();
+    for (target, _, _) in TARGETS {
+        let artifact = catalog
+            .get(target)
+            .await
+            .map_err(|_| anyhow::anyhow!("release asset validation failed for {target}"))?;
+        anyhow::ensure!(
+            artifact.release.version == version,
+            "release version mismatch for {target}"
+        );
+        releases.push(artifact.release);
+    }
+    Ok(releases)
+}
 pub fn normalize(target: &str, legacy: bool) -> ApiResult<&'static str> {
     let target = match target {
         "amd64" | "linux_amd64" | "linux_x86_64" => "x86_64",

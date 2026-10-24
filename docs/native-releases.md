@@ -14,6 +14,23 @@ Build-only version overrides remain available for isolated updater fixtures.
 
 The Rust API serves release metadata and binaries from a read-only bundle. It
 does not run a downloader, shell script or Go handler to deliver these assets.
+The production core image embeds exactly the latest release for all ten
+platforms in `/app/client-bin`, including version and SHA256 sidecars. No client
+artifact volume or runtime download is required. Historical releases are kept
+outside the active image for operator rollback.
+
+Stage the verified CI bundle before a production build:
+
+```sh
+PORTHUB_RELEASE_BUNDLE=/path/to/verified/bundle ./deploy.sh
+```
+
+The build stages only one release and rejects missing platforms, mixed versions,
+unexpected history directories, and checksum mismatches. `porthub-api
+--check-artifacts /app/client-bin VERSION` verifies an image offline. Development
+images may build the host agent locally; production consumes the complete
+prebuilt bundle instead of recompiling an agent during deployment.
+
 All routes require the current enabled machine's ID and token; account cookies
 cannot substitute for the machine credential. Retirement returns the existing
 410 response, and disabled machines receive 403.

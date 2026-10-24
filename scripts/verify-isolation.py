@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import pathlib
+import platform
 import secrets
 import socket
 import ssl
@@ -331,8 +332,7 @@ def main():
         assert api("DELETE", book_path, {"revision": 2})["msg"] == "Rule book deleted"
         assert api("POST", "/api/access/test", policy_preview)["data"]["allowed"] is False
         checks.append("native rule-book validation, revision conflict detection and deletion drive allow-only policy previews through production ingress")
-        agent_name = next(name for name in docker("exec", prefix + "-core", "ls", "/app/client-bin").stdout.split()
-                          if name.startswith("porthub-") and not name.endswith(".version"))
+        agent_name = "porthub-" + {"aarch64": "arm64", "arm64": "arm64", "x86_64": "x86_64", "AMD64": "x86_64"}[platform.machine()]
         agent = "/app/client-bin/" + agent_name
         def run_agent(*args):
             return docker("exec", "-e", "PORTHUB_STATE_DIR=/tmp/porthub-state", prefix + "-core", agent, *args)

@@ -8,8 +8,32 @@ async fn main() -> Result<()> {
     let check = match arguments.next() {
         None => false,
         Some(argument) if argument == "--check-config" => true,
+        Some(argument) if argument == "--check-artifacts" => {
+            let root = arguments
+                .next()
+                .map(std::path::PathBuf::from)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Usage: porthub-api --check-artifacts DIRECTORY VERSION")
+                })?;
+            let version = arguments
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Usage: porthub-api --check-artifacts DIRECTORY VERSION")
+                })?;
+            anyhow::ensure!(
+                arguments.next().is_none(),
+                "Usage: porthub-api --check-artifacts DIRECTORY VERSION"
+            );
+            let releases = porthub_api::artifacts::verify_complete(&root, &version).await?;
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({"version":version,"releases":releases}))?
+            );
+            return Ok(());
+        }
         Some(argument) if argument == "--help" || argument == "-h" => {
-            println!("Usage: porthub-api [--check-config]\n\n--check-config  Validate current database configuration without starting or modifying services");
+            println!("Usage: porthub-api [--check-config | --check-artifacts DIRECTORY VERSION]\n\n--check-config  Validate current database configuration without starting or modifying services\n--check-artifacts  Validate the complete image release without database or network access");
             return Ok(());
         }
         _ => anyhow::bail!("Usage: porthub-api [--check-config]"),

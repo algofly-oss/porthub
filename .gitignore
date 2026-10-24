@@ -6,3 +6,5 @@ volumes/
 .env*
 .DS_Store
 /target/
+/deploy/native/client-bin/*
+!/deploy/native/client-bin/.gitkeep

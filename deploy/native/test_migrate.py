@@ -189,6 +189,7 @@ class ReleasePreflight(unittest.TestCase):
                 with mock.patch.object(sys, "argv", argv), mock.patch.object(migrate, "inspect", inspect), \
                      mock.patch.object(migrate, "run", run), mock.patch.object(migrate.os, "geteuid", return_value=0), \
                      mock.patch.object(migrate, "database_preflight", return_value={"web_routes": 0}), \
+                     mock.patch.object(migrate, "image_release_preflight", return_value={name:{"sha256":hashlib.sha256(b"native-agent").hexdigest()} for name in migrate.ASSETS}), \
                      mock.patch.object(migrate.platform, "machine", return_value="x86_64"), \
                      mock.patch.object(migrate.subprocess, "run") as rollback:
                     with self.assertRaisesRegex(RuntimeError, "interrupted"):

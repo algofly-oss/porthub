@@ -10,6 +10,9 @@ case "$PORTHUB_MODE" in
   *) echo "PORTHUB_MODE must be prod or dev" >&2; exit 1 ;;
 esac
 export PORTHUB_VERSION PORTHUB_SOURCE_REVISION PORTHUB_MODE PORTHUB_CORE_READ_ONLY
+if [ "$PORTHUB_MODE" = prod ] && [ -n "${PORTHUB_RELEASE_BUNDLE:-}" ]; then
+  python3 "$(dirname "$0")/deploy/native/stage_client_bundle.py" --source "$PORTHUB_RELEASE_BUNDLE" --version "$PORTHUB_VERSION"
+fi
 docker compose config --quiet
 docker compose build core edge firewall
 if [ "$PORTHUB_MODE" = dev ]; then

@@ -69,7 +69,7 @@ LABEL org.opencontainers.image.version=$PORTHUB_VERSION
 ARG PORTHUB_SOURCE_REVISION=unknown
 LABEL org.opencontainers.image.revision=$PORTHUB_SOURCE_REVISION
 
-FROM runtime-base AS prod-core
+FROM runtime-base AS core-runtime
 LABEL io.porthub.api-preflight=v1
 RUN apt-get update && apt-get install -y --no-install-recommends libcurl4 libssl3 && \
     rm -rf /var/lib/apt/lists/* && \
@@ -79,14 +79,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends libcurl4 libssl
     printf '[server.services]\n' > /run/porthub-config/gateway.toml && \
     chown 10001:10001 /run/porthub-config/gateway.toml
 COPY --from=rust-build /out/porthub-api /out/porthub-runtime /usr/local/bin/
-COPY --from=agent-build --chown=10001:10001 /out/client-bin /app/client-bin
 COPY --from=database /usr/bin/mongod /usr/local/bin/mongod
 COPY --from=ui-build --chown=10001:10001 /out/ui /app/ui/
 COPY deploy/native/core.toml /app/core.toml
 USER 10001:10001
 ENTRYPOINT ["porthub-runtime", "supervise", "--config", "/app/core.toml"]
 
-FROM prod-core AS dev-core
+FROM core-runtime AS prod-core
+COPY --chown=10001:10001 deploy/native/client-bin/ /app/client-bin/
+RUN rm -f /app/client-bin/.gitkeep && \
+    porthub-api --check-artifacts /app/client-bin "$PORTHUB_VERSION"
+LABEL io.porthub.image-client-bundle=complete-v1
+
+FROM core-runtime AS dev-core
+COPY --from=agent-build --chown=10001:10001 /out/client-bin /app/client-bin
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends libstdc++6 && rm -rf /var/lib/apt/lists/*
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
