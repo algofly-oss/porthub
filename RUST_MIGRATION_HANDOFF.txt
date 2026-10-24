@@ -114,13 +114,20 @@ even if Docker stop was interrupted, including SIGTERM/SIGHUP, then restores
 signal handlers. Eight local mocked maintenance tests pass; they do not prove
 actual production activation/rollback. A small separate CI workflow covers them.
 
-The ae4559e ARM prod-core build is still running on URM2 through local exec
-session 2670; portable-core-build.log shows active porthub agent compilation.
-The first musl dependency build is slow with one Cargo job. A live rustc process
-was confirmed, so do not restart merely because the log is quiet. The final
-release bundle uses b81e865; finish and inspect this build, then build matching
-version roles before migration. Current images' labels must not be assumed to
-match; the hardened preflight rejects that. Production remains the old monolith.
+The first ae4559e ARM prod-core build completed successfully (exec session 2670).
+Final matching-version b81e865 core/edge/firewall builds now run sequentially
+through local exec session 62532. Logs in the same owned stage:
+release-core-build.log, release-edge-build.log, release-firewall-build.log.
+Do not restart a quiet build without checking its actual process/session state.
+All 1014 tracked files from source revision 94ec610 were hash-verified in the
+stage; its runtime/packaging source matches b81e865. The complete 30-file bundle
+is staged in release-bundle-b81e8653864b13286651a29efad5dfedc456c9b8.
+The stage .env now explicitly sets the matching release and advertised HTTP
+origin on existing API port 8345. Its prior bytes are retained at mode 0600 in
+.env.before-release-b81. Existing ports 80/443/8345/8346 were verified to belong
+to PortHub's old Traefik process and are preserved. Current image labels must
+not be assumed to match until the sequence finishes; the hardened preflight
+rejects mismatches. Production remains the old monolith; no client was upgraded.
 
 Checkpoint 6965f8535e98b13fc1bf675a14b8cc95a5c11bbe is pushed on
 rust-native-migration. main was not merged or deployed. The first Actions run
