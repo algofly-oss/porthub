@@ -131,6 +131,18 @@ packaged HTTP management and macOS launchd lifecycle.
   built native update candidate: 243 passed, zero failed/ignored. Log:
   /tmp/porthub-portable-full-tests.log. Verification scope and checkpoint CI
   evidence are in docs/verification/2026-10-24-portable-agents.json.
+- Runtime fix ae4559e3d5fb70b2c6c7c60d1bd5939d4b9eb6d5 is pushed.
+  Its Actions run 40088238085 verifies all three Windows UDP recovery tests
+  on x86, x86_64 and ARM64. Those jobs next failed at a test fixture creating
+  `<&.txt`, which Windows cannot represent. Follow-up uses apostrophe/ampersand
+  escaping on every OS and retains the angle-bracket check on Unix. Six local
+  HTTP download integration tests pass; remaining runner evidence is pending.
+- Refreshed the owned URM2 staging tree from ae4559e, verified SHA256 for all
+  1011 tracked source files, and recorded IDs/start times/restart counts of its
+  nine existing containers in portable-build-before.json. A single-Cargo-job
+  ARM prod-core build is running there; log portable-core-build.log. No
+  containers were replaced and production remains porthub:latest. The staging
+  .env is preserved at mode 0600. Do not assume old.env exists at stage root.
 - Resolve actual CI failures; finish Windows/macOS lifecycle, credential safety,
   native private devices/routes/DNS, adoption and updates. Complete the full
   supported architecture artifact matrix, including static 32-bit Linux.

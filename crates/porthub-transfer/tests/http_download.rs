@@ -52,6 +52,10 @@ async fn ranges_parallel_download_checksum_and_safe_collision() -> Result<()> {
     let destination = tempfile::tempdir()?;
     let payload: Vec<u8> = (0..3 * 1024 * 1024 + 71).map(|n| (n % 251) as u8).collect();
     tokio::fs::write(source.path().join("payload.bin"), &payload).await?;
+    // Apostrophes and ampersands exercise HTML escaping on every supported OS.
+    // Windows rejects angle brackets in file names before HTTP is involved.
+    tokio::fs::write(source.path().join("'&.txt"), b"file").await?;
+    #[cfg(not(windows))]
     tokio::fs::write(source.path().join("<&.txt"), b"file").await?;
     let http = http(server::router(
         tokio::fs::canonicalize(source.path()).await?,
@@ -91,8 +95,13 @@ async fn ranges_parallel_download_checksum_and_safe_collision() -> Result<()> {
         .await?;
     assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
     let index = client.get(&http.url).send().await?.text().await?;
-    assert!(index.contains("&lt;&amp;.txt"));
-    assert!(!index.contains("><&.txt<"));
+    assert!(index.contains("&#39;&amp;.txt"));
+    assert!(!index.contains(">'&.txt<"));
+    #[cfg(not(windows))]
+    {
+        assert!(index.contains("&lt;&amp;.txt"));
+        assert!(!index.contains("><&.txt<"));
+    }
     let mut settings = options(url.clone(), destination.path().into());
     settings.sha256 = Some(format!("{:x}", Sha256::digest(&payload)));
     let path = download::get(settings, CancellationToken::new()).await?;

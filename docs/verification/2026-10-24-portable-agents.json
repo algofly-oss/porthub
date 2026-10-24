@@ -39,7 +39,18 @@
     "ignored": 1,
     "clippy": "passed",
     "scope": "Treat a consumed oversized receive as a dropped datagram, preserving authenticated peer state. Windows WSAEMSGSIZE classification awaits actual CI.",
-    "source_sha256": "57d79d66982cba0b6b7f87aefb6a0098a93e1c79a223a9fce0d02ae74f42df32"
+    "source_sha256": "57d79d66982cba0b6b7f87aefb6a0098a93e1c79a223a9fce0d02ae74f42df32",
+    "actual_windows_verification": {
+      "ci_run": "https://github.com/algofly-oss/porthub/actions/runs/40088238085",
+      "checkpoint": "ae4559e3d5fb70b2c6c7c60d1bd5939d4b9eb6d5",
+      "architectures": [
+        "x86",
+        "x86_64",
+        "arm64"
+      ],
+      "udp_recovery_tests_passed_per_architecture": 3,
+      "limitations": "Jobs next failed in a separate HTTP test fixture that created an invalid Windows filename. This does not prove the entire Windows suite passed."
+    }
   },
   "limitations": [
     "This is a checkpoint verification, not final production acceptance.",
@@ -56,5 +67,9 @@
     "includes": "Mongo/API, installed systemd user autoupdate, Go/Pion compatibility fixtures, Socket.IO and private recovery integration tests",
     "log": "/tmp/porthub-portable-full-tests.log",
     "update_candidate": "freshly built native-portable-fixture-20261024"
+  },
+  "portable_filename_fixture_follow_up": {
+    "local_http_download_tests_passed": 6,
+    "scope": "Use a portable apostrophe/ampersand filename on every OS; retain angle-bracket filename coverage on Unix. Product runtime unchanged."
   }
 }
