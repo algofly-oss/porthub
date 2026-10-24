@@ -462,3 +462,26 @@ Never mark the goal complete merely because local tests or a checkpoint pass.
   PublicTCP mappings throughgateway are expected; privateLANoffload proved.
   NonLinuxprivatedevices/routes/DNS/security/serviceadoption, allfleetupdates
   and routechecks, PMTU and scaling stillrequired. Keep fullgoalactive.
+
+2026-10-24 latest continuation:
+- Source8777f3b93cefa9e62b10b2a10476aabd7c76df75 fixes gateway-pinned flows
+  blackholing when gateway fails but peertransportready. It switches to the
+  ready peer without applicationRST; recoverydoesnotflipback. Nine path/policy
+  tests passed; targetedClippyincludingroot-dns-test passed. Still need actual
+  longlivedTCP handover proof; do not equateunitpinningtests with that proof.
+- Updated existing UIcachedtabtest (ac218cf) to assert publicportonly and internal
+  IP:port rather than oldgatewaybindIP. Browsertooling old /tmp/porthub-ui-review
+  missing; test NOT rerun yet. UIcompileverification running onURM2 via
+  ui-addresses-e4fbaa2-build.log (exec36596), targetui-build tagged
+  porthub:ui-build-candidate-e4fbaa2; it contains UIupthroughcopyLAN/WANcommit.
+  Only ui/ subtree updated in stage frome4fbaa2; originalrelease1.2build captured
+  context6210 and is stillseparate exec99076. Neithercandidateisdeployed.
+- GatewayARMdiagnostics exec19280 completed0,6loglines/24events, tempuser-session
+  and ownedNodecontainerremoved. BothARMoldclients downloadedlegacybridge but
+  preflightdidnotcomplete. Their logs donotcontainunderlyinginstallerstderr,
+  becauseoldupdatebackgroundpathsuppressesit. Bothremainonline/pending, not
+  upgraded. Do not claimcauseisARMcodegen/noexec/TLSwithoutnewevidence.
+- Latestgatewayauditconfirmed6native1.1.1: Luna,Condor,Miro,Clear,Deep,OTSIReid.
+  ThelatterthreegatewayupdatedandacknowledgedwithoutSSH. HarshithaAGX/DGXSpark
+  oldonlinepending; Macoldonlineunsupportedlegacyadoption; Clearsight/test
+  offline. All11enabledregistrationsremaininscope. audit-fleet.py retained.
