@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 #[command(
     name = "porthub",
     version = option_env!("PORTHUB_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
-    about = "PortHub native agent: tunnels, HTTP file serving and parallel downloads"
+    about = "PortHub native agent: tunnels, HTTP file serving, syncing and parallel transfers"
 )]
 struct Args {
     /// Rathole-compatible client configuration (legacy -c form).
@@ -134,6 +134,24 @@ enum Command {
         root: Option<PathBuf>,
         #[arg(long)]
         all: bool,
+        #[arg(long)]
+        upload: bool,
+    },
+    /// Receive direct HTTP uploads from curl/wget or `porthub push`.
+    #[command(name = "http.receive", alias = "http-receive")]
+    HttpReceive {
+        #[arg(default_value = "8001", value_name = "PORT|PATH|list|stop")]
+        target: String,
+        #[arg(value_name = "PATH|PORT")]
+        path: Option<String>,
+        #[arg(long, default_value = "0.0.0.0")]
+        bind: IpAddr,
+        #[arg(short = 'p', long = "port")]
+        port_override: Option<u16>,
+        #[arg(long = "path")]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        all: bool,
     },
     /// Download with parallel byte ranges, safe resume, and optional SHA256.
     Get {
@@ -147,6 +165,19 @@ enum Command {
         /// Minimum size of a parallel download segment, in bytes.
         #[arg(long,default_value_t=8*1024*1024)]
         segment_size: u64,
+    },
+    /// Send files or sync directories directly to another PortHub receiver.
+    Push {
+        path: PathBuf,
+        url: String,
+        #[arg(short = 'x', long, default_value_t = 8)]
+        connections: usize,
+        /// Place directory contents directly in the receiver root instead of retaining its top folder.
+        #[arg(long)]
+        contents_only: bool,
+        /// Send every file even when size and modification time already match.
+        #[arg(long)]
+        force: bool,
     },
     /// Run public service forwarding using an in-process Rathole client.
     Tunnel {
@@ -215,6 +246,71 @@ enum Command {
         #[arg(long,hide=true,requires="request_id",conflicts_with_all=["check","rollback"])]
         target_version: Option<String>,
     },
+}
+
+async fn run_http_command(
+    target: String,
+    path: Option<String>,
+    bind: IpAddr,
+    port_override: Option<u16>,
+    root: Option<PathBuf>,
+    all: bool,
+    accept_uploads: bool,
+    cancel: CancellationToken,
+) -> Result<()> {
+    if target == "list" {
+        for record in server::list().await? {
+            println!(
+                "port {}  bind {}  pid {}  uploads {}  {}",
+                record.port,
+                record.bind,
+                record.pid,
+                if record.accepts_uploads { "on" } else { "off" },
+                record.root.display()
+            );
+        }
+        return Ok(());
+    }
+    if target == "stop" {
+        let port = if all {
+            None
+        } else {
+            Some(
+                path.context("usage: porthub http.server stop PORT|--all")?
+                    .parse::<u16>()?,
+            )
+        };
+        for port in server::stop_servers(port).await? {
+            println!("Stopped HTTP server on port {port}");
+        }
+        return Ok(());
+    }
+    let (port, default_root) = match target.parse::<u16>() {
+        Ok(port) => (
+            port,
+            path.map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(".")),
+        ),
+        Err(_) => {
+            if path.is_some() {
+                bail!("expected a port followed by a path");
+            }
+            (
+                if accept_uploads { 8001 } else { 8000 },
+                PathBuf::from(target),
+            )
+        }
+    };
+    server::serve(
+        server::Options {
+            port: port_override.unwrap_or(port),
+            bind,
+            root: root.unwrap_or(default_root),
+            accept_uploads,
+        },
+        cancel,
+    )
+    .await
 }
 
 #[cfg(target_os = "linux")]
@@ -891,17 +987,10 @@ async fn main() -> Result<()> {
                     Some(&cli),
                 )
                 .await?;
+                let parent = cli.parent().context("CLI bin directory missing")?;
+                porthub_agent::bootstrap::register_cli_path(parent, user)?;
                 println!("PortHub enrolled; native service activated");
                 println!("PortHub CLI installed: {}", cli.display());
-                let parent = cli.parent().context("CLI bin directory missing")?;
-                if !std::env::var_os("PATH")
-                    .is_some_and(|path| std::env::split_paths(&path).any(|item| item == parent))
-                {
-                    println!(
-                        "Add {} to PATH to invoke porthub directly",
-                        parent.display()
-                    );
-                }
             } else {
                 porthub_agent::bootstrap::save(
                     enrollment,
@@ -918,56 +1007,16 @@ async fn main() -> Result<()> {
             port_override,
             root,
             all,
-        }) => {
-            if target == "list" {
-                for record in server::list().await? {
-                    println!(
-                        "port {}  bind {}  pid {}  {}",
-                        record.port,
-                        record.bind,
-                        record.pid,
-                        record.root.display()
-                    );
-                }
-                Ok(())
-            } else if target == "stop" {
-                let port = if all {
-                    None
-                } else {
-                    Some(
-                        path.context("usage: porthub http.server stop PORT|--all")?
-                            .parse::<u16>()?,
-                    )
-                };
-                for port in server::stop_servers(port).await? {
-                    println!("Stopped http.server on port {port}");
-                }
-                Ok(())
-            } else {
-                let (port, default_root) = match target.parse::<u16>() {
-                    Ok(port) => (
-                        port,
-                        path.map(PathBuf::from)
-                            .unwrap_or_else(|| PathBuf::from(".")),
-                    ),
-                    Err(_) => {
-                        if path.is_some() {
-                            bail!("expected a port followed by a path");
-                        }
-                        (8000, PathBuf::from(target))
-                    }
-                };
-                server::serve(
-                    server::Options {
-                        port: port_override.unwrap_or(port),
-                        bind,
-                        root: root.unwrap_or(default_root),
-                    },
-                    cancel,
-                )
-                .await
-            }
-        }
+            upload,
+        }) => run_http_command(target, path, bind, port_override, root, all, upload, cancel).await,
+        Some(Command::HttpReceive {
+            target,
+            path,
+            bind,
+            port_override,
+            root,
+            all,
+        }) => run_http_command(target, path, bind, port_override, root, all, true, cancel).await,
         Some(Command::Get {
             url,
             directory,
@@ -980,6 +1029,19 @@ async fn main() -> Result<()> {
             options.sha256 = sha256;
             options.piece_size = segment_size;
             download::get(options, cancel).await.map(|_| ())
+        }
+        Some(Command::Push {
+            path,
+            url,
+            connections,
+            contents_only,
+            force,
+        }) => {
+            let result =
+                porthub_transfer::upload::put_path(path, url, connections, contents_only, force)
+                    .await?;
+            println!("{result}");
+            Ok(())
         }
         Some(Command::Tunnel { config }) => {
             porthub_tunnel::run_client_until(config, cancel.cancelled_owned()).await

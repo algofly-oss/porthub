@@ -51,11 +51,19 @@ porthub http.server 9000 ./other-files
 porthub http.server list
 porthub http.server stop 8000
 porthub http.server stop --all
+porthub http.receive 8001 ./drop
+porthub http.receive list
+porthub http.receive stop 8001
 porthub get https://example.com/archive.bin --connections 16 --sha256 <digest>
+porthub push ./dataset http://machine:8001/
 ```
 
 Servers can be managed from another terminal. Downloads validate resume state,
 fall back to a single stream when required, and avoid overwriting existing files.
+`push` sends files in parallel with resume and incrementally syncs directory
+trees. The receiver also accepts standard HTTP `PUT` and `POST` uploads through
+the configured listener. See [native transfers](docs/native-transfers.md) for
+the curl/wget forms and options.
 No lighttpd, aria2c, Python or package-manager dependency is required at runtime.
 See [native transfers](docs/native-transfers.md) and the
 [agent platform matrix](docs/agent-platforms.md). Enrollment, private networking,

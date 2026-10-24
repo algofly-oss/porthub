@@ -49,6 +49,20 @@ pub async fn publish(part: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Atomically replace a completed upload target, preserving the old file until
+/// the new contents are fully assembled and synced.
+pub async fn replace(part: &Path, target: &Path) -> Result<()> {
+    let part = part.to_owned();
+    let target = target.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let temp = tempfile::TempPath::try_from_path(part)?;
+        temp.persist(target).map_err(|error| error.error)?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

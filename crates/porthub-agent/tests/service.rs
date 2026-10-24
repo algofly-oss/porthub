@@ -563,8 +563,9 @@ async fn private_service_registration_preserves_private_wire_format_and_scopes_i
         "workspace":"0123456789abcdef01234567","token":"fixture-private-token-0123456789abcdef"});
     porthub_agent::profile::write_private(&source, &serde_json::to_vec(&profile)?, false)?;
     let manager = Fake::default();
-    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_porthub"));
-    let spec = service::install(&layout, &source, executable, &manager).await?;
+    let executable = directory.path().join("test-agent-binary");
+    std::fs::write(&executable, b"test agent executable")?;
+    let spec = service::install(&layout, &source, &executable, &manager).await?;
     let saved = porthub_agent::private_profile::Profile::load(&spec.profile)?;
     ensure!(saved.peer_id == peer && saved.workspace == "0123456789abcdef01234567");
     ensure!(service::status(&layout, &source, &manager).await?.installed);

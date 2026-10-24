@@ -8,6 +8,8 @@ use crate::{
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::{
+    env, fs,
+    io::Write,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -171,6 +173,95 @@ pub fn cli_path(user: bool, bin_directory: Option<&Path>) -> Result<PathBuf> {
     );
     Ok(directory.join("porthub"))
 }
+
+/// Add a user-installed CLI directory to the invoking user's shell startup
+/// files when it is not already on PATH. System installs use /usr/local/bin,
+/// which is already part of the standard system PATH.
+pub fn register_cli_path(directory: &Path, user_install: bool) -> Result<()> {
+    let path = env::var_os("PATH").unwrap_or_default();
+    if env::split_paths(&path).any(|entry| entry == directory) {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        user_install,
+        "system CLI directory is not on PATH; install under /usr/local/bin or choose a PATH directory"
+    );
+    #[cfg(not(unix))]
+    anyhow::bail!("automatic PATH registration is not available for this platform yet");
+    #[cfg(unix)]
+    {
+        let home = directories::BaseDirs::new()
+            .context("user home directory unavailable")?
+            .home_dir()
+            .to_owned();
+        let shell = env::var("SHELL").unwrap_or_default();
+        let profiles = if shell.ends_with("/zsh") {
+            vec![home.join(".zprofile"), home.join(".zshrc")]
+        } else if shell.ends_with("/bash") {
+            let login = if home.join(".bash_profile").exists() {
+                home.join(".bash_profile")
+            } else {
+                home.join(".profile")
+            };
+            vec![login, home.join(".bashrc")]
+        } else {
+            vec![home.join(".profile")]
+        };
+        for profile in profiles {
+            append_path_block(&profile, directory)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn append_path_block(profile: &Path, directory: &Path) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let directory = directory
+        .to_str()
+        .context("CLI directory path must be Unicode")?;
+    anyhow::ensure!(
+        !directory
+            .chars()
+            .any(|character| matches!(character, '\n' | '\r' | '\0')),
+        "CLI directory contains unsupported characters"
+    );
+    const START: &str = "# >>> PortHub CLI PATH >>>";
+    const END: &str = "# <<< PortHub CLI PATH <<<";
+    if let Ok(metadata) = fs::symlink_metadata(profile) {
+        anyhow::ensure!(
+            metadata.is_file()
+                && metadata.uid() == rustix::process::getuid().as_raw()
+                && metadata.nlink() == 1
+                && metadata.mode() & 0o022 == 0,
+            "shell startup file is not a safe user-owned regular file"
+        );
+        if fs::read_to_string(profile)?.contains(START) {
+            return Ok(());
+        }
+    }
+    let quoted = format!("'{}'", directory.replace('\'', "'\\''"));
+    let block = format!(
+        "\n{START}\ncase \":$PATH:\" in\n  *:{quoted}:*) ;;\n  *) export PATH={quoted}:\"$PATH\" ;;\nesac\n{END}\n"
+    );
+    let mut options = fs::OpenOptions::new();
+    options.create(true).append(true).write(true);
+    options
+        .mode(0o644)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let mut file = options.open(profile)?;
+    let metadata = file.metadata()?;
+    anyhow::ensure!(
+        metadata.is_file()
+            && metadata.uid() == rustix::process::getuid().as_raw()
+            && metadata.nlink() == 1
+            && metadata.mode() & 0o022 == 0,
+        "shell startup file changed during PATH registration"
+    );
+    file.write_all(block.as_bytes())?;
+    file.sync_all()?;
+    Ok(())
+}
 pub async fn install_published(
     mut profile: Profile,
     path: Option<&Path>,
@@ -203,5 +294,26 @@ pub async fn install_published(
                 .context("service activation failed and source profile rollback failed")?;
             Err(error)
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod path_tests {
+    use super::append_path_block;
+    use anyhow::{ensure, Result};
+
+    #[test]
+    fn shell_path_registration_is_quoted_and_idempotent() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let profile = root.path().join(".bashrc");
+        let directory = root.path().join("user bin");
+        append_path_block(&profile, &directory)?;
+        append_path_block(&profile, &directory)?;
+        let content = std::fs::read_to_string(profile)?;
+        ensure!(content.matches("# >>> PortHub CLI PATH >>>").count() == 1);
+        ensure!(content.contains("export PATH='"));
+        ensure!(content.contains("user bin"));
+        ensure!(content.contains("case \":$PATH:\" in"));
+        Ok(())
     }
 }

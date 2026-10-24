@@ -3,3 +3,4 @@
 pub mod download;
 pub mod server;
 mod state;
+pub mod upload;

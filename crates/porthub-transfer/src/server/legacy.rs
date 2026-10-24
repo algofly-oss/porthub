@@ -80,6 +80,7 @@ pub async fn list() -> Result<Vec<(PathBuf, Record)>> {
                 port,
                 bind: record.bind.parse().unwrap_or(Ipv4Addr::LOCALHOST.into()),
                 root: record.root,
+                accepts_uploads: false,
                 started_unix: 0,
                 control: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
                 token: String::new(),

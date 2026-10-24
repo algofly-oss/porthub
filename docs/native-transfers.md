@@ -8,9 +8,14 @@ extracted helper executable for these operations.
 porthub http.server 8000 /path/to/files --bind 0.0.0.0
 porthub http.server list
 porthub http.server stop 8000
+porthub http.receive 8001 /path/to/drop
+porthub http.receive list
+porthub http.receive stop 8001
 porthub get http://machine:8000/file.bin
 porthub get http://machine:8000/file.bin --connections 16 --dir ./downloads \
   --sha256 EXPECTED_HEX_DIGEST
+porthub push ./archive.bin http://machine:8001/
+porthub push ./dataset/ http://machine:8001/ --connections 8
 ```
 
 `porthub-transfer` contains the implementation. The native server supports
@@ -18,6 +23,28 @@ directory listings, GET/HEAD, byte ranges, validators, and safe document-root
 resolution. A separate authenticated control listener binds only to loopback;
 its random capability is stored in a private per-user registry for list/stop.
 The public file listener is the requested address/port only.
+
+`http.receive` uses the same listener and process registry as `http.server`,
+with uploads enabled. It supports ordinary raw HTTP `PUT` and `POST`, as well
+as PortHub's resumable transfer protocol. `curl --upload-file file.bin
+http://machine:8001/.porthub/raw/file.bin` and
+`curl -X POST --data-binary @file.bin
+http://machine:8001/.porthub/raw/file.bin`, as well as
+`wget --post-file=file.bin
+http://machine:8001/.porthub/raw/file.bin` work without extra software. A
+configured PortHub public port mapping can point at this listener; an upload
+to a private peer URL stays on the private route and under its existing peer
+access policy.
+
+`porthub push` accepts a file, archive, binary, or directory. Files use
+parallel 8 MiB chunks by default and persist a private resume checkpoint. A
+directory keeps its top-level folder by default, sends changed files, resumes
+interrupted files, and skips files with matching size and modification time.
+`--contents-only` puts directory contents directly in the receive root;
+`--connections` changes parallelism, and `--force` resends matching files. It
+never removes unrelated destination files. The receiver replaces a named file
+only after the new upload is complete. PortHub peers query the receiver's state
+directly; the gateway does not carry file bytes.
 
 The downloader uses concurrent range workers and a shared queue of missing
 pieces, avoiding a fixed assignment that strands finished connections behind

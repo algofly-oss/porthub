@@ -29,6 +29,7 @@ pub struct Options {
     pub port: u16,
     pub bind: IpAddr,
     pub root: PathBuf,
+    pub accept_uploads: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -37,6 +38,8 @@ pub struct Record {
     pub port: u16,
     pub bind: IpAddr,
     pub root: PathBuf,
+    #[serde(default)]
+    pub accepts_uploads: bool,
     pub started_unix: u64,
     control: SocketAddr,
     token: String,
@@ -244,6 +247,17 @@ async fn files(State(root): State<Arc<PathBuf>>, mut request: Request) -> Respon
                 header::ETAG,
                 HeaderValue::from_str(&etag).expect("generated ETag"),
             );
+            let modified_unix = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|time| time.as_secs().to_string())
+                .unwrap_or_default();
+            if let Ok(value) = HeaderValue::from_str(&modified_unix) {
+                response
+                    .headers_mut()
+                    .insert("x-porthub-modified-unix", value);
+            }
             response
         }
         Err(error) => match error {},
@@ -269,6 +283,7 @@ pub async fn serve(options: Options, shutdown: CancellationToken) -> Result<()> 
         port,
         bind: options.bind,
         root: root.clone(),
+        accepts_uploads: options.accept_uploads,
         started_unix: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
         control: control_listener.local_addr()?,
         token: token.clone(),
@@ -289,16 +304,31 @@ pub async fn serve(options: Options, shutdown: CancellationToken) -> Result<()> 
     let data = data.tap_io(|stream| {
         let _ = stream.set_nodelay(true);
     });
-    let data_server = axum::serve(data, router(root.clone()))
-        .with_graceful_shutdown(shutdown.clone().cancelled_owned());
+    #[cfg(unix)]
+    let hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()).ok();
+    #[cfg(unix)]
+    let hangup_guard = tokio::spawn(async move {
+        if let Some(mut signal) = hangup {
+            while signal.recv().await.is_some() {}
+        }
+    });
+    let mut app = router(root.clone());
+    if options.accept_uploads {
+        app = app.merge(crate::upload::routes(root.clone())?);
+    }
+    let data_server =
+        axum::serve(data, app).with_graceful_shutdown(shutdown.clone().cancelled_owned());
     let control_server = axum::serve(control_listener, control)
         .with_graceful_shutdown(shutdown.clone().cancelled_owned());
     eprintln!(
-        "[porthub-http.server] Serving {} on {}:{port}",
+        "[porthub-http.server] Serving {} on {}:{port} (uploads: {})",
         root.display(),
-        options.bind
+        options.bind,
+        options.accept_uploads
     );
     let result = tokio::select! {result=data_server=>result,result=control_server=>result};
+    #[cfg(unix)]
+    hangup_guard.abort();
     shutdown.cancel();
     result?;
     Ok(())

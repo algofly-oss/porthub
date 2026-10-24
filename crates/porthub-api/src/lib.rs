@@ -4,6 +4,7 @@ pub mod bootstrap;
 pub mod config;
 pub mod config_signals;
 pub mod connection_refresh;
+pub mod docs;
 pub mod domain;
 pub mod enrollment_ticket;
 pub mod error;
@@ -130,6 +131,7 @@ pub fn router(app: Arc<App>) -> Router {
     let realtime = realtime::Hub::install(&app);
     Router::new()
         .merge(routes::router())
+        .merge(docs::router())
         .route("/api/auth/settings", get(auth::settings))
         .route("/api/ping", get(ping))
         .route("/api/auth/signin", post(auth::signin))

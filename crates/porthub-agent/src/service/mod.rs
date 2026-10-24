@@ -426,6 +426,14 @@ pub(crate) fn binary(source: &Path, releases: &Path) -> Result<PathBuf> {
     staged.as_file().sync_all()?;
     let release = releases.join(hex(hash.finalize()));
     directory(&release, false)?;
+    // Release directories contain only the public executable. Keep them
+    // searchable so a system-wide `/usr/local/bin/porthub` link works for
+    // ordinary users as well as the root-owned service.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&release, std::fs::Permissions::from_mode(0o755))?;
+    }
     let path = release.join(if cfg!(windows) {
         "porthub.exe"
     } else {
@@ -473,6 +481,32 @@ pub(crate) fn binary(source: &Path, releases: &Path) -> Result<PathBuf> {
     #[cfg(unix)]
     File::open(&release)?.sync_all()?;
     Ok(path)
+}
+
+#[cfg(all(test, unix))]
+mod binary_tests {
+    use super::binary;
+    use anyhow::{ensure, Context, Result};
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn published_release_directory_is_searchable_but_not_writable_by_others() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let releases = root.path().join("releases");
+        std::fs::create_dir(&releases)?;
+        std::fs::set_permissions(&releases, std::fs::Permissions::from_mode(0o700))?;
+        let source = root.path().join("agent");
+        std::fs::write(&source, b"test executable")?;
+        let installed = binary(&source, &releases)?;
+        let directory = installed.parent().context("release directory missing")?;
+        let mode = std::fs::metadata(directory)?.permissions().mode() & 0o777;
+        ensure!(mode == 0o755, "release directory mode was {mode:o}");
+        ensure!(
+            installed.is_file(),
+            "published executable is not accessible"
+        );
+        Ok(())
+    }
 }
 struct Files {
     saved: Vec<(PathBuf, Option<Vec<u8>>, bool)>,
