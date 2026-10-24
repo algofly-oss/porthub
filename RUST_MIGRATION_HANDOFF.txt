@@ -254,3 +254,77 @@ packaged HTTP management and macOS launchd lifecycle.
 Use /home/nitin/.cargo/bin/cargo (pinned 1.99.1). Local test Mongo is the owned
 porthub-rust-test-mongo container on localhost:47117 with random disposable DBs.
 Never mark the goal complete merely because local tests or a checkpoint pass.
+
+2026-10-24 live activation / private baseline update (supersedes staging-only notes):
+- Complete B81 ten-platform release bundle verified; 246 workspace tests and
+  twelve migration tests passed before deployment. Source 4fa12cc fixes the
+  two legitimate gateway-self aliases among 27 actual traffic_routes rows.
+- Native migration applied successfully on URM2 from the owned staging tree
+  /home/ubuntu/algofly/porthub-native-20261024-0118. Three native roles healthy;
+  original porthub container stopped and retained. Cold backup:
+  backup-before-native-20261024T140825Z. All eight unrelated containers verified
+  unchanged by ID, start time and restart count. Do not restart unrelated apps.
+- HTTP API responds 200 on local ports 80 and 8345. Optional 443 retains web
+  proxy compatibility; application TLS 8346 disabled as requested. Gateway
+  advertisement remains explicit HTTP origin in the private environment.
+- Live Cloudflare check exposed HTTP/2 ingress forwarded unchanged to HTTP/1
+  upstream pools (502). Runtime fix f97586ba2d450e6e9caa625547cca4dc83f16b14
+  committed/pushed; seven proxy tests and targeted Clippy passed. Replacement
+  prod-edge build is running in http2-edge-build.log (exec session 63325).
+  Build finished; final edge image 7891b9d3 is healthy and Cloudflare returns 200.
+  Python urllib default UA receives Cloudflare 1010 independently; use UA
+  porthub for the domain check. Luna and Condor adoption has now succeeded.
+- Legacy Luna-to-Condor private baseline used native B81 HTTP/get tools with
+  16 connections. Initial 25-27 MB/s degraded through repeated stalls to 9.17
+  MB/s at 883.2 MiB / 101.7 seconds. Cancelled owned downloader with SIGINT
+  before gateway cutover; NOT a completed 10 GiB benchmark. Report:
+  docs/benchmarks/2026-10-24-private-legacy-baseline.json (pushed 56b4ea4).
+- Native managed HTTP source still running on Luna port41133, test files only.
+  /tmp/porthub-private-baseline-state points to private benchmark.json containing
+  PID, root/state paths, size and SHA. Preserve for full native repeat; stop via
+  native http.server stop with its PORTHUB_STATE_DIR/XDG_RUNTIME_DIR afterward.
+- Condor native binary /home/nitin/.cache/porthub-private-baseline/porthub,
+  transfer.json and active-run pointer under the same private directory. SSH via
+  public mapped port29282 can reset until gateway control recovers. Preserve
+  resumable download metadata. No full private native result or Miro LAN proof.
+- Both Luna and Condor native adopt-legacy read-only inspection verified two
+  registrations each with canonical https://porthub.algofly.in and DuckDNS
+  fallbacks. Apply remains pending domain recovery. sudo timestamp is PTY-
+  scoped: run actual sudo command in PTY and supply password through stdin,
+  rather than expecting sudo -v from another exec to authorize sudo -n.
+
+2026-10-24 pilot / completed private transfer update:
+- Luna native adoption receipt /etc/porthub/native/adoption-kvMraM; Condor
+  adoption worker porthub-adoption-2d0c615bdb0cb9ef983a7d84.service completed
+  Result=success. Both public/private services active and shared CLI B81.
+- Native private-IP Luna-to-Condor 10 GiB COMPLETED and SHA256 verified at
+  41.82 MB/s (334.56 Mbps), 268.54 seconds including SHA. Evidence committed
+  next in docs/benchmarks/2026-10-24-rust-private-production-ip.json.
+  Gateway Rx+Tx during 12s sample 82.24 MB/s; payload 36.18 MB/s concurrently.
+  Consistent with gateway relay, NOT proof of private direct offload.
+- Found real DNS failure: resolved binds per-link loopback DNS queries to TUN.
+  Confirmed tcpdump showing packets to 127.0.0.1 exiting virtual link.
+  Fix f7fd18cee2a242ccd189bb4822f5d33a682f17c2 binds DNS to assigned private
+  IP/high port, accepts only local-origin queries, registers that address.
+  Actual privileged host-resolver test PASSED using temporary owned link;
+  four policy/DNS/flow tests pass. Source pushed. Ten-target CI 40102607577
+  running; four jobs already successful at last poll, six still in progress.
+- Locally built static x86 release for f7fd18c:
+  /home/nitin/.cache/porthub-native-releases/f7fd18cee2a242ccd189bb4822f5d33a682f17c2/local-linux
+  Agent-artifacts Docker build completed (exec16304 terminal0).
+- Applied DNS-fixed binary ONLY to native private service on Luna and Condor
+  with service install --profile existing private profile. Public agents/shared
+  CLI remain B81; do not claim full version uniformity yet. No credential/ID
+  rotation. Domain resolution and hash-checked probe now succeed on Condor.
+- Fresh 10 GiB luna.phub download running on Condor, native f7fd18c get and
+  private agents. Pointer ~/.cache/porthub-private-baseline/active-domain-run
+  gives job.json/log location. First domain run was discarded during controlled
+  final edge replacement; use only the pointer's CURRENT run for results.
+  Wait for Saved line + checksum success; do not mutate gateway/pilot routes
+  during transfer. Afterward finish public benchmark and Miro LAN test.
+- Miro /tmp/porthub-native-f7fd18c staged, readonly inspection verified two
+  registrations. Handoff being queued next; check actual worker/CLI/service
+  outcome before declaring adopted. SSH miro uses LAN miro.local.
+- URM2 final edge image 7891b9d3 replaces recovery-layer image; all roles healthy.
+  Core/firewall still source4fa, release B81; complete matching new-release
+  images/artifact bundle before whole-fleet latest-version rollout.
