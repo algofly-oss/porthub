@@ -235,6 +235,99 @@ pub fn render_web(routes: &[Document]) -> anyhow::Result<porthub_runtime::web_ro
     Ok(porthub_runtime::web_routes::Config { routes: result })
 }
 
+/// Older gateways used a web proxy back to their own application listener.
+/// Unified ingress already serves that application, so proxying it again would
+/// either conflict with a reserved hostname or recurse into the same listener.
+/// Keep the database records and let builtin gateway ingress serve these aliases.
+pub fn render_web_for_gateway(
+    routes: &[Document],
+    settings: &crate::config::Config,
+) -> anyhow::Result<porthub_runtime::web_routes::Config> {
+    fn whole_origin(value: &str) -> Option<url::Origin> {
+        let url = url::Url::parse(value).ok()?;
+        (["http", "https"].contains(&url.scheme())
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.path() == "/"
+            && url.query().is_none()
+            && url.fragment().is_none())
+        .then(|| url.origin())
+    }
+    let origins: Vec<_> = std::iter::once(settings.public_base_url.as_str())
+        .chain(std::iter::once(settings.tunnel_http_base_url.as_str()))
+        .chain(settings.gateway_advertised_url.as_deref())
+        .chain(
+            settings
+                .tunnel_fallback_base_urls
+                .iter()
+                .map(String::as_str),
+        )
+        .filter_map(whole_origin)
+        .collect();
+    let mut config = render_web(routes)?;
+    config.routes.retain(|route| {
+        whole_origin(&route.target_url).is_none_or(|origin| !origins.contains(&origin))
+    });
+    Ok(config)
+}
+
+async fn web_snapshot(app: &App) -> ApiResult<(usize, porthub_runtime::web_routes::Config)> {
+    let routes: Vec<Document> = app
+        .collection("traffic_routes")
+        .find(doc! {"enabled":{"$ne":false}})
+        .sort(doc! {"created_at":1,"_id":1})
+        .await?
+        .try_collect()
+        .await?;
+    let config = render_web_for_gateway(&routes, &app.config).map_err(internal)?;
+    let gateways = std::iter::once(&app.config.public_base_url)
+        .chain(std::iter::once(&app.config.tunnel_http_base_url))
+        .chain(app.config.tunnel_fallback_base_urls.iter())
+        .filter_map(|base| url::Url::parse(base).ok())
+        .filter_map(|url| url.host_str().map(str::to_owned));
+    porthub_runtime::web_routes::WebRoutes::with_gateway_hosts(gateways)
+        .reload(config.clone())
+        .map_err(internal)?;
+    Ok((routes.len(), config))
+}
+
+#[derive(Serialize)]
+pub struct Preflight {
+    pub active_machines: usize,
+    pub public_services: usize,
+    pub web_routes: usize,
+    pub proxy_routes: usize,
+    pub gateway_alias_routes: usize,
+}
+
+/// Read-only production-data validation: no bootstrap, reconciliation, IPC,
+/// file publication, index creation or background workers are started.
+pub async fn preflight(app: &App) -> ApiResult<Preflight> {
+    let machines: Vec<Document> = app.collection("machines")
+        .find(doc! {"enabled":{"$ne":false},"deletion_pending":{"$ne":true},"token":{"$nin":[Bson::Null,""]}})
+        .await?.try_collect().await?;
+    let ids: Vec<Bson> = machines
+        .iter()
+        .filter_map(|m| m.get("_id").cloned())
+        .collect();
+    let connections: Vec<Document> = app
+        .collection("connections")
+        .find(doc! {"machine_id":{"$in":ids},"enabled":{"$ne":false}})
+        .await?
+        .try_collect()
+        .await?;
+    render(&machines, &connections).map_err(internal)?;
+    let (web_routes, config) = web_snapshot(app).await?;
+    Ok(Preflight {
+        active_machines: machines.len(),
+        public_services: connections.len(),
+        web_routes,
+        proxy_routes: config.routes.len(),
+        gateway_alias_routes: web_routes - config.routes.len(),
+    })
+}
+
 pub async fn rebuild_web(app: &App) -> ApiResult<()> {
     let path = app.config.web_routes_config_path.clone().or_else(|| {
         app.config
@@ -246,23 +339,7 @@ pub async fn rebuild_web(app: &App) -> ApiResult<()> {
         return Ok(());
     };
     let _guard = app.gateway_config_lock.lock().await;
-    let routes: Vec<Document> = app
-        .collection("traffic_routes")
-        .find(doc! {"enabled":{"$ne":false}})
-        .sort(doc! {"created_at":1,"_id":1})
-        .await?
-        .try_collect()
-        .await?;
-    let config = render_web(&routes).map_err(internal)?;
-    // Use the same validator as edge before publishing. No service is contacted.
-    let gateways = std::iter::once(&app.config.public_base_url)
-        .chain(std::iter::once(&app.config.tunnel_http_base_url))
-        .chain(app.config.tunnel_fallback_base_urls.iter())
-        .filter_map(|base| url::Url::parse(base).ok())
-        .filter_map(|url| url.host_str().map(str::to_owned));
-    porthub_runtime::web_routes::WebRoutes::with_gateway_hosts(gateways)
-        .reload(config.clone())
-        .map_err(internal)?;
+    let (_, config) = web_snapshot(app).await?;
     let content = serde_json::to_string(&config).map_err(internal)?;
     tokio::task::spawn_blocking(move || atomic_replace(&path, &content))
         .await

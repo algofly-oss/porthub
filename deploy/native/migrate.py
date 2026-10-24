@@ -16,8 +16,11 @@ import platform
 import re
 import shutil
 import signal
+import ssl
 import subprocess
 import sys
+import tempfile
+import uuid
 
 ASSETS = {
     "porthub-" + target + (".exe" if target.startswith("windows_") else "")
@@ -99,6 +102,61 @@ def inspect(kind, name):
     return json.loads(run(["docker", kind, "inspect", name]))[0]
 
 
+def database_preflight(configured, root):
+    """Use the native renderer against the live database, with no startup writes."""
+    environment = configured["services"]["core"]["environment"]
+    if not environment.get("MONGO_DATABASE_URI") or not environment.get("MONGO_DATABASE_NAME"):
+        raise RuntimeError("database configuration is required for native preflight")
+    nonce = uuid.uuid4().hex
+    name = "porthub-data-preflight-" + nonce
+    arguments = ["docker", "run", "--rm", "--name", name,
+                 "--label", "porthub.data-preflight=" + nonce, "--network", "host",
+                 "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true"]
+    forwarded = {key: str(value) for key, value in environment.items()
+                 if value is not None and key.startswith(("MONGO_", "PORTHUB_", "PORT_HUB_", "RATHOLE_", "FW_", "FIREWALL_", "SESSION_", "SIGNUP_", "MACHINE_", "WEB_PROXY_"))}
+    for key in forwarded:
+        arguments.extend(["--env", key])
+    arguments.extend(["--entrypoint", "porthub-api", "porthub:core", "--check-config"])
+    try:
+        result = subprocess.run(arguments, env={**os.environ, **forwarded}, capture_output=True, text=True, timeout=45)
+        private_file(root / (name + ".log"), (result.stdout + result.stderr).encode())
+        if result.returncode:
+            raise RuntimeError("live database configuration preflight failed; private diagnostics retained")
+        report = json.loads(result.stdout)
+        expected = {"active_machines", "public_services", "web_routes", "proxy_routes", "gateway_alias_routes"}
+        if set(report) != expected or any(type(value) is not int or value < 0 for value in report.values()):
+            raise RuntimeError("invalid native database preflight receipt")
+        return report
+    finally:
+        inspected = subprocess.run(["docker", "inspect", name], capture_output=True, text=True)
+        if inspected.returncode == 0:
+            record = json.loads(inspected.stdout)[0]
+            if (record["Config"].get("Labels") or {}).get("porthub.data-preflight") == nonce:
+                subprocess.run(["docker", "rm", "--force", record["Id"]], capture_output=True)
+
+
+def legacy_tls(container, enabled, allow_self_signed=False):
+    if not enabled:
+        return None
+    certificate = run(["docker", "exec", container, "cat", "/app/deploy/certificates/server.crt"], binary=True)
+    key = run(["docker", "exec", container, "cat", "/app/deploy/certificates/server.key"], binary=True)
+    if not certificate or not key:
+        if allow_self_signed:
+            return None
+        raise RuntimeError("legacy TLS certificate/key is empty; configure HTTP ingress or supply valid TLS material before migration")
+    with tempfile.TemporaryDirectory(prefix="porthub-tls-preflight-") as directory:
+        cert_path, key_path = pathlib.Path(directory) / "certificate", pathlib.Path(directory) / "key"
+        private_file(cert_path, certificate)
+        private_file(key_path, key)
+        try:
+            ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).load_cert_chain(cert_path, key_path, password=lambda: b"")
+        except ssl.SSLError as error:
+            if allow_self_signed:
+                return None
+            raise RuntimeError("legacy TLS certificate/key is invalid; configure HTTP ingress or supply valid TLS material before migration") from error
+    return certificate, key
+
+
 def private_file(path, data):
     descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, "wb") as output:
@@ -161,6 +219,8 @@ def main():
     for role in ("core", "edge", "firewall"):
         image = inspect("image", "porthub:" + role)
         versions.add(image_version(image))
+        if role == "core" and (image["Config"].get("Labels") or {}).get("io.porthub.api-preflight") != "v1":
+            raise RuntimeError("core image must support read-only database configuration preflight")
         wanted = "arm64" if platform.machine() == "aarch64" else "amd64"
         if image["Architecture"] != wanted:
             raise RuntimeError("native image architecture does not match host")
@@ -183,8 +243,15 @@ def main():
                   "--entrypoint", "/bin/cat", "porthub:core", "/app/client-bin/" + artifact + suffix], binary=True)
              for suffix in ("", ".version", ".sha256")]
     artifacts = artifact_bundle(args.extra_artifacts, version, artifact_files(artifact, *parts, version))
+    edge_environment = configured["services"].get("edge", {}).get("environment", {})
+    tls_enabled = bool(edge_environment.get("PORTHUB_EDGE_TLS_LISTEN", ""))
+    allow_self_signed = str(edge_environment.get("PORTHUB_ALLOW_SELF_SIGNED", "false")).lower() in ("1", "true", "yes", "on")
+    tls_material = legacy_tls(args.container, tls_enabled, allow_self_signed)
+    data_report = database_preflight(configured, root)
     print("Preflight: owned PortHub container, data volume, native images and Compose configuration verified", flush=True)
     print("Preflight: matching release versions and complete agent artifacts verified before downtime", flush=True)
+    print("Preflight: live configuration verified: " + json.dumps(data_report, sort_keys=True), flush=True)
+    print("Preflight: TLS " + ("identity validated" if tls_material else "optional listener uses native automatic identity" if tls_enabled else "disabled; HTTP ingress configured"), flush=True)
     if not args.apply:
         return
     if os.geteuid() != 0:
@@ -196,8 +263,9 @@ def main():
     backup.mkdir(mode=0o700)
     private_file(backup / "container.json", json.dumps(old).encode())
     private_file(backup / "environment", (root / ".env").read_bytes())
-    for source, destination in [("/app/deploy/certificates/server.crt", "origin.crt"), ("/app/deploy/certificates/server.key", "origin.key")]:
-        private_file(backup / destination, run(["docker", "exec", args.container, "cat", source], binary=True))
+    if tls_material:
+        for name, content in zip(("origin.crt", "origin.key"), tls_material):
+            private_file(backup / name, content)
     running = set(run(["docker", "ps", "--quiet"]).split())
     others = running - {old["Id"][:12]}
     stopped = False
@@ -218,7 +286,7 @@ def main():
         owners = snapshot(data / "mongo", backup / "mongo")
         snapshot(data / "firewall", backup / "firewall")
         private_file(backup / "mongo-ownership.json", json.dumps(owners).encode())
-        print("PortHub stopped; cold MongoDB/firewall backups verified; TLS identity retained", flush=True)
+        print("PortHub stopped; cold MongoDB/firewall backups verified", flush=True)
         volumes = {}
         for name in ("firewall_data", "certificates", "client_artifacts"):
             volume = args.project + "_" + name
@@ -228,9 +296,10 @@ def main():
                 raise RuntimeError("native destination volume must be empty for initial migration")
             volumes[name] = path
         shutil.copytree(backup / "firewall", volumes["firewall_data"], dirs_exist_ok=True)
-        for name in ("origin.crt", "origin.key"):
-            shutil.copy2(backup / name, volumes["certificates"] / name)
-            os.chmod(volumes["certificates"] / name, 0o640)
+        if tls_material:
+            for name in ("origin.crt", "origin.key"):
+                shutil.copy2(backup / name, volumes["certificates"] / name)
+                os.chmod(volumes["certificates"] / name, 0o640)
         owner_tree(volumes["certificates"], 0, 10001)
         os.chmod(volumes["certificates"], 0o770)
         owner_tree(data / "mongo", 10001, 10001)

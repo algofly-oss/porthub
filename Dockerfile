@@ -61,8 +61,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 ARG PORTHUB_VERSION=dev
 ENV RUST_LOG=info PORTHUB_VERSION=$PORTHUB_VERSION
 LABEL org.opencontainers.image.version=$PORTHUB_VERSION
+ARG PORTHUB_SOURCE_REVISION=dev
+LABEL org.opencontainers.image.revision=$PORTHUB_SOURCE_REVISION
 
 FROM runtime-base AS prod-core
+LABEL io.porthub.api-preflight=v1
 RUN apt-get update && apt-get install -y --no-install-recommends libcurl4 libssl3 && \
     rm -rf /var/lib/apt/lists/* && \
     mkdir -p /data/mongo /run/porthub-api /run/porthub-edge /run/porthub-firewall /run/porthub-config /run/porthub-activity /app/ui /app/client-bin && \

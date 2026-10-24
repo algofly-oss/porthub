@@ -95,6 +95,44 @@ Do not reactivate disabled registrations or change credentials speculatively.
 
 CHECKPOINT AND NEXT REQUIRED WORK / NOT COMPLETE
 
+LATEST OVERRIDE: First production apply failed and automatically restored the
+legacy container/database. All 8 unrelated containers retained IDs/start times/
+restart counts. Old PortHub's local HTTP API returns 200. A Python request to
+the canonical Cloudflare domain returns 403 (no prior external baseline).
+No registered client was upgraded. Failed native core/firewall are stopped;
+edge is only Created. Preserve the original cold backup and failed Mongo copy.
+
+Actual failure: traffic_routes has 27 enabled records, not zero. The earlier
+inventory queried traffic_rules incorrectly. Two records route gateway aliases
+back to its own declared HTTP origin on port 8345; strict reserved-host checks
+blocked native startup. The API patch recognizes whole declared gateway origins
+as builtin aliases while retaining every database record and rejecting other
+upstreams on protected hostnames. A new native `porthub-api --check-config`
+validates actual Mongo data without bootstrap/index/file/IPC/worker writes.
+Its integration test and full workspace pass: 246 passed, 0 failed/ignored.
+Workspace clippy and 12 updated maintenance tests pass.
+
+User explicitly clarified API/backend HTTP with Cloudflare public TLS, and
+authorized temporarily stopping old PortHub to test the new deployment. Do not
+spend time migrating its broken TLS files: legacy private keys are empty and
+active Traefik uses a different temporary certificate. API traffic uses HTTP
+8345. Access-log evidence also shows existing unrelated web-proxy traffic on
+443, so retain that optional listener with built-in automatic identity, disable
+the separate app TLS port 8346, and keep the API origin explicitly HTTP.
+
+The updated migration skips TLS material for HTTP-only ingress; explicit native
+self-signed fallback handles an optional compatibility listener when legacy
+material is invalid. It now requires the core's readonly-preflight capability
+label and checks the live database before downtime. The server image source
+revision is separate from the unchanged b81e865 client-artifact release.
+
+Server-only ARM compilation is active via exec session 77312, log
+http-server-build.log; source was synced before building target rust-build.
+Do not restart a quiet live build. Next: finish matching image packaging with
+the current source revision, archive/empty only the three task-created native
+destination volumes from the failed attempt, run the new live-data preflight,
+then retry HTTP-first activation. Original production checkout stays untouched.
+
 The matching b81e865 ARM core/edge/firewall sequence completed successfully.
 All three images passed 24 disposable isolation/functional checks on URM2;
 report docs/verification/2026-10-24-urm2-isolation.json. The verifier now runs

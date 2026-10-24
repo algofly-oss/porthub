@@ -85,7 +85,7 @@ class ReleasePreflight(unittest.TestCase):
             old = {"Config": {"Labels": {"com.docker.compose.project": "porthub",
                                           "com.docker.compose.service": "porthub"}, "Env": []},
                    "Mounts": [{"Destination": "/data", "Type": "volume", "Name": "porthub_porthub_data"}]}
-            image = {"Architecture": "amd64", "Config": {"Labels": {"org.opencontainers.image.version": self.version}}}
+            image = {"Architecture": "amd64", "Config": {"Labels": {"org.opencontainers.image.version": self.version, "io.porthub.api-preflight": "v1"}}}
             files = self.bundle("porthub-x86_64")
             calls = []
 
@@ -134,7 +134,7 @@ class ReleasePreflight(unittest.TestCase):
                         if kind == "volume":
                             return {"Mountpoint": str(root / "data")}
                         version = "stale" if mismatch == "image" and name == "porthub:edge" else self.version
-                        return {"Architecture": "amd64", "Config": {"Labels": {"org.opencontainers.image.version": version}}}
+                        return {"Architecture": "amd64", "Config": {"Labels": {"org.opencontainers.image.version": version, "io.porthub.api-preflight": "v1"}}}
 
                     def run(arguments, **_):
                         calls.append(arguments)
@@ -158,7 +158,7 @@ class ReleasePreflight(unittest.TestCase):
                 old = {"Id": old_id, "Config": {"Env": [], "Labels": {
                     "com.docker.compose.project": "porthub", "com.docker.compose.service": "porthub"}},
                     "Mounts": [{"Destination": "/data", "Type": "volume", "Name": "porthub_porthub_data"}]}
-                image = {"Architecture": "amd64", "Config": {"Labels": {"org.opencontainers.image.version": self.version}}}
+                image = {"Architecture": "amd64", "Config": {"Labels": {"org.opencontainers.image.version": self.version, "io.porthub.api-preflight": "v1"}}}
                 files = self.bundle("porthub-x86_64")
                 calls = []
                 handlers = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
@@ -188,6 +188,7 @@ class ReleasePreflight(unittest.TestCase):
                 argv = ["migrate.py", "--apply", "--project-dir", str(root)]
                 with mock.patch.object(sys, "argv", argv), mock.patch.object(migrate, "inspect", inspect), \
                      mock.patch.object(migrate, "run", run), mock.patch.object(migrate.os, "geteuid", return_value=0), \
+                     mock.patch.object(migrate, "database_preflight", return_value={"web_routes": 0}), \
                      mock.patch.object(migrate.platform, "machine", return_value="x86_64"), \
                      mock.patch.object(migrate.subprocess, "run") as rollback:
                     with self.assertRaisesRegex(RuntimeError, "interrupted"):
@@ -197,6 +198,40 @@ class ReleasePreflight(unittest.TestCase):
                 self.assertEqual(rollback.call_args_list[1].args[0], ["docker", "start", "porthub"])
                 self.assertEqual(handlers, {number: signal.getsignal(number) for number in handlers})
                 self.assertFalse((root / "data").exists(), "interrupted stop reached data migration")
+
+    def test_http_ingress_never_reads_or_requires_a_legacy_private_key(self):
+        with mock.patch.object(migrate, "run") as run:
+            self.assertIsNone(migrate.legacy_tls("porthub", False))
+            run.assert_not_called()
+
+    def test_empty_tls_key_fails_before_any_stop_when_tls_is_requested(self):
+        with mock.patch.object(migrate, "run", side_effect=[b"existing-certificate", b""]):
+            with self.assertRaisesRegex(RuntimeError, "certificate/key is empty"):
+                migrate.legacy_tls("porthub", True)
+
+    def test_invalid_legacy_key_does_not_block_an_explicit_automatic_identity(self):
+        with mock.patch.object(migrate, "run", side_effect=[b"existing-certificate", b""]):
+            self.assertIsNone(migrate.legacy_tls("porthub", True, allow_self_signed=True))
+
+    def test_native_data_preflight_forwards_secrets_only_in_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = {"active_machines": 1, "public_services": 2, "web_routes": 3,
+                      "proxy_routes": 1, "gateway_alias_routes": 2}
+            environment = {"MONGO_DATABASE_URI": "mongodb://preflight:fixture-secret@127.0.0.1:47017/database",
+                           "MONGO_DATABASE_NAME": "database", "PATH": "/not-a-command-search-path"}
+            configured = {"services": {"core": {"environment": environment}}}
+            completed = migrate.subprocess.CompletedProcess([], 0, json.dumps(report), "")
+            absent = migrate.subprocess.CompletedProcess([], 1, "", "")
+            with mock.patch.object(migrate.subprocess, "run", side_effect=[completed, absent]) as run:
+                self.assertEqual(migrate.database_preflight(configured, pathlib.Path(directory)), report)
+            arguments = run.call_args_list[0].args[0]
+            self.assertEqual(arguments[-1], "--check-config")
+            self.assertNotIn(environment["MONGO_DATABASE_URI"], arguments)
+            self.assertEqual(run.call_args_list[0].kwargs["env"]["MONGO_DATABASE_URI"], environment["MONGO_DATABASE_URI"])
+            self.assertNotEqual(run.call_args_list[0].kwargs["env"].get("PATH"), environment["PATH"])
+            logs = list(pathlib.Path(directory).glob("*.log"))
+            self.assertEqual(len(logs), 1)
+            self.assertEqual(logs[0].stat().st_mode & 0o777, 0o600)
 
 
 if __name__ == "__main__":

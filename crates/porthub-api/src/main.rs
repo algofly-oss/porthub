@@ -4,10 +4,34 @@ use std::sync::Arc;
 
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
+    let mut arguments = std::env::args_os().skip(1);
+    let check = match arguments.next() {
+        None => false,
+        Some(argument) if argument == "--check-config" => true,
+        Some(argument) if argument == "--help" || argument == "-h" => {
+            println!("Usage: porthub-api [--check-config]\n\n--check-config  Validate current database configuration without starting or modifying services");
+            return Ok(());
+        }
+        _ => anyhow::bail!("Usage: porthub-api [--check-config]"),
+    };
+    anyhow::ensure!(
+        arguments.next().is_none(),
+        "Usage: porthub-api [--check-config]"
+    );
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     let config = Config::load()?;
+    if check {
+        let client = mongodb::Client::with_uri_str(&config.mongo_uri).await?;
+        let database = client.database(&config.mongo_database);
+        let app = App::new(config, database);
+        let report = porthub_api::generated::preflight(&app)
+            .await
+            .map_err(|error| anyhow::anyhow!("configuration preflight failed: {}", error.detail))?;
+        println!("{}", serde_json::to_string(&report)?);
+        return Ok(());
+    }
     let db = porthub_api::bootstrap::database(&config).await?;
     let tcp_address = config.listen.clone();
     let app = Arc::new(App::new(config, db));
