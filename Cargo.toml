@@ -1,7 +1,10 @@
 [workspace]
 resolver = "2"
 members = ["crates/porthub-identity", "crates/porthub-tunnel", "crates/porthub-agent", "crates/porthub-edge", "crates/porthub-api", "crates/porthub-transfer", "crates/porthub-runtime", "crates/porthub-firewall", "crates/porthub-mesh"]
-exclude = ["vendor/rathole"]
+exclude = ["vendor/rathole", "vendor/nlink"]
+
+[patch.crates-io]
+nlink = { path = "vendor/nlink" }
 
 [workspace.package]
 version = "0.1.0"

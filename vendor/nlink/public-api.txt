@@ -1,0 +1,23 @@
+# Public API snapshot — placeholder for the convention
+#
+# As of 0.15.1, public-API gating is enforced by the
+# `public-api-diff` CI job in `.github/workflows/rust.yml`,
+# which runs:
+#
+#     cargo public-api -p nlink diff "<latest-tag>..HEAD" --deny=all
+#
+# The full snapshot (`cargo public-api -p nlink -sss`) is
+# ~14k lines even with maximum simplification flags. That's
+# too noisy for a useful checked-in baseline — every PR diff
+# would dwarf the actual change, and regenerating after every
+# minor release becomes a source of merge conflicts.
+#
+# The 0.16 cycle will decide whether to:
+#   (a) commit the full snapshot anyway and tolerate the noise,
+#   (b) commit a curated "stable surface" subset (see
+#       STRATEGIC_ANALYSIS.md §4.1 stability tier proposal),
+#   (c) stay with the current diff-vs-tag CI mechanism and
+#       remove this file entirely.
+#
+# This placeholder reserves the path so the eventual convention
+# has a known location.

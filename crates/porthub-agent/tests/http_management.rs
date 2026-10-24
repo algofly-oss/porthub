@@ -69,11 +69,15 @@ fn multiple_servers_can_be_managed_from_independent_cli_processes() {
     let second_root = tempfile::tempdir().unwrap();
     let mut first = start(state.path(), first_root.path());
     let mut second = start(state.path(), second_root.path());
+    // Servers publish canonical roots, including macOS /private/var aliases
+    // and Windows extended-length paths. Keep the input aliases above.
+    let first_path = first_root.path().canonicalize().unwrap();
+    let second_path = second_root.path().canonicalize().unwrap();
     wait_until(|| records(state.path()).len() == 2);
     let items = records(state.path());
     let first_record = items
         .iter()
-        .find(|(_, value)| value["root"] == first_root.path().to_string_lossy().as_ref())
+        .find(|(_, value)| value["root"] == first_path.to_string_lossy().as_ref())
         .unwrap()
         .clone();
     let port = first_record.1["port"].as_u64().unwrap() as u16;
@@ -83,8 +87,8 @@ fn multiple_servers_can_be_managed_from_independent_cli_processes() {
         .unwrap();
     assert!(list.status.success());
     let output = String::from_utf8(list.stdout).unwrap();
-    assert!(output.contains(first_root.path().to_str().unwrap()));
-    assert!(output.contains(second_root.path().to_str().unwrap()));
+    assert!(output.contains(first_path.to_str().unwrap()));
+    assert!(output.contains(second_path.to_str().unwrap()));
     let stopped = command(state.path())
         .args(["http.server", "stop", &port.to_string()])
         .output()

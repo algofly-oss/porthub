@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev p
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
 COPY api/assets/client/porthub-client.sh api/assets/client/porthub-client.sh
-COPY vendor/rathole/ vendor/rathole/
+COPY vendor/ vendor/
 ARG PORTHUB_VERSION=dev
 ARG PORTHUB_BUILD_JOBS=4
 ENV PORTHUB_VERSION=$PORTHUB_VERSION RUST_MIN_STACK=33554432 CARGO_BUILD_JOBS=$PORTHUB_BUILD_JOBS
@@ -22,7 +22,7 @@ WORKDIR /src
 RUN apk add --no-cache build-base
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
-COPY vendor/rathole/ vendor/rathole/
+COPY vendor/ vendor/
 ARG PORTHUB_VERSION=dev
 ARG PORTHUB_BUILD_JOBS=4
 ARG TARGETARCH

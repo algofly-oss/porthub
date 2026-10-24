@@ -1,0 +1,480 @@
+[package]
+name = "nlink"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+documentation = "https://docs.rs/nlink"
+readme = "../../README.md"
+description = "Async netlink library for Linux network configuration"
+keywords = ["netlink", "linux", "networking", "async", "iproute2"]
+categories = ["network-programming", "os::linux-apis", "asynchronous"]
+
+[features]
+default = []
+# Socket diagnostics (NETLINK_SOCK_DIAG)
+sockdiag = ["dep:serde"]
+# TUN/TAP device management
+tuntap = []
+# TUN/TAP async support
+# Output formatting (JSON/text)
+output = ["dep:serde", "dep:serde_json"]
+# Namespace watcher (inotify-based)
+namespace_watcher = ["dep:inotify"]
+# Lab / integration-test helpers (LabNamespace, with_namespace, require_root!)
+# Pulls in tracing-subscriber so `nlink::lab::init_test_tracing()`
+# can wire a libtest-friendly subscriber (used by `require_root!()`
+# automatically). Per Plan 174.
+lab = ["dep:tracing-subscriber"]
+# Bulk-receive via recvmmsg(2) / sendmmsg(2) — batches up to 32
+# netlink frames per syscall. ≥1.5x wall-clock speedup on
+# dump-heavy workloads (BGP route tables, conntrack tables, nft
+# rulesets). Opt-in for one release while soak runs; default-on
+# planned for 0.17. See Plan 158.
+syscall_batch = []
+# Serialize derives on public diff + result + report types
+# for JSON-shape ABI stability. See Plan 189.
+# JSON field naming: kebab-case for structs (`links-to-add`),
+# snake_case for enum variants. Opt-in only — no runtime
+# cost when disabled.
+serde = ["dep:serde", "dep:serde_json"]
+# JSON Schema generation for the declarative `NetworkConfig` input
+# format (Plan 189 §8). Implies `serde` so the generated schema
+# matches the validated serde JSON shape. Opt-in only — no runtime
+# cost when disabled. Use `NetworkConfig::json_schema()`.
+schemars = ["dep:schemars", "serde"]
+# Generate WireGuard private keys and derive their public keys
+# (`PrivateKey::generate`, `PrivateKey::public_key`): X25519, without a
+# separate crypto dependency of your own.
+wireguard-keys = ["dep:x25519-dalek"]
+# `NetnsCommand::spawn_tokio` and `output_async`: a namespace process
+# spawned as a tokio child, waited on without blocking the runtime (#521).
+process = ["tokio/process"]
+# Record a connection's netlink traffic and replay it without a kernel
+# (`nlink::replay`, #168): for testing code that drives nlink. Not in
+# `full`: it puts a hook on every socket.
+replay = []
+# Every library feature. `lab` is test code (namespace helpers,
+# require_root!, a tracing subscriber) and is not in it: enable it in
+# dev-dependencies (#532).
+full = ["sockdiag", "tuntap", "output", "namespace_watcher", "syscall_batch", "serde", "schemars", "wireguard-keys", "process"]
+# Enable integration tests (require root or network namespace)
+integration = []
+
+[dependencies]
+# Core dependencies (always needed)
+tokio = { workspace = true }
+netlink-sys = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+libc = { workspace = true }
+winnow = { workspace = true }
+serde_json = { workspace = true, optional = true }
+zerocopy = { workspace = true }
+tokio-stream = { workspace = true }
+# Bitflags newtype generation — used in-tree for DPLL pin
+# capabilities (Plan 156) and re-usable by downstream consumers
+# defining their own GENL families with bitmask fields.
+bitflags = { workspace = true }
+# Proc-macro derives (GenlCommand, GenlAttribute, GenlEnum,
+# eventually GenlMessage + #[genl_family]). Re-exported from
+# `nlink::macros` so downstream code only depends on `nlink`.
+nlink-macros = { workspace = true }
+
+# Optional dependencies
+serde = { workspace = true, optional = true }
+# JSON Schema generation for `NetworkConfig` (gated by `schemars`
+# feature, which implies `serde` so the schema matches the serde
+# JSON shape). Plan 189 §8.
+schemars = { workspace = true, optional = true }
+inotify = { version = "0.11", default-features = false, features = ["stream"], optional = true }
+# Pulled in by the `lab` feature so `nlink::lab::init_test_tracing()`
+# (auto-invoked by `nlink::require_root!()`) can wire a libtest-
+# friendly subscriber. Integration-test only; production consumers
+# install their own subscriber.
+tracing-subscriber = { workspace = true, optional = true }
+# WireGuard key generation and public-key derivation (`wireguard-keys`).
+x25519-dalek = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# Plan 189: JSON-shape stability tests for the `serde` feature.
+serde_json = { workspace = true }
+# Plan 193 phase 2-3: property-based parser-robustness harnesses.
+proptest = { workspace = true }
+
+[lints.rust]
+# `#[nlink_macros::send_futures]` compiles its `Send` checkers under `test`,
+# and under `trybuild`, which its own compile-fail tests build with (#884).
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(trybuild)"] }
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu"]
+rustdoc-args = ["--cfg", "docsrs"]
+
+# Integration tests build on top of the public `nlink::lab` module, so
+# they require the `lab` feature. `cargo test --test integration` alone
+# will be a no-op; use `cargo test --test integration --features lab`.
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+required-features = ["lab"]
+
+# Route protocol examples
+[[example]]
+name = "route_list_interfaces"
+path = "examples/route/list_interfaces.rs"
+
+[[example]]
+name = "route_addresses"
+path = "examples/route/addresses.rs"
+
+[[example]]
+name = "route_routes"
+path = "examples/route/routes.rs"
+
+[[example]]
+name = "route_neighbors"
+path = "examples/route/neighbors.rs"
+
+[[example]]
+name = "route_stats"
+path = "examples/route/stats.rs"
+
+[[example]]
+name = "route_link_create"
+path = "examples/route/link_create.rs"
+
+[[example]]
+name = "route_error_handling"
+path = "examples/route/error_handling.rs"
+
+[[example]]
+name = "route_namespaces"
+path = "examples/route/namespaces.rs"
+
+[[example]]
+name = "route_stream_dump"
+path = "examples/route/stream_dump.rs"
+
+[[example]]
+name = "route_mpls"
+path = "examples/route/mpls.rs"
+
+[[example]]
+name = "route_nexthop"
+path = "examples/route/nexthop.rs"
+
+[[example]]
+name = "route_srv6"
+path = "examples/route/srv6.rs"
+
+# Bridge examples
+[[example]]
+name = "bridge_vlan"
+path = "examples/bridge/vlan.rs"
+
+[[example]]
+name = "bridge_fdb"
+path = "examples/bridge/fdb.rs"
+
+# Diagnostics examples
+[[example]]
+name = "diagnostics_health_check"
+path = "examples/diagnostics/health_check.rs"
+
+# Declarative NetworkConfig
+[[example]]
+name = "config_declarative"
+path = "examples/config/declarative.rs"
+
+# NetworkConfig JSON round-trip (validating serde, #108)
+[[example]]
+name = "config_round_trip"
+path = "examples/config/round_trip.rs"
+required-features = ["serde"]
+
+# Stack facade (network + nftables + WireGuard bundle)
+[[example]]
+name = "config_stack"
+path = "examples/config/stack.rs"
+
+# Traffic control examples
+[[example]]
+name = "route_tc_netem"
+path = "examples/route/tc/netem.rs"
+
+[[example]]
+name = "route_tc_minimal_caller"
+path = "examples/route/tc/minimal_caller.rs"
+
+[[example]]
+name = "route_tc_htb"
+path = "examples/route/tc/htb.rs"
+
+[[example]]
+name = "route_tc_stats"
+path = "examples/route/tc/stats.rs"
+
+# Event monitoring examples
+[[example]]
+name = "events_monitor"
+path = "examples/events/monitor.rs"
+
+[[example]]
+name = "events_monitor_namespace"
+path = "examples/events/monitor_namespace.rs"
+
+[[example]]
+name = "events_ip_monitor"
+path = "examples/events/ip_monitor.rs"
+
+[[example]]
+name = "events_tc_monitor"
+path = "examples/events/tc_monitor.rs"
+
+# Namespace examples
+[[example]]
+name = "namespace_events"
+path = "examples/namespace/events.rs"
+
+[[example]]
+name = "namespace_watch"
+path = "examples/namespace/watch.rs"
+required-features = ["namespace_watcher"]
+
+# Socket diagnostics examples
+[[example]]
+name = "sockdiag_list_sockets"
+path = "examples/sockdiag/list_sockets.rs"
+required-features = ["sockdiag"]
+
+[[example]]
+name = "sockdiag_tcp_connections"
+path = "examples/sockdiag/tcp_connections.rs"
+required-features = ["sockdiag"]
+
+[[example]]
+name = "sockdiag_unix_sockets"
+path = "examples/sockdiag/unix_sockets.rs"
+required-features = ["sockdiag"]
+
+[[example]]
+name = "sockdiag_socket_owners"
+path = "examples/sockdiag/socket_owners.rs"
+required-features = ["sockdiag"]
+
+[[example]]
+name = "sockdiag_rate_top"
+path = "examples/sockdiag/rate_top.rs"
+required-features = ["sockdiag"]
+
+[[example]]
+name = "sockdiag_filter_expr"
+path = "examples/sockdiag/filter_expr.rs"
+required-features = ["sockdiag"]
+
+# Generic Netlink examples
+[[example]]
+name = "genl_wireguard"
+path = "examples/genl/wireguard.rs"
+
+[[example]]
+name = "genl_mptcp"
+path = "examples/genl/mptcp.rs"
+
+[[example]]
+name = "genl_macsec"
+path = "examples/genl/macsec.rs"
+
+[[example]]
+name = "ethtool_link_state"
+path = "examples/genl/ethtool_link_state.rs"
+
+[[example]]
+name = "ethtool_features"
+path = "examples/genl/ethtool_features.rs"
+
+[[example]]
+name = "ethtool_rings"
+path = "examples/genl/ethtool_rings.rs"
+
+[[example]]
+name = "ethtool_monitor"
+path = "examples/genl/ethtool_monitor.rs"
+
+[[example]]
+name = "genl_dpll"
+path = "examples/genl/dpll.rs"
+
+[[example]]
+name = "genl_net_shaper"
+path = "examples/genl/net_shaper.rs"
+
+[[example]]
+name = "genl_ovpn"
+path = "examples/genl/ovpn.rs"
+required-features = ["lab"]
+
+# nlink-macros showcase
+[[example]]
+name = "macros_define_taskstats"
+path = "examples/macros/define_taskstats.rs"
+
+# Uevent examples (device hotplug)
+[[example]]
+name = "uevent_device_monitor"
+path = "examples/uevent/device_monitor.rs"
+
+[[example]]
+name = "uevent_device_monitor_stream"
+path = "examples/uevent/device_monitor_stream.rs"
+
+[[example]]
+name = "uevent_filtered_monitor"
+path = "examples/uevent/filtered_monitor.rs"
+
+[[example]]
+name = "uevent_resync_monitor"
+path = "examples/uevent/resync_monitor.rs"
+
+[[example]]
+name = "uevent_netdev_lifecycle"
+path = "examples/uevent/netdev_lifecycle.rs"
+
+# Connector examples (process events)
+[[example]]
+name = "connector_process_monitor"
+path = "examples/connector/process_monitor.rs"
+
+[[example]]
+name = "connector_process_monitor_stream"
+path = "examples/connector/process_monitor_stream.rs"
+
+# Netfilter examples (connection tracking)
+[[example]]
+name = "netfilter_conntrack"
+path = "examples/netfilter/conntrack.rs"
+
+[[example]]
+name = "netfilter_conntrack_events"
+path = "examples/netfilter/conntrack_events.rs"
+
+# XFRM examples (IPsec)
+# `--apply` codepath uses `nlink::lab::with_namespace`, so the example
+# requires the `lab` feature.
+[[example]]
+name = "xfrm_ipsec_monitor"
+path = "examples/xfrm/ipsec_monitor.rs"
+required-features = ["lab"]
+
+# FIB lookup examples
+[[example]]
+name = "fib_lookup_route_lookup"
+path = "examples/fib_lookup/route_lookup.rs"
+
+# Audit examples
+[[example]]
+name = "audit_status"
+path = "examples/audit/audit_status.rs"
+
+# SELinux examples
+[[example]]
+name = "selinux_monitor"
+path = "examples/selinux/selinux_monitor.rs"
+
+[[example]]
+name = "selinux_monitor_stream"
+path = "examples/selinux/selinux_monitor_stream.rs"
+
+# Multi-source event monitoring
+[[example]]
+name = "events_multi_source"
+path = "examples/events/multi_source.rs"
+
+[[example]]
+name = "events_resync_loop"
+path = "examples/events/resync_loop.rs"
+
+# nftables examples
+[[example]]
+name = "nftables_firewall"
+path = "examples/nftables/firewall.rs"
+
+[[example]]
+name = "nftables_declarative"
+path = "examples/nftables/declarative.rs"
+
+[[example]]
+name = "nftables_sets_maps"
+path = "examples/nftables/sets_maps.rs"
+
+# Connection pool example
+[[example]]
+name = "pool_parallel_dump"
+path = "examples/pool/parallel_dump.rs"
+
+# nl80211 WiFi examples
+[[example]]
+name = "genl_nl80211"
+path = "examples/genl/nl80211.rs"
+
+# Devlink examples
+[[example]]
+name = "genl_devlink"
+path = "examples/genl/devlink.rs"
+
+# Bond interface examples
+[[example]]
+name = "route_bond"
+path = "examples/route/bond.rs"
+
+# BPF/TC attachment examples
+[[example]]
+name = "route_tc_bpf"
+path = "examples/route/tc/bpf.rs"
+
+# Socket diagnostics - summary and kill
+[[example]]
+name = "sockdiag_summary"
+path = "examples/sockdiag/summary.rs"
+required-features = ["sockdiag"]
+
+[[example]]
+name = "sockdiag_kill"
+path = "examples/sockdiag/kill.rs"
+required-features = ["sockdiag"]
+
+# Batching and timeout examples
+[[example]]
+name = "route_batch"
+path = "examples/route/batch.rs"
+
+[[example]]
+name = "route_timeout"
+path = "examples/route/timeout.rs"
+
+# Per-peer impairment helper
+[[example]]
+name = "impair_per_peer"
+path = "examples/impair/per_peer.rs"
+
+# High-level rate limiting (RateLimiter + PerHostLimiter + reconcile)
+[[example]]
+name = "ratelimit_simple"
+path = "examples/ratelimit/simple.rs"
+
+# Lab module (LabNamespace / LabBridge / LabVeth) demos
+[[example]]
+name = "lab_three_namespace"
+path = "examples/lab/three_namespace.rs"
+required-features = ["lab"]
+
+# Reflector / watch-cache (Store + ReflectExt)
+[[example]]
+name = "reflector_watch_cache"
+path = "examples/reflector/watch_cache.rs"

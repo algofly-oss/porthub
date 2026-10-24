@@ -1,7 +1,7 @@
 name: Native agent platforms
 on:
   push:
-    paths: ["crates/porthub-agent/**", "crates/porthub-transfer/**", "crates/porthub-tunnel/**", "crates/porthub-identity/**", "crates/porthub-mesh/**", "vendor/rathole/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".github/workflows/agent-platforms.yml"]
+    paths: ["crates/porthub-agent/**", "crates/porthub-transfer/**", "crates/porthub-tunnel/**", "crates/porthub-identity/**", "crates/porthub-mesh/**", "vendor/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".github/workflows/agent-platforms.yml"]
   pull_request:
   workflow_dispatch:
 permissions:
@@ -82,8 +82,8 @@ jobs:
       matrix:
         include:
           - {target: i686-unknown-linux-gnu, artifact: x86, compiler: gcc, ar: ar, packages: gcc-multilib}
-          - {target: armv7-unknown-linux-gnueabihf, artifact: armv7, compiler: arm-linux-gnueabihf-gcc, ar: arm-linux-gnueabihf-ar, packages: gcc-arm-linux-gnueabihf}
-          - {target: arm-unknown-linux-gnueabihf, artifact: armhf, compiler: arm-linux-gnueabihf-gcc, ar: arm-linux-gnueabihf-ar, packages: gcc-arm-linux-gnueabihf}
+          - {target: armv7-unknown-linux-gnueabihf, artifact: armv7, compiler: arm-linux-gnueabihf-gcc, ar: arm-linux-gnueabihf-ar, packages: "gcc-arm-linux-gnueabihf libc6-dev-armhf-cross"}
+          - {target: arm-unknown-linux-gnueabihf, artifact: armhf, compiler: arm-linux-gnueabihf-gcc, ar: arm-linux-gnueabihf-ar, packages: "gcc-arm-linux-gnueabihf libc6-dev-armhf-cross"}
     env:
       PORTHUB_VERSION: ${{ github.sha }}
       RUST_MIN_STACK: "33554432"

@@ -1,0 +1,888 @@
+empty inet: cbf29ce484222325 cbf29ce484222325 
+empty ip: cbf29ce484222325 cbf29ce484222325 
+empty ip6: cbf29ce484222325 cbf29ce484222325 
+empty bridge: cbf29ce484222325 cbf29ce484222325 
+tcp_dport inet: f62c4200186dff09 f62c4200186dff09 tcp dport 22 accept
+tcp_dport ip: f62c4200186dff09 f62c4200186dff09 tcp dport 22 accept
+tcp_dport ip6: f62c4200186dff09 f62c4200186dff09 tcp dport 22 accept
+tcp_dport bridge: f62c4200186dff09 f62c4200186dff09 tcp dport 22 accept
+udp_dport inet: 1130bd983e86323e 1130bd983e86323e udp dport 53 counter packets 0 bytes 0
+udp_dport ip: 1130bd983e86323e 1130bd983e86323e udp dport 53 counter packets 0 bytes 0
+udp_dport ip6: 1130bd983e86323e 1130bd983e86323e udp dport 53 counter packets 0 bytes 0
+udp_dport bridge: 1130bd983e86323e 1130bd983e86323e udp dport 53 counter packets 0 bytes 0
+tcp_sport inet: 96d253387ce5689e 96d253387ce5689e tcp sport 1024 drop
+tcp_sport ip: 96d253387ce5689e 96d253387ce5689e tcp sport 1024 drop
+tcp_sport ip6: 96d253387ce5689e 96d253387ce5689e tcp sport 1024 drop
+tcp_sport bridge: 96d253387ce5689e 96d253387ce5689e tcp sport 1024 drop
+udp_sport inet: 458b0face1156445 458b0face1156445 udp sport 53
+udp_sport ip: 458b0face1156445 458b0face1156445 udp sport 53
+udp_sport ip6: 458b0face1156445 458b0face1156445 udp sport 53
+udp_sport bridge: 458b0face1156445 458b0face1156445 udp sport 53
+tcp_dport_not inet: a8f352f30fcc6222 a8f352f30fcc6222 tcp dport != 22
+tcp_dport_not ip: a8f352f30fcc6222 a8f352f30fcc6222 tcp dport != 22
+tcp_dport_not ip6: a8f352f30fcc6222 a8f352f30fcc6222 tcp dport != 22
+tcp_dport_not bridge: a8f352f30fcc6222 a8f352f30fcc6222 tcp dport != 22
+udp_dport_not inet: 3d15fa6aa4626454 3d15fa6aa4626454 udp dport != 53
+udp_dport_not ip: 3d15fa6aa4626454 3d15fa6aa4626454 udp dport != 53
+udp_dport_not ip6: 3d15fa6aa4626454 3d15fa6aa4626454 udp dport != 53
+udp_dport_not bridge: 3d15fa6aa4626454 3d15fa6aa4626454 udp dport != 53
+tcp_sport_not inet: feee35b32607e411 feee35b32607e411 tcp sport != 1
+tcp_sport_not ip: feee35b32607e411 feee35b32607e411 tcp sport != 1
+tcp_sport_not ip6: feee35b32607e411 feee35b32607e411 tcp sport != 1
+tcp_sport_not bridge: feee35b32607e411 feee35b32607e411 tcp sport != 1
+udp_sport_not inet: 053ab6257f82145b 053ab6257f82145b udp sport != 2
+udp_sport_not ip: 053ab6257f82145b 053ab6257f82145b udp sport != 2
+udp_sport_not ip6: 053ab6257f82145b 053ab6257f82145b udp sport != 2
+udp_sport_not bridge: 053ab6257f82145b 053ab6257f82145b udp sport != 2
+saddr_v4_32 inet: 1ce4fe7d42cb144c 1ce4fe7d42cb144c ip saddr 10.0.0.1
+saddr_v4_32 ip: 32b113154ae4e12c 32b113154ae4e12c ip saddr 10.0.0.1
+saddr_v4_32 ip6: 1ce4fe7d42cb144c 1ce4fe7d42cb144c ip saddr 10.0.0.1
+saddr_v4_32 bridge: 377467582fc40d97 377467582fc40d97 ip saddr 10.0.0.1
+saddr_v4_40 inet: 1ce4fe7d42cb144c 1ce4fe7d42cb144c ip saddr 10.0.0.1
+saddr_v4_40 ip: 32b113154ae4e12c 32b113154ae4e12c ip saddr 10.0.0.1
+saddr_v4_40 ip6: 1ce4fe7d42cb144c 1ce4fe7d42cb144c ip saddr 10.0.0.1
+saddr_v4_40 bridge: 377467582fc40d97 377467582fc40d97 ip saddr 10.0.0.1
+daddr_v4_16 inet: 805a8c11fea171f3 805a8c11fea171f3 ip daddr 192.168.0.0/16
+daddr_v4_16 ip: 42d12c56152ee813 42d12c56152ee813 ip daddr 192.168.0.0/16
+daddr_v4_16 ip6: 805a8c11fea171f3 805a8c11fea171f3 ip daddr 192.168.0.0/16
+daddr_v4_16 bridge: 13e8b9751470448c 13e8b9751470448c ip daddr 192.168.0.0/16
+saddr_v4_not_8 inet: d81d32a8cd63544f d81d32a8cd63544f ip saddr != 10.0.0.0/8
+saddr_v4_not_8 ip: ecec873a058b78ef ecec873a058b78ef ip saddr != 10.0.0.0/8
+saddr_v4_not_8 ip6: d81d32a8cd63544f d81d32a8cd63544f ip saddr != 10.0.0.0/8
+saddr_v4_not_8 bridge: 1d77cab4b03ab1bc 1d77cab4b03ab1bc ip saddr != 10.0.0.0/8
+daddr_v4_not_12 inet: f862662ffccbe323 f862662ffccbe323 ip daddr != 10.16.0.0/12
+daddr_v4_not_12 ip: b0d0e43654fbd583 b0d0e43654fbd583 ip daddr != 10.16.0.0/12
+daddr_v4_not_12 ip6: f862662ffccbe323 f862662ffccbe323 ip daddr != 10.16.0.0/12
+daddr_v4_not_12 bridge: e53ea4d469e9ffb8 e53ea4d469e9ffb8 ip daddr != 10.16.0.0/12
+daddr_v4_not_32 inet: dde86c86167dfee1 dde86c86167dfee1 ip daddr != 10.16.0.3
+daddr_v4_not_32 ip: 6a80e56f5e58e841 6a80e56f5e58e841 ip daddr != 10.16.0.3
+daddr_v4_not_32 ip6: dde86c86167dfee1 dde86c86167dfee1 ip daddr != 10.16.0.3
+daddr_v4_not_32 bridge: b4a9b8867ddb8d2e b4a9b8867ddb8d2e ip daddr != 10.16.0.3
+saddr_v4_0 inet: 16186aa09e5545e1 16186aa09e5545e1 -
+saddr_v4_0 ip: babe4ae03c59e941 babe4ae03c59e941 -
+saddr_v4_0 ip6: 16186aa09e5545e1 16186aa09e5545e1 -
+saddr_v4_0 bridge: d107bf6c9d76c652 d107bf6c9d76c652 -
+saddr_v6_32 inet: f3beff8069e60823 f3beff8069e60823 ip6 saddr 2001:db8::/32
+saddr_v6_32 ip: f3beff8069e60823 f3beff8069e60823 ip6 saddr 2001:db8::/32
+saddr_v6_32 ip6: 0654fee3805b876b 0654fee3805b876b ip6 saddr 2001:db8::/32
+saddr_v6_32 bridge: edd79fef53629209 edd79fef53629209 ip6 saddr 2001:db8::/32
+daddr_v6_128 inet: 442d2bf203b5a962 442d2bf203b5a962 ip6 daddr ::1
+daddr_v6_128 ip: 442d2bf203b5a962 442d2bf203b5a962 ip6 daddr ::1
+daddr_v6_128 ip6: ca43d5aa0a66551a ca43d5aa0a66551a ip6 daddr ::1
+daddr_v6_128 bridge: c017cdd6b07b6ec4 c017cdd6b07b6ec4 ip6 daddr ::1
+saddr_v6_not_8 inet: 8fafc20bab557bcc 8fafc20bab557bcc ip6 saddr != fd00::/8
+saddr_v6_not_8 ip: 8fafc20bab557bcc 8fafc20bab557bcc ip6 saddr != fd00::/8
+saddr_v6_not_8 ip6: 175e37bfb84b88b4 175e37bfb84b88b4 ip6 saddr != fd00::/8
+saddr_v6_not_8 bridge: 33cec77151df0a9e 33cec77151df0a9e ip6 saddr != fd00::/8
+daddr_v6_not_128 inet: 7fcd1e47a9320308 7fcd1e47a9320308 ip6 daddr != fd00::1
+daddr_v6_not_128 ip: 7fcd1e47a9320308 7fcd1e47a9320308 ip6 daddr != fd00::1
+daddr_v6_not_128 ip6: 4dc50d7e71a15990 4dc50d7e71a15990 ip6 daddr != fd00::1
+daddr_v6_not_128 bridge: 983cc7b9a0fd2702 983cc7b9a0fd2702 ip6 daddr != fd00::1
+saddr_any_v4 inet: 1ce5017d42cb1965 1ce5017d42cb1965 ip saddr 10.0.0.2
+saddr_any_v4 ip: 32b116154ae4e645 32b116154ae4e645 ip saddr 10.0.0.2
+saddr_any_v4 ip6: 1ce5017d42cb1965 1ce5017d42cb1965 ip saddr 10.0.0.2
+saddr_any_v4 bridge: 377468582fc40f4a 377468582fc40f4a ip saddr 10.0.0.2
+saddr_any_v6 inet: c95e1705826ff9d0 c95e1705826ff9d0 ip6 saddr fd00::/64
+saddr_any_v6 ip: c95e1705826ff9d0 c95e1705826ff9d0 ip6 saddr fd00::/64
+saddr_any_v6 ip6: de1d3af57634b4c8 de1d3af57634b4c8 ip6 saddr fd00::/64
+saddr_any_v6 bridge: b3a774414dfeaf7e b3a774414dfeaf7e ip6 saddr fd00::/64
+saddr_not_any_v6 inet: c3957c2dd0c39aa3 c3957c2dd0c39aa3 ip6 saddr != fd00::/64
+saddr_not_any_v6 ip: c3957c2dd0c39aa3 c3957c2dd0c39aa3 ip6 saddr != fd00::/64
+saddr_not_any_v6 ip6: 7f465559d6c1f05b 7f465559d6c1f05b ip6 saddr != fd00::/64
+saddr_not_any_v6 bridge: b54223c511d7c1c9 b54223c511d7c1c9 ip6 saddr != fd00::/64
+daddr_any_v4 inet: b1b762d22acfc466 b1b762d22acfc466 ip daddr 10.1.0.0/16
+daddr_any_v4 ip: f5f43eeed47df246 f5f43eeed47df246 ip daddr 10.1.0.0/16
+daddr_any_v4 ip6: b1b762d22acfc466 b1b762d22acfc466 ip daddr 10.1.0.0/16
+daddr_any_v4 bridge: 3bbade84e564fe99 3bbade84e564fe99 ip daddr 10.1.0.0/16
+daddr_not_any_v4 inet: 72a8c10f34fa53c1 72a8c10f34fa53c1 ip daddr != 10.1.0.0/16
+daddr_not_any_v4 ip: 213afac0799e94a1 213afac0799e94a1 ip daddr != 10.1.0.0/16
+daddr_not_any_v4 ip6: 72a8c10f34fa53c1 72a8c10f34fa53c1 ip daddr != 10.1.0.0/16
+daddr_not_any_v4 bridge: e51edddc7630823e e51edddc7630823e ip daddr != 10.1.0.0/16
+iif inet: 392a591d9219f8cc 392a591d9219f8cc iifname "eth0"
+iif ip: 392a591d9219f8cc 392a591d9219f8cc iifname "eth0"
+iif ip6: 392a591d9219f8cc 392a591d9219f8cc iifname "eth0"
+iif bridge: 392a591d9219f8cc 392a591d9219f8cc iifname "eth0"
+iif_not inet: 8ddb8414ec778473 8ddb8414ec778473 iifname != "lo"
+iif_not ip: 8ddb8414ec778473 8ddb8414ec778473 iifname != "lo"
+iif_not ip6: 8ddb8414ec778473 8ddb8414ec778473 iifname != "lo"
+iif_not bridge: 8ddb8414ec778473 8ddb8414ec778473 iifname != "lo"
+iif_prefix inet: 164eca1a10ac1298 164eca1a10ac1298 iifname "veth*"
+iif_prefix ip: 164eca1a10ac1298 164eca1a10ac1298 iifname "veth*"
+iif_prefix ip6: 164eca1a10ac1298 164eca1a10ac1298 iifname "veth*"
+iif_prefix bridge: 164eca1a10ac1298 164eca1a10ac1298 iifname "veth*"
+oif inet: c5fe3eebe2ce0558 c5fe3eebe2ce0558 oifname "eth1"
+oif ip: c5fe3eebe2ce0558 c5fe3eebe2ce0558 oifname "eth1"
+oif ip6: c5fe3eebe2ce0558 c5fe3eebe2ce0558 oifname "eth1"
+oif bridge: c5fe3eebe2ce0558 c5fe3eebe2ce0558 oifname "eth1"
+oif_not inet: 4acf04ee27fc25c0 4acf04ee27fc25c0 oifname != "lo"
+oif_not ip: 4acf04ee27fc25c0 4acf04ee27fc25c0 oifname != "lo"
+oif_not ip6: 4acf04ee27fc25c0 4acf04ee27fc25c0 oifname != "lo"
+oif_not bridge: 4acf04ee27fc25c0 4acf04ee27fc25c0 oifname != "lo"
+oif_prefix inet: e541b3816ee2cf62 e541b3816ee2cf62 oifname "wg*"
+oif_prefix ip: e541b3816ee2cf62 e541b3816ee2cf62 oifname "wg*"
+oif_prefix ip6: e541b3816ee2cf62 e541b3816ee2cf62 oifname "wg*"
+oif_prefix bridge: e541b3816ee2cf62 e541b3816ee2cf62 oifname "wg*"
+iif_15 inet: 2a155e1a9780543d 2a155e1a9780543d iifname "abcdefghijklmno"
+iif_15 ip: 2a155e1a9780543d 2a155e1a9780543d iifname "abcdefghijklmno"
+iif_15 ip6: 2a155e1a9780543d 2a155e1a9780543d iifname "abcdefghijklmno"
+iif_15 bridge: 2a155e1a9780543d 2a155e1a9780543d iifname "abcdefghijklmno"
+iif_too_long inet: error: invalid message: t/c: interface name `abcdefghijklmnop` is longer than 15 bytes; no interface has it
+iif_too_long ip: error: invalid message: t/c: interface name `abcdefghijklmnop` is longer than 15 bytes; no interface has it
+iif_too_long ip6: error: invalid message: t/c: interface name `abcdefghijklmnop` is longer than 15 bytes; no interface has it
+iif_too_long bridge: error: invalid message: t/c: interface name `abcdefghijklmnop` is longer than 15 bytes; no interface has it
+oif_prefix_too_long inet: error: invalid message: t/c: interface name `abcdefghijklmnop` is longer than 15 bytes; no interface has it
+oif_prefix_too_long ip: error: invalid message: t/c: interface name `abcdefghijklmnop` is longer than 15 bytes; no interface has it
+oif_prefix_too_long ip6: error: invalid message: t/c: interface name `abcdefghijklmnop` is longer than 15 bytes; no interface has it
+oif_prefix_too_long bridge: error: invalid message: t/c: interface name `abcdefghijklmnop` is longer than 15 bytes; no interface has it
+ct_state inet: a1d9c69837aa892a a1d9c69837aa892a ct state established,related accept
+ct_state ip: a1d9c69837aa892a a1d9c69837aa892a ct state established,related accept
+ct_state ip6: a1d9c69837aa892a a1d9c69837aa892a ct state established,related accept
+ct_state bridge: a1d9c69837aa892a a1d9c69837aa892a ct state established,related accept
+ct_state_new inet: e6db26a6faaf183c e6db26a6faaf183c ct state new
+ct_state_new ip: e6db26a6faaf183c e6db26a6faaf183c ct state new
+ct_state_new ip6: e6db26a6faaf183c e6db26a6faaf183c ct state new
+ct_state_new bridge: e6db26a6faaf183c e6db26a6faaf183c ct state new
+ct_status inet: 394b14208ffcb1d6 394b14208ffcb1d6 ct status dnat
+ct_status ip: 394b14208ffcb1d6 394b14208ffcb1d6 ct status dnat
+ct_status ip6: 394b14208ffcb1d6 394b14208ffcb1d6 ct status dnat
+ct_status bridge: 394b14208ffcb1d6 394b14208ffcb1d6 ct status dnat
+ct_direction inet: 2ffa84c3281f505c 2ffa84c3281f505c ct direction reply
+ct_direction ip: 2ffa84c3281f505c 2ffa84c3281f505c ct direction reply
+ct_direction ip6: 2ffa84c3281f505c 2ffa84c3281f505c ct direction reply
+ct_direction bridge: 2ffa84c3281f505c 2ffa84c3281f505c ct direction reply
+ct_zone inet: 018430a00f6d403d 018430a00f6d403d ct zone 3
+ct_zone ip: 018430a00f6d403d 018430a00f6d403d ct zone 3
+ct_zone ip6: 018430a00f6d403d 018430a00f6d403d ct zone 3
+ct_zone bridge: 018430a00f6d403d 018430a00f6d403d ct zone 3
+set_ct_zone inet: f73ed1cbf86c0f49 f73ed1cbf86c0f49 ct zone set 4
+set_ct_zone ip: f73ed1cbf86c0f49 f73ed1cbf86c0f49 ct zone set 4
+set_ct_zone ip6: f73ed1cbf86c0f49 f73ed1cbf86c0f49 ct zone set 4
+set_ct_zone bridge: f73ed1cbf86c0f49 f73ed1cbf86c0f49 ct zone set 4
+ct_addr_v4 inet: fe33774e933fac8c fe33774e933fac8c ct original ip saddr 1.2.3.4
+ct_addr_v4 ip: fe33774e933fac8c fe33774e933fac8c ct original ip saddr 1.2.3.4
+ct_addr_v4 ip6: fe33774e933fac8c fe33774e933fac8c ct original ip saddr 1.2.3.4
+ct_addr_v4 bridge: fe33774e933fac8c fe33774e933fac8c ct original ip saddr 1.2.3.4
+ct_addr_v6 inet: 55b15bd311f40d7d 55b15bd311f40d7d ct reply ip6 daddr ::1
+ct_addr_v6 ip: 55b15bd311f40d7d 55b15bd311f40d7d ct reply ip6 daddr ::1
+ct_addr_v6 ip6: 55b15bd311f40d7d 55b15bd311f40d7d ct reply ip6 daddr ::1
+ct_addr_v6 bridge: 55b15bd311f40d7d 55b15bd311f40d7d ct reply ip6 daddr ::1
+ct_daddr_v4 inet: 41e2ba29d70afdff 41e2ba29d70afdff ct reply ip daddr 1.2.3.5
+ct_daddr_v4 ip: 41e2ba29d70afdff 41e2ba29d70afdff ct reply ip daddr 1.2.3.5
+ct_daddr_v4 ip6: 41e2ba29d70afdff 41e2ba29d70afdff ct reply ip daddr 1.2.3.5
+ct_daddr_v4 bridge: 41e2ba29d70afdff 41e2ba29d70afdff ct reply ip daddr 1.2.3.5
+ct_saddr_v6 inet: 95db2f5cd17737c4 95db2f5cd17737c4 ct original ip6 saddr fd00::9
+ct_saddr_v6 ip: 95db2f5cd17737c4 95db2f5cd17737c4 ct original ip6 saddr fd00::9
+ct_saddr_v6 ip6: 95db2f5cd17737c4 95db2f5cd17737c4 ct original ip6 saddr fd00::9
+ct_saddr_v6 bridge: 95db2f5cd17737c4 95db2f5cd17737c4 ct original ip6 saddr fd00::9
+ct_port inet: 2e88907c9fbfd297 2e88907c9fbfd297 meta l4proto tcp ct reply proto-dst 80
+ct_port ip: 2e88907c9fbfd297 2e88907c9fbfd297 meta l4proto tcp ct reply proto-dst 80
+ct_port ip6: 2e88907c9fbfd297 2e88907c9fbfd297 meta l4proto tcp ct reply proto-dst 80
+ct_port bridge: 2e88907c9fbfd297 2e88907c9fbfd297 meta l4proto tcp ct reply proto-dst 80
+ct_sport inet: 43de796830834fdd 43de796830834fdd ct original proto-src 53
+ct_sport ip: 43de796830834fdd 43de796830834fdd ct original proto-src 53
+ct_sport ip6: 43de796830834fdd 43de796830834fdd ct original proto-src 53
+ct_sport bridge: 43de796830834fdd 43de796830834fdd ct original proto-src 53
+ct_label inet: a5638440c0e216ff a5638440c0e216ff ct label 3
+ct_label ip: a5638440c0e216ff a5638440c0e216ff ct label 3
+ct_label ip6: a5638440c0e216ff a5638440c0e216ff ct label 3
+ct_label bridge: a5638440c0e216ff a5638440c0e216ff ct label 3
+ct_label_127 inet: eb3da786d984f957 eb3da786d984f957 ct label 127
+ct_label_127 ip: eb3da786d984f957 eb3da786d984f957 ct label 127
+ct_label_127 ip6: eb3da786d984f957 eb3da786d984f957 ct label 127
+ct_label_127 bridge: eb3da786d984f957 eb3da786d984f957 ct label 127
+ct_label_128 inet: error: invalid message: t/c: ct label: bit 128 is past 127
+ct_label_128 ip: error: invalid message: t/c: ct label: bit 128 is past 127
+ct_label_128 ip6: error: invalid message: t/c: ct label: bit 128 is past 127
+ct_label_128 bridge: error: invalid message: t/c: ct label: bit 128 is past 127
+set_ct_label inet: 6560796b8e7422f7 6560796b8e7422f7 ct label set 5
+set_ct_label ip: 6560796b8e7422f7 6560796b8e7422f7 ct label set 5
+set_ct_label ip6: 6560796b8e7422f7 6560796b8e7422f7 ct label set 5
+set_ct_label bridge: 6560796b8e7422f7 6560796b8e7422f7 ct label set 5
+set_ct_label_200 inet: error: invalid message: t/c: ct label: bit 200 is past 127
+set_ct_label_200 ip: error: invalid message: t/c: ct label: bit 200 is past 127
+set_ct_label_200 ip6: error: invalid message: t/c: ct label: bit 200 is past 127
+set_ct_label_200 bridge: error: invalid message: t/c: ct label: bit 200 is past 127
+ct_count inet: fd26534b9d000874 fd26534b9d000874 ct count 5
+ct_count ip: fd26534b9d000874 fd26534b9d000874 ct count 5
+ct_count ip6: fd26534b9d000874 fd26534b9d000874 ct count 5
+ct_count bridge: fd26534b9d000874 fd26534b9d000874 ct count 5
+ct_count_over inet: 4f4c690623e77310 4f4c690623e77310 ct count over 10
+ct_count_over ip: 4f4c690623e77310 4f4c690623e77310 ct count over 10
+ct_count_over ip6: 4f4c690623e77310 4f4c690623e77310 ct count over 10
+ct_count_over bridge: 4f4c690623e77310 4f4c690623e77310 ct count over 10
+ct_mark inet: 85421a37a1f435b3 85421a37a1f435b3 ct mark 0x00000005
+ct_mark ip: 85421a37a1f435b3 85421a37a1f435b3 ct mark 0x00000005
+ct_mark ip6: 85421a37a1f435b3 85421a37a1f435b3 ct mark 0x00000005
+ct_mark bridge: 85421a37a1f435b3 85421a37a1f435b3 ct mark 0x00000005
+mark inet: b8c568cd09b8b507 b8c568cd09b8b507 meta mark 0x00000001
+mark ip: b8c568cd09b8b507 b8c568cd09b8b507 meta mark 0x00000001
+mark ip6: b8c568cd09b8b507 b8c568cd09b8b507 meta mark 0x00000001
+mark bridge: b8c568cd09b8b507 b8c568cd09b8b507 meta mark 0x00000001
+mark_not inet: 6e04c5981e25c886 6e04c5981e25c886 meta mark != 0x00000003
+mark_not ip: 6e04c5981e25c886 6e04c5981e25c886 meta mark != 0x00000003
+mark_not ip6: 6e04c5981e25c886 6e04c5981e25c886 meta mark != 0x00000003
+mark_not bridge: 6e04c5981e25c886 6e04c5981e25c886 meta mark != 0x00000003
+mark_masked inet: fc3686f8e1bd1150 fc3686f8e1bd1150 meta mark & 0x0000ff00 == 0x00000100
+mark_masked ip: fc3686f8e1bd1150 fc3686f8e1bd1150 meta mark & 0x0000ff00 == 0x00000100
+mark_masked ip6: fc3686f8e1bd1150 fc3686f8e1bd1150 meta mark & 0x0000ff00 == 0x00000100
+mark_masked bridge: fc3686f8e1bd1150 fc3686f8e1bd1150 meta mark & 0x0000ff00 == 0x00000100
+pkttype inet: 9f8aa38b60f6fbba 9f8aa38b60f6fbba meta pkttype broadcast
+pkttype ip: 9f8aa38b60f6fbba 9f8aa38b60f6fbba meta pkttype broadcast
+pkttype ip6: 9f8aa38b60f6fbba 9f8aa38b60f6fbba meta pkttype broadcast
+pkttype bridge: 9f8aa38b60f6fbba 9f8aa38b60f6fbba meta pkttype broadcast
+pkttype_not inet: 2ab60739c4a75a28 2ab60739c4a75a28 meta pkttype != host
+pkttype_not ip: 2ab60739c4a75a28 2ab60739c4a75a28 meta pkttype != host
+pkttype_not ip6: 2ab60739c4a75a28 2ab60739c4a75a28 meta pkttype != host
+pkttype_not bridge: 2ab60739c4a75a28 2ab60739c4a75a28 meta pkttype != host
+l4proto inet: 48766604e1c8fb98 48766604e1c8fb98 meta l4proto tcp
+l4proto ip: 48766604e1c8fb98 48766604e1c8fb98 meta l4proto tcp
+l4proto ip6: 48766604e1c8fb98 48766604e1c8fb98 meta l4proto tcp
+l4proto bridge: 48766604e1c8fb98 48766604e1c8fb98 meta l4proto tcp
+l4proto_not inet: 3e9d62d5811959d8 3e9d62d5811959d8 meta l4proto != udp
+l4proto_not ip: 3e9d62d5811959d8 3e9d62d5811959d8 meta l4proto != udp
+l4proto_not ip6: 3e9d62d5811959d8 3e9d62d5811959d8 meta l4proto != udp
+l4proto_not bridge: 3e9d62d5811959d8 3e9d62d5811959d8 meta l4proto != udp
+tcp_flags inet: 1ef4f6c00ed6afe7 1ef4f6c00ed6afe7 tcp flags & (syn | rst | ack) == syn
+tcp_flags ip: 1ef4f6c00ed6afe7 1ef4f6c00ed6afe7 tcp flags & (syn | rst | ack) == syn
+tcp_flags ip6: 1ef4f6c00ed6afe7 1ef4f6c00ed6afe7 tcp flags & (syn | rst | ack) == syn
+tcp_flags bridge: 1ef4f6c00ed6afe7 1ef4f6c00ed6afe7 tcp flags & (syn | rst | ack) == syn
+icmp_type inet: 4b91737152dd8f2c 4b91737152dd8f2c icmp type echo-request
+icmp_type ip: ddc670a60189b20c ddc670a60189b20c icmp type echo-request
+icmp_type ip6: 4b91737152dd8f2c 4b91737152dd8f2c meta nfproto ipv4 icmp type echo-request
+icmp_type bridge: f085feebe9d5041b f085feebe9d5041b icmp type echo-request
+icmpv6_type inet: 9fa796c0e735ef33 9fa796c0e735ef33 icmpv6 type echo-request
+icmpv6_type ip: 9fa796c0e735ef33 9fa796c0e735ef33 meta nfproto ipv6 icmpv6 type echo-request
+icmpv6_type ip6: 30936289675b555b 30936289675b555b icmpv6 type echo-request
+icmpv6_type bridge: 578d92b9bf8c97c5 578d92b9bf8c97c5 icmpv6 type echo-request
+range_port inet: 7fa5eb996d920239 7fa5eb996d920239 tcp dport 1000-2000
+range_port ip: 7fa5eb996d920239 7fa5eb996d920239 tcp dport 1000-2000
+range_port ip6: 7fa5eb996d920239 7fa5eb996d920239 tcp dport 1000-2000
+range_port bridge: 7fa5eb996d920239 7fa5eb996d920239 tcp dport 1000-2000
+range_not_port inet: e7ba080a10f93f42 e7ba080a10f93f42 udp sport != 1-1023
+range_not_port ip: e7ba080a10f93f42 e7ba080a10f93f42 udp sport != 1-1023
+range_not_port ip6: e7ba080a10f93f42 e7ba080a10f93f42 udp sport != 1-1023
+range_not_port bridge: e7ba080a10f93f42 e7ba080a10f93f42 udp sport != 1-1023
+range_mark inet: e3157e192801371a e3157e192801371a meta mark 0x00000010-0x00000020
+range_mark ip: e3157e192801371a e3157e192801371a meta mark 0x00000010-0x00000020
+range_mark ip6: e3157e192801371a e3157e192801371a meta mark 0x00000010-0x00000020
+range_mark bridge: e3157e192801371a e3157e192801371a meta mark 0x00000010-0x00000020
+range_iif inet: 83db93a728b6cb94 83db93a728b6cb94 iif 1-4
+range_iif ip: 83db93a728b6cb94 83db93a728b6cb94 iif 1-4
+range_iif ip6: 83db93a728b6cb94 83db93a728b6cb94 iif 1-4
+range_iif bridge: 83db93a728b6cb94 83db93a728b6cb94 iif 1-4
+range_l4proto inet: 4a432beecf73a990 4a432beecf73a990 meta l4proto 6-17
+range_l4proto ip: 4a432beecf73a990 4a432beecf73a990 meta l4proto 6-17
+range_l4proto ip6: 4a432beecf73a990 4a432beecf73a990 meta l4proto 6-17
+range_l4proto bridge: 4a432beecf73a990 4a432beecf73a990 meta l4proto 6-17
+range_addr inet: 7aa41852a109a60d 7aa41852a109a60d ip saddr 10.0.0.1-10.0.0.9
+range_addr ip: 7119022725a280ed 7119022725a280ed ip saddr 10.0.0.1-10.0.0.9
+range_addr ip6: 7aa41852a109a60d 7aa41852a109a60d ip saddr 10.0.0.1-10.0.0.9
+range_addr bridge: 4862e76af551c60a 4862e76af551c60a ip saddr 10.0.0.1-10.0.0.9
+range_addr6 inet: 825edc03a7804692 825edc03a7804692 ip6 daddr != fd00::1-fd00::9
+range_addr6 ip: 825edc03a7804692 825edc03a7804692 ip6 daddr != fd00::1-fd00::9
+range_addr6 ip6: f6e987e1cb6e18ca f6e987e1cb6e18ca ip6 daddr != fd00::1-fd00::9
+range_addr6 bridge: c436427d4915e418 c436427d4915e418 ip6 daddr != fd00::1-fd00::9
+range_point inet: 1c68283c366e6b8f 1c68283c366e6b8f tcp sport 7-7
+range_point ip: 1c68283c366e6b8f 1c68283c366e6b8f tcp sport 7-7
+range_point ip6: 1c68283c366e6b8f 1c68283c366e6b8f tcp sport 7-7
+range_point bridge: 1c68283c366e6b8f 1c68283c366e6b8f tcp sport 7-7
+range_backwards inet: error: invalid message: t/c: range: TcpDport Port(2000)..Port(1000) runs backwards
+range_backwards ip: error: invalid message: t/c: range: TcpDport Port(2000)..Port(1000) runs backwards
+range_backwards ip6: error: invalid message: t/c: range: TcpDport Port(2000)..Port(1000) runs backwards
+range_backwards bridge: error: invalid message: t/c: range: TcpDport Port(2000)..Port(1000) runs backwards
+range_wrong_kind inet: error: invalid message: t/c: range: TcpDport cannot hold Addr(10.0.0.1)..Port(9)
+range_wrong_kind ip: error: invalid message: t/c: range: TcpDport cannot hold Addr(10.0.0.1)..Port(9)
+range_wrong_kind ip6: error: invalid message: t/c: range: TcpDport cannot hold Addr(10.0.0.1)..Port(9)
+range_wrong_kind bridge: error: invalid message: t/c: range: TcpDport cannot hold Addr(10.0.0.1)..Port(9)
+range_mixed_family inet: error: invalid message: t/c: range: Ip4Saddr cannot hold Addr(10.0.0.1)..Addr(::9)
+range_mixed_family ip: error: invalid message: t/c: range: Ip4Saddr cannot hold Addr(10.0.0.1)..Addr(::9)
+range_mixed_family ip6: error: invalid message: t/c: range: Ip4Saddr cannot hold Addr(10.0.0.1)..Addr(::9)
+range_mixed_family bridge: error: invalid message: t/c: range: Ip4Saddr cannot hold Addr(10.0.0.1)..Addr(::9)
+range_port_as_u32 inet: error: invalid message: t/c: range: TcpDport cannot hold U32(1)..U32(5)
+range_port_as_u32 ip: error: invalid message: t/c: range: TcpDport cannot hold U32(1)..U32(5)
+range_port_as_u32 ip6: error: invalid message: t/c: range: TcpDport cannot hold U32(1)..U32(5)
+range_port_as_u32 bridge: error: invalid message: t/c: range: TcpDport cannot hold U32(1)..U32(5)
+saddr_in_set inet: 549b9236bbeedaaf 549b9236bbeedaaf ip saddr @s4
+saddr_in_set ip: 3cbe5c61ebd6320f 3cbe5c61ebd6320f ip saddr @s4
+saddr_in_set ip6: 549b9236bbeedaaf 549b9236bbeedaaf ip saddr @s4
+saddr_in_set bridge: 68eeb84550ad76fc 68eeb84550ad76fc ip saddr @s4
+daddr_in_set inet: 6ba39a780528f9ab 6ba39a780528f9ab ip daddr @s4
+daddr_in_set ip: 3f4ab976e9e6ed0b 3f4ab976e9e6ed0b ip daddr @s4
+daddr_in_set ip6: 6ba39a780528f9ab 6ba39a780528f9ab ip daddr @s4
+daddr_in_set bridge: 48b51a751c7c1b00 48b51a751c7c1b00 ip daddr @s4
+not_in_set inet: 549b9136bbeed8fc 549b9136bbeed8fc ip saddr != @s4
+not_in_set ip: 3cbe5b61ebd6305c 3cbe5b61ebd6305c ip saddr != @s4
+not_in_set ip6: 549b9136bbeed8fc 549b9136bbeed8fc ip saddr != @s4
+not_in_set bridge: 68eeb94550ad78af 68eeb94550ad78af ip saddr != @s4
+in_set_port inet: 0bb59fe06ebff483 0bb59fe06ebff483 tcp dport @sp
+in_set_port ip: 0bb59fe06ebff483 0bb59fe06ebff483 tcp dport @sp
+in_set_port ip6: 0bb59fe06ebff483 0bb59fe06ebff483 tcp dport @sp
+in_set_port bridge: 0bb59fe06ebff483 0bb59fe06ebff483 tcp dport @sp
+in_set_v6 inet: f3b29d3409569e49 f3b29d3409569e49 ip6 daddr @s6
+in_set_v6 ip: f3b29d3409569e49 f3b29d3409569e49 ip6 daddr @s6
+in_set_v6 ip6: 3ee69c7df92f6841 3ee69c7df92f6841 ip6 daddr @s6
+in_set_v6 bridge: 51d464c33ba75297 51d464c33ba75297 ip6 daddr @s6
+in_set_mark inet: 8b5ac631bac8377f 8b5ac631bac8377f meta mark @sm
+in_set_mark ip: 8b5ac631bac8377f 8b5ac631bac8377f meta mark @sm
+in_set_mark ip6: 8b5ac631bac8377f 8b5ac631bac8377f meta mark @sm
+in_set_mark bridge: 8b5ac631bac8377f 8b5ac631bac8377f meta mark @sm
+in_set_iif inet: 31b64a74eb44e2e2 31b64a74eb44e2e2 iif @si
+in_set_iif ip: 31b64a74eb44e2e2 31b64a74eb44e2e2 iif @si
+in_set_iif ip6: 31b64a74eb44e2e2 31b64a74eb44e2e2 iif @si
+in_set_iif bridge: 31b64a74eb44e2e2 31b64a74eb44e2e2 iif @si
+in_set_oif inet: d77b4539d23a5b79 d77b4539d23a5b79 oif @si
+in_set_oif ip: d77b4539d23a5b79 d77b4539d23a5b79 oif @si
+in_set_oif ip6: d77b4539d23a5b79 d77b4539d23a5b79 oif @si
+in_set_oif bridge: d77b4539d23a5b79 d77b4539d23a5b79 oif @si
+in_set_l4proto inet: c353a5eab19b1ccd c353a5eab19b1ccd meta l4proto @sl
+in_set_l4proto ip: c353a5eab19b1ccd c353a5eab19b1ccd meta l4proto @sl
+in_set_l4proto ip6: c353a5eab19b1ccd c353a5eab19b1ccd meta l4proto @sl
+in_set_l4proto bridge: c353a5eab19b1ccd c353a5eab19b1ccd meta l4proto @sl
+in_interval_set_mark inet: ffff4a6f4cf55f37 ffff4a6f4cf55f37 meta mark @sm
+in_interval_set_mark ip: ffff4a6f4cf55f37 ffff4a6f4cf55f37 meta mark @sm
+in_interval_set_mark ip6: ffff4a6f4cf55f37 ffff4a6f4cf55f37 meta mark @sm
+in_interval_set_mark bridge: ffff4a6f4cf55f37 ffff4a6f4cf55f37 meta mark @sm
+not_in_interval_set_mark inet: ffff496f4cf55d84 ffff496f4cf55d84 meta mark != @sm
+not_in_interval_set_mark ip: ffff496f4cf55d84 ffff496f4cf55d84 meta mark != @sm
+not_in_interval_set_mark ip6: ffff496f4cf55d84 ffff496f4cf55d84 meta mark != @sm
+not_in_interval_set_mark bridge: ffff496f4cf55d84 ffff496f4cf55d84 meta mark != @sm
+in_interval_set_addr inet: 06362816035d3a7d 06362816035d3a7d ip saddr @sr
+in_interval_set_addr ip: ee58f241334491dd ee58f241334491dd ip saddr @sr
+in_interval_set_addr ip6: 06362816035d3a7d 06362816035d3a7d ip saddr @sr
+in_interval_set_addr bridge: 1a2b828f946eee4a 1a2b828f946eee4a ip saddr @sr
+not_in_interval_set_port inet: 31a76f6a5b7bfaad 31a76f6a5b7bfaad udp dport != @sr
+not_in_interval_set_port ip: 31a76f6a5b7bfaad 31a76f6a5b7bfaad udp dport != @sr
+not_in_interval_set_port ip6: 31a76f6a5b7bfaad 31a76f6a5b7bfaad udp dport != @sr
+not_in_interval_set_port bridge: 31a76f6a5b7bfaad 31a76f6a5b7bfaad udp dport != @sr
+concat_in_set inet: 04c33bb7e14ec11e 04c33bb7e14ec11e ip saddr . tcp dport @sc
+concat_in_set ip: 1fe8d74dac9795be 1fe8d74dac9795be ip saddr . tcp dport @sc
+concat_in_set ip6: 04c33bb7e14ec11e 04c33bb7e14ec11e ip saddr . tcp dport @sc
+concat_in_set bridge: 934272c496c4b1f5 934272c496c4b1f5 ip saddr . tcp dport @sc
+concat_not_in_set inet: 04c33cb7e14ec2d1 04c33cb7e14ec2d1 ip saddr . tcp dport != @sc
+concat_not_in_set ip: 1fe8d84dac979771 1fe8d84dac979771 ip saddr . tcp dport != @sc
+concat_not_in_set ip6: 04c33cb7e14ec2d1 04c33cb7e14ec2d1 ip saddr . tcp dport != @sc
+concat_not_in_set bridge: 934271c496c4b042 934271c496c4b042 ip saddr . tcp dport != @sc
+concat_v6_mark inet: 363c29ab5d2e0c82 363c29ab5d2e0c82 ip6 saddr . meta mark . udp dport @sc6
+concat_v6_mark ip: 363c29ab5d2e0c82 363c29ab5d2e0c82 ip6 saddr . meta mark . udp dport @sc6
+concat_v6_mark ip6: 639090aa6e9c957a 639090aa6e9c957a ip6 saddr . meta mark . udp dport @sc6
+concat_v6_mark bridge: 4fd8c52680707bec 4fd8c52680707bec ip6 saddr . meta mark . udp dport @sc6
+concat_two_tcp inet: fab3a0a4fd2581a1 fab3a0a4fd2581a1 tcp sport . tcp dport @sc
+concat_two_tcp ip: fab3a0a4fd2581a1 fab3a0a4fd2581a1 tcp sport . tcp dport @sc
+concat_two_tcp ip6: fab3a0a4fd2581a1 fab3a0a4fd2581a1 tcp sport . tcp dport @sc
+concat_two_tcp bridge: fab3a0a4fd2581a1 fab3a0a4fd2581a1 tcp sport . tcp dport @sc
+concat_too_long inet: f8a19fe328e15ecb f8a19fe328e15ecb ip6 saddr . ip6 daddr . ip6 saddr . ip6 daddr @sc
+concat_too_long ip: f8a19fe328e15ecb f8a19fe328e15ecb ip6 saddr . ip6 daddr . ip6 saddr . ip6 daddr @sc
+concat_too_long ip6: 8b85ffc7922734f3 8b85ffc7922734f3 ip6 saddr . ip6 daddr . ip6 saddr . ip6 daddr @sc
+concat_too_long bridge: 9e84593efab8ef89 9e84593efab8ef89 ip6 saddr . ip6 daddr . ip6 saddr . ip6 daddr @sc
+vmap inet: 495b98651802c74a 495b98651802c74a tcp dport vmap @vm
+vmap ip: 495b98651802c74a 495b98651802c74a tcp dport vmap @vm
+vmap ip6: 495b98651802c74a 495b98651802c74a tcp dport vmap @vm
+vmap bridge: 495b98651802c74a 495b98651802c74a tcp dport vmap @vm
+vmap_concat inet: bc7a27bd1ad7fefa bc7a27bd1ad7fefa ip saddr . tcp dport vmap @vmc
+vmap_concat ip: 520b3f90e918ab9a 520b3f90e918ab9a ip saddr . tcp dport vmap @vmc
+vmap_concat ip6: bc7a27bd1ad7fefa bc7a27bd1ad7fefa ip saddr . tcp dport vmap @vmc
+vmap_concat bridge: 1ce075a52b40522d 1ce075a52b40522d ip saddr . tcp dport vmap @vmc
+vmap_v6 inet: 09ae7665f76bd257 09ae7665f76bd257 ip6 saddr vmap @vm6
+vmap_v6 ip: 09ae7665f76bd257 09ae7665f76bd257 ip6 saddr vmap @vm6
+vmap_v6 ip6: 0910af8e460aab5f 0910af8e460aab5f ip6 saddr vmap @vm6
+vmap_v6 bridge: 27bce4b43bb53545 27bce4b43bb53545 ip6 saddr vmap @vm6
+mark_from_map inet: c5baeb78686c3033 c5baeb78686c3033 meta mark set ip saddr map @mm
+mark_from_map ip: a7fcab28f9245b93 a7fcab28f9245b93 meta mark set ip saddr map @mm
+mark_from_map ip6: c5baeb78686c3033 c5baeb78686c3033 meta mark set ip saddr map @mm
+mark_from_map bridge: dd6c19db2ba638ac dd6c19db2ba638ac meta mark set ip saddr map @mm
+priority_from_map inet: a28fdd963a96d3b6 a28fdd963a96d3b6 meta priority set udp dport map @pm
+priority_from_map ip: a28fdd963a96d3b6 a28fdd963a96d3b6 meta priority set udp dport map @pm
+priority_from_map ip6: a28fdd963a96d3b6 a28fdd963a96d3b6 meta priority set udp dport map @pm
+priority_from_map bridge: a28fdd963a96d3b6 a28fdd963a96d3b6 meta priority set udp dport map @pm
+objref_counter inet: 9cf64a5c7c115eca 9cf64a5c7c115eca counter name "c0"
+objref_counter ip: 9cf64a5c7c115eca 9cf64a5c7c115eca counter name "c0"
+objref_counter ip6: 9cf64a5c7c115eca 9cf64a5c7c115eca counter name "c0"
+objref_counter bridge: 9cf64a5c7c115eca 9cf64a5c7c115eca counter name "c0"
+objref_quota inet: 449e3ad433effc51 449e3ad433effc51 quota name "q0"
+objref_quota ip: 449e3ad433effc51 449e3ad433effc51 quota name "q0"
+objref_quota ip6: 449e3ad433effc51 449e3ad433effc51 quota name "q0"
+objref_quota bridge: 449e3ad433effc51 449e3ad433effc51 quota name "q0"
+counter_named inet: a59fc55c80f95d75 a59fc55c80f95d75 counter name "c1"
+counter_named ip: a59fc55c80f95d75 a59fc55c80f95d75 counter name "c1"
+counter_named ip6: a59fc55c80f95d75 a59fc55c80f95d75 counter name "c1"
+counter_named bridge: a59fc55c80f95d75 a59fc55c80f95d75 counter name "c1"
+quota_named inet: 3bf4bfd42f07fda6 3bf4bfd42f07fda6 quota name "q1"
+quota_named ip: 3bf4bfd42f07fda6 3bf4bfd42f07fda6 quota name "q1"
+quota_named ip6: 3bf4bfd42f07fda6 3bf4bfd42f07fda6 quota name "q1"
+quota_named bridge: 3bf4bfd42f07fda6 3bf4bfd42f07fda6 quota name "q1"
+limit_named inet: a753a6263fffe495 a753a6263fffe495 limit name "l1"
+limit_named ip: a753a6263fffe495 a753a6263fffe495 limit name "l1"
+limit_named ip6: a753a6263fffe495 a753a6263fffe495 limit name "l1"
+limit_named bridge: a753a6263fffe495 a753a6263fffe495 limit name "l1"
+set_secmark inet: 85856567b8fa669e 85856567b8fa669e meta secmark set "sec"
+set_secmark ip: 85856567b8fa669e 85856567b8fa669e meta secmark set "sec"
+set_secmark ip6: 85856567b8fa669e 85856567b8fa669e meta secmark set "sec"
+set_secmark bridge: 85856567b8fa669e 85856567b8fa669e meta secmark set "sec"
+set_ct_helper inet: 5a507eaa2de5372a 5a507eaa2de5372a ct helper set "ftp"
+set_ct_helper ip: 5a507eaa2de5372a 5a507eaa2de5372a ct helper set "ftp"
+set_ct_helper ip6: 5a507eaa2de5372a 5a507eaa2de5372a ct helper set "ftp"
+set_ct_helper bridge: 5a507eaa2de5372a 5a507eaa2de5372a ct helper set "ftp"
+objref_from_map inet: 5ca12f0c76c2fb89 5ca12f0c76c2fb89 -
+objref_from_map ip: 88af17eb859cece9 88af17eb859cece9 -
+objref_from_map ip6: 5ca12f0c76c2fb89 5ca12f0c76c2fb89 -
+objref_from_map bridge: a9bfadfbeb28ef26 a9bfadfbeb28ef26 -
+objref_from_map_v6 inet: 3bfd29610df09960 3bfd29610df09960 -
+objref_from_map_v6 ip: 3bfd29610df09960 3bfd29610df09960 -
+objref_from_map_v6 ip6: 026b2d5fbffbda98 026b2d5fbffbda98 -
+objref_from_map_v6 bridge: 8f1a8abfb865d67a 8f1a8abfb865d67a -
+quota_until inet: fd073a2a620e976c 648613a1aa2be1ec quota 100 mbytes
+quota_until ip: fd073a2a620e976c 648613a1aa2be1ec quota 100 mbytes
+quota_until ip6: fd073a2a620e976c 648613a1aa2be1ec quota 100 mbytes
+quota_until bridge: fd073a2a620e976c 648613a1aa2be1ec quota 100 mbytes
+quota_over inet: 2b0109306f203776 47aac31dc2232216 quota over 1000 bytes
+quota_over ip: 2b0109306f203776 47aac31dc2232216 quota over 1000 bytes
+quota_over ip6: 2b0109306f203776 47aac31dc2232216 quota over 1000 bytes
+quota_over bridge: 2b0109306f203776 47aac31dc2232216 quota over 1000 bytes
+limit inet: f6daf357750a40b8 f6daf357750a40b8 limit rate 10/minute burst 5 packets
+limit ip: f6daf357750a40b8 f6daf357750a40b8 limit rate 10/minute burst 5 packets
+limit ip6: f6daf357750a40b8 f6daf357750a40b8 limit rate 10/minute burst 5 packets
+limit bridge: f6daf357750a40b8 f6daf357750a40b8 limit rate 10/minute burst 5 packets
+limit_bytes inet: 4d7caaa6e52a7b21 4d7caaa6e52a7b21 limit rate 1 kbytes/second
+limit_bytes ip: 4d7caaa6e52a7b21 4d7caaa6e52a7b21 limit rate 1 kbytes/second
+limit_bytes ip6: 4d7caaa6e52a7b21 4d7caaa6e52a7b21 limit rate 1 kbytes/second
+limit_bytes bridge: 4d7caaa6e52a7b21 4d7caaa6e52a7b21 limit rate 1 kbytes/second
+log inet: 9fc671eec7920a64 9fc671eec7920a64 log
+log ip: 9fc671eec7920a64 9fc671eec7920a64 log
+log ip6: 9fc671eec7920a64 9fc671eec7920a64 log
+log bridge: 9fc671eec7920a64 9fc671eec7920a64 log
+log_prefix inet: b35a7ca7ec1b1c4c b35a7ca7ec1b1c4c log prefix "p: "
+log_prefix ip: b35a7ca7ec1b1c4c b35a7ca7ec1b1c4c log prefix "p: "
+log_prefix ip6: b35a7ca7ec1b1c4c b35a7ca7ec1b1c4c log prefix "p: "
+log_prefix bridge: b35a7ca7ec1b1c4c b35a7ca7ec1b1c4c log prefix "p: "
+log_expr inet: fa9301686be86aef fa9301686be86aef log group 2 snaplen 64
+log_expr ip: fa9301686be86aef fa9301686be86aef log group 2 snaplen 64
+log_expr ip6: fa9301686be86aef fa9301686be86aef log group 2 snaplen 64
+log_expr bridge: fa9301686be86aef fa9301686be86aef log group 2 snaplen 64
+fib_missing inet: 10c2f8387c29bdaf 10c2f8387c29bdaf fib saddr . iif oif missing
+fib_missing ip: 10c2f8387c29bdaf 10c2f8387c29bdaf fib saddr . iif oif missing
+fib_missing ip6: 10c2f8387c29bdaf 10c2f8387c29bdaf fib saddr . iif oif missing
+fib_missing bridge: 10c2f8387c29bdaf 10c2f8387c29bdaf fib saddr . iif oif missing
+fib_missing_daddr inet: 47bf2b11f84ae7be 47bf2b11f84ae7be fib daddr . mark . oif oif missing
+fib_missing_daddr ip: 47bf2b11f84ae7be 47bf2b11f84ae7be fib daddr . mark . oif oif missing
+fib_missing_daddr ip6: 47bf2b11f84ae7be 47bf2b11f84ae7be fib daddr . mark . oif oif missing
+fib_missing_daddr bridge: 47bf2b11f84ae7be 47bf2b11f84ae7be fib daddr . mark . oif oif missing
+fib_type inet: ce20c0643306e222 ce20c0643306e222 fib daddr type local
+fib_type ip: ce20c0643306e222 ce20c0643306e222 fib daddr type local
+fib_type ip6: ce20c0643306e222 ce20c0643306e222 fib daddr type local
+fib_type bridge: ce20c0643306e222 ce20c0643306e222 fib daddr type local
+fib_type_saddr inet: c7919c1efeee8ea0 c7919c1efeee8ea0 fib saddr . iif type unicast
+fib_type_saddr ip: c7919c1efeee8ea0 c7919c1efeee8ea0 fib saddr . iif type unicast
+fib_type_saddr ip6: c7919c1efeee8ea0 c7919c1efeee8ea0 fib saddr . iif type unicast
+fib_type_saddr bridge: c7919c1efeee8ea0 c7919c1efeee8ea0 fib saddr . iif type unicast
+notrack inet: 90f2c63856926967 90f2c63856926967 notrack
+notrack ip: 90f2c63856926967 90f2c63856926967 notrack
+notrack ip6: 90f2c63856926967 90f2c63856926967 notrack
+notrack bridge: 90f2c63856926967 90f2c63856926967 notrack
+flow_offload inet: 83523ff949478ef8 83523ff949478ef8 flow add @ft
+flow_offload ip: 83523ff949478ef8 83523ff949478ef8 flow add @ft
+flow_offload ip6: 83523ff949478ef8 83523ff949478ef8 flow add @ft
+flow_offload bridge: 83523ff949478ef8 83523ff949478ef8 flow add @ft
+set_priority inet: f8acec4edaf487cc f8acec4edaf487cc meta priority set 1:10
+set_priority ip: f8acec4edaf487cc f8acec4edaf487cc meta priority set 1:10
+set_priority ip6: f8acec4edaf487cc f8acec4edaf487cc meta priority set 1:10
+set_priority bridge: f8acec4edaf487cc f8acec4edaf487cc meta priority set 1:10
+save_mark_to_ct inet: 03e4bb7b863addc0 03e4bb7b863addc0 ct mark set meta mark
+save_mark_to_ct ip: 03e4bb7b863addc0 03e4bb7b863addc0 ct mark set meta mark
+save_mark_to_ct ip6: 03e4bb7b863addc0 03e4bb7b863addc0 ct mark set meta mark
+save_mark_to_ct bridge: 03e4bb7b863addc0 03e4bb7b863addc0 ct mark set meta mark
+restore_mark_from_ct inet: f063d25b7b33ef43 f063d25b7b33ef43 meta mark set ct mark
+restore_mark_from_ct ip: f063d25b7b33ef43 f063d25b7b33ef43 meta mark set ct mark
+restore_mark_from_ct ip6: f063d25b7b33ef43 f063d25b7b33ef43 meta mark set ct mark
+restore_mark_from_ct bridge: f063d25b7b33ef43 f063d25b7b33ef43 meta mark set ct mark
+set_ct_mark inet: 06d11d98034e9342 06d11d98034e9342 ct mark set 0x00000007
+set_ct_mark ip: 06d11d98034e9342 06d11d98034e9342 ct mark set 0x00000007
+set_ct_mark ip6: 06d11d98034e9342 06d11d98034e9342 ct mark set 0x00000007
+set_ct_mark bridge: 06d11d98034e9342 06d11d98034e9342 ct mark set 0x00000007
+set_mark inet: 653356f4053c18f8 653356f4053c18f8 meta mark set 0x00000002
+set_mark ip: 653356f4053c18f8 653356f4053c18f8 meta mark set 0x00000002
+set_mark ip6: 653356f4053c18f8 653356f4053c18f8 meta mark set 0x00000002
+set_mark bridge: 653356f4053c18f8 653356f4053c18f8 meta mark set 0x00000002
+set_mark_masked inet: d184b197c2592a05 d184b197c2592a05 meta mark set meta mark & 0xffff01ff | 0x00000100
+set_mark_masked ip: d184b197c2592a05 d184b197c2592a05 meta mark set meta mark & 0xffff01ff | 0x00000100
+set_mark_masked ip6: d184b197c2592a05 d184b197c2592a05 meta mark set meta mark & 0xffff01ff | 0x00000100
+set_mark_masked bridge: d184b197c2592a05 d184b197c2592a05 meta mark set meta mark & 0xffff01ff | 0x00000100
+clamp_tcp_mss inet: 81cb9c467c30217c b18c6ca744d5f13d meta l4proto tcp tcp option maxseg size set 1400
+clamp_tcp_mss ip: 81cb9c467c30217c b18c6ca744d5f13d meta l4proto tcp tcp option maxseg size set 1400
+clamp_tcp_mss ip6: 81cb9c467c30217c b18c6ca744d5f13d meta l4proto tcp tcp option maxseg size set 1400
+clamp_tcp_mss bridge: 81cb9c467c30217c b18c6ca744d5f13d meta l4proto tcp tcp option maxseg size set 1400
+clamp_tcp_mss_to_pmtu inet: beeb9fbd6b1d2cdb 55f39b6cd3b0019a meta l4proto tcp tcp option maxseg size set rt mtu
+clamp_tcp_mss_to_pmtu ip: beeb9fbd6b1d2cdb 55f39b6cd3b0019a meta l4proto tcp tcp option maxseg size set rt mtu
+clamp_tcp_mss_to_pmtu ip6: beeb9fbd6b1d2cdb 55f39b6cd3b0019a meta l4proto tcp tcp option maxseg size set rt mtu
+clamp_tcp_mss_to_pmtu bridge: beeb9fbd6b1d2cdb 55f39b6cd3b0019a meta l4proto tcp tcp option maxseg size set rt mtu
+numgen_mark inet: 0c8e35ba5edf397a 0c8e35ba5edf397a meta mark set numgen inc mod 2
+numgen_mark ip: 0c8e35ba5edf397a 0c8e35ba5edf397a meta mark set numgen inc mod 2
+numgen_mark ip6: 0c8e35ba5edf397a 0c8e35ba5edf397a meta mark set numgen inc mod 2
+numgen_mark bridge: 0c8e35ba5edf397a 0c8e35ba5edf397a meta mark set numgen inc mod 2
+numgen_random inet: c02835627a4c81ab c02835627a4c81ab ct mark set numgen random mod 10 offset 3
+numgen_random ip: c02835627a4c81ab c02835627a4c81ab ct mark set numgen random mod 10 offset 3
+numgen_random ip6: c02835627a4c81ab c02835627a4c81ab ct mark set numgen random mod 10 offset 3
+numgen_random bridge: c02835627a4c81ab c02835627a4c81ab ct mark set numgen random mod 10 offset 3
+jhash_mark inet: 734cf880caa62c36 734cf880caa62c36 meta mark set jhash ip saddr . tcp dport mod 4 seed 0x1
+jhash_mark ip: 0697d4c3bca71896 0697d4c3bca71896 meta mark set jhash ip saddr . tcp dport mod 4 seed 0x1
+jhash_mark ip6: 734cf880caa62c36 734cf880caa62c36 meta mark set jhash ip saddr . tcp dport mod 4 seed 0x1
+jhash_mark bridge: 22bc9685c5b96d8d 22bc9685c5b96d8d meta mark set jhash ip saddr . tcp dport mod 4 seed 0x1
+jhash_v6 inet: 977de4d3dcd8c1ad 977de4d3dcd8c1ad meta priority set jhash ip6 saddr mod 3 offset 7
+jhash_v6 ip: 977de4d3dcd8c1ad 977de4d3dcd8c1ad meta priority set jhash ip6 saddr mod 3 offset 7
+jhash_v6 ip6: 24607bf5bfd09cc5 24607bf5bfd09cc5 meta priority set jhash ip6 saddr mod 3 offset 7
+jhash_v6 bridge: b9480c5d0189263f b9480c5d0189263f meta priority set jhash ip6 saddr mod 3 offset 7
+symhash_ct inet: 5723bc65c290c301 5723bc65c290c301 ct mark set symhash mod 2 offset 100
+symhash_ct ip: 5723bc65c290c301 5723bc65c290c301 ct mark set symhash mod 2 offset 100
+symhash_ct ip6: 5723bc65c290c301 5723bc65c290c301 ct mark set symhash mod 2 offset 100
+symhash_ct bridge: 5723bc65c290c301 5723bc65c290c301 ct mark set symhash mod 2 offset 100
+socket_transparent inet: c533e544bb537e61 c533e544bb537e61 socket transparent 1
+socket_transparent ip: c533e544bb537e61 c533e544bb537e61 socket transparent 1
+socket_transparent ip6: c533e544bb537e61 c533e544bb537e61 socket transparent 1
+socket_transparent bridge: c533e544bb537e61 c533e544bb537e61 socket transparent 1
+socket_wildcard inet: f8dc957aea18f6a2 f8dc957aea18f6a2 socket wildcard 0
+socket_wildcard ip: f8dc957aea18f6a2 f8dc957aea18f6a2 socket wildcard 0
+socket_wildcard ip6: f8dc957aea18f6a2 f8dc957aea18f6a2 socket wildcard 0
+socket_wildcard bridge: f8dc957aea18f6a2 f8dc957aea18f6a2 socket wildcard 0
+socket_mark inet: 83278bd9c1d28fc9 83278bd9c1d28fc9 socket mark 0x00000007
+socket_mark ip: 83278bd9c1d28fc9 83278bd9c1d28fc9 socket mark 0x00000007
+socket_mark ip6: 83278bd9c1d28fc9 83278bd9c1d28fc9 socket mark 0x00000007
+socket_mark bridge: 83278bd9c1d28fc9 83278bd9c1d28fc9 socket mark 0x00000007
+osf inet: 797ef31b89b33a19 811d07b4a6316f7a osf ttl loose name "Linux"
+osf ip: 797ef31b89b33a19 811d07b4a6316f7a osf ttl loose name "Linux"
+osf ip6: 797ef31b89b33a19 811d07b4a6316f7a osf ttl loose name "Linux"
+osf bridge: 797ef31b89b33a19 811d07b4a6316f7a osf ttl loose name "Linux"
+osf_version inet: ee2889f4970d988a ee2889f4970d988a osf ttl skip version "Linux"
+osf_version ip: ee2889f4970d988a ee2889f4970d988a osf ttl skip version "Linux"
+osf_version ip6: ee2889f4970d988a ee2889f4970d988a osf ttl skip version "Linux"
+osf_version bridge: ee2889f4970d988a ee2889f4970d988a osf ttl skip version "Linux"
+osf_exact inet: ffd4cfd0dde0511d 3aaf33e856400622 osf name "Windows"
+osf_exact ip: ffd4cfd0dde0511d 3aaf33e856400622 osf name "Windows"
+osf_exact ip6: ffd4cfd0dde0511d 3aaf33e856400622 osf name "Windows"
+osf_exact bridge: ffd4cfd0dde0511d 3aaf33e856400622 osf name "Windows"
+osf_too_long inet: error: invalid message: t/c: osf name `abcdefghijklmnop` is longer than 15 bytes
+osf_too_long ip: error: invalid message: t/c: osf name `abcdefghijklmnop` is longer than 15 bytes
+osf_too_long ip6: error: invalid message: t/c: osf name `abcdefghijklmnop` is longer than 15 bytes
+osf_too_long bridge: error: invalid message: t/c: osf name `abcdefghijklmnop` is longer than 15 bytes
+reject inet: 20aa9b217ac17d0e 20aa9b217ac17d0e reject
+reject ip: 1d44d4d94121786a 1d44d4d94121786a reject
+reject ip6: fd34d8f243c2ae1d fd34d8f243c2ae1d reject
+reject bridge: 20aa9b217ac17d0e 20aa9b217ac17d0e reject
+reject_tcp_reset inet: 8ebc71635b83e620 8ebc71635b83e620 meta l4proto tcp reject with tcp reset
+reject_tcp_reset ip: 8ebc71635b83e620 8ebc71635b83e620 reject with tcp reset
+reject_tcp_reset ip6: 8ebc71635b83e620 8ebc71635b83e620 reject with tcp reset
+reject_tcp_reset bridge: 8ebc71635b83e620 8ebc71635b83e620 meta l4proto tcp reject with tcp reset
+reject_tcp_reset_after_tcp inet: d3cf3519ad5ae9b1 d3cf3519ad5ae9b1 tcp dport 22 reject with tcp reset
+reject_tcp_reset_after_tcp ip: d3cf3519ad5ae9b1 d3cf3519ad5ae9b1 tcp dport 22 reject with tcp reset
+reject_tcp_reset_after_tcp ip6: d3cf3519ad5ae9b1 d3cf3519ad5ae9b1 tcp dport 22 reject with tcp reset
+reject_tcp_reset_after_tcp bridge: d3cf3519ad5ae9b1 d3cf3519ad5ae9b1 tcp dport 22 reject with tcp reset
+reject_tcp_reset_after_udp inet: 8d3f56cb2f0c6d17 8d3f56cb2f0c6d17 udp dport 22 meta l4proto tcp reject with tcp reset
+reject_tcp_reset_after_udp ip: 8d3f56cb2f0c6d17 8d3f56cb2f0c6d17 udp dport 22 reject with tcp reset
+reject_tcp_reset_after_udp ip6: 8d3f56cb2f0c6d17 8d3f56cb2f0c6d17 udp dport 22 reject with tcp reset
+reject_tcp_reset_after_udp bridge: 8d3f56cb2f0c6d17 8d3f56cb2f0c6d17 udp dport 22 meta l4proto tcp reject with tcp reset
+reject_icmpx inet: e0b54310ce5603ec e0b54310ce5603ec reject with icmpx admin-prohibited
+reject_icmpx ip: 5d64cca73bdf0d04 5d64cca73bdf0d04 reject with icmp admin-prohibited
+reject_icmpx ip6: dd4f7cc894b5ff48 dd4f7cc894b5ff48 reject with icmpv6 admin-prohibited
+reject_icmpx bridge: e0b54310ce5603ec e0b54310ce5603ec reject with icmpx admin-prohibited
+reject_icmpx_no_route inet: c0a54729d0f7399f c0a54729d0f7399f reject with icmpx no-route
+reject_icmpx_no_route ip: 7d4a28d0eaebbbd9 7d4a28d0eaebbbd9 reject with icmp net-unreachable
+reject_icmpx_no_route ip6: 7d4a28d0eaebbbd9 7d4a28d0eaebbbd9 reject with icmpv6 no-route
+reject_icmpx_no_route bridge: c0a54729d0f7399f c0a54729d0f7399f reject with icmpx no-route
+reject_icmp inet: 7f1c657f34f04a28 7f1c657f34f04a28 reject with icmp host-unreachable
+reject_icmp ip: dd4f7cc894b5ff48 dd4f7cc894b5ff48 reject with icmp host-unreachable
+reject_icmp ip6: 7f1c657f34f04a28 7f1c657f34f04a28 meta nfproto ipv4 reject with icmpv6 admin-prohibited
+reject_icmp bridge: 40f5284bdf72b373 40f5284bdf72b373 reject with icmp host-unreachable
+reject_icmpv6 inet: bf18f92410e90742 bf18f92410e90742 reject with icmpv6 addr-unreachable
+reject_icmpv6 ip: bf18f92410e90742 bf18f92410e90742 meta nfproto ipv6 reject
+reject_icmpv6 ip6: 1d44d4d94121786a 1d44d4d94121786a reject with icmpv6 addr-unreachable
+reject_icmpv6 bridge: 6611805a61d15430 6611805a61d15430 reject with icmpv6 addr-unreachable
+reject_with_icmp inet: 1d44d4d94121786a 1d44d4d94121786a reject
+reject_with_icmp ip: 1d44d4d94121786a 1d44d4d94121786a reject
+reject_with_icmp ip6: 1d44d4d94121786a 1d44d4d94121786a reject with icmpv6 addr-unreachable
+reject_with_icmp bridge: 1d44d4d94121786a 1d44d4d94121786a reject
+reject_with_rst inet: 8ebc71635b83e620 8ebc71635b83e620 meta l4proto tcp reject with tcp reset
+reject_with_rst ip: 8ebc71635b83e620 8ebc71635b83e620 reject with tcp reset
+reject_with_rst ip6: 8ebc71635b83e620 8ebc71635b83e620 reject with tcp reset
+reject_with_rst bridge: 8ebc71635b83e620 8ebc71635b83e620 meta l4proto tcp reject with tcp reset
+reject_with_icmpx_9 inet: 20d53adec9139886 20d53adec9139886 reject with icmpx 9
+reject_with_icmpx_9 ip: 20d53adec9139886 20d53adec9139886 reject with icmpx 9
+reject_with_icmpx_9 ip6: 20d53adec9139886 20d53adec9139886 reject with icmpx 9
+reject_with_icmpx_9 bridge: 20d53adec9139886 20d53adec9139886 reject with icmpx 9
+add_to_set inet: a491f57241469f9d 9c5054c8eab43547 add @s4 { ip saddr }
+add_to_set ip: e3f091d7a4e0523d 83b1ee5a38d0fea7 add @s4 { ip saddr }
+add_to_set ip6: a491f57241469f9d 9c5054c8eab43547 add @s4 { ip saddr }
+add_to_set bridge: 156d3f1d8c0c990a 9fd5ad033cd5c0f8 add @s4 { ip saddr }
+update_in_set inet: 7d452ff9f9bbdc99 7d452ff9f9bbdc99 update @s4 { ip saddr timeout 30s }
+update_in_set ip: 0e38af83a5016a79 0e38af83a5016a79 update @s4 { ip saddr timeout 30s }
+update_in_set ip6: 7d452ff9f9bbdc99 7d452ff9f9bbdc99 update @s4 { ip saddr timeout 30s }
+update_in_set bridge: 7ea4cd3617a67706 7ea4cd3617a67706 update @s4 { ip saddr timeout 30s }
+add_to_set_port inet: 038d753f7f37e81a 038d753f7f37e81a add @sp { tcp dport timeout 1s500ms }
+add_to_set_port ip: 038d753f7f37e81a 038d753f7f37e81a add @sp { tcp dport timeout 1s500ms }
+add_to_set_port ip6: 038d753f7f37e81a 038d753f7f37e81a add @sp { tcp dport timeout 1s500ms }
+add_to_set_port bridge: 038d753f7f37e81a 038d753f7f37e81a add @sp { tcp dport timeout 1s500ms }
+delete_from_set inet: 0bdbac827c705213 953d34d67b1bd669 delete @s4 { ip saddr }
+delete_from_set ip: 4b3a48e7e00a04b3 7c9ece67c9389fc9 delete @s4 { ip saddr }
+delete_from_set ip6: 0bdbac827c705213 953d34d67b1bd669 delete @s4 { ip saddr }
+delete_from_set bridge: ae892a0e5c7ec4c8 b2ea6f5a7b8e06da delete @s4 { ip saddr }
+dynset_counter inet: 51bf90259d6dd2d1 7cf672645ea2704b update @s4 { ip saddr counter }
+dynset_counter ip: 872fccf8500ba5b1 7a5b7dd3aeb279ab update @s4 { ip saddr counter }
+dynset_counter ip6: 51bf90259d6dd2d1 7cf672645ea2704b update @s4 { ip saddr counter }
+dynset_counter bridge: ea269a02338750c6 21ce68473f7bfacc update @s4 { ip saddr counter }
+dynset_limit inet: 0716bd8c1c7c0e30 4691a71f26be4582 update @s6 { ip6 saddr limit rate over 10/second burst 5 packets } drop
+dynset_limit ip: 0716bd8c1c7c0e30 4691a71f26be4582 update @s6 { ip6 saddr limit rate over 10/second burst 5 packets } drop
+dynset_limit ip6: 8c83462ef0b66788 453e7ca126b8d7ca update @s6 { ip6 saddr limit rate over 10/second burst 5 packets } drop
+dynset_limit bridge: da00801549aa4d62 ffa8d9ce16ffa310 update @s6 { ip6 saddr limit rate over 10/second burst 5 packets } drop
+header_ip_dscp inet: fb67f6de140e15f5 fb67f6de140e15f5 ip dscp set cs1
+header_ip_dscp ip: 385425d720e68115 385425d720e68115 ip dscp set cs1
+header_ip_dscp ip6: fb67f6de140e15f5 fb67f6de140e15f5 ip dscp set cs1
+header_ip_dscp bridge: 595d18cc363b2202 595d18cc363b2202 ip dscp set cs1
+header_ip_dscp_63 inet: e54cc5dcfaf43a71 e54cc5dcfaf43a71 ip dscp set 0x3f
+header_ip_dscp_63 ip: 664d8995826d9191 664d8995826d9191 ip dscp set 0x3f
+header_ip_dscp_63 ip6: e54cc5dcfaf43a71 e54cc5dcfaf43a71 ip dscp set 0x3f
+header_ip_dscp_63 bridge: 1e7a1dfa511784c6 1e7a1dfa511784c6 ip dscp set 0x3f
+header_ip_dscp_64 inet: error: invalid message: t/c: set_header: DSCP 64 is past 63
+header_ip_dscp_64 ip: error: invalid message: t/c: set_header: DSCP 64 is past 63
+header_ip_dscp_64 ip6: error: invalid message: t/c: set_header: DSCP 64 is past 63
+header_ip_dscp_64 bridge: error: invalid message: t/c: set_header: DSCP 64 is past 63
+header_ip_ttl inet: a17250af20978d32 a17250af20978d32 ip ttl set 64
+header_ip_ttl ip: 8d13b0eb2dbfdf92 8d13b0eb2dbfdf92 ip ttl set 64
+header_ip_ttl ip6: a17250af20978d32 a17250af20978d32 ip ttl set 64
+header_ip_ttl bridge: 1f370efbc5c59325 1f370efbc5c59325 ip ttl set 64
+header_ip_saddr inet: f17b8990930859d1 f17b8990930859d1 ip saddr set 10.0.0.9
+header_ip_saddr ip: d4a2272fef802131 d4a2272fef802131 ip saddr set 10.0.0.9
+header_ip_saddr ip6: f17b8990930859d1 f17b8990930859d1 ip saddr set 10.0.0.9
+header_ip_saddr bridge: 83e6f017ccb394de 83e6f017ccb394de ip saddr set 10.0.0.9
+header_ip_daddr inet: 13857fe507b10bde 13857fe507b10bde ip daddr set 10.0.0.8
+header_ip_daddr ip: d015971886e782be d015971886e782be ip daddr set 10.0.0.8
+header_ip_daddr ip6: 13857fe507b10bde 13857fe507b10bde ip daddr set 10.0.0.8
+header_ip_daddr bridge: dde5f7cf056ae481 dde5f7cf056ae481 ip daddr set 10.0.0.8
+header_ip6_dscp inet: 5530fc7db08d2713 5530fc7db08d2713 ip6 dscp set af21
+header_ip6_dscp ip: 5530fc7db08d2713 5530fc7db08d2713 ip6 dscp set af21
+header_ip6_dscp ip6: b9f5cf1de12b904b b9f5cf1de12b904b ip6 dscp set af21
+header_ip6_dscp bridge: 51a51686495dd5c9 51a51686495dd5c9 ip6 dscp set af21
+header_ip6_dscp_99 inet: error: invalid message: t/c: set_header: DSCP 99 is past 63
+header_ip6_dscp_99 ip: error: invalid message: t/c: set_header: DSCP 99 is past 63
+header_ip6_dscp_99 ip6: error: invalid message: t/c: set_header: DSCP 99 is past 63
+header_ip6_dscp_99 bridge: error: invalid message: t/c: set_header: DSCP 99 is past 63
+header_ip6_hoplimit inet: efac01d98090669c efac01d98090669c ip6 hoplimit set 9
+header_ip6_hoplimit ip: efac01d98090669c efac01d98090669c ip6 hoplimit set 9
+header_ip6_hoplimit ip6: ab1242a9389372b4 ab1242a9389372b4 ip6 hoplimit set 9
+header_ip6_hoplimit bridge: 37ae4b6e5f7da8b6 37ae4b6e5f7da8b6 ip6 hoplimit set 9
+header_ip6_saddr inet: 5e1735cb35a41a2d 5e1735cb35a41a2d ip6 saddr set 2001:db8::2
+header_ip6_saddr ip: 5e1735cb35a41a2d 5e1735cb35a41a2d ip6 saddr set 2001:db8::2
+header_ip6_saddr ip6: dfdbfab0e0b84735 dfdbfab0e0b84735 ip6 saddr set 2001:db8::2
+header_ip6_saddr bridge: e2f1caf6729e20f7 e2f1caf6729e20f7 ip6 saddr set 2001:db8::2
+header_ip6_daddr inet: 5da13c78affba1ec 5da13c78affba1ec ip6 daddr set 2001:db8::1
+header_ip6_daddr ip: 5da13c78affba1ec 5da13c78affba1ec ip6 daddr set 2001:db8::1
+header_ip6_daddr ip6: 425e57d6376520f4 425e57d6376520f4 ip6 daddr set 2001:db8::1
+header_ip6_daddr bridge: 86da6d646b847332 86da6d646b847332 ip6 daddr set 2001:db8::1
+header_tcp_sport inet: e6fceda3dc85d7b6 e6fceda3dc85d7b6 tcp sport set 1
+header_tcp_sport ip: e6fceda3dc85d7b6 e6fceda3dc85d7b6 tcp sport set 1
+header_tcp_sport ip6: e6fceda3dc85d7b6 e6fceda3dc85d7b6 tcp sport set 1
+header_tcp_sport bridge: e6fceda3dc85d7b6 e6fceda3dc85d7b6 tcp sport set 1
+header_tcp_dport inet: 358c383d7b517920 358c383d7b517920 tcp dport set 8080
+header_tcp_dport ip: 358c383d7b517920 358c383d7b517920 tcp dport set 8080
+header_tcp_dport ip6: 358c383d7b517920 358c383d7b517920 tcp dport set 8080
+header_tcp_dport bridge: 358c383d7b517920 358c383d7b517920 tcp dport set 8080
+header_udp_sport inet: e0f0c022e6770415 e0f0c022e6770415 udp sport set 53
+header_udp_sport ip: e0f0c022e6770415 e0f0c022e6770415 udp sport set 53
+header_udp_sport ip6: e0f0c022e6770415 e0f0c022e6770415 udp sport set 53
+header_udp_sport bridge: e0f0c022e6770415 e0f0c022e6770415 udp sport set 53
+header_udp_dport inet: e7491f9ddd6abcae e7491f9ddd6abcae udp dport set 54
+header_udp_dport ip: e7491f9ddd6abcae e7491f9ddd6abcae udp dport set 54
+header_udp_dport ip6: e7491f9ddd6abcae e7491f9ddd6abcae udp dport set 54
+header_udp_dport bridge: e7491f9ddd6abcae e7491f9ddd6abcae udp dport set 54
+jump inet: 76029cb01b2ef6d4 76029cb01b2ef6d4 jump c2
+jump ip: 76029cb01b2ef6d4 76029cb01b2ef6d4 jump c2
+jump ip6: 76029cb01b2ef6d4 76029cb01b2ef6d4 jump c2
+jump bridge: 76029cb01b2ef6d4 76029cb01b2ef6d4 jump c2
+goto inet: 43b75e7b151b2b83 43b75e7b151b2b83 goto c2
+goto ip: 43b75e7b151b2b83 43b75e7b151b2b83 goto c2
+goto ip6: 43b75e7b151b2b83 43b75e7b151b2b83 goto c2
+goto bridge: 43b75e7b151b2b83 43b75e7b151b2b83 goto c2
+try_jump inet: 7eac17b02016f57f 7eac17b02016f57f jump c3
+try_jump ip: 7eac17b02016f57f 7eac17b02016f57f jump c3
+try_jump ip6: 7eac17b02016f57f 7eac17b02016f57f jump c3
+try_jump bridge: 7eac17b02016f57f 7eac17b02016f57f jump c3
+try_goto inet: 3b0de37b10332cd8 3b0de37b10332cd8 goto c3
+try_goto ip: 3b0de37b10332cd8 3b0de37b10332cd8 goto c3
+try_goto ip6: 3b0de37b10332cd8 3b0de37b10332cd8 goto c3
+try_goto bridge: 3b0de37b10332cd8 3b0de37b10332cd8 goto c3
+verdict_return inet: cd05301259535de6 cd05301259535de6 return
+verdict_return ip: cd05301259535de6 cd05301259535de6 return
+verdict_return ip6: cd05301259535de6 cd05301259535de6 return
+verdict_return bridge: cd05301259535de6 cd05301259535de6 return
+comment inet: 3960261118875770 3960261118875770 tcp dport 22 counter packets 0 bytes 0 accept comment "ssh"
+comment ip: 3960261118875770 3960261118875770 tcp dport 22 counter packets 0 bytes 0 accept comment "ssh"
+comment ip6: 3960261118875770 3960261118875770 tcp dport 22 counter packets 0 bytes 0 accept comment "ssh"
+comment bridge: 3960261118875770 3960261118875770 tcp dport 22 counter packets 0 bytes 0 accept comment "ssh"
+comment_only inet: cbf29ce484222325 cbf29ce484222325 comment "nothing else"
+comment_only ip: cbf29ce484222325 cbf29ce484222325 comment "nothing else"
+comment_only ip6: cbf29ce484222325 cbf29ce484222325 comment "nothing else"
+comment_only bridge: cbf29ce484222325 cbf29ce484222325 comment "nothing else"
+snat inet: 03141bf0a2704752 03141bf0a2704752 snat ip to 1.2.3.4
+snat ip: 03141bf0a2704752 03141bf0a2704752 snat to 1.2.3.4
+snat ip6: 03141bf0a2704752 03141bf0a2704752 snat to 1.2.3.4
+snat bridge: 03141bf0a2704752 03141bf0a2704752 snat to 1.2.3.4
+snat_port inet: 5b2415f8ae31105a 5b2415f8ae31105a snat ip to 1.2.3.4:80
+snat_port ip: 5b2415f8ae31105a 5b2415f8ae31105a snat to 1.2.3.4:80
+snat_port ip6: 5b2415f8ae31105a 5b2415f8ae31105a snat to 1.2.3.4:80
+snat_port bridge: 5b2415f8ae31105a 5b2415f8ae31105a snat to 1.2.3.4:80
+dnat_port inet: 0a6ba0223f9d6347 0a6ba0223f9d6347 dnat ip to 10.0.0.1:8080
+dnat_port ip: 0a6ba0223f9d6347 0a6ba0223f9d6347 dnat to 10.0.0.1:8080
+dnat_port ip6: 0a6ba0223f9d6347 0a6ba0223f9d6347 dnat to 10.0.0.1:8080
+dnat_port bridge: 0a6ba0223f9d6347 0a6ba0223f9d6347 dnat to 10.0.0.1:8080
+dnat inet: bf2d22d279607e7c bf2d22d279607e7c dnat ip to 10.0.0.1
+dnat ip: bf2d22d279607e7c bf2d22d279607e7c dnat to 10.0.0.1
+dnat ip6: bf2d22d279607e7c bf2d22d279607e7c dnat to 10.0.0.1
+dnat bridge: bf2d22d279607e7c bf2d22d279607e7c dnat to 10.0.0.1
+snat_v6 inet: 2260e4526d62b9ef 2260e4526d62b9ef snat ip6 to 2001:db8::1
+snat_v6 ip: 2260e4526d62b9ef 2260e4526d62b9ef snat to 2001:db8::1
+snat_v6 ip6: 2260e4526d62b9ef 2260e4526d62b9ef snat to 2001:db8::1
+snat_v6 bridge: 2260e4526d62b9ef 2260e4526d62b9ef snat to 2001:db8::1
+snat_v6_port inet: 37c459870fd28070 37c459870fd28070 snat ip6 to [2001:db8::1]:9
+snat_v6_port ip: 37c459870fd28070 37c459870fd28070 snat to [2001:db8::1]:9
+snat_v6_port ip6: 37c459870fd28070 37c459870fd28070 snat to [2001:db8::1]:9
+snat_v6_port bridge: 37c459870fd28070 37c459870fd28070 snat to [2001:db8::1]:9
+dnat_v6_port inet: ab55ab2c52944ae4 ab55ab2c52944ae4 dnat ip6 to [2001:db8::1]:80
+dnat_v6_port ip: ab55ab2c52944ae4 ab55ab2c52944ae4 dnat to [2001:db8::1]:80
+dnat_v6_port ip6: ab55ab2c52944ae4 ab55ab2c52944ae4 dnat to [2001:db8::1]:80
+dnat_v6_port bridge: ab55ab2c52944ae4 ab55ab2c52944ae4 dnat to [2001:db8::1]:80
+dnat_v6 inet: 4e5a66b4a7ae7268 4e5a66b4a7ae7268 dnat ip6 to 2001:db8::1
+dnat_v6 ip: 4e5a66b4a7ae7268 4e5a66b4a7ae7268 dnat to 2001:db8::1
+dnat_v6 ip6: 4e5a66b4a7ae7268 4e5a66b4a7ae7268 dnat to 2001:db8::1
+dnat_v6 bridge: 4e5a66b4a7ae7268 4e5a66b4a7ae7268 dnat to 2001:db8::1
+masquerade inet: b4ad5cb28b6cb748 b4ad5cb28b6cb748 masquerade
+masquerade ip: b4ad5cb28b6cb748 b4ad5cb28b6cb748 masquerade
+masquerade ip6: b4ad5cb28b6cb748 b4ad5cb28b6cb748 masquerade
+masquerade bridge: b4ad5cb28b6cb748 b4ad5cb28b6cb748 masquerade
+nat_snat_range inet: 06084ab813ad94fd 06084ab813ad94fd snat ip to 10.0.0.1-10.0.0.5:1000-2000 random
+nat_snat_range ip: 06084ab813ad94fd 06084ab813ad94fd snat to 10.0.0.1-10.0.0.5:1000-2000 random
+nat_snat_range ip6: 06084ab813ad94fd 06084ab813ad94fd snat to 10.0.0.1-10.0.0.5:1000-2000 random
+nat_snat_range bridge: 06084ab813ad94fd 06084ab813ad94fd snat to 10.0.0.1-10.0.0.5:1000-2000 random
+nat_masq_ports inet: b2342a1678662e6a b2342a1678662e6a masquerade to :1000-2000 persistent
+nat_masq_ports ip: b2342a1678662e6a b2342a1678662e6a masquerade to :1000-2000 persistent
+nat_masq_ports ip6: b2342a1678662e6a b2342a1678662e6a masquerade to :1000-2000 persistent
+nat_masq_ports bridge: b2342a1678662e6a b2342a1678662e6a masquerade to :1000-2000 persistent
+nat_dnat_v6_port inet: f24be7058c0199e3 f24be7058c0199e3 dnat ip6 to [fd00::1]:80 fully-random
+nat_dnat_v6_port ip: f24be7058c0199e3 f24be7058c0199e3 dnat to [fd00::1]:80 fully-random
+nat_dnat_v6_port ip6: f24be7058c0199e3 f24be7058c0199e3 dnat to [fd00::1]:80 fully-random
+nat_dnat_v6_port bridge: f24be7058c0199e3 f24be7058c0199e3 dnat to [fd00::1]:80 fully-random
+nat_redirect inet: 22c98cbacde69450 22c98cbacde69450 redirect to :53
+nat_redirect ip: 22c98cbacde69450 22c98cbacde69450 redirect to :53
+nat_redirect ip6: 22c98cbacde69450 22c98cbacde69450 redirect to :53
+nat_redirect bridge: 22c98cbacde69450 22c98cbacde69450 redirect to :53
+nat_snat_to_port inet: 6ea1acc3ee63c942 6ea1acc3ee63c942 snat ip to :9
+nat_snat_to_port ip: 6ea1acc3ee63c942 6ea1acc3ee63c942 snat to :9
+nat_snat_to_port ip6: 6ea1acc3ee63c942 6ea1acc3ee63c942 snat to :9
+nat_snat_to_port bridge: 6ea1acc3ee63c942 6ea1acc3ee63c942 snat to :9
+nat_dnat_netmap inet: 7ea9a01cb8657061 7ea9a01cb8657061 dnat ip prefix to 10.1.0.0/16
+nat_dnat_netmap ip: 7ea9a01cb8657061 7ea9a01cb8657061 dnat prefix to 10.1.0.0/16
+nat_dnat_netmap ip6: 7ea9a01cb8657061 7ea9a01cb8657061 dnat prefix to 10.1.0.0/16
+nat_dnat_netmap bridge: 7ea9a01cb8657061 7ea9a01cb8657061 dnat prefix to 10.1.0.0/16
+nat_mixed_family inet: error: invalid message: t/c: nat: snat range 10.0.0.1-fd00::1 mixes IPv4 and IPv6
+nat_mixed_family ip: error: invalid message: t/c: nat: snat range 10.0.0.1-fd00::1 mixes IPv4 and IPv6
+nat_mixed_family ip6: error: invalid message: t/c: nat: snat range 10.0.0.1-fd00::1 mixes IPv4 and IPv6
+nat_mixed_family bridge: error: invalid message: t/c: nat: snat range 10.0.0.1-fd00::1 mixes IPv4 and IPv6
+redirect_port inet: e86560c4f02841dc e86560c4f02841dc redirect to :8080
+redirect_port ip: e86560c4f02841dc e86560c4f02841dc redirect to :8080
+redirect_port ip6: e86560c4f02841dc e86560c4f02841dc redirect to :8080
+redirect_port bridge: e86560c4f02841dc e86560c4f02841dc redirect to :8080
+redirect inet: cad833261db6f8bd cad833261db6f8bd redirect
+redirect ip: cad833261db6f8bd cad833261db6f8bd redirect
+redirect ip6: cad833261db6f8bd cad833261db6f8bd redirect
+redirect bridge: cad833261db6f8bd cad833261db6f8bd redirect
+tproxy_ip inet: 78870561901214f6 78870561901214f6 tcp dport 80 tproxy ip to 1.2.3.4:80
+tproxy_ip ip: 78870561901214f6 78870561901214f6 tcp dport 80 tproxy to 1.2.3.4:80
+tproxy_ip ip6: 78870561901214f6 78870561901214f6 tcp dport 80 tproxy to 1.2.3.4:80
+tproxy_ip bridge: 78870561901214f6 78870561901214f6 tcp dport 80 tproxy to 1.2.3.4:80
+tproxy_inet_port inet: 1ab6ac319fffacf9 1ab6ac319fffacf9 tproxy to :80
+tproxy_inet_port ip: 1ab6ac319fffacf9 1ab6ac319fffacf9 tproxy to :80
+tproxy_inet_port ip6: 1ab6ac319fffacf9 1ab6ac319fffacf9 tproxy to :80
+tproxy_inet_port bridge: 1ab6ac319fffacf9 1ab6ac319fffacf9 tproxy to :80
+tproxy_inet_v6 inet: 95d53133bc019ebb 95d53133bc019ebb tproxy ip6 to [::1]
+tproxy_inet_v6 ip: 95d53133bc019ebb 95d53133bc019ebb tproxy to [::1]
+tproxy_inet_v6 ip6: 95d53133bc019ebb 95d53133bc019ebb tproxy to [::1]
+tproxy_inet_v6 bridge: 95d53133bc019ebb 95d53133bc019ebb tproxy to [::1]
+tproxy_ip6 inet: 332d8677681a7b28 332d8677681a7b28 tproxy ip6 to [::1]:1
+tproxy_ip6 ip: 332d8677681a7b28 332d8677681a7b28 tproxy to [::1]:1
+tproxy_ip6 ip6: 332d8677681a7b28 332d8677681a7b28 tproxy to [::1]:1
+tproxy_ip6 bridge: 332d8677681a7b28 332d8677681a7b28 tproxy to [::1]:1
+tproxy_wrong_family inet: error: invalid message: t/c: tproxy: Some(1.2.3.4) in a Ip6 table (an address of the table's family, in an ip, ip6 or inet table)
+tproxy_wrong_family ip: error: invalid message: t/c: tproxy: Some(1.2.3.4) in a Ip6 table (an address of the table's family, in an ip, ip6 or inet table)
+tproxy_wrong_family ip6: error: invalid message: t/c: tproxy: Some(1.2.3.4) in a Ip6 table (an address of the table's family, in an ip, ip6 or inet table)
+tproxy_wrong_family bridge: error: invalid message: t/c: tproxy: Some(1.2.3.4) in a Ip6 table (an address of the table's family, in an ip, ip6 or inet table)
+tproxy_bridge inet: error: invalid message: t/c: tproxy: None in a Bridge table (an address of the table's family, in an ip, ip6 or inet table)
+tproxy_bridge ip: error: invalid message: t/c: tproxy: None in a Bridge table (an address of the table's family, in an ip, ip6 or inet table)
+tproxy_bridge ip6: error: invalid message: t/c: tproxy: None in a Bridge table (an address of the table's family, in an ip, ip6 or inet table)
+tproxy_bridge bridge: error: invalid message: t/c: tproxy: None in a Bridge table (an address of the table's family, in an ip, ip6 or inet table)
+dup_to_v4_dev inet: 3f8592ad9dac5245 3f8592ad9dac5245 dup to 10.0.0.2 device 2
+dup_to_v4_dev ip: 3f8592ad9dac5245 3f8592ad9dac5245 dup to 10.0.0.2 device 2
+dup_to_v4_dev ip6: 3f8592ad9dac5245 3f8592ad9dac5245 dup to 10.0.0.2 device 2
+dup_to_v4_dev bridge: 3f8592ad9dac5245 3f8592ad9dac5245 dup to 10.0.0.2 device 2
+dup_to_v6 inet: 640c0aa59ee2a713 640c0aa59ee2a713 dup to fd00::2
+dup_to_v6 ip: 640c0aa59ee2a713 640c0aa59ee2a713 dup to fd00::2
+dup_to_v6 ip6: 640c0aa59ee2a713 640c0aa59ee2a713 dup to fd00::2
+dup_to_v6 bridge: 640c0aa59ee2a713 640c0aa59ee2a713 dup to fd00::2
+dup_to_device inet: 320f14b548ab5830 320f14b548ab5830 dup to 3
+dup_to_device ip: 320f14b548ab5830 320f14b548ab5830 dup to 3
+dup_to_device ip6: 320f14b548ab5830 320f14b548ab5830 dup to 3
+dup_to_device bridge: 320f14b548ab5830 320f14b548ab5830 dup to 3
+fwd_to inet: 958fc64f76f69c73 958fc64f76f69c73 fwd to 3
+fwd_to ip: 958fc64f76f69c73 958fc64f76f69c73 fwd to 3
+fwd_to ip6: 958fc64f76f69c73 958fc64f76f69c73 fwd to 3
+fwd_to bridge: 958fc64f76f69c73 958fc64f76f69c73 fwd to 3
+fwd_ip_to_v4 inet: b26a144195441df5 b26a144195441df5 fwd ip to 10.0.0.3 device 4
+fwd_ip_to_v4 ip: b26a144195441df5 b26a144195441df5 fwd ip to 10.0.0.3 device 4
+fwd_ip_to_v4 ip6: b26a144195441df5 b26a144195441df5 fwd ip to 10.0.0.3 device 4
+fwd_ip_to_v4 bridge: b26a144195441df5 b26a144195441df5 fwd ip to 10.0.0.3 device 4
+fwd_ip_to_v6 inet: 6055e6297c3875da 6055e6297c3875da fwd ip6 to fd00::3 device 4
+fwd_ip_to_v6 ip: 6055e6297c3875da 6055e6297c3875da fwd ip6 to fd00::3 device 4
+fwd_ip_to_v6 ip6: 6055e6297c3875da 6055e6297c3875da fwd ip6 to fd00::3 device 4
+fwd_ip_to_v6 bridge: 6055e6297c3875da 6055e6297c3875da fwd ip6 to fd00::3 device 4
+queue inet: 6d6cf7fd8aa6e99e 6d6cf7fd8aa6e99e queue flags fanout to 3-4 tcp dport 1
+queue ip: 6d6cf7fd8aa6e99e 6d6cf7fd8aa6e99e queue flags fanout to 3-4 tcp dport 1
+queue ip6: 6d6cf7fd8aa6e99e 6d6cf7fd8aa6e99e queue flags fanout to 3-4 tcp dport 1
+queue bridge: 6d6cf7fd8aa6e99e 6d6cf7fd8aa6e99e queue flags fanout to 3-4 tcp dport 1
+expr_counter inet: f7fc53a4e5317771 f7fc53a4e5317771 tcp dport 1 counter packets 0 bytes 0
+expr_counter ip: f7fc53a4e5317771 f7fc53a4e5317771 tcp dport 1 counter packets 0 bytes 0
+expr_counter ip6: f7fc53a4e5317771 f7fc53a4e5317771 tcp dport 1 counter packets 0 bytes 0
+expr_counter bridge: f7fc53a4e5317771 f7fc53a4e5317771 tcp dport 1 counter packets 0 bytes 0
+expressions_replace inet: e84caf91b2df6f70 e84caf91b2df6f70 counter packets 0 bytes 0 accept
+expressions_replace ip: e84caf91b2df6f70 e84caf91b2df6f70 counter packets 0 bytes 0 accept
+expressions_replace ip6: e84caf91b2df6f70 e84caf91b2df6f70 counter packets 0 bytes 0 accept
+expressions_replace bridge: e84caf91b2df6f70 e84caf91b2df6f70 counter packets 0 bytes 0 accept
+expressions_then_more inet: 8462488e42731b87 8462488e42731b87 counter packets 0 bytes 0 udp dport 2
+expressions_then_more ip: 8462488e42731b87 8462488e42731b87 counter packets 0 bytes 0 udp dport 2
+expressions_then_more ip6: 8462488e42731b87 8462488e42731b87 counter packets 0 bytes 0 udp dport 2
+expressions_then_more bridge: 8462488e42731b87 8462488e42731b87 counter packets 0 bytes 0 udp dport 2
+guards_repeat inet: 4230e88d46204ae3 fa6f6b6b78be21de tcp dport 22 tcp sport 1 tcp option maxseg size set 1400 reject with tcp reset
+guards_repeat ip: 4230e88d46204ae3 fa6f6b6b78be21de tcp dport 22 tcp sport 1 tcp option maxseg size set 1400 reject with tcp reset
+guards_repeat ip6: 4230e88d46204ae3 fa6f6b6b78be21de tcp dport 22 tcp sport 1 tcp option maxseg size set 1400 reject with tcp reset
+guards_repeat bridge: 4230e88d46204ae3 fa6f6b6b78be21de tcp dport 22 tcp sport 1 tcp option maxseg size set 1400 reject with tcp reset
+guards_l4proto_then_port inet: 6fc86e4db5008b25 6fc86e4db5008b25 tcp dport 22
+guards_l4proto_then_port ip: 6fc86e4db5008b25 6fc86e4db5008b25 tcp dport 22
+guards_l4proto_then_port ip6: 6fc86e4db5008b25 6fc86e4db5008b25 tcp dport 22
+guards_l4proto_then_port bridge: 6fc86e4db5008b25 6fc86e4db5008b25 tcp dport 22
+guards_v4_and_v6 inet: ed8378942e3b56de ed8378942e3b56de ip saddr 10.0.0.1 ip6 daddr ::1 icmp type echo-request
+guards_v4_and_v6 ip: ad7d9356d09a12be ad7d9356d09a12be ip saddr 10.0.0.1 ip6 daddr ::1 icmp type echo-request
+guards_v4_and_v6 ip6: 585f0c38f77c56f2 585f0c38f77c56f2 -
+guards_v4_and_v6 bridge: 8ba0b197f42dd413 8ba0b197f42dd413 ip saddr 10.0.0.1 ip6 daddr ::1 icmp type echo-request
+guards_icmp_after_v4 inet: 646568c91bc2fef3 646568c91bc2fef3 ip daddr 10.0.0.0/24 icmp type echo-reply
+guards_icmp_after_v4 ip: 2e53f35232c0e293 2e53f35232c0e293 ip daddr 10.0.0.0/24 icmp type echo-reply
+guards_icmp_after_v4 ip6: 646568c91bc2fef3 646568c91bc2fef3 ip daddr 10.0.0.0/24 icmp type echo-reply
+guards_icmp_after_v4 bridge: 30d15f73a8145ee8 30d15f73a8145ee8 ip daddr 10.0.0.0/24 icmp type echo-reply
+guards_set_then_port inet: 9914bfe51597a415 9914bfe51597a415 ip saddr @s4 udp dport 53 accept
+guards_set_then_port ip: 53c51d28293aa8b5 53c51d28293aa8b5 ip saddr @s4 udp dport 53 accept
+guards_set_then_port ip6: 9914bfe51597a415 9914bfe51597a415 ip saddr @s4 udp dport 53 accept
+guards_set_then_port bridge: aa3eba53ebebe12a aa3eba53ebebe12a ip saddr @s4 udp dport 53 accept
+two_errors inet: error: invalid message: t/c: interface name `abcdefghijklmnopq` is longer than 15 bytes; no interface has it
+two_errors ip: error: invalid message: t/c: interface name `abcdefghijklmnopq` is longer than 15 bytes; no interface has it
+two_errors ip6: error: invalid message: t/c: interface name `abcdefghijklmnopq` is longer than 15 bytes; no interface has it
+two_errors bridge: error: invalid message: t/c: interface name `abcdefghijklmnopq` is longer than 15 bytes; no interface has it
+full inet: 2f72615222ac3a79 2f72615222ac3a79 iifname "eth0" ct state new ip saddr 10.0.0.0/8 tcp dport 443 limit rate 5/second burst 5 packets counter packets 0 bytes 0 log prefix "new: " meta mark set meta mark & 0xffffff01 | 0x00000001 accept comment "https"
+full ip: 748a31cf4d72bab9 748a31cf4d72bab9 iifname "eth0" ct state new ip saddr 10.0.0.0/8 tcp dport 443 limit rate 5/second burst 5 packets counter packets 0 bytes 0 log prefix "new: " meta mark set meta mark & 0xffffff01 | 0x00000001 accept comment "https"
+full ip6: 2f72615222ac3a79 2f72615222ac3a79 iifname "eth0" ct state new ip saddr 10.0.0.0/8 tcp dport 443 limit rate 5/second burst 5 packets counter packets 0 bytes 0 log prefix "new: " meta mark set meta mark & 0xffffff01 | 0x00000001 accept comment "https"
+full bridge: a2eed4a2b511beca a2eed4a2b511beca iifname "eth0" ct state new ip saddr 10.0.0.0/8 tcp dport 443 limit rate 5/second burst 5 packets counter packets 0 bytes 0 log prefix "new: " meta mark set meta mark & 0xffffff01 | 0x00000001 accept comment "https"
+tproxy_inet_v4 inet: 217ad88f24027c20 217ad88f24027c20 tproxy ip to 1.2.3.4
+tproxy_inet_v4 ip: 217ad88f24027c20 217ad88f24027c20 tproxy to 1.2.3.4
+tproxy_inet_v4 ip6: 217ad88f24027c20 217ad88f24027c20 tproxy to 1.2.3.4
+tproxy_inet_v4 bridge: 217ad88f24027c20 217ad88f24027c20 tproxy to 1.2.3.4

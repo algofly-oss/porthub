@@ -1,19 +1,22 @@
-use anyhow::Result;
-use vergen::{vergen, Config, SemverKind};
-
-fn main() -> Result<()> {
-    let mut config = Config::default();
-    // Change the SEMVER output to the lightweight variant
-    *config.git_mut().semver_kind_mut() = SemverKind::Lightweight;
-    // Add a `-dirty` flag to the SEMVER output
-    *config.git_mut().semver_dirty_mut() = Some("-dirty");
-    // Generate the instructions
-    if let Err(e) = vergen(config) {
-        eprintln!("error occurred while generating instructions: {:?}", e);
-        let mut config = Config::default();
-        *config.git_mut().enabled_mut() = false;
-        vergen(config)
-    } else {
-        Ok(())
+// PortHub: generate embedded Rathole metadata without a host libgit2 dependency.
+// PortHub's release identity is embedded separately through PORTHUB_VERSION.
+fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    for (output, input) in [
+        ("VERGEN_BUILD_SEMVER", "CARGO_PKG_VERSION"),
+        ("VERGEN_CARGO_TARGET_TRIPLE", "TARGET"),
+        ("VERGEN_CARGO_PROFILE", "PROFILE"),
+    ] {
+        println!("cargo:rustc-env={output}={}", std::env::var(input).unwrap());
     }
+    // Avoid non-reproducible wall-clock metadata or probing an enclosing repo.
+    println!("cargo:rustc-env=VERGEN_BUILD_TIMESTAMP=not-recorded");
+    let mut features: Vec<_> = std::env::vars()
+        .filter_map(|(key, _)| key.strip_prefix("CARGO_FEATURE_").map(str::to_owned))
+        .collect();
+    features.sort_unstable();
+    println!(
+        "cargo:rustc-env=VERGEN_CARGO_FEATURES={}",
+        features.join(",")
+    );
 }

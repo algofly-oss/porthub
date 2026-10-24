@@ -9,6 +9,9 @@ forwarding implementation remain in use.
 
 Local changes:
 
+- Generate CLI build metadata using only Rust's standard library. Embedded
+  builds no longer compile libgit2 or probe the enclosing repository; PortHub's
+  own release identity remains supplied through PORTHUB_VERSION.
 - Expose the validated configuration parser.
 - Add `EmbeddedServer` and an injected-stream transport so an existing HTTP
   listener can supply connections without opening another communication port.
