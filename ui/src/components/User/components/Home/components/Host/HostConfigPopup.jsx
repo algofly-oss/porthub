@@ -602,12 +602,12 @@ export default function HostConfigPopup({
   const effectiveServiceDomain =
     (host?.clientSetupServiceDomain || "").trim() || serviceDomain;
 
-  // Every enabled port is reachable directly on the gateway, with or without
-  // a web proxy; shown as the fallback address.
+  // Keep the gateway address visible for saved mappings even when disabled.
+  // A custom web proxy is an additional address, not a prerequisite.
   const gatewayLink = (rule) => {
-    const url = rule.dataId && rule.enabled ? buildExternalPortUrl(effectiveServiceDomain, rule.externalPort) : "";
+    const url = rule.dataId ? buildExternalPortUrl(effectiveServiceDomain, rule.externalPort) : "";
     return url ? (
-      <a href={url} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()} className="block truncate font-mono text-xs text-blue-700 hover:underline dark:text-blue-300" title="Open directly on the gateway">
+      <a href={url} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()} className="block truncate font-mono text-xs text-blue-700 hover:underline dark:text-blue-300" title={rule.enabled ? "Open directly on the gateway" : "Gateway address (mapping disabled)"}>
         {url.replace(/^https?:\/\//, "").replace(/\/$/, "")}
       </a>
     ) : null;
