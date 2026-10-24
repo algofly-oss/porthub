@@ -251,10 +251,12 @@ class ReleasePreflight(unittest.TestCase):
             configured = {"services": {"core": {"environment": environment}}}
             completed = migrate.subprocess.CompletedProcess([], 0, json.dumps(report), "")
             absent = migrate.subprocess.CompletedProcess([], 1, "", "")
-            with mock.patch.object(migrate.subprocess, "run", side_effect=[completed, absent]) as run:
+            with mock.patch.object(migrate, "inspect", return_value={"State": {"Running": True}}), \
+                 mock.patch.object(migrate.subprocess, "run", side_effect=[completed, absent]) as run:
                 self.assertEqual(migrate.database_preflight(configured, pathlib.Path(directory)), report)
             arguments = run.call_args_list[0].args[0]
             self.assertEqual(arguments[-1], "--check-config")
+            self.assertEqual(arguments[arguments.index("--network") + 1], "container:porthub-core")
             self.assertNotIn(environment["MONGO_DATABASE_URI"], arguments)
             self.assertEqual(run.call_args_list[0].kwargs["env"]["MONGO_DATABASE_URI"], environment["MONGO_DATABASE_URI"])
             self.assertNotEqual(run.call_args_list[0].kwargs["env"].get("PATH"), environment["PATH"])

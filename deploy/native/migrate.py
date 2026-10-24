@@ -126,10 +126,15 @@ def database_preflight(configured, root):
     environment = configured["services"]["core"]["environment"]
     if not environment.get("MONGO_DATABASE_URI") or not environment.get("MONGO_DATABASE_NAME"):
         raise RuntimeError("database configuration is required for native preflight")
+    try:
+        core_running = inspect("container", "porthub-core")["State"].get("Running", False)
+    except RuntimeError:
+        core_running = False
+    network = ["--network", "container:porthub-core"] if core_running else ["--network", "host"]
     nonce = uuid.uuid4().hex
     name = "porthub-data-preflight-" + nonce
     arguments = ["docker", "run", "--rm", "--name", name,
-                 "--label", "porthub.data-preflight=" + nonce, "--network", "host",
+                 "--label", "porthub.data-preflight=" + nonce, *network,
                  "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true"]
     forwarded = {key: str(value) for key, value in environment.items()
                  if value is not None and key.startswith(("MONGO_", "PORTHUB_", "PORT_HUB_", "RATHOLE_", "FW_", "FIREWALL_", "SESSION_", "SIGNUP_", "MACHINE_", "WEB_PROXY_"))}
