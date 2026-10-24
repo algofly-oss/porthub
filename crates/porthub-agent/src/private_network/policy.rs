@@ -236,20 +236,28 @@ impl Engine {
                     "invalid private port range"
                 );
             }
-            if self.snapshot.as_ref().is_some_and(|old| {
-                old.peers.iter().any(|peer| {
-                    snapshot
-                        .peers
-                        .iter()
-                        .find(|current| current.id == peer.id)
-                        .is_none_or(|current| {
-                            current.ip != peer.ip
-                                || current.instance != peer.instance
-                                || current.fingerprint != peer.fingerprint
-                        })
-                })
-            }) {
-                self.flows.clear();
+            if let Some(old) = &self.snapshot {
+                let current: HashMap<_, _> = snapshot
+                    .peers
+                    .iter()
+                    .map(|peer| (peer.id.as_str(), peer))
+                    .collect();
+                let mut changed = HashSet::new();
+                for peer in &old.peers {
+                    let next = current.get(peer.id.as_str());
+                    if next.is_none_or(|next| {
+                        next.ip != peer.ip
+                            || next.instance != peer.instance
+                            || next.fingerprint != peer.fingerprint
+                    }) {
+                        changed.insert(peer.ip);
+                        if let Some(next) = next {
+                            changed.insert(next.ip);
+                        }
+                    }
+                }
+                self.flows
+                    .retain(|key, _| !changed.contains(&key.src) && !changed.contains(&key.dst));
             }
             snapshot.peers.shrink_to_fit();
             self.ips = ips;

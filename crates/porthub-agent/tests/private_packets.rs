@@ -56,6 +56,47 @@ fn private_acl_binds_identity_tracks_tcp_replies_and_revokes_open_flows() {
     assert!(!engine.check(&packet(1, 2, 4000, 8000, 16), "b", false));
 }
 #[test]
+fn unrelated_peer_changes_preserve_established_transfers_but_endpoint_changes_revoke_them() {
+    for change in ["fingerprint", "instance", "address", "removal"] {
+        let mut policy = snapshot();
+        let mut third = policy.peers[1].clone();
+        third.id = "c".into();
+        third.ip = "10.203.0.3".parse().unwrap();
+        third.hostname = "third.phub".into();
+        policy.peers.push(third);
+        let mut engine = Engine::default();
+        engine.apply(policy.clone()).unwrap();
+        assert!(engine.check(&packet(1, 2, 4000, 8000, 2), "b", false));
+        assert!(engine.check(&packet(2, 1, 8000, 4000, 18), "b", true));
+        assert!(engine.check(&packet(1, 2, 4000, 8000, 16), "b", false));
+        policy.revision += 1;
+        match change {
+            "fingerprint" => policy.peers[2].fingerprint = "replacement certificate".into(),
+            "instance" => policy.peers[2].instance = "restarted process".into(),
+            "address" => policy.peers[2].ip = "10.203.0.4".parse().unwrap(),
+            "removal" => {
+                policy.peers.pop();
+            }
+            _ => unreachable!(),
+        }
+        engine.apply(policy.clone()).unwrap();
+        assert!(
+            engine.check(&packet(2, 1, 8000, 4000, 16), "b", true),
+            "unrelated {change}"
+        );
+        assert!(
+            engine.check(&packet(1, 2, 4000, 8000, 16), "b", false),
+            "unrelated {change}"
+        );
+        policy.revision += 1;
+        policy.peers[1].fingerprint = "replacement endpoint certificate".into();
+        engine.apply(policy).unwrap();
+        assert!(!engine.check(&packet(2, 1, 8000, 4000, 16), "b", true));
+        assert!(!engine.check(&packet(1, 2, 4000, 8000, 16), "b", false));
+    }
+}
+
+#[test]
 fn private_policy_rejects_overlapping_addresses_expired_lease_and_revision_rollback() {
     let mut engine = Engine::default();
     engine.apply(snapshot()).unwrap();
