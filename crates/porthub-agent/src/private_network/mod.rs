@@ -17,3 +17,4 @@ pub fn is_profile(path: &std::path::Path) -> anyhow::Result<bool> {
 }
 pub mod paths;
 pub mod relay;
+pub mod strategy;

@@ -228,6 +228,45 @@ fn active_flows_keep_the_prechecked_route_and_fail_over_only_on_transport_failur
     assert_eq!(paths.choose(new, true, false), None);
 }
 
+#[test]
+fn path_preferences_only_choose_new_flows_and_keep_available_fallbacks() {
+    use porthub_agent::private_network::{paths::Pinned, policy::Packet};
+    let gateway_flow = Packet::parse(&packet(1, 2, 5000, 8000, 2)).unwrap();
+    let direct_flow = Packet::parse(&packet(1, 2, 5001, 8000, 2)).unwrap();
+    let mut paths = Pinned::default();
+    assert_eq!(
+        paths.choose_preferred(gateway_flow, true, true, false),
+        Some(false)
+    );
+    assert_eq!(
+        paths.choose_preferred(gateway_flow, true, true, true),
+        Some(false)
+    );
+    assert_eq!(
+        paths.choose_preferred(direct_flow, true, true, true),
+        Some(true)
+    );
+    assert_eq!(
+        paths.choose_preferred(direct_flow, true, true, false),
+        Some(true)
+    );
+    let unavailable_gateway = Packet::parse(&packet(1, 2, 5002, 8000, 2)).unwrap();
+    assert_eq!(
+        paths.choose_preferred(unavailable_gateway, true, false, false),
+        Some(true)
+    );
+    let unavailable_direct = Packet::parse(&packet(1, 2, 5003, 8000, 2)).unwrap();
+    assert_eq!(
+        paths.choose_preferred(unavailable_direct, false, true, true),
+        Some(false)
+    );
+    let unavailable_both = Packet::parse(&packet(1, 2, 5004, 8000, 2)).unwrap();
+    assert_eq!(
+        paths.choose_preferred(unavailable_both, false, false, true),
+        None
+    );
+}
+
 #[cfg(all(target_os = "linux", feature = "root-dns-test"))]
 #[tokio::test]
 #[ignore = "requires explicit host administrator access; owns only a temporary PortHub link"]

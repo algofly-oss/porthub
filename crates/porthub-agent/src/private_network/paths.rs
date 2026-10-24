@@ -22,6 +22,17 @@ impl Pinned {
         }
     }
     pub fn choose(&mut self, packet: Packet, direct: bool, relay: bool) -> Option<bool> {
+        self.choose_preferred(packet, direct, relay, true)
+    }
+    /// The preference applies only to a new flow. Existing replies and active
+    /// application sockets retain their established transport.
+    pub fn choose_preferred(
+        &mut self,
+        packet: Packet,
+        direct: bool,
+        relay: bool,
+        prefer_direct: bool,
+    ) -> Option<bool> {
         let key = packet.flow_id();
         let now = Instant::now();
         if let Some((route, expires)) = self
@@ -42,7 +53,7 @@ impl Pinned {
             *expires = now + packet.flow_ttl();
             return Some(*route);
         }
-        let route = if direct {
+        let route = if direct && (prefer_direct || !relay) {
             true
         } else if relay {
             false

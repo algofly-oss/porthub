@@ -82,6 +82,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Inspect, override, or reset a private registration's path strategy.
+    Path {
+        #[command(subcommand)]
+        command: PathCommand,
+    },
     /// Start one native registration selected by id from porthub ls.
     #[command(alias = "up")]
     Start(TenantArgs),
@@ -356,6 +361,98 @@ struct TenantArgs {
     selector: Option<String>,
     #[arg(long)]
     user: bool,
+}
+#[derive(clap::Args)]
+struct PathArgs {
+    /// Registration or machine ID from porthub list; optional if only one private registration exists.
+    #[arg(conflicts_with = "profile")]
+    selector: Option<String>,
+    /// Use an explicitly saved private profile.
+    #[arg(long)]
+    profile: Option<PathBuf>,
+    #[arg(long)]
+    user: bool,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Subcommand)]
+enum PathCommand {
+    Show(PathArgs),
+    Set {
+        #[arg(value_enum)]
+        mode: porthub_agent::private_network::strategy::Mode,
+        #[command(flatten)]
+        registration: PathArgs,
+    },
+    Reset(PathArgs),
+}
+fn path_profile(args: &PathArgs) -> Result<PathBuf> {
+    use porthub_agent::{private_network, private_profile, service};
+    if let Some(path) = &args.profile {
+        private_profile::Profile::load(path)?;
+        return Ok(path.clone());
+    }
+    let selector = args.selector.as_deref().map(str::to_ascii_lowercase);
+    if let Some(value) = &selector {
+        anyhow::ensure!(
+            (value.len() >= 6
+                && value.len() <= 64
+                && value.bytes().all(|ch| ch.is_ascii_hexdigit()))
+                || (value.starts_with("porthub-")
+                    && value.len() == 32
+                    && value[8..].bytes().all(|ch| ch.is_ascii_hexdigit())),
+            "invalid registration selector"
+        );
+    }
+    let mut matches = Vec::new();
+    for entry in service::registrations(&layout(args.user)?)? {
+        if private_network::is_profile(&entry.spec.profile)?
+            && selector.as_ref().is_none_or(|value| {
+                entry.spec.identity.starts_with(value)
+                    || entry.machine_id.starts_with(value)
+                    || entry.spec.service == *value
+            })
+        {
+            matches.push(entry.spec.profile);
+        }
+    }
+    anyhow::ensure!(
+        matches.len() == 1,
+        "select one private registration using an ID from porthub list"
+    );
+    Ok(matches.remove(0))
+}
+fn path_strategy(command: PathCommand) -> Result<()> {
+    use porthub_agent::private_network::strategy;
+    let (args, mode, reset) = match command {
+        PathCommand::Show(args) => (args, None, false),
+        PathCommand::Set { mode, registration } => (registration, Some(mode), false),
+        PathCommand::Reset(args) => (args, None, true),
+    };
+    let path = path_profile(&args)?;
+    let settings = if reset {
+        strategy::reset(&path)?
+    } else if let Some(mode) = mode {
+        strategy::save(&path, mode)?
+    } else {
+        strategy::load(&path)?
+    };
+    let source = if strategy::path(&path).try_exists()? {
+        "override"
+    } else {
+        "default"
+    };
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "format_version":settings.format_version,"mode":settings.mode,"source":source
+            }))?
+        );
+    } else {
+        println!("Path strategy: {} ({source})", settings.mode.as_str());
+    }
+    Ok(())
 }
 fn layout(user: bool) -> Result<porthub_agent::service::Layout> {
     if user {
@@ -694,6 +791,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Some(Command::List { user, json }) => list_registrations(user, json).await,
+        Some(Command::Path { command }) => path_strategy(command),
         Some(Command::Start(args)) => {
             tenant_action(args, porthub_agent::service::Action::Start).await
         }

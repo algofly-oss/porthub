@@ -31,6 +31,13 @@ pub async fn run(path: PathBuf, cancel: CancellationToken) -> Result<()> {
     let (events, mut input) = mpsc::channel(4096);
     let work = cancel.child_token();
     let mut tasks = JoinSet::new();
+    let (strategy_updates, strategy) =
+        tokio::sync::watch::channel(super::strategy::load(&path)?.mode);
+    tasks.spawn(super::strategy::run(
+        path.clone(),
+        strategy_updates,
+        work.clone(),
+    ));
     let instance = controller::nonce()?;
     let (interface_updates, interfaces) = tokio::sync::watch::channel(Vec::new());
     tasks.spawn(super::interfaces::watch(interface_updates, work.clone()));
@@ -98,7 +105,9 @@ pub async fn run(path: PathBuf, cancel: CancellationToken) -> Result<()> {
             if policy.check(&buffer[..size],peer,false) {
                 let peers=sessions.read().await;
                 let direct=peers.get(peer).filter(|session|session.state()==porthub_mesh::State::Ready);
-                match paths.choose(parsed,direct.is_some(),relay_sender.is_ready()) {
+                let relay_ready=relay_sender.is_ready();
+                let prefer_peer=strategy.borrow().prefer_peer_transport(direct.is_some_and(|session|session.is_relay()),relay_ready);
+                match paths.choose_preferred(parsed,direct.is_some(),relay_ready,prefer_peer) {
                     Some(true)=>{if let Some(session)=direct {let _=session.send(bytes::Bytes::copy_from_slice(&buffer[..size]));}},
                     Some(false)=>{let _=relay_sender.send(peer,&buffer[..size]);},None=>{}
                 }
