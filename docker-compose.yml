@@ -26,6 +26,7 @@ services:
     env_file: [.env]
     environment:
       PORTHUB_MODE: ${PORTHUB_MODE:-prod}
+      PORTHUB_VERSION: ${PORTHUB_VERSION:-1.2.0}
       PORTHUB_CLIENT_BINARY_DIR: /app/client-bin
       PORTHUB_API_SOCKET: /run/porthub-api/api.sock
       PORTHUB_EDGE_SOCKET: /run/porthub-edge/control.sock
