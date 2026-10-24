@@ -95,6 +95,25 @@ Do not reactivate disabled registrations or change credentials speculatively.
 
 CHECKPOINT AND NEXT REQUIRED WORK / NOT COMPLETE
 
+The matching b81e865 ARM core/edge/firewall sequence completed successfully.
+All three images passed 24 disposable isolation/functional checks on URM2;
+report docs/verification/2026-10-24-urm2-isolation.json. The verifier now runs
+both official Socket.IO client checks in an ephemeral UI-builder container,
+avoiding missing host Node dependencies. Its labelled client, temporary image
+tag and private Compose resources are removed. All nine original production
+containers retained IDs/start times/restart counts after validation.
+
+Read-only migration preflight with the complete 30-file bundle passed, including
+byte-identical packaged/CI ARM agent coalescing. Logs: release-preflight.log and
+release-isolation.log in the owned stage. Actual production cutover has NOT
+happened at this checkpoint. Next apply only the reviewed migration utility,
+then verify existing clients/routes before proceeding with registered upgrades.
+The registry baseline is registry-before-native.json (0600): 16 machines,
+11 enabled, 65 connections / 20 enabled, 11 private peers, 4 groups, 5 rulebooks.
+registered-update-baseline.json has correct last_seen_at and request fields.
+Two older update requests target 2a1ed8c24540 (clearsight/test); do not mistake
+them for successful native updates. No enabled registration has been upgraded.
+
 All ten jobs in run 40088578711 passed for
 b81e8653864b13286651a29efad5dfedc456c9b8. Local immutable bundle:
 /home/nitin/.cache/porthub-native-releases/b81e8653864b13286651a29efad5dfedc456c9b8/bundle

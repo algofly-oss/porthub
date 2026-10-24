@@ -116,7 +116,17 @@ def main():
 
     checks = []
     children = []
+    client_image = prefix + "-ui-check"
+    client_image_id = None
+    client_container = prefix + "-realtime"
     try:
+        # Reuse the locked UI builder dependencies without installing Node or
+        # node_modules on the deployment host or in any production image.
+        built = subprocess.run(["docker", "build", "--target", "ui-build", "--tag", client_image, "."],
+                               cwd=ROOT, capture_output=True, text=True)
+        if built.returncode:
+            raise RuntimeError("could not prepare the isolated UI verification image: " + built.stderr)
+        client_image_id = docker("image", "inspect", client_image, "--format", "{{.Id}}").stdout.strip()
         # Compose creates every container before startup, exercising shared-volume ownership.
         compose("up", "-d", "--no-build", "--wait", "--wait-timeout", "150")
         for tls in (False, True):
@@ -178,17 +188,33 @@ def main():
         private_before = request("/api/machines/private-addresses/" + machine_id, headers={"Cookie": cookie})[2]
         assert len(json.loads(private_before)["data"]) == 1
         checks.append("native machine creation assigns a private address and publishes gateway config")
-        realtime = subprocess.run(
-            ["node", str(ROOT / "ui/tests/native-realtime.cjs")],
-            env={**os.environ,
-                 "PORTHUB_TEST_SOCKET_URL": address(tls=True),
-                 "PORTHUB_TEST_MACHINE_ID": machine_id,
-                 "PORTHUB_TEST_MACHINE_TOKEN": created["data"]["token"],
-                 "PORTHUB_TEST_SESSION_COOKIE": cookie,
-                 "PORTHUB_TEST_SELF_SIGNED": "1"},
-            capture_output=True, text=True, timeout=20)
-        assert realtime.returncode == 0, "official Socket.IO client failed through TLS edge ingress"
-        assert "Native Socket.IO status and log streaming passed." in realtime.stdout
+        def ui_client(agent_logs=False):
+            with tempfile.TemporaryDirectory(prefix=prefix + "-client-") as directory:
+                environment_file = pathlib.Path(directory) / "environment"
+                values = {"PORTHUB_TEST_SOCKET_URL": address(tls=True),
+                          "PORTHUB_TEST_MACHINE_ID": machine_id,
+                          "PORTHUB_TEST_MACHINE_TOKEN": created["data"]["token"],
+                          "PORTHUB_TEST_SESSION_COOKIE": cookie,
+                          "PORTHUB_TEST_SELF_SIGNED": "1",
+                          "PORTHUB_TEST_EXPECT_AGENT_LOG": "1" if agent_logs else "0"}
+                with environment_file.open("x") as output:
+                    os.chmod(environment_file, 0o600)
+                    output.write("".join(name + "=" + value + "\n" for name, value in values.items()))
+                result = subprocess.run(
+                    ["docker", "run", "--rm", "--name", client_container,
+                     "--label", "porthub.verification=" + prefix, "--network", "host",
+                     "--read-only", "--user", "65534:65534", "--cap-drop", "ALL",
+                     "--security-opt", "no-new-privileges:true",
+                     "--tmpfs", "/tmp:rw,nosuid,nodev,size=16m", "--env", "HOME=/tmp",
+                     "--env-file", str(environment_file), "--mount",
+                     f"type=bind,src={ROOT / 'ui/tests/native-realtime.cjs'},dst=/src/ui/tests/native-realtime.cjs,readonly",
+                     client_image, "node", "/src/ui/tests/native-realtime.cjs"],
+                    capture_output=True, text=True, timeout=25 if agent_logs else 20)
+            if result.returncode:
+                detail = result.stderr.replace(cookie, "[redacted]").replace(created["data"]["token"], "[redacted]")
+                raise AssertionError("official Socket.IO client failed through TLS edge ingress: " + detail)
+            return result.stdout
+        assert "Native Socket.IO status and log streaming passed." in ui_client()
         checks.append("official UI Socket.IO client authenticates and streams scoped status/log events through HTTPS edge and Unix API")
         request("/api/machines/sync", data=json.dumps({
             "machine_id": machine_id, "token": created["data"]["token"]}).encode(),
@@ -410,16 +436,7 @@ def main():
             actual = docker("exec", prefix + "-core", "sha256sum", "/tmp/transfer-get/payload.bin").stdout.split()[0]
             assert actual == expected
             checks.append("saved-profile native agent syncs real API configuration and transfers 32 MiB via embedded tunnel, http.server and parallel get with matching SHA256")
-            diagnostics = subprocess.run(
-                ["node", str(ROOT / "ui/tests/native-realtime.cjs")],
-                env={**os.environ, "PORTHUB_TEST_SOCKET_URL": address(tls=True),
-                     "PORTHUB_TEST_MACHINE_ID": machine_id,
-                     "PORTHUB_TEST_MACHINE_TOKEN": created["data"]["token"],
-                     "PORTHUB_TEST_SESSION_COOKIE": cookie,
-                     "PORTHUB_TEST_SELF_SIGNED": "1", "PORTHUB_TEST_EXPECT_AGENT_LOG": "1"},
-                capture_output=True, text=True, timeout=25)
-            assert diagnostics.returncode == 0, "native agent diagnostics failed through the UI websocket ingress"
-            assert "Native agent diagnostics reached the UI Socket.IO client." in diagnostics.stdout
+            assert "Native agent diagnostics reached the UI Socket.IO client." in ui_client(agent_logs=True)
             checks.append("native agent captures diagnostics in memory and streams them on demand to the official UI client over HTTPS without shell helpers")
             api("PUT", "/api/connections/firewall/policy", {"data_id": mapped_id,
                 "is_public": False, "allowed_ips": ["203.0.113.254"]})
@@ -522,7 +539,19 @@ def main():
             except subprocess.TimeoutExpired:
                 child.kill()
                 child.wait()
-        compose("down", "--volumes")
+        # A timed-out docker run CLI can leave its container alive. Remove only
+        # this run's labelled client, then its private Compose resources and tag.
+        client = docker("inspect", client_container, check=False)
+        if client.returncode == 0:
+            record = json.loads(client.stdout)[0]
+            if (record["Config"].get("Labels") or {}).get("porthub.verification") == prefix:
+                docker("rm", "--force", record["Id"], check=False)
+        try:
+            compose("down", "--volumes")
+        finally:
+            image = docker("image", "inspect", client_image, "--format", "{{.Id}}", check=False)
+            if client_image_id and image.returncode == 0 and image.stdout.strip() == client_image_id:
+                docker("image", "rm", client_image, check=False)
 
 
 if __name__ == "__main__":
