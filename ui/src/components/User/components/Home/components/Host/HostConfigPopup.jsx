@@ -2094,10 +2094,22 @@ export default function HostConfigPopup({
                 <Badge color="blue" variant="light" className={getInfoBadgeClassName(isDark)}>
                   {host.name || "Untitled machine"}
                 </Badge>
-                <Badge color="blue" variant="light" className={getInfoBadgeClassName(isDark)}>
+                <Badge component="button" type="button" color="blue" variant="light"
+                  disabled={!host.localIp}
+                  onClick={() => handleCopy("LAN IP", host.localIp)}
+                  aria-label={host.localIp ? `Copy LAN IP ${host.localIp}` : "LAN IP not reported"}
+                  title={host.localIp ? "Copy LAN IP" : "LAN IP not reported"}
+                  rightSection={host.localIp ? <IconCopy size={12} /> : null}
+                  className={`${getInfoBadgeClassName(isDark)} ${host.localIp ? "cursor-pointer" : "cursor-default"} focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2`}>
                   LAN: {host.localIp || "Not reported"}
                 </Badge>
-                <Badge color="blue" variant="light" className={getInfoBadgeClassName(isDark)}>
+                <Badge component="button" type="button" color="blue" variant="light"
+                  disabled={!host.publicIp}
+                  onClick={() => handleCopy("WAN IP", host.publicIp)}
+                  aria-label={host.publicIp ? `Copy WAN IP ${host.publicIp}` : "WAN IP not reported"}
+                  title={host.publicIp ? "Copy WAN IP" : "WAN IP not reported"}
+                  rightSection={host.publicIp ? <IconCopy size={12} /> : null}
+                  className={`${getInfoBadgeClassName(isDark)} ${host.publicIp ? "cursor-pointer" : "cursor-default"} focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2`}>
                   WAN: {host.publicIp || "Pending"}
                 </Badge>
                 {privateAddresses?.length ? privateAddresses.map((ip) => (
