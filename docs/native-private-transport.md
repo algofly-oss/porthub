@@ -10,7 +10,8 @@ substituted certificate do not deliver packets.
 The Linux agent's private `run --profile` mode owns an exclusive, nonpersistent
 TUN, private /32 routes, an expiring allow-only packet policy, stateful TCP/UDP/
 ICMP replies and a private authoritative DNS responder. DNS registers the owned
-link with systemd-resolved over D-Bus and uses a loopback high port. It does not
+link with systemd-resolved over D-Bus and binds a high port on its assigned
+private address. Queries are accepted only from the local host. It does not
 claim an application's port 53 or rewrite global resolver files. Dropping the
 TUN removes its interface and routes. Existing interface names or conflicting
 network routes are refused.

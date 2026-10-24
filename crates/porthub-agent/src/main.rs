@@ -182,7 +182,11 @@ enum Command {
         action: ServiceCommand,
     },
     /// Display the installed agent release.
-    Version,
+    Version {
+        /// Include build provenance without changing the release version.
+        #[arg(long)]
+        verbose: bool,
+    },
     /// Check or update an existing native Linux registration and its private pair.
     #[cfg(target_os = "linux")]
     Update {
@@ -984,11 +988,12 @@ async fn main() -> Result<()> {
                 .await
             }
         }
-        Some(Command::Version) => {
-            println!(
-                "porthub {}",
-                option_env!("PORTHUB_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
-            );
+        Some(Command::Version { verbose }) => {
+            println!("porthub {}", porthub_agent::VERSION);
+            if verbose {
+                println!("build {}", porthub_agent::BUILD_REVISION);
+                println!("target {}", env!("PORTHUB_RUST_TARGET"));
+            }
             Ok(())
         }
         None => {

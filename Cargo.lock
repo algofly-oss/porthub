@@ -2669,7 +2669,7 @@ checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
 
 [[package]]
 name = "porthub-agent"
-version = "0.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2709,7 +2709,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-api"
-version = "0.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2755,7 +2755,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-edge"
-version = "0.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2782,7 +2782,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-firewall"
-version = "0.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2802,7 +2802,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-identity"
-version = "0.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "hex",
@@ -2817,7 +2817,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-mesh"
-version = "0.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2842,7 +2842,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-runtime"
-version = "0.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2877,7 +2877,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-transfer"
-version = "0.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2902,7 +2902,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-tunnel"
-version = "0.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "axum",

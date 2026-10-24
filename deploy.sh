@@ -1,7 +1,7 @@
 #!/bin/sh
 # Build and start the three native PortHub roles after migration readiness checks.
 set -eu
-PORTHUB_VERSION="${PORTHUB_VERSION:-$(git rev-parse --short=12 HEAD)}"
+PORTHUB_VERSION="${PORTHUB_VERSION:-$(sh "$(dirname "$0")/scripts/release-version.sh")}"
 PORTHUB_SOURCE_REVISION="${PORTHUB_SOURCE_REVISION:-$(git rev-parse HEAD 2>/dev/null || printf '%s' "$PORTHUB_VERSION")}"
 PORTHUB_MODE="${PORTHUB_MODE:-prod}"
 case "$PORTHUB_MODE" in

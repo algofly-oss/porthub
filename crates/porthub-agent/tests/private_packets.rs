@@ -266,7 +266,8 @@ async fn linux_private_dns_resolves_through_the_owned_link_without_claiming_port
         "org.freedesktop.resolve1.Manager",
     )
     .await?;
-    let (addresses, _, _): (Vec<(i32, i32, Vec<u8>)>, String, u64) = tokio::time::timeout(
+    type ResolvedAddresses = Vec<(i32, i32, Vec<u8>)>;
+    let (addresses, _, _): (ResolvedAddresses, String, u64) = tokio::time::timeout(
         Duration::from_secs(8),
         proxy.call(
             "ResolveHostname",

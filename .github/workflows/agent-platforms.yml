@@ -1,7 +1,7 @@
 name: Native agent platforms
 on:
   push:
-    paths: ["crates/porthub-agent/**", "crates/porthub-transfer/**", "crates/porthub-tunnel/**", "crates/porthub-identity/**", "crates/porthub-mesh/**", "vendor/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".github/workflows/agent-platforms.yml"]
+    paths: ["crates/porthub-agent/**", "crates/porthub-transfer/**", "crates/porthub-tunnel/**", "crates/porthub-identity/**", "crates/porthub-mesh/**", "vendor/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "Dockerfile", "scripts/release-version.sh", ".github/workflows/agent-platforms.yml"]
   pull_request:
   workflow_dispatch:
 permissions:
@@ -22,7 +22,7 @@ jobs:
           - {os: windows-latest, target: i686-pc-windows-msvc, artifact: windows_x86, extension: .exe}
     runs-on: ${{ matrix.os }}
     env:
-      PORTHUB_VERSION: ${{ github.sha }}
+      PORTHUB_SOURCE_REVISION: ${{ github.sha }}
       RUST_MIN_STACK: "33554432"
       RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static' || '' }}
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -30,6 +30,9 @@ jobs:
       CARGO_BUILD_JOBS: ${{ contains(matrix.target, 'apple') && '2' || '4' }}
     steps:
       - uses: actions/checkout@v4
+      - name: Read numeric release version
+        shell: bash
+        run: echo "PORTHUB_VERSION=$(sh scripts/release-version.sh)" >> "$GITHUB_ENV"
       - name: Install pinned Rust target
         shell: bash
         run: |
@@ -45,7 +48,7 @@ jobs:
       - name: Build static Linux agent bundle
         if: runner.os == 'Linux'
         shell: bash
-        run: docker build --target agent-artifacts --build-arg PORTHUB_VERSION="$PORTHUB_VERSION" --output type=local,dest=dist .
+        run: docker build --target agent-artifacts --build-arg PORTHUB_VERSION="$PORTHUB_VERSION" --build-arg PORTHUB_SOURCE_REVISION="$PORTHUB_SOURCE_REVISION" --output type=local,dest=dist .
       - name: Prepare versioned artifact metadata
         if: runner.os != 'Linux'
         shell: bash
@@ -85,10 +88,13 @@ jobs:
           - {target: armv7-unknown-linux-gnueabihf, artifact: armv7, compiler: arm-linux-gnueabihf-gcc, ar: arm-linux-gnueabihf-ar, packages: "gcc-arm-linux-gnueabihf libc6-dev-armhf-cross"}
           - {target: arm-unknown-linux-gnueabihf, artifact: armhf, compiler: arm-linux-gnueabihf-gcc, ar: arm-linux-gnueabihf-ar, packages: "gcc-arm-linux-gnueabihf libc6-dev-armhf-cross"}
     env:
-      PORTHUB_VERSION: ${{ github.sha }}
+      PORTHUB_SOURCE_REVISION: ${{ github.sha }}
       RUST_MIN_STACK: "33554432"
     steps:
       - uses: actions/checkout@v4
+      - name: Read numeric release version
+        shell: bash
+        run: echo "PORTHUB_VERSION=$(sh scripts/release-version.sh)" >> "$GITHUB_ENV"
       - name: Install build-only cross compiler
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ${{ matrix.packages }}
       - run: rustup target add ${{ matrix.target }}

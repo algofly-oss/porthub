@@ -1,5 +1,17 @@
 # Native agent release distribution
 
+Release versions use `major.minor.patch`, defined in the root Cargo workspace.
+`porthub version`, `porthub --version`, agent heartbeats and release catalogs
+report this numeric version. Major releases cover incompatible changes, minor
+releases add compatible features, and patch releases contain compatible fixes.
+Once published, a version must not be reused for different release contents.
+
+`porthub version --verbose` separately reports the source revision and target.
+CI passes the commit through `PORTHUB_SOURCE_REVISION`; container OCI labels also
+retain it independently of `org.opencontainers.image.version`. Assemble a bundle
+from one verified CI run and promote matching images from that same revision.
+Build-only version overrides remain available for isolated updater fixtures.
+
 The Rust API serves release metadata and binaries from a read-only bundle. It
 does not run a downloader, shell script or Go handler to deliver these assets.
 All routes require the current enabled machine's ID and token; account cookies

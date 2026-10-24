@@ -294,7 +294,7 @@ impl Config {
             machine_offline_alert_grace_millis,
             client_version: env(
                 "PORTHUB_VERSION",
-                option_env!("PORTHUB_VERSION").unwrap_or(""),
+                option_env!("PORTHUB_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
             ),
             client_binary_dir: Some(
                 env(

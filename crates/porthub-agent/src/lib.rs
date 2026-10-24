@@ -19,3 +19,7 @@ pub const VERSION: &str = match option_env!("PORTHUB_VERSION") {
     Some(value) => value,
     None => env!("CARGO_PKG_VERSION"),
 };
+pub const BUILD_REVISION: &str = match option_env!("PORTHUB_SOURCE_REVISION") {
+    Some(value) => value,
+    None => "unknown",
+};

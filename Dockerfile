@@ -7,8 +7,10 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
 COPY api/assets/client/porthub-client.sh api/assets/client/porthub-client.sh
 COPY vendor/ vendor/
-ARG PORTHUB_VERSION=dev
+ARG PORTHUB_VERSION=1.1.1
 ARG PORTHUB_BUILD_JOBS=4
+ARG PORTHUB_SOURCE_REVISION=unknown
+ENV PORTHUB_SOURCE_REVISION=$PORTHUB_SOURCE_REVISION
 ENV PORTHUB_VERSION=$PORTHUB_VERSION RUST_MIN_STACK=33554432 CARGO_BUILD_JOBS=$PORTHUB_BUILD_JOBS
 RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/src/target \
     cargo build --locked --release -p porthub-api -p porthub-edge -p porthub-firewall -p porthub-runtime && mkdir -p /out && \
@@ -23,9 +25,11 @@ RUN apk add --no-cache build-base
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
 COPY vendor/ vendor/
-ARG PORTHUB_VERSION=dev
+ARG PORTHUB_VERSION=1.1.1
 ARG PORTHUB_BUILD_JOBS=4
 ARG TARGETARCH
+ARG PORTHUB_SOURCE_REVISION=unknown
+ENV PORTHUB_SOURCE_REVISION=$PORTHUB_SOURCE_REVISION
 ENV PORTHUB_VERSION=$PORTHUB_VERSION RUST_MIN_STACK=33554432 CARGO_BUILD_JOBS=$PORTHUB_BUILD_JOBS
 RUN --mount=type=cache,id=porthub-agent-musl-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=porthub-agent-musl-target,target=/src/target \
@@ -58,10 +62,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     rm -rf /var/lib/apt/lists/* && \
     printf 'porthub:x:10001:10001:PortHub:/nonexistent:/usr/sbin/nologin\n' >> /etc/passwd && \
     printf 'porthub:x:10001:\n' >> /etc/group
-ARG PORTHUB_VERSION=dev
+ARG PORTHUB_VERSION=1.1.1
 ENV RUST_LOG=info PORTHUB_VERSION=$PORTHUB_VERSION
 LABEL org.opencontainers.image.version=$PORTHUB_VERSION
-ARG PORTHUB_SOURCE_REVISION=dev
+ARG PORTHUB_SOURCE_REVISION=unknown
 LABEL org.opencontainers.image.revision=$PORTHUB_SOURCE_REVISION
 
 FROM runtime-base AS prod-core
