@@ -1,0 +1,32 @@
+# Core has no host networking or published ports. Commands execute directly.
+[[process]]
+name = "mongodb"
+program = "mongod"
+args = ["--bind_ip", "127.0.0.1", "--port", "47017", "--dbpath", "/data/mongo", "--auth", "--quiet"]
+
+[[process]]
+name = "api"
+program = "porthub-api"
+after = "127.0.0.1:47017"
+modes = ["prod"]
+[process.env]
+PORTHUB_UI_ROOT = "/app/ui"
+PORTHUB_UI_UPSTREAM = ""
+
+[[process]]
+name = "api"
+program = "porthub-api"
+after = "127.0.0.1:47017"
+modes = ["dev"]
+[process.env]
+PORTHUB_UI_ROOT = ""
+PORTHUB_UI_UPSTREAM = "http://127.0.0.1:47030"
+
+[[process]]
+name = "ui"
+program = "porthub-runtime"
+args = ["dev-ui"]
+modes = ["dev"]
+[process.env]
+NODE_ENV = "development"
+NEXT_BUILD_DIR = "/tmp/porthub-next"

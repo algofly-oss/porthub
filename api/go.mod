@@ -5,6 +5,8 @@ go 1.26.0
 toolchain go1.27.3
 
 require (
+	github.com/BurntSushi/toml v1.6.0
+	github.com/algofly-oss/porthub/client v0.0.0
 	github.com/coder/websocket v1.8.15
 	github.com/danielgtaylor/huma/v2 v2.39.1
 	github.com/google/uuid v1.6.0
@@ -12,6 +14,8 @@ require (
 	golang.org/x/crypto v0.58.0
 	modernc.org/sqlite v1.61.0
 )
+
+replace github.com/algofly-oss/porthub/client => ../client
 
 require (
 	github.com/dustin/go-humanize v1.1.0 // indirect

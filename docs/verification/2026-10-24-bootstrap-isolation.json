@@ -1,0 +1,27 @@
+{
+  "checks": [
+    "HTTP/HTTPS ingress reaches Unix API after simultaneous Compose creation",
+    "production UI is exported/precompressed and served without Node",
+    "firewall IPC requires credentials and is unavailable to edge",
+    "edge apply socket is writable only by edge, core connects through a read-only mount, and firewall has no mount",
+    "database/API/UI/firewall TCP ports and standalone tunnel control port are inaccessible",
+    "all production roots read-only with separate minimum capabilities",
+    "native machine creation assigns a private address and publishes gateway config",
+    "official UI Socket.IO client authenticates and streams scoped status/log events through HTTPS edge and Unix API",
+    "native status worker persists online history and detects idle expiry without a client request",
+    "native edge counts reach activity API through a read-only core journal mount",
+    "authenticated native release catalog, legacy alias, HTTP ranges and packaged agent self-download preserve SHA256 integrity",
+    "owner setup ticket enrolls the packaged native CLI into a private profile without passing machine credentials in arguments",
+    "saved-profile native agent syncs real API configuration and transfers 32 MiB via embedded tunnel, http.server and parallel get with matching SHA256",
+    "native agent captures diagnostics in memory and streams them on demand to the official UI client over HTTPS without shell helpers",
+    "saved-profile native agent applies live mapped-port deletion without a shell client",
+    "whole-machine deletion closes forwarding, native agent exits and acknowledges removal, and the other profile/server stays running",
+    "native API enforces deny/allow mapped-port policy via authenticated firewall IPC and filters traffic by ownership",
+    "MongoDB account/session, private address, activity counters and TLS identity survive restart"
+  ],
+  "images": {
+    "core": "sha256:2a573ebb2917afb8c9a4d828afafcc9a51f6f9cd49e2f0cda49aa91f8266ca3f",
+    "edge": "sha256:e54e90ee7837107dfa26d4d729e0f8e434bce11437de4a0b07d7576a344ad725",
+    "firewall": "sha256:cf94aa9ba3bc17bbe11889ab0da8bccc6cbb3b231b5a3fcc815758f224f5c149"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "scope": "Local Linux native agent service lifecycle; no URM2 deployment",
+  "agent_sha256": "fc291e955b9dd6bae71db31538122d6d8540388b714e53bafa5045d603f5ad5f",
+  "verification": {
+    "workspace_tests_passed": 97,
+    "workspace_tests_failed": 0,
+    "clippy": "workspace all targets, warnings denied",
+    "format": "cargo fmt --all -- --check"
+  },
+  "checks": [
+    "Native CLI user-service installation through real systemd D-Bus",
+    "Private profile copy and immutable release executable used by running process",
+    "Authenticated API sync and embedded tunnel forwarding of 4 MiB before and after stop/start",
+    "CLI status and scoped uninstall --purge; no test unit remains",
+    "Isolated tests cover failed activation rollback, foreign files, modified release, multiple profiles, argument escaping and job completion"
+  ],
+  "limitations": [
+    "Privileged system-service activation unverified",
+    "Windows/macOS service controllers not implemented",
+    "No crash-safe agent-update lifecycle yet",
+    "No current production-image rebuild for this service milestone",
+    "Remote 10 GiB public/private and Luna-to-miro.phub benchmarks outstanding",
+    "No commit, push or URM2 deployment performed"
+  ]
+}

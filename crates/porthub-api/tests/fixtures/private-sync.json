@@ -1,0 +1,401 @@
+[
+  {
+    "model": "ClientSync",
+    "body": "{\"peer_id\": \"p\", \"token\": \"tttttttttttttttttttttttttttttttt\", \"fingerprint\": \"ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab\", \"instance\": \"iiiiiiiiiiiiiiii\"}",
+    "status": 200,
+    "response": {
+      "peer_id": "p",
+      "token": "tttttttttttttttttttttttttttttttt",
+      "fingerprint": "AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB",
+      "instance": "iiiiiiiiiiiiiiii",
+      "signals": [],
+      "acks": [],
+      "paths": {}
+    }
+  },
+  {
+    "model": "ClientSync",
+    "body": "{\"peer_id\": \"p\", \"token\": \"tttttttttttttttttttttttttttttttt\", \"fingerprint\": \"ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab\", \"instance\": \"iiiiiiiiiiiiiiii\\n\", \"acks\": [\"a\", 2], \"paths\": {\"z\": \"relay\", \"a\": \"direct\"}, \"signals\": [{\"to\": \"q\", \"session\": \"ssssssssssssssss\", \"description\": {\"type\": \"offer\", \"sdp\": \"v=0\"}}]}",
+    "status": 200,
+    "response": {
+      "peer_id": "p",
+      "token": "tttttttttttttttttttttttttttttttt",
+      "fingerprint": "AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB",
+      "instance": "iiiiiiiiiiiiiiii\n",
+      "signals": [
+        {
+          "to": "q",
+          "session": "ssssssssssssssss",
+          "description": {
+            "type": "offer",
+            "sdp": "v=0"
+          }
+        }
+      ],
+      "acks": [
+        "a",
+        "2"
+      ],
+      "paths": {
+        "z": "relay",
+        "a": "direct"
+      }
+    }
+  },
+  {
+    "model": "ClientSync",
+    "body": "{\"peer_id\": \"ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp\", \"token\": \"short\", \"fingerprint\": \"AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:A\", \"instance\": \"bad instance\"}",
+    "status": 422,
+    "response": {
+      "detail": [
+        {
+          "loc": [
+            "body",
+            "peer_id"
+          ],
+          "msg": "ensure this value has at most 60 characters",
+          "type": "value_error.any_str.max_length",
+          "ctx": {
+            "limit_value": 60
+          }
+        },
+        {
+          "loc": [
+            "body",
+            "token"
+          ],
+          "msg": "ensure this value has at least 32 characters",
+          "type": "value_error.any_str.min_length",
+          "ctx": {
+            "limit_value": 32
+          }
+        },
+        {
+          "loc": [
+            "body",
+            "fingerprint"
+          ],
+          "msg": "ensure this value has at least 95 characters",
+          "type": "value_error.any_str.min_length",
+          "ctx": {
+            "limit_value": 95
+          }
+        },
+        {
+          "loc": [
+            "body",
+            "instance"
+          ],
+          "msg": "string does not match regex \"^[a-zA-Z0-9-]{16,64}$\"",
+          "type": "value_error.str.regex",
+          "ctx": {
+            "pattern": "^[a-zA-Z0-9-]{16,64}$"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "model": "ClientSync",
+    "body": "{\"peer_id\": \"p\", \"token\": \"tttttttttttttttttttttttttttttttt\", \"fingerprint\": \"zz:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab\", \"instance\": \"iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii\"}",
+    "status": 422,
+    "response": {
+      "detail": [
+        {
+          "loc": [
+            "body",
+            "fingerprint"
+          ],
+          "msg": "A SHA-256 certificate fingerprint is required",
+          "type": "value_error"
+        },
+        {
+          "loc": [
+            "body",
+            "instance"
+          ],
+          "msg": "string does not match regex \"^[a-zA-Z0-9-]{16,64}$\"",
+          "type": "value_error.str.regex",
+          "ctx": {
+            "pattern": "^[a-zA-Z0-9-]{16,64}$"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "model": "ClientSync",
+    "body": "{\"peer_id\": \"p\", \"token\": \"tttttttttttttttttttttttttttttttt\", \"fingerprint\": \"ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab\", \"instance\": \"iiiiiiiiiiiiiiii\", \"signals\": [{\"to\": \"\", \"session\": \"x\", \"description\": {\"type\": \"pranswer\", \"sdp\": \"\"}}, {}, {\"to\": \"q\", \"session\": \"ssssssssssssssss\", \"description\": 5}]}",
+    "status": 422,
+    "response": {
+      "detail": [
+        {
+          "loc": [
+            "body",
+            "signals",
+            0,
+            "to"
+          ],
+          "msg": "ensure this value has at least 1 characters",
+          "type": "value_error.any_str.min_length",
+          "ctx": {
+            "limit_value": 1
+          }
+        },
+        {
+          "loc": [
+            "body",
+            "signals",
+            0,
+            "session"
+          ],
+          "msg": "string does not match regex \"^[a-zA-Z0-9-]{16,64}$\"",
+          "type": "value_error.str.regex",
+          "ctx": {
+            "pattern": "^[a-zA-Z0-9-]{16,64}$"
+          }
+        },
+        {
+          "loc": [
+            "body",
+            "signals",
+            0,
+            "description",
+            "type"
+          ],
+          "msg": "unexpected value; permitted: 'offer', 'answer', 'candidate'",
+          "type": "value_error.const",
+          "ctx": {
+            "given": "pranswer",
+            "permitted": [
+              "offer",
+              "answer",
+              "candidate"
+            ]
+          }
+        },
+        {
+          "loc": [
+            "body",
+            "signals",
+            0,
+            "description",
+            "sdp"
+          ],
+          "msg": "ensure this value has at least 1 characters",
+          "type": "value_error.any_str.min_length",
+          "ctx": {
+            "limit_value": 1
+          }
+        },
+        {
+          "loc": [
+            "body",
+            "signals",
+            1,
+            "to"
+          ],
+          "msg": "field required",
+          "type": "value_error.missing"
+        },
+        {
+          "loc": [
+            "body",
+            "signals",
+            1,
+            "session"
+          ],
+          "msg": "field required",
+          "type": "value_error.missing"
+        },
+        {
+          "loc": [
+            "body",
+            "signals",
+            1,
+            "description"
+          ],
+          "msg": "field required",
+          "type": "value_error.missing"
+        },
+        {
+          "loc": [
+            "body",
+            "signals",
+            2,
+            "description"
+          ],
+          "msg": "value is not a valid dict",
+          "type": "type_error.dict"
+        }
+      ]
+    }
+  },
+  {
+    "model": "ClientSync",
+    "body": "{\"peer_id\": \"p\", \"token\": \"tttttttttttttttttttttttttttttttt\", \"fingerprint\": \"ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab\", \"instance\": \"iiiiiiiiiiiiiiii\", \"signals\": [{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}], \"acks\": [\"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\"], \"paths\": {\"a\": \"bogus\"}}",
+    "status": 422,
+    "response": {
+      "detail": [
+        {
+          "loc": [
+            "body",
+            "signals"
+          ],
+          "msg": "ensure this value has at most 16 items",
+          "type": "value_error.list.max_items",
+          "ctx": {
+            "limit_value": 16
+          }
+        },
+        {
+          "loc": [
+            "body",
+            "acks"
+          ],
+          "msg": "ensure this value has at most 128 items",
+          "type": "value_error.list.max_items",
+          "ctx": {
+            "limit_value": 128
+          }
+        },
+        {
+          "loc": [
+            "body",
+            "paths",
+            "a"
+          ],
+          "msg": "unexpected value; permitted: 'direct', 'relay', 'connecting'",
+          "type": "value_error.const",
+          "ctx": {
+            "given": "bogus",
+            "permitted": [
+              "direct",
+              "relay",
+              "connecting"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "model": "ClientSync",
+    "body": "{\"peer_id\": \"p\", \"token\": \"tttttttttttttttttttttttttttttttt\", \"fingerprint\": \"ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab\", \"instance\": \"iiiiiiiiiiiiiiii\", \"paths\": []}",
+    "status": 200,
+    "response": {
+      "peer_id": "p",
+      "token": "tttttttttttttttttttttttttttttttt",
+      "fingerprint": "AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB",
+      "instance": "iiiiiiiiiiiiiiii",
+      "signals": [],
+      "acks": [],
+      "paths": {}
+    }
+  },
+  {
+    "model": "ClientSync",
+    "body": "{}",
+    "status": 422,
+    "response": {
+      "detail": [
+        {
+          "loc": [
+            "body",
+            "peer_id"
+          ],
+          "msg": "field required",
+          "type": "value_error.missing"
+        },
+        {
+          "loc": [
+            "body",
+            "token"
+          ],
+          "msg": "field required",
+          "type": "value_error.missing"
+        },
+        {
+          "loc": [
+            "body",
+            "fingerprint"
+          ],
+          "msg": "field required",
+          "type": "value_error.missing"
+        },
+        {
+          "loc": [
+            "body",
+            "instance"
+          ],
+          "msg": "field required",
+          "type": "value_error.missing"
+        }
+      ]
+    }
+  },
+  {
+    "model": "ClientSync",
+    "body": "{\"peer_id\": \"p\", \"token\": \"tttttttttttttttttttttttttttttttt\", \"fingerprint\": \"ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab\", \"instance\": \"iiiiiiiiiiiiiiii\", \"paths\": {\"z\": \"x\", \"a\": null, \"m\": \"relay\"}}",
+    "status": 422,
+    "response": {
+      "detail": [
+        {
+          "loc": [
+            "body",
+            "paths",
+            "z"
+          ],
+          "msg": "unexpected value; permitted: 'direct', 'relay', 'connecting'",
+          "type": "value_error.const",
+          "ctx": {
+            "given": "x",
+            "permitted": [
+              "direct",
+              "relay",
+              "connecting"
+            ]
+          }
+        },
+        {
+          "loc": [
+            "body",
+            "paths",
+            "a"
+          ],
+          "msg": "none is not an allowed value",
+          "type": "type_error.none.not_allowed"
+        }
+      ]
+    }
+  },
+  {
+    "model": "ClientSync",
+    "body": "{\"peer_id\": \"p\", \"token\": \"tttttttttttttttttttttttttttttttt\", \"fingerprint\": \"ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab\", \"instance\": \"iiiiiiiiiiiiiiii\", \"paths\": [[\"k\", \"relay\"]], \"signals\": [[[\"to\", \"q\"]]]}",
+    "status": 422,
+    "response": {
+      "detail": [
+        {
+          "loc": [
+            "body",
+            "signals",
+            0,
+            "session"
+          ],
+          "msg": "field required",
+          "type": "value_error.missing"
+        },
+        {
+          "loc": [
+            "body",
+            "signals",
+            0,
+            "description"
+          ],
+          "msg": "field required",
+          "type": "value_error.missing"
+        }
+      ]
+    }
+  }
+]

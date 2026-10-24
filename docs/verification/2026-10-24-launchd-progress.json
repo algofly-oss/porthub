@@ -1,0 +1,50 @@
+{
+  "verified_at_utc": "2026-10-24T08:30:38.209475+00:00",
+  "scope": "macOS launchd lifecycle implementation with Linux regression verification; macOS runtime verification is pending",
+  "linux_tests": {
+    "passed": 15,
+    "failed": 0,
+    "ignored": 0
+  },
+  "linux_clippy": "workspace all-targets, warnings denied: passed",
+  "log_sha256": {
+    "linux_regression": "bbffc344ec2ca11bac5810dafd66d0df90b6e7fb42f0a916c84b7edf991c6c94",
+    "linux_clippy": "d621232f5baef8030dd93ee4b8e12a8d6f2d35c91399d9eace0b44064938f8a4"
+  },
+  "source_sha256": {
+    "crates/porthub-agent/src/service/mod.rs": "80b05871086c9228ba6d848672a08165094327e44b8fb6f8f6e19194c9e99dfe",
+    "crates/porthub-agent/src/service/launchd.rs": "877b0ed78aa83528078fd9136b280e357b0493ecdbf0fb89a479091da8c4f513",
+    "crates/porthub-agent/src/service/process.rs": "22276d2929399575b09e592f1e9d6e5340aae60f162f10dfcb67d770118f436a",
+    "crates/porthub-agent/src/service/publication.rs": "427ca5d73fcf17816362481e87b86515273d09941d9008a15b26ae8c945fa6f4",
+    "crates/porthub-agent/tests/launchd_live.rs": "2ac1b2216f73292e62b1bf1a70b8159a4c329d87382e783d1feb491d0651d99b"
+  },
+  "implementation": [
+    "Owned per-profile plist filenames, immutable executable releases, private profile state and installation rollback reuse the existing shared lifecycle",
+    "launchctl receives typed argv through its absolute OS path, never a shell; errors omit service output",
+    "System and user domains remain separate; labels and identity are checked before service operations",
+    "Stopped jobs are unloaded and profile leases are checked before stop completes",
+    "Readiness matches the OS process executable on Linux and macOS; stale PID and unrelated executable checks pass on Linux",
+    "Disposable macOS test exercises exact literal paths, native sync, 4 MiB bidirectional forwarding, restart, stop/start and scoped removal when explicitly enabled"
+  ],
+  "macos_evidence": {
+    "baseline_compile": "Earlier source compiled all agent targets with Rust 1.99.1 on Darwin arm64, with four warnings",
+    "current_source_compile": "pending: SSH timed out during source sync",
+    "user_service_runtime": "pending",
+    "system_service_runtime": "pending",
+    "installed_services_changed": false,
+    "build_environment": "Pinned toolchain in an isolated per-user PortHub cache; no global profile changes"
+  },
+  "limitations": [
+    "This report does not claim the macOS lifecycle implementation has compiled or run on macOS",
+    "Windows lifecycle, non-Linux updater/adoption and private packet devices remain unfinished",
+    "No commit, push, production deployment, client upgrade or physical 10 GiB benchmark occurred"
+  ],
+  "linux_live_service": {
+    "passed": 1,
+    "failed": 0,
+    "ignored": 0,
+    "scope": "Rebuilt current agent; real disposable systemd user service, CLI bootstrap, native update/rollback, 4 MiB forwarding, restart, stop/start and removal",
+    "log_sha256": "2cbafe4512909f4461af12197399a669ab0c646a867bfa737589d542f41120e8",
+    "build_log_sha256": "2ee30934e9be126212ed73c162442a6f951a9e7829aa09af1b0ba2d4ca3b6de5"
+  }
+}

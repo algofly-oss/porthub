@@ -1,0 +1,20 @@
+{
+  "checks": [
+    "HTTP/HTTPS ingress reaches Unix API after simultaneous Compose creation",
+    "production UI is exported/precompressed and served without Node",
+    "firewall IPC requires credentials and is unavailable to edge",
+    "database/API/UI/firewall TCP ports and standalone tunnel control port are inaccessible",
+    "all production roots read-only with separate minimum capabilities",
+    "native machine creation assigns a private address and publishes gateway config",
+    "native edge counts reach activity API through a read-only core journal mount",
+    "saved-profile native agent syncs real API configuration and transfers 32 MiB via embedded tunnel, http.server and parallel get with matching SHA256",
+    "saved-profile native agent applies live mapped-port deletion without a shell client",
+    "native API enforces deny/allow mapped-port policy via authenticated firewall IPC and filters traffic by ownership",
+    "MongoDB account/session, private address, activity counters and TLS identity survive restart"
+  ],
+  "images": {
+    "core": "sha256:4be25c85324c304ac02811cb67d083d172428b42ad1eeef783ee45b9b9bd1c89",
+    "edge": "sha256:50643ad7131246cdc557638de505964773c67e489491decc3b3a67c9ce79706d",
+    "firewall": "sha256:ee4216f476e455f2759e1b982c9ae48695747dae2ec596e3bb93cbd402e9c010"
+  }
+}

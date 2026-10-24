@@ -1,0 +1,32 @@
+{
+  "scope": "Local native authenticated release catalog and resumable artifact distribution; no URM2 rollout",
+  "verification": {
+    "workspace_tests_passed": 141,
+    "workspace_tests_failed": 0,
+    "workspace_tests_ignored": 0,
+    "clippy": "workspace all targets, warnings denied",
+    "format": "cargo fmt --all -- --check",
+    "compose_checks_passed": 17,
+    "compose_report": "2026-10-24-artifacts-isolation.json"
+  },
+  "checks": [
+    "Platform aliases preserve native 32-bit x86 and legacy x86-to-x86_64 behavior",
+    "Opened descriptors preserve responses across atomic replacement; changed files invalidate the hash cache",
+    "Missing versions, invalid SHA metadata, symlink leaves and nonregular files fail closed",
+    "GET/HEAD, suffix/open-ended byte ranges, changed If-Range, ETags, timestamps and preconditions",
+    "Machine credentials are required before target resolution; account cookies cannot bypass authentication",
+    "Catalog advertises only actual bundled assets and preserves public authority/path prefixes",
+    "Real native get downloads an authenticated release with parallel ranges and matching SHA256",
+    "Packaged native agent downloads its own production-bundle release through API/edge ingress",
+    "Existing diagnostics, file integrity, policy enforcement, retirement and restart checks retained",
+    "Disposable Compose project and user-service test unit removed"
+  ],
+  "limitations": [
+    "Other platform catalog fixtures are not executed platform releases; full target lifecycle/build verification is incomplete",
+    "Published release directories must be immutable; rewriting files during an active response is unsupported",
+    "Native ticket bootstrap, installer replacement, crash-safe updates and existing tenant import remain incomplete",
+    "Private networking, native relay and adaptive authenticated path selection remain incomplete",
+    "Production adoption, registered-agent upgrades and final remote bandwidth tests remain outstanding",
+    "No commit, push or URM2 deployment performed"
+  ]
+}

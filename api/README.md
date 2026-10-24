@@ -14,6 +14,7 @@ root using the root `Dockerfile` and `docker-compose.yml`.
 | `internal/httpapi/` | HTTP server setup, errors, OpenAPI, and Swagger UI |
 | `internal/realtime/` | Socket.IO events and machine status |
 | `internal/firewall/` | Firewall HTTP service, nftables policies, and traffic sampling |
+| `internal/gateway/` | Public TCP forwarding over the API's HTTPS WebSocket endpoint |
 | `internal/config/` | Environment configuration |
 | `internal/store/` | MongoDB connection and database encoding |
 | `internal/clientassets/` | Go tests for the shell client's service lifecycle |

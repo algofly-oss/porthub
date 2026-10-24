@@ -1,0 +1,62 @@
+{
+  "verified_at_utc": "2026-10-24T06:47:56.174847+00:00",
+  "scope": "Explicit native Linux CLI update transaction, independent systemd worker and durable recovery",
+  "workspace_tests": {
+    "passed": 229,
+    "failed": 0,
+    "ignored": 0
+  },
+  "full_test_log_sha256": "2775f09e32dc823aaf9be60a69c403f58f3cd3563a2068ad572b43c3f125d2ee",
+  "clippy": "workspace all-targets with warnings denied: passed",
+  "clippy_log_sha256": "0105dd563241cdbdedc649b04e25cd8702bde451c7e3f69656ecb3843c288cac",
+  "isolation_checks_passed": 23,
+  "isolation_evidence": "2026-10-24-update-activation-isolation.json",
+  "live_user_service_scenarios": {
+    "unchanged": {
+      "passed": 1,
+      "log_sha256": "d341516e2ce8785222951d53f0274f20a5ee955d1aae830358f4da010bf7a54d"
+    },
+    "distinct_version": {
+      "passed": 1,
+      "log_sha256": "c0ad582892de4a1e68a10825dca9e1fb9056525cddac5f5827ae782e073f0ca0"
+    },
+    "rejected_version": {
+      "passed": 1,
+      "log_sha256": "480fdad7cdbdfa5552118b2f0967dcc91b36a223bcc13aace669febed5cd8833"
+    }
+  },
+  "source_sha256": {
+    "crates/porthub-agent/src/upgrade.rs": "8b04f2b605ddcc54d3051c8fd6fd1d63f9fc0658753f459374e60d4a5524ff5f",
+    "crates/porthub-agent/src/main.rs": "6e3286155af933350d304391bcf1aa406903ad88d6e2363015e7a8d6b2f9d525",
+    "crates/porthub-agent/src/service/mod.rs": "85db8a137c37a449989c3d1db55da5017dbf6a7ef46c06641547a92f28054a6c",
+    "crates/porthub-agent/src/service/publication.rs": "db48eb78b9e54f68a68f6f03f33a3f2a6055d67f0f20d393a7765f2a52348e43",
+    "crates/porthub-agent/src/service/systemd.rs": "bf41ab394b9189a7eced42bbf7dfefb2b8e897e86953d6fd3301587081d9bded",
+    "crates/porthub-agent/src/adopt.rs": "8946c4a467c871b13ed84480aa2d0d097b9350a69e1597f3e2769ef63dc2bb85",
+    "crates/porthub-agent/src/update.rs": "56d10a408c4fc23d0581242102632f1ab2f185d9db664e819a8b2935871381eb",
+    "crates/porthub-agent/tests/upgrade.rs": "70116ab6d7af0fbb392bebef025d7d7bb0c8663fa91fe2a5a995e6ad82bebbd6",
+    "crates/porthub-agent/tests/service_live.rs": "64416834c5a64d8a52e342a696ffaa225e326b87677d389a6f851b8d06e09002",
+    "crates/porthub-agent/tests/systemd.rs": "01acabb916cddd9682076954220ef6ffbc226586915a9bc0d02d0fe07fbacf09"
+  },
+  "checks": [
+    "Read-only plan limits updates to an enrolled public identity and its matching private pair; foreign local registrations remain unchanged",
+    "Service edits are serialized by the normal installation lock; stopped/disabled services stay stopped/disabled",
+    "Private fsynced receipt retains old profiles, units, manifests, executable paths, service states and managed CLI target before activation",
+    "Active services must report running with the worker version and their actual executable identity before CLI publication",
+    "Explicit CLI queues an immutable executable through systemd D-Bus with typed literal argv and caller XDG directory overrides; it does not stop itself",
+    "Recovery handles cancelled activation and partial unit/manifest writes, and avoids restarting untouched services",
+    "Recovery refuses later credentials, unit or CLI changes; completed rollback is idempotent",
+    "Real user-service fixture exercises unchanged binary update without a restart, distinct version and PID replacement, explicit rollback, and automatic rollback on rejected-version readiness failure",
+    "The fixture verifies forwarding before/after update and rollback, then removes only its owned service",
+    "Production core/edge/firewall images rebuilt from final source pass all disposable checks"
+  ],
+  "limitations": [
+    "Live scenarios change disposable systemd user registrations, not production system services or real enrolled clients",
+    "Distinct/rejected-version fixtures preceded the final parent-directory fsync refinement; the final workspace suite and production images include that refinement",
+    "API-requested automatic update initiation and post-commit update acknowledgement remain unfinished",
+    "Legacy Go/shell automatic updater migration remains a separate gate",
+    "Non-Linux lifecycle, remaining private routing work, fleet access/upgrade and physical benchmarks remain unfinished",
+    "No commit, push or production deployment occurred"
+  ],
+  "production_rollout": "pending",
+  "physical_benchmarks": "pending"
+}

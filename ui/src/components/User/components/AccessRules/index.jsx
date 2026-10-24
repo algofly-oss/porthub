@@ -1,3 +1,5 @@
+import useBackgroundRefresh from "@/shared/hooks/useBackgroundRefresh";
+import { useWorkspaceState } from "@/shared/contexts/workspaceCache";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/router";
 import axios from "axios";
@@ -26,9 +28,9 @@ import PrivateMachines from "./PrivateMachines";
 export default function AccessRules() {
   const router = useRouter(),
     toast = useToast();
-  const [workspaces, setWorkspaces] = useState([]),
-    [workspace, setWorkspace] = useState("");
-  const [data, setData] = useState(null),
+  const [workspaces, setWorkspaces] = useWorkspaceState("access.workspaces", []),
+    [workspace, setWorkspace] = useWorkspaceState("access.workspace", "");
+  const [data, setData] = useWorkspaceState("access.data", null),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
   const [section, setSection] = useState("rules"),
@@ -37,13 +39,15 @@ export default function AccessRules() {
   const [editor, setEditor] = useState(null),
     [confirmation, setConfirmation] = useState(null);
   const [invite, setInvite] = useState(false);
+  const [dataWorkspace, setDataWorkspace] = useWorkspaceState("access.dataWorkspace", "");
   const params = useMemo(() => (workspace ? { workspace } : {}), [workspace]);
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal) => {
     try {
-      const response = await axios.get(`${API}/snapshot`, { params });
+      const response = await axios.get(`${API}/snapshot`, { params, ...(signal instanceof AbortSignal ? { signal } : {}) });
       setData(response.data);
       setError("");
     } catch (error) {
+      if (axios.isCancel(error)) return;
       setError(errorText(error));
     }
   }, [params]);
@@ -59,6 +63,7 @@ export default function AccessRules() {
         setWorkspace(
           items.some((item) => item.id === requested)
             ? requested
+            : items.some((item) => item.id === workspace) ? workspace
             : items.find((item) => item.role === "owner")?.id ||
                 items[0]?.id ||
                 "",
@@ -73,12 +78,13 @@ export default function AccessRules() {
   }, [router.query.workspace]);
   useEffect(() => {
     if (workspace) {
-      setData(null);
+      if (dataWorkspace !== workspace) setData(null);
+      setDataWorkspace(workspace);
       setGroup("all");
       setQuery("");
-      load();
     }
   }, [workspace, load]);
+  useBackgroundRefresh(load, { enabled: Boolean(workspace), refreshKey: workspace });
   const manage = data?.role === "owner" || data?.role === "admin";
   const options = useMemo(
     () =>

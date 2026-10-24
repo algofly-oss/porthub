@@ -19,6 +19,10 @@ type Config struct {
 	PublicBaseURL                       string
 	RatholeServerAddress                string
 	RatholePort                         int
+	TunnelWebSocket                     bool
+	TunnelHTTPBaseURL                   string
+	TunnelFallbackBaseURLs              string
+	TunnelDirectHTTPSBaseURL            string
 
 	// External port range for connections; zero when unrestricted.
 	PortRangeStart, PortRangeEnd int
@@ -28,10 +32,8 @@ type Config struct {
 	LongPollTimeout          time.Duration
 	LongPollInterval         time.Duration
 
-	RatholeReleaseRepo, RatholeReleaseAPI, RatholeReleaseCacheDir string
-	RatholeReleaseCacheTTL                                        time.Duration
-	RatholeDummyName, RatholeDummyToken, RatholeDummyBind         string
-	RatholeConfigPath, TraefikConfigPath                          string
+	RatholeDummyName, RatholeDummyToken, RatholeDummyBind string
+	RatholeConfigPath, TraefikConfigPath                  string
 
 	FirewallBaseURL, FirewallAPIKey string
 	FirewallTimeout                 time.Duration
@@ -80,37 +82,41 @@ func number(name string, fallback float64, errs *[]string) float64 {
 func seconds(f float64) time.Duration { return time.Duration(f * float64(time.Second)) }
 
 func Load() (Config, error) {
+	tunnelWebSocket, err := Bool("PORTHUB_TUNNEL_WEBSOCKET", true)
+	if err != nil {
+		return Config{}, err
+	}
 	signup, err := Bool("SIGNUP_DISABLED", false)
 	if err != nil {
 		return Config{}, err
 	}
 	var errs []string
 	c := Config{
-		Listen:               env("PORTHUB_API_LISTEN", "127.0.0.1:47080"),
-		MongoURI:             os.Getenv("MONGO_DATABASE_URI"),
-		MongoDatabase:        os.Getenv("MONGO_DATABASE_NAME"),
-		SessionCookie:        env("SESSION_COOKIE_NAME", "porthub_session"),
-		SignupDisabled:       signup,
-		WebProxyDomainSuffix: strings.ToLower(strings.TrimSpace(os.Getenv("WEB_PROXY_DOMAIN_SUFFIX"))),
-		ServiceDomain:        strings.TrimSpace(os.Getenv("PORT_HUB_SERVICE_DOMAIN")),
-		PublicBaseURL:        os.Getenv("PORT_HUB_PUBLIC_BASE_URL"),
-		RatholeServerAddress: os.Getenv("RATHOLE_SERVER_ADDRESS"),
-		RatholePort:          int(number("RATHOLE_PORT", 2334, &errs)),
+		Listen:                   env("PORTHUB_API_LISTEN", "127.0.0.1:47080"),
+		MongoURI:                 os.Getenv("MONGO_DATABASE_URI"),
+		MongoDatabase:            os.Getenv("MONGO_DATABASE_NAME"),
+		SessionCookie:            env("SESSION_COOKIE_NAME", "porthub_session"),
+		SignupDisabled:           signup,
+		WebProxyDomainSuffix:     strings.ToLower(strings.TrimSpace(os.Getenv("WEB_PROXY_DOMAIN_SUFFIX"))),
+		ServiceDomain:            strings.TrimSpace(os.Getenv("PORT_HUB_SERVICE_DOMAIN")),
+		PublicBaseURL:            os.Getenv("PORT_HUB_PUBLIC_BASE_URL"),
+		RatholeServerAddress:     os.Getenv("RATHOLE_SERVER_ADDRESS"),
+		RatholePort:              int(number("RATHOLE_PORT", 2334, &errs)),
+		TunnelWebSocket:          tunnelWebSocket,
+		TunnelHTTPBaseURL:        os.Getenv("PORT_HUB_HTTP_BASE_URL"),
+		TunnelFallbackBaseURLs:   os.Getenv("PORT_HUB_FALLBACK_BASE_URLS"),
+		TunnelDirectHTTPSBaseURL: os.Getenv("PORT_HUB_DIRECT_HTTPS_BASE_URL"),
 
 		MachineOnlineTTL:         seconds(number("MACHINE_ONLINE_TTL_SECONDS", 300, &errs)),
 		MachineOfflineAlertGrace: seconds(number("MACHINE_OFFLINE_ALERT_GRACE_SECONDS", 60, &errs)),
 		LongPollTimeout:          seconds(number("MACHINE_CONFIG_LONG_POLL_TIMEOUT_SECONDS", 25, &errs)),
 		LongPollInterval:         seconds(number("MACHINE_CONFIG_LONG_POLL_INTERVAL_SECONDS", 1, &errs)),
 
-		RatholeReleaseRepo:     env("RATHOLE_RELEASE_GITHUB_REPOSITORY", "rathole-org/rathole"),
-		RatholeReleaseAPI:      env("RATHOLE_RELEASE_GITHUB_API_URL", "https://api.github.com"),
-		RatholeReleaseCacheDir: env("RATHOLE_RELEASE_CACHE_DIR", "/tmp/porthub/rathole-downloads"),
-		RatholeReleaseCacheTTL: seconds(number("RATHOLE_RELEASE_CACHE_TTL_SECONDS", 86400, &errs)),
-		RatholeDummyName:       env("RATHOLE_DUMMY_SERVICE_NAME", "dummy"),
-		RatholeDummyToken:      env("RATHOLE_DUMMY_SERVICE_TOKEN", "dummy"),
-		RatholeDummyBind:       env("RATHOLE_DUMMY_SERVICE_BIND_ADDR", "127.0.0.1:65535"),
-		RatholeConfigPath:      env("RATHOLE_SERVER_CONFIG_PATH", "/runtime/rathole/server.toml"),
-		TraefikConfigPath:      env("TRAEFIK_DYNAMIC_CONFIG_PATH", "/runtime/traefik/traffic-routes.yml"),
+		RatholeDummyName:  env("RATHOLE_DUMMY_SERVICE_NAME", "dummy"),
+		RatholeDummyToken: env("RATHOLE_DUMMY_SERVICE_TOKEN", "dummy"),
+		RatholeDummyBind:  env("RATHOLE_DUMMY_SERVICE_BIND_ADDR", "127.0.0.1:65535"),
+		RatholeConfigPath: env("PORTHUB_GATEWAY_CONFIG_PATH", env("RATHOLE_SERVER_CONFIG_PATH", "/runtime/porthub/gateway.toml")),
+		TraefikConfigPath: env("TRAEFIK_DYNAMIC_CONFIG_PATH", "/runtime/traefik/traffic-routes.yml"),
 
 		FirewallBaseURL: strings.TrimRight(os.Getenv("FIREWALL_BASE_URL"), "/"),
 		FirewallAPIKey:  os.Getenv("FIREWALL_API_KEY"),

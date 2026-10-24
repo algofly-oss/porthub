@@ -1,0 +1,32 @@
+{
+  "verified_at_utc": "2026-10-24T03:09:32.187138+00:00",
+  "scope": "Native STUN gathering and private-access group mutation",
+  "workspace_tests": {
+    "passed": 203,
+    "failed": 0,
+    "ignored": 0
+  },
+  "full_test_log_sha256": "c1cb85181f00c971e29cc3dd79bf3cea83ca7781106271a236dd90fd60bd0fdd",
+  "clippy": "workspace all-targets, warnings denied: passed",
+  "checks": [
+    "Real UDP STUN gathering uses the same bound socket, random transaction ID, matching source and matching transaction; spoofed replies ignored",
+    "Reflexive-only NAT address-translation simulation establishes pinned ICE/DTLS and delivers a full-size packet from the correct base interface",
+    "Configured UDP STUN authorities reject embedded credentials, fragments, paths, invalid ports and unsupported transport",
+    "Native access-group creation and membership reject foreign objects before mutation, enforce workspace administrator and origin checks, bound inputs and preserve legacy memberships",
+    "Authenticated inventory excludes machine credentials after group mutation"
+  ],
+  "limits": [
+    "NAT simulation and local UDP STUN fixtures do not prove physical ISP NAT connectivity or WAN bandwidth",
+    "Current images and ARM candidate builds are staging artifacts; production has not been switched",
+    "Real user-service integration uses the previously built release agent executable; workspace compilation and protocol tests use current source",
+    "Legacy installer compatibility, native service adoption, all-platform private runtimes, native updates, full fleet access, physical benchmarks and deployment remain unfinished"
+  ],
+  "fleet_access": "Luna, Condor and Miro accessible; alternate SSH details requested for eight other enabled records",
+  "production_rollout": "pending",
+  "physical_benchmarks": "pending",
+  "production_image_verification": {
+    "checks_passed": 23,
+    "evidence": "2026-10-24-stun-groups-isolation.json",
+    "scope": "isolated production containers; packaged public CLI transfer and private enrollment/signaling; no physical private TUN transfer"
+  }
+}

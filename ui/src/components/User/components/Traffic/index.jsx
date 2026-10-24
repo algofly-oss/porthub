@@ -1,3 +1,5 @@
+import { externalEndpoint, internalEndpoint } from "@/shared/utils/endpoints.mjs";
+import { useWorkspaceState } from "@/shared/contexts/workspaceCache";
 import ResultsPagination from "@/components/ui/results-pagination";
 import SearchSelect from "@/components/ui/search-select";
 import { useEffect, useMemo, useState } from "react";
@@ -29,9 +31,9 @@ function TrafficSkeleton() {
 export default function Traffic() {
   const demo = useDemo();
   const { colorScheme } = useMantineColorScheme();
-  const [rows, setRows] = useState([]);
+  const [rows, setRows] = useWorkspaceState("traffic.rows", []);
   const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useWorkspaceState("traffic.loading", true);
   const [paused, setPaused] = useState(false);
   const [query, setQuery] = useState("");
   const [machine, setMachine] = useState("all");
@@ -40,7 +42,7 @@ export default function Traffic() {
   const [expanded, setExpanded] = useState("");
   const [page, setPage] = useState(1);
   const [refresh, setRefresh] = useState(0);
-  const [updated, setUpdated] = useState(null);
+  const [updated, setUpdated] = useWorkspaceState("traffic.updated", null);
   useEffect(() => {
     if (paused) return;
     let active = true, timeout;
@@ -95,7 +97,7 @@ export default function Traffic() {
         const c = row.connection, s = row.summary, open = expanded === c._id;
         return <div key={c._id}>
           <button type="button" aria-expanded={open} aria-controls={`traffic-${c._id}`} onClick={() => setExpanded(open ? "" : c._id)} className="relative grid w-full grid-cols-3 items-center gap-3 px-4 py-3 text-left hover:bg-accent/40 md:grid-cols-[minmax(0,1.4fr)_minmax(70px,120px)_repeat(3,minmax(0,1fr))_20px]">
-            <div className="col-span-2 min-w-0 md:col-span-1"><p className="truncate text-sm font-medium">{c.service_name || `Port ${c.external_port}`}</p><p className="mt-1 truncate text-xs text-muted-foreground">{c.machine_name || "Unknown machine"} · :{c.external_port} → :{c.internal_port}</p></div>
+            <div className="col-span-2 min-w-0 md:col-span-1"><p className="truncate text-sm font-medium">{c.service_name || `Port ${c.external_port}`}</p><p className="mt-1 truncate text-xs text-muted-foreground">{c.machine_name || "Unknown machine"} · {externalEndpoint(c)} → {internalEndpoint(c)}</p></div>
             <TrafficSparkline samples={row.traffic} now={(updated || Date.now()) / 1000} showRates={false} label={`${c.machine_name || "Machine"} · ${c.service_name || `Port ${c.external_port}`}`} className="mr-5 md:mr-0" />
             <div><p className="text-[11px] text-muted-foreground">Incoming</p><p className="mt-1 font-mono text-xs text-emerald-700 dark:text-emerald-400">{formatBytes(s.incoming)}/s</p></div>
             <div><p className="text-[11px] text-muted-foreground">Outgoing</p><p className="mt-1 font-mono text-xs text-blue-700 dark:text-blue-400">{formatBytes(s.outgoing)}/s</p></div>
@@ -103,7 +105,7 @@ export default function Traffic() {
             <IconChevronDown size={16} className={`absolute right-3 top-3 text-zinc-400 transition-transform md:static ${open ? "rotate-180" : ""}`} />
           </button>
           {open && <div id={`traffic-${c._id}`} className="space-y-4 border-t border-border/60 p-4 sm:p-5">
-            <TrafficMonitorPanel isDark={colorScheme === "dark"} samples={row.traffic} isLoading={false} title={`${c.service_name || "Port"} · :${c.external_port}`} windowSeconds={seconds} />
+            <TrafficMonitorPanel isDark={colorScheme === "dark"} samples={row.traffic} isLoading={false} title={`${c.service_name || "Port"} · ${externalEndpoint(c)}`} windowSeconds={seconds} />
             <div className="grid gap-3 sm:grid-cols-2"><IpList title="Observed IP addresses" ips={s.ips} /><IpList title="Blocked IP addresses" ips={s.blockedIps} /></div>
             <Button asChild variant="secondary"><a href={uiRoutes.getTrafficMonitor({dataId:c._id,demo})} target="_blank" rel="noreferrer">Open Dedicated Monitor<IconArrowUpRight size={15} /></a></Button>
           </div>}

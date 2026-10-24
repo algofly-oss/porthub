@@ -1,0 +1,31 @@
+{
+  "verified_at_utc": "2026-10-24T08:16:36.802821+00:00",
+  "scope": "Private ICE/DTLS datagram I/O fault isolation on Linux loopback",
+  "tests": {
+    "passed": 13,
+    "failed": 0,
+    "ignored": 0
+  },
+  "clippy": "workspace all-targets, warnings denied: passed",
+  "log_sha256": {
+    "mesh": "ecdf249f4e9d4a16dfe3fcc7b79fbc5f4b7c37b4b8ab212d6eda2703e2f4fe6d",
+    "clippy": "c6e6f68a92d6c6105d71a878978576c89182c2500e190066db106aebd7933890"
+  },
+  "source_sha256": {
+    "crates/porthub-mesh/src/udp.rs": "e83e46431790ca5aa7f7781521b4f8653b63d4f51da0c492b0402141176f763d",
+    "crates/porthub-mesh/src/protocol.rs": "b3c838ceb797ad8b56f5462362cae105e9ab76ceb4c2304085044ac933f488a2"
+  },
+  "checks": [
+    "An unreachable higher-priority ICE candidate does not close a peer using the viable candidate",
+    "Recoverable receive errors use cancellable exponential backoff, bounded at one second",
+    "An irrecoverably closed interface does not close a connection using another viable interface",
+    "Oversized unauthenticated datagrams are dropped before protocol processing and authenticated packets continue in both directions",
+    "All closed interfaces fail the peer promptly to permit route fallback",
+    "Peer ID and fingerprint validation and both Go compatibility roles still pass"
+  ],
+  "limitations": [
+    "Controlled loopback tests do not prove physical LAN/WAN throughput or dynamic network-handoff behavior",
+    "Path MTU adaptation and bandwidth-based route selection remain unfinished",
+    "No production deployment, client upgrade or physical 10 GiB benchmark occurred"
+  ]
+}

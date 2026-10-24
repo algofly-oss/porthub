@@ -1,0 +1,33 @@
+{
+  "scope": "Local native listener application and role isolation; not an URM2 rollout",
+  "verification": {
+    "workspace_tests_passed": 106,
+    "workspace_tests_failed": 0,
+    "clippy": "workspace all targets, warnings denied",
+    "format": "cargo fmt --all -- --check",
+    "compose_checks_passed": 12,
+    "compose_report": "2026-10-24-listener-ack-isolation.json"
+  },
+  "checks": [
+    "Exact SHA256 snapshot acknowledgement over a private Unix socket; absent from public ingress",
+    "API waits for real listener and active visitor closure before firewall deletion",
+    "Unavailable or rejected acknowledgement retains restrictions and rolls back machine edit",
+    "Interrupted revocation remains owned and is awaited on retry",
+    "TCP and UDP ports can be rebound synchronously after reload completion",
+    "Wrong/extra receipts, oversized responses, HTTP errors and redirects rejected by core client",
+    "Initial active restrictions installed before listener snapshot publication",
+    "Reconciliation preserves failed-candidate restrictions until snapshot application succeeds",
+    "Read-only core access to edge control volume; no firewall access; three containers retained"
+  ],
+  "go_compatibility": {
+    "tests_passed": 5,
+    "executable_sha256": "7bfbc5712fe850f3956b8f4509f2cdf8bc24682d79d9f85a9e284b567272e4e9",
+    "scope": "Local Go compatibility executable consumes native API configuration over shared native edge"
+  },
+  "limitations": [
+    "Crash/restart and simultaneous multiple-failure recovery need broader verification",
+    "Remaining native API/realtime/private-network and cross-platform lifecycle work incomplete",
+    "Final remote 10 GiB public/private and miro.phub benchmarks outstanding",
+    "No commit, push, URM2 deployment or registered-agent upgrades performed"
+  ]
+}

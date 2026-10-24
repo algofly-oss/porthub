@@ -1,0 +1,109 @@
+name: Native agent platforms
+on:
+  push:
+    paths: ["crates/porthub-agent/**", "crates/porthub-transfer/**", "crates/porthub-tunnel/**", "crates/porthub-identity/**", "crates/porthub-mesh/**", "vendor/rathole/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".github/workflows/agent-platforms.yml"]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    name: ${{ matrix.artifact }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, artifact: x86_64, extension: ""}
+          - {os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, artifact: arm64, extension: ""}
+          - {os: macos-15-intel, target: x86_64-apple-darwin, artifact: darwin_x86_64, extension: ""}
+          - {os: macos-15, target: aarch64-apple-darwin, artifact: darwin_arm64, extension: ""}
+          - {os: windows-latest, target: x86_64-pc-windows-msvc, artifact: windows_x86_64, extension: .exe}
+          - {os: windows-11-arm, target: aarch64-pc-windows-msvc, artifact: windows_arm64, extension: .exe}
+          - {os: windows-latest, target: i686-pc-windows-msvc, artifact: windows_x86, extension: .exe}
+    runs-on: ${{ matrix.os }}
+    env:
+      PORTHUB_VERSION: ${{ github.sha }}
+      RUST_MIN_STACK: "33554432"
+      RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust target
+        shell: bash
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup target add --toolchain 1.99.1 ${{ matrix.target }}
+      - name: Test transfers, management and tunnel adapters
+        shell: bash
+        run: cargo test --locked -p porthub-agent -p porthub-transfer -p porthub-tunnel -p porthub-identity -p porthub-mesh --target ${{ matrix.target }}
+      - name: Build self-contained agent
+        if: runner.os != 'Linux'
+        shell: bash
+        run: cargo build --locked --release -p porthub-agent --target ${{ matrix.target }}
+      - name: Build static Linux agent bundle
+        if: runner.os == 'Linux'
+        shell: bash
+        run: docker build --target agent-artifacts --build-arg PORTHUB_VERSION="$PORTHUB_VERSION" --output type=local,dest=dist .
+      - name: Prepare versioned artifact metadata
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib, os, pathlib, shutil
+          source = pathlib.Path('target/${{ matrix.target }}/release/porthub${{ matrix.extension }}')
+          output = pathlib.Path('dist/porthub-${{ matrix.artifact }}${{ matrix.extension }}')
+          output.parent.mkdir(exist_ok=True)
+          shutil.copy2(source, output)
+          output.with_name(output.name+'.version').write_text(os.environ['PORTHUB_VERSION']+'\n')
+          output.with_name(output.name+'.sha256').write_text(hashlib.sha256(output.read_bytes()).hexdigest()+'  '+output.name+'\n')
+          PY
+      - name: Test packaged HTTP server lifecycle
+        shell: bash
+        env:
+          PORTHUB_TEST_AGENT_EXECUTABLE: ${{ github.workspace }}/dist/porthub-${{ matrix.artifact }}${{ matrix.extension }}
+        run: cargo test --locked -p porthub-agent --test http_management --target ${{ matrix.target }}
+      - name: Test native macOS service lifecycle
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          PORTHUB_TEST_LAUNCHD: "1"
+        run: cargo test --locked -p porthub-agent --test launchd_live --target ${{ matrix.target }} -- --include-ignored
+      - uses: actions/upload-artifact@v4
+        with:
+          name: porthub-${{ matrix.artifact }}
+          path: dist/
+          if-no-files-found: error
+  linux-32:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {target: i686-unknown-linux-gnu, artifact: x86, compiler: gcc, ar: ar, packages: gcc-multilib}
+          - {target: armv7-unknown-linux-gnueabihf, artifact: armv7, compiler: arm-linux-gnueabihf-gcc, ar: arm-linux-gnueabihf-ar, packages: gcc-arm-linux-gnueabihf}
+          - {target: arm-unknown-linux-gnueabihf, artifact: armhf, compiler: arm-linux-gnueabihf-gcc, ar: arm-linux-gnueabihf-ar, packages: gcc-arm-linux-gnueabihf}
+    env:
+      PORTHUB_VERSION: ${{ github.sha }}
+      RUST_MIN_STACK: "33554432"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build-only cross compiler
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ${{ matrix.packages }}
+      - run: rustup target add ${{ matrix.target }}
+      - name: Build agent for 32-bit Linux
+        shell: bash
+        run: |
+          target_key=$(echo '${{ matrix.target }}' | tr '[:lower:]-' '[:upper:]_')
+          export "CARGO_TARGET_${target_key}_LINKER=${{ matrix.compiler }}"
+          cc_target_key=$(echo '${{ matrix.target }}' | tr '-' '_')
+          export "CC_${cc_target_key}=${{ matrix.compiler }}"
+          export "AR_${cc_target_key}=${{ matrix.ar }}"
+          cargo build --locked --release -p porthub-agent --target ${{ matrix.target }}
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/porthub dist/porthub-${{ matrix.artifact }}
+          printf '%s\n' "$PORTHUB_VERSION" > dist/porthub-${{ matrix.artifact }}.version
+          cd dist && sha256sum porthub-${{ matrix.artifact }} > porthub-${{ matrix.artifact }}.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: porthub-${{ matrix.artifact }}
+          path: dist/
+          if-no-files-found: error

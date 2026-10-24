@@ -1,0 +1,54 @@
+{
+  "verified_at_utc": "2026-10-24T07:54:57.651435+00:00",
+  "scope": "API-requested automatic updates for installed native Linux public services and post-commit acknowledgement",
+  "workspace_tests": {
+    "passed": 233,
+    "failed": 0,
+    "ignored": 0
+  },
+  "full_test_log_sha256": "8bb85e0e58dfd7f3974e6361c923a68541c0926fd077fdd8ba32a416fc1cff05",
+  "clippy": "workspace all-targets, warnings denied: passed",
+  "clippy_log_sha256": "eb63903ac84b3b07a191f61245120a065a04a78d5e764dd9d3c79db8bb06abf6",
+  "isolation_checks_passed": 23,
+  "isolation_evidence": "2026-10-24-auto-update-isolation.json",
+  "rejected_version_live_test": {
+    "passed": 1,
+    "log_sha256": "5b399844ffd3d7b01fa8fb0f31bd3d98b073c2d9e52e9ebf2ea596cf26007ae5"
+  },
+  "source_sha256": {
+    "crates/porthub-agent/src/autoupdate.rs": "a41a8a7f72c9502d447492d02051e13bc0c1a656ea35c5f4d4a0ad52309ccae1",
+    "crates/porthub-agent/src/runtime.rs": "3302bde0439cbc6bc68d28ec8015f3ec2b2ab45a0121267c422e852ea4e29aaf",
+    "crates/porthub-agent/src/upgrade.rs": "59fd6418c665a51b9928ca65b6cfbb82d79f2e143cf6f9aee38d34ac26d29049",
+    "crates/porthub-agent/src/update.rs": "2f869815bfa0b96e07ec05f79d0da10de1f54ae364bd3daada3bc329a54e228b",
+    "crates/porthub-agent/src/service/mod.rs": "8ce1361ae27dc402db75fac59d6714d0749f4b1264151acd2196d658b62a77f7",
+    "crates/porthub-agent/src/adopt.rs": "47ae093c7e4203b13e4ad93e0a646f7c25c1c123c78d13ded652566695fc801e",
+    "crates/porthub-agent/src/main.rs": "f4d42853a01c02d5ccb942acba88424bd4cb1f0901754d872521f0962474e1f1",
+    "crates/porthub-agent/tests/service_live.rs": "37940e3ce8982018b0b3ae810885d3487eeeb24050e6f0c1cf4ebe566870b5c2",
+    "crates/porthub-agent/tests/upgrade.rs": "c0abe21c788b0b179d77fe178c1695a73b3e17e2bf9966eee71df709dae82217",
+    "crates/porthub-agent/tests/update.rs": "651d3e5a338ba557f95a50a0c87857843be3a8fb33fbfda950d3e7e839cbe2f1",
+    "crates/porthub-api/tests/native_update.rs": "cf4cd369a534d45f2a7af7a22ca7da18a36ba1f95bd0dfcf8793e16711f28a0a",
+    "ui/src/components/User/components/Home/components/Host/HostConfigPopup.jsx": "442f8d987db041c04bc28120adfd00337d718697692442510ec2ddc3eebdba94"
+  },
+  "checks": [
+    "Machine identity is validated before update metadata changes; a foreign machine configuration neither downloads nor acknowledges and forwarding remains usable",
+    "Only the actual installed service/executable/cgroup performs automatic service updates; foreground profiles have no maintenance worker",
+    "CLI bindings preserve custom bin locations and XDG directories across independent systemd updates",
+    "One dormant controller waits for requests, persists preparation cooldown across restarts and stops retrying rolled-back request identities",
+    "The request/target is recorded durably before activation; a new running version alone is not an acknowledgement",
+    "Committed proof matches request, target, public profile, installed public/private executable paths and running release; rollback invalidates it",
+    "Actual native API/Mongo dashboard request updates a real disposable user service; the database observes the new version before acknowledgement and clears the request target after commit",
+    "Real service fixture verifies a distinct version/PID, one asset download for the request, forwarding and rollback",
+    "Rejected target version triggers readiness rollback and stays unacknowledged without an automatic retry loop",
+    "UI prioritizes outstanding requests over observed version equality; production frontend image build passed",
+    "All three rebuilt production roles pass the disposable container checks; test containers were removed"
+  ],
+  "limitations": [
+    "Automatic updates are implemented for installed native Linux services, not legacy Go/shell agents or non-Linux lifecycle",
+    "Interrupted worker recovery remains explicit through the retained rollback receipt; this report does not prove automatic recovery from machine power loss",
+    "Local user-service and controlled API tests are not production system-service or physical fleet upgrades",
+    "Remaining platform lifecycle, private-route optimization, legacy updater migration and unavailable fleet access remain unfinished",
+    "No commit/push, URM2 production cutover, real-client upgrade or physical 10 GiB benchmark occurred"
+  ],
+  "production_rollout": "pending",
+  "physical_benchmarks": "pending"
+}

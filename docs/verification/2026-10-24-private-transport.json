@@ -1,0 +1,20 @@
+{
+  "date": "2026-10-24",
+  "milestone": "native private UDP/DTLS, Linux TUN/DNS, policy, relay and operator origin configuration",
+  "tests": {
+    "passed": 191,
+    "failed": 0,
+    "ignored": 0
+  },
+  "additional_checks": [
+    "isolated Docker NET_ADMIN TUN kernel UDP/route cleanup test passed",
+    "authorized Luna root systemd-resolved test passed",
+    "workspace Clippy with warnings denied passed"
+  ],
+  "physical_benchmarks": "pending",
+  "production_rollout": "pending",
+  "notes": [
+    "Go interoperability uses a temporary GatherOnce fixture adjustment documented in native-private-transport.md",
+    "The isolation report records its exact tested image hashes; operator-private-address and candidate-preference changes require refreshed image verification."
+  ]
+}

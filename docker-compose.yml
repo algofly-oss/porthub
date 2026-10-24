@@ -1,40 +1,140 @@
-# PortHub server: a single container running the API, web app, database,
-# web proxy, tunnel server, firewall and private-network relay.
-# Mode: PORTHUB_MODE=prod (default) or dev in .env.
-#   docker compose up -d --build
+# Production: docker compose up -d --build
+# Development: PORTHUB_MODE=dev ./deploy.sh
+x-common: &common
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  stop_grace_period: 20s
+  tmpfs: ["/tmp:rw,nosuid,nodev,size=256m"]
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: "3"}
+
 services:
-  porthub:
+  core:
+    <<: *common
+    # Compose Watch copies via Docker's archive API, which requires a writable
+    # development core rootfs. Production defaults to read-only.
+    read_only: ${PORTHUB_CORE_READ_ONLY:-true}
+    image: porthub:core
+    container_name: ${PORTHUB_CONTAINER_PREFIX:-porthub}-core
     build:
       context: .
-      dockerfile: Dockerfile
-      args:
-        PORTHUB_VERSION: ${PORTHUB_VERSION:-dev} # set by deploy.sh (git commit)
-    image: porthub:latest
-    container_name: porthub
-    network_mode: host # binds 80/443 (web), 8345/8346 (app), tunnel ports
-    cap_add:
-      - NET_ADMIN # firewall rules and traffic counters
-      - NET_RAW
-    env_file:
-      - ./.env
+      target: ${PORTHUB_MODE:-prod}-core
+      args: {PORTHUB_VERSION: "${PORTHUB_VERSION:-dev}", PORTHUB_BUILD_JOBS: "${PORTHUB_BUILD_JOBS:-4}"}
+    env_file: [.env]
     environment:
       PORTHUB_MODE: ${PORTHUB_MODE:-prod}
+      PORTHUB_API_SOCKET: /run/porthub-api/api.sock
+      PORTHUB_EDGE_SOCKET: /run/porthub-edge/control.sock
+      PORTHUB_DB_INITIALIZE: "true"
       MONGO_DATABASE_URI: mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@127.0.0.1:47017/${MONGO_DATABASE_NAME}?authSource=admin
-      FIREWALL_BASE_URL: http://127.0.0.1:47001/api
-      RATHOLE_SERVER_CONFIG_PATH: /runtime/rathole/server.toml
-      TRAEFIK_DYNAMIC_CONFIG_PATH: /runtime/traefik/traffic-routes.yml
-      FW_DB_PATH: /data/firewall/firewall.db
-      FW_HOST: 127.0.0.1
-      FW_PORT: "47001"
+      FIREWALL_SOCKET: /run/porthub-firewall/api.sock
+      PORTHUB_GATEWAY_CONFIG_PATH: /run/porthub-config/gateway.toml
+      PORTHUB_WEB_ROUTES_CONFIG_PATH: /run/porthub-config/web-routes.json
+      PORTHUB_WEB_ACTIVITY_LOG_PATH: /run/porthub-activity/web-activity.log
     volumes:
       - porthub_data:/data
-      - ./ui:/app/ui-src # used only in dev mode
-    restart: always
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+      - client_artifacts:/app/client-bin:ro
+      - api_socket:/run/porthub-api
+      - edge_socket:/run/porthub-edge:ro
+      - firewall_socket:/run/porthub-firewall
+      - routing_config:/run/porthub-config
+      - web_activity:/run/porthub-activity:ro
+    healthcheck:
+      test: [CMD, porthub-runtime, check, --socket, /run/porthub-api/api.sock]
+      interval: 30s
+      timeout: 6s
+      start_period: 60s
+      retries: 3
+    depends_on:
+      firewall: {condition: service_healthy}
+    develop:
+      watch:
+        - {path: crates, action: rebuild}
+        - {path: Cargo.lock, action: rebuild}
+        - {path: ui/src, action: sync, target: /app/ui-live/src}
+        - {path: ui/public, action: sync, target: /app/ui-live/public}
+        - {path: ui/package.json, action: rebuild}
+
+  edge:
+    <<: *common
+    image: porthub:edge
+    container_name: ${PORTHUB_CONTAINER_PREFIX:-porthub}-edge
+    build:
+      context: .
+      target: ${PORTHUB_MODE:-prod}-edge
+      args: {PORTHUB_VERSION: "${PORTHUB_VERSION:-dev}", PORTHUB_BUILD_JOBS: "${PORTHUB_BUILD_JOBS:-4}"}
+    network_mode: host
+    cap_add: [NET_BIND_SERVICE]
+    environment:
+      PORTHUB_API_SOCKET: /run/porthub-api/api.sock
+      PORTHUB_EDGE_SOCKET: /run/porthub-edge/control.sock
+      PORTHUB_WEB_ROUTES_CONFIG_PATH: /run/porthub-config/web-routes.json
+      PORTHUB_WEB_ACTIVITY_LOG_PATH: /run/porthub-activity/web-activity.log
+      PORTHUB_EDGE_HTTP_LISTEN: ${PORTHUB_EDGE_HTTP_LISTEN:-0.0.0.0:80,0.0.0.0:8345}
+      PORTHUB_EDGE_TLS_LISTEN: ${PORTHUB_EDGE_TLS_LISTEN-0.0.0.0:443,0.0.0.0:8346}
+      PORTHUB_TLS_CERT: /data/certificates/origin.crt
+      PORTHUB_TLS_KEY: /data/certificates/origin.key
+      PORTHUB_ALLOW_SELF_SIGNED: ${PORTHUB_ALLOW_SELF_SIGNED:-true}
+      PORT_HUB_PUBLIC_BASE_URL: ${PORT_HUB_PUBLIC_BASE_URL:-}
+      PORT_HUB_HTTP_BASE_URL: ${PORT_HUB_HTTP_BASE_URL:-}
+      PORT_HUB_FALLBACK_BASE_URLS: ${PORT_HUB_FALLBACK_BASE_URLS:-}
+    volumes:
+      - api_socket:/run/porthub-api:ro
+      - edge_socket:/run/porthub-edge
+      - routing_config:/run/porthub-config:ro
+      - web_activity:/run/porthub-activity
+      - certificates:/data/certificates
+    depends_on:
+      core: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, porthub-runtime, check, --listen-env, PORTHUB_EDGE_HTTP_LISTEN]
+      interval: 30s
+      timeout: 6s
+      retries: 3
+    develop:
+      watch:
+        - {path: crates/porthub-edge, action: rebuild}
+        - {path: crates/porthub-tunnel, action: rebuild}
+        - {path: crates/porthub-identity, action: rebuild}
+        - {path: crates/porthub-runtime, action: rebuild}
+        - {path: vendor/rathole, action: rebuild}
+
+  firewall:
+    <<: *common
+    image: porthub:firewall
+    container_name: ${PORTHUB_CONTAINER_PREFIX:-porthub}-firewall
+    build:
+      context: .
+      target: ${PORTHUB_MODE:-prod}-firewall
+      args: {PORTHUB_VERSION: "${PORTHUB_VERSION:-dev}", PORTHUB_BUILD_JOBS: "${PORTHUB_BUILD_JOBS:-4}"}
+    network_mode: host
+    cap_add: [NET_ADMIN]
+    environment:
+      FW_API_KEY: ${FW_API_KEY:?Set FW_API_KEY in .env}
+      FW_NFT_TABLE: ${FW_NFT_TABLE:-inet porthub}
+    volumes:
+      - firewall_data:/data/firewall
+      - firewall_socket:/run/porthub-firewall
+    healthcheck:
+      test: [CMD, porthub-runtime, check, --socket, /run/porthub-firewall/api.sock, --path, /api/ping, --api-key-env, FW_API_KEY]
+      interval: 30s
+      timeout: 6s
+      retries: 3
+    develop:
+      watch:
+        - {path: crates/porthub-firewall, action: rebuild}
+        - {path: crates/porthub-runtime, action: rebuild}
 
 volumes:
   porthub_data:
+  client_artifacts:
+  firewall_data:
+  api_socket:
+  edge_socket:
+  firewall_socket:
+  routing_config:
+  certificates:
+  web_activity:

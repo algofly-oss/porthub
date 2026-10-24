@@ -1,0 +1,30 @@
+{
+  "scope": "Local Rust API machine editing and shared conditional recovery; no production deployment",
+  "routes": [
+    "PUT /api/machines/update"
+  ],
+  "checks": [
+    "Authenticated owner checks and rejection of injected token/owner/private-revocation fields",
+    "Legacy enabled/is_active precedence; explicit null versus omitted setup/group fields",
+    "Hostname runtime fallback, aliases, groups, URL/text limits and Telegram exclusions",
+    "Authenticated runtime synchronization and update requests survive failed-edit recovery",
+    "Atomic recovery handles missing/null values, arrays and strings beginning with dollar signs",
+    "Partial firewall failures restore owned port policies and preserve unrelated ports",
+    "Restrictions precede publication for new enable and disable recovery",
+    "Token rotation regression checks pass with shared atomic recovery"
+  ],
+  "verification": {
+    "workspace_tests_passed": 103,
+    "workspace_tests_failed": 0,
+    "clippy": "workspace all targets, warnings denied",
+    "format": "cargo fmt --all -- --check",
+    "real_linux_user_service_test": "passed; no test unit remains"
+  },
+  "limitations": [
+    "Live listener-closure acknowledgement before policy removal remains unimplemented",
+    "Recovery after multiple simultaneous external failures needs durable retries",
+    "Native realtime event parity and remaining machine APIs incomplete",
+    "Production images not rebuilt for this milestone",
+    "No remote benchmarks, commit, push or URM2 deployment performed"
+  ]
+}

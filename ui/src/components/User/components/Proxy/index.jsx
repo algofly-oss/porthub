@@ -1,3 +1,5 @@
+import useBackgroundRefresh from "@/shared/hooks/useBackgroundRefresh";
+import { useWorkspaceState } from "@/shared/contexts/workspaceCache";
 import ResultsPagination from "@/components/ui/results-pagination";
 import { useEffect, useMemo, useState } from "react";
 import axios from "axios";
@@ -26,11 +28,11 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
   const activity = useProxyActivity();
   const activityById = new Map(activity.data.map(metric=>[metric.route_id,metric]));
   const { success, error } = useToast();
-  const [proxies, setProxies] = useState([]);
-  const [connections, setConnections] = useState([]);
-  const [machines, setMachines] = useState([]);
-  const [settings, setSettings] = useState({});
-  const [loading, setLoading] = useState(true);
+  const [proxies, setProxies] = useWorkspaceState("proxies.routes", []);
+  const [connections, setConnections] = useWorkspaceState("proxies.connections", []);
+  const [machines, setMachines] = useWorkspaceState("proxies.machines", []);
+  const [settings, setSettings] = useWorkspaceState("proxies.settings", {});
+  const [loading, setLoading] = useWorkspaceState("proxies.loading", true);
   const [loadError, setLoadError] = useState("");
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -49,19 +51,19 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
     setOpened(nextOpened);
   }
 
-  async function load() {
-    setLoading(true);
+  async function load(signal) {
+    const options = signal instanceof AbortSignal ? { signal } : {};
     try {
       const [routes, ports, clients, defaults] = await Promise.all([
-        axios.get(apiRoutes.listTrafficRoutes), axios.get(apiRoutes.listConnections),
-        axios.get(apiRoutes.listMachines), axios.get(apiRoutes.authSettings),
+        axios.get(apiRoutes.listTrafficRoutes, options), axios.get(apiRoutes.listConnections, options),
+        axios.get(apiRoutes.listMachines, options), axios.get(apiRoutes.authSettings, options),
       ]);
       setProxies(routes.data?.data || []); setConnections(ports.data?.data || []);
       setMachines(clients.data?.data || []); setSettings(defaults.data || {}); setLoadError("");
-    } catch { setLoadError("Could not load proxies. Check your connection and try again."); }
-    finally { setLoading(false); }
+    } catch (error) { if (axios.isCancel(error)) return; setLoadError("Could not load proxies. Check your connection and try again."); }
+    finally { if (!options.signal?.aborted) setLoading(false); }
   }
-  useEffect(() => { load(); }, []);
+  useBackgroundRefresh(load);
   useCreateFromUrl("proxies", create, !compact && !loading);
   useEffect(() => {
     if (!compact && typeof router.query.search === "string") setQuery(router.query.search);

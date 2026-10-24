@@ -1,0 +1,47 @@
+{
+  "verified_at_utc": "2026-10-24T05:49:28.640284+00:00",
+  "scope": "Local Linux Rust regression, independent adoption handoff, advertised HTTP origin with HTTPS authority",
+  "results": {
+    "workspace": {
+      "log_sha256": "ba66ebeff5b220a683f8a2eb2f07ad7f894d992ac0653000abd78d899ae9c96e",
+      "passed": 214,
+      "failed": 0,
+      "ignored": 0
+    },
+    "handoff": {
+      "log_sha256": "75c796f975c186b751ac9347c0b5d8b131e0e2ecaa221f8079b4fd571a1974c5",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "clippy": {
+      "log_sha256": "665be995cfd3cc1b105446b600ee74e041acf7ba828a76ce998b6001a660d9c5",
+      "result": "passed; workspace all-targets with warnings denied"
+    }
+  },
+  "source_sha256": {
+    "crates/porthub-agent/tests/pinned_origin.rs": "a5d3606f06ee1bc11e303f2b51bca9e0e6b4c765e3f17b6bd7ae83dced20be73",
+    "crates/porthub-api/tests/advertised_origin.rs": "2a6e0c2378c151882a63393131b8fcd3d573ba58d63cb2fa92590e7f2f0d9be8",
+    "crates/porthub-agent/src/adopt.rs": "55c90bf94add720145cf6f2b814375abc43fa5bd071c1562ad12f91df7463b81",
+    "crates/porthub-agent/src/service/systemd.rs": "5b235e854b3792f3c9f601abc1db48bd83f0b29caf211a379fd71bf260019824",
+    "crates/porthub-api/src/routes/bootstrap.rs": "a090eaf92afec056a77a74fd715925fa782646567042fa7acaa5853ac5b28fe9",
+    "client/cmd/porthub-turn-compat/main.go": "fd4e3daa698056c05c7a5476af56dd155b26380081313e0ae7460fe84b249141",
+    "client/cmd/porthub-mesh-compat/main.go": "ab0929f0f1047ba5abf861168e520da8a6399d3e756a76bf040268e092c0a4c5",
+    "client/internal/mesh/peer.go": "d3efde826b13ecc00c04ffbdc0565b6d635cc32bc78f09da45198a1aae4b161a"
+  },
+  "checks": [
+    "API returns operator-configured HTTP/HTTPS scheme and external port only after authentication, bypassing automatic IP discovery",
+    "Real HTTP origin transport retains canonical Host, forwards 4 MiB intact, and supports half-close with a separate HTTPS authority in its plan",
+    "Current debug agent built from source is used by actual enrollment and user-service checks",
+    "Disposable systemd user transient worker survives caller exit and retains literal arguments",
+    "Native TURN exchanges packets among Go/Pion, Rust, and mixed peers; short-lived Go reference fixtures explicitly gather one finite candidate snapshot"
+  ],
+  "limitations": [
+    "Default workspace features do not exercise opt-in root network namespace, root DNS, root transient handoff, or non-Linux platform suites",
+    "Go fixtures test protocol interoperability with finite gathering, not continual network roaming in the retired Go runtime",
+    "This report does not rebuild or verify production container images",
+    "No production gateway cutover, installed client adoption, fleet upgrade, commit, push, or physical bandwidth benchmark was performed in this verification"
+  ],
+  "production_rollout": "pending",
+  "physical_benchmarks": "pending"
+}

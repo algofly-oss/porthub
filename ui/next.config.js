@@ -23,6 +23,8 @@ module.exports = withPWA({
   reactStrictMode: true,
   // Self-contained server with only the modules it uses (small image).
   output: "standalone",
+  // Production assets are exported and served by Rust, without a Node image API.
+  images: { unoptimized: true },
   distDir: process.env.NEXT_BUILD_DIR || ".next",
   async rewrites() {
     const backend = process.env.PORTHUB_DEV_BACKEND_URL;

@@ -28,6 +28,7 @@ var scriptAssetFilenames = map[string]string{
 var scriptPlaceholders = [][2]string{
 	{"__PORT_HUB_CLIENT_VERSION__", ""},
 	{"__PORT_HUB_API_URL__", ""},
+	{"__PORT_HUB_API_FALLBACK_URLS__", ""},
 	{"__PORT_HUB_MACHINE_ID__", ""},
 	{"__PORT_HUB_MACHINE_TOKEN__", ""},
 	{"__PORT_HUB_AUTH_URL__", "auth"},
@@ -66,10 +67,11 @@ func (h *h) renderScriptAsset(name string, r *http.Request, machine core.Doc) (s
 	app := h.app
 	endpoints := app.MachineEndpoints(machine, r)
 	fixed := map[string]string{
-		"__PORT_HUB_CLIENT_VERSION__": app.ClientVersion(),
-		"__PORT_HUB_API_URL__":        app.APIBaseURL(r, machine, core.RequestOverrides(r)),
-		"__PORT_HUB_MACHINE_ID__":     core.IDString(machine["_id"]),
-		"__PORT_HUB_MACHINE_TOKEN__":  core.Str(machine, "token"),
+		"__PORT_HUB_API_FALLBACK_URLS__": shellQuoteURL(strings.Join(app.APIFallbackURLs(machine, r, core.RequestOverrides(r)), ",")),
+		"__PORT_HUB_CLIENT_VERSION__":    app.ClientVersion(),
+		"__PORT_HUB_API_URL__":           app.APIBaseURL(r, machine, core.RequestOverrides(r)),
+		"__PORT_HUB_MACHINE_ID__":        core.IDString(machine["_id"]),
+		"__PORT_HUB_MACHINE_TOKEN__":     core.Str(machine, "token"),
 	}
 	path := filepath.Join(filepath.Dir(app.ClientScriptPath()), filename)
 	if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {

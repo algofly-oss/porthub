@@ -18,6 +18,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 	"sync"
@@ -93,8 +94,9 @@ func fingerprintOf(der []byte) string {
 }
 
 type config struct {
-	dialer    proxy.Dialer
-	relayOnly bool
+	dialer     proxy.Dialer
+	relayOnly  bool
+	gatherOnce bool
 }
 
 // Option adjusts how a peer reaches its peer.
@@ -106,6 +108,10 @@ func WithRelay(d proxy.Dialer) Option { return func(c *config) { c.dialer = d } 
 // RelayOnly forces the relay path (used to test and to measure it).
 func RelayOnly() Option { return func(c *config) { c.relayOnly = true } }
 
+// GatherOnce gives short-lived interoperability fixtures a finite candidate
+// snapshot. Continual gathering intentionally has no final nil candidate.
+func GatherOnce() Option { return func(c *config) { c.gatherOnce = true } }
+
 type Peer struct {
 	agent    *ice.Agent
 	cert     *Cert
@@ -113,12 +119,13 @@ type Peer struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 
-	mu         sync.Mutex
-	conn       *dtls.Conn
-	path       string
-	candidates []string
-	gathered   chan struct{}
-	started    bool
+	mu          sync.Mutex
+	conn        *dtls.Conn
+	path        string
+	candidates  []string
+	onCandidate func(string)
+	gathered    chan struct{}
+	started     bool
 
 	ready, done         chan struct{}
 	readyOnce, doneOnce sync.Once
@@ -159,9 +166,18 @@ func New(cert *Cert, servers []ICEServer, loopback bool, onPacket func([]byte), 
 		ice.WithDisconnectedTimeout(5 * time.Second),
 		ice.WithFailedTimeout(12 * time.Second),
 		ice.WithKeepaliveInterval(2 * time.Second),
+		ice.WithContinualGatheringPolicy(ice.GatherContinually),
+		ice.WithNetworkMonitorInterval(5 * time.Second),
+		// Continue testing viable paths after connection so a peer can move to
+		// a better LAN, direct, or relay pair as its network changes.
+		ice.WithRenomination(ice.DefaultNominationValueGenerator()),
+		ice.WithAutomaticRenomination(3 * time.Second),
 	}
 	if cfg.dialer != nil {
 		agentOptions = append(agentOptions, ice.WithProxyDialer(cfg.dialer))
+	}
+	if cfg.gatherOnce {
+		agentOptions = append(agentOptions, ice.WithContinualGatheringPolicy(ice.GatherOnce))
 	}
 	if loopback {
 		agentOptions = append(agentOptions, ice.WithIncludeLoopback())
@@ -186,13 +202,23 @@ func New(cert *Cert, servers []ICEServer, loopback bool, onPacket func([]byte), 
 		}
 		p.mu.Lock()
 		p.candidates = append(p.candidates, c.Marshal())
+		var onCandidate func(string)
+		select {
+		case <-p.gathered:
+			onCandidate = p.onCandidate
+		default:
+		}
 		p.mu.Unlock()
+		if onCandidate != nil {
+			onCandidate(c.Marshal())
+		}
 	})
 	_ = agent.OnSelectedCandidatePairChange(func(local, remote ice.Candidate) {
 		path := "direct"
 		if local.Type() == ice.CandidateTypeRelay || remote.Type() == ice.CandidateTypeRelay {
 			path = "relay"
 		}
+		log.Printf("private ICE selected %s path (local %s, remote %s)", path, local.Type(), remote.Type())
 		p.mu.Lock()
 		p.path = path
 		p.mu.Unlock()
@@ -287,6 +313,50 @@ func (p *Peer) apply(d Description, pin string) (remoteInfo, error) {
 
 func (p *Peer) Offer(ctx context.Context) (Description, error) {
 	return p.describe(ctx, "offer")
+}
+
+// OnCandidate receives candidates discovered after the initial description.
+// Those candidates must be signaled to the peer for ICE to test new routes.
+func (p *Peer) OnCandidate(f func(string)) {
+	p.mu.Lock()
+	p.onCandidate = f
+	p.mu.Unlock()
+}
+
+// AddRemoteCandidate applies one trickled candidate after checking that it
+// belongs to the already authenticated peer.
+func (p *Peer) AddRemoteCandidate(d Description, pin string) error {
+	if d.Type != "candidate" || len(d.SDP) > 4096 || len(pin) != 95 {
+		return errors.New("invalid ICE candidate")
+	}
+	var candidate ice.Candidate
+	scanner := bufio.NewScanner(strings.NewReader(d.SDP))
+	fingerprintOK, candidateOK := false, false
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		switch {
+		case strings.HasPrefix(line, "a=fingerprint:"):
+			parts := strings.Fields(strings.TrimPrefix(line, "a=fingerprint:"))
+			if len(parts) != 2 || parts[0] != "sha-256" || !strings.EqualFold(parts[1], pin) {
+				return errors.New("ICE candidate fingerprint mismatch")
+			}
+			fingerprintOK = true
+		case strings.HasPrefix(line, "a=candidate:"):
+			parsed, err := ice.UnmarshalCandidate(strings.TrimPrefix(line, "a=candidate:"))
+			if err != nil {
+				return err
+			}
+			candidate = parsed
+			candidateOK = true
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	if !fingerprintOK || !candidateOK {
+		return errors.New("ICE candidate is missing its fingerprint or candidate")
+	}
+	return p.agent.AddRemoteCandidate(candidate)
 }
 
 // Answer accepts the offer and starts connecting as the ICE-controlled side

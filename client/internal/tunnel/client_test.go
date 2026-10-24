@@ -4,14 +4,21 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/algofly-oss/porthub/client/transport"
+	"github.com/coder/websocket"
 )
 
 // Golden bytes: bincode 1 encoding of Hello::ControlChannelHello(1, digest).
@@ -26,6 +33,67 @@ func TestWireEncoding(t *testing.T) {
 	}
 	if hex.EncodeToString(encodeU32(cmdHeartBeat)) != "01000000" {
 		t.Fatal("u32 tag")
+	}
+}
+
+func TestHTTPFallbackAndHalfClose(t *testing.T) {
+	server := newFakeServer(t, map[string]string{"web": "token"})
+	defer server.control.Close()
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{transport.Subprotocol}})
+		if err == nil {
+			server.handle(transport.New(ws))
+		}
+	}))
+	defer httpServer.Close()
+	backend := echoServer(t)
+	defer backend.Close()
+	client := New(log.New(io.Discard, "", 0))
+	defer client.Close()
+	cfg, err := ParseConfig([]byte(fmt.Sprintf("[client]\nremote_addr=%q\nfallback_addr=%q\n[client.services.web]\ntoken=%q\nlocal_addr=%q\n", "https://127.0.0.1:1/api/tunnel", httpServer.URL, "token", backend.Addr().String())))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Apply(context.Background(), cfg)
+	data := server.visit(t)
+	defer data.Close()
+	_ = data.SetDeadline(time.Now().Add(3 * time.Second))
+	_, _ = data.Write([]byte("fallback"))
+	_ = data.(interface{ CloseWrite() error }).CloseWrite()
+	got, err := io.ReadAll(data)
+	if err != nil || string(got) != "echo:fallback" {
+		t.Fatalf("fallback: %q %v", got, err)
+	}
+}
+
+func TestPinnedTLSRejectsChangedKey(t *testing.T) {
+	h := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Host != "porthub.test" {
+			http.NotFound(w, r)
+			return
+		}
+		ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{transport.Subprotocol}})
+		if err == nil {
+			defer ws.CloseNow()
+			_, _, _ = ws.Read(r.Context())
+		}
+	}))
+	defer h.Close()
+	client := New(log.New(io.Discard, "", 0))
+	defer client.Close()
+	pin := sha256.Sum256(h.Certificate().RawSubjectPublicKeyInfo)
+	c, err := client.dialPinned(context.Background(), h.URL, true, hex.EncodeToString(pin[:]), "porthub.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+	if c, err := client.dialPinned(context.Background(), h.URL, true, strings.Repeat("00", 32)); err == nil {
+		c.Close()
+		t.Fatal("accepted incorrect certificate key")
+	}
+	if c, err := client.dialPinned(context.Background(), strings.Replace(h.URL, "https://", "http://", 1), true, hex.EncodeToString(pin[:])); err == nil {
+		c.Close()
+		t.Fatal("sent pinned transport over HTTP")
 	}
 }
 

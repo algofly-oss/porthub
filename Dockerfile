@@ -1,61 +1,109 @@
-# PortHub server: one container with everything (API, UI, database, web
-# proxy, tunnel server, firewall, private-network relay) supervised by the
-# porthub binary. Runs with host networking; internal services bind to
-# 127.0.0.1. Build context: repository root.
-
-FROM golang:1.27 AS porthub
+# syntax=docker/dockerfile:1.7
+# Independent slim runtime images; one Compose file chooses prod/dev targets.
+FROM rust:1.99.1-slim-bookworm AS rust-build
 WORKDIR /src
-COPY client/go.mod client/go.sum ./
-RUN go mod download
-COPY client/ ./
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev pkg-config && rm -rf /var/lib/apt/lists/*
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/ crates/
+COPY api/assets/client/porthub-client.sh api/assets/client/porthub-client.sh
+COPY vendor/rathole/ vendor/rathole/
 ARG PORTHUB_VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$PORTHUB_VERSION" -o /out/porthub ./cmd/porthub
-# Client binaries for every supported machine, served by the API
-# (/api/downloads/porthub/<target>); also the drop-in tunnel client.
-RUN set -e; mkdir -p /out/client-bin; \
-    for t in x86_64,linux,amd64,0 arm64,linux,arm64,0 armv7,linux,arm,7 armhf,linux,arm,6 \
-             darwin_x86_64,darwin,amd64,0 darwin_arm64,darwin,arm64,0; do \
-      set -- $(echo "$t" | tr , ' '); \
-      CGO_ENABLED=0 GOOS=$2 GOARCH=$3 GOARM=$4 go build -trimpath -ldflags "-s -w -X main.version=$PORTHUB_VERSION" \
-        -o /out/client-bin/porthub-$1 ./cmd/porthub; \
-      echo "$PORTHUB_VERSION" > /out/client-bin/porthub-$1.version; \
-    done
+ARG PORTHUB_BUILD_JOBS=4
+ENV PORTHUB_VERSION=$PORTHUB_VERSION RUST_MIN_STACK=33554432 CARGO_BUILD_JOBS=$PORTHUB_BUILD_JOBS
+RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/src/target \
+    cargo build --locked --release -p porthub-api -p porthub-edge -p porthub-firewall -p porthub-runtime && mkdir -p /out && \
+    cp target/release/porthub-api target/release/porthub-edge \
+       target/release/porthub-firewall target/release/porthub-runtime /out/
 
-FROM golang:1.27 AS api
+# Agents run on hosts with different libc versions. Native musl builds provide
+# one self-contained Linux executable without a distribution-specific loader.
+FROM rust:1.99.1-alpine AS agent-build
 WORKDIR /src
-COPY api/go.mod api/go.sum ./
-RUN go mod download
-COPY api/ ./
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/porthub-api ./cmd/porthub-api
+RUN apk add --no-cache build-base
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/ crates/
+COPY vendor/rathole/ vendor/rathole/
+ARG PORTHUB_VERSION=dev
+ARG PORTHUB_BUILD_JOBS=4
+ARG TARGETARCH
+ENV PORTHUB_VERSION=$PORTHUB_VERSION RUST_MIN_STACK=33554432 CARGO_BUILD_JOBS=$PORTHUB_BUILD_JOBS
+RUN --mount=type=cache,id=porthub-agent-musl-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=porthub-agent-musl-target,target=/src/target \
+    cargo build --locked --release -p porthub-agent --bin porthub && \
+    target/release/porthub version && \
+    readelf -l target/release/porthub > /tmp/porthub-elf && \
+    if grep -q INTERP /tmp/porthub-elf; then echo 'Agent must not require a dynamic loader' >&2; exit 1; fi && \
+    mkdir -p /out/client-bin && \
+    case "$TARGETARCH" in amd64) agent_target=x86_64 ;; arm64) agent_target=arm64 ;; *) exit 1 ;; esac && \
+    cp target/release/porthub /out/client-bin/porthub-$agent_target && \
+    cd /out/client-bin && sha256sum porthub-$agent_target > porthub-$agent_target.sha256 && \
+    echo "$PORTHUB_VERSION" > /out/client-bin/porthub-$agent_target.version
 
-FROM node:19.8.1-slim AS ui
-WORKDIR /app
+FROM scratch AS agent-artifacts
+COPY --from=agent-build /out/client-bin/ /
+
+FROM node:22-bookworm-slim AS ui-build
+WORKDIR /src/ui
 COPY ui/package.json ui/yarn.lock ./
-RUN yarn install --frozen-lockfile
+RUN corepack enable && yarn install --frozen-lockfile
 COPY ui/ ./
-RUN yarn build
+RUN yarn build && yarn next export --outdir /out/ui && \
+    find /out/ui -type f \( -name '*.html' -o -name '*.js' -o -name '*.css' -o -name '*.json' -o -name '*.svg' \) -exec gzip --keep -9 {} +
 
-FROM mongo:7.0 AS mongo
-FROM traefik:v3.0 AS traefik
-FROM archef2000/rathole:latest AS rathole
-FROM node:19.8.1-slim AS node
+FROM mongo:7.0 AS database
+FROM node:22-bookworm-slim AS node-runtime
 
-# nft 1.1 (trixie): bookworm's 1.0.6 segfaults on the firewall ruleset.
-FROM debian:trixie-slim
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends nftables libcurl4t64 ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY --from=porthub /out/porthub /usr/local/bin/porthub
-COPY --from=porthub /out/client-bin /app/client-bin
-COPY --from=api /out/porthub-api /usr/local/bin/porthub-api
-COPY --from=mongo /usr/bin/mongod /usr/bin/mongodump /usr/bin/mongorestore /usr/local/bin/
-COPY --from=traefik /usr/local/bin/traefik /usr/local/bin/traefik
-COPY --from=rathole /rathole /usr/local/bin/rathole
-COPY --from=node /usr/local/bin/node /usr/local/bin/node
-# Next.js standalone server: only the traced modules, plus static assets.
-COPY --from=ui /app/.next/standalone /app/ui/
-COPY --from=ui /app/.next/static /app/ui/.next/static
-COPY --from=ui /app/public /app/ui/public
-COPY api/assets/client/ /app/client/
-COPY deploy/ /app/deploy/
-VOLUME ["/data"]
-ENTRYPOINT ["/bin/sh", "/app/deploy/entrypoint.sh"]
+FROM debian:bookworm-slim AS runtime-base
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/* && \
+    printf 'porthub:x:10001:10001:PortHub:/nonexistent:/usr/sbin/nologin\n' >> /etc/passwd && \
+    printf 'porthub:x:10001:\n' >> /etc/group
+ARG PORTHUB_VERSION=dev
+ENV RUST_LOG=info PORTHUB_VERSION=$PORTHUB_VERSION
+LABEL org.opencontainers.image.version=$PORTHUB_VERSION
+
+FROM runtime-base AS prod-core
+RUN apt-get update && apt-get install -y --no-install-recommends libcurl4 libssl3 && \
+    rm -rf /var/lib/apt/lists/* && \
+    mkdir -p /data/mongo /run/porthub-api /run/porthub-edge /run/porthub-firewall /run/porthub-config /run/porthub-activity /app/ui /app/client-bin && \
+    chown -R 10001:10001 /data /run/porthub-api /run/porthub-edge /run/porthub-firewall /run/porthub-config /run/porthub-activity /app && \
+    chmod 0750 /run/porthub-api /run/porthub-config && chmod 0770 /run/porthub-edge /run/porthub-firewall /run/porthub-activity && \
+    printf '[server.services]\n' > /run/porthub-config/gateway.toml && \
+    chown 10001:10001 /run/porthub-config/gateway.toml
+COPY --from=rust-build /out/porthub-api /out/porthub-runtime /usr/local/bin/
+COPY --from=agent-build --chown=10001:10001 /out/client-bin /app/client-bin
+COPY --from=database /usr/bin/mongod /usr/local/bin/mongod
+COPY --from=ui-build --chown=10001:10001 /out/ui /app/ui/
+COPY deploy/native/core.toml /app/core.toml
+USER 10001:10001
+ENTRYPOINT ["porthub-runtime", "supervise", "--config", "/app/core.toml"]
+
+FROM prod-core AS dev-core
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends libstdc++6 && rm -rf /var/lib/apt/lists/*
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=ui-build --chown=10001:10001 /src/ui /app/ui-dev
+USER 10001:10001
+
+FROM runtime-base AS prod-edge
+RUN mkdir -p /run/porthub-api /run/porthub-edge /run/porthub-config /run/porthub-activity /data/certificates && \
+    chown 10001:10001 /run/porthub-api /run/porthub-config /run/porthub-activity && \
+    chown 0:10001 /run/porthub-edge && \
+    chmod 0750 /run/porthub-api /run/porthub-config && chmod 0770 /run/porthub-edge /run/porthub-activity && \
+    chown -R 0:10001 /data/certificates && chmod 0770 /data/certificates
+COPY --from=rust-build /out/porthub-edge /out/porthub-runtime /usr/local/bin/
+# Only NET_BIND_SERVICE is granted by Compose; no database or firewall access.
+USER 0:10001
+ENTRYPOINT ["porthub-edge", "--config", "/run/porthub-config/gateway.toml"]
+
+FROM prod-edge AS dev-edge
+
+FROM runtime-base AS prod-firewall
+RUN mkdir -p /data/firewall /run/porthub-firewall && \
+    chown -R 0:10001 /data/firewall /run/porthub-firewall && chmod 0770 /run/porthub-firewall
+COPY --from=rust-build /out/porthub-firewall /out/porthub-runtime /usr/local/bin/
+# Root UID with only NET_ADMIN: non-root exec loses this capability on Docker.
+USER 0:10001
+ENTRYPOINT ["porthub-firewall"]
+
+FROM prod-firewall AS dev-firewall

@@ -1,0 +1,66 @@
+{
+  "verified_at_utc": "2026-10-24T09:35:35.220884+00:00",
+  "scope": "Background Linux underlay recovery, legacy updater compatibility contract, and native static Linux x86_64 agent packaging",
+  "workspace_tests": {
+    "passed": 243,
+    "failed": 0,
+    "ignored": 0
+  },
+  "clippy": "workspace all-targets with warnings denied: passed",
+  "isolation_checks_passed": 24,
+  "isolation_evidence": "2026-10-24-static-agent-isolation.json",
+  "extra_tests": {
+    "owned_kernel_namespace": 2,
+    "real_static_update_activation_and_rollback": 1,
+    "packaged_http_management": 2,
+    "installed_luna_go_client_interoperability": 1
+  },
+  "logs_sha256": {
+    "workspace": "1e88332611029a9cd91dd2871ee01677f892c4d87141913cd2d88721e89ba6a4",
+    "clippy": "f178e1c56dae9aae45d406b5adc742fad834512490875cf4e50290f33a4e06a1",
+    "kernel": "4c2d2c74c0846d4c2f8925bbba23b3f342571db4d05f162b594b1120c4a88089",
+    "live_static_update": "c90555d59b43fb10e849676c81692858c7aecfeb544ffc00f8f618e00ae57c50",
+    "packaged_cli_management": "df8123ae634dc13a65cacb4067abbf6a75a09f981a152d191636ba9ff6bd35d1",
+    "installed_go": "b86edb47aab8be470089e21b87bfc32c0c1060418c4468c0a8028efcaaf7b6d1"
+  },
+  "source_sha256": {
+    "crates/porthub-agent/src/private_network/controller.rs": "c7aa305691f0cf5358fcbb7fb72f4ef56d13f9da1291344b4c7afd4177a28492",
+    "crates/porthub-agent/src/private_network/interfaces.rs": "d12f3cfca35d293034387d014c72b89d33340ba40faf0f17317f988372d8e235",
+    "crates/porthub-agent/src/private_network/runtime.rs": "341d78af454ac8aebb298c8192238f9b07a22ed06a63bae3d54c65e88b3b4562",
+    "crates/porthub-api/src/legacy_upgrade.rs": "8a83b91fcd2d229a9f3b5d7cf90a1f42e99672c1ba1d347f090b3b26043c169d",
+    "crates/porthub-api/src/routes/artifacts.rs": "000d1afa7d7803b8b66a06b851cb993bc94be1c3b42c89e95fd68342a7e19f65",
+    "crates/porthub-api/tests/private_mesh.rs": "95d789fc2902a47d7c888f547bfd8658868a9247cf47a91b3fc536c5805e50a2",
+    "Dockerfile": "61bb9472d389bbabd58fe2aaad3ca087f94ce6018d609533d22913bcf945cc0e",
+    "docker-compose.yml": "015546d2f176abbea6eb3a9c47de8e8cc4f0b034b7e287dda46f844634d02adb",
+    ".github/workflows/agent-platforms.yml": "833b41a64c8df9dbdf77d46c88afe9c0a9e330ae9f29c4bff13b86dac66d87ec"
+  },
+  "static_agent": {
+    "platform": "Linux x86_64",
+    "version": "native-network-upgrade-20261024",
+    "size_bytes": 21103168,
+    "sha256": "cfcd5fba89b3bb79a3f5c8ee9864644dc84df079f87b95c1f7148d1e52a0419b",
+    "elf_dynamic_loader": false,
+    "elf_shared_libraries": false,
+    "condor_execution": "native get completed the 10 GiB public staging transfer with SHA256 verification; installed agent unchanged"
+  },
+  "checks": [
+    "Kernel link/address/route events update bounded interface snapshots without probing on the packet path; unchanged snapshots are not published",
+    "Starting offline keeps policy signaling alive; healthy sessions survive interface refresh; failed sessions negotiate using current addresses",
+    "Actual kernel namespace tests cover address replacement, interface-down detection and suppression of overlay link updates",
+    "Native API discovery test transfers 1024 full-size round trips after shutting the gateway down, including after underlay recovery",
+    "Both legacy updater URLs require current enabled-machine credentials and return a credential-free compatibility CLI",
+    "The real legacy download/install/preflight sequence invokes the migration boundary and stops without acknowledging or replacing the tunnel executable",
+    "Packaged static agent works in Debian containers and a real systemd user-service update with readiness, forwarding and rollback",
+    "The currently installed Luna Go binary 025b501-go-20261023-gateway-r5 forwards 2 MiB and half-close through native API/edge configuration"
+  ],
+  "limitations": [
+    "Legacy updater contract test stubs the native installer boundary; complete automatic fleet adoption is not proven",
+    "Current static Linux x86_64 artifact is verified; ARM, 32-bit Linux, macOS and Windows final artifacts/runtime acceptance remain pending",
+    "macOS launchd runtime test still awaits restored Mac connectivity; private devices and non-Linux updates remain unfinished",
+    "Physical NAT, MTU adaptation, bandwidth/latency route scoring and large-workspace scheduling remain acceptance gates",
+    "GitHub workflow changes have not run in CI before push",
+    "No production cutover or registered-agent upgrade has occurred; the separate physical public staging benchmark passed and was cleaned up"
+  ],
+  "static_bundle_export": "agent-artifacts Docker target exported verified binary and sidecars successfully",
+  "physical_public_staging_evidence": "../benchmarks/2026-10-24-rust-public-staging.json"
+}

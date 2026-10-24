@@ -1,13 +1,15 @@
-import { useEffect, useState } from "react";
+import { useWorkspaceState } from "@/shared/contexts/workspaceCache";
+import { useEffect } from "react";
 import axios from "axios";
 import apiRoutes from "@/shared/routes/apiRoutes";
 
 // One request at a time: a slow response cannot overwrite a newer snapshot.
 export default function useTrafficSnapshot({ ids, enabled = true, interval = 2000 } = {}) {
   const key = ids === undefined ? "all" : [...new Set(ids.filter(Boolean))].sort().join(",");
-  const [state, setState] = useState({ rows: [], loading: true, error: "", updated: null });
+  const [state, setState] = useWorkspaceState(`snapshots.traffic:${key}`, { rows: [], loading: true, error: "", updated: null });
   useEffect(() => {
-    if (!enabled || key === "") { setState({ rows: [], loading: false, error: "", updated: null }); return; }
+    if (!enabled) return;
+    if (key === "") { setState({ rows: [], loading: false, error: "", updated: null }); return; }
     let active = true, timeout;
     const controller = new AbortController();
     async function poll() {

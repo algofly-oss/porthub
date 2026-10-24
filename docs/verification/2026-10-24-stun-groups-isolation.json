@@ -1,0 +1,32 @@
+{
+  "checks": [
+    "HTTP/HTTPS ingress reaches Unix API after simultaneous Compose creation",
+    "production UI is exported/precompressed and served without Node",
+    "firewall IPC requires credentials and is unavailable to edge",
+    "edge apply socket is writable only by edge, core connects through a read-only mount, and firewall has no mount",
+    "database/API/UI/firewall TCP ports and standalone tunnel control port are inaccessible",
+    "all production roots read-only with separate minimum capabilities",
+    "authenticated origin discovery receives the gateway TLS key pin through the read-only role mount",
+    "native machine creation assigns a private address and publishes gateway config",
+    "official UI Socket.IO client authenticates and streams scoped status/log events through HTTPS edge and Unix API",
+    "native status worker persists online history and detects idle expiry without a client request",
+    "native edge counts reach activity API through a read-only core journal mount",
+    "native private signaling ingress rejects public machine credentials",
+    "native private-access inventory, network settings and scoped peer controls preserve assigned addresses without exposing machine credentials",
+    "native rule-book validation, revision conflict detection and deletion drive allow-only policy previews through production ingress",
+    "authenticated native release catalog, legacy alias, HTTP ranges and packaged agent self-download preserve SHA256 integrity",
+    "owner setup ticket enrolls the packaged native CLI into a private profile without passing machine credentials in arguments",
+    "packaged native CLI stages two private enrollments and exchanges authenticated scoped signaling through production ingress without activating packet transport",
+    "saved-profile native agent syncs real API configuration and transfers 32 MiB via embedded tunnel, http.server and parallel get with matching SHA256",
+    "native agent captures diagnostics in memory and streams them on demand to the official UI client over HTTPS without shell helpers",
+    "saved-profile native agent applies live mapped-port deletion without a shell client",
+    "whole-machine deletion closes forwarding, native agent exits and acknowledges removal, and the other profile/server stays running",
+    "native API enforces deny/allow mapped-port policy via authenticated firewall IPC and filters traffic by ownership",
+    "MongoDB account/session, private address, activity counters and TLS identity survive restart"
+  ],
+  "images": {
+    "core": "sha256:72883c9c710db4235d587e26d587de330b65c0d6d5103a1eb4052842b60bf041",
+    "edge": "sha256:4e07ace5f9996d4268c71581d9e2dfda7fbc722bf9ca0472c34420392338ec92",
+    "firewall": "sha256:f79588267c625b1af82f0f466207ec2b201f2aac4ce23fc74841c6fbdfa8a16a"
+  }
+}

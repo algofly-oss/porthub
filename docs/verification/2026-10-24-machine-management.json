@@ -1,0 +1,30 @@
+{
+  "scope": "Local native Rust API and isolated MongoDB; no production deployment",
+  "routes": [
+    "POST /api/machines/groups/add",
+    "POST /api/machines/groups/remove",
+    "POST /api/machines/refresh-token"
+  ],
+  "checks": [
+    "Cross-account and unauthenticated mutations rejected",
+    "Legacy scalar groups and modern arrays preserved/migrated correctly",
+    "Duplicate concurrent additions and concurrent group deletion retain consistent membership",
+    "New machine token published in gateway configuration; old credential and waiting long poll rejected with legacy 410 contract",
+    "At most five unique nonempty string log tokens retained, newest first",
+    "Failed gateway publication restores credentials/history",
+    "Recovery preserves actual concurrent authenticated runtime sync and browser update request"
+  ],
+  "verification": {
+    "workspace_tests_passed": 99,
+    "workspace_tests_failed": 0,
+    "clippy": "workspace all targets, warnings denied",
+    "format": "cargo fmt --all -- --check"
+  },
+  "remaining": [
+    "Native realtime disconnect/status events",
+    "Machine update/delete APIs and install/artifact/log routes",
+    "Private-network lifecycle and cross-platform service controllers",
+    "Fresh production-image checks and required remote benchmarks",
+    "Commit, push, URM2 rollout and registered-agent upgrades"
+  ]
+}

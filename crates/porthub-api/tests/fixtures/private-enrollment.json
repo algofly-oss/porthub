@@ -1,0 +1,187 @@
+[
+  {
+    "model": "Bootstrap",
+    "body": "{\"ticket\": \"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\"}",
+    "status": 200,
+    "response": {
+      "ticket": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+    }
+  },
+  {
+    "model": "Bootstrap",
+    "body": "{\"ticket\": null}",
+    "status": 422,
+    "response": {
+      "detail": [
+        {
+          "loc": [
+            "body",
+            "ticket"
+          ],
+          "msg": "none is not an allowed value",
+          "type": "type_error.none.not_allowed"
+        }
+      ]
+    }
+  },
+  {
+    "model": "PeerEnrollment",
+    "body": "{\"machine_id\": \"m\"}",
+    "status": 200,
+    "response": {
+      "machine_id": "m",
+      "hostname": null,
+      "alias": null
+    }
+  },
+  {
+    "model": "PeerEnrollment",
+    "body": "{\"machine_id\": \"m\", \"hostname\": \" Laptop. \", \"alias\": \"  \"}",
+    "status": 200,
+    "response": {
+      "machine_id": "m",
+      "hostname": "laptop",
+      "alias": null
+    }
+  },
+  {
+    "model": "PeerEnrollment",
+    "body": "{\"machine_id\": \"m\", \"alias\": \"-bad-\"}",
+    "status": 422,
+    "response": {
+      "detail": [
+        {
+          "loc": [
+            "body",
+            "alias"
+          ],
+          "msg": "Use up to 48 letters, numbers or hyphens, not starting or ending with a hyphen",
+          "type": "value_error"
+        }
+      ]
+    }
+  },
+  {
+    "model": "PeerEnrollment",
+    "body": "{\"machine_id\": \"m\", \"hostname\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}",
+    "status": 422,
+    "response": {
+      "detail": [
+        {
+          "loc": [
+            "body",
+            "hostname"
+          ],
+          "msg": "ensure this value has at most 48 characters",
+          "type": "value_error.any_str.max_length",
+          "ctx": {
+            "limit_value": 48
+          }
+        }
+      ]
+    }
+  },
+  {
+    "model": "PeerEnrollment",
+    "body": "{\"machine_id\": \"m\", \"hostname\": null, \"alias\": 42}",
+    "status": 200,
+    "response": {
+      "machine_id": "m",
+      "hostname": null,
+      "alias": "42"
+    }
+  },
+  {
+    "model": "PeerEnrollment",
+    "body": "{\"hostname\": \"a_b\"}",
+    "status": 422,
+    "response": {
+      "detail": [
+        {
+          "loc": [
+            "body",
+            "machine_id"
+          ],
+          "msg": "field required",
+          "type": "value_error.missing"
+        },
+        {
+          "loc": [
+            "body",
+            "hostname"
+          ],
+          "msg": "Use up to 48 letters, numbers or hyphens, not starting or ending with a hyphen",
+          "type": "value_error"
+        }
+      ]
+    }
+  },
+  {
+    "model": "PeerEnrollment",
+    "body": "{\"machine_id\": \"m\", \"hostname\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+    "status": 200,
+    "response": {
+      "machine_id": "m",
+      "hostname": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "alias": null
+    }
+  },
+  {
+    "model": "HostnameChange",
+    "body": "{}",
+    "status": 200,
+    "response": {
+      "hostname": null
+    }
+  },
+  {
+    "model": "HostnameChange",
+    "body": "{\"hostname\": \"\"}",
+    "status": 200,
+    "response": {
+      "hostname": null
+    }
+  },
+  {
+    "model": "HostnameChange",
+    "body": "{\"hostname\": \"Work-Station\"}",
+    "status": 200,
+    "response": {
+      "hostname": "work-station"
+    }
+  },
+  {
+    "model": "HostnameChange",
+    "body": "{\"hostname\": \"-x\"}",
+    "status": 422,
+    "response": {
+      "detail": [
+        {
+          "loc": [
+            "body",
+            "hostname"
+          ],
+          "msg": "Use up to 48 letters, numbers or hyphens, not starting or ending with a hyphen",
+          "type": "value_error"
+        }
+      ]
+    }
+  },
+  {
+    "model": "HostnameChange",
+    "body": "{\"hostname\": [\"x\"]}",
+    "status": 422,
+    "response": {
+      "detail": [
+        {
+          "loc": [
+            "body",
+            "hostname"
+          ],
+          "msg": "str type expected",
+          "type": "type_error.str"
+        }
+      ]
+    }
+  }
+]

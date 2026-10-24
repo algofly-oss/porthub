@@ -1,0 +1,38 @@
+{
+  "verified_at_utc": "2026-10-24T06:15:55.818678+00:00",
+  "scope": "Native authenticated release discovery, download, immutable staging and bounded executable version verification; no installed-service update activation",
+  "workspace_tests": {
+    "passed": 224,
+    "failed": 0,
+    "ignored": 0
+  },
+  "full_test_log_sha256": "655a9f7516f8cd63e637a72fa3cbd6ed00ecfa83b6e8d30131ff84f6ac115977",
+  "clippy": "workspace all-targets with warnings denied: passed",
+  "clippy_log_sha256": "45c2bd96131bb098fae5477870290f3834dd2a021e8702edcb5b6adea4e00f31",
+  "source_sha256": {
+    "crates/porthub-agent/build.rs": "41264ea42fa5e6e8c7bbc1f199c8cef4fb38dca626439d2c10b2d5e23c2c4e41",
+    "crates/porthub-agent/src/update.rs": "aa3942c8e3890f0c0acb4e2ad99bc857036abfd45b6a9a04e6ea9f2f1fce7c8b",
+    "crates/porthub-agent/src/control.rs": "8a706df8c15116e4f9dd0aa812ad6c8219976acf04f5025419eaa1163f8149bb",
+    "crates/porthub-agent/src/service/publication.rs": "1023e2a6adc7a0b250c96410c7e15e36426164c238178898082e6d3ae42cd65c",
+    "crates/porthub-agent/tests/update.rs": "6295869d7c6b67f03917595f46b22546dbdb787e6a18fb3a3952981a1cb089ca",
+    "crates/porthub-api/tests/artifacts.rs": "9d21226e6d02d24e5610cdc7f55cce13b2836c83bea0199b2b7bc7797abdb6b3"
+  },
+  "checks": [
+    "Catalog URLs cannot introduce an unconfigured credential authority; requests use saved control authorities and URL-encoded path segments",
+    "Catalog checks machine identity, platform, target, asset, version, bounded size, digest and duplicate targets",
+    "Streaming downloads verify response identity, length and SHA256 before immutable publication; interrupted network responses may use configured fallbacks",
+    "Redirects never forward credentials; authentication rejection stops fallback",
+    "Cancellation, bad headers, oversized/truncated/corrupt bodies and unsafe directories do not publish a release or leave temporary files",
+    "ARMv7 versus ARM baseline selection uses the compilation target",
+    "Actual API-published current agent executable is downloaded, staged and verified with bounded version-command output and lifetime",
+    "Wrong executable version and post-staging tampering fail verification; tampering does not publish a second hash directory"
+  ],
+  "limitations": [
+    "The new update module is preparation for the activation worker; it is not automatic service updating or a new CLI update command",
+    "Durable activation/rollback, shared CLI publication and post-readiness update acknowledgement remain unfinished",
+    "This verification does not execute non-Linux platform releases or rebuild production images",
+    "No production deployment, installed client upgrade, commit/push or physical bandwidth test was performed"
+  ],
+  "production_rollout": "pending",
+  "physical_benchmarks": "pending"
+}

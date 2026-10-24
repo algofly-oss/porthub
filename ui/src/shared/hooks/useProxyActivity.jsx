@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useWorkspaceState } from "@/shared/contexts/workspaceCache";
+import { useEffect } from "react";
 import axios from "axios";
 import apiRoutes from "@/shared/routes/apiRoutes";
 
 export default function useProxyActivity() {
-  const [state, setState] = useState({data:[],available:false,loading:true,error:""});
+  const [state, setState] = useWorkspaceState("snapshots.proxyActivity", {data:[],available:false,loading:true,error:""});
   useEffect(() => {
     const controller = new AbortController(); let timer;
     async function poll() {

@@ -107,9 +107,14 @@ func (h *handlers) activeInventory(ctx context.Context, o bson.ObjectID) ([]core
 }
 
 var fingerprintLines = regexp.MustCompile(`(?m)^a=fingerprint:sha-256 ([^\r\n]+)`)
+var candidateLines = regexp.MustCompile(`(?m)^a=candidate:[^\r\n]+`)
 
 func validateSignal(source, target string, s policy.Signal, fingerprint string) error {
-	if (s.Description.Type == "offer") != (source < target) {
+	if s.Description.Type == "candidate" {
+		if len(s.Description.SDP) > 4096 || len(candidateLines.FindAllString(s.Description.SDP, -1)) != 1 {
+			return httpapi.Fail(400, "Invalid ICE candidate")
+		}
+	} else if (s.Description.Type == "offer") != (source < target) {
 		return httpapi.Fail(400, "Invalid peer negotiation direction")
 	}
 	matches := fingerprintLines.FindAllStringSubmatch(s.Description.SDP, -1)
@@ -215,7 +220,11 @@ func (h *handlers) sync(ctx context.Context, _ string, raw any) (*output, error)
 		if err = validateSignal(b.PeerID, s.To, s, b.Fingerprint); err != nil {
 			return nil, err
 		}
-		id := core.TokenDigest(b.PeerID + ":" + b.Instance + ":" + s.To + ":" + s.Session + ":" + s.Description.Type)
+		idInput := b.PeerID + ":" + b.Instance + ":" + s.To + ":" + s.Session + ":" + s.Description.Type
+		if s.Description.Type == "candidate" {
+			idInput += ":" + s.Description.SDP
+		}
+		id := core.TokenDigest(idInput)
 		_, err = h.app.C("private_signals").UpdateOne(ctx, bson.M{"_id": id}, bson.M{"$setOnInsert": bson.M{"from": b.PeerID, "to": s.To, "source_instance": b.Instance, "target_instance": target["instance"], "session": s.Session, "fingerprint": b.Fingerprint, "description": s.Description.Dict(), "expires_at": now.Add(45 * time.Second)}}, options.UpdateOne().SetUpsert(true))
 		if err != nil {
 			return nil, err
@@ -259,6 +268,11 @@ func (h *handlers) sync(ctx context.Context, _ string, raw any) (*output, error)
 		peerOut = append(peerOut, map[string]any{"id": id, "ip": p["ip"], "fingerprint": core.Get(p, "fingerprint", ""), "instance": core.Get(p, "instance", ""), "hostname": labels[id] + "." + prefs.DNSSuffix, "aliases": aa})
 	}
 	out := reply(map[string]any{"snapshot": map[string]any{"workspace": o.Hex(), "self": b.PeerID, "revision": updated["revision"], "expires_at": now.Add(15 * time.Second), "peers": peerOut, "grants": grants}, "signals": signals, "ice_servers": iceServers(b.PeerID), "relay_routes": relayRoutes(), "poll_seconds": 1})
+	fallbacks := []string{}
+	for _, v := range h.app.APIFallbackURLs(nil, httpapi.Request(ctx), nil) {
+		fallbacks = append(fallbacks, strings.TrimSuffix(v, "/api"))
+	}
+	out.Body["control_fallback_urls"] = fallbacks
 	out.CacheControl = "no-store"
 	return out, nil
 }

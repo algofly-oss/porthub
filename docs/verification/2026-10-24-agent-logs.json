@@ -1,0 +1,36 @@
+{
+  "scope": "Local native agent bounded diagnostics and demand-driven streaming, with production API/edge/UI integration; no URM2 rollout",
+  "verification": {
+    "workspace_tests_passed": 135,
+    "workspace_tests_failed": 0,
+    "workspace_tests_ignored": 0,
+    "clippy": "workspace all targets, warnings denied",
+    "format": "cargo fmt --all -- --check",
+    "compose_checks_passed": 16,
+    "compose_report": "2026-10-24-agent-logs-isolation.json",
+    "local_native_agent_sha256": "348ad3cae34d4c15749a9fcdf26e6017d88b3de1bc7bccace47166a7e5fcd654",
+    "go_compatibility_executable_sha256": "7bfbc5712fe850f3956b8f4509f2cdf8bc24682d79d9f85a9e284b567272e4e9"
+  },
+  "checks": [
+    "Credentials, escaped credentials, endpoint URLs and addresses are redacted before console output and retention",
+    "Partial writer fragments are joined before redaction; oversized events are omitted whole",
+    "Retention bounded by lines and bytes; monotonic cursors preserve recent context without ordinary duplicates",
+    "Inactive viewer demand prevents uploads; subscriptions and resubscriptions stream recent context and new lines",
+    "Wrong-machine demand responses cannot enable uploads",
+    "Upload retry retains its pending batch; successful demand polls cannot reset upload backoff",
+    "Deleted registration stops the worker and owner drop/cancellation terminates stalled HTTP requests",
+    "Actual native CLI uploads its runtime configuration diagnostics and shuts down normally on SIGTERM",
+    "Actual rebuilt native release passes scoped systemd user-service lifecycle checks",
+    "Packaged native agent diagnostics reach the official UI Socket.IO client through HTTPS edge ingress",
+    "Existing file integrity, policy enforcement, retirement and restart-persistence checks retained",
+    "Disposable Compose project and user-service test unit removed"
+  ],
+  "limitations": [
+    "Diagnostics are process-local and bounded, not a durable archive; eviction, repeated recent context and restart loss are possible",
+    "Unsubscribe is observed on the next scheduled demand check; the server scopes delivery to current subscribers",
+    "Install/artifact/private APIs, adaptive authenticated private routes and native relay remain incomplete",
+    "Cross-platform lifecycle, crash-safe updates, full retirement and production adoption remain incomplete",
+    "Final remote 10 GiB public/private and miro.phub fastest-route benchmarks remain outstanding",
+    "No commit, push, URM2 deployment or registered-agent upgrade performed"
+  ]
+}

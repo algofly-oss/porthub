@@ -1,8 +1,44 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Tunnel release: native HTTP Upgrade streaming with pinned origin HTTPS.
+
 PORT_HUB_CLIENT_VERSION="__PORT_HUB_CLIENT_VERSION__"
 PORT_HUB_DEFAULT_API_URL="__PORT_HUB_API_URL__"
+PORT_HUB_DEFAULT_API_FALLBACK_URLS=__PORT_HUB_API_FALLBACK_URLS__
+
+# Retry only explicitly configured endpoints of the same PortHub server.
+# Buffer stdout per attempt so a failed partial response is never concatenated
+# with a fallback response. Non-PortHub URLs use curl directly.
+curl() {
+  local original="${PORT_HUB_API_URL:-$PORT_HUB_DEFAULT_API_URL}" arg target="" tmp rc=0 base
+  local -a request_args=("$@") retry_args=() candidates=()
+  for arg in "$@"; do
+    case "$arg" in "${original%/}/"*) target="$arg" ;; esac
+  done
+  if [ -z "$target" ] || [ -z "${PORT_HUB_DEFAULT_API_FALLBACK_URLS:-}" ]; then
+    command curl "$@"; return $?
+  fi
+  tmp="$(mktemp)"
+  candidates=("${original%/}")
+  local previous_ifs="$IFS"
+  IFS=','
+  for base in $PORT_HUB_DEFAULT_API_FALLBACK_URLS; do
+    case "$base" in http://*|https://*) candidates+=("${base%/}") ;; esac
+  done
+  IFS="$previous_ifs"
+  for base in "${candidates[@]}"; do
+    retry_args=()
+    for arg in "${request_args[@]}"; do
+      if [ "$arg" = "$target" ]; then retry_args+=("${base}${target#"${original%/}"}"); else retry_args+=("$arg"); fi
+    done
+    if command curl "${retry_args[@]}" > "$tmp"; then
+      cat "$tmp"; rm -f "$tmp"; return 0
+    else rc=$?; fi
+    case "$rc" in 5|6|7|18|28|35|52|55|56|60) ;; *) break ;; esac
+  done
+  cat "$tmp"; rm -f "$tmp"; return "$rc"
+}
 PORT_HUB_DEFAULT_MACHINE_ID="__PORT_HUB_MACHINE_ID__"
 PORT_HUB_DEFAULT_MACHINE_TOKEN="__PORT_HUB_MACHINE_TOKEN__"
 PORT_HUB_DEFAULT_AUTH_URL="__PORT_HUB_AUTH_URL__"
@@ -175,7 +211,10 @@ detect_platform_defaults() {
 
 log_plain() { printf "%s\n" "$*" >&2; }
 fail() { log "ERROR" "$*"; exit 1; }
-need_cmd() { command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1"; }
+need_cmd() {
+  if [ "$1" = curl ]; then type -P curl >/dev/null 2>&1 || fail "Missing required command: curl";
+  else command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1"; fi
+}
 require_value() {
   local label="$1"
   local value="${2:-}"

@@ -1,3 +1,6 @@
+import useBackgroundRefresh from "@/shared/hooks/useBackgroundRefresh";
+import { externalEndpoint, internalEndpoint } from "@/shared/utils/endpoints.mjs";
+import { useWorkspaceState } from "@/shared/contexts/workspaceCache";
 import SearchSelect from "@/components/ui/search-select";
 import ResultsPagination from "@/components/ui/results-pagination";
 import { useEffect, useMemo, useState } from "react";
@@ -11,17 +14,17 @@ import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@
 import { searchScore } from "@/shared/utils/search.mjs";
 
 export default function PlatformOverview() {
-  const [overview, setOverview] = useState([]), [loading, setLoading] = useState(true), [error, setError] = useState("");
+  const [overview, setOverview] = useWorkspaceState("platform.overview", []), [loading, setLoading] = useWorkspaceState("platform.loading", true), [error, setError] = useState("");
   const [query, setQuery] = useState(""), [role, setRole] = useState("all"), [sort, setSort] = useState("name"), [expanded, setExpanded] = useState("");
   const [page, setPage] = useState(1), [pageSize, setPageSize] = useState(25);
   const reduced = useReducedMotion();
-  async function load() {
-    setLoading(true);
-    try { const response = await axios.get(apiRoutes.adminOverview); setOverview(response.data?.data || []); setError(""); }
-    catch (err) { setError(err?.response?.data?.detail || "Could not load platform overview."); }
-    finally { setLoading(false); }
+  async function load(signal) {
+    const options = signal instanceof AbortSignal ? { signal } : {};
+    try { const response = await axios.get(apiRoutes.adminOverview, options); setOverview(response.data?.data || []); setError(""); }
+    catch (err) { if (axios.isCancel(err)) return; setError(err?.response?.data?.detail || "Could not load platform overview."); }
+    finally { if (!options.signal?.aborted) setLoading(false); }
   }
-  useEffect(() => { load(); }, []);
+  useBackgroundRefresh(load);
   useEffect(() => { setPage(1); }, [query, role, sort, pageSize]);
   const filtered = useMemo(() => overview.filter(entry => (role === "all" || entry.user.role === role) && Number.isFinite(searchScore(query, [entry.user.name, entry.user.email, ...entry.machines.flatMap(m => [m.name, m.hostname, m.local_ip, m.public_ip, ...(m.ports || []).flatMap(p => [p.service_name, p.external_port])])]))).sort((a, b) => sort === "machines" ? b.machines.length - a.machines.length : (a.user.name || a.user.email).localeCompare(b.user.name || b.user.email)), [overview, query, role, sort]);
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
@@ -65,5 +68,5 @@ function AccountRow({ entry, expanded, toggle, reduced }) {
 }
 
 function Fleet({ machines }) {
-  return <div className="bg-muted/40 px-3 py-2 sm:px-6">{!machines.length ? <p className="py-4 text-xs text-muted-foreground">No registered machines.</p> : machines.map(m => <details key={m._id} className="border-b border-border/50 last:border-0"><summary className="flex cursor-pointer list-none items-center justify-between gap-3 py-3"><div className="min-w-0"><p className="truncate text-xs font-medium">{m.name}</p><p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">{m.hostname || m.local_ip || "Awaiting client"}</p></div><div className="flex shrink-0 items-center gap-2 text-[10px] text-muted-foreground"><span className={`h-1.5 w-1.5 rounded-full ${m.connection_status === "online" ? "bg-emerald-500" : "bg-zinc-500"}`} />{m.connection_status === "online" ? "Online" : m.connection_status === "disabled" ? "Disabled" : "Offline"}<span className="hidden sm:inline">· {m.ports?.length || 0} ports</span><IconChevronDown size={13} /></div></summary><div className="pb-3">{(m.ports || []).map(p => <div key={p._id} className="flex flex-wrap items-center justify-between gap-2 rounded-md px-2 py-2 text-[11px] hover:bg-muted"><span className="font-medium">{p.service_name || "Unnamed service"}</span><span className="font-mono text-muted-foreground">:{p.external_port} → {p.internal_ip}:{p.internal_port}</span><span className="text-muted-foreground">{p.enabled ? "Enabled" : "Disabled"}</span></div>)}{!m.ports?.length && <p className="text-xs text-muted-foreground">No mapped ports.</p>}</div></details>)}</div>;
+  return <div className="bg-muted/40 px-3 py-2 sm:px-6">{!machines.length ? <p className="py-4 text-xs text-muted-foreground">No registered machines.</p> : machines.map(m => <details key={m._id} className="border-b border-border/50 last:border-0"><summary className="flex cursor-pointer list-none items-center justify-between gap-3 py-3"><div className="min-w-0"><p className="truncate text-xs font-medium">{m.name}</p><p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">{m.hostname || m.local_ip || "Awaiting client"}</p></div><div className="flex shrink-0 items-center gap-2 text-[10px] text-muted-foreground"><span className={`h-1.5 w-1.5 rounded-full ${m.connection_status === "online" ? "bg-emerald-500" : "bg-zinc-500"}`} />{m.connection_status === "online" ? "Online" : m.connection_status === "disabled" ? "Disabled" : "Offline"}<span className="hidden sm:inline">· {m.ports?.length || 0} ports</span><IconChevronDown size={13} /></div></summary><div className="pb-3">{(m.ports || []).map(p => <div key={p._id} className="flex flex-wrap items-center justify-between gap-2 rounded-md px-2 py-2 text-[11px] hover:bg-muted"><span className="font-medium">{p.service_name || "Unnamed service"}</span><span className="font-mono text-muted-foreground">{externalEndpoint(p)} → {internalEndpoint(p)}</span><span className="text-muted-foreground">{p.enabled ? "Enabled" : "Disabled"}</span></div>)}{!m.ports?.length && <p className="text-xs text-muted-foreground">No mapped ports.</p>}</div></details>)}</div>;
 }

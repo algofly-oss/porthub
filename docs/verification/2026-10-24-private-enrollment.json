@@ -1,0 +1,37 @@
+{
+  "scope": "Native private identity enrollment, one-time bootstrap, hostname changes and CLI credential staging; no packet-service activation or URM2 rollout",
+  "verification": {
+    "workspace_tests_passed": 178,
+    "workspace_tests_failed": 0,
+    "workspace_tests_ignored": 0,
+    "private_enrollment_model_vectors": 14,
+    "clippy": "workspace all targets, warnings denied",
+    "format": "cargo fmt --all -- --check",
+    "patch_whitespace": "git diff --check",
+    "production_checks_passed": 22,
+    "production_report": "2026-10-24-private-enrollment-isolation.json",
+    "production_images_rebuilt": true,
+    "disposable_containers_removed": true,
+    "user_service_test_executable": "Previously built CLI-publication release; production checks execute the newly packaged native CLI"
+  },
+  "checks": [
+    "Enrollment, hostname and bootstrap validation match retained original model fixtures",
+    "Enrollment preserves existing peer IDs and addresses, while custom-name clearing restores the assigned machine label",
+    "Concurrent one-time ticket claims yield exactly one private credential",
+    "Reissued native generations reject stale capabilities, revoked issuers cannot redeem, and pending Go tickets without generation fields remain supported",
+    "Short links negotiate private metadata and select the native enroll command without exposing public machine credentials",
+    "New private profiles retain the existing Go wire fields and are stored privately without overwriting files",
+    "CLI rejects redirects, identity mismatch, plaintext without the explicit test flag, unsafe destinations and cancellation before ticket consumption",
+    "Actual CLI reads long tickets from stdin and omits tokens and gateway addresses from ordinary output",
+    "Packaged production CLI stages two private identities through real API-issued capabilities and the native API exchanges and acknowledges a scoped offer",
+    "Previous public file transfer, firewall, diagnostics, retirement and restart checks remain passing"
+  ],
+  "limitations": [
+    "Private enrollment stages credentials only; no private TUN, packet service or shared CLI publication from the private first-download launcher is activated",
+    "The one-time exchange is not crash-recoverable after an ambiguous successful response or failed credential save; revoke/reissue is required in that case",
+    "Native gateway relay, TUN/DNS/ICE/DTLS transport, certificate-possession proof and background path selection remain incomplete",
+    "Private group mutation, legacy installer aliases/service takeover, platform lifecycle and crash-safe updates remain outstanding",
+    "No private payload connectivity or final physical throughput is proved",
+    "No commit, push, URM2 deployment, registered-agent upgrade or final physical-machine benchmark performed"
+  ]
+}

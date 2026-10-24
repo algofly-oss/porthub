@@ -1,0 +1,32 @@
+{
+  "scope": "Local native machine deletion API, durable recovery and three-container isolation; no URM2 rollout",
+  "route": "POST /api/machines/delete",
+  "verification": {
+    "workspace_tests_passed": 112,
+    "workspace_tests_failed": 0,
+    "clippy": "workspace all targets, warnings denied",
+    "format": "cargo fmt --all -- --check",
+    "compose_checks_passed": 13,
+    "compose_report": "2026-10-24-machine-deletion-isolation.json",
+    "go_compatibility_executable_sha256": "7bfbc5712fe850f3956b8f4509f2cdf8bc24682d79d9f85a9e284b567272e4e9"
+  },
+  "checks": [
+    "Owner-only deletion preserves legacy pre-deletion response and authenticated ACK contract",
+    "Temporary disabled phase prevents premature 410 when closure or firewall cleanup fails",
+    "Live native listener closes before policy deletion; failures restore registration and policies",
+    "Interrupted HTTP requests complete authorized deletion",
+    "Journaled closing/committing work resumes with scheduled bounded retries and no idle timer",
+    "Early ACK does not wait for the cleanup lock; concurrent finalization preserves acknowledgement",
+    "Retiring machines reject edits/token changes and do not receive new startup private enrollments",
+    "Inactive mappings cannot trigger publication before all active restrictions are installed",
+    "Real native agent exits normally, records deleted state and acknowledges physical registration removal",
+    "Another native profile and file server remain running; final disposable resources and test unit removed"
+  ],
+  "limitations": [
+    "Full installed-service/profile retirement and private-route revocation remain lifecycle work",
+    "Broader process-crash and simultaneous failure injection still required",
+    "Install/artifact/log/realtime/private API and cross-platform lifecycle parity incomplete",
+    "Remote 10 GiB public/private and miro.phub benchmarks outstanding",
+    "No commit, push, URM2 deployment or registered-agent upgrades performed"
+  ]
+}

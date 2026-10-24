@@ -1,0 +1,69 @@
+{
+  "at_utc": "2026-10-24T08:24:38.180368+00:00",
+  "scope": "Read-only SSH checks as configured local user; failure does not prove node offline",
+  "machines": [
+    {
+      "name": "clearsight",
+      "ssh_access": false,
+      "platform": [],
+      "result": "unavailable"
+    },
+    {
+      "name": "clear",
+      "ssh_access": true,
+      "platform": [
+        "Linux x86_64",
+        "nitin"
+      ],
+      "result": "connected"
+    },
+    {
+      "name": "deep",
+      "ssh_access": false,
+      "platform": [],
+      "result": "authentication_failed"
+    },
+    {
+      "name": "test",
+      "ssh_access": false,
+      "platform": [],
+      "result": "unavailable"
+    },
+    {
+      "name": "harshithaagx",
+      "ssh_access": true,
+      "platform": [
+        "Linux aarch64",
+        "nitin"
+      ],
+      "result": "connected"
+    },
+    {
+      "name": "condor-dgx-spark",
+      "ssh_access": true,
+      "platform": [
+        "Linux aarch64",
+        "nitin"
+      ],
+      "result": "connected"
+    },
+    {
+      "name": "otsi-reid",
+      "ssh_access": false,
+      "platform": [],
+      "result": "authentication_failed"
+    },
+    {
+      "name": "nitin-mbp",
+      "ssh_access": false,
+      "platform": [],
+      "result": "unavailable"
+    }
+  ],
+  "notes": [
+    "Uses the configured local SSH account; authentication failure does not prove a machine is offline",
+    "No machine services were changed",
+    "clear: Linux x86_64/glibc 2.35; harshithaagx: Linux arm64/glibc 2.35; condor-dgx-spark: Linux arm64/glibc 2.39",
+    "All three newly accessible Linux nodes require administrator authentication for service migration"
+  ]
+}

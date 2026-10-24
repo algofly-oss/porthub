@@ -243,7 +243,7 @@ func signalModel(e *errs, loc []any, v any) (Signal, bool) {
 		if t, has := dd["type"]; !has {
 			missing(e, at(dl, "type"))
 		} else {
-			s.Description.Type, _ = literalField(e, at(dl, "type"), t, "offer", "answer")
+			s.Description.Type, _ = literalField(e, at(dl, "type"), t, "offer", "answer", "candidate")
 		}
 		if sdp, has := dd["sdp"]; !has {
 			missing(e, at(dl, "sdp"))

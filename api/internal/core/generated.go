@@ -91,6 +91,11 @@ func (a *App) renderServerTOML(services []ratholeService, source string) string 
 		`bind_addr = "` + a.Cfg.RatholeDummyBind + `"`,
 		"",
 	}
+	if a.Cfg.TunnelWebSocket {
+		// No separate agent listener or dummy service for the API gateway.
+		lines = lines[:5]
+		lines = append(lines, "[server.services]", "")
+	}
 	for _, s := range services {
 		lines = append(lines, "[server.services."+s.key+"]", `token = "`+s.token+`"`, fmt.Sprintf(`bind_addr = "0.0.0.0:%v"`, s.port), "")
 	}
@@ -98,7 +103,7 @@ func (a *App) renderServerTOML(services []ratholeService, source string) string 
 }
 
 func IsDummyOnlyConfig(content string) bool {
-	return strings.Contains(content, "[server.services.dummy]") && !strings.Contains(content, "[server.services.porthub_")
+	return !strings.Contains(content, "[server.services.porthub_")
 }
 
 func (a *App) WriteBaseServerTOML() error {
@@ -137,14 +142,14 @@ func (a *App) RebuildServerTOML(ctx context.Context, allowEmpty bool) error {
 	path := a.Cfg.RatholeConfigPath
 	if len(services) == 0 && !allowEmpty {
 		if existing, err := os.ReadFile(path); err == nil && !IsDummyOnlyConfig(string(existing)) {
-			log.Printf("Skipping dummy-only Rathole rewrite because an existing real config is present at %s", path)
+			log.Printf("Skipping empty gateway rewrite because an existing real config is present at %s", path)
 			return nil
 		}
 	}
 	if err := writeAtomic(path, ".server.toml.tmp-", a.renderServerTOML(services, "database-rebuild"), false); err != nil {
 		return err
 	}
-	log.Printf("Rebuilt Rathole server config with %d services at %s", len(services), path)
+	log.Printf("Rebuilt PortHub gateway config with %d services at %s", len(services), path)
 	return nil
 }
 

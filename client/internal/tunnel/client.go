@@ -2,18 +2,27 @@ package tunnel
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"math/rand/v2"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/algofly-oss/porthub/client/transport"
+	"github.com/coder/websocket"
 )
 
 // Defaults mirror rathole's src/config.rs and src/transport/mod.rs.
@@ -26,41 +35,76 @@ const (
 )
 
 type Service struct {
-	Name          string
-	Token         string `toml:"token"`
-	LocalAddr     string `toml:"local_addr"`
-	Type          string `toml:"type"`
-	Nodelay       *bool  `toml:"nodelay"`
-	RetryInterval int    `toml:"retry_interval"`
+	PrimaryAddr                               string   `toml:"-"`
+	DirectAddr, DirectFingerprint, DirectHost string   `toml:"-"`
+	FallbackAddr                              string   `toml:"-"`
+	FallbackAddrs                             []string `toml:"-"`
+	Name                                      string
+	Token                                     string `toml:"token"`
+	LocalAddr                                 string `toml:"local_addr"`
+	Type                                      string `toml:"type"`
+	Nodelay                                   *bool  `toml:"nodelay"`
+	RetryInterval                             int    `toml:"retry_interval"`
 }
 type Config struct {
-	RemoteAddr       string
-	HeartbeatTimeout time.Duration
-	Services         map[string]Service
+	DirectAddr, DirectFingerprint, DirectHost string
+	RemoteAddr                                string
+	FallbackAddr                              string
+	FallbackAddrs                             []string
+	HeartbeatTimeout                          time.Duration
+	Services                                  map[string]Service
 }
 
 // ParseConfig reads the client section of a rathole TOML file, the format
-// PortHub already renders in api/shared/machine_client.py.
+// PortHub renders in api/internal/core/machineclient.go.
 func ParseConfig(data []byte) (Config, error) {
 	var raw struct {
 		Client struct {
-			RemoteAddr       string                `toml:"remote_addr"`
-			DefaultToken     string                `toml:"default_token"`
-			HeartbeatTimeout *int                  `toml:"heartbeat_timeout"`
-			RetryInterval    int                   `toml:"retry_interval"`
-			Transport        struct{ Type string } `toml:"transport"`
-			Services         map[string]Service    `toml:"services"`
+			DirectHost        string                `toml:"direct_host"`
+			DirectAddr        string                `toml:"direct_addr"`
+			DirectFingerprint string                `toml:"direct_spki_sha256"`
+			RemoteAddr        string                `toml:"remote_addr"`
+			FallbackAddr      string                `toml:"fallback_addr"`
+			FallbackAddrs     []string              `toml:"fallback_addrs"`
+			DefaultToken      string                `toml:"default_token"`
+			HeartbeatTimeout  *int                  `toml:"heartbeat_timeout"`
+			RetryInterval     int                   `toml:"retry_interval"`
+			Transport         struct{ Type string } `toml:"transport"`
+			Services          map[string]Service    `toml:"services"`
 		} `toml:"client"`
 	}
 	if _, err := toml.Decode(string(data), &raw); err != nil {
 		return Config{}, err
 	}
-	c := Config{RemoteAddr: raw.Client.RemoteAddr, HeartbeatTimeout: defaultHeartbeatTimeout, Services: map[string]Service{}}
+	c := Config{RemoteAddr: raw.Client.RemoteAddr, FallbackAddr: raw.Client.FallbackAddr, FallbackAddrs: raw.Client.FallbackAddrs, HeartbeatTimeout: defaultHeartbeatTimeout, Services: map[string]Service{}}
+	c.DirectAddr = raw.Client.DirectAddr
+	c.DirectHost = raw.Client.DirectHost
+	c.DirectFingerprint = raw.Client.DirectFingerprint
+	if c.DirectAddr != "" {
+		u, err := url.Parse(c.DirectAddr)
+		pin, e := hex.DecodeString(c.DirectFingerprint)
+		if err != nil || e != nil || len(pin) != 32 || u.Host == "" || u.User != nil || u.Fragment != "" || (u.Scheme != "https" && u.Scheme != "wss") {
+			return c, errors.New("direct HTTPS tunnel needs a valid URL and SHA-256 certificate key pin")
+		}
+	}
 	if t := raw.Client.Transport.Type; t != "" && t != "tcp" {
 		return c, fmt.Errorf("transport %q is not supported; only tcp", t)
 	}
-	if _, _, err := net.SplitHostPort(c.RemoteAddr); err != nil {
+	if u, err := url.Parse(c.RemoteAddr); err == nil && (u.Scheme == "ws" || u.Scheme == "wss" || u.Scheme == "http" || u.Scheme == "https") {
+		if u.Host == "" || u.User != nil || u.Fragment != "" {
+			return c, errors.New("invalid tunnel URL")
+		}
+	} else if _, _, err := net.SplitHostPort(c.RemoteAddr); err != nil {
 		return c, fmt.Errorf("client.remote_addr: %w", err)
+	}
+	for _, fallback := range append(append([]string{}, c.FallbackAddrs...), c.FallbackAddr) {
+		if fallback == "" {
+			continue
+		}
+		u, err := url.Parse(fallback)
+		if err != nil || u.Host == "" || u.User != nil || u.Fragment != "" || (u.Scheme != "http" && u.Scheme != "ws" && u.Scheme != "https" && u.Scheme != "wss") {
+			return c, errors.New("fallback address must be an HTTP or HTTPS tunnel URL")
+		}
 	}
 	if raw.Client.HeartbeatTimeout != nil {
 		c.HeartbeatTimeout = time.Duration(*raw.Client.HeartbeatTimeout) * time.Second
@@ -110,7 +154,8 @@ func New(logger *log.Logger) *Client {
 }
 
 func identity(remote string, heartbeat time.Duration, s Service) string {
-	return fmt.Sprintf("%s|%s|%s|%s|%v|%d|%s", remote, heartbeat, s.Token, s.LocalAddr, s.Nodelay, s.RetryInterval, s.Type)
+	nodelay := s.Nodelay == nil || *s.Nodelay
+	return fmt.Sprintf("%s|%s|%s|%s|%v|%d|%s|%s", remote, heartbeat, s.Token, s.LocalAddr, nodelay, s.RetryInterval, s.Type, s.FallbackAddr+"|"+strings.Join(s.FallbackAddrs, ",")+"|"+s.DirectAddr+"|"+s.DirectFingerprint+"|"+s.DirectHost)
 }
 
 // Apply starts, restarts or stops services so the running set matches c.
@@ -119,6 +164,12 @@ func (cl *Client) Apply(ctx context.Context, c Config) {
 	defer cl.mu.Unlock()
 	for name, ch := range cl.running {
 		s, ok := c.Services[name]
+		s.FallbackAddr = c.FallbackAddr
+		s.PrimaryAddr = c.RemoteAddr
+		s.DirectAddr = c.DirectAddr
+		s.DirectHost = c.DirectHost
+		s.DirectFingerprint = c.DirectFingerprint
+		s.FallbackAddrs = c.FallbackAddrs
 		if !ok || identity(c.RemoteAddr, c.HeartbeatTimeout, s) != ch.key {
 			ch.cancel()
 			<-ch.done
@@ -126,6 +177,12 @@ func (cl *Client) Apply(ctx context.Context, c Config) {
 		}
 	}
 	for name, s := range c.Services {
+		s.FallbackAddr = c.FallbackAddr
+		s.PrimaryAddr = c.RemoteAddr
+		s.DirectAddr = c.DirectAddr
+		s.DirectHost = c.DirectHost
+		s.DirectFingerprint = c.DirectFingerprint
+		s.FallbackAddrs = c.FallbackAddrs
 		if _, ok := cl.running[name]; ok {
 			continue
 		}
@@ -191,6 +248,67 @@ func (cl *Client) supervise(ctx context.Context, remote string, heartbeat time.D
 }
 
 func (cl *Client) dial(ctx context.Context, address string, nodelay bool) (net.Conn, error) {
+	return cl.dialPinned(ctx, address, nodelay, "")
+}
+
+var tlsSessions = tls.NewLRUClientSessionCache(256)
+
+func (cl *Client) dialPinned(ctx context.Context, address string, nodelay bool, pin string, hosts ...string) (net.Conn, error) {
+	if u, err := url.Parse(address); err == nil && (u.Scheme == "http" || u.Scheme == "https" || u.Scheme == "ws" || u.Scheme == "wss") {
+		dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
+		defer cancel()
+		opts := &websocket.DialOptions{Subprotocols: []string{transport.Subprotocol}, CompressionMode: websocket.CompressionDisabled}
+		if pin != "" {
+			if u.Scheme != "https" && u.Scheme != "wss" {
+				return nil, errors.New("certificate pin requires HTTPS")
+			}
+			expected, e := hex.DecodeString(pin)
+			if e != nil || len(expected) != 32 {
+				return nil, errors.New("invalid tunnel certificate key pin")
+			}
+			t := http.DefaultTransport.(*http.Transport).Clone()
+			t.ForceAttemptHTTP2 = false
+			if len(hosts) > 0 && hosts[0] != "" {
+				opts.Host = hosts[0]
+			}
+			// The authenticated API supplies the origin's key pin. Verify it
+			// on every handshake (including resumed sessions) instead of CA/DNS
+			// validation; a changed key must never be silently accepted.
+			serverName := ""
+			if h, e := url.Parse("https://" + opts.Host); e == nil {
+				serverName = h.Hostname()
+			}
+			t.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, ServerName: serverName, NextProtos: []string{"http/1.1"}, ClientSessionCache: tlsSessions, InsecureSkipVerify: true, VerifyConnection: func(state tls.ConnectionState) error {
+				if len(state.PeerCertificates) == 0 {
+					return errors.New("missing tunnel certificate")
+				}
+				got := sha256.Sum256(state.PeerCertificates[0].RawSubjectPublicKeyInfo)
+				if subtle.ConstantTimeCompare(expected, got[:]) != 1 {
+					return errors.New("tunnel certificate key pin mismatch")
+				}
+				return nil
+			}}
+			opts.HTTPClient = &http.Client{Transport: t, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+			if stream, err := transport.DialUpgrade(dialCtx, opts.HTTPClient, address, opts.Host); err == nil {
+				return stream, nil
+			}
+		}
+		if pin == "" && (u.Scheme == "http" || u.Scheme == "ws") {
+			client := &http.Client{Transport: http.DefaultTransport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+			if stream, err := transport.DialUpgrade(dialCtx, client, address, ""); err == nil {
+				return stream, nil
+			}
+		}
+		ws, _, err := websocket.Dial(dialCtx, address, opts)
+		if err != nil {
+			return nil, err
+		}
+		if ws.Subprotocol() != transport.Subprotocol {
+			_ = ws.CloseNow()
+			return nil, errors.New("tunnel subprotocol was not accepted")
+		}
+		return transport.New(ws), nil
+	}
 	conn, err := cl.dialer(ctx, "tcp", address)
 	if err != nil {
 		return nil, err
@@ -201,8 +319,59 @@ func (cl *Client) dial(ctx context.Context, address string, nodelay bool) (net.C
 	return conn, nil
 }
 
+func (cl *Client) dialTunnel(ctx context.Context, remote string, s Service) (net.Conn, error) {
+	pin := ""
+	if remote == s.DirectAddr {
+		pin = s.DirectFingerprint
+	}
+	nodelay := s.Nodelay == nil || *s.Nodelay
+	return cl.dialPinned(ctx, remote, nodelay, pin, s.DirectHost)
+}
+
+// Data channels share the authenticated session across the API listeners.
+// If an origin certificate rotates before the next configuration sync, use
+// the canonical HTTPS endpoint while waiting for the updated key pin.
+func (cl *Client) dialData(ctx context.Context, remote string, s Service) (net.Conn, error) {
+	conn, err := cl.dialTunnel(ctx, remote, s)
+	if err == nil || remote != s.DirectAddr || s.PrimaryAddr == "" || ctx.Err() != nil {
+		return conn, err
+	}
+	for _, endpoint := range append([]string{s.PrimaryAddr}, s.FallbackAddrs...) {
+		conn, err = cl.dialTunnel(ctx, endpoint, s)
+		if err == nil || ctx.Err() != nil {
+			return conn, err
+		}
+	}
+	return nil, err
+}
+
 func (cl *Client) control(ctx context.Context, remote string, heartbeat time.Duration, s Service) error {
-	conn, err := cl.dial(ctx, remote, true)
+	var conn net.Conn
+	var err error
+	if s.DirectAddr != "" {
+		attempt, cancel := context.WithTimeout(ctx, 3*time.Second)
+		conn, err = cl.dialTunnel(attempt, s.DirectAddr, s)
+		cancel()
+		if err == nil {
+			remote = s.DirectAddr
+		}
+	}
+	if conn == nil {
+		conn, err = cl.dialTunnel(ctx, remote, s)
+	}
+	for _, fallback := range append(append([]string{}, s.FallbackAddrs...), s.FallbackAddr) {
+		if err == nil || ctx.Err() != nil {
+			break
+		}
+		if fallback == "" {
+			continue
+		}
+		remote = fallback
+		conn, err = cl.dialTunnel(ctx, remote, s)
+		if err == nil {
+			cl.logger.Printf("%s: using fallback %s", s.Name, remote)
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -231,7 +400,11 @@ func (cl *Client) control(ctx context.Context, remote string, heartbeat time.Dur
 	if ack != ackOK {
 		return AuthError{ack}
 	}
-	cl.logger.Printf("%s: control channel established", s.Name)
+	protocol := "tcp"
+	if stream, ok := conn.(interface{ Protocol() string }); ok {
+		protocol = stream.Protocol()
+	}
+	cl.logger.Printf("%s: control channel established via %s (%s)", s.Name, remote, protocol)
 	for {
 		deadline := time.Time{}
 		if heartbeat > 0 {
@@ -271,7 +444,7 @@ func (cl *Client) data(ctx context.Context, remote string, session digest, s Ser
 	var err error
 	budget := time.Now().Add(10 * time.Second)
 	for {
-		if conn, err = cl.dial(ctx, remote, nodelay); err == nil {
+		if conn, err = cl.dialData(ctx, remote, s); err == nil {
 			break
 		}
 		if ctx.Err() != nil || time.Now().After(budget) {

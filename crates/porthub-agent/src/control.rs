@@ -1,0 +1,246 @@
+//! Authenticated control plane. Bounded bodies/timeouts and redacted failures
+//! keep machine tokens and origin addresses out of routine agent output.
+use crate::profile::Profile;
+use reqwest::{Method, StatusCode};
+use serde_json::Value;
+use std::{
+    sync::Mutex,
+    time::{Duration, Instant},
+};
+#[derive(Debug)]
+pub enum Failure {
+    Unavailable,
+    Rejected(u16),
+    InvalidResponse,
+}
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable => f.write_str("gateway temporarily unavailable"),
+            Self::Rejected(status) => write!(f, "gateway request rejected (HTTP {status})"),
+            Self::InvalidResponse => f.write_str("invalid authenticated gateway response"),
+        }
+    }
+}
+impl std::error::Error for Failure {}
+pub struct Reply {
+    pub status: StatusCode,
+    pub headers: reqwest::header::HeaderMap,
+    pub bytes: Vec<u8>,
+}
+impl Reply {
+    pub fn json(&self) -> Result<Value, Failure> {
+        serde_json::from_slice(&self.bytes).map_err(|_| Failure::InvalidResponse)
+    }
+}
+pub struct Control {
+    profile: Profile,
+    http: reqwest::Client,
+    preferred: Mutex<Option<(String, Instant)>>,
+}
+impl Control {
+    pub fn new(mut profile: Profile) -> anyhow::Result<Self> {
+        profile.validate()?;
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .pool_max_idle_per_host(2)
+            .pool_idle_timeout(Duration::from_secs(60))
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(40))
+            .build()?;
+        Ok(Self {
+            profile,
+            http,
+            preferred: Mutex::new(None),
+        })
+    }
+    pub fn profile(&self) -> &Profile {
+        &self.profile
+    }
+    pub(crate) fn authorities(&self) -> Vec<String> {
+        let preferred = self
+            .preferred
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .filter(|(_, until)| Instant::now() < *until)
+            .map(|(base, _)| base.clone());
+        let mut bases = Vec::new();
+        for base in preferred
+            .iter()
+            .chain(std::iter::once(&self.profile.server))
+            .chain(&self.profile.fallback_servers)
+        {
+            if !bases.contains(base) {
+                bases.push(base.clone());
+            }
+        }
+        bases
+    }
+    pub(crate) fn release_request(&self, base: &str, target: &str) -> reqwest::RequestBuilder {
+        self.http
+            .get(format!("{base}/api/{}", self.release_path(Some(target))))
+            .header("x-porthub-agent-protocol", "rust-v1")
+            .timeout(Duration::from_secs(600))
+    }
+    pub(crate) fn release_path(&self, target: Option<&str>) -> String {
+        // URL path segments encode enrollment secrets without allowing '/',
+        // '?', or '#' in a token to change routing. This URL is never fetched.
+        let mut path = url::Url::parse("https://relative.invalid/").unwrap();
+        {
+            let mut segments = path.path_segments_mut().unwrap();
+            segments.extend([
+                "machines",
+                &self.profile.machine_id,
+                &self.profile.token,
+                "downloads",
+            ]);
+            if let Some(target) = target {
+                segments.extend(["agent", target]);
+            } else {
+                segments.push("releases");
+            }
+        }
+        path.path().trim_start_matches('/').to_owned()
+    }
+    pub async fn request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+        query: &[(&str, String)],
+    ) -> Result<Reply, Failure> {
+        let mut query = query.to_vec();
+        if matches!(
+            path,
+            "machines/client/auth"
+                | "machines/client/sync"
+                | "machines/client/config"
+                | "machines/client/config.toml"
+                | "machines/client/changes"
+                | "machines/client/changes.toml"
+        ) {
+            if !self.profile.setup_overrides.contains_key("public_base_url") {
+                query.push(("public_base_url", self.profile.server.clone()));
+            }
+            query.extend(
+                self.profile
+                    .setup_overrides
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.clone())),
+            );
+        }
+        for base in self.authorities() {
+            let mut request = self
+                .http
+                .request(method.clone(), format!("{base}/api/{path}"))
+                .header("x-porthub-agent-protocol", "rust-v1");
+            if !query.is_empty() {
+                request = request.query(&query);
+            }
+            if let Some(body) = &body {
+                request = request.json(body);
+            }
+            let mut response = match request.send().await {
+                Ok(response) => response,
+                Err(_) => continue,
+            };
+            if response.status().is_redirection() || response.status().is_server_error() {
+                continue;
+            }
+            if !response.status().is_success() {
+                return Err(Failure::Rejected(response.status().as_u16()));
+            }
+            let status = response.status();
+            let headers = response.headers().clone();
+            let mut bytes = Vec::new();
+            loop {
+                match response.chunk().await {
+                    Ok(Some(chunk)) if bytes.len() + chunk.len() <= 4 * 1024 * 1024 => {
+                        bytes.extend_from_slice(&chunk)
+                    }
+                    Ok(None) => break,
+                    Ok(Some(_)) => return Err(Failure::InvalidResponse),
+                    Err(_) => return Err(Failure::Unavailable),
+                }
+            }
+            *self.preferred.lock().unwrap_or_else(|p| p.into_inner()) =
+                Some((base, Instant::now() + Duration::from_secs(30)));
+            return Ok(Reply {
+                status,
+                headers,
+                bytes,
+            });
+        }
+        Err(Failure::Unavailable)
+    }
+    pub async fn sync(&self, hostname: &str, handled: &str) -> Result<Reply, Failure> {
+        self.request(Method::POST,"machines/client/sync",Some(serde_json::json!({"machine_id":self.profile.machine_id,"token":self.profile.token,"hostname":hostname,"client_version":crate::VERSION,"client_update_last_handled_request_id":handled,"is_active":true})),&[]).await
+    }
+    pub async fn changes(&self, version: &str) -> Result<Reply, Failure> {
+        self.request(
+            Method::GET,
+            "machines/client/changes.toml",
+            None,
+            &[
+                ("machine_id", self.profile.machine_id.clone()),
+                ("token", self.profile.token.clone()),
+                ("since", version.into()),
+                ("wait_seconds", "25".into()),
+            ],
+        )
+        .await
+    }
+    pub async fn deletion_ack(&self) -> Result<(), Failure> {
+        self.request(Method::POST,"machines/client/deletion-ack",Some(serde_json::json!({"machine_id":self.profile.machine_id,"token":self.profile.token})),&[]).await.map(|_|())
+    }
+    pub async fn log_requested(&self) -> Result<bool, Failure> {
+        let reply = self
+            .request(
+                Method::GET,
+                "machines/client/log-stream",
+                None,
+                &[
+                    ("machine_id", self.profile.machine_id.clone()),
+                    ("token", self.profile.token.clone()),
+                ],
+            )
+            .await?;
+        if reply
+            .headers
+            .get("x-porthub-machine-id")
+            .and_then(|value| value.to_str().ok())
+            != Some(self.profile.machine_id.as_str())
+        {
+            return Err(Failure::InvalidResponse);
+        }
+        let body = reply.json()?;
+        let active = body["active"].as_bool().ok_or(Failure::InvalidResponse)?;
+        if reply
+            .headers
+            .get("x-porthub-log-stream-active")
+            .and_then(|value| value.to_str().ok())
+            != Some(if active { "true" } else { "false" })
+        {
+            return Err(Failure::InvalidResponse);
+        }
+        Ok(active)
+    }
+    pub async fn upload_logs(&self, lines: &[String]) -> Result<(), Failure> {
+        if lines.is_empty() {
+            return Ok(());
+        }
+        if lines.len() > 100 || lines.iter().any(|line| line.chars().count() > 4000) {
+            return Err(Failure::InvalidResponse);
+        }
+        let reply=self.request(Method::POST,"machines/client/logs",Some(serde_json::json!({
+            "machine_id":self.profile.machine_id,"token":self.profile.token,"source":"agent","lines":lines})),&[]).await?;
+        let body = reply.json()?;
+        if body["data"]["machine_id"] != self.profile.machine_id
+            || body["data"]["count"].as_u64() != Some(lines.len() as u64)
+        {
+            return Err(Failure::InvalidResponse);
+        }
+        Ok(())
+    }
+}

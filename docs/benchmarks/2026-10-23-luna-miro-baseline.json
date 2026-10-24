@@ -1,0 +1,48 @@
+{
+  "phase": "finished",
+  "completed": [
+    {
+      "route": "lan-direct",
+      "url": "http://192.168.0.3:47180/payload-10gib.bin",
+      "bytes": 10737418240,
+      "elapsed_seconds": 96.74,
+      "MBps": 110.992,
+      "MiBps": 105.851,
+      "Mbps": 887.938,
+      "sha256": "53ddf81cbba561ba45cad6bd1b6d6d9d5cb0acb370e9e7dca92d4d9fd52ac67e",
+      "success": true
+    },
+    {
+      "route": "private-ip",
+      "url": "http://10.203.0.62:47180/payload-10gib.bin",
+      "bytes": 10737418240,
+      "elapsed_seconds": 98.708,
+      "MBps": 108.78,
+      "MiBps": 103.741,
+      "Mbps": 870.239,
+      "sha256": "53ddf81cbba561ba45cad6bd1b6d6d9d5cb0acb370e9e7dca92d4d9fd52ac67e",
+      "success": true
+    },
+    {
+      "route": "private-domain",
+      "url": "http://luna.phub:47180/payload-10gib.bin",
+      "bytes": 10737418240,
+      "elapsed_seconds": 98.304,
+      "MBps": 109.227,
+      "MiBps": 104.167,
+      "Mbps": 873.815,
+      "sha256": "53ddf81cbba561ba45cad6bd1b6d6d9d5cb0acb370e9e7dca92d4d9fd52ac67e",
+      "success": true
+    }
+  ],
+  "date": "2026-10-23",
+  "stage": "existing Go agent baseline; not Rust private-network implementation",
+  "source": "Luna porthub http.server",
+  "client": "Miro porthub get",
+  "connections": 16,
+  "file_bytes": 10737418240,
+  "observed_outer_transport": "Direct LAN UDP 192.168.0.51:41095 <-> 192.168.0.22:44033 while pinging the private IP",
+  "private_domain": "luna.phub resolves to 10.203.0.62",
+  "ping_average_ms": 0.277,
+  "network_change_recovery_tested": false
+}

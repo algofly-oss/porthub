@@ -1,9 +1,20 @@
-# Root Dockerfile build context: include only current server components.
 *
-!api
-!client
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!crates
+!vendor
 !ui
 !deploy
+!api/
+api/**
+!api/assets/
+!api/assets/client/
+!api/assets/client/porthub-client.sh
 ui/node_modules
 ui/.next
 ui/.next-*
+ui/tests
+ui/test-results
+
+ui/.env*

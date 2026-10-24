@@ -1,0 +1,32 @@
+{
+  "verified_at_utc": "2026-10-24T03:42:42.438168+00:00",
+  "scope": "Explicit native adoption of generated legacy Linux public/private registrations",
+  "workspace_tests": {
+    "passed": 209,
+    "failed": 0,
+    "ignored": 0
+  },
+  "full_test_log_sha256": "39c464a317f4af65b5502c6bde398d88f928f66cb7e0f8ac25aa5624cebb9602",
+  "clippy": "workspace all-targets, warnings denied: passed",
+  "isolation_checks_passed": 23,
+  "isolation_evidence": "2026-10-24-adoption-isolation.json",
+  "checks": [
+    "Five isolated adoption tests: batch publication/recovery, stopped and disabled state, runtime-readiness failure, omitted tenants/modified CLI, private identity and endpoint conversion, interrupted retirement recovery",
+    "Legacy query import retains explicit tunnel/service-domain overrides without persisting an origin as the API authority",
+    "Actual systemd read-only planner recognized one public and one private legacy registration on Luna, Condor and Miro",
+    "All six inspected running registrations left unchanged"
+  ],
+  "inspection_artifact": {
+    "version": "native-candidate-20261024",
+    "sha256": "b3ac95ff1579c336235cc73b7584542a9554110ad8d99d0e09674602742bec09",
+    "scope": "Condor/Miro read-only planner; earlier candidate before final recovery/import refinements; not an installed release"
+  },
+  "limitations": [
+    "Adoption activation/rollback is covered with isolated managers; actual system-service adoption awaits rollout",
+    "The live user-service regression uses the earlier release executable; current source is compiled by workspace checks and packaged image tests",
+    "Legacy installer/update handoff, public transport failover and remaining path/platform gates remain unfinished",
+    "Production gateway cutover, client fleet upgrades and physical bandwidth benchmarks remain pending"
+  ],
+  "production_rollout": "pending",
+  "physical_benchmarks": "pending"
+}

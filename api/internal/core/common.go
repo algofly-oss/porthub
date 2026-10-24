@@ -28,7 +28,10 @@ type App struct {
 	// Events delivers Socket.IO events to browsers (set by the socket hub).
 	Events Events
 	// Rebuild coalesces Rathole/Traefik config rewrites.
-	rebuildMu sync.Mutex
+	rebuildMu      sync.Mutex
+	directTLSMu    sync.Mutex
+	directTLSPin   string
+	directTLSUntil time.Time
 }
 
 // Events is implemented by the Socket.IO hub. Room "" means the user room.
@@ -344,6 +347,9 @@ func (a *App) SerializeConnection(connection, machine Doc) map[string]any {
 		"internal_ip":                   JSON(InternalIP(connection)),
 		"internal_port":                 JSON(connection["internal_port"]),
 		"external_port":                 JSON(connection["external_port"]),
+		// The current gateway binds every forwarding listener to all IPv4
+		// interfaces. Report the actual binding independently of its access URL.
+		"external_bind_ip":              "0.0.0.0",
 		"enabled":                       JSON(valueOr(connection, "enabled", true)),
 		"auto_refresh_enabled":          JSON(valueOr(connection, "auto_refresh_enabled", false)),
 		"auto_refresh_interval_minutes": JSON(connection["auto_refresh_interval_minutes"]),

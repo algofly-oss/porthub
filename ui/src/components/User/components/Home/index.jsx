@@ -1,3 +1,4 @@
+import { useWorkspaceState } from "@/shared/contexts/workspaceCache";
 import ResultsPagination from "@/components/ui/results-pagination";
 import { normalizeTrafficSamples, trafficSummary } from "@/shared/utils/traffic.mjs";
 import { compareInventoryEntries, INVENTORY_SORT_OPTIONS, isTrafficSort } from "@/shared/utils/inventory-sort.mjs";
@@ -103,6 +104,7 @@ const mapConnectionToForwardingConfig = (connection) => {
     internalIp: connection.internal_ip || connection.internalIp || "0.0.0.0",
     internalPort: readConnectionValue(connection, "internal_port", "internalPort"),
     externalPort: readConnectionValue(connection, "external_port", "externalPort"),
+    externalBindIp: connection.external_bind_ip || connection.externalBindIp || "0.0.0.0",
     enabled: connection.enabled ?? true,
     autoRefreshEnabled:
       connection.autoRefreshEnabled ?? connection.auto_refresh_enabled ?? false,
@@ -282,10 +284,10 @@ export default function Home({ onStatsChange }) {
   const { colorScheme } = useMantineColorScheme();
   const isDark = colorScheme === "dark";
   const socket = useContext(SocketContext);
-  const [hosts, setHosts] = useState([]);
+  const [hosts, setHosts] = useWorkspaceState("machines.hosts", []);
   const [selectedHostId, setSelectedHostId] = useState(null);
   const [configStartSection, setConfigStartSection] = useState("ports");
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useWorkspaceState("machines.loading", true);
   const [isSaving, setIsSaving] = useState(false);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isCreatingMachine, setIsCreatingMachine] = useState(false);
@@ -295,10 +297,10 @@ export default function Home({ onStatsChange }) {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState("name");
   const [groupFilter, setGroupFilter] = useState(ALL_GROUPS_FILTER);
-  const [machineGroups, setMachineGroups] = useState([]);
+  const [machineGroups, setMachineGroups] = useWorkspaceState("machines.groups", []);
   const [isGroupsModalOpen, setIsGroupsModalOpen] = useState(false);
   const [lastSeenRefreshTick, setLastSeenRefreshTick] = useState(0);
-  const [machineTrafficByHostId, setMachineTrafficByHostId] = useState({});
+  const [machineTrafficByHostId, setMachineTrafficByHostId] = useWorkspaceState("machines.traffic", {});
   const { success, error } = useToast();
   useCreateFromUrl("machines", () => setIsCreateModalOpen(true));
   useEffect(() => {
@@ -443,15 +445,16 @@ export default function Home({ onStatsChange }) {
   }, [hosts, onStatsChange]);
 
   useEffect(() => {
+    const controller = new AbortController();
     const loadData = async () => {
-      setIsLoading(true);
-
       try {
         const [machinesResponse, connectionsResponse, groupsResponse] = await Promise.all([
-          axios.get(apiRoutes.listMachines),
-          axios.get(apiRoutes.listConnections),
-          axios.get(apiRoutes.listGroups).catch(() => ({ data: { data: [] } })),
+          axios.get(apiRoutes.listMachines, { signal: controller.signal }),
+          axios.get(apiRoutes.listConnections, { signal: controller.signal }),
+          axios.get(apiRoutes.listGroups, { signal: controller.signal }).catch(() => ({ data: { data: [] } })),
         ]);
+
+        if (controller.signal.aborted) return;
 
         const machines = machinesResponse.data?.data || [];
         const connections = connectionsResponse.data?.data || [];
@@ -471,15 +474,17 @@ export default function Home({ onStatsChange }) {
           })
         );
       } catch (loadError) {
+        if (axios.isCancel(loadError)) return;
         if (loadError?.response?.data?.detail !== "User not logged in") {
           error("Could not load saved machines");
         }
       } finally {
-        setIsLoading(false);
+        if (!controller.signal.aborted) setIsLoading(false);
       }
     };
 
     loadData();
+    return () => controller.abort();
   }, []);
 
   useEffect(() => {

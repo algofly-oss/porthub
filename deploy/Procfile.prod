@@ -6,5 +6,4 @@ mongod: mongod --bind_ip 127.0.0.1 --port 47017 --dbpath /data/mongo --auth --qu
 api: after=127.0.0.1:47017 PORTHUB_API_LISTEN=127.0.0.1:47080 exec porthub-api
 relay: porthub relay-server --listen 127.0.0.1:47091
 ui: cd /app/ui && NODE_ENV=production HOSTNAME=127.0.0.1 PORT=47030 exec node server.js
-rathole: after=127.0.0.1:47080 exec rathole -s /runtime/rathole/server.toml
 traefik: exec sh /app/deploy/traefik.sh

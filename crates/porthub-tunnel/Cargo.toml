@@ -1,0 +1,19 @@
+[package]
+name = "porthub-tunnel"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+futures-util.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+rathole.workspace = true
+toml = "0.5"
+notify = "5.2"
+url = "2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

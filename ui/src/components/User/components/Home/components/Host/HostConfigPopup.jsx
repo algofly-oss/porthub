@@ -1,3 +1,4 @@
+import { externalEndpoint, internalEndpoint } from "@/shared/utils/endpoints.mjs";
 import Pagination from "@/components/ui/pagination";
 import WorkspaceDrawer from "@/components/ui/workspace-drawer";
 import { Dialog as Modal } from "@/components/ui/dialog";
@@ -174,6 +175,7 @@ const mapRuleFromConfig = (config) => ({
   serviceName: config.serviceName || "",
   serviceDescription: config.serviceDescription || "",
   internalIp: config.internalIp || config.internal_ip || "0.0.0.0",
+  externalBindIp: config.externalBindIp || config.external_bind_ip || "0.0.0.0",
   internalPort:
     config.internalPort === undefined ||
     config.internalPort === null ||
@@ -438,6 +440,7 @@ export default function HostConfigPopup({
   const [isCheckingAvailability, setIsCheckingAvailability] = useState(false);
   const [randomizingRuleId, setRandomizingRuleId] = useState(null);
   const [machineCommand, setMachineCommand] = useState("");
+  const machineCommandPreviewsRef = useRef({ identity: "", commands: new Map() });
   const [isLoadingMachineCommand, setIsLoadingMachineCommand] = useState(false);
   const [showClientSetupAdvanced, setShowClientSetupAdvanced] = useState(false);
   const [clientSetupDefaults, setClientSetupDefaults] = useState(
@@ -888,24 +891,35 @@ export default function HostConfigPopup({
     }
 
     let isActive = true;
+    const controller = new AbortController();
+    const identity = `${host.id}:${host.token || ""}`;
+    if (machineCommandPreviewsRef.current.identity !== identity) {
+      machineCommandPreviewsRef.current = { identity, commands: new Map() };
+      setMachineCommand("");
+    }
 
     const loadMachineCommand = async () => {
       setIsLoadingMachineCommand(true);
 
       try {
-        const response = await axios.get(apiRoutes.getMachineCommand(host.id));
+        const response = await axios.get(apiRoutes.getMachineCommand(host.id), { signal: controller.signal });
         if (isActive) {
           const setup = response.data?.data?.client_setup || {};
           const defaults = mapClientSetupValues(setup.defaults);
           const overrides = mapClientSetupValues(setup.overrides);
-          setMachineCommand(response.data?.data?.command || "");
-          setClientSetupDefaults(defaults);
-          setClientSetupFields({
+          const fields = {
             publicBaseUrl: overrides.publicBaseUrl || defaults.publicBaseUrl,
             ratholeServerAddress:
               overrides.ratholeServerAddress || defaults.ratholeServerAddress,
             serviceDomain: overrides.serviceDomain || defaults.serviceDomain,
-          });
+          };
+          const command = response.data?.data?.command || "";
+          machineCommandPreviewsRef.current.commands.set(
+            JSON.stringify(getChangedClientSetupValues(fields, defaults)), command
+          );
+          setMachineCommand(command);
+          setClientSetupDefaults(defaults);
+          setClientSetupFields(fields);
         }
       } catch (machineCommandError) {
         // Keep the last known command instead of flashing "Unavailable" on transient failures.
@@ -920,8 +934,9 @@ export default function HostConfigPopup({
 
     return () => {
       isActive = false;
+      controller.abort();
     };
-  }, [opened, host?.id]);
+  }, [opened, host?.id, host?.token]);
 
   useEffect(() => {
     if (!opened || !host?.id || !showClientSetupAdvanced) {
@@ -934,14 +949,32 @@ export default function HostConfigPopup({
       clientSetupDefaults
     );
 
+    const cache = machineCommandPreviewsRef.current;
+    const key = JSON.stringify(commandOverrides);
+    // Expanding advanced settings is not an input change. Reuse commands for
+    // saved or previously previewed values, scoped to this machine and token.
+    if (cache.identity !== `${host.id}:${host.token || ""}` || !cache.commands.size ||
+        valuesDiffer(debouncedClientSetupFields, clientSetupFields)) {
+      return undefined;
+    }
+    if (cache.commands.has(key)) {
+      setMachineCommand(cache.commands.get(key));
+      setIsLoadingMachineCommand(false);
+      return undefined;
+    }
+    const controller = new AbortController();
     const loadPreviewCommand = async () => {
       setIsLoadingMachineCommand(true);
       try {
         const response = await axios.get(
-          apiRoutes.getMachineCommand(host.id, commandOverrides)
+          apiRoutes.getMachineCommand(host.id, commandOverrides),
+          { signal: controller.signal }
         );
         if (isActive) {
-          setMachineCommand(response.data?.data?.command || "");
+          const command = response.data?.data?.command || "";
+          if (cache.commands.size >= 16) cache.commands.delete(cache.commands.keys().next().value);
+          cache.commands.set(key, command);
+          setMachineCommand(command);
         }
       } catch {
         // Keep the last known command while the user is editing advanced values.
@@ -956,10 +989,14 @@ export default function HostConfigPopup({
 
     return () => {
       isActive = false;
+      controller.abort();
+      setIsLoadingMachineCommand(false);
     };
   }, [
     opened,
     host?.id,
+    host?.token,
+    clientSetupFields,
     showClientSetupAdvanced,
     debouncedClientSetupFields,
     clientSetupDefaults,
@@ -1723,14 +1760,20 @@ export default function HostConfigPopup({
       const setup = response.data?.data?.client_setup || {};
       const defaults = mapClientSetupValues(setup.defaults);
       const overrides = mapClientSetupValues(setup.overrides);
-      setMachineCommand(response.data?.data?.command || "");
-      setClientSetupDefaults(defaults);
-      setClientSetupFields({
+      const fields = {
         publicBaseUrl: overrides.publicBaseUrl || defaults.publicBaseUrl,
         ratholeServerAddress:
           overrides.ratholeServerAddress || defaults.ratholeServerAddress,
         serviceDomain: overrides.serviceDomain || defaults.serviceDomain,
-      });
+      };
+      const command = response.data?.data?.command || "";
+      machineCommandPreviewsRef.current = {
+        identity: `${host.id}:${host.token || ""}`,
+        commands: new Map([[JSON.stringify(getChangedClientSetupValues(fields, defaults)), command]]),
+      };
+      setMachineCommand(command);
+      setClientSetupDefaults(defaults);
+      setClientSetupFields(fields);
     } finally {
       setIsLoadingMachineCommand(false);
     }
@@ -2453,7 +2496,7 @@ export default function HostConfigPopup({
                                   isDark ? "text-zinc-100" : "text-zinc-800"
                                 }`}
                               >
-                                {isLoadingMachineCommand
+                                {isLoadingMachineCommand && !machineCommand
                                   ? "Loading bootstrap command..."
                                   : machineCommand || "Unavailable"}
                               </code>
@@ -2573,13 +2616,13 @@ export default function HostConfigPopup({
                                 {host?.latestClientVersion ? (
                                   <>
                                     {" · "}
-                                    {host.clientVersion === host.latestClientVersion ? (
+                                    {host.clientUpdateRequested ? (
+                                      <span className="text-amber-700 dark:text-amber-400">
+                                        Update requested: {latestClientVersionLabel}
+                                      </span>
+                                    ) : host.clientVersion === host.latestClientVersion ? (
                                       <span className="text-emerald-700 dark:text-emerald-400">
                                         Up to date
-                                      </span>
-                                    ) : host.clientUpdateRequested ? (
-                                      <span className="text-amber-700 dark:text-amber-400">
-                                        Updating to {latestClientVersionLabel}
                                       </span>
                                     ) : (
                                       <span className="text-amber-700 dark:text-amber-400">
@@ -2795,8 +2838,8 @@ export default function HostConfigPopup({
                       const addresses = linkedProxies.filter(proxy => (proxy.connection?.data_id || proxy.connection?._id) === rule.dataId);
                       const openAddresses = event => { event.stopPropagation(); openRuleEditor(rule); setPortSection("web"); };
                       return <TableRow key={rule.localId} className="cursor-pointer" onClick={()=>openRuleEditor(rule)}>
-                        <TableCell className="!py-2"><button type="button" aria-label={`Edit forwarding rule ${rule.serviceName.trim() || "untitled rule"}`} className="block max-w-full text-left"><span className="block truncate text-sm font-medium">{rule.serviceName || "Untitled service"}</span><span className="mt-1 hidden truncate text-xs text-muted-foreground md:block">{rule.serviceDescription || `Port ${rule.externalPort}`}</span></button><p className="mt-1 text-xs text-muted-foreground md:hidden">:{rule.externalPort} → :{rule.internalPort}</p><div className="md:hidden">{gatewayLink(rule)}</div><button type="button" onClick={openAddresses} className="mt-1 max-w-full truncate text-left text-xs text-blue-700 dark:text-blue-300 md:hidden">{addresses[0]?.hosts?.[0] || "Add web address"}</button></TableCell>
-                        <TableCell className="hidden md:table-cell !py-2"><p className="font-mono text-xs">:{rule.externalPort || "—"} → :{rule.internalPort || "—"}</p><p className="mt-1 truncate text-[11px] text-muted-foreground" title={rule.internalIp}>{normalizeAllowedIps(rule.firewall?.allowedIps).length ? "IP restricted" : "Public access"} · {rule.internalIp || "127.0.0.1"}</p></TableCell>
+                        <TableCell className="!py-2"><button type="button" aria-label={`Edit forwarding rule ${rule.serviceName.trim() || "untitled rule"}`} className="block max-w-full text-left"><span className="block truncate text-sm font-medium">{rule.serviceName || "Untitled service"}</span><span className="mt-1 hidden truncate text-xs text-muted-foreground md:block">{rule.serviceDescription || `Port ${rule.externalPort}`}</span></button><p className="mt-1 text-xs text-muted-foreground md:hidden">{externalEndpoint(rule)} → {internalEndpoint(rule)}</p><div className="md:hidden">{gatewayLink(rule)}</div><button type="button" onClick={openAddresses} className="mt-1 max-w-full truncate text-left text-xs text-blue-700 dark:text-blue-300 md:hidden">{addresses[0]?.hosts?.[0] || "Add web address"}</button></TableCell>
+                        <TableCell className="hidden md:table-cell !py-2"><p className="font-mono text-xs">{externalEndpoint(rule)} → {internalEndpoint(rule)}</p><p className="mt-1 truncate text-[11px] text-muted-foreground" title={rule.internalIp}>{normalizeAllowedIps(rule.firewall?.allowedIps).length ? "IP restricted" : "Public access"} · {rule.internalIp || "127.0.0.1"}</p></TableCell>
                         <TableCell className="!py-2"><TrafficSparkline dense samples={samplesByConnection.get(rule.dataId) || []} label={`${rule.serviceName} port traffic`} /></TableCell>
                         <TableCell className="hidden md:table-cell"><div className="space-y-1">{addresses.slice(0,2).map(proxy=><a key={proxy._id} href={`${proxy.entry_points?.includes("websecure") ? "https" : "http"}://${proxy.hosts?.[0]}`} target="_blank" rel="noreferrer" onClick={event=>event.stopPropagation()} className="block truncate text-xs text-blue-700 hover:underline dark:text-blue-300" title={proxy.hosts?.join(", ")}>{proxy.hosts?.[0] || proxy.name}</a>)}{gatewayLink(rule)}<button type="button" onClick={openAddresses} className="text-xs text-muted-foreground hover:text-foreground">{addresses.length ? addresses.length > 2 ? `Manage ${addresses.length} addresses` : "Manage addresses" : "+ Add web address"}</button></div></TableCell>
                         <TableCell><div onClick={event=>event.stopPropagation()}><Switch size="sm" checked={rule.enabled} onChange={event=>updateRule(rule.localId,"enabled",event.currentTarget.checked)} aria-label={rule.enabled ? "Disable forwarding rule" : "Enable forwarding rule"} /></div></TableCell>

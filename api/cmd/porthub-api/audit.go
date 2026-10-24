@@ -29,9 +29,10 @@ type auditCollection struct {
 	Fingerprint string `json:"fingerprint"`
 }
 type auditProbe struct {
-	Path    string `json:"path"`
-	Account string `json:"account,omitempty"`
-	Status  int    `json:"status"`
+	Path       string  `json:"path"`
+	Account    string  `json:"account,omitempty"`
+	Status     int     `json:"status"`
+	DurationMS float64 `json:"duration_ms"`
 }
 type auditReport struct {
 	CapturedAt       time.Time                  `json:"captured_at"`
@@ -162,12 +163,14 @@ func runAudit(args []string, stdout io.Writer) error {
 			req.AddCookie(&http.Cookie{Name: cfg.SessionCookie, Value: token})
 		}
 		result := auditProbe{Path: path, Account: account}
+		started := time.Now()
 		response, err := client.Do(req)
 		if err == nil {
 			result.Status = response.StatusCode
 			_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 8<<20))
 			response.Body.Close()
 		}
+		result.DurationMS = float64(time.Since(started).Microseconds()) / 1000
 		if result.Status != 200 {
 			report.Problems = append(report.Problems, fmt.Sprintf("probe %s account %s: HTTP %d", path, account, result.Status))
 		}

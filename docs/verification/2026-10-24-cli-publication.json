@@ -1,0 +1,31 @@
+{
+  "scope": "Local native CLI publication and registration management; legacy adoption and production rollout remain incomplete",
+  "verification": {
+    "workspace_tests_passed": 153,
+    "workspace_tests_failed": 0,
+    "workspace_tests_ignored": 0,
+    "clippy": "workspace all targets, warnings denied",
+    "format": "cargo fmt --all -- --check",
+    "compose_checks_passed": 18,
+    "compose_report": "2026-10-24-cli-publication-isolation.json",
+    "local_native_agent_sha256": "5bcb0e3a46c35fc26c896417cdc4b720882fdfb495ff3467eb7fee052b4ef240"
+  },
+  "checks": [
+    "Atomic CLI publication targets a verified immutable release and rolls back with failed activation",
+    "Adopted identical executable restores its original inode and mode after failed activation",
+    "Foreign executables, unknown links and publication into the managed release cache are rejected",
+    "Native registration selectors reject ambiguous identifiers and malformed manifests",
+    "Actual systemd user-service test uses the published executable to list, inspect, stop, start and remove its registration",
+    "The published executable remains available after scoped registration removal",
+    "Existing production enrollment, transfer integrity, diagnostics, policy, retirement and restart checks pass",
+    "Disposable production verification containers are removed"
+  ],
+  "build_note": "An initial optimized rustc build crashed with SIGSEGV. A retry with RUST_MIN_STACK=33554432 succeeded; the stack setting is scoped to compiler builds and CI, not production runtime. The precise compiler fault is not established.",
+  "limitations": [
+    "Legacy CLI and tenant adoption and full installer-route compatibility remain incomplete",
+    "Full privileged HTTPS installation, Linux system-service activation and Windows/macOS lifecycle remain unverified or incomplete",
+    "Private networking, background path selection and crash-safe updates remain incomplete",
+    "Platform execution, production adoption and final physical-machine bandwidth tests remain outstanding",
+    "No commit, push, URM2 deployment or registered-agent upgrade performed"
+  ]
+}

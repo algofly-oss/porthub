@@ -239,7 +239,27 @@ func MachineConfigVersion(machine Doc, connections []Doc) string {
 }
 
 func (a *App) RenderClientTOML(machine Doc, connections []Doc, r *http.Request, o Overrides) string {
-	lines := []string{managedHeader, "[client]", `remote_addr = "` + a.RatholeServerAddress(r, machine, o) + `"`, ""}
+	remote := a.RatholeServerAddress(r, machine, o)
+	if a.Cfg.TunnelWebSocket {
+		remote = a.TunnelURL(machine, r, o)
+	}
+	lines := []string{managedHeader, "[client]", `remote_addr = "` + remote + `"`, ""}
+	if a.Cfg.TunnelWebSocket {
+		fallbacks := a.TunnelFallbackURLs(machine, r, o)
+		if direct, pin := a.DirectTunnel(); direct != "" {
+			lines = append(lines, fmt.Sprintf("direct_addr = %q", direct), fmt.Sprintf("direct_spki_sha256 = %q", pin), "")
+			if host := a.DirectTunnelHost(); host != "" {
+				lines = append(lines, fmt.Sprintf("direct_host = %q", host), "")
+			}
+		}
+		if len(fallbacks) > 0 {
+			values := []string{}
+			for _, v := range fallbacks {
+				values = append(values, fmt.Sprintf("%q", v))
+			}
+			lines = append(lines, "fallback_addrs = ["+strings.Join(values, ",")+"]", "")
+		}
+	}
 	for _, c := range connections {
 		if IsFalse(c, "enabled") {
 			continue
@@ -248,6 +268,83 @@ func (a *App) RenderClientTOML(machine Doc, connections []Doc, r *http.Request, 
 		lines = append(lines, "[client.services."+s["service_key"].(string)+"]", `token = "`+Str(machine, "token")+`"`, `local_addr = "`+s["local_address"].(string)+`"`, "")
 	}
 	return strings.TrimRight(strings.Join(lines, "\n"), " \t\n") + "\n"
+}
+
+func (a *App) TunnelURL(machine Doc, r *http.Request, o Overrides) string {
+	u, err := url.Parse(a.APIBaseURL(r, machine, o))
+	if err != nil {
+		return ""
+	}
+	if u.Scheme == "https" {
+		u.Scheme = "wss"
+	} else {
+		u.Scheme = "ws"
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + "/tunnel"
+	return u.String()
+}
+
+func (a *App) machineTransportVersion(machine Doc, connections []Doc, rendered string) string {
+	version := MachineConfigVersion(machine, connections)
+	if !a.Cfg.TunnelWebSocket {
+		return version
+	}
+	sum := sha256.Sum256([]byte(version + "|porthub.tcp.v1|" + rendered))
+	return hex.EncodeToString(sum[:])
+}
+
+func (a *App) TunnelFallbackURL(machine Doc, r *http.Request, o Overrides) string {
+	u, err := url.Parse(a.MachinePublicBaseURL(machine, r, o))
+	if err != nil || u.Scheme != "https" {
+		return ""
+	}
+	if base := strings.TrimSpace(a.Cfg.TunnelHTTPBaseURL); base != "" {
+		u, err = url.Parse(base)
+		if err != nil || u.Scheme != "http" || u.Host == "" {
+			return ""
+		}
+	} else {
+		if port := u.Port(); port != "" && port != "443" {
+			return ""
+		}
+		u.Scheme = "http"
+		u.Host = u.Hostname()
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + "/api/tunnel"
+	return u.String()
+}
+
+func (a *App) TunnelFallbackURLs(machine Doc, r *http.Request, o Overrides) []string {
+	values := []string{}
+	if v := a.TunnelFallbackURL(machine, r, o); v != "" {
+		values = append(values, v)
+	}
+	for _, base := range strings.Split(a.Cfg.TunnelFallbackBaseURLs, ",") {
+		u, err := url.Parse(strings.TrimRight(strings.TrimSpace(base), "/"))
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			continue
+		}
+		u.Path += "/api/tunnel"
+		v := u.String()
+		found := false
+		for _, old := range values {
+			if old == v {
+				found = true
+			}
+		}
+		if !found {
+			values = append(values, v)
+		}
+	}
+	return values
+}
+
+func (a *App) APIFallbackURLs(machine Doc, r *http.Request, o Overrides) []string {
+	values := []string{}
+	for _, v := range a.TunnelFallbackURLs(machine, r, o) {
+		values = append(values, strings.TrimSuffix(v, "/tunnel"))
+	}
+	return values
 }
 
 func withSetupQuery(u string, o Overrides) string {
@@ -321,8 +418,9 @@ func (a *App) MachineConfigBundle(ctx context.Context, machine Doc, r *http.Requ
 	for _, c := range connections {
 		serialized = append(serialized, SerializeMachineConnection(c, machine))
 	}
+	clientTOML := a.RenderClientTOML(machine, connections, r, o)
 	return map[string]any{
-		"version":                MachineConfigVersion(machine, connections),
+		"version":                a.machineTransportVersion(machine, connections, clientTOML),
 		"machine_id":             IDString(machine["_id"]),
 		"machine_name":           JSON(Get(machine, "name", "")),
 		"hostname":               ResolveMachineHostname(machine),
@@ -330,7 +428,7 @@ func (a *App) MachineConfigBundle(ctx context.Context, machine Doc, r *http.Requ
 		"rathole_server_address": a.RatholeServerAddress(r, machine, o),
 		"service_domain":         a.SetupServiceDomain(machine, o),
 		"connections":            serialized,
-		"files":                  map[string]any{"client.toml": a.RenderClientTOML(machine, connections, r, o)},
+		"files":                  map[string]any{"client.toml": clientTOML},
 		"generated_at":           JSON(Now()),
 	}, nil
 }

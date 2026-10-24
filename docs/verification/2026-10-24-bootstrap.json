@@ -1,0 +1,36 @@
+{
+  "scope": "Local native bootstrap enrollment, immutable preview contexts and Linux user-service activation; first-install publication/migration incomplete; no URM2 rollout",
+  "verification": {
+    "workspace_tests_passed": 149,
+    "workspace_tests_failed": 0,
+    "workspace_tests_ignored": 0,
+    "clippy": "workspace all targets, warnings denied",
+    "format": "cargo fmt --all -- --check",
+    "bootstrap_cache_browser_check": "passed",
+    "compose_checks_passed": 18,
+    "compose_report": "2026-10-24-bootstrap-isolation.json",
+    "local_native_agent_sha256": "8977cec3724dcd8e5ed881b984ff7febab4458700819b4482572b1e4a24d99c2"
+  },
+  "checks": [
+    "Owner-only command generation; unchanged settings reuse stable codes and cached differing contexts remain independent",
+    "Expiry, credential rotation, disable and retirement reject profile and asset capabilities",
+    "Existing public Go-issued ticket formats remain readable",
+    "Concurrent owner requests share one context ticket; asset ranges require a live capability",
+    "Native fetch rejects redirect/identity/authority/size errors and cancels stalled requests",
+    "Credential saves reject foreign, symlinked and live foreground enrollments",
+    "Failed service activation restores source and installed credentials while other tenants stay active",
+    "Actual native CLI saves and runs an API-issued profile with advanced setup overrides retained",
+    "Actual systemd user-service setup, sync, 4 MiB forwarding, stop/start and scoped removal",
+    "Packaged agent enrolls through a real owner ticket before production file integrity/policy checks",
+    "Existing release distribution, diagnostics, retirement and restart checks retained",
+    "Disposable Compose project and user-service test unit removed"
+  ],
+  "limitations": [
+    "Interactive CLI bin publication, native tenant-management aliases and legacy CLI/tenant adoption remain incomplete",
+    "Full legacy installer-route compatibility and private installer tickets remain incomplete",
+    "The small first-download launcher uses OS tools; only syntax was checked, not complete privileged HTTPS installation",
+    "Windows credential protection, Windows/macOS service activation and privileged Linux system-service activation remain unverified or incomplete",
+    "Private networking, crash-safe updates, production adoption and final remote bandwidth tests remain outstanding",
+    "No commit, push, URM2 deployment or registered-agent upgrade performed"
+  ]
+}

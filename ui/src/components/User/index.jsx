@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useContext, useEffect, useState } from "react";
+import { SocketContext } from "@/shared/contexts/socket";
 import UserNavBar from "./components/NavBar";
 import { VscRemoteExplorer } from "react-icons/vsc";
 import Home from "./components/Home";
@@ -19,6 +20,7 @@ import useNavigationPreference from "@/shared/hooks/useNavigationPreference";
 import useWorkspaceViewport from "@/shared/hooks/useWorkspaceViewport";
 import { motion, useReducedMotion } from "framer-motion";
 import { DemoNotice } from "@/shared/demo/DemoProvider";
+import { WorkspaceCacheProvider } from "@/shared/contexts/workspaceCache";
 
 export default function UserHome() {
   useWorkspaceViewport();
@@ -26,6 +28,25 @@ export default function UserHome() {
   const router = useRouter();
   const reducedMotion = useReducedMotion();
   const { user } = useAuth();
+  const socket = useContext(SocketContext);
+  const demo = router.query.demo === "1";
+  useEffect(() => {
+    if (!user?.username || demo || typeof socket?.connect !== "function") return;
+    let retry;
+    const reconnect = (reason) => {
+      if (reason === "io server disconnect") {
+        window.clearTimeout(retry);
+        retry = window.setTimeout(() => socket.connect(), 1000);
+      }
+    };
+    socket.on("disconnect", reconnect);
+    socket.disconnect().connect();
+    return () => {
+      window.clearTimeout(retry);
+      socket.off("disconnect", reconnect);
+      socket.disconnect();
+    };
+  }, [socket, user?.username, demo]);
   const { collapsed, ready: navigationReady, setCollapsed } = useNavigationPreference(user);
   const [savingNavigation, setSavingNavigation] = useState(false);
   const toggleNavigation = async () => {
@@ -90,6 +111,7 @@ export default function UserHome() {
       <div className={`workspace-body w-full min-w-0 ${collapsed ? "md:ml-16" : "md:ml-56"}`}>
         <DemoNotice />
         <main id="workspace-content" tabIndex={-1}>
+        <WorkspaceCacheProvider key={`${user?.username || "anonymous"}:${router.query.demo === "1"}`}>
         <motion.div key={tab} initial={reducedMotion ? false : { opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.16 }} className="h-full min-h-0">
         {tab === "Dashboard" && <Dashboard />}
         {tab === "Home" && <Home onStatsChange={setMachineStats} />}
@@ -99,6 +121,7 @@ export default function UserHome() {
         {tab === "Settings" && <Settings />}
         {tab === "Platform" && isAdmin && <PlatformOverview />}
         </motion.div>
+        </WorkspaceCacheProvider>
         </main>
       </div>
     </div>

@@ -1,0 +1,29 @@
+{
+  "scope": "Native Unix legacy credential staging only; no legacy service takeover or production rollout",
+  "verification": {
+    "workspace_tests_passed": 158,
+    "workspace_tests_failed": 0,
+    "workspace_tests_ignored": 0,
+    "clippy": "workspace all targets, warnings denied",
+    "format": "cargo fmt --all -- --check",
+    "patch_whitespace": "git diff --check",
+    "production_images_rebuilt": false,
+    "production_isolation_rerun": false,
+    "service_lifecycle_executable": "Previously built CLI-publication release; import-specific CLI test executes the newly compiled test binary"
+  },
+  "checks": [
+    "Generated assignments import the original credentials and authority, including prefixed API paths",
+    "Shell expansion, commands, duplicate keys, malformed values, oversized input and invalid gateway URLs are rejected without revealing values",
+    "Simple single-quoted values remain literal without execution or expansion",
+    "New profile is 0600 and repeated import cannot overwrite it; legacy source bytes remain unchanged",
+    "Source symlinks, directories and writable-by-others files are rejected; securely owned legacy 0644 source files are readable",
+    "Actual import-legacy CLI accepts explicit fallback authority and emits no token or gateway address"
+  ],
+  "limitations": [
+    "Importer stages one explicitly selected client.env; it does not discover or replace legacy services",
+    "Fallbacks embedded only in the shared old shell executable are not inferred",
+    "Private-network credentials, runtime identity, keys and route migration remain separate work",
+    "Private transport, platform lifecycle, crash-safe updates, remaining API compatibility and production adoption remain incomplete",
+    "No commit, push, URM2 deployment, registered-agent upgrade or final remote benchmark performed"
+  ]
+}

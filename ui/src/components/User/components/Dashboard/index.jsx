@@ -1,4 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import useBackgroundRefresh from "@/shared/hooks/useBackgroundRefresh";
+import { externalEndpoint } from "@/shared/utils/endpoints.mjs";
+import { useWorkspaceState } from "@/shared/contexts/workspaceCache";
+import { useMemo, useState } from "react";
 import { useRouter } from "next/router";
 import axios from "axios";
 import { IconArrowUpRight, IconCheck, IconRefresh, IconServer, IconWorld, IconAlertCircle, IconPlus } from "@tabler/icons-react";
@@ -30,8 +33,8 @@ function DashboardSkeleton() {
 export default function Dashboard() {
   const router = useRouter();
   const { colorScheme } = useMantineColorScheme();
-  const [data, setData] = useState({ machines: [], proxies: [], ports: [] });
-  const [loading, setLoading] = useState(true), [error, setError] = useState("");
+  const [data, setData] = useWorkspaceState("dashboard.data", { machines: [], proxies: [], ports: [] });
+  const [loading, setLoading] = useWorkspaceState("dashboard.loading", true), [error, setError] = useState("");
   const seconds = 300;
   const traffic = useTrafficSnapshot();
   const activity = useProxyActivity();
@@ -44,12 +47,7 @@ export default function Dashboard() {
     } catch (error) { if (!axios.isCancel(error)) setError("Could not refresh the workspace. Try again."); }
     finally { if (!signal?.aborted) setLoading(false); }
   }
-  useEffect(() => {
-    const controller = new AbortController();
-    load(controller.signal);
-    const timer = setInterval(() => { if (!document.hidden) load(controller.signal); }, 15000);
-    return () => { controller.abort(); clearInterval(timer); };
-  }, []);
+  useBackgroundRefresh(load);
   const navigate = (view, query = {}) => router.push({ pathname: "/home", query: { ...(router.query.demo ? { demo: router.query.demo } : {}), view, ...query } }, undefined, { shallow: true });
   const status = machine => machine.connection_status || (machine.enabled === false ? "disabled" : machine.is_active ? "online" : "offline");
   const online = data.machines.filter(machine => status(machine) === "online");
@@ -84,7 +82,7 @@ export default function Dashboard() {
       <div className="grid items-stretch gap-4 lg:grid-cols-[minmax(0,1.8fr)_minmax(290px,1fr)]">
         <section className="min-w-0 overflow-hidden rounded-xl bg-surface"><PanelHeading title="Busiest Ports" description="Transferred in the last 5 minutes" onClick={()=>navigate("traffic")} />
           <div className="grid grid-cols-[minmax(0,1fr)_100px_80px] gap-3 bg-muted/40 px-5 py-2 text-[11px] text-muted-foreground"><span>Service / machine</span><span>Activity</span><span className="text-right">Transferred</span></div>
-          <div>{busiest.length ? busiest.map(row=><button key={row.connection._id} onClick={()=>navigate("machines",{machine:row.connection.machine_id})} className="grid w-full grid-cols-[minmax(0,1fr)_100px_80px] items-center gap-3 px-5 py-3 text-left hover:bg-muted/50"><div className="min-w-0"><p className="truncate text-sm font-medium">{row.connection.service_name || `Port ${row.connection.external_port}`}</p><p className="mt-1 truncate text-xs text-muted-foreground">{row.connection.machine_name} · :{row.connection.external_port}</p></div><div><TrafficSparkline samples={row.traffic} showRates={true} label={row.connection.service_name} /><div className="mt-1 h-0.5 rounded-full bg-muted"><div className="h-full rounded-full bg-primary/50" style={{width:`${row.summary.volume / peak * 100}%`}} /></div></div><p className="text-right text-xs font-medium tabular-nums">{formatBytes(row.summary.volume)}</p></button>) : <p className="p-5 text-sm text-muted-foreground">Traffic appears when a forwarded port is used.</p>}</div>
+          <div>{busiest.length ? busiest.map(row=><button key={row.connection._id} onClick={()=>navigate("machines",{machine:row.connection.machine_id})} className="grid w-full grid-cols-[minmax(0,1fr)_100px_80px] items-center gap-3 px-5 py-3 text-left hover:bg-muted/50"><div className="min-w-0"><p className="truncate text-sm font-medium">{row.connection.service_name || `Port ${row.connection.external_port}`}</p><p className="mt-1 truncate text-xs text-muted-foreground">{row.connection.machine_name} · {externalEndpoint(row.connection)}</p></div><div><TrafficSparkline samples={row.traffic} showRates={true} label={row.connection.service_name} /><div className="mt-1 h-0.5 rounded-full bg-muted"><div className="h-full rounded-full bg-primary/50" style={{width:`${row.summary.volume / peak * 100}%`}} /></div></div><p className="text-right text-xs font-medium tabular-nums">{formatBytes(row.summary.volume)}</p></button>) : <p className="p-5 text-sm text-muted-foreground">Traffic appears when a forwarded port is used.</p>}</div>
         </section>
         <section aria-label="Recent Web Addresses" className="flex min-w-0 flex-col overflow-hidden rounded-xl bg-surface">
           <PanelHeading title="Web Addresses" description="Most recently requested services" onClick={()=>navigate("proxies")} />

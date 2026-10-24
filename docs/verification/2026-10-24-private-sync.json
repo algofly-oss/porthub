@@ -1,0 +1,38 @@
+{
+  "scope": "Native private credential sync, scoped snapshots, signaling and ICE metadata; no native private payload transport or URM2 rollout",
+  "verification": {
+    "workspace_tests_passed": 172,
+    "workspace_tests_failed": 0,
+    "workspace_tests_ignored": 0,
+    "private_sync_model_vectors": 10,
+    "model_vector_note": "One old Python enum-error expectation includes the existing Go trickle-candidate extension",
+    "clippy": "workspace all targets, warnings denied",
+    "format": "cargo fmt --all -- --check",
+    "patch_whitespace": "git diff --check",
+    "production_checks_passed": 21,
+    "production_report": "2026-10-24-private-sync-isolation.json",
+    "production_images_rebuilt": true,
+    "disposable_containers_removed": true,
+    "user_service_test_executable": "Previously built CLI-publication release; production checks execute the newly packaged public agent"
+  },
+  "checks": [
+    "ClientSync message normalization and nested validation match retained fixtures with the current candidate enum extension",
+    "ICE configuration and relay routes are bounded; peer-scoped TURN REST credentials match an independent HMAC-SHA1 fixture",
+    "Only active private credentials and authorized machine/workspace ownership permit sync",
+    "Snapshots include only incident grants and reachable peers without public/private credentials or unrelated peer identities",
+    "UTC RFC3339 snapshot expiry preserves the existing Go timestamp decoder contract",
+    "Sender fingerprints, candidate limits and negotiation direction are validated independently of candidate LAN addresses",
+    "Message retries deduplicate and acknowledgements cannot remove another recipient's messages",
+    "Both source and target restart contexts and certificate rotations invalidate stale signaling",
+    "Expired signaling is filtered without waiting for TTL deletion; disabled/deleting machines and revoked memberships are denied",
+    "Production ingress rejects public machine credentials at the private signaling endpoint and retains all previous production checks"
+  ],
+  "limitations": [
+    "Positive private sync tests use the native router with real isolated MongoDB; production private credential enrollment and a real private-client handshake remain unverified",
+    "Native private enrollment/bootstrap, hostname/group mutation and gateway relay remain incomplete",
+    "Native TUN/DNS/ICE/DTLS transport, certificate-possession proof, agent enforcement and background path selection remain incomplete",
+    "This does not prove private payload connectivity, shortest-path selection or physical throughput",
+    "Legacy service takeover, platform lifecycle, crash-safe updates and production adoption remain outstanding",
+    "No commit, push, URM2 deployment, registered-agent upgrade or final physical-machine benchmark performed"
+  ]
+}

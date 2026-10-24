@@ -1,0 +1,40 @@
+{
+  "scope": "Native private policy models, preview/grant compiler and browser rule-book CRUD; private payload transport remains incomplete; no URM2 rollout",
+  "verification": {
+    "workspace_tests_passed": 167,
+    "workspace_tests_failed": 0,
+    "workspace_tests_ignored": 0,
+    "reference_model_cases": 69,
+    "reference_port_cases": 21,
+    "reference_access_decisions": 1536,
+    "reference_compiled_grants": 10,
+    "clippy": "workspace all targets, warnings denied",
+    "format": "cargo fmt --all -- --check",
+    "patch_whitespace": "git diff --check",
+    "production_checks_passed": 20,
+    "production_report": "2026-10-24-private-policy-isolation.json",
+    "production_images_rebuilt": true,
+    "disposable_containers_removed": true,
+    "user_service_test_executable": "Previously built CLI-publication release; production checks execute the newly packaged agent"
+  },
+  "checks": [
+    "Original Python/Pydantic rule/book/delete/connection model fixtures and Unicode port syntax match native validation and normalization",
+    "All reference access decisions and compiled grants match, with explicit legacy numeric-enabled preview semantics retained",
+    "Per-client grant compilation matches the incident subset of reference grants and restricts pair selection before expansion",
+    "Missing books/groups, revoked or disabled machines and invalid stored rules fail closed during grant compilation",
+    "Large numeric identifiers retain their exact JSON integer lexemes and string coercion uses original exponent formatting",
+    "Nested object/list errors retain index paths and reference ordering",
+    "Rule-book creation validates workspace group/machine/user selectors and administrator roles",
+    "Two concurrent updates at one revision yield one successful write and one conflict; stale deletion fails",
+    "Creation/update/deletion drive protocol/direction-aware policy previews without changing public machine credentials",
+    "Inventory preserves rule-book creator metadata while excluding unexpected stored fields",
+    "Rebuilt production images exercise rule-book creation, revision conflict, deletion and preview through edge ingress while retaining transfer/firewall/diagnostics/retirement/restart checks"
+  ],
+  "limitations": [
+    "Native private enrollment/bootstrap, hostname changes, private group mutation, signaling and relay APIs remain incomplete",
+    "Native private TUN/DNS/ICE/DTLS transport, background path selection and agent enforcement remain incomplete",
+    "Grant compilation and previews do not establish a private payload path; transport_ready remains false",
+    "Legacy service takeover, platform lifecycle, crash-safe updates and production adoption remain outstanding",
+    "No commit, push, URM2 deployment, registered-agent upgrade or final physical-machine benchmark performed"
+  ]
+}

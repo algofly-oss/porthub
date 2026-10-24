@@ -1,0 +1,43 @@
+{
+  "verified_at_utc": "2026-10-24T06:02:37.682281+00:00",
+  "scope": "Public tunnel background endpoint recovery and TCP generation ownership",
+  "workspace_tests": {
+    "passed": 218,
+    "failed": 0,
+    "ignored": 0
+  },
+  "full_test_log_sha256": "1fa456ef3432a1633761d524694ee519f87a723e47142aa55dca46d2024d8d57",
+  "clippy": "workspace all-targets with warnings denied: passed",
+  "clippy_log_sha256": "5d4558f1a8d90f73e99f0859b65a46e8607e0083a6eeffd140f5f5da7b26b27a",
+  "isolation_checks_passed": 23,
+  "isolation_evidence": "2026-10-24-failover-isolation.json",
+  "source_sha256": {
+    "vendor/rathole/src/client.rs": "3a9fc49ea789cdee64eea97688c7ffe146f3cd5976af631b5c557a0e3ad33147",
+    "vendor/rathole/src/server.rs": "4cc6c70d4ac5ceb966bab1782e2be6317f524a9a7c14b68ac7023909a1e3090f",
+    "crates/porthub-tunnel/src/client_plan.rs": "e3d939c87e5b69d0ecdd0d49a621a00847db27b56279dde38f6d880af184ecb6",
+    "crates/porthub-agent/src/runtime.rs": "a019373b0aaed871895747ce34359f8cbe536cd40e86252f1b2bd5ff273c5b49",
+    "crates/porthub-agent/src/routes.rs": "6882b9f9856518d2a5b250a5956ca82627d2629ecac2e33ed4c30701038ec517",
+    "crates/porthub-agent/tests/runtime.rs": "bf1292b9a61810906076a936d2c8ffd59ccba008b4e63aa5f7b7170cd8af8b41",
+    "crates/porthub-agent/tests/tunnel_reroute.rs": "34246c1a65e6dff9abe3eaa16ba2cd6e6fd15c8f9f759def0e003d4ca69c03c1"
+  },
+  "checks": [
+    "Scheduled direct-origin failure switches to a verified domain route without configuration changes",
+    "Background direct-origin recovery preserves open streams from previous endpoints",
+    "All-candidate failure retains the existing selection and healthy copies",
+    "Route recovery continues during API failure backoff",
+    "Three TCP endpoint generations retain payload integrity across HTTP Upgrade and WebSocket transports",
+    "Server removal, server token rotation and client removal close every TCP generation",
+    "Endpoint-only ordinary configuration reload uses the same drain behavior; route replacement rejects service identity changes",
+    "Current-source debug agent used by real user-service enrollment/forwarding checks",
+    "Rebuilt production core/edge/firewall images pass the disposable isolation and 32 MiB transfer fixture"
+  ],
+  "limitations": [
+    "Checks use local controlled endpoints, not the physical Luna-Condor or Luna-Miro paths",
+    "Default route checks use the heartbeat interval (30 seconds); two failures trigger alternate checks; origin recovery runs every ten checks",
+    "UDP associations retain immediate replacement behavior; TCP stream draining does not migrate an existing stream onto another transport",
+    "No non-Linux lifecycle, root network-namespace or root DNS feature suite was run here",
+    "Production gateway deployment, installed client upgrades, commit/push and physical performance benchmarks remain pending"
+  ],
+  "production_rollout": "pending",
+  "physical_benchmarks": "pending"
+}

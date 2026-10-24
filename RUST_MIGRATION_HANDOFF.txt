@@ -1,0 +1,121 @@
+PORTHUB RUST MIGRATION — ACTIVE HANDOFF
+Updated: 2026-10-24
+Workspace: /home/nitin/nitin/algofly-oss/porthub
+
+AUTHORIZATION AND SCOPE
+
+The user resumed work and explicitly authorized testing, commits/push, URM2
+PortHub deployment and registered-agent upgrades. Earlier local-only/no-commit
+restrictions were superseded. The goal is active and incomplete. Keep the full
+Rust server/client, logical isolation, cross-platform, fleet and benchmark scope.
+Do not modify unrelated URM2 applications, their data or firewall tables. Do not
+reset its dirty production checkout. No secrets/passwords belong in this file.
+
+CURRENT CODE AND VERIFICATION
+
+Nine Rust crates implement API, agent, embedded Rathole, edge, firewall,
+supervision, transfer tools, identity and private mesh. Go directories remain
+transition/reference sources and compatibility fixtures; runtime images use
+native custom services. The one-time legacy updater bridge embeds the existing
+Bash CLI to retain a usable rollback CLI before native adoption starts. Native
+adoption itself parses literal env files and uses D-Bus; it never sources them.
+
+One Compose file supports dev/prod roles porthub:core, porthub:edge and
+porthub:firewall, with clean container names. Core isolates API/Mongo/UI on a
+bridge. Edge and firewall alone use host networking, with separate capabilities,
+Unix sockets and volume boundaries. No separate Rathole communication port.
+
+Latest complete Linux workspace verification: 243 passed, 0 failed, 0 ignored,
+including isolated Mongo/API, Go compatibility, actual user-service updates and
+Socket.IO fixtures. Workspace Clippy with warnings denied passed. Two additional
+owned network namespace tests cover kernel TUN packets and event-driven underlay
+updates. Kernel link/address/route updates affect new negotiations; healthy
+sessions are retained and failed sessions use refreshed interfaces.
+
+The Linux x86_64 packaged agent is now static musl, about 21 MB, with no ELF
+interpreter or shared-library dependencies. Real user-service update/readiness,
+forwarding/rollback and packaged HTTP-server management passed. All three rebuilt
+production roles pass 24 isolation checks, including the authenticated legacy
+updater URLs. The currently installed Luna Go tunnel binary also passed native
+API/edge forwarding and half-close interoperability.
+
+Evidence:
+  docs/verification/2026-10-24-network-upgrade.json
+  docs/verification/2026-10-24-static-agent-isolation.json
+  docs/verification/2026-10-24-launchd-progress.json
+  docs/verification/2026-10-24-fleet-access.json
+
+PUBLIC PHYSICAL STAGING BENCHMARK
+
+A native HTTP server on Luna served a 10 GiB uncompressed zero-filled test file.
+Condor used the static native get CLI with 16 connections and SHA256 verification
+through a fresh ARM Rust edge on URM2. Native reported transfer: 46.98 MB/s
+(375.84 Mbps). Command wall time including checksum: 240.21 s, 44.70 MB/s.
+SHA256 matched. This used temporary plaintext HTTP forwarding and a static
+benchmark service, not production registered-agent cutover or final HTTPS proof.
+
+  docs/benchmarks/2026-10-24-rust-public-staging.json
+  docs/benchmarks/2026-10-24-rust-public-staging.txt
+
+Cleanup completed: temporary URM2 gateway removed, source HTTP/tunnel stopped,
+temporary credentials and both payloads removed. All nine preexisting URM2
+containers retained their IDs, start times and restart counts. Condor's installed
+agent was unchanged. Temporary native binaries/logs remain in task-owned caches.
+No production cutover or registered-service upgrade has happened.
+
+URM2 STAGING
+
+Owned staging checkout: /home/ubuntu/algofly/porthub-native-20261024-0118
+The ARM edge image was rebuilt from current runtime source with one Cargo job.
+Production legacy container porthub and its data were not replaced. Preserve
+old.env and previous migration backups. The original production checkout at
+/home/ubuntu/algofly/porthub is dirty and must not be overwritten.
+
+deploy/native/migrate.py implements preflight, cold backup, role startup,
+ownership conversion and rollback. It has not performed the production cutover.
+Refresh all final sources, matching-version artifacts and checks before using it.
+PORTHUB_GATEWAY_ADVERTISED_URL controls the explicit external scheme/host/port;
+retain porthub.algofly.in and the requested DuckDNS fallbacks as API authorities.
+
+PLATFORMS AND FLEET
+
+Mac nitin-mbp.phub initially allowed SSH and compiled the earlier ARM baseline.
+It became unavailable before the new launchd code could be synced/tested.
+The new launchd controller and proc_pidpath readiness have Linux unit coverage;
+macOS runtime verification is pending. Its toolchain is isolated under
+~/Library/Caches/porthub-native-build with no global profile changes. Existing
+Mac services were not touched. A user question about restoring connectivity is
+pending; elapsed time is not an answer.
+
+Read-only SSH additionally works for clear, harshithaagx and condor-dgx-spark.
+Their service migration requires administrator access, or a verified automatic
+legacy-to-native update. Deep/otsi-reid rejected the configured SSH identity;
+clearsight/test were unavailable in that probe. This does not prove them offline.
+Do not reactivate disabled registrations or change credentials speculatively.
+
+NEXT REQUIRED WORK / NOT COMPLETE
+
+- Checkpoint/push the verified migration source to a working branch and inspect
+  actual platform CI. No main merge or production deployment is implied by a
+  feature-branch checkpoint. Platform workflow exports static Linux 64-bit
+  bundles and exercises packaged HTTP management and macOS launchd lifecycle.
+- Resolve actual CI failures; finish Windows/macOS lifecycle, credential safety,
+  native private devices/routes/DNS, adoption and updates. Complete the full
+  supported architecture artifact matrix, including static 32-bit Linux.
+- Finish private path MTU, measured bandwidth/latency selection, credential and
+  network-hop validation and large-workspace scheduling. Do not call loopback
+  integration a physical fastest-LAN-path result.
+- Verify complete legacy automatic adoption, real privileged public/private
+  service activation and recovery. The legacy shell contract test stubs the
+  native installer boundary; do not overstate its coverage.
+- Commit/push final reviewed changes, deploy only PortHub on URM2 with backups,
+  upgrade every enabled registered client and verify identities/routes/policies.
+- Repeat the 10 GiB public benchmark against the final deployment, run native
+  private Luna/Condor transfer, and test Luna/Miro using miro.phub with evidence
+  of selected LAN/direct route and gateway payload offload.
+- Retire obsolete Go runtime sources once transition/parity gates are satisfied,
+  keeping required licenses/fixtures and organized native source.
+
+Use /home/nitin/.cargo/bin/cargo (pinned 1.99.1). Local test Mongo is the owned
+porthub-rust-test-mongo container on localhost:47117 with random disposable DBs.
+Never mark the goal complete merely because local tests or a checkpoint pass.

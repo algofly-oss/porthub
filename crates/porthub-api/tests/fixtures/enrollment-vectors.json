@@ -1,0 +1,789 @@
+{
+  "addresses": [
+    {
+      "cidr": "10.203.0.0/24",
+      "machine_id": "0",
+      "occupied": [],
+      "address": "10.203.0.165"
+    },
+    {
+      "cidr": "10.203.0.0/24",
+      "machine_id": "1",
+      "occupied": [
+        "10.203.0.165"
+      ],
+      "address": "10.203.0.20"
+    },
+    {
+      "cidr": "10.203.0.0/24",
+      "machine_id": "650f1c2e9b1e8a0012345678",
+      "occupied": [
+        "10.203.0.165",
+        "10.203.0.20"
+      ],
+      "address": "10.203.0.118"
+    },
+    {
+      "cidr": "10.203.0.0/24",
+      "machine_id": "650f1c2e9b1e8a0012345679",
+      "occupied": [
+        "10.203.0.118",
+        "10.203.0.165",
+        "10.203.0.20"
+      ],
+      "address": "10.203.0.122"
+    },
+    {
+      "cidr": "10.203.0.0/24",
+      "machine_id": "machine",
+      "occupied": [
+        "10.203.0.118",
+        "10.203.0.122",
+        "10.203.0.165",
+        "10.203.0.20"
+      ],
+      "address": "10.203.0.52"
+    },
+    {
+      "cidr": "10.203.0.0/24",
+      "machine_id": "ws:peer",
+      "occupied": [
+        "10.203.0.118",
+        "10.203.0.122",
+        "10.203.0.165",
+        "10.203.0.20",
+        "10.203.0.52"
+      ],
+      "address": "10.203.0.56"
+    },
+    {
+      "cidr": "10.203.0.0/28",
+      "machine_id": "0",
+      "occupied": [],
+      "address": "10.203.0.11"
+    },
+    {
+      "cidr": "10.203.0.0/28",
+      "machine_id": "1",
+      "occupied": [
+        "10.203.0.11"
+      ],
+      "address": "10.203.0.10"
+    },
+    {
+      "cidr": "10.203.0.0/28",
+      "machine_id": "650f1c2e9b1e8a0012345678",
+      "occupied": [
+        "10.203.0.10",
+        "10.203.0.11"
+      ],
+      "address": "10.203.0.4"
+    },
+    {
+      "cidr": "10.203.0.0/28",
+      "machine_id": "650f1c2e9b1e8a0012345679",
+      "occupied": [
+        "10.203.0.10",
+        "10.203.0.11",
+        "10.203.0.4"
+      ],
+      "address": "10.203.0.12"
+    },
+    {
+      "cidr": "10.203.0.0/28",
+      "machine_id": "machine",
+      "occupied": [
+        "10.203.0.10",
+        "10.203.0.11",
+        "10.203.0.12",
+        "10.203.0.4"
+      ],
+      "address": "10.203.0.14"
+    },
+    {
+      "cidr": "10.203.0.0/28",
+      "machine_id": "ws:peer",
+      "occupied": [
+        "10.203.0.10",
+        "10.203.0.11",
+        "10.203.0.12",
+        "10.203.0.14",
+        "10.203.0.4"
+      ],
+      "address": "10.203.0.13"
+    },
+    {
+      "cidr": "172.16.0.0/16",
+      "machine_id": "0",
+      "occupied": [],
+      "address": "172.16.27.211"
+    },
+    {
+      "cidr": "172.16.0.0/16",
+      "machine_id": "1",
+      "occupied": [
+        "172.16.27.211"
+      ],
+      "address": "172.16.33.88"
+    },
+    {
+      "cidr": "172.16.0.0/16",
+      "machine_id": "650f1c2e9b1e8a0012345678",
+      "occupied": [
+        "172.16.27.211",
+        "172.16.33.88"
+      ],
+      "address": "172.16.217.32"
+    },
+    {
+      "cidr": "172.16.0.0/16",
+      "machine_id": "650f1c2e9b1e8a0012345679",
+      "occupied": [
+        "172.16.217.32",
+        "172.16.27.211",
+        "172.16.33.88"
+      ],
+      "address": "172.16.105.138"
+    },
+    {
+      "cidr": "172.16.0.0/16",
+      "machine_id": "machine",
+      "occupied": [
+        "172.16.105.138",
+        "172.16.217.32",
+        "172.16.27.211",
+        "172.16.33.88"
+      ],
+      "address": "172.16.67.250"
+    },
+    {
+      "cidr": "172.16.0.0/16",
+      "machine_id": "ws:peer",
+      "occupied": [
+        "172.16.105.138",
+        "172.16.217.32",
+        "172.16.27.211",
+        "172.16.33.88",
+        "172.16.67.250"
+      ],
+      "address": "172.16.70.94"
+    },
+    {
+      "cidr": "192.168.10.0/26",
+      "machine_id": "0",
+      "occupied": [],
+      "address": "192.168.10.55"
+    },
+    {
+      "cidr": "192.168.10.0/26",
+      "machine_id": "1",
+      "occupied": [
+        "192.168.10.55"
+      ],
+      "address": "192.168.10.42"
+    },
+    {
+      "cidr": "192.168.10.0/26",
+      "machine_id": "650f1c2e9b1e8a0012345678",
+      "occupied": [
+        "192.168.10.42",
+        "192.168.10.55"
+      ],
+      "address": "192.168.10.32"
+    },
+    {
+      "cidr": "192.168.10.0/26",
+      "machine_id": "650f1c2e9b1e8a0012345679",
+      "occupied": [
+        "192.168.10.32",
+        "192.168.10.42",
+        "192.168.10.55"
+      ],
+      "address": "192.168.10.48"
+    },
+    {
+      "cidr": "192.168.10.0/26",
+      "machine_id": "machine",
+      "occupied": [
+        "192.168.10.32",
+        "192.168.10.42",
+        "192.168.10.48",
+        "192.168.10.55"
+      ],
+      "address": "192.168.10.43"
+    },
+    {
+      "cidr": "192.168.10.0/26",
+      "machine_id": "ws:peer",
+      "occupied": [
+        "192.168.10.32",
+        "192.168.10.42",
+        "192.168.10.43",
+        "192.168.10.48",
+        "192.168.10.55"
+      ],
+      "address": "192.168.10.34"
+    }
+  ],
+  "full": {
+    "cidr": "10.203.0.0/28",
+    "occupied": [
+      "10.203.0.1",
+      "10.203.0.10",
+      "10.203.0.11",
+      "10.203.0.12",
+      "10.203.0.13",
+      "10.203.0.14",
+      "10.203.0.2",
+      "10.203.0.3",
+      "10.203.0.4",
+      "10.203.0.5",
+      "10.203.0.6",
+      "10.203.0.7",
+      "10.203.0.8",
+      "10.203.0.9"
+    ]
+  },
+  "models": [
+    {
+      "model": "NetworkPreferences",
+      "body": "{}",
+      "status": 200,
+      "response": {
+        "cidr": "10.203.0.0/24",
+        "dns_suffix": "phub"
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"cidr\": \"10.1.0.0/16\"}",
+      "status": 200,
+      "response": {
+        "cidr": "10.1.0.0/16",
+        "dns_suffix": "phub"
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"cidr\": \"172.20.4.0/255.255.255.0\"}",
+      "status": 200,
+      "response": {
+        "cidr": "172.20.4.0/24",
+        "dns_suffix": "phub"
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"cidr\": \"192.168.7.0/0.0.0.15\"}",
+      "status": 200,
+      "response": {
+        "cidr": "192.168.7.0/28",
+        "dns_suffix": "phub"
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"cidr\": \"10.0.0.1/24\"}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "cidr"
+            ],
+            "msg": "Enter a network CIDR such as 10.203.0.0/24",
+            "type": "value_error"
+          }
+        ]
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"cidr\": \"10.0.0.0/8\"}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "cidr"
+            ],
+            "msg": "Choose an RFC1918 IPv4 range between /16 and /28",
+            "type": "value_error"
+          }
+        ]
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"cidr\": \"10.0.0.0/29\"}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "cidr"
+            ],
+            "msg": "Choose an RFC1918 IPv4 range between /16 and /28",
+            "type": "value_error"
+          }
+        ]
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"cidr\": \"1.1.1.0/24\"}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "cidr"
+            ],
+            "msg": "Choose an RFC1918 IPv4 range between /16 and /28",
+            "type": "value_error"
+          }
+        ]
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"cidr\": \"::1/128\"}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "cidr"
+            ],
+            "msg": "Choose an RFC1918 IPv4 range between /16 and /28",
+            "type": "value_error"
+          }
+        ]
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"cidr\": \"::1/64\"}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "cidr"
+            ],
+            "msg": "Enter a network CIDR such as 10.203.0.0/24",
+            "type": "value_error"
+          }
+        ]
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"cidr\": \"fd00::/120\"}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "cidr"
+            ],
+            "msg": "Choose an RFC1918 IPv4 range between /16 and /28",
+            "type": "value_error"
+          }
+        ]
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"cidr\": \"010.0.0.0/24\"}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "cidr"
+            ],
+            "msg": "Enter a network CIDR such as 10.203.0.0/24",
+            "type": "value_error"
+          }
+        ]
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"cidr\": \"10.0.0.0\"}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "cidr"
+            ],
+            "msg": "Choose an RFC1918 IPv4 range between /16 and /28",
+            "type": "value_error"
+          }
+        ]
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"cidr\": \"abc\"}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "cidr"
+            ],
+            "msg": "Enter a network CIDR such as 10.203.0.0/24",
+            "type": "value_error"
+          }
+        ]
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"cidr\": \"10.0.0.0/024\"}",
+      "status": 200,
+      "response": {
+        "cidr": "10.0.0.0/24",
+        "dns_suffix": "phub"
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"cidr\": \"10.0.0.0/24/1\"}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "cidr"
+            ],
+            "msg": "Enter a network CIDR such as 10.203.0.0/24",
+            "type": "value_error"
+          }
+        ]
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"cidr\": null}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "cidr"
+            ],
+            "msg": "none is not an allowed value",
+            "type": "type_error.none.not_allowed"
+          }
+        ]
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"cidr\": 10}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "cidr"
+            ],
+            "msg": "Enter a network CIDR such as 10.203.0.0/24",
+            "type": "value_error"
+          }
+        ]
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"cidr\": \"172.32.0.0/16\"}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "cidr"
+            ],
+            "msg": "Choose an RFC1918 IPv4 range between /16 and /28",
+            "type": "value_error"
+          }
+        ]
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"dns_suffix\": \" PH.IO. \"}",
+      "status": 200,
+      "response": {
+        "cidr": "10.203.0.0/24",
+        "dns_suffix": "ph.io"
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"dns_suffix\": \"Internal\"}",
+      "status": 200,
+      "response": {
+        "cidr": "10.203.0.0/24",
+        "dns_suffix": "internal"
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"dns_suffix\": \"com\"}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "dns_suffix"
+            ],
+            "msg": "Use phub, internal, or a full domain you own such as lan.example.com",
+            "type": "value_error"
+          }
+        ]
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"dns_suffix\": \"localhost\"}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "dns_suffix"
+            ],
+            "msg": "Use phub, internal, or a full domain you own such as lan.example.com",
+            "type": "value_error"
+          }
+        ]
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"dns_suffix\": \"ph.local\"}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "dns_suffix"
+            ],
+            "msg": "This suffix is reserved for local OS networking",
+            "type": "value_error"
+          }
+        ]
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"dns_suffix\": \"ph..io\"}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "dns_suffix"
+            ],
+            "msg": "Enter a domain suffix such as phub",
+            "type": "value_error"
+          }
+        ]
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"dns_suffix\": \"http://ph.io\"}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "dns_suffix"
+            ],
+            "msg": "Enter a domain suffix such as phub",
+            "type": "value_error"
+          }
+        ]
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"dns_suffix\": \"-ph.io\"}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "dns_suffix"
+            ],
+            "msg": "Enter a domain suffix such as phub",
+            "type": "value_error"
+          }
+        ]
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"dns_suffix\": \"ab\"}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "dns_suffix"
+            ],
+            "msg": "ensure this value has at least 3 characters",
+            "type": "value_error.any_str.min_length",
+            "ctx": {
+              "limit_value": 3
+            }
+          }
+        ]
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"dns_suffix\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "dns_suffix"
+            ],
+            "msg": "ensure this value has at most 120 characters",
+            "type": "value_error.any_str.max_length",
+            "ctx": {
+              "limit_value": 120
+            }
+          }
+        ]
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"dns_suffix\": 12345}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "dns_suffix"
+            ],
+            "msg": "Use phub, internal, or a full domain you own such as lan.example.com",
+            "type": "value_error"
+          }
+        ]
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"dns_suffix\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.io\"}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "dns_suffix"
+            ],
+            "msg": "Enter a domain suffix such as phub",
+            "type": "value_error"
+          }
+        ]
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"dns_suffix\": \"lan.example.com\", \"cidr\": \"192.168.0.0/16\", \"extra\": 1}",
+      "status": 200,
+      "response": {
+        "cidr": "192.168.0.0/16",
+        "dns_suffix": "lan.example.com"
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"dns_suffix\": \"\\u0130nternal.io\"}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "dns_suffix"
+            ],
+            "msg": "Enter a domain suffix such as phub",
+            "type": "value_error"
+          }
+        ]
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"dns_suffix\": \"phub...\"}",
+      "status": 200,
+      "response": {
+        "cidr": "10.203.0.0/24",
+        "dns_suffix": "phub"
+      }
+    },
+    {
+      "model": "NetworkPreferences",
+      "body": "{\"cidr\": \"\", \"dns_suffix\": \"\"}",
+      "status": 422,
+      "response": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "cidr"
+            ],
+            "msg": "Enter a network CIDR such as 10.203.0.0/24",
+            "type": "value_error"
+          },
+          {
+            "loc": [
+              "body",
+              "dns_suffix"
+            ],
+            "msg": "ensure this value has at least 3 characters",
+            "type": "value_error.any_str.min_length",
+            "ctx": {
+              "limit_value": 3
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

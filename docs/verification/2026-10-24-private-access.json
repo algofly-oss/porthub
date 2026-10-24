@@ -1,0 +1,34 @@
+{
+  "scope": "Native private-access browser inventory, network preferences, peer enable/disable and revocation; no private payload transport or URM2 rollout",
+  "verification": {
+    "workspace_tests_passed": 162,
+    "workspace_tests_failed": 0,
+    "workspace_tests_ignored": 0,
+    "clippy": "workspace all targets, warnings denied",
+    "format": "cargo fmt --all -- --check",
+    "patch_whitespace": "git diff --check",
+    "production_checks_passed": 19,
+    "production_report": "2026-10-24-private-access-isolation.json",
+    "production_images_rebuilt": true,
+    "disposable_containers_removed": true,
+    "user_service_test_executable": "Previously built CLI-publication release; production checks execute the newly packaged agent"
+  },
+  "checks": [
+    "Private names preserve enrollment ordering, custom names, alias reservations and BSON identifier types",
+    "Colliding legacy four-character machine-ID suffixes receive deterministic distinct names",
+    "Snapshot respects current workspace membership, administrator invitation visibility, credential projections and deletion filters",
+    "Network mutation validates private ranges, DNS suffixes, browser origin and administrator permissions without changing peer addresses or credentials",
+    "Peer enable/disable requires administration, while members can revoke only their own peers",
+    "Revocation clears private credentials, fingerprint and instance before consuming tickets and deleting both directions of signaling",
+    "Public machine credentials and unrelated peer/signaling records survive private revocation unchanged",
+    "Rebuilt isolated production images expose the new controls through edge ingress and retain the previous 32 MiB transfer, firewall, diagnostics, deletion and restart checks",
+    "Read-only URM2 inspection confirmed the existing porthub container using porthub:latest; no remote changes were made"
+  ],
+  "limitations": [
+    "Native private enrollment/bootstrap, hostname changes, rule-book/group mutation, policy evaluation, signaling and relay APIs remain incomplete",
+    "The Rust agent private TUN/DNS/ICE/DTLS transport, background path selection and private runtime-state migration remain incomplete",
+    "This proves browser control-plane behavior, not private payload connectivity or final physical-machine throughput",
+    "Legacy service takeover, platform lifecycle, crash-safe updates and production adoption remain outstanding",
+    "No commit, push, URM2 deployment, registered-agent upgrade or final remote benchmark performed"
+  ]
+}

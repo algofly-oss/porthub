@@ -326,6 +326,15 @@ func (r *Runtime) handleSignal(ctx context.Context, self string, signal Signal, 
 	if seen || current == nil {
 		return nil
 	}
+	if signal.Description.Type == "candidate" {
+		if signal.Session != session {
+			return nil
+		}
+		if err := current.peer.AddRemoteCandidate(signal.Description, current.info.Fingerprint); err != nil {
+			log.Printf("private ICE candidate rejected: %v", err)
+		}
+		return nil
+	}
 	switch {
 	case signal.Description.Type == "answer" && self < signal.From:
 		if signal.Session != session {
@@ -464,7 +473,18 @@ func (r *Runtime) newPeer(info policy.Peer, servers []mesh.ICEServer) (*peerSess
 	if err != nil {
 		return nil, err
 	}
-	return &peerSession{info: info, peer: p, started: time.Now()}, nil
+	current := &peerSession{info: info, peer: p, started: time.Now()}
+	p.OnCandidate(func(candidate string) {
+		r.mu.Lock()
+		session := current.session
+		r.mu.Unlock()
+		if session == "" {
+			return
+		}
+		description := mesh.Description{Type: "candidate", SDP: fmt.Sprintf("a=fingerprint:sha-256 %s\r\na=candidate:%s\r\n", current.info.Fingerprint, candidate)}
+		r.queue(info.ID, current, Signal{To: info.ID, Session: session, Description: description})
+	})
+	return current, nil
 }
 func (r *Runtime) makeOffer(ctx context.Context, id string, current *peerSession, session string) {
 	ctx, cancel := context.WithTimeout(ctx, gatherTimeout)

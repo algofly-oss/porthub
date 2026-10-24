@@ -1,0 +1,60 @@
+[package]
+name = "porthub-agent"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "porthub"
+path = "src/main.rs"
+
+[features]
+netns-tests = []
+root-dns-test = []
+handoff-service-test = []
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+porthub-tunnel.workspace = true
+porthub-transfer = { path = "../porthub-transfer" }
+porthub-mesh = { path = "../porthub-mesh" }
+chrono = { version = "0.4", features = ["serde"] }
+bytes = "1.12"
+getrandom = "0.3"
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+hickory-proto = { version = "0.26", default-features = false, features = ["std"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tempfile = "3"
+fs2 = "0.4"
+hostname = "0.4"
+directories = "6"
+sha2 = "0.10"
+async-trait = "0.1"
+futures-util.workspace = true
+tracing.workspace = true
+libc = "0.2"
+rustix = { version = "1", features = ["process"] }
+
+[dev-dependencies]
+axum.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+rcgen = "0.14"
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+porthub-identity = { path = "../porthub-identity" }
+porthub-edge = { path = "../porthub-edge" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nlink = "0.33"
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+zbus = { version = "5", default-features = false, features = ["tokio", "p2p"] }

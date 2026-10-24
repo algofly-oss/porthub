@@ -5,3 +5,4 @@ volumes/
 .env
 .env*
 .DS_Store
+/target/

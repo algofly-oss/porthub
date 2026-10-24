@@ -1,0 +1,36 @@
+{
+  "scope": "Local native authenticated Socket.IO events, machine logs, legacy sync and three-container isolation; no URM2 rollout",
+  "verification": {
+    "workspace_tests_passed": 119,
+    "workspace_tests_failed": 0,
+    "workspace_tests_ignored": 0,
+    "clippy": "workspace all targets, warnings denied",
+    "format": "cargo fmt --all -- --check",
+    "ui_unit_checks_passed": 13,
+    "ui_browser_checks_passed": [
+      "tab-data-cache.cjs",
+      "bootstrap-cache.cjs"
+    ],
+    "compose_checks_passed": 14,
+    "compose_report": "2026-10-24-realtime-isolation.json",
+    "go_compatibility_executable_sha256": "7bfbc5712fe850f3956b8f4509f2cdf8bc24682d79d9f85a9e284b567272e4e9"
+  },
+  "checks": [
+    "User-cookie and machine-token namespace authentication, origin checks and account/machine event isolation",
+    "Bounded ordered event queues and reference-counted log subscriptions cleaned on disconnect",
+    "Current and historical log credentials accepted; unknown credentials cannot inject logs or update presence",
+    "Unicode log bounds and first-hundred-input-line semantics",
+    "Token rotation, signout, direct session revocation and expiry revalidated before delivery",
+    "Legacy sync top-level response, disabled configuration, unknown-field handling and retirement response",
+    "Official frontend Socket.IO client exercises status and logs against native API and HTTPS production edge",
+    "Native profile file transfer, mapped deletion, machine retirement, firewall enforcement and restart persistence retained",
+    "Disposable Compose project and user-service test unit removed"
+  ],
+  "limitations": [
+    "Offline status/history monitor, Telegram alert and digest workers and native agent log upload remain incomplete",
+    "Install/artifact/private network APIs and cross-platform lifecycle parity remain incomplete",
+    "Broader process-crash and simultaneous-failure checks remain required",
+    "Final remote 10 GiB public/private and miro.phub fastest-route benchmarks remain outstanding",
+    "No commit, push, URM2 deployment or registered-agent upgrade performed"
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "verified_at_utc": "2026-10-24T02:54:19.328904+00:00",
+  "scope": "Native TURN-over-WebSocket transport and background private path preparation",
+  "workspace_tests": {
+    "passed": 199,
+    "failed": 0,
+    "ignored": 0
+  },
+  "full_test_log_sha256": "8a30645b4058ac85ed3d12844e1dd69c73e00a783b63517fa9d1c1adc78a22bd",
+  "clippy": "workspace all-targets, warnings denied: passed",
+  "checks": [
+    "Forced TURN-only Go/Go, Rust/Rust and Rust/Go certificate-pinned DTLS exchanges: 256 full-size round trips each",
+    "Native controller prepares TURN candidates, selects LAN, then transfers 1024 full-size round trips after gateway shutdown",
+    "Cancellation during unauthenticated TURN allocation closes its owned WebSocket",
+    "Plaintext production relay and credential-bearing relay URLs rejected before dialing",
+    "URM2 read-only migration preflight passed; existing container untouched"
+  ],
+  "limitations": [
+    "Local integration packet counts do not establish WAN throughput or sustained 10 GiB transfer performance",
+    "Live user-service test uses the previously built release executable; current workspace tests compile current sources",
+    "Production image refresh, cold migration, agent fleet upgrade and physical benchmarks remain pending",
+    "STUN server-reflexive candidates, measured route scheduling, credential rotation, all-platform private runtimes and remaining migration gates are unfinished"
+  ],
+  "production_rollout": "pending",
+  "physical_benchmarks": "pending"
+}

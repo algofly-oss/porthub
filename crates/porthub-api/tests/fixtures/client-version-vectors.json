@@ -1,0 +1,44 @@
+[
+  {
+    "machine": {
+      "_id": "650f1c2e9b1e8a0012345678",
+      "token": "aBc123",
+      "enabled": true,
+      "client_setup_rathole_server_address": "  tunnel.example:443  "
+    },
+    "connections": [
+      {
+        "_id": "650f1c2e9b1e8a0012345679",
+        "service_name": "files",
+        "service_description": "test <>&",
+        "internal_ip": "::1",
+        "internal_port": 8080,
+        "external_port": 33126,
+        "enabled": true,
+        "updated_at": "2026-10-23T10:20:30.123000"
+      }
+    ],
+    "digest": "29b760152ba7c0360f62ec2472698d949778af011d0aba84a8231cf736221f7a"
+  },
+  {
+    "machine": {
+      "_id": "650f1c2e9b1e8a0012345678",
+      "token": "aBc123",
+      "enabled": true,
+      "client_setup_rathole_server_address": "  tunnel.example:443  "
+    },
+    "connections": [
+      {
+        "_id": "650f1c2e9b1e8a0012345679",
+        "service_name": "\u6587\u4ef6 \ud83d\ude80",
+        "service_description": "caf\u00e9\nquote \"",
+        "internal_ip": "::1",
+        "internal_port": 8080,
+        "external_port": 33126,
+        "enabled": true,
+        "updated_at": "2026-10-23T10:20:30.123000"
+      }
+    ],
+    "digest": "cd03e76135089191e6335b14e3270cb20c9df37fd325cedfecca8e6635072789"
+  }
+]

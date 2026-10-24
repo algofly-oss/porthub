@@ -15,7 +15,8 @@ selected by `docker-compose.yml`. The retired Python API, Python firewall,
 requirements, entrypoints, and separate component Dockerfiles have been removed.
 `api/` contains the Go backend and `api/assets/client/` contains its client shell
 assets. See [the API package guide](../api/README.md). Historical code remains
-available in Git history. Rathole, Traefik, MongoDB, and the Next.js UI
+available in Git history. The Go API also runs the public forwarding gateway.
+Traefik, MongoDB, and the Next.js UI
 remain separate supervised processes inside the same container.
 
 ## Development checks

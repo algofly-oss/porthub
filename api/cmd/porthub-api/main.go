@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -17,6 +18,7 @@ import (
 	"github.com/algofly-oss/porthub/api/internal/config"
 	"github.com/algofly-oss/porthub/api/internal/core"
 	"github.com/algofly-oss/porthub/api/internal/firewall"
+	"github.com/algofly-oss/porthub/api/internal/gateway"
 	"github.com/algofly-oss/porthub/api/internal/httpapi"
 	"github.com/algofly-oss/porthub/api/internal/realtime"
 	"github.com/algofly-oss/porthub/api/internal/routes/access"
@@ -33,6 +35,12 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "clients" {
+		if err := runClients(os.Args[2:], os.Stdout); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "audit" {
 		if err := runAudit(os.Args[2:], os.Stdout); err != nil {
 			log.Fatal(err)
@@ -77,6 +85,24 @@ func main() {
 		log.Printf("Default private enrollment migration: %v", err)
 	}
 	startWorkers(ctx, app, hub)
+	if err := app.WriteGatewayTrafficConfig(); err != nil {
+		log.Fatalf("gateway public routing: %v", err)
+	}
+	if os.Getenv("PORTHUB_TUNNEL_GATEWAY_ENABLED") != "false" {
+		gate := gateway.New(ctx)
+		defer gate.Close()
+		server.Mux.HandleFunc("/api/tunnel", gate.Handler)
+		go gate.Watch(cfg.RatholeConfigPath)
+		// Explicit migration-only fallback; no separate agent port by default.
+		if addr := os.Getenv("PORTHUB_TUNNEL_LEGACY_LISTEN"); addr != "" {
+			listener, err := net.Listen("tcp", addr)
+			if err != nil {
+				log.Fatal(err)
+			}
+			go func() { _ = gate.ServeLegacy(listener) }()
+			log.Printf("Temporary legacy tunnel listener: %s", addr)
+		}
+	}
 
 	httpServer := &http.Server{Addr: cfg.Listen, Handler: cors(sessions.RenewMiddleware(server.Mux)), ReadHeaderTimeout: 15 * time.Second}
 	go func() {
@@ -187,9 +213,9 @@ func startWorkers(ctx context.Context, app *core.App, hub *realtime.Hub) {
 		content, err := os.ReadFile(app.Cfg.RatholeConfigPath)
 		return err == nil && !core.IsDummyOnlyConfig(string(content)), err
 	}
-	if !retry(ctx, "Rathole server.toml rebuild", seconds(0, 2, 5, 10, 20), rathole) {
-		log.Printf("Continuing with dummy-only Rathole config; retrying in the background")
-		go retry(ctx, "Rathole server.toml rebuild", seconds(30, 60, 120), rathole)
+	if !retry(ctx, "Gateway configuration rebuild", seconds(0, 2, 5, 10, 20), rathole) {
+		log.Printf("Continuing with empty gateway config; retrying in the background")
+		go retry(ctx, "Gateway configuration rebuild", seconds(30, 60, 120), rathole)
 	}
 	if err := app.RebuildTrafficConfig(ctx); err != nil {
 		log.Printf("Failed to rebuild Traefik traffic config during startup: %v", err)

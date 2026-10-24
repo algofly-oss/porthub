@@ -1,3 +1,4 @@
+import { useWorkspaceState } from "@/shared/contexts/workspaceCache";
 import SearchSelect from "@/components/ui/search-select";
 import { useEffect, useRef, useState } from "react";
 import axios from "axios";
@@ -190,22 +191,22 @@ export default function Settings() {
   const [profilePictureRemoved, setProfilePictureRemoved] = useState(false);
   const [isSavingProfile, setIsSavingProfile] = useState(false);
   const [isSavingPassword, setIsSavingPassword] = useState(false);
-  const [sessions, setSessions] = useState([]);
-  const [isLoadingSessions, setIsLoadingSessions] = useState(true);
+  const [sessions, setSessions] = useWorkspaceState("settings.sessions", []);
+  const [isLoadingSessions, setIsLoadingSessions] = useWorkspaceState("settings.sessionsLoading", true);
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [sessionPendingSignOut, setSessionPendingSignOut] = useState(null);
 
-  const [telegramSettings, setTelegramSettings] = useState(null);
+  const [telegramSettings, setTelegramSettings] = useWorkspaceState("settings.telegram", null);
   const [telegramEditing, setTelegramEditing] = useState(false);
   const [telegramForm, setTelegramForm] = useState({
     botToken: "",
-    chatIds: [""],
-    alertsEnabled: false,
-    instantAlertsEnabled: true,
-    digestEnabled: true,
-    digestIntervalHours: 6,
+    chatIds: telegramSettings?.chat_ids?.length ? telegramSettings.chat_ids : [""],
+    alertsEnabled: Boolean(telegramSettings?.alerts_enabled),
+    instantAlertsEnabled: telegramSettings?.instant_alerts_enabled ?? true,
+    digestEnabled: telegramSettings?.digest_enabled ?? true,
+    digestIntervalHours: telegramSettings?.digest_interval_hours || 6,
   });
-  const [isLoadingTelegram, setIsLoadingTelegram] = useState(true);
+  const [isLoadingTelegram, setIsLoadingTelegram] = useWorkspaceState("settings.telegramLoading", true);
   const [isSavingTelegram, setIsSavingTelegram] = useState(false);
   const [isSendingTelegramTest, setIsSendingTelegramTest] = useState(false);
 
@@ -220,7 +221,6 @@ export default function Settings() {
   }, [user?.email, user?.name, user?.profile_picture?.data_url, user?.username]);
 
   const loadSessions = async () => {
-    setIsLoadingSessions(true);
     try {
       const response = await axios.get(apiRoutes.listSessions);
       setSessions(response?.data?.data || []);
@@ -250,7 +250,6 @@ export default function Settings() {
   };
 
   const loadTelegramSettings = async () => {
-    setIsLoadingTelegram(true);
     try {
       const response = await axios.get(apiRoutes.telegramSettings);
       applyTelegramSettings(response.data || {});

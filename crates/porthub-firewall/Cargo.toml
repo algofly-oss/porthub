@@ -1,0 +1,23 @@
+[package]
+name = "porthub-firewall"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+porthub-runtime = { path = "../porthub-runtime" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+subtle = "2"
+clap.workspace = true
+nlink = "0.33"
+tokio-rusqlite = { version = "0.8", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }

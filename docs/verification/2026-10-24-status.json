@@ -1,0 +1,34 @@
+{
+  "scope": "Local native status/history, instant-alert and digest workers, plus production three-container isolation; no URM2 rollout",
+  "verification": {
+    "workspace_tests_passed": 128,
+    "workspace_tests_failed": 0,
+    "workspace_tests_ignored": 0,
+    "clippy": "workspace all targets, warnings denied",
+    "format": "cargo fmt --all -- --check",
+    "compose_checks_passed": 15,
+    "compose_report": "2026-10-24-status-isolation.json",
+    "go_compatibility_executable_sha256": "7bfbc5712fe850f3956b8f4509f2cdf8bc24682d79d9f85a9e284b567272e4e9"
+  },
+  "checks": [
+    "Presence TTL boundaries, auth-required and disabled states, retirement and owner-scoped history",
+    "Persisted transitions are not duplicated on restart; failed history writes retry without a new transition",
+    "Unchanged status repairs its baseline after history retention expiry",
+    "Startup offline suppression and idempotent history, TTL and alert-state indexes",
+    "Instant alert grace period, recovery, exclusions and stale-heartbeat compare-and-set guards",
+    "Account-scoped scheduled digests, failed recipients and UTF-16-bounded HTML-escaped chunks",
+    "Stalled notification delivery does not stall history; shutdown cancels pending HTTP I/O",
+    "Idle expiry and recovery push owner websocket status without a new browser request",
+    "Production native API worker persists online presence then idle offline status",
+    "Existing HTTPS Socket.IO, native 32 MiB file integrity, firewall, retirement and restart checks retained",
+    "Disposable Compose project and user-service test unit removed"
+  ],
+  "limitations": [
+    "Notification delivery has no durable outbox; an interrupted or failed claimed attempt is not replayed automatically",
+    "Digest checkpoint moves before delivery to prevent duplicate scheduled claims; a crash can skip that period",
+    "Install/artifact/private APIs, native agent update/log lifecycle and full platform support remain incomplete",
+    "Private networking, relay and adaptive authenticated route selection remain incomplete",
+    "Production adoption, full failure recovery and final remote 10 GiB/miro.phub tests remain outstanding",
+    "No commit, push, URM2 deployment or registered-agent upgrade performed"
+  ]
+}
