@@ -5,7 +5,8 @@ export function formatEndpoint(host, port) {
 }
 
 export function externalEndpoint(connection = {}) {
-  return formatEndpoint(connection.external_bind_ip || connection.externalBindIp || "0.0.0.0", connection.external_port ?? connection.externalPort);
+  const port = connection.external_port ?? connection.externalPort;
+  return port === undefined || port === null || port === "" ? "—" : String(port);
 }
 
 export function internalEndpoint(connection = {}) {
