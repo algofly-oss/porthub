@@ -113,6 +113,24 @@ packaged HTTP management and macOS launchd lifecycle.
   opt-in test skipped; workspace clippy and actionlint passed. Local i686
   check cannot reach Rust compilation because host multilib headers are
   absent; actual subsequent CI cross-build is required as evidence.
+- Checkpoint 913f3b674a83c6034efc9124226f0994d5e71c0c is pushed. Run
+  40087637905 has verified GNU release builds for i686, ARMv6 and ARMv7.
+  Its macOS ARM64 job passed native tests, release packaging, packaged HTTP
+  management and the actual launchd lifecycle/forwarding test (not ignored).
+  Remaining job conclusions must be inspected independently. Local static
+  913f3b6 agent export also passed ELF-interpreter and packaged HTTP checks;
+  output directory is recorded in /tmp/porthub-platform-static-output.
+- Windows now compiles, but its real UDP fault-isolation tests exposed native
+  recvfrom WSAEMSGSIZE (10040): a consumed oversized packet was classified as
+  a permanently failed interface. Follow-up treats truncation as one dropped
+  packet without a backoff or socket shutdown. The existing 9000-byte outsider
+  regression exercises the actual OS behavior, and the fault socket now also
+  injects the portable packet-too-big error. Twelve local mesh tests and mesh
+  clippy pass; actual Windows follow-up CI remains mandatory.
+- The complete workspace suite was rerun after the UDP change with a freshly
+  built native update candidate: 243 passed, zero failed/ignored. Log:
+  /tmp/porthub-portable-full-tests.log. Verification scope and checkpoint CI
+  evidence are in docs/verification/2026-10-24-portable-agents.json.
 - Resolve actual CI failures; finish Windows/macOS lifecycle, credential safety,
   native private devices/routes/DNS, adoption and updates. Complete the full
   supported architecture artifact matrix, including static 32-bit Linux.

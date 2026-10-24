@@ -1,0 +1,60 @@
+{
+  "verified_at_utc": "2026-10-24T11:00:23.221012+00:00",
+  "checkpoint": "913f3b674a83c6034efc9124226f0994d5e71c0c",
+  "ci_run": "https://github.com/algofly-oss/porthub/actions/runs/40087637905",
+  "verified_ci_jobs": {
+    "linux_i686_gnu": {
+      "job_id": 120853709745,
+      "result": "passed",
+      "scope": "release cross-build and artifact upload"
+    },
+    "linux_armv6_gnu": {
+      "job_id": 120853709595,
+      "result": "passed",
+      "scope": "release cross-build and artifact upload"
+    },
+    "linux_armv7_gnu": {
+      "job_id": 120853709830,
+      "result": "passed",
+      "scope": "release cross-build and artifact upload"
+    },
+    "macos_arm64": {
+      "job_id": 120853709798,
+      "result": "passed",
+      "scope": "native tests, release artifact, packaged HTTP server management and real launchd lifecycle/traffic test"
+    }
+  },
+  "local_checkpoint_static_agent": {
+    "sha256": "e4859eb7058c6ce30b788cc476574230135e70e8b350fce4f771def36ea013c2",
+    "bytes": 21099072,
+    "no_elf_interpreter": true,
+    "packaged_http_lifecycle_tests_passed": 2
+  },
+  "targeted_local_tests": {
+    "passed": 38,
+    "ignored": 1
+  },
+  "follow_up_udp_fix": {
+    "mesh_tests_passed": 12,
+    "ignored": 1,
+    "clippy": "passed",
+    "scope": "Treat a consumed oversized receive as a dropped datagram, preserving authenticated peer state. Windows WSAEMSGSIZE classification awaits actual CI.",
+    "source_sha256": "57d79d66982cba0b6b7f87aefb6a0098a93e1c79a223a9fce0d02ae74f42df32"
+  },
+  "limitations": [
+    "This is a checkpoint verification, not final production acceptance.",
+    "Linux 32-bit artifacts currently use GNU libc, not static musl.",
+    "Windows follow-up, macOS x86_64 and remaining Linux 64-bit jobs need their own terminal results.",
+    "Registered services and URM2 production were not upgraded.",
+    "Private physical-machine performance and full cross-platform private network support remain incomplete."
+  ],
+  "full_workspace_follow_up": {
+    "passed": 243,
+    "failed": 0,
+    "ignored": 0,
+    "verified_at_utc": "2026-10-24T11:01:41.246225+00:00",
+    "includes": "Mongo/API, installed systemd user autoupdate, Go/Pion compatibility fixtures, Socket.IO and private recovery integration tests",
+    "log": "/tmp/porthub-portable-full-tests.log",
+    "update_candidate": "freshly built native-portable-fixture-20261024"
+  }
+}

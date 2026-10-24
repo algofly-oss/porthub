@@ -30,6 +30,20 @@ enum Datagram {
     Packet(SocketAddr, SocketAddr, BytesMut),
     ReadError(SocketAddr, bool),
 }
+fn truncated_datagram(error: &turn_util::Error) -> bool {
+    if matches!(error, turn_util::Error::ErrPacketTooBig) {
+        return true;
+    }
+    // Winsock discards the excess of a UDP datagram and returns WSAEMSGSIZE
+    // (10040), rather than a truncated successful receive as on Linux. This
+    // consumes one bad packet; it does not mean that the socket has closed.
+    // https://learn.microsoft.com/en-us/windows/win32/api/winsock/nf-winsock-recvfrom
+    #[cfg(windows)]
+    if matches!(error, turn_util::Error::Io(error) if error.0.raw_os_error() == Some(10040)) {
+        return true;
+    }
+    false
+}
 fn retry_read(error: &turn_util::Error) -> bool {
     use std::io::ErrorKind;
     match error {
@@ -347,6 +361,7 @@ async fn read_datagrams(
                 )
             }
             Ok(_) => (Datagram::ReadError(local, false), None),
+            Err(error) if truncated_datagram(&error) => (Datagram::ReadError(local, false), None),
             Err(error) => {
                 let retry = retry_read(&error);
                 (Datagram::ReadError(local, !retry), Some(retry))
@@ -466,6 +481,7 @@ mod io_tests {
         socket: Arc<UdpSocket>,
         target: SocketAddr,
         reset: AtomicBool,
+        oversized: AtomicBool,
         closed: bool,
         rejected: AtomicUsize,
     }
@@ -483,6 +499,9 @@ mod io_tests {
             }
             if self.reset.swap(false, Ordering::SeqCst) {
                 return Err(std::io::Error::from(std::io::ErrorKind::ConnectionReset).into());
+            }
+            if self.oversized.swap(false, Ordering::SeqCst) {
+                return Err(IoError::ErrPacketTooBig);
             }
             Ok(self.socket.recv_from(buffer).await?)
         }
@@ -529,6 +548,7 @@ mod io_tests {
             socket: left_socket,
             target: ra,
             reset: AtomicBool::new(true),
+            oversized: AtomicBool::new(true),
             closed: false,
             rejected: AtomicUsize::new(0),
         });
@@ -552,6 +572,7 @@ mod io_tests {
                     socket,
                     target: ra,
                     reset: AtomicBool::new(false),
+                    oversized: AtomicBool::new(false),
                     closed: true,
                     rejected: AtomicUsize::new(0),
                 }) as Socket,
@@ -581,7 +602,7 @@ mod io_tests {
             outsider.send_to(&vec![0; 9000], la).await?;
             tokio::time::timeout(Duration::from_secs(1), async {
                 loop {
-                    if left.statistics().await?.read_errors >= 2 {
+                    if left.statistics().await?.read_errors >= 3 {
                         break;
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -631,6 +652,7 @@ mod io_tests {
             socket,
             target: address,
             reset: AtomicBool::new(false),
+            oversized: AtomicBool::new(false),
             closed: true,
             rejected: AtomicUsize::new(0),
         });
