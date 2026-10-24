@@ -3,8 +3,8 @@ const assert = require('node:assert/strict');
 (async () => {
  const {makeDemoData,handleDemoRequest} = await import("../src/shared/demo/data.mjs");
  const state=makeDemoData(); const originalName=state.machines[0].name;
- // All fixture ports use the same explicit interface so whichever traffic
- // rows are ranked first must still show the supplied listener address.
+ // A gateway bind address must not appear in public port labels; internal
+ // destinations remain explicit IP:port values.
  state.connections.forEach(connection => connection.external_bind_ip = '192.0.2.44');
  const browser=await launchBrowser();
  const page=await browser.newPage({viewport:{width:1512,height:982},serviceWorkers:'block'});
@@ -33,8 +33,9 @@ const assert = require('node:assert/strict');
   release();hold=false;
   await page.getByText('AAA Refreshed machine name',{exact:true}).first().waitFor();
   await page.getByRole('navigation',{name:'Workspace pages',exact:true}).getByRole('button',{name:'Traffic',exact:true}).click();
-  await page.getByText(/192\.0\.2\.44:\d+/).first().waitFor();
+  await page.getByText(/\d+ → 127\.0\.0\.1:\d+/).first().waitFor();
+  assert(!(await page.locator('main').innerText()).includes('192.0.2.44:'), 'public labels omit the gateway bind IP');
   assert.deepEqual(errors,[]);
-  console.log('PASS cached tab content appears while revalidation is delayed; fresh data replaces it; bind endpoints displayed; no browser errors');
+  console.log('PASS cached tab content appears while revalidation is delayed; fresh data replaces it; public ports and internal endpoints displayed; no browser errors');
  }finally{release?.();await browser.close()}
 })().catch(e=>{console.error(e);process.exit(1)});
