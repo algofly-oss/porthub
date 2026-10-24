@@ -2095,7 +2095,7 @@ export default function HostConfigPopup({
                   {host.name || "Untitled machine"}
                 </Badge>
                 <Badge color="blue" variant="light" className={getInfoBadgeClassName(isDark)}>
-                  LAN: {host.localIp || "Pending"}
+                  LAN: {host.localIp || "Not reported"}
                 </Badge>
                 <Badge color="blue" variant="light" className={getInfoBadgeClassName(isDark)}>
                   WAN: {host.publicIp || "Pending"}

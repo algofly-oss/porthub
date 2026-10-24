@@ -48,6 +48,13 @@ async fn sync(State(state): State<Arc<Control>>, Json(body): Json<Value>) -> Res
     assert_eq!(body["machine_id"], MACHINE);
     assert_eq!(body["token"], TOKEN);
     assert_eq!(body["client_version"], porthub_agent::VERSION);
+    let local = body["local_ip"]
+        .as_str()
+        .expect("heartbeat includes LAN address metadata");
+    if !local.is_empty() {
+        let address: std::net::IpAddr = local.parse().unwrap();
+        assert!(!address.is_unspecified() && !address.is_loopback());
+    }
     assert!(body["hostname"].as_str().is_some_and(|v| !v.is_empty()));
     state.syncs.fetch_add(1, Ordering::SeqCst);
     let snapshot = state.snapshot.lock().unwrap().clone();

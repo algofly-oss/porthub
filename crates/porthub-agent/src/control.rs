@@ -28,6 +28,19 @@ pub struct Reply {
     pub headers: reqwest::header::HeaderMap,
     pub bytes: Vec<u8>,
 }
+/// Ask the kernel for its default IPv4 source address. UDP connect selects a
+/// route locally: it sends no packet and performs no DNS or gateway request.
+fn local_address() -> String {
+    let selected = (|| -> std::io::Result<std::net::IpAddr> {
+        let socket = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0))?;
+        socket.connect((std::net::Ipv4Addr::new(192, 0, 2, 1), 9))?;
+        Ok(socket.local_addr()?.ip())
+    })();
+    match selected {
+        Ok(address) if !address.is_unspecified() && !address.is_loopback() => address.to_string(),
+        _ => String::new(),
+    }
+}
 impl Reply {
     pub fn json(&self) -> Result<Value, Failure> {
         serde_json::from_slice(&self.bytes).map_err(|_| Failure::InvalidResponse)
@@ -175,7 +188,7 @@ impl Control {
         Err(Failure::Unavailable)
     }
     pub async fn sync(&self, hostname: &str, handled: &str) -> Result<Reply, Failure> {
-        self.request(Method::POST,"machines/client/sync",Some(serde_json::json!({"machine_id":self.profile.machine_id,"token":self.profile.token,"hostname":hostname,"client_version":crate::VERSION,"client_update_last_handled_request_id":handled,"is_active":true})),&[]).await
+        self.request(Method::POST,"machines/client/sync",Some(serde_json::json!({"machine_id":self.profile.machine_id,"token":self.profile.token,"hostname":hostname,"local_ip":local_address(),"client_version":crate::VERSION,"client_update_last_handled_request_id":handled,"is_active":true})),&[]).await
     }
     pub async fn changes(&self, version: &str) -> Result<Reply, Failure> {
         self.request(
