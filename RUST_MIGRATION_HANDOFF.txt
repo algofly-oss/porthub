@@ -508,3 +508,41 @@ Never mark the goal complete merely because local tests or a checkpoint pass.
 - Mainolder6210candidate1.2buildexec99076 stillactive atlastpoll; UIbuild36596
   completed0. CurrentprodAPIversion1.1.1. Await/buildfinalsourcewithLAN+failover
   fixes and matchingcompleteCIbundle beforepromoting1.2.
+
+2026-10-24 ARM blocker identified and corrected in source363cf04:
+- User supplied sudo credential for username nitin on the twoARMhosts; it works
+  onboth. Keep password only in conversation context, never files/arguments.
+  Used SSH solely for READ-ONLY preflight/metadata. Upgrades remain gateway-driven.
+- Verified1.1.1ARMdiagnosticbinarySHA98c73603... staged onboth hosts at
+  /tmp/porthub-native-diagnostic-1.1.1. Read-only adopt-legacy with canonical
+  authority/fallbacks returns Harshitha: legacy registration directory ownership
+  unsafe; DGXSpark: unsafe legacyenvironmentownership/permissions.
+- Exactmetadata: all /etc/porthubdirsrootroot0755, client.envrootroot0644,
+  private.jsonrootroot0600; bothactualPortHubunitsrootroot0644; bothCLIs
+  rootroot0755. Harshitha'sGLOBAL /etc/systemd/system rootroot0775 triggers
+  overstrictdirectorycheck. DGXSparksGLOBALunitsdirrootroot0755; its PortHub
+  sourcesallpassownership, failurecomesfromscanningunrelatedsystemunits.
+  Neitherhost/tmpnoexec; both onlyonepublictenant+private. No services stopped
+  orpermissionsmodified; no environment file contents printed.
+- Source363cf049ee94b238c25281b6d366e3ff00c27ab1 scopes root-group write
+  exception ONLY to /etc/systemd/system withcurrentUID0,owner0,group0, never
+  worldwrite orothergroups/credential/releasedirectories. Genericservicedirectory
+  creationandadoptionbothuse samepermissionpredicate. Testscoverexactexception
+  andnegativeowner/group/path/modecases.
+- OmittedservicechecknowreadsboundedNOFOLLOWstableunitdata first, regardless
+  unrelatedfileowner; only unitsreferencingPortHubCLI mustpassstrictread_owned.
+  AnyomittedPortHubreference stillfails. Regressionprovesunrelatedwritableunit
+  untouchedandaccepted,butwritableorownedomittedCLIreferencebothrejected.
+- Focusedmigration/service/legacytests+ClippyalltargetsincludingrootDNS passed;
+  FULL255passed0failed0ignored, /tmp/porthub-arm-adoption-permission-full-tests.log.
+  Sourcecommitted/pushed. Finalcrossplatformrun40116880718 source363cf04 RUNNING.
+  Previoussource8777run40115617406 ALLsuccess (doesnotincludefinalpermissionfix).
+- Older6210candidatebuild completedthreeimages (logscomplete; unifiedSSHhandle
+  99076 stilldidnotreturnterminalatlastpoll, don'tcallmissingoutputfailure).
+  NOTpromoted,becausemissesLANmetadataandnewfailover/permissionfixes.
+- NEWfinalthree-rolecandidatebuildRUNNINGexec26896, source363cf04, version1.2.0,
+  logs release-1.2.0-363cf04-{core,edge,firewall}-build.log, tags
+  porthub:{core,edge,firewall}-candidate-1.2.0-363cf04. Stagesourcegitarchived363
+  (includesallrecentUIchanges), private.envpreserved. Waitforrealprocess/terminal
+  evidence; thenreadonlyARMpreflightontwoactualhosts, fullmatchingCIbundle,
+  gatewaypromotionandgateway-issuedupdates. Currentproductionhealthy1.1.1+newUI.
