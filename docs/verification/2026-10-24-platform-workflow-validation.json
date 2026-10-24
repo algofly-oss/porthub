@@ -1,0 +1,20 @@
+{
+  "verified_at_utc": "2026-10-24T10:29:57.107794+00:00",
+  "checkpoint_commit": "6965f8535e98b13fc1bf675a14b8cc95a5c11bbe",
+  "branch": "rust-native-migration",
+  "first_run": {
+    "id": 40085156832,
+    "outcome": "workflow validation failed before any job started"
+  },
+  "correction": "Use matrix target in job-level RUSTFLAGS, with bounded build jobs and disabled development/test debug symbols",
+  "actionlint": {
+    "version": "v1.7.12",
+    "exit_code": 0,
+    "workflow_sha256": "b6f00e1649eb2964c9623d7060008c2f701e88655280e18a2218ec5924acf6cd",
+    "log_sha256": "a9f10398005f69a5251a53148d4b2480a596c92ca4edee17b238db0aecaecf03"
+  },
+  "runner_labels_source": "https://docs.github.com/en/actions/reference/runners/github-hosted-runners",
+  "platform_job_results": "pending a new run after follow-up push",
+  "production_deployment": "pending",
+  "registered_client_upgrades": "pending"
+}

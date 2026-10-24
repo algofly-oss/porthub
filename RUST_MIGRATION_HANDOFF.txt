@@ -93,12 +93,17 @@ legacy-to-native update. Deep/otsi-reid rejected the configured SSH identity;
 clearsight/test were unavailable in that probe. This does not prove them offline.
 Do not reactivate disabled registrations or change credentials speculatively.
 
-NEXT REQUIRED WORK / NOT COMPLETE
+CHECKPOINT AND NEXT REQUIRED WORK / NOT COMPLETE
 
-- Checkpoint/push the verified migration source to a working branch and inspect
-  actual platform CI. No main merge or production deployment is implied by a
-  feature-branch checkpoint. Platform workflow exports static Linux 64-bit
-  bundles and exercises packaged HTTP management and macOS launchd lifecycle.
+Checkpoint 6965f8535e98b13fc1bf675a14b8cc95a5c11bbe is pushed on
+rust-native-migration. main was not merged or deployed. The first Actions run
+40085156832 was rejected before jobs because a job-level env expression used
+runner context. The follow-up switches to matrix context, bounds CI compilation,
+and passes actionlint v1.7.12. Inspect actual latest branch runs, not the old
+failed run. Platform workflow exports static Linux 64-bit bundles and exercises
+packaged HTTP management and macOS launchd lifecycle.
+
+- Inspect and resolve actual platform CI; a checkpoint is not completion.
 - Resolve actual CI failures; finish Windows/macOS lifecycle, credential safety,
   native private devices/routes/DNS, adoption and updates. Complete the full
   supported architecture artifact matrix, including static 32-bit Linux.

@@ -24,7 +24,10 @@ jobs:
     env:
       PORTHUB_VERSION: ${{ github.sha }}
       RUST_MIN_STACK: "33554432"
-      RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+      RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static' || '' }}
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_BUILD_JOBS: ${{ contains(matrix.target, 'apple') && '2' || '4' }}
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust target
