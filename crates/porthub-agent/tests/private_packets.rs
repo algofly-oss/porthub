@@ -225,7 +225,8 @@ fn active_flows_keep_the_prechecked_route_and_fail_over_only_on_transport_failur
     assert_eq!(paths.choose(new, true, true), Some(true));
     assert_eq!(paths.choose(new, false, true), Some(false));
     assert_eq!(paths.choose(new, true, true), Some(false));
-    assert_eq!(paths.choose(new, true, false), None);
+    assert_eq!(paths.choose(new, true, false), Some(true));
+    assert_eq!(paths.choose(new, true, true), Some(true));
 }
 
 #[test]
@@ -241,6 +242,14 @@ fn path_preferences_only_choose_new_flows_and_keep_available_fallbacks() {
     assert_eq!(
         paths.choose_preferred(gateway_flow, true, true, true),
         Some(false)
+    );
+    assert_eq!(
+        paths.choose_preferred(gateway_flow, true, false, false),
+        Some(true)
+    );
+    assert_eq!(
+        paths.choose_preferred(gateway_flow, true, true, false),
+        Some(true)
     );
     assert_eq!(
         paths.choose_preferred(direct_flow, true, true, true),

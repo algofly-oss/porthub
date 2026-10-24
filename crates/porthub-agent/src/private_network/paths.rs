@@ -48,7 +48,11 @@ impl Pinned {
                 }
             }
             if !*route && !relay {
-                return None;
+                if direct {
+                    *route = true;
+                } else {
+                    return None;
+                }
             }
             *expires = now + packet.flow_ttl();
             return Some(*route);
