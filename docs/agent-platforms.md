@@ -14,8 +14,15 @@ separate from this runtime requirement.
 `.github/workflows/agent-platforms.yml` builds these targets. Native 64-bit OS
 runners and Windows x86 run transfer, management and tunnel-adapter checks.
 32-bit Linux targets currently have build jobs; ARM hardware/emulator runtime
-checks are still required. The workflow has not run until it is pushed: its
-existence is not evidence that a target passes. Runner labels come from the
+checks are still required. All ten jobs passed for checkpoint
+`b81e8653864b13286651a29efad5dfedc456c9b8` in
+[run 40088578711](https://github.com/algofly-oss/porthub/actions/runs/40088578711).
+The ten downloaded bundles have matching version markers and verified archive
+and executable SHA256 values. Linux 64-bit executables have no ELF interpreter
+or shared-library dependencies; all three Windows executables import no
+external Microsoft C runtime DLL. See
+[release evidence](verification/2026-10-24-release-bundle.json).
+Runner labels come from the
 [GitHub runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
 
 Foreground profile storage/control is implemented in the portable agent. Unix
@@ -27,10 +34,10 @@ controller now generates owned plists and supports install, start, stop,
 restart and removal through the OS-provided `/bin/launchctl`, without a shell
 or an additional installed helper. Readiness checks the actual process
 executable through `proc_pidpath`. Its disposable user-service test is gated by
-`PORTHUB_TEST_LAUNCHD=1`; runtime verification is still pending. An ARM Mac
-compiled the earlier agent baseline, but disconnected before the new lifecycle
-implementation could be synced and tested. This is not evidence that the
-current macOS implementation passes. Windows service control, non-Linux
+`PORTHUB_TEST_LAUNCHD=1`; the actual lifecycle/forwarding check passed on both
+macOS runner architectures. The registered Mac became unreachable before a
+fleet upgrade could be tested; runner success does not establish its live state.
+Windows service control, non-Linux
 updates, private-network lifecycle and Windows credential ACL verification
 remain.
 
@@ -45,5 +52,8 @@ native driver strategy; it must not require users to assemble external tools.
 Release builds embed the commit version and produce a version marker and SHA256
 beside each binary. Packaging must gather matching-version artifacts for every
 supported target before a server release advertises or queues agent updates.
-The local Docker build currently includes only the agent matching its server
-architecture; complete artifact gathering/download routes remain rollout gates.
+The local Docker build includes only the agent matching its server architecture.
+The verified ten-target bundle is prepared for deployment; publishing it and
+upgrading the registered clients remain rollout gates. Migration preflight
+rejects mixed image/runtime/agent versions, incomplete metadata and conflicting
+duplicates before stopping the existing deployment.

@@ -13,9 +13,78 @@ import json
 import os
 import pathlib
 import platform
+import re
 import shutil
+import signal
 import subprocess
 import sys
+
+ASSETS = {
+    "porthub-" + target + (".exe" if target.startswith("windows_") else "")
+    for target in ("x86_64", "x86", "arm64", "armhf", "armv7", "darwin_x86_64",
+                   "darwin_arm64", "windows_x86_64", "windows_x86", "windows_arm64")
+}
+
+
+def image_version(image):
+    version = (image["Config"].get("Labels") or {}).get("org.opencontainers.image.version", "")
+    if version == "dev" or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", version):
+        raise RuntimeError("native image requires an explicit release version")
+    return version
+
+
+def artifact_files(name, payload, version, checksum, expected_version):
+    """Validate and normalize one immutable, fully captured agent release."""
+    if name not in ASSETS or not 0 < len(payload) <= 128 * 1024 * 1024:
+        raise RuntimeError("invalid native artifact")
+    if len(version) > 256 or len(checksum) > 512:
+        raise RuntimeError("invalid native artifact metadata")
+    try:
+        version = version.decode("ascii").strip()
+        fields = checksum.decode("ascii").split()
+    except UnicodeError as error:
+        raise RuntimeError("invalid native artifact metadata") from error
+    digest = hashlib.sha256(payload).hexdigest()
+    if version != expected_version:
+        raise RuntimeError("native images and agent artifacts must have the same release version")
+    if fields != [digest, name]:
+        raise RuntimeError("native artifact hash or filename mismatch")
+    return {name: payload, name + ".version": (version + "\n").encode(),
+            name + ".sha256": (digest + "  " + name + "\n").encode()}
+
+
+def artifact_bundle(directory, expected_version, initial):
+    """Resolve bundles before stopping production; identical host assets coalesce."""
+    result = dict(initial)
+    if directory is None:
+        return result
+    directory = directory.resolve(strict=True)
+    if not directory.is_dir():
+        raise RuntimeError("native artifact bundle must be a directory")
+    names = set()
+    for path in directory.iterdir():
+        name = path.name
+        if name.startswith("porthub-"):
+            if name.endswith(".sha256"):
+                name = name.removesuffix(".sha256")
+            elif name.endswith(".version"):
+                name = name.removesuffix(".version")
+            if name not in ASSETS:
+                raise RuntimeError("unsupported native artifact filename")
+            names.add(name)
+    for name in sorted(names):
+        parts = []
+        for suffix, maximum in (("", 128 * 1024 * 1024), (".version", 256), (".sha256", 512)):
+            path = directory / (name + suffix)
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > maximum:
+                raise RuntimeError("missing or unsafe native artifact bundle entry")
+            parts.append(path.read_bytes())
+        files = artifact_files(name, *parts, expected_version)
+        for filename, content in files.items():
+            if filename in result and result[filename] != content:
+                raise RuntimeError("native artifact bundle conflicts with the packaged host agent")
+            result[filename] = content
+    return result
 
 
 def run(arguments, *, binary=False):
@@ -88,19 +157,34 @@ def main():
     if mount["Type"] != "volume" or mount["Name"] != "porthub_porthub_data":
         raise RuntimeError("unexpected PortHub data volume")
     data = pathlib.Path(inspect("volume", mount["Name"])["Mountpoint"])
+    versions = set()
     for role in ("core", "edge", "firewall"):
         image = inspect("image", "porthub:" + role)
+        versions.add(image_version(image))
         wanted = "arm64" if platform.machine() == "aarch64" else "amd64"
         if image["Architecture"] != wanted:
             raise RuntimeError("native image architecture does not match host")
+    if len(versions) != 1:
+        raise RuntimeError("native core, edge and firewall images must have the same release version")
+    version = versions.pop()
     compose = ["docker", "compose", "--project-name", args.project, "--project-directory", str(root), "--file", str(root / "docker-compose.yml")]
     configured=json.loads(run([*compose,"config","--format","json"]))
+    if configured["services"]["core"]["environment"].get("PORTHUB_VERSION", version) != version:
+        raise RuntimeError("configured runtime version must match the native image release")
     old_environment=dict(item.split("=",1) for item in old["Config"]["Env"] if "=" in item)
     old_table=old_environment.get("FW_NFT_TABLE","inet rathole").removeprefix("inet ").strip()
     new_table=configured["services"]["firewall"]["environment"].get("FW_NFT_TABLE","inet porthub").removeprefix("inet ").strip()
     if old_table!=new_table:
         raise RuntimeError("native firewall must retain the existing PortHub table name")
+    native_target = "arm64" if platform.machine() == "aarch64" else "x86_64"
+    artifact = "porthub-" + native_target
+    parts = [run(["docker", "run", "--rm", "--network", "none", "--read-only",
+                  "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+                  "--entrypoint", "/bin/cat", "porthub:core", "/app/client-bin/" + artifact + suffix], binary=True)
+             for suffix in ("", ".version", ".sha256")]
+    artifacts = artifact_bundle(args.extra_artifacts, version, artifact_files(artifact, *parts, version))
     print("Preflight: owned PortHub container, data volume, native images and Compose configuration verified", flush=True)
+    print("Preflight: matching release versions and complete agent artifacts verified before downtime", flush=True)
     if not args.apply:
         return
     if os.geteuid() != 0:
@@ -118,9 +202,19 @@ def main():
     others = running - {old["Id"][:12]}
     stopped = False
     owners = None
+    watched_signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    previous_handlers = {number: signal.getsignal(number) for number in watched_signals}
+
+    def interrupted(_number, _frame):
+        raise RuntimeError("PortHub migration interrupted; restoring the previous deployment")
+
     try:
-        run(["docker", "stop", "--time", "30", args.container])
+        for number in watched_signals:
+            signal.signal(number, interrupted)
+        # A Docker stop can take effect before its CLI is interrupted. Rollback
+        # must also run if that command never returns a successful result.
         stopped = True
+        run(["docker", "stop", "--time", "30", args.container])
         owners = snapshot(data / "mongo", backup / "mongo")
         snapshot(data / "firewall", backup / "firewall")
         private_file(backup / "mongo-ownership.json", json.dumps(owners).encode())
@@ -140,29 +234,9 @@ def main():
         owner_tree(volumes["certificates"], 0, 10001)
         os.chmod(volumes["certificates"], 0o770)
         owner_tree(data / "mongo", 10001, 10001)
-        native_target = "arm64" if platform.machine() == "aarch64" else "x86_64"
         artifact_dir = volumes["client_artifacts"]
-        artifact = "porthub-" + native_target
-        payload = run(["docker", "run", "--rm", "--network", "none", "--entrypoint", "/bin/cat", "porthub:core", "/app/client-bin/" + artifact], binary=True)
-        private_file(artifact_dir / artifact, payload)
-        version = run(["docker", "run", "--rm", "--network", "none", "--entrypoint", "/bin/cat", "porthub:core", "/app/client-bin/" + artifact + ".version"], binary=True)
-        private_file(artifact_dir / (artifact + ".version"), version)
-        private_file(artifact_dir / (artifact + ".sha256"), (hashlib.sha256(payload).hexdigest() + "  " + artifact + "\n").encode())
-        if args.extra_artifacts:
-            source_dir = args.extra_artifacts.resolve(strict=True)
-            for checksum in source_dir.glob("porthub-*.sha256"):
-                name = checksum.name.removesuffix(".sha256")
-                source = source_dir / name
-                if not source.is_file() or source.is_symlink() or source.stat().st_size > 128 * 1024 * 1024:
-                    raise RuntimeError("invalid additional native artifact")
-                payload = source.read_bytes()
-                if hashlib.sha256(payload).hexdigest() != checksum.read_text().split()[0]:
-                    raise RuntimeError("additional native artifact hash mismatch")
-                for suffix in ("", ".version", ".sha256"):
-                    item = source_dir / (name + suffix)
-                    if item.is_symlink() or not item.is_file():
-                        raise RuntimeError("invalid artifact metadata")
-                    private_file(artifact_dir / item.name, item.read_bytes())
+        for filename, content in artifacts.items():
+            private_file(artifact_dir / filename, content)
         for path in artifact_dir.iterdir():
             os.chmod(path, 0o555 if path.suffix not in (".version", ".sha256") else 0o444)
         os.chmod(artifact_dir, 0o755)
@@ -173,6 +247,9 @@ def main():
         print("Native PortHub roles healthy; unrelated containers retained; backup: " + str(backup), flush=True)
     except BaseException:
         if stopped:
+            # A lost SSH session must not interrupt the short restoration path.
+            for number in watched_signals:
+                signal.signal(number, signal.SIG_IGN)
             # Preserve the failed native state before restoring the verified
             # snapshot; no database directory is deleted during rollback.
             subprocess.run([*compose, "stop", "--timeout", "20", "edge", "core", "firewall"], capture_output=True)
@@ -185,6 +262,10 @@ def main():
             subprocess.run(["docker", "start", args.container], capture_output=True, check=True)
             print("Native activation failed; previous PortHub container restored; diagnostic state retained", file=sys.stderr, flush=True)
         raise
+    finally:
+        for number, previous in previous_handlers.items():
+            signal.signal(number, previous)
+        os.close(lock)
 
 
 if __name__ == "__main__":

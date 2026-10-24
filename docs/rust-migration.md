@@ -1,7 +1,7 @@
 # Native Rust migration
 
-Resumed at the user's request. See `../RUST_MIGRATION_HANDOFF.txt` for the pause
-snapshot; current verification and implementation may be newer.
+Resumed at the user's request. See `../RUST_MIGRATION_HANDOFF.txt` for the
+current implementation, verification and deployment state.
 
 This migration is in progress. Production still runs the existing Go server
 and agents. Do not deploy the Rust binaries until the parity and rollout gates
@@ -15,6 +15,35 @@ to PortHub. Native file serving and segmented/resumable downloads must be part
 of the agent binary, with no apt/lighttpd/aria2c runtime dependency.
 
 ## Current rollout gates
+
+The latest local Rust workspace run passed 243 tests with integration opt-ins
+and none ignored. All ten native agent platform jobs passed at checkpoint
+`b81e8653864b13286651a29efad5dfedc456c9b8`. The collected release bundle and
+its exact hashes are recorded in
+[`verification/2026-10-24-release-bundle.json`](verification/2026-10-24-release-bundle.json).
+This proves the tested packaging/tooling scope, not complete private-network
+or service/update support on every platform, or registered-client upgrades.
+
+The operator migration utility validates all three image versions, the configured
+runtime version and the captured agent bundle before downtime. Identical host
+artifacts coalesce when a complete bundle also includes that architecture;
+conflicts, bad hashes and missing metadata abort preflight. Its eight standard
+library tests include an interrupted Docker stop, SIGTERM and lost-SSH SIGHUP:
+recovery targets only the owned PortHub roles/container, then restores signal
+handlers. These are mocked maintenance tests, not a production cutover result.
+
+Run the read-only preflight first with the prepared bundle directory (containing
+executables and their `.version`/`.sha256` files, without ZIP archives):
+
+```sh
+python3 deploy/native/migrate.py --project-dir /path/to/native/staging --extra-artifacts /path/to/release/bundle
+```
+
+The same command with `--apply` needs administrator access and performs the
+PortHub stop, cold backup, ownership conversion and role activation. Existing
+state and certificates must be retained for rollback. It must not be pointed at
+or modify the dirty production source checkout. Python is an operator maintenance
+dependency; it is not installed in the product images or agents.
 
 Local native implementation and test milestones below do not establish a
 completed migration. Public tunnel endpoint recovery now runs in a scheduled

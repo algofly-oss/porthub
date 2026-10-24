@@ -1,0 +1,16 @@
+name: Migration preflight
+on:
+  push:
+    paths: ["deploy/native/migrate.py", "deploy/native/test_migrate.py", ".github/workflows/migration-preflight.yml"]
+  pull_request:
+    paths: ["deploy/native/migrate.py", "deploy/native/test_migrate.py", ".github/workflows/migration-preflight.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check release validation and interrupted-stop recovery
+        run: python3 -m unittest discover -s deploy/native -p test_migrate.py -v

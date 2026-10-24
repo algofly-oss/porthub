@@ -1,0 +1,150 @@
+{
+  "verified_at_utc": "2026-10-24T11:24:30.394900+00:00",
+  "version": "b81e8653864b13286651a29efad5dfedc456c9b8",
+  "ci_run": "https://github.com/algofly-oss/porthub/actions/runs/40088578711",
+  "platform_jobs_passed": 10,
+  "bootstrap_archive_fetch": "Python urllib for x86_64, before extracting the native downloader",
+  "remaining_archive_fetch": "Nine bundles downloaded with the verified native PortHub get binary, four connections each and expected archive SHA256",
+  "releases": [
+    {
+      "asset": "porthub-x86_64",
+      "version": "b81e8653864b13286651a29efad5dfedc456c9b8",
+      "size": 21099072,
+      "sha256": "32d682ab0d609cf3f24fb94922129932ab01a52b061a4434f74ed2f71651706c",
+      "artifact_id": 12558049242,
+      "archive_sha256": "885dc4e36fb855f3ec3a2e98a2350af3433f60541aab50b3af9ffab43ed6b233",
+      "static_linux_verified": true
+    },
+    {
+      "asset": "porthub-windows_x86.exe",
+      "version": "b81e8653864b13286651a29efad5dfedc456c9b8",
+      "size": 9583616,
+      "sha256": "e63615395d7e9909f9be344b557837b4f1d7351081fc43a5eeeb94b1e300a437",
+      "artifact_id": 12558585663,
+      "archive_sha256": "e7e8dfd4730d6e876e820165aa9f21f1ab2dfccf7eff52708a9b038e9e8e6269",
+      "static_linux_verified": null
+    },
+    {
+      "asset": "porthub-windows_x86_64.exe",
+      "version": "b81e8653864b13286651a29efad5dfedc456c9b8",
+      "size": 12291584,
+      "sha256": "1ad80e272d3b157d72e388237f9d610d6479673692aca423e4b8e9ca27b00a2a",
+      "artifact_id": 12558570780,
+      "archive_sha256": "d138d147305eb6a82281381820da5277cb62c535b4d6925f91ec75d6f2754f17",
+      "static_linux_verified": null
+    },
+    {
+      "asset": "porthub-darwin_x86_64",
+      "version": "b81e8653864b13286651a29efad5dfedc456c9b8",
+      "size": 10660624,
+      "sha256": "3a910a1aadd1285f30fb60fa322c3f82c8fbc397d064f559ef31ef0ff63c1d71",
+      "artifact_id": 12558506477,
+      "archive_sha256": "77fb9b62aef663aec1eef702c140af0b1d2b299050510829951af3c7b5357c60",
+      "static_linux_verified": null
+    },
+    {
+      "asset": "porthub-armhf",
+      "version": "b81e8653864b13286651a29efad5dfedc456c9b8",
+      "size": 18185352,
+      "sha256": "515bfa474588b6a532a6fcdc58aebaa6e1daea8569bb1597d2808fae1506a67d",
+      "artifact_id": 12558276543,
+      "archive_sha256": "3edc455d2ce42667f399291b5e11c1e8e8667bbfa191392bf350976add579475",
+      "static_linux_verified": null
+    },
+    {
+      "asset": "porthub-arm64",
+      "version": "b81e8653864b13286651a29efad5dfedc456c9b8",
+      "size": 18755608,
+      "sha256": "8acb402f6160f389c028944a4f1c7a63a3bc9399cc7bbfba18f400527827b239",
+      "artifact_id": 12557839835,
+      "archive_sha256": "1ec8985282f8d1e7812b2da0f48eb9739ce470485487ff0130496ffa6fefafca",
+      "static_linux_verified": true
+    },
+    {
+      "asset": "porthub-darwin_arm64",
+      "version": "b81e8653864b13286651a29efad5dfedc456c9b8",
+      "size": 10326560,
+      "sha256": "db50d38481ebe1f5a2b607f0fa7e8cc0f0cd2a0ad8d4e3f1e0adbb279674ac6e",
+      "artifact_id": 12557859205,
+      "archive_sha256": "3b0a04c05cf2c772ba329e8af2ee9b1d634234e0af651bdca6d8cf26378bd858",
+      "static_linux_verified": null
+    },
+    {
+      "asset": "porthub-armv7",
+      "version": "b81e8653864b13286651a29efad5dfedc456c9b8",
+      "size": 17742984,
+      "sha256": "2fdee4cf45842d79c6a1f3c9bd41668fcd626a869bbb5e155a9f24b90f272f24",
+      "artifact_id": 12557894004,
+      "archive_sha256": "f3f79cdbd16b018326242b138c3171c6fccf7a6f6e63e8e756a0c31a231ed964",
+      "static_linux_verified": null
+    },
+    {
+      "asset": "porthub-windows_arm64.exe",
+      "version": "b81e8653864b13286651a29efad5dfedc456c9b8",
+      "size": 10564096,
+      "sha256": "7dc962ec1b7ab496f34c1a91b9d70cf783dabcb63a73618a26e8860d3cb38ccc",
+      "artifact_id": 12557593531,
+      "archive_sha256": "82434157bb58e6e4af6987856c296ff9551f41bc686deacbda9ab08d320a260a",
+      "static_linux_verified": null
+    },
+    {
+      "asset": "porthub-x86",
+      "version": "b81e8653864b13286651a29efad5dfedc456c9b8",
+      "size": 21302260,
+      "sha256": "562cd89a24dce7357b53283b7451612b911f29830ab68b1c8637bca222b99ef3",
+      "artifact_id": 12558122913,
+      "archive_sha256": "2815879e074fb6fed0975b222ef5b71ad63c5f952de53594f684b1bc0b18e2c0",
+      "static_linux_verified": null
+    }
+  ],
+  "limitations": [
+    "Linux 32-bit files require GNU libc; Linux 64-bit files verified static.",
+    "Platform tests do not prove Windows service management or macOS/Windows private network drivers are implemented.",
+    "These artifacts have not yet been installed on registered client services."
+  ],
+  "windows_pe_import_checks": {
+    "windows_x86": {
+      "imported_dlls": [
+        "kernel32.dll",
+        "bcryptprimitives.dll",
+        "api-ms-win-core-synch-l1-2-0.dll",
+        "shell32.dll",
+        "combase.dll",
+        "ws2_32.dll",
+        "ntdll.dll",
+        "bcrypt.dll",
+        "advapi32.dll"
+      ],
+      "no_external_microsoft_crt_import": true
+    },
+    "windows_x86_64": {
+      "imported_dlls": [
+        "kernel32.dll",
+        "bcryptprimitives.dll",
+        "api-ms-win-core-synch-l1-2-0.dll",
+        "shell32.dll",
+        "combase.dll",
+        "ws2_32.dll",
+        "ntdll.dll",
+        "bcrypt.dll",
+        "advapi32.dll"
+      ],
+      "no_external_microsoft_crt_import": true
+    },
+    "windows_arm64": {
+      "imported_dlls": [
+        "kernel32.dll",
+        "bcryptprimitives.dll",
+        "api-ms-win-core-synch-l1-2-0.dll",
+        "shell32.dll",
+        "combase.dll",
+        "ws2_32.dll",
+        "ntdll.dll",
+        "bcrypt.dll",
+        "advapi32.dll"
+      ],
+      "no_external_microsoft_crt_import": true,
+      "method": "native PE32+ import directory inspection; ARM64 machine type verified"
+    }
+  }
+}

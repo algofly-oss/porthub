@@ -67,6 +67,7 @@ service lifecycle and updater parity remain part of the migration.
 | --- | --- |
 | `crates/` | Native API, agent, edge, embedded tunnel, transfers, runtime and firewall |
 | `vendor/rathole/` | Pinned upstream streaming implementation and documented patches |
+| `vendor/nlink/` | Pinned Linux netlink source with documented 32-bit portability fixes |
 | `ui/` | Dashboard; static production export and development UI |
 | `deploy/native/` | Structured native process configuration |
 | `api/`, `client/` | Previous Go behavior reference and transition tests |
@@ -78,6 +79,8 @@ cargo test --workspace
 # MongoDB integration checks require a dedicated disposable test database.
 PORTHUB_TEST_MONGO_URI=mongodb://127.0.0.1:47117 cargo test -p porthub-api -- --include-ignored
 node --test ui/tests/workspace.test.mjs
+# Operator-only migration tests use Python's standard library; no Docker state is changed.
+python3 -m unittest discover -s deploy/native -p test_migrate.py
 ```
 
 Privileged firewall tests must run in a disposable network namespace. Production

@@ -95,6 +95,33 @@ Do not reactivate disabled registrations or change credentials speculatively.
 
 CHECKPOINT AND NEXT REQUIRED WORK / NOT COMPLETE
 
+All ten jobs in run 40088578711 passed for
+b81e8653864b13286651a29efad5dfedc456c9b8. Local immutable bundle:
+/home/nitin/.cache/porthub-native-releases/b81e8653864b13286651a29efad5dfedc456c9b8/bundle
+All 30 files have checked versions and executable/archive SHA256. Nine archives
+were fetched with the bootstrapped native get CLI; its x86_64 bootstrap ZIP used
+urllib. Both Linux 64-bit binaries are static, and all Windows PE imports were
+checked to exclude external Microsoft CRT DLLs. Report:
+docs/verification/2026-10-24-release-bundle.json. The complete bundle is not yet
+published or installed on any registered service. Non-Linux private devices,
+Windows services/ACLs and non-Linux update/adoption remain incomplete.
+
+The migration utility now checks matching core/edge/firewall/runtime/artifact
+versions and validates complete captured bundles BEFORE stopping PortHub.
+Identical host duplicates coalesce; conflicts, stale versions, symlinks, bad
+hashes and missing metadata fail preflight. It restores the old owned container
+even if Docker stop was interrupted, including SIGTERM/SIGHUP, then restores
+signal handlers. Eight local mocked maintenance tests pass; they do not prove
+actual production activation/rollback. A small separate CI workflow covers them.
+
+The ae4559e ARM prod-core build is still running on URM2 through local exec
+session 2670; portable-core-build.log shows active porthub agent compilation.
+The first musl dependency build is slow with one Cargo job. A live rustc process
+was confirmed, so do not restart merely because the log is quiet. The final
+release bundle uses b81e865; finish and inspect this build, then build matching
+version roles before migration. Current images' labels must not be assumed to
+match; the hardened preflight rejects that. Production remains the old monolith.
+
 Checkpoint 6965f8535e98b13fc1bf675a14b8cc95a5c11bbe is pushed on
 rust-native-migration. main was not merged or deployed. The first Actions run
 40085156832 was rejected before jobs because a job-level env expression used
