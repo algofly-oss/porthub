@@ -1,11 +1,13 @@
 """Migration release checks must fail before any production stop or state write."""
 import hashlib
 import importlib.util
+import io
 import json
 import pathlib
 import signal
 import sys
 import tempfile
+import tarfile
 import unittest
 from unittest import mock
 
@@ -26,6 +28,14 @@ class ReleasePreflight(unittest.TestCase):
     def write_bundle(self, directory, files):
         for name, content in files.items():
             (directory / name).write_bytes(content)
+
+    def tar_file(self, name, content):
+        output = io.BytesIO()
+        with tarfile.open(fileobj=output, mode="w") as archive:
+            entry = tarfile.TarInfo(name)
+            entry.size = len(content)
+            archive.addfile(entry, io.BytesIO(content))
+        return output.getvalue()
 
     def test_identical_host_asset_coalesces_with_complete_cross_platform_bundle(self):
         host = self.bundle("porthub-arm64")
@@ -206,13 +216,31 @@ class ReleasePreflight(unittest.TestCase):
             run.assert_not_called()
 
     def test_empty_tls_key_fails_before_any_stop_when_tls_is_requested(self):
-        with mock.patch.object(migrate, "run", side_effect=[b"existing-certificate", b""]):
+        with mock.patch.object(migrate, "run", side_effect=[
+            self.tar_file("server.crt", b"existing-certificate"),
+            self.tar_file("server.key", b""),
+        ]):
             with self.assertRaisesRegex(RuntimeError, "certificate/key is empty"):
                 migrate.legacy_tls("porthub", True)
 
     def test_invalid_legacy_key_does_not_block_an_explicit_automatic_identity(self):
-        with mock.patch.object(migrate, "run", side_effect=[b"existing-certificate", b""]):
+        with mock.patch.object(migrate, "run", side_effect=[
+            self.tar_file("server.crt", b"existing-certificate"),
+            self.tar_file("server.key", b""),
+        ]):
             self.assertIsNone(migrate.legacy_tls("porthub", True, allow_self_signed=True))
+
+    def test_tls_material_reads_stopped_container_files_without_starting_container(self):
+        certificate, key = b"certificate", b"private-key"
+        with mock.patch.object(migrate, "run", side_effect=[
+            self.tar_file("server.crt", certificate), self.tar_file("server.key", key),
+        ]) as run, mock.patch.object(migrate.ssl, "SSLContext") as context:
+            self.assertEqual(migrate.legacy_tls("porthub", True), (certificate, key))
+        context.return_value.load_cert_chain.assert_called_once()
+        self.assertEqual(run.call_args_list[0].args[0], [
+            "docker", "cp", "porthub:/app/deploy/certificates/server.crt", "-",
+        ])
+        self.assertTrue(run.call_args_list[0].kwargs["binary"])
 
     def test_native_data_preflight_forwards_secrets_only_in_environment(self):
         with tempfile.TemporaryDirectory() as directory:

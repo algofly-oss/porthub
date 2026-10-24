@@ -9,6 +9,7 @@ import argparse
 import datetime
 import fcntl
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -20,6 +21,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import tarfile
 import uuid
 
 ASSETS = {
@@ -155,8 +157,13 @@ def database_preflight(configured, root):
 def legacy_tls(container, enabled, allow_self_signed=False):
     if not enabled:
         return None
-    certificate = run(["docker", "exec", container, "cat", "/app/deploy/certificates/server.crt"], binary=True)
-    key = run(["docker", "exec", container, "cat", "/app/deploy/certificates/server.key"], binary=True)
+    try:
+        certificate = legacy_file(container, "/app/deploy/certificates/server.crt")
+        key = legacy_file(container, "/app/deploy/certificates/server.key")
+    except RuntimeError:
+        if allow_self_signed:
+            return None
+        raise RuntimeError("legacy TLS certificate/key is unavailable; configure HTTP ingress or allow automatic identity")
     if not certificate or not key:
         if allow_self_signed:
             return None
@@ -172,6 +179,22 @@ def legacy_tls(container, enabled, allow_self_signed=False):
                 return None
             raise RuntimeError("legacy TLS certificate/key is invalid; configure HTTP ingress or supply valid TLS material before migration") from error
     return certificate, key
+
+
+def legacy_file(container, path):
+    """Read one regular file from a stopped legacy container without starting it."""
+    archive = run(["docker", "cp", container + ":" + path, "-"], binary=True)
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:*") as source:
+        members = source.getmembers()
+        if len(members) != 1 or not members[0].isfile() or members[0].size > 1024 * 1024:
+            raise RuntimeError("legacy container file is not a bounded regular file")
+        stream = source.extractfile(members[0])
+        if stream is None:
+            raise RuntimeError("legacy container file could not be read")
+        content = stream.read(1024 * 1024 + 1)
+        if len(content) != members[0].size:
+            raise RuntimeError("legacy container file changed while being read")
+        return content
 
 
 def private_file(path, data):
