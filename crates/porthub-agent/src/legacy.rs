@@ -147,6 +147,17 @@ pub fn is_generated_cli(path: &Path) -> Result<bool> {
     )
 }
 pub(crate) fn read_owned(path: &Path, maximum: u64) -> Result<Vec<u8>> {
+    read_bounded(path, maximum, true)
+}
+/// Inspect unrelated system units as inert data solely to detect references to
+/// the shared CLI. A referencing unit must subsequently pass read_owned.
+#[cfg(target_os = "linux")]
+pub(crate) fn read_unit_candidate(path: &Path, maximum: u64) -> Result<Vec<u8>> {
+    read_bounded(path, maximum, false)
+}
+fn read_bounded(path: &Path, maximum: u64, require_owner: bool) -> Result<Vec<u8>> {
+    #[cfg(not(unix))]
+    let _ = require_owner;
     let before = std::fs::symlink_metadata(path).context("read legacy environment metadata")?;
     anyhow::ensure!(
         before.is_file() && before.len() <= maximum,
@@ -160,8 +171,9 @@ pub(crate) fn read_owned(path: &Path, maximum: u64) -> Result<Vec<u8>> {
         // Older installers created 0644 files. Reading those is permitted,
         // but a writable-by-others or foreign-owned source cannot be trusted.
         anyhow::ensure!(
-            (before.uid() == 0 || before.uid() == rustix::process::getuid().as_raw())
-                && before.mode() & 0o022 == 0,
+            !require_owner
+                || ((before.uid() == 0 || before.uid() == rustix::process::getuid().as_raw())
+                    && before.mode() & 0o022 == 0),
             "unsafe legacy environment ownership or permissions"
         );
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);

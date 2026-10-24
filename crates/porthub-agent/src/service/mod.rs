@@ -176,6 +176,28 @@ impl Readiness for RuntimeReady {
         .context("native registration did not become ready")?
     }
 }
+#[cfg(unix)]
+pub(crate) fn trusted_directory(path: &Path, metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    directory_permissions(
+        path,
+        metadata.uid(),
+        metadata.gid(),
+        metadata.mode(),
+        rustix::process::getuid().as_raw(),
+    )
+}
+#[cfg(unix)]
+fn directory_permissions(path: &Path, owner: u32, group: u32, mode: u32, current: u32) -> bool {
+    // Some distributions use 0775 for the root-controlled system unit folder.
+    // This exception never applies to profiles, releases, or arbitrary folders.
+    let root_system_units = cfg!(target_os = "linux")
+        && current == 0
+        && owner == 0
+        && group == 0
+        && path == Path::new("/etc/systemd/system");
+    owner == current && mode & 0o002 == 0 && (mode & 0o020 == 0 || root_system_units)
+}
 pub(crate) fn directory(path: &Path, private: bool) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => {
@@ -185,10 +207,8 @@ pub(crate) fn directory(path: &Path, private: bool) -> Result<()> {
             );
             #[cfg(unix)]
             {
-                use std::os::unix::fs::{MetadataExt, PermissionsExt};
                 anyhow::ensure!(
-                    metadata.uid() == rustix::process::getuid().as_raw()
-                        && metadata.permissions().mode() & 0o022 == 0,
+                    trusted_directory(path, &metadata),
                     "service directory must be owned by this account and not writable by others"
                 );
             }
@@ -232,6 +252,35 @@ pub(crate) fn directory(path: &Path, private: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+#[cfg(all(test, target_os = "linux"))]
+mod directory_permission_tests {
+    use super::directory_permissions;
+    use std::path::Path;
+    #[test]
+    fn only_root_controlled_system_units_allow_root_group_writes() {
+        let units = Path::new("/etc/systemd/system");
+        assert!(directory_permissions(units, 0, 0, 0o775, 0));
+        assert!(directory_permissions(units, 0, 0, 0o755, 0));
+        assert!(!directory_permissions(units, 0, 0, 0o777, 0));
+        assert!(!directory_permissions(units, 0, 1000, 0o775, 0));
+        assert!(!directory_permissions(units, 1000, 0, 0o775, 0));
+        assert!(!directory_permissions(units, 1000, 0, 0o775, 1000));
+        assert!(!directory_permissions(
+            Path::new("/etc/porthub"),
+            0,
+            0,
+            0o775,
+            0
+        ));
+        assert!(!directory_permissions(
+            Path::new("/tmp/units"),
+            0,
+            0,
+            0o775,
+            0
+        ));
+    }
 }
 fn regular(path: &Path) -> Result<Option<Vec<u8>>> {
     let metadata = match std::fs::symlink_metadata(path) {

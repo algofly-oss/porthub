@@ -217,10 +217,8 @@ fn real_directory(path: &Path) -> Result<()> {
         metadata.is_dir(),
         "legacy registration directory must be real"
     );
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     ensure!(
-        metadata.uid() == rustix::process::getuid().as_raw()
-            && metadata.permissions().mode() & 0o022 == 0,
+        service::trusted_directory(path, &metadata),
         "legacy registration directory ownership is unsafe"
     );
     Ok(())
@@ -426,11 +424,17 @@ async fn inspect(
         {
             continue;
         }
-        let bytes = legacy::read_owned(&path, 65536)?;
+        let bytes = legacy::read_unit_candidate(&path, 65536)?;
         let uses_cli = std::str::from_utf8(&bytes).ok().is_some_and(|text| {
             text.lines()
                 .any(|line| line.starts_with("ExecStart=") && line.contains(marker))
         });
+        if uses_cli {
+            ensure!(
+                legacy::read_owned(&path, 65536)? == bytes,
+                "legacy unit changed during inspection"
+            );
+        }
         ensure!(
             !uses_cli || entries.iter().any(|entry| entry.legacy.unit == path),
             "another service still uses the legacy CLI; include every registration before adoption"

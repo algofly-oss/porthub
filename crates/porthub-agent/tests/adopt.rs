@@ -144,6 +144,38 @@ fn fixture(root: &Path) -> Result<(Layout, Options, Fake)> {
 }
 
 #[tokio::test]
+async fn unrelated_writable_unit_is_not_adopted_but_any_cli_reference_is_rejected() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let root = common::private_dir()?;
+    let (layout, options, fake) = fixture(root.path())?;
+    let unrelated = layout.units.join("unrelated-app.service");
+    write(
+        &unrelated,
+        "[Service]\nExecStart=/opt/unrelated/application\n",
+    )?;
+    fs::set_permissions(&unrelated, fs::Permissions::from_mode(0o666))?;
+    let bytes = fs::read(&unrelated)?;
+    let plan = adopt::plan(&layout, &options, &fake).await?;
+    ensure!(plan.registrations() == 2);
+    ensure!(fs::read(&unrelated)? == bytes);
+    ensure!(fs::metadata(&unrelated)?.permissions().mode() & 0o777 == 0o666);
+    write(
+        &unrelated,
+        format!(
+            "[Service]\nExecStart={} __service-run\n",
+            options.cli.display()
+        ),
+    )?;
+    fs::set_permissions(&unrelated, fs::Permissions::from_mode(0o666))?;
+    ensure!(adopt::plan(&layout, &options, &fake).await.is_err());
+    fs::set_permissions(&unrelated, fs::Permissions::from_mode(0o644))?;
+    ensure!(adopt::plan(&layout, &options, &fake).await.is_err());
+    ensure!(fake.starts.lock().unwrap().is_empty());
+    ensure!(!layout.state.exists());
+    Ok(())
+}
+
+#[tokio::test]
 async fn batch_adoption_preserves_stopped_tenants_and_can_restore_the_exact_legacy_cli(
 ) -> Result<()> {
     let root = common::private_dir()?;
