@@ -69,7 +69,7 @@
     "update_candidate": "freshly built native-portable-fixture-20261024"
   },
   "portable_filename_fixture_follow_up": {
-    "local_http_download_tests_passed": 6,
+    "local_http_download_tests_passed": 7,
     "scope": "Use a portable apostrophe/ampersand filename on every OS; retain angle-bracket filename coverage on Unix. Product runtime unchanged."
   }
 }

@@ -135,7 +135,7 @@ packaged HTTP management and macOS launchd lifecycle.
   Its Actions run 40088238085 verifies all three Windows UDP recovery tests
   on x86, x86_64 and ARM64. Those jobs next failed at a test fixture creating
   `<&.txt`, which Windows cannot represent. Follow-up uses apostrophe/ampersand
-  escaping on every OS and retains the angle-bracket check on Unix. Six local
+  escaping on every OS and retains the angle-bracket check on Unix. Seven local
   HTTP download integration tests pass; remaining runner evidence is pending.
 - Refreshed the owned URM2 staging tree from ae4559e, verified SHA256 for all
   1011 tracked source files, and recorded IDs/start times/restart counts of its
