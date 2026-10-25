@@ -444,6 +444,28 @@ async fn http_server(root: PathBuf) -> Result<Http> {
     http(server::router(tokio::fs::canonicalize(root).await?)).await
 }
 
+// Keep one worker pending while the others checkpoint pieces. A fixed sleep
+// cannot guarantee cancellation before EOF on fast or heavily scheduled hosts.
+fn hold_first_data_response(router: Router) -> Router {
+    let requests = Arc::new(AtomicUsize::new(0));
+    router.layer(axum::middleware::from_fn(
+        move |request: Request<Body>, next: axum::middleware::Next| {
+            let requests = requests.clone();
+            async move {
+                let data = request
+                    .headers()
+                    .get(header::RANGE)
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| value != "bytes=0-0");
+                if data && requests.fetch_add(1, Ordering::SeqCst) == 0 {
+                    std::future::pending::<()>().await;
+                }
+                next.run(request).await
+            }
+        },
+    ))
+}
+
 #[tokio::test]
 async fn cancellation_resumes_validated_completed_segments() -> Result<()> {
     let source = tempfile::tempdir()?;
@@ -451,21 +473,7 @@ async fn cancellation_resumes_validated_completed_segments() -> Result<()> {
     let payload = vec![73u8; 8 * 1024 * 1024];
     tokio::fs::write(source.path().join("resume.bin"), &payload).await?;
     let base = server::router(tokio::fs::canonicalize(source.path()).await?);
-    // Delay data responses so cancellation is deterministic after early pieces
-    // are checkpointed, rather than relying on loopback throughput timing.
-    let router = base.layer(axum::middleware::from_fn(
-        |request: Request<Body>, next: axum::middleware::Next| async move {
-            if request
-                .headers()
-                .get(header::RANGE)
-                .and_then(|value| value.to_str().ok())
-                .is_some_and(|value| value != "bytes=0-0")
-            {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            next.run(request).await
-        },
-    ));
+    let router = hold_first_data_response(base);
     let http = http(router).await?;
     let url = format!("{}/resume.bin", http.url);
     let token = CancellationToken::new();
@@ -537,21 +545,9 @@ async fn changed_validator_discards_old_resume_segments() -> Result<()> {
     let destination = tempfile::tempdir()?;
     let first = vec![11u8; 8 * 1024 * 1024];
     tokio::fs::write(source.path().join("changed.bin"), &first).await?;
-    let router = server::router(tokio::fs::canonicalize(source.path()).await?).layer(
-        axum::middleware::from_fn(
-            |request: Request<Body>, next: axum::middleware::Next| async move {
-                if request
-                    .headers()
-                    .get(header::RANGE)
-                    .and_then(|value| value.to_str().ok())
-                    .is_some_and(|value| value != "bytes=0-0")
-                {
-                    tokio::time::sleep(Duration::from_millis(40)).await;
-                }
-                next.run(request).await
-            },
-        ),
-    );
+    let router = hold_first_data_response(server::router(
+        tokio::fs::canonicalize(source.path()).await?,
+    ));
     let http = http(router).await?;
     let url = format!("{}/changed.bin", http.url);
     let token = CancellationToken::new();
