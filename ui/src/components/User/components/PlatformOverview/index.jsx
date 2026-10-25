@@ -12,7 +12,6 @@ import { PageHeader, SearchField, EmptyState } from "@/components/ui/workspace";
 import { Button } from "@/components/ui/button";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { searchScore } from "@/shared/utils/search.mjs";
-import { Switch } from "@mantine/core";
 
 export default function PlatformOverview() {
   const [overview, setOverview] = useWorkspaceState("platform.overview", []), [loading, setLoading] = useWorkspaceState("platform.loading", true), [error, setError] = useState("");
@@ -52,9 +51,35 @@ export default function PlatformOverview() {
   const visible = filtered.slice(visibleStart, visibleStart + pageSize);
   return <div className="workspace-page">
     <PageHeader title="Platform Overview" />
-    <section className="rounded-xl bg-surface p-4" aria-label="Signup settings">
-      <div className="flex flex-wrap items-center justify-between gap-4"><div><h2 className="text-sm font-semibold">New signups</h2><p className="mt-1 text-xs text-muted-foreground">{signup ? `Currently ${signup.signup_enabled ? "enabled" : "disabled"}. ${signup.configured ? "Using the platform override." : `Using the SIGNUP_DISABLED environment default (${signup.env_default ? "enabled" : "disabled"}).`}` : "Loading signup settings…"}</p></div><div className="flex items-center gap-3"><Switch aria-label="Enable new signups" checked={signup?.signup_enabled ?? false} disabled={!signup || signupBusy} onChange={event => setSignupEnabled(event.currentTarget.checked)} /><Button type="button" variant="outline" disabled={!signup?.configured || signupBusy} onClick={resetSignup}>Reset to env default</Button></div></div>
-      {signupError && <p role="alert" className="mt-2 text-xs text-red-600 dark:text-red-400">{signupError}</p>}
+    <section className="mb-3 shrink-0 rounded-xl border border-border/60 bg-surface p-3 sm:p-4" aria-label="Signup settings">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-sm font-semibold">New signups</h2>
+            {signup && <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${signup.signup_enabled ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400" : "bg-muted text-muted-foreground"}`}>{signup.signup_enabled ? "Enabled" : "Disabled"}</span>}
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {!signup ? "Loading signup settings…" : signup.configured ? "Set by an administrator." : `Following the SIGNUP_DISABLED environment default (${signup.env_default ? "enabled" : "disabled"}).`}
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center justify-between gap-3 sm:justify-start">
+          <button
+            type="button"
+            role="switch"
+            aria-label="Enable new signups"
+            aria-checked={signup?.signup_enabled ?? false}
+            disabled={!signup || signupBusy}
+            onClick={() => setSignupEnabled(!signup.signup_enabled)}
+            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 ${signup?.signup_enabled ? "bg-primary" : "bg-muted-foreground/35"}`}
+          >
+            <span className={`pointer-events-none block h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${signup?.signup_enabled ? "translate-x-[22px]" : "translate-x-0.5"}`} />
+          </button>
+          <Button type="button" size="sm" variant="outline" disabled={!signup?.configured || signupBusy} onClick={resetSignup}>
+            <IconRefresh size={14} /> Reset to env
+          </Button>
+        </div>
+      </div>
+      {signupError && <p role="alert" className="mt-3 text-xs text-red-600 dark:text-red-400">{signupError}</p>}
     </section>
     <div className="toolbar flex-row flex-wrap items-center"><div className="min-w-0 basis-full sm:mr-auto sm:basis-72"><SearchField value={query} onChange={setQuery} label="Search platform" placeholder="Search users or machines…" /></div><SearchSelect className="min-w-0 flex-1 sm:w-44 sm:flex-none" label="Filter account role" value={role} onChange={setRole} options={[{value:"all",label:"All roles"},{value:"admin",label:"Administrators"},{value:"user",label:"Members"}]} /><SearchSelect className="min-w-0 flex-1 sm:w-44 sm:flex-none" label="Sort accounts" value={sort} onChange={setSort} options={[{value:"name",label:"Name A–Z"},{value:"machines",label:"Most machines"}]} /><Button type="button" variant="outline" onClick={load} disabled={loading} aria-label="Refresh platform"><IconRefresh size={15} /><span className="hidden sm:inline">Refresh</span></Button></div>
     {error ? <EmptyState icon={IconServer} title="Platform unavailable" description={error} action={<Button onClick={load}>Try again</Button>} /> : loading ? <p role="status" className="p-6 text-xs text-muted-foreground">Loading accounts…</p> : !filtered.length ? <EmptyState icon={IconUsers} title="No matching accounts" description="Try a different name, email, machine, or port." /> : <section aria-label="Platform results" className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-surface">
