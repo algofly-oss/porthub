@@ -12,6 +12,7 @@ import os
 import pathlib
 import platform
 import secrets
+import shutil
 import socket
 import ssl
 import sys
@@ -29,18 +30,27 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 def main():
     prefix = "porthub-verify-" + secrets.token_hex(5)
     password, key = secrets.token_hex(24), secrets.token_hex(32)
+    bind_root = pathlib.Path(tempfile.mkdtemp(prefix=prefix + "-binds-"))
     environment = {**os.environ, "PORTHUB_MODE": "prod", "PORTHUB_CORE_READ_ONLY": "true"}
     config = json.loads(subprocess.check_output(
         ["docker", "compose", "config", "--format", "json"], cwd=ROOT, env=environment))
     config["name"] = prefix
-    for name, volume in config["volumes"].items():
+    for name, volume in config.get("volumes", {}).items():
         volume["name"] = prefix + "-" + name
         assert not volume.get("external")
     for name, network in config.get("networks", {}).items():
         network["name"] = prefix + "-" + name
         assert not network.get("external")
+    bind_sources = {}
     for role, service in config["services"].items():
         service["container_name"] = prefix + "-" + role
+        for mount in service.get("volumes", []):
+            if mount.get("type") == "bind":
+                source = mount["source"]
+                isolated_source = bind_root / hashlib.sha256(source.encode()).hexdigest()
+                isolated_source.mkdir(parents=True, exist_ok=True)
+                mount["source"] = str(isolated_source)
+                bind_sources[mount["target"]] = isolated_source
         for field in ("env_file", "restart", "develop", "build"):
             service.pop(field, None)
         service["healthcheck"].update(interval="1s", start_period="20s", retries=30)
@@ -100,6 +110,35 @@ def main():
     def docker(*args, check=True):
         return subprocess.run(["docker", *args], capture_output=True, text=True, check=check)
 
+    def prepare_bind_roots():
+        # Match deploy.sh's owner/group permissions. Named volumes used to
+        # receive these permissions from image initialization.
+        bind_permissions = {
+            "/data": ("10001:10001", "0750"),
+            "/run/porthub-api": ("10001:10001", "0770"),
+            "/run/porthub-edge": ("0:10001", "0770"),
+            "/run/porthub-firewall": ("0:10001", "0770"),
+            "/run/porthub-config": ("10001:10001", "0750"),
+            "/run/porthub-activity": ("0:10001", "0770"),
+            "/data/certificates": ("0:10001", "0770"),
+            "/data/firewall": ("0:10001", "0770"),
+        }
+        commands = []
+        for target, source in bind_sources.items():
+            owner, mode = bind_permissions[target]
+            path = "/porthub-test-binds/" + str(source.relative_to(bind_root))
+            commands.extend((f"chown {owner} {path}", f"chmod {mode} {path}"))
+        data_path = "/porthub-test-binds/" + str(bind_sources["/data"].relative_to(bind_root))
+        config_path = "/porthub-test-binds/" + str(bind_sources["/run/porthub-config"].relative_to(bind_root))
+        commands.extend((f"mkdir -p {data_path}/mongo", f"chown 10001:10001 {data_path}/mongo",
+                         f"chmod 0750 {data_path}/mongo", f"printf '[server.services]\\n' > {config_path}/gateway.toml",
+                         f"chown 10001:10001 {config_path}/gateway.toml"))
+        subprocess.run(
+            ["docker", "run", "--rm", "--user", "0:0", "--mount",
+             f"type=bind,src={bind_root},dst=/porthub-test-binds", "--entrypoint", "/bin/sh",
+             "porthub:core", "-c", " && ".join(commands)],
+            check=True, capture_output=True, text=True)
+
     def inspect(role):
         return json.loads(docker("inspect", prefix + "-" + role).stdout)[0]
 
@@ -121,6 +160,7 @@ def main():
     client_image_id = None
     client_container = prefix + "-realtime"
     try:
+        prepare_bind_roots()
         # Reuse the locked UI builder dependencies without installing Node or
         # node_modules on the deployment host or in any production image.
         built = subprocess.run(["docker", "build", "--target", "ui-build", "--tag", client_image, "."],
@@ -552,6 +592,7 @@ def main():
             image = docker("image", "inspect", client_image, "--format", "{{.Id}}", check=False)
             if client_image_id and image.returncode == 0 and image.stdout.strip() == client_image_id:
                 docker("image", "rm", client_image, check=False)
+            shutil.rmtree(bind_root, ignore_errors=True)
 
 
 if __name__ == "__main__":
