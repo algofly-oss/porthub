@@ -5,7 +5,7 @@ import SearchSelect from "@/components/ui/search-select";
 import { useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { useMantineColorScheme } from "@mantine/core";
-import { IconActivity, IconArrowDownLeft, IconArrowUpRight, IconShieldLock, IconPlayerPause, IconPlayerPlay, IconChevronDown, IconRefresh } from "@tabler/icons-react";
+import { IconActivity, IconArrowUpRight, IconShieldLock, IconPlayerPause, IconPlayerPlay, IconChevronDown, IconRefresh } from "@tabler/icons-react";
 import { PageHeader, SearchField, EmptyState } from "@/components/ui/workspace";
 import apiRoutes from "@/shared/routes/apiRoutes";
 import { searchScore } from "@/shared/utils/search.mjs";
@@ -102,12 +102,10 @@ export default function Traffic({ active = true }) {
       <div className="divide-y divide-border/60">{filtered.slice((currentPage - 1) * 10, currentPage * 10).map(row => {
         const c = row.connection, s = row.summary, open = expanded === c._id;
         return <div key={c._id}>
-          <button type="button" aria-expanded={open} aria-controls={`traffic-${c._id}`} onClick={() => setExpanded(open ? "" : c._id)} className="relative grid w-full grid-cols-3 items-center gap-3 px-4 py-3 text-left hover:bg-accent/40 md:grid-cols-[minmax(0,1.4fr)_minmax(70px,120px)_repeat(3,minmax(0,1fr))_20px]">
+          <button type="button" aria-expanded={open} aria-controls={`traffic-${c._id}`} onClick={() => setExpanded(open ? "" : c._id)} className="relative grid w-full grid-cols-3 items-center gap-3 px-4 py-3 text-left hover:bg-accent/40 md:grid-cols-[minmax(0,1.4fr)_minmax(120px,1fr)_minmax(100px,0.8fr)_20px]">
             <div className="col-span-2 min-w-0 md:col-span-1"><p className="truncate text-sm font-medium">{c.service_name || `Port ${c.external_port}`}</p><p className="mt-1 truncate text-xs text-muted-foreground">{c.machine_name || "Unknown machine"} · {externalEndpoint(c)} → {internalEndpoint(c)}</p></div>
-            <TrafficSparkline samples={row.traffic} now={(updated || Date.now()) / 1000} showRates={false} label={`${c.machine_name || "Machine"} · ${c.service_name || `Port ${c.external_port}`}`} className="mr-5 md:mr-0" />
-            <div><p className="text-[11px] text-muted-foreground">Incoming</p><p className="mt-1 font-mono text-xs text-emerald-700 dark:text-emerald-400">{formatBytes(s.incoming)}/s</p></div>
-            <div><p className="text-[11px] text-muted-foreground">Outgoing</p><p className="mt-1 font-mono text-xs text-blue-700 dark:text-blue-400">{formatBytes(s.outgoing)}/s</p></div>
-            <div><p className="text-[11px] text-muted-foreground">Transferred / blocked</p><p className="mt-1 font-mono text-xs">{formatBytes(s.volume)} / <span className="text-rose-700 dark:text-rose-300">{formatBytes(s.blockedVolume)}</span></p></div>
+            <TrafficSparkline samples={row.traffic} now={(updated || Date.now()) / 1000} showRates={true} label={`${c.machine_name || "Machine"} · ${c.service_name || `Port ${c.external_port}`}`} className="mr-5 md:mr-0" />
+            <div className="col-span-full md:col-span-1"><p className="text-[11px] text-muted-foreground">Transferred / blocked</p><p className="mt-1 font-mono text-xs">{formatBytes(s.volume)} / <span className="text-rose-700 dark:text-rose-300">{formatBytes(s.blockedVolume)}</span></p></div>
             <IconChevronDown size={16} className={`absolute right-3 top-3 text-zinc-400 transition-transform md:static ${open ? "rotate-180" : ""}`} />
           </button>
           {open && <div id={`traffic-${c._id}`} className="space-y-4 border-t border-border/60 p-4 sm:p-5">

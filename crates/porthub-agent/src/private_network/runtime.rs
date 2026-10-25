@@ -61,7 +61,8 @@ pub async fn run(path: PathBuf, cancel: CancellationToken) -> Result<()> {
     let mut device: Option<Arc<Tun>> = None;
     let mut zone = None;
     let mut dns_registration: Option<dns::Registration> = None;
-    let mut registered_suffix = String::new();
+    let mut registered_suffixes: Vec<String> = Vec::new();
+    let mut dns_port: Option<u16> = None;
     let mut policy = Engine::default();
     let mut paths = super::paths::Pinned::default();
     let mut by_ip = HashMap::new();
@@ -79,15 +80,24 @@ pub async fn run(path: PathBuf, cancel: CancellationToken) -> Result<()> {
                 policy.apply(snapshot.clone())?;
                 if let Some(tun)=&device {
                     tun.update_routes(&routes).await?;
-                    ensure!(own.hostname.split_once('.').is_some_and(|(_,suffix)|suffix==registered_suffix),"private DNS suffix changed; restart required");
                 } else {
                     let tun=Arc::new(Tun::open(&name,own.ip,&routes).await?);
                     let server=dns::Server::bind(own.ip).await?;let port=server.port()?;
                     zone=Some(server.zone.clone()); tasks.spawn(server.serve(work.clone()));
-                    // Resolver registration is tied only to this owned link.
-                    let (_,suffix)=own.hostname.split_once('.').ok_or_else(||anyhow::anyhow!("private DNS suffix missing"))?;
-                    dns_registration = Some(dns::register(tun.index,own.ip,port,suffix).await?);registered_suffix=suffix.into();
+                    dns_port=Some(port);
                     device=Some(tun);
+                }
+                // Register every advertised private DNS suffix on the owned
+                // tunnel resolver. This also applies suffix changes live.
+                let mut suffixes=snapshot.dns_suffixes.iter().map(|suffix|suffix.trim_matches('.').to_ascii_lowercase()).filter(|suffix|!suffix.is_empty()).collect::<Vec<_>>();
+                if let Some((_,suffix))=own.hostname.split_once('.') { suffixes.push(suffix.trim_matches('.').to_ascii_lowercase()); }
+                suffixes.sort();suffixes.dedup();
+                if registered_suffixes!=suffixes {
+                    let tun=device.as_ref().expect("private tunnel initialized");
+                    let port=dns_port.ok_or_else(||anyhow::anyhow!("private DNS listener missing"))?;
+                    dns_registration=None;
+                    dns_registration=Some(dns::register(tun.index,own.ip,port,&suffixes).await?);
+                    registered_suffixes=suffixes;
                 }
                 by_ip=snapshot.peers.iter().map(|p|(p.ip,p.id.clone())).collect();
                 zone.as_ref().unwrap().write().await.update(&snapshot)?;

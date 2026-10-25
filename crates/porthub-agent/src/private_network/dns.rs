@@ -6,12 +6,16 @@ use hickory_proto::{
     op::{Message, MessageType, OpCode, ResponseCode},
     rr::{rdata::A, DNSClass, RData, Record, RecordType},
 };
-use std::{collections::HashMap, net::Ipv4Addr, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    net::Ipv4Addr,
+    sync::Arc,
+};
 use tokio::{net::UdpSocket, sync::RwLock};
 use tokio_util::sync::CancellationToken;
 #[derive(Default)]
 pub struct Zone {
-    suffix: String,
+    suffixes: HashSet<String>,
     records: HashMap<String, Ipv4Addr>,
 }
 impl Zone {
@@ -29,14 +33,25 @@ impl Zone {
             !suffix.is_empty() && suffix.len() < 254 && !suffix.ends_with('.'),
             "invalid private DNS suffix"
         );
-        let suffix = format!("{}.", suffix.to_ascii_lowercase());
+        let mut suffixes: HashSet<String> = snapshot
+            .dns_suffixes
+            .iter()
+            .map(|suffix| format!("{}.", suffix.trim_matches('.').to_ascii_lowercase()))
+            .collect();
+        suffixes.insert(format!(
+            "{}.",
+            suffix.trim_matches('.').to_ascii_lowercase()
+        ));
         let mut records = HashMap::new();
         for peer in &snapshot.peers {
             for name in std::iter::once(&peer.hostname).chain(&peer.aliases) {
                 let name = format!("{}.", name.trim_end_matches('.').to_ascii_lowercase());
                 ensure!(
-                    name.len() <= 254 && name.ends_with(&format!(".{suffix}")),
-                    "private name outside assigned suffix"
+                    name.len() <= 254
+                        && suffixes
+                            .iter()
+                            .any(|suffix| name.ends_with(&format!(".{suffix}"))),
+                    "private name outside assigned DNS suffixes"
                 );
                 ensure!(
                     records
@@ -46,7 +61,7 @@ impl Zone {
                 );
             }
         }
-        self.suffix = suffix;
+        self.suffixes = suffixes;
         self.records = records;
         Ok(())
     }
@@ -70,11 +85,13 @@ impl Zone {
         reply.add_query(q.clone());
         let code = if query.metadata.op_code != OpCode::Query {
             ResponseCode::NotImp
-        } else if self.suffix.is_empty()
-            || !(name == self.suffix || name.ends_with(&format!(".{}", self.suffix)))
+        } else if !self
+            .suffixes
+            .iter()
+            .any(|suffix| name == *suffix || name.ends_with(&format!(".{suffix}")))
         {
             ResponseCode::Refused
-        } else if !self.records.contains_key(&name) && name != self.suffix {
+        } else if !self.records.contains_key(&name) && !self.suffixes.contains(&name) {
             ResponseCode::NXDomain
         } else {
             ResponseCode::NoError
@@ -131,9 +148,7 @@ impl Server {
 #[derive(Default)]
 pub struct Registration {
     #[cfg(target_os = "macos")]
-    path: Option<std::path::PathBuf>,
-    #[cfg(target_os = "macos")]
-    contents: Vec<u8>,
+    paths: Vec<(std::path::PathBuf, Vec<u8>)>,
     #[cfg(windows)]
     interface: Option<windows_sys::core::GUID>,
 }
@@ -141,8 +156,8 @@ pub struct Registration {
 impl Drop for Registration {
     fn drop(&mut self) {
         #[cfg(target_os = "macos")]
-        if let Some(path) = self.path.take() {
-            if std::fs::read(&path).ok().as_deref() == Some(self.contents.as_slice()) {
+        for (path, contents) in self.paths.drain(..) {
+            if std::fs::read(&path).ok().as_deref() == Some(contents.as_slice()) {
                 if let Err(error) = std::fs::remove_file(path) {
                     tracing::warn!("could not remove owned macOS private DNS resolver: {error}");
                 }
@@ -151,17 +166,28 @@ impl Drop for Registration {
         #[cfg(windows)]
         if let Some(interface) = self.interface.take() {
             use windows_sys::Win32::NetworkManagement::IpHelper::{
-                SetInterfaceDnsSettings, DNS_INTERFACE_SETTINGS, DNS_INTERFACE_SETTINGS_VERSION1,
-                DNS_SETTING_DOMAIN, DNS_SETTING_NAMESERVER,
+                SetInterfaceDnsSettings, DNS_INTERFACE_SETTINGS, DNS_INTERFACE_SETTINGS3,
+                DNS_INTERFACE_SETTINGS_VERSION3, DNS_SETTING_DOMAIN, DNS_SETTING_NAMESERVER,
+                DNS_SETTING_SUPPLEMENTAL_SEARCH_LIST,
             };
-            let settings = DNS_INTERFACE_SETTINGS {
-                Version: DNS_INTERFACE_SETTINGS_VERSION1,
-                Flags: u64::from(DNS_SETTING_DOMAIN | DNS_SETTING_NAMESERVER),
+            let settings = DNS_INTERFACE_SETTINGS3 {
+                Version: DNS_INTERFACE_SETTINGS_VERSION3,
+                Flags: u64::from(
+                    DNS_SETTING_DOMAIN
+                        | DNS_SETTING_NAMESERVER
+                        | DNS_SETTING_SUPPLEMENTAL_SEARCH_LIST,
+                ),
                 ..Default::default()
             };
             // SAFETY: The interface GUID and settings structure are valid for
             // the duration of the call. Null field pointers clear these values.
-            if unsafe { SetInterfaceDnsSettings(interface, &settings) } != 0 {
+            if unsafe {
+                SetInterfaceDnsSettings(
+                    interface,
+                    &settings as *const _ as *const DNS_INTERFACE_SETTINGS,
+                )
+            } != 0
+            {
                 tracing::warn!("could not clear owned Windows private DNS settings");
             }
         }
@@ -169,7 +195,12 @@ impl Drop for Registration {
 }
 
 #[cfg(target_os = "linux")]
-pub async fn register(index: u32, own: Ipv4Addr, port: u16, suffix: &str) -> Result<Registration> {
+pub async fn register(
+    index: u32,
+    own: Ipv4Addr,
+    port: u16,
+    suffixes: &[String],
+) -> Result<Registration> {
     let connection = zbus::Connection::system()
         .await
         .map_err(|_| anyhow::anyhow!("private DNS system bus unavailable"))?;
@@ -190,8 +221,12 @@ pub async fn register(index: u32, own: Ipv4Addr, port: u16, suffix: &str) -> Res
         )
         .await
         .map_err(|_| anyhow::anyhow!("private DNS per-interface registration failed"))?;
+    let domains = suffixes
+        .iter()
+        .map(|suffix| (suffix.as_str(), true))
+        .collect::<Vec<_>>();
     proxy
-        .call::<_, _, ()>("SetLinkDomains", &(index as i32, vec![(suffix, true)]))
+        .call::<_, _, ()>("SetLinkDomains", &(index as i32, domains))
         .await?;
     proxy
         .call::<_, _, ()>("SetLinkDefaultRoute", &(index as i32, false))
@@ -204,61 +239,68 @@ pub async fn register(
     _index: u32,
     _own: Ipv4Addr,
     port: u16,
-    suffix: &str,
+    suffixes: &[String],
 ) -> Result<Registration> {
     use std::{fs, io::Write, os::unix::fs::OpenOptionsExt, path::PathBuf};
 
-    ensure!(
-        !suffix.is_empty()
-            && suffix.len() < 254
-            && suffix.split('.').all(|label| {
-                !label.is_empty()
-                    && label.len() <= 63
-                    && label
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-                    && !label.starts_with('-')
-                    && !label.ends_with('-')
-            }),
-        "invalid private DNS suffix"
-    );
+    ensure!(!suffixes.is_empty(), "private DNS suffix is missing");
     let directory = PathBuf::from("/etc/resolver");
     fs::create_dir_all(&directory)?;
-    let path = directory.join(suffix);
-    let contents = format!(
+    let mut paths = Vec::new();
+    for suffix in suffixes {
+        ensure!(
+            !suffix.is_empty()
+                && suffix.len() < 254
+                && suffix.split('.').all(|label| {
+                    !label.is_empty()
+                        && label.len() <= 63
+                        && label
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                        && !label.starts_with('-')
+                        && !label.ends_with('-')
+                }),
+            "invalid private DNS suffix"
+        );
+        let path = directory.join(suffix);
+        let contents = format!(
         "# Managed by PortHub native agent\ndomain {suffix}\nnameserver 127.0.0.1\nport {port}\nsearch_order 100\ntimeout 2\n"
     )
     .into_bytes();
-    let temporary = directory.join(format!(".porthub-{}-{port}.tmp", std::process::id()));
-    let result = (|| -> Result<()> {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o644)
-            .open(&temporary)?;
-        file.write_all(&contents)?;
-        file.sync_all()?;
-        fs::hard_link(&temporary, &path)?;
-        fs::remove_file(&temporary)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+        let temporary = directory.join(format!(".porthub-{}-{port}.tmp", std::process::id()));
+        let result = (|| -> Result<()> {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o644)
+                .open(&temporary)?;
+            file.write_all(&contents)?;
+            file.sync_all()?;
+            fs::hard_link(&temporary, &path)?;
+            fs::remove_file(&temporary)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result?;
+        paths.push((path, contents));
     }
-    result?;
-    Ok(Registration {
-        path: Some(path),
-        contents,
-    })
+    Ok(Registration { paths })
 }
 
 #[cfg(windows)]
-pub async fn register(index: u32, _own: Ipv4Addr, port: u16, suffix: &str) -> Result<Registration> {
+pub async fn register(
+    index: u32,
+    _own: Ipv4Addr,
+    port: u16,
+    suffixes: &[String],
+) -> Result<Registration> {
     use windows_sys::Win32::NetworkManagement::{
         IpHelper::{
             ConvertInterfaceIndexToLuid, ConvertInterfaceLuidToGuid, SetInterfaceDnsSettings,
-            DNS_INTERFACE_SETTINGS, DNS_INTERFACE_SETTINGS_VERSION1, DNS_SETTING_DOMAIN,
-            DNS_SETTING_NAMESERVER,
+            DNS_INTERFACE_SETTINGS, DNS_INTERFACE_SETTINGS3, DNS_INTERFACE_SETTINGS_VERSION3,
+            DNS_SETTING_DOMAIN, DNS_SETTING_NAMESERVER, DNS_SETTING_SUPPLEMENTAL_SEARCH_LIST,
         },
         Ndis::NET_LUID_LH,
     };
@@ -267,8 +309,9 @@ pub async fn register(index: u32, _own: Ipv4Addr, port: u16, suffix: &str) -> Re
         port == 53,
         "Windows private DNS must use the standard DNS port"
     );
+    ensure!(!suffixes.is_empty(), "private DNS suffix is missing");
     ensure!(
-        !suffix.is_empty()
+        suffixes.iter().all(|suffix| !suffix.is_empty()
             && suffix.len() < 254
             && suffix.split('.').all(|label| {
                 !label.is_empty()
@@ -278,7 +321,7 @@ pub async fn register(index: u32, _own: Ipv4Addr, port: u16, suffix: &str) -> Re
                         .all(|b| b.is_ascii_alphanumeric() || b == b'-')
                     && !label.starts_with('-')
                     && !label.ends_with('-')
-            }),
+            })),
         "invalid private DNS suffix"
     );
     // SAFETY: Each output pointer refers to an initialized local value.
@@ -296,17 +339,33 @@ pub async fn register(index: u32, _own: Ipv4Addr, port: u16, suffix: &str) -> Re
         .encode_utf16()
         .chain(Some(0))
         .collect::<Vec<_>>();
-    let domain = suffix.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
-    let settings = DNS_INTERFACE_SETTINGS {
-        Version: DNS_INTERFACE_SETTINGS_VERSION1,
-        Flags: u64::from(DNS_SETTING_DOMAIN | DNS_SETTING_NAMESERVER),
+    let domain = suffixes[0]
+        .encode_utf16()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let supplemental_search_list = suffixes
+        .join(",")
+        .encode_utf16()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let settings = DNS_INTERFACE_SETTINGS3 {
+        Version: DNS_INTERFACE_SETTINGS_VERSION3,
+        Flags: u64::from(
+            DNS_SETTING_DOMAIN | DNS_SETTING_NAMESERVER | DNS_SETTING_SUPPLEMENTAL_SEARCH_LIST,
+        ),
         Domain: domain.as_ptr() as *mut u16,
         NameServer: server.as_ptr() as *mut u16,
+        SupplementalSearchList: supplemental_search_list.as_ptr() as *mut u16,
         ..Default::default()
     };
     // SAFETY: Both strings and the settings structure stay live through this call.
     ensure!(
-        unsafe { SetInterfaceDnsSettings(interface, &settings) } == 0,
+        unsafe {
+            SetInterfaceDnsSettings(
+                interface,
+                &settings as *const _ as *const DNS_INTERFACE_SETTINGS,
+            )
+        } == 0,
         "cannot register Windows private DNS resolver"
     );
     Ok(Registration {

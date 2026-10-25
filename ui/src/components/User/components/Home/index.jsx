@@ -212,6 +212,7 @@ const mapMachineToHost = (machine) => ({
   createdAt: machine.created_at || "",
   hostname: machine.hostname || "",
   clientHostname: machine.client_hostname || "",
+  privateDomains: Array.isArray(machine.private_domains) ? machine.private_domains : [],
   hostnameOverride: machine.hostname_override || "",
   clientSetupPublicBaseUrl: machine.client_setup_public_base_url || "",
   clientSetupRatholeServerAddress:
@@ -287,7 +288,7 @@ export default function Home({ onStatsChange, active = true }) {
   const [hosts, setHosts] = useWorkspaceState("machines.hosts", []);
   const [privateAccess] = useWorkspaceState("access.data", null);
   const [selectedHostId, setSelectedHostId] = useState(null);
-  const [configStartSection, setConfigStartSection] = useState("ports");
+  const [configStartSection, setConfigStartSection] = useState("groups");
   const [isLoading, setIsLoading] = useWorkspaceState("machines.loading", true);
   const [isSaving, setIsSaving] = useState(false);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
@@ -557,11 +558,18 @@ export default function Home({ onStatsChange, active = true }) {
     (host.forwardingConfigs || []).filter(config => config.dataId).map(config => [config.dataId, host.id]));
   const trafficTargetKey = JSON.stringify(trafficTargets.sort(([a], [b]) => a.localeCompare(b)));
   const privateDnsSuffix = String(privateAccess?.network?.dns_suffix || "").trim().replace(/^\.+|\.+$/g, "");
-  const privateDomain = host => {
+  const defaultPrivateDomain = host => {
     if (!privateDnsSuffix) return "";
     const peer = (privateAccess?.private_peers || []).find(item => item.machine_id === host.id);
     const label = String(peer?.hostname || "").trim();
     return label ? `${label}.${privateDnsSuffix}` : "";
+  };
+  const privateDomain = host => {
+    const configured = Array.isArray(host.privateDomains) ? host.privateDomains : [];
+    const first = configured[0];
+    return first?.default ? defaultPrivateDomain(host) : first?.host && first?.suffix
+      ? `${first.host}.${first.suffix}`
+      : defaultPrivateDomain(host);
   };
   useEffect(() => {
     const targets = JSON.parse(trafficTargetKey);
@@ -641,9 +649,9 @@ export default function Home({ onStatsChange, active = true }) {
     };
   }, [trafficTargetKey, active]);
 
-  const handleOpenConfig = (hostId) => { setConfigStartSection("ports"); setSelectedHostId(hostId); };
+  const handleOpenConfig = (hostId) => { setConfigStartSection("groups"); setSelectedHostId(hostId); };
 
-  const handleCloseConfig = () => { setSelectedHostId(null); setConfigStartSection("ports"); };
+  const handleCloseConfig = () => { setSelectedHostId(null); setConfigStartSection("groups"); };
 
   const handleCreateMachine = async (machine) => {
     setIsCreatingMachine(true);
@@ -1025,6 +1033,7 @@ export default function Home({ onStatsChange, active = true }) {
         data_id: currentHost.id,
         name: details.name,
         hostname: details.hostname,
+        private_domains: details.privateDomains,
         enabled: currentHost.enabled,
       });
       const updatedHost = mapMachineToHost(response.data.data);
@@ -1291,6 +1300,7 @@ export default function Home({ onStatsChange, active = true }) {
                               machineId={host.id}
                               name={host.name}
                               privateDomain={privateDomain(host)}
+                              defaultPrivateDomain={defaultPrivateDomain(host)}
                               hostname={host.hostname}
                               groupLabels={(host.groupIds || [])
                                 .map((id) => groupLabelById[id])
@@ -1359,6 +1369,8 @@ export default function Home({ onStatsChange, active = true }) {
         initialSection={configStartSection}
         host={selectedHost}
         privateDomain={selectedHost ? privateDomain(selectedHost) : ""}
+        defaultPrivateDomain={selectedHost ? defaultPrivateDomain(selectedHost) : ""}
+        privateDnsSuffix={privateDnsSuffix || "phub"}
         opened={Boolean(selectedHost)}
         onClose={handleCloseConfig}
         onSave={handleSaveConfig}

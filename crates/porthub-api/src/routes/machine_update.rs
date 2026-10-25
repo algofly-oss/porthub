@@ -7,11 +7,13 @@ use crate::{
     store, App,
 };
 use axum::{extract::State, http::HeaderMap, routing::put, Json, Router};
+use futures_util::TryStreamExt;
 use mongodb::{
     bson::{doc, Bson, DateTime, Document},
     options::ReturnDocument,
 };
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 pub fn router() -> Router<Arc<App>> {
@@ -54,6 +56,26 @@ async fn update(
                 .cloned()
                 .unwrap_or(Bson::Boolean(true))
         });
+    let preferences = app
+        .collection("private_networks")
+        .find_one(doc! {"_id":owner.to_string()})
+        .await?
+        .unwrap_or_default();
+    let (_, dns_suffix) = crate::domain::enrollment::preferences(&preferences)?;
+    let private_domains = input
+        .private_domains
+        .clone()
+        .unwrap_or_else(|| crate::domain::private_domains::from_document(&previous));
+    ensure_private_domains_unique(
+        &app,
+        owner,
+        id,
+        &name,
+        &aliases,
+        &private_domains,
+        &dns_suffix,
+    )
+    .await?;
     let override_name = input.hostname.as_deref().unwrap_or_default().trim();
     let hostname = [
         override_name,
@@ -65,6 +87,12 @@ async fn update(
     .unwrap_or_default();
     let mut set = doc! {"name":name,"aliases":aliases,"hostname":hostname,"hostname_override":override_name,"enabled":enabled,"updated_at":DateTime::now()};
     let mut unset = Document::new();
+    if let Some(domains) = &input.private_domains {
+        set.insert(
+            "private_domains",
+            crate::domain::private_domains::to_bson(domains),
+        );
+    }
     if input.present.contains("group_ids") {
         let groups =
             super::machines::valid_groups(&app, owner, input.groups.unwrap_or_default()).await?;
@@ -114,6 +142,7 @@ async fn update(
         "hostname",
         "enabled",
         "client_setup_rathole_server_address",
+        "private_domains",
     ]
     .iter()
     .any(|key| previous_view[*key] != updated_view[*key]);
@@ -162,4 +191,99 @@ async fn update(
     Ok(Json(
         json!({"msg":"Machine updated successfully","data":updated_view}),
     ))
+}
+
+async fn ensure_private_domains_unique(
+    app: &App,
+    owner: &Bson,
+    machine_id: mongodb::bson::oid::ObjectId,
+    name: &str,
+    aliases: &[String],
+    domains: &[crate::domain::private_domains::Entry],
+    default_suffix: &str,
+) -> ApiResult<()> {
+    fn add_label(set: &mut HashSet<String>, label: &str, suffix: &str) -> bool {
+        let label = crate::domain::private_names::label(Some(&Bson::String(label.to_owned())));
+        set.insert(format!("{label}.{suffix}").to_ascii_lowercase())
+    }
+    let peers: Vec<Document> = app
+        .collection("private_peers")
+        .find(doc! {"workspace_id":owner})
+        .projection(doc! {"machine_id":1})
+        .await?
+        .try_collect()
+        .await?;
+    let ids: Vec<Bson> = peers
+        .iter()
+        .filter_map(|peer| peer.get("machine_id").cloned())
+        .collect();
+    let machines: Vec<Document> = app
+        .collection("machines")
+        .find(doc! {"$or":[{"user_id":owner},{"_id":{"$in":ids}}],"deletion_pending":{"$ne":true}})
+        .projection(doc! {"_id":1,"name":1,"aliases":1,"private_domains":1})
+        .await?
+        .try_collect()
+        .await?;
+    let mut candidate = HashSet::new();
+    if !add_label(&mut candidate, name, default_suffix) {
+        return Err(ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "Machine names and private DNS domains must be unique",
+        ));
+    }
+    for alias in aliases {
+        if !add_label(&mut candidate, alias, default_suffix) {
+            return Err(ApiError::new(
+                axum::http::StatusCode::CONFLICT,
+                "Machine names and private DNS domains must be unique",
+            ));
+        }
+    }
+    for domain in domains {
+        if domain.default {
+            continue;
+        }
+        let full = format!("{}.{}", domain.host, domain.suffix).to_ascii_lowercase();
+        if !candidate.insert(full) {
+            return Err(ApiError::new(
+                axum::http::StatusCode::CONFLICT,
+                "Machine names and private DNS domains must be unique",
+            ));
+        }
+    }
+    for machine in machines {
+        if store::id(machine.get("_id")) == machine_id.to_hex() {
+            continue;
+        }
+        let mut existing = HashSet::new();
+        add_label(
+            &mut existing,
+            store::string(&machine, "name"),
+            default_suffix,
+        );
+        if let Ok(values) = machine.get_array("aliases") {
+            for value in values {
+                let alias = store::json(value).as_str().unwrap_or_default().to_owned();
+                add_label(&mut existing, &alias, default_suffix);
+            }
+        }
+        for domain in crate::domain::private_domains::from_document(&machine) {
+            if domain.default {
+                add_label(
+                    &mut existing,
+                    store::string(&machine, "name"),
+                    default_suffix,
+                );
+            } else {
+                existing.insert(format!("{}.{}", domain.host, domain.suffix).to_ascii_lowercase());
+            }
+        }
+        if candidate.iter().any(|domain| existing.contains(domain)) {
+            return Err(ApiError::new(
+                axum::http::StatusCode::CONFLICT,
+                "This machine name or private DNS domain is already registered",
+            ));
+        }
+    }
+    Ok(())
 }

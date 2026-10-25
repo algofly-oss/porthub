@@ -395,6 +395,8 @@ const CLIENT_LOG_AUTO_SCROLL_THRESHOLD = 24;
 export default function HostConfigPopup({
   host,
   privateDomain = "",
+  defaultPrivateDomain = "",
+  privateDnsSuffix = "phub",
   opened,
   onClose,
   onSave,
@@ -411,7 +413,7 @@ export default function HostConfigPopup({
   onRemoveMachineFromGroup,
   groups = [],
   isSaving,
-  initialSection = "ports",
+  initialSection = "groups",
 }) {
   const { colorScheme } = useMantineColorScheme();
   const isDark = colorScheme === "dark";
@@ -420,7 +422,7 @@ export default function HostConfigPopup({
   const socket = useContext(SocketContext);
 
   const [rules, setRules] = useState([]);
-  const [machineSection, setMachineSection] = useState("ports");
+  const [machineSection, setMachineSection] = useState("groups");
   const [portSection, setPortSection] = useState("connection");
   const [linkedProxies, setLinkedProxies] = useState([]);
   const [proxiesOpen, setProxiesOpen] = useState(false);
@@ -492,6 +494,7 @@ export default function HostConfigPopup({
     return () => { active = false; };
   }, [opened, host?.id]);
   const [machineDetails, setMachineDetails] = useState({ name: "", hostname: "" });
+  const [machineDomains, setMachineDomains] = useState([]);
   const [machineDetailsErrors, setMachineDetailsErrors] = useState({});
   const [isSavingMachineDetails, setIsSavingMachineDetails] = useState(false);
   const [showRuleAdvanced, setShowRuleAdvanced] = useState(true);
@@ -574,13 +577,20 @@ export default function HostConfigPopup({
   );
   const machineNameValue = machineDetails.name.trim();
   const machineHostnameValue = machineDetails.hostname.trim();
+  const nameLabel = (machineNameValue.split(",")[0] || "machine").toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "machine";
+  const fallbackDomain = defaultPrivateDomain || `${nameLabel}.${privateDnsSuffix}`;
+  const fallbackParts = fallbackDomain.split(".");
+  const defaultDomain = { host: nameLabel || fallbackParts.shift() || "machine", suffix: privateDnsSuffix || fallbackParts.join(".") || "phub", default: true };
+  const domainRows = (machineDomains.length ? machineDomains : [{ default: true }]).map(row => row.default ? defaultDomain : row);
+  const savedDomainsKey = JSON.stringify(host?.privateDomains || []);
+  const machineDomainsChanged = JSON.stringify(machineDomains) !== JSON.stringify(host?.privateDomains?.length ? host.privateDomains : [{ default: true }]);
   // The name field holds "name, alias, alias"; the server splits and cleans it.
   const hostAliasesKey = (host?.aliases || []).join(",");
   const hostNameValue = [host?.name || "", ...(host?.aliases || [])].join(", ").trim();
   const hostHostnameValue = (host?.hostname || "").trim();
   const clientHostnameValue = (host?.clientHostname || "").trim();
   const machineDetailsChanged =
-    machineNameValue !== hostNameValue || machineHostnameValue !== hostHostnameValue;
+    machineNameValue !== hostNameValue || machineHostnameValue !== hostHostnameValue || machineDomainsChanged;
   const savedClientSetupFields = {
     publicBaseUrl:
       (host?.clientSetupPublicBaseUrl || "").trim() ||
@@ -745,8 +755,9 @@ export default function HostConfigPopup({
   // Metadata saves must not reset draft port edits, or vice versa.
   useEffect(() => {
     setMachineDetails({ name: [host?.name || "", ...(host?.aliases || [])].join(", "), hostname: host?.hostname || "" });
+    setMachineDomains(host?.privateDomains?.length ? host.privateDomains : [{ default: true }]);
     setMachineDetailsErrors({});
-  }, [host?.id, host?.name, hostAliasesKey, host?.hostname]);
+  }, [host?.id, host?.name, host?.aliases, hostAliasesKey, host?.hostname, host?.privateDomains, savedDomainsKey, defaultPrivateDomain, privateDnsSuffix]);
 
   useEffect(() => {
     setShowGroups(machineSection === "groups");
@@ -1294,6 +1305,38 @@ export default function HostConfigPopup({
     });
   };
 
+  const updateMachineDomain = (index, field, value) => {
+    setMachineDomains(current => current.map((domain, position) =>
+      position === index && !domain.default ? { ...domain, [field]: value } : domain
+    ));
+  };
+  const moveMachineDomain = (index, offset) => {
+    setMachineDomains(current => {
+      const next = [...current];
+      const target = index + offset;
+      if (target < 0 || target >= next.length) return current;
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  };
+  const addMachineDomain = () => setMachineDomains(current => [...current, { host: "", suffix: "" }]);
+  const removeMachineDomain = index => setMachineDomains(current => current.filter((_, position) => position !== index));
+  const handleDomainDragStart = (event, index) => {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", String(index));
+  };
+  const handleDomainDrop = (event, index) => {
+    event.preventDefault();
+    const from = Number(event.dataTransfer.getData("text/plain"));
+    if (!Number.isInteger(from) || from === index) return;
+    setMachineDomains(current => {
+      const next = [...current];
+      const [entry] = next.splice(from, 1);
+      next.splice(index, 0, entry);
+      return next;
+    });
+  };
+
   const handleResetHostnameToClient = () => {
     setMachineDetails((current) => ({
       ...current,
@@ -1331,6 +1374,7 @@ export default function HostConfigPopup({
       const saved = await onUpdateMachineDetails(host.id, {
         name: machineNameValue,
         hostname: machineHostnameValue,
+        privateDomains: machineDomains,
       });
 
       if (saved) {
@@ -2058,9 +2102,9 @@ export default function HostConfigPopup({
               }`}
             >
             <div className="flex flex-col gap-3">
-            {!selectedRule ? <div className="overflow-x-auto pb-1"><StatusTabs label="Machine configuration sections" value={machineSection} onChange={setMachineSection} options={[{value:"ports",label:"Ports"},{value:"groups",label:"Details"},{value:"credentials",label:"Client"},{value:"logs",label:"Logs"},{value:"uptime",label:"History"}]} /></div> : <div className="flex min-w-0 items-center gap-3"><WorkspaceButton type="button" variant="ghost" size="sm" onClick={handleDoneEditing}><IconArrowLeft size={16} />All Ports</WorkspaceButton><span className="text-muted-foreground" aria-hidden="true">/</span><h2 ref={portHeadingRef} tabIndex={-1} className="min-w-0 flex-1 truncate text-base font-semibold !outline-none">{selectedRule.serviceName || "New Port"}</h2><WorkspaceButton type="button" variant="ghost" size="icon" onClick={()=>handleRemoveRule(selectedRule.localId)} className="text-red-600 dark:text-red-400" aria-label="Remove Port"><IconTrash size={16} /></WorkspaceButton></div>}
+            {!selectedRule ? <div className="overflow-x-auto pb-1"><StatusTabs label="Machine configuration sections" value={machineSection} onChange={setMachineSection} options={[{value:"groups",label:"Details"},{value:"ports",label:"Ports"},{value:"credentials",label:"Client"},{value:"logs",label:"Logs"},{value:"uptime",label:"History"}]} /></div> : <div className="flex min-w-0 items-center gap-3"><WorkspaceButton type="button" variant="ghost" size="sm" onClick={handleDoneEditing}><IconArrowLeft size={16} />All Ports</WorkspaceButton><span className="text-muted-foreground" aria-hidden="true">/</span><h2 ref={portHeadingRef} tabIndex={-1} className="min-w-0 flex-1 truncate text-base font-semibold !outline-none">{selectedRule.serviceName || "New Port"}</h2><WorkspaceButton type="button" variant="ghost" size="icon" onClick={()=>handleRemoveRule(selectedRule.localId)} className="text-red-600 dark:text-red-400" aria-label="Remove Port"><IconTrash size={16} /></WorkspaceButton></div>}
             {selectedRule && <div className="overflow-x-auto pb-1"><StatusTabs label="Port configuration sections" value={portSection} onChange={setPortSection} options={[{value:"connection",label:"Connection"},{value:"access",label:"Access"},{value:"traffic",label:"Traffic"},{value:"web",label:"Web Addresses"}]} /></div>}
-            <div className="flex items-start justify-between gap-3">
+            {!selectedRule && machineSection === "groups" && <div className="flex items-start justify-between gap-3">
               <Group spacing="xs">
                 <Badge
                   color={
@@ -2095,17 +2139,14 @@ export default function HostConfigPopup({
                 <Badge color="blue" variant="light" className={getInfoBadgeClassName(isDark)}>
                   {host.name || "Untitled machine"}
                 </Badge>
-                {privateDomain && <ActionIcon
-                  type="button"
-                  variant="subtle"
-                  size="sm"
+                {privateDomain && <Badge component="button" type="button" color="blue" variant="light"
                   onClick={() => handleCopy("PortHub domain address", `http://${privateDomain}`)}
                   aria-label={`Copy PortHub address http://${privateDomain}`}
                   title={`Copy http://${privateDomain}`}
-                  className="text-muted-foreground hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
-                >
-                  <IconCopy size={14} />
-                </ActionIcon>}
+                  rightSection={<IconCopy size={12} />}
+                  className={`${getInfoBadgeClassName(isDark)} cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2`}>
+                  HOST: {privateDomain}
+                </Badge>}
                 <Badge component="button" type="button" color="blue" variant="light"
                   disabled={!host.localIp}
                   onClick={() => handleCopy("LAN IP", host.localIp)}
@@ -2148,7 +2189,7 @@ export default function HostConfigPopup({
                 </Badge>
               </Group>
 
-            </div>
+            </div>}
 
             {!selectedRule && machineSection !== "ports" ? (
               <div
@@ -2167,16 +2208,17 @@ export default function HostConfigPopup({
 
                         <div className="grid gap-3 md:grid-cols-2">
                           <div>
-                            <input
-                              type="text"
-                              aria-label="Machine name"
-                              placeholder="Machine name, then optional aliases separated by commas"
-                              className={getDetailInputClassName(isDark)}
-                              value={machineDetails.name}
-                              onChange={(event) =>
-                                handleMachineDetailsChange("name", event.currentTarget.value)
-                              }
-                            />
+                            <div className="relative">
+                              <input
+                                type="text"
+                                aria-label="Machine name"
+                                placeholder="Machine name, then optional aliases separated by commas"
+                                className={`${getDetailInputClassName(isDark)} pr-24`}
+                                value={machineDetails.name}
+                                onChange={(event) => handleMachineDetailsChange("name", event.currentTarget.value)}
+                              />
+                              <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">.{privateDnsSuffix}</span>
+                            </div>
                             {machineDetailsErrors.name ? (
                               <p className={errorClassName}>{machineDetailsErrors.name}</p>
                             ) : null}
@@ -2229,6 +2271,29 @@ export default function HostConfigPopup({
                             ) : null}
                           </div>
 
+                        </div>
+
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <p className="text-sm font-medium">Private DNS domains</p>
+                              <p className="text-xs text-muted-foreground">The default .{privateDnsSuffix} domain follows the machine name. Add aliases and drag them to set copy priority.</p>
+                            </div>
+                            <Button type="button" size="xs" variant="light" leftSection={<IconPlus size={14} />} onClick={addMachineDomain}>Add domain</Button>
+                          </div>
+                          <div className="space-y-2">
+                            {domainRows.map((domain, index) => (
+                              <div key={`${domain.default ? "default" : "alias"}-${index}`} draggable onDragStart={event => handleDomainDragStart(event, index)} onDragOver={event => event.preventDefault()} onDrop={event => handleDomainDrop(event, index)} className="flex items-center gap-2 rounded-md border border-border/60 bg-control/40 p-2">
+                                <span className="cursor-grab select-none text-muted-foreground" aria-hidden="true">⠿</span>
+                                <input type="text" aria-label={domain.default ? "Default private domain host label" : `Domain ${index + 1} host label`} value={domain.host} readOnly={domain.default} placeholder="machine" className={`${getDetailInputClassName(isDark)} min-w-0 flex-1 ${domain.default ? "opacity-75" : ""}`} onChange={event => updateMachineDomain(index, "host", event.currentTarget.value)} />
+                                <span className="text-muted-foreground">.</span>
+                                <input type="text" aria-label={domain.default ? "Default private domain suffix" : `Domain ${index + 1} suffix`} value={domain.suffix} readOnly={domain.default} placeholder="phub.io" className={`${getDetailInputClassName(isDark)} min-w-0 flex-1 ${domain.default ? "opacity-75" : ""}`} onChange={event => updateMachineDomain(index, "suffix", event.currentTarget.value)} />
+                                <Button type="button" size="compact-xs" variant="subtle" aria-label={`Move domain ${index + 1} up`} disabled={index === 0} onClick={() => moveMachineDomain(index, -1)}>↑</Button>
+                                <Button type="button" size="compact-xs" variant="subtle" aria-label={`Move domain ${index + 1} down`} disabled={index === domainRows.length - 1} onClick={() => moveMachineDomain(index, 1)}>↓</Button>
+                                {domain.default ? <span className="px-2 text-xs text-muted-foreground">Default</span> : <ActionIcon type="button" variant="subtle" color="red" aria-label={`Remove domain ${index + 1}`} onClick={() => removeMachineDomain(index)}><IconTrash size={15} /></ActionIcon>}
+                              </div>
+                            ))}
+                          </div>
                         </div>
 
                         {groups.length > 0 && onAddMachineToGroup && onRemoveMachineFromGroup ? (

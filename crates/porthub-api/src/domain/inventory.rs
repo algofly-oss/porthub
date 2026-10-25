@@ -78,6 +78,7 @@ pub fn machine(app: &App, machine: &Document) -> Value {
     let mut output = json!({
         "_id":store::id(machine.get("_id")),"user_id":store::id(machine.get("user_id")),"name":default_field(machine,"name",json!("")),
         "aliases":machine.get_array("aliases").cloned().unwrap_or_default().iter().map(store::json).collect::<Vec<_>>(),
+        "private_domains":crate::domain::private_domains::from_document(machine),
         "hostname":hostname(machine),"group_ids":group_ids(machine).iter().map(|id|id.to_hex()).collect::<Vec<_>>(),
         "enabled":default_field(machine,"enabled",json!(true)),"telegram_alerts_excluded":machine.get_bool("telegram_alerts_excluded").unwrap_or(false),
         "local_ip":default_field(machine,"local_ip",default_field(machine,"ip_address",json!(""))),"public_ip":default_field(machine,"public_ip",json!("")),

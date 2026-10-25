@@ -2852,7 +2852,21 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "additionalProperties": true
+                "additionalProperties": true,
+                "properties": {
+                  "private_domains": {
+                    "type": "array",
+                    "description": "Priority ordered private DNS names. Keep the generated default entry; custom entries resolve through enrolled private clients.",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "default": { "type": "boolean" },
+                        "host": { "type": "string" },
+                        "suffix": { "type": "string" }
+                      }
+                    }
+                  }
+                }
               }
             }
           }

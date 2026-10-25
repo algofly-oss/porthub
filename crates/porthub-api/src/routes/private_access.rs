@@ -104,6 +104,7 @@ async fn network(
 ) -> ApiResult<Json<Value>> {
     let (network, suffix) = enrollment::preferences_value(raw)?;
     let (_, owner, _) = browser(&app, &headers, &Method::PUT, &query.workspace, true).await?;
+    ensure_suffix_unique(&app, &owner, &suffix).await?;
     app.collection("private_networks")
         .update_one(
             doc! {"_id":owner.to_hex()},
@@ -114,6 +115,86 @@ async fn network(
     Ok(Json(
         json!({"data":{"cidr":network.cidr(),"dns_suffix":suffix},"transport_ready":false}),
     ))
+}
+
+async fn ensure_suffix_unique(
+    app: &App,
+    owner: &mongodb::bson::oid::ObjectId,
+    suffix: &str,
+) -> ApiResult<()> {
+    let peers: Vec<Document> = app
+        .collection("private_peers")
+        .find(doc! {"workspace_id":owner})
+        .projection(doc! {"machine_id":1,"hostname":1})
+        .await?
+        .try_collect()
+        .await?;
+    let ids: Vec<Bson> = peers
+        .iter()
+        .filter_map(|peer| peer.get("machine_id").cloned())
+        .collect();
+    let machines: Vec<Document> = app
+        .collection("machines")
+        .find(doc! {"$or":[{"user_id":owner},{"_id":{"$in":ids}}],"deletion_pending":{"$ne":true}})
+        .projection(doc! {"_id":1,"name":1,"aliases":1,"private_domains":1})
+        .await?
+        .try_collect()
+        .await?;
+    let registered: HashMap<String, String> = peers
+        .iter()
+        .map(|peer| {
+            (
+                store::id(peer.get("machine_id")),
+                store::string(peer, "hostname").to_owned(),
+            )
+        })
+        .collect();
+    let mut used = HashMap::<String, String>::new();
+    for machine in machines {
+        let id = store::id(machine.get("_id"));
+        let mut labels = vec![store::string(&machine, "name").to_owned()];
+        if let Some(hostname) = registered.get(&id) {
+            if !hostname.is_empty() {
+                labels.push(hostname.clone());
+            }
+        }
+        if let Ok(aliases) = machine.get_array("aliases") {
+            labels.extend(
+                aliases
+                    .iter()
+                    .map(|value| store::json(value).as_str().unwrap_or_default().to_owned()),
+            );
+        }
+        let domains = crate::domain::private_domains::from_document(&machine);
+        labels.extend(
+            domains
+                .iter()
+                .filter(|domain| domain.default)
+                .map(|_| store::string(&machine, "name").to_owned()),
+        );
+        let mut full_names = Vec::new();
+        for label in labels {
+            let label = crate::domain::private_names::label(Some(&Bson::String(label)));
+            full_names.push(format!("{label}.{suffix}"));
+        }
+        full_names.extend(
+            domains
+                .iter()
+                .filter(|domain| !domain.default)
+                .map(|domain| format!("{}.{}", domain.host, domain.suffix)),
+        );
+        for domain in full_names {
+            let domain = domain.to_ascii_lowercase();
+            if used.get(&domain).is_some_and(|other| other != &id) {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "The new network suffix conflicts with a registered machine domain",
+                ));
+            }
+            used.insert(domain, id.clone());
+        }
+    }
+    Ok(())
 }
 
 async fn snapshot(

@@ -7,8 +7,9 @@ use serde_json::json;
 fn snapshot() -> Snapshot {
     serde_json::from_value(json!({"workspace":"ws","self":"a","revision":1,
         "expires_at":Utc::now()+Duration::seconds(15),
+        "dns_suffixes":["phub","phub.io"],
         "peers":[{"id":"a","ip":"10.203.0.1","fingerprint":"","instance":"","hostname":"luna.phub"},
-                 {"id":"b","ip":"10.203.0.2","fingerprint":"","instance":"","hostname":"miro.phub","aliases":["miro-extra.phub"]}],
+                 {"id":"b","ip":"10.203.0.2","fingerprint":"","instance":"","hostname":"miro.phub","aliases":["miro-extra.phub","condor.phub.io"]}],
         "grants":[{"source":"a","destination":"b","protocol":"tcp","ports":[{"start":8000,"end":8000}]}]})).unwrap()
 }
 fn packet(src: u8, dst: u8, sport: u16, dport: u16, flags: u8) -> Vec<u8> {
@@ -127,6 +128,7 @@ fn private_dns_answers_only_assigned_zone_and_never_falls_through_for_known_ipv6
     for (name, kind, code, count) in [
         ("miro.phub.", RecordType::A, ResponseCode::NoError, 1),
         ("miro-extra.phub.", RecordType::A, ResponseCode::NoError, 1),
+        ("condor.phub.io.", RecordType::A, ResponseCode::NoError, 1),
         ("miro.phub.", RecordType::AAAA, ResponseCode::NoError, 0),
         ("unknown.phub.", RecordType::A, ResponseCode::NXDomain, 0),
         ("example.org.", RecordType::A, ResponseCode::Refused, 0),
@@ -303,7 +305,7 @@ async fn linux_private_dns_resolves_through_the_owned_link_without_claiming_port
         tun.index,
         Ipv4Addr::new(10, 234, 251, 1),
         port,
-        "ph-native-test",
+        &["ph-native-test".to_owned()],
     )
     .await?;
     let connection = zbus::Connection::system().await?;

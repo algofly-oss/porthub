@@ -5,6 +5,7 @@ pub mod inventory;
 pub mod machine_client;
 pub mod machine_logs;
 pub mod machines;
+pub mod private_domains;
 pub mod private_enrollment;
 pub mod private_names;
 pub mod private_policy;

@@ -38,6 +38,8 @@ pub struct Snapshot {
     pub revision: u64,
     pub expires_at: DateTime<Utc>,
     pub peers: Vec<PeerInfo>,
+    #[serde(default)]
+    pub dns_suffixes: Vec<String>,
     pub grants: Vec<Grant>,
 }
 // The control protocol calls the identity field "self".

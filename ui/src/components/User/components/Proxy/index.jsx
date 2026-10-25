@@ -4,7 +4,7 @@ import ResultsPagination from "@/components/ui/results-pagination";
 import { useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { useRouter } from "next/router";
-import { IconPlus, IconWorld, IconPlugConnected, IconFolder, IconArrowUpRight, IconRefresh, IconCheck } from "@tabler/icons-react";
+import { IconPlus, IconWorld, IconPlugConnected, IconFolder, IconArrowUpRight, IconRefresh, IconCheck, IconCopy } from "@tabler/icons-react";
 import apiRoutes from "@/shared/routes/apiRoutes";
 import useToast from "@/shared/hooks/useToast";
 import { PageHeader, SearchField, EmptyState } from "@/components/ui/workspace";
@@ -22,6 +22,7 @@ import TrafficSparkline from "@/components/ui/traffic-sparkline";
 import useCreateFromUrl from "@/shared/hooks/useCreateFromUrl";
 import useProxyActivity from "@/shared/hooks/useProxyActivity";
 import ProxyActivity from "@/components/ui/proxy-activity";
+import { externalEndpoint, internalEndpoint } from "@/shared/utils/endpoints.mjs";
 
 export default function Proxy({ machineId = "", compact = false, connectionId = "", onEditorOpenChange, active = true }) {
   const router = useRouter();
@@ -93,7 +94,13 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
       }
     },
   });
-  const host = proxy => <ProxyHost proxy={proxy} connection={connections.find(connection => connection._id === (proxy.connection?.data_id || proxy.connection?._id))} machine={machines.find(machine => machine._id === proxy.connection?.machine_id)} />;
+  const copyProxyUrl = async (event, proxy) => {
+    event.stopPropagation();
+    const url = `${proxy.entry_points?.includes("websecure") ? "https" : "http"}://${proxy.hosts?.[0] || proxy.name}`;
+    try { await navigator.clipboard.writeText(url); success("Proxy URL copied"); }
+    catch { error("Could not copy proxy URL"); }
+  };
+  const host = proxy => <ProxyHost proxy={proxy} connection={connections.find(connection => connection._id === (proxy.connection?.data_id || proxy.connection?._id))} machine={machines.find(machine => machine._id === proxy.connection?.machine_id)} onCopy={event => copyProxyUrl(event, proxy)} />;
   visible.forEach(p => {
     const key = groupBy === "group" ? p.group || "Ungrouped" : groupBy === "machine" ? p.connection?.machine_name || "Manual targets"
       : groupBy === "domain" ? (p.hosts?.[0] || "").split(".").slice(-2).join(".") : "All proxies";
@@ -154,10 +161,10 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
         <div className="hidden md:block"><Table aria-label="Web proxies"><TableHeader><TableRow><TableHead className="w-[30%]">Hostname</TableHead><TableHead className="w-[25%]">Machine / service</TableHead><TableHead>Target</TableHead><TableHead className="hidden w-48 lg:table-cell"><span title="All traffic on the linked machine port; not individual HTTP requests">Linked port traffic</span></TableHead></TableRow></TableHeader><TableBody>{entries.map(p => <TableRow key={p._id} {...rowInteraction(p)} className="cursor-pointer focus-visible:bg-accent/40">
           <TableCell>{host(p)}<div className="pl-4"><ProxyActivity group={p.group} metric={activityById.get(p._id)} activity={activity} /></div></TableCell>
           <TableCell><p className="truncate font-medium">{p.connection?.machine_name || "Manual target"}</p><p className="mt-0.5 truncate text-[13px] text-muted-foreground">{p.connection?.service_name || p.description || "HTTP endpoint"}</p></TableCell>
-          <TableCell><p className="truncate font-mono text-[13px]" title={p.target_url}>{p.target_url}</p></TableCell>
+          <TableCell>{p.connection ? <p className="truncate text-xs" title={`${p.connection.machine_name || "Unknown machine"} · ${externalEndpoint(p.connection)} → ${internalEndpoint(p.connection)}`}>{p.connection.machine_name || "Unknown machine"} · <span className="font-mono">{externalEndpoint(p.connection)} → {internalEndpoint(p.connection)}</span></p> : <p className="truncate font-mono text-[13px]" title={p.target_url}>{p.target_url}</p>}</TableCell>
           <TableCell className="hidden lg:table-cell">{p.connection ? <TrafficSparkline samples={trafficById.get(p.connection.data_id || p.connection._id) || []} label="Linked port traffic" /> : <span className="text-xs text-muted-foreground">Standalone target</span>}</TableCell>
         </TableRow>)}</TableBody></Table></div>
-        <div className="md:hidden">{entries.map(p => <div className="proxy-row-mobile cursor-pointer focus-visible:bg-accent/40" key={p._id} {...rowInteraction(p)}><div className="min-w-0 flex-1">{host(p)}<div className="pl-4"><ProxyActivity metric={activityById.get(p._id)} activity={activity} /></div><p className="mt-1 truncate pl-4 text-[13px] text-muted-foreground">{p.connection?.machine_name || "Manual target"} · {p.connection?.service_name || p.target_url}</p></div></div>)}</div>
+        <div className="md:hidden">{entries.map(p => <div className="proxy-row-mobile cursor-pointer focus-visible:bg-accent/40" key={p._id} {...rowInteraction(p)}><div className="min-w-0 flex-1">{host(p)}<div className="pl-4"><ProxyActivity metric={activityById.get(p._id)} activity={activity} /></div><p className="mt-1 truncate pl-4 text-[13px] text-muted-foreground">{p.connection ? `${p.connection.machine_name || "Unknown machine"} · ${externalEndpoint(p.connection)} → ${internalEndpoint(p.connection)}` : p.target_url}</p></div></div>)}</div>
       </section>)}</div>
       <ResultsPagination count={filtered.length} noun="Proxies" page={currentPage} pages={totalPages} pageSize={pageSize} onPage={setPage} onPageSize={setPageSize} />
     </div>}
@@ -165,7 +172,7 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
   </div>;
 }
 
-function ProxyHost({ proxy: p, connection, machine }) {
+function ProxyHost({ proxy: p, connection, machine, onCopy }) {
   const port = connection || p.connection;
   const machineStatus = machine?.connection_status || port?.machine_connection_status;
   let status = "Enabled · Target health is not monitored", color = "bg-emerald-600 dark:bg-emerald-400";
@@ -176,5 +183,6 @@ function ProxyHost({ proxy: p, connection, machine }) {
   else if (machineStatus === "auth_required") { status = "Machine authentication required"; color = "bg-amber-600 dark:bg-amber-400"; }
   else if (machineStatus === "online") status = "Enabled · Machine online";
   else if (port) { status = "Machine status unknown"; color = "bg-amber-600 dark:bg-amber-400"; }
-  return <div className="flex min-w-0 items-center gap-2"><span role="img" aria-label={status} title={status} className={`h-2 w-2 shrink-0 rounded-full ${color}`} /><a className="inline-flex min-w-0 max-w-full items-center gap-1 truncate text-[15px] font-medium text-blue-600 hover:underline dark:text-blue-400" href={`${p.entry_points?.includes("websecure") ? "https" : "http"}://${p.hosts?.[0]}`} target="_blank" rel="noreferrer"><span className="truncate">{p.hosts?.[0] || p.name}</span>{p.hosts?.length > 1 && <span className="text-[10px] text-muted-foreground">+{p.hosts.length - 1}</span>}<IconArrowUpRight size={12} className="shrink-0 opacity-60" /></a></div>;
+  const url = `${p.entry_points?.includes("websecure") ? "https" : "http"}://${p.hosts?.[0] || p.name}`;
+  return <div className="flex min-w-0 items-center gap-2"><span role="img" aria-label={status} title={status} className={`h-2 w-2 shrink-0 rounded-full ${color}`} /><a className="inline-flex min-w-0 max-w-full items-center gap-1 truncate text-[15px] font-medium text-blue-600 hover:underline dark:text-blue-400" href={url} target="_blank" rel="noreferrer"><span className="truncate">{p.hosts?.[0] || p.name}</span>{p.hosts?.length > 1 && <span className="text-[10px] text-muted-foreground">+{p.hosts.length - 1}</span>}<IconArrowUpRight size={12} className="shrink-0 opacity-60" /></a><button type="button" onClick={onCopy} aria-label={`Copy proxy URL ${url}`} title="Copy proxy URL" className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"><IconCopy size={14} /></button></div>;
 }

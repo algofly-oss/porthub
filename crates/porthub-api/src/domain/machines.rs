@@ -19,10 +19,15 @@ pub struct Input {
     pub domain: Option<String>,
     pub groups: Option<Vec<String>>,
     pub alerts: Option<bool>,
+    pub private_domains: Option<Vec<super::private_domains::Entry>>,
     pub present: BTreeSet<String>,
 }
 
 pub fn parse(raw: Value) -> ApiResult<Input> {
+    let private_domains = raw
+        .get("private_domains")
+        .map(super::private_domains::parse)
+        .transpose()?;
     let present = raw
         .as_object()
         .map(|map| map.keys().cloned().collect())
@@ -51,6 +56,7 @@ pub fn parse(raw: Value) -> ApiResult<Input> {
         domain,
         groups,
         alerts,
+        private_domains,
         present,
     })
 }

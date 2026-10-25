@@ -267,16 +267,27 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
         .iter()
         .filter_map(|p| p.get("machine_id").cloned())
         .collect();
-    let names: Vec<Document> = app
+    let machine_docs: Vec<Document> = app
         .collection("machines")
         .find(doc! {"$or":[{"user_id":owner},{"_id":{"$in":ids}}],"deletion_pending":{"$ne":true}})
-        .projection(doc! {"name":1,"aliases":1})
+        .projection(doc! {"name":1,"aliases":1,"private_domains":1})
         .await?
         .try_collect()
         .await?;
-    let names = private_names::assign(&names, &all);
+    let names = private_names::assign(&machine_docs, &all);
+    let mut dns_suffixes: HashSet<String> = [suffix.to_ascii_lowercase()].into_iter().collect();
+    let mut domains_by_machine = HashMap::new();
+    for machine in &machine_docs {
+        let domains = crate::domain::private_domains::from_document(machine);
+        for domain in domains.iter().filter(|domain| !domain.default) {
+            dns_suffixes.insert(domain.suffix.clone());
+        }
+        domains_by_machine.insert(store::id(machine.get("_id")), domains);
+    }
     let peers:Vec<_>=peers.iter().filter(|p|by_id.contains_key(store::string(p,"_id"))).map(|p| {
-        let id=store::string(p,"_id");let aliases=names.aliases.get(id).into_iter().flatten().map(|name|format!("{name}.{suffix}")).collect::<Vec<_>>();
+        let id=store::string(p,"_id");let machine_id=store::id(p.get("machine_id"));
+        let mut aliases=names.aliases.get(id).into_iter().flatten().map(|name|format!("{name}.{suffix}")).collect::<Vec<_>>();
+        aliases.extend(domains_by_machine.get(&machine_id).into_iter().flatten().filter(|domain| !domain.default).map(|domain|format!("{}.{}",domain.host,domain.suffix)));
         json!({"id":id,"ip":store::field(p,"ip"),"fingerprint":store::string(p,"fingerprint"),"instance":store::string(p,"instance"),
             "hostname":format!("{}.{suffix}",names.primary.get(id).map(String::as_str).unwrap_or("machine")),"aliases":aliases})
     }).collect();
@@ -326,7 +337,7 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
             .publish(&input.peer_id, &hash, &input.instance, ip, allowed);
     }
     Ok(([(header::CACHE_CONTROL,"no-store")],Json(json!({"snapshot":{"workspace":owner.to_hex(),"self":input.peer_id,"revision":store::field(&updated,"revision"),
-        "expires_at":chrono::DateTime::from_timestamp_millis(now.timestamp_millis()+15_000).expect("current timestamp").to_rfc3339_opts(chrono::SecondsFormat::Millis,true),"peers":peers,"grants":grants},"signals":signals,
+        "expires_at":chrono::DateTime::from_timestamp_millis(now.timestamp_millis()+15_000).expect("current timestamp").to_rfc3339_opts(chrono::SecondsFormat::Millis,true),"peers":peers,"dns_suffixes":dns_suffixes,"grants":grants},"signals":signals,
         "ice_servers":app.config.private_transport.ice(&input.peer_id,now.timestamp_millis()/1000),"relay_routes":app.config.private_transport.relay_routes,
         "control_fallback_urls":fallback,"poll_seconds":1}))).into_response())
 }
