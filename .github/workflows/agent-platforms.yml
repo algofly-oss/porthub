@@ -3,11 +3,30 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform artifact name, or all'
+        default: all
+        type: string
 permissions:
   contents: read
 jobs:
+  select-platforms:
+    runs-on: ubuntu-24.04
+    outputs:
+      native: ${{ steps.select.outputs.native }}
+      linux: ${{ steps.select.outputs.linux }}
+      has_native: ${{ steps.select.outputs.has_native }}
+      has_linux: ${{ steps.select.outputs.has_linux }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: select
+        env:
+          PORTHUB_BUILD_PLATFORM: ${{ inputs.platform || 'all' }}
+        run: python3 scripts/select-agent-platforms.py
   release-bundle:
     name: Validate complete release bundle
+    if: inputs.platform == '' || inputs.platform == 'all'
     needs: [native, linux-32]
     runs-on: ubuntu-24.04
     steps:
@@ -53,18 +72,13 @@ jobs:
             --title "PortHub ${version}" \
             --notes "Consistent ${version} native client release for Linux, macOS, and Windows. Includes binaries, SHA256 checksums, and version metadata for every supported CPU architecture."
   native:
+    needs: [select-platforms]
+    if: needs.select-platforms.outputs.has_native == 'true'
     name: ${{ matrix.artifact }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - {os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, artifact: x86_64, extension: ""}
-          - {os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, artifact: arm64, extension: ""}
-          - {os: macos-15-intel, target: x86_64-apple-darwin, artifact: darwin_x86_64, extension: ""}
-          - {os: macos-15, target: aarch64-apple-darwin, artifact: darwin_arm64, extension: ""}
-          - {os: windows-latest, target: x86_64-pc-windows-msvc, artifact: windows_x86_64, extension: .exe}
-          - {os: windows-11-arm, target: aarch64-pc-windows-msvc, artifact: windows_arm64, extension: .exe}
-          - {os: windows-latest, target: i686-pc-windows-msvc, artifact: windows_x86, extension: .exe}
+        include: ${{ fromJSON(needs.select-platforms.outputs.native) }}
     runs-on: ${{ matrix.os }}
     env:
       PORTHUB_SOURCE_REVISION: ${{ github.sha }}
@@ -124,14 +138,13 @@ jobs:
           path: dist/
           if-no-files-found: error
   linux-32:
+    needs: [select-platforms]
+    if: needs.select-platforms.outputs.has_linux == 'true'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - {target: i686-unknown-linux-gnu, artifact: x86, compiler: gcc, ar: ar, packages: gcc-multilib}
-          - {target: armv7-unknown-linux-gnueabihf, artifact: armv7, compiler: arm-linux-gnueabihf-gcc, ar: arm-linux-gnueabihf-ar, packages: "gcc-arm-linux-gnueabihf libc6-dev-armhf-cross"}
-          - {target: arm-unknown-linux-gnueabihf, artifact: armhf, compiler: arm-linux-gnueabihf-gcc, ar: arm-linux-gnueabihf-ar, packages: "gcc-arm-linux-gnueabihf libc6-dev-armhf-cross"}
+        include: ${{ fromJSON(needs.select-platforms.outputs.linux) }}
     env:
       PORTHUB_SOURCE_REVISION: ${{ github.sha }}
       RUST_MIN_STACK: "33554432"
