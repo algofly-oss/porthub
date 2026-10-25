@@ -319,23 +319,31 @@ async fn session_sync_and_files_preserve_updates_overrides_authentication_and_de
         .as_str()
         .context("override file")?
         .contains("wss://override.invalid:8443/api/tunnel"));
-    let mut handled = credentials.clone();
-    handled["client_version"] = json!("native-release");
-    handled["client_update_last_handled_request_id"] = json!("update-1");
+    let mut installed = credentials.clone();
+    installed["client_version"] = json!("native-release");
     let (_, headers, _) = case
-        .call("POST", "/api/machines/client/sync", handled)
+        .call("POST", "/api/machines/client/sync", installed.clone())
         .await?;
     ensure!(
         headers["x-porthub-client-update-requested"] == "false"
             && !headers.contains_key("x-porthub-client-target-version")
     );
-    let stored = case
+    let reconciled = case
         .db
         .collection::<Document>("machines")
         .find_one(doc! {"_id":case.id})
         .await?
-        .context("stored")?;
-    ensure!(stored.get_datetime("client_updated_at").is_ok());
+        .context("reconciled machine")?;
+    ensure!(reconciled.get_str("client_update_target_version")? == "");
+    ensure!(reconciled.get_str("client_update_last_handled_request_id")? == "update-1");
+    ensure!(reconciled.get_datetime("client_updated_at").is_ok());
+
+    let mut handled = installed;
+    handled["client_update_last_handled_request_id"] = json!("update-1");
+    let (_, headers, _) = case
+        .call("POST", "/api/machines/client/sync", handled)
+        .await?;
+    ensure!(headers["x-porthub-client-update-requested"] == "false");
     case.db
         .collection::<Document>("machines")
         .update_one(doc! {"_id":case.id}, doc! {"$set":{"enabled":false}})

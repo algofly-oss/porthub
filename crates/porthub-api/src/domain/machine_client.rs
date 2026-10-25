@@ -31,10 +31,11 @@ fn should_auto_update(
             _ => true,
         }
     };
-    outdated
-        && (request_id.is_empty()
-            || request_id == handled_id
-            || request_target != latest)
+    outdated && (request_id.is_empty() || request_id == handled_id || request_target != latest)
+}
+
+fn update_request_completed(version: &str, target: &str, request_id: &str, handled: &str) -> bool {
+    !request_id.is_empty() && (handled == request_id || !target.is_empty() && version == target)
 }
 
 fn numeric_version(value: &str) -> Option<Vec<u64>> {
@@ -521,19 +522,23 @@ async fn sync_inner(
     let mut set = doc! {"hostname":hostname,"client_hostname":client_hostname,"local_ip":input.local_ip.trim(),"public_ip":public_ip,"auth_required":false,"last_seen_at":now};
     let version = input.version.trim();
     let handled = input.handled.trim();
-    if !handled.is_empty() {
-        set.insert("client_update_last_handled_request_id", handled);
-    }
     if !version.is_empty() {
         set.insert("client_version", version);
-        if !handled.is_empty()
-            && handled == store::string(machine, "client_update_request_id").trim()
-        {
+        let request_id = store::string(machine, "client_update_request_id").trim();
+        let target = store::string(machine, "client_update_target_version").trim();
+        if update_request_completed(version, target, request_id, handled) {
+            set.insert("client_update_last_handled_request_id", request_id);
             set.insert("client_update_target_version", "");
             set.insert("client_updated_at", now);
         } else if version == app.config.client_version {
             set.insert("client_updated_at", now);
         }
+    } else if !handled.is_empty()
+        && handled == store::string(machine, "client_update_request_id").trim()
+    {
+        set.insert("client_update_last_handled_request_id", handled);
+        set.insert("client_update_target_version", "");
+        set.insert("client_updated_at", now);
     }
     if input.native_update_protocol
         && should_auto_update(
@@ -597,7 +602,7 @@ async fn sync_inner(
 
 #[cfg(test)]
 mod auto_update_tests {
-    use super::should_auto_update;
+    use super::{should_auto_update, update_request_completed};
 
     #[test]
     fn outdated_clients_get_one_gateway_update_request() {
@@ -605,9 +610,26 @@ mod auto_update_tests {
         assert!(should_auto_update("", "1.3.2", "", "", ""));
         assert!(!should_auto_update("1.3.2", "1.3.2", "", "", ""));
         assert!(!should_auto_update("1.10.0", "1.3.2", "", "", ""));
-        assert!(!should_auto_update("1.3.1", "1.3.2", "pending", "1.3.2", ""));
+        assert!(!should_auto_update(
+            "1.3.1", "1.3.2", "pending", "1.3.2", ""
+        ));
         assert!(should_auto_update("1.3.1", "1.3.2", "pending", "1.3.1", ""));
-        assert!(should_auto_update("1.3.1", "1.3.2", "handled", "1.3.2", "handled"));
+        assert!(should_auto_update(
+            "1.3.1", "1.3.2", "handled", "1.3.2", "handled"
+        ));
+    }
+
+    #[test]
+    fn reporting_the_requested_release_completes_its_pending_update() {
+        assert!(update_request_completed("1.3.4", "1.3.4", "request-1", ""));
+        assert!(update_request_completed(
+            "1.3.4",
+            "1.3.4",
+            "request-1",
+            "request-1"
+        ));
+        assert!(!update_request_completed("1.3.3", "1.3.4", "request-1", ""));
+        assert!(!update_request_completed("1.3.4", "1.3.4", "", ""));
     }
 }
 
