@@ -2,8 +2,9 @@
 
 The production gateway, firewall worker, API, and distributed client are Rust
 applications. Public forwarding embeds the Rathole-compatible protocol in the
-Rust edge process. The retired Go client remains under `legacy/go-client/` only
-for compatibility fixtures and is not shipped in production images.
+Rust edge process. The retired Go client source and compatibility fixtures have
+been removed; native Rust implementations and tests are maintained in this
+repository.
 
 The server is split into three containers by privilege and data access:
 

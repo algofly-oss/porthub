@@ -2,9 +2,9 @@ name: Native agent platforms
 on:
   push:
     branches: [main]
-    paths: ["crates/porthub-agent/**", "crates/porthub-transfer/**", "crates/porthub-tunnel/**", "crates/porthub-identity/**", "crates/porthub-mesh/**", "vendor/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "scripts/release-version.sh"]
+    paths: ["crates/porthub-agent/**", "crates/porthub-transfer/**", "crates/porthub-tunnel/**", "crates/porthub-identity/**", "crates/porthub-mesh/src/**", "crates/porthub-mesh/Cargo.toml", "vendor/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "scripts/release-version.sh"]
   pull_request:
-    paths: ["crates/porthub-agent/**", "crates/porthub-transfer/**", "crates/porthub-tunnel/**", "crates/porthub-identity/**", "crates/porthub-mesh/**", "vendor/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "scripts/release-version.sh"]
+    paths: ["crates/porthub-agent/**", "crates/porthub-transfer/**", "crates/porthub-tunnel/**", "crates/porthub-identity/**", "crates/porthub-mesh/src/**", "crates/porthub-mesh/Cargo.toml", "vendor/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "scripts/release-version.sh"]
   workflow_dispatch:
 permissions:
   contents: read

@@ -1,4 +1,4 @@
-//! Original Python/Pydantic 1.10 model fixtures retained from the Go migration.
+//! Original Python/Pydantic 1.10 model fixtures.
 //! Validation and normalized output are produced entirely by native Rust.
 use porthub_api::domain::connections;
 use serde_json::{json, Value};

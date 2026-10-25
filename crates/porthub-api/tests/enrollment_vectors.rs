@@ -1,4 +1,4 @@
-//! Original Python/Pydantic compatibility vectors, retained from the Go port's
+//! Original Python/Pydantic compatibility vectors, retained from the port's
 //! policy/testdata/pydantic_vectors.json. No legacy runtime is used by this test.
 use mongodb::bson::Document;
 use porthub_api::domain::enrollment::{preferences, Network};

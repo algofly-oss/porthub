@@ -21,7 +21,7 @@ fn signal(to: &str, kind: &str, fp: &str) -> Value {
 }
 #[test]
 fn sync_model_matches_original_client_messages_and_errors() {
-    // The Python fixture predates the current Go trickle-candidate extension.
+    // The Python fixture predates the current trickle-candidate extension.
     // Its one enum-error expectation includes that existing third message type.
     let cases: Vec<Value> =
         serde_json::from_str(include_str!("fixtures/private-sync.json")).unwrap();

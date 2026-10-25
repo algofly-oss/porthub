@@ -1,5 +1,5 @@
-//! Original Python/Pydantic fixtures retained by the Go implementation; tests
-//! execute only native Rust validation, evaluation and grant compilation.
+//! Original Python/Pydantic fixtures; tests execute native Rust validation,
+//! evaluation and grant compilation.
 use porthub_api::domain::private_policy::{self as policy, Grant};
 use serde_json::{json, Value};
 use std::collections::HashMap;

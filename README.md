@@ -68,7 +68,6 @@ matrix](docs/agent-platforms.md) for details.
 | `crates/` | Rust API, agent, edge, firewall, mesh, tunnel, transfer and runtime crates |
 | `ui/` | Dashboard source and UI checks |
 | `deploy/` | Compose runtime configuration and deployment preflight tools |
-| `legacy/go-client/` | Retired Go client used only for compatibility fixtures; never shipped |
 | `vendor/` | Pinned upstream Rust dependencies and documented local patches |
 | `docs/` | Architecture, operations, platform support and verification records |
 

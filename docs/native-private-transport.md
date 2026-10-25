@@ -37,8 +37,8 @@ same API port. ICE advertises these alongside LAN host candidates; LAN candidate
 retain the higher preference. The selected TURN path carries the same mutually
 pinned DTLS records as a direct connection. Gateway allocations only route to
 other authorized allocations in memory; they cannot access arbitrary host or
-Internet sockets. The transport interoperates with the existing Go/Pion relay
-protocol. No additional listening port or helper process is required.
+Internet sockets. The transport uses the standard TURN relay protocol. No
+additional listening port or helper process is required.
 
 Preparation runs outside packet forwarding and the sync lease loop, with at most
 four concurrent preparations and 64 peer sessions. Signals stay unacknowledged
@@ -67,29 +67,23 @@ reliability and has not yet met the physical bandwidth acceptance benchmark.
 
 `porthub enroll --install-service` can install the Linux system service and
 publish the shared CLI. Plain `enroll` continues to stage credentials only.
-Existing Go private profiles retain their wire field names. Public and private
-native registrations use separate deterministic identities and scoped lifecycle
-operations. Windows/macOS private device and service support remains unfinished.
+Public and private native registrations use separate deterministic identities
+and scoped lifecycle operations. Windows/macOS private device and service
+support remains unfinished.
 
 Verification includes real UDP Rust/Rust peers, certificate substitution and
-record replay rejection, both ICE/DTLS roles against a Go Pion reference,
-real native API/Mongo discovery and packet transfer after the gateway is shut
+record replay rejection, real native API/Mongo discovery and packet transfer
+after the gateway is shut
 down, native gateway relay authentication/source binding/policy revocation,
 packet ACLs, route pinning and private DNS responses. Forced gateway-only tests
-exchange 256 full-size packets in both directions with Rust/Rust and Rust/Go
-peers. Background discovery prepares relay candidates before a separate test
+exchange 256 full-size packets in both directions with native Rust peers.
+Background discovery prepares relay candidates before a separate test
 confirms LAN selection and transfers 1,024 full-size round trips with the entire
 gateway shut down. These are local integration checks, not physical WAN bandwidth
 acceptance results. A disposable network
 namespace verifies kernel UDP packets through the TUN, route updates and cleanup.
 An explicitly authorized root test on Luna verifies systemd-resolved integration
 on a temporary PortHub-owned interface.
-
-The Go compatibility fixture makes one documented temporary adjustment: the
-current reference requests continual Pion gathering while waiting for an
-initial completion callback that Pion emits only with GatherOnce. The fixture
-builder changes this policy only in its temporary source copy. No Go helper is
-included in production images or the agent.
 
 Remaining acceptance gates include physical NAT connectivity, TURN
 credential renewal and sustained failure/recovery validation,

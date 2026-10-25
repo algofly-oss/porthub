@@ -494,7 +494,7 @@ export default function HostConfigPopup({
     return () => { active = false; };
   }, [opened, host?.id]);
   const [machineDetails, setMachineDetails] = useState({ name: "", hostname: "" });
-  const [machineDomains, setMachineDomains] = useState([]);
+  const [machineDomains, setMachineDomains] = useState(() => host?.privateDomains?.length ? host.privateDomains : [{ default: true }]);
   const [machineDetailsErrors, setMachineDetailsErrors] = useState({});
   const [isSavingMachineDetails, setIsSavingMachineDetails] = useState(false);
   const [showRuleAdvanced, setShowRuleAdvanced] = useState(true);
