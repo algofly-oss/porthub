@@ -56,22 +56,26 @@ fn requires_system_privileges(args: &Args) -> bool {
             port_override,
             ..
         } => {
-            (*port_override).is_some_and(|port| port < 1024)
-                || target.parse::<u16>().is_ok_and(|port| port < 1024)
+            (*port_override).is_some_and(is_privileged_port)
+                || target.parse::<u16>().is_ok_and(is_privileged_port)
         }
         Command::HttpReceive {
             target,
             port_override,
             ..
         } => {
-            (*port_override).is_some_and(|port| port < 1024)
-                || target.parse::<u16>().is_ok_and(|port| port < 1024)
+            (*port_override).is_some_and(is_privileged_port)
+                || target.parse::<u16>().is_ok_and(is_privileged_port)
         }
         Command::Run { profile } => {
             porthub_agent::private_network::is_profile(profile).unwrap_or(false)
         }
         _ => false,
     }
+}
+
+fn is_privileged_port(port: u16) -> bool {
+    port != 0 && port < 1024
 }
 
 fn elevate_if_needed(args: &Args) -> Result<()> {
@@ -1417,6 +1421,8 @@ mod cli_tests {
             &["porthub", "push", "file.bin", "http://host:8001/"][..],
             &["porthub", "get", "http://host/file.bin"][..],
             &["porthub", "http.receive"][..],
+            &["porthub", "http.server", "0", "."][..],
+            &["porthub", "http.receive", "0", "."][..],
             &["porthub", "list", "--user"][..],
             &["porthub", "setup", "--ticket", "ticket", "--user"][..],
         ] {
