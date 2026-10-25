@@ -14,6 +14,8 @@ porthub http.receive stop 8001
 porthub get http://machine:8000/file.bin
 porthub get http://machine:8000/file.bin --connections 16 --dir ./downloads \
   --sha256 EXPECTED_HEX_DIGEST
+porthub get http://machine:8000/dataset/ --dir ./downloads
+porthub get http://machine:8000/dataset/ --dir ./dataset-copy --contents-only
 porthub push ./archive.bin http://machine:8001/
 porthub push ./dataset/ http://machine:8001/ --connections 8
 ```
@@ -56,6 +58,18 @@ and rejects changed validators, unexpected lengths and encoded range bodies.
 An optional SHA256 check runs before publishing the final file. Existing files
 are not overwritten; a completed file is published using a non-overwriting
 filesystem operation.
+
+When the URL points to a directory served by `porthub http.server`, `get`
+fetches its bounded directory manifest and syncs nested files with the same
+parallel range and resume behavior. The default creates or updates a folder
+named after the remote directory under `--dir`; `--contents-only` places its
+contents directly in `--dir`. Matching file size and modification time skips a
+file, changed files replace their old copy only after download completes, and
+unrelated local files are preserved. Interrupted work stays in a hidden
+`.porthub-download-*` folder and is removed after a successful sync. Other HTTP
+servers keep their regular single-file behavior. A symlink or special file in
+a PortHub directory makes the directory transfer fail explicitly instead of
+following it.
 
 Upstream source reviewed for the design:
 

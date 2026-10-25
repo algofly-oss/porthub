@@ -1,3 +1,7 @@
+use crate::directory::{
+    Entry as DirectoryEntry, Manifest, MANIFEST_QUERY, MANIFEST_VERSION, MAX_MANIFEST_BYTES,
+    MAX_MANIFEST_ENTRIES,
+};
 use crate::state;
 use anyhow::{bail, Context, Result};
 use axum::serve::ListenerExt;
@@ -99,6 +103,75 @@ fn escape(value: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+fn wants_manifest(request: &Request) -> bool {
+    request.uri().query().is_some_and(|query| {
+        query
+            .split('&')
+            .any(|pair| pair == format!("{MANIFEST_QUERY}=manifest"))
+    })
+}
+
+async fn make_manifest(directory: &Path) -> Result<Vec<u8>> {
+    let mut pending = vec![directory.to_owned()];
+    let mut entries = Vec::new();
+    while let Some(current) = pending.pop() {
+        let mut reader = tokio::fs::read_dir(&current).await?;
+        while let Some(entry) = reader.next_entry().await? {
+            let path = entry.path();
+            let relative = path.strip_prefix(directory)?;
+            let mut components = Vec::new();
+            for component in relative.components() {
+                let Component::Normal(name) = component else {
+                    anyhow::bail!("directory entry path is not relative")
+                };
+                components.push(
+                    name.to_str()
+                        .context("directory entry name is not valid Unicode")?,
+                );
+            }
+            let relative = components.join("/");
+            let file_type = entry.file_type().await?;
+            let (kind, size, modified_ns) = if file_type.is_dir() {
+                pending.push(path);
+                ("directory", 0, 0)
+            } else if file_type.is_file() {
+                let metadata = entry.metadata().await?;
+                let modified_ns = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                    .map(|time| time.as_nanos())
+                    .unwrap_or(0);
+                ("file", metadata.len(), modified_ns)
+            } else {
+                // Never follow symlinks or transfer special files. The client
+                // rejects these entries instead of silently omitting data.
+                ("unsupported", 0, 0)
+            };
+            entries.push(DirectoryEntry {
+                path: relative,
+                kind: kind.to_owned(),
+                size,
+                modified_ns,
+            });
+            anyhow::ensure!(
+                entries.len() <= MAX_MANIFEST_ENTRIES,
+                "directory contains too many entries for one manifest"
+            );
+        }
+    }
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    let bytes = serde_json::to_vec(&Manifest {
+        version: 1,
+        entries,
+    })?;
+    anyhow::ensure!(
+        bytes.len() <= MAX_MANIFEST_BYTES,
+        "directory manifest exceeds the size limit"
+    );
+    Ok(bytes)
+}
+
 pub fn router(root: PathBuf) -> Router {
     Router::new().fallback(files).with_state(Arc::new(root))
 }
@@ -136,7 +209,43 @@ async fn files(State(root): State<Arc<PathBuf>>, mut request: Request) -> Respon
     };
     if metadata.is_dir() {
         if !request.uri().path().ends_with('/') {
-            return Redirect::permanent(&format!("{}/", request.uri().path())).into_response();
+            let path_and_query = request.uri().path_and_query().map_or_else(
+                || request.uri().path().to_owned(),
+                |value| value.to_string(),
+            );
+            let (path, query) = path_and_query
+                .split_once('?')
+                .map_or((path_and_query.as_str(), ""), |(path, query)| (path, query));
+            let target = if query.is_empty() {
+                format!("{path}/")
+            } else {
+                format!("{path}/?{query}")
+            };
+            return Redirect::permanent(&target).into_response();
+        }
+        if wants_manifest(&request) {
+            let bytes = match make_manifest(&file).await {
+                Ok(bytes) => bytes,
+                Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            };
+            let mut response = Response::new(Body::from(bytes));
+            *response.status_mut() = StatusCode::OK;
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/vnd.porthub.directory+json; version=1"),
+            );
+            response.headers_mut().insert(
+                "x-porthub-manifest-version",
+                HeaderValue::from_static(MANIFEST_VERSION),
+            );
+            if request.method() == Method::HEAD {
+                let size = response.body().size_hint().exact().unwrap_or(0);
+                *response.body_mut() = Body::empty();
+                if let Ok(value) = HeaderValue::from_str(&size.to_string()) {
+                    response.headers_mut().insert(header::CONTENT_LENGTH, value);
+                }
+            }
+            return response;
         }
         let mut entries = match tokio::fs::read_dir(&file).await {
             Ok(entries) => entries,
@@ -167,6 +276,9 @@ async fn files(State(root): State<Arc<PathBuf>>, mut request: Request) -> Respon
         }
         html.push_str("</ul>");
         let mut response = Html(html).into_response();
+        response
+            .headers_mut()
+            .insert("x-porthub-directory", HeaderValue::from_static("1"));
         if request.method() == Method::HEAD {
             let size = response.body().size_hint().exact().unwrap_or(0);
             *response.body_mut() = Body::empty();

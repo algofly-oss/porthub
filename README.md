@@ -55,6 +55,7 @@ porthub http.server list
 porthub http.server stop 8000
 porthub http.receive 8001 ./drop
 porthub get https://example.com/archive.bin --connections 16 --sha256 <digest>
+porthub get http://machine:8000/dataset/ --dir ./downloads
 porthub push ./dataset http://machine:8001/
 ```
 

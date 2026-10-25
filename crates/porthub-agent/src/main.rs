@@ -247,7 +247,7 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
-    /// Download with parallel byte ranges, safe resume, and optional SHA256.
+    /// Download files or sync directories with parallel ranges and safe resume.
     Get {
         url: String,
         #[arg(short = 'd', long = "dir", default_value = ".")]
@@ -259,6 +259,9 @@ enum Command {
         /// Minimum size of a parallel download segment, in bytes.
         #[arg(long,default_value_t=8*1024*1024)]
         segment_size: u64,
+        /// Put the contents of a remote directory directly in --dir.
+        #[arg(long)]
+        contents_only: bool,
     },
     /// Send files or sync directories directly to another PortHub receiver.
     Push {
@@ -1210,11 +1213,13 @@ async fn main() -> Result<()> {
             connections,
             sha256,
             segment_size,
+            contents_only,
         }) => {
             let mut options = download::Options::new(url, directory);
             options.connections = connections;
             options.sha256 = sha256;
             options.piece_size = segment_size;
+            options.contents_only = contents_only;
             download::get(options, cancel).await.map(|_| ())
         }
         Some(Command::Push {
@@ -1419,6 +1424,25 @@ mod cli_tests {
         ])
         .command
         .is_some());
+    }
+
+    #[test]
+    fn get_accepts_directory_contents_only_option() {
+        let parsed = args(&[
+            "porthub",
+            "get",
+            "http://machine:8000/dataset/",
+            "--dir",
+            "./copy",
+            "--contents-only",
+        ]);
+        assert!(matches!(
+            parsed.command,
+            Some(super::Command::Get {
+                contents_only: true,
+                ..
+            })
+        ));
     }
 
     #[test]

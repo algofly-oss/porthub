@@ -121,6 +121,114 @@ async fn ranges_parallel_download_checksum_and_safe_collision() -> Result<()> {
 }
 
 #[tokio::test]
+async fn porthub_server_directory_get_syncs_nested_files_and_preserves_timestamps() -> Result<()> {
+    let source = tempfile::tempdir()?;
+    let destination = tempfile::tempdir()?;
+    let dataset = source.path().join("dataset");
+    tokio::fs::create_dir_all(dataset.join("nested/empty-dir")).await?;
+    tokio::fs::write(dataset.join("top.txt"), b"top-level").await?;
+    tokio::fs::write(dataset.join("nested/payload.bin"), vec![31; 700_123]).await?;
+    tokio::fs::write(dataset.join("zero"), b"").await?;
+    let source_file = dataset.join("nested/payload.bin");
+    let timestamp = filetime::FileTime::from_unix_time(1_700_000_123, 456_000_000);
+    filetime::set_file_mtime(&source_file, timestamp)?;
+    let http = http(server::router(
+        tokio::fs::canonicalize(source.path()).await?,
+    ))
+    .await?;
+
+    let url = format!("{}/dataset?access=fixture", http.url);
+    let parsed_url = reqwest::Url::parse(&format!("{}/dataset/?access=fixture", http.url))?;
+    let staging_digest = format!("{:x}", Sha256::digest(parsed_url.as_str().as_bytes()));
+    let colliding_remote_directory = format!(".porthub-download-{}", &staging_digest[..24]);
+    tokio::fs::create_dir(dataset.join(&colliding_remote_directory)).await?;
+    let output = download::get(
+        options(url.clone(), destination.path().into()),
+        CancellationToken::new(),
+    )
+    .await?;
+    assert_eq!(
+        output.file_name().and_then(|name| name.to_str()),
+        Some("dataset")
+    );
+    assert_eq!(tokio::fs::read(output.join("top.txt")).await?, b"top-level");
+    assert_eq!(
+        tokio::fs::read(output.join("nested/payload.bin")).await?,
+        vec![31; 700_123]
+    );
+    assert_eq!(tokio::fs::read(output.join("zero")).await?, b"");
+    assert!(output.join("nested/empty-dir").is_dir());
+    assert!(output.join(&colliding_remote_directory).is_dir());
+    assert_eq!(
+        tokio::fs::metadata(output.join("nested/payload.bin"))
+            .await?
+            .modified()?,
+        timestamp.into()
+    );
+    let staging_named_entries = std::fs::read_dir(&output)?
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".porthub-download-"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        staging_named_entries,
+        vec![colliding_remote_directory.clone()]
+    );
+
+    // A second get reuses the directory, skips unchanged files and preserves
+    // the remote mtime so later runs can make the same decision.
+    let second = download::get(
+        options(url.clone(), destination.path().into()),
+        CancellationToken::new(),
+    )
+    .await?;
+    assert_eq!(second, output);
+
+    let staging_root = output.join(format!(".porthub-download-{}-1", &staging_digest[..24]));
+    tokio::fs::create_dir(&staging_root).await?;
+    tokio::fs::write(
+        staging_root.join(format!(".porthub-owner-{}", &staging_digest[..24])),
+        staging_digest.as_bytes(),
+    )
+    .await?;
+    tokio::fs::write(staging_root.join("top.txt"), b"old-top!!").await?;
+    filetime::set_file_mtime(
+        &staging_root.join("top.txt"),
+        filetime::FileTime::from_unix_time(1_700_000_120, 0),
+    )?;
+    tokio::fs::write(dataset.join("top.txt"), b"new-top!!").await?;
+    filetime::set_file_mtime(
+        &dataset.join("top.txt"),
+        filetime::FileTime::from_unix_time(1_700_000_130, 0),
+    )?;
+    tokio::fs::write(output.join("unrelated.txt"), b"keep me").await?;
+    let third = download::get(
+        options(url.clone(), destination.path().into()),
+        CancellationToken::new(),
+    )
+    .await?;
+    assert_eq!(third, output);
+    assert_eq!(tokio::fs::read(output.join("top.txt")).await?, b"new-top!!");
+    assert_eq!(
+        tokio::fs::read(output.join("unrelated.txt")).await?,
+        b"keep me"
+    );
+
+    let contents = tempfile::tempdir()?;
+    let mut contents_options = options(url, contents.path().into());
+    contents_options.contents_only = true;
+    let contents_result = download::get(contents_options, CancellationToken::new()).await?;
+    assert_eq!(
+        contents_result,
+        tokio::fs::canonicalize(contents.path()).await?
+    );
+    assert_eq!(
+        tokio::fs::read(contents.path().join("top.txt")).await?,
+        b"new-top!!"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn non_range_and_empty_files_use_single_stream() -> Result<()> {
     let requests = Arc::new(AtomicUsize::new(0));
     let counted = requests.clone();
@@ -246,6 +354,14 @@ async fn symlinks_cannot_escape_document_root() -> Result<()> {
     let http = http_server(root.path().into()).await?;
     let response = reqwest::get(format!("{}/escape/secret", http.url)).await?;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let destination = tempfile::tempdir()?;
+    assert!(download::get(
+        options(format!("{}/", http.url), destination.path().into()),
+        CancellationToken::new(),
+    )
+    .await
+    .is_err());
+    assert_eq!(std::fs::read_dir(destination.path())?.count(), 0);
     Ok(())
 }
 
