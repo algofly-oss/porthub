@@ -10,7 +10,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
@@ -104,7 +104,7 @@ pub async fn run(
                             if let Some((&length,rest))=frame.split_first() {
                                 let length=usize::from(length);
                                 if length>0 && length<=60 && rest.len()>=length+20 && rest.len()<=length+1380 {
-                                    if let Ok(peer)=std::str::from_utf8(&rest[..length]) {let _=events.try_send(Event::Packet{peer:peer.into(),bytes:frame.slice(1+length..),direct:false});}
+                                    if let Ok(peer)=std::str::from_utf8(&rest[..length]) {let _=events.try_send(Event::Packet{peer:peer.into(),bytes:frame.slice(1+length..),direct:false,received_at:Instant::now()});}
                                 }
                             }None
                         },

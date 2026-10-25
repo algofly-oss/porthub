@@ -118,6 +118,7 @@ pub enum Event {
         peer: String,
         bytes: Bytes,
         direct: bool,
+        received_at: Instant,
     },
 }
 pub type Sessions = Arc<RwLock<HashMap<String, Session>>>;
@@ -473,7 +474,7 @@ async fn read_packets(
     loop {
         tokio::select! {_=cancel.cancelled()=>break,
             packet=packets.recv()=>{let Some(bytes)=packet else {break;};
-                let _=events.try_send(Event::Packet{peer:peer.clone(),bytes,direct:true});
+                let _=events.try_send(Event::Packet{peer:peer.clone(),bytes,direct:true,received_at:Instant::now()});
             }
         }
     }

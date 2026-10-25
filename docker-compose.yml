@@ -19,11 +19,11 @@ services:
     build:
       context: .
       target: ${PORTHUB_MODE:-prod}-core
-      args: {PORTHUB_VERSION: "${PORTHUB_VERSION:-1.4.0}", PORTHUB_SOURCE_REVISION: "${PORTHUB_SOURCE_REVISION:-unknown}", PORTHUB_BUILD_JOBS: "${PORTHUB_BUILD_JOBS:-4}"}
+      args: {PORTHUB_VERSION: "${PORTHUB_VERSION:-1.4.1}", PORTHUB_SOURCE_REVISION: "${PORTHUB_SOURCE_REVISION:-unknown}", PORTHUB_BUILD_JOBS: "${PORTHUB_BUILD_JOBS:-4}"}
     env_file: [.env]
     environment:
       PORTHUB_MODE: ${PORTHUB_MODE:-prod}
-      PORTHUB_VERSION: ${PORTHUB_VERSION:-1.4.0}
+      PORTHUB_VERSION: ${PORTHUB_VERSION:-1.4.1}
       PORTHUB_CLIENT_BINARY_DIR: /app/client-bin
       PORTHUB_API_SOCKET: /run/porthub-api/api.sock
       PORTHUB_EDGE_SOCKET: /run/porthub-edge/control.sock
@@ -66,7 +66,7 @@ services:
     build:
       context: .
       target: ${PORTHUB_MODE:-prod}-edge
-      args: {PORTHUB_VERSION: "${PORTHUB_VERSION:-1.4.0}", PORTHUB_SOURCE_REVISION: "${PORTHUB_SOURCE_REVISION:-unknown}", PORTHUB_BUILD_JOBS: "${PORTHUB_BUILD_JOBS:-4}"}
+      args: {PORTHUB_VERSION: "${PORTHUB_VERSION:-1.4.1}", PORTHUB_SOURCE_REVISION: "${PORTHUB_SOURCE_REVISION:-unknown}", PORTHUB_BUILD_JOBS: "${PORTHUB_BUILD_JOBS:-4}"}
     network_mode: host
     cap_add: [NET_BIND_SERVICE]
     environment:
@@ -110,7 +110,7 @@ services:
     build:
       context: .
       target: ${PORTHUB_MODE:-prod}-firewall
-      args: {PORTHUB_VERSION: "${PORTHUB_VERSION:-1.4.0}", PORTHUB_SOURCE_REVISION: "${PORTHUB_SOURCE_REVISION:-unknown}", PORTHUB_BUILD_JOBS: "${PORTHUB_BUILD_JOBS:-4}"}
+      args: {PORTHUB_VERSION: "${PORTHUB_VERSION:-1.4.1}", PORTHUB_SOURCE_REVISION: "${PORTHUB_SOURCE_REVISION:-unknown}", PORTHUB_BUILD_JOBS: "${PORTHUB_BUILD_JOBS:-4}"}
     network_mode: host
     cap_add: [NET_ADMIN]
     environment:

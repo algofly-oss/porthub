@@ -23,12 +23,24 @@ slow peers. Active inner flows retain their established direct or gateway
 transport; queue pressure does not cause transport changes. A failed direct
 transport can fall back to the already connected gateway.
 
+When both transports are ready, the agent measures them in the background using
+authenticated probe frames over the existing peer session and gateway relay.
+It attempts a 32-packet measurement for one peer each second, rotating through
+up to 64 ready peers; each peer is measured at most once every two minutes. It
+skips peers with application traffic in the preceding 20 seconds. The bounded
+relay queue is not flooded by probe bursts.
+The frames never enter the TUN, and no host or public IP addresses are logged or
+advertised by the measurements. The agent estimates each direction's payload
+rate and RTT, then uses a route only when its measured rate is at least 20%
+better or its RTT is at least 10 ms lower. Scores expire after ten minutes.
+Measurements select the route for new flows; established flows stay pinned.
+Explicit path settings continue to override automatic selection.
+
 STUN gathering uses each actual bound ICE socket before its receive owner
 starts. Up to two operator-provided UDP STUN servers share a 1.5-second budget
 per interface; interfaces gather concurrently within the bounded preparation
 workers. Responses must match the server address and a fresh random transaction
-ID. Reflexive candidates retain their base interface for sends; no probes run
-between payload connections. A protocol NAT simulation verifies mutually pinned
+ID. Reflexive candidates retain their base interface for sends. A protocol NAT simulation verifies mutually pinned
 DTLS with only reflexive candidates, separately from a real UDP STUN fixture.
 Neither local fixture is evidence of performance through a physical ISP NAT.
 
@@ -86,11 +98,11 @@ An explicitly authorized root test on Luna verifies systemd-resolved integration
 on a temporary PortHub-owned interface.
 
 Remaining acceptance gates include physical NAT connectivity, TURN
-credential renewal and sustained failure/recovery validation,
-measured bandwidth/latency route selection, large-workspace demand scheduling
-(the current proactive session cap is 64), physical network-hop validation,
-full private runtime/HTTP benchmarks on Luna/Condor/Miro, legacy service adoption,
-all platform lifecycle support, native update application and production rollout.
+credential renewal, sustained failure/recovery, probe accuracy and stability
+under production traffic, large-workspace demand scheduling (the current
+proactive session cap is 64), physical network-hop validation, full private
+runtime/HTTP benchmarks on Luna/Condor/Miro, legacy service adoption, all
+platform lifecycle support, native update application and production rollout.
 The control loop polls once per second during negotiation and backs off to
 five seconds when its discovered peers are ready (or there are no online peers).
 Further fleet-wide scheduling validation is still required.

@@ -16,10 +16,19 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::sync::CancellationToken;
+
+fn mark_activity(activity: &mut HashMap<String, Instant>, peer: &str, now: Instant) {
+    if let Some(last) = activity.get_mut(peer) {
+        *last = now;
+    } else if activity.len() < 4096 {
+        activity.insert(peer.to_owned(), now);
+    }
+}
+
 pub async fn run(path: PathBuf, cancel: CancellationToken) -> Result<()> {
     let profile = Profile::load(&path)?;
     let _lease = Lease::acquire(&path)?;
@@ -39,6 +48,7 @@ pub async fn run(path: PathBuf, cancel: CancellationToken) -> Result<()> {
         work.clone(),
     ));
     let instance = controller::nonce()?;
+    let mut next_probe_id = u64::from_str_radix(&instance[..16], 16)?;
     let (interface_updates, interfaces) = tokio::sync::watch::channel(Vec::new());
     tasks.spawn(super::interfaces::watch(interface_updates, work.clone()));
     let (relay_sender, relay_input) = super::relay::channel();
@@ -65,10 +75,15 @@ pub async fn run(path: PathBuf, cancel: CancellationToken) -> Result<()> {
     let mut dns_port: Option<u16> = None;
     let mut policy = Engine::default();
     let mut paths = super::paths::Pinned::default();
+    let mut path_quality = super::probe::Quality::default();
     let mut by_ip = HashMap::new();
+    let mut last_activity = HashMap::new();
+    let mut probe_cursor = 0usize;
     let mut buffer = [0u8; porthub_mesh::MAX_PACKET + 1];
     let mut status_tick = tokio::time::interval(Duration::from_secs(30));
     status_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut probe_tick = tokio::time::interval(Duration::from_secs(1));
+    probe_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result:Result<()>=async {loop {tokio::select! {
         _=cancel.cancelled()=>break,
         finished=tasks.join_next(),if !tasks.is_empty()=>{match finished {Some(Ok(Ok(()))) if work.is_cancelled()=>break,Some(Ok(Err(error)))=>return Err(error),_=>anyhow::bail!("private background task stopped")}},
@@ -102,7 +117,21 @@ pub async fn run(path: PathBuf, cancel: CancellationToken) -> Result<()> {
                 by_ip=snapshot.peers.iter().map(|p|(p.ip,p.id.clone())).collect();
                 zone.as_ref().unwrap().write().await.update(&snapshot)?;
             },
-            Some(Event::Packet{peer,bytes,direct})=>{
+            Some(Event::Packet{peer,bytes,direct,received_at})=>{
+                let now=received_at;
+                if let Some(replies)=path_quality.handle(&peer,direct,&bytes,now) {
+                    if !replies.is_empty() {
+                        if direct {
+                            if let Some(session)=sessions.read().await.get(&peer) {
+                                for reply in replies { let _=session.send(reply); }
+                            }
+                        } else {
+                            for reply in replies { let _=relay_sender.send(&peer,&reply); }
+                        }
+                    }
+                    continue;
+                }
+                mark_activity(&mut last_activity,&peer,now);
                 if policy.check(&bytes,&peer,true) {
                     if let Some(packet)=Packet::parse(&bytes) {paths.observe(packet,direct);}
                     if let Some(tun)=&device {tun.write(&bytes).await?;}
@@ -114,14 +143,53 @@ pub async fn run(path: PathBuf, cancel: CancellationToken) -> Result<()> {
             let Some(parsed)=Packet::parse(&buffer[..size]) else {continue;};
             let Some(peer)=by_ip.get(&parsed.destination()) else {continue;};
             if policy.check(&buffer[..size],peer,false) {
+                mark_activity(&mut last_activity,peer,std::time::Instant::now());
                 let peers=sessions.read().await;
                 let direct=peers.get(peer).filter(|session|session.state()==porthub_mesh::State::Ready);
                 let relay_ready=relay_sender.is_ready();
-                let prefer_peer=strategy.borrow().prefer_peer_transport(direct.is_some_and(|session|session.is_relay()),relay_ready);
+                let mode=*strategy.borrow();
+                let default_prefer_peer=mode.prefer_peer_transport(direct.is_some_and(|session|session.is_relay()),relay_ready);
+                let prefer_peer=if mode==super::strategy::Mode::Auto {
+                    path_quality.prefer_peer(peer,default_prefer_peer,std::time::Instant::now())
+                } else { default_prefer_peer };
                 match paths.choose_preferred(parsed,direct.is_some(),relay_ready,prefer_peer) {
                     Some(true)=>{if let Some(session)=direct {let _=session.send(bytes::Bytes::copy_from_slice(&buffer[..size]));}},
                     Some(false)=>{let _=relay_sender.send(peer,&buffer[..size]);},None=>{}
                 }
+            }
+        },
+        _=probe_tick.tick(),if device.is_some()=>{
+            let now=std::time::Instant::now();
+            path_quality.prune(now);
+            last_activity.retain(|_,seen|now.saturating_duration_since(*seen)<Duration::from_secs(600));
+            let peers=sessions.read().await;
+            let mut ready:Vec<_>=peers.iter().filter(|(_,session)|session.state()==porthub_mesh::State::Ready)
+                .map(|(id,session)|(id.clone(),session.clone())).collect();
+            ready.sort_by(|left,right|left.0.cmp(&right.0));
+            if !ready.is_empty() {
+                let start=probe_cursor%ready.len();
+                // One relay burst fits comfortably in the bounded queue and
+                // keeps aggregate background traffic low; rotate promptly.
+                let count=ready.len().min(1);
+                for offset in 0..count {
+                    let (peer,session)=&ready[(start+offset)%ready.len()];
+                    if last_activity.get(peer).is_some_and(|seen|now.saturating_duration_since(*seen)<Duration::from_secs(20)) { continue; }
+                    if !relay_sender.is_ready() { continue; }
+                    for direct in [true,false] {
+                        let nonce=next_probe_id;
+                        next_probe_id=next_probe_id.wrapping_add(1).max(1);
+                        let burst=path_quality.start(peer,direct,nonce,now);
+                        let mut complete=true;
+                        for packet in burst {
+                            let sent=if direct { session.send(packet) } else { relay_sender.send(peer,&packet) };
+                            if sent.is_err() { complete=false; break; }
+                        }
+                        if !complete {
+                            path_quality.cancel(peer,direct,nonce,now);
+                        }
+                    }
+                }
+                probe_cursor=(start+count)%ready.len();
             }
         },
         _=status_tick.tick()=>{

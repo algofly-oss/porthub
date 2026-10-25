@@ -28,5 +28,6 @@ pub fn is_profile(path: &std::path::Path) -> anyhow::Result<bool> {
     Ok(value.get("peer_id").is_some())
 }
 pub mod paths;
+mod probe;
 pub mod relay;
 pub mod strategy;
