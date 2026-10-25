@@ -751,6 +751,32 @@ async fn list_registrations(user: bool, json: bool) -> Result<()> {
                 "ports":runtime.as_ref().map(|state|state.service_count).unwrap_or(0),"route":runtime.as_ref().map(|state|state.route.as_str()).unwrap_or("")}));
         }
     }
+    let cached_emails: Vec<_> = rows
+        .iter()
+        .filter_map(|row| {
+            Some((
+                row["machine_id"].as_str()?.to_owned(),
+                row["email"]
+                    .as_str()
+                    .filter(|email| !email.is_empty())?
+                    .to_owned(),
+            ))
+        })
+        .collect();
+    for row in &mut rows {
+        if row["email"].as_str().is_none_or(str::is_empty) {
+            let machine_id = row["machine_id"].as_str().unwrap_or_default();
+            let mut matches = cached_emails
+                .iter()
+                .filter(|(candidate, _)| candidate == machine_id)
+                .map(|(_, email)| email.as_str());
+            if let Some(email) = matches.next() {
+                if matches.all(|other| other == email) {
+                    row["email"] = email.into();
+                }
+            }
+        }
+    }
     if !email_lookups.is_empty() {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
