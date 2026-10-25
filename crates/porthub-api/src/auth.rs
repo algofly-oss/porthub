@@ -143,11 +143,19 @@ fn metadata(headers: &HeaderMap) -> Document {
     doc! {"browser": browser, "os": os, "device_type": kind, "device_name": format!("{browser} on {os}"), "ip": ip, "user_agent": ua}
 }
 
-pub async fn settings(State(app): State<Arc<App>>) -> Json<Value> {
-    Json(
-        json!({"signup_disabled": app.config.signup_disabled, "signup_enabled": !app.config.signup_disabled,
+pub async fn settings(State(app): State<Arc<App>>) -> crate::error::ApiResult<Json<Value>> {
+    let setting = app
+        .collection("platform_settings")
+        .find_one(mongodb::bson::doc! {"_id":"platform"})
+        .await?;
+    let signup_enabled = setting
+        .as_ref()
+        .and_then(|d| d.get_bool("signup_enabled").ok())
+        .unwrap_or(!app.config.signup_disabled);
+    Ok(Json(
+        json!({"signup_disabled": !signup_enabled, "signup_enabled": signup_enabled,
         "web_proxy_domain_suffix": app.config.proxy_domain_suffix, "port_hub_service_domain": app.config.service_domain}),
-    )
+    ))
 }
 
 pub async fn signin(

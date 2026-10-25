@@ -16,17 +16,90 @@ use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc};
 
 pub fn router() -> Router<Arc<App>> {
-    Router::new().route("/api/admin/overview", get(overview))
+    Router::new()
+        .route("/api/admin/overview", get(overview))
+        .route(
+            "/api/admin/settings/signup",
+            get(signup_settings)
+                .patch(update_signup)
+                .delete(reset_signup),
+        )
 }
 
-async fn overview(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    let admin = auth::current_user(&app, &headers).await?;
-    if store::string(&admin, "role") != "admin" {
+async fn admin_user(app: &App, headers: &HeaderMap) -> ApiResult<Document> {
+    let user = auth::current_user(app, headers).await?;
+    if store::string(&user, "role") != "admin" {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "Admin access required",
         ));
     }
+    Ok(user)
+}
+
+async fn signup_value(app: &App) -> ApiResult<(bool, bool)> {
+    let setting = app
+        .collection("platform_settings")
+        .find_one(doc! {"_id":"platform"})
+        .await?;
+    let override_value = setting
+        .as_ref()
+        .and_then(|d| d.get_bool("signup_enabled").ok());
+    Ok((
+        override_value.unwrap_or(!app.config.signup_disabled),
+        override_value.is_some(),
+    ))
+}
+
+async fn signup_settings(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Value>> {
+    admin_user(&app, &headers).await?;
+    let (enabled, configured) = signup_value(&app).await?;
+    Ok(Json(
+        json!({"signup_enabled":enabled,"configured":configured,"env_default":!app.config.signup_disabled}),
+    ))
+}
+
+async fn update_signup(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    crate::input::ApiBody(raw): crate::input::ApiBody,
+) -> ApiResult<Json<Value>> {
+    admin_user(&app, &headers).await?;
+    let mut model = crate::input::Model::new(raw)?;
+    let enabled = model.required_bool("signup_enabled");
+    model.finish()?;
+    app.collection("platform_settings")
+        .update_one(
+            doc! {"_id":"platform"},
+            doc! {"$set":{"signup_enabled":enabled,"updated_at":mongodb::bson::DateTime::now() } },
+        )
+        .upsert(true)
+        .await?;
+    let (effective, configured) = signup_value(&app).await?;
+    Ok(Json(
+        json!({"signup_enabled":effective,"configured":configured,"env_default":!app.config.signup_disabled}),
+    ))
+}
+
+async fn reset_signup(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+    admin_user(&app, &headers).await?;
+    app.collection("platform_settings")
+        .update_one(
+            doc! {"_id":"platform"},
+            doc! {"$unset":{"signup_enabled":"","updated_at":""}},
+        )
+        .await?;
+    let (effective, configured) = signup_value(&app).await?;
+    Ok(Json(
+        json!({"signup_enabled":effective,"configured":configured,"env_default":!app.config.signup_disabled}),
+    ))
+}
+
+async fn overview(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+    admin_user(&app, &headers).await?;
     let users: Vec<Document> = app
         .collection("users")
         .find(doc! {})

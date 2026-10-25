@@ -12,11 +12,13 @@ import { PageHeader, SearchField, EmptyState } from "@/components/ui/workspace";
 import { Button } from "@/components/ui/button";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { searchScore } from "@/shared/utils/search.mjs";
+import { Switch } from "@mantine/core";
 
 export default function PlatformOverview() {
   const [overview, setOverview] = useWorkspaceState("platform.overview", []), [loading, setLoading] = useWorkspaceState("platform.loading", true), [error, setError] = useState("");
   const [query, setQuery] = useState(""), [role, setRole] = useState("all"), [sort, setSort] = useState("name"), [expanded, setExpanded] = useState("");
   const [page, setPage] = useState(1), [pageSize, setPageSize] = useState(25);
+  const [signup, setSignup] = useState(null), [signupBusy, setSignupBusy] = useState(false), [signupError, setSignupError] = useState("");
   const reduced = useReducedMotion();
   async function load(signal) {
     const options = signal instanceof AbortSignal ? { signal } : {};
@@ -25,6 +27,23 @@ export default function PlatformOverview() {
     finally { if (!options.signal?.aborted) setLoading(false); }
   }
   useBackgroundRefresh(load);
+  async function loadSignup() {
+    try { const response = await axios.get(apiRoutes.adminSignupSettings); setSignup(response.data); setSignupError(""); }
+    catch (err) { setSignupError(err?.response?.data?.detail || "Could not load signup settings."); }
+  }
+  useEffect(() => { loadSignup(); }, []);
+  async function setSignupEnabled(enabled) {
+    setSignupBusy(true); setSignupError("");
+    try { const response = await axios.patch(apiRoutes.adminSignupSettings, { signup_enabled: enabled }); setSignup(response.data); }
+    catch (err) { setSignupError(err?.response?.data?.detail || "Could not update signup settings."); }
+    finally { setSignupBusy(false); }
+  }
+  async function resetSignup() {
+    setSignupBusy(true); setSignupError("");
+    try { const response = await axios.delete(apiRoutes.adminSignupSettings); setSignup(response.data); }
+    catch (err) { setSignupError(err?.response?.data?.detail || "Could not reset signup settings."); }
+    finally { setSignupBusy(false); }
+  }
   useEffect(() => { setPage(1); }, [query, role, sort, pageSize]);
   const filtered = useMemo(() => overview.filter(entry => (role === "all" || entry.user.role === role) && Number.isFinite(searchScore(query, [entry.user.name, entry.user.email, ...entry.machines.flatMap(m => [m.name, m.hostname, m.local_ip, m.public_ip, ...(m.ports || []).flatMap(p => [p.service_name, p.external_port])])]))).sort((a, b) => sort === "machines" ? b.machines.length - a.machines.length : (a.user.name || a.user.email).localeCompare(b.user.name || b.user.email)), [overview, query, role, sort]);
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
@@ -33,6 +52,10 @@ export default function PlatformOverview() {
   const visible = filtered.slice(visibleStart, visibleStart + pageSize);
   return <div className="workspace-page">
     <PageHeader title="Platform Overview" />
+    <section className="rounded-xl bg-surface p-4" aria-label="Signup settings">
+      <div className="flex flex-wrap items-center justify-between gap-4"><div><h2 className="text-sm font-semibold">New signups</h2><p className="mt-1 text-xs text-muted-foreground">{signup ? `Currently ${signup.signup_enabled ? "enabled" : "disabled"}. ${signup.configured ? "Using the platform override." : `Using the SIGNUP_DISABLED environment default (${signup.env_default ? "enabled" : "disabled"}).`}` : "Loading signup settings…"}</p></div><div className="flex items-center gap-3"><Switch aria-label="Enable new signups" checked={signup?.signup_enabled ?? false} disabled={!signup || signupBusy} onChange={event => setSignupEnabled(event.currentTarget.checked)} /><Button type="button" variant="outline" disabled={!signup?.configured || signupBusy} onClick={resetSignup}>Reset to env default</Button></div></div>
+      {signupError && <p role="alert" className="mt-2 text-xs text-red-600 dark:text-red-400">{signupError}</p>}
+    </section>
     <div className="toolbar flex-row flex-wrap items-center"><div className="min-w-0 basis-full sm:mr-auto sm:basis-72"><SearchField value={query} onChange={setQuery} label="Search platform" placeholder="Search users or machines…" /></div><SearchSelect className="min-w-0 flex-1 sm:w-44 sm:flex-none" label="Filter account role" value={role} onChange={setRole} options={[{value:"all",label:"All roles"},{value:"admin",label:"Administrators"},{value:"user",label:"Members"}]} /><SearchSelect className="min-w-0 flex-1 sm:w-44 sm:flex-none" label="Sort accounts" value={sort} onChange={setSort} options={[{value:"name",label:"Name A–Z"},{value:"machines",label:"Most machines"}]} /><Button type="button" variant="outline" onClick={load} disabled={loading} aria-label="Refresh platform"><IconRefresh size={15} /><span className="hidden sm:inline">Refresh</span></Button></div>
     {error ? <EmptyState icon={IconServer} title="Platform unavailable" description={error} action={<Button onClick={load}>Try again</Button>} /> : loading ? <p role="status" className="p-6 text-xs text-muted-foreground">Loading accounts…</p> : !filtered.length ? <EmptyState icon={IconUsers} title="No matching accounts" description="Try a different name, email, machine, or port." /> : <section aria-label="Platform results" className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-surface">
       <div className="data-scroll">

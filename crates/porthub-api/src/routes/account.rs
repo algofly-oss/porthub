@@ -96,8 +96,18 @@ async fn signup(
                 "An administrator must resolve duplicate account names before invited registration",
             ));
         }
-    } else if app.config.signup_disabled {
-        return Err(ApiError::new(StatusCode::FORBIDDEN, "sign up is disabled"));
+    } else {
+        let setting = app
+            .collection("platform_settings")
+            .find_one(doc! {"_id":"platform"})
+            .await?;
+        let signup_enabled = setting
+            .as_ref()
+            .and_then(|d| d.get_bool("signup_enabled").ok())
+            .unwrap_or(!app.config.signup_disabled);
+        if !signup_enabled {
+            return Err(ApiError::new(StatusCode::FORBIDDEN, "sign up is disabled"));
+        }
     }
     if app
         .collection("users")
