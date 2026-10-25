@@ -21,7 +21,7 @@ boundaries and [`gateway.md`](gateway.md) for the public data path.
 
 ## Deployment and release status
 
-Native release `1.3.4` is deployed on URM2. Images use stable `porthub:core`,
+Native release `1.3.5` is deployed on URM2. Images use stable `porthub:core`,
 `porthub:edge`, and `porthub:firewall` tags, with version and source revision
 labels. Client binaries are released together for the supported OS and CPU
 targets; the API serves the staged release bundle to installers.

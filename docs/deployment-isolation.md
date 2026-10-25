@@ -1,7 +1,7 @@
 # Native deployment boundaries
 
 The root Dockerfile and single `docker-compose.yml` define three native server
-roles. Native release 1.3.4 is deployed on URM2. Persistent PortHub state is
+roles. Native release 1.3.5 is deployed on URM2. Persistent PortHub state is
 host-bound under `/home/ubuntu/algofly/porthub/volumes/porthub-native`; the
 original named volumes remain intact for rollback.
 
