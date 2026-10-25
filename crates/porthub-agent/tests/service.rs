@@ -507,6 +507,48 @@ async fn explicit_bootstrap_adoption_replaces_legacy_cli_and_restores_it_on_fail
     Ok(())
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn explicit_bootstrap_adoption_replaces_cli_symlink_and_restores_it_on_failure() -> Result<()>
+{
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let temp = common::private_dir()?;
+    let layout = layout(temp.path());
+    let source = profile(temp.path(), "0123456789abcdef01234567")?;
+    let executable = temp.path().join("downloaded-agent");
+    std::fs::write(&executable, b"first native agent release")?;
+    let cli = temp.path().join("bin/porthub");
+    std::fs::create_dir(cli.parent().unwrap())?;
+    std::fs::set_permissions(
+        cli.parent().unwrap(),
+        std::fs::Permissions::from_mode(0o755),
+    )?;
+    let manager = Fake::default();
+    service::install_published(&layout, &source, &executable, &manager, Some(&cli)).await?;
+
+    std::fs::remove_file(&cli)?;
+    let legacy = temp.path().join("legacy-bin/porthub");
+    std::fs::create_dir(legacy.parent().unwrap())?;
+    std::fs::write(&legacy, b"previous package-managed CLI")?;
+    std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o755))?;
+    symlink(&legacy, &cli)?;
+    std::fs::write(&executable, b"updated native agent release")?;
+
+    manager.fail_start.store(true, Ordering::SeqCst);
+    ensure!(
+        service::install_published_adopting_cli(&layout, &source, &executable, &manager, &cli)
+            .await
+            .is_err()
+    );
+    ensure!(std::fs::read_link(&cli)? == legacy);
+
+    let installed =
+        service::install_published_adopting_cli(&layout, &source, &executable, &manager, &cli)
+            .await?;
+    ensure!(std::fs::read_link(&cli)? == installed.executable);
+    Ok(())
+}
+
 #[tokio::test]
 async fn native_registration_selection_is_scoped_unambiguous_and_does_not_accept_arbitrary_paths(
 ) -> Result<()> {

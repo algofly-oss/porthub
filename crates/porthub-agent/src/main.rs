@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
     version = option_env!("PORTHUB_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
     about = "PortHub agent and transfer tools",
     color = clap::ColorChoice::Auto,
-    after_long_help = "Examples:\n  porthub http.server ./public\n  porthub http.receive ./drop\n  porthub push ./dataset http://host:8001/\n  porthub get https://example.com/file.iso\n  porthub list --user"
+    after_long_help = "Examples:\n  porthub ls\n  porthub http.server ./public\n  porthub http.receive ./drop\n  porthub push ./dataset http://host:8001/\n  porthub get https://example.com/file.iso"
 )]
 struct Args {
     #[command(subcommand)]
@@ -142,6 +142,7 @@ enum Command {
         profile: PathBuf,
     },
     /// Enroll a private identity; long tickets are read from stdin.
+    #[command(hide = true)]
     Enroll {
         #[arg(long, required_unless_present = "ticket", conflicts_with = "ticket")]
         server: Option<String>,
@@ -273,11 +274,13 @@ enum Command {
         force: bool,
     },
     /// Run public service forwarding using an in-process Rathole client.
+    #[command(hide = true)]
     Tunnel {
         #[arg(short = 'c', long)]
         config: PathBuf,
     },
     /// Save a machine profile; read its token from stdin instead of process arguments.
+    #[command(hide = true)]
     Configure {
         #[arg(long)]
         profile: PathBuf,
@@ -291,6 +294,7 @@ enum Command {
         allow_insecure_http_for_tests: bool,
     },
     /// Run a saved machine profile, with native control sync and embedded tunnels.
+    #[command(hide = true)]
     Run {
         #[arg(long)]
         profile: PathBuf,
@@ -304,6 +308,7 @@ enum Command {
         user: bool,
     },
     /// Manage a boot-time service for one registered machine profile.
+    #[command(hide = true)]
     Service {
         #[arg(long, global = true)]
         user: bool,
@@ -317,6 +322,7 @@ enum Command {
         verbose: bool,
     },
     /// Check or update an existing native registration and its private pair.
+    #[command(hide = true)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     Update {
         selector: Option<String>,
@@ -1358,10 +1364,58 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod cli_tests {
     use super::{print_help, requires_system_privileges, short_version_requested, Args};
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
 
     fn args(arguments: &[&str]) -> Args {
         Args::try_parse_from(arguments).expect("valid CLI fixture")
+    }
+
+    #[test]
+    fn default_help_keeps_maintenance_commands_advanced_but_accessible() {
+        let command = Args::command();
+        let visible = command
+            .get_subcommands()
+            .filter(|subcommand| !subcommand.is_hide_set())
+            .map(|subcommand| subcommand.get_name().to_owned())
+            .collect::<Vec<_>>();
+        for common in [
+            "list",
+            "start",
+            "stop",
+            "restart",
+            "setup",
+            "http.server",
+            "http.receive",
+            "get",
+            "push",
+            "status",
+            "version",
+        ] {
+            assert!(
+                visible.iter().any(|name| name == common),
+                "missing {common}"
+            );
+        }
+        for advanced in ["enroll", "tunnel", "configure", "run", "service", "update"] {
+            assert!(
+                command
+                    .get_subcommands()
+                    .any(|subcommand| subcommand.get_name() == advanced && subcommand.is_hide_set()),
+                "advanced command {advanced} must remain available but hidden"
+            );
+        }
+        assert!(args(&[
+            "porthub",
+            "configure",
+            "--profile",
+            "/tmp/profile.json",
+            "--server",
+            "https://gateway.example",
+            "--machine-id",
+            "machine-id"
+        ])
+        .command
+        .is_some());
     }
 
     #[test]

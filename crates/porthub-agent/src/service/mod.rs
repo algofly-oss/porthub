@@ -757,7 +757,7 @@ pub async fn install_published_adopting_cli(
     manager: &dyn Manager,
     cli: &Path,
 ) -> Result<Spec> {
-    let legacy_hash = publication::hash_file(cli)?;
+    let legacy_hash = publication::hash_adoption_source(cli)?;
     install_published_mode(
         layout,
         source,

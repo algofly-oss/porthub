@@ -68,6 +68,63 @@ pub(crate) fn hash_file(path: &Path) -> Result<String> {
     }
     Ok(format!("{:x}", hash.finalize()))
 }
+/// Hash an existing CLI during an explicit bootstrap adoption. A system or
+/// package installer may publish the CLI through a symlink, so resolve that
+/// link once and apply the same bounded, owned-file checks to its target.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn hash_adoption_source(path: &Path) -> Result<String> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            anyhow::ensure!(
+                metadata.uid() == rustix::process::getuid().as_raw(),
+                "CLI link is not owned by this account"
+            );
+        }
+    } else {
+        anyhow::ensure!(metadata.is_file(), "existing CLI is not a regular file");
+    }
+    let target = std::fs::canonicalize(path)?;
+    let metadata = std::fs::symlink_metadata(&target)?;
+    anyhow::ensure!(
+        metadata.is_file() && metadata.len() <= 256 * 1024 * 1024,
+        "CLI target must be a bounded regular file"
+    );
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+        anyhow::ensure!(
+            metadata.permissions().mode() & 0o022 == 0,
+            "CLI executable permissions are unsafe"
+        );
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut file = options.open(target)?;
+    let current = file.metadata()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        anyhow::ensure!(
+            metadata.dev() == current.dev() && metadata.ino() == current.ino(),
+            "CLI executable changed during adoption"
+        );
+    }
+    anyhow::ensure!(current.is_file(), "CLI target must be a regular file");
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
 fn owned_target(layout: &Layout, target: &Path) -> Result<()> {
     let parent = target
         .parent()
@@ -164,7 +221,14 @@ fn state(
                 );
             }
             let previous = std::fs::read_link(path)?;
-            owned_target(layout, &previous)?;
+            if let Some(expected) = legacy_hash {
+                anyhow::ensure!(
+                    hash_adoption_source(path)? == expected,
+                    "existing CLI changed during adoption"
+                );
+            } else {
+                owned_target(layout, &previous)?;
+            }
             Ok(Previous::Link(previous))
         }
         Ok(metadata) if metadata.is_file() => {
@@ -172,8 +236,17 @@ fn state(
             let backup = private_directory(parent)?;
             let saved = backup.path().join("porthub");
             std::fs::hard_link(path, &saved)?;
+            let current_hash = if legacy_hash.is_some() {
+                hash_adoption_source(&saved)?
+            } else {
+                hash_file(&saved)?
+            };
+            let expected_hash = match legacy_hash {
+                Some(hash) => hash.to_owned(),
+                None => hash_file(target)?,
+            };
             anyhow::ensure!(
-                hash_file(&saved)? == legacy_hash.map(str::to_owned).unwrap_or(hash_file(target)?),
+                current_hash == expected_hash,
                 "existing CLI is not the selected native binary; legacy adoption must be explicit"
             );
             Ok(Previous::IdenticalFile(backup))

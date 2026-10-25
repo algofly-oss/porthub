@@ -227,12 +227,6 @@ impl Launchd {
         let target = format!("{}/{}", self.domain, label);
         let expected_path = path(&plist)?;
         let previous = super::regular(&plist)?;
-        if let Some(previous) = &previous {
-            ensure!(
-                previous == contents.as_bytes(),
-                "owned maintenance job changed"
-            );
-        }
         let loaded = Self::command(&["print", &target]).await?;
         if loaded.status.success() {
             let description = String::from_utf8(loaded.stdout)?;
@@ -240,15 +234,25 @@ impl Launchd {
                 previous.is_some() && loaded_job_matches(&description, &expected_path),
                 "launchd maintenance label is already owned by another job"
             );
-            // An identical job may already be running. Leave it alone; updates
-            // are idempotent and must not interrupt a live replacement.
-            return Ok(label);
+            if previous.as_deref() == Some(contents.as_bytes()) {
+                // An identical job may already be running. Leave it alone;
+                // updates are idempotent and must not interrupt a replacement.
+                return Ok(label);
+            }
+            ensure!(
+                !description
+                    .lines()
+                    .any(|line| line.trim() == "state = running"),
+                "a different PortHub maintenance operation is still running"
+            );
+            Self::checked(&["bootout", &target]).await?;
+        } else {
+            ensure!(
+                loaded.status.code() == Some(113),
+                "cannot inspect launchd maintenance job (exit {:?})",
+                loaded.status.code()
+            );
         }
-        ensure!(
-            loaded.status.code() == Some(113),
-            "cannot inspect launchd maintenance job (exit {:?})",
-            loaded.status.code()
-        );
         super::atomic(&plist, contents.as_bytes(), true)?;
         if let Err(error) = Self::checked(&["bootstrap", &self.domain, &expected_path]).await {
             let _ = std::fs::remove_file(&plist);

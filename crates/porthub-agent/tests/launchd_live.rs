@@ -152,6 +152,89 @@ async fn native_launchd_user_agent_forwards_restarts_stops_and_is_removed() -> R
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires an authorized macOS user session and PORTHUB_TEST_LAUNCHD=1"]
+async fn completed_maintenance_job_can_be_replaced_for_the_same_registration() -> Result<()> {
+    ensure!(
+        std::env::var("PORTHUB_TEST_LAUNCHD").as_deref() == Ok("1"),
+        "explicit launchd test opt-in required"
+    );
+    let temp = common::private_dir()?;
+    let state = temp.path().join("native-state");
+    std::fs::create_dir(&state)?;
+    let profile = state.join("registration.json");
+    let record_a = state.join("release-a.json");
+    let record_b = state.join("release-b.json");
+    std::fs::write(&profile, b"fixture")?;
+    std::fs::write(&record_a, b"release a")?;
+    std::fs::write(&record_b, b"release b")?;
+
+    let manager = service::launchd::Launchd::connect(true).await?;
+    let arguments = |record: &PathBuf| {
+        vec![
+            "update".into(),
+            "--apply".into(),
+            "--profile".into(),
+            profile.to_string_lossy().into_owned(),
+            "--release-record".into(),
+            record.to_string_lossy().into_owned(),
+            "--user".into(),
+        ]
+    };
+    let first = manager
+        .schedule_update(
+            PathBuf::from("/usr/bin/true").as_path(),
+            &arguments(&record_a),
+        )
+        .await?;
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match manager
+                .schedule_update(
+                    PathBuf::from("/usr/bin/true").as_path(),
+                    &arguments(&record_b),
+                )
+                .await
+            {
+                Ok(second) => {
+                    ensure!(first == second, "maintenance identity changed unexpectedly");
+                    return anyhow::Ok(());
+                }
+                Err(error) if error.to_string().contains("still running") => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    })
+    .await??;
+    let _ = result;
+
+    let uid = rustix::process::getuid().as_raw();
+    let gui = format!("gui/{uid}");
+    let domain = if tokio::process::Command::new("/bin/launchctl")
+        .args(["print", &gui])
+        .output()
+        .await?
+        .status
+        .success()
+    {
+        gui
+    } else {
+        format!("user/{uid}")
+    };
+    let target = format!("{domain}/{first}");
+    let _ = tokio::process::Command::new("/bin/launchctl")
+        .args(["bootout", &target])
+        .output()
+        .await?;
+    let plist = state.join(format!("{first}.plist"));
+    if plist.exists() {
+        std::fs::remove_file(plist)?;
+    }
+    Ok(())
+}
+
 async fn transfer(address: std::net::SocketAddr) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
