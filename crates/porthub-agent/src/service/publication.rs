@@ -96,7 +96,7 @@ pub(crate) fn hash_adoption_source(path: &Path) -> Result<String> {
     options.read(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         anyhow::ensure!(
             metadata.permissions().mode() & 0o022 == 0,
             "CLI executable permissions are unsafe"
@@ -124,6 +124,10 @@ pub(crate) fn hash_adoption_source(path: &Path) -> Result<String> {
         hash.update(&buffer[..count]);
     }
     Ok(format!("{:x}", hash.finalize()))
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn hash_adoption_source(path: &Path) -> Result<String> {
+    hash_file(path)
 }
 fn owned_target(layout: &Layout, target: &Path) -> Result<()> {
     let parent = target

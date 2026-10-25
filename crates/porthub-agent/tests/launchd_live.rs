@@ -183,6 +183,7 @@ async fn completed_maintenance_job_can_be_replaced_for_the_same_registration() -
     };
     let first = manager
         .schedule_update(
+            &state,
             PathBuf::from("/usr/bin/true").as_path(),
             &arguments(&record_a),
         )
@@ -191,6 +192,7 @@ async fn completed_maintenance_job_can_be_replaced_for_the_same_registration() -
         loop {
             match manager
                 .schedule_update(
+                    &state,
                     PathBuf::from("/usr/bin/true").as_path(),
                     &arguments(&record_b),
                 )
