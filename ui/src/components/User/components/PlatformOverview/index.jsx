@@ -4,6 +4,7 @@ import { useWorkspaceState } from "@/shared/contexts/workspaceCache";
 import SearchSelect from "@/components/ui/search-select";
 import ResultsPagination from "@/components/ui/results-pagination";
 import { useEffect, useMemo, useState } from "react";
+import { Popover } from "@mantine/core";
 import axios from "axios";
 import { IconChevronDown, IconRefresh, IconUsers, IconServer } from "@tabler/icons-react";
 import { motion, useReducedMotion } from "framer-motion";
@@ -19,6 +20,7 @@ export default function PlatformOverview() {
   const [page, setPage] = useState(1), [pageSize, setPageSize] = useState(25);
   const [signup, setSignup] = useState(null), [signupBusy, setSignupBusy] = useState(false), [signupError, setSignupError] = useState("");
   const [docs, setDocs] = useState(null), [docsBusy, setDocsBusy] = useState(false), [docsError, setDocsError] = useState("");
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const reduced = useReducedMotion();
   async function load(signal) {
     const options = signal instanceof AbortSignal ? { signal } : {};
@@ -69,12 +71,14 @@ export default function PlatformOverview() {
   return <div className="workspace-page">
     <PageHeader title="Platform Overview" />
     <div className="toolbar flex-row flex-wrap items-center"><div className="min-w-0 basis-full sm:mr-auto sm:basis-72"><SearchField value={query} onChange={setQuery} label="Search platform" placeholder="Search users or machines…" /></div><SearchSelect className="min-w-0 flex-1 sm:w-44 sm:flex-none" label="Filter account role" value={role} onChange={setRole} options={[{value:"all",label:"All roles"},{value:"admin",label:"Administrators"},{value:"user",label:"Members"}]} /><SearchSelect className="min-w-0 flex-1 sm:w-44 sm:flex-none" label="Sort accounts" value={sort} onChange={setSort} options={[{value:"name",label:"Name A–Z"},{value:"machines",label:"Most machines"}]} />
-      <details className="relative shrink-0">
-        <summary className="flex h-9 cursor-pointer list-none items-center gap-2 rounded-md border border-border bg-surface px-3 text-xs font-medium hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+      <Popover opened={settingsOpen} onChange={setSettingsOpen} withinPortal position="bottom-end" width={360} zIndex={420} shadow="sm" transitionProps={{ duration: 0 }}>
+        <Popover.Target>
+        <button type="button" aria-expanded={settingsOpen} onClick={() => setSettingsOpen(open => !open)} className="flex h-10 shrink-0 cursor-pointer items-center gap-2 rounded-lg border border-transparent bg-control px-3 text-sm text-foreground hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
           Platform settings
           <IconChevronDown size={14} className="text-muted-foreground" />
-        </summary>
-        <div className="absolute right-0 z-30 mt-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-surface p-3 shadow-xl">
+        </button>
+        </Popover.Target>
+        <Popover.Dropdown className="!max-w-[calc(100vw-2rem)] !rounded-xl !border-border !bg-dialog !p-3 !text-foreground shadow-lg">
           <div className="flex items-center justify-between gap-3">
             <div><p className="text-sm font-medium">New signups</p><p className="mt-1 text-[11px] text-muted-foreground">{signup ? signup.configured ? "Custom admin setting" : `Environment default: ${signup.env_default ? "enabled" : "disabled"}` : "Loading setting…"}</p></div>
             <button type="button" role="switch" aria-label="Enable new signups" aria-checked={signup?.signup_enabled ?? false} disabled={!signup || signupBusy} onClick={() => setSignupEnabled(!signup.signup_enabled)} className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 ${signup?.signup_enabled ? "bg-primary" : "bg-muted-foreground/35"}`}><span className={`pointer-events-none block h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${signup?.signup_enabled ? "translate-x-[22px]" : "translate-x-0.5"}`} /></button>
@@ -95,8 +99,8 @@ export default function PlatformOverview() {
             </div>
             {docsError && <p role="alert" className="mt-2 text-xs text-red-600 dark:text-red-400">{docsError}</p>}
           </div>
-        </div>
-      </details>
+        </Popover.Dropdown>
+      </Popover>
       <Button type="button" variant="outline" onClick={load} disabled={loading} aria-label="Refresh platform"><IconRefresh size={15} /><span className="hidden sm:inline">Refresh</span></Button></div>
     {error ? <EmptyState icon={IconServer} title="Platform unavailable" description={error} action={<Button onClick={load}>Try again</Button>} /> : loading ? <p role="status" className="p-6 text-xs text-muted-foreground">Loading accounts…</p> : !filtered.length ? <EmptyState icon={IconUsers} title="No matching accounts" description="Try a different name, email, machine, or port." /> : <section aria-label="Platform results" className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-surface">
       <div className="data-scroll">
