@@ -54,7 +54,7 @@ async fn exercise_discovery(network_change: bool) -> Result<()> {
         let app=case.router.clone();let stop=gateway_cancel.clone();gateway=Some(tokio::spawn(async move {axum::serve(listener,app).with_graceful_shutdown(stop.cancelled_owned()).await.map_err(anyhow::Error::from)}));
         let mut sessions:Vec<Sessions>=Vec::new();let mut receivers=Vec::new();let mut interface_updates=Vec::new();
         for id in &peers {
-            let profile=Profile{server:base.clone(),peer_id:id.clone(),workspace:owner.to_hex(),token:token.into(),fallback_servers:vec![],allow_insecure_http_for_tests:true};
+            let profile=Profile{server:base.clone(),peer_id:id.clone(),workspace:owner.to_hex(),token:token.into(),account_email:None,fallback_servers:vec![],allow_insecure_http_for_tests:true};
             let live:Sessions=Default::default();let (output,input)=mpsc::channel(4096);
             if network_change {
                 let initial=if interface_updates.is_empty() {Vec::new()} else {vec!["127.0.0.1:0".parse()?]};
@@ -184,7 +184,7 @@ async fn native_gateway_fallback_authenticates_leases_and_blocks_spoofed_packet_
         }
         let mut senders=Vec::new();let mut receivers=Vec::new();
         for peer in &peers {
-            let profile=Profile{server:base.clone(),peer_id:peer.clone(),workspace:owner.to_hex(),token:token.into(),fallback_servers:vec![],allow_insecure_http_for_tests:true};
+            let profile=Profile{server:base.clone(),peer_id:peer.clone(),workspace:owner.to_hex(),token:token.into(),account_email:None,fallback_servers:vec![],allow_insecure_http_for_tests:true};
             let (sender,input)=relay::channel();let (output,events)=mpsc::channel(16);
             tasks.spawn(relay::run(profile,"relay-instance-0123456789".into(),sender.clone(),input,output,cancel.child_token()));
             senders.push(sender);receivers.push(events);

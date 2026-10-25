@@ -143,6 +143,7 @@ fn control(server: String, fallback_servers: Vec<String>) -> Result<Control> {
         server,
         machine_id: ID.into(),
         token: TOKEN.into(),
+        account_email: None,
         setup_overrides: Default::default(),
         fallback_servers,
         allow_insecure_http_for_tests: true,

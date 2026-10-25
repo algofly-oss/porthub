@@ -93,6 +93,7 @@ pub(crate) fn parse_with_server(
         server,
         machine_id: required("PORT_HUB_MACHINE_ID")?,
         token: required("PORT_HUB_MACHINE_TOKEN")?,
+        account_email: None,
         fallback_servers,
         setup_overrides: BTreeMap::new(),
         allow_insecure_http_for_tests: false,

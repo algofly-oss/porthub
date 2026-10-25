@@ -81,6 +81,7 @@ async fn real_api_update_request_is_acknowledged_only_after_native_worker_commit
         server: base,
         machine_id: id.to_hex(),
         token: token.into(),
+        account_email: None,
         setup_overrides: Default::default(),
         fallback_servers: vec![],
         allow_insecure_http_for_tests: true,

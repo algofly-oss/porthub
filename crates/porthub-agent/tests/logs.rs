@@ -31,6 +31,7 @@ fn profile(server: String) -> Profile {
         server,
         machine_id: ID.into(),
         token: TOKEN.into(),
+        account_email: None,
         setup_overrides: Default::default(),
         fallback_servers: vec![],
         allow_insecure_http_for_tests: true,

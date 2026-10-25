@@ -17,6 +17,8 @@ pub struct Profile {
     pub server: String,
     pub machine_id: String,
     pub token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_email: Option<String>,
     #[serde(default)]
     pub fallback_servers: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -63,6 +65,13 @@ impl Profile {
             (1..=512).contains(&self.token.len()) && !self.token.contains(['\r', '\n']),
             "invalid machine token"
         );
+        if let Some(email) = &mut self.account_email {
+            *email = email.trim().to_ascii_lowercase();
+            anyhow::ensure!(
+                email.len() <= 254 && !email.is_empty() && !email.chars().any(char::is_control),
+                "invalid account email"
+            );
+        }
         self.server = base(&self.server, self.allow_insecure_http_for_tests)?;
         anyhow::ensure!(
             self.fallback_servers.len() <= 8,

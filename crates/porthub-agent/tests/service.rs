@@ -112,6 +112,7 @@ fn profile(path: &Path, id: &str) -> Result<std::path::PathBuf> {
         server: "https://porthub.example".into(),
         machine_id: id.into(),
         token: "service-fixture-secret".into(),
+        account_email: None,
         setup_overrides: Default::default(),
         fallback_servers: vec![],
         allow_insecure_http_for_tests: false,

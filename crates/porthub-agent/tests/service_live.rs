@@ -257,6 +257,7 @@ async fn actual_systemd_user_service_runs_native_agent_restarts_and_is_removed()
         server: format!("http://{address}"),
         machine_id: machine,
         token: "local-service-fixture-secret".into(),
+        account_email: None,
         setup_overrides: Default::default(),
         fallback_servers: vec![],
         allow_insecure_http_for_tests: true,

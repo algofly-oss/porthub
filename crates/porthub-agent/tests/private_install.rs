@@ -40,6 +40,7 @@ async fn native_private_install_request_uses_authenticated_machine_body_and_medi
         server: format!("http://{address}"),
         machine_id: "0123456789abcdef01234567".into(),
         token: "machine-secret".into(),
+        account_email: None,
         fallback_servers: Vec::new(),
         setup_overrides: Default::default(),
         allow_insecure_http_for_tests: true,

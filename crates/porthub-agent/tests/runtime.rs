@@ -233,6 +233,7 @@ async fn scheduled_origin_failover_and_recovery_preserve_transfers_even_during_a
         server,
         machine_id: MACHINE.into(),
         token: TOKEN.into(),
+        account_email: None,
         setup_overrides: Default::default(),
         fallback_servers: Vec::new(),
         allow_insecure_http_for_tests: true,
@@ -315,7 +316,7 @@ async fn saved_profile_syncs_reload_in_place_and_revoke_without_a_helper_process
         let router=Router::new().route("/api/machines/client/sync",post(sync)).route("/api/machines/client/changes.toml",get(changes)).route("/api/machines/client/deletion-ack",post(ack)).with_state(state.clone());
         let listener=TcpListener::bind("127.0.0.1:0").await?;let server=format!("http://{}",listener.local_addr()?);let api=tokio::spawn(async move{axum::serve(listener,router).await});
         let directory=common::private_dir()?;let path=directory.path().join("machine.json");
-        Profile{format_version:1,server,machine_id:MACHINE.into(),token:TOKEN.into(),setup_overrides: Default::default(), fallback_servers:Vec::new(),allow_insecure_http_for_tests:true}.save_new(&path)?;
+        Profile{format_version:1,server,machine_id:MACHINE.into(),token:TOKEN.into(),account_email:None,setup_overrides: Default::default(), fallback_servers:Vec::new(),allow_insecure_http_for_tests:true}.save_new(&path)?;
         let cancel=CancellationToken::new();let worker=tokio::spawn(runtime::run(path.clone(),cancel.clone(),Options{heartbeat:Duration::from_secs(1),retry:Duration::from_millis(30),probe_timeout:Duration::from_millis(100)}));
         status(&path,"running").await?;ensure!(runtime::run(path.clone(),CancellationToken::new(),Options::default()).await.is_err(),"duplicate profile owner accepted");
         let mut stream=connected(public).await?;let payload:Vec<u8>=(0..1024*1024).map(|i|(i%251)as u8).collect();echo(&mut stream,&payload).await.context("initial payload")?;
@@ -365,6 +366,7 @@ async fn control_fallback_retries_network_failure_but_not_authorization_rejectio
         server: primary,
         machine_id: MACHINE.into(),
         token: TOKEN.into(),
+        account_email: None,
         setup_overrides: Default::default(),
         fallback_servers: vec![fallback_url],
         allow_insecure_http_for_tests: true,
@@ -431,6 +433,7 @@ async fn control_redirects_cannot_send_machine_credentials_to_an_unconfigured_en
         server: primary,
         machine_id: MACHINE.into(),
         token: TOKEN.into(),
+        account_email: None,
         setup_overrides: Default::default(),
         fallback_servers: vec![fallback],
         allow_insecure_http_for_tests: true,

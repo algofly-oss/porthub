@@ -18,6 +18,8 @@ pub struct Profile {
     pub peer_id: String,
     pub token: String,
     pub workspace: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_email: Option<String>,
     #[serde(default)]
     pub fallback_servers: Vec<String>,
     #[serde(default)]
@@ -47,6 +49,13 @@ impl Profile {
             (32..=200).contains(&self.token.len()) && !self.token.chars().any(char::is_control),
             "invalid private credential"
         );
+        if let Some(email) = &mut self.account_email {
+            *email = email.trim().to_ascii_lowercase();
+            anyhow::ensure!(
+                email.len() <= 254 && !email.is_empty() && !email.chars().any(char::is_control),
+                "invalid account email"
+            );
+        }
         self.server = profile::base(&self.server, self.allow_insecure_http_for_tests)
             .map_err(|_| anyhow::anyhow!("invalid private gateway authority"))?;
         anyhow::ensure!(
@@ -82,6 +91,8 @@ struct Metadata {
     peer_id: String,
     workspace: String,
     ticket: String,
+    #[serde(default)]
+    account_email: Option<String>,
     #[serde(default)]
     fallback_servers: Vec<String>,
 }
@@ -150,6 +161,8 @@ struct PendingInstall {
     peer_id: String,
     workspace: String,
     ticket: String,
+    #[serde(default)]
+    account_email: Option<String>,
     #[serde(default)]
     fallback_servers: Vec<String>,
 }
@@ -259,6 +272,7 @@ async fn auto_install_once(
         "private enrollment identity mismatch"
     );
     enrolled.fallback_servers = pending.fallback_servers;
+    enrolled.account_email = pending.account_email.or(public.account_email.clone());
     enrolled.validate()?;
     profile::write_private(&path, &serde_json::to_vec_pretty(&enrolled)?, true)?;
     activate_profile(layout, &path, executable).await?;
@@ -361,6 +375,7 @@ pub async fn enroll(
     {
         let http = client()?;
         let mut expected = None;
+        let mut account_email = None;
         let (server, ticket, fallbacks) = if let Source::Link(link) = source {
             let link = url::Url::parse(link)
                 .map_err(|_| anyhow::anyhow!("invalid private bootstrap URL"))?;
@@ -376,6 +391,7 @@ pub async fn enroll(
             let (headers, bytes) = response(request, cancel).await?;
             let metadata: Metadata = serde_json::from_slice(&bytes)
                 .map_err(|_| anyhow::anyhow!("invalid private bootstrap metadata"))?;
+            account_email = metadata.account_email.clone();
             anyhow::ensure!(
                 metadata.format_version == 1
                     && metadata.kind == "private"
@@ -393,6 +409,7 @@ pub async fn enroll(
                 peer_id: metadata.peer_id.clone(),
                 workspace: metadata.workspace.clone(),
                 token: "x".repeat(32),
+                account_email: metadata.account_email.clone(),
                 fallback_servers: metadata.fallback_servers.clone(),
                 allow_insecure_http_for_tests: insecure,
             };
@@ -444,6 +461,7 @@ pub async fn enroll(
             peer_id: credentials.peer_id,
             workspace: credentials.workspace,
             token: credentials.token,
+            account_email,
             fallback_servers: fallbacks,
             allow_insecure_http_for_tests: insecure,
         };

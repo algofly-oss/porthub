@@ -136,6 +136,7 @@ impl Buffer {
             server: profile.server.clone(),
             machine_id: profile.peer_id.clone(),
             token: profile.token.clone(),
+            account_email: profile.account_email.clone(),
             fallback_servers: profile.fallback_servers.clone(),
             setup_overrides: Default::default(),
             allow_insecure_http_for_tests: profile.allow_insecure_http_for_tests,

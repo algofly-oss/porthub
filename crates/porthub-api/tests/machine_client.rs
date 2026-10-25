@@ -67,6 +67,9 @@ impl Case {
         let owner = ObjectId::new();
         db.collection::<Document>("machines").insert_one(doc! {"_id":id,"user_id":owner,"name":"Luna","token":"machine-secret",
             "enabled":true,"hostname_override":"fixed-host","client_update_request_id":"update-1","client_update_target_version":"native-release"}).await?;
+        db.collection::<Document>("users")
+            .insert_one(doc! {"_id":owner,"email":"nitin@example.invalid","username":"nitin@example.invalid"})
+            .await?;
         db.collection::<Document>("connections").insert_many([
             doc! {"_id":ObjectId::new(),"machine_id":id,"internal_ip":"::1","internal_port":8080,"external_port":33126,"enabled":true,"service_name":"Files"},
             doc! {"_id":ObjectId::new(),"machine_id":id,"internal_ip":"127.0.0.1","internal_port":8081,"external_port":33127,"enabled":false},
@@ -123,6 +126,40 @@ impl Case {
     fn query(&self) -> String {
         format!("machine_id={}&token=machine-secret", self.id)
     }
+}
+
+#[tokio::test]
+#[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn client_identity_returns_the_authenticated_machine_account_email() -> Result<()> {
+    let case = Case::new().await?;
+    let result: Result<()> = async {
+        let (status, _, bytes) = case
+            .call(
+                "POST",
+                "/api/machines/client/identity",
+                json!({"machine_id":case.id.to_hex(),"token":"machine-secret"}),
+            )
+            .await?;
+        ensure!(status == StatusCode::OK);
+        let body: Value = serde_json::from_slice(&bytes)?;
+        ensure!(body["account_email"] == "nitin@example.invalid");
+
+        let (status, _, _) = case
+            .call(
+                "POST",
+                "/api/machines/client/identity",
+                json!({"machine_id":case.id.to_hex(),"token":"wrong"}),
+            )
+            .await?;
+        ensure!(status == StatusCode::UNAUTHORIZED);
+        case.db.drop().await?;
+        Ok(())
+    }
+    .await;
+    if result.is_err() {
+        let _ = case.db.drop().await;
+    }
+    result
 }
 
 #[tokio::test]

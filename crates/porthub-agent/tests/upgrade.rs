@@ -123,6 +123,7 @@ impl Fixture {
             server: "https://gateway.example".into(),
             machine_id: "0123456789abcdef01234567".into(),
             token: "native-upgrade-private-enrollment-token".into(),
+            account_email: None,
             fallback_servers: vec![],
             setup_overrides: Default::default(),
             allow_insecure_http_for_tests: false,
@@ -146,6 +147,7 @@ impl Fixture {
             workspace: "abcdef0123456789abcdef01".into(),
             peer_id: format!("abcdef0123456789abcdef01:{}", public.machine_id),
             token: "private-upgrade-credential-0123456789".into(),
+            account_email: None,
             fallback_servers: vec![],
             allow_insecure_http_for_tests: false,
         };

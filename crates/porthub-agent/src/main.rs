@@ -47,8 +47,10 @@ fn requires_system_privileges(args: &Args) -> bool {
         },
         Command::Start(args) | Command::Stop(args) | Command::Restart(args) => !args.user,
         Command::Remove(args) => !args.user,
-        Command::Status { user, .. } => !user,
-        Command::Service { user, .. } => !user,
+        Command::Status { user, profile, .. } => !user && profile.is_none(),
+        Command::Service { user, action } => {
+            !user && !matches!(action, ServiceCommand::Status { .. })
+        }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::Update { user, .. } => !user,
         Command::HttpServer {
@@ -718,20 +720,100 @@ async fn tenant_action(args: TenantArgs, action: porthub_agent::service::Action)
 async fn list_registrations(user: bool, json: bool) -> Result<()> {
     let entries = porthub_agent::service::registrations(&layout(user)?)?;
     let mut rows = Vec::new();
+    let mut email_lookups = Vec::new();
     if !entries.is_empty() {
         let manager = porthub_agent::service::system_manager(user).await?;
         for entry in entries {
             let state = manager.state(&entry.spec).await?;
             let runtime = porthub_agent::runtime::status(&entry.spec.profile).ok();
-            let server = if porthub_agent::private_network::is_profile(&entry.spec.profile)? {
-                porthub_agent::private_profile::Profile::load(&entry.spec.profile)?.server
-            } else {
-                porthub_agent::profile::Profile::load(&entry.spec.profile)?.server
-            };
-            rows.push(serde_json::json!({"id":entry.spec.identity,"machine_id":entry.machine_id,"gateway":display_gateway_url(&server),"active":state.active,"enabled":state.enabled,
+            let (server, email) =
+                if porthub_agent::private_network::is_profile(&entry.spec.profile)? {
+                    let profile =
+                        porthub_agent::private_profile::Profile::load(&entry.spec.profile)?;
+                    (profile.server, profile.account_email.unwrap_or_default())
+                } else {
+                    let profile = porthub_agent::profile::Profile::load(&entry.spec.profile)?;
+                    let email = profile.account_email.clone().unwrap_or_default();
+                    if email.is_empty() {
+                        email_lookups.push((
+                            entry.spec.identity.clone(),
+                            profile.server.clone(),
+                            profile.machine_id.clone(),
+                            profile.token.clone(),
+                            entry.spec.profile.clone(),
+                        ));
+                    }
+                    (profile.server, email)
+                };
+            rows.push(serde_json::json!({"id":entry.spec.identity,"machine_id":entry.machine_id,"email":email,"gateway":display_gateway_url(&server),"active":state.active,"enabled":state.enabled,
                 "state":runtime.as_ref().map(|state|state.state.as_str()).unwrap_or("unavailable"),
                 "agent_version":runtime.as_ref().map(|state|state.agent_version.as_str()).unwrap_or(""),
-                "services":runtime.as_ref().map(|state|state.service_count).unwrap_or(0),"route":runtime.as_ref().map(|state|state.route.as_str()).unwrap_or("")}));
+                "ports":runtime.as_ref().map(|state|state.service_count).unwrap_or(0),"route":runtime.as_ref().map(|state|state.route.as_str()).unwrap_or("")}));
+        }
+    }
+    if !email_lookups.is_empty() {
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(2))
+            .build()?;
+        let results = futures_util::future::join_all(email_lookups.into_iter().map(
+            |(id, server, machine_id, token, profile_path)| {
+                let client = client.clone();
+                async move {
+                    let response = client
+                        .post(format!("{server}/api/machines/client/identity"))
+                        .json(&serde_json::json!({"machine_id":machine_id,"token":token}))
+                        .send()
+                        .await;
+                    let email = match response {
+                        Ok(response) if response.status().is_success() => response
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()
+                            .and_then(|body| {
+                                body.get("account_email")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_owned)
+                            }),
+                        _ => None,
+                    };
+                    if let Some(email) = email.as_deref().filter(|email| !email.is_empty()) {
+                        if let Ok(mut profile) =
+                            porthub_agent::profile::Profile::load(&profile_path)
+                        {
+                            profile.account_email = Some(email.to_owned());
+                            if profile.validate().is_ok() {
+                                if let Ok(bytes) = serde_json::to_vec_pretty(&profile) {
+                                    let _ = porthub_agent::profile::write_private(
+                                        &profile_path,
+                                        &bytes,
+                                        true,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    (id, email)
+                }
+            },
+        ))
+        .await;
+        for (id, email) in results {
+            if let Some(email) = email.filter(|email| !email.is_empty()) {
+                let machine_id = rows
+                    .iter()
+                    .find(|row| row["id"] == id)
+                    .and_then(|row| row["machine_id"].as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                for row in &mut rows {
+                    if row["machine_id"] == machine_id
+                        && row["email"].as_str().is_none_or(str::is_empty)
+                    {
+                        row["email"] = email.clone().into();
+                    }
+                }
+            }
         }
     }
     if json {
@@ -742,7 +824,7 @@ async fn list_registrations(user: bool, json: bool) -> Result<()> {
         println!(
             "{}",
             paint(
-                "ID            MACHINE                   ACTIVE  STATE                  SERVICES  ROUTE    GATEWAY",
+                "ID            MACHINE                   ACCOUNT EMAIL              ACTIVE  STATE                  PORTS  ROUTE    GATEWAY",
                 "1;36"
             )
         );
@@ -767,13 +849,18 @@ async fn list_registrations(user: bool, json: bool) -> Result<()> {
                 _ => paint(route, "2"),
             };
             let gateway = paint(row["gateway"].as_str().unwrap(), "36");
+            let email = row["email"]
+                .as_str()
+                .filter(|email| !email.is_empty())
+                .unwrap_or("-");
             println!(
-                "{}  {}  {:<6}  {:<21}  {:<8}  {:<8}  {}",
+                "{}  {}  {:<27}  {:<6}  {:<21}  {:<5}  {:<8}  {}",
                 &row["id"].as_str().unwrap()[..12],
                 row["machine_id"].as_str().unwrap(),
+                email,
                 active,
                 state,
-                row["services"],
+                row["ports"],
                 route,
                 gateway
             );
@@ -1287,6 +1374,7 @@ async fn main() -> Result<()> {
                 server,
                 machine_id,
                 token,
+                account_email: None,
                 fallback_servers,
                 setup_overrides: Default::default(),
                 allow_insecure_http_for_tests,
@@ -1423,6 +1511,14 @@ mod cli_tests {
             &["porthub", "http.receive"][..],
             &["porthub", "http.server", "0", "."][..],
             &["porthub", "http.receive", "0", "."][..],
+            &["porthub", "status", "--profile", "/tmp/profile.json"][..],
+            &[
+                "porthub",
+                "service",
+                "status",
+                "--profile",
+                "/tmp/profile.json",
+            ][..],
             &["porthub", "list", "--user"][..],
             &["porthub", "setup", "--ticket", "ticket", "--user"][..],
         ] {

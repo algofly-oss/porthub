@@ -459,6 +459,7 @@ async fn installer_handoff_is_scoped_to_one_matching_enrollment_and_keeps_tokens
         server: "https://stable.example".into(),
         machine_id: format!("{:024x}", 1),
         token: "adoption-secret-must-not-leak".into(),
+        account_email: None,
         fallback_servers: options.fallback_servers.clone(),
         setup_overrides: std::collections::BTreeMap::from([(
             "service_domain".into(),

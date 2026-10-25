@@ -9,6 +9,7 @@ fn profile() -> Profile {
         server: "https://porthub.example/".into(),
         machine_id: "0123456789abcdef01234567".into(),
         token: "private-machine-token".into(),
+        account_email: None,
         setup_overrides: Default::default(),
         fallback_servers: vec!["https://fallback.example/".into()],
         allow_insecure_http_for_tests: false,

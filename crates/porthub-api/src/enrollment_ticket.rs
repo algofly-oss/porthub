@@ -209,6 +209,7 @@ pub async fn public_link(
 }
 
 pub struct Enrollment {
+    pub account_email: String,
     pub machine: Document,
     pub setup: Document,
     pub private: Option<(String, Document)>,
@@ -259,6 +260,7 @@ pub async fn resolve(app: &App, code: &str) -> ApiResult<Enrollment> {
         None
     };
     Ok(Enrollment {
+        account_email: account_email(app, &machine).await?,
         machine,
         setup: ticket.get_document("setup").cloned().unwrap_or_default(),
         private,
@@ -266,6 +268,7 @@ pub async fn resolve(app: &App, code: &str) -> ApiResult<Enrollment> {
 }
 impl Enrollment {
     pub fn values(&self, app: &App, headers: &HeaderMap) -> ApiResult<Value> {
+        let account_email = (!self.account_email.is_empty()).then_some(self.account_email.as_str());
         let query = HashMap::new();
         let view = View {
             headers,
@@ -293,7 +296,7 @@ impl Enrollment {
             .collect();
         if let Some((ticket, peer)) = &self.private {
             return Ok(
-                json!({"format_version":1,"kind":"private","server":server,"peer_id":store::field(peer,"_id"),"workspace":store::field(peer,"workspace_id"),"ticket":ticket,"fallback_servers":fallbacks}),
+                json!({"format_version":1,"kind":"private","server":server,"peer_id":store::field(peer,"_id"),"workspace":store::field(peer,"workspace_id"),"ticket":ticket,"fallback_servers":fallbacks,"account_email":account_email}),
             );
         }
         let mut overrides = serde_json::Map::new();
@@ -308,7 +311,26 @@ impl Enrollment {
         Ok(
             json!({"format_version":1,"profile":{"format_version":1,"server":server,
             "machine_id":store::id(self.machine.get("_id")),"token":store::string(&self.machine,"token"),
-            "fallback_servers":fallbacks,"setup_overrides":overrides,"allow_insecure_http_for_tests":false}}),
+            "fallback_servers":fallbacks,"setup_overrides":overrides,"allow_insecure_http_for_tests":false,"account_email":account_email}}),
         )
     }
+}
+
+async fn account_email(app: &App, machine: &Document) -> ApiResult<String> {
+    let Some(user_id) = machine.get("user_id") else {
+        return Ok(String::new());
+    };
+    let Some(user) = app
+        .collection("users")
+        .find_one(doc! {"_id":user_id})
+        .await?
+    else {
+        return Ok(String::new());
+    };
+    let email = store::string(&user, "email");
+    Ok(if email.trim().is_empty() {
+        store::string(&user, "username").to_owned()
+    } else {
+        email.to_owned()
+    })
 }

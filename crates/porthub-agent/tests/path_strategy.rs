@@ -17,6 +17,7 @@ fn fixture(directory: &Path) -> Result<std::path::PathBuf> {
         workspace: "0123456789abcdef01234567".into(),
         peer_id: "0123456789abcdef01234567:abcdef0123456789abcdef01".into(),
         token: "private-credential-never-shown-in-output".into(),
+        account_email: None,
         fallback_servers: vec![],
         allow_insecure_http_for_tests: false,
     };

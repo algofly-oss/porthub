@@ -82,6 +82,7 @@ async fn native_launchd_user_agent_forwards_restarts_stops_and_is_removed() -> R
         server: format!("http://{address}"),
         machine_id: machine,
         token: "launchd-fixture-secret".into(),
+        account_email: None,
         fallback_servers: Vec::new(),
         setup_overrides: Default::default(),
         allow_insecure_http_for_tests: true,

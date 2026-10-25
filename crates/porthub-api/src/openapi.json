@@ -2339,6 +2339,45 @@
         }
       }
     },
+    "/api/machines/client/identity": {
+      "post": {
+        "operationId": "post_api_machines_client_identity",
+        "summary": "Get the registered account email for a machine",
+        "tags": [
+          "Machines"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "machine_id",
+                  "token"
+                ],
+                "properties": {
+                  "machine_id": {
+                    "type": "string"
+                  },
+                  "token": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Authenticated machine account email"
+          },
+          "401": {
+            "description": "Machine is not authorized"
+          }
+        }
+      }
+    },
     "/api/machines/client/private-install": {
       "post": {
         "operationId": "post_api_machines_client_private_install",

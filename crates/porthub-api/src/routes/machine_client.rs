@@ -25,6 +25,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/api/machines/client/auth", post(session))
         .route("/api/machines/client/sync", post(session))
         .route("/api/machines/sync", post(session))
+        .route("/api/machines/client/identity", post(identity))
         .route(
             "/api/machines/client/private-install",
             post(pending_private_install),
@@ -34,6 +35,35 @@ pub fn router() -> Router<Arc<App>> {
         .route("/api/machines/client/changes", get(config))
         .route("/api/machines/client/changes.toml", get(config))
         .route("/api/machines/client/deletion-ack", post(deletion_ack))
+}
+
+async fn identity(State(app): State<Arc<App>>, ApiBody(body): ApiBody) -> ApiResult<Json<Value>> {
+    let mut model = Model::new(body)?;
+    let id = model.required_string("machine_id");
+    model.string_length("machine_id", &id, 1, Some(64));
+    let token = model.required_string("token");
+    model.string_length("token", &token, 1, None);
+    model.finish()?;
+    let machine = machine_client::authenticate(&app, &id, &token).await?;
+    let owner = if let Some(user_id) = machine.get("user_id") {
+        app.collection("users")
+            .find_one(mongodb::bson::doc! {"_id":user_id})
+            .await?
+    } else {
+        None
+    };
+    let email = owner
+        .as_ref()
+        .map(|user| {
+            let email = store::string(user, "email");
+            if email.trim().is_empty() {
+                store::string(user, "username")
+            } else {
+                email
+            }
+        })
+        .unwrap_or_default();
+    Ok(Json(json!({"account_email":email})))
 }
 
 async fn pending_private_install(

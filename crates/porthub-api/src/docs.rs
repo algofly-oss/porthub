@@ -90,6 +90,7 @@ mod tests {
                 .unwrap();
         assert_eq!(value["openapi"], "3.0.3");
         assert!(value["paths"]["/api/machines/client/auth"]["post"].is_object());
+        assert!(value["paths"]["/api/machines/client/identity"]["post"].is_object());
         assert!(value["paths"]["/api/connections/list"]["get"].is_object());
         assert!(value["paths"]["/api/downloads/porthub"]["get"].is_object());
         assert!(value["paths"]["/api/downloads/porthub/{target}"]["get"].is_object());

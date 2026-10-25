@@ -135,6 +135,7 @@ async fn native_updater_downloads_verifies_and_executes_the_actual_api_published
             server: base,
             machine_id: id.to_hex(),
             token: token.into(),
+            account_email: None,
             setup_overrides: Default::default(),
             fallback_servers: Vec::new(),
             allow_insecure_http_for_tests: true,
