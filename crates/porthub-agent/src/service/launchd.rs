@@ -220,12 +220,17 @@ impl Launchd {
         );
         let digest = format!("{:x}", Sha256::digest(profile.as_bytes()));
         let label = format!("porthub-update-{}", &digest[..24]);
+        let state =
+            std::fs::canonicalize(state).context("maintenance state directory must exist")?;
         let plist = state.join(format!("{label}.plist"));
         let mut argv = vec![executable_text];
         argv.extend(arguments.iter().cloned());
         let contents = maintenance_unit(&label, &argv)?;
         let target = format!("{}/{}", self.domain, label);
-        let expected_path = path(&plist)?;
+        let expected_path = plist
+            .to_str()
+            .context("maintenance plist path must be Unicode")?
+            .to_owned();
         let previous = super::regular(&plist)?;
         let loaded = Self::command(&["print", &target]).await?;
         if loaded.status.success() {
