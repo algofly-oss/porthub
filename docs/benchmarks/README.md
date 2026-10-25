@@ -1,12 +1,16 @@
 # PortHub transfer benchmark summary
 
-These are historical runs from 2026-10-23 and 2026-10-24. They describe the
-specific machines, releases, routes and workloads tested at the time; they are
-not current-release guarantees. Large-file tests used 10 GiB payloads unless
-otherwise noted. Completed downloads were SHA256-checked unless stated.
+These runs describe the specific machines, releases, routes and workloads
+tested at the time; they are not general performance guarantees. The
+2026-10-25 PortHub 1.3.4 runs used a 10 GiB sparse, zero-filled payload and
+were SHA256-checked. Earlier payload details are as recorded in the historical
+run notes.
 
 | Test | Route and workload | Result | Interpretation |
 | --- | --- | ---: | --- |
+| Luna → Condor, PortHub 1.3.4 | Private `luna.phub`, 10 GiB, 16 connections | 44.38 MB/s; 242 s | Hash verified. Peer status selected gateway relay, so this is not a direct-path result. |
+| Luna → Condor, PortHub 1.3.4 | Public mapping `algofly.duckdns.org:13367`, 10 GiB, 16 connections | 49.12 MB/s; 219 s | Hash verified; about 393 Mbps, near Luna's stated 400 Mbps ISP limit. |
+| Miro → Luna, PortHub 1.3.4 | Private `miro.phub`, 10 GiB, 16 connections | 111.76 MB/s; 96 s | Hash verified; peer status selected direct. Gateway TX increased by under 35 MB during the transfer, confirming payload bypass. |
 | Luna → Condor, prior Go agent | Private domain / public mapping, 10 GiB | 24.6 / 48.3 MB/s | Public reached about 387 Mbps, near Luna's stated 400 Mbps ISP. |
 | Luna → Condor, Rust transfer tools over prior Go agents | Private / public, 10 GiB | 14.4 / 48.8 MB/s | Public near 390 Mbps; private regressed in this candidate. |
 | Luna → Miro, prior Go agents | LAN / private IP / private domain, 10 GiB | 111.0 / 108.8 / 109.2 MB/s | About 0.28 ms ping; direct LAN UDP observed. |
@@ -32,5 +36,12 @@ otherwise noted. Completed downloads were SHA256-checked unless stated.
 - Public Miro–Luna throughput was substantially lower than Miro–Condor; the
   available measurements did not isolate whether the shared WAN, router, or
   another link caused it.
+- The current 1.3.4 run confirms direct Luna–Miro transfer at about 112 MB/s
+  without material gateway payload traffic. Luna–Condor private access works,
+  but current peer status selects relay; it delivered about 44 MB/s. The
+  public mapped route delivered about 49 MB/s. This confirms functioning
+  routes but does not show a direct Condor path.
 
-Raw per-run JSON and progress logs were removed to keep this directory concise.
+Raw per-run JSON, progress logs, and temporary payloads were removed to keep
+this directory concise. Condor–Miro private transfer was not attempted because
+the current private access rules do not authorize that machine pair.
