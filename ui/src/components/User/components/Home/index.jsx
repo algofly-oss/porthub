@@ -1358,6 +1358,7 @@ export default function Home({ onStatsChange, active = true }) {
       <HostConfigPopup
         initialSection={configStartSection}
         host={selectedHost}
+        privateDomain={selectedHost ? privateDomain(selectedHost) : ""}
         opened={Boolean(selectedHost)}
         onClose={handleCloseConfig}
         onSave={handleSaveConfig}

@@ -394,6 +394,7 @@ const CLIENT_LOG_AUTO_SCROLL_THRESHOLD = 24;
 
 export default function HostConfigPopup({
   host,
+  privateDomain = "",
   opened,
   onClose,
   onSave,
@@ -2094,6 +2095,17 @@ export default function HostConfigPopup({
                 <Badge color="blue" variant="light" className={getInfoBadgeClassName(isDark)}>
                   {host.name || "Untitled machine"}
                 </Badge>
+                {privateDomain && <ActionIcon
+                  type="button"
+                  variant="subtle"
+                  size="sm"
+                  onClick={() => handleCopy("PortHub domain", privateDomain)}
+                  aria-label={`Copy PortHub domain ${privateDomain}`}
+                  title={`Copy ${privateDomain}`}
+                  className="text-muted-foreground hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                >
+                  <IconCopy size={14} />
+                </ActionIcon>}
                 <Badge component="button" type="button" color="blue" variant="light"
                   disabled={!host.localIp}
                   onClick={() => handleCopy("LAN IP", host.localIp)}
