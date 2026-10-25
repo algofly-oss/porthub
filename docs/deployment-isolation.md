@@ -1,9 +1,9 @@
 # Native deployment boundaries
 
 The root Dockerfile and single `docker-compose.yml` define three native server
-roles. Native release 1.3.3 is deployed on URM2. The compose file uses host bind
-mounts for persistent state; URM2's active named volumes still need a careful
-copy into the bind-mount tree before that deployment configuration is adopted.
+roles. Native release 1.3.4 is deployed on URM2. Persistent PortHub state is
+host-bound under `/home/ubuntu/algofly/porthub/volumes/porthub-native`; the
+original named volumes remain intact for rollback.
 
 | Container / image | Components | Network | Added capability | Shared access |
 | --- | --- | --- | --- | --- |

@@ -21,7 +21,7 @@ boundaries and [`gateway.md`](gateway.md) for the public data path.
 
 ## Deployment and release status
 
-Native release `1.3.3` is deployed on URM2. Images use stable `porthub:core`,
+Native release `1.3.4` is deployed on URM2. Images use stable `porthub:core`,
 `porthub:edge`, and `porthub:firewall` tags, with version and source revision
 labels. Client binaries are released together for the supported OS and CPU
 targets; the API serves the staged release bundle to installers.
@@ -36,10 +36,8 @@ Release.
 - GitHub Releases are the source of client artifacts. Gateway-side automatic
   fetch and persistent caching of a newer GitHub release is not implemented;
   deployment currently stages the complete artifact bundle into the image.
-- The active URM2 deployment still uses Docker named volumes. The repository's
-  new compose configuration uses host bind mounts under `./volumes/porthub`;
-  migrating the active database and runtime state requires a controlled
-  volume copy before replacing the deployment.
-- Benchmark records under `benchmarks/` identify the tested endpoints and
-  workload. Treat each result as specific to that setup, not as a general
-  network capacity claim.
+- URM2's PortHub state was copied to host bind mounts. Original named volumes
+  remain available for rollback until the new deployment is accepted.
+- The single benchmark summary in `docs/benchmarks/README.md` records tested
+  endpoints and workloads. Treat each result as specific to that setup, not as
+  a general network capacity claim.
