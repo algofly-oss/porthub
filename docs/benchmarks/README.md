@@ -1,11 +1,11 @@
 # PortHub transfer benchmark summary
 
 These runs describe the specific machines, releases, routes and workloads
-tested at the time; they are not general performance guarantees. The latest
-2026-10-25 PortHub 1.4.1 runs used a 10 GiB sparse, zero-filled payload served
-by `porthub http.server`, downloaded with `porthub get` using 16 connections,
-and SHA256-checked. Earlier payload details are as recorded in the historical
-run notes.
+tested at the time; they are not general performance guarantees. The 1.4.1
+historical runs used a 10 GiB sparse, zero-filled payload served by
+`porthub http.server`, downloaded with `porthub get` using 16 connections, and
+SHA256-checked. The 1.4.3 candidate runs below use the same 1 GiB file and
+SHA256 on every path.
 
 | Test | Route and workload | Result | Interpretation |
 | --- | --- | ---: | --- |
@@ -26,6 +26,11 @@ run notes.
 | Miro → Luna, native Rust public mapping | Public, 10 GiB | 10.2 MB/s | Hash verified. Both endpoints shared a 400 Mbps WAN; bottleneck was not isolated. |
 | Miro → Condor, native Rust public mapping | Public, 1 GiB | 48.5 MB/s | Hash verified; shows this route can outperform the Miro–Luna shared-WAN result. |
 | Luna ↔ Miro, iperf3 | Private/public TCP and private UDP | 894 / 105 / 100 Mbps | UDP loss 0%, jitter 0.017 ms; TCP retransmits occurred. Independent network test, not PortHub transfer throughput. |
+| Luna → Condor, PortHub 1.4.3 | Private `luna.phub`, 1 GiB, 1 connection | 7.79 and 8.42 MB/s | Both repeated downloads passed SHA256; live route was gateway relay. |
+| Luna → Condor, PortHub 1.4.3 | Public mapping `algofly.duckdns.org:13367`, 1 GiB, 1 connection | 20.44 MB/s | SHA256 verified; about 2.4× the private single-flow result. |
+| Luna → Condor, PortHub 1.4.3 | Private `luna.phub`, 1 GiB, 16 connections | 34.17 MB/s | SHA256 verified; relay route. |
+| Luna → Condor, PortHub 1.4.3 | Public mapping `algofly.duckdns.org:13367`, 1 GiB, 16 connections | 49.60 MB/s | SHA256 verified; about 45% faster than private. |
+| Miro → Luna, PortHub 1.4.3 | Private direct, 64 MiB HTTP range | 111.2 MB/s | 64 MiB completed in 0.60 s; route status was direct. |
 | Luna → Condor, earlier private legacy-agent attempt | Private, 10 GiB | Incomplete | Stalled and retried; stopped before completion at 883 MiB. Not a valid completed throughput result. |
 
 ## What these runs show
@@ -57,14 +62,31 @@ one. The relay also sent each IP packet as a separate WebSocket message over
 TCP. Public Rathole forwarding uses a TCP stream, so the two routes did not
 have equivalent proxy hops or per-packet overhead.
 
-A local, unshipped change now delivers the configured direct origin and a
-short-lived relay credential in authenticated private sync, tries that origin
-before the TLS fallback, and batches up to 32 packet records when both sides
-negotiate support. The peer-to-peer payload remains DTLS protected; the
-credential for the direct gateway WebSocket is valid only while its renewable
-15-second relay lease remains current. Native checks and relay compatibility
-tests pass. A post-change Luna–Condor transfer benchmark is still required
-before claiming equal throughput.
+Release 1.4.3 carries the configured direct origin and short-lived relay
+credential in authenticated private sync, tries that origin before the TLS
+fallback, batches up to 32 packet records, and raises bounded relay queues to
+reduce packet loss during bursts. The peer payload remains DTLS protected.
+All nine enabled clients now report 1.4.3. The live route inventory has 30
+peer reports and no `connecting` routes; Luna–Condor uses gateway relay and
+Luna–Miro uses direct transport.
+
+The 1.4.3 same-file benchmark still shows a material single-flow gap. While the
+private transfer was active, Luna's HTTP socket reported 90–135 ms RTT, CUBIC,
+roughly 590–717 packets in its congestion window, and a send queue near 3 MiB.
+Retransmitted bytes were small relative to bytes sent, and neither endpoint
+logged relay queue overflow. Increasing packet queue capacity therefore did
+not remove the limiting factor: a private relay carries the application's
+end-to-end TCP packets over a long-RTT path, while the public Rathole route
+forwards a TCP stream and splits TCP near the gateway and service. The 1.4.3
+private route averaged 8.1 MB/s across two single-connection runs, versus
+20.44 MB/s publicly; with 16 connections it reached 34.17 MB/s versus
+49.60 MB/s publicly.
+
+The queue change is not a throughput-parity fix. Matching the public single
+flow requires a stream path that terminates TCP near each endpoint (or an
+equivalent transport-level change); it cannot be achieved by increasing the
+packet queues alone. Keep the next release decision pending until that design
+is implemented and measured locally.
 
 Raw per-run JSON, progress logs, and temporary payloads were removed to keep
 this directory concise. Condor–Miro private transfer was not attempted because
