@@ -1396,7 +1396,10 @@ mod cli_tests {
                 "missing {common}"
             );
         }
-        for advanced in ["enroll", "tunnel", "configure", "run", "service", "update"] {
+        let mut advanced = vec!["enroll", "tunnel", "configure", "run", "service"];
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        advanced.push("update");
+        for advanced in advanced {
             assert!(
                 command
                     .get_subcommands()
