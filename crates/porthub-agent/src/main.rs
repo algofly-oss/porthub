@@ -16,9 +16,6 @@ use tokio_util::sync::CancellationToken;
     after_long_help = "Examples:\n  porthub http.server ./public\n  porthub http.receive ./drop\n  porthub push ./dataset http://host:8001/\n  porthub get https://example.com/file.iso\n  porthub list --user"
 )]
 struct Args {
-    /// Rathole-compatible client configuration (legacy -c form).
-    #[arg(short = 'c', long)]
-    config: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -28,8 +25,6 @@ fn requires_system_privileges(args: &Args) -> bool {
         return false;
     };
     match command {
-        #[cfg(target_os = "linux")]
-        Command::AdoptLegacy { .. } => true,
         Command::Enroll {
             install_service, ..
         } => *install_service,
@@ -146,34 +141,6 @@ enum Command {
         #[arg(long)]
         profile: PathBuf,
     },
-    /// Adopt generated legacy Linux registrations, retaining recovery backups.
-    #[cfg(target_os = "linux")]
-    AdoptLegacy {
-        #[arg(long, default_value = "/etc/porthub")]
-        legacy_root: PathBuf,
-        #[arg(long, default_value = "/usr/local/bin/porthub")]
-        cli: PathBuf,
-        #[arg(long, default_value = "/opt/porthub/bin/porthub")]
-        private_executable: PathBuf,
-        #[arg(long)]
-        server: Option<String>,
-        #[arg(long = "fallback-server")]
-        fallback_servers: Vec<String>,
-        /// Activate the inspected registrations; without this flag only inspect.
-        #[arg(long, conflicts_with = "rollback")]
-        apply: bool,
-        /// Restore a previous adoption receipt's original CLI and service state.
-        #[arg(long)]
-        rollback: Option<PathBuf>,
-        /// List retained adoption/recovery receipts without reading credentials.
-        #[arg(long, conflicts_with_all = ["apply", "rollback"])]
-        receipts: bool,
-        /// Queue adoption outside the legacy service's process group.
-        #[arg(long, conflicts_with_all = ["apply", "rollback", "receipts"])]
-        handoff: bool,
-        #[arg(long, hide=true, conflicts_with_all=["handoff","rollback","receipts"])]
-        enrollment: Option<PathBuf>,
-    },
     /// Enroll a private identity; long tickets are read from stdin.
     Enroll {
         #[arg(long, required_unless_present = "ticket", conflicts_with = "ticket")]
@@ -190,7 +157,8 @@ enum Command {
         #[arg(long)]
         allow_insecure_http_for_tests: bool,
     },
-    /// Stage credentials from a legacy client.env without changing running services.
+    /// Compatibility helper for staged credentials from a generated legacy profile.
+    #[command(name = "import-legacy", hide = true)]
     ImportLegacy {
         #[arg(long)]
         env_file: PathBuf,
@@ -238,12 +206,11 @@ enum Command {
         /// Save credentials without activating a service (requires --profile).
         #[arg(long, requires = "profile")]
         no_service: bool,
+        /// Adopt the existing CLI during the authenticated installer migration.
+        #[arg(long, hide = true, conflicts_with = "no_service")]
+        adopt_existing_cli: bool,
         #[arg(long)]
         allow_insecure_http_for_tests: bool,
-        #[arg(long = "install-path", hide = true, conflicts_with_all = ["bin_dir","no_service"])]
-        legacy_install_path: Option<PathBuf>,
-        #[arg(long = "tenant", hide = true)]
-        legacy_tenant: Option<String>,
     },
     /// Serve files with HTTP Range, cache validators and directory listings.
     #[command(name = "http.server", alias = "http-server")]
@@ -985,7 +952,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     let args = Args::parse_from(raw_args);
-    if args.command.is_none() && args.config.is_none() {
+    if args.command.is_none() {
         return print_help();
     }
     elevate_if_needed(&args)?;
@@ -1010,9 +977,6 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
-    if args.config.is_some() && args.command.is_some() {
-        bail!("use either -c CONFIG or a subcommand");
-    }
     let cancel = CancellationToken::new();
     let signal_cancel = cancel.clone();
     let signal = tokio::spawn(async move {
@@ -1020,80 +984,6 @@ async fn main() -> Result<()> {
         signal_cancel.cancel();
     });
     let result = match args.command {
-        #[cfg(target_os = "linux")]
-        Some(Command::AdoptLegacy {
-            legacy_root,
-            cli,
-            private_executable,
-            server,
-            fallback_servers,
-            apply,
-            rollback,
-            receipts,
-            handoff,
-            enrollment,
-        }) => {
-            use porthub_agent::{adopt, service};
-            service::require_administrator()?;
-            let layout = service::Layout::system()?;
-            let manager = service::system_manager(false).await?;
-            if receipts {
-                println!("{}", serde_json::to_string(&adopt::receipts(&layout)?)?);
-            } else if let Some(receipt) = rollback {
-                adopt::rollback(&layout, &receipt, manager.as_ref()).await?;
-                println!("Original PortHub registrations restored");
-            } else {
-                let options = adopt::Options {
-                    legacy_root,
-                    cli,
-                    private_executable,
-                    server,
-                    fallback_servers,
-                };
-                if handoff {
-                    let prepared = adopt::prepare_handoff(
-                        &layout,
-                        &options,
-                        &std::env::current_exe()?,
-                        manager.as_ref(),
-                    )
-                    .await?;
-                    let controller = service::systemd::Systemd::connect().await?;
-                    let job = controller
-                        .schedule_adoption(&prepared.executable, &prepared.arguments)
-                        .await?;
-                    println!(
-                        "Native adoption queued for {} registrations: {job}",
-                        prepared.registrations
-                    );
-                    return Ok(());
-                }
-                let mut plan = adopt::plan(&layout, &options, manager.as_ref()).await?;
-                if let Some(enrollment) = enrollment {
-                    plan =
-                        plan.for_enrollment(&porthub_agent::profile::Profile::load(&enrollment)?)?;
-                }
-                println!(
-                    "Verified {} legacy PortHub registrations",
-                    plan.registrations()
-                );
-                if apply {
-                    let receipt = adopt::apply(
-                        &layout,
-                        plan,
-                        &std::env::current_exe()?,
-                        manager.as_ref(),
-                        &adopt::RuntimeReady,
-                    )
-                    .await?;
-                    println!(
-                        "Native registrations adopted; recovery receipt: {}",
-                        receipt.display()
-                    );
-                }
-            }
-            Ok(())
-        }
         Some(Command::Enroll {
             server,
             ticket,
@@ -1162,6 +1052,7 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::List { user, json }) => list_registrations(user, json).await,
         Some(Command::ImportLegacy {
             env_file,
             profile,
@@ -1172,7 +1063,6 @@ async fn main() -> Result<()> {
             println!("Existing services remain active; service migration is a separate operation");
             Ok(())
         }
-        Some(Command::List { user, json }) => list_registrations(user, json).await,
         Some(Command::Path { command }) => path_strategy(command),
         Some(Command::Start(args)) => {
             tenant_action(args, porthub_agent::service::Action::Start).await
@@ -1196,39 +1086,9 @@ async fn main() -> Result<()> {
             user,
             bin_dir,
             no_service,
+            adopt_existing_cli,
             allow_insecure_http_for_tests,
-            legacy_install_path,
-            legacy_tenant,
         }) => {
-            if let Some(tenant) = legacy_tenant {
-                anyhow::ensure!(
-                    tenant.len() <= 120
-                        && tenant
-                            .bytes()
-                            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)),
-                    "invalid legacy installer tenant"
-                );
-            }
-            let bin_dir = if let Some(path) = legacy_install_path {
-                anyhow::ensure!(
-                    path.is_absolute()
-                        && path.file_name().is_some_and(|name| {
-                            name == if cfg!(windows) {
-                                "porthub.exe"
-                            } else {
-                                "porthub"
-                            }
-                        }),
-                    "legacy installer path must name an absolute porthub executable"
-                );
-                Some(
-                    path.parent()
-                        .context("legacy CLI path needs a parent")?
-                        .to_owned(),
-                )
-            } else {
-                bin_dir
-            };
             let layout = if no_service {
                 None
             } else {
@@ -1247,39 +1107,30 @@ async fn main() -> Result<()> {
             if let Some(layout) = layout {
                 let manager = porthub_agent::service::system_manager(user).await?;
                 let cli = porthub_agent::bootstrap::cli_path(user, bin_dir.as_deref())?;
-                #[cfg(target_os = "linux")]
-                if !user && porthub_agent::legacy::is_generated_cli(&cli)? {
-                    anyhow::ensure!(profile.is_none(),"use adopt-legacy to migrate existing registrations before choosing a custom bootstrap profile path");
-                    let options = porthub_agent::adopt::Options {
-                        cli: cli.clone(),
-                        server: Some(enrollment.server.clone()),
-                        fallback_servers: enrollment.fallback_servers.clone(),
-                        ..Default::default()
-                    };
-                    let prepared = porthub_agent::adopt::prepare_enrollment_handoff(
+                if adopt_existing_cli {
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    porthub_agent::bootstrap::install_published_adopting_cli(
+                        enrollment,
+                        profile.as_deref(),
                         &layout,
-                        &options,
                         &std::env::current_exe()?,
                         manager.as_ref(),
-                        &enrollment,
+                        &cli,
                     )
                     .await?;
-                    let controller = porthub_agent::service::systemd::Systemd::connect().await?;
-                    let job = controller
-                        .schedule_adoption(&prepared.executable, &prepared.arguments)
-                        .await?;
-                    println!("Existing enrollment verified; native adoption queued: {job}");
-                    return Ok(());
+                    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                    anyhow::bail!("legacy CLI adoption is unavailable on this platform");
+                } else {
+                    porthub_agent::bootstrap::install_published(
+                        enrollment,
+                        profile.as_deref(),
+                        &layout,
+                        &std::env::current_exe()?,
+                        manager.as_ref(),
+                        Some(&cli),
+                    )
+                    .await?;
                 }
-                porthub_agent::bootstrap::install_published(
-                    enrollment,
-                    profile.as_deref(),
-                    &layout,
-                    &std::env::current_exe()?,
-                    manager.as_ref(),
-                    Some(&cli),
-                )
-                .await?;
                 let parent = cli.parent().context("CLI bin directory missing")?;
                 porthub_agent::bootstrap::register_cli_path(parent, user)?;
                 println!("PortHub enrolled; native service activated");
@@ -1489,14 +1340,7 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        None => {
-            porthub_tunnel::run_client_until(
-                args.config
-                    .context("supply a command or -c CONFIG; see --help")?,
-                cancel.cancelled_owned(),
-            )
-            .await
-        }
+        None => print_help(),
     };
     signal.abort();
     result
@@ -1555,6 +1399,24 @@ mod cli_tests {
     }
 
     #[test]
+    fn authenticated_setup_can_explicitly_adopt_an_existing_cli() {
+        let parsed = args(&[
+            "porthub",
+            "setup",
+            "--ticket",
+            "https://gateway.example/install/ticket",
+            "--adopt-existing-cli",
+        ]);
+        assert!(matches!(
+            parsed.command,
+            Some(super::Command::Setup {
+                adopt_existing_cli: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn gateway_display_strips_only_a_terminal_api_path() {
         assert_eq!(
             super::display_gateway_url("https://gateway.example/api/"),
@@ -1570,7 +1432,6 @@ mod cli_tests {
     fn bare_invocation_is_a_help_request() {
         let args = args(&["porthub"]);
         assert!(args.command.is_none());
-        assert!(args.config.is_none());
         assert!(!requires_system_privileges(&args));
         print_help().expect("help should print successfully");
     }

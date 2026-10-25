@@ -23,9 +23,9 @@ import useCreateFromUrl from "@/shared/hooks/useCreateFromUrl";
 import useProxyActivity from "@/shared/hooks/useProxyActivity";
 import ProxyActivity from "@/components/ui/proxy-activity";
 
-export default function Proxy({ machineId = "", compact = false, connectionId = "", onEditorOpenChange }) {
+export default function Proxy({ machineId = "", compact = false, connectionId = "", onEditorOpenChange, active = true }) {
   const router = useRouter();
-  const activity = useProxyActivity();
+  const activity = useProxyActivity({ enabled: active, preload: false });
   const activityById = new Map(activity.data.map(metric=>[metric.route_id,metric]));
   const { success, error } = useToast();
   const [proxies, setProxies] = useWorkspaceState("proxies.routes", []);
@@ -63,8 +63,9 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
     } catch (error) { if (axios.isCancel(error)) return; setLoadError("Could not load proxies. Check your connection and try again."); }
     finally { if (!options.signal?.aborted) setLoading(false); }
   }
-  useBackgroundRefresh(load);
-  useCreateFromUrl("proxies", create, !compact && !loading);
+  useBackgroundRefresh(load, { enabled: active });
+  useCreateFromUrl("proxies", create, active && !compact && !loading);
+  useEffect(() => { if (!active) { onEditorOpenChange?.(false); setOpened(false); } }, [active, onEditorOpenChange]);
   useEffect(() => {
     if (!compact && typeof router.query.search === "string") setQuery(router.query.search);
   }, [router.query.search, compact]);
@@ -76,7 +77,7 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
   const totalPages = Math.max(1, Math.ceil(candidates.length / pageSize));
   const currentPage = Math.min(page, totalPages);
   const trafficTargets = isTrafficSort(sort) ? candidates : candidates.slice((currentPage - 1) * pageSize, currentPage * pageSize);
-  const traffic = useTrafficSnapshot({ ids: trafficTargets.map(proxy => proxy.connection?.data_id || proxy.connection?._id), enabled: !loading });
+  const traffic = useTrafficSnapshot({ ids: trafficTargets.map(proxy => proxy.connection?.data_id || proxy.connection?._id), enabled: active && !loading });
   const trafficById = new Map(traffic.rows.map(row=>[row.connection?._id,row.traffic]));
   const trafficMetrics = useMemo(()=>new Map(traffic.rows.map(row=>[row.connection?._id,trafficSummary(row.traffic,30)])),[traffic.rows]);
   const filtered = useMemo(()=>isTrafficSort(sort) ? selectProxies(scoped,{query,status,group,machine,sort,trafficById:trafficMetrics}) : candidates,[sort,scoped,query,status,group,machine,trafficMetrics,candidates]);

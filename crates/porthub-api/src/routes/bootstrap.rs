@@ -144,7 +144,7 @@ fn launcher(
     let action = if values["kind"] == "private" {
         "enroll --install-service"
     } else {
-        "setup"
+        "setup --adopt-existing-cli"
     };
     // First-download compatibility only. The binary performs credential file,
     // release and service operations natively; nothing tails or supervises it here.

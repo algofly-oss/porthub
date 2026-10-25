@@ -744,11 +744,43 @@ pub async fn install_published(
     manager: &dyn Manager,
     cli: Option<&Path>,
 ) -> Result<Spec> {
+    install_published_mode(layout, source, executable, manager, cli, None).await
+}
+/// Replace a pre-native CLI only when an authenticated setup flow explicitly
+/// requests adoption. The previous executable is retained for transaction
+/// rollback if service activation fails.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub async fn install_published_adopting_cli(
+    layout: &Layout,
+    source: &Path,
+    executable: &Path,
+    manager: &dyn Manager,
+    cli: &Path,
+) -> Result<Spec> {
+    let legacy_hash = publication::hash_file(cli)?;
+    install_published_mode(
+        layout,
+        source,
+        executable,
+        manager,
+        Some(cli),
+        Some(&legacy_hash),
+    )
+    .await
+}
+async fn install_published_mode(
+    layout: &Layout,
+    source: &Path,
+    executable: &Path,
+    manager: &dyn Manager,
+    cli: Option<&Path>,
+    legacy_hash: Option<&str>,
+) -> Result<Spec> {
     directory(&layout.state, true)?;
     directory(&layout.releases, false)?;
     directory(&layout.units, false)?;
     let _lock = lock(layout)?;
-    install_locked(layout, source, executable, manager, cli).await
+    install_locked_mode(layout, source, executable, manager, cli, legacy_hash).await
 }
 /// The caller holds the layout installation lock for a larger transaction.
 pub(crate) async fn install_locked(
@@ -757,6 +789,16 @@ pub(crate) async fn install_locked(
     executable: &Path,
     manager: &dyn Manager,
     cli: Option<&Path>,
+) -> Result<Spec> {
+    install_locked_mode(layout, source, executable, manager, cli, None).await
+}
+async fn install_locked_mode(
+    layout: &Layout,
+    source: &Path,
+    executable: &Path,
+    manager: &dyn Manager,
+    cli: Option<&Path>,
+    legacy_hash: Option<&str>,
 ) -> Result<Spec> {
     let profile = RegistrationProfile::load(source)?;
     anyhow::ensure!(
@@ -794,7 +836,13 @@ pub(crate) async fn install_locked(
         "service registration is not owned by PortHub"
     );
     let mut publication = cli
-        .map(|path| publication::Publication::prepare(layout, path, &spec.executable))
+        .map(|path| match legacy_hash {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            Some(hash) => {
+                publication::Publication::prepare_adoption(layout, path, &spec.executable, hash)
+            }
+            _ => publication::Publication::prepare(layout, path, &spec.executable),
+        })
         .transpose()?;
     let mut files = Files::new();
     files.write(&spec.profile, &profile.bytes()?, true)?;

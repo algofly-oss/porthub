@@ -279,12 +279,13 @@ const MACHINE_PAGE_SIZE_OPTIONS = [
 ];
 
 const ALL_GROUPS_FILTER = "all";
-export default function Home({ onStatsChange }) {
+export default function Home({ onStatsChange, active = true }) {
   const router = useRouter();
   const { colorScheme } = useMantineColorScheme();
   const isDark = colorScheme === "dark";
   const socket = useContext(SocketContext);
   const [hosts, setHosts] = useWorkspaceState("machines.hosts", []);
+  const [privateAccess] = useWorkspaceState("access.data", null);
   const [selectedHostId, setSelectedHostId] = useState(null);
   const [configStartSection, setConfigStartSection] = useState("ports");
   const [isLoading, setIsLoading] = useWorkspaceState("machines.loading", true);
@@ -302,7 +303,7 @@ export default function Home({ onStatsChange }) {
   const [lastSeenRefreshTick, setLastSeenRefreshTick] = useState(0);
   const [machineTrafficByHostId, setMachineTrafficByHostId] = useWorkspaceState("machines.traffic", {});
   const { success, error } = useToast();
-  useCreateFromUrl("machines", () => setIsCreateModalOpen(true));
+  useCreateFromUrl("machines", () => setIsCreateModalOpen(true), active);
   useEffect(() => {
     if (router.query.machine) setSelectedHostId(String(router.query.machine));
     if (["online", "offline", "disabled"].includes(router.query.status)) setStatusFilter(String(router.query.status));
@@ -376,6 +377,7 @@ export default function Home({ onStatsChange }) {
   }, [page, totalPages]);
 
   useEffect(() => {
+    if (!active) return undefined;
     const intervalId = window.setInterval(() => {
       setLastSeenRefreshTick((current) => current + 1);
     }, 60 * 1000);
@@ -383,7 +385,15 @@ export default function Home({ onStatsChange }) {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, []);
+  }, [active]);
+
+  useEffect(() => {
+    if (!active) {
+      setSelectedHostId(null);
+      setIsCreateModalOpen(false);
+      setIsGroupsModalOpen(false);
+    }
+  }, [active]);
 
   useEffect(() => {
     setHosts((currentHosts) =>
@@ -525,11 +535,9 @@ export default function Home({ onStatsChange }) {
       requestMachineStatusSnapshot();
     }
 
-    const snapshotIntervalId = window.setInterval(() => {
-      if (socket.connected) {
-        requestMachineStatusSnapshot();
-      }
-    }, 30 * 1000);
+    const snapshotIntervalId = active ? window.setInterval(() => {
+      if (socket.connected) requestMachineStatusSnapshot();
+    }, 30 * 1000) : null;
 
     socket.on("connect", requestMachineStatusSnapshot);
     socket.on(socketRoutes.stcMachineStatusSnapshot, handleMachineStatusSnapshot);
@@ -541,13 +549,20 @@ export default function Home({ onStatsChange }) {
       socket.off(socketRoutes.stcMachineStatusSnapshot, handleMachineStatusSnapshot);
       socket.off(socketRoutes.stcMachineStatusChanged, handleMachineStatusChanged);
     };
-  }, [socket]);
+  }, [socket, active]);
 
   // Traffic ordering must rank the entire fleet, not only the current page.
   // Key requests by stable IDs so sorting a fresh snapshot cannot restart polls.
   const trafficTargets = (isTrafficSort(sort) ? hosts : paginatedHosts).flatMap(host =>
     (host.forwardingConfigs || []).filter(config => config.dataId).map(config => [config.dataId, host.id]));
   const trafficTargetKey = JSON.stringify(trafficTargets.sort(([a], [b]) => a.localeCompare(b)));
+  const privateDnsSuffix = String(privateAccess?.network?.dns_suffix || "").trim().replace(/^\.+|\.+$/g, "");
+  const privateDomain = host => {
+    if (!privateDnsSuffix) return "";
+    const peer = (privateAccess?.private_peers || []).find(item => item.machine_id === host.id);
+    const label = String(peer?.hostname || "").trim();
+    return label ? `${label}.${privateDnsSuffix}` : "";
+  };
   useEffect(() => {
     const targets = JSON.parse(trafficTargetKey);
     if (targets.length === 0) {
@@ -613,7 +628,7 @@ export default function Home({ onStatsChange }) {
           )
         );
       } finally {
-        if (isActive) timeout = setTimeout(loadMachineTraffic, 2000);
+        if (isActive && active) timeout = setTimeout(loadMachineTraffic, 2000);
       }
     };
 
@@ -624,7 +639,7 @@ export default function Home({ onStatsChange }) {
       clearTimeout(timeout);
       controller.abort();
     };
-  }, [trafficTargetKey]);
+  }, [trafficTargetKey, active]);
 
   const handleOpenConfig = (hostId) => { setConfigStartSection("ports"); setSelectedHostId(hostId); };
 
@@ -1275,6 +1290,7 @@ export default function Home({ onStatsChange }) {
                               key={host.id}
                               machineId={host.id}
                               name={host.name}
+                              privateDomain={privateDomain(host)}
                               hostname={host.hostname}
                               groupLabels={(host.groupIds || [])
                                 .map((id) => groupLabelById[id])

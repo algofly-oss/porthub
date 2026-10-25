@@ -273,7 +273,7 @@ impl Publication {
     pub(crate) fn prepare(layout: &Layout, path: &Path, target: &Path) -> Result<Self> {
         Self::prepare_inner(layout, path, target, None)
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn prepare_adoption(
         layout: &Layout,
         path: &Path,

@@ -30,14 +30,14 @@ function DashboardSkeleton() {
   </div>;
 }
 
-export default function Dashboard() {
+export default function Dashboard({ active = true }) {
   const router = useRouter();
   const { colorScheme } = useMantineColorScheme();
   const [data, setData] = useWorkspaceState("dashboard.data", { machines: [], proxies: [], ports: [] });
   const [loading, setLoading] = useWorkspaceState("dashboard.loading", true), [error, setError] = useState("");
   const seconds = 300;
-  const traffic = useTrafficSnapshot();
-  const activity = useProxyActivity();
+  const traffic = useTrafficSnapshot({ enabled: active });
+  const activity = useProxyActivity({ enabled: active });
   const activityById = useMemo(()=>new Map(activity.data.map(metric=>[metric.route_id,metric])),[activity.data]);
   async function load(signal) {
     try {
@@ -47,7 +47,7 @@ export default function Dashboard() {
     } catch (error) { if (!axios.isCancel(error)) setError("Could not refresh the workspace. Try again."); }
     finally { if (!signal?.aborted) setLoading(false); }
   }
-  useBackgroundRefresh(load);
+  useBackgroundRefresh(load, { enabled: active });
   const navigate = (view, query = {}) => router.push({ pathname: "/home", query: { ...(router.query.demo ? { demo: router.query.demo } : {}), view, ...query } }, undefined, { shallow: true });
   const status = machine => machine.connection_status || (machine.enabled === false ? "disabled" : machine.is_active ? "online" : "offline");
   const online = data.machines.filter(machine => status(machine) === "online");

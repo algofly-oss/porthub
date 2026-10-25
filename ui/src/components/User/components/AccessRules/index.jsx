@@ -23,9 +23,8 @@ import GroupEditor from "./GroupEditor";
 import NetworkSettings from "./NetworkSettings";
 import InviteEditor from "./InviteEditor";
 import PolicyTable from "./PolicyTable";
-import PrivateMachines from "./PrivateMachines";
 
-export default function AccessRules() {
+export default function AccessRules({ active = true }) {
   const router = useRouter(),
     toast = useToast();
   const [workspaces, setWorkspaces] = useWorkspaceState("access.workspaces", []),
@@ -84,7 +83,7 @@ export default function AccessRules() {
       setQuery("");
     }
   }, [workspace, load]);
-  useBackgroundRefresh(load, { enabled: Boolean(workspace), refreshKey: workspace });
+  useBackgroundRefresh(load, { enabled: active && Boolean(workspace), preload: Boolean(workspace), refreshKey: workspace });
   const manage = data?.role === "owner" || data?.role === "admin";
   const options = useMemo(
     () =>
@@ -401,12 +400,6 @@ export default function AccessRules() {
           )}
           {section === "network" && (
             <div className="data-scroll overflow-auto">
-              <PrivateMachines
-                data={data}
-                manage={manage}
-                params={params}
-                onSaved={load}
-              />
               <NetworkSettings
                 data={data}
                 manage={manage}

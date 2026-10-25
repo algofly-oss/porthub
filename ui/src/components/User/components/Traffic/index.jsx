@@ -2,7 +2,7 @@ import { externalEndpoint, internalEndpoint } from "@/shared/utils/endpoints.mjs
 import { useWorkspaceState } from "@/shared/contexts/workspaceCache";
 import ResultsPagination from "@/components/ui/results-pagination";
 import SearchSelect from "@/components/ui/search-select";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { useMantineColorScheme } from "@mantine/core";
 import { IconActivity, IconArrowDownLeft, IconArrowUpRight, IconShieldLock, IconPlayerPause, IconPlayerPlay, IconChevronDown, IconRefresh } from "@tabler/icons-react";
@@ -28,7 +28,7 @@ function TrafficSkeleton() {
   </section>;
 }
 
-export default function Traffic() {
+export default function Traffic({ active = true }) {
   const demo = useDemo();
   const { colorScheme } = useMantineColorScheme();
   const [rows, setRows] = useWorkspaceState("traffic.rows", []);
@@ -43,26 +43,32 @@ export default function Traffic() {
   const [page, setPage] = useState(1);
   const [refresh, setRefresh] = useState(0);
   const [updated, setUpdated] = useWorkspaceState("traffic.updated", null);
+  const hasSnapshot = useRef(updated !== null);
   useEffect(() => {
     if (paused) return;
-    let active = true, timeout;
+    let alive = true, timeout;
     const controller = new AbortController();
     async function poll() {
+      if (document.hidden) {
+        if (active) timeout = setTimeout(poll, 2000);
+        return;
+      }
       try {
-        if (!document.hidden) {
-          const response = await axios.post(apiRoutes.trafficSnapshot, {}, { signal: controller.signal });
-          if (!active) return;
-          setRows(response.data?.data || []); setUpdated(Date.now()); setError("");
-        }
+        const response = await axios.post(apiRoutes.trafficSnapshot, {}, { signal: controller.signal });
+        if (!alive) return;
+        hasSnapshot.current = true;
+        setRows(response.data?.data || []); setUpdated(Date.now()); setError("");
       } catch (err) {
-        if (active) setError(err?.response?.data?.detail || "Could not load traffic. Check the firewall service and try again.");
+        if (alive) { hasSnapshot.current = true; setError(err?.response?.data?.detail || "Could not load traffic. Check the firewall service and try again."); }
       } finally {
-        if (active) { setLoading(false); timeout = setTimeout(poll, 2000); }
+        if (alive) { setLoading(false); if (active) timeout = setTimeout(poll, 2000); }
       }
     }
+    const visible = () => { if (!document.hidden && (active || !hasSnapshot.current)) poll(); };
     poll();
-    return () => { active = false; clearTimeout(timeout); controller.abort(); };
-  }, [paused, refresh]);
+    document.addEventListener("visibilitychange", visible);
+    return () => { alive = false; clearTimeout(timeout); controller.abort(); document.removeEventListener("visibilitychange", visible); };
+  }, [paused, refresh, active]);
   useEffect(() => { setPage(1); }, [query, machine, sort]);
   const machines = [...new Map(rows.map(r => [r.connection.machine_id, r.connection.machine_name || "Unknown machine"]))];
   const filtered = useMemo(() => rows.filter(r => (machine === "all" || r.connection.machine_id === machine)

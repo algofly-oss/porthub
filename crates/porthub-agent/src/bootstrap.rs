@@ -298,12 +298,36 @@ fn append_path_block(profile: &Path, directory: &Path) -> Result<()> {
     Ok(())
 }
 pub async fn install_published(
+    profile: Profile,
+    path: Option<&Path>,
+    layout: &Layout,
+    executable: &Path,
+    manager: &dyn Manager,
+    cli: Option<&Path>,
+) -> Result<Spec> {
+    install_published_mode(profile, path, layout, executable, manager, cli, false).await
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub async fn install_published_adopting_cli(
+    profile: Profile,
+    path: Option<&Path>,
+    layout: &Layout,
+    executable: &Path,
+    manager: &dyn Manager,
+    cli: &Path,
+) -> Result<Spec> {
+    install_published_mode(profile, path, layout, executable, manager, Some(cli), true).await
+}
+
+async fn install_published_mode(
     mut profile: Profile,
     path: Option<&Path>,
     layout: &Layout,
     executable: &Path,
     manager: &dyn Manager,
     cli: Option<&Path>,
+    adopt_existing_cli: bool,
 ) -> Result<Spec> {
     profile.validate()?;
     let default = if path.is_none() {
@@ -318,7 +342,26 @@ pub async fn install_published(
         .or(default.as_deref())
         .context("bootstrap profile path missing")?;
     let mut source = Source::save(&profile, path)?;
-    match service::install_published(layout, path, executable, manager, cli).await {
+    let install = if adopt_existing_cli {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            service::install_published_adopting_cli(
+                layout,
+                path,
+                executable,
+                manager,
+                cli.context("CLI adoption path missing")?,
+            )
+            .await
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            anyhow::bail!("legacy CLI adoption is unavailable on this platform")
+        }
+    } else {
+        service::install_published(layout, path, executable, manager, cli).await
+    };
+    match install {
         Ok(spec) => {
             source.committed = true;
             Ok(spec)

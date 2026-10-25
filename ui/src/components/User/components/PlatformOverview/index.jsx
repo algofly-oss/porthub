@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { searchScore } from "@/shared/utils/search.mjs";
 
-export default function PlatformOverview() {
+export default function PlatformOverview({ active = true }) {
   const [overview, setOverview] = useWorkspaceState("platform.overview", []), [loading, setLoading] = useWorkspaceState("platform.loading", true), [error, setError] = useState("");
   const [query, setQuery] = useState(""), [role, setRole] = useState("all"), [sort, setSort] = useState("name"), [expanded, setExpanded] = useState("");
   const [page, setPage] = useState(1), [pageSize, setPageSize] = useState(25);
@@ -28,7 +28,7 @@ export default function PlatformOverview() {
     catch (err) { if (axios.isCancel(err)) return; setError(err?.response?.data?.detail || "Could not load platform overview."); }
     finally { if (!options.signal?.aborted) setLoading(false); }
   }
-  useBackgroundRefresh(load);
+  useBackgroundRefresh(load, { enabled: active });
   async function loadSignup() {
     try { const response = await axios.get(apiRoutes.adminSignupSettings); setSignup(response.data); setSignupError(""); }
     catch (err) { setSignupError(err?.response?.data?.detail || "Could not load signup settings."); }

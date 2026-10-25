@@ -471,6 +471,43 @@ async fn identical_native_cli_files_are_adopted_and_rollback_restores_original_p
 }
 
 #[tokio::test]
+async fn explicit_bootstrap_adoption_replaces_legacy_cli_and_restores_it_on_failure() -> Result<()>
+{
+    use std::os::unix::fs::PermissionsExt;
+    let temp = common::private_dir()?;
+    let layout = layout(temp.path());
+    let source = profile(temp.path(), "0123456789abcdef01234567")?;
+    let executable = temp.path().join("downloaded-agent");
+    std::fs::write(&executable, b"first native agent release")?;
+    let cli = temp.path().join("bin/porthub");
+    std::fs::create_dir(cli.parent().unwrap())?;
+    std::fs::set_permissions(
+        cli.parent().unwrap(),
+        std::fs::Permissions::from_mode(0o755),
+    )?;
+    let manager = Fake::default();
+    service::install_published(&layout, &source, &executable, &manager, Some(&cli)).await?;
+    std::fs::remove_file(&cli)?;
+    std::fs::write(&cli, b"previous PortHub CLI")?;
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755))?;
+    std::fs::write(&executable, b"updated native agent release")?;
+    manager.fail_start.store(true, Ordering::SeqCst);
+    ensure!(
+        service::install_published_adopting_cli(&layout, &source, &executable, &manager, &cli)
+            .await
+            .is_err()
+    );
+    ensure!(std::fs::read(&cli)? == b"previous PortHub CLI");
+
+    let installed =
+        service::install_published_adopting_cli(&layout, &source, &executable, &manager, &cli)
+            .await?;
+    ensure!(std::fs::read_link(&cli)? == installed.executable);
+    ensure!(std::fs::read(&cli)? == b"updated native agent release");
+    Ok(())
+}
+
+#[tokio::test]
 async fn native_registration_selection_is_scoped_unambiguous_and_does_not_accept_arbitrary_paths(
 ) -> Result<()> {
     let temp = common::private_dir()?;

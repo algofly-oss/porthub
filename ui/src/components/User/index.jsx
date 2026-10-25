@@ -112,14 +112,14 @@ export default function UserHome() {
         <DemoNotice />
         <main id="workspace-content" tabIndex={-1}>
         <WorkspaceCacheProvider key={`${user?.username || "anonymous"}:${router.query.demo === "1"}`}>
-        <motion.div key={tab} initial={reducedMotion ? false : { opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.16 }} className="h-full min-h-0">
-        {tab === "Dashboard" && <Dashboard />}
-        {tab === "Home" && <Home onStatsChange={setMachineStats} />}
-        {tab === "Access" && <AccessRules />}
-        {tab === "Proxy" && <Proxy />}
-        {tab === "Traffic" && <Traffic />}
-        {tab === "Settings" && <Settings />}
-        {tab === "Platform" && isAdmin && <PlatformOverview />}
+        <motion.div initial={reducedMotion ? false : { opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.16 }} className="h-full min-h-0">
+        <div hidden={tab !== "Dashboard"} aria-hidden={tab !== "Dashboard"} className="h-full min-h-0"><Dashboard active={tab === "Dashboard"} /></div>
+        <div hidden={tab !== "Home"} aria-hidden={tab !== "Home"} className="h-full min-h-0"><Home active={tab === "Home"} onStatsChange={setMachineStats} /></div>
+        <div hidden={tab !== "Access"} aria-hidden={tab !== "Access"} className="h-full min-h-0"><AccessRules active={tab === "Access"} /></div>
+        <div hidden={tab !== "Proxy"} aria-hidden={tab !== "Proxy"} className="h-full min-h-0"><Proxy active={tab === "Proxy"} /></div>
+        <div hidden={tab !== "Traffic"} aria-hidden={tab !== "Traffic"} className="h-full min-h-0"><Traffic active={tab === "Traffic"} /></div>
+        <div hidden={tab !== "Settings"} aria-hidden={tab !== "Settings"} className="h-full min-h-0"><Settings /></div>
+        {isAdmin && <div hidden={tab !== "Platform"} aria-hidden={tab !== "Platform"} className="h-full min-h-0"><PlatformOverview active={tab === "Platform"} /></div>}
         </motion.div>
         </WorkspaceCacheProvider>
         </main>

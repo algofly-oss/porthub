@@ -607,7 +607,7 @@ export default function HostConfigPopup({
   const gatewayLink = (rule) => {
     const url = rule.dataId ? buildExternalPortUrl(effectiveServiceDomain, rule.externalPort) : "";
     return url ? (
-      <a href={url} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()} className="block truncate font-mono text-xs text-blue-700 hover:underline dark:text-blue-300" title={rule.enabled ? "Open directly on the gateway" : "Gateway address (mapping disabled)"}>
+      <a href={url} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()} className="block truncate text-xs text-blue-700 hover:underline dark:text-blue-300" title={rule.enabled ? "Open directly on the gateway" : "Gateway address (mapping disabled)"}>
         {url.replace(/^https?:\/\//, "").replace(/\/$/, "")}
       </a>
     ) : null;
