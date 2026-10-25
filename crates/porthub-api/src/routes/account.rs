@@ -101,10 +101,12 @@ async fn signup(
             .collection("platform_settings")
             .find_one(doc! {"_id":"platform"})
             .await?;
-        let signup_enabled = setting
-            .as_ref()
-            .and_then(|d| d.get_bool("signup_enabled").ok())
-            .unwrap_or(!app.config.signup_disabled);
+        let signup_enabled = crate::config::signup_enabled(
+            app.config.signup_disabled,
+            setting
+                .as_ref()
+                .and_then(|d| d.get_bool("signup_enabled").ok()),
+        );
         if !signup_enabled {
             return Err(ApiError::new(StatusCode::FORBIDDEN, "sign up is disabled"));
         }

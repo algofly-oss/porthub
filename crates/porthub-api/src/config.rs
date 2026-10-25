@@ -87,6 +87,10 @@ fn env(name: &str, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.into())
 }
 
+pub fn signup_enabled(env_signup_disabled: bool, admin_override: Option<bool>) -> bool {
+    admin_override.unwrap_or(!env_signup_disabled)
+}
+
 impl Config {
     pub fn load() -> Result<Self> {
         let signup_disabled = match env("SIGNUP_DISABLED", "false")
@@ -304,5 +308,18 @@ impl Config {
                 .into(),
             ),
         })
+    }
+}
+
+#[cfg(test)]
+mod signup_setting_tests {
+    use super::signup_enabled;
+
+    #[test]
+    fn signup_override_wins_and_reset_uses_environment_default() {
+        assert!(signup_enabled(false, None));
+        assert!(!signup_enabled(true, None));
+        assert!(signup_enabled(true, Some(true)));
+        assert!(!signup_enabled(false, Some(false)));
     }
 }

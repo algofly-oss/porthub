@@ -46,7 +46,7 @@ async fn signup_value(app: &App) -> ApiResult<(bool, bool)> {
         .as_ref()
         .and_then(|d| d.get_bool("signup_enabled").ok());
     Ok((
-        override_value.unwrap_or(!app.config.signup_disabled),
+        crate::config::signup_enabled(app.config.signup_disabled, override_value),
         override_value.is_some(),
     ))
 }
