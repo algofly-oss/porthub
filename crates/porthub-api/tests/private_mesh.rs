@@ -59,7 +59,8 @@ async fn exercise_discovery(network_change: bool) -> Result<()> {
             if network_change {
                 let initial=if interface_updates.is_empty() {Vec::new()} else {vec!["127.0.0.1:0".parse()?]};
                 let (updates,interfaces)=tokio::sync::watch::channel(initial);
-                tasks.spawn(controller::run_watched_instance(profile,interfaces,live.clone(),output,controller::nonce()?,cancel.child_token()));
+                let (relay_config, _) = tokio::sync::watch::channel(None);
+                tasks.spawn(controller::run_watched_instance(profile,interfaces,live.clone(),output,relay_config,controller::nonce()?,cancel.child_token()));
                 interface_updates.push(updates);
             } else {
                 tasks.spawn(controller::run(profile,vec!["127.0.0.1:0".parse()?],live.clone(),output,cancel.child_token()));
@@ -186,7 +187,8 @@ async fn native_gateway_fallback_authenticates_leases_and_blocks_spoofed_packet_
         for peer in &peers {
             let profile=Profile{server:base.clone(),peer_id:peer.clone(),workspace:owner.to_hex(),token:token.into(),account_email:None,fallback_servers:vec![],allow_insecure_http_for_tests:true};
             let (sender,input)=relay::channel();let (output,events)=mpsc::channel(16);
-            tasks.spawn(relay::run(profile,"relay-instance-0123456789".into(),sender.clone(),input,output,cancel.child_token()));
+            let (_relay_config, receiver) = tokio::sync::watch::channel(Some(relay::Config { direct_url: None, relay_token: None }));
+            tasks.spawn(relay::run(profile,"relay-instance-0123456789".into(),sender.clone(),input,receiver,output,cancel.child_token()));
             senders.push(sender);receivers.push(events);
         }
         tokio::time::timeout(Duration::from_secs(3),async {while !senders.iter().all(|sender|sender.is_ready()) {tokio::time::sleep(Duration::from_millis(10)).await;}}).await?;

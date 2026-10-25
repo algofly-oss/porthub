@@ -553,7 +553,7 @@ async fn update_command(options: UpdateOptions, cancel: &CancellationToken) -> R
         arguments.extend(["--bin-dir".into(), path(&directory)?]);
     }
     #[cfg(target_os = "linux")]
-    let job = {
+    let _job = {
         let systemd = if user {
             service::systemd::Systemd::connect_user().await?
         } else {
@@ -564,13 +564,17 @@ async fn update_command(options: UpdateOptions, cancel: &CancellationToken) -> R
             .await?
     };
     #[cfg(target_os = "macos")]
-    let job = {
+    let _job = {
         let launchd = service::launchd::Launchd::connect(user).await?;
         launchd
             .schedule_update(&layout.state, &staged.executable, &arguments)
             .await?
     };
-    println!("Verified native release queued: {job}");
+    println!(
+        "PortHub update to {} scheduled (current CLI version: {})",
+        staged.release.version,
+        porthub_agent::VERSION
+    );
     Ok(())
 }
 #[derive(clap::Args)]

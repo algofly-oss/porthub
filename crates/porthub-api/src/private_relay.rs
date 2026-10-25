@@ -10,11 +10,12 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::Response,
     routing::get,
     Router,
 };
+use porthub_mesh::RELAY_BATCH_MAGIC;
 use std::{
     collections::{HashMap, HashSet},
     net::Ipv4Addr,
@@ -24,7 +25,9 @@ use std::{
 use tokio::sync::mpsc;
 #[derive(Clone)]
 struct Lease {
+    credential_hash: String,
     hash: String,
+    relay_token: String,
     instance: String,
     ip: Ipv4Addr,
     allowed: HashSet<String>,
@@ -51,23 +54,34 @@ impl Hub {
         instance: &str,
         ip: Ipv4Addr,
         allowed: HashSet<String>,
-    ) {
+    ) -> String {
         let mut hub = self.0.lock().unwrap_or_else(|p| p.into_inner());
         let now = Instant::now();
         hub.leases.retain(|_, lease| lease.expires > now);
         if hub.leases.len() >= 16384 && !hub.leases.contains_key(id) {
-            return;
+            return String::new();
         }
+        let relay_token = hub
+            .leases
+            .get(id)
+            .filter(|lease| {
+                lease.expires > now && lease.credential_hash == hash && lease.instance == instance
+            })
+            .map(|lease| lease.relay_token.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
         hub.leases.insert(
             id.into(),
             Lease {
-                hash: hash.into(),
+                credential_hash: hash.into(),
+                hash: token_digest(&relay_token),
+                relay_token: relay_token.clone(),
                 instance: instance.into(),
                 ip,
                 allowed,
                 expires: now + Duration::from_secs(15),
             },
         );
+        relay_token
     }
     pub(crate) fn peer_alive(&self, id: &str) -> bool {
         self.0
@@ -95,10 +109,49 @@ impl Hub {
             .leases
             .get(id)
             .is_some_and(|lease| {
-                lease.expires > Instant::now() && lease.hash == hash && lease.instance == instance
+                lease.expires > Instant::now()
+                    && (lease.hash == hash || lease.credential_hash == hash)
+                    && lease.instance == instance
             })
     }
     fn route(&self, source: &str, hash: &str, instance: &str, frame: &[u8]) {
+        let mut records = Vec::with_capacity(32);
+        if let Some(mut offset) = frame
+            .strip_prefix(RELAY_BATCH_MAGIC)
+            .map(|_| RELAY_BATCH_MAGIC.len())
+        {
+            while offset < frame.len() {
+                if records.len() == 32 || frame.len() - offset < 2 {
+                    return;
+                }
+                let length = usize::from(u16::from_be_bytes([frame[offset], frame[offset + 1]]));
+                offset += 2;
+                if length == 0 || length > 1441 || length > frame.len() - offset {
+                    return;
+                }
+                records.push(&frame[offset..offset + length]);
+                offset += length;
+            }
+            if records.is_empty() {
+                return;
+            }
+        } else {
+            records.push(frame);
+        }
+        let hub = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let now = Instant::now();
+        for record in records {
+            Self::route_record(&hub, source, hash, instance, record, now);
+        }
+    }
+    fn route_record(
+        hub: &Inner,
+        source: &str,
+        hash: &str,
+        instance: &str,
+        frame: &[u8],
+        now: Instant,
+    ) {
         let Some((&length, rest)) = frame.split_first() else {
             return;
         };
@@ -115,11 +168,9 @@ impl Hub {
         {
             return;
         }
-        let hub = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        let now = Instant::now();
         let Some(a) = hub.leases.get(source).filter(|a| {
             a.expires > now
-                && a.hash == hash
+                && (a.hash == hash || a.credential_hash == hash)
                 && a.instance == instance
                 && a.allowed.contains(target)
         }) else {
@@ -208,15 +259,31 @@ async fn upgrade(
             "Private relay lease unavailable",
         ));
     }
-    Ok(ws
+    let batch = headers
+        .get("x-porthub-relay-batch")
+        .is_some_and(|value| value == "1");
+    let mut response = ws
         .read_buffer_size(8192)
         .write_buffer_size(8192)
-        .max_write_buffer_size(32768)
-        .max_message_size(1500)
-        .max_frame_size(1500)
-        .on_upgrade(move |socket| serve(app, socket, id, hash, instance)))
+        .max_write_buffer_size(65536)
+        .max_message_size(65536)
+        .max_frame_size(65536)
+        .on_upgrade(move |socket| serve(app, socket, id, hash, instance, batch));
+    if batch {
+        response
+            .headers_mut()
+            .insert("x-porthub-relay-batch", HeaderValue::from_static("1"));
+    }
+    Ok(response)
 }
-async fn serve(app: Arc<App>, mut socket: WebSocket, id: String, hash: String, instance: String) {
+async fn serve(
+    app: Arc<App>,
+    mut socket: WebSocket,
+    id: String,
+    hash: String,
+    instance: String,
+    batch: bool,
+) {
     let (output, mut packets) = mpsc::channel(128);
     let generation = {
         let mut hub = app
@@ -244,7 +311,24 @@ async fn serve(app: Arc<App>, mut socket: WebSocket, id: String, hash: String, i
         tokio::select! {
             _=lease_check.tick()=>{if !app.private_relay.authorized(&id,&hash,&instance){break;}},
             frame=socket.recv()=>match frame {Some(Ok(Message::Binary(bytes)))=>app.private_relay.route(&id,&hash,&instance,&bytes),Some(Ok(Message::Ping(bytes)))=>{if !matches!(tokio::time::timeout(Duration::from_secs(3),socket.send(Message::Pong(bytes))).await,Ok(Ok(()))){break;}},Some(Ok(Message::Pong(_)))=>{},_=>break},
-            packet=packets.recv()=>{let Some(packet)=packet else{break;};if !app.private_relay.authorized(&id,&hash,&instance) || !matches!(tokio::time::timeout(Duration::from_secs(3),socket.send(Message::Binary(packet.into()))).await,Ok(Ok(()))){break;}}
+            packet=packets.recv()=>{
+                let Some(packet)=packet else{break;};
+                if !app.private_relay.authorized(&id,&hash,&instance){break;}
+                let mut output=packet;
+                if batch {
+                    let mut records=vec![output];
+                    while records.len()<32 {
+                        match packets.try_recv(){Ok(packet)=>records.push(packet),Err(_)=>break}
+                    }
+                    output=Vec::with_capacity(4+records.iter().map(|p|2+p.len()).sum::<usize>());
+                    output.extend_from_slice(RELAY_BATCH_MAGIC);
+                    for record in records {
+                        output.extend_from_slice(&(record.len() as u16).to_be_bytes());
+                        output.extend_from_slice(&record);
+                    }
+                }
+                if !matches!(tokio::time::timeout(Duration::from_secs(3),socket.send(Message::Binary(output.into()))).await,Ok(Ok(()))){break;}
+            }
         }
     }
     let mut hub = app
@@ -258,5 +342,98 @@ async fn serve(app: Arc<App>, mut socket: WebSocket, id: String, hash: String, i
         .is_some_and(|connection| connection.generation == generation)
     {
         hub.connections.remove(&id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relay_credentials_are_ephemeral_and_stable_for_a_live_instance() {
+        let hub = Hub::default();
+        let allowed = HashSet::new();
+        let token = hub.publish(
+            "peer",
+            "stored-machine-credential-hash",
+            "instance-a",
+            Ipv4Addr::LOCALHOST,
+            allowed.clone(),
+        );
+        assert_eq!(token.len(), 32);
+        assert!(hub.authorized("peer", &token_digest(&token), "instance-a"));
+        assert!(hub.authorized("peer", "stored-machine-credential-hash", "instance-a"));
+        assert_eq!(
+            token,
+            hub.publish(
+                "peer",
+                "stored-machine-credential-hash",
+                "instance-a",
+                Ipv4Addr::LOCALHOST,
+                allowed.clone(),
+            )
+        );
+        let replacement = hub.publish(
+            "peer",
+            "stored-machine-credential-hash",
+            "instance-b",
+            Ipv4Addr::LOCALHOST,
+            allowed,
+        );
+        assert_ne!(token, replacement);
+        assert!(!hub.authorized("peer", &token_digest(&token), "instance-a"));
+        assert!(hub.authorized("peer", &token_digest(&replacement), "instance-b"));
+    }
+
+    #[test]
+    fn batched_and_legacy_frames_route_the_same_way() {
+        let hub = Hub::default();
+        let a_ip = Ipv4Addr::new(10, 0, 0, 1);
+        let b_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let a = hub.publish(
+            "peer-a",
+            "credential-a",
+            "instance-a",
+            a_ip,
+            HashSet::from(["peer-b".to_owned()]),
+        );
+        hub.publish(
+            "peer-b",
+            "credential-b",
+            "instance-b",
+            b_ip,
+            HashSet::from(["peer-a".to_owned()]),
+        );
+        let (output, mut received) = mpsc::channel(8);
+        hub.0.lock().unwrap().connections.insert(
+            "peer-b".into(),
+            Connection {
+                instance: "instance-b".into(),
+                generation: 1,
+                output,
+            },
+        );
+        let mut packet = vec![0u8; 20];
+        packet[0] = 0x45;
+        packet[3] = 20;
+        packet[8] = 64;
+        packet[12..16].copy_from_slice(&a_ip.octets());
+        packet[16..20].copy_from_slice(&b_ip.octets());
+        let mut record = vec![6];
+        record.extend_from_slice(b"peer-b");
+        record.extend_from_slice(&packet);
+        let mut batch = RELAY_BATCH_MAGIC.to_vec();
+        for _ in 0..2 {
+            batch.extend_from_slice(&(record.len() as u16).to_be_bytes());
+            batch.extend_from_slice(&record);
+        }
+        hub.route("peer-a", &token_digest(&a), "instance-a", &batch);
+        hub.route("peer-a", &token_digest(&a), "instance-a", &record);
+        for _ in 0..3 {
+            let forwarded = received.try_recv().expect("forwarded packet");
+            assert_eq!(forwarded[0], 6);
+            assert_eq!(&forwarded[1..7], b"peer-a");
+            assert_eq!(&forwarded[7..], &packet);
+        }
     }
 }

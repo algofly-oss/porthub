@@ -40,6 +40,7 @@ socketioxide = { version = "0.18.7", features = ["extensions"] }
 tokio-util = { version = "0.7", features = ["io"] }
 httpdate = "1"
 libc = "0.2"
+porthub-mesh = { path = "../porthub-mesh" }
 
 
 [dev-dependencies]
@@ -47,4 +48,3 @@ tokio-tungstenite = "0.30"
 porthub-tunnel.workspace = true
 porthub-edge = { path = "../porthub-edge" }
 porthub-agent = { path = "../porthub-agent" }
-porthub-mesh = { path = "../porthub-mesh" }

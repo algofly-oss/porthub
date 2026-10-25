@@ -18,7 +18,10 @@ use std::{
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::{sync::mpsc, task::JoinSet};
+use tokio::{
+    sync::{mpsc, watch},
+    task::JoinSet,
+};
 use tokio_util::sync::CancellationToken;
 
 fn mark_activity(activity: &mut HashMap<String, Instant>, peer: &str, now: Instant) {
@@ -52,11 +55,13 @@ pub async fn run(path: PathBuf, cancel: CancellationToken) -> Result<()> {
     let (interface_updates, interfaces) = tokio::sync::watch::channel(Vec::new());
     tasks.spawn(super::interfaces::watch(interface_updates, work.clone()));
     let (relay_sender, relay_input) = super::relay::channel();
+    let (relay_config, relay_config_updates) = watch::channel(None);
     tasks.spawn(super::relay::run(
         profile.clone(),
         instance.clone(),
         relay_sender.clone(),
         relay_input,
+        relay_config_updates,
         events.clone(),
         work.clone(),
     ));
@@ -65,6 +70,7 @@ pub async fn run(path: PathBuf, cancel: CancellationToken) -> Result<()> {
         interfaces,
         sessions.clone(),
         events,
+        relay_config,
         instance,
         work.clone(),
     ));

@@ -35,6 +35,10 @@ struct Reply {
     signals: Vec<Signal>,
     #[serde(default)]
     ice_servers: Vec<IceServer>,
+    #[serde(default)]
+    direct_relay_url: Option<String>,
+    #[serde(default)]
+    relay_auth_token: String,
 }
 #[derive(Clone, Deserialize)]
 struct IceServer {
@@ -150,7 +154,17 @@ pub async fn run_instance(
         "no usable private network interface"
     );
     let (_sender, interfaces) = watch::channel(interfaces);
-    run_watched_instance(profile, interfaces, sessions, events, instance, cancel).await
+    let (relay_config, _) = watch::channel(None);
+    run_watched_instance(
+        profile,
+        interfaces,
+        sessions,
+        events,
+        relay_config,
+        instance,
+        cancel,
+    )
+    .await
 }
 /// The packet owner supplies a kernel-driven interface snapshot. An empty
 /// snapshot pauses new peer preparations without tearing down healthy sessions
@@ -160,6 +174,7 @@ pub async fn run_watched_instance(
     mut interfaces: watch::Receiver<Vec<SocketAddr>>,
     sessions: Sessions,
     events: mpsc::Sender<Event>,
+    relay_config: watch::Sender<Option<super::relay::Config>>,
     instance: String,
     cancel: CancellationToken,
 ) -> Result<()> {
@@ -246,6 +261,15 @@ pub async fn run_watched_instance(
             }
         }
         if let Some(reply) = reply {
+            let direct_relay = super::relay::Config {
+                direct_url: reply.direct_relay_url.filter(|url| !url.is_empty()),
+                relay_token: (32..=128)
+                    .contains(&reply.relay_auth_token.len())
+                    .then(|| reply.relay_auth_token.clone()),
+            };
+            if *relay_config.borrow() != Some(direct_relay.clone()) {
+                relay_config.send_replace(Some(direct_relay));
+            }
             ensure!(
                 reply.snapshot.self_ == profile.peer_id
                     && reply.snapshot.workspace == profile.workspace,

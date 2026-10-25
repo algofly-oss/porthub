@@ -320,6 +320,7 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
             s.strip_suffix("/api").unwrap_or(s).to_owned()
         })
         .collect();
+    let mut relay_auth_token = String::new();
     if let Ok(ip) = store::string(&current, "ip").parse() {
         let allowed = grants
             .iter()
@@ -333,11 +334,23 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
                 }
             })
             .collect();
-        app.private_relay
-            .publish(&input.peer_id, &hash, &input.instance, ip, allowed);
+        relay_auth_token =
+            app.private_relay
+                .publish(&input.peer_id, &hash, &input.instance, ip, allowed);
     }
+    // This origin is configured by the gateway operator and returned only to
+    // authenticated private clients. The inner peer session remains DTLS
+    // authenticated and encrypted, while the short-lived token limits the
+    // exposure of the direct HTTP WebSocket authorization header.
+    let direct_relay_url = app
+        .config
+        .gateway_advertised_url
+        .as_deref()
+        .filter(|url| url.starts_with("http://"))
+        .map(|url| url.trim_end_matches('/').to_owned());
     Ok(([(header::CACHE_CONTROL,"no-store")],Json(json!({"snapshot":{"workspace":owner.to_hex(),"self":input.peer_id,"revision":store::field(&updated,"revision"),
         "expires_at":chrono::DateTime::from_timestamp_millis(now.timestamp_millis()+15_000).expect("current timestamp").to_rfc3339_opts(chrono::SecondsFormat::Millis,true),"peers":peers,"dns_suffixes":dns_suffixes,"grants":grants},"signals":signals,
         "ice_servers":app.config.private_transport.ice(&input.peer_id,now.timestamp_millis()/1000),"relay_routes":app.config.private_transport.relay_routes,
+        "direct_relay_url":direct_relay_url,"relay_auth_token":relay_auth_token,
         "control_fallback_urls":fallback,"poll_seconds":1}))).into_response())
 }

@@ -1,10 +1,7 @@
 name: Native agent platforms
 on:
   push:
-    branches: [main]
-    paths: ["crates/porthub-agent/**", "crates/porthub-transfer/**", "crates/porthub-tunnel/**", "crates/porthub-identity/**", "crates/porthub-mesh/src/**", "crates/porthub-mesh/Cargo.toml", "vendor/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "scripts/release-version.sh"]
-  pull_request:
-    paths: ["crates/porthub-agent/**", "crates/porthub-transfer/**", "crates/porthub-tunnel/**", "crates/porthub-identity/**", "crates/porthub-mesh/src/**", "crates/porthub-mesh/Cargo.toml", "vendor/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "scripts/release-version.sh"]
+    tags: ["v*"]
   workflow_dispatch:
 permissions:
   contents: read
@@ -30,7 +27,7 @@ jobs:
           if-no-files-found: error
   publish-release:
     name: Publish versioned GitHub release
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [release-bundle]
     runs-on: ubuntu-24.04
     permissions:

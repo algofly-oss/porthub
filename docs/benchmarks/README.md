@@ -46,6 +46,26 @@ run notes.
   Luna's stated WAN limit. The direct Condor path is not available in this
   network configuration, so the private result is a relay benchmark.
 
+## Luna–Condor private relay investigation
+
+The 1.4.1 private relay stayed on the configured `https://porthub.algofly.in`
+WebSocket endpoint, which is Cloudflare proxied. URM2 also advertises its
+operator-configured direct HTTP API origin on port 8345, but that origin was
+not included in private relay candidates: enrollment filtered relay fallbacks
+to HTTPS, and a healthy primary connection was never replaced with a direct
+one. The relay also sent each IP packet as a separate WebSocket message over
+TCP. Public Rathole forwarding uses a TCP stream, so the two routes did not
+have equivalent proxy hops or per-packet overhead.
+
+A local, unshipped change now delivers the configured direct origin and a
+short-lived relay credential in authenticated private sync, tries that origin
+before the TLS fallback, and batches up to 32 packet records when both sides
+negotiate support. The peer-to-peer payload remains DTLS protected; the
+credential for the direct gateway WebSocket is valid only while its renewable
+15-second relay lease remains current. Native checks and relay compatibility
+tests pass. A post-change Luna–Condor transfer benchmark is still required
+before claiming equal throughput.
+
 Raw per-run JSON, progress logs, and temporary payloads were removed to keep
 this directory concise. Condor–Miro private transfer was not attempted because
 the current private access rules do not authorize that machine pair.
