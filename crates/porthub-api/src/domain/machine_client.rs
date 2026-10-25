@@ -11,7 +11,13 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
-fn should_auto_update(version: &str, latest: &str, request_id: &str, handled_id: &str) -> bool {
+fn should_auto_update(
+    version: &str,
+    latest: &str,
+    request_id: &str,
+    request_target: &str,
+    handled_id: &str,
+) -> bool {
     let outdated = if latest.is_empty() || version == latest {
         false
     } else if version.is_empty() {
@@ -25,7 +31,10 @@ fn should_auto_update(version: &str, latest: &str, request_id: &str, handled_id:
             _ => true,
         }
     };
-    outdated && (request_id.is_empty() || request_id == handled_id)
+    outdated
+        && (request_id.is_empty()
+            || request_id == handled_id
+            || request_target != latest)
 }
 
 fn numeric_version(value: &str) -> Option<Vec<u64>> {
@@ -456,6 +465,7 @@ pub struct Sync {
     pub public_ip: String,
     pub version: String,
     pub handled: String,
+    pub native_update_protocol: bool,
 }
 pub async fn sync(
     app: &App,
@@ -525,11 +535,12 @@ async fn sync_inner(
             set.insert("client_updated_at", now);
         }
     }
-    if !legacy
+    if input.native_update_protocol
         && should_auto_update(
             version,
             &app.config.client_version,
             &store::string(machine, "client_update_request_id"),
+            &store::string(machine, "client_update_target_version"),
             handled,
         )
     {
@@ -590,12 +601,13 @@ mod auto_update_tests {
 
     #[test]
     fn outdated_clients_get_one_gateway_update_request() {
-        assert!(should_auto_update("1.3.1", "1.3.2", "", ""));
-        assert!(should_auto_update("", "1.3.2", "", ""));
-        assert!(!should_auto_update("1.3.2", "1.3.2", "", ""));
-        assert!(!should_auto_update("1.10.0", "1.3.2", "", ""));
-        assert!(!should_auto_update("1.3.1", "1.3.2", "pending", ""));
-        assert!(should_auto_update("1.3.1", "1.3.2", "handled", "handled"));
+        assert!(should_auto_update("1.3.1", "1.3.2", "", "", ""));
+        assert!(should_auto_update("", "1.3.2", "", "", ""));
+        assert!(!should_auto_update("1.3.2", "1.3.2", "", "", ""));
+        assert!(!should_auto_update("1.10.0", "1.3.2", "", "", ""));
+        assert!(!should_auto_update("1.3.1", "1.3.2", "pending", "1.3.2", ""));
+        assert!(should_auto_update("1.3.1", "1.3.2", "pending", "1.3.1", ""));
+        assert!(should_auto_update("1.3.1", "1.3.2", "handled", "1.3.2", "handled"));
     }
 }
 

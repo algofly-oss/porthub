@@ -224,13 +224,9 @@ async fn session(
     } else {
         model.optional_string("client_version").unwrap_or_default()
     };
-    let handled = if legacy {
-        String::new()
-    } else {
-        model
-            .optional_string("client_update_last_handled_request_id")
-            .unwrap_or_default()
-    };
+    let handled = model.optional_string("client_update_last_handled_request_id");
+    let native_update_protocol = !legacy || handled.is_some();
+    let handled = handled.unwrap_or_default();
     model.finish()?;
     let machine = if legacy {
         machine_client::authenticate_legacy(&app, &id, &token).await?
@@ -243,6 +239,7 @@ async fn session(
         public_ip,
         version,
         handled,
+        native_update_protocol,
     };
     let machine = if legacy {
         machine_client::sync_legacy(&app, &machine, input, &headers).await?
