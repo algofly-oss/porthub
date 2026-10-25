@@ -132,11 +132,11 @@ async fn init(
             manifest.chunks <= 1_000_000,
             "upload exceeds the supported maximum size"
         );
-        let name = safe_name(&manifest.name)?;
-        ensure!(
-            name.as_os_str() == std::ffi::OsStr::new(&manifest.name),
-            "invalid upload name"
-        );
+        // The wire format uses `/` on every platform. `PathBuf` normalizes
+        // separators to `\\` on Windows, so comparing its native string form
+        // to the manifest would incorrectly reject valid nested paths there.
+        // `safe_name` already rejects roots, prefixes, and traversal parts.
+        safe_name(&manifest.name)?;
         tokio::fs::create_dir_all(&dir).await?;
         let file = dir.join("manifest.json");
         if tokio::fs::try_exists(&file).await? {
