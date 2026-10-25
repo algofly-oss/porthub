@@ -24,7 +24,7 @@ struct Native {
     executable: PathBuf,
 }
 impl Native {
-    fn inspect(source: &Path, public: &Profile) -> Result<Option<Self>> {
+    async fn inspect(source: &Path, public: &Profile) -> Result<Option<Self>> {
         let id = service::identity(public);
         let Some(state) = source.parent() else {
             return Ok(None);
@@ -64,10 +64,21 @@ impl Native {
             spec.executable.canonicalize()? == executable,
             "running executable does not match native registration"
         );
-        let cgroup = std::fs::read_to_string("/proc/self/cgroup")?;
+        #[cfg(target_os = "linux")]
+        {
+            let cgroup = std::fs::read_to_string("/proc/self/cgroup")?;
+            ensure!(
+                cgroup.contains(&format!("{}.service", spec.service)),
+                "automatic updates require the registered service process"
+            );
+        }
+        #[cfg(target_os = "macos")]
         ensure!(
-            cgroup.contains(&format!("{}.service", spec.service)),
-            "automatic updates require the registered service process"
+            crate::service::launchd::Launchd::connect(spec.user)
+                .await?
+                .owns_process(&spec, std::process::id())
+                .await?,
+            "automatic updates require the registered launchd service process"
         );
         Ok(Some(Self {
             layout,
@@ -104,8 +115,8 @@ pub(crate) struct Controller {
     task: tokio::task::JoinHandle<()>,
 }
 impl Controller {
-    pub fn new(source: &Path, public: &Profile) -> Result<Option<Self>> {
-        let Some(native) = Native::inspect(source, public)? else {
+    pub async fn new(source: &Path, public: &Profile) -> Result<Option<Self>> {
+        let Some(native) = Native::inspect(source, public).await? else {
             return Ok(None);
         };
         let (settings, receiver) = watch::channel(None);
@@ -120,6 +131,11 @@ impl Controller {
             stop,
             task,
         }))
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn private_activation_context(&self) -> Option<(Layout, PathBuf)> {
+        (!self.native.layout.user)
+            .then(|| (self.native.layout.clone(), self.native.executable.clone()))
     }
     pub fn request(&mut self, request: Option<Request>) {
         if self.current != request {

@@ -1,0 +1,133 @@
+{
+  "scope": "read-only rollout preflight for Rust migration",
+  "date": "2026-10-25",
+  "workspace": {
+    "branch": "rust-native-migration",
+    "head": "e59cb478f870e99174caf755ddefe26955dd434d",
+    "dirty": true,
+    "local_agent_version": "1.3.0",
+    "rebuilt_local_agent_sha256": "dc7d70a612cce4000b71f2cfddaeb0c92d73c05bb1ae74ac4dee2c8e5636e8f2"
+  },
+  "cross_target_checks": {
+    "target": "x86_64-pc-windows-gnu",
+    "command": "RUSTFLAGS=-D warnings cargo check -p porthub-agent --target x86_64-pc-windows-gnu --locked --offline",
+    "result": "passed in an ephemeral Rust/MinGW container",
+    "windows_runtime_test": "not performed"
+  },
+  "private_policy": {
+    "query": "read-only MongoDB inspection using the current Rust selector and grant rules",
+    "valid_private_peers_in_workspace": 10,
+    "enabled_rulebooks": 5,
+    "enabled_rules": 5,
+    "pair_grants": {
+      "luna_condor": {"allowed": true, "matching_rules": 2},
+      "luna_miro": {"allowed": true, "matching_rules": 3},
+      "condor_miro": {"allowed": false, "matching_rules": 0}
+    }
+  },
+  "private_transport_reports": {
+    "luna_condor": {"luna_to_condor": "relay", "condor_to_luna": "relay"},
+    "luna_miro": {"luna_to_miro": "direct", "miro_to_luna": "direct"},
+    "condor_miro": "no peer report; no matching policy grant"
+  },
+  "transfer_benchmarks": {
+    "source": "Luna built-in porthub http.server, temporary port 5201",
+    "agent_build_used": "installed PortHub 1.3.0 binaries from the deployed e59cb47 release",
+    "transfer_size_bytes": 10737418240,
+    "payload": "sparse zero-filled fixture served as raw HTTP bytes; no external transfer tool",
+    "client": "installed PortHub CLI porthub get, 16 connections",
+    "integrity": "SHA256 matched the source on every completed download",
+    "luna_condor_private_relay": {
+      "elapsed_seconds": 247.73,
+      "wall_average_MiB_s": 41.34,
+      "porthub_transfer_rate_MB_s": 44.41
+    },
+    "luna_condor_public_mapping": {
+      "url_authority": "algofly.duckdns.org:13367",
+      "elapsed_seconds": 223.50,
+      "wall_average_MiB_s": 45.82,
+      "porthub_transfer_rate_MB_s": 49.47
+    },
+    "luna_miro_private_direct": {
+      "elapsed_seconds": 106.87,
+      "wall_average_MiB_s": 95.81,
+      "porthub_transfer_rate_MB_s": 109.93
+    },
+    "cleanup": "Temporary server stopped and benchmark data/logs removed"
+  },
+  "urm2": {
+    "containers": {
+      "porthub-core": "healthy",
+      "porthub-edge": "healthy",
+      "porthub-firewall": "healthy"
+    },
+    "image_version": "1.3.0",
+    "image_source_revision": "e59cb478f870e99174caf755ddefe26955dd434d",
+    "http_checks": {
+      "/healthz": 200,
+      "/api/auth/settings": 200,
+      "/api": 307,
+      "/api/docs": 200,
+      "/api/openapi.json": 200
+    }
+  },
+  "clients": {
+    "luna": {
+      "ssh_reachable": true,
+      "agent_version": "1.3.0",
+      "installed_agent_sha256": "3f3b138ea2faa77a36566172ed3cf7a2b51f9bb2aa156bd4b99a0ea305f3b712",
+      "private_workspace_fingerprint": "acefcbea1421",
+      "active_porthub_registrations": 2,
+      "profiles": [
+        {"registration": "732d12416c83", "route": "origin", "active": true, "forwarded_services": 4},
+        {"registration": "fff3b579d384", "route": "private", "active": true, "forwarded_services": 7, "path_strategy": {"mode": "auto", "source": "default"}}
+      ],
+      "phub_checks": {
+        "luna.phub": "resolved and ICMP replied",
+        "condor.phub": "resolved and ICMP replied",
+        "miro.phub": "resolved and ICMP replied"
+      }
+    },
+    "condor": {
+      "ssh_reachable": true,
+      "agent_version": "1.3.0",
+      "active_porthub_registrations": 2,
+      "private_workspace_fingerprint": "acefcbea1421",
+      "installed_agent_sha256": "3f3b138ea2faa77a36566172ed3cf7a2b51f9bb2aa156bd4b99a0ea305f3b712",
+      "profiles": [
+        {"registration": "e3a0381d553e", "route": "private", "active": true, "forwarded_services": 1, "path_strategy": {"mode": "auto", "source": "default"}},
+        {"registration": "ebafd641694b", "route": "origin", "active": true, "forwarded_services": 3}
+      ],
+      "phub_checks": {
+        "luna.phub": "resolved and ICMP replied",
+        "condor.phub": "resolved and ICMP replied",
+        "miro.phub": "unresolved"
+      }
+    },
+    "miro": {
+      "ssh_reachable": true,
+      "agent_version": "1.3.0",
+      "active_porthub_registrations": 2,
+      "private_workspace_fingerprint": "acefcbea1421",
+      "installed_agent_sha256": "3f3b138ea2faa77a36566172ed3cf7a2b51f9bb2aa156bd4b99a0ea305f3b712",
+      "profiles": [
+        {"registration": "7f6a669fbb25", "route": "origin", "active": true, "forwarded_services": 3},
+        {"registration": "b0e23480e3d2", "route": "private", "active": true, "forwarded_services": 1, "path_strategy": {"mode": "auto", "source": "default"}}
+      ],
+      "phub_checks": {
+        "luna.phub": "resolved and ICMP replied",
+        "condor.phub": "unresolved",
+        "miro.phub": "resolved and ICMP replied"
+      }
+    }
+  },
+  "interpretation": [
+    "Condor and Miro have matching installed agent binaries, but those binaries differ from the locally rebuilt agent.",
+    "The gateway image revision matches workspace HEAD, but this workspace has uncommitted changes.",
+    "All three private profiles have the same one-way workspace fingerprint. Current grants allow Luna-Condor and Luna-Miro; no rule grants Condor-Miro. The observed private DNS names match those policy relationships.",
+    "All three private registrations use the default auto path strategy. No private access rules were changed.",
+    "The gateway's fresh private-client path reports confirm Luna-Condor uses relay and Luna-Miro uses direct peer transport.",
+    "The 10 GiB downloads use the already configured routes; no access rules, client registrations or containers were mutated.",
+    "No commit, push, URM2 deployment or agent upgrade was performed."
+  ]
+}

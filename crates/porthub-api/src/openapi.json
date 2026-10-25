@@ -1761,6 +1761,106 @@
         }
       }
     },
+    "/api/downloads/porthub": {
+      "get": {
+        "operationId": "get_api_downloads_porthub",
+        "summary": "List PortHub client binaries",
+        "tags": [
+          "Downloads"
+        ],
+        "responses": {
+          "200": {
+            "description": "Available client releases",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "target": {
+                            "type": "string"
+                          },
+                          "os": {
+                            "type": "string"
+                          },
+                          "arch": {
+                            "type": "string"
+                          },
+                          "size": {
+                            "type": "integer",
+                            "format": "int64"
+                          },
+                          "version": {
+                            "type": "string"
+                          },
+                          "url": {
+                            "type": "string",
+                            "format": "uri"
+                          }
+                        },
+                        "required": [
+                          "target",
+                          "os",
+                          "arch",
+                          "size",
+                          "version",
+                          "url"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/downloads/porthub/{target}": {
+      "get": {
+        "operationId": "get_api_downloads_porthub_target",
+        "summary": "Download a PortHub client binary",
+        "tags": [
+          "Downloads"
+        ],
+        "parameters": [
+          {
+            "name": "target",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Verified release binary",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "206": {
+            "description": "Requested byte range"
+          },
+          "404": {
+            "description": "Unknown or unavailable release"
+          },
+          "416": {
+            "description": "Unsatisfiable byte range"
+          }
+        }
+      }
+    },
     "/api/gateway/origin": {
       "post": {
         "operationId": "post_api_gateway_origin",
@@ -2239,6 +2339,112 @@
         }
       }
     },
+    "/api/machines/client/private-install": {
+      "post": {
+        "operationId": "post_api_machines_client_private_install",
+        "summary": "Complete Requested Private Enrollment",
+        "tags": [
+          "Machines"
+        ],
+        "parameters": [
+          {
+            "name": "Accept",
+            "in": "header",
+            "required": false,
+            "description": "Use application/vnd.porthub.private-install+json for native agents. Omit it for the legacy shell script.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "machine_id": {
+                    "type": "string"
+                  },
+                  "token": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "machine_id",
+                  "token"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Private enrollment ticket as JSON for native agents, or a shell installer for legacy agents",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "required": [
+                        "format_version",
+                        "server",
+                        "peer_id",
+                        "workspace",
+                        "ticket"
+                      ],
+                      "properties": {
+                        "format_version": {
+                          "type": "integer",
+                          "enum": [
+                            1
+                          ]
+                        },
+                        "server": {
+                          "type": "string"
+                        },
+                        "peer_id": {
+                          "type": "string"
+                        },
+                        "workspace": {
+                          "type": "string"
+                        },
+                        "ticket": {
+                          "type": "string"
+                        },
+                        "fallback_servers": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "No pending private enrollment"
+          },
+          "403": {
+            "description": "Machine or workspace is not authorized"
+          },
+          "409": {
+            "description": "Pending enrollment is ambiguous"
+          }
+        }
+      }
+    },
     "/api/machines/client/sync": {
       "post": {
         "operationId": "post_api_machines_client_sync",
@@ -2272,6 +2478,59 @@
                 "additionalProperties": true
               }
             }
+          }
+        }
+      }
+    },
+    "/api/machines/command/{machine_id}": {
+      "get": {
+        "operationId": "get_api_machines_command_machine_id",
+        "summary": "Machine Command",
+        "description": "Create an authenticated, machine-scoped bootstrap command and setup ticket.",
+        "tags": [
+          "Machines"
+        ],
+        "parameters": [
+          {
+            "name": "machine_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "public_base_url",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "service_domain",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "404": {
+            "description": "Resource not found"
+          },
+          "500": {
+            "description": "Server error"
           }
         }
       }
@@ -2723,6 +2982,53 @@
         "summary": "Install.Sh",
         "tags": [
           "Machines"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "404": {
+            "description": "Resource not found"
+          },
+          "500": {
+            "description": "Server error"
+          }
+        }
+      }
+    },
+    "/api/machines/{machine_id}/status-history": {
+      "get": {
+        "operationId": "get_api_machines_machine_id_status_history",
+        "summary": "Get Machine Status History",
+        "tags": [
+          "Machines"
+        ],
+        "parameters": [
+          {
+            "name": "machine_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 366,
+              "default": 365
+            }
+          }
         ],
         "responses": {
           "200": {

@@ -8,11 +8,12 @@ use crate::{
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::{
-    env, fs,
-    io::Write,
+    env,
     path::{Path, PathBuf},
     time::Duration,
 };
+#[cfg(unix)]
+use std::{fs, io::Write};
 use tokio_util::sync::CancellationToken;
 #[derive(Deserialize)]
 struct Enrollment {
@@ -159,6 +160,10 @@ pub async fn install(
 pub fn cli_path(user: bool, bin_directory: Option<&Path>) -> Result<PathBuf> {
     let directory = if let Some(directory) = bin_directory {
         directory.into()
+    } else if cfg!(windows) {
+        let program_files = env::var_os("ProgramFiles")
+            .context("Windows Program Files directory is unavailable")?;
+        PathBuf::from(program_files).join("PortHub").join("bin")
     } else if user {
         directories::BaseDirs::new()
             .context("user home directory unavailable")?
@@ -171,25 +176,55 @@ pub fn cli_path(user: bool, bin_directory: Option<&Path>) -> Result<PathBuf> {
         directory.is_absolute(),
         "CLI bin directory must be absolute"
     );
-    Ok(directory.join("porthub"))
+    Ok(directory.join(if cfg!(windows) {
+        "porthub.exe"
+    } else {
+        "porthub"
+    }))
 }
 
 /// Add a user-installed CLI directory to the invoking user's shell startup
 /// files when it is not already on PATH. System installs use /usr/local/bin,
 /// which is already part of the standard system PATH.
 pub fn register_cli_path(directory: &Path, user_install: bool) -> Result<()> {
-    let path = env::var_os("PATH").unwrap_or_default();
-    if env::split_paths(&path).any(|entry| entry == directory) {
+    #[cfg(windows)]
+    {
+        anyhow::ensure!(
+            !user_install,
+            "per-user Windows service installation is not supported"
+        );
+        let path_key = windows_registry::LOCAL_MACHINE
+            .open("SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment")
+            .context("cannot open the machine environment registry key")?;
+        let current = path_key
+            .get_string("Path")
+            .context("cannot read the machine PATH registry value")?;
+        let contains =
+            env::split_paths(std::ffi::OsStr::new(&current)).any(|entry| entry == directory);
+        if !contains {
+            let mut updated = current;
+            if !updated.is_empty() && !updated.ends_with(';') {
+                updated.push(';');
+            }
+            updated.push_str(&directory.to_string_lossy());
+            path_key
+                .set_expand_string("Path", updated)
+                .context("cannot add PortHub to the machine PATH")?;
+        }
         return Ok(());
     }
-    anyhow::ensure!(
-        user_install,
-        "system CLI directory is not on PATH; install under /usr/local/bin or choose a PATH directory"
-    );
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     anyhow::bail!("automatic PATH registration is not available for this platform yet");
     #[cfg(unix)]
     {
+        let path = env::var_os("PATH").unwrap_or_default();
+        if env::split_paths(&path).any(|entry| entry == directory) {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            user_install,
+            "system CLI directory is not on PATH; install under /usr/local/bin or choose a PATH directory"
+        );
         let home = directories::BaseDirs::new()
             .context("user home directory unavailable")?
             .home_dir()

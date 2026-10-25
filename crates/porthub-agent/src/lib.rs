@@ -1,6 +1,6 @@
 #[cfg(target_os = "linux")]
 pub mod adopt;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod autoupdate;
 pub mod bootstrap;
 pub mod control;
@@ -13,7 +13,7 @@ mod routes;
 pub mod runtime;
 pub mod service;
 pub mod update;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod upgrade;
 pub const VERSION: &str = match option_env!("PORTHUB_VERSION") {
     Some(value) => value,

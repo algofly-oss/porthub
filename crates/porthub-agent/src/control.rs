@@ -123,6 +123,16 @@ impl Control {
         body: Option<Value>,
         query: &[(&str, String)],
     ) -> Result<Reply, Failure> {
+        self.request_accept(method, path, body, query, None).await
+    }
+    pub async fn request_accept(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+        query: &[(&str, String)],
+        accept: Option<&str>,
+    ) -> Result<Reply, Failure> {
         let mut query = query.to_vec();
         if matches!(
             path,
@@ -148,6 +158,9 @@ impl Control {
                 .http
                 .request(method.clone(), format!("{base}/api/{path}"))
                 .header("x-porthub-agent-protocol", "rust-v1");
+            if let Some(accept) = accept {
+                request = request.header(reqwest::header::ACCEPT, accept);
+            }
             if !query.is_empty() {
                 request = request.query(&query);
             }
@@ -186,6 +199,19 @@ impl Control {
             });
         }
         Err(Failure::Unavailable)
+    }
+    pub async fn pending_private_install(&self) -> Result<Reply, Failure> {
+        self.request_accept(
+            Method::POST,
+            "machines/client/private-install",
+            Some(serde_json::json!({
+                "machine_id": self.profile.machine_id,
+                "token": self.profile.token,
+            })),
+            &[],
+            Some("application/vnd.porthub.private-install+json"),
+        )
+        .await
     }
     pub async fn sync(&self, hostname: &str, handled: &str) -> Result<Reply, Failure> {
         self.request(Method::POST,"machines/client/sync",Some(serde_json::json!({"machine_id":self.profile.machine_id,"token":self.profile.token,"hostname":hostname,"local_ip":local_address(),"client_version":crate::VERSION,"client_update_last_handled_request_id":handled,"is_active":true})),&[]).await

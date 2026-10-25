@@ -91,5 +91,53 @@ mod tests {
         assert_eq!(value["openapi"], "3.0.3");
         assert!(value["paths"]["/api/machines/client/auth"]["post"].is_object());
         assert!(value["paths"]["/api/connections/list"]["get"].is_object());
+        assert!(value["paths"]["/api/downloads/porthub"]["get"].is_object());
+        assert!(value["paths"]["/api/downloads/porthub/{target}"]["get"].is_object());
+        assert!(value["paths"]["/api/machines/command/{machine_id}"]["get"].is_object());
+        assert!(value["paths"]["/api/machines/{machine_id}/status-history"]["get"].is_object());
+        let private_install = &value["paths"]["/api/machines/client/private-install"]["post"];
+        assert!(private_install.is_object());
+        assert_eq!(
+            private_install["responses"]["200"]["content"]["application/json"]["schema"]
+                ["properties"]["data"]["properties"]["ticket"]["type"],
+            "string"
+        );
+    }
+
+    #[test]
+    fn openapi_covers_every_legacy_route_method() {
+        let openapi: Value = serde_json::from_str(include_str!("openapi.json")).unwrap();
+        let legacy: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../api/cmd/porthub-api/testdata/legacy_routes.json"
+        ))
+        .unwrap();
+        let normalize = |path: &str| {
+            let mut normalized = String::with_capacity(path.len());
+            let mut parameter = false;
+            for ch in path.chars() {
+                match ch {
+                    '{' => {
+                        parameter = true;
+                        normalized.push_str("{}");
+                    }
+                    '}' => parameter = false,
+                    _ if parameter => {}
+                    _ => normalized.push(ch),
+                }
+            }
+            normalized
+        };
+        let documented = openapi["paths"].as_object().unwrap();
+        for route in legacy {
+            let path = route["path"].as_str().unwrap();
+            let method = route["method"].as_str().unwrap().to_ascii_lowercase();
+            let entry = documented
+                .iter()
+                .find(|(candidate, _)| normalize(candidate) == normalize(path));
+            assert!(
+                entry.is_some_and(|(_, operations)| operations[&method].is_object()),
+                "legacy route {method} {path} is missing from OpenAPI"
+            );
+        }
     }
 }

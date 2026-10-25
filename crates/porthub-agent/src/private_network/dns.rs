@@ -102,9 +102,14 @@ impl Server {
             "private DNS requires the assigned address"
         );
         Ok(Self {
-            // resolved binds per-link queries to that link. A loopback target
-            // would consequently leave through TUN instead of reaching lo.
+            // Linux resolved binds per-link queries to that link. macOS uses
+            // a suffix-scoped resolver file pointing at loopback.
+            #[cfg(target_os = "linux")]
             socket: UdpSocket::bind((own, 0)).await?,
+            #[cfg(target_os = "macos")]
+            socket: UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?,
+            #[cfg(windows)]
+            socket: UdpSocket::bind((Ipv4Addr::LOCALHOST, 53)).await?,
             zone: Default::default(),
         })
     }
@@ -123,8 +128,48 @@ impl Server {
         }
     }
 }
+#[derive(Default)]
+pub struct Registration {
+    #[cfg(target_os = "macos")]
+    path: Option<std::path::PathBuf>,
+    #[cfg(target_os = "macos")]
+    contents: Vec<u8>,
+    #[cfg(windows)]
+    interface: Option<windows_sys::core::GUID>,
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
+        if let Some(path) = self.path.take() {
+            if std::fs::read(&path).ok().as_deref() == Some(self.contents.as_slice()) {
+                if let Err(error) = std::fs::remove_file(path) {
+                    tracing::warn!("could not remove owned macOS private DNS resolver: {error}");
+                }
+            }
+        }
+        #[cfg(windows)]
+        if let Some(interface) = self.interface.take() {
+            use windows_sys::Win32::NetworkManagement::IpHelper::{
+                SetInterfaceDnsSettings, DNS_INTERFACE_SETTINGS, DNS_INTERFACE_SETTINGS_VERSION1,
+                DNS_SETTING_DOMAIN, DNS_SETTING_NAMESERVER,
+            };
+            let settings = DNS_INTERFACE_SETTINGS {
+                Version: DNS_INTERFACE_SETTINGS_VERSION1,
+                Flags: u64::from(DNS_SETTING_DOMAIN | DNS_SETTING_NAMESERVER),
+                ..Default::default()
+            };
+            // SAFETY: The interface GUID and settings structure are valid for
+            // the duration of the call. Null field pointers clear these values.
+            if unsafe { SetInterfaceDnsSettings(interface, &settings) } != 0 {
+                tracing::warn!("could not clear owned Windows private DNS settings");
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
-pub async fn register(index: u32, own: Ipv4Addr, port: u16, suffix: &str) -> Result<()> {
+pub async fn register(index: u32, own: Ipv4Addr, port: u16, suffix: &str) -> Result<Registration> {
     let connection = zbus::Connection::system()
         .await
         .map_err(|_| anyhow::anyhow!("private DNS system bus unavailable"))?;
@@ -151,5 +196,120 @@ pub async fn register(index: u32, own: Ipv4Addr, port: u16, suffix: &str) -> Res
     proxy
         .call::<_, _, ()>("SetLinkDefaultRoute", &(index as i32, false))
         .await?;
-    Ok(())
+    Ok(Registration::default())
+}
+
+#[cfg(target_os = "macos")]
+pub async fn register(
+    _index: u32,
+    _own: Ipv4Addr,
+    port: u16,
+    suffix: &str,
+) -> Result<Registration> {
+    use std::{fs, io::Write, os::unix::fs::OpenOptionsExt, path::PathBuf};
+
+    ensure!(
+        !suffix.is_empty()
+            && suffix.len() < 254
+            && suffix.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+            }),
+        "invalid private DNS suffix"
+    );
+    let directory = PathBuf::from("/etc/resolver");
+    fs::create_dir_all(&directory)?;
+    let path = directory.join(suffix);
+    let contents = format!(
+        "# Managed by PortHub native agent\ndomain {suffix}\nnameserver 127.0.0.1\nport {port}\nsearch_order 100\ntimeout 2\n"
+    )
+    .into_bytes();
+    let temporary = directory.join(format!(".porthub-{}-{port}.tmp", std::process::id()));
+    let result = (|| -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o644)
+            .open(&temporary)?;
+        file.write_all(&contents)?;
+        file.sync_all()?;
+        fs::hard_link(&temporary, &path)?;
+        fs::remove_file(&temporary)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result?;
+    Ok(Registration {
+        path: Some(path),
+        contents,
+    })
+}
+
+#[cfg(windows)]
+pub async fn register(index: u32, _own: Ipv4Addr, port: u16, suffix: &str) -> Result<Registration> {
+    use windows_sys::Win32::NetworkManagement::{
+        IpHelper::{
+            ConvertInterfaceIndexToLuid, ConvertInterfaceLuidToGuid, SetInterfaceDnsSettings,
+            DNS_INTERFACE_SETTINGS, DNS_INTERFACE_SETTINGS_VERSION1, DNS_SETTING_DOMAIN,
+            DNS_SETTING_NAMESERVER,
+        },
+        Ndis::NET_LUID_LH,
+    };
+
+    ensure!(
+        port == 53,
+        "Windows private DNS must use the standard DNS port"
+    );
+    ensure!(
+        !suffix.is_empty()
+            && suffix.len() < 254
+            && suffix.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+            }),
+        "invalid private DNS suffix"
+    );
+    // SAFETY: Each output pointer refers to an initialized local value.
+    let mut luid: NET_LUID_LH = unsafe { std::mem::zeroed() };
+    ensure!(
+        unsafe { ConvertInterfaceIndexToLuid(index, &mut luid) } == 0,
+        "cannot identify Windows private DNS interface"
+    );
+    let mut interface = windows_sys::core::GUID::default();
+    ensure!(
+        unsafe { ConvertInterfaceLuidToGuid(&luid, &mut interface) } == 0,
+        "cannot identify Windows private DNS interface"
+    );
+    let server = "127.0.0.1"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let domain = suffix.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+    let settings = DNS_INTERFACE_SETTINGS {
+        Version: DNS_INTERFACE_SETTINGS_VERSION1,
+        Flags: u64::from(DNS_SETTING_DOMAIN | DNS_SETTING_NAMESERVER),
+        Domain: domain.as_ptr() as *mut u16,
+        NameServer: server.as_ptr() as *mut u16,
+        ..Default::default()
+    };
+    // SAFETY: Both strings and the settings structure stay live through this call.
+    ensure!(
+        unsafe { SetInterfaceDnsSettings(interface, &settings) } == 0,
+        "cannot register Windows private DNS resolver"
+    );
+    Ok(Registration {
+        interface: Some(interface),
+    })
 }

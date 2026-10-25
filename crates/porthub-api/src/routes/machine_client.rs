@@ -2,6 +2,7 @@ use crate::{
     domain::{
         inventory,
         machine_client::{self, View},
+        private_enrollment,
     },
     error::{ApiError, ApiResult},
     input::{ApiBody, Model},
@@ -9,12 +10,13 @@ use crate::{
 };
 use axum::{
     extract::{OriginalUri, Query, State},
-    http::{HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
-use mongodb::bson::doc;
+use futures_util::TryStreamExt;
+use mongodb::bson::{doc, Bson, DateTime, Document};
 use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -23,11 +25,153 @@ pub fn router() -> Router<Arc<App>> {
         .route("/api/machines/client/auth", post(session))
         .route("/api/machines/client/sync", post(session))
         .route("/api/machines/sync", post(session))
+        .route(
+            "/api/machines/client/private-install",
+            post(pending_private_install),
+        )
         .route("/api/machines/client/config", get(config))
         .route("/api/machines/client/config.toml", get(config))
         .route("/api/machines/client/changes", get(config))
         .route("/api/machines/client/changes.toml", get(config))
         .route("/api/machines/client/deletion-ack", post(deletion_ack))
+}
+
+async fn pending_private_install(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    ApiBody(body): ApiBody,
+) -> ApiResult<Response> {
+    let mut model = Model::new(body)?;
+    let id = model.required_string("machine_id");
+    model.string_length("machine_id", &id, 1, Some(64));
+    let token = model.required_string("token");
+    model.string_length("token", &token, 1, None);
+    model.finish()?;
+    let machine = machine_client::authenticate(&app, &id, &token).await?;
+    let mut empty = StatusCode::NO_CONTENT.into_response();
+    empty
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if machine.get_bool("private_owner_revoked").unwrap_or(false) {
+        return Ok(empty);
+    }
+
+    private_enrollment::initialize(&app).await?;
+    crate::domain::enrollment::ensure(&app, &machine).await?;
+    let machine_id = machine.get("_id").ok_or_else(ApiError::unauthenticated)?;
+    let owner_id = machine
+        .get("user_id")
+        .ok_or_else(ApiError::unauthenticated)?;
+    let peers: Vec<Document> = app
+        .collection("private_peers")
+        .find(doc! {"machine_id":machine_id,"owner_id":owner_id,"enabled":true,"credential_hash":{"$exists":false}})
+        .limit(2)
+        .await?
+        .try_collect()
+        .await?;
+    if peers.is_empty() {
+        return Ok(empty);
+    }
+    if peers.len() != 1 {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "Choose which pending private workspace to install",
+        ));
+    }
+    let peer = &peers[0];
+    let workspace = store::id(peer.get("workspace_id"));
+    let owner = store::id(Some(owner_id));
+    if workspace != owner {
+        let membership = app
+            .collection("workspace_members")
+            .find_one(doc! {"_id":format!("{workspace}:{owner}")})
+            .await?;
+        if !membership
+            .as_ref()
+            .is_some_and(|record| matches!(store::string(record, "role"), "admin" | "member"))
+        {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "Machine owner no longer belongs to the private workspace",
+            ));
+        }
+    }
+
+    let now = DateTime::now();
+    let ticket = private_enrollment::token()?;
+    app.collection("private_install_tickets")
+        .update_many(
+            doc! {"peer_id":peer.get("_id"),"consumed_at":Bson::Null},
+            doc! {"$set":{"consumed_at":now}},
+        )
+        .await?;
+    let mut claim = doc! {
+        "_id":crate::domain::workspaces::token_digest(&ticket),
+        "peer_id":peer.get_str("_id").unwrap_or_default(),
+        "created_by":owner_id,
+        "consumed_at":Bson::Null,
+        "expires_at":DateTime::from_millis(now.timestamp_millis()+600_000),
+    };
+    if let Some(generation) = peer.get("enrollment_generation") {
+        claim.insert("generation", generation.clone());
+    }
+    app.collection("private_install_tickets")
+        .insert_one(claim)
+        .await?;
+
+    let query = HashMap::new();
+    let view = View {
+        headers: &headers,
+        query: &query,
+    };
+
+    // Native agents consume a small structured ticket instead of executing a
+    // shell installer. Keep the text installer as the default representation
+    // for existing Go clients.
+    if headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.split(',').any(|entry| {
+                entry.trim().split(';').next()
+                    == Some("application/vnd.porthub.private-install+json")
+            })
+        })
+    {
+        let mut response = Json(json!({"data": {
+            "format_version": 1,
+            "server": view.public_base(&app, &machine),
+            "peer_id": store::field(peer, "_id"),
+            "workspace": workspace,
+            "ticket": ticket,
+            "fallback_servers": []
+        }}))
+        .into_response();
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        return Ok(response);
+    }
+
+    let server = view.public_base(&app, &machine);
+    let script = include_str!("../../../../api/assets/client/private-install.sh")
+        .replace(
+            "__PRIVATE_SERVER__",
+            &crate::enrollment_ticket::shell_quote(&server),
+        )
+        .replace(
+            "__PRIVATE_TICKET__",
+            &crate::enrollment_ticket::shell_quote(&ticket),
+        );
+    let mut response = script.into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
 }
 
 async fn session(

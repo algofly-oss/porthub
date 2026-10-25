@@ -1,6 +1,8 @@
 mod common;
 use anyhow::Result;
-use porthub_agent::profile::{self, Lease, Profile};
+#[cfg(unix)]
+use porthub_agent::profile;
+use porthub_agent::profile::{Lease, Profile};
 fn profile() -> Profile {
     Profile {
         format_version: 1,

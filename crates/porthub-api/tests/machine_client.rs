@@ -72,7 +72,7 @@ impl Case {
             doc! {"_id":ObjectId::new(),"machine_id":id,"internal_ip":"127.0.0.1","internal_port":8081,"external_port":33127,"enabled":false},
         ]).await?;
         db.collection::<Document>("private_peers")
-            .insert_one(doc! {"machine_id":id,"owner_id":owner,"ip":"10.203.0.7","enabled":true})
+            .insert_one(doc! {"_id":format!("{}:{}",owner.to_hex(),id.to_hex()),"workspace_id":owner,"machine_id":id,"owner_id":owner,"ip":"10.203.0.7","enabled":true})
             .await?;
         let router = porthub_api::router(app.clone());
         Ok(Self {
@@ -88,19 +88,29 @@ impl Case {
         path: &str,
         body: Value,
     ) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
+        self.call_accept(method, path, body, None).await
+    }
+    async fn call_accept(
+        &self,
+        method: &str,
+        path: &str,
+        body: Value,
+        accept: Option<&str>,
+    ) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("host", "hub.example.invalid")
+            .header("x-forwarded-proto", "https")
+            .header("x-forwarded-for", "198.51.100.9, 127.0.0.1")
+            .header("content-type", "application/json");
+        if let Some(accept) = accept {
+            request = request.header("accept", accept);
+        }
         let response = self
             .router
             .clone()
-            .oneshot(
-                Request::builder()
-                    .method(method)
-                    .uri(path)
-                    .header("host", "hub.example.invalid")
-                    .header("x-forwarded-proto", "https")
-                    .header("x-forwarded-for", "198.51.100.9, 127.0.0.1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))?,
-            )
+            .oneshot(request.body(Body::from(body.to_string()))?)
             .await?;
         Ok((
             response.status(),
@@ -113,6 +123,104 @@ impl Case {
     fn query(&self) -> String {
         format!("machine_id={}&token=machine-secret", self.id)
     }
+}
+
+#[tokio::test]
+#[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn pending_private_install_negotiates_native_ticket_json() -> Result<()> {
+    let case = Case::new().await?;
+    let result: Result<()> = async {
+        let (status, headers, bytes) = case
+            .call_accept(
+                "POST",
+                "/api/machines/client/private-install",
+                json!({"machine_id":case.id.to_hex(),"token":"machine-secret"}),
+                Some("application/vnd.porthub.private-install+json"),
+            )
+            .await?;
+        ensure!(status == StatusCode::OK);
+        ensure!(headers["cache-control"] == "no-store");
+        ensure!(headers["content-type"]
+            .to_str()?
+            .starts_with("application/json"));
+        let body: Value = serde_json::from_slice(&bytes)?;
+        let data = &body["data"];
+        ensure!(data["format_version"] == 1);
+        ensure!(data["server"] == "https://hub.example.invalid");
+        let peer_id = data["peer_id"].as_str().context("native peer ID missing")?;
+        let (workspace, machine) = peer_id.split_once(':').context("invalid peer ID")?;
+        ensure!(machine == case.id.to_hex());
+        ensure!(data["workspace"] == workspace);
+        let ticket = data["ticket"].as_str().context("native ticket missing")?;
+        let (status, _, bytes) = case
+            .call(
+                "POST",
+                "/api/access/private/bootstrap",
+                json!({"ticket":ticket}),
+            )
+            .await?;
+        ensure!(status == StatusCode::OK);
+        let credentials: Value = serde_json::from_slice(&bytes)?;
+        ensure!(credentials["peer_id"] == data["peer_id"]);
+        ensure!(credentials["workspace"] == data["workspace"]);
+        Ok(())
+    }
+    .await;
+    let cleanup = case.db.drop().await;
+    result?;
+    cleanup?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn pending_private_install_returns_a_single_use_native_enrollment_script() -> Result<()> {
+    let case = Case::new().await?;
+    let result: Result<()> = async {
+        let body = json!({"machine_id":case.id.to_hex(),"token":"machine-secret"});
+        let (status, headers, bytes) = case
+            .call("POST", "/api/machines/client/private-install", body.clone())
+            .await?;
+        ensure!(
+            status == StatusCode::OK,
+            "private install returned {status}"
+        );
+        ensure!(headers["cache-control"] == "no-store");
+        ensure!(headers["content-type"].to_str()?.starts_with("text/plain"));
+        let script = String::from_utf8(bytes)?;
+        ensure!(script.contains("https://hub.example.invalid"));
+        ensure!(!script.contains("__PRIVATE_SERVER__"));
+        ensure!(!script.contains("__PRIVATE_TICKET__"));
+        let ticket = script
+            .lines()
+            .find_map(|line| line.strip_prefix("TICKET="))
+            .context("installer script did not contain its ticket")?;
+        ensure!(!ticket.is_empty());
+
+        let (status, _, response) = case
+            .call(
+                "POST",
+                "/api/access/private/bootstrap",
+                json!({"ticket":ticket}),
+            )
+            .await?;
+        ensure!(status == StatusCode::OK, "bootstrap returned {status}");
+        let credentials: Value = serde_json::from_slice(&response)?;
+        ensure!(credentials["token"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()));
+
+        let (status, _, _) = case
+            .call("POST", "/api/machines/client/private-install", body)
+            .await?;
+        ensure!(status == StatusCode::NO_CONTENT);
+        Ok(())
+    }
+    .await;
+    let cleanup = case.db.drop().await;
+    result?;
+    cleanup?;
+    Ok(())
 }
 
 #[tokio::test]

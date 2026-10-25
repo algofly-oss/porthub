@@ -18,6 +18,10 @@ mod process;
 pub(crate) mod publication;
 #[cfg(target_os = "linux")]
 pub mod systemd;
+#[cfg(windows)]
+pub mod windows;
+#[cfg(windows)]
+pub(crate) mod windows_acl;
 const MARKER: &str = "# Managed by PortHub native agent";
 fn hex(bytes: impl AsRef<[u8]>) -> String {
     bytes
@@ -93,7 +97,17 @@ impl Layout {
             releases: "/Library/Application Support/PortHub/releases".into(),
             units: "/Library/LaunchDaemons".into(),
         });
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(windows)]
+        {
+            let root = windows_acl::managed_root()?;
+            return Ok(Self {
+                user: false,
+                state: root.join("native"),
+                releases: root.join("releases"),
+                units: root.join("services"),
+            });
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         anyhow::bail!("native service installation for this platform is not implemented yet")
     }
     pub fn user() -> Result<Self> {
@@ -117,7 +131,11 @@ impl Layout {
                 },
             })
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(windows)]
+        {
+            anyhow::bail!("per-user Windows services are not supported; install the system service")
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         anyhow::bail!("native user services for this platform are not implemented yet")
     }
 }
@@ -147,6 +165,9 @@ pub trait Manager: Send + Sync {
     async fn disable(&self, spec: &Spec) -> Result<()>;
     async fn start(&self, spec: &Spec) -> Result<()>;
     async fn stop(&self, spec: &Spec) -> Result<()>;
+    async fn remove(&self, _spec: &Spec) -> Result<()> {
+        Ok(())
+    }
     async fn reset_failed(&self, _spec: &Spec) -> Result<()> {
         Ok(())
     }
@@ -199,6 +220,8 @@ fn directory_permissions(path: &Path, owner: u32, group: u32, mode: u32, current
     owner == current && mode & 0o002 == 0 && (mode & 0o020 == 0 || root_system_units)
 }
 pub(crate) fn directory(path: &Path, private: bool) -> Result<()> {
+    #[cfg(windows)]
+    let _ = private;
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => {
             anyhow::ensure!(
@@ -232,7 +255,10 @@ pub(crate) fn directory(path: &Path, private: bool) -> Result<()> {
                     "service directory parent is not owned securely"
                 );
             }
+            #[cfg(unix)]
             let mut builder = std::fs::DirBuilder::new();
+            #[cfg(not(unix))]
+            let builder = std::fs::DirBuilder::new();
             #[cfg(unix)]
             {
                 use std::os::unix::fs::DirBuilderExt;
@@ -250,6 +276,10 @@ pub(crate) fn directory(path: &Path, private: bool) -> Result<()> {
         if private {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
         }
+    }
+    #[cfg(windows)]
+    if windows_acl::is_managed(path) {
+        windows_acl::secure(path, true)?;
     }
     Ok(())
 }
@@ -304,6 +334,8 @@ fn regular(path: &Path) -> Result<Option<Vec<u8>>> {
     Ok(Some(std::fs::read(path)?))
 }
 pub(crate) fn atomic(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
+    #[cfg(not(unix))]
+    let _ = private;
     let parent = path.parent().context("service state needs a directory")?;
     let mut file = tempfile::NamedTempFile::new_in(parent)?;
     file.write_all(bytes)?;
@@ -319,11 +351,15 @@ pub(crate) fn atomic(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
     }
     file.as_file().sync_all()?;
     file.persist(path).map_err(|error| error.error)?;
+    #[cfg(windows)]
+    if windows_acl::is_managed(path) {
+        windows_acl::secure(path, false)?;
+    }
     #[cfg(unix)]
     File::open(parent)?.sync_all()?;
     Ok(())
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn argument(path: &Path) -> Result<String> {
     let value = path
         .to_str()
@@ -340,7 +376,7 @@ fn argument(path: &Path) -> Result<String> {
             .replace('%', "%%")
     ))
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 pub fn unit(spec: &Spec) -> Result<String> {
     // systemd rejects these characters in the executable itself even when
     // correctly escaped. Profile arguments can still contain quoted characters.
@@ -368,11 +404,25 @@ pub fn unit(spec: &Spec) -> Result<String> {
 pub fn unit(spec: &Spec) -> Result<String> {
     launchd::unit(spec)
 }
+#[cfg(windows)]
+pub fn unit(spec: &Spec) -> Result<String> {
+    anyhow::ensure!(
+        spec.identity.len() == 64 && spec.identity.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "invalid Windows service identity"
+    );
+    Ok(format!(
+        "{MARKER}: {}\n{}\n",
+        spec.identity,
+        serde_json::to_string(spec)?
+    ))
+}
 fn unit_name(service: &str) -> String {
     format!(
         "{service}.{}",
         if cfg!(target_os = "macos") {
             "plist"
+        } else if cfg!(windows) {
+            "json"
         } else {
             "service"
         }
@@ -564,7 +614,7 @@ pub(crate) fn installed(layout: &Layout, id: &str) -> Result<Option<Spec>> {
             && spec.unit == layout.units.join(unit_name(&spec.service))
             && spec.executable.parent().and_then(Path::parent)==Some(layout.releases.as_path())
             && spec.executable.file_name().is_some_and(|name|name==if cfg!(windows){"porthub.exe"}else{"porthub"})
-            && spec.cli.as_ref().is_none_or(|path|path.is_absolute() && path.file_name().is_some_and(|name|name=="porthub"))
+            && spec.cli.as_ref().is_none_or(|path|path.is_absolute() && path.file_name().is_some_and(|name|name==if cfg!(windows){"porthub.exe"}else{"porthub"}))
             && spec.executable.parent().and_then(Path::file_name).and_then(|name|name.to_str()).is_some_and(|name|name.len()==64&&name.bytes().all(|b|b.is_ascii_hexdigit())),
         "installed service manifest does not match its profile"
     );
@@ -718,6 +768,11 @@ pub(crate) async fn install_locked(
     directory(&layout.releases, false)?;
     directory(&layout.units, false)?;
     let previous = installed(layout, &id)?;
+    #[cfg(windows)]
+    anyhow::ensure!(
+        !matches!(&profile, RegistrationProfile::Private(_)),
+        "Windows private-network service activation is not supported"
+    );
     let executable = binary(executable, &layout.releases)?;
     let spec = Spec {
         user: layout.user,
@@ -764,6 +819,9 @@ pub(crate) async fn install_locked(
         }
         if !old.enabled {
             let _ = manager.disable(&spec).await;
+        }
+        if !old.installed {
+            let _ = manager.remove(&spec).await;
         }
         let rollback = files.rollback();
         let cli_rollback = publication
@@ -830,6 +888,7 @@ pub async fn action(
         Action::Uninstall { purge } => {
             manager.stop(&spec).await?;
             manager.disable(&spec).await?;
+            manager.remove(&spec).await?;
             match std::fs::remove_file(&spec.unit) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -874,7 +933,7 @@ pub async fn status(layout: &Layout, source: &Path, manager: &dyn Manager) -> Re
     }
 }
 pub async fn system_manager(user: bool) -> Result<Box<dyn Manager>> {
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     let _ = user;
     #[cfg(target_os = "linux")]
     return Ok(Box::new(if user {
@@ -884,7 +943,9 @@ pub async fn system_manager(user: bool) -> Result<Box<dyn Manager>> {
     }));
     #[cfg(target_os = "macos")]
     return Ok(Box::new(launchd::Launchd::connect(user).await?));
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    return Ok(Box::new(windows::Windows::connect(user)?));
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     anyhow::bail!("native service controller for this platform is not implemented yet")
 }
 pub fn require_administrator() -> Result<()> {
@@ -893,6 +954,8 @@ pub fn require_administrator() -> Result<()> {
         rustix::process::geteuid().is_root(),
         "run with administrative privileges to manage system services"
     );
+    #[cfg(windows)]
+    windows::require_administrator()?;
     Ok(())
 }
 pub const OPERATION_TIMEOUT: Duration = Duration::from_secs(20);

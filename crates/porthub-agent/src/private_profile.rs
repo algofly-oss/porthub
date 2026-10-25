@@ -1,12 +1,15 @@
 //! Private-network credentials retain the existing Go profile wire format.
 //! Enrollment stages identity only; packet runtime activation is separate.
-use crate::profile::{self, Lease};
-use anyhow::{Context, Result};
+use crate::profile;
+#[cfg(unix)]
+use crate::profile::Lease;
+#[cfg(unix)]
+use anyhow::Context;
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -71,6 +74,7 @@ impl Profile {
     }
 }
 #[derive(Deserialize)]
+#[cfg(unix)]
 struct Metadata {
     format_version: u32,
     kind: String,
@@ -82,11 +86,13 @@ struct Metadata {
     fallback_servers: Vec<String>,
 }
 #[derive(Deserialize)]
+#[cfg(unix)]
 struct Credentials {
     peer_id: String,
     workspace: String,
     token: String,
 }
+#[cfg(unix)]
 fn client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -94,6 +100,7 @@ fn client() -> Result<reqwest::Client> {
         .timeout(Duration::from_secs(20))
         .build()?)
 }
+#[cfg(unix)]
 async fn response(
     mut response: reqwest::Response,
     cancel: &CancellationToken,
@@ -118,7 +125,8 @@ async fn response(
     }
     Ok((headers, bytes))
 }
-fn default_path(user: bool, server: &str, peer: &str) -> Result<PathBuf> {
+#[cfg(unix)]
+pub(crate) fn default_path(user: bool, server: &str, peer: &str) -> Result<PathBuf> {
     use sha2::{Digest, Sha256};
     let layout = if user {
         crate::service::Layout::user()?
@@ -132,6 +140,204 @@ fn default_path(user: bool, server: &str, peer: &str) -> Result<PathBuf> {
         "{:x}.json",
         Sha256::digest(format!("{server}\n{peer}").as_bytes())
     )))
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Deserialize)]
+struct PendingInstall {
+    format_version: u32,
+    server: String,
+    peer_id: String,
+    workspace: String,
+    ticket: String,
+    #[serde(default)]
+    fallback_servers: Vec<String>,
+}
+
+/// Linux system services can activate a pending private enrollment in a
+/// separate, identity-scoped service. This never restarts the public service.
+#[cfg(target_os = "linux")]
+pub(crate) async fn run_auto_install(
+    control: std::sync::Arc<crate::control::Control>,
+    public: crate::profile::Profile,
+    layout: crate::service::Layout,
+    executable: PathBuf,
+    cancel: CancellationToken,
+) {
+    use std::time::Duration;
+    loop {
+        if cancel.is_cancelled() {
+            return;
+        }
+        let result = auto_install_once(&control, &public, &layout, &executable, &cancel).await;
+        let delay = if result.is_ok() {
+            Duration::from_secs(6 * 60 * 60)
+        } else {
+            tracing::warn!("automatic private enrollment is pending; it will be retried later");
+            Duration::from_secs(15 * 60)
+        };
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = tokio::time::sleep(delay) => {}
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn auto_install_once(
+    control: &crate::control::Control,
+    public: &crate::profile::Profile,
+    layout: &crate::service::Layout,
+    executable: &Path,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    use anyhow::ensure;
+    use reqwest::StatusCode;
+
+    crate::service::require_administrator()?;
+    activate_pending_profiles(layout, &public.machine_id, executable).await?;
+
+    let reply = tokio::select! {
+        _ = cancel.cancelled() => anyhow::bail!("private enrollment cancelled"),
+        reply = control.pending_private_install() => reply.map_err(|_| anyhow::anyhow!("private enrollment gateway unavailable"))?,
+    };
+    if reply.status == StatusCode::NO_CONTENT {
+        return Ok(());
+    }
+    ensure!(
+        reply.status == StatusCode::OK,
+        "unexpected private enrollment response"
+    );
+    let body: serde_json::Value = serde_json::from_slice(&reply.bytes)
+        .map_err(|_| anyhow::anyhow!("invalid private enrollment response"))?;
+    let pending: PendingInstall =
+        serde_json::from_value(body.get("data").cloned().unwrap_or_default())
+            .map_err(|_| anyhow::anyhow!("invalid private enrollment response"))?;
+    ensure!(
+        pending.format_version == 1,
+        "unsupported private enrollment response"
+    );
+    ensure!(
+        pending
+            .peer_id
+            .strip_prefix(&format!("{}:", pending.workspace))
+            .is_some_and(|machine| machine.eq_ignore_ascii_case(&public.machine_id)),
+        "private enrollment identity mismatch"
+    );
+    ensure!(
+        pending.fallback_servers.len() <= 8,
+        "too many private gateway fallbacks"
+    );
+    let path = default_path(false, &pending.server, &pending.peer_id)?;
+    let marker = path.with_extension("pending");
+    profile::write_private(
+        &marker,
+        path.file_name()
+            .context("private profile path is invalid")?
+            .to_string_lossy()
+            .as_bytes(),
+        true,
+    )?;
+    if std::fs::symlink_metadata(&path)
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        enroll(
+            Source::Ticket {
+                server: &pending.server,
+                ticket: &pending.ticket,
+            },
+            Some(&path),
+            false,
+            public.allow_insecure_http_for_tests,
+            cancel,
+        )
+        .await?;
+    }
+    let mut enrolled = Profile::load(&path)?;
+    ensure!(
+        enrolled.peer_id == pending.peer_id && enrolled.workspace == pending.workspace,
+        "private enrollment identity mismatch"
+    );
+    enrolled.fallback_servers = pending.fallback_servers;
+    enrolled.validate()?;
+    profile::write_private(&path, &serde_json::to_vec_pretty(&enrolled)?, true)?;
+    activate_profile(layout, &path, executable).await?;
+    std::fs::remove_file(marker)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn pending_profiles(layout: &crate::service::Layout) -> Result<Vec<(PathBuf, PathBuf)>> {
+    let root = layout.state.join("private");
+    let metadata = match std::fs::symlink_metadata(&root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "private profile directory is unsafe"
+    );
+    let mut profiles = Vec::new();
+    for entry in std::fs::read_dir(&root)?.take(256) {
+        let marker = entry?.path();
+        if marker
+            .extension()
+            .is_none_or(|extension| extension != "pending")
+        {
+            continue;
+        }
+        let name = String::from_utf8(profile::read_private(&marker)?)?;
+        let filename = Path::new(&name)
+            .file_name()
+            .context("invalid private recovery marker")?;
+        let path = root.join(filename);
+        if Profile::load(&path).is_ok() {
+            profiles.push((path, marker));
+        }
+    }
+    Ok(profiles)
+}
+
+#[cfg(target_os = "linux")]
+async fn activate_pending_profiles(
+    layout: &crate::service::Layout,
+    machine_id: &str,
+    executable: &Path,
+) -> Result<()> {
+    for (path, marker) in pending_profiles(layout)? {
+        let profile = Profile::load(&path)?;
+        if !profile
+            .peer_id
+            .rsplit_once(':')
+            .is_some_and(|(_, id)| id.eq_ignore_ascii_case(machine_id))
+        {
+            continue;
+        }
+        activate_profile(layout, &path, executable).await?;
+        std::fs::remove_file(marker)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+async fn activate_profile(
+    layout: &crate::service::Layout,
+    path: &Path,
+    executable: &Path,
+) -> Result<()> {
+    let profile = Profile::load(path)?;
+    let registration = crate::service::RegistrationProfile::Private(profile);
+    let id = registration.identity();
+    if crate::service::installed(layout, &id)?.is_some() {
+        // Existing enable/disable state belongs to the operator. Automatic
+        // enrollment only activates an identity with no owned service yet.
+        return Ok(());
+    }
+    let manager = crate::service::system_manager(false).await?;
+    crate::service::install_published(layout, path, executable, manager.as_ref(), None).await?;
+    tracing::info!("private network service activated");
+    Ok(())
 }
 /// Read either an installer capability or an existing long ticket supplied on
 /// stdin. Preflight the destination before consuming the one-time ticket.

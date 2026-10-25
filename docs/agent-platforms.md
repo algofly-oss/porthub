@@ -37,17 +37,25 @@ executable through `proc_pidpath`. Its disposable user-service test is gated by
 `PORTHUB_TEST_LAUNCHD=1`; the actual lifecycle/forwarding check passed on both
 macOS runner architectures. The registered Mac became unreachable before a
 fleet upgrade could be tested; runner success does not establish its live state.
-Windows service control, non-Linux
-updates, private-network lifecycle and Windows credential ACL verification
-remain.
+Windows service installation now uses the native Service Control Manager,
+publishes `porthub.exe` atomically into a PATH directory, and adds the system
+install directory to machine PATH. Managed state applies a protected native
+DACL granting access only to SYSTEM and local Administrators. The Windows
+private packet path now uses native route/DNS APIs and embeds the signed Wintun
+0.14.1 runtime for x86, x86_64, ARM32 and ARM64; it extracts the selected DLL
+into ACL-protected PortHub state. Its license and verified source archive
+checksum are included beside the binaries. macOS has a native utun/route and
+suffix-resolver implementation. Windows x86_64 and i686 GNU targets pass
+disposable MinGW cross-target checks. The native MSVC/ARM64 workflow and
+runtime behavior for SCM, registry, file replacement, ACL, private DNS and
+packet routes still need execution on Windows. macOS target compilation remains
+delegated to macOS CI because this Linux host lacks the Apple SDK.
 
 The server runtime, nftables worker and container deployment are Linux-specific
-crates and must not become dependencies of the portable agent. TUN, DNS, service
-installation, updates and policy enforcement need platform implementations
-behind shared interfaces. Those lifecycle/private-network features are not yet
-fully migrated, so the new transfer CLI is not a verified replacement for every
-installed agent. Windows private networking also needs a bundled and licensed
-native driver strategy; it must not require users to assemble external tools.
+crates and must not become dependencies of the portable agent. Remaining gates
+include native platform tests for the new Windows/macOS private paths, the
+non-Linux update lifecycle and full route-policy parity. These implementations
+are not yet verified as a production replacement for every installed agent.
 
 Release builds embed the commit version and produce a version marker and SHA256
 beside each binary. Packaging must gather matching-version artifacts for every

@@ -1,0 +1,46 @@
+{
+  "date": "2026-10-25",
+  "base_revision": "e59cb478f870e99174caf755ddefe26955dd434d",
+  "working_tree_contains_uncommitted_changes": true,
+  "scope": "Rust API MongoDB integration suites",
+  "database": "Fresh disposable MongoDB container bound to 127.0.0.1 on an ephemeral host port; each test uses a unique database name",
+  "results": {
+    "workflow_suite_tests_passed": 16,
+    "additional_suite_binaries": 18,
+    "additional_tests_passed": 70,
+    "tests_failed": 0,
+    "tests_ignored": 0,
+    "private_mesh_tests_passed": 3
+  },
+  "additional_suites": [
+    "advertised_origin",
+    "artifacts",
+    "auth_migration",
+    "bootstrap",
+    "config_preflight",
+    "gateway_apply",
+    "legacy_upgrade",
+    "machine_client",
+    "machine_delete",
+    "machine_update",
+    "private_access",
+    "private_books",
+    "private_enrollment",
+    "private_groups",
+    "private_mesh",
+    "private_sync",
+    "realtime",
+    "status_monitor"
+  ],
+  "excluded": [
+    "Go agent and TURN interoperability fixtures",
+    "frontend Socket.IO fixture requiring its separate browser setup",
+    "native-update lifecycle requiring a live authorized systemd user service"
+  ],
+  "notes": [
+    "The native updater integration used the release-mode Rust agent binary; the debug binary exceeds the updater's release-size limit.",
+    "The private_mesh suite passed native authenticated peer discovery, bidirectional UDP payload transfer without gateway payload, underlay-change recovery, and authenticated relay fallback checks.",
+    "This verifies the listed API integration behavior only; it does not establish full Go parity, platform service support, network path behavior, production deployment, or client upgrades.",
+    "The temporary MongoDB container was removed after the run."
+  ]
+}

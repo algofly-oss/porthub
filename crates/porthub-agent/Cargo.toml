@@ -59,3 +59,15 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 zbus = { version = "5", default-features = false, features = ["tokio", "p2p"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tun-rs = { version = "=2.8.13", default-features = false, features = ["async"] }
+route_manager = { version = "=0.2.9", features = ["async"] }
+
+[target."cfg(windows)".dependencies]
+windows-service = "0.8.1"
+windows-registry = "0.6.1"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Memory"] }
+tun-rs = { version = "=2.8.13", default-features = false, features = ["async"] }
+route_manager = { version = "=0.2.9", features = ["async"] }
+getifaddrs = "0.6.2"

@@ -3,8 +3,9 @@
 use super::{directory, Layout};
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::fs::File;
 use std::{
-    fs::File,
     io::Read,
     path::{Path, PathBuf},
 };
@@ -13,6 +14,13 @@ enum Previous {
     Missing,
     Link(PathBuf),
     IdenticalFile(tempfile::TempDir),
+}
+fn cli_name() -> &'static str {
+    if cfg!(windows) {
+        "porthub.exe"
+    } else {
+        "porthub"
+    }
 }
 pub(crate) struct Publication {
     path: PathBuf,
@@ -71,7 +79,7 @@ fn owned_target(layout: &Layout, target: &Path) -> Result<()> {
     anyhow::ensure!(
         target.is_absolute()
             && parent.parent() == Some(layout.releases.as_path())
-            && target.file_name().is_some_and(|name| name == "porthub")
+            && target.file_name().is_some_and(|name| name == cli_name())
             && name.len() == 64
             && name.bytes().all(|b| b.is_ascii_hexdigit()),
         "existing CLI is not a managed PortHub release; legacy adoption must be explicit"
@@ -87,10 +95,10 @@ fn owned_target(layout: &Layout, target: &Path) -> Result<()> {
 }
 /// Read-only ownership check for a native update's shared CLI. Legacy files
 /// require adoption; an update may replace only an existing managed link.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn managed_link(layout: &Layout, path: &Path) -> Result<PathBuf> {
     anyhow::ensure!(
-        path.is_absolute() && path.file_name().is_some_and(|name| name == "porthub"),
+        path.is_absolute() && path.file_name().is_some_and(|name| name == cli_name()),
         "native update requires an absolute CLI path"
     );
     let metadata = std::fs::symlink_metadata(path)?;
@@ -119,7 +127,7 @@ pub(crate) fn managed_link(layout: &Layout, path: &Path) -> Result<PathBuf> {
     owned_target(layout, &target)?;
     Ok(target)
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn restore_link(
     layout: &Layout,
     path: &Path,
@@ -193,9 +201,73 @@ fn replace_link(path: &Path, target: &Path) -> Result<()> {
     File::open(parent)?.sync_all()?;
     Ok(())
 }
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn replace_link(path: &Path, target: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, ReplaceFileW, MOVEFILE_WRITE_THROUGH, REPLACEFILE_WRITE_THROUGH,
+    };
+    let parent = path.parent().context("CLI needs a bin directory")?;
+    let directory = private_directory(parent)?;
+    let staged = directory.path().join("porthub.exe");
+    std::fs::copy(target, &staged).context("cannot stage the PortHub CLI executable")?;
+    let path_wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let staged_wide = staged
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let exists = std::fs::symlink_metadata(path).is_ok();
+    // SAFETY: Both paths are NUL-terminated UTF-16 strings that remain alive
+    // for the duration of the native call. The staged file shares the target
+    // volume, so Windows can publish it atomically.
+    let result = unsafe {
+        if exists {
+            ReplaceFileW(
+                path_wide.as_ptr(),
+                staged_wide.as_ptr(),
+                std::ptr::null(),
+                REPLACEFILE_WRITE_THROUGH,
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        } else {
+            MoveFileExW(
+                staged_wide.as_ptr(),
+                path_wide.as_ptr(),
+                MOVEFILE_WRITE_THROUGH,
+            )
+        }
+    };
+    anyhow::ensure!(
+        result != 0,
+        "Windows refused to atomically publish the PortHub CLI ({})",
+        std::io::Error::last_os_error()
+    );
+    Ok(())
+}
+#[cfg(not(any(unix, windows)))]
 fn replace_link(_: &Path, _: &Path) -> Result<()> {
     anyhow::bail!("native CLI publication for this platform is not implemented yet")
+}
+fn is_published(path: &Path, target: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        std::fs::read_link(path).ok().as_deref() == Some(target)
+    }
+    #[cfg(windows)]
+    {
+        hash_file(path).ok() == hash_file(target).ok()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (path, target);
+        false
+    }
 }
 impl Publication {
     pub(crate) fn prepare(layout: &Layout, path: &Path, target: &Path) -> Result<Self> {
@@ -217,7 +289,7 @@ impl Publication {
         legacy_hash: Option<&str>,
     ) -> Result<Self> {
         anyhow::ensure!(
-            path.is_absolute() && path.file_name().is_some_and(|name| name == "porthub"),
+            path.is_absolute() && path.file_name().is_some_and(|name| name == cli_name()),
             "CLI bin directory must be absolute"
         );
         let parent = path.parent().context("CLI needs a bin directory")?;
@@ -229,9 +301,23 @@ impl Publication {
                 "CLI bin directory overlaps managed service state"
             );
         }
-        let path = parent.join("porthub");
+        let path = parent.join(cli_name());
         owned_target(layout, target)?;
         let previous = state(layout, &path, target, legacy_hash)?;
+        #[cfg(windows)]
+        if matches!(&previous, Previous::IdenticalFile(_))
+            && hash_file(&path)? == hash_file(target)?
+        {
+            // Reinstalling the exact CLI must work while that executable is
+            // running. No replacement is needed, and rollback has no bytes to
+            // restore because the published content is already identical.
+            return Ok(Self {
+                path,
+                target: target.into(),
+                previous,
+                committed: true,
+            });
+        }
         let mut publication = Self {
             path: path.clone(),
             target: target.into(),
@@ -242,7 +328,7 @@ impl Publication {
         // fails before rename, an existing file must remain untouched.
         publication.committed = true;
         if let Err(error) = replace_link(&path, target) {
-            if std::fs::read_link(&path).ok().as_deref() == Some(target) {
+            if is_published(&path, target) {
                 publication.committed = false;
             }
             return Err(error);
@@ -255,16 +341,25 @@ impl Publication {
             return Ok(());
         }
         anyhow::ensure!(
-            std::fs::read_link(&self.path).ok().as_deref() == Some(self.target.as_path()),
+            is_published(&self.path, &self.target),
             "published CLI changed during installation; refusing to replace it"
         );
         match &self.previous {
             Previous::Missing => std::fs::remove_file(&self.path)?,
             Previous::Link(target) => replace_link(&self.path, target)?,
             Previous::IdenticalFile(backup) => {
-                std::fs::rename(backup.path().join("porthub"), &self.path)?
+                #[cfg(unix)]
+                std::fs::rename(backup.path().join("porthub"), &self.path)?;
+                #[cfg(windows)]
+                {
+                    let saved = backup.path().join("porthub");
+                    if hash_file(&self.path)? != hash_file(&saved)? {
+                        replace_link(&self.path, &saved)?;
+                    }
+                }
             }
         }
+        #[cfg(unix)]
         File::open(self.path.parent().context("CLI needs a bin directory")?)?.sync_all()?;
         self.committed = true;
         Ok(())

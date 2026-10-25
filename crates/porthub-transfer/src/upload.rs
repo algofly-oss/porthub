@@ -133,7 +133,10 @@ async fn init(
             "upload exceeds the supported maximum size"
         );
         let name = safe_name(&manifest.name)?;
-        ensure!(name == PathBuf::from(&manifest.name), "invalid upload name");
+        ensure!(
+            name.as_os_str() == std::ffi::OsStr::new(&manifest.name),
+            "invalid upload name"
+        );
         tokio::fs::create_dir_all(&dir).await?;
         let file = dir.join("manifest.json");
         if tokio::fs::try_exists(&file).await? {
@@ -148,7 +151,7 @@ async fn init(
             let bytes = serde_json::to_vec(&manifest)?;
             tokio::fs::write(file, bytes).await?;
         }
-        Ok::<_, anyhow::Error>(status_for(&dir, &manifest).await?)
+        status_for(&dir, &manifest).await
     }
     .await;
     match result {
@@ -170,7 +173,7 @@ async fn status(
         let dir = session_dir(&state, &id)?;
         let manifest: Manifest =
             serde_json::from_slice(&tokio::fs::read(dir.join("manifest.json")).await?)?;
-        Ok::<_, anyhow::Error>(status_for(&dir, &manifest).await?)
+        status_for(&dir, &manifest).await
     }
     .await;
     match result {
@@ -334,33 +337,6 @@ fn prune_old_sessions(staging: &Path) -> Result<()> {
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn receiver_rejects_unsafe_file_names() {
-        for name in ["", "../escape", "/absolute", "a/../../escape"] {
-            assert!(safe_name(name).is_err(), "accepted unsafe name {name:?}");
-        }
-        assert_eq!(
-            safe_name("nested/file.bin").unwrap(),
-            PathBuf::from("nested/file.bin")
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn receiver_rejects_symlinked_parent_escape() -> Result<()> {
-        let root = tempfile::tempdir()?;
-        let outside = tempfile::tempdir()?;
-        std::os::unix::fs::symlink(outside.path(), root.path().join("escape"))?;
-        assert!(destination(root.path(), "escape/file.bin").await.is_err());
-        ensure!(!outside.path().join("file.bin").exists());
-        Ok(())
-    }
 }
 
 /// Parallel upload, with a local durable session token so rerunning the same
@@ -653,4 +629,31 @@ pub async fn put_path(
 
 async fn metadata_len(file: &Path) -> Result<u64> {
     Ok(tokio::fs::metadata(file).await?.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn receiver_rejects_unsafe_file_names() {
+        for name in ["", "../escape", "/absolute", "a/../../escape"] {
+            assert!(safe_name(name).is_err(), "accepted unsafe name {name:?}");
+        }
+        assert_eq!(
+            safe_name("nested/file.bin").unwrap(),
+            PathBuf::from("nested/file.bin")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn receiver_rejects_symlinked_parent_escape() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        std::os::unix::fs::symlink(outside.path(), root.path().join("escape"))?;
+        assert!(destination(root.path(), "escape/file.bin").await.is_err());
+        ensure!(!outside.path().join("file.bin").exists());
+        Ok(())
+    }
 }

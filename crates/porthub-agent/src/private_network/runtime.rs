@@ -60,6 +60,7 @@ pub async fn run(path: PathBuf, cancel: CancellationToken) -> Result<()> {
     ));
     let mut device: Option<Arc<Tun>> = None;
     let mut zone = None;
+    let mut dns_registration: Option<dns::Registration> = None;
     let mut registered_suffix = String::new();
     let mut policy = Engine::default();
     let mut paths = super::paths::Pinned::default();
@@ -85,7 +86,7 @@ pub async fn run(path: PathBuf, cancel: CancellationToken) -> Result<()> {
                     zone=Some(server.zone.clone()); tasks.spawn(server.serve(work.clone()));
                     // Resolver registration is tied only to this owned link.
                     let (_,suffix)=own.hostname.split_once('.').ok_or_else(||anyhow::anyhow!("private DNS suffix missing"))?;
-                    dns::register(tun.index,own.ip,port,suffix).await?;registered_suffix=suffix.into();
+                    dns_registration = Some(dns::register(tun.index,own.ip,port,suffix).await?);registered_suffix=suffix.into();
                     device=Some(tun);
                 }
                 by_ip=snapshot.peers.iter().map(|p|(p.ip,p.id.clone())).collect();
@@ -126,6 +127,7 @@ pub async fn run(path: PathBuf, cancel: CancellationToken) -> Result<()> {
     for session in sessions.write().await.drain().map(|(_, session)| session) {
         session.close().await;
     }
+    drop(dns_registration);
     drop(device);
     result
 }

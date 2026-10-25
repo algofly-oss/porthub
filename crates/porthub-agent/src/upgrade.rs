@@ -189,14 +189,27 @@ fn original(layout: &Layout, entry: &Entry) -> Result<()> {
     );
     Ok(())
 }
-fn independent(entries: &[Entry]) -> Result<()> {
-    let cgroup = std::fs::read_to_string("/proc/self/cgroup")?;
-    ensure!(
-        entries
-            .iter()
-            .all(|entry| !cgroup.contains(&format!("{}.service", entry.spec.service))),
-        "native updates must run in an independent maintenance worker"
-    );
+async fn independent(entries: &[Entry]) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let cgroup = std::fs::read_to_string("/proc/self/cgroup")?;
+        ensure!(
+            entries
+                .iter()
+                .all(|entry| !cgroup.contains(&format!("{}.service", entry.spec.service))),
+            "native updates must run in an independent maintenance worker"
+        );
+    }
+    #[cfg(target_os = "macos")]
+    for entry in entries {
+        ensure!(
+            !service::launchd::Launchd::connect(entry.spec.user)
+                .await?
+                .owns_process(&entry.spec, std::process::id())
+                .await?,
+            "native updates must run in an independent launchd maintenance job"
+        );
+    }
     Ok(())
 }
 /// Executable must already have passed authenticated staging and its version
@@ -228,7 +241,7 @@ pub async fn apply_requested(
     service::directory(&layout.state, true)?;
     service::directory(&layout.releases, false)?;
     let _lock = service::lock(layout)?;
-    independent(&plan.entries)?;
+    independent(&plan.entries).await?;
     for entry in &plan.entries {
         original(layout, entry)?;
         ensure!(
@@ -577,7 +590,7 @@ pub async fn rollback(layout: &Layout, receipt: &Path, manager: &dyn Manager) ->
     let mut journal: Journal =
         serde_json::from_slice(&profile::read_private(&receipt.join("journal.json"))?)?;
     validate(layout, receipt, &journal)?;
-    independent(&journal.entries)?;
+    independent(&journal.entries).await?;
     if journal.state == "rolled-back" {
         return Ok(());
     }

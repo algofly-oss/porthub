@@ -20,6 +20,17 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Hidden Windows SCM entrypoint used by a managed PortHub service.
+    #[cfg(windows)]
+    #[command(name = "__windows-service", hide = true)]
+    WindowsServiceHost {
+        #[arg(long)]
+        service_name: String,
+        #[arg(long)]
+        service_id: String,
+        #[arg(long)]
+        profile: PathBuf,
+    },
     /// Adopt generated legacy Linux registrations, retaining recovery backups.
     #[cfg(target_os = "linux")]
     AdoptLegacy {
@@ -223,8 +234,8 @@ enum Command {
         #[arg(long)]
         verbose: bool,
     },
-    /// Check or update an existing native Linux registration and its private pair.
-    #[cfg(target_os = "linux")]
+    /// Check or update an existing native registration and its private pair.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     Update {
         selector: Option<String>,
         #[arg(long, conflicts_with = "selector")]
@@ -248,7 +259,7 @@ enum Command {
     },
 }
 
-async fn run_http_command(
+struct HttpCommandOptions {
     target: String,
     path: Option<String>,
     bind: IpAddr,
@@ -256,8 +267,17 @@ async fn run_http_command(
     root: Option<PathBuf>,
     all: bool,
     accept_uploads: bool,
-    cancel: CancellationToken,
-) -> Result<()> {
+}
+async fn run_http_command(options: HttpCommandOptions, cancel: CancellationToken) -> Result<()> {
+    let HttpCommandOptions {
+        target,
+        path,
+        bind,
+        port_override,
+        root,
+        all,
+        accept_uploads,
+    } = options;
     if target == "list" {
         for record in server::list().await? {
             println!(
@@ -313,7 +333,7 @@ async fn run_http_command(
     .await
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 struct UpdateOptions {
     source: PathBuf,
     user: bool,
@@ -323,7 +343,7 @@ struct UpdateOptions {
     record: Option<PathBuf>,
     request: Option<porthub_agent::update::Request>,
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn update_command(options: UpdateOptions, cancel: &CancellationToken) -> Result<()> {
     let UpdateOptions {
         source,
@@ -441,14 +461,24 @@ async fn update_command(options: UpdateOptions, cancel: &CancellationToken) -> R
     if let Some(directory) = bin_dir {
         arguments.extend(["--bin-dir".into(), path(&directory)?]);
     }
-    let systemd = if user {
-        service::systemd::Systemd::connect_user().await?
-    } else {
-        service::systemd::Systemd::connect().await?
+    #[cfg(target_os = "linux")]
+    let job = {
+        let systemd = if user {
+            service::systemd::Systemd::connect_user().await?
+        } else {
+            service::systemd::Systemd::connect().await?
+        };
+        systemd
+            .schedule_update(&staged.executable, &arguments)
+            .await?
     };
-    let job = systemd
-        .schedule_update(&staged.executable, &arguments)
-        .await?;
+    #[cfg(target_os = "macos")]
+    let job = {
+        let launchd = service::launchd::Launchd::connect(user).await?;
+        launchd
+            .schedule_update(&layout.state, &staged.executable, &arguments)
+            .await?
+    };
     println!("Verified native release queued: {job}");
     Ok(())
 }
@@ -710,7 +740,13 @@ async fn shutdown_signal() {
 async fn main() -> Result<()> {
     let args = Args::parse();
     let logs = porthub_agent::logs::Buffer::default();
-    if let Some(Command::Run { profile }) = &args.command {
+    let profile_to_configure = match &args.command {
+        Some(Command::Run { profile }) => Some(profile),
+        #[cfg(windows)]
+        Some(Command::WindowsServiceHost { profile, .. }) => Some(profile),
+        _ => None,
+    };
+    if let Some(profile) = profile_to_configure {
         if porthub_agent::private_network::is_profile(profile)? {
             logs.configure_private(&porthub_agent::private_profile::Profile::load(profile)?);
         } else {
@@ -925,7 +961,14 @@ async fn main() -> Result<()> {
             }
             let bin_dir = if let Some(path) = legacy_install_path {
                 anyhow::ensure!(
-                    path.is_absolute() && path.file_name().is_some_and(|name| name == "porthub"),
+                    path.is_absolute()
+                        && path.file_name().is_some_and(|name| {
+                            name == if cfg!(windows) {
+                                "porthub.exe"
+                            } else {
+                                "porthub"
+                            }
+                        }),
                     "legacy installer path must name an absolute porthub executable"
                 );
                 Some(
@@ -1008,7 +1051,21 @@ async fn main() -> Result<()> {
             root,
             all,
             upload,
-        }) => run_http_command(target, path, bind, port_override, root, all, upload, cancel).await,
+        }) => {
+            run_http_command(
+                HttpCommandOptions {
+                    target,
+                    path,
+                    bind,
+                    port_override,
+                    root,
+                    all,
+                    accept_uploads: upload,
+                },
+                cancel,
+            )
+            .await
+        }
         Some(Command::HttpReceive {
             target,
             path,
@@ -1016,7 +1073,21 @@ async fn main() -> Result<()> {
             port_override,
             root,
             all,
-        }) => run_http_command(target, path, bind, port_override, root, all, true, cancel).await,
+        }) => {
+            run_http_command(
+                HttpCommandOptions {
+                    target,
+                    path,
+                    bind,
+                    port_override,
+                    root,
+                    all,
+                    accept_uploads: true,
+                },
+                cancel,
+            )
+            .await
+        }
         Some(Command::Get {
             url,
             directory,
@@ -1072,9 +1143,9 @@ async fn main() -> Result<()> {
         }
         Some(Command::Run { profile }) => {
             if porthub_agent::private_network::is_profile(&profile)? {
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                 return porthub_agent::private_network::runtime::run(profile, cancel).await;
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
                 anyhow::bail!("private packet device is not yet available for this platform");
             }
             porthub_agent::runtime::run_with_logs(profile, cancel, Default::default(), logs).await
@@ -1100,7 +1171,18 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Some(Command::Service { action, user }) => service_command(action, user).await,
-        #[cfg(target_os = "linux")]
+        #[cfg(windows)]
+        Some(Command::WindowsServiceHost {
+            service_name,
+            service_id,
+            profile,
+        }) => porthub_agent::service::windows::run_dispatcher(
+            service_name,
+            service_id,
+            profile,
+            logs.clone(),
+        ),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Some(Command::Update {
             selector,
             profile,

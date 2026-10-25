@@ -37,6 +37,36 @@ fn path(value: &Path) -> Result<String> {
         .context("launchd service paths must be Unicode")?)
 }
 
+fn maintenance_unit(label: &str, argv: &[String]) -> Result<String> {
+    ensure!(
+        label.len() == 39
+            && label.starts_with("porthub-update-")
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
+        "invalid launchd maintenance label"
+    );
+    ensure!(
+        !argv.is_empty() && argv.len() <= 33,
+        "invalid launchd maintenance arguments"
+    );
+    let arguments = argv
+        .iter()
+        .map(|value| xml(value).map(|value| format!("<string>{value}</string>")))
+        .collect::<Result<Vec<_>>>()?
+        .concat();
+    Ok(format!(
+        "{}<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>Label</key><string>{label}</string><key>ProgramArguments</key><array>{arguments}</array><key>RunAtLoad</key><true/><key>Umask</key><integer>63</integer><key>ProcessType</key><string>Background</string><key>StandardOutPath</key><string>/dev/null</string><key>StandardErrorPath</key><string>/dev/null</string></dict></plist>\n",
+        marker(&label[15..])
+    ))
+}
+
+fn loaded_job_matches(description: &str, expected_path: &str) -> bool {
+    description
+        .lines()
+        .any(|line| line.trim() == format!("path = {expected_path}"))
+}
+
 pub(super) fn unit(spec: &Spec) -> Result<String> {
     ensure!(
         spec.identity.len() == 64 && spec.identity.bytes().all(|c| c.is_ascii_hexdigit()),
@@ -136,6 +166,96 @@ impl Launchd {
         );
         Ok(None)
     }
+
+    /// True only when launchd reports this exact owned service label running
+    /// under the supplied PID. Used to keep an update worker outside the
+    /// service process that it will stop and replace.
+    pub async fn owns_process(&self, spec: &Spec, pid: u32) -> Result<bool> {
+        let output = Self::command(&["print", &self.target(spec)?]).await?;
+        if !output.status.success() {
+            ensure!(
+                output.status.code() == Some(113),
+                "cannot inspect launchd service (exit {:?})",
+                output.status.code()
+            );
+            return Ok(false);
+        }
+        let text = String::from_utf8(output.stdout)?;
+        Ok(text.lines().any(|line| {
+            line.trim()
+                .strip_prefix("pid = ")
+                .and_then(|value| value.parse::<u32>().ok())
+                == Some(pid)
+        }))
+    }
+
+    /// Install and bootstrap an independent one-shot launchd job. Its argv is
+    /// encoded as plist strings, so profile paths and request values are never
+    /// interpreted by a shell.
+    pub async fn schedule_update(
+        &self,
+        state: &Path,
+        executable: &Path,
+        arguments: &[String],
+    ) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        let executable_text = path(executable)?;
+        ensure!(
+            arguments.first().is_some_and(|value| value == "update")
+                && arguments.iter().any(|value| value == "--apply")
+                && arguments.len() <= 32
+                && arguments
+                    .iter()
+                    .all(|value| { value.len() <= 4096 && !value.chars().any(char::is_control) }),
+            "invalid native maintenance command"
+        );
+        let profile = arguments
+            .windows(2)
+            .find(|pair| pair[0] == "--profile")
+            .map(|pair| pair[1].as_str())
+            .context("maintenance profile missing")?;
+        ensure!(
+            Path::new(profile).is_absolute(),
+            "invalid maintenance profile"
+        );
+        let digest = format!("{:x}", Sha256::digest(profile.as_bytes()));
+        let label = format!("porthub-update-{}", &digest[..24]);
+        let plist = state.join(format!("{label}.plist"));
+        let mut argv = vec![executable_text];
+        argv.extend(arguments.iter().cloned());
+        let contents = maintenance_unit(&label, &argv)?;
+        let target = format!("{}/{}", self.domain, label);
+        let expected_path = path(&plist)?;
+        let previous = super::regular(&plist)?;
+        if let Some(previous) = &previous {
+            ensure!(
+                previous == contents.as_bytes(),
+                "owned maintenance job changed"
+            );
+        }
+        let loaded = Self::command(&["print", &target]).await?;
+        if loaded.status.success() {
+            let description = String::from_utf8(loaded.stdout)?;
+            ensure!(
+                previous.is_some() && loaded_job_matches(&description, &expected_path),
+                "launchd maintenance label is already owned by another job"
+            );
+            // An identical job may already be running. Leave it alone; updates
+            // are idempotent and must not interrupt a live replacement.
+            return Ok(label);
+        }
+        ensure!(
+            loaded.status.code() == Some(113),
+            "cannot inspect launchd maintenance job (exit {:?})",
+            loaded.status.code()
+        );
+        super::atomic(&plist, contents.as_bytes(), true)?;
+        if let Err(error) = Self::checked(&["bootstrap", &self.domain, &expected_path]).await {
+            let _ = std::fs::remove_file(&plist);
+            return Err(error);
+        }
+        Ok(label)
+    }
 }
 
 #[async_trait]
@@ -230,6 +350,35 @@ mod tests {
         ensure!(unit(&spec).is_err());
         spec.identity = "bad-->".into();
         ensure!(unit(&spec).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn update_job_encodes_argv_and_rejects_untrusted_label_or_control_input() -> Result<()> {
+        let label = format!("porthub-update-{}", "a".repeat(24));
+        let argv = vec![
+            "/private/PortHub/porthub".into(),
+            "update".into(),
+            "--apply".into(),
+            "/private/profile & \"quoted\".json".into(),
+        ];
+        let plist = maintenance_unit(&label, &argv)?;
+        ensure!(
+            plist.contains("<!-- # Managed by PortHub native agent: aaaaaaaaaaaaaaaaaaaaaaaa -->")
+        );
+        ensure!(plist.contains("<string>/private/profile &amp; &quot;quoted&quot;.json</string>"));
+        ensure!(maintenance_unit("../../launchd", &argv).is_err());
+        let mut invalid = argv;
+        invalid.push("bad\nargument".into());
+        ensure!(maintenance_unit(&label, &invalid).is_err());
+        ensure!(loaded_job_matches(
+            "state = running\npath = /owned/job.plist\n",
+            "/owned/job.plist"
+        ));
+        ensure!(!loaded_job_matches(
+            "path = /foreign/job.plist\n",
+            "/owned/job.plist"
+        ));
         Ok(())
     }
 

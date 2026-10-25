@@ -35,6 +35,68 @@ async fn publish(root: &Path, target: &str, bytes: &[u8], version: &str) -> Resu
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn public_download_catalog_and_assets_work_without_machine_credentials() -> Result<()> {
+    let bundle = tempfile::tempdir()?;
+    publish(bundle.path(), "x86_64", b"public-release-bytes", "1.3.0").await?;
+    let case = Case::new(Config {
+        client_binary_dir: Some(bundle.path().into()),
+        public_base_url: "https://porthub.example".into(),
+        ..Config::default()
+    })
+    .await?;
+    let result: Result<()> = async {
+        let (status, _, catalog) = case
+            .call(
+                "GET",
+                "/api/downloads/porthub",
+                "",
+                serde_json::Value::Null,
+                &[],
+            )
+            .await?;
+        ensure!(status == StatusCode::OK, "public catalog returned {status}");
+        ensure!(catalog["data"]
+            .as_array()
+            .is_some_and(|items| items.len() == 1));
+        ensure!(catalog["data"][0]["version"] == "1.3.0");
+        ensure!(
+            catalog["data"][0]["url"] == "https://porthub.example/api/downloads/porthub/x86_64"
+        );
+
+        let request = Request::get("/api/downloads/porthub/x86_64")
+            .header("host", "porthub.example")
+            .body(Body::empty())?;
+        let response = case.router.clone().oneshot(request).await?;
+        ensure!(response.status() == StatusCode::OK);
+        ensure!(response.headers()["content-disposition"] == "attachment; filename=\"porthub\"");
+        ensure!(response.headers()["x-porthub-version"] == "1.3.0");
+        ensure!(to_bytes(response.into_body(), 1024).await? == b"public-release-bytes"[..]);
+
+        let request = Request::get("/api/downloads/porthub/x86_64")
+            .header("host", "porthub.example")
+            .header("range", "bytes=2-4")
+            .body(Body::empty())?;
+        let response = case.router.clone().oneshot(request).await?;
+        ensure!(response.status() == StatusCode::PARTIAL_CONTENT);
+        ensure!(to_bytes(response.into_body(), 1024).await? == b"bli"[..]);
+
+        let response = case
+            .router
+            .clone()
+            .oneshot(Request::get("/api/downloads/porthub/unknown").body(Body::empty())?)
+            .await?;
+        ensure!(response.status() == StatusCode::NOT_FOUND);
+        Ok(())
+    }
+    .await;
+    let cleanup = case.db.drop().await;
+    result?;
+    cleanup?;
+    Ok(())
+}
+
 #[cfg(unix)]
 #[tokio::test]
 #[ignore = "requires isolated MongoDB and PORTHUB_TEST_AGENT_EXECUTABLE"]

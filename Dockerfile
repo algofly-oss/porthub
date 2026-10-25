@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev p
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
 COPY api/assets/client/porthub-client.sh api/assets/client/porthub-client.sh
+COPY api/assets/client/private-install.sh api/assets/client/private-install.sh
 COPY vendor/ vendor/
 ARG PORTHUB_VERSION=1.3.0
 ARG PORTHUB_BUILD_JOBS=4

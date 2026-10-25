@@ -333,11 +333,30 @@ pub async fn run_with_logs(
         .and_then(|v| v.into_string().ok())
         .unwrap_or_default();
     let mut session = Session::new();
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let mut updater = crate::autoupdate::Controller::new(&path, &profile)
+        .await
+        .unwrap_or_else(|_| {
+            tracing::warn!(
+                "automatic updates unavailable for this profile; forwarding remains active"
+            );
+            None
+        });
     #[cfg(target_os = "linux")]
-    let mut updater = crate::autoupdate::Controller::new(&path, &profile).unwrap_or_else(|_| {
-        tracing::warn!("automatic updates unavailable for this profile; forwarding remains active");
-        None
-    });
+    let private_install_cancel = cancel.child_token();
+    #[cfg(target_os = "linux")]
+    let _private_install_task = updater
+        .as_ref()
+        .and_then(crate::autoupdate::Controller::private_activation_context)
+        .map(|(layout, executable)| {
+            tokio::spawn(crate::private_profile::run_auto_install(
+                control.clone(),
+                profile.clone(),
+                layout,
+                executable,
+                private_install_cancel.clone(),
+            ))
+        });
     let mut monitor = crate::routes::Monitor::new(options.heartbeat, options.probe_timeout);
     let mut status_name = "starting";
     let mut next_heartbeat = tokio::time::Instant::now();
@@ -349,15 +368,15 @@ pub async fn run_with_logs(
         let initial = session.client.is_none() || tokio::time::Instant::now() >= next_heartbeat;
         let started = tokio::time::Instant::now();
         monitor.set(session.revision, session.route_snapshot());
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let handled = updater
             .as_ref()
             .map(|updater| updater.handled())
             .unwrap_or_default();
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let handled = String::new();
         let maintenance = async {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             if let Some(updater) = &mut updater {
                 return updater.next().await.is_some();
             }
@@ -407,7 +426,7 @@ pub async fn run_with_logs(
                         failure_delay = options.retry;
                         status_name = "running";
                         state(&path, &session, status_name)?;
-                        #[cfg(target_os = "linux")]
+                        #[cfg(any(target_os = "linux", target_os = "macos"))]
                         if let Some(updater) = &mut updater {
                             updater.request(session.pending_update.clone());
                         }
@@ -437,6 +456,8 @@ pub async fn run_with_logs(
             }
             Err(Failure::Rejected(410)) => {
                 #[cfg(target_os = "linux")]
+                private_install_cancel.cancel();
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
                 if let Some(updater) = &mut updater {
                     updater.stop().await;
                 }
@@ -449,7 +470,7 @@ pub async fn run_with_logs(
             }
             Err(error) => {
                 let name = if matches!(error, Failure::Rejected(400 | 401 | 403)) {
-                    #[cfg(target_os = "linux")]
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
                     if let Some(updater) = &mut updater {
                         updater.request(None);
                     }
@@ -474,10 +495,12 @@ pub async fn run_with_logs(
             }
         }
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if let Some(updater) = &mut updater {
         updater.stop().await;
     }
+    #[cfg(target_os = "linux")]
+    private_install_cancel.cancel();
     session.stop().await;
     log_stream.stop().await;
     state(&path, &session, "stopped")?;

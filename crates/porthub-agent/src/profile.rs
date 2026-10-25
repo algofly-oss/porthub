@@ -212,6 +212,10 @@ pub fn write_private(path: &Path, bytes: &[u8], replace: bool) -> Result<()> {
     } else {
         temporary.persist_noclobber(path).map_err(|e| e.error)?;
     }
+    #[cfg(windows)]
+    if crate::service::windows_acl::is_managed(path) {
+        crate::service::windows_acl::secure(path, false)?;
+    }
     #[cfg(unix)]
     File::open(parent)?.sync_all()?;
     Ok(())

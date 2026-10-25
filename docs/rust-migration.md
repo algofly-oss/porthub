@@ -75,23 +75,28 @@ that verification are recorded in
 [`verification/2026-10-24-public-failover.json`](verification/2026-10-24-public-failover.json).
 
 Native updates now include authenticated release preparation and an explicit
-Linux `porthub update` command. Its independent systemd worker preserves the
+Linux/macOS `porthub update` command. The Linux systemd worker preserves the
 installed state in a private receipt, checks readiness before CLI publication,
-and restores the prior state on failure. Local user-service checks cover an
-unchanged binary, a distinct version/PID, explicit rollback and rejected-version
-readiness failure. The latest regression passes 229 tests with integration
-opt-ins and no ignored tests, Clippy with warnings denied, and 23 rebuilt image
-checks. This manual-update milestone preceded API-request handling below.
-Scope and limitations are in
+and restores the prior state on failure. The macOS path now verifies the active
+launchd service PID and queues a separate, argv-safe launchd maintenance job;
+its target compilation and OS-level lifecycle still require macOS CI/runtime
+verification. Local Linux user-service checks cover an unchanged binary, a
+distinct version/PID, explicit rollback and rejected-version readiness failure.
+The latest regression passes 229 tests with integration opt-ins and no ignored
+tests, Clippy with warnings denied, and 23 rebuilt image checks. This
+manual-update milestone preceded API-request handling below. Scope and
+limitations are in
 [`verification/2026-10-24-update-activation.json`](verification/2026-10-24-update-activation.json).
 
-Installed Linux agents now handle API-requested updates in a dormant background
-controller and acknowledge only matching committed receipts. The native API/Mongo
-test observes the new process version before acknowledgement and verifies the
-request target clears after commit. Foreign identity, deduplicated preparation
-and rejected-version rollback are exercised with actual disposable user
-services. Legacy updater migration, platform lifecycle, private-route work and
-all production/fleet/performance rollout gates above remain.
+Installed Linux and macOS agents now handle API-requested updates in a dormant
+background controller and acknowledge only matching committed receipts. The
+Linux native API/Mongo test observes the new process version before
+acknowledgement and verifies the request target clears after commit. Foreign
+identity, deduplicated preparation and rejected-version rollback are exercised
+with actual disposable Linux user services. The macOS launchd update path is
+implemented but awaits target/runtime verification. Legacy updater migration,
+Windows lifecycle, private-route work and all production/fleet/performance
+rollout gates above remain.
 The final run passes 233 workspace tests with integration opt-ins and no ignored
 tests, Clippy with warnings denied, and 23 rebuilt production-image checks. See
 [`verification/2026-10-24-native-auto-update.json`](verification/2026-10-24-native-auto-update.json)
@@ -191,6 +196,14 @@ cover it; it is not the intended final runtime.
   resumable binaries, including the existing Rathole download URL. Only actual
   bundled assets are advertised; this does not establish platform lifecycle or
   bootstrap/update completion. See `native-releases.md`.
+- Installed Linux system agents negotiate authenticated native private-install
+  JSON while legacy clients retain the shell response. The agent enrolls the
+  private credential in the background and activates a separate identity-scoped
+  service, preserving the running public service. A private recovery marker
+  retries activation after process restart without auto-starting profiles the
+  operator explicitly saved without a service. This path compiles and its API
+  and client media-type contract are tested; a live system-service activation
+  and non-Linux private service lifecycle remain unverified.
 
 ## Required work before rollout
 
@@ -256,9 +269,10 @@ application's private address.
    Mapped-port CRUD, availability/random selection, firewall policy/activity/traffic
    endpoints and manual/scheduled refresh are implemented natively. Machine
    creation, editing, group membership, token refresh, journaled deletion and
-   native startup configuration are implemented. Install/artifact/private-install
-   operations still need translation and end-to-end verification. Binary artifact
-   distribution is native; install/bootstrap handling remains. Log routes,
+   native startup configuration are implemented. Binary artifact distribution
+   and native private-install ticket negotiation are implemented; bootstrap,
+   service activation and the remaining install routes still need end-to-end
+   verification. Log routes,
    realtime events and status/alert workers are native. HTTP client sync
    and configuration reads are implemented. A saved-profile Rust foreground agent
    now synchronizes them and reloads embedded tunnels natively. Linux service
@@ -271,7 +285,9 @@ application's private address.
    updates, installed-service retirement, private enrollment, TUN, DNS, ICE/DTLS signaling, relay
    authentication, policy enforcement and network-change/path reselection.
    Native file serving, cross-terminal server management and resumable parallel
-   downloads are implemented; full enrollment and private networking remain.
+   downloads are implemented. Linux system-service private auto-enrollment is
+   implemented but still needs live activation verification; non-Linux private
+   service lifecycle, packet runtime integration, and route optimization remain.
 3. Support existing `porthub.tcp.v1` framed WebSocket and HTTP-upgrade clients
    during staged upgrades. Verify half-close, bidirectional traffic, wrong
    credentials, token rotation, concurrent transfers, reconnects and backpressure.
@@ -925,3 +941,70 @@ image identities are in `verification/2026-10-24-private-policy.json` and its
 isolation report. Native private signaling/relay/agent transport and the other
 production migration gates remain; no commit, push, URM2 rollout, registered
 client upgrade or final remote benchmark has occurred.
+
+The Rust API now also serves the legacy public client-download catalog and
+`/api/downloads/porthub/{target}` endpoint from the verified artifact catalog,
+preserving version headers, the `porthub` download filename, HEAD and byte-range
+behavior. The old-agent `/api/machines/client/private-install` poll is also
+implemented in Rust: it authenticates the machine, checks workspace membership,
+issues a short-lived single-use ticket and returns the existing private bootstrap
+script. Redeeming that ticket consumes the capability and ends subsequent polls.
+Both routes are listed in the Rust Swagger schema.
+
+The full Rust workspace tests and Clippy with warnings denied pass. Focused
+loopback-MongoDB integration tests cover public downloads and the private-install
+ticket lifecycle. Go API/client sources remain for staged compatibility; route
+parity audit, native Windows runtime validation, remaining client/platform
+migration, final deployment checks, commit/push and URM2 rollout remain.
+
+### 2026-10-25 rollout preflight
+
+URM2 currently runs the three isolated Rust roles (`core`, `edge`, `firewall`)
+at revision `e59cb478f870e99174caf755ddefe26955dd434d`; all are healthy. Health,
+auth settings, `/api` redirect, Swagger and OpenAPI checks pass. Luna, Condor and
+Miro each have active origin and private registrations. Their private profiles
+report the default `auto` path strategy and share one workspace fingerprint.
+Luna resolves all three `.phub` names; Condor and Miro do not resolve each
+other's names. A read-only query of the running gateway database, evaluated
+with the Rust selector/grant semantics, found active grants for Luna-Condor
+and Luna-Miro, and none for Condor-Miro. The observed DNS names therefore match
+the configured policy; no access rules were changed. ICMP success does not
+prove a direct application path. Fresh gateway path reports confirm the
+Luna-Condor private route is relayed and Luna-Miro is direct in both directions.
+Three checksum-verified 10 GiB `porthub get` transfers completed through the
+temporary built-in HTTP server: Luna→Condor private relay at 41.34 MiB/s
+wall-clock average, Luna→Condor public mapping at 45.82 MiB/s, and Luna→Miro
+private direct at 95.81 MiB/s. The first two are near Luna's stated 400 Mbit/s
+ISP ceiling; the direct Miro path reaches about 80% of the stated 1 Gbit/s LAN
+rate. These tests used the installed 1.3.0 agents and a sparse zero-filled
+fixture transferred as raw bytes. The temporary listener, source file and
+downloaded files were removed.
+
+The installed Condor and Miro agent binaries match each other but differ from
+the workspace's rebuilt binary, even though all report version `1.3.0`. This
+confirms semantic version alone cannot establish that clients run the current
+source. The x86_64 Windows GNU agent now passes cross-target `cargo check` with
+warnings denied in a disposable MinGW container. The full default workspace
+test suite, Clippy with warnings denied, formatting, transfer HTTP PUT/POST
+integration coverage, and Compose config validation pass. Mongo, privileged
+network, live Windows/macOS service, and physical transfer tests remain separate
+gates. No client or container was changed; this preflight is recorded in
+`verification/2026-10-25-rollout-preflight.json`.
+
+The OpenAPI route audit also found and documented the machine bootstrap-command
+and status-history endpoints. A Rust regression test now checks all 84 legacy
+HTTP route/method pairs against the bundled OpenAPI document; this verifies
+documentation coverage only and does not replace behavior-parity checks.
+
+### 2026-10-25 Rust API integration coverage
+
+The selected Mongo-backed API suites pass against a fresh disposable MongoDB:
+16 workflow tests, another 67 tests across 17 integration binaries, and three
+private-mesh tests covering native UDP peer transfer, underlay-change recovery,
+and authenticated gateway fallback. The native artifact updater test used the
+release-mode Rust agent executable. Go
+agent/TURN fixtures, the separately configured frontend client test, and a live
+systemd update lifecycle were excluded. The temporary database container was
+removed. Exact suite scope and limits are recorded in
+`verification/2026-10-25-api-integration.json`; these checks do not prove full
+Go parity or close the remaining platform, networking, and rollout gates.
