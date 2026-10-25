@@ -27,7 +27,8 @@ when deploying from versioned source directories.
 
 ```sh
 docker compose config --quiet
-./deploy.sh
+# Download the matching GitHub release bundle before building production images.
+PORTHUB_RELEASE_BUNDLE=/path/to/verified/bundle ./deploy.sh
 
 # Development: builds toolchains into dev-only images and syncs source into them.
 PORTHUB_MODE=dev ./deploy.sh

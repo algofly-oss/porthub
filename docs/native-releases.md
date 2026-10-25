@@ -8,14 +8,18 @@ Once published, a version must not be reused for different release contents.
 
 `porthub version --verbose` separately reports the source revision and target.
 CI passes the commit through `PORTHUB_SOURCE_REVISION`; container OCI labels also
-retain it independently of `org.opencontainers.image.version`. Assemble a bundle
+retain it independently of `org.opencontainers.image.version`. Normally assemble
 from one verified CI run and promote matching images from that same revision.
 Build-only version overrides remain available for isolated updater fixtures.
 
 CI assembles `porthub-release-bundle` only after every platform job succeeds.
 All ten targets must have the same workspace version and valid checksums; a
-missing target or mixed version fails the release. Use this aggregate artifact
-from a single CI run rather than mixing individual builds from different runs.
+missing target or mixed version fails the release. Prefer the aggregate artifact
+from a single CI run. A targeted recovery build may reuse successful artifacts
+when the production source, dependencies and build recipe are unchanged; only
+tests or workflow orchestration may differ. Verify that equivalence with Git,
+validate the complete bundle again, and record the recovery commits and runs in
+the release notes. Do not combine different feature sets under one version.
 The shared version identifies the same source release; operating-system-specific
 capabilities and limitations still apply.
 
@@ -31,7 +35,9 @@ platforms in `/app/client-bin`, including version and SHA256 sidecars. No client
 artifact volume or runtime download is required. Historical releases are kept
 outside the active image for operator rollback.
 
-Stage the verified CI bundle before a production build:
+Generated binaries are not tracked in the source repository. They remain in
+GitHub Releases and are embedded in the production image. Stage the verified
+bundle before a production build:
 
 ```sh
 PORTHUB_RELEASE_BUNDLE=/path/to/verified/bundle ./deploy.sh
