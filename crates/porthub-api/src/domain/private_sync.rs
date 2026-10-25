@@ -21,6 +21,8 @@ pub struct Sync {
     pub token: String,
     pub fingerprint: String,
     pub instance: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub stream_transport: String,
     pub signals: Vec<Signal>,
     pub acks: Vec<String>,
     pub paths: BTreeMap<String, String>,
@@ -55,6 +57,7 @@ pub fn parse(raw: Value) -> ApiResult<Sync> {
         );
     }
     let instance = session(&mut model, "instance");
+    let stream_transport = model.literal("stream_transport", "", &["", "quic1"]);
     let mut signals = Vec::new();
     for mut child in model.objects("signals", false, 0, 16) {
         if !child.is_valid() {
@@ -96,6 +99,7 @@ pub fn parse(raw: Value) -> ApiResult<Sync> {
         token,
         fingerprint: fingerprint.to_ascii_uppercase(),
         instance,
+        stream_transport,
         signals,
         acks,
         paths,

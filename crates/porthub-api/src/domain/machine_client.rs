@@ -47,6 +47,16 @@ fn numeric_version(value: &str) -> Option<Vec<u64>> {
     (!parts.is_empty()).then_some(parts)
 }
 
+fn should_replace_reported_version(current: &str, incoming: &str) -> bool {
+    if incoming.is_empty() {
+        return false;
+    }
+    // Keep a release version if a stale legacy/hash build reports after it.
+    // A numbered release can still replace it, including an intentional
+    // downgrade, so the inventory reflects an actual release transition.
+    numeric_version(current).is_none() || numeric_version(incoming).is_some()
+}
+
 pub async fn authenticate(app: &App, id: &str, token: &str) -> ApiResult<Document> {
     let id = super::workspaces::object_id(id, "Invalid machine id")?;
     let machine = app
@@ -522,8 +532,10 @@ async fn sync_inner(
     let mut set = doc! {"hostname":hostname,"client_hostname":client_hostname,"local_ip":input.local_ip.trim(),"public_ip":public_ip,"auth_required":false,"last_seen_at":now};
     let version = input.version.trim();
     let handled = input.handled.trim();
-    if !version.is_empty() {
+    if should_replace_reported_version(store::string(machine, "client_version").trim(), version) {
         set.insert("client_version", version);
+    }
+    if !version.is_empty() {
         let request_id = store::string(machine, "client_update_request_id").trim();
         let target = store::string(machine, "client_update_target_version").trim();
         if update_request_completed(version, target, request_id, handled) {
@@ -544,8 +556,8 @@ async fn sync_inner(
         && should_auto_update(
             version,
             &app.config.client_version,
-            &store::string(machine, "client_update_request_id"),
-            &store::string(machine, "client_update_target_version"),
+            store::string(machine, "client_update_request_id"),
+            store::string(machine, "client_update_target_version"),
             handled,
         )
     {
@@ -569,6 +581,14 @@ async fn sync_inner(
     let mut filter = doc! {"_id":id,"token":machine.get("token"),"enabled":{"$ne":false},"deletion_pending":{"$ne":true}};
     if legacy {
         filter.remove("enabled");
+    }
+    if set.contains_key("client_version") {
+        // The client authenticated before this update. A concurrent newer
+        // heartbeat must not be overwritten using that older version snapshot.
+        filter.insert(
+            "client_version",
+            machine.get("client_version").cloned().unwrap_or(Bson::Null),
+        );
     }
     if set.contains_key("client_update_target_version") {
         filter.insert(
@@ -598,39 +618,6 @@ async fn sync_inner(
         StatusCode::CONFLICT,
         "Machine configuration changed; retry synchronization",
     ))
-}
-
-#[cfg(test)]
-mod auto_update_tests {
-    use super::{should_auto_update, update_request_completed};
-
-    #[test]
-    fn outdated_clients_get_one_gateway_update_request() {
-        assert!(should_auto_update("1.3.1", "1.3.2", "", "", ""));
-        assert!(should_auto_update("", "1.3.2", "", "", ""));
-        assert!(!should_auto_update("1.3.2", "1.3.2", "", "", ""));
-        assert!(!should_auto_update("1.10.0", "1.3.2", "", "", ""));
-        assert!(!should_auto_update(
-            "1.3.1", "1.3.2", "pending", "1.3.2", ""
-        ));
-        assert!(should_auto_update("1.3.1", "1.3.2", "pending", "1.3.1", ""));
-        assert!(should_auto_update(
-            "1.3.1", "1.3.2", "handled", "1.3.2", "handled"
-        ));
-    }
-
-    #[test]
-    fn reporting_the_requested_release_completes_its_pending_update() {
-        assert!(update_request_completed("1.3.4", "1.3.4", "request-1", ""));
-        assert!(update_request_completed(
-            "1.3.4",
-            "1.3.4",
-            "request-1",
-            "request-1"
-        ));
-        assert!(!update_request_completed("1.3.3", "1.3.4", "request-1", ""));
-        assert!(!update_request_completed("1.3.4", "1.3.4", "", ""));
-    }
 }
 
 pub async fn private_ips(app: &App, machine: &Document) -> ApiResult<Vec<String>> {
@@ -705,4 +692,51 @@ pub fn control_headers(app: &App, machine: &Document) -> HeaderMap {
         }
     }
     headers
+}
+
+#[cfg(test)]
+mod auto_update_tests {
+    use super::{should_auto_update, should_replace_reported_version, update_request_completed};
+
+    #[test]
+    fn outdated_clients_get_one_gateway_update_request() {
+        assert!(should_auto_update("1.3.1", "1.3.2", "", "", ""));
+        assert!(should_auto_update("", "1.3.2", "", "", ""));
+        assert!(!should_auto_update("1.3.2", "1.3.2", "", "", ""));
+        assert!(!should_auto_update("1.10.0", "1.3.2", "", "", ""));
+        assert!(!should_auto_update(
+            "1.3.1", "1.3.2", "pending", "1.3.2", ""
+        ));
+        assert!(should_auto_update("1.3.1", "1.3.2", "pending", "1.3.1", ""));
+        assert!(should_auto_update(
+            "1.3.1", "1.3.2", "handled", "1.3.2", "handled"
+        ));
+    }
+
+    #[test]
+    fn reporting_the_requested_release_completes_its_pending_update() {
+        assert!(update_request_completed("1.3.4", "1.3.4", "request-1", ""));
+        assert!(update_request_completed(
+            "1.3.4",
+            "1.3.4",
+            "request-1",
+            "request-1"
+        ));
+        assert!(!update_request_completed("1.3.3", "1.3.4", "request-1", ""));
+        assert!(!update_request_completed("1.3.4", "1.3.4", "", ""));
+    }
+
+    #[test]
+    fn stale_legacy_build_cannot_replace_a_reported_release() {
+        assert!(!should_replace_reported_version(
+            "1.4.3",
+            "legacy-build-hash"
+        ));
+        assert!(!should_replace_reported_version("1.4.3", ""));
+        assert!(should_replace_reported_version(
+            "legacy-build-hash",
+            "1.4.3"
+        ));
+        assert!(should_replace_reported_version("1.4.3", "1.4.2"));
+    }
 }

@@ -150,6 +150,7 @@ pub fn router(app: Arc<App>) -> Router {
             auth::renew_session,
         ))
         .layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024))
+        .layer(axum::middleware::from_fn(http::private_api_cache))
         .layer(axum::middleware::from_fn(http::cors))
         .with_state(app)
 }

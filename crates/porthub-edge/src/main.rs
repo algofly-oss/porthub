@@ -192,7 +192,9 @@ async fn main() -> Result<()> {
             false,
             std::env::var("PORT_HUB_PUBLIC_BASE_URL").ok().as_deref(),
         );
-        let server = axum_server::bind(listen).handle(handle.clone());
+        let server = axum_server::bind(listen)
+            .acceptor(axum_server::accept::NoDelayAcceptor::new())
+            .handle(handle.clone());
         serving.spawn(async move { server.serve(router.into_make_service()).await });
         handles.push(handle);
     }
@@ -207,7 +209,11 @@ async fn main() -> Result<()> {
         let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(certificate, key).await?;
         for listen in args.tls_listen {
             let handle = axum_server::Handle::new();
-            let server = axum_server::bind_rustls(listen, tls.clone()).handle(handle.clone());
+            let acceptor = axum_server::tls_rustls::RustlsAcceptor::new(tls.clone())
+                .acceptor(axum_server::accept::NoDelayAcceptor::new());
+            let server = axum_server::bind(listen)
+                .acceptor(acceptor)
+                .handle(handle.clone());
             let router = porthub_edge::listener_router(router.clone(), true);
             serving.spawn(async move { server.serve(router.into_make_service()).await });
             handles.push(handle);

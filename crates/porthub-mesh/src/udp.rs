@@ -312,6 +312,20 @@ impl Session {
             .try_send(packet)
             .map_err(|_| anyhow::anyhow!("private peer send queue unavailable"))
     }
+    /// Reliable stream carriers propagate bounded queue pressure in their own
+    /// worker, without blocking the TUN packet owner or control-plane work.
+    #[cfg(feature = "streams")]
+    pub async fn send_stream(&self, packet: Bytes) -> Result<()> {
+        ensure!(self.state() == State::Ready, "private peer is not ready");
+        ensure!(
+            (20..=MAX_PACKET).contains(&packet.len()),
+            "invalid private packet size"
+        );
+        self.packets
+            .send(packet)
+            .await
+            .map_err(|_| anyhow::anyhow!("private peer closed"))
+    }
     pub async fn statistics(&self) -> Result<Statistics> {
         let (reply, result) = oneshot::channel();
         self.commands

@@ -153,10 +153,8 @@ mod tests {
     #[test]
     fn openapi_covers_every_legacy_route_method() {
         let openapi: Value = serde_json::from_str(include_str!("openapi.json")).unwrap();
-        let legacy: Vec<Value> = serde_json::from_str(include_str!(
-            "../tests/fixtures/legacy_routes.json"
-        ))
-        .unwrap();
+        let legacy: Vec<Value> =
+            serde_json::from_str(include_str!("../tests/fixtures/legacy_routes.json")).unwrap();
         let normalize = |path: &str| {
             let mut normalized = String::with_capacity(path.len());
             let mut parameter = false;

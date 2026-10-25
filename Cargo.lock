@@ -949,6 +949,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
+name = "defmt"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4a0795ac740cb54d7b3775c9c17345f6aaecf884c01733b39d6017738e0e3e1"
+dependencies = [
+ "bitflags 1.3.2",
+ "defmt-macros",
+]
+
+[[package]]
+name = "defmt-macros"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "840bb056bd99c495c9188198a258ab787c79f306d864db3e6e8451442d6d8366"
+dependencies = [
+ "defmt-parser",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
+]
+
+[[package]]
+name = "defmt-parser"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71958f69fb2de856c5dd51ac9377e986ca1aa5919f931bf5395a807277f889a0"
+dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "der-parser"
 version = "9.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1516,6 +1547,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hash32"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47d60b12902ba28e2730cd37e95b8c9223af2808df9e902d4df49588d1470606"
+dependencies = [
+ "byteorder",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1546,6 +1586,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
 dependencies = [
  "hashbrown 0.17.1",
+]
+
+[[package]]
+name = "heapless"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25ba4bd83f9415b58b4ed8dc5714c76e626a105be4646c02630ad730ad3b5aa4"
+dependencies = [
+ "hash32",
+ "stable_deref_trait",
 ]
 
 [[package]]
@@ -2252,6 +2302,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "managed"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ca88d725a0a943b096803bd34e73a4437208b6077654cc4ecb2947a5f91618d"
+
+[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2843,7 +2899,7 @@ checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
 
 [[package]]
 name = "porthub-agent"
-version = "1.4.3"
+version = "1.4.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2874,6 +2930,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "smoltcp",
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.30.0",
@@ -2890,7 +2947,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-api"
-version = "1.4.3"
+version = "1.4.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2936,7 +2993,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-edge"
-version = "1.4.3"
+version = "1.4.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -2963,7 +3020,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-firewall"
-version = "1.4.3"
+version = "1.4.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -2983,7 +3040,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-identity"
-version = "1.4.3"
+version = "1.4.4"
 dependencies = [
  "anyhow",
  "hex",
@@ -2998,20 +3055,23 @@ dependencies = [
 
 [[package]]
 name = "porthub-mesh"
-version = "1.4.3"
+version = "1.4.4"
 dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
  "futures-util",
+ "quinn",
  "rtc-crypto",
  "rtc-dtls",
  "rtc-ice",
  "rtc-shared",
+ "rustls",
  "sansio",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "socket2 0.6.5",
  "stun",
  "tokio",
  "tokio-tungstenite 0.30.0",
@@ -3023,7 +3083,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-runtime"
-version = "1.4.3"
+version = "1.4.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -3058,7 +3118,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-transfer"
-version = "1.4.3"
+version = "1.4.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -3084,7 +3144,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-tunnel"
-version = "1.4.3"
+version = "1.4.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -3397,6 +3457,7 @@ dependencies = [
  "serde",
  "sha2 0.10.9",
  "socket2 0.4.10",
+ "socket2 0.6.5",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite 0.20.1",
@@ -4055,6 +4116,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b3dc8af474f516a851ff4bd12db780f948b9250ad37211e4eec0bccea54e01b"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "smoltcp"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6f8b28ad56c6e35524a37dd492af5d1a47e31e1a4d175cd12f89c075f01980f"
+dependencies = [
+ "bitflags 1.3.2",
+ "byteorder",
+ "cfg-if",
+ "defmt",
+ "heapless",
+ "managed",
 ]
 
 [[package]]

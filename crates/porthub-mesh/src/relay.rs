@@ -121,11 +121,11 @@ impl Allocation {
         url: &str,
         username: &str,
         password: &str,
-        allow_plaintext_for_tests: bool,
+        allow_plaintext_origin: bool,
     ) -> Result<Self> {
         let url = url::Url::parse(url).map_err(|_| anyhow::anyhow!("invalid private relay URL"))?;
         ensure!(
-            url.scheme() == "wss" || (url.scheme() == "ws" && allow_plaintext_for_tests),
+            url.scheme() == "wss" || (url.scheme() == "ws" && allow_plaintext_origin),
             "private TURN relay requires TLS"
         );
         ensure!(
@@ -155,6 +155,13 @@ impl Allocation {
         .await
         .map_err(|_| anyhow::anyhow!("private relay connection timed out"))?
         .map_err(|_| anyhow::anyhow!("private relay connection failed"))?;
+        match websocket.get_ref() {
+            tokio_tungstenite::MaybeTlsStream::Plain(stream) => crate::configure_tcp(stream),
+            tokio_tungstenite::MaybeTlsStream::Rustls(stream) => {
+                crate::configure_tcp(stream.get_ref().0)
+            }
+            _ => {}
+        }
         let cancel = CancellationToken::new();
         let wire_cancel = cancel.clone();
         let (input, input_rx) = mpsc::channel(128);

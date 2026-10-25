@@ -353,16 +353,43 @@ struct Work {
     remote: Remote,
     size: u64,
     piece_size: u64,
-    pending: Arc<Vec<usize>>,
+    pending: Arc<Vec<(usize, usize)>>,
     next: Arc<AtomicUsize>,
     received: Arc<AtomicU64>,
 }
 
-async fn piece(work: &Work, file: &mut tokio::fs::File, index: usize) -> Result<()> {
-    let start = (index as u64)
+fn contiguous_runs(pending: Vec<usize>, connections: usize) -> Vec<(usize, usize)> {
+    let limit = pending.len().div_ceil(connections.max(1)).max(1);
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for index in pending {
+        if let Some((_, last)) = runs
+            .last_mut()
+            .filter(|(first, last)| index == last.saturating_add(1) && *last - *first + 1 < limit)
+        {
+            *last = index;
+        } else {
+            runs.push((index, index));
+        }
+    }
+    runs
+}
+
+async fn piece_run(
+    work: &Work,
+    file: &mut tokio::fs::File,
+    index: &mut usize,
+    last: usize,
+    completed: &mpsc::Sender<usize>,
+) -> Result<()> {
+    let start = (*index as u64)
         .checked_mul(work.piece_size)
         .context("segment offset overflow")?;
-    let end = start.saturating_add(work.piece_size).min(work.size) - 1;
+    let end = (last as u64)
+        .checked_mul(work.piece_size)
+        .context("segment offset overflow")?
+        .saturating_add(work.piece_size)
+        .min(work.size)
+        - 1;
     let mut request = work
         .client
         .get(work.url.clone())
@@ -411,6 +438,7 @@ async fn piece(work: &Work, file: &mut tokio::fs::File, index: usize) -> Result<
     }
     file.seek(std::io::SeekFrom::Start(start)).await?;
     let mut received = 0u64;
+    let mut committed = 0u64;
     let result = async {
         while let Some(bytes) = response.chunk().await? {
             ensure!(
@@ -421,6 +449,27 @@ async fn piece(work: &Work, file: &mut tokio::fs::File, index: usize) -> Result<
             received += bytes.len() as u64;
             work.received
                 .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+            // A resume checkpoint is independent of the HTTP request boundary.
+            // Keep the response flowing across adjacent pieces, but publish
+            // only complete, durably written pieces. Retain the final piece
+            // until EOF confirms the complete response length.
+            while *index < last {
+                let boundary = (*index as u64 + 1)
+                    .checked_mul(work.piece_size)
+                    .context("segment offset overflow")?
+                    - start;
+                if received < boundary {
+                    break;
+                }
+                file.flush().await?;
+                file.sync_data().await?;
+                completed
+                    .send(*index)
+                    .await
+                    .context("download coordinator stopped")?;
+                committed = boundary;
+                *index += 1;
+            }
         }
         ensure!(
             received == end - start + 1,
@@ -428,11 +477,18 @@ async fn piece(work: &Work, file: &mut tokio::fs::File, index: usize) -> Result<
         );
         file.flush().await?;
         file.sync_data().await?;
+        completed
+            .send(*index)
+            .await
+            .context("download coordinator stopped")?;
+        *index += 1;
+        committed = received;
         Ok::<_, anyhow::Error>(())
     }
     .await;
     if result.is_err() {
-        work.received.fetch_sub(received, Ordering::Relaxed);
+        work.received
+            .fetch_sub(received - committed, Ordering::Relaxed);
     }
     result
 }
@@ -444,11 +500,11 @@ async fn worker(work: Work, completed: mpsc::Sender<usize>) -> Result<()> {
         .await?;
     loop {
         let cursor = work.next.fetch_add(1, Ordering::Relaxed);
-        let Some(index) = work.pending.get(cursor).copied() else {
+        let Some((mut index, last)) = work.pending.get(cursor).copied() else {
             return Ok(());
         };
         for attempt in 0..6 {
-            match piece(&work, &mut file, index).await {
+            match piece_run(&work, &mut file, &mut index, last, &completed).await {
                 Ok(()) => break,
                 Err(error) if attempt == 5 => {
                     return Err(error.context(format!("segment {index} failed")))
@@ -456,10 +512,6 @@ async fn worker(work: Work, completed: mpsc::Sender<usize>) -> Result<()> {
                 Err(_) => tokio::time::sleep(Duration::from_millis(200u64 << attempt)).await,
             }
         }
-        completed
-            .send(index)
-            .await
-            .context("download coordinator stopped")?;
     }
 }
 
@@ -1014,14 +1066,15 @@ async fn get_with_client(
                 .await?;
             file.set_len(size).await?;
             drop(file);
-            let pending = Arc::new(
+            let pending = Arc::new(contiguous_runs(
                 state
                     .complete
                     .iter()
                     .enumerate()
                     .filter_map(|(index, done)| (!*done).then_some(index))
                     .collect::<Vec<_>>(),
-            );
+                options.connections,
+            ));
             let work = Work {
                 client: client.clone(),
                 url: url.clone(),

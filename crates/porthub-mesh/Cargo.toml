@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[features]
+streams = ["dep:quinn", "dep:rustls"]
+
 [dependencies]
 anyhow.workspace = true
 tokio.workspace = true
@@ -24,6 +27,9 @@ turn = "=0.17.2"
 stun = "=0.17.2"
 turn-util = { package = "webrtc-util", version = "=0.17.2", default-features = false, features = ["conn"] }
 url = "2"
+socket2 = { version = "0.6", features = ["all"] }
+quinn = { version = "=0.11.12", optional = true, default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["std", "ring"] }
 
 [dev-dependencies]
 serde_json = "1"

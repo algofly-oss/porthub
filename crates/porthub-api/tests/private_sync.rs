@@ -114,7 +114,7 @@ async fn native_signaling_authenticates_identity_limits_discovery_and_binds_both
         case.app.collection("access_rulebooks").insert_one(doc!{"_id":ObjectId::new(),"user_id":owner,"group_id":group.to_hex(),"rules":[{
             "id":"ssh","name":"SSH","sources":[{"kind":"machine","id":ids[0].to_hex()}],"destinations":[{"kind":"machine","id":ids[1].to_hex()}],"ports":"22"}]}).await?;
         let fp0=fingerprint("AB");let fp1=fingerprint("CD");
-        let request0=sync("peer-0",&fp0,"instance-00000000");
+        let mut request0=sync("peer-0",&fp0,"instance-00000000");request0["stream_transport"]=json!("quic1");
         let request1=sync("peer-1",&fp1,"instance-11111111");
         let mut bad=request0.clone();bad["token"]=json!("wrong-token-0123456789abcdef0123456789");
         case.status("POST","/api/access/private/sync","",bad,StatusCode::FORBIDDEN).await?;
@@ -122,6 +122,8 @@ async fn native_signaling_authenticates_identity_limits_discovery_and_binds_both
         let (status,headers,initial)=case.call("POST","/api/access/private/sync","",request0.clone(),&[]).await?;
         ensure!(status==StatusCode::OK && headers["cache-control"]=="no-store");
         ensure!(initial["snapshot"]["self"]=="peer-0" && initial["snapshot"]["workspace"]==owner.to_hex());
+        ensure!(initial["snapshot"]["peers"].as_array().unwrap().iter().any(|peer|peer["id"]=="peer-0" && peer["stream_transport"]=="quic1"));
+        ensure!(initial["snapshot"]["peers"].as_array().unwrap().iter().any(|peer|peer["id"]=="peer-1" && peer["stream_transport"]==""));
         ensure!(chrono::DateTime::parse_from_rfc3339(initial["snapshot"]["expires_at"].as_str().unwrap()).is_ok());
         ensure!(initial["snapshot"]["peers"].as_array().unwrap().len()==2);
         ensure!(initial["snapshot"]["grants"][0]["source"]=="peer-0" && initial["snapshot"]["grants"][0]["destination"]=="peer-1");

@@ -37,6 +37,15 @@ fn packet(src: u8, dst: u8, sport: u16, dport: u16, flags: u8) -> Vec<u8> {
     packet
 }
 #[test]
+fn closed_private_tcp_ports_can_return_a_reset_during_the_handshake() {
+    let mut policy = Engine::default();
+    policy.apply(snapshot()).unwrap();
+    assert!(!policy.check(&packet(2, 1, 8000, 40000, 0x14), "b", true));
+    assert!(policy.check(&packet(1, 2, 40000, 8000, 0x02), "b", false));
+    assert!(policy.check(&packet(2, 1, 8000, 40000, 0x14), "b", true));
+    assert!(!policy.check(&packet(1, 2, 40000, 8000, 0x10), "b", false));
+}
+#[test]
 fn private_acl_binds_identity_tracks_tcp_replies_and_revokes_open_flows() {
     let mut engine = Engine::default();
     engine.apply(snapshot()).unwrap();

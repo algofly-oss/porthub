@@ -144,14 +144,16 @@ async fn client_identity_returns_the_authenticated_machine_account_email() -> Re
         let body: Value = serde_json::from_slice(&bytes)?;
         ensure!(body["account_email"] == "nitin@example.invalid");
 
-        let (status, _, _) = case
+        let (status, _, denied) = case
             .call(
                 "POST",
                 "/api/machines/client/identity",
                 json!({"machine_id":case.id.to_hex(),"token":"wrong"}),
             )
             .await?;
-        ensure!(status == StatusCode::UNAUTHORIZED);
+        ensure!(status == StatusCode::GONE);
+        let denied: Value = serde_json::from_slice(&denied)?;
+        ensure!(denied.get("account_email").is_none());
         case.db.drop().await?;
         Ok(())
     }
@@ -464,7 +466,11 @@ async fn owner_update_request_wakes_an_idle_agent_without_changing_its_service_d
     for (id, token) in [(owner, "owner-session"), (foreign, "foreign-session")] {
         case.app
             .collection("users")
-            .insert_one(doc! {"_id":id,"username":format!("{id}@example.invalid")})
+            .update_one(
+                doc! {"_id":id},
+                doc! {"$set":{"username":format!("{id}@example.invalid")}},
+            )
+            .upsert(true)
             .await?;
         case.app.collection("user_sessions").insert_one(doc! {"_id":token,"user_id":id.to_hex(),"revoked_at":Bson::Null,
             "renewed_at":DateTime::now(),"expires_at":DateTime::from_millis(DateTime::now().timestamp_millis()+60_000)}).await?;

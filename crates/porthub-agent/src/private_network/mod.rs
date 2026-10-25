@@ -31,3 +31,7 @@ pub mod paths;
 mod probe;
 pub mod relay;
 pub mod strategy;
+#[cfg(feature = "private-stream")]
+pub mod stream_router;
+#[cfg(feature = "private-stream")]
+pub mod tcp_stream;

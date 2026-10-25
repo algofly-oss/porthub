@@ -40,14 +40,14 @@ const VIRTUAL_REMOTE: SocketAddr =
 fn safe<T, E>(result: std::result::Result<T, E>, message: &'static str) -> Result<T> {
     result.map_err(|_| anyhow::anyhow!(message))
 }
-fn fingerprint(der: &[u8]) -> String {
+pub(crate) fn fingerprint(der: &[u8]) -> String {
     Sha256::digest(der)
         .iter()
         .map(|b| format!("{b:02X}"))
         .collect::<Vec<_>>()
         .join(":")
 }
-fn pin(value: &str) -> Result<[u8; 32]> {
+pub(crate) fn pin(value: &str) -> Result<[u8; 32]> {
     let mut bytes = [0u8; 32];
     let parts: Vec<_> = value.split(':').collect();
     ensure!(
@@ -98,6 +98,23 @@ impl Identity {
     }
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
+    }
+    #[cfg(feature = "streams")]
+    pub(crate) fn tls_material(
+        &self,
+    ) -> Result<(
+        Vec<rustls::pki_types::CertificateDer<'static>>,
+        rustls::pki_types::PrivateKeyDer<'static>,
+    )> {
+        let key = safe(
+            self.certificate.private_key.signing_key.to_pkcs8_der(),
+            "private stream key unavailable",
+        )?
+        .ok_or_else(|| anyhow::anyhow!("private stream key is not exportable"))?;
+        Ok((
+            self.certificate.certificate.clone(),
+            rustls::pki_types::PrivatePkcs8KeyDer::from(key.as_ref().to_vec()).into(),
+        ))
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

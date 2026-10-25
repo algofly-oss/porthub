@@ -62,6 +62,7 @@ async fn prepare(
     info: PeerInfo,
     identity: Identity,
     base: String,
+    direct_origin: Option<String>,
     servers: Vec<IceServer>,
 ) -> Result<Prepared> {
     let credential = servers.iter().find(|server| {
@@ -72,19 +73,28 @@ async fn prepare(
     });
     let mut allocation = None;
     if let Some(credential) = credential {
-        let mut url = url::Url::parse(&base)?;
-        let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
-        url.set_scheme(scheme)
-            .map_err(|_| anyhow::anyhow!("invalid private relay URL"))?;
-        url.set_path("/api/access/private/relay");
-        allocation = porthub_mesh::relay::Allocation::connect(
-            url.as_str(),
-            &credential.username,
-            &credential.credential,
+        for (url, allow_plaintext) in turn_origins(
+            direct_origin.as_deref(),
+            &base,
             profile.allow_insecure_http_for_tests,
-        )
-        .await
-        .ok();
+        ) {
+            // Origin discovery comes from authenticated sync. Negotiation stays
+            // in this background task; payloads retain peer-pinned DTLS.
+            if let Ok(Ok(ready)) = tokio::time::timeout(
+                Duration::from_secs(3),
+                porthub_mesh::relay::Allocation::connect(
+                    url.as_str(),
+                    &credential.username,
+                    &credential.credential,
+                    allow_plaintext,
+                ),
+            )
+            .await
+            {
+                allocation = Some(ready);
+                break;
+            }
+        }
     }
     let stun_servers: Vec<_> = servers
         .iter()
@@ -110,6 +120,44 @@ async fn prepare(
         packets,
     })
 }
+fn turn_origins(
+    direct_origin: Option<&str>,
+    base: &str,
+    allow_plaintext_base: bool,
+) -> Vec<(url::Url, bool)> {
+    let mut result = Vec::new();
+    for (origin, explicit) in direct_origin
+        .into_iter()
+        .map(|origin| (origin, true))
+        .chain(std::iter::once((base, false)))
+    {
+        let Ok(mut url) = url::Url::parse(origin) else {
+            continue;
+        };
+        if url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            continue;
+        }
+        let allow_plaintext = explicit || allow_plaintext_base;
+        let scheme = match url.scheme() {
+            "https" => "wss",
+            "http" if allow_plaintext => "ws",
+            _ => continue,
+        };
+        if url.set_scheme(scheme).is_err() {
+            continue;
+        }
+        url.set_path("/api/access/private/relay");
+        if !result.iter().any(|(existing, _)| *existing == url) {
+            result.push((url, allow_plaintext));
+        }
+    }
+    result
+}
 struct Live {
     info: PeerInfo,
     session: Session,
@@ -124,8 +172,22 @@ pub enum Event {
         direct: bool,
         received_at: Instant,
     },
+    #[cfg(feature = "private-stream")]
+    StreamLocal {
+        peer: String,
+        bytes: Bytes,
+    },
+    #[cfg(feature = "private-stream")]
+    StreamDatagram {
+        destination: std::net::Ipv4Addr,
+        payload: Bytes,
+    },
 }
 pub type Sessions = Arc<RwLock<HashMap<String, Session>>>;
+pub struct LocalIdentity {
+    pub instance: String,
+    pub certificate: Identity,
+}
 pub fn nonce() -> Result<String> {
     let mut random = [0u8; 16];
     getrandom::fill(&mut random)
@@ -171,11 +233,34 @@ pub async fn run_instance(
 /// or preventing authenticated policy/relay discovery during a network outage.
 pub async fn run_watched_instance(
     profile: Profile,
-    mut interfaces: watch::Receiver<Vec<SocketAddr>>,
+    interfaces: watch::Receiver<Vec<SocketAddr>>,
     sessions: Sessions,
     events: mpsc::Sender<Event>,
     relay_config: watch::Sender<Option<super::relay::Config>>,
     instance: String,
+    cancel: CancellationToken,
+) -> Result<()> {
+    run_watched_identity(
+        profile,
+        interfaces,
+        sessions,
+        events,
+        relay_config,
+        LocalIdentity {
+            instance,
+            certificate: Identity::new()?,
+        },
+        cancel,
+    )
+    .await
+}
+pub async fn run_watched_identity(
+    profile: Profile,
+    mut interfaces: watch::Receiver<Vec<SocketAddr>>,
+    sessions: Sessions,
+    events: mpsc::Sender<Event>,
+    relay_config: watch::Sender<Option<super::relay::Config>>,
+    local: LocalIdentity,
     cancel: CancellationToken,
 ) -> Result<()> {
     ensure!(
@@ -183,7 +268,10 @@ pub async fn run_watched_instance(
         "private interface limit exceeded"
     );
     let mut interface_changes_open = true;
-    let identity = Identity::new()?;
+    let LocalIdentity {
+        instance,
+        certificate: identity,
+    } = local;
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(2))
@@ -220,7 +308,7 @@ pub async fn run_watched_instance(
             })
             .collect();
         let body = serde_json::json!({"peer_id":profile.peer_id,"token":profile.token,
-            "fingerprint":identity.fingerprint(),"instance":instance,"signals":&pending[..sent],
+            "fingerprint":identity.fingerprint(),"instance":instance,"stream_transport":if cfg!(feature="private-stream") {"quic1"} else {""},"signals":&pending[..sent],
             "acks":&acks[..acked],"paths":paths});
         let mut reply = None;
         for offset in 0..bases.len() {
@@ -262,7 +350,7 @@ pub async fn run_watched_instance(
         }
         if let Some(reply) = reply {
             let direct_relay = super::relay::Config {
-                direct_url: reply.direct_relay_url.filter(|url| !url.is_empty()),
+                direct_url: reply.direct_relay_url.clone().filter(|url| !url.is_empty()),
                 relay_token: (32..=128)
                     .contains(&reply.relay_auth_token.len())
                     .then(|| reply.relay_auth_token.clone()),
@@ -386,6 +474,7 @@ pub async fn run_watched_instance(
                 let info = info.clone();
                 let identity = identity.clone();
                 let base = bases[preferred].clone();
+                let direct_origin = reply.direct_relay_url.clone();
                 let servers = reply.ice_servers.clone();
                 preparing.spawn(async move {
                     let result = prepare(
@@ -395,6 +484,7 @@ pub async fn run_watched_instance(
                         info,
                         identity,
                         base,
+                        direct_origin,
                         servers,
                     )
                     .await;
@@ -500,6 +590,41 @@ async fn read_packets(
             packet=packets.recv()=>{let Some(bytes)=packet else {break;};
                 let _=events.try_send(Event::Packet{peer:peer.clone(),bytes,direct:true,received_at:Instant::now()});
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::turn_origins;
+    #[test]
+    fn authenticated_direct_turn_origin_precedes_secure_fallback() {
+        let origins = turn_origins(
+            Some("http://192.0.2.1:8345/api"),
+            "https://gateway.example/api",
+            false,
+        );
+        assert_eq!(origins.len(), 2);
+        assert_eq!(
+            origins[0].0.as_str(),
+            "ws://192.0.2.1:8345/api/access/private/relay"
+        );
+        assert!(origins[0].1);
+        assert_eq!(origins[1].0.scheme(), "wss");
+        assert!(!origins[1].1);
+        assert!(turn_origins(None, "http://gateway.example", false).is_empty());
+    }
+    #[test]
+    fn turn_origin_rejects_embedded_credentials_and_url_metadata() {
+        for origin in [
+            "http://user:secret@192.0.2.1",
+            "http://192.0.2.1/?token=secret",
+            "http://192.0.2.1/#fragment",
+            "file:///tmp/socket",
+        ] {
+            let origins = turn_origins(Some(origin), "https://gateway.example", false);
+            assert_eq!(origins.len(), 1);
+            assert_eq!(origins[0].0.scheme(), "wss");
         }
     }
 }

@@ -5,6 +5,18 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+pub async fn private_api_cache(request: Request, next: Next) -> Response {
+    let api = request.uri().path() == "/api" || request.uri().path().starts_with("/api/");
+    let mut response = next.run(request).await;
+    if api {
+        response
+            .headers_mut()
+            .entry(header::CACHE_CONTROL)
+            .or_insert(HeaderValue::from_static("private, no-store"));
+    }
+    response
+}
+
 pub async fn cors(request: Request, next: Next) -> Response {
     let Some(origin) = request
         .headers()
@@ -48,4 +60,46 @@ pub async fn cors(request: Request, next: Next) -> Response {
         }
     }
     response
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use axum::{body::Body, routing::get, Router};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn api_responses_are_not_cached_and_explicit_stream_policies_are_preserved() {
+        let app = Router::new()
+            .route("/api/inventory", get(|| async { "live inventory" }))
+            .route(
+                "/api/stream",
+                get(|| async {
+                    (
+                        [(header::CACHE_CONTROL, "private, no-store, no-transform")],
+                        "stream",
+                    )
+                }),
+            )
+            .route("/asset.js", get(|| async { "asset" }))
+            .layer(axum::middleware::from_fn(private_api_cache));
+        for (path, expected) in [
+            ("/api/inventory", Some("private, no-store")),
+            ("/api/stream", Some("private, no-store, no-transform")),
+            ("/asset.js", None),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CACHE_CONTROL)
+                    .map(|value| value.to_str().unwrap()),
+                expected
+            );
+        }
+    }
 }

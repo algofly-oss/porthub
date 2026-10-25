@@ -9,6 +9,55 @@ use support::Case;
 
 #[tokio::test]
 #[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn concurrent_legacy_heartbeat_cannot_replace_a_reported_release() -> Result<()> {
+    use porthub_api::domain::machine_client;
+    let case = Case::new(Config::default()).await?;
+    let result = async {
+        let id = ObjectId::new();
+        let stale =
+            doc! {"_id":id,"token":"test-token","enabled":true,"client_version":"legacy-one"};
+        case.app.collection("machines").insert_one(&stale).await?;
+        case.app
+            .collection("machines")
+            .update_one(doc! {"_id":id}, doc! {"$set":{"client_version":"1.4.3"}})
+            .await?;
+        let heartbeat = |version: &str| machine_client::Sync {
+            hostname: String::new(),
+            local_ip: String::new(),
+            public_ip: String::new(),
+            version: version.into(),
+            handled: String::new(),
+            native_update_protocol: false,
+        };
+        let headers = axum::http::HeaderMap::new();
+        let error = machine_client::sync(&case.app, &stale, heartbeat("legacy-two"), &headers)
+            .await
+            .unwrap_err();
+        ensure!(error.status == StatusCode::CONFLICT);
+        let current = case
+            .app
+            .collection("machines")
+            .find_one(doc! {"_id":id})
+            .await?
+            .unwrap();
+        ensure!(current.get_str("client_version")? == "1.4.3");
+        let legacy = machine_client::sync(&case.app, &current, heartbeat("legacy-two"), &headers)
+            .await
+            .map_err(|error| anyhow::anyhow!("{}", error.detail))?;
+        ensure!(legacy.get_str("client_version")? == "1.4.3");
+        let updated = machine_client::sync(&case.app, &legacy, heartbeat("1.4.4"), &headers)
+            .await
+            .map_err(|error| anyhow::anyhow!("{}", error.detail))?;
+        ensure!(updated.get_str("client_version")? == "1.4.4");
+        Ok(())
+    }
+    .await;
+    case.db.drop().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
 async fn edits_preserve_ownership_optional_fields_aliases_and_enable_controls() -> Result<()> {
     let temporary = tempfile::tempdir()?;
     let path = temporary.path().join("gateway.toml");

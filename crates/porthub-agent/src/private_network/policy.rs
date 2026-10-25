@@ -14,6 +14,8 @@ pub struct PeerInfo {
     pub ip: Ipv4Addr,
     pub fingerprint: String,
     pub instance: String,
+    #[serde(default)]
+    pub stream_transport: String,
     pub hostname: String,
     #[serde(default)]
     pub aliases: Vec<String>,
@@ -67,6 +69,9 @@ impl Packet {
     }
     pub fn destination(&self) -> Ipv4Addr {
         self.key.dst
+    }
+    pub fn is_reset(&self) -> bool {
+        self.key.protocol == 6 && self.rst
     }
     pub fn parse(bytes: &[u8]) -> Option<Self> {
         if bytes.len() < 20 || bytes[0] >> 4 != 4 {
@@ -340,6 +345,10 @@ impl Engine {
                     return false;
                 }
                 if key.protocol == 6 {
+                    if packet.rst {
+                        self.flows.remove(&candidate);
+                        return true;
+                    }
                     if reply && packet.syn && !packet.ack {
                         break;
                     }
@@ -361,9 +370,6 @@ impl Engine {
                     }
                 }
                 flow.expires = now + ttl(key.protocol);
-                if packet.rst {
-                    self.flows.remove(&candidate);
-                }
                 return true;
             }
         }

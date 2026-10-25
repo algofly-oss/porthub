@@ -2,6 +2,7 @@ import { useWorkspaceState } from "@/shared/contexts/workspaceCache";
 import ResultsPagination from "@/components/ui/results-pagination";
 import { normalizeTrafficSamples, trafficSummary } from "@/shared/utils/traffic.mjs";
 import { compareInventoryEntries, INVENTORY_SORT_OPTIONS, isTrafficSort } from "@/shared/utils/inventory-sort.mjs";
+import { preserveNewerClientVersion } from "@/shared/utils/client-version.mjs";
 import { useContext, useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { useRouter } from "next/router";
@@ -251,9 +252,10 @@ const mapMachineToHost = (machine) => ({
 
 const mergeMachineIntoHost = (host, machine) => {
   const mappedHost = mapMachineToHost(machine);
+  const currentVersionState = preserveNewerClientVersion(host, mappedHost);
 
   return {
-    ...mappedHost,
+    ...currentVersionState,
     privateIps: Array.isArray(machine.private_ips) ? machine.private_ips : (host?.privateIps || []),
     numPorts: host?.numPorts ?? 0,
     forwardingConfigs: host?.forwardingConfigs ?? [],
@@ -471,19 +473,20 @@ export default function Home({ onStatsChange, active = true }) {
         const connections = connectionsResponse.data?.data || [];
         setMachineGroups(groupsResponse.data?.data || []);
 
-        setHosts(
-          machines.map((machine) => {
+        setHosts((currentHosts) => {
+          const previousHosts = new Map(currentHosts.map((host) => [host.id, host]));
+          return machines.map((machine) => {
             const hostConnections = connections.filter(
               (item) => item.machine_id === machine._id
             );
 
             return {
-              ...mapMachineToHost(machine),
+              ...mergeMachineIntoHost(previousHosts.get(machine._id), machine),
               numPorts: hostConnections.filter((item) => item.enabled !== false).length,
               forwardingConfigs: hostConnections.map(mapConnectionToForwardingConfig),
             };
-          })
-        );
+          });
+        });
       } catch (loadError) {
         if (axios.isCancel(loadError)) return;
         if (loadError?.response?.data?.detail !== "User not logged in") {

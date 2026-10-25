@@ -71,6 +71,7 @@ backoff = { version = "0.4", features = ["tokio"] }
 tracing = "0.1"
 tracing-subscriber = { version="0.3", features=["env-filter"] }
 socket2 = { version = "0.4", features = ["all"] }
+socket2-modern = { package = "socket2", version = "0.6", features = ["all"] }
 fdlimit = "0.2"
 tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring", "tls12"] }
 rustls-pemfile = { version = "2", optional = true }

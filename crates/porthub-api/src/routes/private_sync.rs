@@ -127,6 +127,7 @@ pub fn validate_signal(
     }
     Ok(())
 }
+
 async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<Response> {
     let input = private_sync::parse(raw)?;
     let hash = token_digest(&input.token);
@@ -151,7 +152,7 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
     }
     indexes(&app).await?;
     let now = DateTime::now();
-    let updated=app.collection("private_peers").find_one_and_update(filter.clone(),doc!{"$set":{"fingerprint":&input.fingerprint,"instance":&input.instance,"last_seen_at":now,
+    let updated=app.collection("private_peers").find_one_and_update(filter.clone(),doc!{"$set":{"fingerprint":&input.fingerprint,"instance":&input.instance,"stream_transport":&input.stream_transport,"last_seen_at":now,
         "paths":mongodb::bson::to_document(&input.paths).expect("string map")},"$inc":{"revision":1_i64}}).return_document(ReturnDocument::After).await?
         .ok_or_else(||forbidden("Private credential revoked"))?;
     for p in &mut peers {
@@ -288,7 +289,7 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
         let id=store::string(p,"_id");let machine_id=store::id(p.get("machine_id"));
         let mut aliases=names.aliases.get(id).into_iter().flatten().map(|name|format!("{name}.{suffix}")).collect::<Vec<_>>();
         aliases.extend(domains_by_machine.get(&machine_id).into_iter().flatten().filter(|domain| !domain.default).map(|domain|format!("{}.{}",domain.host,domain.suffix)));
-        json!({"id":id,"ip":store::field(p,"ip"),"fingerprint":store::string(p,"fingerprint"),"instance":store::string(p,"instance"),
+        json!({"id":id,"ip":store::field(p,"ip"),"fingerprint":store::string(p,"fingerprint"),"instance":store::string(p,"instance"),"stream_transport":store::string(p,"stream_transport"),
             "hostname":format!("{}.{suffix}",names.primary.get(id).map(String::as_str).unwrap_or("machine")),"aliases":aliases})
     }).collect();
     let current = app
@@ -339,9 +340,9 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
                 .publish(&input.peer_id, &hash, &input.instance, ip, allowed);
     }
     // This origin is configured by the gateway operator and returned only to
-    // authenticated private clients. The inner peer session remains DTLS
-    // authenticated and encrypted, while the short-lived token limits the
-    // exposure of the direct HTTP WebSocket authorization header.
+    // authenticated private clients. The short-lived token limits exposure of
+    // the direct HTTP WebSocket authorization header; payload encryption is
+    // provided by the selected peer/stream protocol, not this packet relay.
     let direct_relay_url = app
         .config
         .gateway_advertised_url

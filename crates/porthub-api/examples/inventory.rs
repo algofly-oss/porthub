@@ -20,7 +20,7 @@ async fn main() -> Result<()> {
     let machines: Vec<Document> = db
         .collection::<Document>("machines")
         .find(doc! {})
-        .projection(doc! {"_id":1,"name":1,"enabled":1,"client_version":1,"deletion_pending":1})
+        .projection(doc! {"_id":1,"name":1,"enabled":1,"client_version":1,"last_seen_at":1,"deletion_pending":1})
         .await?
         .try_collect()
         .await?;

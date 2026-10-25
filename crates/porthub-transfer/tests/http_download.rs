@@ -6,6 +6,7 @@ use axum::{
     routing::get,
     Router,
 };
+use futures_util::StreamExt;
 use porthub_transfer::{
     download::{self, Options},
     server,
@@ -44,6 +45,171 @@ fn options(url: String, directory: PathBuf) -> Options {
     options.piece_size = 256 * 1024;
     options.progress = false;
     options
+}
+
+#[tokio::test]
+async fn single_connection_streams_across_checkpoints_and_resumes_only_the_missing_tail(
+) -> Result<()> {
+    let source = tempfile::tempdir()?;
+    let destination = tempfile::tempdir()?;
+    let payload: Vec<u8> = (0..3 * 1024 * 1024 + 71)
+        .map(|value| (value % 251) as u8)
+        .collect();
+    tokio::fs::write(source.path().join("continuous.bin"), &payload).await?;
+    let ranges = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let recorded = ranges.clone();
+    let router = server::router(tokio::fs::canonicalize(source.path()).await?).layer(
+        axum::middleware::from_fn(
+            move |request: Request<Body>, next: axum::middleware::Next| {
+                let recorded = recorded.clone();
+                async move {
+                    let data = request
+                        .headers()
+                        .get(header::RANGE)
+                        .and_then(|value| value.to_str().ok())
+                        .filter(|range| *range != "bytes=0-0")
+                        .map(str::to_owned);
+                    if let Some(range) = &data {
+                        recorded.lock().unwrap().push(range.clone());
+                    }
+                    let response = next.run(request).await;
+                    if data.is_none() {
+                        return response;
+                    }
+                    let (parts, body) = response.into_parts();
+                    let chunks = body.into_data_stream().then(|chunk| async {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        chunk
+                    });
+                    Response::from_parts(parts, Body::from_stream(chunks))
+                }
+            },
+        ),
+    );
+    let server = http(router).await?;
+    let mut settings = options(
+        format!("{}/continuous.bin", server.url),
+        destination.path().into(),
+    );
+    settings.connections = 1;
+    settings.sha256 = Some(format!("{:x}", Sha256::digest(&payload)));
+    let cancel = CancellationToken::new();
+    let stopping = cancel.clone();
+    let first = settings.clone();
+    let task = tokio::spawn(async move { download::get(first, stopping).await });
+    let control = destination.path().join("continuous.bin.porthub-part.json");
+    for _ in 0..200 {
+        let ready = tokio::fs::read(&control)
+            .await
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .is_some_and(|state| state["complete"][0] == true);
+        if ready {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    cancel.cancel();
+    assert!(task.await?.is_err());
+    let checkpoint: serde_json::Value = serde_json::from_slice(&tokio::fs::read(&control).await?)?;
+    let complete = checkpoint["complete"].as_array().unwrap();
+    let first_missing = complete
+        .iter()
+        .position(|done| *done == false)
+        .expect("cancellation must precede EOF");
+    assert!(first_missing > 0);
+    let path = download::get(settings.clone(), CancellationToken::new()).await?;
+    assert_eq!(tokio::fs::read(path).await?, payload);
+    assert_eq!(
+        *ranges.lock().unwrap(),
+        vec![
+            format!("bytes=0-{}", payload.len() - 1),
+            format!(
+                "bytes={}-{}",
+                first_missing as u64 * settings.piece_size,
+                payload.len() - 1
+            )
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn interrupted_continuous_response_retries_after_durable_checkpoints() -> Result<()> {
+    let source = tempfile::tempdir()?;
+    let destination = tempfile::tempdir()?;
+    let payload: Vec<u8> = (0..3 * 1024 * 1024 + 71)
+        .map(|value| (value % 251) as u8)
+        .collect();
+    tokio::fs::write(source.path().join("retry.bin"), &payload).await?;
+    let ranges = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let recorded = ranges.clone();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let router = server::router(tokio::fs::canonicalize(source.path()).await?).layer(
+        axum::middleware::from_fn(
+            move |request: Request<Body>, next: axum::middleware::Next| {
+                let recorded = recorded.clone();
+                let requests = requests.clone();
+                async move {
+                    let range = request
+                        .headers()
+                        .get(header::RANGE)
+                        .and_then(|value| value.to_str().ok())
+                        .filter(|range| *range != "bytes=0-0")
+                        .map(str::to_owned);
+                    let truncate = range.is_some() && requests.fetch_add(1, Ordering::Relaxed) == 0;
+                    if let Some(range) = range {
+                        recorded.lock().unwrap().push(range);
+                    }
+                    let response = next.run(request).await;
+                    if !truncate {
+                        return response;
+                    }
+                    let (parts, body) = response.into_parts();
+                    let chunks = body
+                        .into_data_stream()
+                        .scan(512 * 1024 + 17, |remaining, chunk| {
+                            let next = if *remaining == 0 {
+                                None
+                            } else {
+                                Some(chunk.map(|bytes| {
+                                    let count = bytes.len().min(*remaining);
+                                    *remaining -= count;
+                                    bytes.slice(..count)
+                                }))
+                            };
+                            futures_util::future::ready(next)
+                        })
+                        .then(|chunk| async {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                            chunk
+                        });
+                    Response::from_parts(parts, Body::from_stream(chunks))
+                }
+            },
+        ),
+    );
+    let server = http(router).await?;
+    let mut settings = options(
+        format!("{}/retry.bin", server.url),
+        destination.path().into(),
+    );
+    settings.connections = 1;
+    settings.sha256 = Some(format!("{:x}", Sha256::digest(&payload)));
+    let path = download::get(settings.clone(), CancellationToken::new()).await?;
+    assert_eq!(tokio::fs::read(path).await?, payload);
+    let requests = ranges.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let resumed = requests[1]
+        .strip_prefix("bytes=")
+        .unwrap()
+        .split('-')
+        .next()
+        .unwrap()
+        .parse::<u64>()?;
+    assert!(resumed >= settings.piece_size && resumed <= 512 * 1024);
+    assert_eq!(resumed % settings.piece_size, 0);
+    Ok(())
 }
 
 #[tokio::test]

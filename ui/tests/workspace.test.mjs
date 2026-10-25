@@ -3,6 +3,33 @@ import assert from "node:assert/strict";
 import { searchScore, selectProxies } from "../src/shared/utils/search.mjs";
 import { aggregateTraffic, trafficSummary, formatBytes, normalizeTrafficSamples, buildTrafficWindow, trafficLinePath } from "../src/shared/utils/traffic.mjs";
 import { compareInventoryEntries } from "../src/shared/utils/inventory-sort.mjs";
+import { preserveNewerClientVersion } from "../src/shared/utils/client-version.mjs";
+
+test("stale machine snapshots cannot roll the displayed client version backward", () => {
+  const current = {
+    clientVersion: "1.4.3",
+    latestClientVersion: "1.4.3",
+    clientUpdateAvailable: false,
+    clientUpdateRequested: false,
+    clientUpdateTargetVersion: "",
+    lastSeenAt: "2026-10-25T10:00:02.000Z",
+    lastSeen: "just now",
+  };
+  const stale = {
+    ...current,
+    clientVersion: "legacy-build-hash",
+    clientUpdateAvailable: true,
+    lastSeenAt: "2026-10-25T10:00:01.000Z",
+  };
+
+  assert.equal(preserveNewerClientVersion(current, stale).clientVersion, "1.4.3");
+  assert.equal(preserveNewerClientVersion(current, stale).lastSeenAt, current.lastSeenAt);
+  assert.equal(
+    preserveNewerClientVersion(current, { ...stale, lastSeenAt: "2026-10-25T10:00:03.000Z" })
+      .clientVersion,
+    "legacy-build-hash",
+  );
+});
 
 test("inventory ordering supports names, registration and directional traffic with stable ties", () => {
   const entries = [
