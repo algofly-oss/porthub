@@ -1,6 +1,8 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use porthub_transfer::{download, server};
+#[cfg(unix)]
+use std::process::Command as ProcessCommand;
 use std::{net::IpAddr, path::PathBuf};
 use tokio_util::sync::CancellationToken;
 
@@ -8,7 +10,9 @@ use tokio_util::sync::CancellationToken;
 #[command(
     name = "porthub",
     version = option_env!("PORTHUB_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
-    about = "PortHub native agent: tunnels, HTTP file serving, syncing and parallel transfers"
+    about = "PortHub agent and transfer tools",
+    color = clap::ColorChoice::Auto,
+    after_long_help = "Examples:\n  porthub http.server ./public\n  porthub http.receive ./drop\n  porthub push ./dataset http://host:8001/\n  porthub get https://example.com/file.iso\n  porthub list --user"
 )]
 struct Args {
     /// Rathole-compatible client configuration (legacy -c form).
@@ -16,6 +20,91 @@ struct Args {
     config: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+fn requires_system_privileges(args: &Args) -> bool {
+    let Some(command) = args.command.as_ref() else {
+        return false;
+    };
+    match command {
+        #[cfg(target_os = "linux")]
+        Command::AdoptLegacy { .. } => true,
+        Command::Enroll {
+            install_service, ..
+        } => *install_service,
+        Command::Setup {
+            user, no_service, ..
+        } => !user && !no_service,
+        Command::List { user, .. } => !user,
+        Command::Path { command } => match command {
+            PathCommand::Show(args) | PathCommand::Reset(args) => {
+                !args.user && args.profile.is_none()
+            }
+            PathCommand::Set { registration, .. } => {
+                !registration.user && registration.profile.is_none()
+            }
+        },
+        Command::Start(args) | Command::Stop(args) | Command::Restart(args) => !args.user,
+        Command::Remove(args) => !args.user,
+        Command::Status { user, .. } => !user,
+        Command::Service { user, .. } => !user,
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        Command::Update { user, .. } => !user,
+        Command::HttpServer {
+            target,
+            port_override,
+            ..
+        } => {
+            (*port_override).is_some_and(|port| port < 1024)
+                || target.parse::<u16>().is_ok_and(|port| port < 1024)
+        }
+        Command::HttpReceive {
+            target,
+            port_override,
+            ..
+        } => {
+            (*port_override).is_some_and(|port| port < 1024)
+                || target.parse::<u16>().is_ok_and(|port| port < 1024)
+        }
+        Command::Run { profile } => {
+            porthub_agent::private_network::is_profile(profile).unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+fn elevate_if_needed(args: &Args) -> Result<()> {
+    if !requires_system_privileges(args) {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    if !rustix::process::geteuid().is_root() {
+        let executable = std::env::current_exe().context("cannot locate PortHub executable")?;
+        let status = ProcessCommand::new("sudo")
+            .arg("--")
+            .arg(executable)
+            .args(std::env::args_os().skip(1))
+            .status()
+            .context("system privileges are required; install sudo or run this command as root")?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    #[cfg(windows)]
+    if requires_system_privileges(args) {
+        porthub_agent::service::require_administrator()?;
+    }
+    Ok(())
+}
+
+fn paint(text: impl std::fmt::Display, style: &str) -> String {
+    use std::io::IsTerminal;
+    let enabled = std::io::stdout().is_terminal()
+        && std::env::var_os("NO_COLOR").is_none()
+        && std::env::var("TERM").is_ok_and(|term| term != "dumb");
+    if enabled {
+        format!("\x1b[{style}m{text}\x1b[0m")
+    } else {
+        text.to_string()
+    }
 }
 
 #[derive(Subcommand)]
@@ -619,18 +708,43 @@ async fn list_registrations(user: bool, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string(&rows)?);
     } else if rows.is_empty() {
-        println!("No native PortHub registrations");
+        println!("{}", paint("No native PortHub registrations", "2"));
     } else {
-        println!("ID            MACHINE                   ACTIVE  STATE                  SERVICES  ROUTE");
+        println!(
+            "{}",
+            paint(
+                "ID            MACHINE                   ACTIVE  STATE                  SERVICES  ROUTE",
+                "1;36"
+            )
+        );
         for row in rows {
+            let active = if row["active"] == true {
+                paint(format!("{:<6}", "yes"), "1;32")
+            } else {
+                paint(format!("{:<6}", "no"), "2")
+            };
+            let state = row["state"].as_str().unwrap();
+            let state = match state {
+                "running" => paint(format!("{state:<21}"), "32"),
+                "configuration-rejected" | "stopped" | "interrupted" => {
+                    paint(format!("{state:<21}"), "1;31")
+                }
+                _ => paint(format!("{state:<21}"), "33"),
+            };
+            let route = row["route"].as_str().unwrap();
+            let route = match route {
+                "direct" => paint(route, "1;32"),
+                "relay" | "gateway" => paint(route, "36"),
+                _ => paint(route, "2"),
+            };
             println!(
                 "{}  {}  {:<6}  {:<21}  {:<8}  {}",
                 &row["id"].as_str().unwrap()[..12],
                 row["machine_id"].as_str().unwrap(),
-                row["active"],
-                row["state"].as_str().unwrap(),
+                active,
+                state,
                 row["services"],
-                row["route"].as_str().unwrap()
+                route
             );
         }
     }
@@ -739,6 +853,7 @@ async fn shutdown_signal() {
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    elevate_if_needed(&args)?;
     let logs = porthub_agent::logs::Buffer::default();
     let profile_to_configure = match &args.command {
         Some(Command::Run { profile }) => Some(profile),
@@ -1249,4 +1364,47 @@ async fn main() -> Result<()> {
     };
     signal.abort();
     result
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::{requires_system_privileges, Args};
+    use clap::Parser;
+
+    fn args(arguments: &[&str]) -> Args {
+        Args::try_parse_from(arguments).expect("valid CLI fixture")
+    }
+
+    #[test]
+    fn routine_transfer_and_user_commands_do_not_request_elevation() {
+        for arguments in [
+            &["porthub", "version"][..],
+            &["porthub", "push", "file.bin", "http://host:8001/"][..],
+            &["porthub", "get", "http://host/file.bin"][..],
+            &["porthub", "http.receive"][..],
+            &["porthub", "list", "--user"][..],
+            &["porthub", "setup", "--ticket", "ticket", "--user"][..],
+        ] {
+            assert!(
+                !requires_system_privileges(&args(arguments)),
+                "unexpected elevation for {arguments:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn system_service_commands_and_privileged_ports_request_elevation() {
+        for arguments in [
+            &["porthub", "list"][..],
+            &["porthub", "setup", "--ticket", "ticket"][..],
+            &["porthub", "start", "abcdef"][..],
+            &["porthub", "http.server", "80"][..],
+            &["porthub", "http.receive", "--port", "443"][..],
+        ] {
+            assert!(
+                requires_system_privileges(&args(arguments)),
+                "missing elevation for {arguments:?}"
+            );
+        }
+    }
 }
