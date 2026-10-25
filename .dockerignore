@@ -4,6 +4,7 @@
 !rust-toolchain.toml
 !crates
 !vendor
+!vendor/**
 !ui
 !deploy
 ui/node_modules
