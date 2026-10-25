@@ -740,7 +740,6 @@ async fn list_registrations(user: bool, json: bool) -> Result<()> {
                             profile.server.clone(),
                             profile.machine_id.clone(),
                             profile.token.clone(),
-                            entry.spec.profile.clone(),
                         ));
                     }
                     (profile.server, email)
@@ -783,7 +782,7 @@ async fn list_registrations(user: bool, json: bool) -> Result<()> {
             .timeout(std::time::Duration::from_secs(2))
             .build()?;
         let results = futures_util::future::join_all(email_lookups.into_iter().map(
-            |(id, server, machine_id, token, profile_path)| {
+            |(id, server, machine_id, token)| {
                 let client = client.clone();
                 async move {
                     let response = client
@@ -803,22 +802,6 @@ async fn list_registrations(user: bool, json: bool) -> Result<()> {
                             }),
                         _ => None,
                     };
-                    if let Some(email) = email.as_deref().filter(|email| !email.is_empty()) {
-                        if let Ok(mut profile) =
-                            porthub_agent::profile::Profile::load(&profile_path)
-                        {
-                            profile.account_email = Some(email.to_owned());
-                            if profile.validate().is_ok() {
-                                if let Ok(bytes) = serde_json::to_vec_pretty(&profile) {
-                                    let _ = porthub_agent::profile::write_private(
-                                        &profile_path,
-                                        &bytes,
-                                        true,
-                                    );
-                                }
-                            }
-                        }
-                    }
                     (id, email)
                 }
             },
