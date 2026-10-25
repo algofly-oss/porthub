@@ -6,11 +6,36 @@ Luna has a stated 400 Mbps ISP connection; Condor has 1 Gbps. Luna–Miro LAN is
 downloads use fresh destinations and verify SHA256. No raw benchmark artifacts
 are retained in this directory.
 
-## Latest local candidate
+## Release and current local qualification
 
-The native Linux candidate identifies itself as 1.4.4. Release packaging is pending. The working tree enables private TCP streams by default. URM2's test
-API images retain all ten production 1.4.3 agent artifacts, so these experiments
-do not publish an agent update. No GitHub workflow builds were used.
+Release 1.4.4 is deployed on URM2 with isolated core, edge and firewall
+containers. All eight online clients upgraded through the gateway. The offline
+MacBook remains outside this verification. A subsequent Linux-only candidate is
+being tested locally before another cross-platform release is published.
+
+Production 1.4.4 measured 47.70 MB/s for a SHA256-verified 10 GB private
+Luna → Condor transfer on one connection. Its public comparison measured
+38.17 MB/s; an earlier public run reached 48.84 MB/s, so consistency still needs
+qualification.
+
+With both LAN clients on 1.4.4, Auto selection stalled after about 5.3 MB.
+Forced direct selection completed 1 GB at 90.19 MB/s. The local fix floors probe
+arrival intervals at 1 ms: coalesced WebSocket reads must not imply implausible
+capacity and outweigh the LAN's lower latency. With Auto restored on both
+clients, the candidate completed 1 GB at 90.57 MB/s and 10 GB at **90.31 MB/s**,
+with SHA256 verification. Gateway-wide TX increased by 187,453,073 bytes during
+the 10 GB qualification interval, confirming that the payload bypassed it; this
+counter also includes unrelated gateway traffic.
+
+The same local candidate defaults public Rathole sockets to Linux BBR when
+available, without changing host-wide settings. Luna → Condor completed a
+SHA256-verified 10 GB public transfer at **49.76 MB/s** on one connection.
+The earlier production private result of 47.70 MB/s is 4.1% below this public
+result; these sequential WAN runs cannot establish an invariant capacity.
+Workspace tests after both fixes passed **245 tests**, with 78 ignored.
+Both temporary Luna agents were restored to production 1.4.4 after testing.
+
+The following table retains the earlier qualification measurements for context.
 
 The built-in `porthub http.server` on Luna serves files through `luna.phub` and
 the existing public mapping. Condor uses `porthub get -x 1 --sha256 …`.

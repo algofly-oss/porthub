@@ -300,6 +300,13 @@ impl Quality {
             score.bits_per_second.saturating_mul(3) / 4 + next.bits_per_second / 4;
         score.rtt = score.rtt.mul_f64(0.75) + next.rtt.mul_f64(0.25);
         score.measured_at = next.measured_at;
+        tracing::debug!(
+            peer,
+            direct,
+            bits_per_second = score.bits_per_second,
+            rtt_us = score.rtt.as_micros() as u64,
+            "private path estimate refreshed"
+        );
         if self.scores.len() > MAX_PEERS {
             self.scores.retain(|_, values| {
                 for value in values.iter_mut() {
@@ -360,8 +367,12 @@ impl Quality {
 }
 
 fn throughput(bytes: u64, nanos: u32) -> u64 {
-    (u128::from(bytes) * 8 * 1_000_000_000 / u128::from(nanos.max(1))).min(u128::from(u64::MAX))
-        as u64
+    // WebSocket/TCP batching can expose an entire packet train in one read.
+    // Sub-millisecond dispatch spacing is not link capacity. Use the same
+    // one-millisecond measurement floor as the RTT estimate so a batched WAN
+    // path cannot masquerade as much faster than an authenticated LAN path.
+    (u128::from(bytes) * 8 * 1_000_000_000 / u128::from(nanos.max(1_000_000)))
+        .min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]
@@ -405,6 +416,52 @@ mod tests {
         // Scores are keyed by the authenticated remote identity, not the IP
         // address shared by unrelated machines.
         assert!(source.prefer_peer("another-peer", true, start + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn batched_wan_delivery_does_not_outrank_a_fast_low_latency_peer() {
+        let now = Instant::now();
+        let mut quality = Quality::default();
+        quality.observe(
+            "peer",
+            true,
+            Score {
+                bits_per_second: throughput(PROBE_BYTES, 310_000),
+                rtt: Duration::from_millis(1),
+                measured_at: now,
+            },
+        );
+        quality.observe(
+            "peer",
+            false,
+            Score {
+                bits_per_second: throughput(PROBE_BYTES, 620),
+                rtt: Duration::from_millis(80),
+                measured_at: now,
+            },
+        );
+        assert!(quality.prefer_peer("peer", false, now));
+        // A genuinely slow peer remains distinguishable from a faster gateway.
+        quality.scores.clear();
+        quality.observe(
+            "peer",
+            true,
+            Score {
+                bits_per_second: throughput(PROBE_BYTES, 62_000_000),
+                rtt: Duration::from_millis(80),
+                measured_at: now,
+            },
+        );
+        quality.observe(
+            "peer",
+            false,
+            Score {
+                bits_per_second: throughput(PROBE_BYTES, 1_550_000),
+                rtt: Duration::from_millis(80),
+                measured_at: now,
+            },
+        );
+        assert!(!quality.prefer_peer("peer", true, now));
     }
 
     #[test]

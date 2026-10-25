@@ -148,10 +148,12 @@ impl SocketOpts {
     }
 
     pub fn apply(&self, conn: &TcpStream) {
-        // PortHub diagnostic override is per socket and leaves host defaults
-        // intact. Unsupported algorithms/kernels retain their current policy.
+        // Prefer Linux BBR per socket, without changing host defaults.
+        // Unsupported algorithms/kernels retain their current policy.
         #[cfg(target_os = "linux")]
-        if let Ok(algorithm) = std::env::var("PORTHUB_TCP_CONGESTION") {
+        {
+            let algorithm =
+                std::env::var("PORTHUB_TCP_CONGESTION").unwrap_or_else(|_| "bbr".into());
             if matches!(algorithm.as_str(), "bbr" | "cubic") {
                 let _ =
                     socket2_modern::SockRef::from(conn).set_tcp_congestion(algorithm.as_bytes());
