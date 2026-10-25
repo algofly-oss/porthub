@@ -2,6 +2,7 @@ import { TableRow, TableCell } from "@/components/ui/table";
 import { IconCopy, IconFolder } from "@tabler/icons-react";
 import useToast from "@/shared/hooks/useToast";
 import TrafficSparkline from "@/components/ui/traffic-sparkline";
+import { formatClientVersion } from "@/shared/utils/client-version.mjs";
 
 export default function HostItem({ name, hostname, privateDomain = "", groupLabels = [], localIp, privateIps = [], clientVersion, clientUpdateAvailable, latestClientVersion, forwardingConfigs = [], isActive, connectionStatus, lastSeen, trafficSamples = [], onClick }) {
   const { success, error } = useToast();
@@ -38,6 +39,8 @@ export default function HostItem({ name, hostname, privateDomain = "", groupLabe
   const statusLabel = { online: "Online", offline: "Offline", disabled: "Disabled", auth_required: "Auth required" }[status] || "Offline";
   const labels = groupLabels.filter(Boolean);
   const activePorts = forwardingConfigs.filter(port => port.enabled !== false).length;
+  const clientVersionLabel = formatClientVersion(clientVersion, "");
+  const latestClientVersionLabel = formatClientVersion(latestClientVersion);
   return <TableRow className="group cursor-pointer" data-machine-status={status} onClick={onClick}>
     <TableCell className="py-3">
       <div className="flex min-w-0 items-start gap-3">
@@ -51,7 +54,7 @@ export default function HostItem({ name, hostname, privateDomain = "", groupLabe
               <IconCopy size={14} />
             </button>}
           </span>
-          <span className="mt-1 block truncate text-xs text-muted-foreground"><span className={status === "online" ? "text-emerald-700 dark:text-emerald-400" : status === "offline" ? "text-red-700 dark:text-red-400" : status === "auth_required" ? "text-amber-700 dark:text-amber-400" : ""}>{statusLabel}</span> · {status !== "online" && lastSeen ? lastSeen : hostname || "Awaiting client"}{clientVersion ? <> · <span className={clientUpdateAvailable ? "text-amber-700 dark:text-amber-400" : ""} title={clientUpdateAvailable ? `Update available: v${latestClientVersion}` : "Latest client version"}>v{clientVersion}</span></> : ""}</span>
+          <span className="mt-1 block truncate text-xs text-muted-foreground"><span className={status === "online" ? "text-emerald-700 dark:text-emerald-400" : status === "offline" ? "text-red-700 dark:text-red-400" : status === "auth_required" ? "text-amber-700 dark:text-amber-400" : ""}>{statusLabel}</span> · {status !== "online" && lastSeen ? lastSeen : hostname || "Awaiting client"}{clientVersionLabel ? <> · <span className={clientUpdateAvailable ? "text-amber-700 dark:text-amber-400" : ""} title={clientUpdateAvailable ? `Update available: ${latestClientVersionLabel}` : "Latest client version"}>{clientVersionLabel}</span></> : ""}</span>
         </span>
       </div>
       <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 pl-5 text-xs text-muted-foreground lg:hidden">{localIp && <span className="inline-flex items-center gap-1 font-mono">LAN {localIp}<button type="button" onClick={event => copyValue(event, localIp, "LAN IP")} aria-label={`Copy LAN IP ${localIp}`} title="Copy LAN IP" className="inline-flex shrink-0 items-center rounded p-1 hover:bg-accent hover:text-foreground focus-visible:outline focus-visible:outline-2"><IconCopy size={12} /></button></span>}{privateIps.length > 0 && <span className="inline-flex items-center gap-2 font-mono">PAN {privateAddress}</span>}{labels.length > 0 && <span>{labels.join(" · ")}</span>}</div>

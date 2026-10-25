@@ -54,6 +54,7 @@ import TrafficMonitorPanel, {
 } from "./TrafficMonitorPanel";
 import UptimeHistoryPanel from "./UptimeHistoryPanel";
 import { useDemo } from "@/shared/demo/DemoProvider";
+import { formatClientVersion } from "@/shared/utils/client-version.mjs";
 
 const getInputClassName = () => "w-full rounded-lg !border !border-transparent !bg-control px-3 py-2 text-sm !text-foreground !outline-none !shadow-none placeholder:!text-muted-foreground";
 const getLabelClassName = () => "mb-2 block text-sm font-medium text-foreground";
@@ -531,12 +532,15 @@ export default function HostConfigPopup({
   const hostConnectionStatus =
     host?.connectionStatus || (host?.isActive ? "online" : "offline");
   const showClientUpdateAction = Boolean(host?.id);
-  const clientVersionLabel = host?.clientVersion
-    ? `v${host.clientVersion}`
-    : "Awaiting heartbeat";
-  const latestClientVersionLabel = host?.latestClientVersion
-    ? `v${host.latestClientVersion}`
-    : "Unknown";
+  const clientVersionLabel = formatClientVersion(
+    host?.clientVersion,
+    "Awaiting heartbeat"
+  );
+  const latestClientVersionLabel = formatClientVersion(host?.latestClientVersion);
+  const latestClientUpdateRequested = Boolean(
+    host?.clientUpdateRequested &&
+      host?.clientUpdateTargetVersion === host?.latestClientVersion
+  );
   const savedRulesById = new Map(
     (host?.forwardingConfigs || [])
       .filter((rule) => rule.dataId)
@@ -2712,7 +2716,7 @@ export default function HostConfigPopup({
                                 {host?.latestClientVersion ? (
                                   <>
                                     {" · "}
-                                    {host.clientUpdateRequested ? (
+                                    {latestClientUpdateRequested ? (
                                       <span className="text-amber-700 dark:text-amber-400">
                                         Update requested: {latestClientVersionLabel}
                                       </span>

@@ -684,6 +684,58 @@ async fn tenant_action(args: TenantArgs, action: porthub_agent::service::Action)
     );
     Ok(())
 }
+
+fn render_registration_table(rows: &[serde_json::Value]) -> String {
+    let header = paint(
+        format!(
+            "{:<12}  {:<24}  {:<27}  {:<6}  {:<21}  {:<5}  {:<8}  GATEWAY",
+            "ID", "MACHINE", "ACCOUNT EMAIL", "ACTIVE", "STATE", "PORTS", "ROUTE"
+        ),
+        "1;36",
+    );
+    let mut output = vec![header];
+    for row in rows {
+        let (active, active_style) = if row["active"] == true {
+            ("yes", "1;32")
+        } else {
+            ("no", "2")
+        };
+        let active = paint(format!("{active:<6}"), active_style);
+        let state = row["state"].as_str().unwrap();
+        let state_style = match state {
+            "running" => "32",
+            "configuration-rejected" | "stopped" | "interrupted" => "1;31",
+            _ => "33",
+        };
+        let state = paint(format!("{state:<21}"), state_style);
+        let route = row["route"].as_str().unwrap();
+        let route_style = match route {
+            "direct" => "1;32",
+            "relay" | "gateway" => "36",
+            _ => "2",
+        };
+        let route = paint(format!("{route:<8}"), route_style);
+        let gateway = paint(row["gateway"].as_str().unwrap(), "36");
+        let email = row["email"]
+            .as_str()
+            .filter(|email| !email.is_empty())
+            .unwrap_or("-");
+        let ports = row["ports"].to_string();
+        output.push(format!(
+            "{}  {:<24}  {:<27}  {}  {}  {:<5}  {}  {}",
+            &row["id"].as_str().unwrap()[..12],
+            row["machine_id"].as_str().unwrap(),
+            email,
+            active,
+            state,
+            ports,
+            route,
+            gateway
+        ));
+    }
+    output.join("\n")
+}
+
 async fn list_registrations(user: bool, json: bool) -> Result<()> {
     let entries = porthub_agent::service::registrations(&layout(user)?)?;
     let mut rows = Vec::new();
@@ -797,50 +849,7 @@ async fn list_registrations(user: bool, json: bool) -> Result<()> {
     } else if rows.is_empty() {
         println!("{}", paint("No native PortHub registrations", "2"));
     } else {
-        println!(
-            "{}",
-            paint(
-                "ID            MACHINE                   ACCOUNT EMAIL              ACTIVE  STATE                  PORTS  ROUTE    GATEWAY",
-                "1;36"
-            )
-        );
-        for row in rows {
-            let active = if row["active"] == true {
-                paint(format!("{:<6}", "yes"), "1;32")
-            } else {
-                paint(format!("{:<6}", "no"), "2")
-            };
-            let state = row["state"].as_str().unwrap();
-            let state = match state {
-                "running" => paint(format!("{state:<21}"), "32"),
-                "configuration-rejected" | "stopped" | "interrupted" => {
-                    paint(format!("{state:<21}"), "1;31")
-                }
-                _ => paint(format!("{state:<21}"), "33"),
-            };
-            let route = row["route"].as_str().unwrap();
-            let route = match route {
-                "direct" => paint(route, "1;32"),
-                "relay" | "gateway" => paint(route, "36"),
-                _ => paint(route, "2"),
-            };
-            let gateway = paint(row["gateway"].as_str().unwrap(), "36");
-            let email = row["email"]
-                .as_str()
-                .filter(|email| !email.is_empty())
-                .unwrap_or("-");
-            println!(
-                "{}  {}  {:<27}  {:<6}  {:<21}  {:<5}  {:<8}  {}",
-                &row["id"].as_str().unwrap()[..12],
-                row["machine_id"].as_str().unwrap(),
-                email,
-                active,
-                state,
-                row["ports"],
-                route,
-                gateway
-            );
-        }
+        println!("{}", render_registration_table(&rows));
     }
     Ok(())
 }
@@ -1426,6 +1435,40 @@ mod cli_tests {
             super::display_gateway_url("https://gateway.example/api/v2"),
             "https://gateway.example/api/v2"
         );
+    }
+
+    #[test]
+    fn registration_table_columns_align_with_headers() {
+        let table = super::render_registration_table(&[serde_json::json!({
+            "id": "0d2bab5a347aabcdef123456",
+            "machine_id": "6ad9f6aeeaf54977a4f930f7",
+            "email": "mneonizer@gmail.com",
+            "active": true,
+            "state": "running",
+            "ports": 0,
+            "route": "primary",
+            "gateway": "https://porthub.algofly.in"
+        })]);
+        let mut lines = table.lines();
+        let header = lines.next().unwrap();
+        let row = lines.next().unwrap();
+        for (heading, value) in [
+            ("ID", "0d2bab5a347a"),
+            ("MACHINE", "6ad9f6aeeaf54977a4f930f7"),
+            ("ACCOUNT EMAIL", "mneonizer@gmail.com"),
+            ("ACTIVE", "yes"),
+            ("STATE", "running"),
+            ("ROUTE", "primary"),
+            ("GATEWAY", "https://porthub.algofly.in"),
+        ] {
+            assert_eq!(
+                header.find(heading),
+                row.find(value),
+                "column {heading} does not align"
+            );
+        }
+        let ports_column = header.find("PORTS").unwrap();
+        assert_eq!(row[ports_column..].split_whitespace().next(), Some("0"));
     }
 
     #[test]
