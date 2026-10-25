@@ -11,6 +11,27 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
+fn should_auto_update(version: &str, latest: &str, request_id: &str, handled_id: &str) -> bool {
+    let outdated = if version == latest || version.is_empty() || latest.is_empty() {
+        false
+    } else {
+        match (numeric_version(version), numeric_version(latest)) {
+            (Some(current), Some(target)) => current < target,
+            _ => true,
+        }
+    };
+    outdated && (request_id.is_empty() || request_id == handled_id)
+}
+
+fn numeric_version(value: &str) -> Option<Vec<u64>> {
+    let parts = value
+        .split('.')
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    (!parts.is_empty()).then_some(parts)
+}
+
 pub async fn authenticate(app: &App, id: &str, token: &str) -> ApiResult<Document> {
     let id = super::workspaces::object_id(id, "Invalid machine id")?;
     let machine = app
@@ -499,6 +520,27 @@ async fn sync_inner(
             set.insert("client_updated_at", now);
         }
     }
+    if !legacy
+        && should_auto_update(
+            version,
+            &app.config.client_version,
+            &store::string(machine, "client_update_request_id"),
+            handled,
+        )
+    {
+        let mut bytes = [0u8; 16];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
+        let request = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        set.insert(
+            "client_update_target_version",
+            app.config.client_version.as_str(),
+        );
+        set.insert("client_update_request_id", request);
+        set.insert("client_update_requested_at", now);
+    }
     let id = machine
         .get_object_id("_id")
         .map_err(|_| ApiError::bad_request("Invalid machine id"))?;
@@ -535,6 +577,21 @@ async fn sync_inner(
         StatusCode::CONFLICT,
         "Machine configuration changed; retry synchronization",
     ))
+}
+
+#[cfg(test)]
+mod auto_update_tests {
+    use super::should_auto_update;
+
+    #[test]
+    fn outdated_clients_get_one_gateway_update_request() {
+        assert!(should_auto_update("1.3.1", "1.3.2", "", ""));
+        assert!(!should_auto_update("", "1.3.2", "", ""));
+        assert!(!should_auto_update("1.3.2", "1.3.2", "", ""));
+        assert!(!should_auto_update("1.10.0", "1.3.2", "", ""));
+        assert!(!should_auto_update("1.3.1", "1.3.2", "pending", ""));
+        assert!(should_auto_update("1.3.1", "1.3.2", "handled", "handled"));
+    }
 }
 
 pub async fn private_ips(app: &App, machine: &Document) -> ApiResult<Vec<String>> {
