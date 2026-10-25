@@ -19,7 +19,10 @@ use porthub_mesh::RELAY_BATCH_MAGIC;
 use std::{
     collections::{HashMap, HashSet},
     net::Ipv4Addr,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::mpsc;
@@ -43,6 +46,7 @@ struct Inner {
     leases: HashMap<String, Lease>,
     connections: HashMap<String, Connection>,
     generation: u64,
+    dropped_packets: AtomicU64,
 }
 #[derive(Default)]
 pub struct Hub(Mutex<Inner>);
@@ -199,7 +203,9 @@ impl Hub {
         forwarded.extend_from_slice(packet);
         // Inner IP congestion control supplies reliability. An idle or slow
         // recipient cannot allocate unbounded gateway memory or block others.
-        let _ = connection.output.try_send(forwarded);
+        if connection.output.try_send(forwarded).is_err() {
+            hub.dropped_packets.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 pub fn router() -> Router<Arc<App>> {
@@ -284,8 +290,7 @@ async fn serve(
     instance: String,
     batch: bool,
 ) {
-    let (output, mut packets) = mpsc::channel(128);
-    let generation = {
+    let (generation, mut packets) = {
         let mut hub = app
             .private_relay
             .0
@@ -294,6 +299,13 @@ async fn serve(
         if hub.connections.len() >= 4096 && !hub.connections.contains_key(&id) {
             return;
         }
+        let active = hub
+            .connections
+            .len()
+            .saturating_sub(usize::from(hub.connections.contains_key(&id)))
+            + 1;
+        let capacity = relay_queue_capacity(active);
+        let (output, packets) = mpsc::channel(capacity);
         hub.generation = hub.generation.wrapping_add(1);
         let generation = hub.generation;
         hub.connections.insert(
@@ -304,12 +316,18 @@ async fn serve(
                 output,
             },
         );
-        generation
+        (generation, packets)
     };
     let mut lease_check = tokio::time::interval(Duration::from_secs(5));
+    let mut drop_report = tokio::time::interval(Duration::from_secs(10));
+    drop_report.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             _=lease_check.tick()=>{if !app.private_relay.authorized(&id,&hash,&instance){break;}},
+            _=drop_report.tick()=>{
+                let dropped=app.private_relay.0.lock().unwrap_or_else(|p|p.into_inner()).dropped_packets.swap(0,Ordering::Relaxed);
+                if dropped>0 {tracing::warn!(dropped_packets=dropped,"private relay gateway queue overflowed");}
+            },
             frame=socket.recv()=>match frame {Some(Ok(Message::Binary(bytes)))=>app.private_relay.route(&id,&hash,&instance,&bytes),Some(Ok(Message::Ping(bytes)))=>{if !matches!(tokio::time::timeout(Duration::from_secs(3),socket.send(Message::Pong(bytes))).await,Ok(Ok(()))){break;}},Some(Ok(Message::Pong(_)))=>{},_=>break},
             packet=packets.recv()=>{
                 let Some(packet)=packet else{break;};
@@ -345,9 +363,26 @@ async fn serve(
     }
 }
 
+const MIN_RELAY_QUEUE_PACKETS: usize = 128;
+const MAX_RELAY_QUEUE_PACKETS: usize = 2048;
+// Keep the worst-case queued packet budget at or below the old 4096 x 128 cap.
+const MAX_RELAY_QUEUE_BUDGET: usize = 4096 * MIN_RELAY_QUEUE_PACKETS;
+fn relay_queue_capacity(active_connections: usize) -> usize {
+    (MAX_RELAY_QUEUE_BUDGET / active_connections.max(1))
+        .clamp(MIN_RELAY_QUEUE_PACKETS, MAX_RELAY_QUEUE_PACKETS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_queue_capacity_grows_for_few_peers_without_increasing_global_bound() {
+        assert_eq!(relay_queue_capacity(1), MAX_RELAY_QUEUE_PACKETS);
+        assert_eq!(relay_queue_capacity(256), MAX_RELAY_QUEUE_PACKETS);
+        assert_eq!(relay_queue_capacity(512), 1024);
+        assert_eq!(relay_queue_capacity(4096), MIN_RELAY_QUEUE_PACKETS);
+    }
 
     #[test]
     fn relay_credentials_are_ephemeral_and_stable_for_a_live_instance() {

@@ -8,7 +8,7 @@ use futures_util::{SinkExt, StreamExt};
 use porthub_mesh::RELAY_BATCH_MAGIC;
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 pub struct Sender {
     output: mpsc::Sender<Bytes>,
     ready: Arc<AtomicBool>,
+    dropped_packets: Arc<AtomicU64>,
 }
 #[derive(Clone, PartialEq, Eq)]
 pub struct Config {
@@ -43,17 +44,25 @@ impl Sender {
         bytes.push(peer.len() as u8);
         bytes.extend_from_slice(peer.as_bytes());
         bytes.extend_from_slice(packet);
-        self.output
-            .try_send(bytes.into())
-            .map_err(|_| anyhow::anyhow!("private relay queue unavailable"))
+        if self.output.try_send(bytes.into()).is_err() {
+            self.dropped_packets.fetch_add(1, Ordering::Relaxed);
+            anyhow::bail!("private relay queue unavailable");
+        }
+        Ok(())
+    }
+    fn take_dropped_packets(&self) -> u64 {
+        self.dropped_packets.swap(0, Ordering::Relaxed)
     }
 }
 pub fn channel() -> (Sender, mpsc::Receiver<Bytes>) {
-    let (output, input) = mpsc::channel(128);
+    // Buffer at most about 2.8 MiB of packets per agent to absorb short relay
+    // stalls while keeping memory use bounded.
+    let (output, input) = mpsc::channel(2048);
     (
         Sender {
             output,
             ready: Default::default(),
+            dropped_packets: Default::default(),
         },
         input,
     )
@@ -215,7 +224,11 @@ pub async fn run(
                             Some(Message::Binary(output.into()))
                         } else {Some(Message::Binary(packet))}
                     },
-                    _=heartbeat.tick()=>Some(Message::Ping(Bytes::new())),
+                    _=heartbeat.tick()=>{
+                        let dropped=sender.take_dropped_packets();
+                        if dropped>0 {tracing::warn!(dropped_packets=dropped,"private relay sender queue overflowed");}
+                        Some(Message::Ping(Bytes::new()))
+                    },
                     frame=socket.next()=>match frame {
                         Some(Ok(Message::Binary(frame)))=>{dispatch_frame(frame,&events);None},
                         Some(Ok(Message::Ping(bytes)))=>Some(Message::Pong(bytes)),
