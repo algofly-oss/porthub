@@ -40,16 +40,19 @@ export default function HostItem({ name, hostname, privateDomain = "", groupLabe
   const activePorts = forwardingConfigs.filter(port => port.enabled !== false).length;
   return <TableRow className="group cursor-pointer" data-machine-status={status} onClick={onClick}>
     <TableCell className="py-3">
-      <div className="flex min-w-0 items-start gap-1">
-        <button type="button" className="flex min-w-0 flex-1 items-start gap-3 rounded text-left" aria-label={`Configure ${name}`}>
-          <span aria-label={statusLabel} className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${status === "online" ? "bg-emerald-500" : status === "offline" ? "bg-red-600 dark:bg-red-400" : status === "auth_required" ? "bg-amber-400" : "bg-zinc-500"}`} />
-          <span className="min-w-0"><span className="block truncate text-[15px] font-medium">{name}</span><span className="mt-1 block truncate text-xs text-muted-foreground"><span className={status === "online" ? "text-emerald-700 dark:text-emerald-400" : status === "offline" ? "text-red-700 dark:text-red-400" : status === "auth_required" ? "text-amber-700 dark:text-amber-400" : ""}>{statusLabel}</span> · {status !== "online" && lastSeen ? lastSeen : hostname || "Awaiting client"}{clientVersion ? <> · <span className={clientUpdateAvailable ? "text-amber-700 dark:text-amber-400" : ""} title={clientUpdateAvailable ? `Update available: v${latestClientVersion}` : "Latest client version"}>v{clientVersion}</span></> : ""}</span></span>
-        </button>
-        {privateDomain && <button type="button" onClick={event => copyValue(event, privateDomain, "PortHub domain")}
-          aria-label={`Copy PortHub domain ${privateDomain}`} title={`Copy ${privateDomain}`}
-          className="mt-0.5 inline-flex shrink-0 items-center rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline focus-visible:outline-2">
-          <IconCopy size={14} />
-        </button>}
+      <div className="flex min-w-0 items-start gap-3">
+        <span aria-label={statusLabel} className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${status === "online" ? "bg-emerald-500" : status === "offline" ? "bg-red-600 dark:bg-red-400" : status === "auth_required" ? "bg-amber-400" : "bg-zinc-500"}`} />
+        <span className="min-w-0 flex-1">
+          <span className="flex min-w-0 items-center gap-1">
+            <button type="button" className="min-w-0 truncate rounded text-left text-[15px] font-medium" aria-label={`Configure ${name}`}>{name}</button>
+            {privateDomain && <button type="button" onClick={event => copyValue(event, privateDomain, "PortHub domain")}
+              aria-label={`Copy PortHub domain ${privateDomain}`} title={`Copy ${privateDomain}`}
+              className="inline-flex shrink-0 items-center rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline focus-visible:outline-2">
+              <IconCopy size={14} />
+            </button>}
+          </span>
+          <span className="mt-1 block truncate text-xs text-muted-foreground"><span className={status === "online" ? "text-emerald-700 dark:text-emerald-400" : status === "offline" ? "text-red-700 dark:text-red-400" : status === "auth_required" ? "text-amber-700 dark:text-amber-400" : ""}>{statusLabel}</span> · {status !== "online" && lastSeen ? lastSeen : hostname || "Awaiting client"}{clientVersion ? <> · <span className={clientUpdateAvailable ? "text-amber-700 dark:text-amber-400" : ""} title={clientUpdateAvailable ? `Update available: v${latestClientVersion}` : "Latest client version"}>v{clientVersion}</span></> : ""}</span>
+        </span>
       </div>
       <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 pl-5 text-xs text-muted-foreground lg:hidden">{localIp && <span className="inline-flex items-center gap-1 font-mono">LAN {localIp}<button type="button" onClick={event => copyValue(event, localIp, "LAN IP")} aria-label={`Copy LAN IP ${localIp}`} title="Copy LAN IP" className="inline-flex shrink-0 items-center rounded p-1 hover:bg-accent hover:text-foreground focus-visible:outline focus-visible:outline-2"><IconCopy size={12} /></button></span>}{privateIps.length > 0 && <span className="inline-flex items-center gap-2 font-mono">PAN {privateAddress}</span>}{labels.length > 0 && <span>{labels.join(" · ")}</span>}</div>
     </TableCell>
