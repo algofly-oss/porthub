@@ -3406,6 +3406,172 @@
           }
         }
       }
+    },
+    "/api/admin/settings/docs": {
+      "get": {
+        "operationId": "get_api_admin_settings_api_docs_enabled",
+        "summary": "Get API documentation settings",
+        "tags": [
+          "Administration"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Admin access required"
+          },
+          "500": {
+            "description": "Server error"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "patch_api_admin_settings_api_docs_enabled",
+        "summary": "Update API documentation settings",
+        "tags": [
+          "Administration"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Admin access required"
+          },
+          "500": {
+            "description": "Server error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "api_docs_enabled"
+                ],
+                "properties": {
+                  "api_docs_enabled": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "delete_api_admin_settings_api_docs_enabled",
+        "summary": "Reset API documentation settings to the environment default",
+        "tags": [
+          "Administration"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Admin access required"
+          },
+          "500": {
+            "description": "Server error"
+          }
+        }
+      }
+    },
+    "/api/admin/settings/signup": {
+      "get": {
+        "operationId": "get_api_admin_settings_signup_enabled",
+        "summary": "Get signup settings",
+        "tags": [
+          "Administration"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Admin access required"
+          },
+          "500": {
+            "description": "Server error"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "patch_api_admin_settings_signup_enabled",
+        "summary": "Update signup settings",
+        "tags": [
+          "Administration"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Admin access required"
+          },
+          "500": {
+            "description": "Server error"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "signup_enabled"
+                ],
+                "properties": {
+                  "signup_enabled": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "delete_api_admin_settings_signup_enabled",
+        "summary": "Reset signup settings to the environment default",
+        "tags": [
+          "Administration"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Admin access required"
+          },
+          "500": {
+            "description": "Server error"
+          }
+        }
+      }
     }
   }
 }

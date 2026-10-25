@@ -49,6 +49,7 @@ let apiRoutes = {
   // Admin
   adminOverview: "/admin/overview",
   adminSignupSettings: "/admin/settings/signup",
+  adminDocsSettings: "/admin/settings/docs",
 };
 
 Object.entries(apiRoutes).forEach(([key, value]) => {

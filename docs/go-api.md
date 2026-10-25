@@ -7,6 +7,9 @@ development process lists start this binary directly. There is no Python proxy;
 unknown routes return the existing JSON `404` response.
 
 The generated OpenAPI document is `/api/openapi.json`; Swagger UI is `/api/docs`.
+Set `PORTHUB_API_DOCS_ENABLED=false` to disable `/api`, Swagger UI, and both
+OpenAPI JSON routes by default. An administrator can override this at runtime
+from Platform settings and reset it to the startup environment default.
 The former `/api/openapi-go.json` address redirects to the canonical document.
 The old `PORTHUB_PYTHON_API_URL` environment variable has no effect.
 

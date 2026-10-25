@@ -15,6 +15,7 @@ pub struct Config {
     pub mongo_database: String,
     pub session_cookie: String,
     pub signup_disabled: bool,
+    pub api_docs_enabled: bool,
     pub service_domain: String,
     pub proxy_domain_suffix: String,
     pub telegram_base_url: String,
@@ -53,6 +54,7 @@ impl Default for Config {
             mongo_database: String::new(),
             session_cookie: "porthub_session".into(),
             signup_disabled: false,
+            api_docs_enabled: true,
             service_domain: String::new(),
             proxy_domain_suffix: String::new(),
             telegram_base_url: "https://api.telegram.org".into(),
@@ -91,6 +93,10 @@ pub fn signup_enabled(env_signup_disabled: bool, admin_override: Option<bool>) -
     admin_override.unwrap_or(!env_signup_disabled)
 }
 
+pub fn docs_enabled(env_default: bool, admin_override: Option<bool>) -> bool {
+    admin_override.unwrap_or(env_default)
+}
+
 impl Config {
     pub fn load() -> Result<Self> {
         let signup_disabled = match env("SIGNUP_DISABLED", "false")
@@ -101,6 +107,15 @@ impl Config {
             "true" | "yes" | "on" | "1" => true,
             "false" | "no" | "off" | "0" => false,
             _ => anyhow::bail!("invalid SIGNUP_DISABLED"),
+        };
+        let api_docs_enabled = match env("PORTHUB_API_DOCS_ENABLED", "true")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "true" | "yes" | "on" | "1" => true,
+            "false" | "no" | "off" | "0" => false,
+            _ => anyhow::bail!("invalid PORTHUB_API_DOCS_ENABLED"),
         };
         let session_cookie = env("SESSION_COOKIE_NAME", "porthub_session");
         anyhow::ensure!(
@@ -291,6 +306,7 @@ impl Config {
                 .context("MONGO_DATABASE_NAME required")?,
             session_cookie,
             signup_disabled,
+            api_docs_enabled,
             service_domain: env("PORT_HUB_SERVICE_DOMAIN", ""),
             proxy_domain_suffix: env("WEB_PROXY_DOMAIN_SUFFIX", ""),
             telegram_base_url: env("PORTHUB_TELEGRAM_API_URL", "https://api.telegram.org"),
@@ -312,8 +328,8 @@ impl Config {
 }
 
 #[cfg(test)]
-mod signup_setting_tests {
-    use super::signup_enabled;
+mod platform_setting_tests {
+    use super::{docs_enabled, signup_enabled};
 
     #[test]
     fn signup_override_wins_and_reset_uses_environment_default() {
@@ -321,5 +337,13 @@ mod signup_setting_tests {
         assert!(!signup_enabled(true, None));
         assert!(signup_enabled(true, Some(true)));
         assert!(!signup_enabled(false, Some(false)));
+    }
+
+    #[test]
+    fn docs_override_wins_and_reset_uses_environment_default() {
+        assert!(docs_enabled(true, None));
+        assert!(!docs_enabled(false, None));
+        assert!(docs_enabled(false, Some(true)));
+        assert!(!docs_enabled(true, Some(false)));
     }
 }

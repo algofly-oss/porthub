@@ -24,6 +24,10 @@ pub fn router() -> Router<Arc<App>> {
                 .patch(update_signup)
                 .delete(reset_signup),
         )
+        .route(
+            "/api/admin/settings/docs",
+            get(docs_settings).patch(update_docs).delete(reset_docs),
+        )
 }
 
 async fn admin_user(app: &App, headers: &HeaderMap) -> ApiResult<Document> {
@@ -95,6 +99,64 @@ async fn reset_signup(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiRes
     let (effective, configured) = signup_value(&app).await?;
     Ok(Json(
         json!({"signup_enabled":effective,"configured":configured,"env_default":!app.config.signup_disabled}),
+    ))
+}
+
+async fn docs_value(app: &App) -> ApiResult<(bool, bool)> {
+    let setting = app
+        .collection("platform_settings")
+        .find_one(doc! {"_id":"platform"})
+        .await?;
+    let override_value = setting
+        .as_ref()
+        .and_then(|d| d.get_bool("api_docs_enabled").ok());
+    Ok((
+        crate::config::docs_enabled(app.config.api_docs_enabled, override_value),
+        override_value.is_some(),
+    ))
+}
+
+async fn docs_settings(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+    admin_user(&app, &headers).await?;
+    let (enabled, configured) = docs_value(&app).await?;
+    Ok(Json(
+        json!({"api_docs_enabled":enabled,"configured":configured,"env_default":app.config.api_docs_enabled}),
+    ))
+}
+
+async fn update_docs(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    crate::input::ApiBody(raw): crate::input::ApiBody,
+) -> ApiResult<Json<Value>> {
+    admin_user(&app, &headers).await?;
+    let mut model = crate::input::Model::new(raw)?;
+    let enabled = model.required_bool("api_docs_enabled");
+    model.finish()?;
+    app.collection("platform_settings")
+        .update_one(
+            doc! {"_id":"platform"},
+            doc! {"$set":{"api_docs_enabled":enabled,"docs_updated_at":mongodb::bson::DateTime::now()}},
+        )
+        .upsert(true)
+        .await?;
+    let (effective, configured) = docs_value(&app).await?;
+    Ok(Json(
+        json!({"api_docs_enabled":effective,"configured":configured,"env_default":app.config.api_docs_enabled}),
+    ))
+}
+
+async fn reset_docs(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+    admin_user(&app, &headers).await?;
+    app.collection("platform_settings")
+        .update_one(
+            doc! {"_id":"platform"},
+            doc! {"$unset":{"api_docs_enabled":"","docs_updated_at":""}},
+        )
+        .await?;
+    let (effective, configured) = docs_value(&app).await?;
+    Ok(Json(
+        json!({"api_docs_enabled":effective,"configured":configured,"env_default":app.config.api_docs_enabled}),
     ))
 }
 

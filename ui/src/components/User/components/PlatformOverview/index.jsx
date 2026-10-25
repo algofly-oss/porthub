@@ -18,6 +18,7 @@ export default function PlatformOverview() {
   const [query, setQuery] = useState(""), [role, setRole] = useState("all"), [sort, setSort] = useState("name"), [expanded, setExpanded] = useState("");
   const [page, setPage] = useState(1), [pageSize, setPageSize] = useState(25);
   const [signup, setSignup] = useState(null), [signupBusy, setSignupBusy] = useState(false), [signupError, setSignupError] = useState("");
+  const [docs, setDocs] = useState(null), [docsBusy, setDocsBusy] = useState(false), [docsError, setDocsError] = useState("");
   const reduced = useReducedMotion();
   async function load(signal) {
     const options = signal instanceof AbortSignal ? { signal } : {};
@@ -30,7 +31,11 @@ export default function PlatformOverview() {
     try { const response = await axios.get(apiRoutes.adminSignupSettings); setSignup(response.data); setSignupError(""); }
     catch (err) { setSignupError(err?.response?.data?.detail || "Could not load signup settings."); }
   }
-  useEffect(() => { loadSignup(); }, []);
+  async function loadDocs() {
+    try { const response = await axios.get(apiRoutes.adminDocsSettings); setDocs(response.data); setDocsError(""); }
+    catch (err) { setDocsError(err?.response?.data?.detail || "Could not load API documentation settings."); }
+  }
+  useEffect(() => { loadSignup(); loadDocs(); }, []);
   async function setSignupEnabled(enabled) {
     setSignupBusy(true); setSignupError("");
     try { const response = await axios.patch(apiRoutes.adminSignupSettings, { signup_enabled: enabled }); setSignup(response.data); }
@@ -43,6 +48,18 @@ export default function PlatformOverview() {
     catch (err) { setSignupError(err?.response?.data?.detail || "Could not reset signup settings."); }
     finally { setSignupBusy(false); }
   }
+  async function setDocsEnabled(enabled) {
+    setDocsBusy(true); setDocsError("");
+    try { const response = await axios.patch(apiRoutes.adminDocsSettings, { api_docs_enabled: enabled }); setDocs(response.data); }
+    catch (err) { setDocsError(err?.response?.data?.detail || "Could not update API documentation settings."); }
+    finally { setDocsBusy(false); }
+  }
+  async function resetDocs() {
+    setDocsBusy(true); setDocsError("");
+    try { const response = await axios.delete(apiRoutes.adminDocsSettings); setDocs(response.data); }
+    catch (err) { setDocsError(err?.response?.data?.detail || "Could not reset API documentation settings."); }
+    finally { setDocsBusy(false); }
+  }
   useEffect(() => { setPage(1); }, [query, role, sort, pageSize]);
   const filtered = useMemo(() => overview.filter(entry => (role === "all" || entry.user.role === role) && Number.isFinite(searchScore(query, [entry.user.name, entry.user.email, ...entry.machines.flatMap(m => [m.name, m.hostname, m.local_ip, m.public_ip, ...(m.ports || []).flatMap(p => [p.service_name, p.external_port])])]))).sort((a, b) => sort === "machines" ? b.machines.length - a.machines.length : (a.user.name || a.user.email).localeCompare(b.user.name || b.user.email)), [overview, query, role, sort]);
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
@@ -54,11 +71,10 @@ export default function PlatformOverview() {
     <div className="toolbar flex-row flex-wrap items-center"><div className="min-w-0 basis-full sm:mr-auto sm:basis-72"><SearchField value={query} onChange={setQuery} label="Search platform" placeholder="Search users or machines…" /></div><SearchSelect className="min-w-0 flex-1 sm:w-44 sm:flex-none" label="Filter account role" value={role} onChange={setRole} options={[{value:"all",label:"All roles"},{value:"admin",label:"Administrators"},{value:"user",label:"Members"}]} /><SearchSelect className="min-w-0 flex-1 sm:w-44 sm:flex-none" label="Sort accounts" value={sort} onChange={setSort} options={[{value:"name",label:"Name A–Z"},{value:"machines",label:"Most machines"}]} />
       <details className="relative shrink-0">
         <summary className="flex h-9 cursor-pointer list-none items-center gap-2 rounded-md border border-border bg-surface px-3 text-xs font-medium hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-          <span className={`h-1.5 w-1.5 rounded-full ${signup?.signup_enabled ? "bg-emerald-500" : "bg-muted-foreground"}`} />
-          Signups{signup ? `: ${signup.signup_enabled ? "On" : "Off"}` : "…"}
+          Platform settings
           <IconChevronDown size={14} className="text-muted-foreground" />
         </summary>
-        <div className="absolute right-0 z-30 mt-2 w-72 rounded-lg border border-border bg-surface p-3 shadow-xl">
+        <div className="absolute right-0 z-30 mt-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-surface p-3 shadow-xl">
           <div className="flex items-center justify-between gap-3">
             <div><p className="text-sm font-medium">New signups</p><p className="mt-1 text-[11px] text-muted-foreground">{signup ? signup.configured ? "Custom admin setting" : `Environment default: ${signup.env_default ? "enabled" : "disabled"}` : "Loading setting…"}</p></div>
             <button type="button" role="switch" aria-label="Enable new signups" aria-checked={signup?.signup_enabled ?? false} disabled={!signup || signupBusy} onClick={() => setSignupEnabled(!signup.signup_enabled)} className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 ${signup?.signup_enabled ? "bg-primary" : "bg-muted-foreground/35"}`}><span className={`pointer-events-none block h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${signup?.signup_enabled ? "translate-x-[22px]" : "translate-x-0.5"}`} /></button>
@@ -68,6 +84,17 @@ export default function PlatformOverview() {
             <Button type="button" size="sm" variant="outline" disabled={!signup?.configured || signupBusy} onClick={resetSignup}><IconRefresh size={13} />Reset</Button>
           </div>
           {signupError && <p role="alert" className="mt-2 text-xs text-red-600 dark:text-red-400">{signupError}</p>}
+          <div className="mt-3 border-t border-border/60 pt-3">
+            <div className="flex items-center justify-between gap-3">
+              <div><p className="text-sm font-medium">API documentation</p><p className="mt-1 text-[11px] text-muted-foreground">{docs ? docs.configured ? "Custom admin setting" : `Environment default: ${docs.env_default ? "enabled" : "disabled"}` : "Loading setting…"}</p></div>
+              <button type="button" role="switch" aria-label="Enable API documentation" aria-checked={docs?.api_docs_enabled ?? false} disabled={!docs || docsBusy} onClick={() => setDocsEnabled(!docs.api_docs_enabled)} className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 ${docs?.api_docs_enabled ? "bg-primary" : "bg-muted-foreground/35"}`}><span className={`pointer-events-none block h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${docs?.api_docs_enabled ? "translate-x-[22px]" : "translate-x-0.5"}`} /></button>
+            </div>
+            <div className="mt-3 flex items-center justify-between gap-3">
+              <p className="min-w-0 pr-2 text-[11px] text-muted-foreground">Hides /api, Swagger UI, and the OpenAPI JSON</p>
+              <Button type="button" size="sm" variant="outline" disabled={!docs?.configured || docsBusy} onClick={resetDocs}><IconRefresh size={13} />Reset</Button>
+            </div>
+            {docsError && <p role="alert" className="mt-2 text-xs text-red-600 dark:text-red-400">{docsError}</p>}
+          </div>
         </div>
       </details>
       <Button type="button" variant="outline" onClick={load} disabled={loading} aria-label="Refresh platform"><IconRefresh size={15} /><span className="hidden sm:inline">Refresh</span></Button></div>

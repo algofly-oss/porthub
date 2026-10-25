@@ -1,10 +1,14 @@
+use crate::{error::ApiResult, App};
 use axum::{
-    response::{Html, Redirect},
+    extract::State,
+    http::StatusCode,
+    response::{Html, IntoResponse, Redirect, Response},
     routing::get,
-    Json, Router,
+    Router,
 };
+use mongodb::bson::doc;
 use serde_json::Value;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 static OPENAPI: LazyLock<Value> = LazyLock::new(|| {
     serde_json::from_str(include_str!("openapi.json")).expect("bundled OpenAPI document is valid")
@@ -19,81 +23,122 @@ const SWAGGER: &str = r##"<!doctype html>
 <script>SwaggerUIBundle({url:"/api/openapi.json",dom_id:"#swagger-ui",defaultModelsExpandDepth:-1,persistAuthorization:true});</script>
 </body></html>"##;
 
-pub fn router<S>() -> Router<S>
-where
-    S: Clone + Send + Sync + 'static,
-{
+pub fn router() -> Router<Arc<App>> {
     Router::new()
-        .route("/api", get(|| async { Redirect::temporary("/api/docs") }))
-        .route("/api/docs", get(|| async { Html(SWAGGER) }))
+        .route("/api", get(api_root))
+        .route("/api/docs", get(swagger_ui))
         .route("/api/openapi.json", get(openapi))
-        .route(
-            "/api/openapi-go.json",
-            get(|| async { Redirect::permanent("/api/openapi.json") }),
-        )
+        .route("/api/openapi-go.json", get(openapi_legacy))
 }
 
-async fn openapi() -> Json<Value> {
-    Json(OPENAPI.clone())
+async fn docs_enabled(app: &App) -> ApiResult<bool> {
+    let setting = app
+        .collection("platform_settings")
+        .find_one(doc! {"_id":"platform"})
+        .await?;
+    Ok(crate::config::docs_enabled(
+        app.config.api_docs_enabled,
+        setting
+            .as_ref()
+            .and_then(|document| document.get_bool("api_docs_enabled").ok()),
+    ))
+}
+
+async fn api_root(State(app): State<Arc<App>>) -> ApiResult<Response> {
+    Ok(api_root_response(docs_enabled(&app).await?))
+}
+
+async fn swagger_ui(State(app): State<Arc<App>>) -> ApiResult<Response> {
+    Ok(swagger_response(docs_enabled(&app).await?))
+}
+
+async fn openapi(State(app): State<Arc<App>>) -> ApiResult<Response> {
+    Ok(schema_response(docs_enabled(&app).await?))
+}
+
+async fn openapi_legacy(State(app): State<Arc<App>>) -> ApiResult<Response> {
+    Ok(openapi_legacy_response(docs_enabled(&app).await?))
+}
+
+fn openapi_legacy_response(enabled: bool) -> Response {
+    if enabled {
+        Redirect::permanent("/api/openapi.json").into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
+}
+
+fn api_root_response(enabled: bool) -> Response {
+    if enabled {
+        Redirect::temporary("/api/docs").into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
+}
+
+fn swagger_response(enabled: bool) -> Response {
+    if enabled {
+        Html(SWAGGER).into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
+}
+
+fn schema_response(enabled: bool) -> Response {
+    if enabled {
+        axum::Json(OPENAPI.clone()).into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::router;
-    use axum::{
-        body::{to_bytes, Body},
-        http::{Request, StatusCode},
-        Router,
+    use super::{
+        api_root_response, openapi_legacy_response, schema_response, swagger_response, OPENAPI,
     };
+    use axum::{body::to_bytes, http::StatusCode};
     use serde_json::Value;
-    use tower::ServiceExt;
 
     #[tokio::test]
     async fn api_root_redirects_to_swagger_ui() {
-        let app: Router<()> = router();
-        let response = app
-            .oneshot(Request::get("/api").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+        let response = api_root_response(true);
         assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
         assert_eq!(response.headers()["location"], "/api/docs");
+        assert_eq!(api_root_response(false).status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            openapi_legacy_response(false).status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            openapi_legacy_response(true).status(),
+            StatusCode::PERMANENT_REDIRECT
+        );
     }
 
     #[tokio::test]
     async fn docs_load_bundled_openapi_document() {
-        let app: Router<()> = router();
-        let response = app
-            .oneshot(Request::get("/api/docs").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+        let response = swagger_response(true);
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body = String::from_utf8(body.to_vec()).unwrap();
         assert!(body.contains("SwaggerUIBundle"));
         assert!(body.contains("/api/openapi.json"));
+        assert_eq!(swagger_response(false).status(), StatusCode::NOT_FOUND);
+        assert_eq!(schema_response(false).status(), StatusCode::NOT_FOUND);
+        assert_eq!(schema_response(true).status(), StatusCode::OK);
     }
 
     #[tokio::test]
     async fn openapi_document_describes_registered_api_routes() {
-        let app: Router<()> = router();
-        let response = app
-            .oneshot(
-                Request::get("/api/openapi.json")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let value: Value =
-            serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
-                .unwrap();
+        let value = OPENAPI.clone();
         assert_eq!(value["openapi"], "3.0.3");
         assert!(value["paths"]["/api/machines/client/auth"]["post"].is_object());
         assert!(value["paths"]["/api/machines/client/identity"]["post"].is_object());
         assert!(value["paths"]["/api/connections/list"]["get"].is_object());
         assert!(value["paths"]["/api/downloads/porthub"]["get"].is_object());
         assert!(value["paths"]["/api/downloads/porthub/{target}"]["get"].is_object());
+        assert!(value["paths"]["/api/admin/settings/docs"]["patch"].is_object());
         assert!(value["paths"]["/api/machines/command/{machine_id}"]["get"].is_object());
         assert!(value["paths"]["/api/machines/{machine_id}/status-history"]["get"].is_object());
         let private_install = &value["paths"]["/api/machines/client/private-install"]["post"];
