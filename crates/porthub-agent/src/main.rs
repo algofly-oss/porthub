@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use porthub_transfer::{download, server};
 #[cfg(unix)]
 use std::process::Command as ProcessCommand;
@@ -105,6 +105,21 @@ fn paint(text: impl std::fmt::Display, style: &str) -> String {
     } else {
         text.to_string()
     }
+}
+
+fn display_gateway_url(server: &str) -> String {
+    let server = server.trim_end_matches('/');
+    server
+        .strip_suffix("/api")
+        .unwrap_or(server)
+        .trim_end_matches('/')
+        .to_owned()
+}
+
+fn print_help() -> Result<()> {
+    Args::command().print_help()?;
+    println!();
+    Ok(())
 }
 
 #[derive(Subcommand)]
@@ -699,7 +714,12 @@ async fn list_registrations(user: bool, json: bool) -> Result<()> {
         for entry in entries {
             let state = manager.state(&entry.spec).await?;
             let runtime = porthub_agent::runtime::status(&entry.spec.profile).ok();
-            rows.push(serde_json::json!({"id":entry.spec.identity,"machine_id":entry.machine_id,"active":state.active,"enabled":state.enabled,
+            let server = if porthub_agent::private_network::is_profile(&entry.spec.profile)? {
+                porthub_agent::private_profile::Profile::load(&entry.spec.profile)?.server
+            } else {
+                porthub_agent::profile::Profile::load(&entry.spec.profile)?.server
+            };
+            rows.push(serde_json::json!({"id":entry.spec.identity,"machine_id":entry.machine_id,"gateway":display_gateway_url(&server),"active":state.active,"enabled":state.enabled,
                 "state":runtime.as_ref().map(|state|state.state.as_str()).unwrap_or("unavailable"),
                 "agent_version":runtime.as_ref().map(|state|state.agent_version.as_str()).unwrap_or(""),
                 "services":runtime.as_ref().map(|state|state.service_count).unwrap_or(0),"route":runtime.as_ref().map(|state|state.route.as_str()).unwrap_or("")}));
@@ -713,7 +733,7 @@ async fn list_registrations(user: bool, json: bool) -> Result<()> {
         println!(
             "{}",
             paint(
-                "ID            MACHINE                   ACTIVE  STATE                  SERVICES  ROUTE",
+                "ID            MACHINE                   ACTIVE  STATE                  SERVICES  ROUTE    GATEWAY",
                 "1;36"
             )
         );
@@ -737,14 +757,16 @@ async fn list_registrations(user: bool, json: bool) -> Result<()> {
                 "relay" | "gateway" => paint(route, "36"),
                 _ => paint(route, "2"),
             };
+            let gateway = paint(row["gateway"].as_str().unwrap(), "36");
             println!(
-                "{}  {}  {:<6}  {:<21}  {:<8}  {}",
+                "{}  {}  {:<6}  {:<21}  {:<8}  {:<8}  {}",
                 &row["id"].as_str().unwrap()[..12],
                 row["machine_id"].as_str().unwrap(),
                 active,
                 state,
                 row["services"],
-                route
+                route,
+                gateway
             );
         }
     }
@@ -853,6 +875,9 @@ async fn shutdown_signal() {
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if args.command.is_none() && args.config.is_none() {
+        return print_help();
+    }
     elevate_if_needed(&args)?;
     let logs = porthub_agent::logs::Buffer::default();
     let profile_to_configure = match &args.command {
@@ -1368,7 +1393,7 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod cli_tests {
-    use super::{requires_system_privileges, Args};
+    use super::{print_help, requires_system_privileges, Args};
     use clap::Parser;
 
     fn args(arguments: &[&str]) -> Args {
@@ -1406,5 +1431,26 @@ mod cli_tests {
                 "missing elevation for {arguments:?}"
             );
         }
+    }
+
+    #[test]
+    fn gateway_display_strips_only_a_terminal_api_path() {
+        assert_eq!(
+            super::display_gateway_url("https://gateway.example/api/"),
+            "https://gateway.example"
+        );
+        assert_eq!(
+            super::display_gateway_url("https://gateway.example/api/v2"),
+            "https://gateway.example/api/v2"
+        );
+    }
+
+    #[test]
+    fn bare_invocation_is_a_help_request() {
+        let args = args(&["porthub"]);
+        assert!(args.command.is_none());
+        assert!(args.config.is_none());
+        assert!(!requires_system_privileges(&args));
+        print_help().expect("help should print successfully");
     }
 }
