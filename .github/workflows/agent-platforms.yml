@@ -1,8 +1,10 @@
 name: Native agent platforms
 on:
   push:
-    paths: ["crates/porthub-agent/**", "crates/porthub-transfer/**", "crates/porthub-tunnel/**", "crates/porthub-identity/**", "crates/porthub-mesh/**", "vendor/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "Dockerfile", "scripts/release-version.sh", ".github/workflows/agent-platforms.yml"]
+    branches: [main]
+    paths: ["crates/porthub-agent/**", "crates/porthub-transfer/**", "crates/porthub-tunnel/**", "crates/porthub-identity/**", "crates/porthub-mesh/**", "vendor/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "scripts/release-version.sh"]
   pull_request:
+    paths: ["crates/porthub-agent/**", "crates/porthub-transfer/**", "crates/porthub-tunnel/**", "crates/porthub-identity/**", "crates/porthub-mesh/**", "vendor/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "scripts/release-version.sh"]
   workflow_dispatch:
 permissions:
   contents: read
@@ -26,6 +28,33 @@ jobs:
           name: porthub-release-bundle
           path: deploy/native/client-bin/
           if-no-files-found: error
+  publish-release:
+    name: Publish versioned GitHub release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [release-bundle]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: porthub-release-bundle
+          path: release-assets
+      - name: Publish all platform assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(sh scripts/release-version.sh)"
+          tag="v${version}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "GitHub release $tag already exists; refusing to replace published assets" >&2
+            exit 1
+          fi
+          gh release create "$tag" release-assets/porthub-* \
+            --target "$GITHUB_SHA" \
+            --title "PortHub ${version}" \
+            --notes "Consistent ${version} native client release for Linux, macOS, and Windows. Includes binaries, SHA256 checksums, and version metadata for every supported CPU architecture."
   native:
     name: ${{ matrix.artifact }}
     strategy:

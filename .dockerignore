@@ -6,11 +6,6 @@
 !vendor
 !ui
 !deploy
-!api/
-api/**
-!api/assets/
-!api/assets/client/
-!api/assets/client/porthub-client.sh
 ui/node_modules
 ui/.next
 ui/.next-*

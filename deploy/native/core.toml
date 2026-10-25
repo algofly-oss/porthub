@@ -15,7 +15,8 @@ PORTHUB_UI_UPSTREAM = ""
 
 [[process]]
 name = "api"
-program = "porthub-api"
+program = "cargo"
+args = ["run", "--locked", "-p", "porthub-api"]
 after = "127.0.0.1:47017"
 modes = ["dev"]
 [process.env]

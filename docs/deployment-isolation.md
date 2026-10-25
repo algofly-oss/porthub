@@ -1,9 +1,9 @@
 # Native deployment boundaries
 
-The root Dockerfile and single `docker-compose.yml` now define three native
-server roles. Local production images have been built and exercised in isolated
-test containers. URM2 still runs the previous Go deployment; full API/agent
-parity and migration checks in `rust-migration.md` remain rollout gates.
+The root Dockerfile and single `docker-compose.yml` define three native server
+roles. Native release 1.3.3 is deployed on URM2. The compose file uses host bind
+mounts for persistent state; URM2's active named volumes still need a careful
+copy into the bind-mount tree before that deployment configuration is adopted.
 
 | Container / image | Components | Network | Added capability | Shared access |
 | --- | --- | --- | --- | --- |
@@ -94,8 +94,8 @@ PORTHUB_MODE=dev ./deploy.sh
 PORTHUB_MODE=prod ./deploy.sh
 ```
 
-Development core includes Next.js/Node for UI live updates. Compose Watch syncs
-UI source and rebuilds native roles when Rust source changes. Production copies
+Development images include Rust and Node toolchains and source. Compose Watch
+syncs UI and Rust source into the containers. Production copies
 only compiled Rust executables, MongoDB and exported/precompressed UI assets;
 compilers, Go, Node, npm, Yarn and source trees are absent. Version labels and
 embedded executable versions identify a release even though tags remain latest.

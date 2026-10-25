@@ -2099,9 +2099,9 @@ export default function HostConfigPopup({
                   type="button"
                   variant="subtle"
                   size="sm"
-                  onClick={() => handleCopy("PortHub domain", privateDomain)}
-                  aria-label={`Copy PortHub domain ${privateDomain}`}
-                  title={`Copy ${privateDomain}`}
+                  onClick={() => handleCopy("PortHub domain address", `http://${privateDomain}`)}
+                  aria-label={`Copy PortHub address http://${privateDomain}`}
+                  title={`Copy http://${privateDomain}`}
                   className="text-muted-foreground hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
                 >
                   <IconCopy size={14} />

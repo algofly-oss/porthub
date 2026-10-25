@@ -1,96 +1,87 @@
 # PortHub
 
-Self-hosted private networking, public port forwarding and a web dashboard.
-PortHub is migrating its server and agent to native Rust with embedded Rathole.
-The deployed Go implementation remains the behavior reference until the native
-replacement passes the [migration gates](docs/rust-migration.md). The current
-Rust binaries are not yet a complete replacement for registered production agents.
+Self-hosted private networking, public port forwarding and a web dashboard. The
+API, gateway, firewall worker and host agent are Rust; the dashboard is Next.js.
 
 ![PortHub dashboard](docs/screenshots/dashboard-overview.jpg)
 
-The native deployment uses three isolated roles: core holds the API, static UI
-and MongoDB on a private container network; edge owns intentional public
-listeners; firewall alone has network administration capability. Production
-serves the exported UI in Rust and needs no Node runtime. See
-[deployment boundaries and local verification](docs/deployment-isolation.md).
+## Architecture
 
-## Build and develop
+One Compose file runs three isolated roles:
 
-Requires Docker Compose and a Linux server host. Configure `.env` from
-`env.example`, including database credentials, firewall key and public URLs.
+- `porthub-core`: API, MongoDB and UI; no host networking or published ports.
+- `porthub-edge`: public listeners and streaming gateway; no database access.
+- `porthub-firewall`: network policy; only this role receives `NET_ADMIN`.
+
+The roles communicate through scoped Unix sockets. Rathole-compatible forwarding
+uses the existing API listeners, so it needs no extra control port. Production
+images use slim runtime layers; development images also include Rust and Node
+toolchains and the source needed to build inside the containers.
+
+## Configure and run
+
+Copy `env.example` to `.env`, set strong database and firewall credentials, and
+configure the gateway URL. Runtime state is stored on the host under
+`./volumes/porthub` by default; set `PORTHUB_VOLUME_ROOT` to a stable host path
+when deploying from versioned source directories.
 
 ```sh
 docker compose config --quiet
-docker compose build core edge firewall
-# Same Compose file; Next.js live editing exists only in development.
+./deploy.sh
+
+# Development: builds toolchains into dev-only images and syncs source into them.
 PORTHUB_MODE=dev ./deploy.sh
 ```
 
-Images use `porthub:core`, `porthub:edge` and `porthub:firewall`; containers are `porthub-core`, `porthub-edge` and
-`porthub-firewall`. Only edge and firewall use host networking. Internal
-services communicate through separate Unix sockets, and the database has no
-published port. Rathole uses `/api/tunnel` on the API's existing HTTP/HTTPS
-listener, with no additional communication port.
+Development dependencies stay in the containers; the host needs Docker Compose,
+not Rust, Go or Node. Run Rust commands in a development container, for example:
 
-`PORTHUB_BUILD_JOBS` bounds Cargo compilation per build stage (default four).
-The packaged Linux agent is built separately with musl to avoid requiring the
-server image's glibc version on client hosts.
+```sh
+docker exec -it porthub-core cargo test --workspace
+```
 
-`./deploy.sh` targets those three roles. An existing deployment additionally
-requires the data/ownership, firewall and rollback steps in the migration guide;
-full native parity is still pending. Do not replace a working deployment with
-these partial API/agent implementations.
+Production keeps read-only roots and excludes build toolchains and source trees.
+The default images are `porthub:core`, `porthub:edge` and `porthub:firewall`,
+with the release version recorded in image labels.
 
-## Native agent tools
+## Agent transfer tools
 
-The Rust `porthub` binary includes HTTP serving and parallel/resumable downloads:
+The Rust `porthub` binary includes HTTP serving, receiving, parallel downloads
+and resumable directory sync:
 
 ```sh
 porthub http.server 8000 ./files
-porthub http.server 9000 ./other-files
 porthub http.server list
 porthub http.server stop 8000
-porthub http.server stop --all
 porthub http.receive 8001 ./drop
-porthub http.receive list
-porthub http.receive stop 8001
 porthub get https://example.com/archive.bin --connections 16 --sha256 <digest>
 porthub push ./dataset http://machine:8001/
 ```
 
-Servers can be managed from another terminal. Downloads validate resume state,
-fall back to a single stream when required, and avoid overwriting existing files.
-`push` sends files in parallel with resume and incrementally syncs directory
-trees. The receiver also accepts standard HTTP `PUT` and `POST` uploads through
-the configured listener. See [native transfers](docs/native-transfers.md) for
-the curl/wget forms and options.
-No lighttpd, aria2c, Python or package-manager dependency is required at runtime.
-See [native transfers](docs/native-transfers.md) and the
-[agent platform matrix](docs/agent-platforms.md). Enrollment, private networking,
-service lifecycle and updater parity remain part of the migration.
+See [native transfers](docs/native-transfers.md) and the [agent platform
+matrix](docs/agent-platforms.md) for details.
 
-## Source and checks
+## Repository layout
 
-| Directory | Contents |
+| Path | Contents |
 | --- | --- |
-| `crates/` | Native API, agent, edge, embedded tunnel, transfers, runtime and firewall |
-| `vendor/rathole/` | Pinned upstream streaming implementation and documented patches |
-| `vendor/nlink/` | Pinned Linux netlink source with documented 32-bit portability fixes |
-| `ui/` | Dashboard; static production export and development UI |
-| `deploy/native/` | Structured native process configuration |
-| `api/`, `client/` | Previous Go behavior reference and transition tests |
+| `crates/` | Rust API, agent, edge, firewall, mesh, tunnel, transfer and runtime crates |
+| `ui/` | Dashboard source and UI checks |
+| `deploy/` | Compose runtime configuration and deployment preflight tools |
+| `legacy/go-client/` | Retired Go client used only for compatibility fixtures; never shipped |
+| `vendor/` | Pinned upstream Rust dependencies and documented local patches |
+| `docs/` | Architecture, operations, platform support and verification records |
+
+## Checks
 
 ```sh
 cargo check --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-# MongoDB integration checks require a dedicated disposable test database.
-PORTHUB_TEST_MONGO_URI=mongodb://127.0.0.1:47117 cargo test -p porthub-api -- --include-ignored
 node --test ui/tests/workspace.test.mjs
-# Operator-only migration tests use Python's standard library; no Docker state is changed.
-python3 -m unittest discover -s deploy/native -p test_migrate.py
+python3 -m unittest discover -s deploy/native -p 'test_*.py'
 ```
 
-Privileged firewall tests must run in a disposable network namespace. Production
-Rathole/WAN benchmarks and registered-client checks are separate rollout gates;
-local unit tests do not establish their completion.
+MongoDB integration checks require a dedicated disposable database. Network
+benchmarks and registered-client rollout checks are recorded separately under
+`docs/benchmarks/` and `docs/verification/`.

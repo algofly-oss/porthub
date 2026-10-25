@@ -4,7 +4,7 @@
 //! asset. No machine credentials or gateway addresses are embedded in it.
 use std::sync::LazyLock;
 
-const SOURCE: &str = include_str!("../../../api/assets/client/porthub-client.sh");
+const SOURCE: &str = include_str!("../assets/client/legacy-update-bridge.sh");
 const HOOK: &str = r#"
 # Migration compatibility only. The native installer validates the enrollment,
 # queues an independent worker and retains this CLI for activation rollback.

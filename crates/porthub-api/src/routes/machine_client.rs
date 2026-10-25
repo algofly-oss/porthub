@@ -184,7 +184,7 @@ async fn pending_private_install(
     }
 
     let server = view.public_base(&app, &machine);
-    let script = include_str!("../../../../api/assets/client/private-install.sh")
+    let script = include_str!("../../assets/client/private-install.sh")
         .replace(
             "__PRIVATE_SERVER__",
             &crate::enrollment_ticket::shell_quote(&server),

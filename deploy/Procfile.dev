@@ -1,6 +1,0 @@
-# Development: the Next.js dev server from mounted sources (./ui).
-mongod: mongod --bind_ip 127.0.0.1 --port 47017 --dbpath /data/mongo --auth --quiet --logpath /data/mongo/mongod.log --logappend
-api: after=127.0.0.1:47017 PORTHUB_API_LISTEN=127.0.0.1:47080 exec porthub-api
-relay: porthub relay-server --listen 127.0.0.1:47091
-ui: cd /app/ui-src && exec node node_modules/.bin/next dev -H 127.0.0.1 -p 47030
-traefik: exec sh /app/deploy/traefik.sh

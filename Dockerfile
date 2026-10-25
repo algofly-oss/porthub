@@ -5,10 +5,8 @@ WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev pkg-config && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
-COPY api/assets/client/porthub-client.sh api/assets/client/porthub-client.sh
-COPY api/assets/client/private-install.sh api/assets/client/private-install.sh
 COPY vendor/ vendor/
-ARG PORTHUB_VERSION=1.3.2
+ARG PORTHUB_VERSION=1.3.3
 ARG PORTHUB_BUILD_JOBS=4
 ARG PORTHUB_SOURCE_REVISION=unknown
 ENV PORTHUB_SOURCE_REVISION=$PORTHUB_SOURCE_REVISION
@@ -26,7 +24,7 @@ RUN apk add --no-cache build-base
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
 COPY vendor/ vendor/
-ARG PORTHUB_VERSION=1.3.2
+ARG PORTHUB_VERSION=1.3.3
 ARG PORTHUB_BUILD_JOBS=4
 ARG TARGETARCH
 ARG PORTHUB_SOURCE_REVISION=unknown
@@ -64,7 +62,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     rm -rf /var/lib/apt/lists/* && \
     printf 'porthub:x:10001:10001:PortHub:/nonexistent:/usr/sbin/nologin\n' >> /etc/passwd && \
     printf 'porthub:x:10001:\n' >> /etc/group
-ARG PORTHUB_VERSION=1.3.2
+ARG PORTHUB_VERSION=1.3.3
 ENV RUST_LOG=info PORTHUB_VERSION=$PORTHUB_VERSION
 LABEL org.opencontainers.image.version=$PORTHUB_VERSION
 ARG PORTHUB_SOURCE_REVISION=unknown
@@ -93,11 +91,21 @@ RUN rm -f /app/client-bin/.gitkeep && \
 LABEL io.porthub.image-client-bundle=complete-v1
 
 FROM core-runtime AS dev-core
-COPY --from=agent-build --chown=10001:10001 /out/client-bin /app/client-bin
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends libstdc++6 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      gcc libc6-dev pkg-config libssl-dev libcurl4-openssl-dev && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=rust-build /src /src
+COPY --from=rust-build /usr/local/cargo /usr/local/cargo
+COPY --from=rust-build /usr/local/rustup /usr/local/rustup
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
 COPY --from=ui-build --chown=10001:10001 /src/ui /app/ui-dev
+COPY --chown=10001:10001 deploy/native/client-bin/ /app/client-bin/
+ENV CARGO_HOME=/opt/porthub-cargo CARGO_TARGET_DIR=/src/target RUSTUP_HOME=/usr/local/rustup \
+    PATH=/src/target/release:/usr/local/cargo/bin:$PATH
+RUN mkdir -p /opt/porthub-cargo /src/target && \
+    chown -R 10001:10001 /opt/porthub-cargo /src/target /data /run/porthub-api \
+      /run/porthub-edge /run/porthub-firewall /run/porthub-config /run/porthub-activity /app
 USER 10001:10001
 
 FROM runtime-base AS prod-edge
@@ -112,6 +120,20 @@ USER 0:10001
 ENTRYPOINT ["porthub-edge", "--config", "/run/porthub-config/gateway.toml"]
 
 FROM prod-edge AS dev-edge
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      gcc libc6-dev pkg-config libssl-dev libcurl4-openssl-dev && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=rust-build /src /src
+COPY --from=rust-build /usr/local/cargo /usr/local/cargo
+COPY --from=rust-build /usr/local/rustup /usr/local/rustup
+ENV CARGO_HOME=/opt/porthub-cargo CARGO_TARGET_DIR=/src/target RUSTUP_HOME=/usr/local/rustup \
+    PATH=/src/target/release:/usr/local/cargo/bin:$PATH
+RUN mkdir -p /opt/porthub-cargo /src/target && \
+    chown -R 0:10001 /opt/porthub-cargo /src/target && \
+    chmod -R g+rwX /opt/porthub-cargo /src/target
+USER 0:10001
+ENTRYPOINT ["cargo", "run", "--locked", "-p", "porthub-edge", "--", "--config", "/run/porthub-config/gateway.toml"]
 
 FROM runtime-base AS prod-firewall
 RUN mkdir -p /data/firewall /run/porthub-firewall && \
@@ -122,3 +144,17 @@ USER 0:10001
 ENTRYPOINT ["porthub-firewall"]
 
 FROM prod-firewall AS dev-firewall
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      gcc libc6-dev pkg-config libssl-dev libcurl4-openssl-dev && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=rust-build /src /src
+COPY --from=rust-build /usr/local/cargo /usr/local/cargo
+COPY --from=rust-build /usr/local/rustup /usr/local/rustup
+ENV CARGO_HOME=/opt/porthub-cargo CARGO_TARGET_DIR=/src/target RUSTUP_HOME=/usr/local/rustup \
+    PATH=/src/target/release:/usr/local/cargo/bin:$PATH
+RUN mkdir -p /opt/porthub-cargo /src/target && \
+    chown -R 0:10001 /opt/porthub-cargo /src/target && \
+    chmod -R g+rwX /opt/porthub-cargo /src/target
+USER 0:10001
+ENTRYPOINT ["cargo", "run", "--locked", "-p", "porthub-firewall"]

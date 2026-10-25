@@ -1,9 +1,0 @@
-# name: [after=HOST:PORT] command   (run by `porthub supervise`)
-# Internal services listen on uncommon loopback ports (47xxx) so they never
-# clash with anything else on a host-networked server.
-mongod: mongod --bind_ip 127.0.0.1 --port 47017 --dbpath /data/mongo --auth --quiet --logpath /data/mongo/mongod.log --logappend
-# Go API: all routes, Socket.IO, background workers and the firewall service (127.0.0.1:47001).
-api: after=127.0.0.1:47017 PORTHUB_API_LISTEN=127.0.0.1:47080 exec porthub-api
-relay: porthub relay-server --listen 127.0.0.1:47091
-ui: cd /app/ui && NODE_ENV=production HOSTNAME=127.0.0.1 PORT=47030 exec node server.js
-traefik: exec sh /app/deploy/traefik.sh

@@ -154,7 +154,7 @@ mod tests {
     fn openapi_covers_every_legacy_route_method() {
         let openapi: Value = serde_json::from_str(include_str!("openapi.json")).unwrap();
         let legacy: Vec<Value> = serde_json::from_str(include_str!(
-            "../../../api/cmd/porthub-api/testdata/legacy_routes.json"
+            "../tests/fixtures/legacy_routes.json"
         ))
         .unwrap();
         let normalize = |path: &str| {
