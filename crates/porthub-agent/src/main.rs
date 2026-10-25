@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use porthub_transfer::{download, server};
+use std::ffi::{OsStr, OsString};
 #[cfg(unix)]
 use std::process::Command as ProcessCommand;
 use std::{net::IpAddr, path::PathBuf};
@@ -120,6 +121,10 @@ fn print_help() -> Result<()> {
     Args::command().print_help()?;
     println!();
     Ok(())
+}
+
+fn short_version_requested(arguments: &[OsString]) -> bool {
+    arguments.len() == 2 && arguments[1] == OsStr::new("-v")
 }
 
 #[derive(Subcommand)]
@@ -874,7 +879,12 @@ async fn shutdown_signal() {
 
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    let raw_args: Vec<_> = std::env::args_os().collect();
+    if short_version_requested(&raw_args) {
+        println!("porthub {}", porthub_agent::VERSION);
+        return Ok(());
+    }
+    let args = Args::parse_from(raw_args);
     if args.command.is_none() && args.config.is_none() {
         return print_help();
     }
@@ -1393,7 +1403,7 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod cli_tests {
-    use super::{print_help, requires_system_privileges, Args};
+    use super::{print_help, requires_system_privileges, short_version_requested, Args};
     use clap::Parser;
 
     fn args(arguments: &[&str]) -> Args {
@@ -1452,5 +1462,15 @@ mod cli_tests {
         assert!(args.config.is_none());
         assert!(!requires_system_privileges(&args));
         print_help().expect("help should print successfully");
+    }
+
+    #[test]
+    fn lowercase_v_displays_the_release_version() {
+        assert!(short_version_requested(&["porthub".into(), "-v".into()]));
+        assert!(!short_version_requested(&[
+            "porthub".into(),
+            "-v".into(),
+            "list".into(),
+        ]));
     }
 }
