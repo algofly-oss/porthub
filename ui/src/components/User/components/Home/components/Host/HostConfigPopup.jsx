@@ -2514,17 +2514,24 @@ export default function HostConfigPopup({
                               </code>
                             </div>
                             <p className="mt-2 text-xs text-muted-foreground">
-                              Paste once to install and connect. After that use
+                              Paste once to install and connect. Then use
+                              {" "}
+                              <code>porthub ls</code>,{" "}
+                              <code>porthub status</code>, or{" "}
+                              <code>porthub stop</code>
+                              {" "}
+                              on the client. If multiple accounts are connected, pass the
+                              registration ID from
                               {" "}
                               <code>porthub ls</code>
-                              {", "}
-                              <code>porthub status &lt;tenant&gt;</code>
                               {" "}
-                              and
+                              to
                               {" "}
-                              <code>porthub stop &lt;tenant&gt;</code>
+                              <code>status</code>
                               {" "}
-                              on the client machine.
+                              or
+                              {" "}
+                              <code>stop</code>.
                             </p>
                             <div
                               className={`mt-3 rounded-md border px-3 py-2.5 ${
