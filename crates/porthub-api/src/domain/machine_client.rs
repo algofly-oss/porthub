@@ -12,8 +12,13 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
 fn should_auto_update(version: &str, latest: &str, request_id: &str, handled_id: &str) -> bool {
-    let outdated = if version == latest || version.is_empty() || latest.is_empty() {
+    let outdated = if latest.is_empty() || version == latest {
         false
+    } else if version.is_empty() {
+        // Older native agents used the authenticated client sync endpoint
+        // before reporting their release version. Their sync itself proves
+        // they are native clients and can consume the gateway update headers.
+        true
     } else {
         match (numeric_version(version), numeric_version(latest)) {
             (Some(current), Some(target)) => current < target,
@@ -586,7 +591,7 @@ mod auto_update_tests {
     #[test]
     fn outdated_clients_get_one_gateway_update_request() {
         assert!(should_auto_update("1.3.1", "1.3.2", "", ""));
-        assert!(!should_auto_update("", "1.3.2", "", ""));
+        assert!(should_auto_update("", "1.3.2", "", ""));
         assert!(!should_auto_update("1.3.2", "1.3.2", "", ""));
         assert!(!should_auto_update("1.10.0", "1.3.2", "", ""));
         assert!(!should_auto_update("1.3.1", "1.3.2", "pending", ""));
