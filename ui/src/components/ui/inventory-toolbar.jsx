@@ -20,7 +20,7 @@ export default function InventoryToolbar({ label, search, status, filters = [], 
       <Popover.Dropdown className="!rounded-xl !border-border !bg-dialog !p-4 !text-foreground">
         <div className="max-h-[65dvh] space-y-4 overflow-y-auto overscroll-contain">
           {panelFilters.map(filter => <div key={filter.label}><p className="mb-2 text-xs font-medium text-muted-foreground">{filter.label}</p>{filter.control}</div>)}
-          {mobile && secondaryActions && <div className="border-t border-border pt-3 [&_button]:w-full">{secondaryActions}</div>}
+          {mobile && secondaryActions && <div className="border-t border-border pt-3 [&_button]:w-full" onClick={() => setOpened(false)}>{secondaryActions}</div>}
         </div>
       </Popover.Dropdown>
     </Popover>}
