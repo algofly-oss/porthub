@@ -158,14 +158,23 @@ porthub restart ID_FROM_LS --user
 porthub remove ID_FROM_LS --user
 ```
 
-Omit `--user` for system registrations and run with administrator access.
+Omit `--user` for system registrations. `ls`, `status`, `service status` and
+`path show` do not request administrator access. Commands that change system
+services or their settings request elevation when needed.
 `list`, `up`, `down`, `rm` and `uninstall` are aliases. Selectors accept a unique
 native identity or machine-ID prefix of at least six hex characters, or an exact
 managed service name. When exactly one registration exists, the selector may be
-omitted. Multiple matches fail without changing any service. These commands read
-only validated native manifests and omit credentials and origin addresses.
+omitted. Multiple matches fail without changing any service. Service changes use
+validated native manifests; display output omits credentials and origin addresses.
 Existing `status --profile FILE` and `service ... --profile FILE` remain available.
-Legacy tenant IDs/selection have not yet been imported into this registry.
+The agent publishes only display metadata in a separate local status directory:
+`/var/lib/porthub-status` on Linux, `/Library/Application Support/PortHub Status`
+on macOS, and `%ProgramData%/PortHubStatus` on Windows. Credential profiles retain
+their existing private permissions. Read-only commands neither open those profiles
+nor contact the gateway. Snapshots reuse existing status updates; no additional
+polling process, listener or timer is introduced. Active records older than 90
+seconds display unknown activity rather than claiming the agent is still running.
+They are never used to authorize service or policy changes.
 
 ## Live diagnostics
 

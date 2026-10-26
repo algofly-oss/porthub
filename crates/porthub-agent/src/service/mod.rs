@@ -16,6 +16,7 @@ use std::{
 pub mod launchd;
 mod process;
 pub(crate) mod publication;
+pub mod readable;
 #[cfg(target_os = "linux")]
 pub mod systemd;
 #[cfg(windows)]
@@ -858,7 +859,8 @@ async fn install_locked_mode(
         manager.enable(&spec).await?;
         manager.reset_failed(&spec).await?;
         attempted_start = true;
-        manager.start(&spec).await
+        manager.start(&spec).await?;
+        readable::install(layout, &spec, &profile).await
     }
     .await;
     if let Err(error) = result {
@@ -965,6 +967,17 @@ pub async fn action(
             }
             std::fs::remove_file(manifest(layout, &id))?;
         }
+    }
+    let display = if matches!(action, Action::Uninstall { purge: true }) {
+        readable::remove(layout, &id)
+    } else {
+        match manager.state(&spec).await {
+            Ok(state) => readable::service_state(layout, &id, &state),
+            Err(error) => Err(error),
+        }
+    };
+    if display.is_err() {
+        tracing::debug!("local registration display snapshot unavailable");
     }
     Ok(spec)
 }

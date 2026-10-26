@@ -263,12 +263,18 @@ impl Session {
 }
 
 fn state(path: &Path, session: &Session, name: &str) -> Result<()> {
+    let status = session.status(name);
     profile::write_private(
         &profile::sibling(path, ".status.json"),
-        &serde_json::to_vec(&session.status(name))?,
+        &serde_json::to_vec(&status)?,
         true,
-    )
+    )?;
+    if crate::service::readable::refresh(path, &status).is_err() {
+        tracing::debug!("local registration display snapshot unavailable");
+    }
+    Ok(())
 }
+
 async fn route_update(
     path: &Path,
     session: &mut Session,

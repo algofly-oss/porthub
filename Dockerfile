@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev p
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
 COPY vendor/ vendor/
-ARG PORTHUB_VERSION=1.4.5
+ARG PORTHUB_VERSION=1.4.6
 ARG PORTHUB_BUILD_JOBS=4
 ARG PORTHUB_SOURCE_REVISION=unknown
 ENV PORTHUB_SOURCE_REVISION=$PORTHUB_SOURCE_REVISION
@@ -24,7 +24,7 @@ RUN apk add --no-cache build-base
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
 COPY vendor/ vendor/
-ARG PORTHUB_VERSION=1.4.5
+ARG PORTHUB_VERSION=1.4.6
 ARG PORTHUB_BUILD_JOBS=4
 ARG TARGETARCH
 ARG PORTHUB_SOURCE_REVISION=unknown
@@ -62,7 +62,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     rm -rf /var/lib/apt/lists/* && \
     printf 'porthub:x:10001:10001:PortHub:/nonexistent:/usr/sbin/nologin\n' >> /etc/passwd && \
     printf 'porthub:x:10001:\n' >> /etc/group
-ARG PORTHUB_VERSION=1.4.5
+ARG PORTHUB_VERSION=1.4.6
 ENV RUST_LOG=info PORTHUB_VERSION=$PORTHUB_VERSION
 LABEL org.opencontainers.image.version=$PORTHUB_VERSION
 ARG PORTHUB_SOURCE_REVISION=unknown

@@ -31,18 +31,17 @@ fn requires_system_privileges(args: &Args) -> bool {
         Command::Setup {
             user, no_service, ..
         } => !user && !no_service,
-        Command::List { user, .. } => !user,
+        Command::List { .. } => false,
         Command::Path { command } => match command {
-            PathCommand::Show(args) | PathCommand::Reset(args) => {
-                !args.user && args.profile.is_none()
-            }
+            PathCommand::Show(_) => false,
+            PathCommand::Reset(args) => !args.user && args.profile.is_none(),
             PathCommand::Set { registration, .. } => {
                 !registration.user && registration.profile.is_none()
             }
         },
         Command::Start(args) | Command::Stop(args) | Command::Restart(args) => !args.user,
         Command::Remove(args) => !args.user,
-        Command::Status { user, profile, .. } => !user && profile.is_none(),
+        Command::Status { .. } => false,
         Command::Service { user, action } => {
             !user && !matches!(action, ServiceCommand::Status { .. })
         }
@@ -650,6 +649,36 @@ fn path_strategy(command: PathCommand) -> Result<()> {
         PathCommand::Set { mode, registration } => (registration, Some(mode), false),
         PathCommand::Reset(args) => (args, None, true),
     };
+    let snapshot = if reset || mode.is_some() {
+        None
+    } else if let Some(path) = &args.profile {
+        porthub_agent::service::readable::for_profile(path)?
+    } else {
+        Some(porthub_agent::service::readable::select(
+            &layout(args.user)?,
+            args.selector.as_deref(),
+            Some(true),
+        )?)
+    };
+    if let Some(record) = snapshot {
+        anyhow::ensure!(record.private, "select a private registration");
+        let source = if record.strategy_override {
+            "override"
+        } else {
+            "default"
+        };
+        if args.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"format_version":1,"mode":record.strategy,"source":source})
+                )?
+            );
+        } else {
+            println!("Path strategy: {} ({source})", record.strategy.as_str());
+        }
+        return Ok(());
+    }
     let path = path_profile(&args)?;
     let settings = if reset {
         strategy::reset(&path)?
@@ -658,6 +687,11 @@ fn path_strategy(command: PathCommand) -> Result<()> {
     } else {
         strategy::load(&path)?
     };
+    if (reset || mode.is_some())
+        && porthub_agent::service::readable::strategy_changed(&path, &settings, !reset).is_err()
+    {
+        tracing::debug!("local registration display snapshot unavailable");
+    }
     let source = if strategy::path(&path).try_exists()? {
         "override"
     } else {
@@ -708,10 +742,10 @@ fn render_registration_table(rows: &[serde_json::Value]) -> String {
     );
     let mut output = vec![header];
     for row in rows {
-        let (active, active_style) = if row["active"] == true {
-            ("yes", "1;32")
-        } else {
-            ("no", "2")
+        let (active, active_style) = match row["active"].as_bool() {
+            Some(true) => ("yes", "1;32"),
+            Some(false) => ("no", "2"),
+            None => ("?", "33"),
         };
         let active = paint(format!("{active:<6}"), active_style);
         let state = row["state"].as_str().unwrap();
@@ -728,7 +762,7 @@ fn render_registration_table(rows: &[serde_json::Value]) -> String {
             _ => "2",
         };
         let route = paint(format!("{route:<8}"), route_style);
-        let gateway = paint(row["gateway"].as_str().unwrap(), "36");
+        let gateway = paint(display_gateway_url(row["gateway"].as_str().unwrap()), "36");
         let email = row["email"]
             .as_str()
             .filter(|email| !email.is_empty())
@@ -750,113 +784,11 @@ fn render_registration_table(rows: &[serde_json::Value]) -> String {
 }
 
 async fn list_registrations(user: bool, json: bool) -> Result<()> {
-    let entries = porthub_agent::service::registrations(&layout(user)?)?;
-    let mut rows = Vec::new();
-    let mut email_lookups = Vec::new();
-    if !entries.is_empty() {
-        let manager = porthub_agent::service::system_manager(user).await?;
-        for entry in entries {
-            let state = manager.state(&entry.spec).await?;
-            let runtime = porthub_agent::runtime::status(&entry.spec.profile).ok();
-            let (server, email) =
-                if porthub_agent::private_network::is_profile(&entry.spec.profile)? {
-                    let profile =
-                        porthub_agent::private_profile::Profile::load(&entry.spec.profile)?;
-                    (profile.server, profile.account_email.unwrap_or_default())
-                } else {
-                    let profile = porthub_agent::profile::Profile::load(&entry.spec.profile)?;
-                    let email = profile.account_email.clone().unwrap_or_default();
-                    if email.is_empty() {
-                        email_lookups.push((
-                            entry.spec.identity.clone(),
-                            profile.server.clone(),
-                            profile.machine_id.clone(),
-                            profile.token.clone(),
-                        ));
-                    }
-                    (profile.server, email)
-                };
-            rows.push(serde_json::json!({"id":entry.spec.identity,"machine_id":entry.machine_id,"email":email,"gateway":display_gateway_url(&server),"active":state.active,"enabled":state.enabled,
-                "state":runtime.as_ref().map(|state|state.state.as_str()).unwrap_or("unavailable"),
-                "agent_version":runtime.as_ref().map(|state|state.agent_version.as_str()).unwrap_or(""),
-                "ports":runtime.as_ref().map(|state|state.service_count).unwrap_or(0),"route":runtime.as_ref().map(|state|state.route.as_str()).unwrap_or("")}));
-        }
-    }
-    let cached_emails: Vec<_> = rows
-        .iter()
-        .filter_map(|row| {
-            Some((
-                row["machine_id"].as_str()?.to_owned(),
-                row["email"]
-                    .as_str()
-                    .filter(|email| !email.is_empty())?
-                    .to_owned(),
-            ))
-        })
-        .collect();
-    for row in &mut rows {
-        if row["email"].as_str().is_none_or(str::is_empty) {
-            let machine_id = row["machine_id"].as_str().unwrap_or_default();
-            let mut matches = cached_emails
-                .iter()
-                .filter(|(candidate, _)| candidate == machine_id)
-                .map(|(_, email)| email.as_str());
-            if let Some(email) = matches.next() {
-                if matches.all(|other| other == email) {
-                    row["email"] = email.into();
-                }
-            }
-        }
-    }
-    if !email_lookups.is_empty() {
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(2))
-            .build()?;
-        let results = futures_util::future::join_all(email_lookups.into_iter().map(
-            |(id, server, machine_id, token)| {
-                let client = client.clone();
-                async move {
-                    let response = client
-                        .post(format!("{server}/api/machines/client/identity"))
-                        .json(&serde_json::json!({"machine_id":machine_id,"token":token}))
-                        .send()
-                        .await;
-                    let email = match response {
-                        Ok(response) if response.status().is_success() => response
-                            .json::<serde_json::Value>()
-                            .await
-                            .ok()
-                            .and_then(|body| {
-                                body.get("account_email")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(str::to_owned)
-                            }),
-                        _ => None,
-                    };
-                    (id, email)
-                }
-            },
-        ))
-        .await;
-        for (id, email) in results {
-            if let Some(email) = email.filter(|email| !email.is_empty()) {
-                let machine_id = rows
-                    .iter()
-                    .find(|row| row["id"] == id)
-                    .and_then(|row| row["machine_id"].as_str())
-                    .unwrap_or_default()
-                    .to_owned();
-                for row in &mut rows {
-                    if row["machine_id"] == machine_id
-                        && row["email"].as_str().is_none_or(str::is_empty)
-                    {
-                        row["email"] = email.clone().into();
-                    }
-                }
-            }
-        }
-    }
+    let records = porthub_agent::service::readable::list(&layout(user)?)?;
+    let rows: Vec<_> = records
+        .into_iter()
+        .map(serde_json::to_value)
+        .collect::<std::result::Result<_, _>>()?;
     if json {
         println!("{}", serde_json::to_string(&rows)?);
     } else if rows.is_empty() {
@@ -905,6 +837,19 @@ async fn service_command(command: ServiceCommand, user: bool) -> Result<()> {
     };
     match command {
         ServiceCommand::Status { profile } => {
+            if let Some(record) = service::readable::for_profile(&profile)? {
+                let active = record
+                    .active
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".into());
+                println!(
+                    "installed {}; active {}; boot {}",
+                    record.state != "uninstalled",
+                    active,
+                    record.enabled
+                );
+                return Ok(());
+            }
             let manager = service::system_manager(user).await?;
             let state = service::status(&layout, &profile, manager.as_ref()).await?;
             println!(
@@ -1281,19 +1226,30 @@ async fn main() -> Result<()> {
             selector,
             user,
         }) => {
-            let profile = match profile {
-                Some(profile) => profile,
-                None => {
-                    porthub_agent::service::select(&layout(user)?, selector.as_deref())?
-                        .spec
-                        .profile
+            if let Some(profile) = profile {
+                if let Some(record) = porthub_agent::service::readable::for_profile(&profile)? {
+                    println!(
+                        "{}; agent {}; ports {}; route {}",
+                        record.state, record.agent_version, record.ports, record.route
+                    );
+                    return Ok(());
                 }
-            };
-            let status = porthub_agent::runtime::status(&profile)?;
-            println!(
-                "{}; agent {}; services {}; route {}",
-                status.state, status.agent_version, status.service_count, status.route
-            );
+                let status = porthub_agent::runtime::status(&profile)?;
+                println!(
+                    "{}; agent {}; ports {}; route {}",
+                    status.state, status.agent_version, status.service_count, status.route
+                );
+            } else {
+                let record = porthub_agent::service::readable::select(
+                    &layout(user)?,
+                    selector.as_deref(),
+                    None,
+                )?;
+                println!(
+                    "{}; agent {}; ports {}; route {}",
+                    record.state, record.agent_version, record.ports, record.route
+                );
+            }
             Ok(())
         }
         Some(Command::Service { action, user }) => service_command(action, user).await,
@@ -1467,6 +1423,9 @@ mod cli_tests {
                 "/tmp/profile.json",
             ][..],
             &["porthub", "list", "--user"][..],
+            &["porthub", "list"][..],
+            &["porthub", "status"][..],
+            &["porthub", "path", "show"][..],
             &["porthub", "setup", "--ticket", "ticket", "--user"][..],
         ] {
             assert!(
@@ -1479,9 +1438,9 @@ mod cli_tests {
     #[test]
     fn system_service_commands_and_privileged_ports_request_elevation() {
         for arguments in [
-            &["porthub", "list"][..],
             &["porthub", "setup", "--ticket", "ticket"][..],
             &["porthub", "start", "abcdef"][..],
+            &["porthub", "path", "reset"][..],
             &["porthub", "http.server", "80"][..],
             &["porthub", "http.receive", "--port", "443"][..],
         ] {

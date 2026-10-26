@@ -364,6 +364,7 @@ pub async fn run(path: PathBuf, cancel: CancellationToken) -> Result<()> {
             let count=peers.values().filter(|peer|peer.state()==porthub_mesh::State::Ready).count();
             let status=crate::runtime::Status{pid:std::process::id(),state:if device.is_some(){"running"}else{"connecting"}.into(),agent_version:crate::VERSION.into(),config_version:String::new(),service_count:count,route:"private".into(),updated_at:SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),update_request_id:String::new()};
             profile::write_private(&profile::sibling(&path,".status.json"),&serde_json::to_vec(&status)?,true)?;
+            if crate::service::readable::refresh(&path,&status).is_err(){tracing::debug!("local registration display snapshot unavailable");}
         }
     }}Ok(())}.await;
     work.cancel();
@@ -383,5 +384,8 @@ pub async fn run(path: PathBuf, cancel: CancellationToken) -> Result<()> {
     }
     drop(dns_registration);
     drop(device);
+    if crate::service::readable::stopped(&path).is_err() {
+        tracing::debug!("local registration display snapshot unavailable");
+    }
     result
 }

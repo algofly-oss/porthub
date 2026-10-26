@@ -1,4 +1,5 @@
-//! Restrict managed Windows state to SYSTEM and local Administrators.
+//! Credentials stay restricted to SYSTEM and local Administrators.
+//! The separate display directory grants Users file read/traverse rights.
 //! No shell helpers are involved; the DACL is applied with the native security API.
 use anyhow::{ensure, Context, Result};
 use std::{os::windows::ffi::OsStrExt, path::Path, ptr};
@@ -34,8 +35,21 @@ pub(crate) fn is_managed(path: &Path) -> bool {
 }
 
 pub(crate) fn secure(path: &Path, directory: bool) -> Result<()> {
+    apply(path, directory, false)
+}
+pub(crate) fn readable(path: &Path, directory: bool) -> Result<()> {
+    apply(path, directory, true)
+}
+fn apply(path: &Path, directory: bool, readable: bool) -> Result<()> {
     ensure!(
-        is_managed(path),
+        if readable {
+            path.starts_with(managed_root()?.with_file_name("PortHubStatus"))
+                && path
+                    .components()
+                    .all(|c| !matches!(c, std::path::Component::ParentDir))
+        } else {
+            is_managed(path)
+        },
         "refusing to change ACL outside PortHub state"
     );
     let metadata = std::fs::symlink_metadata(path)?;
@@ -52,7 +66,11 @@ pub(crate) fn secure(path: &Path, directory: bool) -> Result<()> {
         .encode_wide()
         .chain(Some(0))
         .collect::<Vec<_>>();
-    let sddl = if directory {
+    let sddl = if readable && directory {
+        "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)"
+    } else if readable {
+        "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)"
+    } else if directory {
         "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
     } else {
         "D:P(A;;FA;;;SY)(A;;FA;;;BA)"
