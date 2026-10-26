@@ -1234,14 +1234,21 @@ async fn main() -> Result<()> {
                 if jobs.is_empty() {
                     println!("No active sync jobs");
                 } else {
-                    println!("{:<16}  {:<10}  SOURCE  DESTINATION", "ID", "STATE");
+                    let source_width = jobs
+                        .iter()
+                        .map(|job| job.source.to_string_lossy().chars().count())
+                        .max()
+                        .unwrap_or(0)
+                        .max(6);
+                    println!(
+                        "{:<16}  {:<10}  {:source_width$}  DESTINATION",
+                        "ID", "STATE", "SOURCE"
+                    );
                     for job in jobs {
+                        let source = job.source.display().to_string();
                         println!(
-                            "{}  {:<10}  {}  {}",
-                            job.id,
-                            job.state,
-                            job.source.display(),
-                            job.destination
+                            "{}  {:<10}  {source:source_width$}  {}",
+                            job.id, job.state, job.destination
                         );
                     }
                 }
