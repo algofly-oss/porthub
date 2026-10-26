@@ -120,6 +120,7 @@ function AccountRow({ entry, expanded, toggle, reduced }) {
         <div className="flex items-center gap-3">
           <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-medium">{(entry.user.name || entry.user.email || "U").slice(0, 1)}</span>
           <div className="min-w-0"><p className="truncate font-medium">{entry.user.name}</p><p className="mt-0.5 truncate text-[11px] text-muted-foreground">{entry.user.email}</p></div>
+          <IconChevronDown aria-hidden="true" size={16} className={`ml-auto shrink-0 text-muted-foreground transition-transform ${expanded ? "rotate-180" : ""}`} />
         </div>
       </TableCell>
       <TableCell>{entry.user.role === "admin" ? "Administrator" : "Member"}</TableCell>
@@ -131,5 +132,18 @@ function AccountRow({ entry, expanded, toggle, reduced }) {
 }
 
 function Fleet({ machines }) {
-  return <div className="bg-muted/40 px-3 py-2 sm:px-6">{!machines.length ? <p className="py-4 text-xs text-muted-foreground">No registered machines.</p> : machines.map(m => <details key={m._id} className="border-b border-border/50 last:border-0"><summary className="flex cursor-pointer list-none items-center justify-between gap-3 py-3"><div className="min-w-0"><p className="truncate text-xs font-medium">{m.name}</p><p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">{m.hostname || m.local_ip || "Awaiting client"}</p></div><div className="flex shrink-0 items-center gap-2 text-[10px] text-muted-foreground"><span className={`h-1.5 w-1.5 rounded-full ${m.connection_status === "online" ? "bg-emerald-500" : "bg-zinc-500"}`} />{m.connection_status === "online" ? "Online" : m.connection_status === "disabled" ? "Disabled" : "Offline"}<span className="hidden sm:inline">· {m.ports?.length || 0} ports</span><IconChevronDown size={13} /></div></summary><div className="pb-3">{(m.ports || []).map(p => <div key={p._id} className="flex flex-wrap items-center justify-between gap-2 rounded-md px-2 py-2 text-[11px] hover:bg-muted"><span className="font-medium">{p.service_name || "Unnamed service"}</span><span className="font-mono text-muted-foreground">{externalEndpoint(p)} → {internalEndpoint(p)}</span><span className={`rounded-full px-2 py-0.5 font-medium ${p.enabled ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400" : "bg-zinc-500/10 text-zinc-600 dark:text-zinc-400"}`}>{p.enabled ? "Enabled" : "Disabled"}</span></div>)}{!m.ports?.length && <p className="text-xs text-muted-foreground">No mapped ports.</p>}</div></details>)}</div>;
+  return <div className="border-t border-border/60 bg-muted/30">
+    {!machines.length ? <p className="px-4 py-4 text-xs text-muted-foreground">No registered machines.</p> : machines.map(m => <details key={m._id} className="group border-b border-border/50 last:border-0">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 sm:px-6 [&::-webkit-details-marker]:hidden">
+        <div className="min-w-0"><p className="truncate text-xs font-medium">{m.name}</p><p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">{m.hostname || m.local_ip || "Awaiting client"}</p></div>
+        <div className="flex shrink-0 items-center gap-2 text-[10px] text-muted-foreground"><span className={`h-1.5 w-1.5 rounded-full ${m.connection_status === "online" ? "bg-emerald-500" : "bg-zinc-500"}`} />{m.connection_status === "online" ? "Online" : m.connection_status === "disabled" ? "Disabled" : "Offline"}<span className="hidden sm:inline">· {m.ports?.length || 0} ports</span><IconChevronDown size={14} className="transition-transform group-open:rotate-180" /></div>
+      </summary>
+      <div>
+        {(m.ports || []).map(p => <div key={p._id} className="flex w-full flex-wrap items-center justify-between gap-x-4 gap-y-1 border-t border-border/40 py-2.5 text-[11px] hover:bg-muted/70">
+          <span className="font-medium">{p.service_name || "Unnamed service"}</span><span className="font-mono text-muted-foreground">{externalEndpoint(p)} → {internalEndpoint(p)}</span><span className={`rounded-full px-2 py-0.5 font-medium ${p.enabled ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400" : "bg-zinc-500/10 text-zinc-600 dark:text-zinc-400"}`}>{p.enabled ? "Enabled" : "Disabled"}</span>
+        </div>)}
+        {!m.ports?.length && <p className="w-full border-t border-border/40 py-2.5 text-xs text-muted-foreground">No mapped ports.</p>}
+      </div>
+    </details>)}
+  </div>;
 }

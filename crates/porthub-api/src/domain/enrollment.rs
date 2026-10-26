@@ -79,6 +79,15 @@ impl Network {
         format!("{}/{}", Ipv4Addr::from(self.base), self.bits)
     }
 
+    pub fn contains(self, ip: Ipv4Addr) -> bool {
+        let mask = u32::MAX << (32 - self.bits);
+        u32::from(ip) & mask == self.base
+    }
+
+    pub fn overlaps(self, other: Self) -> bool {
+        self.contains(Ipv4Addr::from(other.base)) || other.contains(Ipv4Addr::from(self.base))
+    }
+
     pub fn allocate(self, machine_id: &str, occupied: &HashSet<String>) -> ApiResult<String> {
         let count = (1u32 << (32 - self.bits)) - 2;
         let digest = Sha256::digest(machine_id.as_bytes());
@@ -151,6 +160,7 @@ pub fn preferences_value(value: serde_json::Value) -> ApiResult<(Network, String
 }
 
 pub async fn ensure(app: &App, machine: &Document) -> ApiResult<()> {
+    let _network_guard = app.private_network_lock.lock().await;
     if machine.get_bool("private_owner_revoked").unwrap_or(false) {
         return Ok(());
     }
@@ -166,11 +176,7 @@ pub async fn ensure(app: &App, machine: &Document) -> ApiResult<()> {
     {
         return Ok(());
     }
-    let document = app
-        .collection("private_networks")
-        .find_one(doc! {"_id":store::id(Some(owner))})
-        .await?
-        .unwrap_or_default();
+    let document = super::private_networks::ensure_locked(app, &store::id(Some(owner))).await?;
     let (network, _) = preferences(&document)?;
     peers
         .create_index(

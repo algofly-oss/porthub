@@ -8,6 +8,7 @@ pub mod machines;
 pub mod private_domains;
 pub mod private_enrollment;
 pub mod private_names;
+pub mod private_networks;
 pub mod private_policy;
 pub mod private_sync;
 pub mod telegram;

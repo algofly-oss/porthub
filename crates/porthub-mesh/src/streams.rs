@@ -22,7 +22,10 @@ use std::{
     io::{self, IoSliceMut},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     pin::Pin,
-    sync::{Arc, Mutex, RwLock},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, RwLock,
+    },
     task::{Context, Poll},
     time::Duration,
 };
@@ -34,7 +37,9 @@ pub const MAX_DATAGRAM: usize = crate::MAX_PACKET - 20;
 const QUEUE: usize = 256;
 const MAX_PEERS: usize = 4096;
 const MAX_CONNECTIONS: usize = 512;
+const MAX_CONNECTIONS_PER_PEER: usize = 8;
 const ALPN: &[u8] = b"porthub-private-stream/1";
+const PARALLEL_ALPN: &[u8] = b"porthub-private-stream/1-lanes8";
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct Peer {
@@ -319,7 +324,7 @@ impl ClientCertVerifier for Verifier {
         self.algorithms.supported_schemes()
     }
 }
-fn transport() -> Arc<quinn::TransportConfig> {
+fn transport(idle_timeout: Option<Duration>) -> Result<Arc<quinn::TransportConfig>> {
     let mut config = quinn::TransportConfig::default();
     config
         .max_concurrent_uni_streams(0u8.into())
@@ -335,19 +340,31 @@ fn transport() -> Arc<quinn::TransportConfig> {
         .max_idle_timeout(None)
         .stream_receive_window((16u32 * 1024 * 1024).into())
         .receive_window((32u32 * 1024 * 1024).into())
-        .send_window(32 * 1024 * 1024)
-        .congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
-    Arc::new(config)
+        .send_window(32 * 1024 * 1024);
+    if let Some(timeout) = idle_timeout {
+        config.max_idle_timeout(Some(timeout.try_into()?));
+    }
+    config.congestion_controller_factory(Arc::new(quinn::congestion::CubicConfig::default()));
+    Ok(Arc::new(config))
 }
 pub struct Endpoint {
     inner: quinn::Endpoint,
     local: Ipv4Addr,
     identity: Identity,
     peers: Peers,
-    connections: Mutex<HashMap<Ipv4Addr, quinn::Connection>>,
+    connections: Mutex<HashMap<Ipv4Addr, Vec<quinn::Connection>>>,
+    next_connection: AtomicUsize,
+    protocols: Vec<Vec<u8>>,
 }
 impl Endpoint {
     pub fn new(identity: Identity, local: Ipv4Addr) -> Result<(Self, PacketIo)> {
+        Self::with_protocols(identity, local, vec![PARALLEL_ALPN.into(), ALPN.into()])
+    }
+    fn with_protocols(
+        identity: Identity,
+        local: Ipv4Addr,
+        protocols: Vec<Vec<u8>>,
+    ) -> Result<(Self, PacketIo)> {
         ensure!(local.is_private(), "invalid private stream endpoint");
         let peers: Peers = Default::default();
         let provider = rustls::crypto::ring::default_provider();
@@ -361,11 +378,11 @@ impl Endpoint {
             .with_safe_default_protocol_versions()?
             .with_client_cert_verifier(verifier)
             .with_single_cert(certificates, key)?;
-        tls.alpn_protocols = vec![ALPN.into()];
+        tls.alpn_protocols = protocols.clone();
         let mut server = quinn::ServerConfig::with_crypto(Arc::new(
             quinn::crypto::rustls::QuicServerConfig::try_from(tls)?,
         ));
-        server.transport = transport();
+        server.transport = transport(None)?;
         let (input, incoming) = mpsc::channel(QUEUE);
         let (outgoing, output) = mpsc::channel(QUEUE);
         let socket = Arc::new(PacketSocket {
@@ -388,6 +405,8 @@ impl Endpoint {
                 identity,
                 peers: peers.clone(),
                 connections: Default::default(),
+                next_connection: AtomicUsize::new(0),
+                protocols,
             },
             PacketIo {
                 input,
@@ -430,12 +449,16 @@ impl Endpoint {
         self.connections
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .retain(|ip, connection| {
-                let keep = connection.close_reason().is_none() && trusted.get(ip) == next.get(ip);
-                if !keep {
-                    connection.close(1u8.into(), b"private peer authorization changed");
-                }
-                keep
+            .retain(|ip, peer_connections| {
+                let allowed = trusted.get(ip) == next.get(ip);
+                peer_connections.retain(|connection| {
+                    let keep = connection.close_reason().is_none() && allowed;
+                    if !keep && !allowed {
+                        connection.close(1u8.into(), b"private peer authorization changed");
+                    }
+                    keep
+                });
+                !peer_connections.is_empty()
             });
         *trusted = next;
         Ok(())
@@ -468,16 +491,21 @@ impl Endpoint {
             "private stream peer identity mismatch"
         );
         let mut connections = self.connections.lock().unwrap_or_else(|p| p.into_inner());
-        connections.retain(|_, connection| connection.close_reason().is_none());
+        connections.retain(|_, peer_connections| {
+            peer_connections.retain(|connection| connection.close_reason().is_none());
+            !peer_connections.is_empty()
+        });
+        let connection_count: usize = connections.values().map(Vec::len).sum();
         ensure!(
-            connections.len() < MAX_CONNECTIONS || connections.contains_key(&ip),
+            connection_count < MAX_CONNECTIONS * MAX_CONNECTIONS_PER_PEER,
             "private stream connection limit reached"
         );
-        if connections.contains_key(&ip) {
+        let peer_connections = connections.entry(ip).or_default();
+        if peer_connections.len() >= MAX_CONNECTIONS_PER_PEER {
             connection.close(2u8.into(), b"private stream connection already prepared");
-            anyhow::bail!("private stream connection already prepared");
+            anyhow::bail!("private stream connection limit reached");
         }
-        connections.insert(ip, connection.clone());
+        peer_connections.push(connection.clone());
         Ok((peer, connection))
     }
     pub fn prepared(&self, expected: &Peer) -> Option<quinn::Connection> {
@@ -485,12 +513,47 @@ impl Endpoint {
         if trusted.get(&expected.ip) != Some(expected) {
             return None;
         }
-        self.connections
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(&expected.ip)
-            .filter(|connection| connection.close_reason().is_none())
-            .cloned()
+        let mut connections = self.connections.lock().unwrap_or_else(|p| p.into_inner());
+        let peer_connections = connections.get_mut(&expected.ip)?;
+        peer_connections.retain(|connection| connection.close_reason().is_none());
+        if peer_connections.is_empty() {
+            connections.remove(&expected.ip);
+            return None;
+        }
+        let lane = self.next_connection.fetch_add(1, Ordering::Relaxed) % peer_connections.len();
+        peer_connections.get(lane).cloned()
+    }
+    pub fn connection_count(&self, expected: &Peer) -> usize {
+        let trusted = self.peers.read().unwrap_or_else(|p| p.into_inner());
+        if trusted.get(&expected.ip) != Some(expected) {
+            return 0;
+        }
+        let mut connections = self.connections.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(peer_connections) = connections.get_mut(&expected.ip) else {
+            return 0;
+        };
+        peer_connections.retain(|connection| connection.close_reason().is_none());
+        let count = peer_connections.len();
+        if count == 0 {
+            connections.remove(&expected.ip);
+        }
+        count
+    }
+    pub fn connection_stats(&self, expected: &Peer) -> Vec<quinn::ConnectionStats> {
+        let trusted = self.peers.read().unwrap_or_else(|p| p.into_inner());
+        if trusted.get(&expected.ip) != Some(expected) {
+            return Vec::new();
+        }
+        let mut connections = self.connections.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(peer_connections) = connections.get_mut(&expected.ip) else {
+            return Vec::new();
+        };
+        peer_connections.retain(|connection| connection.close_reason().is_none());
+        let stats = peer_connections.iter().map(Connection::stats).collect();
+        if peer_connections.is_empty() {
+            connections.remove(&expected.ip);
+        }
+        stats
     }
     pub async fn connect(&self, expected: &Peer) -> Result<quinn::Connection> {
         let ip = expected.ip;
@@ -505,6 +568,52 @@ impl Endpoint {
         if let Some(connection) = self.prepared(expected) {
             return Ok(connection);
         }
+        self.connect_new(expected, None).await
+    }
+    /// Parallel lanes are negotiated in the authenticated TLS handshake. Older
+    /// peers retain one connection without repeated rejected extra handshakes.
+    pub fn supports_parallel(&self, expected: &Peer) -> bool {
+        let trusted = self.peers.read().unwrap_or_else(|p| p.into_inner());
+        if trusted.get(&expected.ip) != Some(expected) {
+            return false;
+        }
+        let connections = self.connections.lock().unwrap_or_else(|p| p.into_inner());
+        connections.get(&expected.ip).is_some_and(|connections| {
+            connections
+                .iter()
+                .find(|connection| connection.close_reason().is_none())
+                .and_then(|connection| connection.handshake_data())
+                .and_then(|data| data.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
+                .is_some_and(|data| data.protocol.as_deref() == Some(PARALLEL_ALPN))
+        })
+    }
+    /// Keep negotiated lanes prepared without keepalive traffic. Opening an
+    /// application flow after an idle period must not wait for new handshakes.
+    pub async fn connect_additional(&self, expected: &Peer) -> Result<quinn::Connection> {
+        ensure!(
+            self.supports_parallel(expected),
+            "private peer supports one stream connection"
+        );
+        ensure!(
+            self.connection_count(expected) < MAX_CONNECTIONS_PER_PEER,
+            "private stream lane limit reached"
+        );
+        self.connect_new(expected, None).await
+    }
+    async fn connect_new(
+        &self,
+        expected: &Peer,
+        idle_timeout: Option<Duration>,
+    ) -> Result<quinn::Connection> {
+        let ip = expected.ip;
+        ensure!(
+            self.peers
+                .read()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(&ip)
+                == Some(expected),
+            "private stream peer not admitted"
+        );
         let provider = rustls::crypto::ring::default_provider();
         let verifier = Arc::new(Verifier {
             expected: Some(pin(&expected.fingerprint)?),
@@ -517,11 +626,11 @@ impl Endpoint {
             .dangerous()
             .with_custom_certificate_verifier(verifier)
             .with_client_auth_cert(certificates, key)?;
-        tls.alpn_protocols = vec![ALPN.into()];
+        tls.alpn_protocols = self.protocols.clone();
         let mut config = quinn::ClientConfig::new(Arc::new(
             quinn::crypto::rustls::QuicClientConfig::try_from(tls)?,
         ));
-        config.transport_config(transport());
+        config.transport_config(transport(idle_timeout)?);
         let connection = tokio::time::timeout(
             Duration::from_secs(10),
             self.inner.connect_with(
@@ -557,6 +666,76 @@ impl Drop for Endpoint {
 #[cfg(test)]
 mod ingress_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn parallel_lanes_negotiate_and_legacy_peers_keep_one_connection() -> Result<()> {
+        for parallel in [false, true] {
+            let a_ip = Ipv4Addr::new(10, 234, 252, 1);
+            let b_ip = Ipv4Addr::new(10, 234, 252, 2);
+            let a_identity = Identity::new()?;
+            let b_identity = Identity::new()?;
+            let a_peer = Peer {
+                id: "a".into(),
+                ip: a_ip,
+                fingerprint: a_identity.fingerprint().into(),
+                instance: "a-instance".into(),
+            };
+            let b_peer = Peer {
+                id: "b".into(),
+                ip: b_ip,
+                fingerprint: b_identity.fingerprint().into(),
+                instance: "b-instance".into(),
+            };
+            let (a, mut a_io) = Endpoint::new(a_identity, a_ip)?;
+            let protocols = if parallel {
+                vec![PARALLEL_ALPN.into(), ALPN.into()]
+            } else {
+                vec![ALPN.into()]
+            };
+            let (b, mut b_io) = Endpoint::with_protocols(b_identity, b_ip, protocols)?;
+            a.update_peers(vec![b_peer.clone()])?;
+            b.update_peers(vec![a_peer.clone()])?;
+            let a_in = a_io.ingress();
+            let b_in = b_io.ingress();
+            let wire = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        packet=a_io.outgoing()=>match packet {Some(packet)=>{let _=b_in.send_reliable(a_ip,packet.payload).await;},None=>break},
+                        packet=b_io.outgoing()=>match packet {Some(packet)=>{let _=a_in.send_reliable(b_ip,packet.payload).await;},None=>break},
+                    }
+                }
+            }));
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let (source, (_, target)) = tokio::try_join!(a.connect(&b_peer), b.accept())?;
+                assert_eq!(a.supports_parallel(&b_peer), parallel);
+                assert_eq!(b.supports_parallel(&a_peer), parallel);
+                if parallel {
+                    tokio::try_join!(a.connect_additional(&b_peer), b.accept())?;
+                    assert_eq!(a.connection_count(&b_peer), 2);
+                } else {
+                    assert!(a.connect_additional(&b_peer).await.is_err());
+                    assert_eq!(a.connection_count(&b_peer), 1);
+                }
+                let send = async {
+                    let (mut send, _) = source.open_bi().await?;
+                    send.write_all(b"still connected").await?;
+                    send.finish()?;
+                    Ok::<_, anyhow::Error>(())
+                };
+                let receive = async {
+                    let (_, mut receive) = target.accept_bi().await?;
+                    assert_eq!(receive.read_to_end(64).await?, b"still connected");
+                    Ok::<_, anyhow::Error>(())
+                };
+                tokio::try_join!(send, receive)?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await??;
+            wire.abort();
+            let _ = wire.await;
+        }
+        Ok(())
+    }
 
     #[tokio::test]
     async fn reliable_ingress_waits_for_capacity_and_rechecks_revocation() -> Result<()> {

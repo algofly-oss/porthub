@@ -45,6 +45,7 @@ async fn enroll(
         browser(&app, &headers, &Method::POST, &query.workspace, false).await?;
     let mid = object_id(&mid, "Invalid machine")?;
     let _guard = app.connection_lock.lock().await;
+    let _network_guard = app.private_network_lock.lock().await;
     let machine = app
         .collection("machines")
         .find_one(doc! {"_id":mid,"deletion_pending":{"$ne":true}})
@@ -85,11 +86,7 @@ async fn enroll(
             "This machine already has a private client; revoke it before reinstalling",
         ));
     }
-    let prefs = app
-        .collection("private_networks")
-        .find_one(doc! {"_id":owner.to_hex()})
-        .await?
-        .unwrap_or_default();
+    let prefs = crate::domain::private_networks::ensure_locked(&app, &owner.to_hex()).await?;
     let (network, suffix) = preferences(&prefs)?;
     if let Some(name) = &name {
         enrollment::check_name(&app, owner, &Bson::ObjectId(mid), name).await?;

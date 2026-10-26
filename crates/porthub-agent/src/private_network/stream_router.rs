@@ -27,6 +27,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const MAX_FLOWS: usize = 512;
+const MAX_STREAM_LANES: usize = 8;
 const HEADER: &[u8; 4] = b"PHT1";
 #[derive(Default)]
 struct Ports(Vec<(u16, u16)>);
@@ -255,16 +256,20 @@ impl Router {
         let receive_drops = self.receive_drops.load(Ordering::Relaxed);
         let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         for peer in state.policy.peers.values() {
-            if let Some(connection) = self.endpoint.prepared(peer) {
-                let stats = connection.stats();
+            for (lane, stats) in self.endpoint.connection_stats(peer).into_iter().enumerate() {
                 tracing::debug!(
+                    peer_id = %peer.id,
+                    lane,
+                    lane_count = self.endpoint.connection_count(peer),
                     receive_drops,
                     tx_bytes = stats.udp_tx.bytes,
                     rx_bytes = stats.udp_rx.bytes,
                     rtt_us = stats.path.rtt.as_micros() as u64,
+                    min_rtt_us = stats.path.min_rtt.as_micros() as u64,
                     cwnd = stats.path.cwnd,
                     sent_packets = stats.path.sent_packets,
                     lost_packets = stats.path.lost_packets,
+                    lost_bytes = stats.path.lost_bytes,
                     stream_blocked = stats.frame_tx.stream_data_blocked,
                     connection_blocked = stats.frame_tx.data_blocked,
                     stream_credit_updates = stats.frame_rx.max_stream_data,
@@ -368,6 +373,7 @@ impl Router {
         };
         tracing::debug!(
             port = kernel.destination.port(),
+            connection_id = connection.stable_id(),
             "private TCP stream admitted locally"
         );
         state.flows.insert(
@@ -567,10 +573,17 @@ impl Background {
         let mut readers = HashMap::new();
         let result:Result<()>=async {loop {
             let pending={let state=router.state.lock().unwrap_or_else(|p|p.into_inner());
-                state.policy.peers.values().filter(|peer|state.policy.deadline>Instant::now() && state.policy.own<peer.id && !preparing.contains(&peer.id)
-                    && backoff.get(&peer.id).is_none_or(|(due,_)|*due<=Instant::now()) && router.endpoint.prepared(peer).is_none())
+                state.policy.peers.values().filter(|peer|{
+                    let lanes=if router.endpoint.supports_parallel(peer){MAX_STREAM_LANES}else{1};
+                    let connections=router.endpoint.connection_count(peer);
+                    state.policy.deadline>Instant::now()
+                        && (connections>0 || state.policy.own<peer.id)
+                        && connections<lanes
+                        && !preparing.contains(&peer.id)
+                        && backoff.get(&peer.id).is_none_or(|(due,_)|*due<=Instant::now())
+                })
                     .take(8usize.saturating_sub(preparing.len())).cloned().collect::<Vec<_>>()};
-            for peer in pending {preparing.insert(peer.id.clone());let endpoint=router.endpoint.clone();tasks.spawn(async move {let result=endpoint.connect(&peer).await;Finished::Dial(peer,result)});}
+            for peer in pending {preparing.insert(peer.id.clone());let endpoint=router.endpoint.clone();let additional=endpoint.connection_count(&peer)>0;tasks.spawn(async move {let result=if additional{endpoint.connect_additional(&peer).await}else{endpoint.connect(&peer).await};Finished::Dial(peer,result)});}
             tokio::select! {
                 _=router.cancel.cancelled()=>break,
                 updated=changed.changed()=>{

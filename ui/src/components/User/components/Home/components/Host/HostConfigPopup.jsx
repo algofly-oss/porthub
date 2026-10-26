@@ -430,6 +430,9 @@ export default function HostConfigPopup({
   const [proxyEditorOpen, setProxyEditorOpen] = useState(false);
   const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
   useEffect(() => { if (opened) setMachineSection(initialSection); }, [opened, host?.id, initialSection]);
+  useEffect(() => {
+    if (opened && additionalDomainsRef.current) additionalDomainsRef.current.open = false;
+  }, [opened, host?.id]);
   const allPortTraffic = useTrafficSnapshot({ ids: rules.map(rule=>rule.dataId), enabled: opened });
   const samplesByConnection = new Map(allPortTraffic.rows.map(row=>[row.connection?._id,row.traffic]));
   useEffect(() => {
@@ -510,6 +513,7 @@ export default function HostConfigPopup({
   const [debouncedClientSetupFields] = useDebouncedValue(clientSetupFields, 300);
   const initialRulesSnapshotRef = useRef("");
   const clientLogsContainerRef = useRef(null);
+  const additionalDomainsRef = useRef(null);
   const groupInputRef = useRef(null);
   const allowIpInputRef = useRef(null);
   const previousHostIdRef = useRef(null);
@@ -585,7 +589,9 @@ export default function HostConfigPopup({
   const fallbackDomain = defaultPrivateDomain || `${nameLabel}.${privateDnsSuffix}`;
   const fallbackParts = fallbackDomain.split(".");
   const defaultDomain = { host: nameLabel || fallbackParts.shift() || "machine", suffix: privateDnsSuffix || fallbackParts.join(".") || "phub", default: true };
-  const domainRows = (machineDomains.length ? machineDomains : [{ default: true }]).map(row => row.default ? defaultDomain : row);
+  const domainRows = (machineDomains.length ? machineDomains : [{ default: true }])
+    .map(row => ({ domain: row.default ? defaultDomain : row }))
+    .filter(({ domain }) => !domain.default);
   const savedDomainsKey = JSON.stringify(host?.privateDomains || []);
   const machineDomainsChanged = JSON.stringify(machineDomains) !== JSON.stringify(host?.privateDomains?.length ? host.privateDomains : [{ default: true }]);
   // The name field holds "name, alias, alias"; the server splits and cleans it.
@@ -1059,15 +1065,44 @@ export default function HostConfigPopup({
       });
     };
 
+    const handleLogStreamStatus = (payload) => {
+      if (payload?.machine_id !== host.id) return;
+      if (payload?.subscribed || payload?.stream_requested) {
+        setClientLogStreamStatus("streaming");
+      } else if (payload?.machine_online === false) {
+        setClientLogStreamStatus("offline");
+      } else {
+        setClientLogStreamStatus("idle");
+      }
+    };
+
+    const handleLogStreamLine = (payload) => {
+      if (payload?.machine_id !== host.id || !payload?.line) return;
+      setClientLogStreamStatus("streaming");
+      setClientLogs((current) => {
+        const next = [...current, payload.line];
+        const overflow = Math.max(0, next.length - MAX_CLIENT_LOG_LINES);
+        if (overflow > 0) {
+          setClientLogStartLineNumber((lineNumber) => lineNumber + overflow);
+        }
+        return overflow > 0 ? next.slice(-MAX_CLIENT_LOG_LINES) : next;
+      });
+    };
+
     setClientLogs([]);
     setClientLogStartLineNumber(1);
     setClientLogStreamStatus(host.isActive ? "connecting" : "offline");
     setShouldAutoScrollClientLogs(true);
-    subscribeToLogs();
+    // Register first: the server replies to subscribe immediately with status.
+    socket.on(socketRoutes.stcMachineLogStreamStatus, handleLogStreamStatus);
+    socket.on(socketRoutes.stcMachineLogStreamLine, handleLogStreamLine);
+    if (socket.connected) subscribeToLogs();
     socket.on("connect", subscribeToLogs);
 
     return () => {
       socket.off("connect", subscribeToLogs);
+      socket.off(socketRoutes.stcMachineLogStreamStatus, handleLogStreamStatus);
+      socket.off(socketRoutes.stcMachineLogStreamLine, handleLogStreamLine);
       socket.emit(socketRoutes.ctsMachineLogStreamUnsubscribe, {
         machine_id: host.id,
       });
@@ -1114,50 +1149,6 @@ export default function HostConfigPopup({
       clearInterval(refreshTimer);
     };
   }, [opened, host?.id, showUptimeHistory, host?.isActive]);
-
-  useEffect(() => {
-    if (!socket || !host?.id) {
-      return undefined;
-    }
-
-    const handleLogStreamStatus = (payload) => {
-      if (payload?.machine_id !== host.id) {
-        return;
-      }
-
-      if (payload?.subscribed || payload?.stream_requested) {
-        setClientLogStreamStatus("streaming");
-      } else if (payload?.machine_online === false) {
-        setClientLogStreamStatus("offline");
-      } else {
-        setClientLogStreamStatus("idle");
-      }
-    };
-
-    const handleLogStreamLine = (payload) => {
-      if (payload?.machine_id !== host.id || !payload?.line) {
-        return;
-      }
-
-      setClientLogStreamStatus("streaming");
-      setClientLogs((current) => {
-        const next = [...current, payload.line];
-        const overflow = Math.max(0, next.length - MAX_CLIENT_LOG_LINES);
-        if (overflow > 0) {
-          setClientLogStartLineNumber((lineNumber) => lineNumber + overflow);
-        }
-        return overflow > 0 ? next.slice(-MAX_CLIENT_LOG_LINES) : next;
-      });
-    };
-
-    socket.on(socketRoutes.stcMachineLogStreamStatus, handleLogStreamStatus);
-    socket.on(socketRoutes.stcMachineLogStreamLine, handleLogStreamLine);
-
-    return () => {
-      socket.off(socketRoutes.stcMachineLogStreamStatus, handleLogStreamStatus);
-      socket.off(socketRoutes.stcMachineLogStreamLine, handleLogStreamLine);
-    };
-  }, [socket, host?.id]);
 
   useEffect(() => {
     if (
@@ -1310,21 +1301,30 @@ export default function HostConfigPopup({
   };
 
   const updateMachineDomain = (index, field, value) => {
-    setMachineDomains(current => current.map((domain, position) =>
-      position === index && !domain.default ? { ...domain, [field]: value } : domain
-    ));
+    setMachineDomains(current => {
+      const stateIndex = current.findIndex((domain, position) => !domain.default &&
+        current.slice(0, position).filter(item => !item.default).length === index);
+      return stateIndex < 0 ? current : current.map((domain, position) =>
+        position === stateIndex ? { ...domain, [field]: value } : domain
+      );
+    });
   };
   const moveMachineDomain = (index, offset) => {
     setMachineDomains(current => {
-      const next = [...current];
+      const defaults = current.filter(domain => domain.default);
+      const aliases = current.filter(domain => !domain.default);
       const target = index + offset;
-      if (target < 0 || target >= next.length) return current;
-      [next[index], next[target]] = [next[target], next[index]];
-      return next;
+      if (target < 0 || target >= aliases.length) return current;
+      [aliases[index], aliases[target]] = [aliases[target], aliases[index]];
+      return [...defaults, ...aliases];
     });
   };
   const addMachineDomain = () => setMachineDomains(current => [...current, { host: "", suffix: "" }]);
-  const removeMachineDomain = index => setMachineDomains(current => current.filter((_, position) => position !== index));
+  const removeMachineDomain = index => setMachineDomains(current => {
+    const stateIndex = current.findIndex((domain, position) => !domain.default &&
+      current.slice(0, position).filter(item => !item.default).length === index);
+    return stateIndex < 0 ? current : current.filter((_, position) => position !== stateIndex);
+  });
   const handleDomainDragStart = (event, index) => {
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", String(index));
@@ -1334,10 +1334,12 @@ export default function HostConfigPopup({
     const from = Number(event.dataTransfer.getData("text/plain"));
     if (!Number.isInteger(from) || from === index) return;
     setMachineDomains(current => {
-      const next = [...current];
-      const [entry] = next.splice(from, 1);
-      next.splice(index, 0, entry);
-      return next;
+      const defaults = current.filter(domain => domain.default);
+      const aliases = current.filter(domain => !domain.default);
+      if (from < 0 || from >= aliases.length || index < 0 || index >= aliases.length) return current;
+      const [entry] = aliases.splice(from, 1);
+      aliases.splice(index, 0, entry);
+      return [...defaults, ...aliases];
     });
   };
 
@@ -2281,23 +2283,32 @@ export default function HostConfigPopup({
                           <div className="flex items-center justify-between gap-3">
                             <div>
                               <p className="text-sm font-medium">Private DNS domains</p>
-                              <p className="text-xs text-muted-foreground">The default .{privateDnsSuffix} domain follows the machine name. Add aliases and drag them to set copy priority.</p>
+                              <p className="text-xs text-muted-foreground">The primary domain is set by Hostname. Additional domains are optional.</p>
                             </div>
-                            <Button type="button" size="xs" variant="light" leftSection={<IconPlus size={14} />} onClick={addMachineDomain}>Add domain</Button>
                           </div>
-                          <div className="space-y-2">
-                            {domainRows.map((domain, index) => (
-                              <div key={`${domain.default ? "default" : "alias"}-${index}`} draggable onDragStart={event => handleDomainDragStart(event, index)} onDragOver={event => event.preventDefault()} onDrop={event => handleDomainDrop(event, index)} className="flex items-center gap-2 rounded-md border border-border/60 bg-control/40 p-2">
-                                <span className="cursor-grab select-none text-muted-foreground" aria-hidden="true">⠿</span>
-                                <input type="text" aria-label={domain.default ? "Default private domain host label" : `Domain ${index + 1} host label`} value={domain.host} readOnly={domain.default} placeholder="e.g. machine" className={`${getDetailInputClassName(isDark)} placeholder:!text-muted-foreground/60 placeholder:italic min-w-0 flex-1 ${domain.default ? "opacity-75" : ""}`} onChange={event => updateMachineDomain(index, "host", event.currentTarget.value)} />
-                                <span className="text-muted-foreground">.</span>
-                                <input type="text" aria-label={domain.default ? "Default private domain suffix" : `Domain ${index + 1} suffix`} value={domain.suffix} readOnly={domain.default} placeholder="phub" className={`${getDetailInputClassName(isDark)} placeholder:!text-muted-foreground/60 placeholder:italic min-w-0 flex-1 ${domain.default ? "opacity-75" : ""}`} onChange={event => updateMachineDomain(index, "suffix", event.currentTarget.value)} />
-                                <Button type="button" size="compact-xs" variant="subtle" aria-label={`Move domain ${index + 1} up`} disabled={index === 0} onClick={() => moveMachineDomain(index, -1)}>↑</Button>
-                                <Button type="button" size="compact-xs" variant="subtle" aria-label={`Move domain ${index + 1} down`} disabled={index === domainRows.length - 1} onClick={() => moveMachineDomain(index, 1)}>↓</Button>
-                                {domain.default ? <span className="px-2 text-xs text-muted-foreground">Default</span> : <ActionIcon type="button" variant="subtle" color="red" aria-label={`Remove domain ${index + 1}`} onClick={() => removeMachineDomain(index)}><IconTrash size={15} /></ActionIcon>}
+                          <details ref={additionalDomainsRef} className="group rounded-md border border-border/60 bg-control/30">
+                            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-sm [&::-webkit-details-marker]:hidden">
+                              <span>Additional domains ({domainRows.length})</span>
+                              <IconChevronDown size={16} className="shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
+                            </summary>
+                            <div className="space-y-2 border-t border-border/60 p-3">
+                              <div className="flex justify-end">
+                                <Button type="button" size="xs" variant="light" leftSection={<IconPlus size={14} />} onClick={addMachineDomain}>Add domain</Button>
                               </div>
-                            ))}
-                          </div>
+                              {domainRows.length ? domainRows.map(({ domain }, index) => (
+                                <div key={`alias-${index}`} draggable onDragStart={event => handleDomainDragStart(event, index)} onDragOver={event => event.preventDefault()} onDrop={event => handleDomainDrop(event, index)} className="flex items-center gap-2 rounded-md border border-border/60 bg-control/40 p-2">
+                                  <span className="cursor-grab select-none text-muted-foreground" aria-hidden="true">⠿</span>
+                                  <input type="text" aria-label={`Domain ${index + 1} host label`} value={domain.host || ""} placeholder="e.g. machine" className={`${getDetailInputClassName(isDark)} placeholder:!text-muted-foreground/60 placeholder:italic min-w-0 flex-1`} onChange={event => updateMachineDomain(index, "host", event.currentTarget.value)} />
+                                  <span className="text-muted-foreground">.</span>
+                                  <input type="text" aria-label={`Domain ${index + 1} suffix`} value={domain.suffix || ""} placeholder="phub" className={`${getDetailInputClassName(isDark)} placeholder:!text-muted-foreground/60 placeholder:italic min-w-0 flex-1`} onChange={event => updateMachineDomain(index, "suffix", event.currentTarget.value)} />
+                                  <Button type="button" size="compact-xs" variant="subtle" aria-label={`Move domain ${index + 1} up`} disabled={index === 0} onClick={() => moveMachineDomain(index, -1)}>↑</Button>
+                                  <Button type="button" size="compact-xs" variant="subtle" aria-label={`Move domain ${index + 1} down`} disabled={index === domainRows.length - 1} onClick={() => moveMachineDomain(index, 1)}>↓</Button>
+                                  <ActionIcon type="button" variant="subtle" color="red" aria-label={`Remove domain ${index + 1}`} onClick={() => removeMachineDomain(index)}><IconTrash size={15} /></ActionIcon>
+                                </div>
+                              )) : <p className="text-xs text-muted-foreground">No additional domains configured.</p>}
+                              <p className="text-xs text-muted-foreground">Drag domains or use the arrows to set copy priority.</p>
+                            </div>
+                          </details>
                         </div>
 
                         {groups.length > 0 && onAddMachineToGroup && onRemoveMachineFromGroup ? (
@@ -2847,9 +2858,11 @@ export default function HostConfigPopup({
                                 ? "Verbose logs are currently hidden. Enable the verbose toggle to view them."
                                 : clientLogStreamStatus === "offline"
                                   ? "The client must be online before logs can be streamed."
-                                : showClientLogs
-                                  ? "Fetching logs from the client..."
-                                  : "Fetching logs from the client..."}
+                                  : clientLogStreamStatus === "connecting"
+                                    ? "Connecting to the client log stream..."
+                                    : clientLogStreamStatus === "idle"
+                                      ? "Waiting for the client log stream..."
+                                      : "Connected. Waiting for client logs..."}
                             </p>
                           )}
                         </div>

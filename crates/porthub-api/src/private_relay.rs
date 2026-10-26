@@ -28,7 +28,10 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
+const MAX_RELAY_LANES: u8 = 4;
+const MAX_RELAY_PEERS: usize = 4096;
+const MAX_RELAY_CONNECTIONS: usize = MAX_RELAY_PEERS * MAX_RELAY_LANES as usize;
 #[derive(Clone)]
 struct Lease {
     credential_hash: String,
@@ -42,23 +45,36 @@ struct Lease {
 struct Connection {
     instance: String,
     generation: u64,
-    output: mpsc::Sender<Vec<u8>>,
+    output: mpsc::Sender<QueuedPacket>,
 }
 struct Forward<'a> {
     packet: &'a [u8],
-    output: mpsc::Sender<Vec<u8>>,
+    output: mpsc::Sender<QueuedPacket>,
     generation: u64,
     expires: Instant,
 }
 #[derive(Default)]
 struct Inner {
     leases: HashMap<String, Lease>,
-    connections: HashMap<String, Connection>,
+    connections: HashMap<String, HashMap<u8, Connection>>,
     generation: u64,
     dropped_packets: AtomicU64,
 }
-#[derive(Default)]
-pub struct Hub(Mutex<Inner>);
+struct QueuedPacket {
+    bytes: Vec<u8>,
+    // Released on dequeue/drop, including connection teardown and cancellation.
+    _budget: OwnedSemaphorePermit,
+}
+impl std::ops::Deref for QueuedPacket {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] { &self.bytes }
+}
+pub struct Hub(Mutex<Inner>, Arc<Semaphore>);
+impl Default for Hub {
+    fn default() -> Self {
+        Self(Mutex::new(Inner::default()), Arc::new(Semaphore::new(MAX_RELAY_QUEUE_BUDGET)))
+    }
+}
 impl Hub {
     pub fn publish(
         &self,
@@ -127,14 +143,14 @@ impl Hub {
                     && lease.instance == instance
             })
     }
-    async fn route(&self, source: &str, hash: &str, instance: &str, frame: Bytes) {
+    async fn route(&self, source: &str, hash: &str, instance: &str, lane: u8, frame: Bytes) {
         let Ok(records) = porthub_mesh::batch::decode(frame) else {
             return;
         };
         for record in records {
             let route = {
                 let hub = self.0.lock().unwrap_or_else(|p| p.into_inner());
-                Self::route_record(&hub, source, hash, instance, &record, Instant::now())
+                Self::route_record(&hub, source, hash, instance, lane, &record, Instant::now())
             };
             let Some(route) = route else {
                 continue;
@@ -161,11 +177,18 @@ impl Hub {
                     .fetch_add(1, Ordering::Relaxed);
                 continue;
             };
+            // Reserve globally before allocating a forwarded packet. Queue sizing
+            // alone cannot bound memory as earlier queues retain their capacities.
+            let Ok(budget) = self.1.clone().try_acquire_owned() else {
+                self.0.lock().unwrap_or_else(|p| p.into_inner())
+                    .dropped_packets.fetch_add(1, Ordering::Relaxed);
+                continue;
+            };
             let hub = self.0.lock().unwrap_or_else(|p| p.into_inner());
             // A lease, ACL, IP, credential or target generation can change while
             // capacity is unavailable. Revalidate before committing the packet.
             let Some(current) =
-                Self::route_record(&hub, source, hash, instance, &record, Instant::now())
+                Self::route_record(&hub, source, hash, instance, lane, &record, Instant::now())
             else {
                 continue;
             };
@@ -177,7 +200,7 @@ impl Hub {
             forwarded.push(source.len() as u8);
             forwarded.extend_from_slice(source.as_bytes());
             forwarded.extend_from_slice(current.packet);
-            permit.send(forwarded);
+            permit.send(QueuedPacket { bytes: forwarded, _budget: budget });
         }
     }
     fn route_record<'a>(
@@ -185,6 +208,7 @@ impl Hub {
         source: &str,
         hash: &str,
         instance: &str,
+        lane: u8,
         frame: &'a [u8],
         now: Instant,
     ) -> Option<Forward<'a>> {
@@ -215,9 +239,14 @@ impl Hub {
         if packet[12..16] != a.ip.octets() || packet[16..20] != b.ip.octets() {
             return None;
         }
-        let connection = hub
+        let connections = hub
             .connections
             .get(target)
+            .filter(|connections| !connections.is_empty())?;
+        let connection = connections
+            .get(&lane)
+            .or_else(|| connections.get(&0))
+            .or_else(|| connections.values().next())
             .filter(|connection| connection.instance == b.instance)?;
         Some(Forward {
             packet,
@@ -247,6 +276,16 @@ fn header(headers: &HeaderMap, key: &str) -> ApiResult<String> {
                 "Private relay authentication required",
             )
         })
+}
+fn relay_lane_header(headers: &HeaderMap, key: &str, default: u8) -> ApiResult<u8> {
+    let Some(value) = headers.get(key) else {
+        return Ok(default);
+    };
+    value
+        .to_str()
+        .ok()
+        .and_then(|value| value.parse::<u8>().ok())
+        .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "Invalid private relay lane"))
 }
 async fn upgrade(
     State(app): State<Arc<App>>,
@@ -284,6 +323,14 @@ async fn upgrade(
             "Private relay lease unavailable",
         ));
     }
+    let lanes = relay_lane_header(&headers, "x-porthub-relay-lanes", 1)?;
+    let lane = relay_lane_header(&headers, "x-porthub-relay-lane", 0)?;
+    if !(1..=MAX_RELAY_LANES).contains(&lanes) || lane >= lanes {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "Invalid private relay lane",
+        ));
+    }
     let batch = headers
         .get("x-porthub-relay-batch")
         .is_some_and(|value| value == "1");
@@ -297,7 +344,11 @@ async fn upgrade(
         .max_write_buffer_size(65536)
         .max_message_size(65536)
         .max_frame_size(65536)
-        .on_upgrade(move |socket| serve(app, socket, id, hash, instance, batch, prefixes));
+        .on_upgrade(move |socket| {
+            serve(
+                app, socket, id, hash, instance, lane, lanes, batch, prefixes,
+            )
+        });
     if batch {
         response
             .headers_mut()
@@ -308,6 +359,10 @@ async fn upgrade(
             .headers_mut()
             .insert("x-porthub-relay-prefix", HeaderValue::from_static("1"));
     }
+    response.headers_mut().insert(
+        "x-porthub-relay-lanes",
+        HeaderValue::from_str(&lanes.to_string()).expect("numeric lane count is a valid header"),
+    );
     Ok(response)
 }
 async fn serve(
@@ -316,6 +371,8 @@ async fn serve(
     id: String,
     hash: String,
     instance: String,
+    lane: u8,
+    lanes: u8,
     batch: bool,
     prefixes: bool,
 ) {
@@ -325,20 +382,41 @@ async fn serve(
             .0
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        if hub.connections.len() >= 4096 && !hub.connections.contains_key(&id) {
+        // The lease can change while the HTTP upgrade completes. A stale
+        // instance must never evict the current instance's connected lanes.
+        if !hub.leases.get(&id).is_some_and(|lease| {
+            lease.expires > Instant::now()
+                && lease.instance == instance
+                && (lease.hash == hash || lease.credential_hash == hash)
+        }) {
             return;
         }
-        let active = hub
-            .connections
-            .len()
-            .saturating_sub(usize::from(hub.connections.contains_key(&id)))
-            + 1;
-        let capacity = relay_queue_capacity(active);
+        if hub.connections.len() >= MAX_RELAY_PEERS && !hub.connections.contains_key(&id) {
+            return;
+        }
+        let active: usize = hub.connections.values().map(HashMap::len).sum();
+        if active >= MAX_RELAY_CONNECTIONS
+            && !hub
+                .connections
+                .get(&id)
+                .is_some_and(|peer| peer.contains_key(&lane))
+        {
+            return;
+        }
+        let capacity =
+            (relay_queue_capacity(active.saturating_add(1)) / usize::from(lanes)).max(16);
         let (output, packets) = mpsc::channel(capacity);
         hub.generation = hub.generation.wrapping_add(1);
         let generation = hub.generation;
-        hub.connections.insert(
-            id.clone(),
+        let channels = hub.connections.entry(id.clone()).or_default();
+        if channels
+            .values()
+            .any(|connection| connection.instance != instance)
+        {
+            channels.clear();
+        }
+        channels.insert(
+            lane,
             Connection {
                 instance: instance.clone(),
                 generation,
@@ -362,7 +440,7 @@ async fn serve(
             tokio::select! {
                 _=stopping.cancelled()=>break,
                 frame=incoming.next()=>match frame {
-                    Some(Ok(Message::Binary(bytes)))=>reader_app.private_relay.route(&reader_id,&reader_hash,&reader_instance,bytes).await,
+                    Some(Ok(Message::Binary(bytes)))=>reader_app.private_relay.route(&reader_id,&reader_hash,&reader_instance,lane,bytes).await,
                     Some(Ok(Message::Ping(bytes)))=>if pongs.try_send(bytes).is_err(){break;},
                     Some(Ok(Message::Pong(_)))=>{},
                     _=>break,
@@ -386,11 +464,11 @@ async fn serve(
             packet=packets.recv()=>{
                 let Some(packet)=packet else{break;};
                 if !app.private_relay.authorized(&id,&hash,&instance){break;}
-                let mut output=packet;
+                let mut output=packet.bytes;
                 if batch {
                     let mut records=vec![output];
                     while records.len()<32 {
-                        match packets.try_recv(){Ok(packet)=>records.push(packet),Err(_)=>break}
+                        match packets.try_recv(){Ok(packet)=>records.push(packet.bytes),Err(_)=>break}
                     }
                     let Ok(encoded)=porthub_mesh::batch::encode(&records,prefixes) else {break;};
                     output=encoded;
@@ -407,11 +485,18 @@ async fn serve(
         .0
         .lock()
         .unwrap_or_else(|p| p.into_inner());
-    if hub
-        .connections
-        .get(&id)
-        .is_some_and(|connection| connection.generation == generation)
-    {
+    let remove_peer = if let Some(channels) = hub.connections.get_mut(&id) {
+        if channels
+            .get(&lane)
+            .is_some_and(|connection| connection.generation == generation)
+        {
+            channels.remove(&lane);
+        }
+        channels.is_empty()
+    } else {
+        false
+    };
+    if remove_peer {
         hub.connections.remove(&id);
     }
 }
@@ -429,8 +514,48 @@ fn relay_queue_capacity(active_connections: usize) -> usize {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn global_budget_is_shared_and_released_on_disconnect() {
+        let hub = Hub(Mutex::new(Inner::default()), Arc::new(Semaphore::new(2)));
+        let a_ip = Ipv4Addr::new(10, 0, 0, 1);
+        let b_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let token = hub.publish("a", "credential-a", "instance-a", a_ip, HashSet::from(["b".into()]));
+        hub.publish("b", "credential-b", "instance-b", b_ip, HashSet::from(["a".into()]));
+        let (output, mut received) = mpsc::channel(16);
+        hub.0.lock().unwrap().connections.insert("b".into(), HashMap::from([(0, Connection {
+            instance: "instance-b".into(), generation: 1, output,
+        })]));
+        let mut packet = vec![0u8; 20];
+        packet[0] = 0x45;
+        packet[3] = 20;
+        packet[9] = 17;
+        packet[12..16].copy_from_slice(&a_ip.octets());
+        packet[16..20].copy_from_slice(&b_ip.octets());
+        let mut record = vec![1, b'b'];
+        record.extend_from_slice(&packet);
+        let hash = token_digest(&token);
+        // Bad credentials, stale instances and forged source IPs never consume budget.
+        hub.route("a", "wrong", "instance-a", 0, record.clone().into()).await;
+        hub.route("a", &hash, "stale", 0, record.clone().into()).await;
+        let mut forged = record.clone();
+        forged[14] = 99;
+        hub.route("a", &hash, "instance-a", 0, forged.into()).await;
+        assert_eq!(hub.1.available_permits(), 2);
+        for lane in 0..3 {
+            hub.route("a", &hash, "instance-a", lane, record.clone().into()).await;
+        }
+        assert_eq!(received.len(), 2);
+        assert_eq!(hub.1.available_permits(), 0);
+        drop(received.recv().await.unwrap());
+        assert_eq!(hub.1.available_permits(), 1);
+        hub.route("a", &hash, "instance-a", 1, record.into()).await;
+        assert_eq!(hub.1.available_permits(), 0);
+        drop(received);
+        assert_eq!(hub.1.available_permits(), 2);
+    }
+
     #[test]
-    fn relay_queue_capacity_grows_for_few_peers_without_increasing_global_bound() {
+    fn relay_queue_capacity_scales_per_connection() {
         assert_eq!(relay_queue_capacity(1), MAX_RELAY_QUEUE_PACKETS);
         assert_eq!(relay_queue_capacity(256), MAX_RELAY_QUEUE_PACKETS);
         assert_eq!(relay_queue_capacity(512), 1024);
@@ -495,11 +620,14 @@ mod tests {
         let (output, mut received) = mpsc::channel(1);
         hub.0.lock().unwrap().connections.insert(
             "b".into(),
-            Connection {
-                instance: "instance-b".into(),
-                generation: 1,
-                output: output.clone(),
-            },
+            HashMap::from([(
+                0,
+                Connection {
+                    instance: "instance-b".into(),
+                    generation: 1,
+                    output: output.clone(),
+                },
+            )]),
         );
         let packet = porthub_mesh::control_packet::encode(
             porthub_mesh::control_packet::STREAM,
@@ -511,9 +639,9 @@ mod tests {
         let mut record = vec![1, b'b'];
         record.extend_from_slice(&packet);
         let hash = token_digest(&token);
-        output.send(vec![0]).await.unwrap();
+        output.send(QueuedPacket { bytes: vec![0], _budget: hub.1.clone().acquire_owned().await.unwrap() }).await.unwrap();
         let mut waiting =
-            Box::pin(hub.route("a", &hash, "instance-a", Bytes::copy_from_slice(&record)));
+            Box::pin(hub.route("a", &hash, "instance-a", 0, Bytes::copy_from_slice(&record)));
         assert!(
             tokio::time::timeout(Duration::from_millis(10), &mut waiting)
                 .await
@@ -531,9 +659,9 @@ mod tests {
         assert_eq!(&forwarded[..2], &[1, b'a']);
         assert_eq!(&forwarded[2..], packet.as_ref());
 
-        output.send(vec![0]).await.unwrap();
+        output.send(QueuedPacket { bytes: vec![0], _budget: hub.1.clone().acquire_owned().await.unwrap() }).await.unwrap();
         let mut waiting =
-            Box::pin(hub.route("a", &hash, "instance-a", Bytes::copy_from_slice(&record)));
+            Box::pin(hub.route("a", &hash, "instance-a", 0, Bytes::copy_from_slice(&record)));
         assert!(
             tokio::time::timeout(Duration::from_millis(10), &mut waiting)
                 .await
@@ -580,11 +708,14 @@ mod tests {
         let (output, mut received) = mpsc::channel(8);
         hub.0.lock().unwrap().connections.insert(
             "peer-b".into(),
-            Connection {
-                instance: "instance-b".into(),
-                generation: 1,
-                output,
-            },
+            HashMap::from([(
+                0,
+                Connection {
+                    instance: "instance-b".into(),
+                    generation: 1,
+                    output,
+                },
+            )]),
         );
         let mut packet = vec![0u8; 20];
         packet[0] = 0x45;
@@ -604,6 +735,7 @@ mod tests {
             "peer-a",
             &token_digest(&a),
             "instance-a",
+            0,
             Bytes::copy_from_slice(&batch),
         )
         .await;
@@ -611,11 +743,12 @@ mod tests {
             "peer-a",
             &token_digest(&a),
             "instance-a",
+            0,
             Bytes::copy_from_slice(&record),
         )
         .await;
         let compact = porthub_mesh::batch::encode(&[record.clone(), record.clone()], true).unwrap();
-        hub.route("peer-a", &token_digest(&a), "instance-a", compact.into())
+        hub.route("peer-a", &token_digest(&a), "instance-a", 0, compact.into())
             .await;
         for _ in 0..5 {
             let forwarded = received.try_recv().expect("forwarded packet");
@@ -623,5 +756,81 @@ mod tests {
             assert_eq!(&forwarded[1..7], b"peer-a");
             assert_eq!(&forwarded[7..], &packet);
         }
+    }
+
+    #[test]
+    fn relay_routes_matching_lanes_and_falls_back_to_legacy_lane_zero() {
+        let hub = Hub::default();
+        let a_ip = Ipv4Addr::new(10, 0, 0, 1);
+        let b_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let a = hub.publish(
+            "peer-a",
+            "credential-a",
+            "instance-a",
+            a_ip,
+            HashSet::from(["peer-b".to_owned()]),
+        );
+        hub.publish(
+            "peer-b",
+            "credential-b",
+            "instance-b",
+            b_ip,
+            HashSet::from(["peer-a".to_owned()]),
+        );
+        let (lane0, _lane0_rx) = mpsc::channel(4);
+        let (lane1, _lane1_rx) = mpsc::channel(4);
+        hub.0.lock().unwrap().connections.insert(
+            "peer-b".into(),
+            HashMap::from([
+                (
+                    0,
+                    Connection {
+                        instance: "instance-b".into(),
+                        generation: 1,
+                        output: lane0.clone(),
+                    },
+                ),
+                (
+                    1,
+                    Connection {
+                        instance: "instance-b".into(),
+                        generation: 2,
+                        output: lane1.clone(),
+                    },
+                ),
+            ]),
+        );
+        let mut packet = vec![0u8; 20];
+        packet[0] = 0x45;
+        packet[3] = 20;
+        packet[8] = 64;
+        packet[12..16].copy_from_slice(&a_ip.octets());
+        packet[16..20].copy_from_slice(&b_ip.octets());
+        let mut record = vec![6];
+        record.extend_from_slice(b"peer-b");
+        record.extend_from_slice(&packet);
+        let hash = token_digest(&a);
+        let route_lane1 = Hub::route_record(
+            &hub.0.lock().unwrap(),
+            "peer-a",
+            &hash,
+            "instance-a",
+            1,
+            &record,
+            Instant::now(),
+        )
+        .expect("lane 1 should be available");
+        assert!(route_lane1.output.same_channel(&lane1));
+        let route_legacy = Hub::route_record(
+            &hub.0.lock().unwrap(),
+            "peer-a",
+            &hash,
+            "instance-a",
+            3,
+            &record,
+            Instant::now(),
+        )
+        .expect("legacy peer should fall back to lane 0");
+        assert!(route_legacy.output.same_channel(&lane0));
     }
 }

@@ -131,16 +131,7 @@ impl Buffer {
         *self.0.redaction.lock().unwrap_or_else(|p| p.into_inner()) = Redaction::profile(profile);
     }
     pub fn configure_private(&self, profile: &crate::private_profile::Profile) {
-        self.configure(&Profile {
-            format_version: 1,
-            server: profile.server.clone(),
-            machine_id: profile.peer_id.clone(),
-            token: profile.token.clone(),
-            account_email: profile.account_email.clone(),
-            fallback_servers: profile.fallback_servers.clone(),
-            setup_overrides: Default::default(),
-            allow_insecure_http_for_tests: profile.allow_insecure_http_for_tests,
-        });
+        self.configure(&profile.control_profile());
     }
     fn clean(&self, text: &str) -> String {
         self.0

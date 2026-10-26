@@ -105,13 +105,7 @@ async fn network(
     let (network, suffix) = enrollment::preferences_value(raw)?;
     let (_, owner, _) = browser(&app, &headers, &Method::PUT, &query.workspace, true).await?;
     ensure_suffix_unique(&app, &owner, &suffix).await?;
-    app.collection("private_networks")
-        .update_one(
-            doc! {"_id":owner.to_hex()},
-            doc! {"$set":{"cidr":network.cidr(),"dns_suffix":&suffix,"updated_at":DateTime::now()}},
-        )
-        .upsert(true)
-        .await?;
+    crate::domain::private_networks::save(&app, &owner.to_hex(), network, &suffix).await?;
     Ok(Json(
         json!({"data":{"cidr":network.cidr(),"dns_suffix":suffix},"transport_ready":false}),
     ))

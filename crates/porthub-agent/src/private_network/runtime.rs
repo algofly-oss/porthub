@@ -114,7 +114,20 @@ async fn stream_carrier(
 
 pub async fn run(path: PathBuf, cancel: CancellationToken) -> Result<()> {
     let profile = Profile::load(&path)?;
+    let logs = crate::logs::Buffer::default();
+    logs.configure_private(&profile);
+    run_with_logs(path, cancel, logs).await
+}
+
+pub async fn run_with_logs(
+    path: PathBuf,
+    cancel: CancellationToken,
+    logs: crate::logs::Buffer,
+) -> Result<()> {
+    let profile = Profile::load(&path)?;
     let _lease = Lease::acquire(&path)?;
+    let control = Arc::new(crate::control::Control::new_private(&profile)?);
+    let mut log_stream = crate::logs::Guard::start(control, logs, cancel.child_token());
     let name = format!(
         "ph{}",
         &format!("{:x}", Sha256::digest(profile.peer_id.as_bytes()))[..8]
@@ -362,6 +375,26 @@ pub async fn run(path: PathBuf, cancel: CancellationToken) -> Result<()> {
             if let Some(router)=&stream_router {router.log_transport_stats();}
             let peers=sessions.read().await;
             let count=peers.values().filter(|peer|peer.state()==porthub_mesh::State::Ready).count();
+            #[cfg(feature="private-stream")]
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                let peer_sessions: Vec<_> = peers.iter().map(|(id, session)| (id.clone(), session.clone())).collect();
+                drop(peers);
+                for (peer_id, session) in peer_sessions {
+                    if let Ok(stats) = session.statistics().await {
+                        tracing::debug!(
+                            peer_id,
+                            carrier = if session.is_relay() { "relay" } else { "direct" },
+                            sent_bytes = stats.sent_bytes,
+                            received_bytes = stats.received_bytes,
+                            dropped_outgoing = stats.dropped_outgoing,
+                            dropped_incoming = stats.dropped_incoming,
+                            write_errors = stats.write_errors,
+                            read_errors = stats.read_errors,
+                            "private peer carrier statistics"
+                        );
+                    }
+                }
+            }
             let status=crate::runtime::Status{pid:std::process::id(),state:if device.is_some(){"running"}else{"connecting"}.into(),agent_version:crate::VERSION.into(),config_version:String::new(),service_count:count,route:"private".into(),updated_at:SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),update_request_id:String::new()};
             profile::write_private(&profile::sibling(&path,".status.json"),&serde_json::to_vec(&status)?,true)?;
             if crate::service::readable::refresh(&path,&status).is_err(){tracing::debug!("local registration display snapshot unavailable");}
@@ -387,5 +420,6 @@ pub async fn run(path: PathBuf, cancel: CancellationToken) -> Result<()> {
     if crate::service::readable::stopped(&path).is_err() {
         tracing::debug!("local registration display snapshot unavailable");
     }
+    log_stream.stop().await;
     result
 }

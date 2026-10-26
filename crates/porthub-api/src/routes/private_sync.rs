@@ -340,14 +340,14 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
                 .publish(&input.peer_id, &hash, &input.instance, ip, allowed);
     }
     // This origin is configured by the gateway operator and returned only to
-    // authenticated private clients. The short-lived token limits exposure of
-    // the direct HTTP WebSocket authorization header; payload encryption is
-    // provided by the selected peer/stream protocol, not this packet relay.
+    // authenticated private clients. HTTP origins are supported by operator
+    // choice; their bearer headers and raw fallback packets are not encrypted.
+    // Stream payloads retain their independent peer encryption.
     let direct_relay_url = app
         .config
         .gateway_advertised_url
         .as_deref()
-        .filter(|url| url.starts_with("http://"))
+        .filter(|url| url.starts_with("http://") || url.starts_with("https://"))
         .map(|url| url.trim_end_matches('/').to_owned());
     Ok(([(header::CACHE_CONTROL,"no-store")],Json(json!({"snapshot":{"workspace":owner.to_hex(),"self":input.peer_id,"revision":store::field(&updated,"revision"),
         "expires_at":chrono::DateTime::from_timestamp_millis(now.timestamp_millis()+15_000).expect("current timestamp").to_rfc3339_opts(chrono::SecondsFormat::Millis,true),"peers":peers,"dns_suffixes":dns_suffixes,"grants":grants},"signals":signals,

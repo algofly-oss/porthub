@@ -1305,7 +1305,10 @@ async fn main() -> Result<()> {
         Some(Command::Run { profile }) => {
             if porthub_agent::private_network::is_profile(&profile)? {
                 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
-                return porthub_agent::private_network::runtime::run(profile, cancel).await;
+                return porthub_agent::private_network::runtime::run_with_logs(
+                    profile, cancel, logs,
+                )
+                .await;
                 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
                 anyhow::bail!("private packet device is not yet available for this platform");
             }

@@ -7,9 +7,9 @@ destinations and SHA256 verification. This directory retains only this summary.
 
 ## Current deployment
 
-URM2 runs release 1.4.7 in the isolated Rust core, edge and firewall images.
-All nine enabled machines, including the MacBook, report agent 1.4.7. All ten
-platform binaries in the production image and GitHub release are 1.4.7.
+URM2 runs release 1.4.8 in the isolated Rust core, edge and firewall images.
+All nine enabled machines, including the MacBook, report agent 1.4.8. All ten
+platform binaries in the production image and GitHub release are 1.4.8.
 
 An additional 1.4.6 Luna → Miro public gateway test sustained only about
 0.72 MB/s before cancellation. The gateway's accepted public socket used CUBIC
@@ -166,12 +166,13 @@ confirmed BBR, with the host default still CUBIC. A public parallel push improve
 from 7.03 MB/s before this fix to 55.66 MB/s afterward. No agent rebuild or
 GitHub release was required.
 
-Private upload parity remains unproven. Parallel private streams share a QUIC
-connection per peer, while public forwards have independent TCP connections.
-This changes how parallel transfers scale; it does not by itself quantify the
-remaining private upload bottleneck. Single-connection push also performs
-8 MiB chunk acknowledgements, hashing and durable receiver writes. These numbers
-must not be reported as equal public/private throughput.
+Private upload parity remained unproven in the 1.4.6 matrix. The follow-up
+1.4.8 checks below confirm a parallel-upload gap. Source inspection shows that
+the private TCP flows to one peer are multiplexed over one QUIC connection and
+share its congestion controller; public forwarding uses separate TCP
+connections. This is a plausible explanation for the different scaling, but
+the measurements do not isolate the cause. Single-connection `push` also does
+8 MiB chunk acknowledgements, hashing and durable receiver writes.
 
 Directory bandwidth used three files totaling 256 MiB and the default worker
 counts. Changing one 64 MiB file resent that file, retaining the other two.
@@ -229,3 +230,160 @@ nested directories, subsequent watched edits, and successful stop/cleanup.
 The installed detached senders used about 12 MiB RSS and recorded zero CPU
 ticks over five idle seconds. These remain functional checks rather than
 sustained capacity measurements.
+
+### 1.4.8 private upload follow-up (2026-10-26)
+
+Condor pushed the same sparse 512 MiB file to a manually started Luna
+`http.receive` listener on port 5201. The receiver was on the same host and
+filesystem for every case. Every completed file matched SHA256
+`9acca8e8c22201155389f65abbf6bc9723edc7384ead80503839f49dcc56d767`.
+Times include the remote SSH command startup. Runs were sequential; the
+variation between the two 32-connection public/private results shows why these
+single samples are diagnostic rather than a final capacity qualification.
+
+| Condor → Luna route | Connections | MB/s |
+| --- | ---: | ---: |
+| Private domain, Auto | 1 | 17.56 |
+| Public gateway mapping | 1 | 15.29 |
+| Private domain, Auto | 16 | 30.35 |
+| Public gateway mapping | 16 | 42.55 |
+| Private domain, Auto | 32 | 23.80 |
+| Public gateway mapping | 32 | 35.91 |
+| Private domain, `prefer-gateway` override | 16 | 22.33 |
+
+The 16-connection Auto private run reached about 71% of the public result;
+the single-connection results were similar in this sample. Raising concurrency
+to 32 did not help. Forcing the private overlay's gateway relay was slower than
+Auto, and Condor's strategy was reset to Auto after the run. No transfer
+completed during that temporary override. Temporary files and the receiver
+were removed after each case.
+
+### Local four-lane candidate follow-up (2026-10-26)
+
+A temporary, native-built 1.4.8 candidate added a bounded pool of up to four
+authenticated QUIC connections per private peer. It was run on Luna and Condor
+only; the public origin services and gateway were left on their installed
+builds. The clients' path strategy remained Auto and the original private
+services were restored after the comparison.
+
+Condor downloaded from a Luna `http.server` using `porthub get -x 16`, first
+over `luna.phub:5201`, then over the existing public mapping at
+`algofly.duckdns.org:13367`. The source was a 10 GiB sparse file and both
+destinations matched SHA256
+`732377e7f4a2abdc13ddfa1eb4c9c497fd2a2b294674d056cf51581b47dd586d`.
+
+| Route | Size | Connections | Elapsed | Average MB/s |
+| --- | ---: | ---: | ---: | ---: |
+| Private domain, Auto (private first) | 10 GiB | 16 | 255.92 s | 43.20 |
+| Public gateway mapping (private first) | 10 GiB | 16 | 223.98 s | 49.58 |
+| Public gateway mapping (public first) | 10 GiB | 16 | 225.82 s | 49.30 |
+| Private domain, Auto (public first) | 10 GiB | 16 | 241.82 s | 46.11 |
+
+The reversed-order check puts private at about 93.5% of public throughput, a
+smaller gap than the first run's 87%. Public-first then private reduces the
+transfer-order bias, though a single pair is not a full storage-cache
+qualification. The 512 MiB single-connection samples were 50.46 MB/s private
+and 55.96 MB/s public; the 16-connection samples were 56.68 and 56.55 MB/s.
+The remaining sustained difference is still unexplained; transport RTT,
+congestion window, loss and per-lane byte counters during the same transfer
+are needed before selecting another tuning change. Nothing from this candidate
+was deployed or committed.
+
+### 1.4.8 upload carrier diagnosis (2026-10-26)
+
+A matched 512 MiB `porthub push -x 16` to the same Luna `http.receive`
+listener measured 29.0 MB/s over the private domain and 41.9 MB/s over the
+public Rathole mapping on the installed build. Both files matched the same
+SHA256. A native-built eight-lane candidate reached 31.1 MB/s in Auto; the
+public result remained 41.9 MB/s. A diagnostic build that sent QUIC stream
+datagrams over the peer ICE session while the saved strategy remained Auto
+reached 26.4 MB/s.
+
+Counters identified the active carriers. The private-domain route sent the
+payload through the PortHub tunnel. QUIC stream counters totaled about 550 MB
+across eight lanes, while one private-agent TCP WebSocket to the gateway
+carried about 557 MB. The ICE session carried little data in normal Auto mode.
+When the diagnostic build forced stream datagrams onto that ICE session, the
+ICE byte counter rose to about 558 MB and the WebSocket carried only control
+traffic. This shows that Auto correctly preferred the WebSocket relay over the
+slower available ICE relay in this test; it does not indicate a direct peer
+path.
+
+The current private upload therefore multiplexes its QUIC lanes over one
+gateway WebSocket/TCP connection. The public Rathole upload uses independent
+TCP flows and was faster. More QUIC lanes alone did not remove that shared
+carrier limit. Both clients were restored to their installed services with
+Auto selected. The diagnostic override, listener, benchmark data, and local
+temporary service units were removed. No change was committed or deployed.
+
+### Native relay-lane qualification (2026-10-26)
+
+The final native Linux candidate uses four independently written, bounded
+WebSocket relay lanes on the existing API port. QUIC destination-CID affinity
+keeps each connection's packets on one lane, including under queue pressure.
+Up to eight QUIC connections are prepared only when authenticated TLS ALPN
+negotiation confirms peer support. Older peers retain one connection. Prepared
+lanes require no keepalive traffic and remain available after idle periods.
+Peer certificate pinning, private port authorization and revocation remain in
+place; lane headers do not replace authentication.
+
+The controlled Condor-to-Luna comparison used one manually started installed
+`http.receive` on Luna port 5201, the private domain with **Auto** preserved on
+both machines, and the existing public Rathole mapping. No GitHub build was
+used. The gateway API was built natively on URM2 in its existing builder image
+and temporarily staged only in the PortHub core container. Client candidates
+ran through temporary service units without replacing installed releases.
+
+Final Linux candidate SHA256:
+`02527c96d473a45d53582a703022031aa56ec26a9a9bb87f08b83a5ad794f4af`.
+
+Every final run below transferred **10,000,000,000 bytes** to a fresh destination.
+Each completed output independently matched SHA256
+`1a0a850851f333647936c0a1b4576e7ab90398b9e1ae2faf4bb66ca6b72cf724`.
+
+| Upload method | Public seconds | Public MB/s | Private seconds | Private MB/s |
+| --- | ---: | ---: | ---: | ---: |
+| Continuous curl PUT, one HTTP connection | 303.841 | 32.91 | 287.304 | 34.81 |
+| `porthub push -x 16`, including commit/assembly | 227.30 | 44.00 | 230.65 | 43.36 |
+
+The final private parallel run was 1.45% below public end-to-end throughput.
+Its chunk-upload phase took 212.812 s, approximately **46.99 MB/s**, measured
+from receiver manifest creation to the last completed chunk. This excludes
+final file assembly/checksum work and is not interchangeable with end-to-end
+rates. Single-connection uploads completed without retries or application
+reconnection. An earlier CID-affinity build also completed the private 10 GB
+single-connection upload at 35.29 MB/s with matching SHA256.
+
+These sequential measurements establish comparable throughput in this tested
+setup, not identical capacity on every route. 400 Mbps is 50 MB/s before protocol
+and application overhead. The public end-to-end parallel baseline itself was
+44.00 MB/s; private did not introduce a material deficit in this pair.
+
+Diagnostic evidence behind the change:
+
+- A fresh installed-build 512 MiB parallel comparison measured 28.54 MB/s
+  privately versus 44.11 MB/s publicly. The native candidate against the old
+  one-lane gateway reached 31.64 MB/s. With CID affinity and four relay lanes,
+  private short samples reached 40.28–44.44 MB/s, versus a 44.74 MB/s public
+  recheck. The final large-file comparison above reduces startup bias.
+- Packet-by-packet round-robin striping was rejected: one upload timed out and
+  a warmed retry achieved only 8.56 MB/s. Sender QUIC counters reported 77,131
+  packets lost out of 243,108 sent on the busy connection. Keeping packets on
+  the same carrier removed that regression.
+- Idle checks after several minutes showed eight prepared lanes for Condor
+  and one for each of six older peers. Luna's idle diagnostic agent used about
+  25 MiB RSS and 0.1% average CPU. The private domain still resolved through the
+  PortHub tunnel interface; no path override was used.
+- Targeted tests covered independent lane backpressure, older gateway framing,
+  peer protocol negotiation, certificate identity, port ACLs, revocation,
+  packet loss and carrier changes. A test-harness shutdown race was fixed so
+  a deliberately closed carrier is accepted only after explicit cancellation.
+  The privileged disposable-network-namespace test remained skipped; real
+  Luna/Condor transfers exercised the installed Linux TUN environment.
+
+After qualification, both installed private services were restored with Auto
+selected. URM2 was restored to the exact original healthy `porthub:core` image;
+edge, firewall and unrelated applications were not restarted. Temporary
+receivers, agent units, rollback timers, candidate image, source staging,
+upload checkpoints and payloads were cleaned up. Luna returned to approximately
+119 GiB free. No source change was committed and no production client upgraded.

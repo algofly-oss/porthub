@@ -5,6 +5,7 @@ use porthub_mesh::{
     Identity,
 };
 use std::{
+    collections::HashSet,
     net::Ipv4Addr,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -116,6 +117,78 @@ async fn reliable_stream_survives_carrier_change_and_packet_loss_without_reconne
 #[tokio::test]
 async fn reliable_stream_survives_bursts_on_independently_delayed_carriers() -> Result<()> {
     transfer_with_wire(true).await
+}
+
+#[tokio::test]
+async fn active_peer_scales_to_eight_bounded_congestion_lanes() -> Result<()> {
+    let a_ip = Ipv4Addr::new(10, 234, 250, 1);
+    let b_ip = Ipv4Addr::new(10, 234, 250, 2);
+    let a_identity = Identity::new()?;
+    let b_identity = Identity::new()?;
+    let (a, a_io) = Endpoint::new(a_identity.clone(), a_ip)?;
+    let (b, b_io) = Endpoint::new(b_identity.clone(), b_ip)?;
+    let b_peer = peer("b", b_ip, &b_identity);
+    let a_peer = peer("a", a_ip, &a_identity);
+    a.update_peers(vec![b_peer.clone()])?;
+    b.update_peers(vec![a_peer.clone()])?;
+    let wire = Wire::new(a_io, b_io, a_ip, b_ip);
+    let result = tokio::time::timeout(Duration::from_secs(15), async {
+        let (_source, accepted) = tokio::try_join!(a.connect(&b_peer), b.accept())?;
+        let (remote, first) = accepted;
+        ensure!(remote.id == "a");
+        let mut target_lanes = vec![first];
+        for _ in 1..8 {
+            let (source, accepted) = tokio::try_join!(a.connect_additional(&b_peer), b.accept())?;
+            let (remote, target) = accepted;
+            ensure!(remote.id == "a");
+            ensure!(source.stable_id() != 0);
+            target_lanes.push(target);
+        }
+        ensure!(a.connection_count(&b_peer) == 8);
+        ensure!(b.connection_count(&a_peer) == 8);
+
+        let source_lanes: Vec<_> = (0..8)
+            .map(|_| a.prepared(&b_peer).expect("prepared lane"))
+            .collect();
+        let selected: Vec<_> = source_lanes.iter().map(|lane| lane.stable_id()).collect();
+        ensure!(selected.iter().copied().collect::<HashSet<_>>().len() == 8);
+        ensure!(
+            a.connect_additional(&b_peer).await.is_err(),
+            "per-peer connection bound was not enforced"
+        );
+
+        let mut readers = JoinSet::new();
+        for target in target_lanes {
+            readers.spawn(async move {
+                let (mut send, mut receive) = target.accept_bi().await?;
+                let body = receive.read_to_end(64).await?;
+                send.write_all(&body).await?;
+                send.finish()?;
+                Ok::<_, anyhow::Error>(body)
+            });
+        }
+        for (index, connection) in source_lanes.iter().enumerate() {
+            let body = format!("lane-{index}").into_bytes();
+            let (mut send, mut receive) = connection.open_bi().await?;
+            send.write_all(&body).await?;
+            send.finish()?;
+            ensure!(receive.read_to_end(64).await? == body);
+        }
+        for _ in 0..8 {
+            let received = readers
+                .join_next()
+                .await
+                .context("lane reader stopped")???;
+            ensure!(received.starts_with(b"lane-"));
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("bounded private lane test timed out")?;
+    a.close();
+    b.close();
+    wire.stop().await;
+    result
 }
 
 async fn transfer_with_wire(striped: bool) -> Result<()> {

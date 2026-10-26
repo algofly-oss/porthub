@@ -341,9 +341,15 @@ export default function Home({ onStatsChange, active = true }) {
     () =>
       hosts.filter((host) => {
         if (!Number.isFinite(searchScore(query, [host.name, host.hostname, host.localIp, host.publicIp, ...(host.privateIps || []), ...(host.forwardingConfigs || []).flatMap(c => [c.serviceName, c.internalPort, c.externalPort])]))) return false;
+        const disabled = host.enabled === false || host.connectionStatus === "disabled";
         const matchesStatus =
-          statusFilter === "all" ||
-          (statusFilter === "online" ? host.isActive : statusFilter === "disabled" ? host.enabled === false : host.enabled !== false && !host.isActive);
+          statusFilter === "all"
+            ? !disabled
+            : statusFilter === "disabled"
+              ? disabled
+              : statusFilter === "online"
+                ? host.isActive
+                : !host.isActive;
 
         if (!matchesStatus) {
           return false;
@@ -431,19 +437,7 @@ export default function Home({ onStatsChange, active = true }) {
     let offline = 0;
 
     hosts.forEach((host) => {
-      const resolvedStatus =
-        host.connectionStatus ||
-        (host.enabled === false
-          ? "disabled"
-          : host.isActive
-            ? "online"
-            : "offline");
-
-      if (resolvedStatus === "disabled") {
-        return;
-      }
-
-      if (resolvedStatus === "online" || resolvedStatus === "auth_required") {
+      if (host.isActive) {
         online += 1;
       } else {
         offline += 1;

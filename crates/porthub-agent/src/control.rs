@@ -48,6 +48,7 @@ impl Reply {
 }
 pub struct Control {
     profile: Profile,
+    private_peer_id: Option<String>,
     http: reqwest::Client,
     preferred: Mutex<Option<(String, Instant)>>,
 }
@@ -63,9 +64,15 @@ impl Control {
             .build()?;
         Ok(Self {
             profile,
+            private_peer_id: None,
             http,
             preferred: Mutex::new(None),
         })
+    }
+    pub fn new_private(profile: &crate::private_profile::Profile) -> anyhow::Result<Self> {
+        let mut control = Self::new(profile.control_profile())?;
+        control.private_peer_id = Some(profile.peer_id.clone());
+        Ok(control)
     }
     pub fn profile(&self) -> &Profile {
         &self.profile
@@ -234,6 +241,24 @@ impl Control {
         self.request(Method::POST,"machines/client/deletion-ack",Some(serde_json::json!({"machine_id":self.profile.machine_id,"token":self.profile.token})),&[]).await.map(|_|())
     }
     pub async fn log_requested(&self) -> Result<bool, Failure> {
+        if let Some(peer_id) = &self.private_peer_id {
+            let reply = self
+                .request(
+                    Method::GET,
+                    "private/client/log-stream",
+                    None,
+                    &[
+                        ("peer_id", peer_id.clone()),
+                        ("token", self.profile.token.clone()),
+                    ],
+                )
+                .await?;
+            let body = reply.json()?;
+            if body["peer_id"] != *peer_id {
+                return Err(Failure::InvalidResponse);
+            }
+            return body["active"].as_bool().ok_or(Failure::InvalidResponse);
+        }
         let reply = self
             .request(
                 Method::GET,
@@ -272,10 +297,29 @@ impl Control {
         if lines.len() > 100 || lines.iter().any(|line| line.chars().count() > 4000) {
             return Err(Failure::InvalidResponse);
         }
-        let reply=self.request(Method::POST,"machines/client/logs",Some(serde_json::json!({
-            "machine_id":self.profile.machine_id,"token":self.profile.token,"source":"agent","lines":lines})),&[]).await?;
+        let (endpoint, body, expected_id) = if let Some(peer_id) = &self.private_peer_id {
+            (
+                "private/client/logs",
+                serde_json::json!({"peer_id":peer_id,"token":self.profile.token,"source":"agent","lines":lines}),
+                peer_id.as_str(),
+            )
+        } else {
+            (
+                "machines/client/logs",
+                serde_json::json!({"machine_id":self.profile.machine_id,"token":self.profile.token,"source":"agent","lines":lines}),
+                self.profile.machine_id.as_str(),
+            )
+        };
+        let reply = self
+            .request(Method::POST, endpoint, Some(body), &[])
+            .await?;
         let body = reply.json()?;
-        if body["data"]["machine_id"] != self.profile.machine_id
+        let id_field = if self.private_peer_id.is_some() {
+            "peer_id"
+        } else {
+            "machine_id"
+        };
+        if body["data"][id_field] != expected_id
             || body["data"]["count"].as_u64() != Some(lines.len() as u64)
         {
             return Err(Failure::InvalidResponse);

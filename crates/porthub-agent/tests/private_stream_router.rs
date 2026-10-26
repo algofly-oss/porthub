@@ -70,7 +70,10 @@ fn node(
             _=cancel.cancelled()=>return Ok(()),
             packet=datagrams.recv()=>{
                 let Some(packet)=packet else {ensure!(cancel.is_cancelled(),"stream carrier stopped");return Ok(());};
-                carrier.send(Delivery {source:own,destination:packet.address,payload:packet.payload}).await?;
+                if carrier.send(Delivery {source:own,destination:packet.address,payload:packet.payload}).await.is_err() {
+                    ensure!(cancel.is_cancelled(), "test carrier stopped before cancellation");
+                    return Ok(());
+                }
             },
             packet=packets.recv()=>{
                 let Some(packet)=packet else {ensure!(cancel.is_cancelled(),"kernel simulator stopped");return Ok(());};
@@ -81,7 +84,10 @@ fn node(
                 Some(Event::StreamDatagram {destination,payload})=>{
                     let envelope=control_packet::encode(control_packet::STREAM,own,destination,&payload)?;
                     let envelope=control_packet::decode(control_packet::STREAM,envelope).context("stream carrier envelope rejected")?;
-                    carrier.send(Delivery {source:envelope.source,destination:envelope.destination,payload:envelope.payload}).await?;
+                    if carrier.send(Delivery {source:envelope.source,destination:envelope.destination,payload:envelope.payload}).await.is_err() {
+                        ensure!(cancel.is_cancelled(), "test carrier stopped before cancellation");
+                        return Ok(());
+                    }
                 },
                 Some(Event::StreamLocal {peer,bytes})=>{
                     ensure!(peer==other,"private peer identity changed");

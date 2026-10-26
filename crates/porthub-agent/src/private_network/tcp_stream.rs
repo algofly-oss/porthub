@@ -29,7 +29,13 @@ use tokio_util::{sync::CancellationToken, sync::PollSender};
 const MTU: usize = 1380;
 const MAX_FLOWS: usize = 512;
 const PACKET_QUEUE: usize = 256;
-const TCP_BUFFER: usize = 131072;
+// Each virtual TCP leg feeds a QUIC stream whose RTT may be tens of
+// milliseconds, while the local TUN peer sees a sub-millisecond RTT. Keep a
+// larger receive window so that the synthetic TCP ACKs do not throttle the
+// WAN stream to a small per-flow buffer. The send side stays modest because
+// the bounded duplex pipe and QUIC stream already provide backpressure.
+const TCP_RECEIVE_BUFFER: usize = 524288;
+const TCP_SEND_BUFFER: usize = 131072;
 const PIPE_BUFFER: usize = 16384;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -307,8 +313,8 @@ impl Runner {
             return;
         }
         let mut socket = tcp::Socket::new(
-            tcp::SocketBuffer::new(vec![0; TCP_BUFFER]),
-            tcp::SocketBuffer::new(vec![0; TCP_BUFFER]),
+            tcp::SocketBuffer::new(vec![0; TCP_RECEIVE_BUFFER]),
+            tcp::SocketBuffer::new(vec![0; TCP_SEND_BUFFER]),
         );
         // This TCP leg stays on the local TUN. Match a stream proxy's
         // TCP_NODELAY behavior; delayed local ACKs must not pace WAN data.

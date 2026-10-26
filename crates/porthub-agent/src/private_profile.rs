@@ -36,6 +36,22 @@ fn oid(value: &str) -> bool {
     value.len() == 24 && value.bytes().all(|c| c.is_ascii_hexdigit())
 }
 impl Profile {
+    pub fn control_profile(&self) -> profile::Profile {
+        profile::Profile {
+            format_version: 1,
+            server: self.server.clone(),
+            machine_id: self
+                .peer_id
+                .rsplit_once(':')
+                .map_or_else(|| self.peer_id.clone(), |(_, machine)| machine.to_owned()),
+            token: self.token.clone(),
+            account_email: self.account_email.clone(),
+            fallback_servers: self.fallback_servers.clone(),
+            setup_overrides: Default::default(),
+            allow_insecure_http_for_tests: self.allow_insecure_http_for_tests,
+        }
+    }
+
     pub fn validate(&mut self) -> Result<()> {
         anyhow::ensure!(oid(&self.workspace), "invalid private workspace ID");
         let Some((workspace, machine)) = self.peer_id.split_once(':') else {
