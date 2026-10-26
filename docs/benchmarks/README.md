@@ -18,7 +18,11 @@ per-socket policy to accepted visitors and loading the installed `tcp_bbr` kerne
 module improved a fresh single-connection 1 GB transfer to **40.76 MB/s**, with
 matching SHA256. Socket inspection confirmed BBR; the host default remained
 CUBIC. The initial tuning-only test still used CUBIC and remained slow before
-the module was loaded. Sustained 10 GB qualification is in progress.
+the module was loaded. The subsequent single-connection 10 GB transfer completed
+at **37.32 MB/s**, with matching SHA256. Both public runs used fresh destinations
+and the existing gateway mapping; no Cloudflare proxy carried their payloads.
+This route did not saturate the stated 400 Mbps ISP capacity, so these results
+do not establish that every public route achieves the same throughput.
 
 ## Release 1.4.5 throughput qualification
 
@@ -94,9 +98,8 @@ and were removed. The current transport uses one bounded carrier per route.
   its application TCP source port remained 38168 throughout; no retry occurred.
 - A prior 149.8-second idle sample measured private-agent CPU/RSS at 0.174% of
   one core / 20.2 MiB on Luna and 0.093% / 18.4 MiB on Condor.
-- Verified qualification downloads were removed after recording results.
-  Additional diagnostic transfers may run while investigating the public
-  Luna → Miro route. No unrelated URM2 application was changed.
+- Verified qualification downloads were removed and test HTTP servers stopped
+  after recording results. No unrelated URM2 application was changed.
 
 Release 1.4.6 passed 251 workspace tests (78 ignored), including the new
 credential-free unprivileged status checks. All ten platform builds passed;
