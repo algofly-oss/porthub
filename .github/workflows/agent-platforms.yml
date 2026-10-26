@@ -97,6 +97,18 @@ jobs:
         run: |
           rustup toolchain install 1.99.1 --profile minimal
           rustup target add --toolchain 1.99.1 ${{ matrix.target }}
+      - name: Compile focused Windows watch checks
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo test --locked -p porthub-transfer --no-run --target ${{ matrix.target }}
+          cargo test --locked -p porthub-agent --test upload --no-run --target ${{ matrix.target }}
+      - name: Verify Windows watch jobs with a bounded runtime
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-transfer --target ${{ matrix.target }} -- --nocapture
+          python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --test upload --target ${{ matrix.target }} -- --nocapture
       - name: Test transfers, management and tunnel adapters
         shell: bash
         run: cargo test --locked -p porthub-agent -p porthub-transfer -p porthub-tunnel -p porthub-identity -p porthub-mesh --target ${{ matrix.target }}

@@ -72,6 +72,15 @@ By default the example creates `backups/luna/projects/data/`; `--contents-only`
 puts the contents directly in `projects/`. Parent traversal and symlinked
 receiver directories are rejected. The receiver must be upload-enabled.
 
+The standard system installer publishes a root-owned CLI through
+`/usr/local/bin/porthub` on Linux and macOS, so ordinary commands and
+`sudo porthub push ...` use the same installation. Use sudo explicitly when a
+source needs elevated file access; transfer commands do not request elevation
+themselves. Sudo controls its own password prompt and PATH. A deliberately
+per-user installation under `~/.local/bin` is not automatically added to sudo's
+restricted PATH; use the standard system install when both forms are needed.
+Jobs started with sudo belong to root, so manage them with `sudo porthub sync`.
+
 Without `-d` / `--detach`, watch occupies the terminal until Ctrl-C. Detached jobs
 run in a separate process session and can be inspected or stopped after the
 terminal closes. They belong to the current OS user and need no administrator
