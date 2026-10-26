@@ -135,7 +135,7 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
   const reset = () => { setQuery(""); setStatus("all"); setGroup("all"); setMachine("all"); };
   return <div className={compact ? "flex min-h-0 max-h-[75dvh] flex-col gap-3" : "workspace-page"}>
     {compact ? <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="text-sm font-semibold">Linked web proxies</h3><p className="mt-1 text-xs text-muted-foreground">Create and edit addresses for this {connectionId ? "port" : "machine"} here.</p></div>{createButton}</div>
-      : <PageHeader eyebrow="Routing" title="Public Web Proxies" description="Manage publicly reachable web addresses separately from private machine access." />}
+      : <PageHeader eyebrow="Routing" title="Public Web Proxies" description="Manage publicly reachable web addresses separately from private machine access." actions={<Button variant="ghost" size="icon" aria-label="Refresh proxies" onClick={load} disabled={loading}><IconRefresh size={17} /></Button>} />}
     {!compact ? <InventoryToolbar label="Proxy tools"
       search={<SearchField value={query} onChange={setQuery} label="Search proxies" placeholder="Search proxies…" />}
       status={<StatusTabs label="Proxy status" value={status} onChange={setStatus} options={[{value:"all",label:"All"},{value:"enabled",label:"Enabled"},{value:"disabled",label:"Disabled"}]} />}
@@ -146,7 +146,7 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
         {label:"Machine",advanced:true,control:<SearchSelect label="Filter proxy machine" value={machine} onChange={setMachine} options={[{value:"all",label:"All machines"},{value:"manual",label:"Manual targets"},...machines.map(m=>({value:m._id,label:m.name}))]} />},
         {label:"Group rows",advanced:true,control:<SearchSelect label="Group proxies by" value={groupBy} onChange={setGroupBy} options={[{value:"none",label:"No grouping"},{value:"group",label:"Group by project"},{value:"machine",label:"Group by machine"},{value:"domain",label:"Group by domain"}]} />},
       ]}
-      primaryActions={<><Button variant="secondary" size="icon" aria-label="Refresh proxies" onClick={load} disabled={loading}><IconRefresh size={17} /></Button>{createButton}</>}
+      primaryActions={createButton}
     /> : <div className="mb-2 flex shrink-0 flex-wrap items-center gap-2">
       <div className="contents">
         <div className="min-w-0 basis-full md:flex-1 md:basis-48"><SearchField value={query} onChange={setQuery} label="Search proxies" placeholder="Search proxies…" /></div>

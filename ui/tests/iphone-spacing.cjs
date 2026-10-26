@@ -17,7 +17,7 @@ const origin=process.env.REVIEW_ORIGIN||'http://127.0.0.1:5300';
    // Reproduce a shortened fixed containing block independently of the full
    // screen: JS heights and an inset-only shell are insufficient in this case.
    await page.addStyleTag({content:`#__next {position:fixed;top:0;left:0;width:100%;height:760px;transform:translateZ(0);}`});
-   const nav=page.getByRole('complementary',{name:'Main navigation'});
+   const nav=page.getByRole('complementary',{name:'Main navigation'});let machineSearchWidth;
    for(const view of ['Dashboard','Machines','Rules','Proxies','Traffic','Settings','Platform']){
     await navigateWorkspace(page,view);
     const title={Rules:'Access Rules',Proxies:'Public Web Proxies',Traffic:'Traffic Explorer',Platform:'Platform Overview'}[view]||view;
@@ -26,6 +26,15 @@ const origin=process.env.REVIEW_ORIGIN||'http://127.0.0.1:5300';
     const box=await nav.boundingBox();assert(Math.abs(box.y+box.height-height)<1,`${width} ${view}: bottom navigation fills the full iPhone screen`);
     const heading=await panel.locator('.page-heading').boundingBox();assert(Math.abs(heading.x-12)<1,`${view}: shared 12px page inset`);
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false,`${view}: no horizontal overflow`);
+    if(view==='Machines'||view==='Proxies'){
+     const toolbar=page.locator(`[aria-label="${view==='Machines'?'Machine':'Proxy'} tools"]`);
+     const status=await toolbar.getByRole('group').boundingBox();const filter=await toolbar.getByRole('button',{name:'Filters',exact:true}).boundingBox();
+     assert(Math.abs(filter.x-status.x-status.width-8)<1,`${view}: status and Filters have exactly the shared 8px gap`);
+     const search=await toolbar.locator('.search-field').boundingBox();const actions=await toolbar.getByRole('button',{name:view==='Machines'?'Create machine':'Create proxy',exact:true}).boundingBox();
+     assert(Math.abs(actions.x-search.x-search.width-8)<1,`${view}: search and actions also have an 8px gap`);
+     if(view==='Machines')machineSearchWidth=search.width;else assert(Math.abs(search.width-machineSearchWidth)<1,'Machines and Proxies search rows use identical widths');
+     assert(Math.abs(search.y-actions.y)<1&&Math.abs(status.y-filter.y)<1,`${view}: controls align within their independent rows`);
+    }
     if(view==='Rules'){
      await page.getByLabel('Filter rule group',{exact:true}).waitFor({state:'visible'});const select=await page.getByLabel('Filter rule group',{exact:true}).boundingBox();assert(Math.abs(select.width-(width-24))<2,'Policy group dropdown fills its mobile row');
     }
