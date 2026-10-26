@@ -8,8 +8,10 @@ use std::{
 struct Server(Child);
 impl Drop for Server {
     fn drop(&mut self) {
+        eprintln!("transfer test: stopping server process {}", self.0.id());
         let _ = self.0.kill();
         let _ = self.0.wait();
+        eprintln!("transfer test: server process stopped");
     }
 }
 
@@ -179,6 +181,7 @@ struct SyncJob {
 }
 impl Drop for SyncJob {
     fn drop(&mut self) {
+        eprintln!("watch lifecycle: cleaning up sync job {}", self.id);
         let _ = cli(&self.state)
             .args(["sync", "stop", &self.id])
             .stdout(Stdio::null())
@@ -219,6 +222,8 @@ async fn detached_watch_is_managed_after_launcher_exits_and_foreground_stops_cle
     let _receiver = Server(receiver);
     let base = format!("http://127.0.0.1:{port}/");
     ready(&base).await;
+    eprintln!("watch lifecycle: receiver ready");
+    eprintln!("watch lifecycle: starting detached launcher");
     let output = cli(state.path())
         .arg("push")
         .arg(&source)
@@ -231,6 +236,7 @@ async fn detached_watch_is_managed_after_launcher_exits_and_foreground_stops_cle
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    eprintln!("watch lifecycle: detached launcher returned");
     let text = String::from_utf8(output.stdout).unwrap();
     let id = text
         .lines()
@@ -245,17 +251,22 @@ async fn detached_watch_is_managed_after_launcher_exits_and_foreground_stops_cle
     };
     let target = root.path().join("backups/luna/projects/data");
     uploaded(&target.join("one"), b"initial").await;
+    eprintln!("watch lifecycle: initial sync finished");
     assert!(target.join("empty/deep").is_dir());
     std::fs::write(source.join("one"), b"changed").unwrap();
     uploaded(&target.join("one"), b"changed").await;
+    eprintln!("watch lifecycle: edit synced");
+    eprintln!("watch lifecycle: querying status");
     let status = cli(state.path())
         .args(["sync", "status", &job.id])
         .output()
         .unwrap();
     assert!(status.status.success());
     assert!(String::from_utf8_lossy(&status.stdout).contains("backups/luna/projects/"));
+    eprintln!("watch lifecycle: querying list");
     let list = cli(state.path()).args(["sync", "list"]).output().unwrap();
     assert!(String::from_utf8_lossy(&list.stdout).contains(&job.id));
+    eprintln!("watch lifecycle: stopping detached job");
     let stopped = cli(state.path())
         .args(["sync", "stop", &job.id])
         .output()
@@ -275,6 +286,7 @@ async fn detached_watch_is_managed_after_launcher_exits_and_foreground_stops_cle
     std::fs::write(source.join("one"), b"stopped").unwrap();
     tokio::time::sleep(Duration::from_millis(700)).await;
     assert_eq!(std::fs::read(target.join("one")).unwrap(), b"changed");
+    eprintln!("watch lifecycle: starting foreground job");
     let child = cli(state.path())
         .arg("push")
         .arg(&source)
@@ -286,6 +298,7 @@ async fn detached_watch_is_managed_after_launcher_exits_and_foreground_stops_cle
         .unwrap();
     let mut foreground = Server(child);
     uploaded(&root.path().join("foreground/data/one"), b"stopped").await;
+    eprintln!("watch lifecycle: foreground synced");
     assert!(
         foreground.0.try_wait().unwrap().is_none(),
         "foreground returned early"

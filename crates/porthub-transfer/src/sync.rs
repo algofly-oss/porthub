@@ -253,9 +253,14 @@ pub async fn detach(mut options: Options) -> Result<String> {
             let mut registration = registration;
             registration.token.clear(); // The worker now owns cleanup.
                                         // Reap the child when it exits without keeping the parent alive.
+            #[cfg(unix)]
             std::thread::spawn(move || {
                 let _ = child.wait();
             });
+            // Windows reaps exited processes itself. Closing our handle keeps
+            // the worker alive without a waiting thread in the launcher.
+            #[cfg(windows)]
+            drop(child);
             return Ok(id);
         }
         if let Some(exit) = child.try_wait()? {
