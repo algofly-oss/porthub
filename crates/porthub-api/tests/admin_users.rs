@@ -210,3 +210,28 @@ async fn fresh_public_signup_has_the_same_uniqueness_constraint()->Result<()> {
         Ok(())
     }.await;case.db.drop().await?;result
 }
+
+#[tokio::test]
+#[ignore="requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn deletion_waits_for_inflight_browser_requests_but_invalid_passwords_do_not_take_the_write_gate()->Result<()> {
+    let case=Case::new(Config::default()).await?;
+    let result=async {
+        let (_,admin)=case.user("gate-admin@test.invalid","admin").await?;
+        let (target,_)=case.user("gate-user@test.invalid","user").await?;
+        let request_guard=case.app.account_lifecycle.read().await;
+        let invalid=tokio::time::timeout(std::time::Duration::from_secs(1),case.call("DELETE","/api/auth/delete","",json!({"username":"gate-user@test.invalid","password":"wrong"}),&[])).await??;
+        ensure!(invalid.0==StatusCode::BAD_REQUEST,"Bad credentials must not wait for the maintenance write gate");
+        let path=format!("/api/admin/users/{target}");
+        let mut deletion=Box::pin(case.call("DELETE",&path,&admin,json!({"confirm_email":"gate-user@test.invalid"}),&[]));
+        for _ in 0..50 {
+            if tokio::time::timeout(std::time::Duration::from_millis(10),&mut deletion).await.is_ok(){anyhow::bail!("Deletion bypassed an active browser request");}
+            if case.app.account_lifecycle.try_read().is_err(){break;}
+        }
+        ensure!(case.app.account_lifecycle.try_read().is_err(),"Deletion must queue the exclusive gate");
+        ensure!(case.app.collection("users").count_documents(doc!{"_id":target,"account_deletion":{"$exists":false}}).await?==1);
+        drop(request_guard);
+        ensure!(deletion.await?.0==StatusCode::OK);
+        ensure!(case.app.collection("users").count_documents(doc!{"_id":target}).await?==0);
+        Ok(())
+    }.await;case.db.drop().await?;result
+}

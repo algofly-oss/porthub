@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import apiRoutes from "@/shared/routes/apiRoutes";
 import { copyText } from "@/shared/utils/clipboard";
 
-const inputClass="mt-1.5 h-11 w-full rounded-lg border border-input bg-control px-3 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-blue-500 focus:ring-2 focus:ring-blue-500/15";
+const inputClass="mt-1.5 h-11 w-full rounded-lg border border-input bg-control px-3 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-blue-500 focus:ring-2 focus:ring-blue-500/[0.15]";
 function message(error,fallback) {
   const detail=error?.response?.data?.detail;
   return typeof detail==="string"?detail:Array.isArray(detail)?detail.map(item=>item.msg||item.message||"Invalid input").join(". "):fallback;

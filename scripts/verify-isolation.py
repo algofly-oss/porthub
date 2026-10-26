@@ -563,9 +563,16 @@ def main():
         status,_,body=request("/api/auth/delete",method="DELETE",data=removal,
             headers={"Cookie":cookie,"Content-Type":"application/json"})
         assert status==200, (status,body)
-        assert request("/api/auth/me",headers={"Cookie":cookie})[0]==400
-        assert request("/api/machines/client/config",data=origin_request,
-            headers={"Content-Type":"application/json"})[0]==410
+        for endpoint,expected,payload,request_headers in [
+            ("/api/auth/me",400,None,{"Cookie":cookie}),
+            ("/api/machines/client/config?"+urllib.parse.urlencode(json.loads(origin_request)),410,None,{}),
+        ]:
+            try:
+                request(endpoint,data=payload,headers=request_headers)
+            except urllib.error.HTTPError as error:
+                assert error.code==expected, (endpoint,error.code)
+            else:
+                raise AssertionError("Retired account credentials were accepted: "+endpoint)
         checks.append("account retirement revokes sessions and machine credentials and cascades service cleanup through production ingress and firewall IPC")
 
         report = {"checks": checks, "images": {role: inspect(role)["Image"] for role in config["services"]}}

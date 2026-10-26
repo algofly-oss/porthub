@@ -64,6 +64,8 @@ const {launchBrowser}=require('./browser.cjs');
   const fleet=page.getByRole('region',{name:'Platform results'}).locator('details:visible');await fleet.first().locator('summary').click();
   const portName=fleet.first().getByText(longPort,{exact:true});assert(await portName.evaluate(element=>element.scrollWidth<=element.clientWidth+1),'Long service names wrap');
   await fleet.first().locator('summary').hover();
+  assert.notEqual(await fleet.first().locator('summary').evaluate(element=>getComputedStyle(element).backgroundColor),'rgba(0, 0, 0, 0)','The hovered machine gets its own highlight');
+  assert.equal(await fleet.nth(1).locator('summary').evaluate(element=>getComputedStyle(element).backgroundColor),'rgba(0, 0, 0, 0)','Other machines do not highlight');
   assert.equal(await fleet.first().evaluate(element=>getComputedStyle(element.closest('tr')).backgroundColor),'rgba(0, 0, 0, 0)','Expanded account row must not highlight the entire fleet');
   await page.screenshot({path:path.join(screens,'platform-expanded.png'),fullPage:true});
   await page.getByRole('button',{name:'Create user',exact:true}).click();let modal=page.getByRole('dialog');
@@ -89,6 +91,12 @@ const {launchBrowser}=require('./browser.cjs');
   if(!await mobileFleet.getAttribute('open')) {if(await mobileFleet.getAttribute('open')===null)await mobileFleet.locator('summary').click();}
   assert(await mobileFleet.getByText(longPort,{exact:true}).evaluate(element=>element.scrollWidth<=element.clientWidth+1),'Mobile port names wrap');
   await page.screenshot({path:path.join(screens,'platform-iphone.png'),fullPage:true});
+  await page.waitForLoadState('networkidle');
+  await page.getByRole('button',{name:'More navigation',exact:true}).click();
+  await page.getByRole('link',{name:'User guide',exact:true}).click();
+  await page.getByRole('heading',{name:'Meet PortHub',exact:true}).waitFor();
+  await page.evaluate(()=>window.scrollTo(0,document.body.scrollHeight));await page.waitForTimeout(100);
+  assert(await page.evaluate(()=>window.scrollY>0),'Guide stays scrollable when opened from the workspace');
   assert.deepEqual(errors,[]);console.log('PASS responsive sign-in, guide navigation/search/copy, admin account creation and confirmed deletion');
   await context.close();
  }finally{await browser.close();await new Promise(resolve=>server.close(resolve));await app.close();}

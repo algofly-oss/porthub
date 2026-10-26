@@ -15,13 +15,13 @@ export default function AuthShell({ children }) {
         <p className="mb-5 text-xs font-medium uppercase tracking-[0.2em] text-blue-200">Your infrastructure, connected</p>
         <h1 className="max-w-lg text-[clamp(2.4rem,3.5vw,3.8rem)] font-semibold leading-[1.1] tracking-[-0.045em]">Every machine.<br />One place to connect.</h1>
         <p className="mt-6 max-w-md text-base leading-7 text-slate-300">Bring your machines, services and files together. Publish a port, connect privately, or move a dataset—all from one workspace.</p>
-        <div className="relative my-10 rounded-2xl border border-white/15 bg-[#142340]/90 p-6 shadow-2xl shadow-black/15">
+        <div className="relative my-10 rounded-2xl border border-white/[0.15] bg-[#142340]/90 p-6 shadow-2xl shadow-black/[0.15]">
           <div className="mb-8 flex items-center justify-between text-[11px] text-slate-300"><span className="flex items-center gap-2"><IconRoute size={15} />A connected workspace</span><span className="rounded-full border border-blue-300/20 px-2 py-1 text-blue-200">Private + public</span></div>
           <div className="relative grid grid-cols-3 gap-3 pb-4">
             <svg aria-hidden="true" className="absolute left-0 top-5 h-20 w-full text-blue-400/70" preserveAspectRatio="none" viewBox="0 0 300 80"><path d="M50 0 V35 Q50 45 65 45 H235 Q250 45 250 35 V0 M150 0 V75" fill="none" stroke="currentColor" strokeWidth="1.5" strokeDasharray="4 5" /></svg>
             {[[IconServer,"Your workstation"],[IconServer,"Remote machine"],[IconWorld,"Your services"]].map(([Icon,label])=><div key={label} className="relative flex flex-col items-center gap-3 text-center"><span className="flex h-11 w-11 items-center justify-center rounded-xl border border-blue-300/25 bg-[#1c3359] text-blue-200"><Icon size={21} stroke={1.5} /></span><span className="text-[11px] text-slate-300">{label}</span></div>)}
           </div>
-          <div className="relative mx-auto mt-2 flex w-fit items-center gap-2 rounded-lg border border-blue-300/30 bg-blue-500/15 px-5 py-3 text-sm font-medium"><img src="/favicon.svg" alt="" width="20" height="20" />PortHub</div>
+          <div className="relative mx-auto mt-2 flex w-fit items-center gap-2 rounded-lg border border-blue-300/30 bg-blue-500/[0.15] px-5 py-3 text-sm font-medium"><img src="/favicon.svg" alt="" width="20" height="20" />PortHub</div>
           <div className="mt-6 rounded-lg border border-white/10 bg-[#0c172b] px-4 py-3 font-mono text-xs text-blue-100"><span className="mr-2 select-none text-blue-400">$</span>porthub push ./data http://node.phub:8001/</div>
         </div>
         <div className="flex flex-wrap gap-x-5 gap-y-2 text-xs text-slate-300"><span>Private networking</span><span>Public port mapping</span><span>Built-in transfers</span></div>
