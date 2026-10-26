@@ -70,10 +70,10 @@ export default function PlatformOverview({ active = true }) {
   const visible = filtered.slice(visibleStart, visibleStart + pageSize);
   return <div className="workspace-page">
     <PageHeader title="Platform Overview" />
-    <div className="toolbar flex-row flex-wrap items-center"><div className="min-w-0 basis-full sm:mr-auto sm:basis-72"><SearchField value={query} onChange={setQuery} label="Search platform" placeholder="Search users or machines…" /></div><SearchSelect className="min-w-0 flex-1 sm:w-44 sm:flex-none" label="Filter account role" value={role} onChange={setRole} options={[{value:"all",label:"All roles"},{value:"admin",label:"Administrators"},{value:"user",label:"Members"}]} /><SearchSelect className="min-w-0 flex-1 sm:w-44 sm:flex-none" label="Sort accounts" value={sort} onChange={setSort} options={[{value:"name",label:"Name A–Z"},{value:"machines",label:"Most machines"}]} />
-      <Popover opened={settingsOpen} onChange={setSettingsOpen} withinPortal position="bottom-end" width={360} zIndex={420} shadow="sm" transitionProps={{ duration: 0 }}>
+    <div className="toolbar grid grid-cols-2 sm:flex sm:flex-row sm:flex-wrap sm:items-center"><div className="col-span-2 min-w-0 sm:mr-auto sm:basis-72"><SearchField value={query} onChange={setQuery} label="Search platform" placeholder="Search users or machines…" /></div><SearchSelect className="min-w-0 w-full sm:w-44" label="Filter account role" value={role} onChange={setRole} options={[{value:"all",label:"All roles"},{value:"admin",label:"Administrators"},{value:"user",label:"Members"}]} /><SearchSelect className="min-w-0 w-full sm:w-44" label="Sort accounts" value={sort} onChange={setSort} options={[{value:"name",label:"Name A–Z"},{value:"machines",label:"Most machines"}]} />
+      <div className="col-span-2 flex min-w-0 items-center gap-2 sm:contents"><Popover opened={settingsOpen} onChange={setSettingsOpen} withinPortal position="bottom-end" width={360} zIndex={420} shadow="sm" transitionProps={{ duration: 0 }}>
         <Popover.Target>
-        <button type="button" aria-expanded={settingsOpen} onClick={() => setSettingsOpen(open => !open)} className="flex h-10 shrink-0 cursor-pointer items-center gap-2 rounded-lg border border-transparent bg-control px-3 text-sm text-foreground hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        <button type="button" aria-expanded={settingsOpen} onClick={() => setSettingsOpen(open => !open)} className="flex h-11 flex-1 cursor-pointer md:h-10 items-center justify-between gap-2 rounded-lg border border-transparent bg-control px-3 text-sm text-foreground sm:flex-none hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
           Platform settings
           <IconChevronDown size={14} className="text-muted-foreground" />
         </button>
@@ -101,7 +101,7 @@ export default function PlatformOverview({ active = true }) {
           </div>
         </Popover.Dropdown>
       </Popover>
-      <Button type="button" variant="outline" onClick={load} disabled={loading} aria-label="Refresh platform"><IconRefresh size={15} /><span className="hidden sm:inline">Refresh</span></Button></div>
+      <Button type="button" variant="outline" onClick={load} disabled={loading} aria-label="Refresh platform"><IconRefresh size={15} /><span className="hidden sm:inline">Refresh</span></Button></div></div>
     {error ? <EmptyState icon={IconServer} title="Platform unavailable" description={error} action={<Button onClick={load}>Try again</Button>} /> : loading ? <p role="status" className="p-6 text-xs text-muted-foreground">Loading accounts…</p> : !filtered.length ? <EmptyState icon={IconUsers} title="No matching accounts" description="Try a different name, email, machine, or port." /> : <section aria-label="Platform results" className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-surface">
       <div className="data-scroll">
         <div className="hidden lg:block"><Table aria-label="Platform accounts"><TableHeader><TableRow><TableHead className="w-[40%]">Account</TableHead><TableHead>Role</TableHead><TableHead>Machines</TableHead><TableHead>Online</TableHead></TableRow></TableHeader><TableBody>{visible.map(entry => <AccountRow key={entry.user.id} entry={entry} expanded={expanded === entry.user.id} toggle={() => setExpanded(expanded === entry.user.id ? "" : entry.user.id)} reduced={reduced} />)}</TableBody></Table></div>

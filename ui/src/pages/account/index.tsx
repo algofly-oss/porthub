@@ -1,8 +1,9 @@
 import useAuth from "@/shared/hooks/useAuth";
+import { useEffect } from "react";
 
 export default function App(props: any) {
   const auth = useAuth();
-  auth.autoRoute();
+  useEffect(() => { auth.autoRoute(); }, []);
 
   return null;
 }

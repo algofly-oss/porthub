@@ -243,7 +243,7 @@ export default function AccessRules({ active = true }) {
                   </Button>
                 )}
                 <SearchSelect
-                  className="min-w-0 sm:w-44"
+                  className="col-span-2 min-w-0 sm:w-44"
                   label="Filter rule group"
                   value={group}
                   onChange={setGroup}

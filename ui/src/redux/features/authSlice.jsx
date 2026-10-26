@@ -11,16 +11,22 @@ export const authSlice = createSlice({
   name: "auth",
   initialState: {
     user: initialUserState,
+    connectionError: null,
   },
   reducers: {
     setAccountInfo: (state, action) => {
       state.user = action.payload;
+      state.connectionError = null;
     },
     updateAccountInfo: (state, action) => {
       state.user = Object.assign(state.user, action.payload);
     },
     resetAccountInfo: (state) => {
       state.user = initialUserState;
+      state.connectionError = null;
+    },
+    accountUnavailable: (state) => {
+      state.connectionError = "Could not reconnect to PortHub. Your saved session has not been cleared.";
     },
   },
 });

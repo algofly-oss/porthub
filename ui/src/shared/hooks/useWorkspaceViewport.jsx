@@ -13,6 +13,7 @@ export default function useWorkspaceViewport() {
         root.classList.remove("workspace-standalone", "workspace-keyboard");
         root.style.removeProperty("--workspace-height");
         root.style.removeProperty("--workspace-top");
+        root.style.removeProperty("--workspace-standalone-height");
         return;
       }
       // Leave pinch zoom to the browser rather than resizing the application.
@@ -27,10 +28,21 @@ export default function useWorkspaceViewport() {
       // undersized visualViewport. Anchor the shell to all four viewport edges
       // in CSS instead of trusting either cached number for its bottom edge.
       if (installed && !keyboardOpen) {
+        // Full-screen iPhones can report a stale, Safari-sized layout viewport
+        // after launching a Home Screen app. Use the matching screen dimension
+        // only when its width proves this is a full-screen phone window.
+        const phone = /iPhone|iPod/.test(window.navigator.userAgent);
+        const screenHeight = phone && Math.abs(window.innerWidth - window.screen.width) < 2
+          ? window.screen.height
+          : phone && Math.abs(window.innerWidth - window.screen.height) < 2
+            ? window.screen.width : 0;
+        if (screenHeight) root.style.setProperty("--workspace-standalone-height", `${screenHeight}px`);
+        else root.style.removeProperty("--workspace-standalone-height");
         root.style.removeProperty("--workspace-height");
         root.style.removeProperty("--workspace-top");
         return;
       }
+      root.style.removeProperty("--workspace-standalone-height");
       const height = viewport?.height || window.innerHeight;
       const top = viewport?.offsetTop || 0;
       root.style.setProperty("--workspace-height", `${height}px`);
@@ -53,6 +65,7 @@ export default function useWorkspaceViewport() {
       root.classList.remove("workspace-active", "workspace-standalone", "workspace-keyboard");
       root.style.removeProperty("--workspace-height");
       root.style.removeProperty("--workspace-top");
+      root.style.removeProperty("--workspace-standalone-height");
       window.removeEventListener("resize", schedule);
       window.removeEventListener("orientationchange", schedule);
       window.removeEventListener("pageshow", schedule);

@@ -6,20 +6,45 @@ import axios from "axios";
 import apiRoutes from "../routes/apiRoutes";
 import uiRoutes from "../routes/uiRoutes";
 
+let accountRequest = null;
+let accountController = null;
+let accountEpoch = 0;
+function invalidateAccountRequest() {
+  accountEpoch += 1;
+  accountController?.abort();
+  accountController = null;
+  accountRequest = null;
+}
+
 export default function useAuth() {
   const user = useSelector(authSelector);
+  const connectionError = useSelector(state => state.auth.connectionError);
   const dispatch = useDispatch();
   const router = useRouter();
   const [authSettings, setAuthSettings] = useState(null);
 
   useEffect(() => {
     if (!user?.username) {
-      getAccountInfo();
+      getAccountInfo().catch(() => {});
     }
     getAuthSettings();
+    const reconnect = () => {
+      if (document.visibilityState !== "hidden") getAccountInfo().then(data => {
+        if (data && !data.username && router.pathname === uiRoutes.home) router.replace(uiRoutes.signIn);
+      }).catch(() => {});
+    };
+    window.addEventListener("online", reconnect);
+    window.addEventListener("pageshow", reconnect);
+    document.addEventListener("visibilitychange", reconnect);
+    return () => {
+      window.removeEventListener("online", reconnect);
+      window.removeEventListener("pageshow", reconnect);
+      document.removeEventListener("visibilitychange", reconnect);
+    };
   }, []);
 
   const clearStorage = () => {
+    invalidateAccountRequest();
     // remove all user data except theme preference
     const theme = localStorage.theme || "light";
     localStorage.clear();
@@ -29,17 +54,36 @@ export default function useAuth() {
   };
 
   const getAccountInfo = async () => {
-    return await axios
-      .get(apiRoutes.accountInfo)
-      .then((res) => {
-        if (res?.data?.username) {
-          dispatch(authActions.setAccountInfo(res.data));
-          return res.data;
-        } else {
-          return {};
-        }
-      })
-      .catch((err) => {});
+    const epoch = accountEpoch;
+    if (!accountRequest) {
+      accountController = new AbortController();
+      accountRequest = axios.get(apiRoutes.accountInfo, {
+        timeout: 20000,
+        signal: accountController.signal,
+        headers: { "Cache-Control": "no-store" },
+      });
+    }
+    const request = accountRequest;
+    try {
+      const response = await request;
+      if (epoch !== accountEpoch) return null;
+      if (!response?.data?.username) throw new Error("Account response is unavailable");
+      dispatch(authActions.setAccountInfo(response.data));
+      return response.data;
+    } catch (error) {
+      if (epoch !== accountEpoch) return null;
+      if (error?.response?.status === 401) {
+        dispatch(authActions.resetAccountInfo());
+        return {};
+      }
+      dispatch(authActions.accountUnavailable());
+      throw error;
+    } finally {
+      if (accountRequest === request) {
+        accountRequest = null;
+        accountController = null;
+      }
+    }
   };
 
   const getAuthSettings = async () => {
@@ -60,6 +104,7 @@ export default function useAuth() {
   };
 
   const signUp = async (name, username, password) => {
+    invalidateAccountRequest();
     try {
       const response = await axios.post(apiRoutes.signUp, {
         name,
@@ -76,6 +121,7 @@ export default function useAuth() {
   };
 
   const signIn = async (username, password) => {
+    invalidateAccountRequest();
     try {
       const response = await axios.post(apiRoutes.signIn, {
         username,
@@ -92,11 +138,11 @@ export default function useAuth() {
 
   const signOut = async (args) => {
     return await axios
-      .post(apiRoutes.signOut, { withCredentials: true })
+      .post(apiRoutes.signOut, {}, { withCredentials: true })
       .then((res) => {
         clearStorage();
         if (args?.redirect) {
-          router.push(uiRoutes.root);
+          router.replace(uiRoutes.signIn);
         }
       })
       .catch((err) => {
@@ -106,6 +152,7 @@ export default function useAuth() {
 
   const autoRoute = async (redirectUrl) => {
     await getAccountInfo().then((data) => {
+      if (data === null) return;
       switch (data?.role) {
         case "admin":
           if (router.pathname !== uiRoutes.home) router.push(uiRoutes.home);
@@ -114,15 +161,16 @@ export default function useAuth() {
           if (router.pathname !== uiRoutes.home) router.push(uiRoutes.home);
           break;
         default:
-          router.push(redirectUrl || uiRoutes.signIn);
+          if (router.pathname !== (redirectUrl || uiRoutes.signIn)) router.replace(redirectUrl || uiRoutes.signIn);
           break;
       }
-    });
+    }).catch(() => {});
   };
 
   return {
     user,
     authSettings,
+    connectionError,
     signUp,
     signIn,
     signOut,

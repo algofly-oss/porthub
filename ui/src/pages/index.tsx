@@ -3,6 +3,7 @@ import { useRouter } from "next/router";
 import Link from "next/link";
 import useAuth from "@/shared/hooks/useAuth";
 import uiRoutes from "@/shared/routes/uiRoutes";
+import SessionStatus from "@/components/Account/SessionStatus";
 
 export default function App(props: any) {
   const router = useRouter();
@@ -12,5 +13,5 @@ export default function App(props: any) {
     auth.autoRoute();
   }, []);
 
-  return null;
+  return <SessionStatus error={auth.connectionError} onRetry={() => auth.autoRoute()} />;
 }

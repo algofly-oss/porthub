@@ -19,7 +19,7 @@
   .workspace-body > main { @apply min-h-0 flex-1 overflow-hidden outline-none; }
   .workspace-sidebar { @apply border-t border-zinc-300 bg-zinc-100 dark:border-zinc-800 dark:bg-black md:border-r md:border-t-0; height: calc(64px + env(safe-area-inset-bottom)); padding-bottom: env(safe-area-inset-bottom); }
   .workspace-page { @apply mx-auto flex h-full min-h-0 w-full max-w-[1600px] flex-col overflow-hidden px-3 pt-3 pb-2 sm:px-5 md:py-4; }
-  .page-heading { @apply mb-3 flex shrink-0 items-center justify-between gap-3; }
+  .page-heading { @apply mb-3 flex min-h-[36px] shrink-0 items-center justify-between gap-3; }
   .page-heading h1 { @apply text-xl font-semibold tracking-tight; }
   .eyebrow { @apply text-[10px] font-semibold uppercase tracking-[0.18em] text-blue-600 dark:text-blue-400; }
   .page-description { @apply mt-2 max-w-2xl text-sm leading-6 text-zinc-500 dark:text-zinc-400; }
@@ -47,7 +47,7 @@
   .data-scroll { @apply min-h-0 flex-1 overflow-auto overscroll-contain; scrollbar-width: thin; scrollbar-color: #71717a transparent; }
   /* The scrollbar track is transparent, so paint the strip beside the sticky
      table header (h-11) in the header colour; it stays put while scrolling. */
-  .data-scroll:has(> table:first-child > thead), .data-scroll:has(> div:first-child > table:first-child > thead) { background: linear-gradient(hsl(var(--muted)) 2.75rem, transparent 2.75rem) no-repeat; }
+  .data-scroll:has(> table:first-child > thead), .data-scroll:has(> div:first-child:not(.hidden) > table:first-child > thead) { background: linear-gradient(hsl(var(--muted)) 2.75rem, transparent 2.75rem) no-repeat; }
   .metric-strip { @apply mb-5 flex shrink-0 flex-wrap items-center gap-x-5 gap-y-2 text-sm; }
   .metric-item { @apply inline-flex items-center gap-2; }
   .proxy-results { @apply flex min-h-0 flex-1 flex-col; }
@@ -62,8 +62,12 @@ html.workspace-active, html.workspace-active body { height: 100%; overflow: hidd
   html.workspace-active, html.workspace-active body { background: #f4f4f5; }
   html.dark.workspace-active, html.dark.workspace-active body { background: #000; }
   html.workspace-active body { position: fixed; inset: 0; width: 100%; }
+  html.workspace-standalone, html.workspace-standalone body { height: var(--workspace-standalone-height, 100%); }
   .workspace { position: fixed; inset-inline: 0; top: var(--workspace-top, 0px); }
-  .workspace-standalone .workspace { inset: 0; height: auto; }
+  .workspace-standalone .workspace { inset: 0; height: var(--workspace-standalone-height, auto); }
+  .workspace-sidebar { padding-left: 8px; padding-right: 8px; }
+  .page-heading { min-height: 44px; }
+  .search-field, .control { height: 44px; }
   .workspace-standalone.workspace-keyboard .workspace { top: var(--workspace-top, 0px); bottom: auto; height: var(--workspace-height); }
 }
 html.theme-changing *, html.theme-changing *::before, html.theme-changing *::after {
@@ -97,7 +101,7 @@ html[data-keyboard-navigation] :is(input:not([type=checkbox]):not([type=radio]),
 .nav-item { position: relative; display: flex; flex: 1; min-width: 0; min-height: 44px; flex-direction: column; align-items: center; justify-content: center; gap: 4px; border-radius: 8px; padding: 6px 4px; font-size: 10px; color: hsl(var(--muted-foreground)); }
 .nav-item.is-current { background: hsl(var(--muted)); color: hsl(var(--foreground)); }
 .nav-item.is-current::before { content: none; }
-.nav-item:hover { color: hsl(var(--foreground)); background: hsl(var(--muted) / .7); }
+@media (hover: hover) { .nav-item:hover { color: hsl(var(--foreground)); background: hsl(var(--muted) / .7); } }
 @media (min-width: 768px) { .workspace { padding-top: 0; } .nav-item { flex: initial; min-width: 44px; flex-direction: row; justify-content: flex-start; gap: 12px; padding: 10px 12px; font-size: 14px; } .nav-item-collapsed { justify-content: center; padding: 10px; } .nav-item.is-current::before { content: ''; position: absolute; left: 0; top: 13px; bottom: 13px; width: 3px; border-radius: 3px; background: #2563eb; } }
 .settings-nav button { font-size: 14px; }
 button, a, input, select { touch-action: manipulation; }
@@ -126,6 +130,8 @@ button, a, input, select { touch-action: manipulation; }
   .settings-nav button { flex-direction: column; gap: 4px; padding: 8px 4px; font-size: 10px; }
 }
 @media (min-width: 768px) { .workspace-body { padding-bottom: 0; } .workspace-sidebar { height: 100dvh; } }
+@media (min-width: 768px) { .data-scroll:has(> div:first-child[class~="md:block"] > table:first-child > thead) { background: linear-gradient(hsl(var(--muted)) 2.75rem, transparent 2.75rem) no-repeat; } }
+@media (min-width: 1024px) { .data-scroll:has(> div:first-child[class~="lg:block"] > table:first-child > thead) { background: linear-gradient(hsl(var(--muted)) 2.75rem, transparent 2.75rem) no-repeat; } }
 @media (min-width: 768px) { .group-workspace { grid-template-columns: 200px minmax(0,1fr); grid-template-rows: minmax(0,1fr); } }
 @media (min-width: 1024px) { .settings-layout { grid-template-rows: minmax(0, 1fr); } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; } }

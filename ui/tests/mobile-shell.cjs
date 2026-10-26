@@ -23,7 +23,7 @@ const {launchBrowser}=require("./browser.cjs");
     assert.equal(geometry.pagePadding,"8px",`${view}: small intentional inset separates panels from navigation`);
     assert(["none","normal"].includes(geometry.line),`${view}: no blue active line on phone`);
     if(["machines","proxies"].includes(view)){
-     const insets=await page.locator('[aria-label$="tools"] [role="group"]').evaluateAll(groups=>groups.map(group=>{
+     const insets=await page.locator('[aria-label$="tools"] [role="group"]:visible').evaluateAll(groups=>groups.map(group=>{
       const box=group.getBoundingClientRect(),buttons=group.querySelectorAll("button"),first=buttons[0].getBoundingClientRect(),last=buttons[buttons.length-1].getBoundingClientRect();
       return [first.top-box.top,box.bottom-first.bottom,first.left-box.left,box.right-last.right];
      }));

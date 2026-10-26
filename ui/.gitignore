@@ -10,10 +10,7 @@
 
 # next.js
 /.next/
-/.next-review/
-/.next-porthub-review/
-/.next-dev-local/
-/.next-verify-*/
+/.next-*/
 /out/
 /public/sw.js
 /public/sw.js.map
