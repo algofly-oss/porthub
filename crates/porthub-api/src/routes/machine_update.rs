@@ -96,6 +96,10 @@ async fn update(
     if input.present.contains("group_ids") {
         let groups =
             super::machines::valid_groups(&app, owner, input.groups.unwrap_or_default()).await?;
+        let mut candidate = previous.clone();
+        candidate.insert("group_ids", &groups);
+        candidate.remove("group_id");
+        super::exit_nodes::validate_machine_changes(&app, owner, &[candidate]).await?;
         set.insert("group_ids", groups);
         unset.insert("group_id", "");
     }
@@ -206,6 +210,9 @@ async fn ensure_private_domains_unique(
         let label = crate::domain::private_names::label(Some(&Bson::String(label.to_owned())));
         set.insert(format!("{label}.{suffix}").to_ascii_lowercase())
     }
+    let zones: Vec<String> = std::iter::once(default_suffix.to_owned())
+        .chain(domains.iter().filter(|domain| !domain.default).map(|domain| domain.suffix.clone())).collect();
+    crate::routes::dns_rules::ensure_zones_available(app, owner, &zones).await?;
     let peers: Vec<Document> = app
         .collection("private_peers")
         .find(doc! {"workspace_id":owner})

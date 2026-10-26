@@ -67,6 +67,16 @@ impl Sender {
                     cid.hash(&mut hash);
                 }
             }
+        } else if packet.len() >= 40 && packet[9] == porthub_mesh::control_packet::EXIT {
+            // Hash the inner flow so parallel exit connections can use separate
+            // carriers without reordering packets within a connection.
+            let inner = &packet[20..];
+            inner[9].hash(&mut hash);
+            inner[12..20].hash(&mut hash);
+            let header = usize::from(inner[0] & 15) * 4;
+            if matches!(inner[9], 6 | 17) && header >= 20 {
+                if let Some(ports) = inner.get(header..header + 4) { ports.hash(&mut hash); }
+            }
         } else if packet.len() >= 20 {
             packet[9].hash(&mut hash);
             packet[12..20].hash(&mut hash);
@@ -190,8 +200,22 @@ pub async fn run(
     profile: Profile,
     instance: String,
     sender: Sender,
+    packets: [mpsc::Receiver<Bytes>; RELAY_LANES],
+    config: watch::Receiver<Option<Config>>,
+    events: mpsc::Sender<Event>,
+    cancel: CancellationToken,
+) -> Result<()> {
+    let (_source, interfaces) = watch::channel(Vec::new());
+    run_bound(profile, instance, sender, packets, config, interfaces, events, cancel).await
+}
+
+pub async fn run_bound(
+    profile: Profile,
+    instance: String,
+    sender: Sender,
     mut packets: [mpsc::Receiver<Bytes>; RELAY_LANES],
     mut config: watch::Receiver<Option<Config>>,
+    interfaces: watch::Receiver<Vec<std::net::SocketAddr>>,
     events: mpsc::Sender<Event>,
     cancel: CancellationToken,
 ) -> Result<()> {
@@ -239,6 +263,7 @@ pub async fn run(
                 .cloned()
                 .map(|base| (base, profile.token.clone())),
         );
+        let local: Vec<_> = interfaces.borrow().iter().map(|address| address.ip()).collect();
         let mut primary = None;
         for (base, token) in candidates {
             if let Some(connection) = connect_lane(
@@ -248,6 +273,7 @@ pub async fn run(
                 &instance,
                 0,
                 RELAY_LANES as u8,
+                &local,
                 &cancel,
             )
             .await?
@@ -267,6 +293,7 @@ pub async fn run(
                     &instance,
                     lane as u8,
                     lane_count,
+                    &local,
                     &cancel,
                 )
                 .await?
@@ -317,6 +344,7 @@ async fn connect_lane(
     instance: &str,
     lane: u8,
     requested_lanes: u8,
+    local: &[std::net::IpAddr],
     cancel: &CancellationToken,
 ) -> Result<Option<ConnectedLane>> {
     let Ok(mut url) = url::Url::parse(base) else { return Ok(None); };
@@ -346,8 +374,12 @@ async fn connect_lane(
         _=cancel.cancelled()=>return Ok(None),
         result=tokio::time::timeout(
             Duration::from_secs(2),
-            tokio_tungstenite::connect_async_with_config(
+            async {
+                let stream = porthub_mesh::underlay::connect(&url, local).await?;
+                porthub_mesh::configure_tcp(&stream);
+                Ok::<_,anyhow::Error>(tokio_tungstenite::client_async_tls_with_config(
                 request,
+                stream,
                 Some(
                     tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
                         .read_buffer_size(8192)
@@ -356,8 +388,9 @@ async fn connect_lane(
                         .max_message_size(Some(65536))
                         .max_frame_size(Some(65536)),
                 ),
-                true,
-            ),
+                None,
+            ).await?)
+            },
         )=>result,
     };
     let Ok(Ok((socket, response))) = result else {
@@ -494,6 +527,29 @@ async fn write_lane(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exit_flows_keep_carrier_affinity_and_distribute_parallel_connections() {
+        let (sender, _inputs) = channel();
+        for lane in 0..RELAY_LANES { sender.set_ready(lane, true); }
+        let mut packet = vec![0u8; 100];
+        packet[9] = porthub_mesh::control_packet::EXIT;
+        packet[20] = 0x45; packet[29] = 6;
+        packet[32..36].copy_from_slice(&[10,203,0,1]);
+        packet[36..40].copy_from_slice(&[8,8,8,8]);
+        packet[42..44].copy_from_slice(&443u16.to_be_bytes());
+        let mut lanes = std::collections::HashSet::new();
+        for port in 40000..40100u16 {
+            packet[40..42].copy_from_slice(&port.to_be_bytes());
+            let lane = sender.packet_lane("exit", &packet).unwrap();
+            lanes.insert(lane);
+            for value in [0, 1, 255] {
+                packet[44..].fill(value);
+                assert_eq!(sender.packet_lane("exit", &packet).unwrap(), lane);
+            }
+        }
+        assert!(lanes.len() > 1);
+    }
 
     #[test]
     fn stream_packets_keep_carrier_affinity_when_payload_changes() {
@@ -689,6 +745,7 @@ mod tests {
                 "instance",
                 lane as u8,
                 4,
+                &[],
                 &cancel,
             )
             .await?;

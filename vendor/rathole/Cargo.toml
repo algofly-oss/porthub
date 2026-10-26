@@ -15,6 +15,7 @@ default = ["server", "client", "tls", "noise", "websocket", "hot-reload"]
 
 # Run as a server
 server = []
+http-access = ["dep:porthub-runtime"]
 # Run as a client
 client = []
 # TLS support
@@ -54,6 +55,7 @@ lto = true
 codegen-units = 1
 
 [dependencies]
+porthub-runtime = { path = "../../crates/porthub-runtime", optional = true }
 porthub-identity = { path = "../../crates/porthub-identity" }
 tokio = { version = "1", features = ["full"] }
 bytes = { version = "1", features = ["serde"] }

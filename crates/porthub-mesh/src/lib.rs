@@ -5,6 +5,9 @@ pub const MAX_PACKET: usize = 1380;
 pub const RELAY_BATCH_MAGIC: &[u8; 4] = batch::LEGACY;
 pub mod batch;
 pub mod control_packet;
+pub mod underlay;
+pub mod dns_policy;
+pub mod exit_policy;
 pub mod protocol;
 pub mod relay;
 #[cfg(feature = "streams")]

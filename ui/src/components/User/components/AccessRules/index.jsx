@@ -10,6 +10,7 @@ import {
   IconFolder,
   IconUsers,
   IconSettings,
+  IconRoute,
 } from "@tabler/icons-react";
 import { Button } from "@/components/ui/button";
 import SearchSelect from "@/components/ui/search-select";
@@ -23,6 +24,8 @@ import GroupEditor from "./GroupEditor";
 import NetworkSettings from "./NetworkSettings";
 import InviteEditor from "./InviteEditor";
 import PolicyTable from "./PolicyTable";
+import ExitRoutes from "./ExitRoutes";
+import DnsRules from "./DnsRules";
 
 export default function AccessRules({ active = true }) {
   const router = useRouter(),
@@ -173,6 +176,7 @@ export default function AccessRules({ active = true }) {
       >
         {[
           ["rules", "Policies", IconShieldLock],
+          ["routes", "Routes", IconRoute],
           ["groups", "Groups", IconFolder],
           ["people", "People", IconUsers],
           ["network", "Network", IconSettings],
@@ -308,6 +312,9 @@ export default function AccessRules({ active = true }) {
               onOpen={(group) => setEditor({ kind: "group", data: group })}
             />
           )}
+          {section === "routes" && (
+            <ExitRoutes data={data} manage={manage} params={params} onSaved={load} />
+          )}
           {section === "people" && (
             <section className="data-scroll overflow-auto rounded-xl bg-surface p-4">
               <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -406,6 +413,7 @@ export default function AccessRules({ active = true }) {
                 params={params}
                 onSaved={load}
               />
+              <DnsRules data={data} manage={manage} params={params} onSaved={load} />
             </div>
           )}
         </>

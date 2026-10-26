@@ -19,6 +19,8 @@ use std::{
 struct Service {
     token: String,
     bind_addr: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    access: Option<porthub_runtime::public_access::Config>,
 }
 #[derive(Serialize)]
 struct Server {
@@ -87,6 +89,10 @@ pub fn render(machines: &[Document], connections: &[Document]) -> anyhow::Result
         let previous = services.insert(
             service_key(connection),
             Service {
+                access: match connection.get("public_access") {
+                    None => None,
+                    Some(value) => Some(mongodb::bson::from_bson(value.clone())?),
+                },
                 token: store::string(machine, "token").into(),
                 bind_addr: address.to_string(),
             },
@@ -231,6 +237,7 @@ pub fn render_web(routes: &[Document]) -> anyhow::Result<porthub_runtime::web_ro
             pass_host,
             http: entries.is_empty() || entries.contains(&"web"),
             https: true,
+            access: None,
         });
     }
     Ok(porthub_runtime::web_routes::Config { routes: result })

@@ -221,7 +221,7 @@ impl Control {
         .await
     }
     pub async fn sync(&self, hostname: &str, handled: &str) -> Result<Reply, Failure> {
-        self.request(Method::POST,"machines/client/sync",Some(serde_json::json!({"machine_id":self.profile.machine_id,"token":self.profile.token,"hostname":hostname,"local_ip":local_address(),"client_version":crate::VERSION,"client_update_last_handled_request_id":handled,"is_active":true})),&[]).await
+        self.request(Method::POST,"machines/client/sync",Some(serde_json::json!({"machine_id":self.profile.machine_id,"token":self.profile.token,"hostname":hostname,"local_ip":local_address(),"client_os":std::env::consts::OS,"client_arch":std::env::consts::ARCH,"client_version":crate::VERSION,"client_update_last_handled_request_id":handled,"is_active":true})),&[]).await
     }
     pub async fn changes(&self, version: &str) -> Result<Reply, Failure> {
         self.request(

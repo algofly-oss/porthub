@@ -1,5 +1,5 @@
 use crate::{
-    auth,
+    App, auth,
     domain::{
         inventory,
         traffic_routes::{self, Input},
@@ -9,21 +9,21 @@ use crate::{
     generated,
     input::{ApiBody, Model},
     input_compat::strip,
-    store, App,
+    store,
 };
 use axum::{
+    Json, Router,
     extract::State,
     http::HeaderMap,
     routing::{get, post, put},
-    Json, Router,
 };
 use futures_util::TryStreamExt;
 use mongodb::{
-    bson::{doc, oid::ObjectId, Bson, DateTime, Document},
-    options::IndexOptions,
     IndexModel,
+    bson::{Bson, DateTime, Document, doc, oid::ObjectId},
+    options::IndexOptions,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{collections::BTreeSet, sync::Arc};
 
 pub fn router() -> Router<Arc<App>> {
@@ -90,6 +90,11 @@ async fn metadata(app: &App, owner: &Bson, id: &str) -> ApiResult<Bson> {
         .find_one(doc! {"_id":id,"user_id":owner})
         .await?
         .ok_or_else(|| ApiError::bad_request("Mapped port-pair entry not found"))?;
+    if connection.get_bool("temporary") == Ok(true) {
+        return Err(ApiError::bad_request(
+            "Temporary agent mappings can only use their generated proxy address",
+        ));
+    }
     let machine = match connection.get("machine_id") {
         Some(id) => {
             app.collection("machines")
@@ -209,6 +214,11 @@ async fn update(
     let id = input.data_id.clone().unwrap_or_default();
     let _guard = app.traffic_route_lock.lock().await;
     let previous = owned(&app, owner, &id).await?;
+    if previous.get_bool("temporary") == Ok(true) {
+        return Err(ApiError::bad_request(
+            "Temporary agent proxies can only be stopped from the PortHub CLI",
+        ));
+    }
     let id = previous.get_object_id("_id").unwrap();
     let patch = document(&app, owner, input).await?;
     let mut candidate = previous.clone();
@@ -264,6 +274,11 @@ async fn delete(
     let owner = user.get("_id").ok_or_else(ApiError::unauthenticated)?;
     let _guard = app.traffic_route_lock.lock().await;
     let previous = owned(&app, owner, &id).await?;
+    if previous.get_bool("temporary") == Ok(true) {
+        return Err(ApiError::bad_request(
+            "Temporary agent proxies can only be stopped from the PortHub CLI",
+        ));
+    }
     let id = previous.get_object_id("_id").unwrap();
     app.collection("traffic_routes")
         .delete_one(doc! {"_id":id,"user_id":owner})

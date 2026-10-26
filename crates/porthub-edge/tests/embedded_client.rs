@@ -242,3 +242,59 @@ async fn file_runner_handles_atomic_replacement_and_retains_services_on_invalid_
     .await??;
     Ok(())
 }
+
+#[tokio::test]
+async fn locked_public_port_and_hostname_proxy_share_enforcement() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        use axum::{body::Body, http::{Request, StatusCode}, routing::any, Router};
+        use porthub_runtime::web_routes::{Config as WebConfig, Route, WebRoutes};
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let target = TcpListener::bind("127.0.0.1:0").await?;
+        let target_address = target.local_addr()?;
+        let app = Router::new().fallback(any(move |request: Request<Body>| {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                assert!(!request.headers().contains_key("x-porthub-key"));
+                "protected response"
+            }
+        }));
+        let mut workers = JoinSet::new();
+        workers.spawn(async move { let _ = axum::serve(target, app).await; });
+        let public = unused().await?;
+        let verifier = bcrypt::hash("123456", 10)?;
+        let configuration = format!("[server.services.fixture]\ntoken=\"fixture-secret\"\nbind_addr=\"{public}\"\n[server.services.fixture.access]\nverifier=\"{verifier}\"\npin=true\n");
+        let gateway = Arc::new(RwLock::new(EmbeddedServer::new(gateway_config(&configuration)?).await?));
+        let web = Arc::new(WebRoutes::new(None));
+        // Machine proxies target the protected public listener, so there is
+        // one authoritative gate and no second credential-stripping gate.
+        web.reload(WebConfig { routes: vec![Route { id: "protected".into(), hosts: vec!["protected.example".into()], target_url: format!("http://{public}"), pass_host: true, http: true, https: true, access: None }] })?;
+        let ingress = TcpListener::bind("127.0.0.1:0").await?;
+        let address = ingress.local_addr()?;
+        let router = porthub_edge::router_with_web(gateway.clone(), None, web);
+        workers.spawn(async move { let _ = axum::serve(ingress, router).await; });
+        let agent = EmbeddedClient::new(client(address, &[("fixture".into(), target_address)])?).await?;
+        loop {
+            if TcpStream::connect(public).await.is_ok() { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build()?;
+        for (url, host) in [(format!("http://{public}/"), None), (format!("http://{address}/"), Some("protected.example"))] {
+            let mut request = http.get(&url);
+            if let Some(host) = host { request = request.header("host", host); }
+            ensure!(request.send().await?.status() == StatusCode::UNAUTHORIZED);
+            let mut request = http.get(&url).header("x-porthub-key", "123456");
+            if let Some(host) = host { request = request.header("host", host); }
+            let response = request.send().await?;
+            ensure!(response.status() == StatusCode::OK);
+            ensure!(response.text().await? == "protected response");
+        }
+        ensure!(hits.load(Ordering::SeqCst) == 2);
+        agent.shutdown().await;
+        gateway.write().await.shutdown().await;
+        workers.shutdown().await;
+        Ok::<_, anyhow::Error>(())
+    }).await??;
+    Ok(())
+}

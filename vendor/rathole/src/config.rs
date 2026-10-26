@@ -102,6 +102,16 @@ pub struct ServerServiceConfig {
     pub bind_addr: String,
     pub token: Option<MaskedString>,
     pub nodelay: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<PublicAccessConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PublicAccessConfig {
+    pub verifier: MaskedString,
+    #[serde(default)]
+    pub pin: bool,
 }
 
 impl ServerServiceConfig {
@@ -270,6 +280,17 @@ impl Config {
         // Validate services
         for (name, s) in &mut server.services {
             s.name = name.clone();
+            if s.access.is_some() {
+                if s.service_type != ServiceType::Tcp { bail!("HTTP access lock requires a TCP service"); }
+                #[cfg(not(feature = "http-access"))]
+                bail!("This server build does not support HTTP access locks");
+                #[cfg(feature = "http-access")]
+                if let Some(access) = &s.access {
+                    porthub_runtime::public_access::Gate::new(name, porthub_runtime::public_access::Config {
+                        verifier: access.verifier.to_string(), pin: access.pin,
+                    })?;
+                }
+            }
             if s.token.is_none() {
                 s.token = server.default_token.clone();
                 if s.token.is_none() {

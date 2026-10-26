@@ -1132,6 +1132,211 @@ export const guideArticles = [
         ]
       }
     ]
+  },
+  {
+    "slug": "temporary-exposure",
+    "group": "Networking",
+    "title": "Temporary CLI tunnels",
+    "description": "Expose a local service using an existing registered account.",
+    "sections": [
+      {
+        "id": "start",
+        "title": "Expose a local port",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "Start your local application first. PortHub authenticates with the selected machine registration and reserves a free port from the gateway\u2019s normal public port range. The terminal prints the public address."
+          },
+          {
+            "type": "code",
+            "label": "Terminal",
+            "text": "porthub expose 3000"
+          },
+          {
+            "type": "paragraph",
+            "text": "Leave the terminal open. Press Ctrl+C to release the mapping. If the agent loses connectivity, the gateway expires its temporary lease. Stopping the local application alone does not stop the exposure."
+          }
+        ]
+      },
+      {
+        "id": "options",
+        "title": "Choose a port, subdomain or background mode",
+        "blocks": [
+          {
+            "type": "code",
+            "label": "Terminal",
+            "text": "porthub expose 3000 --port 35000"
+          },
+          {
+            "type": "paragraph",
+            "text": "The requested gateway port must be in the allowed range and unused. CLI tunnels and dashboard mappings share the same reservations."
+          },
+          {
+            "type": "code",
+            "label": "Terminal",
+            "text": "porthub expose 3000 --subdomain myapp -d"
+          },
+          {
+            "type": "paragraph",
+            "text": "The optional subdomain creates a web proxy under the gateway\u2019s configured domain. Without this flag, only the public port is created. Use --registration ID when the machine has multiple registrations."
+          }
+        ]
+      },
+      {
+        "id": "manage",
+        "title": "List and stop temporary tunnels",
+        "blocks": [
+          {
+            "type": "code",
+            "label": "Terminal",
+            "text": "porthub expose list"
+          },
+          {
+            "type": "code",
+            "label": "Terminal",
+            "text": "porthub expose stop ID"
+          },
+          {
+            "type": "paragraph",
+            "text": "Temporary ports and proxies appear in the account dashboard with an agent-managed indicator. Manage their lifetime through the CLI; dashboard editing is disabled."
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "slug": "exit-nodes",
+    "group": "Networking",
+    "title": "Exit nodes",
+    "description": "Route internet connections through one or more registered machines.",
+    "sections": [
+      {
+        "id": "create",
+        "title": "Configure routing peers and consumers",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "Open Access rules \u2192 Routes and create an exit node. Select machines or groups as routing peers, then select the machines or groups that will use them. Routing peers provide internet egress; consuming machines send their internet traffic through the selected peers. A machine cannot be both roles in a routing loop."
+          }
+        ]
+      },
+      {
+        "id": "selection",
+        "title": "Choose the connection strategy",
+        "blocks": [
+          {
+            "type": "table",
+            "columns": [
+              "Strategy",
+              "Behavior"
+            ],
+            "rows": [
+              [
+                "Sticky (default)",
+                "A stable client hash selects one available exit for that client\u2019s new connections."
+              ],
+              [
+                "Round robin",
+                "Successive new connections alternate between available exits."
+              ],
+              [
+                "Random",
+                "Each new connection independently selects an available exit."
+              ]
+            ]
+          },
+          {
+            "type": "paragraph",
+            "text": "Established connections retain their selected exit when you change the strategy. Round robin balances connection counts, not bytes. A single long transfer uses one exit. If that exit goes offline, the connection can fail; another public source address cannot transparently take over its TCP session."
+          }
+        ]
+      },
+      {
+        "id": "compatibility",
+        "title": "Supported traffic",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "Exit routing currently requires compatible Linux agents and transports IPv4. New IPv6 internet traffic is rejected while the exit is active so applications can fall back to IPv4. Established IPv6 traffic and directly attached LAN access remain available. This is not an IPv6 full tunnel. One machine can have only one active system-wide exit policy."
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "slug": "public-access-lock",
+    "group": "Networking",
+    "title": "Lock public web access",
+    "description": "Require a PIN or API key before forwarding HTTP requests.",
+    "sections": [
+      {
+        "id": "configure",
+        "title": "Enable a public access lock",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "Open a machine\u2019s port configuration and its Access settings. Choose Off, a six-digit PIN, or an API key. Locks are off by default. Save a new secret to replace the previous one; existing browser sessions are invalidated when the gate is replaced. The same mapping\u2019s direct gateway port and web proxy enforce the lock."
+          }
+        ]
+      },
+      {
+        "id": "browser",
+        "title": "Use a browser or API client",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "A browser without an authenticated session sees a sign-in form. Enter the configured PIN or key to continue. Programmatic clients can send the credential in the X-PortHub-Key header."
+          },
+          {
+            "type": "code",
+            "label": "Terminal",
+            "text": "curl -H 'X-PortHub-Key: YOUR_KEY' http://GATEWAY:PORT/"
+          },
+          {
+            "type": "paragraph",
+            "text": "The gateway removes the authentication header before forwarding to the application. Use HTTPS when available to protect credentials in transit; an HTTP URL does not encrypt them."
+          }
+        ]
+      },
+      {
+        "id": "protocols",
+        "title": "HTTP service requirement",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "The lock operates on HTTP requests. It is not a login layer for SSH, database protocols or raw TLS passthrough. HTTPS web proxies can terminate TLS before forwarding to the protected HTTP service."
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "slug": "dns-controls",
+    "group": "Networking",
+    "title": "DNS controls",
+    "description": "Block or override domains for selected registered machines.",
+    "sections": [
+      {
+        "id": "rules",
+        "title": "Configure a domain rule",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "Open the DNS controls in Access rules. Select the machines that should receive the rule, then choose Block or Override. A block returns a DNS failure for the configured domain. An override returns the configured IP address. Private PortHub identity zones cannot be replaced by these rules."
+          }
+        ]
+      },
+      {
+        "id": "limits",
+        "title": "Understand the boundary",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "These rules apply to the managed operating-system DNS path. They do not guarantee blocking for applications using their own encrypted DNS, a VPN, cached addresses or direct IP connections. An IP override does not rewrite a URL or provide a certificate for another website. HTTPS still checks the original hostname, so mapping one unrelated HTTPS site to another will usually produce a certificate error."
+          }
+        ]
+      }
+    ]
   }
 ];
 export const guideGroups = ["Start here", "Networking", "Transfers", "Operations"];

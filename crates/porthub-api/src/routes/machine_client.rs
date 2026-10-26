@@ -218,6 +218,8 @@ async fn session(
     let hostname = model.optional_string("hostname").unwrap_or_default();
     let local_ip = model.optional_string("local_ip").unwrap_or_default();
     let public_ip = model.optional_string("public_ip").unwrap_or_default();
+    let client_os = model.optional_string("client_os").unwrap_or_default();
+    let client_arch = model.optional_string("client_arch").unwrap_or_default();
     let _active = model.optional_bool("is_active");
     let version = if legacy {
         String::new()
@@ -237,6 +239,8 @@ async fn session(
         hostname,
         local_ip,
         public_ip,
+        client_os,
+        client_arch,
         version,
         handled,
         native_update_protocol,

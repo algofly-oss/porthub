@@ -6,7 +6,7 @@ use crate::{
 };
 use mongodb::bson::Document;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashSet;
 
 #[derive(Debug, Serialize)]
@@ -209,5 +209,7 @@ pub fn serialize(route: &Document) -> Value {
         "target_mode":if mode.is_empty() {"manual"} else {mode},"target_url":compat::strip(store::string(route,"target_url")),
         "entry_points":if entries.is_empty() {vec!["web".to_owned()]} else {entries},"enabled":route.get_bool("enabled")!=Ok(false),
         "connection":route.get("connection").map(store::json).filter(compat::truthy).unwrap_or(Value::Null),
-        "created_at":store::field(route,"created_at"),"updated_at":store::field(route,"updated_at")})
+        "created_at":store::field(route,"created_at"),"updated_at":store::field(route,"updated_at"),
+        "temporary":route.get_bool("temporary").unwrap_or(false),"managed_by":store::field(route,"managed_by"),
+        "exposure_id":store::field(route,"exposure_id"),"lease_expires_at":store::field(route,"lease_expires_at")})
 }

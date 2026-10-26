@@ -201,3 +201,35 @@ async fn private_sync_denies_revoked_members_disabled_machines_and_expired_signa
     case.db.drop().await?;
     result
 }
+
+#[tokio::test]
+#[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn exit_discovery_is_scoped_without_creating_private_port_grants() -> Result<()> {
+    let case = Case::new(Config::default()).await?;
+    let result = async {
+        let (owner, _) = case.user("exit-sync@test.invalid", "user").await?;
+        let ids = [ObjectId::new(), ObjectId::new(), ObjectId::new(), ObjectId::new()];
+        for (i, id) in ids.iter().enumerate() {
+            case.app.collection("machines").insert_one(doc! {"_id":id,"user_id":owner,"name":format!("machine-{i}")}).await?;
+            case.app.collection("private_peers").insert_one(doc! {"_id":format!("peer-{i}"),"workspace_id":owner,"machine_id":id,"owner_id":owner,"ip":format!("10.203.0.{}",i+10),"enabled":true,"credential_hash":token_digest("fixture-token-0123456789abcdef0123456789")}).await?;
+        }
+        case.app.collection("private_exit_nodes").insert_one(doc! {"_id":ObjectId::new(),"workspace_id":owner,"name":"Exits","enabled":true,"selection":"round_robin",
+            "routing_selectors":[{"kind":"machine","id":ids[1].to_hex()},{"kind":"machine","id":ids[2].to_hex()}],
+            "distribution_selectors":[{"kind":"machine","id":ids[0].to_hex()}]}).await?;
+        for (i, peer_count, route_count) in [(0,3,1),(1,2,1),(2,2,1),(3,1,0)] {
+            let response = case.status("POST", "/api/access/private/sync", "", sync(&format!("peer-{i}"), &fingerprint("AB"), "instance-00000000"), StatusCode::OK).await?;
+            let snapshot = &response["snapshot"];
+            ensure!(snapshot["peers"].as_array().unwrap().len() == peer_count, "peer {i}: {snapshot}");
+            ensure!(snapshot["grants"].as_array().unwrap().is_empty());
+            ensure!(snapshot["exit_routes"].as_array().unwrap().len() == route_count);
+            if route_count > 0 {
+                ensure!(snapshot["exit_routes"][0]["selection"] == "round_robin");
+                let policy = serde_json::from_value(snapshot.clone())?;
+                porthub_agent::private_network::policy::Engine::default().apply(policy)?;
+            }
+        }
+        Ok::<_,anyhow::Error>(())
+    }.await;
+    case.db.drop().await?;
+    result
+}

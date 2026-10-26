@@ -252,6 +252,12 @@ async fn resume(app: &App, user: &Document) -> ApiResult<()> {
     app.collection("private_networks")
         .delete_many(doc! {"_id":{"$in":&owner}})
         .await?;
+    app.collection("private_dns_rules")
+        .delete_many(doc! {"$or":[{"workspace_id":{"$in":&owner}},{"machine_id":{"$in":&mids}}]})
+        .await?;
+    app.collection("private_exit_nodes")
+        .delete_many(doc! {"workspace_id":{"$in":&owner}})
+        .await?;
     let mut unset = Document::new();
     for id in routes.iter().filter_map(Bson::as_object_id) {
         unset.insert(format!("metrics.{}", id.to_hex()), "");

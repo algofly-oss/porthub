@@ -157,7 +157,7 @@ pub fn router_with_web(
                         .is_some_and(|ingress| ingress.secure);
                     match web.select(&request, secure) {
                         porthub_runtime::web_routes::Selection::Proxy(proxy) => {
-                            proxy.forward(request).await
+                            proxy.forward_with_security(request, secure).await
                         }
                         porthub_runtime::web_routes::Selection::Disabled => {
                             StatusCode::NOT_FOUND.into_response()

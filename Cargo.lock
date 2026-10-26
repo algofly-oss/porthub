@@ -2958,7 +2958,7 @@ checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
 
 [[package]]
 name = "porthub-agent"
-version = "1.4.9"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2998,6 +2998,7 @@ dependencies = [
  "tracing-subscriber",
  "tun-rs",
  "url",
+ "uuid",
  "windows-registry",
  "windows-service",
  "windows-sys 0.61.2",
@@ -3006,7 +3007,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-api"
-version = "1.4.9"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3052,11 +3053,12 @@ dependencies = [
 
 [[package]]
 name = "porthub-edge"
-version = "1.4.9"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "axum",
  "axum-server",
+ "bcrypt",
  "clap 4.6.7",
  "hyper",
  "hyper-util",
@@ -3079,7 +3081,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-firewall"
-version = "1.4.9"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3099,7 +3101,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-identity"
-version = "1.4.9"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "hex",
@@ -3114,7 +3116,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-mesh"
-version = "1.4.9"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3142,12 +3144,13 @@ dependencies = [
 
 [[package]]
 name = "porthub-runtime"
-version = "1.4.9"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "axum",
  "axum-server",
  "base64 0.22.1",
+ "bcrypt",
  "chrono",
  "clap 4.6.7",
  "fs2",
@@ -3166,6 +3169,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "subtle",
  "tempfile",
  "tokio",
  "toml",
@@ -3177,7 +3181,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-transfer"
-version = "1.4.9"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3205,7 +3209,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-tunnel"
-version = "1.4.9"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3513,6 +3517,7 @@ dependencies = [
  "lazy_static",
  "notify 5.2.0",
  "porthub-identity",
+ "porthub-runtime",
  "rand 0.8.8",
  "rustls-pemfile",
  "serde",

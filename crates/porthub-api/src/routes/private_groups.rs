@@ -137,6 +137,16 @@ async fn members(
         .await?
         .try_collect()
         .await?;
+    let proposed: Vec<Document> = records.iter().map(|record| {
+        let mut changed = record.clone();
+        let mut groups = inventory::group_ids(record);
+        groups.retain(|id| *id != group);
+        if record.get_object_id("_id").is_ok_and(|id| machines.contains(&id)) { groups.push(group); }
+        changed.insert("group_ids", groups);
+        changed.remove("group_id");
+        changed
+    }).collect();
+    super::exit_nodes::validate_machine_changes(&app, &Bson::ObjectId(owner), &proposed).await?;
     for record in records {
         if record
             .get("group_id")

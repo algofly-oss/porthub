@@ -79,6 +79,9 @@ async fn membership(
         if legacy != Some(group) {
             return Err(ApiError::bad_request("Machine is not in this group"));
         }
+        let mut candidate = record.clone();
+        candidate.remove("group_id");
+        super::exit_nodes::validate_machine_changes(app, user.get("_id").ok_or_else(ApiError::unauthenticated)?, &[candidate]).await?;
         let now = DateTime::now();
         app.collection("machines")
             .update_one(
@@ -94,6 +97,10 @@ async fn membership(
         } else {
             groups.push(group);
         }
+        let mut candidate = record.clone();
+        candidate.insert("group_ids", &groups);
+        candidate.remove("group_id");
+        super::exit_nodes::validate_machine_changes(app, user.get("_id").ok_or_else(ApiError::unauthenticated)?, &[candidate]).await?;
         let now = DateTime::now();
         app.collection("machines")
             .update_one(
@@ -325,6 +332,7 @@ async fn add(
     if !groups.is_empty() {
         machine.insert("group_ids", groups);
     }
+    super::exit_nodes::validate_machine_changes(&app, owner, &[machine.clone()]).await?;
     app.collection("machines").insert_one(&machine).await?;
     if let Err(error) = enrollment::ensure(&app, &machine).await {
         app.collection("machines")

@@ -1,18 +1,19 @@
 //! Durable machine retirement. Closing remains reversible; committing is an
 //! accepted deletion and is completed after a crash or early client ACK.
 use crate::{
+    App,
     domain::{inventory, machines},
     error::{ApiError, ApiResult},
-    firewall, generated, store, App,
+    firewall, generated, store,
 };
 use axum::http::StatusCode;
 use futures_util::TryStreamExt;
 use mongodb::{
-    bson::{doc, oid::ObjectId, Bson, DateTime, Document},
-    options::IndexOptions,
     IndexModel,
+    bson::{Bson, DateTime, Document, doc, oid::ObjectId},
+    options::IndexOptions,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::watch;
 
@@ -30,11 +31,19 @@ pub async fn initialize(app: &App) -> ApiResult<()> {
                 .build(),
         )
         .await?;
-    app.collection("users").create_index(
-        IndexModel::builder().keys(doc! {"account_deletion.next_attempt_at":1})
-            .options(IndexOptions::builder().name("porthub_account_deletion_queue".to_owned())
-                .partial_filter_expression(doc! {"account_deletion":{"$exists":true}}).build()).build()
-    ).await?;
+    app.collection("users")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"account_deletion.next_attempt_at":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("porthub_account_deletion_queue".to_owned())
+                        .partial_filter_expression(doc! {"account_deletion":{"$exists":true}})
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     Ok(())
 }
 
@@ -151,6 +160,9 @@ pub(crate) async fn resume(app: &App, machine: &Document) -> ApiResult<()> {
     app.collection("connections")
         .delete_many(doc! {"machine_id":id})
         .await?;
+    app.collection("private_dns_rules")
+        .delete_many(doc! {"machine_id":id})
+        .await?;
     // ACK can be recorded without connection_lock. Retire the journal only
     // while unacknowledged; if ACK races that compare-and-set, remove the
     // acknowledged record instead. Failed physical deletion retains the job.
@@ -251,10 +263,8 @@ pub async fn run(app: Arc<App>, mut stop: watch::Receiver<bool>) {
         let attempt = async {
             let machine = recover_due(&app).await?;
             let account = crate::account_delete::recover_due(&app).await?;
-            Ok::<_, ApiError>(match (machine, account) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            })
+            let exposure = crate::routes::exposes::recover_due(&app).await?;
+            Ok::<_, ApiError>([machine, account, exposure].into_iter().flatten().min())
         };
         let result = tokio::select! {result=attempt=>result,_=stop.changed()=>return};
         let wait = match result {

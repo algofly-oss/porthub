@@ -13,7 +13,7 @@ clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-porthub-tunnel.workspace = true
+porthub-tunnel = { workspace = true, features = ["http-access"] }
 hyper = { version = "1", features = ["http1", "server"] }
 axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 rcgen = "0.14"
@@ -24,6 +24,7 @@ serde_json = "1"
 url = "2"
 
 [dev-dependencies]
+bcrypt = "0.17"
 tower = { version = "0.5", features = ["util"] }
 rathole.workspace = true
 sha2 = "0.10"

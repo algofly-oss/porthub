@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "PortHub API",
-    "version": "1.4.9",
+    "version": "1.5.0",
     "description": "PortHub gateway API. Request and response bodies are JSON unless an operation specifies otherwise."
   },
   "servers": [
@@ -3712,6 +3712,570 @@
           },
           "503": {
             "description": "Access revoked; durable cleanup is pending and will retry"
+          }
+        }
+      }
+    },
+    "/api/access/exit-nodes": {
+      "post": {
+        "operationId": "post_api_access_exit_nodes",
+        "summary": "Create exit node",
+        "description": "Requires workspace administrator access. Select routing peers and consumers. Selection applies only to new connections.",
+        "tags": [
+          "Private access"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Invalid request or conflicting configuration"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Not permitted"
+          },
+          "404": {
+            "description": "Resource not found"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "maxLength": 80
+                  },
+                  "enabled": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "selection": {
+                    "type": "string",
+                    "enum": [
+                      "sticky",
+                      "round_robin",
+                      "random"
+                    ],
+                    "default": "sticky"
+                  },
+                  "routing_selectors": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 32,
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "kind",
+                        "id"
+                      ],
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "machine",
+                            "group"
+                          ]
+                        },
+                        "id": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "distribution_selectors": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 32,
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "kind",
+                        "id"
+                      ],
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "machine",
+                            "group"
+                          ]
+                        },
+                        "id": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                "required": [
+                  "name",
+                  "routing_selectors",
+                  "distribution_selectors"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/access/exit-nodes/{id}": {
+      "put": {
+        "operationId": "put_api_access_exit_nodes_id",
+        "summary": "Update exit node",
+        "description": "Requires workspace administrator access. Rejects routing loops and conflicting consumer assignments.",
+        "tags": [
+          "Private access"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Invalid request or conflicting configuration"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Not permitted"
+          },
+          "404": {
+            "description": "Resource not found"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "maxLength": 80
+                  },
+                  "enabled": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "selection": {
+                    "type": "string",
+                    "enum": [
+                      "sticky",
+                      "round_robin",
+                      "random"
+                    ],
+                    "default": "sticky"
+                  },
+                  "routing_selectors": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 32,
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "kind",
+                        "id"
+                      ],
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "machine",
+                            "group"
+                          ]
+                        },
+                        "id": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "distribution_selectors": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 32,
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "kind",
+                        "id"
+                      ],
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "machine",
+                            "group"
+                          ]
+                        },
+                        "id": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                "required": [
+                  "name",
+                  "routing_selectors",
+                  "distribution_selectors"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "delete_api_access_exit_nodes_id",
+        "summary": "Delete exit node",
+        "description": "Requires workspace administrator access. Removes this route definition.",
+        "tags": [
+          "Private access"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Invalid request or conflicting configuration"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Not permitted"
+          },
+          "404": {
+            "description": "Resource not found"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/access/dns-rules/{machine}": {
+      "put": {
+        "operationId": "put_api_access_dns_rules_machine",
+        "summary": "Replace machine DNS rules",
+        "description": "Requires workspace administrator access. Rules cover the domain and its subdomains. An empty list clears the policy.",
+        "tags": [
+          "Private access"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Invalid request or conflicting configuration"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Not permitted"
+          },
+          "404": {
+            "description": "Resource not found"
+          }
+        },
+        "parameters": [
+          {
+            "name": "machine",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "rules": {
+                    "type": "array",
+                    "maxItems": 256,
+                    "items": {
+                      "type": "object"
+                    }
+                  }
+                },
+                "required": [
+                  "rules"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/connections/access/{id}": {
+      "put": {
+        "operationId": "put_api_connections_access_id",
+        "summary": "Configure public HTTP access lock",
+        "description": "Requires ownership of the mapped port. Applies to direct HTTP access and proxies targeting that mapping. Omit secret to preserve an existing secret of the same mode. Temporary agent mappings cannot be edited.",
+        "tags": [
+          "Private access"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Invalid request or conflicting configuration"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Not permitted"
+          },
+          "404": {
+            "description": "Resource not found"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "off",
+                      "pin",
+                      "key"
+                    ]
+                  },
+                  "secret": {
+                    "type": "string",
+                    "writeOnly": true,
+                    "maxLength": 72,
+                    "description": "Six digits for pin; 16 to 72 bytes for key."
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/machines/client/expose": {
+      "post": {
+        "operationId": "post_api_machines_client_expose",
+        "summary": "Create temporary public mapping",
+        "description": "Authenticates the installed machine credential. Reserves a port from the shared pool. Lease duration is 90 seconds; renew every 30 seconds.",
+        "tags": [
+          "Temporary tunnels"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Invalid request or conflicting configuration"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Not permitted"
+          },
+          "404": {
+            "description": "Resource not found"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "machine_id": {
+                    "type": "string"
+                  },
+                  "token": {
+                    "type": "string",
+                    "writeOnly": true
+                  },
+                  "local_port": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65535
+                  },
+                  "external_port": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65535
+                  },
+                  "subdomain": {
+                    "type": "string"
+                  },
+                  "request_id": {
+                    "type": "string",
+                    "pattern": "^[a-fA-F0-9]{32}$"
+                  }
+                },
+                "required": [
+                  "machine_id",
+                  "token",
+                  "local_port"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/machines/client/expose/renew": {
+      "post": {
+        "operationId": "post_api_machines_client_expose_renew",
+        "summary": "Renew temporary mapping",
+        "description": "Authenticates the owning machine credential. Expired leases cannot be revived.",
+        "tags": [
+          "Temporary tunnels"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Invalid request or conflicting configuration"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Not permitted"
+          },
+          "404": {
+            "description": "Resource not found"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "machine_id": {
+                    "type": "string"
+                  },
+                  "token": {
+                    "type": "string",
+                    "writeOnly": true
+                  },
+                  "exposure_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "machine_id",
+                  "token",
+                  "exposure_id"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/machines/client/expose/close": {
+      "post": {
+        "operationId": "post_api_machines_client_expose_close",
+        "summary": "Close temporary mapping",
+        "description": "Authenticates the owning machine credential. Expired leases cannot be revived.",
+        "tags": [
+          "Temporary tunnels"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Invalid request or conflicting configuration"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Not permitted"
+          },
+          "404": {
+            "description": "Resource not found"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "machine_id": {
+                    "type": "string"
+                  },
+                  "token": {
+                    "type": "string",
+                    "writeOnly": true
+                  },
+                  "exposure_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "machine_id",
+                  "token",
+                  "exposure_id"
+                ]
+              }
+            }
           }
         }
       }

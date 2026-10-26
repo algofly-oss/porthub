@@ -8,6 +8,17 @@ pub mod device;
 #[path = "device_windows.rs"]
 pub mod device;
 pub mod dns;
+pub mod exit_selection;
+#[cfg(target_os = "linux")]
+pub mod exit_kernel;
+#[cfg(target_os = "linux")]
+mod exit_forwarding;
+#[cfg(target_os = "linux")]
+pub mod exit_routes;
+#[cfg(target_os = "linux")]
+mod exit_journal;
+#[cfg(target_os = "linux")]
+mod exit_ipv6;
 #[cfg(target_os = "linux")]
 mod interfaces;
 #[cfg(target_os = "macos")]

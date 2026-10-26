@@ -22,7 +22,7 @@ use mongodb::{
     IndexModel,
 };
 use regex::Regex;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, LazyLock},
@@ -170,6 +170,29 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
         .await?
         .try_collect()
         .await?;
+    let exit_definitions: Vec<Document> = app.collection("private_exit_nodes")
+        .find(doc! {"workspace_id":owner,"enabled":{"$ne":false}})
+        .sort(doc! {"created_at":1,"_id":1})
+        .await?.try_collect().await?;
+    let exit_routes: Vec<Value> = exit_definitions.iter().filter_map(|route| {
+        let mut routing_peers: Vec<_> = peers.iter().filter(|p| {
+            let machine_id=store::id(p.get("machine_id"));
+            inventory.get(&machine_id).is_some_and(|machine| crate::routes::exit_nodes::matches_selectors(route,"routing_selectors",&machine_id,machine))
+        }).map(|p|store::string(p,"_id").to_owned()).collect();
+        let mut clients: Vec<_> = peers.iter().filter(|p| {
+            let machine_id=store::id(p.get("machine_id"));
+            inventory.get(&machine_id).is_some_and(|machine| crate::routes::exit_nodes::matches_selectors(route,"distribution_selectors",&machine_id,machine))
+        }).map(|p|store::string(p,"_id").to_owned()).collect();
+        let is_client = clients.contains(&input.peer_id);
+        let is_exit = routing_peers.contains(&input.peer_id);
+        if !is_client && !is_exit { return None; }
+        // Disclose only the participating side of this route to each peer.
+        // Transport reachability does not add ordinary private-port grants.
+        if !is_exit { clients.retain(|id| id == &input.peer_id); }
+        if !is_client { routing_peers.retain(|id| id == &input.peer_id); }
+        (!routing_peers.is_empty() && !clients.is_empty()).then(|| json!({"id":store::id(route.get("_id")),"name":store::string(route,"name"),"routing_peers":routing_peers,"clients":clients,
+            "selection":route.get_str("selection").unwrap_or("sticky"),"masquerade":true,"block_lan_access":true}))
+    }).collect();
     let books: Vec<Document> = app
         .collection("access_rulebooks")
         .find(doc! {"user_id":owner})
@@ -207,6 +230,12 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
         reachable.insert(grant.source.clone());
         reachable.insert(grant.destination.clone());
     }
+    let exit_neighbors: HashSet<String> = exit_routes.iter().flat_map(|route| {
+        ["routing_peers", "clients"].into_iter().flat_map(|key| {
+            route[key].as_array().into_iter().flatten().filter_map(Value::as_str)
+        }).filter(|id| *id != input.peer_id).map(str::to_owned)
+    }).collect();
+    reachable.extend(exit_neighbors.iter().cloned());
     let by_id: HashMap<_, _> = peers
         .iter()
         .filter(|p| reachable.contains(store::string(p, "_id")))
@@ -293,7 +322,11 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
         let id=store::string(p,"_id");let machine_id=store::id(p.get("machine_id"));
         let mut aliases=names.aliases.get(id).into_iter().flatten().map(|name|format!("{name}.{suffix}")).collect::<Vec<_>>();
         aliases.extend(domains_by_machine.get(&machine_id).into_iter().flatten().filter(|domain| !domain.default).map(|domain|format!("{}.{}",domain.host,domain.suffix)));
-        json!({"id":id,"ip":store::field(p,"ip"),"fingerprint":store::string(p,"fingerprint"),"instance":store::string(p,"instance"),"stream_transport":store::string(p,"stream_transport"),
+        let online = p.get_datetime("last_seen_at").is_ok_and(|seen| {
+            let age = now.timestamp_millis() - seen.timestamp_millis();
+            (0..15_000).contains(&age)
+        }) && !store::string(p, "fingerprint").is_empty() && !store::string(p, "instance").is_empty();
+        json!({"id":id,"online":online,"ip":store::field(p,"ip"),"fingerprint":store::string(p,"fingerprint"),"instance":store::string(p,"instance"),"stream_transport":store::string(p,"stream_transport"),
             "hostname":format!("{}.{suffix}",names.primary.get(id).map(String::as_str).unwrap_or("machine")),"aliases":aliases})
     }).collect();
     let current = app
@@ -327,7 +360,7 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
         .collect();
     let mut relay_auth_token = String::new();
     if let Ok(ip) = store::string(&current, "ip").parse() {
-        let allowed = grants
+        let mut allowed: HashSet<String> = grants
             .iter()
             .filter_map(|grant| {
                 if grant.source == input.peer_id {
@@ -339,6 +372,7 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
                 }
             })
             .collect();
+        allowed.extend(exit_neighbors.iter().cloned());
         relay_auth_token =
             app.private_relay
                 .publish(&input.peer_id, &hash, &input.instance, ip, allowed);
@@ -353,8 +387,10 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
         .as_deref()
         .filter(|url| url.starts_with("http://") || url.starts_with("https://"))
         .map(|url| url.trim_end_matches('/').to_owned());
-    Ok(([(header::CACHE_CONTROL,"no-store")],Json(json!({"snapshot":{"workspace":owner.to_hex(),"self":input.peer_id,"revision":store::field(&updated,"revision"),
-        "expires_at":chrono::DateTime::from_timestamp_millis(now.timestamp_millis()+15_000).expect("current timestamp").to_rfc3339_opts(chrono::SecondsFormat::Millis,true),"peers":peers,"dns_suffixes":dns_suffixes,"grants":grants},"signals":signals,
+    let dns_document = app.collection("private_dns_rules").find_one(doc! {"workspace_id":owner,"machine_id":current.get("machine_id")}).await?;
+    let dns_rules = dns_document.as_ref().map(|value|store::field(value,"rules")).unwrap_or_else(||json!([]));
+    Ok(([(header::CACHE_CONTROL,"no-store")],Json(json!({"snapshot":{"workspace":owner.to_hex(),"self":input.peer_id,"revision":store::field(&updated,"revision"),"dns_rules":dns_rules,
+        "expires_at":chrono::DateTime::from_timestamp_millis(now.timestamp_millis()+15_000).expect("current timestamp").to_rfc3339_opts(chrono::SecondsFormat::Millis,true),"peers":peers,"dns_suffixes":dns_suffixes,"grants":grants,"exit_routes":exit_routes},"signals":signals,
         "ice_servers":app.config.private_transport.ice(&input.peer_id,now.timestamp_millis()/1000),"relay_routes":app.config.private_transport.relay_routes,
         "direct_relay_url":direct_relay_url,"relay_auth_token":relay_auth_token,
         "control_fallback_urls":fallback,"poll_seconds":1}))).into_response())

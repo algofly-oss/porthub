@@ -123,6 +123,11 @@ impl Allocation {
         password: &str,
         allow_plaintext_origin: bool,
     ) -> Result<Self> {
+        Self::connect_bound(url, username, password, allow_plaintext_origin, &[]).await
+    }
+    pub async fn connect_bound(
+        url: &str, username: &str, password: &str, allow_plaintext_origin: bool, local: &[std::net::IpAddr],
+    ) -> Result<Self> {
         let url = url::Url::parse(url).map_err(|_| anyhow::anyhow!("invalid private relay URL"))?;
         ensure!(
             url.scheme() == "wss" || (url.scheme() == "ws" && allow_plaintext_origin),
@@ -150,7 +155,11 @@ impl Allocation {
             .max_frame_size(Some(65536));
         let (mut websocket, _) = tokio::time::timeout(
             Duration::from_secs(5),
-            tokio_tungstenite::connect_async_with_config(url.as_str(), Some(config), true),
+            async {
+                let stream = crate::underlay::connect(&url, local).await?;
+                crate::configure_tcp(&stream);
+                Ok::<_,anyhow::Error>(tokio_tungstenite::client_async_tls_with_config(url.as_str(), stream, Some(config), None).await?)
+            },
         )
         .await
         .map_err(|_| anyhow::anyhow!("private relay connection timed out"))?

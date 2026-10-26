@@ -57,6 +57,7 @@ enum Target {
 pub struct HttpProxy {
     target: Target,
     clients: ProxyPool,
+    access: Option<Arc<crate::public_access::Gate>>,
 }
 #[derive(Clone)]
 pub struct ProxyPool(Arc<Clients>);
@@ -105,6 +106,7 @@ impl HttpProxy {
         Self {
             target: Target::Unix(path),
             clients: ProxyPool::default(),
+            access: None,
         }
     }
     pub fn tcp(base: &str) -> anyhow::Result<Self> {
@@ -152,10 +154,26 @@ impl HttpProxy {
                 authorization,
             },
             clients,
+            access: None,
         })
     }
 
-    pub async fn forward(&self, mut request: Request<Body>) -> Response<Body> {
+    pub fn with_access(mut self, id: &str, config: Option<crate::public_access::Config>) -> anyhow::Result<Self> {
+        self.access = config.map(|config| crate::public_access::Gate::new(id, config).map(Arc::new)).transpose()?;
+        Ok(self)
+    }
+
+    pub async fn forward(&self, request: Request<Body>) -> Response<Body> {
+        self.forward_with_security(request, false).await
+    }
+
+    pub async fn forward_with_security(&self, request: Request<Body>, secure: bool) -> Response<Body> {
+        let mut request = if let Some(gate) = &self.access {
+            match gate.authorize(request, secure).await {
+                Ok(request) => request,
+                Err(response) => return response,
+            }
+        } else { request };
         let upgrade = is_upgrade(request.headers());
         let downstream = upgrade.then(|| hyper::upgrade::on(&mut request));
         let path = request

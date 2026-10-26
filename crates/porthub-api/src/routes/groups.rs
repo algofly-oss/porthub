@@ -132,6 +132,14 @@ async fn delete(
     let _guard = app.connection_lock.lock().await;
     let owner = user.get("_id").ok_or_else(ApiError::unauthenticated)?;
     let (id, group) = owned_group(&app, owner, &values[0]).await?;
+    let mut proposed: Vec<Document> = app.collection("machines").find(doc! {"user_id":owner}).projection(doc! {"group_id":1,"group_ids":1}).await?.try_collect().await?;
+    for machine in &mut proposed {
+        let mut groups = crate::domain::inventory::group_ids(machine);
+        groups.retain(|group| *group != id);
+        machine.insert("group_ids", groups);
+        machine.remove("group_id");
+    }
+    super::exit_nodes::validate_machine_changes(&app, owner, &proposed).await?;
     let now = DateTime::now();
     app.collection("machines")
         .update_many(

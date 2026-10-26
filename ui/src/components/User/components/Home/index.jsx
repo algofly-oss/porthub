@@ -106,6 +106,9 @@ const mapConnectionToForwardingConfig = (connection) => {
     internalPort: readConnectionValue(connection, "internal_port", "internalPort"),
     externalPort: readConnectionValue(connection, "external_port", "externalPort"),
     externalBindIp: connection.external_bind_ip || connection.externalBindIp || "0.0.0.0",
+    temporary: connection.temporary === true,
+    publicAccess: connection.public_access || connection.publicAccess || { mode: "off" },
+    managedBy: connection.managed_by || connection.managedBy || "",
     enabled: connection.enabled ?? true,
     autoRefreshEnabled:
       connection.autoRefreshEnabled ?? connection.auto_refresh_enabled ?? false,
@@ -213,6 +216,9 @@ const mapMachineToHost = (machine) => ({
   createdAt: machine.created_at || "",
   hostname: machine.hostname || "",
   clientHostname: machine.client_hostname || "",
+  clientOs: machine.client_os || "",
+  clientArch: machine.client_arch || "",
+  clientCountry: machine.client_country || "",
   privateDomains: Array.isArray(machine.private_domains) ? machine.private_domains : [],
   hostnameOverride: machine.hostname_override || "",
   clientSetupPublicBaseUrl: machine.client_setup_public_base_url || "",
@@ -692,12 +698,13 @@ export default function Home({ onStatsChange, active = true }) {
       forwardingConfigs.filter((config) => config.dataId).map((config) => config.dataId)
     );
     const configsToDelete = currentConfigs.filter(
-      (config) => config.dataId && !nextConfigIds.has(config.dataId)
+      (config) => config.dataId && !config.temporary && !nextConfigIds.has(config.dataId)
     );
-    const configsToCreate = forwardingConfigs.filter((config) => !config.dataId);
+    const configsToCreate = forwardingConfigs.filter((config) => !config.dataId && !config.temporary);
     const configsToUpdate = forwardingConfigs.filter(
       (config) =>
         config.dataId &&
+        !config.temporary &&
         forwardingConfigChanged(currentConfigsById.get(config.dataId), config)
     );
 
@@ -753,6 +760,8 @@ export default function Home({ onStatsChange, active = true }) {
             internalPort: Number(config.internalPort),
             externalPort: Number(config.externalPort),
             enabled: config.enabled,
+            temporary: config.temporary === true,
+            managedBy: config.managedBy || "",
             autoRefreshEnabled: config.autoRefreshEnabled ?? false,
             autoRefreshIntervalMinutes: Number(config.autoRefreshIntervalMinutes) || 60,
             autoRefreshedAt: config.autoRefreshedAt || null,
@@ -1299,6 +1308,9 @@ export default function Home({ onStatsChange, active = true }) {
                               privateDomain={privateDomain(host)}
                               defaultPrivateDomain={defaultPrivateDomain(host)}
                               hostname={host.hostname}
+                              clientOs={host.clientOs}
+                              clientArch={host.clientArch}
+                              clientCountry={host.clientCountry}
                               groupLabels={(host.groupIds || [])
                                 .map((id) => groupLabelById[id])
                                 .filter(Boolean)}

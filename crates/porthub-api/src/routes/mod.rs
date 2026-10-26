@@ -5,7 +5,11 @@ pub mod admin_users;
 pub mod artifacts;
 pub mod bootstrap;
 pub mod connection_firewall;
+pub mod connection_access;
 pub mod connections;
+pub mod dns_rules;
+pub mod exposes;
+pub mod exit_nodes;
 pub mod gateway;
 pub mod groups;
 pub mod machine_client;
@@ -29,7 +33,11 @@ pub fn router() -> Router<Arc<App>> {
     Router::new()
         .merge(telegram::router())
         .merge(connections::router())
+        .merge(exposes::router())
+        .merge(exit_nodes::router())
+        .merge(dns_rules::router())
         .merge(connection_firewall::router())
+        .merge(connection_access::router())
         .merge(admin::router())
         .merge(admin_users::router())
         .merge(artifacts::router())

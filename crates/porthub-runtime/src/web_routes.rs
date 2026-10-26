@@ -23,6 +23,8 @@ pub struct Route {
     pub pass_host: bool,
     pub http: bool,
     pub https: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<crate::public_access::Config>,
 }
 struct Prepared {
     route: Route,
@@ -102,7 +104,8 @@ impl WebRoutes {
             {
                 old.clone()
             } else {
-                let proxy = HttpProxy::web(&route.target_url, route.pass_host, self.pool.clone())?;
+                let proxy = HttpProxy::web(&route.target_url, route.pass_host, self.pool.clone())?
+                    .with_access(&route.id, route.access.clone())?;
                 Arc::new(Prepared { route, proxy })
             };
             next.by_id

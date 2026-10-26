@@ -54,6 +54,21 @@ fn relay_probe(
     sender.send(peer, &packet)
 }
 
+async fn send_exit(
+    sessions: &Sessions, relay: &super::relay::Sender,
+    ips: &HashMap<String, std::net::Ipv4Addr>, own: &str, peer: &str,
+    payload: &[u8], prefer_direct: bool,
+) -> Result<()> {
+    let (Some(source), Some(destination)) = (ips.get(own), ips.get(peer)) else { return Ok(()); };
+    let packet = porthub_mesh::control_packet::encode(porthub_mesh::control_packet::EXIT, *source, *destination, payload)?;
+    let peers = sessions.read().await;
+    let direct = peers.get(peer).filter(|session| session.state() == porthub_mesh::State::Ready);
+    if let Some(session) = direct.filter(|_| prefer_direct || !relay.is_ready()) {
+        let _ = session.send(packet);
+    } else if relay.is_ready() { let _ = relay.send(peer, &packet); }
+    Ok(())
+}
+
 #[cfg(feature = "private-stream")]
 #[derive(Clone, Default)]
 struct StreamCarrierPlan {
@@ -162,18 +177,19 @@ pub async fn run_with_logs(
         work.clone(),
     ));
     let (relay_config, relay_config_updates) = watch::channel(None);
-    tasks.spawn(super::relay::run(
+    tasks.spawn(super::relay::run_bound(
         profile.clone(),
         instance.clone(),
         relay_sender.clone(),
         relay_input,
         relay_config_updates,
+        interfaces.clone(),
         events.clone(),
         work.clone(),
     ));
     tasks.spawn(controller::run_watched_identity(
         profile.clone(),
-        interfaces,
+        interfaces.clone(),
         sessions.clone(),
         events.clone(),
         relay_config,
@@ -189,8 +205,28 @@ pub async fn run_with_logs(
     let mut zone = None;
     let mut dns_registration: Option<dns::Registration> = None;
     let mut registered_suffixes: Vec<String> = Vec::new();
+    let mut registered_rules = Vec::new();
     let mut dns_port: Option<u16> = None;
     let mut policy = Engine::default();
+    let mut exit_route = None;
+    let mut online_peers = std::collections::HashSet::new();
+    #[cfg(target_os = "linux")]
+    let exit_consumer = {
+        let (sender, receiver) = watch::channel(None);
+        tasks.spawn(super::exit_routes::watch(receiver, interfaces.clone(), work.clone()));
+        sender
+    };
+    let mut exit_selection = super::exit_selection::FlowTable::new(profile.peer_id.clone());
+    #[cfg(target_os = "linux")]
+    let mut exit_kernel: Option<super::exit_kernel::Kernel> = None;
+    #[cfg(target_os = "linux")]
+    let mut exit_clients = std::collections::BTreeSet::new();
+    #[cfg(target_os = "linux")]
+    let exit_refresh = {
+        let (sender, receiver) = watch::channel(false);
+        tasks.spawn(super::exit_forwarding::watch(name.clone(), receiver, work.clone()));
+        sender
+    };
     let mut paths = super::paths::Pinned::default();
     let mut path_quality = super::probe::Quality::default();
     let mut by_ip = HashMap::new();
@@ -228,24 +264,71 @@ pub async fn run_with_logs(
                     dns_port=Some(port);
                     device=Some(tun);
                 }
+                online_peers = snapshot.peers.iter().filter(|peer| peer.online).map(|peer| peer.id.clone()).collect();
+                exit_route = snapshot.exit_routes.iter().find(|route| route.clients.contains(&profile.peer_id))
+                    .map(|route| (route.routing_peers.clone(), route.selection));
+                // Apply a received policy before processing another packet;
+                // the periodic tick only refreshes transport availability.
+                if let Some((peers, mode)) = &exit_route {
+                    let live = sessions.read().await;
+                    let available = peers.iter().filter(|peer| online_peers.contains(*peer) && (relay_sender.is_ready() || live.get(*peer).is_some_and(|session| session.state() == porthub_mesh::State::Ready))).cloned().collect::<Vec<_>>();
+                    exit_selection.configure(available, *mode);
+                } else { exit_selection.configure(Vec::new(), Default::default()); }
+                #[cfg(target_os = "linux")]
+                {
+                    let tun = device.as_ref().expect("private tunnel initialized");
+                    tun.exit_mtu(!snapshot.exit_routes.is_empty()).await?;
+                    let clients: std::collections::BTreeSet<_> = snapshot.exit_routes.iter()
+                        .filter(|route| route.routing_peers.contains(&profile.peer_id))
+                        .flat_map(|route| &route.clients)
+                        .filter_map(|id| snapshot.peers.iter().find(|peer| &peer.id == id).map(|peer| peer.ip)).collect();
+                    let desired = exit_route.as_ref().map(|_| (tun.index, own.ip));
+                    if *exit_consumer.borrow() != desired { exit_consumer.send_replace(desired); }
+                    if clients != exit_clients {
+                        if exit_kernel.is_none() && !clients.is_empty() { exit_kernel = Some(super::exit_kernel::Kernel::new(&name)?); }
+                        exit_refresh.send_replace(!clients.is_empty());
+                        if let Some(kernel) = &exit_kernel { kernel.apply(&clients).await?; }
+                        exit_clients = clients;
+                    }
+                }
                 // Register every advertised private DNS suffix on the owned
                 // tunnel resolver. This also applies suffix changes live.
+                zone.as_ref().unwrap().write().await.update(&snapshot)?;
                 let mut suffixes=snapshot.dns_suffixes.iter().map(|suffix|suffix.trim_matches('.').to_ascii_lowercase()).filter(|suffix|!suffix.is_empty()).collect::<Vec<_>>();
                 if let Some((_,suffix))=own.hostname.split_once('.') { suffixes.push(suffix.trim_matches('.').to_ascii_lowercase()); }
+                suffixes.extend(snapshot.dns_rules.iter().map(|rule|rule.domain.trim_end_matches('.').to_ascii_lowercase()));
                 suffixes.sort();suffixes.dedup();
-                if registered_suffixes!=suffixes {
+                if registered_suffixes!=suffixes || registered_rules!=snapshot.dns_rules {
                     let tun=device.as_ref().expect("private tunnel initialized");
                     let port=dns_port.ok_or_else(||anyhow::anyhow!("private DNS listener missing"))?;
                     dns_registration=None;
-                    dns_registration=Some(dns::register(tun.index,own.ip,port,&suffixes).await?);
+                    #[cfg(all(target_os = "linux", feature = "netns-tests"))]
+                    let isolated = std::env::var("PORTHUB_TEST_OWNED_NETNS").as_deref() == Ok("1") && std::path::Path::new("/.dockerenv").is_file();
+                    #[cfg(not(all(target_os = "linux", feature = "netns-tests")))]
+                    let isolated = false;
+                    if !isolated { dns_registration=Some(dns::register(tun.index,own.ip,port,&suffixes).await?); }
                     registered_suffixes=suffixes;
+                    registered_rules=snapshot.dns_rules.clone();
                 }
                 by_ip=snapshot.peers.iter().map(|p|(p.ip,p.id.clone())).collect();
                 peer_ips=snapshot.peers.iter().map(|p|(p.id.clone(),p.ip)).collect();
-                zone.as_ref().unwrap().write().await.update(&snapshot)?;
             },
             Some(Event::Packet{peer,bytes,direct,received_at})=>{
                 let now=received_at;
+                if let Some(envelope) = porthub_mesh::control_packet::decode(porthub_mesh::control_packet::EXIT, bytes.clone()) {
+                    if peer_ips.get(&peer) != Some(&envelope.source) || peer_ips.get(&profile.peer_id) != Some(&envelope.destination) { continue; }
+                    let Some(packet) = Packet::parse(&envelope.payload) else { continue; };
+                    let is_reply = peer_ips.get(&profile.peer_id) == Some(&packet.destination());
+                    #[cfg(target_os = "linux")]
+                    let can_forward = exit_clients.contains(&packet.source());
+                    #[cfg(not(target_os = "linux"))]
+                    let can_forward = false;
+                    if (is_reply || can_forward) && policy.check_exit(&envelope.payload, &peer, true) {
+                        if is_reply { exit_selection.observe(&packet.flow_id(), &peer, Instant::now(), packet.flow_ttl()); }
+                        if let Some(tun) = &device { tun.write(&envelope.payload).await?; }
+                    }
+                    continue;
+                }
                 #[cfg(feature="private-stream")]
                 if let Some(envelope)=porthub_mesh::control_packet::decode(porthub_mesh::control_packet::STREAM,bytes.clone()) {
                     if peer_ips.get(&peer)==Some(&envelope.source) && peer_ips.get(&profile.peer_id)==Some(&envelope.destination) {
@@ -304,6 +387,18 @@ pub async fn run_with_logs(
         packet=async {match &device {Some(device)=>device.read(&mut buffer).await,None=>std::future::pending().await}}=>{
             let size=packet?;if size>porthub_mesh::MAX_PACKET {continue;}
             let Some(parsed)=Packet::parse(&buffer[..size]) else {continue;};
+            let exit_peer = if peer_ips.get(&profile.peer_id) == Some(&parsed.source()) && !by_ip.contains_key(&parsed.destination()) {
+                exit_selection.select(parsed.flow_id(), Instant::now(), parsed.flow_ttl()).map(str::to_owned)
+            } else if !by_ip.contains_key(&parsed.source()) {
+                by_ip.get(&parsed.destination()).cloned()
+            } else { None };
+            if let Some(peer) = exit_peer {
+                if size <= porthub_mesh::MAX_PACKET - 20 && policy.check_exit(&buffer[..size], &peer, false) {
+                    let prefer = *strategy.borrow() != super::strategy::Mode::PreferGateway;
+                    send_exit(&sessions, &relay_sender, &peer_ips, &profile.peer_id, &peer, &buffer[..size], prefer).await?;
+                }
+                continue;
+            }
             let Some(peer)=by_ip.get(&parsed.destination()) else {continue;};
             if policy.check(&buffer[..size],peer,false) {
                 mark_activity(&mut last_activity,peer,std::time::Instant::now());
@@ -327,6 +422,11 @@ pub async fn run_with_logs(
             }
         },
         _=probe_tick.tick(),if device.is_some()=>{
+            if let Some((peers, mode)) = &exit_route {
+                let live = sessions.read().await;
+                let available = peers.iter().filter(|peer| online_peers.contains(*peer) && (relay_sender.is_ready() || live.get(*peer).is_some_and(|session| session.state() == porthub_mesh::State::Ready))).cloned().collect::<Vec<_>>();
+                exit_selection.configure(available, *mode);
+            } else { exit_selection.configure(Vec::new(), Default::default()); }
             let now=std::time::Instant::now();
             #[cfg(feature="private-stream")]
             {
@@ -414,6 +514,10 @@ pub async fn run_with_logs(
     while tasks.join_next().await.is_some() {}
     for session in sessions.write().await.drain().map(|(_, session)| session) {
         session.close().await;
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(kernel) = &exit_kernel {
+        if kernel.clear().await.is_err() { tracing::warn!("exit firewall cleanup pending; owned TUN removal disables forwarding"); }
     }
     drop(dns_registration);
     drop(device);

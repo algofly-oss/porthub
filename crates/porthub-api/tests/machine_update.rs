@@ -26,6 +26,8 @@ async fn concurrent_legacy_heartbeat_cannot_replace_a_reported_release() -> Resu
             local_ip: String::new(),
             public_ip: String::new(),
             version: version.into(),
+            client_os: String::new(),
+            client_arch: String::new(),
             handled: String::new(),
             native_update_protocol: false,
         };

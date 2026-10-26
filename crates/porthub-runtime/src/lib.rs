@@ -4,6 +4,7 @@ pub mod development;
 #[cfg(unix)]
 pub mod file_watch;
 pub mod gateway_apply;
+pub mod public_access;
 #[cfg(unix)]
 pub mod proxy;
 #[cfg(unix)]

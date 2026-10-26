@@ -4,19 +4,20 @@ use super::policy::Snapshot;
 use anyhow::{ensure, Result};
 use hickory_proto::{
     op::{Message, MessageType, OpCode, ResponseCode},
-    rr::{rdata::A, DNSClass, RData, Record, RecordType},
+    rr::{rdata::{A, AAAA}, DNSClass, RData, Record, RecordType},
 };
 use std::{
     collections::{HashMap, HashSet},
-    net::Ipv4Addr,
+    net::{IpAddr, Ipv4Addr},
     sync::Arc,
 };
-use tokio::{net::UdpSocket, sync::RwLock};
+use tokio::{net::{TcpListener, UdpSocket}, sync::RwLock};
 use tokio_util::sync::CancellationToken;
 #[derive(Default)]
 pub struct Zone {
     suffixes: HashSet<String>,
     records: HashMap<String, Ipv4Addr>,
+    rules: Vec<porthub_mesh::dns_policy::Rule>,
 }
 impl Zone {
     pub fn update(&mut self, snapshot: &Snapshot) -> Result<()> {
@@ -61,6 +62,15 @@ impl Zone {
                 );
             }
         }
+        let rules = porthub_mesh::dns_policy::prepare(&snapshot.dns_rules)?;
+        for rule in &rules {
+            let domain = format!("{}.", rule.domain);
+            ensure!(!suffixes.iter().any(|suffix| domain == *suffix
+                || domain.ends_with(&format!(".{suffix}"))
+                || suffix.ends_with(&format!(".{domain}"))),
+                "DNS policy conflicts with a private identity zone");
+        }
+        self.rules = rules;
         self.suffixes = suffixes;
         self.records = records;
         Ok(())
@@ -83,6 +93,27 @@ impl Zone {
         reply.metadata.authoritative = true;
         reply.metadata.recursion_desired = query.metadata.recursion_desired;
         reply.add_query(q.clone());
+        if query.metadata.op_code == OpCode::Query {
+            if let Some(rule) = porthub_mesh::dns_policy::matching(&self.rules, &name) {
+                use porthub_mesh::dns_policy::Action;
+                match &rule.action {
+                    Action::Block => reply.metadata.response_code = ResponseCode::NXDomain,
+                    Action::Override { addresses } => {
+                        if q.query_class() == DNSClass::IN {
+                            for address in addresses {
+                                let data = match (q.query_type(), address) {
+                                    (RecordType::A, IpAddr::V4(ip)) => Some(RData::A(A(*ip))),
+                                    (RecordType::AAAA, IpAddr::V6(ip)) => Some(RData::AAAA(AAAA(*ip))),
+                                    _ => None,
+                                };
+                                if let Some(data) = data { reply.add_answer(Record::from_rdata(q.name().clone(), 5, data)); }
+                            }
+                        }
+                    }
+                }
+                return reply.to_vec().ok();
+            }
+        }
         let code = if query.metadata.op_code != OpCode::Query {
             ResponseCode::NotImp
         } else if !self
@@ -110,6 +141,7 @@ impl Zone {
 }
 pub struct Server {
     socket: UdpSocket,
+    tcp: TcpListener,
     pub zone: Arc<RwLock<Zone>>,
 }
 impl Server {
@@ -118,17 +150,17 @@ impl Server {
             own.is_private(),
             "private DNS requires the assigned address"
         );
-        Ok(Self {
-            // Linux resolved binds per-link queries to that link. macOS uses
-            // a suffix-scoped resolver file pointing at loopback.
-            #[cfg(target_os = "linux")]
-            socket: UdpSocket::bind((own, 0)).await?,
-            #[cfg(target_os = "macos")]
-            socket: UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?,
-            #[cfg(windows)]
-            socket: UdpSocket::bind((Ipv4Addr::LOCALHOST, 53)).await?,
-            zone: Default::default(),
-        })
+        // Bind TCP and UDP on the same private resolver endpoint. OS resolver
+        // registration applies to both transports.
+        #[cfg(target_os = "linux")]
+        let address = (own, 0);
+        #[cfg(target_os = "macos")]
+        let address = (Ipv4Addr::LOCALHOST, 0);
+        #[cfg(windows)]
+        let address = (Ipv4Addr::LOCALHOST, 53);
+        let socket = UdpSocket::bind(address).await?;
+        let tcp = TcpListener::bind(socket.local_addr()?).await?;
+        Ok(Self { socket, tcp, zone: Default::default() })
     }
     pub fn port(&self) -> Result<u16> {
         Ok(self.socket.local_addr()?.port())
@@ -136,8 +168,35 @@ impl Server {
     pub async fn serve(self, cancel: CancellationToken) -> Result<()> {
         let own = self.socket.local_addr()?.ip();
         let mut buffer = [0; 1501];
+        let mut connections = tokio::task::JoinSet::new();
         loop {
-            tokio::select! {_=cancel.cancelled()=>return Ok(()), packet=self.socket.recv_from(&mut buffer)=>{
+            tokio::select! {
+                _=cancel.cancelled()=>return Ok(()),
+                _=connections.join_next(), if !connections.is_empty()=>{},
+                accepted=self.tcp.accept()=>{
+                    let (mut stream, remote) = accepted?;
+                    if (remote.ip()!=own && !remote.ip().is_loopback()) || connections.len() >= 32 { continue; }
+                    let zone = self.zone.clone();
+                    connections.spawn(async move {
+                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                        let exchange = async {
+                            for _ in 0..64 {
+                                let length = stream.read_u16().await? as usize;
+                                anyhow::ensure!((12..=1500).contains(&length), "invalid DNS query size");
+                                let mut query = vec![0; length];
+                                stream.read_exact(&mut query).await?;
+                                let answer = zone.read().await.answer(&query);
+                                if let Some(answer) = answer {
+                                    stream.write_u16(answer.len() as u16).await?;
+                                    stream.write_all(&answer).await?;
+                                } else { break; }
+                            }
+                            Ok::<_, anyhow::Error>(())
+                        };
+                        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), exchange).await;
+                    });
+                },
+                packet=self.socket.recv_from(&mut buffer)=>{
                 let (n,remote)=packet?; if remote.ip()!=own && !remote.ip().is_loopback() {continue;}
                 let answer=self.zone.read().await.answer(&buffer[..n]);
                 if let Some(answer)=answer {tokio::select! {_=cancel.cancelled()=>return Ok(()),result=self.socket.send_to(&answer,remote)=>{result?;}}}
@@ -231,6 +290,9 @@ pub async fn register(
     proxy
         .call::<_, _, ()>("SetLinkDefaultRoute", &(index as i32, false))
         .await?;
+    // A removed block or changed address should not remain in the system
+    // resolver cache. Registration is refreshed only when policy changes.
+    let _ = proxy.call::<_, _, ()>("FlushCaches", &()).await;
     Ok(Registration::default())
 }
 
@@ -371,4 +433,47 @@ pub async fn register(
     Ok(Registration {
         interface: Some(interface),
     })
+}
+
+#[cfg(test)]
+mod tcp_tests {
+    use super::*;
+    use hickory_proto::{op::Query, rr::Name};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn tcp_and_udp_share_policy_and_shutdown_closes_idle_clients() -> Result<()> {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let address = socket.local_addr()?;
+        let tcp = TcpListener::bind(address).await?;
+        let zone = Zone { rules: vec![porthub_mesh::dns_policy::Rule {
+            domain: "blocked.example".into(), action: porthub_mesh::dns_policy::Action::Block,
+            include_subdomains: true,
+        }], ..Default::default() };
+        let server = Server { socket, tcp, zone: Arc::new(RwLock::new(zone)) };
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(server.serve(cancel.clone()));
+        let mut query = Message::query();
+        query.add_query(Query::query(Name::from_ascii("blocked.example")?, RecordType::AAAA));
+        let wire = query.to_vec()?;
+        let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        udp.send_to(&wire, address).await?;
+        let mut buffer = [0; 1500];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), udp.recv(&mut buffer)).await??;
+        let expected = buffer[..n].to_vec();
+        assert_eq!(Message::from_vec(&expected)?.metadata.response_code, ResponseCode::NXDomain);
+        let mut stream = tokio::net::TcpStream::connect(address).await?;
+        for _ in 0..2 {
+            stream.write_u16(wire.len() as u16).await?;
+            stream.write_all(&wire).await?;
+            let length = stream.read_u16().await? as usize;
+            let mut answer = vec![0; length];
+            stream.read_exact(&mut answer).await?;
+            assert_eq!(answer, expected);
+        }
+        cancel.cancel();
+        task.await??;
+        assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buffer)).await??, 0);
+        Ok(())
+    }
 }

@@ -45,6 +45,6 @@ porthub-mesh = { path = "../porthub-mesh" }
 
 [dev-dependencies]
 tokio-tungstenite = "0.30"
-porthub-tunnel.workspace = true
+porthub-tunnel = { workspace = true, features = ["http-access"] }
 porthub-edge = { path = "../porthub-edge" }
 porthub-agent = { path = "../porthub-agent" }

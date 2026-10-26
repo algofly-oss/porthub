@@ -1,4 +1,5 @@
 import { externalEndpoint, internalEndpoint } from "@/shared/utils/endpoints.mjs";
+import PublicAccessLock from "./PublicAccessLock";
 import Pagination from "@/components/ui/pagination";
 import WorkspaceDrawer from "@/components/ui/workspace-drawer";
 import { Dialog as Modal } from "@/components/ui/dialog";
@@ -29,6 +30,8 @@ import {
 import { useDebouncedValue } from "@mantine/hooks";
 import {
   IconArrowLeft,
+  IconBrandApple,
+  IconBrandWindows,
   IconChevronDown,
   IconChevronUp,
   IconCopy,
@@ -38,6 +41,7 @@ import {
   IconPlus,
   IconRefresh,
   IconShieldLock,
+  IconTerminal2,
   IconTrash,
   IconUsers,
   IconX,
@@ -60,6 +64,24 @@ const getInputClassName = () => "w-full rounded-lg !border !border-transparent !
 const getLabelClassName = () => "mb-2 block text-sm font-medium text-foreground";
 const errorClassName = "mt-1 text-xs text-red-600 dark:text-red-400";
 const getDetailInputClassName = getInputClassName;
+
+const setupTargets = {
+  linux: ["x86_64", "arm64", "armv7", "armhf"],
+  macos: ["x86_64", "arm64"],
+  windows: ["x86_64", "x86", "arm64"],
+};
+const quoteShell = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+const quotePowerShell = value => `'${String(value).replaceAll("'", "''")}'`;
+function setupCommand(url, os, arch) {
+  if (!url) return "";
+  const target = os === "macos" ? `darwin_${arch}` : os === "windows" ? `windows_${arch}` : arch;
+  if (os === "windows") {
+    const escapedUrl = quotePowerShell(url);
+    return `& { $ErrorActionPreference = 'Stop'; $url = ${escapedUrl}; $dir = Join-Path $env:TEMP ('porthub-' + [Guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $dir | Out-Null; $file = Join-Path $dir 'porthub.exe'; try { Invoke-WebRequest -Uri ($url + '/agent/${target}') -OutFile $file; & $file setup --ticket $url; if ($LASTEXITCODE -ne 0) { throw 'PortHub setup failed' } } finally { Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue } }`;
+  }
+  const q = quoteShell(url);
+  return `(set -eu; url=${q}; dir="$(mktemp -d)"; trap 'rm -rf "$dir"' EXIT; curl -fsSL "$url/agent/${target}" -o "$dir/porthub"; chmod 700 "$dir/porthub"; if [ "$(id -u)" -eq 0 ]; then "$dir/porthub" setup --ticket "$url"; else sudo -- "$dir/porthub" setup --ticket "$url"; fi)`;
+}
 
 const getInfoBadgeClassName = () => "!bg-control !text-muted-foreground";
 
@@ -173,6 +195,9 @@ const createEmptyRule = (externalPort = "") => ({
 const mapRuleFromConfig = (config) => ({
   localId: config.dataId || createRuleId(),
   dataId: config.dataId || null,
+  temporary: config.temporary === true,
+  managedBy: config.managedBy || config.managed_by || "",
+  publicAccess: config.publicAccess || config.public_access || { mode: "off" },
   serviceName: config.serviceName || "",
   serviceDescription: config.serviceDescription || "",
   internalIp: config.internalIp || config.internal_ip || "0.0.0.0",
@@ -447,6 +472,9 @@ export default function HostConfigPopup({
   const [isCheckingAvailability, setIsCheckingAvailability] = useState(false);
   const [randomizingRuleId, setRandomizingRuleId] = useState(null);
   const [machineCommand, setMachineCommand] = useState("");
+  const [bootstrapUrl, setBootstrapUrl] = useState("");
+  const [setupOs, setSetupOs] = useState("linux");
+  const [setupArch, setSetupArch] = useState("x86_64");
   const machineCommandPreviewsRef = useRef({ identity: "", commands: new Map() });
   const [isLoadingMachineCommand, setIsLoadingMachineCommand] = useState(false);
   const [showClientSetupAdvanced, setShowClientSetupAdvanced] = useState(false);
@@ -522,7 +550,8 @@ export default function HostConfigPopup({
   const portHeadingRef = useRef(null);
   const portsHeadingRef = useRef(null);
 
-  const selectedRule = rules.find((rule) => rule.localId === selectedRuleId) || null;
+  const selectedRuleCandidate = rules.find((rule) => rule.localId === selectedRuleId) || null;
+  const selectedRule = selectedRuleCandidate?.temporary ? null : selectedRuleCandidate;
   useEffect(() => {
     if (!opened) return;
     const form = editorFormRef.current;
@@ -535,6 +564,8 @@ export default function HostConfigPopup({
   const savedRuleCount = host?.forwardingConfigs?.length || 0;
   const hostConnectionStatus =
     host?.connectionStatus || (host?.isActive ? "online" : "offline");
+  const ClientOsIcon = host?.clientOs === "windows" ? IconBrandWindows : host?.clientOs === "macos" ? IconBrandApple : IconTerminal2;
+  const clientOsLabel = { linux: "Linux", macos: "macOS", windows: "Windows" }[host?.clientOs] || "";
   const showClientUpdateAction = Boolean(host?.id);
   const clientVersionLabel = formatClientVersion(
     host?.clientVersion,
@@ -676,6 +707,7 @@ export default function HostConfigPopup({
       setErrorsByRuleId({});
       setAvailabilityByRuleId({});
       setMachineCommand("");
+      setBootstrapUrl("");
       setShowClientSetupAdvanced(false);
       setClientSetupDefaults(createEmptyClientSetupValues());
       setClientSetupFields(createEmptyClientSetupValues());
@@ -906,6 +938,7 @@ export default function HostConfigPopup({
   useEffect(() => {
     if (!opened || !host?.id) {
       setMachineCommand("");
+      setBootstrapUrl("");
       setIsLoadingMachineCommand(false);
       setIsGroupPickerOpen(false);
       setGroupQuery("");
@@ -936,10 +969,13 @@ export default function HostConfigPopup({
             serviceDomain: overrides.serviceDomain || defaults.serviceDomain,
           };
           const command = response.data?.data?.command || "";
+          const installUrl = response.data?.data?.bootstrap_url || "";
           machineCommandPreviewsRef.current.commands.set(
-            JSON.stringify(getChangedClientSetupValues(fields, defaults)), command
+            JSON.stringify(getChangedClientSetupValues(fields, defaults)),
+            { command, installUrl }
           );
           setMachineCommand(command);
+          setBootstrapUrl(installUrl);
           setClientSetupDefaults(defaults);
           setClientSetupFields(fields);
         }
@@ -980,7 +1016,9 @@ export default function HostConfigPopup({
       return undefined;
     }
     if (cache.commands.has(key)) {
-      setMachineCommand(cache.commands.get(key));
+      const cached = cache.commands.get(key);
+      setMachineCommand(cached.command);
+      setBootstrapUrl(cached.installUrl);
       setIsLoadingMachineCommand(false);
       return undefined;
     }
@@ -994,9 +1032,11 @@ export default function HostConfigPopup({
         );
         if (isActive) {
           const command = response.data?.data?.command || "";
+          const installUrl = response.data?.data?.bootstrap_url || "";
           if (cache.commands.size >= 16) cache.commands.delete(cache.commands.keys().next().value);
-          cache.commands.set(key, command);
+          cache.commands.set(key, { command, installUrl });
           setMachineCommand(command);
+          setBootstrapUrl(installUrl);
         }
       } catch {
         // Keep the last known command while the user is editing advanced values.
@@ -1500,6 +1540,7 @@ export default function HostConfigPopup({
   };
 
   const openRuleEditor = (rule) => {
+    if (rule?.temporary) return;
     setPortSection("connection");
     setEditingRuleSnapshot(rule?.dataId ? { ...rule } : null);
     setSelectedRuleId(rule.localId);
@@ -1785,6 +1826,7 @@ export default function HostConfigPopup({
 
       const response = await axios.get(apiRoutes.getMachineCommand(host.id));
       setMachineCommand(response.data?.data?.command || "");
+      setBootstrapUrl(response.data?.data?.bootstrap_url || "");
       setIsRefreshMachineTokenConfirmOpen(false);
     } catch (refreshError) {
       error("Could not refresh machine setup details");
@@ -1818,11 +1860,13 @@ export default function HostConfigPopup({
         serviceDomain: overrides.serviceDomain || defaults.serviceDomain,
       };
       const command = response.data?.data?.command || "";
+      const installUrl = response.data?.data?.bootstrap_url || "";
       machineCommandPreviewsRef.current = {
         identity: `${host.id}:${host.token || ""}`,
-        commands: new Map([[JSON.stringify(getChangedClientSetupValues(fields, defaults)), command]]),
+        commands: new Map([[JSON.stringify(getChangedClientSetupValues(fields, defaults)), { command, installUrl }]]),
       };
       setMachineCommand(command);
+      setBootstrapUrl(installUrl);
       setClientSetupDefaults(defaults);
       setClientSetupFields(fields);
     } finally {
@@ -1989,6 +2033,10 @@ export default function HostConfigPopup({
     </div>
   );
 
+  const installCommand = bootstrapUrl
+    ? setupCommand(bootstrapUrl, setupOs, setupArch)
+    : machineCommand;
+
   return (
     <>
       <WorkspaceDrawer
@@ -2145,6 +2193,7 @@ export default function HostConfigPopup({
                 <Badge color="blue" variant="light" className={getInfoBadgeClassName(isDark)}>
                   {host.name || "Untitled machine"}
                 </Badge>
+                {clientOsLabel && <Badge color="blue" variant="light" leftSection={<ClientOsIcon size={13} />} className={getInfoBadgeClassName(isDark)} title={host.clientArch ? `${clientOsLabel} · ${host.clientArch}` : clientOsLabel}>{clientOsLabel}{host.clientArch ? ` · ${host.clientArch}` : ""}</Badge>}
                 {privateDomain && <Badge component="button" type="button" color="blue" variant="light"
                   onClick={() => handleCopy("PortHub domain address", `http://${privateDomain}`)}
                   aria-label={`Copy PortHub address http://${privateDomain}`}
@@ -2576,6 +2625,17 @@ export default function HostConfigPopup({
                             </Tooltip>
                           </div>
                           <div className="mt-2">
+                            <div className="mb-3 space-y-3">
+                              <div>
+                                <p className="mb-1.5 text-xs font-medium text-muted-foreground">Operating system</p>
+                                <StatusTabs label="Install operating system" value={setupOs} onChange={value => { setSetupOs(value); setSetupArch(setupTargets[value][0]); }} options={[{value:"linux",label:"Linux"},{value:"macos",label:"macOS"},{value:"windows",label:"Windows"}]} />
+                              </div>
+                              <div>
+                                <p className="mb-1.5 text-xs font-medium text-muted-foreground">Architecture</p>
+                                <StatusTabs label="Install CPU architecture" value={setupArch} onChange={setSetupArch} options={setupTargets[setupOs].map(value => ({value,label:({x86_64:setupOs==="windows"?"x64":"x86_64",x86:"x86",arm64:"ARM64",armv7:"ARMv7",armhf:"ARMv6 / ARMhf"})[value]}))} />
+                              </div>
+                              {setupOs === "windows" && <p className="text-xs text-muted-foreground">Run this command in an Administrator PowerShell window.</p>}
+                            </div>
                             <div
                               className={`relative rounded-lg ${
                                 isDark ? "bg-control" : "bg-control"
@@ -2584,9 +2644,9 @@ export default function HostConfigPopup({
                               <ActionIcon
                                 type="button"
                                 variant="subtle"
-                                onClick={() => handleCopy("Bootstrap command", machineCommand)}
+                                onClick={() => handleCopy("Bootstrap command", installCommand)}
                                 aria-label="Copy bootstrap command"
-                                disabled={!machineCommand || isLoadingMachineCommand}
+                                disabled={!installCommand || isLoadingMachineCommand}
                                 className={`!absolute right-2 top-2 ${
                                   isDark
                                     ? "!text-zinc-300 hover:!bg-accent disabled:!bg-transparent"
@@ -2600,9 +2660,9 @@ export default function HostConfigPopup({
                                   isDark ? "text-zinc-100" : "text-zinc-800"
                                 }`}
                               >
-                                {isLoadingMachineCommand && !machineCommand
+                                {isLoadingMachineCommand && !installCommand
                                   ? "Loading bootstrap command..."
-                                  : machineCommand || "Unavailable"}
+                                  : installCommand || "Unavailable"}
                               </code>
                             </div>
                             <p className="mt-2 text-xs text-muted-foreground">
@@ -2932,7 +2992,7 @@ export default function HostConfigPopup({
                       <div className="grid gap-4 sm:grid-cols-3"><PortField id={`internal-ip-${rule.localId}`} label="Internal host / IP" value={rule.internalIp} onChange={value=>updateRule(rule.localId,"internalIp",value)} error={ruleErrors.internalIp} placeholder="127.0.0.1" /><PortField id={`internal-port-${rule.localId}`} label="Internal port" value={rule.internalPort} onChange={value=>updateRule(rule.localId,"internalPort",value)} error={ruleErrors.internalPort} inputMode="numeric" /><div><PortField id={`external-port-${rule.localId}`} label="External port" value={rule.externalPort} onChange={value=>updateRule(rule.localId,"externalPort",value)} error={ruleErrors.externalPort || (availability?.available === false ? availability.message : "")} inputMode="numeric" /><WorkspaceButton type="button" variant="ghost" size="sm" disabled={randomizingRuleId === rule.localId} aria-label="Generate random external port" onClick={()=>handleGeneratePort(rule.localId)}><IconRefresh size={14} />Choose available port</WorkspaceButton></div></div>
                       <div className="rounded-lg bg-surface p-4"><div className="flex items-center justify-between gap-4"><div><h3 className="text-sm font-medium">Scheduled Refresh</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">Reconnect this service periodically.</p></div><Switch size="sm" checked={rule.autoRefreshEnabled || false} onChange={event=>updateRule(rule.localId,"autoRefreshEnabled",event.currentTarget.checked)} aria-label={rule.autoRefreshEnabled ? "Disable service auto refresh" : "Enable service auto refresh"} /></div><div className="mt-4 flex flex-wrap items-end gap-3">{rule.autoRefreshEnabled && <PortField id={`auto-refresh-interval-${rule.localId}`} label="Refresh interval (minutes)" value={rule.autoRefreshIntervalMinutes} onChange={value=>updateRule(rule.localId,"autoRefreshIntervalMinutes",value)} error={ruleErrors.autoRefreshIntervalMinutes} inputMode="numeric" />}<WorkspaceButton type="button" variant="secondary" disabled={!rule.dataId || rule.enabled === false || ruleHasUnsavedChanges || !!refreshingRuleId} onClick={()=>handleRefreshRuleNow(rule)}><IconRefresh size={15} />{refreshingRuleId === rule.localId ? "Refreshing…" : "Refresh Now"}</WorkspaceButton></div></div>
                     </div>}
-                    {portSection === "access" && <div className="space-y-4"><div><h3 className="text-base font-semibold">Source IP Access</h3><p className="mt-2 text-sm leading-6 text-muted-foreground">Leave the list empty for public access. Add IP addresses to restrict who can reach this port.</p></div><div className="flex flex-wrap gap-2">{allowedIps.map(ip=><span key={ip} className="inline-flex items-center gap-2 rounded-md bg-surface px-3 py-2 text-sm">{ip}<button type="button" aria-label={`Remove ${ip}`} onClick={()=>removeAllowedIpFromRule(rule.localId,ip)} className="rounded text-muted-foreground hover:text-foreground"><IconX size={14} /></button></span>)}</div><div className="flex gap-2"><WorkspaceInput aria-label="Allowed source IP" className="bg-control" value={allowIpDraft} onChange={event=>setAllowIpDraft(event.target.value)} placeholder="e.g. 192.0.2.10" onKeyDown={event=>{if(event.key==="Enter"){event.preventDefault();addAllowedIpToRule(rule.localId,allowIpDraft);}}} /><WorkspaceButton type="button" disabled={!allowIpDraft.trim()} onClick={()=>addAllowedIpToRule(rule.localId,allowIpDraft)}>Add IP</WorkspaceButton></div><div><h4 className="mb-2 text-xs font-medium text-muted-foreground">Recent source addresses</h4><div className="flex flex-wrap gap-2">{filteredRecentIpHits.slice(0,10).map(item=><WorkspaceButton type="button" key={item.ip} size="sm" variant="secondary" onClick={()=>addAllowedIpToRule(rule.localId,item.ip)}>{item.ip}<IconPlus size={13} /></WorkspaceButton>)}{!filteredRecentIpHits.length && <p className="text-xs text-muted-foreground">No additional addresses observed.</p>}</div></div></div>}
+                    {portSection === "access" && <div className="space-y-4"><PublicAccessLock key={rule.localId} id={rule.dataId} initialMode={rule.publicAccess?.mode || "off"} temporary={rule.temporary} onSaved={mode => updateRule(rule.localId, "publicAccess", { mode })} /><div><h3 className="text-base font-semibold">Source IP Access</h3><p className="mt-2 text-sm leading-6 text-muted-foreground">Leave the list empty for public access. Add IP addresses to restrict who can reach this port.</p></div><div className="flex flex-wrap gap-2">{allowedIps.map(ip=><span key={ip} className="inline-flex items-center gap-2 rounded-md bg-surface px-3 py-2 text-sm">{ip}<button type="button" aria-label={`Remove ${ip}`} onClick={()=>removeAllowedIpFromRule(rule.localId,ip)} className="rounded text-muted-foreground hover:text-foreground"><IconX size={14} /></button></span>)}</div><div className="flex gap-2"><WorkspaceInput aria-label="Allowed source IP" className="bg-control" value={allowIpDraft} onChange={event=>setAllowIpDraft(event.target.value)} placeholder="e.g. 192.0.2.10" onKeyDown={event=>{if(event.key==="Enter"){event.preventDefault();addAllowedIpToRule(rule.localId,allowIpDraft);}}} /><WorkspaceButton type="button" disabled={!allowIpDraft.trim()} onClick={()=>addAllowedIpToRule(rule.localId,allowIpDraft)}>Add IP</WorkspaceButton></div><div><h4 className="mb-2 text-xs font-medium text-muted-foreground">Recent source addresses</h4><div className="flex flex-wrap gap-2">{filteredRecentIpHits.slice(0,10).map(item=><WorkspaceButton type="button" key={item.ip} size="sm" variant="secondary" onClick={()=>addAllowedIpToRule(rule.localId,item.ip)}>{item.ip}<IconPlus size={13} /></WorkspaceButton>)}{!filteredRecentIpHits.length && <p className="text-xs text-muted-foreground">No additional addresses observed.</p>}</div></div></div>}
                     {portSection === "traffic" && <TrafficMonitorPanel isDark={isDark} samples={samplesByConnection.get(rule.dataId) || []} isLoading={allPortTraffic.loading} onOpenExternal={()=>openTrafficMonitorWindow(rule)} title={`${rule.serviceName || "Port"} Traffic`} />}
                     {portSection === "web" && <div><p className="mb-4 text-sm text-muted-foreground">Web addresses that route to this port. Changes here also appear on the Proxies page.</p>{rule.dataId ? <Proxy key={`${host.id}-${rule.dataId}`} machineId={host.id} connectionId={rule.dataId} onEditorOpenChange={setProxyEditorOpen} compact /> : <p className="rounded-lg bg-surface p-4 text-sm">Save this port first, then connect a web address to it.</p>}</div>}
                   </div>
@@ -2949,13 +3009,13 @@ export default function HostConfigPopup({
                   <Table aria-label="Forwarded ports"><TableHeader><TableRow><TableHead>Service</TableHead><TableHead className="hidden w-[19%] md:table-cell">Forwarding</TableHead><TableHead className="w-36 md:w-44">Live Traffic</TableHead><TableHead className="hidden w-[25%] md:table-cell">Web Addresses</TableHead><TableHead className="w-20"><span className="sr-only">Enabled</span></TableHead></TableRow></TableHeader><TableBody>
                     {paginatedRules.map(rule => {
                       const addresses = linkedProxies.filter(proxy => (proxy.connection?.data_id || proxy.connection?._id) === rule.dataId);
-                      const openAddresses = event => { event.stopPropagation(); openRuleEditor(rule); setPortSection("web"); };
-                      return <TableRow key={rule.localId} className="cursor-pointer" onClick={()=>openRuleEditor(rule)}>
-                        <TableCell className="!py-2"><button type="button" aria-label={`Edit forwarding rule ${rule.serviceName.trim() || "untitled rule"}`} className="block max-w-full text-left"><span className="block truncate text-sm font-medium">{rule.serviceName || "Untitled service"}</span><span className="mt-1 hidden truncate text-xs text-muted-foreground md:block">{rule.serviceDescription || `Port ${rule.externalPort}`}</span></button><p className="mt-1 text-xs text-muted-foreground md:hidden">{externalEndpoint(rule)} → {internalEndpoint(rule)}</p><div className="md:hidden">{gatewayLink(rule)}</div><button type="button" onClick={openAddresses} className="mt-1 max-w-full truncate text-left text-xs text-blue-700 dark:text-blue-300 md:hidden">{addresses[0]?.hosts?.[0] || "Add web address"}</button></TableCell>
+                      const openAddresses = event => { event.stopPropagation(); if (rule.temporary) return; openRuleEditor(rule); setPortSection("web"); };
+                      return <TableRow key={rule.localId} className={rule.temporary ? "" : "cursor-pointer"} onClick={rule.temporary ? undefined : ()=>openRuleEditor(rule)}>
+                        <TableCell className="!py-2"><div className="flex max-w-full flex-wrap items-center gap-2"><button type="button" aria-label={`Edit forwarding rule ${rule.serviceName.trim() || "untitled rule"}`} disabled={rule.temporary} className="block max-w-full text-left disabled:cursor-default"><span className="block truncate text-sm font-medium">{rule.serviceName || "Untitled service"}</span></button>{rule.temporary && <span title="Removed when the PortHub CLI exposure stops or its lease expires" className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-200">Temporary · PortHub agent</span>}</div><span className="mt-1 hidden truncate text-xs text-muted-foreground md:block">{rule.serviceDescription || `Port ${rule.externalPort}`}</span><p className="mt-1 text-xs text-muted-foreground md:hidden">{externalEndpoint(rule)} → {internalEndpoint(rule)}</p>{rule.temporary && <p className="mt-1 text-xs text-muted-foreground md:hidden">Removed when the CLI exposure stops.</p>}<div className="md:hidden">{gatewayLink(rule)}</div><button type="button" onClick={openAddresses} disabled={rule.temporary} className="mt-1 max-w-full truncate text-left text-xs text-blue-700 disabled:opacity-60 dark:text-blue-300 md:hidden">{addresses[0]?.hosts?.[0] || (rule.temporary ? "Managed by temporary exposure" : "Add web address")}</button></TableCell>
                         <TableCell className="hidden md:table-cell !py-2"><p className="font-mono text-xs">{externalEndpoint(rule)} → {internalEndpoint(rule)}</p></TableCell>
                         <TableCell className="!py-2"><TrafficSparkline dense samples={samplesByConnection.get(rule.dataId) || []} label={`${rule.serviceName} port traffic`} /></TableCell>
-                        <TableCell className="hidden md:table-cell"><div className="space-y-1">{addresses.slice(0,2).map(proxy=><a key={proxy._id} href={`${proxy.entry_points?.includes("websecure") ? "https" : "http"}://${proxy.hosts?.[0]}`} target="_blank" rel="noreferrer" onClick={event=>event.stopPropagation()} className="block truncate text-xs text-blue-700 hover:underline dark:text-blue-300" title={proxy.hosts?.join(", ")}>{proxy.hosts?.[0] || proxy.name}</a>)}{gatewayLink(rule)}<button type="button" onClick={openAddresses} className="text-xs text-muted-foreground hover:text-foreground">{addresses.length ? addresses.length > 2 ? `Manage ${addresses.length} addresses` : "Manage addresses" : "+ Add web address"}</button></div></TableCell>
-                        <TableCell><div onClick={event=>event.stopPropagation()}><Switch size="sm" checked={rule.enabled} onChange={event=>updateRule(rule.localId,"enabled",event.currentTarget.checked)} aria-label={rule.enabled ? "Disable forwarding rule" : "Enable forwarding rule"} /></div></TableCell>
+                        <TableCell className="hidden md:table-cell"><div className="space-y-1">{addresses.slice(0,2).map(proxy=><a key={proxy._id} href={`${proxy.entry_points?.includes("websecure") ? "https" : "http"}://${proxy.hosts?.[0]}`} target="_blank" rel="noreferrer" onClick={event=>event.stopPropagation()} className="block truncate text-xs text-blue-700 hover:underline dark:text-blue-300" title={proxy.hosts?.join(", ")}>{proxy.hosts?.[0] || proxy.name}</a>)}{gatewayLink(rule)}{rule.temporary ? <span className="text-xs text-muted-foreground">Managed by the temporary CLI exposure</span> : <button type="button" onClick={openAddresses} className="text-xs text-muted-foreground hover:text-foreground">{addresses.length ? addresses.length > 2 ? `Manage ${addresses.length} addresses` : "Manage addresses" : "+ Add web address"}</button>}</div></TableCell>
+                        <TableCell><div onClick={event=>event.stopPropagation()}><Switch size="sm" checked={rule.enabled} disabled={rule.temporary} onChange={event=>updateRule(rule.localId,"enabled",event.currentTarget.checked)} aria-label={rule.temporary ? "Temporary forwarding rule managed by PortHub agent" : rule.enabled ? "Disable forwarding rule" : "Enable forwarding rule"} /></div></TableCell>
                       </TableRow>;
                     })}
                   </TableBody></Table>

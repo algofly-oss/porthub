@@ -1,8 +1,8 @@
 //! Serialization shared by inventory routes, realtime updates and operator
 //! reports. Raw Mongo records (including private credentials) are never returned.
-use crate::{store, App};
-use mongodb::bson::{oid::ObjectId, Bson, DateTime, Document};
-use serde_json::{json, Value};
+use crate::{App, store};
+use mongodb::bson::{Bson, DateTime, Document, oid::ObjectId};
+use serde_json::{Value, json};
 use std::collections::HashSet;
 
 pub fn default_field(document: &Document, key: &str, default: Value) -> Value {
@@ -89,6 +89,9 @@ pub fn machine(app: &App, machine: &Document) -> Value {
     });
     for key in [
         "client_hostname",
+        "client_os",
+        "client_arch",
+        "client_country",
         "hostname_override",
         "client_setup_public_base_url",
         "client_setup_rathole_server_address",
@@ -117,7 +120,10 @@ pub fn connection(app: &App, connection: &Document, machine: Option<&Document>) 
         "internal_port":store::field(connection,"internal_port"),"external_port":store::field(connection,"external_port"),
         "external_bind_ip":default_field(connection,"external_bind_ip",json!("0.0.0.0")),
         "enabled":default_field(connection,"enabled",json!(true)),"auto_refresh_enabled":default_field(connection,"auto_refresh_enabled",json!(false)),
+        "temporary":default_field(connection,"temporary",json!(false)),"managed_by":default_field(connection,"managed_by",Value::Null),
+        "exposure_id":default_field(connection,"exposure_id",Value::Null),"lease_expires_at":default_field(connection,"lease_expires_at",Value::Null),
         "firewall":crate::firewall::policy(connection),
+        "public_access":{"mode":connection.get_document("public_access").ok().map(|value| if value.get_bool("pin") == Ok(true) {"pin"} else {"key"}).unwrap_or("off")},
     });
     for key in [
         "auto_refresh_interval_minutes",

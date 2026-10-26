@@ -1,22 +1,22 @@
 use super::connections::{machine, owned};
 use crate::{
-    auth,
+    App, auth,
     domain::{connections, inventory, workspaces::object_id},
     error::{ApiError, ApiResult},
     firewall,
     input::ApiBody,
-    input_compat, store, App,
+    input_compat, store,
 };
 use axum::{
+    Json, Router,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     routing::{get, put},
-    Json, Router,
 };
 use futures_util::TryStreamExt;
-use mongodb::bson::{doc, Bson, Document};
+use mongodb::bson::{Bson, Document, doc};
 use reqwest::Method;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeSet, HashMap},
     sync::Arc,
@@ -89,6 +89,11 @@ async fn set(
     tokio::spawn(async move {
         let _guard = app.connection_lock.lock().await;
         let previous = owned(&app, &owner, &id, StatusCode::NOT_FOUND).await?;
+        if previous.get_bool("temporary") == Ok(true) {
+            return Err(ApiError::bad_request(
+                "Temporary agent mappings can only be stopped from the PortHub CLI",
+            ));
+        }
         let mut candidate = previous.clone();
         candidate.insert(
             "firewall",

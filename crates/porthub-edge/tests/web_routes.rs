@@ -36,6 +36,7 @@ async fn edge_binary_reloads_atomic_web_configuration_without_idle_rescans() -> 
                 pass_host: true,
                 http: true,
                 https: true,
+                access: None,
             }],
         };
         std::fs::write(&web, serde_json::to_vec(&config)?)?;
@@ -127,6 +128,7 @@ async fn custom_hosts_take_precedence_over_api_paths_and_reload_atomically() -> 
         pass_host: true,
         http: true,
         https: true,
+                access: None,
     };
     web.reload(Config {
         routes: vec![route.clone()],
@@ -227,7 +229,7 @@ async fn mapped_websocket_upgrade_preserves_pipelined_bytes_and_half_close() -> 
             (StatusCode::SWITCHING_PROTOCOLS,[("connection","Upgrade"),("upgrade","fixture.stream")],Body::empty()).into_response()
         });
         workers.spawn(async move {let _=axum::serve(target,upstream).await;});
-        let web=Arc::new(WebRoutes::new(None));web.reload(Config {routes:vec![Route {id:"fixture".into(),hosts:vec!["socket.example".into()],target_url:format!("http://{address}"),pass_host:true,http:true,https:true}]})?;
+        let web=Arc::new(WebRoutes::new(None));web.reload(Config {routes:vec![Route {id:"fixture".into(),hosts:vec!["socket.example".into()],target_url:format!("http://{address}"),pass_host:true,http:true,https:true,access:None}]})?;
         let gateway=Arc::new(RwLock::new(EmbeddedServer::new(gateway_config("[server.services]\n")?).await?));
         let router=porthub_edge::router_with_web(gateway,None,web);let listener=TcpListener::bind("127.0.0.1:0").await?;let address=listener.local_addr()?;
         workers.spawn(async move {let _=axum::serve(listener,router).await;});

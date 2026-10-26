@@ -605,6 +605,7 @@ where
         let shutdown_rx_clone = shutdown_tx.subscribe();
         let bind_addr = service.bind_addr.clone();
         let visitor_socket_opts = SocketOpts::from_server_cfg(&service);
+        let public_access = service.access.clone();
         let pool = match service.service_type {
             ServiceType::Tcp => tokio::spawn(
                 async move {
@@ -615,6 +616,7 @@ where
                         shutdown_rx_clone,
                         listener_closed,
                         visitor_socket_opts,
+                        public_access,
                     )
                     .await
                     .with_context(|| "Failed to run TCP connection pool")
@@ -830,13 +832,20 @@ async fn run_tcp_connection_pool<T: Transport>(
     mut shutdown_rx: broadcast::Receiver<bool>,
     listener_closed: oneshot::Sender<()>,
     visitor_socket_opts: SocketOpts,
+    public_access: Option<crate::config::PublicAccessConfig>,
 ) -> Result<()> {
     let (mut visitor_rx, listener) = tcp_listen_and_send(
-        bind_addr,
+        bind_addr.clone(),
         data_ch_req_tx.clone(),
         shutdown_rx.resubscribe(),
         visitor_socket_opts,
     );
+    #[cfg(feature = "http-access")]
+    let access_gate = public_access.map(|access| porthub_runtime::public_access::Gate::new(
+        &bind_addr, porthub_runtime::public_access::Config { verifier: access.verifier.to_string(), pin: access.pin }
+    ).map(Arc::new)).transpose()?;
+    #[cfg(not(feature = "http-access"))]
+    anyhow::ensure!(public_access.is_none(), "HTTP access locks are unavailable");
     let cmd = bincode::serialize(&DataChannelCmd::StartForwardTcp).unwrap();
     let mut copies = tokio::task::JoinSet::new();
     let forwarding = async {
@@ -854,7 +863,14 @@ async fn run_tcp_connection_pool<T: Transport>(
             loop {
                 if let Some(mut ch) = data_ch_rx.recv().await {
                     if ch.write_all(&cmd).await.is_ok() {
+                        #[cfg(feature = "http-access")]
+                        let gate = access_gate.clone();
                         copies.spawn(async move {
+                            #[cfg(feature = "http-access")]
+                            if let Some(gate) = gate {
+                                let _ = porthub_runtime::public_access::forward_io(visitor, ch, gate).await;
+                                return;
+                            }
                             let _ = copy_bidirectional(&mut ch, &mut visitor).await;
                         });
                         break;

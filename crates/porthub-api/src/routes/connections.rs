@@ -1,5 +1,5 @@
 use crate::{
-    auth,
+    App, auth,
     domain::{
         connections::{self, Input},
         inventory,
@@ -9,22 +9,22 @@ use crate::{
     firewall, generated,
     input::{ApiBody, Model},
     input_compat::strip,
-    store, App,
+    store,
 };
 use axum::{
+    Json, Router,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     routing::{get, post, put},
-    Json, Router,
 };
 use futures_util::TryStreamExt;
 use mongodb::{
-    bson::{doc, oid::ObjectId, Bson, DateTime, Document},
-    options::IndexOptions,
     IndexModel,
+    bson::{Bson, DateTime, Document, doc, oid::ObjectId},
+    options::IndexOptions,
 };
 use rand::Rng;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -157,6 +157,14 @@ async fn save(app: Arc<App>, owner: Bson, input: Input, updating: bool) -> ApiRe
     } else {
         None
     };
+    if previous
+        .as_ref()
+        .is_some_and(|connection| connection.get_bool("temporary") == Ok(true))
+    {
+        return Err(ApiError::bad_request(
+            "Temporary agent mappings can only be stopped from the PortHub CLI",
+        ));
+    }
     if let Some(error) = range_error(&app, input.external_port) {
         return Err(ApiError::bad_request(&error));
     }
@@ -310,10 +318,16 @@ async fn list(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json
         .collect();
     Ok(reply(
         "Connections listed successfully",
-        json!(connections
-            .iter()
-            .map(|c| inventory::connection(&app, c, machines.get(&store::id(c.get("machine_id")))))
-            .collect::<Vec<_>>()),
+        json!(
+            connections
+                .iter()
+                .map(|c| inventory::connection(
+                    &app,
+                    c,
+                    machines.get(&store::id(c.get("machine_id")))
+                ))
+                .collect::<Vec<_>>()
+        ),
     ))
 }
 async fn delete(
@@ -329,6 +343,11 @@ async fn delete(
     tokio::spawn(async move {
         let _guard = app.connection_lock.lock().await;
         let previous = owned(&app, &owner, &id, StatusCode::BAD_REQUEST).await?;
+        if previous.get_bool("temporary") == Ok(true) {
+            return Err(ApiError::bad_request(
+                "Temporary agent mappings can only be stopped from the PortHub CLI",
+            ));
+        }
         let machine = machine(&app, &previous).await?;
         app.collection("connections")
             .delete_one(doc! {"_id":previous.get("_id"),"user_id":owner})

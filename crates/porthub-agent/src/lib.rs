@@ -4,6 +4,7 @@ pub mod adopt;
 mod autoupdate;
 pub mod bootstrap;
 pub mod control;
+pub mod expose;
 pub mod legacy;
 pub mod logs;
 pub mod private_network;

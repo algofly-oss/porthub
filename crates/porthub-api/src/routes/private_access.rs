@@ -104,6 +104,8 @@ async fn network(
 ) -> ApiResult<Json<Value>> {
     let (network, suffix) = enrollment::preferences_value(raw)?;
     let (_, owner, _) = browser(&app, &headers, &Method::PUT, &query.workspace, true).await?;
+    let _guard = app.connection_lock.lock().await;
+    crate::routes::dns_rules::ensure_zones_available(&app, &Bson::ObjectId(owner), std::slice::from_ref(&suffix)).await?;
     ensure_suffix_unique(&app, &owner, &suffix).await?;
     crate::domain::private_networks::save(&app, &owner.to_hex(), network, &suffix).await?;
     Ok(Json(
@@ -308,10 +310,18 @@ async fn snapshot(
     } else {
         Vec::new()
     };
+    let exit_nodes: Vec<Document> = app.collection("private_exit_nodes")
+        .find(doc! {"workspace_id":owner})
+        .sort(doc! {"created_at":1,"_id":1})
+        .await?.try_collect().await?;
+    let dns_rules: Vec<Document> = app.collection("private_dns_rules")
+        .find(doc! {"workspace_id":owner}).await?.try_collect().await?;
     Ok(Json(
         json!({"workspace_id":owner.to_hex(),"role":role,"transport_ready":false,
         "network":{"cidr":network.cidr(),"dns_suffix":suffix},"machines":machines,"users":users,"groups":groups,
         "books":books.iter().map(store::document).collect::<Vec<_>>(),"private_peers":private_peers,
+        "exit_nodes":exit_nodes.iter().map(crate::routes::exit_nodes::serialize).collect::<Vec<_>>(),
+        "dns_rules":dns_rules.iter().map(crate::routes::dns_rules::serialize).collect::<Vec<_>>(),
         "invitations":invitations.iter().map(store::document).collect::<Vec<_>>()}),
     ))
 }

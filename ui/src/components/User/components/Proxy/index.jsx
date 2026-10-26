@@ -85,11 +85,11 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
   const visible = filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize);
   const sections = new Map();
   const rowInteraction = proxy => ({
-    tabIndex: 0,
-    "aria-label": `Edit proxy ${proxy.hosts?.[0] || proxy.name}`,
-    onClick: event => { if (!event.target.closest("a,button,input")) edit(proxy); },
+    tabIndex: proxy.temporary ? -1 : 0,
+    "aria-label": proxy.temporary ? `Temporary proxy ${proxy.hosts?.[0] || proxy.name}, managed by PortHub agent` : `Edit proxy ${proxy.hosts?.[0] || proxy.name}`,
+    onClick: event => { if (!proxy.temporary && !event.target.closest("a,button,input")) edit(proxy); },
     onKeyDown: event => {
-      if (event.target === event.currentTarget && ["Enter", " "].includes(event.key)) {
+      if (!proxy.temporary && event.target === event.currentTarget && ["Enter", " "].includes(event.key)) {
         event.preventDefault(); edit(proxy);
       }
     },
@@ -107,7 +107,7 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
     sections.set(key, [...(sections.get(key) || []), p]);
   });
   function create() {
-    const port = connections.find(c => c._id === connectionId) || connections.find(c => c.machine_id === machineId);
+    const port = connections.find(c => c._id === connectionId && !c.temporary) || connections.find(c => c.machine_id === machineId && !c.temporary);
     setEditing(machineId && port ? { target_mode: "connection", connection: { data_id: port._id } } : null);
     changeEditor(true);
   }
@@ -131,7 +131,7 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
     finally { setDeleting(false); }
   }
   const createButton = <Button type="button" aria-label="Create proxy" onClick={create} disabled={loading}><IconPlus size={16} /><span className="md:hidden">Create</span><span className="hidden md:inline">Create proxy</span></Button>;
-  const edit = p => { setEditing(p); changeEditor(true); };
+  const edit = p => { if (p.temporary) return; setEditing(p); changeEditor(true); };
   const reset = () => { setQuery(""); setStatus("all"); setGroup("all"); setMachine("all"); };
   return <div className={compact ? "flex min-h-0 max-h-[75dvh] flex-col gap-3" : "workspace-page"}>
     {compact ? <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="text-sm font-semibold">Linked web proxies</h3><p className="mt-1 text-xs text-muted-foreground">Create and edit addresses for this {connectionId ? "port" : "machine"} here.</p></div>{createButton}</div>
@@ -158,17 +158,17 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
       : !filtered.length ? <EmptyState icon={IconWorld} title={scoped.length ? "No matching proxies" : "Your services, one address away"} description={scoped.length ? "Try another hostname, service, machine, or port, or clear your filters." : "Create a public address linked to a machine port or an HTTP target."} action={scoped.length ? <button className="action-secondary" onClick={reset}>Clear filters</button> : undefined} />
       : <div className="proxy-results overflow-hidden rounded-xl bg-surface"><div className="data-scroll">{[...sections].map(([label, entries]) => <section key={label}>
         {groupBy !== "none" && <h2 className="flex items-center gap-2 bg-muted px-4 py-2 text-xs font-semibold"><IconFolder size={14} />{label}<span className="ml-auto text-muted-foreground">{entries.length}</span></h2>}
-        <div className="hidden md:block"><Table aria-label="Web proxies"><TableHeader><TableRow><TableHead className="w-[30%]">Hostname</TableHead><TableHead className="w-[25%]">Machine / service</TableHead><TableHead>Target</TableHead><TableHead className="hidden w-48 lg:table-cell"><span title="All traffic on the linked machine port; not individual HTTP requests">Linked port traffic</span></TableHead></TableRow></TableHeader><TableBody>{entries.map(p => <TableRow key={p._id} {...rowInteraction(p)} className="cursor-pointer focus-visible:bg-accent/40">
+        <div className="hidden md:block"><Table aria-label="Web proxies"><TableHeader><TableRow><TableHead className="w-[30%]">Hostname</TableHead><TableHead className="w-[25%]">Machine / service</TableHead><TableHead>Target</TableHead><TableHead className="hidden w-48 lg:table-cell"><span title="All traffic on the linked machine port; not individual HTTP requests">Linked port traffic</span></TableHead></TableRow></TableHeader><TableBody>{entries.map(p => <TableRow key={p._id} {...rowInteraction(p)} className={p.temporary ? "bg-amber-500/[0.04]" : "cursor-pointer focus-visible:bg-accent/40"}>
           <TableCell>{host(p)}<div className="pl-4"><ProxyActivity group={p.group} metric={activityById.get(p._id)} activity={activity} /></div></TableCell>
           <TableCell><p className="truncate font-medium">{p.connection?.machine_name || "Manual target"}</p><p className="mt-0.5 truncate text-[13px] text-muted-foreground">{p.connection?.service_name || p.description || "HTTP endpoint"}</p></TableCell>
           <TableCell>{p.connection ? <p className="truncate font-mono text-xs" title={`${externalEndpoint(p.connection)} → ${internalEndpoint(p.connection)}`}>{externalEndpoint(p.connection)} → {internalEndpoint(p.connection)}</p> : <p className="truncate font-mono text-[13px]" title={p.target_url}>{p.target_url}</p>}</TableCell>
           <TableCell className="hidden lg:table-cell">{p.connection ? <TrafficSparkline samples={trafficById.get(p.connection.data_id || p.connection._id) || []} label="Linked port traffic" /> : <span className="text-xs text-muted-foreground">Standalone target</span>}</TableCell>
         </TableRow>)}</TableBody></Table></div>
-        <div className="md:hidden">{entries.map(p => <div className="proxy-row-mobile cursor-pointer focus-visible:bg-accent/40" key={p._id} {...rowInteraction(p)}><div className="min-w-0 flex-1">{host(p)}<div className="pl-4"><ProxyActivity metric={activityById.get(p._id)} activity={activity} /></div><p className="mt-1 truncate pl-4 font-mono text-[13px] text-muted-foreground">{p.connection ? `${externalEndpoint(p.connection)} → ${internalEndpoint(p.connection)}` : p.target_url}</p></div></div>)}</div>
+        <div className="md:hidden">{entries.map(p => <div className={`proxy-row-mobile ${p.temporary ? "" : "cursor-pointer"} focus-visible:bg-accent/40`} key={p._id} {...rowInteraction(p)}><div className="min-w-0 flex-1">{host(p)}<div className="pl-4"><ProxyActivity metric={activityById.get(p._id)} activity={activity} /></div><p className="mt-1 truncate pl-4 font-mono text-[13px] text-muted-foreground">{p.connection ? `${externalEndpoint(p.connection)} → ${internalEndpoint(p.connection)}` : p.target_url}</p></div></div>)}</div>
       </section>)}</div>
       <ResultsPagination count={filtered.length} noun="Proxies" page={currentPage} pages={totalPages} pageSize={pageSize} onPage={setPage} onPageSize={setPageSize} />
     </div>}
-    <ProxyConfigModal opened={opened} onClose={() => changeEditor(false)} onSubmit={save} onDelete={remove} proxy={editing} connections={machineId ? connections.filter(c => c.machine_id === machineId) : connections} machines={machineId ? machines.filter(m => m._id === machineId) : machines} defaultDomainSuffix={settings.web_proxy_domain_suffix || ""} serviceDomain={settings.port_hub_service_domain || ""} isSaving={saving} isDeleting={deleting} />
+    <ProxyConfigModal opened={opened} onClose={() => changeEditor(false)} onSubmit={save} onDelete={remove} proxy={editing} connections={(machineId ? connections.filter(c => c.machine_id === machineId) : connections).filter(c => !c.temporary)} machines={machineId ? machines.filter(m => m._id === machineId) : machines} defaultDomainSuffix={settings.web_proxy_domain_suffix || ""} serviceDomain={settings.port_hub_service_domain || ""} isSaving={saving} isDeleting={deleting} />
   </div>;
 }
 
@@ -184,5 +184,5 @@ function ProxyHost({ proxy: p, connection, machine, onCopy }) {
   else if (machineStatus === "online") status = "Enabled · Machine online";
   else if (port) { status = "Machine status unknown"; color = "bg-amber-600 dark:bg-amber-400"; }
   const url = `${p.entry_points?.includes("websecure") ? "https" : "http"}://${p.hosts?.[0] || p.name}`;
-  return <div className="flex min-w-0 items-center gap-2"><span role="img" aria-label={status} title={status} className={`h-2 w-2 shrink-0 rounded-full ${color}`} /><a className="inline-flex min-w-0 max-w-full items-center gap-1 truncate text-[15px] font-medium text-blue-600 hover:underline dark:text-blue-400" href={url} target="_blank" rel="noreferrer"><span className="truncate">{p.hosts?.[0] || p.name}</span>{p.hosts?.length > 1 && <span className="text-[10px] text-muted-foreground">+{p.hosts.length - 1}</span>}<IconArrowUpRight size={12} className="shrink-0 opacity-60" /></a><button type="button" onClick={onCopy} aria-label={`Copy proxy URL ${url}`} title="Copy proxy URL" className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"><IconCopy size={14} /></button></div>;
+  return <div className="flex min-w-0 flex-wrap items-center gap-2"><span role="img" aria-label={status} title={status} className={`h-2 w-2 shrink-0 rounded-full ${color}`} /><a className="inline-flex min-w-0 max-w-full items-center gap-1 truncate text-[15px] font-medium text-blue-600 hover:underline dark:text-blue-400" href={url} target="_blank" rel="noreferrer"><span className="truncate">{p.hosts?.[0] || p.name}</span>{p.hosts?.length > 1 && <span className="text-[10px] text-muted-foreground">+{p.hosts.length - 1}</span>}<IconArrowUpRight size={12} className="shrink-0 opacity-60" /></a>{p.temporary && <span title="Removed when the PortHub CLI exposure stops or its lease expires" className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-200">Temporary · PortHub agent</span>}<button type="button" onClick={onCopy} aria-label={`Copy proxy URL ${url}`} title="Copy proxy URL" className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"><IconCopy size={14} /></button></div>;
 }

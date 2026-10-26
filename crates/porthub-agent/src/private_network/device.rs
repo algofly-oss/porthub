@@ -128,6 +128,11 @@ impl Tun {
         }
         Ok(())
     }
+    pub async fn exit_mtu(&self, enabled: bool) -> Result<()> {
+        let mtu = porthub_mesh::MAX_PACKET - if enabled { 20 } else { 0 };
+        safe(self.netlink.set_link_mtu_by_index(self.index, mtu as u32).await,
+            "exit MTU configuration failed")
+    }
     pub async fn read(&self, buffer: &mut [u8]) -> Result<usize> {
         loop {
             let mut ready = self.fd.readable().await?;

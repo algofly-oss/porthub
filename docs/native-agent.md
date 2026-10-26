@@ -204,3 +204,43 @@ runtime package installation is needed.
 Legacy Linux registrations have an explicit native inspection/adoption command,
 with retained recovery receipts and activation rollback. See
 [native-adoption.md](native-adoption.md) for its verified scope and rollout gates.
+
+## Temporary public exposure
+
+An installed, authenticated registration can expose a local HTTP or TCP service:
+
+```sh
+porthub expose 8000
+```
+
+The command stays in the foreground. Stop it with Ctrl+C to remove its mapping.
+For a background worker, use:
+
+```sh
+porthub expose 8000 --detach
+```
+
+List workers and stop one using its displayed exposure ID:
+
+```sh
+porthub expose list
+```
+
+```sh
+porthub expose stop EXPOSURE_ID
+```
+
+`--port EXTERNAL_PORT` requests a particular gateway port from the configured
+pool. `--subdomain NAME` optionally adds a hostname proxy under the configured
+proxy suffix. Port and hostname reservations are shared with UI-created entries;
+conflicts are rejected. Temporary entries appear in the UI with an agent-managed
+indicator and cannot be edited there. The displayed TCP endpoint prefers the
+configured service domain.
+
+The worker uses its selected registration’s existing credentials. It cannot
+create mappings for an unrelated account. It renews its lease every 30 seconds;
+if the process disappears, the gateway removes the expired mapping and proxy.
+Repeated create requests with the same session identity return the same mapping.
+Normal stopping removes the mapping immediately. System registrations retain
+their existing credential permissions; the CLI elevates when access to those
+credentials is required.

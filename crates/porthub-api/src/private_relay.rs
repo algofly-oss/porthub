@@ -175,7 +175,7 @@ impl Hub {
             // Only this source reader waits. Other peers keep forwarding, and
             // queue capacity still enforces the existing global memory budget.
             let output = route.output.clone();
-            let permit = if matches!(route.packet[9], 6 | porthub_mesh::control_packet::STREAM) {
+            let permit = if matches!(route.packet[9], 6 | porthub_mesh::control_packet::STREAM | porthub_mesh::control_packet::EXIT) {
                 let deadline = route
                     .expires
                     .min(Instant::now() + Duration::from_millis(200));

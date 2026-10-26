@@ -481,6 +481,8 @@ pub struct Sync {
     pub hostname: String,
     pub local_ip: String,
     pub public_ip: String,
+    pub client_os: String,
+    pub client_arch: String,
     pub version: String,
     pub handled: String,
     pub native_update_protocol: bool,
@@ -537,6 +539,21 @@ async fn sync_inner(
     .find(|s| !s.is_empty())
     .unwrap_or("");
     let mut set = doc! {"hostname":hostname,"client_hostname":client_hostname,"local_ip":input.local_ip.trim(),"public_ip":public_ip,"auth_required":false,"last_seen_at":now};
+    if let Some(country) = headers
+        .get("cf-ipcountry")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .map(str::to_ascii_uppercase)
+        .filter(|country| country.len() == 2 && country.bytes().all(|byte| byte.is_ascii_alphabetic()) && country != "XX" && country != "T1")
+    {
+        set.insert("client_country", country);
+    }
+    if matches!(input.client_os.as_str(), "linux" | "macos" | "windows") {
+        set.insert("client_os", &input.client_os);
+    }
+    if matches!(input.client_arch.as_str(), "x86_64" | "x86" | "aarch64" | "arm" | "armv7") {
+        set.insert("client_arch", &input.client_arch);
+    }
     let version = input.version.trim();
     let handled = input.handled.trim();
     if should_replace_reported_version(store::string(machine, "client_version").trim(), version) {

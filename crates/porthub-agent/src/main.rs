@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
     version = option_env!("PORTHUB_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
     about = "PortHub agent and transfer tools",
     color = clap::ColorChoice::Auto,
-    after_long_help = "Examples:\n  porthub ls\n  porthub http.server ./public\n  porthub http.receive ./drop\n  porthub push ./dataset http://host:8001/\n  porthub get https://example.com/file.iso"
+    after_long_help = "Examples:\n  porthub ls\n  porthub http.server ./public\n  porthub http.receive ./drop\n  porthub expose 8080\n  porthub expose 8080 --subdomain myapp --detach\n  porthub push ./dataset http://host:8001/\n  porthub get https://example.com/file.iso"
 )]
 struct Args {
     #[command(subcommand)]
@@ -75,6 +75,7 @@ fn requires_system_privileges(args: &Args) -> bool {
             (*port_override).is_some_and(is_privileged_port)
                 || target.parse::<u16>().is_ok_and(is_privileged_port)
         }
+        Command::Expose { user, worker, .. } => !user && !worker,
         Command::Run { profile } => {
             porthub_agent::private_network::is_profile(profile).unwrap_or(false)
         }
@@ -257,6 +258,35 @@ enum Command {
         root: Option<PathBuf>,
         #[arg(long)]
         all: bool,
+    },
+    /// Expose a local port temporarily through the PortHub gateway.
+    #[command(name = "expose")]
+    Expose {
+        #[arg(value_name = "PORT|list|stop")]
+        target: Option<String>,
+        #[arg(value_name = "ID")]
+        id: Option<String>,
+        /// Reserve a specific external gateway port instead of choosing one.
+        #[arg(long, short = 'p')]
+        port: Option<u16>,
+        /// Create a temporary web proxy on this subdomain label.
+        #[arg(long)]
+        subdomain: Option<String>,
+        /// Keep the exposure running in the background.
+        #[arg(long, short = 'd')]
+        detach: bool,
+        /// Use a per-user registration instead of the system service.
+        #[arg(long)]
+        user: bool,
+        /// Select a registration by ID from `porthub ls` when multiple exist.
+        #[arg(long, conflicts_with = "profile")]
+        registration: Option<String>,
+        #[arg(long, hide = true)]
+        profile: Option<PathBuf>,
+        #[arg(long, hide = true)]
+        worker: bool,
+        #[arg(long, hide = true, requires = "worker")]
+        session_id: Option<String>,
     },
     /// Download files or sync directories with parallel ranges and safe resume.
     Get {
@@ -1179,6 +1209,79 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Some(Command::Expose {
+            target,
+            id,
+            port,
+            subdomain,
+            detach,
+            user,
+            registration,
+            profile,
+            worker,
+            session_id,
+        }) => {
+            let selected_layout = layout(user)?;
+            if worker {
+                let profile = profile.context("missing exposure profile")?;
+                let id = session_id.context("missing exposure session identity")?;
+                let local_port = target.context("missing local port")?.parse::<u16>()?;
+                porthub_agent::expose::worker(
+                    selected_layout,
+                    profile,
+                    id,
+                    local_port,
+                    port,
+                    subdomain,
+                )
+                .await
+            } else {
+                let target = target.unwrap_or_default();
+                match target.as_str() {
+                    "list" => porthub_agent::expose::list(&selected_layout),
+                    "stop" => porthub_agent::expose::stop(
+                        &selected_layout,
+                        id.as_deref().context("usage: porthub expose stop ID")?,
+                    ),
+                    _ => {
+                        anyhow::ensure!(
+                            !target.is_empty(),
+                            "usage: porthub expose LOCAL_PORT [--port EXTERNAL_PORT] [--subdomain NAME] [--detach]"
+                        );
+                        let local_port = target
+                            .parse::<u16>()
+                            .context("local port must be from 1 to 65535")?;
+                        let registrations =
+                            porthub_agent::service::registrations(&selected_layout)?;
+                        let selector = registration.as_deref().map(str::to_ascii_lowercase);
+                        let candidates = registrations
+                            .into_iter()
+                            .filter(|entry| {
+                                !porthub_agent::private_network::is_profile(&entry.spec.profile)
+                                    .unwrap_or(true)
+                                    && selector.as_ref().is_none_or(|value| {
+                                        entry.machine_id.starts_with(value)
+                                            || entry.spec.service == *value
+                                    })
+                            })
+                            .collect::<Vec<_>>();
+                        anyhow::ensure!(
+                            candidates.len() == 1,
+                            "select one public registration with --registration from porthub ls"
+                        );
+                        porthub_agent::expose::start(
+                            selected_layout,
+                            candidates[0].spec.profile.clone(),
+                            local_port,
+                            port,
+                            subdomain,
+                            detach,
+                        )
+                        .await
+                    }
+                }
+            }
+        }
         Some(Command::Get {
             url,
             directory,
@@ -1515,6 +1618,7 @@ mod cli_tests {
             "setup",
             "http.server",
             "http.receive",
+            "expose",
             "get",
             "push",
             "status",

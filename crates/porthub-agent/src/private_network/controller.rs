@@ -81,11 +81,12 @@ async fn prepare(
             // in this background task; payloads retain peer-pinned DTLS.
             if let Ok(Ok(ready)) = tokio::time::timeout(
                 Duration::from_secs(3),
-                porthub_mesh::relay::Allocation::connect(
+                porthub_mesh::relay::Allocation::connect_bound(
                     url.as_str(),
                     &credential.username,
                     &credential.credential,
                     allow_plaintext,
+                    &interfaces.iter().map(|address| address.ip()).collect::<Vec<_>>(),
                 ),
             )
             .await
@@ -271,11 +272,14 @@ pub async fn run_watched_identity(
         instance,
         certificate: identity,
     } = local;
-    let client = reqwest::Client::builder()
+    let make_client = |local: Option<std::net::IpAddr>| reqwest::Client::builder()
+        .local_address(local)
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(2))
         .timeout(Duration::from_secs(4))
-        .build()?;
+        .build();
+    let mut bound = interfaces.borrow().first().map(|address| address.ip());
+    let mut client = make_client(bound)?;
     let mut bases = vec![profile.server.clone()];
     bases.extend(profile.fallback_servers.clone());
     let mut preferred = 0;
@@ -287,6 +291,8 @@ pub async fn run_watched_identity(
     let mut acks: Vec<String> = Vec::new();
     let mut seen: HashMap<String, Instant> = HashMap::new();
     loop {
+        let next_bind = interfaces.borrow().first().map(|address| address.ip());
+        if next_bind != bound { client = make_client(next_bind)?; bound = next_bind; }
         let sent = pending.len().min(16);
         let acked = acks.len().min(128);
         let paths: BTreeMap<_, _> = peers

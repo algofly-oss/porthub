@@ -17,6 +17,9 @@ use tokio_util::sync::CancellationToken;
 pub(super) async fn current() -> Result<Vec<SocketAddr>> {
     let netlink = Connection::<Route>::new()?;
     let links = netlink.get_links().await?;
+    let default = netlink.get_routes().await?.iter()
+        .filter(|route| route.is_ipv4() && route.table_id() == 254 && route.dst_len() == 0)
+        .min_by_key(|route| route.priority().unwrap_or(0)).and_then(|route| route.oif());
     let preference: HashMap<_, _> = links
         .iter()
         .filter(|link| {
@@ -43,7 +46,7 @@ pub(super) async fn current() -> Result<Vec<SocketAddr>> {
             } else {
                 1
             };
-            (link.ifindex(), rank)
+            (link.ifindex(), if Some(link.ifindex()) == default { 0 } else { rank + 1 })
         })
         .collect();
     let mut interfaces: Vec<_> = netlink

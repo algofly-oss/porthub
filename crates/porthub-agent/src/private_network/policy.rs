@@ -15,6 +15,8 @@ pub struct PeerInfo {
     pub fingerprint: String,
     pub instance: String,
     #[serde(default)]
+    pub online: bool,
+    #[serde(default)]
     pub stream_transport: String,
     pub hostname: String,
     #[serde(default)]
@@ -33,6 +35,22 @@ pub struct Grant {
     pub ports: Vec<Port>,
 }
 #[derive(Clone, Deserialize, Serialize)]
+pub struct ExitRoute {
+    pub id: String,
+    pub name: String,
+    pub routing_peers: Vec<String>,
+    pub clients: Vec<String>,
+    #[serde(default)]
+    pub selection: porthub_mesh::exit_policy::Selection,
+    #[serde(default = "yes")]
+    pub masquerade: bool,
+    #[serde(default = "yes")]
+    pub block_lan_access: bool,
+}
+fn yes() -> bool {
+    true
+}
+#[derive(Clone, Deserialize, Serialize)]
 pub struct Snapshot {
     pub workspace: String,
     #[serde(rename = "self")]
@@ -43,6 +61,10 @@ pub struct Snapshot {
     #[serde(default)]
     pub dns_suffixes: Vec<String>,
     pub grants: Vec<Grant>,
+    #[serde(default)]
+    pub exit_routes: Vec<ExitRoute>,
+    #[serde(default)]
+    pub dns_rules: Vec<porthub_mesh::dns_policy::Rule>,
 }
 // The control protocol calls the identity field "self".
 #[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -168,10 +190,11 @@ impl Packet {
         FlowId(key.min(reverse))
     }
     pub fn flow_ttl(&self) -> Duration {
-        ttl(self.key.protocol)
+        if self.key.protocol == 6 && self.ack && !self.syn { TCP_ESTABLISHED_TTL } else { ttl(self.key.protocol) }
     }
 }
 struct Flow {
+    remote: String,
     expires: Instant,
     opening: Packet,
     phase: u8,
@@ -181,12 +204,14 @@ pub struct Engine {
     snapshot: Option<Snapshot>,
     ips: HashMap<String, Ipv4Addr>,
     flows: HashMap<Key, Flow>,
+    exit_flows: HashMap<Key, Flow>,
     deadline: Option<Instant>,
 }
 impl Engine {
     pub fn revoke(&mut self) {
         self.deadline = None;
         self.flows.clear();
+        self.exit_flows.clear();
     }
     pub fn apply(&mut self, mut snapshot: Snapshot) -> Result<()> {
         let result = (|| {
@@ -227,6 +252,29 @@ impl Engine {
                 ips.contains_key(&snapshot.self_),
                 "private policy omits local identity"
             );
+            // Validate independently of the API: dynamic group membership can
+            // change between editing a route and publishing a policy lease.
+            ensure!(snapshot.exit_routes.len() <= 256, "too many exit routes");
+            let mut route_ids = HashSet::new();
+            let mut exit_clients = HashSet::new();
+            let mut routing_peers = HashSet::new();
+            for route in &snapshot.exit_routes {
+                ensure!(
+                    !route.id.is_empty() && route_ids.insert(&route.id)
+                        && !route.routing_peers.is_empty() && !route.clients.is_empty()
+                        && route.routing_peers.len() <= 4096 && route.clients.len() <= 4096,
+                    "invalid exit route"
+                );
+                let mut unique_peers = HashSet::new();
+                for peer in &route.routing_peers {
+                    ensure!(ips.contains_key(peer) && unique_peers.insert(peer), "invalid exit peer");
+                    routing_peers.insert(peer);
+                }
+                for client in &route.clients {
+                    ensure!(ips.contains_key(client) && exit_clients.insert(client), "ambiguous exit assignment");
+                }
+            }
+            ensure!(routing_peers.is_disjoint(&exit_clients), "recursive exit routing is not supported");
             for grant in &snapshot.grants {
                 ensure!(
                     ips.contains_key(&grant.source)
@@ -263,6 +311,10 @@ impl Engine {
                         }
                     }
                 }
+                self.exit_flows.retain(|key, flow| {
+                    !changed.contains(&key.src) && !changed.contains(&key.dst)
+                        && self.ips.get(&flow.remote).is_none_or(|ip| !changed.contains(ip))
+                });
                 self.flows
                     .retain(|key, _| !changed.contains(&key.src) && !changed.contains(&key.dst));
             }
@@ -276,6 +328,10 @@ impl Engine {
                 .into_iter()
                 .filter(|(_, f)| f.expires > now && self.allowed(f.opening))
                 .collect();
+            let old_exits = std::mem::take(&mut self.exit_flows);
+            self.exit_flows = old_exits.into_iter().filter(|(_, flow)| {
+                flow.expires > now && self.exit_permitted(flow.opening, &flow.remote).is_some()
+            }).collect();
             Ok(())
         })();
         if result.is_err() {
@@ -325,6 +381,66 @@ impl Engine {
         {
             return false;
         }
+        let may_open = self.allowed(packet);
+        track_packet(&mut self.flows, packet, "", may_open, now)
+    }
+
+    // A separate state table prevents exit grants from widening private ACLs.
+    // The authenticated transport identity is bound to every tracked flow.
+    pub fn check_exit(&mut self, bytes: &[u8], remote: &str, inbound: bool) -> bool {
+        let now = Instant::now();
+        if self.deadline.is_none_or(|deadline| deadline <= now) {
+            self.exit_flows.clear();
+            return false;
+        }
+        // A relay can connect before the next policy sync publishes the other
+        // peer's identity. Do not start flows against that placeholder: its
+        // first real fingerprint/instance would correctly revoke those flows.
+        if !self.snapshot.as_ref().is_some_and(|snapshot| snapshot.peers.iter().any(|peer|
+            peer.id == remote && !peer.fingerprint.is_empty() && !peer.instance.is_empty())) {
+            return false;
+        }
+        let Some(packet) = Packet::parse(bytes) else { return false; };
+        let Some((request, local_is_client)) = self.exit_permitted(packet, remote) else { return false; };
+        if request != (inbound != local_is_client) { return false; }
+        track_packet(&mut self.exit_flows, packet, remote, request, now)
+    }
+
+    fn exit_permitted(&self, packet: Packet, remote: &str) -> Option<(bool, bool)> {
+        let snapshot = self.snapshot.as_ref()?;
+        for route in &snapshot.exit_routes {
+            let local_is_client = route.clients.contains(&snapshot.self_)
+                && route.routing_peers.iter().any(|id| id == remote);
+            let local_is_exit = route.routing_peers.contains(&snapshot.self_)
+                && route.clients.iter().any(|id| id == remote);
+            if !local_is_client && !local_is_exit { continue; }
+            let client = if local_is_client { &snapshot.self_ } else { remote };
+            let client_ip = self.ips.get(client)?;
+            let request = packet.source() == *client_ip;
+            let target = if request { packet.destination() } else {
+                if packet.destination() != *client_ip { return None; }
+                packet.source()
+            };
+            // Never make overlay peers, loopback or host metadata reachable by
+            // granting internet access. LAN access is separately opt-in.
+            if self.ips.values().any(|ip| *ip == target) || !exit_target(target, route.block_lan_access) {
+                return None;
+            }
+            return Some((request, local_is_client));
+        }
+        None
+    }
+}
+
+fn exit_target(ip: Ipv4Addr, block_lan: bool) -> bool {
+    let [a, b, _, _] = ip.octets();
+    !ip.is_unspecified() && !ip.is_loopback() && !ip.is_link_local()
+        && !ip.is_multicast() && !ip.is_broadcast() && a != 0 && a < 240
+        && !(a == 100 && (64..=127).contains(&b))
+        && !(block_lan && ip.is_private())
+}
+
+fn track_packet(flows: &mut HashMap<Key, Flow>, packet: Packet, remote: &str, may_open: bool, now: Instant) -> bool {
         let key = packet.key;
         let reverse = Key {
             src: key.dst,
@@ -334,10 +450,11 @@ impl Engine {
             ..key
         };
         for candidate in [key, reverse] {
-            if self.flows.get(&candidate).is_some_and(|f| f.expires <= now) {
-                self.flows.remove(&candidate);
+            if flows.get(&candidate).is_some_and(|f| f.expires <= now) {
+                flows.remove(&candidate);
             }
-            if let Some(flow) = self.flows.get_mut(&candidate) {
+            if let Some(flow) = flows.get_mut(&candidate) {
+                if flow.remote != remote { return false; }
                 let reply = candidate != key;
                 if key.protocol == 1
                     && ((reply && packet.icmp_type != 0) || (!reply && packet.icmp_type != 8))
@@ -346,7 +463,7 @@ impl Engine {
                 }
                 if key.protocol == 6 {
                     if packet.rst {
-                        self.flows.remove(&candidate);
+                        flows.remove(&candidate);
                         return true;
                     }
                     if reply && packet.syn && !packet.ack {
@@ -369,33 +486,66 @@ impl Engine {
                         }
                     }
                 }
-                flow.expires = now + ttl(key.protocol);
+                flow.expires = now + if key.protocol == 6 && flow.phase == 2 { TCP_ESTABLISHED_TTL } else { ttl(key.protocol) };
                 return true;
             }
         }
-        if !self.allowed(packet)
+        if !may_open
             || (key.protocol == 6 && (!packet.syn || packet.ack || packet.rst || packet.fin))
             || (key.protocol == 1 && packet.icmp_type != 8)
         {
             return false;
         }
-        if self.flows.len() >= 65536 {
-            self.flows.retain(|_, f| f.expires > now);
-            if self.flows.len() >= 65536 {
+        if flows.len() >= 65536 {
+            flows.retain(|_, f| f.expires > now);
+            if flows.len() >= 65536 {
                 return false;
             }
         }
-        self.flows.insert(
+        flows.insert(
             key,
             Flow {
+                remote: remote.to_owned(),
                 expires: now + ttl(key.protocol),
                 opening: packet,
                 phase: 0,
             },
         );
         true
-    }
 }
+
+// Match the usual Linux conntrack established TCP idle lifetime. Policy
+// leases and identity revocation still apply independently of this timeout.
+const TCP_ESTABLISHED_TTL: Duration = Duration::from_secs(5 * 24 * 60 * 60);
+
 fn ttl(protocol: u8) -> Duration {
     Duration::from_secs(if protocol == 6 { 300 } else { 30 })
+}
+
+#[cfg(test)]
+mod lifetime_tests {
+    use super::*;
+
+    #[test]
+    fn quiet_established_tcp_survives_but_unfinished_handshakes_expire() {
+        let start = Instant::now();
+        let syn = Packet {
+            key: Key { src: Ipv4Addr::new(10, 203, 0, 1), dst: Ipv4Addr::new(203, 0, 113, 1), protocol: 6, sport: 4000, dport: 443, icmp: 0 },
+            syn: true, ack: false, rst: false, fin: false, icmp_type: 0,
+        };
+        let reply = Packet { key: Key { src: syn.key.dst, dst: syn.key.src, sport: syn.key.dport, dport: syn.key.sport, ..syn.key }, ack: true, ..syn };
+        let ack = Packet { syn: false, ack: true, ..syn };
+        let mut flows = HashMap::new();
+        assert!(track_packet(&mut flows, syn, "exit", true, start));
+        assert!(track_packet(&mut flows, reply, "exit", false, start));
+        assert!(track_packet(&mut flows, ack, "exit", true, start));
+        let later = start + Duration::from_secs(3600);
+        assert!(track_packet(&mut flows, ack, "exit", true, later));
+        assert!(!track_packet(&mut flows, ack, "another-exit", true, later));
+        assert_eq!(ack.flow_ttl(), TCP_ESTABLISHED_TTL);
+        let mut incomplete = HashMap::new();
+        assert!(track_packet(&mut incomplete, syn, "exit", true, start));
+        assert!(!track_packet(&mut incomplete, reply, "exit", false, later));
+        assert!(!track_packet(&mut flows, ack, "exit", true, later + TCP_ESTABLISHED_TTL));
+    }
 }

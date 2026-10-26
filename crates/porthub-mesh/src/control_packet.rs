@@ -4,6 +4,7 @@
 use anyhow::{ensure, Result};
 use bytes::Bytes;
 use std::net::Ipv4Addr;
+pub const EXIT: u8 = 252;
 pub const STREAM: u8 = 253;
 pub const PROBE: u8 = 254;
 pub struct Envelope {
@@ -30,7 +31,7 @@ pub fn encode(
     payload: &[u8],
 ) -> Result<Bytes> {
     ensure!(
-        matches!(protocol, STREAM | PROBE)
+        matches!(protocol, EXIT | STREAM | PROBE)
             && source.is_private()
             && destination.is_private()
             && source != destination
@@ -52,7 +53,7 @@ pub fn encode(
     Ok(packet.into())
 }
 pub fn decode(protocol: u8, packet: Bytes) -> Option<Envelope> {
-    if !matches!(protocol, STREAM | PROBE)
+    if !matches!(protocol, EXIT | STREAM | PROBE)
         || !(21..=crate::MAX_PACKET).contains(&packet.len())
         || packet[0] != 0x45
         || packet[9] != protocol
