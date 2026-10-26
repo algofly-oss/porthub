@@ -1,7 +1,7 @@
 # Native deployment boundaries
 
 The root Dockerfile and single `docker-compose.yml` define three native server
-roles. Native release 1.4.6 is deployed on URM2. Persistent PortHub state is
+roles. Native release 1.4.7 is deployed on URM2. Persistent PortHub state is
 host-bound under `/home/ubuntu/algofly/porthub/volumes/porthub-native`; the
 original named volumes remain intact for rollback.
 
@@ -39,7 +39,7 @@ routes reached HTTP responses: 15 reached upstream responses, while 10 returned
 502 because their existing mapped targets were disabled (eight disabled port
 mappings and two mappings on the disabled Clearsight machine). Those settings
 were preserved. Both builtin PortHub gateway aliases returned 200. All nine
-enabled machines reported agent 1.4.6 with no pending update target.
+enabled machines reported agent 1.4.7 with no pending update target.
 
 Core requests exact-snapshot application over `/run/porthub-edge/control.sock`.
 This is a separate Unix socket volume: edge mounts it writable, core read-only,
@@ -180,3 +180,26 @@ Audit/adopt or remove only PortHub's legacy `inet rathole` table after its worke
 is stopped, so stale rules do not conflict with the native `inet porthub` table.
 Do not flush unrelated rules, remove unrelated containers or prune networks.
 The old monolithic container must stop before the replacement takes its ports.
+
+## Latest rollout validation
+
+The 1.4.7 images use source revision `833186d`; the agent release is tagged
+`v1.4.7` at `c7b310c`. The Rust source is identical between those commits; the
+subsequent commit contains the UI and browser tests. Production images were
+assembled from the validated native ARM binaries and the exact static UI export
+tested locally. All 30 published agent asset digests matched GitHub metadata,
+and the core image retains only the complete 1.4.7 client bundle.
+
+The native agent passed 117 tests (2 ignored); all ten platform builds passed.
+Chromium and WebKit verified session restoration after transient errors, reload,
+reopening, explicit logout and revocation, including an outstanding account
+request during logout. The production service worker's network-only API policy
+and offline fallback passed. Both engines checked the mobile shell at 320, 402
+and 430 pixels; WebKit repeated the checks against the live site, including the
+iPhone 16 Pro's 402 × 874 CSS-pixel viewport and a shortened containing block.
+These are isolated browser checks, not a physical-device test.
+
+After rollout, all nine enabled machines reported 1.4.7 with cleared update
+targets. Routing configuration hashes, bind mounts, database identity and
+firewall credentials matched the previous deployment. All three roles remained
+healthy, read-only and without build tools; other containers retained their IDs.
