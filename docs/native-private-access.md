@@ -77,7 +77,12 @@ source IPs.
 Assignments are bounded to 65,536 flows. Authenticated replies refresh existing
 assignments but cannot create them or change their exit identity. Established TCP
 flows have a five-day idle lifetime; incomplete handshakes expire after five
-minutes. Policy leases, revocation, and peer identity changes are enforced
+minutes. A single FIN preserves the half-closed stream. Both FIN directions cap
+the remaining lifetime at two minutes, so completed connections release capacity
+without later ACKs extending it. RST removes policy state and retires the exit
+assignment after the same grace period. A new SYN sequence on a reused tuple
+starts a new selection; retransmissions retain their original exit. Policy
+leases, revocation, and peer identity changes are enforced
 independently of idle lifetimes.
 
 The current exit data plane is Linux IPv4. IPv6 routing and other operating
@@ -91,7 +96,7 @@ source-bound sockets, an established UDP round trip, LAN access and restoration.
 Do not describe this implementation as an IPv6 full tunnel. Local verification uses `scripts/verify-exit-network.py` with an
 isolated test MongoDB: three native agent processes, two separate exit interfaces,
 round-robin/sticky/random connections, a persistent TCP stream across mode
-changes, and removal of an unused exit. These fixtures do not prove fleet
+changes, final responses after a client half-close, and removal of an unused exit. These fixtures do not prove fleet
 rollout or real Luna/Miro/Condor throughput.
 
 ## Device DNS policy verification
@@ -130,3 +135,10 @@ measure the previous strategy. Received policies now update selection immediatel
 the periodic tick refreshes availability without moving existing assignments.
 The isolated native-agent test also passed with a persistent TCP connection
 across all three mode changes and removal of an unused exit.
+
+The 1.5.2 connection-lifetime fix passed 139 native agent tests, including
+authorized tuple reuse and bounded cleanup without expiring half-closed streams.
+The isolated three-agent test verified final responses and orderly shutdown
+after a client half-close in every selection mode. A further Miro test through
+Luna and Condor exits produced round robin 4/4, sticky 0/8, and random 3/13.
+These are functional connection-distribution checks, not throughput benchmarks.

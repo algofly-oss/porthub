@@ -324,7 +324,10 @@ pub async fn run_with_logs(
                     #[cfg(not(target_os = "linux"))]
                     let can_forward = false;
                     if (is_reply || can_forward) && policy.check_exit(&envelope.payload, &peer, true) {
-                        if is_reply { exit_selection.observe(&packet.flow_id(), &peer, Instant::now(), packet.flow_ttl()); }
+                        if is_reply {
+                            exit_selection.observe(&packet.flow_id(), &peer, Instant::now(), packet.flow_ttl());
+                            exit_selection.observe_close(&packet.flow_id(), &peer, false, packet.is_finish(), packet.is_reset(), Instant::now());
+                        }
                         if let Some(tun) = &device { tun.write(&envelope.payload).await?; }
                     }
                     continue;
@@ -388,12 +391,13 @@ pub async fn run_with_logs(
             let size=packet?;if size>porthub_mesh::MAX_PACKET {continue;}
             let Some(parsed)=Packet::parse(&buffer[..size]) else {continue;};
             let exit_peer = if peer_ips.get(&profile.peer_id) == Some(&parsed.source()) && !by_ip.contains_key(&parsed.destination()) {
-                exit_selection.select(parsed.flow_id(), Instant::now(), parsed.flow_ttl()).map(str::to_owned)
+                exit_selection.select_with_syn(parsed.flow_id(), Instant::now(), parsed.flow_ttl(), parsed.opening_sequence()).map(str::to_owned)
             } else if !by_ip.contains_key(&parsed.source()) {
                 by_ip.get(&parsed.destination()).cloned()
             } else { None };
             if let Some(peer) = exit_peer {
                 if size <= porthub_mesh::MAX_PACKET - 20 && policy.check_exit(&buffer[..size], &peer, false) {
+                    exit_selection.observe_close(&parsed.flow_id(), &peer, true, parsed.is_finish(), parsed.is_reset(), Instant::now());
                     let prefer = *strategy.borrow() != super::strategy::Mode::PreferGateway;
                     send_exit(&sessions, &relay_sender, &peer_ips, &profile.peer_id, &peer, &buffer[..size], prefer).await?;
                 }

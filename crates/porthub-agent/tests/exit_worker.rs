@@ -56,6 +56,14 @@ async fn consumer(target: &str) -> Result<()> {
             _ => ensure!(counts.len() == 2, "random did not use both exits: {counts:?}"),
         }
         println!("{mode}: {count} new connections verified; established connection preserved");
+        let (mut half_closed, exit) = open(target).await?;
+        half_closed.get_mut().shutdown().await?;
+        let mut final_reply = String::new();
+        tokio::time::timeout(Duration::from_secs(3), half_closed.read_line(&mut final_reply)).await??;
+        ensure!(final_reply.trim().parse::<IpAddr>()? == exit, "half-closed connection lost its final reply");
+        final_reply.clear();
+        ensure!(tokio::time::timeout(Duration::from_secs(3), half_closed.read_line(&mut final_reply)).await?? == 0, "server close was not delivered");
+        println!("{mode}: half-close preserved final response and orderly shutdown");
     }
     let offline = expected.iter().find(|ip| **ip != original).unwrap();
     established.get_mut().write_all(format!("offline:{offline}\n").as_bytes()).await?;

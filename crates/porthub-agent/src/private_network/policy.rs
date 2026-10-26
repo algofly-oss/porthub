@@ -84,6 +84,7 @@ pub struct Packet {
     rst: bool,
     fin: bool,
     icmp_type: u8,
+    tcp_sequence: u32,
 }
 impl Packet {
     pub fn source(&self) -> Ipv4Addr {
@@ -92,6 +93,10 @@ impl Packet {
     pub fn destination(&self) -> Ipv4Addr {
         self.key.dst
     }
+    pub fn opening_sequence(&self) -> Option<u32> {
+        (self.key.protocol == 6 && self.syn && !self.ack && !self.fin && !self.rst).then_some(self.tcp_sequence)
+    }
+    pub fn is_finish(&self) -> bool { self.key.protocol == 6 && self.fin }
     pub fn is_reset(&self) -> bool {
         self.key.protocol == 6 && self.rst
     }
@@ -134,6 +139,7 @@ impl Packet {
             rst: false,
             fin: false,
             icmp_type: 0,
+            tcp_sequence: 0,
         };
         match bytes[9] {
             6 => {
@@ -144,6 +150,7 @@ impl Packet {
                 if header < 20 || header > n - h {
                     return None;
                 }
+                packet.tcp_sequence = u32::from_be_bytes(bytes[h + 4..h + 8].try_into().ok()?);
                 packet.syn = bytes[h + 13] & 2 != 0;
                 packet.ack = bytes[h + 13] & 16 != 0;
                 packet.rst = bytes[h + 13] & 4 != 0;
@@ -198,6 +205,8 @@ struct Flow {
     expires: Instant,
     opening: Packet,
     phase: u8,
+    fin_directions: u8,
+    close_until: Option<Instant>,
 }
 #[derive(Default)]
 pub struct Engine {
@@ -453,6 +462,10 @@ fn track_packet(flows: &mut HashMap<Key, Flow>, packet: Packet, remote: &str, ma
             if flows.get(&candidate).is_some_and(|f| f.expires <= now) {
                 flows.remove(&candidate);
             }
+            if may_open && candidate == key && packet.opening_sequence().is_some()
+                && flows.get(&candidate).is_some_and(|flow| flow.opening.opening_sequence() != packet.opening_sequence() || flow.close_until.is_some()) {
+                flows.remove(&candidate);
+            }
             if let Some(flow) = flows.get_mut(&candidate) {
                 if flow.remote != remote { return false; }
                 let reply = candidate != key;
@@ -486,7 +499,12 @@ fn track_packet(flows: &mut HashMap<Key, Flow>, packet: Packet, remote: &str, ma
                         }
                     }
                 }
+                if key.protocol == 6 && packet.fin {
+                    flow.fin_directions |= if reply { 2 } else { 1 };
+                    if flow.fin_directions == 3 { flow.close_until.get_or_insert(now + Duration::from_secs(120)); }
+                }
                 flow.expires = now + if key.protocol == 6 && flow.phase == 2 { TCP_ESTABLISHED_TTL } else { ttl(key.protocol) };
+                if let Some(until) = flow.close_until { flow.expires = flow.expires.min(until); }
                 return true;
             }
         }
@@ -509,6 +527,8 @@ fn track_packet(flows: &mut HashMap<Key, Flow>, packet: Packet, remote: &str, ma
                 expires: now + ttl(key.protocol),
                 opening: packet,
                 phase: 0,
+                fin_directions: 0,
+                close_until: None,
             },
         );
         true
@@ -527,11 +547,53 @@ mod lifetime_tests {
     use super::*;
 
     #[test]
+    fn closed_tcp_expires_without_shortening_half_closed_streams() {
+        let start = Instant::now();
+        let syn = Packet {
+            key: Key { src: Ipv4Addr::new(10, 203, 0, 1), dst: Ipv4Addr::new(203, 0, 113, 1), protocol: 6, sport: 4000, dport: 443, icmp: 0 },
+            syn: true, ack: false, rst: false, fin: false, icmp_type: 0, tcp_sequence: 1,
+        };
+        let reply = Packet { key: Key { src: syn.key.dst, dst: syn.key.src, sport: syn.key.dport, dport: syn.key.sport, ..syn.key }, ack: true, ..syn };
+        let ack = Packet { syn: false, ack: true, ..syn };
+        let mut flows = HashMap::new();
+        assert!(track_packet(&mut flows, syn, "exit", true, start));
+        assert!(track_packet(&mut flows, reply, "exit", false, start));
+        assert!(track_packet(&mut flows, ack, "exit", true, start));
+        assert!(track_packet(&mut flows, Packet { fin: true, ..ack }, "exit", true, start));
+        let later = start + Duration::from_secs(3600);
+        assert!(track_packet(&mut flows, Packet { syn: false, ..reply }, "exit", false, later));
+        assert!(flows[&syn.key].close_until.is_none());
+        assert!(track_packet(&mut flows, Packet { syn: false, fin: true, ..reply }, "exit", false, later));
+        assert!(track_packet(&mut flows, ack, "exit", true, later + Duration::from_secs(60)));
+        assert_eq!(flows[&syn.key].expires, later + Duration::from_secs(120));
+        assert!(!track_packet(&mut flows, ack, "exit", true, later + Duration::from_secs(121)));
+        assert!(flows.is_empty());
+    }
+
+    #[test]
+    fn reused_tuple_requires_authorized_opening_before_changing_exit() {
+        let now = Instant::now();
+        let syn = Packet {
+            key: Key { src: Ipv4Addr::new(10, 203, 0, 1), dst: Ipv4Addr::new(203, 0, 113, 1), protocol: 6, sport: 4000, dport: 443, icmp: 0 },
+            syn: true, ack: false, rst: false, fin: false, icmp_type: 0, tcp_sequence: 1,
+        };
+        let mut flows = HashMap::new();
+        assert!(track_packet(&mut flows, syn, "exit-a", true, now));
+        assert!(!track_packet(&mut flows, syn, "exit-b", true, now));
+        let fresh = Packet { tcp_sequence: 2, ..syn };
+        assert!(!track_packet(&mut flows, fresh, "exit-b", false, now));
+        assert_eq!(flows[&syn.key].remote, "exit-a");
+        assert!(track_packet(&mut flows, fresh, "exit-b", true, now));
+        assert_eq!(flows[&syn.key].remote, "exit-b");
+        assert_eq!(flows[&syn.key].phase, 0);
+    }
+
+    #[test]
     fn quiet_established_tcp_survives_but_unfinished_handshakes_expire() {
         let start = Instant::now();
         let syn = Packet {
             key: Key { src: Ipv4Addr::new(10, 203, 0, 1), dst: Ipv4Addr::new(203, 0, 113, 1), protocol: 6, sport: 4000, dport: 443, icmp: 0 },
-            syn: true, ack: false, rst: false, fin: false, icmp_type: 0,
+            syn: true, ack: false, rst: false, fin: false, icmp_type: 0, tcp_sequence: 1,
         };
         let reply = Packet { key: Key { src: syn.key.dst, dst: syn.key.src, sport: syn.key.dport, dport: syn.key.sport, ..syn.key }, ack: true, ..syn };
         let ack = Packet { syn: false, ack: true, ..syn };

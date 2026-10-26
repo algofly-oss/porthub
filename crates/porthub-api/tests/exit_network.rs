@@ -54,7 +54,13 @@ async fn native_agents_use_two_exits_and_preserve_established_tcp() -> Result<()
                 loop {
                     let mut line = String::new();
                     let size = tokio::select! { _ = stopped.cancelled() => break, size = stream.read_line(&mut line) => size? };
-                    if size == 0 { break; }
+                    if size == 0 {
+                        // The client closed its write half; its read half must
+                        // still receive the server's final response through the exit.
+                        stream.get_mut().write_all(format!("{}\n", peer.ip()).as_bytes()).await?;
+                        stream.get_mut().shutdown().await?;
+                        break;
+                    }
                     let response = if let Some(mode) = line.trim().strip_prefix("mode:") {
                         ensure!(["round_robin", "sticky", "random"].contains(&mode), "invalid test mode");
                         app.collection("private_exit_nodes").update_one(doc! {"_id":exit_id}, doc! {"$set":{"selection":mode}}).await?;

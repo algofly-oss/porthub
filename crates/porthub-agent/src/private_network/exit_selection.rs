@@ -20,11 +20,25 @@ fn test_selection_sender() -> &'static tokio::sync::watch::Sender<Option<(Select
     STATE.get_or_init(|| tokio::sync::watch::channel(None).0)
 }
 
+struct Assignment {
+    peer: String,
+    deadline: Instant,
+    syn_sequence: Option<u32>,
+    fin_directions: u8,
+    close_until: Option<Instant>,
+}
+impl Assignment {
+    fn refresh(&mut self, now: Instant, ttl: Duration) {
+        self.deadline = self.deadline.max(now + ttl);
+        if let Some(limit) = self.close_until { self.deadline = self.deadline.min(limit); }
+    }
+}
+
 pub struct FlowTable<K> {
     client: String,
     peers: Vec<String>,
     mode: Selection,
-    flows: HashMap<K, (String, Instant)>,
+    flows: HashMap<K, Assignment>,
     cursor: u64,
     random: RandomState,
     next_reap: Instant,
@@ -59,25 +73,43 @@ impl<K: Eq + Hash> FlowTable<K> {
     /// Refresh only an authenticated reply from the assigned exit. Never
     /// create an assignment from unsolicited incoming packets.
     pub fn observe(&mut self, flow: &K, peer: &str, now: Instant, ttl: Duration) {
-        if let Some((assigned, deadline)) = self.flows.get_mut(flow) {
-            if assigned == peer && *deadline > now {
-                *deadline = (*deadline).max(now + ttl);
+        if let Some(entry) = self.flows.get_mut(flow) {
+            if entry.peer == peer && entry.deadline > now { entry.refresh(now, ttl); }
+        }
+    }
+
+    /// Call only after policy validation. A single FIN is a half-close and
+    /// must not expire a stream that continues transferring in the other direction.
+    pub fn observe_close(&mut self, flow: &K, peer: &str, outgoing: bool, fin: bool, reset: bool, now: Instant) {
+        if !fin && !reset { return; }
+        if let Some(entry) = self.flows.get_mut(flow) {
+            if entry.peer != peer || entry.deadline <= now { return; }
+            if fin { entry.fin_directions |= if outgoing { 1 } else { 2 }; }
+            if reset || entry.fin_directions == 3 {
+                let until = *entry.close_until.get_or_insert(now + Duration::from_secs(120));
+                entry.deadline = entry.deadline.min(until);
             }
         }
     }
 
     pub fn select(&mut self, flow: K, now: Instant, ttl: Duration) -> Option<&str> {
+        self.select_with_syn(flow, now, ttl, None)
+    }
+
+    pub fn select_with_syn(&mut self, flow: K, now: Instant, ttl: Duration, syn_sequence: Option<u32>) -> Option<&str> {
         if now >= self.next_reap {
-            self.flows.retain(|_, (_, deadline)| *deadline > now);
+            self.flows.retain(|_, entry| entry.deadline > now);
             self.next_reap = now + Duration::from_secs(30);
         }
-        if self
-            .flows
-            .get(&flow)
-            .is_some_and(|(_, deadline)| *deadline > now)
-        {
-            let (peer, deadline) = self.flows.get_mut(&flow).expect("existing flow");
-            *deadline = (*deadline).max(now + ttl);
+        // A new SYN sequence is a new TCP connection even when its four-tuple
+        // is reused. Retransmissions of the original SYN retain the same exit.
+        if syn_sequence.is_some() && self.flows.get(&flow).is_some_and(|entry| entry.syn_sequence != syn_sequence || entry.close_until.is_some()) {
+            self.flows.remove(&flow);
+        }
+        if self.flows.get(&flow).is_some_and(|entry| entry.deadline > now) {
+            let entry = self.flows.get_mut(&flow).expect("existing flow");
+            entry.refresh(now, ttl);
+            let peer = &entry.peer;
             // Keep the assignment through temporary unavailability. A new
             // exit would silently invalidate TCP's externally visible tuple.
             return self
@@ -113,8 +145,8 @@ impl<K: Eq + Hash> FlowTable<K> {
         Some(
             self.flows
                 .entry(flow)
-                .or_insert((peer, now + ttl))
-                .0
+                .or_insert(Assignment { peer, deadline: now + ttl, syn_sequence, fin_directions: 0, close_until: None })
+                .peer
                 .as_str(),
         )
     }
@@ -196,7 +228,7 @@ mod tests {
         let ttl = Duration::from_secs(30);
         assert_eq!(table.select(1, now, ttl), Some("condor"));
         table.observe(&1, "luna", now + Duration::from_secs(20), ttl);
-        assert_eq!(table.flows[&1].1, now + ttl);
+        assert_eq!(table.flows[&1].deadline, now + ttl);
         table.observe(&2, "condor", now, ttl);
         assert!(!table.flows.contains_key(&2));
         table.observe(&1, "condor", now + Duration::from_secs(20), ttl);
@@ -206,6 +238,40 @@ mod tests {
         // A retransmitted handshake must not shorten an established pin.
         assert_eq!(table.select(1, now + Duration::from_secs(41), ttl), Some("condor"));
         assert_eq!(table.select(1, now + Duration::from_secs(3600), long), Some("condor"));
+    }
+
+    #[test]
+    fn reused_tcp_tuple_rotates_only_for_a_new_connection() {
+        let mut table = FlowTable::new("miro".into());
+        table.configure(peers(), Selection::RoundRobin);
+        let now = Instant::now();
+        let ttl = Duration::from_secs(300);
+        assert_eq!(table.select_with_syn(1, now, ttl, Some(100)), Some("condor"));
+        assert_eq!(table.select_with_syn(1, now, ttl, Some(100)), Some("condor"));
+        assert_eq!(table.select_with_syn(1, now, ttl, Some(200)), Some("luna"));
+        table.observe_close(&1, "luna", true, false, true, now);
+        assert_eq!(table.select_with_syn(1, now, ttl, Some(200)), Some("condor"));
+    }
+
+    #[test]
+    fn half_closed_stream_stays_pinned_but_closed_stream_releases_capacity() {
+        let mut table = FlowTable::new("miro".into());
+        table.capacity = 1;
+        table.configure(peers(), Selection::RoundRobin);
+        let now = Instant::now();
+        let ttl = Duration::from_secs(5 * 86400);
+        assert_eq!(table.select_with_syn(1, now, ttl, Some(100)), Some("condor"));
+        table.observe_close(&1, "condor", true, true, false, now);
+        let later = now + Duration::from_secs(3600);
+        table.observe(&1, "condor", later, ttl);
+        assert_eq!(table.select(1, later, ttl), Some("condor"));
+        table.observe_close(&1, "luna", false, true, false, later);
+        assert!(table.flows[&1].close_until.is_none());
+        table.observe_close(&1, "condor", false, true, false, later);
+        table.observe(&1, "condor", later + Duration::from_secs(60), ttl);
+        assert_eq!(table.flows[&1].deadline, later + Duration::from_secs(120));
+        assert_eq!(table.select(2, later + Duration::from_secs(121), ttl), Some("luna"));
+        assert_eq!(table.flows.len(), 1);
     }
 
     #[test]
