@@ -28,3 +28,6 @@ notify = "8.2"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["process"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }

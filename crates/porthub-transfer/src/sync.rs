@@ -1,5 +1,6 @@
 //! Event-driven directory synchronization and per-user managed background jobs.
 use crate::{state, upload};
+mod process;
 use anyhow::{bail, ensure, Context, Result};
 use axum::{
     extract::State,
@@ -223,44 +224,13 @@ pub async fn detach(mut options: Options) -> Result<String> {
         id: id.clone(),
         token,
     };
-    let mut command = std::process::Command::new(std::env::current_exe()?);
-    command
-        .args(["sync", "run", &id])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // The only pre-exec operation is async-signal-safe setsid.
-        unsafe {
-            command.pre_exec(|| {
-                if rustix::process::setsid().is_err() {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x00000008 | 0x00000200); // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-    }
-    let mut child = command.spawn().context("cannot start detached sync job")?;
+    let mut child = process::spawn(&id)?;
     for _ in 0..100 {
         if status(&id).await.is_ok() {
             let mut registration = registration;
             registration.token.clear(); // The worker now owns cleanup.
                                         // Reap the child when it exits without keeping the parent alive.
-            #[cfg(unix)]
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-            // Windows reaps exited processes itself. Closing our handle keeps
-            // the worker alive without a waiting thread in the launcher.
-            #[cfg(windows)]
-            drop(child);
+            child.release();
             return Ok(id);
         }
         if let Some(exit) = child.try_wait()? {
@@ -268,8 +238,7 @@ pub async fn detach(mut options: Options) -> Result<String> {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    child.terminate();
     bail!("sync worker did not become ready")
 }
 
