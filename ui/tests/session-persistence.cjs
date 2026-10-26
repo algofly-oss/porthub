@@ -13,6 +13,8 @@ let origin=process.env.REVIEW_ORIGIN||'http://127.0.0.1:5300';
    if(hold){hold=false;await new Promise(resolve=>releasePending=resolve);return {json:state.user};}
    if(mode==='unavailable')return {status:503,json:{detail:'Temporary network failure'}};
    if(mode==='anonymous')return {status:401,json:{detail:'Not signed in'}};
+   if(mode==='legacy-anonymous')return {status:400,json:{detail:'User not logged in'}};
+   if(mode==='bad-request')return {status:400,json:{detail:'Account temporarily unavailable'}};
   }
   let data;try{data=handleDemoRequest(state,method.toLowerCase(),url,body);}catch{data={data:[]};}
   return {json:data};
@@ -52,6 +54,12 @@ let origin=process.env.REVIEW_ORIGIN||'http://127.0.0.1:5300';
   phase='closing first context';const storage=await context.storageState();await context.close();phase='reopening';
   mode='ready';context=await browser.newContext({viewport:{width:402,height:874},isMobile:true,hasTouch:true,storageState:storage});await prepare(context);page=await context.newPage();page.on('pageerror',e=>errors.push({phase,message:e.message,stack:e.stack}));
   await page.goto(origin+'/home');await page.getByRole('heading',{name:'Dashboard',exact:true}).waitFor();
+  phase='unrelated bad request';mode='bad-request';await page.reload();
+  await page.getByRole('alert').filter({hasText:'saved session has not been cleared'}).waitFor();
+  assert((await context.cookies()).some(c=>c.name==='porthub_session'));
+  phase='legacy signout';mode='legacy-anonymous';await page.getByRole('button',{name:'Try again',exact:true}).click();await page.waitForURL('**/account/signin');
+  await page.getByRole('button',{name:'Sign in',exact:true}).waitFor();await page.waitForLoadState('networkidle');
+  mode='ready';await page.goto(origin+'/home');await page.getByRole('heading',{name:'Dashboard',exact:true}).waitFor();
   phase='revocation';mode='anonymous';await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));await page.waitForURL('**/account/signin');
   await page.getByRole('button',{name:'Sign in',exact:true}).waitFor();await page.waitForLoadState('networkidle');
   phase='restore';mode='ready';await page.goto(origin+'/home');await page.getByRole('heading',{name:'Dashboard',exact:true}).waitFor();
@@ -63,7 +71,7 @@ let origin=process.env.REVIEW_ORIGIN||'http://127.0.0.1:5300';
   try{await page.waitForURL('**/account/signin',{timeout:10000});}catch(error){console.log(JSON.stringify(timeline));console.log(await page.locator('body').innerText());throw error;}releasePending();await page.waitForTimeout(250);
   assert.equal(new URL(page.url()).pathname,'/account/signin','An old account response cannot restore a signed-out session');
   assert(!(await context.cookies()).some(c=>c.name==='porthub_session'),'Explicit logout clears the cookie');assert.deepEqual(errors,[]);
-  console.log('PASS persistent session across 503, resume, reload and browser-context restart; 401 redirects; logout fences late responses');
+  console.log('PASS persistent session across 503, resume, reload and browser-context restart; 401 and legacy 400 signout redirect; other 400 preserves session; logout fences late responses');
   await context.close();
  }finally{if(releasePending)releasePending();await browser.close();if(server)await new Promise(resolve=>server.close(resolve));if(app)await app.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

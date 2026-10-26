@@ -72,7 +72,10 @@ export default function useAuth() {
       return response.data;
     } catch (error) {
       if (epoch !== accountEpoch) return null;
-      if (error?.response?.status === 401) {
+      const status = error?.response?.status;
+      const signedOut = status === 401 ||
+        (status === 400 && error?.response?.data?.detail === "User not logged in");
+      if (signedOut) {
         dispatch(authActions.resetAccountInfo());
         return {};
       }
