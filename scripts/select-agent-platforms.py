@@ -47,10 +47,10 @@ LINUX_32 = [{'target': 'i686-unknown-linux-gnu',
 
 selected = os.environ.get("PORTHUB_BUILD_PLATFORM", "all") or "all"
 valid = {item["artifact"] for item in NATIVE + LINUX_32}
-if selected != "all" and selected not in valid:
+if selected not in {"all", "windows"} and selected not in valid:
     raise SystemExit("Unknown agent platform")
 with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
     for key, values in (("native", NATIVE), ("linux", LINUX_32)):
-        matrix = [item for item in values if selected in ("all", item["artifact"])]
+        matrix = [item for item in values if selected in ("all", item["artifact"]) or selected == "windows" and item["artifact"].startswith("windows_")]
         output.write(f"{key}={json.dumps(matrix)}\n")
         output.write(f"has_{key}={str(bool(matrix)).lower()}\n")

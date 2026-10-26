@@ -16,8 +16,9 @@ CI assembles `porthub-release-bundle` only after every platform job succeeds.
 All ten targets must have the same workspace version and valid checksums; a
 missing target or mixed version fails the release. Prefer the aggregate artifact
 from a single CI run. A targeted recovery build may reuse successful artifacts
-when the production source, dependencies and build recipe are unchanged; only
-tests or workflow orchestration may differ. Verify that equivalence with Git,
+when the reused targets' production source, dependencies and build recipe are
+unchanged. Test/workflow changes and fixes compiled exclusively for rebuilt
+platforms are permitted. Verify the target gating and equivalence with Git,
 validate the complete bundle again, and record the recovery commits and runs in
 the release notes. Do not combine different feature sets under one version.
 The shared version identifies the same source release; operating-system-specific

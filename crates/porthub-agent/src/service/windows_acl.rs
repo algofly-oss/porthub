@@ -122,3 +122,71 @@ fn apply(path: &Path, directory: bool, readable: bool) -> Result<()> {
     );
     Ok(())
 }
+
+/// NTFS replacement and security scanners can briefly put a status file into
+/// delete-pending/sharing-conflict states. Bound the retry; never spin or
+/// reinterpret a permanent denial as permission to elevate.
+pub(crate) fn retry_status_io<T>(
+    mut operation: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let delays = [0, 1, 2, 4, 8, 16, 32];
+    for (attempt, delay) in delays.into_iter().enumerate() {
+        if delay != 0 {
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+        }
+        match operation() {
+            Err(error)
+                if attempt + 1 < delays.len()
+                    && matches!(error.raw_os_error(), Some(2 | 5 | 32 | 33)) => {}
+            result => return result,
+        }
+    }
+    unreachable!("the last status IO attempt always returns")
+}
+
+pub(crate) fn persist_status(
+    file: tempfile::NamedTempFile,
+    destination: &Path,
+) -> std::io::Result<()> {
+    let mut pending = Some(file);
+    retry_status_io(|| {
+        let file = pending
+            .take()
+            .ok_or_else(|| std::io::Error::other("status file is unavailable"))?;
+        match file.persist(destination) {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                pending = Some(error.file);
+                Err(error.error)
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+mod status_retry_tests {
+    use super::*;
+    #[test]
+    fn sharing_conflicts_retry_but_other_errors_return_immediately() {
+        let mut attempts = 0;
+        assert_eq!(
+            retry_status_io(|| {
+                attempts += 1;
+                if attempts < 3 {
+                    Err(std::io::Error::from_raw_os_error(32))
+                } else {
+                    Ok(attempts)
+                }
+            })
+            .unwrap(),
+            3
+        );
+        attempts = 0;
+        let result = retry_status_io::<()>(|| {
+            attempts += 1;
+            Err(std::io::Error::from_raw_os_error(87))
+        });
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(87));
+        assert_eq!(attempts, 1);
+    }
+}

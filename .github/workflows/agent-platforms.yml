@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       platform:
-        description: 'Platform artifact name, or all'
+        description: 'Platform artifact name, windows, or all'
         default: all
         type: string
 permissions:

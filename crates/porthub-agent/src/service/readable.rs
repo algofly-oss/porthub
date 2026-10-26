@@ -55,6 +55,10 @@ fn caller_owned(layout: &Layout) -> Result<bool> {
     Ok(layout.user || layout.state != Layout::system()?.state)
 }
 fn check(path: &Path, directory: bool, user: bool) -> Result<fs::Metadata> {
+    #[cfg(windows)]
+    let meta = super::windows_acl::retry_status_io(|| fs::symlink_metadata(path))
+        .context("registration display metadata lookup unavailable")?;
+    #[cfg(not(windows))]
     let meta = fs::symlink_metadata(path)?;
     check_metadata(&meta, directory, user)?;
     Ok(meta)
@@ -117,9 +121,17 @@ fn read(path: &Path, user: bool) -> Result<Record> {
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
     }
+    #[cfg(windows)]
+    let file = super::windows_acl::retry_status_io(|| options.open(path))
+        .context("registration display record unavailable")?;
+    #[cfg(not(windows))]
     let file = options.open(path)?;
     // A publisher may atomically replace the path between stat and open. Trust
     // only the opened handle's ownership/type; either complete record is valid.
+    #[cfg(windows)]
+    let metadata = super::windows_acl::retry_status_io(|| file.metadata())
+        .context("registration display handle unavailable")?;
+    #[cfg(not(windows))]
     let metadata = file.metadata()?;
     check_metadata(&metadata, false, user)?;
     ensure!(
@@ -127,6 +139,13 @@ fn read(path: &Path, user: bool) -> Result<Record> {
         "registration status exceeds size limit"
     );
     let mut bytes = Vec::new();
+    #[cfg(windows)]
+    {
+        let mut reader = file.take(LIMIT + 1);
+        super::windows_acl::retry_status_io(|| reader.read_to_end(&mut bytes))
+            .context("registration display read unavailable")?;
+    }
+    #[cfg(not(windows))]
     file.take(LIMIT + 1).read_to_end(&mut bytes)?;
     ensure!(
         bytes.len() as u64 <= LIMIT,
@@ -203,6 +222,10 @@ fn write(layout: &Layout, record: &Record) -> Result<()> {
     if managed {
         super::windows_acl::readable(temp.path(), false)?;
     }
+    #[cfg(windows)]
+    super::windows_acl::persist_status(temp, &root.join(format!("{}.json", record.id)))
+        .context("registration display publication unavailable")?;
+    #[cfg(not(windows))]
     temp.persist(root.join(format!("{}.json", record.id)))
         .map_err(|e| e.error)?;
     Ok(())
