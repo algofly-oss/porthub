@@ -33,6 +33,14 @@ database credentials/storage nor firewall credentials/storage/socket access.
 The firewall controls only PortHub's own nftables table; it never flushes the
 host ruleset. It communicates with netfilter directly in Rust, without `nft`.
 
+The post-deployment live audit on 2026-10-26 verified all 17 configured public
+ports against sockets owned by the edge process. Requests through all 25 proxy
+routes reached HTTP responses: 15 reached upstream responses, while 10 returned
+502 because their existing mapped targets were disabled (eight disabled port
+mappings and two mappings on the disabled Clearsight machine). Those settings
+were preserved. Both builtin PortHub gateway aliases returned 200. All nine
+enabled machines reported agent 1.4.6 with no pending update target.
+
 Core requests exact-snapshot application over `/run/porthub-edge/control.sock`.
 This is a separate Unix socket volume: edge mounts it writable, core read-only,
 and firewall has no mount. No control endpoint is mounted on public ingress.
