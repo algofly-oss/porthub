@@ -4,6 +4,20 @@ use porthub_tunnel::{gateway_config, EmbeddedServer};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 
+#[derive(Clone, Copy)]
+struct IngressAcceptor;
+
+impl<S> axum_server::accept::Accept<tokio::net::TcpStream, S> for IngressAcceptor {
+    type Stream = tokio::net::TcpStream;
+    type Service = S;
+    type Future = std::future::Ready<std::io::Result<(Self::Stream, S)>>;
+
+    fn accept(&self, stream: Self::Stream, service: S) -> Self::Future {
+        porthub_tunnel::tune_ingress_socket(&stream);
+        std::future::ready(stream.set_nodelay(true).map(|()| (stream, service)))
+    }
+}
+
 #[derive(Parser)]
 #[command(version, about = "PortHub native public edge")]
 struct Args {
@@ -193,7 +207,7 @@ async fn main() -> Result<()> {
             std::env::var("PORT_HUB_PUBLIC_BASE_URL").ok().as_deref(),
         );
         let server = axum_server::bind(listen)
-            .acceptor(axum_server::accept::NoDelayAcceptor::new())
+            .acceptor(IngressAcceptor)
             .handle(handle.clone());
         serving.spawn(async move { server.serve(router.into_make_service()).await });
         handles.push(handle);
@@ -209,8 +223,8 @@ async fn main() -> Result<()> {
         let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(certificate, key).await?;
         for listen in args.tls_listen {
             let handle = axum_server::Handle::new();
-            let acceptor = axum_server::tls_rustls::RustlsAcceptor::new(tls.clone())
-                .acceptor(axum_server::accept::NoDelayAcceptor::new());
+            let acceptor =
+                axum_server::tls_rustls::RustlsAcceptor::new(tls.clone()).acceptor(IngressAcceptor);
             let server = axum_server::bind(listen)
                 .acceptor(acceptor)
                 .handle(handle.clone());

@@ -17,6 +17,12 @@ pub use server::EmbeddedServer;
 pub use transport::embedded::TunnelIo;
 pub use transport::framed::{FramedIo, DIRECT_FRAME_SIZE, SUBPROTOCOL, WEBSOCKET_FRAME_SIZE};
 
+/// Apply tunnel TCP policy before an HTTP listener upgrades the connection.
+/// Embedded streams cannot recover the underlying socket after upgrade.
+pub fn tune_ingress_socket(stream: &tokio::net::TcpStream) {
+    transport::SocketOpts::for_control_channel().apply(stream);
+}
+
 use anyhow::Result;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info};
