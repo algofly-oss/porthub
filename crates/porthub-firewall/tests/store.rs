@@ -51,3 +51,29 @@ async fn migrates_legacy_sqlite_and_preserves_policies_and_traffic() -> Result<(
     assert_eq!(reopened.snapshot(vec![]).await?[&8080][0].out_bytes, 84);
     Ok(())
 }
+
+#[tokio::test]
+async fn retiring_a_port_removes_its_history_without_affecting_other_ports() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = Store::open(&directory.path().join("firewall.db")).await?;
+    let sample = Sample {
+        timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
+        interval_seconds: 1.,
+        in_bytes: 20,
+        out_bytes: 40,
+        drop_bytes: 0,
+        incoming_ips: vec!["192.0.2.1".into()],
+        outgoing_ips: vec![],
+        blocked_ips: vec![],
+    };
+    store
+        .record(vec![(8000, sample.clone()), (8001, sample)])
+        .await?;
+    store.purge(8000).await?;
+    assert!(store.snapshot(vec![8000]).await?.is_empty());
+    assert!(store.hits(8000, 10).await?.is_empty());
+    assert_eq!(store.active().await?.len(), 1);
+    assert_eq!(store.snapshot(vec![8001]).await?[&8001][0].in_bytes, 20);
+    store.purge(8000).await?;
+    Ok(())
+}

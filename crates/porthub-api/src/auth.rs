@@ -72,7 +72,10 @@ pub async fn user_id(app: &App, token: &str) -> ApiResult<Option<String>> {
     {
         return Ok(None);
     }
-    Ok(row.get_str("user_id").ok().map(str::to_owned))
+    let Some(id)=row.get_str("user_id").ok().and_then(|id|ObjectId::parse_str(id).ok()) else { return Ok(None); };
+    let active=app.collection("users").find_one(doc! {"_id":id,"account_deletion":{"$exists":false}})
+        .projection(doc! {"_id":1}).await?.is_some();
+    Ok(active.then(||id.to_hex()))
 }
 
 pub async fn current_user(app: &App, headers: &HeaderMap) -> ApiResult<Document> {
@@ -81,7 +84,7 @@ pub async fn current_user(app: &App, headers: &HeaderMap) -> ApiResult<Document>
         .ok_or_else(ApiError::unauthenticated)?;
     let id = ObjectId::parse_str(id).map_err(|_| ApiError::unauthenticated())?;
     app.collection("users")
-        .find_one(doc! {"_id": id})
+        .find_one(doc! {"_id": id,"account_deletion":{"$exists":false}})
         .await?
         .ok_or_else(ApiError::unauthenticated)
 }
@@ -165,6 +168,7 @@ pub async fn signin(
     headers: HeaderMap,
     ApiBody(raw): ApiBody,
 ) -> ApiResult<Response> {
+    let _lifecycle = app.account_lifecycle.read().await;
     let mut model = Model::new(raw)?;
     let username = model.required_string("username");
     let password = model.required_string("password");
@@ -174,7 +178,7 @@ pub async fn signin(
     }
     let user = app
         .collection("users")
-        .find_one(doc! {"username": &username})
+        .find_one(doc! {"username": &username,"account_deletion":{"$exists":false}})
         .await?
         .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "incorrect username"))?;
     let valid = crate::domain::accounts::verify_password(&user, password).await?;
@@ -308,6 +312,15 @@ pub async fn renew_session(
 ) -> Response {
     let headers = request.headers().clone();
     let value = token(&headers, &app);
+    // Drain authenticated browser requests before destructive account cleanup.
+    // Transfer data and agent control calls do not acquire this browser guard.
+    let path = request.uri().path();
+    let deletion = request.method() == axum::http::Method::DELETE
+        && (path == "/api/auth/delete" || path.starts_with("/api/admin/users/"));
+    let _lifecycle = if path.starts_with("/api/") && path != "/api/auth/signin"
+        && !deletion && !value.is_empty()
+        && user_id(&app, &value).await.ok().flatten().is_some()
+    { Some(app.account_lifecycle.read().await) } else { None };
     let mut response = next.run(request).await;
     if response.status().as_u16() >= 400 || value.is_empty() || value.len() > 128 {
         return response;

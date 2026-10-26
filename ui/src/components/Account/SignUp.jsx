@@ -3,7 +3,6 @@ import TextBox from "@/shared/components/TextBox";
 import useReactState from "@/shared/hooks/reactState";
 import useAuth from "@/shared/hooks/useAuth";
 import uiRoutes from "@/shared/routes/uiRoutes";
-import GoBack from "./GoBack";
 import { useState } from "react";
 import { MdLockOutline, MdOutlineMailOutline } from "react-icons/md";
 
@@ -58,6 +57,7 @@ export default function SignUp() {
   };
 
   const handleSignUp = async () => {
+    if (signUpProgress) return;
     if (signUpDisabled) {
       error.set("form", "Sign up is currently disabled");
       return;
@@ -67,7 +67,6 @@ export default function SignUp() {
       return;
     }
 
-    auth.signOut();
     error.set("username", "");
     error.set("password", "");
     setSignUpProgress(true);
@@ -99,10 +98,9 @@ export default function SignUp() {
   };
 
   return (
-    <div className="rounded-lg p-6 lg:p-16 w-full 2xl:w-[45rem]">
-      <GoBack />
-      <p className="text-3xl font-bold">Create Account</p>
-      <p className="mb-6">
+    <div className="w-full">
+      <h1 className="text-3xl font-semibold tracking-tight">Create Account</h1>
+      <p className="mb-8 mt-2 text-sm leading-6 text-muted-foreground">
         {signUpDisabled
           ? "Account creation is disabled on this server."
           : "Please enter your details"}
@@ -121,6 +119,8 @@ export default function SignUp() {
       />
       <TextBox
         label="Email"
+        type="email"
+        autoComplete="username"
         icon={<MdOutlineMailOutline size={20} />}
         placeholder="Enter your email"
         value={data.get("username")}
@@ -130,6 +130,7 @@ export default function SignUp() {
       />
       <TextBox
         label="Password"
+        autoComplete="new-password"
         icon={<MdLockOutline size={20} />}
         placeholder="Enter your password"
         value={data.get("password")}

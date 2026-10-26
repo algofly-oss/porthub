@@ -47,6 +47,7 @@ let apiRoutes = {
   removeMachineFromGroup: "/machines/groups/remove",
 
   // Admin
+  adminUsers: "/admin/users",
   adminOverview: "/admin/overview",
   adminSignupSettings: "/admin/settings/signup",
   adminDocsSettings: "/admin/settings/docs",

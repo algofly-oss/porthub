@@ -226,7 +226,7 @@ async fn overview(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<
             email
         };
         output.push(json!({"user":{"id":uid,"name":inventory::default_field(&user,"name",json!("")),"email":email,
-            "role":inventory::default_field(&user,"role",json!("user")),"created_at":store::field(&user,"created_at")},"machines":machine_output}));
+            "role":inventory::default_field(&user,"role",json!("user")),"deleting":user.contains_key("account_deletion"),"created_at":store::field(&user,"created_at")},"machines":machine_output}));
     }
     Ok(Json(
         json!({"msg":"Platform overview loaded successfully","data":output}),

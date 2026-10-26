@@ -30,6 +30,11 @@ pub async fn initialize(app: &App) -> ApiResult<()> {
                 .build(),
         )
         .await?;
+    app.collection("users").create_index(
+        IndexModel::builder().keys(doc! {"account_deletion.next_attempt_at":1})
+            .options(IndexOptions::builder().name("porthub_account_deletion_queue".to_owned())
+                .partial_filter_expression(doc! {"account_deletion":{"$exists":true}}).build()).build()
+    ).await?;
     Ok(())
 }
 
@@ -243,7 +248,14 @@ pub async fn run(app: Arc<App>, mut stop: watch::Receiver<bool>) {
         if *stop.borrow() {
             return;
         }
-        let attempt = recover_due(&app);
+        let attempt = async {
+            let machine = recover_due(&app).await?;
+            let account = crate::account_delete::recover_due(&app).await?;
+            Ok::<_, ApiError>(match (machine, account) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            })
+        };
         let result = tokio::select! {result=attempt=>result,_=stop.changed()=>return};
         let wait = match result {
             Ok(next) => {
@@ -257,7 +269,7 @@ pub async fn run(app: Arc<App>, mut stop: watch::Receiver<bool>) {
                 })
             }
             Err(error) => {
-                tracing::warn!(detail=%error.detail,"machine deletion queue will retry");
+                tracing::warn!(detail=%error.detail,"deletion queue will retry");
                 let delay = backoff;
                 backoff = (backoff * 2).min(Duration::from_secs(30));
                 Some(delay)

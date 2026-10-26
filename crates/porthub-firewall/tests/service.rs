@@ -139,6 +139,30 @@ async fn firewall_api_authenticates_and_persists_policy_changes() -> Result<()> 
         call(
             &router,
             "DELETE",
+            "/api/ports/8080/history",
+            "wrong",
+            Value::Null
+        )
+        .await?
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(
+            &router,
+            "DELETE",
+            "/api/ports/8080/history",
+            "isolated-test-secret",
+            Value::Null
+        )
+        .await?
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        call(
+            &router,
+            "DELETE",
             "/api/ports/8080/policy",
             "isolated-test-secret",
             Value::Null
@@ -147,6 +171,23 @@ async fn firewall_api_authenticates_and_persists_policy_changes() -> Result<()> 
         .0,
         StatusCode::OK
     );
+    assert_eq!(
+        call(
+            &router,
+            "DELETE",
+            "/api/ports/8080/history",
+            "isolated-test-secret",
+            Value::Null
+        )
+        .await?
+        .0,
+        StatusCode::OK
+    );
+    assert!(porthub_firewall::store::Store::open(&database)
+        .await?
+        .snapshot(vec![8080])
+        .await?
+        .is_empty());
     assert!(porthub_firewall::store::Store::open(&database)
         .await?
         .policies()

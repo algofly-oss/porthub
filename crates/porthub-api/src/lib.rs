@@ -1,3 +1,4 @@
+pub mod account_delete;
 pub mod artifacts;
 pub mod auth;
 pub mod bootstrap;
@@ -37,6 +38,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 pub struct App {
+    pub account_lifecycle: tokio::sync::RwLock<()>,
     pub private_relay: private_relay::Hub,
     pub legacy_turn: legacy_turn::Network,
     pub private_enrollment_initialized: tokio::sync::OnceCell<()>,
@@ -82,6 +84,7 @@ impl App {
         Self {
             private_enrollment_initialized: Default::default(),
             private_initialized: Default::default(),
+            account_lifecycle: tokio::sync::RwLock::new(()),
             private_relay: Default::default(),
             legacy_turn: Default::default(),
             bootstrap_initialized: Default::default(),

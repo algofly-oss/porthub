@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "PortHub API",
-    "version": "1.3.0",
+    "version": "1.4.9",
     "description": "PortHub gateway API. Request and response bodies are JSON unless an operation specifies otherwise."
   },
   "servers": [
@@ -2860,9 +2860,15 @@
                     "items": {
                       "type": "object",
                       "properties": {
-                        "default": { "type": "boolean" },
-                        "host": { "type": "string" },
-                        "suffix": { "type": "string" }
+                        "default": {
+                          "type": "boolean"
+                        },
+                        "host": {
+                          "type": "string"
+                        },
+                        "suffix": {
+                          "type": "string"
+                        }
                       }
                     }
                   }
@@ -3585,6 +3591,139 @@
             "description": "Server error"
           }
         }
+      }
+    },
+    "/api/admin/users": {
+      "post": {
+        "operationId": "admin_create_user",
+        "summary": "Create a member account regardless of the public signup setting",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "email",
+                  "password"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "maxLength": 100
+                  },
+                  "email": {
+                    "type": "string",
+                    "format": "email"
+                  },
+                  "password": {
+                    "type": "string",
+                    "format": "password",
+                    "writeOnly": true,
+                    "minLength": 8,
+                    "maxLength": 72
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Member account created; caller session is unchanged"
+          },
+          "400": {
+            "description": "Missing session, malformed input, or confirmation does not match"
+          },
+          "403": {
+            "description": "Platform administrator access required"
+          },
+          "409": {
+            "description": "Existing email, protected account, or last-administrator conflict"
+          },
+          "503": {
+            "description": "Access revoked; durable cleanup is pending and will retry"
+          }
+        }
+      }
+    },
+    "/api/admin/users/{id}": {
+      "delete": {
+        "operationId": "admin_delete_user",
+        "summary": "Delete an account and its owned PortHub resources",
+        "tags": [
+          "Administration"
+        ],
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "confirm_email"
+                ],
+                "properties": {
+                  "confirm_email": {
+                    "type": "string",
+                    "format": "email"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Account and related resources removed"
+          },
+          "400": {
+            "description": "Missing session, malformed input, or confirmation does not match"
+          },
+          "403": {
+            "description": "Platform administrator access required"
+          },
+          "409": {
+            "description": "Existing email, protected account, or last-administrator conflict"
+          },
+          "503": {
+            "description": "Access revoked; durable cleanup is pending and will retry"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "SessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "porthub_session",
+        "description": "A signed-in platform administrator session. The cookie name can be configured by the operator."
       }
     }
   }

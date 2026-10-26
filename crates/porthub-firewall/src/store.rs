@@ -80,6 +80,16 @@ CREATE TABLE IF NOT EXISTS porthub_schema(key TEXT PRIMARY KEY,value TEXT NOT NU
         }).await?;
         Ok(())
     }
+    pub async fn purge(&self, port: u16) -> Result<()> {
+        self.db.call(move |db| -> tokio_rusqlite::rusqlite::Result<()> {
+            let tx=db.transaction()?;
+            for table in ["traffic_buffer","active_ports","recent_ip_hits"] {
+                tx.execute(&format!("DELETE FROM {table} WHERE port=?"), [port])?;
+            }
+            tx.commit()
+        }).await?;
+        Ok(())
+    }
     pub async fn record(&self, samples: Vec<(u16, Sample)>) -> Result<()> {
         let rows: Vec<_> = samples
             .into_iter()

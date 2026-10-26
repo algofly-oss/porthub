@@ -2,7 +2,9 @@ use crate::{
     error::{ApiError, ApiResult},
     store, App,
 };
+use futures_util::TryStreamExt;
 use mongodb::bson::{doc, spec::BinarySubtype, Binary, Bson, Document};
+use mongodb::{options::IndexOptions, IndexModel};
 use serde_json::{json, Value};
 
 pub fn password_hash(user: &Document) -> String {
@@ -62,4 +64,46 @@ pub async fn reload(app: &App, id: &Bson) -> ApiResult<Document> {
         .find_one(doc! {"_id":id})
         .await?
         .ok_or_else(ApiError::unauthenticated)
+}
+
+/// Accept existing unique indexes and upgrade legacy nonunique indexes without
+/// replacing an operator's index. Shared by admin and invited provisioning.
+pub async fn ensure_unique_usernames(app: &App) -> ApiResult<()> {
+    let indexes: Vec<IndexModel> = match app.collection("users").list_indexes().await {
+        Ok(cursor) => cursor.try_collect().await?,
+        Err(error) if matches!(error.kind.as_ref(),mongodb::error::ErrorKind::Command(command) if command.code==26) => {
+            Vec::new()
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if indexes.iter().any(|index| {
+        index.keys == doc! {"username":1}
+            && index.options.as_ref().and_then(|options| options.unique) == Some(true)
+    }) {
+        return Ok(());
+    }
+    app.collection("users")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"username":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("porthub_unique_username".to_owned())
+                        .unique(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await
+        .map_err(|error| {
+            if store::duplicate(&error) {
+                ApiError::new(
+                    axum::http::StatusCode::CONFLICT,
+                    "Resolve duplicate account emails before creating another account",
+                )
+            } else {
+                error.into()
+            }
+        })?;
+    Ok(())
 }

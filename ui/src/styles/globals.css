@@ -223,3 +223,6 @@ input[type="number"] {
     background-color: #27272a;
   }
 }
+
+/* Composite fields draw one border around the icon, input and action. */
+html:not(.dark) .compound-field input { border: 0 !important; background: transparent !important; }

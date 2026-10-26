@@ -1,161 +1,45 @@
 import Link from "next/link";
 import TextBox from "@/shared/components/TextBox";
-import useReactState from "@/shared/hooks/reactState";
 import useAuth from "@/shared/hooks/useAuth";
 import uiRoutes from "@/shared/routes/uiRoutes";
-import GoBack from "./GoBack";
 import { useState } from "react";
+import { IconArrowRight, IconLoader2 } from "@tabler/icons-react";
 import { MdLockOutline, MdOutlineMailOutline } from "react-icons/md";
 
 export default function SignIn() {
   const auth = useAuth();
-  const data = useReactState();
-  const error = useReactState();
-  const [signInProgress, setSignInProgress] = useState(false);
+  const [values, setValues] = useState({ email: "", password: "" });
+  const [errors, setErrors] = useState({});
+  const [busy, setBusy] = useState(false);
   const signUpDisabled = auth.authSettings?.signup_disabled === true;
-
-  const validateAllInputs = () => {
-    let allOk = true;
-
-    if (!data.get("username")) {
-      error.set("username", "Please enter your email");
-      allOk = false;
-    } else {
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (!emailRegex.test(data.get("username"))) {
-        error.set("username", "Please enter a valid email");
-        allOk = false;
-      } else {
-        error.set("username", "");
-      }
-    }
-
-    if (!data.get("password")) {
-      error.set("password", "Please enter your password");
-      allOk = false;
-    } else {
-      const passwordRegex =
-        /^(?=.*\d)(?=.*[a-z])(?=.*[A-Z])(?=.*[^a-zA-Z0-9]).{8,}$/;
-      if (!passwordRegex.test(data.get("password"))) {
-        error.set(
-          "password",
-          "Password must be at least 8 characters long, contain at least 1 uppercase letter, 1 lowercase letter, and 1 number"
-        );
-        allOk = false;
-      } else {
-        error.set("password", "");
-      }
-    }
-
-    return allOk;
-  };
-
-  const handleSignIn = async () => {
-    if (!validateAllInputs()) {
-      return;
-    }
-
-    auth.signOut();
-    error.set("username", "");
-    error.set("password", "");
-    setSignInProgress(true);
-
-    const msg = await auth.signIn(data.get("username"), data.get("password"));
-
-    switch (msg) {
-      case "success":
-        setSignInProgress(false);
-        auth.autoRoute();
-        break;
-      case "incorrect username":
-        setSignInProgress(false);
-        error.set("username", "Please check your email");
-        break;
-      case "incorrect password":
-        setSignInProgress(false);
-        error.set("password", "Incorrect password");
-        break;
-      default:
-        setSignInProgress(false);
-    }
-  };
-
-  const handleKeyPress = (e) => {
-    if (e.code === "Enter") {
-      handleSignIn();
-    }
-  };
-
-  return (
-    <div className="rounded-lg p-6 lg:p-16 w-full 2xl:w-[45rem]">
-      <GoBack />
-      <p className="text-3xl font-bold">Welcome back</p>
-      <p className="mb-6">Please enter your details</p>
-      <TextBox
-        label="Email"
-        icon={<MdOutlineMailOutline size={20} />}
-        placeholder="Enter your email"
-        value={data.get("username")}
-        setValue={(val) => data.set("username", val)}
-        error={error.get("username")}
-      />
-      <TextBox
-        label="Password"
-        icon={<MdLockOutline size={20} />}
-        placeholder="Enter your password"
-        value={data.get("password")}
-        setValue={(val) => data.set("password", val)}
-        error={error.get("password")}
-        mask={true}
-        onKeyDown={handleKeyPress}
-      />
-
-      {/* <Link href={uiRoutes.forgotPassword} passHref>
-        <p className="text-right my-2 font-medium cursor-pointer text-sm text-blue-500">
-          Forgot password
-        </p>
-      </Link> */}
-      <button
-        className="flex items-center justify-center bg-blue-500 dark:bg-blue-700 text-white w-full p-3 rounded-md text-sm md:text-base mt-3"
-        onClick={handleSignIn}
-      >
-        {signInProgress ? (
-          <div role="status">
-            <svg
-              aria-hidden="true"
-              className="w-6 h-6 mr-2 text-gray-200 animate-spin dark:text-gray-600 fill-blue-600"
-              viewBox="0 0 100 101"
-              fill="none"
-              xmlns="http://www.w3.org/2000/svg"
-            >
-              <path
-                d="M100 50.5908C100 78.2051 77.6142 100.591 50 100.591C22.3858 100.591 0 78.2051 0 50.5908C0 22.9766 22.3858 0.59082 50 0.59082C77.6142 0.59082 100 22.9766 100 50.5908ZM9.08144 50.5908C9.08144 73.1895 27.4013 91.5094 50 91.5094C72.5987 91.5094 90.9186 73.1895 90.9186 50.5908C90.9186 27.9921 72.5987 9.67226 50 9.67226C27.4013 9.67226 9.08144 27.9921 9.08144 50.5908Z"
-                fill="currentColor"
-              />
-              <path
-                d="M93.9676 39.0409C96.393 38.4038 97.8624 35.9116 97.0079 33.5539C95.2932 28.8227 92.871 24.3692 89.8167 20.348C85.8452 15.1192 80.8826 10.7238 75.2124 7.41289C69.5422 4.10194 63.2754 1.94025 56.7698 1.05124C51.7666 0.367541 46.6976 0.446843 41.7345 1.27873C39.2613 1.69328 37.813 4.19778 38.4501 6.62326C39.0873 9.04874 41.5694 10.4717 44.0505 10.1071C47.8511 9.54855 51.7191 9.52689 55.5402 10.0491C60.8642 10.7766 65.9928 12.5457 70.6331 15.2552C75.2735 17.9648 79.3347 21.5619 82.5849 25.841C84.9175 28.9121 86.7997 32.2913 88.1811 35.8758C89.083 38.2158 91.5421 39.6781 93.9676 39.0409Z"
-                fill="currentFill"
-              />
-            </svg>
-          </div>
-        ) : null}
-        <p>{signInProgress ? "Signing in..." : "Sign in"}</p>
-      </button>
-      {/* <div
-        className="flex space-x-3 items-center justify-center w-full my-4 p-3.5 rounded-md cursor-pointer border border-neutral-200 dark:border-0 bg-white dark:bg-neutral-700 text-sm md:text-base"
-        onClick={() => auth.login()}
-      >
-        <FcGoogle size={25} />
-        <button>Sign in with Google</button>
-      </div> */}
-      {!signUpDisabled ? (
-        <div className="flex space-x-2 justify-center mt-4">
-          <p>Don&apos;t have an account?</p>
-          <Link href={uiRoutes.signUp} passHref>
-            <p className="text-blue-500 font-medium cursor-pointer">Sign up</p>
-          </Link>
-        </div>
-      ) : null}
-    </div>
-  );
+  async function submit(event) {
+    event.preventDefault();
+    if (busy) return;
+    const next = {};
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(values.email.trim())) next.email = "Enter a valid email address.";
+    if (!values.password) next.password = "Enter your password.";
+    setErrors(next);
+    if (Object.keys(next).length) return;
+    setBusy(true);
+    try {
+      const result = await auth.signIn(values.email.trim(), values.password);
+      if (result === "success") await auth.autoRoute();
+      else if (result === "incorrect username") setErrors({ email: "Check your email address." });
+      else if (result === "incorrect password") setErrors({ password: "That password did not match. Try again." });
+      else setErrors({ form: "Could not sign in. Check your connection and try again." });
+    } finally { setBusy(false); }
+  }
+  return <div className="w-full">
+    <p className="mb-3 text-xs font-medium uppercase tracking-[0.16em] text-primary">Welcome to your workspace</p>
+    <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">Welcome back</h1>
+    <p className="mb-9 mt-3 text-sm leading-6 text-muted-foreground">Sign in to connect your machines, manage services and keep things moving.</p>
+    <form onSubmit={submit} noValidate className="space-y-2">
+      <TextBox label="Email" icon={<MdOutlineMailOutline size={19} />} placeholder="you@example.com" value={values.email} setValue={email=>setValues(v=>({...v,email}))} error={errors.email} type="email" autoComplete="username" />
+      <TextBox label="Password" icon={<MdLockOutline size={19} />} placeholder="Enter your password" value={values.password} setValue={password=>setValues(v=>({...v,password}))} error={errors.password} mask autoComplete="current-password" />
+      {errors.form && <p role="alert" className="pb-2 text-sm text-red-600 dark:text-red-400">{errors.form}</p>}
+      <button type="submit" disabled={busy} className="!mt-6 flex h-12 w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 text-sm font-medium text-white shadow-sm transition-colors hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 disabled:cursor-wait disabled:opacity-70">{busy ? <IconLoader2 size={18} className="animate-spin" /> : null}{busy ? "Signing in…" : "Sign in"}{!busy && <IconArrowRight size={17} />}</button>
+    </form>
+    <div className="mt-7 text-center text-sm text-muted-foreground">{signUpDisabled ? <>Need an account? Contact your gateway administrator.</> : <>New here? <Link href={uiRoutes.signUp} className="font-medium text-primary hover:underline">Create an account</Link></>}</div>
+    <div className="mt-9 rounded-xl border border-border bg-muted/30 p-4"><p className="text-xs font-medium">Connecting a machine for the first time?</p><p className="mt-1 text-xs leading-5 text-muted-foreground">Our guide walks through enrollment, private networking and your first file transfer.</p><Link href="/guide/getting-started" className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-primary">Open the getting started guide <IconArrowRight size={13} /></Link></div>
+  </div>;
 }

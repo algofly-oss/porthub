@@ -7,6 +7,8 @@ import { SocketContext } from "@/shared/contexts/socket";
 
 export default function TextBox({
   label,
+  type = "text",
+  autoComplete,
   required,
   placeholder,
   value,
@@ -88,7 +90,7 @@ export default function TextBox({
       </div>
 
       <div
-        className="border flex items-center border-neutral-200 dark:border-neutral-800 rounded-lg bg-white dark:bg-black"
+        className="compound-field border flex items-center border-neutral-200 dark:border-neutral-800 rounded-lg bg-white dark:bg-black"
         style={{ borderColor: error ? "red" : "" }}
       >
         <div className="pl-4 text-neutral-400 dark:text-neutral-600">
@@ -102,8 +104,11 @@ export default function TextBox({
                 : "password"
               : numeric
               ? "number"
-              : "text"
+              : type
           }
+          autoComplete={autoComplete}
+          aria-label={label}
+          aria-invalid={Boolean(error)}
           ref={inputRef}
           value={value || ""}
           onChange={(e) => {
@@ -119,7 +124,7 @@ export default function TextBox({
           disabled={disabled ? true : false}
         />
         {mask && (
-          <div
+          <button type="button" aria-label={`${passwordVisible ? "Hide" : "Show"} ${label || "password"}`}
             className="pl-0.5 pr-4 text-neutral-400 dark:text-neutral-600 cursor-pointer"
             onClick={() => setPasswordVisible(!passwordVisible)}
           >
@@ -128,7 +133,7 @@ export default function TextBox({
             ) : (
               <AiOutlineEyeInvisible size={20} />
             )}
-          </div>
+          </button>
         )}
       </div>
       {error && (

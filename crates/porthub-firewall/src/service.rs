@@ -119,7 +119,6 @@ impl Service {
                 }
                 next.insert(port, (counters, now));
             }
-            drop(state);
             if !samples.is_empty() {
                 let latest = samples
                     .iter()
@@ -128,6 +127,7 @@ impl Service {
                 self.store.record(samples).await?;
                 self.live.send_replace(Arc::new(Value::Object(latest)));
             }
+            drop(state);
             baseline = next;
         }
     }
@@ -188,6 +188,23 @@ async fn update(
 async fn delete(State(service): State<Arc<Service>>, Path(port): Path<u16>) -> Response {
     match service.change(port,None).await {
         Ok(())=>Json(json!({"msg":"Port policy deleted successfully","data":{"port":port,"is_public":true,"allowed_ips":[]}})).into_response(),Err(error)=>fail(error),
+    }
+}
+async fn purge_history(State(service): State<Arc<Service>>, Path(port): Path<u16>) -> Response {
+    let state=service.state.lock().await;
+    if state.policies.contains_key(&port) {
+        return (StatusCode::CONFLICT, Json(json!({"detail":"Remove the port policy before purging its history"}))).into_response();
+    }
+    match service.store.purge(port).await {
+        Ok(())=>{
+            service.live.send_modify(|snapshot| {
+                let mut value=(**snapshot).clone();
+                if let Some(object)=value.as_object_mut(){object.remove(&port.to_string());}
+                *snapshot=Arc::new(value);
+            });
+            Json(json!({"data":{"port":port}})).into_response()
+        },
+        Err(error)=>fail(error),
     }
 }
 async fn list(State(service): State<Arc<Service>>) -> Json<Value> {
@@ -275,6 +292,7 @@ pub fn router(service: Arc<Service>) -> Router {
             "/api/ports/{port}/policy",
             get(policy).put(update).delete(delete),
         )
+        .route("/api/ports/{port}/history", axum::routing::delete(purge_history))
         .route("/api/ports/policies/list", get(list))
         .route("/api/ports/active", get(active))
         .route("/api/ports/{port}/recent-ip-hits", get(hits))

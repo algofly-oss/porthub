@@ -7,11 +7,13 @@ import {
   IconLayoutDashboard,
   IconRoute,
   IconDots,
+  IconBook2,
 } from "@tabler/icons-react";
 import DarkThemeToggle from "./components/DarkThemeToggle";
 import Logout from "./components/Logout";
 import Workspaces from "./components/Workspaces";
 import { Fragment, useState } from "react";
+import Link from "next/link";
 import { Popover } from "@mantine/core";
 
 export default function UserNavBar({
@@ -142,11 +144,13 @@ export default function UserNavBar({
                 </button>
               </Fragment>
             ))}
+            <Link href="/guide" className="flex min-h-[44px] items-center gap-3 rounded-lg px-3 text-sm hover:bg-accent/50"><IconBook2 size={18} />User guide</Link>
             <div className="mt-1 border-t border-border pt-1"><Workspaces withinPortal={false} onSelected={() => setMoreOpen(false)} /></div>
           </Popover.Dropdown>
         </Popover>
       </nav>
       <div className="hidden shrink-0 flex-col gap-2 pt-4 md:flex">
+        <Link href="/guide" title="User guide" aria-label="User guide" className={`nav-item ${collapsed ? "nav-item-collapsed" : ""}`}><IconBook2 size={20}/>{!collapsed && <span>User guide</span>}</Link>
         <Workspaces collapsed={collapsed} />
         {collapsed ? (
           <DarkThemeToggle collapsed />

@@ -559,6 +559,15 @@ def main():
                                     "/data/certificates/origin.key").stdout.encode()).hexdigest() == fingerprint
         assert activity_count() == 3
         checks.append("MongoDB account/session, private address, activity counters and TLS identity survive restart")
+        removal=json.dumps({"username":"check@example.invalid","password":"Isolated-Password1!Sample"}).encode()
+        status,_,body=request("/api/auth/delete",method="DELETE",data=removal,
+            headers={"Cookie":cookie,"Content-Type":"application/json"})
+        assert status==200, (status,body)
+        assert request("/api/auth/me",headers={"Cookie":cookie})[0]==400
+        assert request("/api/machines/client/config",data=origin_request,
+            headers={"Content-Type":"application/json"})[0]==410
+        checks.append("account retirement revokes sessions and machine credentials and cascades service cleanup through production ingress and firewall IPC")
+
         report = {"checks": checks, "images": {role: inspect(role)["Image"] for role in config["services"]}}
         output = os.environ.get("PORTHUB_VERIFICATION_REPORT")
         if output:

@@ -1,3 +1,6 @@
+import { useSelector } from "react-redux";
+import { authSelector } from "@/redux/features/authSlice";
+import { CreateUser, DeleteUser } from "./UserManagement";
 import useBackgroundRefresh from "@/shared/hooks/useBackgroundRefresh";
 import { externalEndpoint, internalEndpoint } from "@/shared/utils/endpoints.mjs";
 import { useWorkspaceState } from "@/shared/contexts/workspaceCache";
@@ -15,6 +18,7 @@ import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@
 import { searchScore } from "@/shared/utils/search.mjs";
 
 export default function PlatformOverview({ active = true }) {
+  const currentUser = useSelector(authSelector);
   const [overview, setOverview] = useWorkspaceState("platform.overview", []), [loading, setLoading] = useWorkspaceState("platform.loading", true), [error, setError] = useState("");
   const [query, setQuery] = useState(""), [role, setRole] = useState("all"), [sort, setSort] = useState("name"), [expanded, setExpanded] = useState("");
   const [page, setPage] = useState(1), [pageSize, setPageSize] = useState(25);
@@ -69,7 +73,7 @@ export default function PlatformOverview({ active = true }) {
   const visibleStart = (currentPage - 1) * pageSize;
   const visible = filtered.slice(visibleStart, visibleStart + pageSize);
   return <div className="workspace-page">
-    <PageHeader title="Platform Overview" />
+    <PageHeader title="Platform Overview" actions={<CreateUser onChanged={load} />} />
     <div className="toolbar grid grid-cols-2 sm:flex sm:flex-row sm:flex-wrap sm:items-center"><div className="col-span-2 min-w-0 sm:mr-auto sm:basis-72"><SearchField value={query} onChange={setQuery} label="Search platform" placeholder="Search users or machines…" /></div><SearchSelect className="min-w-0 w-full sm:w-44" label="Filter account role" value={role} onChange={setRole} options={[{value:"all",label:"All roles"},{value:"admin",label:"Administrators"},{value:"user",label:"Members"}]} /><SearchSelect className="min-w-0 w-full sm:w-44" label="Sort accounts" value={sort} onChange={setSort} options={[{value:"name",label:"Name A–Z"},{value:"machines",label:"Most machines"}]} />
       <div className="col-span-2 flex min-w-0 items-center gap-2 sm:contents"><Popover opened={settingsOpen} onChange={setSettingsOpen} withinPortal position="bottom-end" width={360} zIndex={420} shadow="sm" transitionProps={{ duration: 0 }}>
         <Popover.Target>
@@ -104,45 +108,47 @@ export default function PlatformOverview({ active = true }) {
       <Button type="button" variant="outline" onClick={load} disabled={loading} aria-label="Refresh platform"><IconRefresh size={15} /><span className="hidden sm:inline">Refresh</span></Button></div></div>
     {error ? <EmptyState icon={IconServer} title="Platform unavailable" description={error} action={<Button onClick={load}>Try again</Button>} /> : loading ? <p role="status" className="p-6 text-xs text-muted-foreground">Loading accounts…</p> : !filtered.length ? <EmptyState icon={IconUsers} title="No matching accounts" description="Try a different name, email, machine, or port." /> : <section aria-label="Platform results" className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-surface">
       <div className="data-scroll">
-        <div className="hidden lg:block"><Table aria-label="Platform accounts"><TableHeader><TableRow><TableHead className="w-[40%]">Account</TableHead><TableHead>Role</TableHead><TableHead>Machines</TableHead><TableHead>Online</TableHead></TableRow></TableHeader><TableBody>{visible.map(entry => <AccountRow key={entry.user.id} entry={entry} expanded={expanded === entry.user.id} toggle={() => setExpanded(expanded === entry.user.id ? "" : entry.user.id)} reduced={reduced} />)}</TableBody></Table></div>
-        <div className="lg:hidden">{visible.map(entry => <div key={entry.user.id} className="border-b border-border/60"><button type="button" aria-label={`View machines for ${entry.user.name || entry.user.email}`} aria-expanded={expanded === entry.user.id} className="flex w-full items-center justify-between gap-3 p-3 text-left hover:bg-accent/40" onClick={() => setExpanded(expanded === entry.user.id ? "" : entry.user.id)}><div className="min-w-0"><p className="truncate text-sm font-medium">{entry.user.name}</p><p className="mt-1 truncate text-[11px] text-muted-foreground">{entry.user.email}</p><p className="mt-1 text-[11px] text-muted-foreground">{entry.user.role === "admin" ? "Admin" : "Member"} · {entry.machines.length} machines</p></div><IconChevronDown size={16} className={`shrink-0 transition-transform ${expanded === entry.user.id ? "rotate-180" : ""}`} /></button>{expanded === entry.user.id && <Fleet machines={entry.machines} />}</div>)}</div>
+        <div className="hidden lg:block"><Table aria-label="Platform accounts"><TableHeader><TableRow><TableHead className="w-[40%]">Account</TableHead><TableHead>Role</TableHead><TableHead>Machines</TableHead><TableHead>Online</TableHead><TableHead className="w-28"><span className="sr-only">Account actions</span></TableHead></TableRow></TableHeader><TableBody>{visible.map(entry => <AccountRow key={entry.user.id} entry={entry} expanded={expanded === entry.user.id} toggle={() => setExpanded(expanded === entry.user.id ? "" : entry.user.id)} reduced={reduced} onChanged={load} currentEmail={currentUser.username} />)}</TableBody></Table></div>
+        <div className="lg:hidden">{visible.map(entry => <div key={entry.user.id} className="border-b border-border/60"><button type="button" aria-label={`View machines for ${entry.user.name || entry.user.email}`} aria-expanded={expanded === entry.user.id} className="flex w-full items-center justify-between gap-3 p-3 text-left hover:bg-accent/40" onClick={() => setExpanded(expanded === entry.user.id ? "" : entry.user.id)}><div className="min-w-0"><p className="truncate text-sm font-medium">{entry.user.name}</p><p className="mt-1 truncate text-[11px] text-muted-foreground">{entry.user.email}</p><p className="mt-1 text-[11px] text-muted-foreground">{entry.user.role === "admin" ? "Admin" : "Member"} · {entry.machines.length} machines</p></div><IconChevronDown size={16} className={`shrink-0 transition-transform ${expanded === entry.user.id ? "rotate-180" : ""}`} /></button><div className="flex items-center justify-between px-3 pb-2"><span className="text-[11px] text-muted-foreground">{entry.user.deleting ? "Deletion pending" : "Account management"}</span><DeleteUser entry={entry} onChanged={load} currentEmail={currentUser.username}/></div>{expanded === entry.user.id && <Fleet machines={entry.machines} />}</div>)}</div>
       </div>
       <ResultsPagination count={filtered.length} noun="Accounts" page={currentPage} pages={totalPages} pageSize={pageSize} onPage={setPage} onPageSize={setPageSize} />
     </section>}
   </div>;
 }
 
-function AccountRow({ entry, expanded, toggle, reduced }) {
+function AccountRow({ entry, expanded, toggle, reduced, onChanged, currentEmail }) {
   const online = entry.machines.filter(machine => machine.connection_status === "online").length;
   return <>
     <TableRow className="cursor-pointer hover:bg-accent/30 focus-visible:bg-accent/40" aria-expanded={expanded} tabIndex={0} onClick={toggle} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggle(); } }}>
       <TableCell>
         <div className="flex items-center gap-3">
           <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-medium">{(entry.user.name || entry.user.email || "U").slice(0, 1)}</span>
-          <div className="min-w-0"><p className="truncate font-medium">{entry.user.name}</p><p className="mt-0.5 truncate text-[11px] text-muted-foreground">{entry.user.email}</p></div>
-          <IconChevronDown aria-hidden="true" size={16} className={`ml-auto shrink-0 text-muted-foreground transition-transform ${expanded ? "rotate-180" : ""}`} />
+          <div className="min-w-0"><p className="truncate font-medium">{entry.user.name}</p><p className="mt-0.5 truncate text-[11px] text-muted-foreground">{entry.user.email}</p>{entry.user.deleting && <span className="mt-1 inline-block text-[10px] font-medium text-amber-700 dark:text-amber-400">Cleanup pending</span>}</div>
         </div>
       </TableCell>
       <TableCell>{entry.user.role === "admin" ? "Administrator" : "Member"}</TableCell>
       <TableCell>{entry.machines.length}</TableCell>
       <TableCell><span className={online ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground"}>{online}</span></TableCell>
+      <TableCell className="!pl-2 !pr-4" onClick={event=>event.stopPropagation()} onKeyDown={event=>event.stopPropagation()}><div className="flex items-center justify-end gap-2"><DeleteUser entry={entry} onChanged={onChanged} currentEmail={currentEmail}/><button type="button" aria-label={`View machines for ${entry.user.name || entry.user.email}`} aria-expanded={expanded} onClick={toggle} className="flex h-9 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-accent"><IconChevronDown size={16} className={`transition-transform ${expanded ? "rotate-180" : ""}`}/></button></div></TableCell>
     </TableRow>
-    {expanded && <TableRow><TableCell colSpan={4} className="p-0"><motion.div initial={reduced ? false : { opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.15 }}><Fleet machines={entry.machines} /></motion.div></TableCell></TableRow>}
+    {expanded && <TableRow className="hover:bg-transparent"><TableCell colSpan={5} className="!p-0"><motion.div initial={reduced ? false : { opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.15 }}><Fleet machines={entry.machines} /></motion.div></TableCell></TableRow>}
   </>;
 }
 
 function Fleet({ machines }) {
-  return <div className="border-t border-border/60 bg-muted/30">
-    {!machines.length ? <p className="px-4 py-4 text-xs text-muted-foreground">No registered machines.</p> : machines.map(m => <details key={m._id} className="group border-b border-border/50 last:border-0">
-      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 sm:px-6 [&::-webkit-details-marker]:hidden">
-        <div className="min-w-0"><p className="truncate text-xs font-medium">{m.name}</p><p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">{m.hostname || m.local_ip || "Awaiting client"}</p></div>
-        <div className="flex shrink-0 items-center gap-2 text-[10px] text-muted-foreground"><span className={`h-1.5 w-1.5 rounded-full ${m.connection_status === "online" ? "bg-emerald-500" : "bg-zinc-500"}`} />{m.connection_status === "online" ? "Online" : m.connection_status === "disabled" ? "Disabled" : "Offline"}<span className="hidden sm:inline">· {m.ports?.length || 0} ports</span><IconChevronDown size={14} className="transition-transform group-open:rotate-180" /></div>
+  return <div className="min-w-0 bg-surface">
+    {!machines.length ? <p className="px-5 py-4 text-xs text-muted-foreground">No registered machines.</p> : machines.map(machine => <details key={machine._id} className="group min-w-0 border-b border-border/60 last:border-0">
+      <summary className="flex min-w-0 cursor-pointer list-none items-center justify-between gap-3 px-5 py-3.5 hover:bg-accent/35 sm:px-6 [&::-webkit-details-marker]:hidden">
+        <div className="flex min-w-0 items-center gap-3"><span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-muted/60 text-muted-foreground"><IconServer size={16}/></span><div className="min-w-0"><p className="break-words text-sm font-medium">{machine.name}</p><p className="mt-1 break-all font-mono text-[11px] text-muted-foreground">{machine.hostname || machine.local_ip || "Awaiting client"}</p></div></div>
+        <div className="flex shrink-0 items-center gap-2 text-[11px] text-muted-foreground"><span className={`h-1.5 w-1.5 rounded-full ${machine.connection_status === "online" ? "bg-emerald-500" : "bg-zinc-500"}`} /><span>{machine.connection_status === "online" ? "Online" : machine.connection_status === "disabled" ? "Disabled" : "Offline"}</span><span className="hidden sm:inline">· {machine.ports?.length || 0} ports</span><IconChevronDown size={14} className="ml-1 transition-transform group-open:rotate-180" /></div>
       </summary>
-      <div>
-        {(m.ports || []).map(p => <div key={p._id} className="flex w-full flex-wrap items-center justify-between gap-x-4 gap-y-1 border-t border-border/40 py-2.5 text-[11px] hover:bg-muted/70">
-          <span className="font-medium">{p.service_name || "Unnamed service"}</span><span className="font-mono text-muted-foreground">{externalEndpoint(p)} → {internalEndpoint(p)}</span><span className={`rounded-full px-2 py-0.5 font-medium ${p.enabled ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400" : "bg-zinc-500/10 text-zinc-600 dark:text-zinc-400"}`}>{p.enabled ? "Enabled" : "Disabled"}</span>
+      <div className="min-w-0">
+        {(machine.ports || []).map(port => <div key={port._id} className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-4 gap-y-2 border-t border-border/40 px-5 py-3 text-xs hover:bg-accent/20 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.8fr)_auto] sm:px-6">
+          <span className="min-w-0 break-words font-medium leading-6">{port.service_name || "Unnamed service"}</span>
+          <span className="col-span-2 row-start-2 min-w-0 break-all font-mono text-[11px] leading-6 text-muted-foreground sm:col-span-1 sm:col-start-2 sm:row-start-1">{externalEndpoint(port)} → {internalEndpoint(port)}</span>
+          <span className={`col-start-2 row-start-1 justify-self-end whitespace-nowrap rounded-full px-2 py-1 text-[10px] font-medium sm:col-start-3 ${port.enabled ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400" : "bg-zinc-500/10 text-zinc-600 dark:text-zinc-400"}`}>{port.enabled ? "Enabled" : "Disabled"}</span>
         </div>)}
-        {!m.ports?.length && <p className="w-full border-t border-border/40 py-2.5 text-xs text-muted-foreground">No mapped ports.</p>}
+        {!machine.ports?.length && <p className="border-t border-border/40 px-5 py-3 text-xs text-muted-foreground sm:px-6">No mapped ports.</p>}
       </div>
     </details>)}
   </div>;

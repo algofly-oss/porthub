@@ -14,9 +14,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use mongodb::{
-    bson::{doc, Bson, DateTime, Document},
-    options::IndexOptions,
-    IndexModel,
+    bson::{doc, DateTime, Document},
 };
 use serde_json::{json, Value};
 use std::sync::{Arc, LazyLock};
@@ -86,16 +84,6 @@ async fn signup(
                 "An account already exists. Sign in to accept the invitation.",
             ));
         }
-        let index = IndexModel::builder()
-            .keys(doc! {"username":1})
-            .options(IndexOptions::builder().unique(true).build())
-            .build();
-        if app.collection("users").create_index(index).await.is_err() {
-            return Err(ApiError::new(
-                StatusCode::CONFLICT,
-                "An administrator must resolve duplicate account names before invited registration",
-            ));
-        }
     } else {
         let setting = app
             .collection("platform_settings")
@@ -111,6 +99,7 @@ async fn signup(
             return Err(ApiError::new(StatusCode::FORBIDDEN, "sign up is disabled"));
         }
     }
+    accounts::ensure_unique_usernames(&app).await?;
     if app
         .collection("users")
         .find_one(doc! {"username":&username})
@@ -376,15 +365,18 @@ async fn delete_account(
     if !accounts::verify_password(&user, password).await? {
         return Err(ApiError::bad_request("Password is incorrect"));
     }
-    let id = user.get("_id").ok_or_else(ApiError::unauthenticated)?;
-    app.collection("users").delete_one(doc! {"_id":id}).await?;
-    app.realtime.disconnect_user(&store::id(Some(id)));
-    app.collection("user_sessions")
-        .update_many(
-            doc! {"user_id":store::id(Some(id)),"revoked_at":Bson::Null},
-            doc! {"$set":{"revoked_at":DateTime::now()}},
-        )
-        .await?;
+    let id = user.get_object_id("_id").map_err(|_|ApiError::unauthenticated())?;
+    // Verify before taking the maintenance write gate; unauthenticated bad
+    // passwords must not block normal browser requests. Recheck after waiting.
+    let _lifecycle = app.account_lifecycle.write().await;
+    let current=app.collection("users").find_one(doc! {"_id":id}).await?
+        .ok_or_else(||ApiError::bad_request("User not found"))?;
+    if accounts::password_hash(&current)!=accounts::password_hash(&user) {
+        return Err(ApiError::bad_request("Password changed; confirm with your current password"));
+    }
+    let _connections = app.connection_lock.lock().await;
+    let _networks = app.private_network_lock.lock().await;
+    crate::account_delete::delete_locked(&app,id).await?;
     Ok(auth::with_cookie(
         json!({"msg":"user deleted"}),
         auth::cookie(&headers, &app, "", 0),

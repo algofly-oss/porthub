@@ -1,6 +1,7 @@
 pub mod access;
 pub mod account;
 pub mod admin;
+pub mod admin_users;
 pub mod artifacts;
 pub mod bootstrap;
 pub mod connection_firewall;
@@ -30,6 +31,7 @@ pub fn router() -> Router<Arc<App>> {
         .merge(connections::router())
         .merge(connection_firewall::router())
         .merge(admin::router())
+        .merge(admin_users::router())
         .merge(artifacts::router())
         .merge(bootstrap::router())
         .merge(account::router())

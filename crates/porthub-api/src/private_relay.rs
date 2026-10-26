@@ -56,6 +56,8 @@ struct Forward<'a> {
 #[derive(Default)]
 struct Inner {
     leases: HashMap<String, Lease>,
+    revoked: HashMap<String, Instant>,
+    revoked_cleanup_at: Option<Instant>,
     connections: HashMap<String, HashMap<u8, Connection>>,
     generation: u64,
     dropped_packets: AtomicU64,
@@ -76,6 +78,16 @@ impl Default for Hub {
     }
 }
 impl Hub {
+    pub fn revoke(&self, ids: &[String]) {
+        let mut hub = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let now=Instant::now();
+        if hub.revoked_cleanup_at.is_none() { hub.revoked_cleanup_at=Some(now+Duration::from_secs(60)); }
+        for id in ids {
+            hub.leases.remove(id); hub.connections.remove(id);
+            // Fence sync responses already in flight when the account retired.
+            hub.revoked.insert(id.clone(), Instant::now()+Duration::from_secs(60));
+        }
+    }
     pub fn publish(
         &self,
         id: &str,
@@ -86,6 +98,11 @@ impl Hub {
     ) -> String {
         let mut hub = self.0.lock().unwrap_or_else(|p| p.into_inner());
         let now = Instant::now();
+        if hub.revoked_cleanup_at.is_some_and(|next|next<=now) {
+            hub.revoked.retain(|_, expires| *expires > now);
+            hub.revoked_cleanup_at=(!hub.revoked.is_empty()).then_some(now+Duration::from_secs(60));
+        }
+        if hub.revoked.get(id).is_some_and(|expires|*expires>now) { return String::new(); }
         hub.leases.retain(|_, lease| lease.expires > now);
         if hub.leases.len() >= 16384 && !hub.leases.contains_key(id) {
             return String::new();
@@ -552,6 +569,17 @@ mod tests {
         assert_eq!(hub.1.available_permits(), 0);
         drop(received);
         assert_eq!(hub.1.available_permits(), 2);
+    }
+
+    #[test]
+    fn account_revocation_invalidates_live_relay_credentials() {
+        let hub=Hub::default();
+        let token=hub.publish("retired","credential","instance",Ipv4Addr::LOCALHOST,HashSet::new());
+        assert!(hub.authorized("retired",&token_digest(&token),"instance"));
+        hub.revoke(&["retired".into()]);
+        assert!(!hub.authorized("retired",&token_digest(&token),"instance"));
+        assert!(!hub.authorized("retired","credential","instance"));
+        assert!(hub.publish("retired","credential","instance",Ipv4Addr::LOCALHOST,HashSet::new()).is_empty());
     }
 
     #[test]

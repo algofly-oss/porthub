@@ -167,6 +167,9 @@ pub async fn ensure(app: &App, machine: &Document) -> ApiResult<()> {
     let owner = machine
         .get("user_id")
         .ok_or_else(ApiError::unauthenticated)?;
+    if app.collection("users").find_one(doc! {"_id":owner,"account_deletion":{"$exists":false}}).await?.is_none() {
+        return Ok(());
+    }
     let machine_id = machine.get("_id").ok_or_else(ApiError::unauthenticated)?;
     let peers = app.collection("private_peers");
     if peers
