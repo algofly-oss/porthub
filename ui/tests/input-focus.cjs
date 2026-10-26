@@ -52,6 +52,12 @@ const fields = 'input:not([type="hidden"]):not([type="checkbox"]):not([type="rad
           await page.waitForTimeout(180);
           const label = await field.getAttribute("aria-label") || await field.getAttribute("id") || await field.getAttribute("placeholder") || "unlabelled field";
           const before = await snapshot(field);
+          if (theme === "light") {
+            const framed = await field.evaluate(element => Boolean(element.closest(".search-field")));
+            const boundary = framed ? before.container : before.field;
+            assert.equal(boundary.borderTopWidth, "1px", `${name}: ${label} needs a visible light-mode boundary`);
+            assert(!["rgba(0, 0, 0, 0)", "rgb(255, 255, 255)", "not painted"].includes(boundary.borderTopColor), `${name}: ${label} must stand out on a white panel`);
+          }
           if (width === 402) await field.tap(); else await field.click();
           assert.deepEqual(await snapshot(field), before, `${theme} ${width} ${name}: ${label} changed immediately on click/tap`);
           await page.waitForTimeout(180);
@@ -100,6 +106,7 @@ const fields = 'input:not([type="hidden"]):not([type="checkbox"]):not([type="rad
         let dialog = page.getByRole("dialog", { name: "Create Machine", exact: true });
         await audit("enrollment", dialog);
         await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+        if (!await page.getByRole("button", { name: "Groups", exact: true }).isVisible()) await page.getByRole("button", { name: "Filters", exact: true }).click();
         await page.getByRole("button", { name: "Groups", exact: true }).click();
         dialog = page.getByRole("dialog", { name: "Machine Groups", exact: true });
         await audit("groups", dialog);
@@ -130,7 +137,7 @@ const fields = 'input:not([type="hidden"]):not([type="checkbox"]):not([type="rad
           }
         }
         await go("proxies");
-        await page.getByRole("button", { name: /^Edit proxy/ }).first().click();
+        await page.locator('[aria-label^="Edit proxy "]:visible').first().locator('span[role="img"]').click();
         dialog = page.getByRole("dialog", { name: /^Edit Proxy Route/ });
         await dialog.getByRole("button", { name: "Add Alias", exact: true }).click();
         await audit("proxy address and aliases", dialog);

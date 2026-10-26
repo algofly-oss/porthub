@@ -60,6 +60,18 @@ const theme=process.env.REVIEW_THEME||'light';
     if(view==='Rules'){
      await page.getByLabel('Filter rule group',{exact:true}).waitFor({state:'visible'});const select=await page.getByLabel('Filter rule group',{exact:true}).boundingBox();assert(Math.abs(select.width-(width-24))<2,'Policy group dropdown fills its mobile row');
     }
+    if(view==='Settings'&&theme==='light'){
+     const categories=page.getByRole('navigation',{name:'Settings categories',exact:true});
+     for(const category of ['Profile','Security','Notifications','Appearance']){
+      await categories.getByRole('button',{name:category,exact:true}).click();
+      await panel.getByRole('heading',{name:category,exact:true}).waitFor();
+      if(category==='Notifications')await page.getByLabel('Bot token',{exact:true}).waitFor();
+      const fields=panel.locator('input:visible:not([type="file"]):not([type="checkbox"]):not([type="radio"]),textarea:visible,select:visible');
+      const styles=await fields.evaluateAll(elements=>elements.map(el=>({label:el.getAttribute('aria-label')||el.type,border:getComputedStyle(el).borderTopWidth,color:getComputedStyle(el).borderTopColor,fill:getComputedStyle(el).backgroundColor})));
+      for(const field of styles){assert.equal(field.border,'1px',`${category} ${field.label}: visible field boundary`);assert(!['transparent','rgba(0, 0, 0, 0)','rgb(255, 255, 255)'].includes(field.color),`${category} ${field.label}: outline contrasts with white card`);}
+     }
+     await categories.getByRole('button',{name:'Profile',exact:true}).click();
+    }
     if(view==='Platform'){
      assert.equal(await panel.locator('.data-scroll').evaluate(el=>getComputedStyle(el).backgroundImage),'none','Hidden desktop table headers do not paint a stripe across mobile account rows');
      const role=await page.getByLabel('Filter account role',{exact:true}).boundingBox();const sort=await page.getByLabel('Sort accounts',{exact:true}).boundingBox();

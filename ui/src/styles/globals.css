@@ -36,7 +36,7 @@
   .search-field button { @apply flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground; }
   .control { @apply h-10 min-w-0 rounded-lg border border-transparent bg-control px-3 py-1 text-sm text-foreground outline-none; }
   .action-primary { @apply inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md bg-blue-600 px-3 py-1 text-xs font-medium text-white shadow-sm transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50; }
-  .action-secondary { @apply inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md border border-transparent bg-control px-3 py-1 text-xs font-medium text-foreground transition-colors hover:bg-accent disabled:opacity-50; }
+  .action-secondary { @apply inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md border border-input bg-control px-3 py-1 text-xs font-medium text-foreground dark:border-transparent transition-colors hover:bg-accent disabled:opacity-50; }
   .group-workspace { @apply grid min-h-0 min-w-0 gap-4; height: min(560px, 65dvh); grid-template-columns: minmax(0,1fr); grid-template-rows: auto minmax(0,1fr); }
   .status-badge { @apply inline-flex items-center gap-1.5 whitespace-nowrap rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-medium text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400; }
   .status-badge.muted { @apply bg-muted text-muted-foreground; }
@@ -77,6 +77,19 @@ html.theme-changing *, html.theme-changing *::before, html.theme-changing *::aft
 /* Text fields keep their resting appearance on click/tap, including searchable selects. */
 :root :is(input:not([type=checkbox]):not([type=radio]), textarea, select),
 :root :is(input:not([type=checkbox]):not([type=radio]), textarea, select):focus { outline: none !important; box-shadow: none !important; }
+/* Light fields need a visible boundary on both page and white card surfaces.
+   Search has one boundary around the icon and field, rather than two nested borders. */
+html:not(.dark) :is(input:not([type]), input[type="text"], input[type="search"],
+  input[type="email"], input[type="password"], input[type="url"], input[type="tel"],
+  input[type="number"], input[type="date"], input[type="time"], input[type="datetime-local"],
+  textarea, select) {
+  border: 1px solid hsl(var(--input)) !important;
+}
+html:not(.dark) :is(input, textarea, select):is([aria-invalid="true"], [data-invalid]:not([data-invalid="false"])) {
+  border-color: #ef4444 !important;
+}
+html:not(.dark) .search-field { border-color: hsl(var(--input)); }
+html:not(.dark) .search-field input { border: 0 !important; }
 .search-field input:focus { border-color: transparent !important; }
 /* Text inputs match :focus-visible even after a mouse click. Only Tab navigation
    gets an external focus marker; it never changes the field's fill or border. */
