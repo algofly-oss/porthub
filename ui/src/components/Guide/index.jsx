@@ -14,14 +14,34 @@ const searchText = article => JSON.stringify([article.title, article.description
 const searchIndex = guideArticles.map(article=>({article,text:searchText(article)}));
 function Inline({ text }) { return String(text).split(/(`[^`]+`)/g).map((part,i)=>part.startsWith("`") ? <code key={i} className="rounded bg-muted px-1 py-0.5 text-[0.9em]">{part.slice(1,-1)}</code> : part); }
 function CodeBlock({ text, label }) {
-  const [copied,setCopied] = useState(false);
+  const lines = String(text).split("\n").filter(line => line.trim());
+  const commandCount = lines.filter(line => !line.trimStart().startsWith("#")).length;
+  let commandIndex = 0;
+  return <div className="my-5 overflow-hidden rounded-xl border border-border bg-muted/40 text-foreground">
+    <div className="flex items-center justify-between border-b border-border px-4 py-2.5 text-[11px] text-muted-foreground"><span>{label || "Command"}</span><span>{commandCount > 1 ? `${commandCount} commands` : "Command"}</span></div>
+    <div className="divide-y divide-border">
+      {lines.map((line, i) => line.trimStart().startsWith("#")
+        ? <div key={`comment-${i}`} className="flex items-start px-4 py-2 font-mono text-xs text-muted-foreground sm:text-[13px]"><pre className="m-0 whitespace-pre-wrap break-words">{line}</pre></div>
+        : <CommandLine key={`${i}-${line}`} command={line} index={commandIndex++} multiple={commandCount > 1} />)}
+    </div>
+  </div>;
+}
+function CommandLine({ command, index, multiple }) {
+  const [copied, setCopied] = useState(false);
   const timer = useRef(null);
-  useEffect(()=>()=>clearTimeout(timer.current),[]);
+  useEffect(() => () => clearTimeout(timer.current), []);
   async function copy() {
-    try { await copyText(text); setCopied(true); clearTimeout(timer.current); timer.current=setTimeout(()=>setCopied(false),1800); }
-    catch { setCopied(false); }
+    try {
+      await copyText(command);
+      setCopied(true);
+      clearTimeout(timer.current);
+      timer.current = setTimeout(() => setCopied(false), 1800);
+    } catch { setCopied(false); }
   }
-  return <div className="my-5 overflow-hidden rounded-xl border border-border bg-[#101827] text-slate-200"><div className="flex items-center justify-between border-b border-white/10 px-4 py-2.5 text-[11px] text-slate-400"><span>{label||"Terminal"}</span><button type="button" onClick={copy} aria-label={copied ? "Copied command" : "Copy command"} className="flex items-center gap-1.5 rounded px-1.5 py-1 text-slate-300 hover:bg-white/10">{copied ? <IconCheck size={14}/> : <IconCopy size={14}/>}{copied?"Copied":"Copy"}</button></div><pre className="m-0 overflow-x-auto p-4 text-xs leading-7 sm:text-[13px]" tabIndex={0}><code>{text}</code></pre></div>;
+  return <div className="flex min-w-0 items-start gap-3 px-4 py-2.5">
+    <pre className="m-0 min-w-0 flex-1 overflow-x-auto whitespace-pre-wrap break-all py-1 font-mono text-xs leading-6 sm:text-[13px]"><code>{command}</code></pre>
+    <button type="button" onClick={copy} aria-label={copied ? "Copied command" : `Copy command${multiple ? ` ${index + 1}` : ""}`} className="flex shrink-0 items-center gap-1 rounded-md border border-border bg-background px-2 py-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground">{copied ? <IconCheck size={14}/> : <IconCopy size={14}/>}{copied ? "Copied" : "Copy"}</button>
+  </div>;
 }
 function Block({block}) {
   if(block.type==="code")return <CodeBlock {...block}/>;
