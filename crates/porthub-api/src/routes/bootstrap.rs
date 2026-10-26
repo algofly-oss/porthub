@@ -144,7 +144,7 @@ fn launcher(
     let action = if values["kind"] == "private" {
         "enroll --install-service"
     } else {
-        "setup --adopt-existing-cli"
+        "setup $porthub_bootstrap_adopt"
     };
     // First-download compatibility only. The binary performs credential file,
     // release and service operations natively; nothing tails or supervises it here.
@@ -176,9 +176,31 @@ trap 'exit 1' HUP INT TERM
 curl -fsS --proto '=https' "$porthub_bootstrap_url/agent/$porthub_bootstrap_target" -o "$porthub_bootstrap_dir/porthub"
 chmod 700 "$porthub_bootstrap_dir/porthub"
 porthub_bootstrap_user=false
+porthub_bootstrap_bin_dir=
+porthub_bootstrap_next_bin_dir=false
 for porthub_bootstrap_arg in "$@"; do
-  if [ "$porthub_bootstrap_arg" = --user ]; then porthub_bootstrap_user=true; fi
+  if [ "$porthub_bootstrap_next_bin_dir" = true ]; then
+    porthub_bootstrap_bin_dir=$porthub_bootstrap_arg
+    porthub_bootstrap_next_bin_dir=false
+    continue
+  fi
+  case "$porthub_bootstrap_arg" in
+    --user) porthub_bootstrap_user=true ;;
+    --bin-dir) porthub_bootstrap_next_bin_dir=true ;;
+    --bin-dir=*) porthub_bootstrap_bin_dir=${{porthub_bootstrap_arg#--bin-dir=}} ;;
+  esac
 done
+if [ -z "$porthub_bootstrap_bin_dir" ]; then
+  if [ "$porthub_bootstrap_user" = true ]; then
+    porthub_bootstrap_bin_dir=$HOME/.local/bin
+  else
+    porthub_bootstrap_bin_dir=/usr/local/bin
+  fi
+fi
+porthub_bootstrap_adopt=
+if [ -e "$porthub_bootstrap_bin_dir/porthub" ] || [ -L "$porthub_bootstrap_bin_dir/porthub" ]; then
+  porthub_bootstrap_adopt=--adopt-existing-cli
+fi
 if [ "$porthub_bootstrap_user" = true ] || [ "$(id -u)" = 0 ]; then
   "$porthub_bootstrap_dir/porthub" {action} --ticket "$porthub_bootstrap_url" "$@"
 else

@@ -86,7 +86,7 @@ async fn unchanged_bootstrap_previews_reuse_code_and_different_cached_previews_r
         let response=case.router.clone().oneshot(Request::builder().uri(format!("/install/{ticket}")).body(Body::empty())?).await?;
         ensure!(response.headers()["vary"]=="Accept" && response.headers()["content-type"]=="text/plain; charset=utf-8");
         let launcher=String::from_utf8(to_bytes(response.into_body(),65536).await?.to_vec())?;
-        ensure!(launcher.contains(" setup --adopt-existing-cli --ticket ") && launcher.contains("--proto '=https'") && !launcher.contains(TOKEN));
+        ensure!(launcher.contains("setup $porthub_bootstrap_adopt --ticket ") && launcher.contains("-e \"$porthub_bootstrap_bin_dir/porthub\"") && launcher.contains("--proto '=https'") && !launcher.contains(TOKEN));
         let mut syntax=std::process::Command::new("sh").arg("-n").stdin(std::process::Stdio::piped()).spawn()?;
         use std::io::Write;syntax.stdin.take().unwrap().write_all(launcher.as_bytes())?;ensure!(syntax.wait()?.success());
         let stored=case.app.collection("machines").find_one(doc! {"_id":id}).await?.unwrap();
@@ -366,7 +366,7 @@ async fn legacy_reinstaller_authenticates_before_minting_native_capability_and_d
         let response=case.router.clone().oneshot(Request::builder().uri(path).header("host","hub.example").body(Body::empty())?).await?;
         ensure!(response.status()==StatusCode::OK && response.headers()["cache-control"]=="no-store" && response.headers()["referrer-policy"]=="no-referrer");
         let body=String::from_utf8(to_bytes(response.into_body(),65536).await?.to_vec())?;
-        ensure!(body.starts_with("#!/bin/sh\n") && body.contains("setup --adopt-existing-cli --ticket") && !body.contains(TOKEN));
+        ensure!(body.starts_with("#!/bin/sh\n") && body.contains("setup $porthub_bootstrap_adopt --ticket") && body.contains("porthub_bootstrap_adopt=--adopt-existing-cli") && !body.contains(TOKEN));
         let ticket=case.app.collection("machine_install_tickets").find_one(doc!{}).await?.unwrap();
         let code=ticket.get_str("code")?;
         let incoming=enrollment(&case,code,StatusCode::OK).await?;
