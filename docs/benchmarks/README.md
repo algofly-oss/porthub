@@ -221,3 +221,11 @@ zero CPU ticks over five seconds and about 14–15 MiB RSS. These small function
 transfers include startup and do not replace the sustained bandwidth results
 above. Temporary receivers, jobs, binaries, payloads, and checkpoints were
 removed after validation.
+
+The published, gateway-installed 1.4.8 CLIs repeated the checks after deployment:
+64 MiB Condor-to-Luna transfers on private and public mapped routes, and a
+16 MiB Luna-to-Condor private transfer, all with matching contents/SHA256,
+nested directories, subsequent watched edits, and successful stop/cleanup.
+The installed detached senders used about 12 MiB RSS and recorded zero CPU
+ticks over five idle seconds. These remain functional checks rather than
+sustained capacity measurements.

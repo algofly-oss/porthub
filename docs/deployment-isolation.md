@@ -203,3 +203,32 @@ After rollout, all nine enabled machines reported 1.4.7 with cleared update
 targets. Routing configuration hashes, bind mounts, database identity and
 firewall credentials matched the previous deployment. All three roles remained
 healthy, read-only and without build tools; other containers retained their IDs.
+
+### 1.4.8 rollout and development release cleanup (2026-10-26)
+
+Agent release `v1.4.8` is built from `1aa2429`; the deployed UI and deployment
+context use `6a6f29d`. The later commits contain UI changes only and did not
+trigger another agent build. All ten platform build jobs passed, including
+native Windows watch-job lifecycle checks. The Intel Mac job passed on a
+selective retry after an existing framing test exceeded its test deadline.
+All 30 published asset digests and the production image's complete release
+catalog were verified.
+
+URM2 runs three healthy 1.4.8 roles with the existing credentials, database and
+host state mounts. The API remains isolated on its bridge network; runtime
+filesystems are read-only, containers are unprivileged, and state uses host
+bind mounts rather than named volumes. Non-PortHub containers retained their
+IDs. All nine enabled clients upgraded through gateway instructions to 1.4.8
+and cleared their update targets. Luna's normal CLI and `sudo porthub` both
+resolve the installed 1.4.8 binary through `/usr/local/bin/porthub`.
+
+The shared mobile toolbar columns, white light-mode controls and visible field
+boundaries are deployed. Browser checks cover all Settings categories, 69
+desktop and 63 mobile input states across settings/editors/auth, pointer and
+keyboard focus, and live WebKit layouts at 320/402/430 CSS pixels. These are
+isolated browser checks rather than a physical iPhone test.
+
+After deployment verification, 13 older GitHub releases, their 390 assets,
+and the corresponding local/remote tags were deleted. Only `v1.4.8` remains.
+Unused PortHub rollback image tags were removed on Luna and URM2; images in
+use and the build toolchain were retained. No application volumes were removed.
