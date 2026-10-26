@@ -31,7 +31,7 @@
   .summary-icon.rose { @apply bg-rose-50 text-rose-600 dark:bg-rose-500/10 dark:text-rose-400; }
   .surface { @apply rounded-lg border border-border bg-surface; }
   .toolbar { @apply mb-3 flex shrink-0 flex-col gap-2; }
-  .search-field { @apply flex h-10 min-w-0 items-center gap-2 rounded-lg border border-transparent bg-control px-3; }
+  .search-field { @apply flex h-10 min-w-0 items-center gap-2 rounded-lg border border-transparent bg-white px-3 dark:bg-control; }
   .search-field input { @apply h-full w-full min-w-0 rounded-none border-0 bg-transparent px-0 py-1 text-sm text-foreground shadow-none outline-none placeholder:text-muted-foreground focus-visible:ring-0 focus:ring-0; }
   .search-field button { @apply flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground; }
   .control { @apply h-10 min-w-0 rounded-lg border border-transparent bg-control px-3 py-1 text-sm text-foreground outline-none; }

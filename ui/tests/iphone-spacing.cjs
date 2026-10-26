@@ -1,17 +1,19 @@
 const assert=require('node:assert/strict');
 const {launchBrowser,navigateWorkspace}=require('./browser.cjs');
 const origin=process.env.REVIEW_ORIGIN||'http://127.0.0.1:5300';
+const theme=process.env.REVIEW_THEME||'light';
 (async()=>{
  const browser=await launchBrowser();
  try{
   for(const width of [320,402,430]){
    const height=width===402?874:932;
    const context=await browser.newContext({viewport:{width,height},screen:{width,height},isMobile:true,hasTouch:true,userAgent:'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1'});
-   await context.addInitScript(()=>{
+   await context.addInitScript(theme=>{
+    localStorage.setItem('mantine-color-scheme',JSON.stringify(theme));
     Object.defineProperty(navigator,'standalone',{value:true});
     Object.defineProperty(window,'innerHeight',{value:760,configurable:true});
     const v=new EventTarget();Object.assign(v,{height:760,width:screen.width,offsetTop:0,scale:1});Object.defineProperty(window,'visualViewport',{value:v});
-   });
+   },theme);
    const page=await context.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
    await page.goto(origin+'/home?demo=1');await page.getByRole('heading',{name:'Dashboard',exact:true}).waitFor();
    // Reproduce a shortened fixed containing block independently of the full
@@ -32,6 +34,10 @@ const origin=process.env.REVIEW_ORIGIN||'http://127.0.0.1:5300';
      assert(Math.abs(filter.x-status.x-status.width-8)<1,`${view}: status and Filters have exactly the shared 8px gap`);
      const search=await toolbar.locator('.search-field').boundingBox();const actions=await toolbar.getByRole('button',{name:view==='Machines'?'Create machine':'Create proxy',exact:true}).boundingBox();
      assert(Math.abs(actions.x-search.x-search.width-8)<1,`${view}: search and actions also have an 8px gap`);
+     assert(Math.abs(search.width-status.width)<1&&Math.abs(search.x-status.x)<1,`${view}: search and status share the same column width`);
+     assert(Math.abs(actions.width-filter.width)<1&&Math.abs(actions.x-filter.x)<1,`${view}: Create and Filters share the same column width`);
+     const surfaces=await toolbar.evaluate(el=>[el.querySelector('.search-field'),el.querySelector('[role="group"]'),el.querySelector('[aria-label="Filters"]')].map(node=>getComputedStyle(node).backgroundColor));
+     if(theme==='light')assert(surfaces.every(color=>color==='rgb(255, 255, 255)'),`${view}: light-mode search, status, and filter surfaces are white`);
      if(view==='Machines')machineSearchWidth=search.width;else assert(Math.abs(search.width-machineSearchWidth)<1,'Machines and Proxies search rows use identical widths');
      assert(Math.abs(search.y-actions.y)<1&&Math.abs(status.y-filter.y)<1,`${view}: controls align within their independent rows`);
     }
@@ -47,7 +53,7 @@ const origin=process.env.REVIEW_ORIGIN||'http://127.0.0.1:5300';
     }
     if(width===402)await page.screenshot({path:`/tmp/porthub-iphone16pro-${view.toLowerCase()}.png`});
    }
-   assert.deepEqual(errors,[]);await context.close();console.log(`PASS iPhone ${width}: all pages, consistent insets/control spacing, full-screen bottom navigation, no overflow`);
+   assert.deepEqual(errors,[]);await context.close();console.log(`PASS ${theme} iPhone ${width}: all pages, consistent insets/control spacing, full-screen bottom navigation, no overflow`);
   }
  }finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});
