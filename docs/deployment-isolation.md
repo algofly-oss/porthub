@@ -232,3 +232,28 @@ After deployment verification, 13 older GitHub releases, their 390 assets,
 and the corresponding local/remote tags were deleted. Only `v1.4.8` remains.
 Unused PortHub rollback image tags were removed on Luna and URM2; images in
 use and the build toolchain were retained. No application volumes were removed.
+
+## 1.4.9 deployment — 2026-10-26
+
+Release `v1.4.9` uses commit `66180fc907eb068ffcc58664b6a4fd21170816cf`.
+URM2 runs its updated `porthub:core` image with all ten verified 1.4.9 client
+binaries embedded. Existing bind mounts are unchanged. Only core was recreated;
+edge, firewall and unrelated containers retained their original container IDs.
+The public UI and health endpoint responded successfully after deployment.
+
+All 24 isolated production-container checks passed before replacement. Luna,
+Condor and Miro subsequently upgraded through the gateway to 1.4.9, with both
+public and private registrations running. HTTP and HTTPS direct relay origins
+remain supported, including fallback to the configured API domain.
+
+New tenant ranges avoid existing tenant ranges and retained peer addresses;
+existing addresses are preserved rather than automatically renumbered. Range
+allocation is serialized in the current single-core deployment. Relay queues
+now share an enforced packet budget across all peers and lanes.
+
+Platform jobs passed in workflow `40309556416`, except an ARM hard-float runner
+that stalled installing its compiler. The same source passed that target in
+retry `40311118200`; the stalled original job was cancelled after the other
+platforms completed. All 30 release assets were checksum/version validated and
+published together. Temporary artifact copies and the intermediate core build
+image were removed after verification.
