@@ -1,7 +1,7 @@
 # Native deployment boundaries
 
 The root Dockerfile and single `docker-compose.yml` define three native server
-roles. Native release 1.4.5 is deployed on URM2. Persistent PortHub state is
+roles. Native release 1.4.6 is deployed on URM2. Persistent PortHub state is
 host-bound under `/home/ubuntu/algofly/porthub/volumes/porthub-native`; the
 original named volumes remain intact for rollback.
 
@@ -76,6 +76,14 @@ Public clients share the existing API/HTTPS listeners for tunnel control and
 data at `/api/tunnel`. Mapped public service ports are additional listeners by
 design. There is no standalone Rathole communication port. Public forwarding
 retains Rathole behavior; private-peer route selection is a separate concern.
+
+Linux TCP sockets prefer BBR individually, including accepted mapped-port
+connections. URM2 loads its installed `tcp_bbr` module through
+`/etc/modules-load.d/porthub-bbr.conf`; this enables the algorithm without changing
+the host's CUBIC default or granting containers module-loading capabilities.
+On another gateway, load `tcp_bbr` on the host if its kernel provides the module.
+Unsupported kernels retain their existing TCP policy. The application does not
+change global TCP sysctls.
 
 ## Development and production
 

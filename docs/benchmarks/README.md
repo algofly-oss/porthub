@@ -5,12 +5,22 @@ Luna has a stated 400 Mbps ISP connection; Condor has 1 Gbps. Luna–Miro LAN is
 1 Gbps. Rates use decimal MB/s. Sparse zero-filled payloads use fresh download
 destinations and SHA256 verification. This directory retains only this summary.
 
-## Deployed release 1.4.5
+## Current deployment
 
-URM2 runs the isolated Rust core, edge and firewall images. Eight reporting
-machines upgraded automatically through the gateway to 1.4.5. The MacBook
-reported its automatic upgrade to 1.4.4, then went offline before the next update.
-All ten platform binaries in the production image and GitHub release are 1.4.5.
+URM2 runs release 1.4.6 in the isolated Rust core, edge and firewall images.
+All nine enabled machines, including the MacBook, report agent 1.4.6. All ten
+platform binaries in the production image and GitHub release are 1.4.6.
+
+An additional 1.4.6 Luna → Miro public gateway test sustained only about
+0.72 MB/s before cancellation. The gateway's accepted public socket used CUBIC
+and showed retransmissions and a small congestion window. Applying the existing
+per-socket policy to accepted visitors and loading the installed `tcp_bbr` kernel
+module improved a fresh single-connection 1 GB transfer to **40.76 MB/s**, with
+matching SHA256. Socket inspection confirmed BBR; the host default remained
+CUBIC. The initial tuning-only test still used CUBIC and remained slow before
+the module was loaded. Sustained 10 GB qualification is in progress.
+
+## Release 1.4.5 throughput qualification
 
 The built-in `porthub http.server` and `porthub get -x 1 --sha256 …` ran on
 release 1.4.5. Each result below transfers 10,000,000,000 bytes on one connection.
@@ -84,5 +94,13 @@ and were removed. The current transport uses one bounded carrier per route.
   its application TCP source port remained 38168 throughout; no retry occurred.
 - A prior 149.8-second idle sample measured private-agent CPU/RSS at 0.174% of
   one core / 20.2 MiB on Luna and 0.093% / 18.4 MiB on Condor.
-- Test HTTP servers were stopped and verified download files removed after
-  recording results. No unrelated URM2 application was changed.
+- Verified qualification downloads were removed after recording results.
+  Additional diagnostic transfers may run while investigating the public
+  Luna → Miro route. No unrelated URM2 application was changed.
+
+Release 1.4.6 passed 251 workspace tests (78 ignored), including the new
+credential-free unprivileged status checks. All ten platform builds passed;
+the three Windows targets used a Windows-only recovery for transient status-file
+sharing conflicts. All 30 published asset digests matched GitHub SHA256 metadata.
+Idle private-agent samples measured 0.178% of one CPU / 19.6 MiB RSS over
+280.4 seconds on Luna and 0.092% / 18.4 MiB over 368.3 seconds on Condor.

@@ -604,6 +604,7 @@ where
 
         let shutdown_rx_clone = shutdown_tx.subscribe();
         let bind_addr = service.bind_addr.clone();
+        let visitor_socket_opts = SocketOpts::from_server_cfg(&service);
         let pool = match service.service_type {
             ServiceType::Tcp => tokio::spawn(
                 async move {
@@ -613,6 +614,7 @@ where
                         data_ch_req_tx,
                         shutdown_rx_clone,
                         listener_closed,
+                        visitor_socket_opts,
                     )
                     .await
                     .with_context(|| "Failed to run TCP connection pool")
@@ -743,6 +745,7 @@ fn tcp_listen_and_send(
     addr: String,
     data_ch_req_tx: mpsc::UnboundedSender<bool>,
     mut shutdown_rx: broadcast::Receiver<bool>,
+    socket_opts: SocketOpts,
 ) -> (mpsc::Receiver<TcpStream>, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(CHAN_SIZE);
 
@@ -789,6 +792,8 @@ fn tcp_listen_and_send(
                             }
                         }
                         Ok((incoming, addr)) => {
+                            // Tune the public visitor socket as well as the tunnel carrier.
+                            socket_opts.apply(&incoming);
                             // For every visitor, request to create a data channel
                             if data_ch_req_tx.send(true).with_context(|| "Failed to send data chan create request").is_err() {
                                 // An error indicates the control channel is broken
@@ -824,9 +829,14 @@ async fn run_tcp_connection_pool<T: Transport>(
     data_ch_req_tx: mpsc::UnboundedSender<bool>,
     mut shutdown_rx: broadcast::Receiver<bool>,
     listener_closed: oneshot::Sender<()>,
+    visitor_socket_opts: SocketOpts,
 ) -> Result<()> {
-    let (mut visitor_rx, listener) =
-        tcp_listen_and_send(bind_addr, data_ch_req_tx.clone(), shutdown_rx.resubscribe());
+    let (mut visitor_rx, listener) = tcp_listen_and_send(
+        bind_addr,
+        data_ch_req_tx.clone(),
+        shutdown_rx.resubscribe(),
+        visitor_socket_opts,
+    );
     let cmd = bincode::serialize(&DataChannelCmd::StartForwardTcp).unwrap();
     let mut copies = tokio::task::JoinSet::new();
     let forwarding = async {
