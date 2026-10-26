@@ -815,7 +815,6 @@ async fn sync_directory_file(
     output_root: &Path,
     staging_root: &Path,
     entry: DirectoryEntry,
-    file_connections: usize,
     cancel: CancellationToken,
 ) -> Result<bool> {
     let relative = safe_relative(&entry.path)?;
@@ -851,7 +850,7 @@ async fn sync_directory_file(
     let relative_url = entry.path.replace('\\', "/");
     let url = file_url(base_url, &relative_url)?;
     let mut file_options = Options::new(url.to_string(), staging_parent.clone());
-    file_options.connections = file_connections;
+    file_options.connections = options.connections;
     file_options.piece_size = options.piece_size;
     file_options.progress = false;
     let downloaded = Box::pin(get_with_client(file_options, cancel, client.clone())).await?;
@@ -905,7 +904,8 @@ async fn get_directory(
         eprintln!("[porthub-get] Syncing {} directory files", files.len());
     }
     let mut transfers = stream::iter(files.into_iter().map(|entry| {
-        let options = options.clone();
+        let mut options = options.clone();
+        options.connections = file_connections;
         let client = client.clone();
         let url = url.clone();
         let output_root = output_root.clone();
@@ -919,7 +919,6 @@ async fn get_directory(
                 &output_root,
                 &staging_root,
                 entry,
-                file_connections,
                 cancel,
             )
             .await

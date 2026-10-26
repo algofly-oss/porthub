@@ -17,7 +17,7 @@ porthub get http://machine:8000/file.bin --connections 16 --dir ./downloads \
 porthub get http://machine:8000/dataset/ --dir ./downloads
 porthub get http://machine:8000/dataset/ --dir ./dataset-copy --contents-only
 porthub push ./archive.bin http://machine:8001/
-porthub push ./dataset/ http://machine:8001/ --connections 8
+porthub push ./dataset/ http://machine:8001/ --connections 16
 ```
 
 `porthub-transfer` contains the implementation. The native server supports
@@ -39,14 +39,23 @@ to a private peer URL stays on the private route and under its existing peer
 access policy.
 
 `porthub push` accepts a file, archive, binary, or directory. Files use
-parallel 8 MiB chunks by default and persist a private resume checkpoint. A
+16 parallel 8 MiB chunks by default and persist a private resume checkpoint. A
 directory keeps its top-level folder by default, sends changed files, resumes
 interrupted files, and skips files with matching size and modification time.
 `--contents-only` puts directory contents directly in the receive root;
 `--connections` changes parallelism, and `--force` resends matching files. It
 never removes unrelated destination files. The receiver replaces a named file
 only after the new upload is complete. PortHub peers query the receiver's state
-directly; the gateway does not carry file bytes.
+directly. Payloads bypass the gateway when a direct private route is selected;
+public mappings and gateway-selected private routes relay through the gateway.
+
+`get` also defaults to 16 connections. Use `-x 1` or another lower count for
+storage-constrained devices. Upload buffers are bounded by the connection
+limit; a slow receiver applies backpressure instead of requiring the sender
+to buffer the whole file. There is no fixed upload-request deadline (connection
+establishment has a five-second timeout). Concurrency does not automatically
+adapt to disk speed. Chunk staging and final assembly add disk I/O, so extra
+connections do not necessarily improve performance on a slow mechanical disk.
 
 The downloader uses concurrent range workers and a shared queue of missing
 pieces, avoiding a fixed assignment that strands finished connections behind

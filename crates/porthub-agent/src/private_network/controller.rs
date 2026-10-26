@@ -58,7 +58,6 @@ struct Prepared {
 async fn prepare(
     profile: Profile,
     interfaces: Vec<SocketAddr>,
-    id: String,
     info: PeerInfo,
     identity: Identity,
     base: String,
@@ -106,7 +105,7 @@ async fn prepare(
     let (session, packets) = Session::gather(
         &interfaces,
         &profile.peer_id,
-        &id,
+        &info.id,
         identity,
         &info.fingerprint,
         allocation,
@@ -480,7 +479,6 @@ pub async fn run_watched_identity(
                     let result = prepare(
                         profile,
                         interfaces,
-                        id.clone(),
                         info,
                         identity,
                         base,

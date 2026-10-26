@@ -266,7 +266,7 @@ enum Command {
     Push {
         path: PathBuf,
         url: String,
-        #[arg(short = 'x', long, default_value_t = 8)]
+        #[arg(short = 'x', long, default_value_t = 16)]
         connections: usize,
         /// Place directory contents directly in the receiver root instead of retaining its top folder.
         #[arg(long)]
@@ -1333,6 +1333,31 @@ mod cli_tests {
 
     fn args(arguments: &[&str]) -> Args {
         Args::try_parse_from(arguments).expect("valid CLI fixture")
+    }
+
+    #[test]
+    fn transfers_default_to_sixteen_connections_and_accept_overrides() {
+        for base in [
+            vec!["porthub", "get", "http://example.test/file.bin"],
+            vec!["porthub", "push", "file.bin", "http://example.test/"],
+        ] {
+            for (flags, expected) in [
+                (vec![], 16),
+                (vec!["-x", "1"], 1),
+                (vec!["--connections", "8"], 8),
+            ] {
+                let mut command = base.clone();
+                command.extend(flags);
+                let Some(
+                    super::Command::Get { connections, .. }
+                    | super::Command::Push { connections, .. },
+                ) = args(&command).command
+                else {
+                    panic!("expected transfer command");
+                };
+                assert_eq!(connections, expected);
+            }
+        }
     }
 
     #[test]
