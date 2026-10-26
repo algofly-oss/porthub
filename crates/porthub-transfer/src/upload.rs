@@ -35,6 +35,8 @@ struct Manifest {
     chunks: u64,
     #[serde(default)]
     modified_unix: i64,
+    #[serde(default)]
+    modified_nanos: u32,
 }
 
 fn valid_id(id: &str) -> bool {
@@ -49,7 +51,7 @@ fn session_dir(state: &ReceiveState, id: &str) -> Result<PathBuf> {
 fn safe_name(name: &str) -> Result<PathBuf> {
     let path = Path::new(name);
     ensure!(
-        !name.is_empty() && !path.is_absolute(),
+        !name.is_empty() && !path.is_absolute() && !name.contains(['\\', ':', '\0']),
         "upload name must be relative"
     );
     let mut clean = PathBuf::new();
@@ -78,10 +80,54 @@ fn append_path(base: &reqwest::Url, relative: &str) -> Result<reqwest::Url> {
     Ok(url)
 }
 
+/// Keep protocol requests at the receiver root and apply URL directories to
+/// manifest names. URL path segments are decoded once and validated before use.
+fn upload_target(value: &str, relative: &str) -> Result<(reqwest::Url, String)> {
+    let mut endpoint = reqwest::Url::parse(value)?;
+    ensure!(
+        matches!(endpoint.scheme(), "http" | "https"),
+        "upload URL must use HTTP or HTTPS"
+    );
+    let prefix = percent_encoding::percent_decode_str(endpoint.path()).decode_utf8()?;
+    let prefix = prefix.trim_matches('/');
+    let name = if prefix.is_empty() {
+        relative.to_owned()
+    } else {
+        format!("{prefix}/{relative}")
+    };
+    safe_name(&name)?;
+    endpoint.set_path("/");
+    endpoint.set_fragment(None);
+    Ok((endpoint, name))
+}
+
 async fn destination(root: &Path, name: &str) -> Result<PathBuf> {
     let target = root.join(safe_name(name)?);
     let parent = target.parent().context("upload has no parent directory")?;
-    tokio::fs::create_dir_all(parent).await?;
+    // Validate each existing ancestor before creating anything below it.
+    let mut current = root.to_owned();
+    for component in parent.strip_prefix(root)?.components() {
+        current.push(component);
+        match tokio::fs::symlink_metadata(&current).await {
+            Ok(metadata) => ensure!(
+                metadata.is_dir() && !metadata.is_symlink(),
+                "upload parent is not a real directory"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if let Err(error) = tokio::fs::create_dir(&current).await {
+                    if error.kind() != std::io::ErrorKind::AlreadyExists {
+                        return Err(error.into());
+                    }
+                }
+                let metadata = tokio::fs::symlink_metadata(&current).await?;
+                ensure!(
+                    metadata.is_dir() && !metadata.is_symlink(),
+                    "upload parent is not a real directory"
+                );
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
     let canonical_parent = tokio::fs::canonicalize(parent).await?;
     ensure!(
         canonical_parent.starts_with(root),
@@ -124,6 +170,10 @@ async fn init(
     let result = async {
         let dir = session_dir(&state, &id)?;
         ensure!(manifest.chunk_size == CHUNK, "invalid upload chunk size");
+        ensure!(
+            manifest.modified_nanos < 1_000_000_000,
+            "invalid modification timestamp"
+        );
         ensure!(
             manifest.chunks == manifest.size.div_ceil(CHUNK),
             "invalid chunk count"
@@ -273,7 +323,7 @@ async fn commit(
         state::replace(&part, &target).await?;
         filetime::set_file_mtime(
             &target,
-            filetime::FileTime::from_unix_time(manifest.modified_unix, 0),
+            filetime::FileTime::from_unix_time(manifest.modified_unix, manifest.modified_nanos),
         )?;
         tokio::fs::remove_dir_all(dir).await?;
         Ok::<_, anyhow::Error>(format!("{:x}", digest.finalize()))
@@ -305,6 +355,36 @@ async fn raw_upload(
     }
 }
 
+#[derive(Serialize, Deserialize)]
+struct Directories {
+    names: Vec<String>,
+}
+
+async fn create_directories(
+    State(state): State<Arc<ReceiveState>>,
+    Json(request): Json<Directories>,
+) -> axum::response::Response {
+    let result = async {
+        ensure!(request.names.len() <= 100_000, "too many directories");
+        for name in request.names {
+            // destination validates every ancestor before creating it. A
+            // synthetic final component lets the same checks create a folder.
+            let name = safe_name(&name)?;
+            destination(
+                &state.root,
+                &format!("{}/.porthub-directory", name.to_string_lossy()),
+            )
+            .await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    match result {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => (StatusCode::CONFLICT, error.to_string()).into_response(),
+    }
+}
+
 /// Add upload endpoints to the built-in HTTP server so the existing list/stop
 /// manager also controls receivers after their launching terminal is gone.
 pub fn routes(root: PathBuf) -> Result<Router> {
@@ -314,6 +394,7 @@ pub fn routes(root: PathBuf) -> Result<Router> {
     prune_old_sessions(&staging)?;
     let state = Arc::new(ReceiveState { root, staging });
     Ok(Router::new()
+        .route("/.porthub/directories", post(create_directories))
         .route("/.porthub/uploads/{id}", get(status).put(init))
         .route("/.porthub/uploads/{id}/chunks/{index}", put(chunk))
         .route("/.porthub/uploads/{id}/commit", post(commit))
@@ -353,8 +434,7 @@ pub async fn put_file(
         .await
         .context("source file is unavailable")?;
     ensure!(metadata.is_file(), "source must be a regular file");
-    let endpoint = reqwest::Url::parse(&url)?;
-    let name = relative_name;
+    let (endpoint, name) = upload_target(&url, &relative_name)?;
     let remote_file = append_path(&endpoint, &name)?;
     // Rsync-like default: matching size and modification time means skip the
     // file without reading or transmitting its contents.
@@ -369,16 +449,16 @@ pub async fn put_file(
                     == Some(metadata.len())
                 && response
                     .headers()
-                    .get("x-porthub-modified-unix")
+                    .get("x-porthub-modified-nanos")
                     .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse::<u64>().ok())
+                    .and_then(|v| v.parse::<u128>().ok())
                     .zip(metadata.modified().ok())
                     .is_some_and(|(remote, local)| {
                         remote
                             == local
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
-                                .as_secs()
+                                .as_nanos()
                     })
             {
                 return Ok(format!("Skipped unchanged {}", name));
@@ -414,6 +494,10 @@ pub async fn put_file(
     };
     let api = append_path(&endpoint, &format!(".porthub/uploads/{id}"))?;
     let manifest = Manifest {
+        modified_nanos: metadata
+            .modified()?
+            .duration_since(std::time::UNIX_EPOCH)?
+            .subsec_nanos(),
         name,
         size: metadata.len(),
         chunk_size: CHUNK,
@@ -479,7 +563,11 @@ pub async fn put_file(
         tasks.spawn(async move {
             let _permit = semaphore.acquire_owned().await?;
             let start = index * CHUNK;
-            let len = (metadata_len(&file).await? - start).min(CHUNK);
+            let len = metadata_len(&file)
+                .await?
+                .checked_sub(start)
+                .context("source file shrank during transfer")?
+                .min(CHUNK);
             let mut input = tokio::fs::File::open(file).await?;
             use tokio::io::{AsyncReadExt, AsyncSeekExt};
             input.seek(std::io::SeekFrom::Start(start)).await?;
@@ -530,6 +618,30 @@ pub async fn put_path(
     contents_only: bool,
     force: bool,
 ) -> Result<String> {
+    put_selection(path, url, connections, contents_only, force, None).await
+}
+
+/// Sync only paths named by a filesystem watcher. Missing paths are retained
+/// remotely; this API never turns a local deletion into a remote deletion.
+pub async fn put_changed_paths(
+    path: PathBuf,
+    url: String,
+    connections: usize,
+    contents_only: bool,
+    force: bool,
+    changed: Vec<PathBuf>,
+) -> Result<String> {
+    put_selection(path, url, connections, contents_only, force, Some(changed)).await
+}
+
+async fn put_selection(
+    path: PathBuf,
+    url: String,
+    connections: usize,
+    contents_only: bool,
+    force: bool,
+    changed: Option<Vec<PathBuf>>,
+) -> Result<String> {
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(5))
         .build()?;
@@ -562,9 +674,60 @@ pub async fn put_path(
                 .to_string_lossy()
         )
     };
-    let mut pending = vec![root.clone()];
+    let mut pending = Vec::new();
     let mut files = Vec::<(PathBuf, String)>::new();
+    if let Some(changed) = changed {
+        for file in changed {
+            let relative = file
+                .strip_prefix(&root)
+                .context("changed path escapes source")?;
+            // Check every existing component, including parents of files:
+            // a replaced directory must not turn into a followed symlink.
+            let mut ancestor = root.clone();
+            for part in relative.components() {
+                ensure!(matches!(part, Component::Normal(_)), "unsafe changed path");
+                ancestor.push(part);
+                match tokio::fs::symlink_metadata(&ancestor).await {
+                    Ok(metadata) => ensure!(
+                        !metadata.is_symlink(),
+                        "directory sync does not follow symlinks"
+                    ),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            match tokio::fs::symlink_metadata(&file).await {
+                Ok(metadata) if metadata.is_dir() => pending.push(file),
+                Ok(metadata) if metadata.is_file() => {
+                    let name = format!("{prefix}{}", relative.to_string_lossy().replace('\\', "/"));
+                    files.push((file, name));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+                _ => bail!("unsupported changed filesystem entry"),
+            }
+        }
+    } else {
+        pending.push(root.clone());
+    }
+    let mut directories = Vec::new();
     while let Some(directory) = pending.pop() {
+        let relative = directory
+            .strip_prefix(&root)?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let relative = format!("{prefix}{relative}");
+        let (_, name) = upload_target(
+            &url,
+            &if relative.is_empty() {
+                ".porthub-directory".into()
+            } else {
+                format!("{}/.porthub-directory", relative.trim_end_matches('/'))
+            },
+        )?;
+        if let Some((parent, _)) = name.rsplit_once('/') {
+            directories.push(parent.to_owned());
+        }
         let mut entries = tokio::fs::read_dir(&directory).await?;
         while let Some(entry) = entries.next_entry().await? {
             let kind = entry.file_type().await?;
@@ -587,8 +750,32 @@ pub async fn put_path(
             }
         }
     }
+    if !directories.is_empty() {
+        let (endpoint, _) = upload_target(&url, ".porthub-directory")?;
+        for batch in directories.chunks(128) {
+            let response = client
+                .post(append_path(&endpoint, ".porthub/directories")?)
+                .json(&Directories {
+                    names: batch.to_vec(),
+                })
+                .send()
+                .await?;
+            ensure!(
+                response.status().is_success()
+                    || matches!(
+                        response.status(),
+                        StatusCode::NOT_FOUND
+                            | StatusCode::METHOD_NOT_ALLOWED
+                            | StatusCode::NOT_IMPLEMENTED
+                    ),
+                "receiver rejected destination directories with HTTP {}",
+                response.status()
+            );
+        }
+    }
     files.sort_by(|a, b| a.1.cmp(&b.1));
-    ensure!(!files.is_empty(), "directory contains no regular files");
+    files.dedup_by(|a, b| a.1 == b.1);
+
     let total = files.len();
     let mut sent = 0usize;
     let mut skipped = 0usize;
@@ -652,8 +839,10 @@ mod tests {
         let root = tempfile::tempdir()?;
         let outside = tempfile::tempdir()?;
         std::os::unix::fs::symlink(outside.path(), root.path().join("escape"))?;
-        assert!(destination(root.path(), "escape/file.bin").await.is_err());
-        ensure!(!outside.path().join("file.bin").exists());
+        assert!(destination(root.path(), "escape/new/deep/file.bin")
+            .await
+            .is_err());
+        ensure!(!outside.path().join("new").exists());
         Ok(())
     }
 }

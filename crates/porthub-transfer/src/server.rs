@@ -370,6 +370,17 @@ async fn files(State(root): State<Arc<PathBuf>>, mut request: Request) -> Respon
                     .headers_mut()
                     .insert("x-porthub-modified-unix", value);
             }
+            if let Some(modified) = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            {
+                if let Ok(value) = HeaderValue::from_str(&modified.as_nanos().to_string()) {
+                    response
+                        .headers_mut()
+                        .insert("x-porthub-modified-nanos", value);
+                }
+            }
             response
         }
         Err(error) => match error {},

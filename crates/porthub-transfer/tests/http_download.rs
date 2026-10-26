@@ -358,12 +358,12 @@ async fn porthub_server_directory_get_syncs_nested_files_and_preserves_timestamp
     .await?;
     tokio::fs::write(staging_root.join("top.txt"), b"old-top!!").await?;
     filetime::set_file_mtime(
-        &staging_root.join("top.txt"),
+        staging_root.join("top.txt"),
         filetime::FileTime::from_unix_time(1_700_000_120, 0),
     )?;
     tokio::fs::write(dataset.join("top.txt"), b"new-top!!").await?;
     filetime::set_file_mtime(
-        &dataset.join("top.txt"),
+        dataset.join("top.txt"),
         filetime::FileTime::from_unix_time(1_700_000_130, 0),
     )?;
     tokio::fs::write(output.join("unrelated.txt"), b"keep me").await?;

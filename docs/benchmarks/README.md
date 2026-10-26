@@ -209,3 +209,15 @@ with staging plus assembly. Other processes were not throttled. This qualifies
 a long slow-write wait with one small chunk, not 16 simultaneously saturated
 writers or every weak-client hardware configuration. The unit was stopped
 after verification.
+
+### 1.4.8 watch-mode validation (2026-10-26)
+
+The locally built Linux candidate synchronized a 64 MiB directory from Condor
+to Luna through both `luna.phub:5201` and the existing public mapping. SHA256
+matched on both routes. Each detached job survived its SSH launcher exiting,
+created multi-level destination and empty source directories, propagated edits
+and newly created files, and supported list/status/stop. The idle jobs recorded
+zero CPU ticks over five seconds and about 14–15 MiB RSS. These small functional
+transfers include startup and do not replace the sustained bandwidth results
+above. Temporary receivers, jobs, binaries, payloads, and checkpoints were
+removed after validation.

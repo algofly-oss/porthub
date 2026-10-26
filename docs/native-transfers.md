@@ -49,6 +49,38 @@ only after the new upload is complete. PortHub peers query the receiver's state
 directly. Payloads bypass the gateway when a direct private route is selected;
 public mappings and gateway-selected private routes relay through the gateway.
 
+To keep a directory synchronized, add `-w` / `--watch`. The initial sync runs
+immediately, then filesystem notifications trigger debounced incremental syncs.
+There is no idle scan timer. Changes during an upload cause another pass;
+connection failures retry with a bounded 5–60 second backoff and reuse durable
+upload checkpoints. Normal changes check only affected paths; initial sync,
+notification overflow, and recovery recheck the full tree. Deletions
+are not propagated: destination-only files remain intact. This is one-way sync,
+not the native rsync protocol or a two-way conflict resolver.
+
+```sh
+porthub push ~/data http://condor.phub:8001/backups/luna/projects/ -w
+porthub push ~/data http://condor.phub:8001/backups/luna/projects/ -w -d
+porthub sync list
+porthub sync status JOB_ID
+porthub sync stop JOB_ID
+```
+
+The URL path becomes a destination below the receiver root; missing nested
+folders and empty source folders are created automatically on current receivers.
+By default the example creates `backups/luna/projects/data/`; `--contents-only`
+puts the contents directly in `projects/`. Parent traversal and symlinked
+receiver directories are rejected. The receiver must be upload-enabled.
+
+Without `-d` / `--detach`, watch occupies the terminal until Ctrl-C. Detached jobs
+run in a separate process session and can be inspected or stopped after the
+terminal closes. They belong to the current OS user and need no administrator
+permission. They do not automatically restart after a reboot. Job configuration
+is private; list/status strip URL credentials, query strings, and fragments.
+The control listener is authenticated and loopback-only. A receiver exposed
+publicly accepts uploads from anyone who can reach its mapped port; use private
+PortHub access rules when access should be restricted.
+
 `get` also defaults to 16 connections. Use `-x 1` or another lower count for
 storage-constrained devices. Upload buffers are bounded by the connection
 limit; a slow receiver applies backpressure instead of requiring the sender
@@ -99,3 +131,10 @@ range and validator responses, cancellation/resume, changed-file restart,
 checksum failure without publication, empty/no-range files and document-root
 escape prevention. Actual network performance is measured separately; passing
 these checks does not prove WAN throughput or private-path selection.
+
+Watch-specific checks cover foreground and detached lifecycle, Ctrl-C,
+capability-protected controls, reconnect/resume, empty and nested directories,
+subsecond edits, affected-path selection, preservation of receiver-only files,
+and rejection of symlinked source or destination ancestors. Native Linux
+validation also exercised private and public mapped routes between Condor and
+Luna before release publication.

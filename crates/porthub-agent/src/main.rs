@@ -20,6 +20,18 @@ struct Args {
     command: Option<Command>,
 }
 
+#[derive(Subcommand)]
+enum SyncCommand {
+    /// List active directory watch jobs.
+    List,
+    /// Show the progress of a directory watch job.
+    Status { id: String },
+    /// Stop a directory watch job without removing transferred files.
+    Stop { id: String },
+    #[command(hide = true)]
+    Run { id: String },
+}
+
 fn requires_system_privileges(args: &Args) -> bool {
     let Some(command) = args.command.as_ref() else {
         return false;
@@ -274,6 +286,17 @@ enum Command {
         /// Send every file even when size and modification time already match.
         #[arg(long)]
         force: bool,
+        /// Keep syncing directory changes until stopped.
+        #[arg(short = 'w', long)]
+        watch: bool,
+        /// Run a watch job in the background.
+        #[arg(short = 'd', long, requires = "watch")]
+        detach: bool,
+    },
+    /// List, inspect, or stop directory watch jobs for this user.
+    Sync {
+        #[command(subcommand)]
+        command: SyncCommand,
     },
     /// Run public service forwarding using an in-process Rathole client.
     #[command(hide = true)]
@@ -1177,13 +1200,73 @@ async fn main() -> Result<()> {
             connections,
             contents_only,
             force,
+            watch,
+            detach,
         }) => {
-            let result =
-                porthub_transfer::upload::put_path(path, url, connections, contents_only, force)
-                    .await?;
-            println!("{result}");
-            Ok(())
+            if watch {
+                let options = porthub_transfer::sync::Options {
+                    path,
+                    url,
+                    connections,
+                    contents_only,
+                    force,
+                };
+                if detach {
+                    let id = porthub_transfer::sync::detach(options).await?;
+                    println!("Sync started in background: {id}\nView: porthub sync status {id}\nStop: porthub sync stop {id}");
+                    Ok(())
+                } else {
+                    porthub_transfer::sync::watch(options, cancel.clone()).await
+                }
+            } else {
+                tokio::select! {
+                    _ = cancel.cancelled() => Ok(()),
+                    result = porthub_transfer::upload::put_path(path, url, connections, contents_only, force) => {
+                        println!("{}", result?);
+                        Ok(())
+                    }
+                }
+            }
         }
+        Some(Command::Sync { command }) => match command {
+            SyncCommand::List => {
+                let jobs = porthub_transfer::sync::list().await?;
+                if jobs.is_empty() {
+                    println!("No active sync jobs");
+                } else {
+                    println!("{:<16}  {:<10}  SOURCE  DESTINATION", "ID", "STATE");
+                    for job in jobs {
+                        println!(
+                            "{}  {:<10}  {}  {}",
+                            job.id,
+                            job.state,
+                            job.source.display(),
+                            job.destination
+                        );
+                    }
+                }
+                Ok(())
+            }
+            SyncCommand::Status { id } => {
+                let job = porthub_transfer::sync::status(&id).await?;
+                println!(
+                    "Sync {}: {}\nSource: {}\nDestination: {}\nCompleted syncs: {}\n{}",
+                    job.id,
+                    job.state,
+                    job.source.display(),
+                    job.destination,
+                    job.completed_runs,
+                    job.message
+                );
+                Ok(())
+            }
+            SyncCommand::Stop { id } => {
+                porthub_transfer::sync::stop(&id).await?;
+                println!("Stopped sync {id}");
+                Ok(())
+            }
+            SyncCommand::Run { id } => porthub_transfer::sync::worker(id, cancel.clone()).await,
+        },
         Some(Command::Tunnel { config }) => {
             porthub_tunnel::run_client_until(config, cancel.cancelled_owned()).await
         }
@@ -1333,6 +1416,52 @@ mod cli_tests {
 
     fn args(arguments: &[&str]) -> Args {
         Args::try_parse_from(arguments).expect("valid CLI fixture")
+    }
+
+    #[test]
+    fn watch_and_detach_use_docker_style_flags_without_elevation() {
+        for flags in [vec!["-w", "-d"], vec!["--watch", "--detach"]] {
+            let mut command = vec!["porthub", "push", "./data", "http://peer:8001/nested/path/"];
+            command.extend(flags);
+            let parsed = args(&command);
+            assert!(!requires_system_privileges(&parsed));
+            assert!(matches!(
+                parsed.command,
+                Some(super::Command::Push {
+                    watch: true,
+                    detach: true,
+                    ..
+                })
+            ));
+        }
+        assert!(
+            Args::try_parse_from(["porthub", "push", "./data", "http://peer:8001/", "-d"]).is_err()
+        );
+        assert!(Args::try_parse_from([
+            "porthub",
+            "push",
+            "./data",
+            "http://peer:8001/",
+            "--detached",
+            "-w"
+        ])
+        .is_err());
+        let parsed = args(&["porthub", "push", "./data", "http://peer:8001/", "-w"]);
+        assert!(matches!(
+            parsed.command,
+            Some(super::Command::Push {
+                watch: true,
+                detach: false,
+                ..
+            })
+        ));
+        for command in [
+            vec!["porthub", "sync", "list"],
+            vec!["porthub", "sync", "status", "0123456789abcdef"],
+            vec!["porthub", "sync", "stop", "0123456789abcdef"],
+        ] {
+            assert!(!requires_system_privileges(&args(&command)));
+        }
     }
 
     #[test]

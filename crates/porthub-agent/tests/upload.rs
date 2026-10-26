@@ -172,3 +172,140 @@ async fn receiver_accepts_standard_http_uploads_and_porthub_parallel_push() {
     );
     let _ = server.0.wait();
 }
+
+struct SyncJob {
+    state: std::path::PathBuf,
+    id: String,
+}
+impl Drop for SyncJob {
+    fn drop(&mut self) {
+        let _ = cli(&self.state)
+            .args(["sync", "stop", &self.id])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+async fn uploaded(path: &Path, expected: &[u8]) {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if std::fs::read(path).is_ok_and(|bytes| bytes == expected) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("watch upload did not arrive");
+}
+
+#[tokio::test]
+async fn detached_watch_is_managed_after_launcher_exits_and_foreground_stops_cleanly() {
+    let state = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let source = state.path().join("data");
+    std::fs::create_dir_all(source.join("empty/deep")).unwrap();
+    std::fs::write(source.join("one"), b"initial").unwrap();
+    let socket = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = socket.local_addr().unwrap().port();
+    drop(socket);
+    let receiver = cli(state.path())
+        .args(["http.receive", &port.to_string()])
+        .arg(root.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _receiver = Server(receiver);
+    let base = format!("http://127.0.0.1:{port}/");
+    ready(&base).await;
+    let output = cli(state.path())
+        .arg("push")
+        .arg(&source)
+        .arg(format!("{base}backups/luna/projects/"))
+        .args(["-w", "-d"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    let id = text
+        .lines()
+        .next()
+        .unwrap()
+        .strip_prefix("Sync started in background: ")
+        .unwrap()
+        .to_owned();
+    let job = SyncJob {
+        state: state.path().to_owned(),
+        id,
+    };
+    let target = root.path().join("backups/luna/projects/data");
+    uploaded(&target.join("one"), b"initial").await;
+    assert!(target.join("empty/deep").is_dir());
+    std::fs::write(source.join("one"), b"changed").unwrap();
+    uploaded(&target.join("one"), b"changed").await;
+    let status = cli(state.path())
+        .args(["sync", "status", &job.id])
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    assert!(String::from_utf8_lossy(&status.stdout).contains("backups/luna/projects/"));
+    let list = cli(state.path()).args(["sync", "list"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&list.stdout).contains(&job.id));
+    let stopped = cli(state.path())
+        .args(["sync", "stop", &job.id])
+        .output()
+        .unwrap();
+    assert!(stopped.status.success());
+    let record = state
+        .path()
+        .join("sync-jobs")
+        .join(format!("{}.json", job.id));
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while record.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    std::fs::write(source.join("one"), b"stopped").unwrap();
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(std::fs::read(target.join("one")).unwrap(), b"changed");
+    let child = cli(state.path())
+        .arg("push")
+        .arg(&source)
+        .arg(format!("{base}foreground/"))
+        .arg("-w")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut foreground = Server(child);
+    uploaded(&root.path().join("foreground/data/one"), b"stopped").await;
+    assert!(
+        foreground.0.try_wait().unwrap().is_none(),
+        "foreground returned early"
+    );
+    #[cfg(unix)]
+    {
+        assert_eq!(
+            unsafe { libc::kill(foreground.0.id() as i32, libc::SIGINT) },
+            0
+        );
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(exit) = foreground.0.try_wait().unwrap() {
+                    assert!(exit.success());
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+}
