@@ -41,6 +41,22 @@ const theme=process.env.REVIEW_THEME||'light';
      if(view==='Machines')machineSearchWidth=search.width;else assert(Math.abs(search.width-machineSearchWidth)<1,'Machines and Proxies search rows use identical widths');
      assert(Math.abs(search.y-actions.y)<1&&Math.abs(status.y-filter.y)<1,`${view}: controls align within their independent rows`);
     }
+    if((view==='Machines'||view==='Proxies')&&theme==='light'){
+     const toolbar=page.locator(`[aria-label="${view==='Machines'?'Machine':'Proxy'} tools"]`);
+     await toolbar.getByRole('button',{name:'Filters',exact:true}).click();
+     for(const label of view==='Machines'?['Filter machine group','Sort machines']:['Filter proxy group','Sort proxies']){
+      const field=page.getByLabel(label,{exact:true});await field.waitFor();
+      assert.equal(await field.evaluate(el=>getComputedStyle(el).backgroundColor),'rgb(255, 255, 255)',`${label}: shared white control surface`);
+     }
+     if(view==='Machines')assert.equal(await page.getByRole('button',{name:'Groups',exact:true}).evaluate(el=>getComputedStyle(el).backgroundColor),'rgb(255, 255, 255)','Groups button: shared white control surface');
+     await page.getByRole('heading',{name:title,exact:true}).click();
+    }
+    if(view==='Traffic'&&theme==='light'){
+     for(const label of ['Traffic machine','Sort traffic','Traffic window']){
+      const field=page.getByLabel(label,{exact:true});await field.waitFor();
+      assert.equal(await field.evaluate(el=>getComputedStyle(el).backgroundColor),'rgb(255, 255, 255)',`${label}: shared white control surface`);
+     }
+    }
     if(view==='Rules'){
      await page.getByLabel('Filter rule group',{exact:true}).waitFor({state:'visible'});const select=await page.getByLabel('Filter rule group',{exact:true}).boundingBox();assert(Math.abs(select.width-(width-24))<2,'Policy group dropdown fills its mobile row');
     }

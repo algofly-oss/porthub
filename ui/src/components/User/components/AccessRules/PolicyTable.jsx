@@ -54,7 +54,7 @@ function StatusSwitch({ book, manage, busy, onToggle }) {
       onClick={() => onToggle(book)}
       className="group inline-flex items-center gap-2 rounded-md px-1 py-1 text-xs disabled:opacity-60"
     >
-      <span className={`relative h-[18px] w-8 rounded-full transition-colors ${book.enabled ? "bg-emerald-600" : "bg-control group-hover:bg-accent"}`}>
+      <span className={`relative h-[18px] w-8 rounded-full transition-colors ${book.enabled ? "bg-emerald-600" : "bg-input dark:bg-control group-hover:bg-accent"}`}>
         <span className={`absolute top-[2px] h-[14px] w-[14px] rounded-full bg-white shadow transition-[left] ${book.enabled ? "left-[16px]" : "left-[2px]"}`} />
       </span>
       <span className={book.enabled ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground"}>{label}</span>

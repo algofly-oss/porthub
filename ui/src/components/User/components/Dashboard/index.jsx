@@ -18,7 +18,7 @@ import ProxyActivity from "@/components/ui/proxy-activity";
 
 // Placeholder cards shaped like the dashboard so the layout does not jump.
 function DashboardSkeleton() {
-  const bar = "animate-pulse rounded bg-control";
+  const bar = "animate-pulse rounded bg-muted dark:bg-control";
   const card = (rows, tall) => <section className="flex min-w-0 flex-col gap-3 rounded-xl bg-surface p-5">
     <div className={`${bar} h-4 w-40`} /><div className={`${bar} h-3 w-56 max-w-full opacity-70`} />
     {tall ? <div className={`${bar} mt-2 h-[180px] w-full opacity-60`} /> : Array.from({ length: rows }, (_, i) => <div key={i} className="flex items-center gap-3 pt-2"><div className="min-w-0 flex-1 space-y-2"><div className={`${bar} h-3 w-3/5`} /><div className={`${bar} h-3 w-2/5 opacity-70`} /></div><div className={`${bar} h-6 w-20 opacity-60`} /></div>)}

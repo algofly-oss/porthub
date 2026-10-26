@@ -22,8 +22,8 @@ function TrafficSkeleton() {
     <span className="sr-only">Loading traffic…</span>
     <div className="h-11 border-b border-border" />
     {Array.from({ length: 6 }, (_, i) => <div key={i} className="flex items-center gap-4 border-b border-border/60 px-4 py-3 last:border-0">
-      <div className="min-w-0 flex-1 space-y-2"><div className="h-3.5 w-40 max-w-full animate-pulse rounded bg-control" /><div className="h-3 w-24 animate-pulse rounded bg-control/70" /></div>
-      <div className="h-8 w-32 animate-pulse rounded bg-control/70 sm:w-56" />
+      <div className="min-w-0 flex-1 space-y-2"><div className="h-3.5 w-40 max-w-full animate-pulse rounded bg-muted dark:bg-control" /><div className="h-3 w-24 animate-pulse rounded bg-muted dark:bg-control/70" /></div>
+      <div className="h-8 w-32 animate-pulse rounded bg-muted dark:bg-control/70 sm:w-56" />
     </div>)}
   </section>;
 }

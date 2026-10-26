@@ -5,7 +5,7 @@
 :root {
   --background: 220 14% 96%; --surface: 0 0% 100%; --foreground: 225 15% 15%; --muted: 220 14% 94%;
   --muted-foreground: 240 5% 36%; --border: 240 5% 92%; --input: 240 5% 88%; --accent: 240 5% 90%;
-  --dialog: 0 0% 100%; --control: 220 14% 94%;
+  --dialog: 0 0% 100%; --control: 0 0% 100%;
 }
 .dark {
   --background: 225 6% 13%; --surface: 223 7% 18%; --foreground: 220 13% 95%; --muted: 225 6% 15%;
