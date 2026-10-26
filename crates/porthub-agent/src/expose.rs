@@ -321,7 +321,7 @@ pub fn list(layout: &crate::service::Layout) -> Result<()> {
             match OpenOptions::new().read(true).write(true).open(lock_path) {
                 Ok(lock) => match lock.try_lock_exclusive() {
                     Ok(()) => "stopped",
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => &session.status,
+                    Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => &session.status,
                     Err(_) => "unknown",
                 },
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => "stopped",
@@ -370,7 +370,7 @@ pub fn stop(layout: &crate::service::Layout, id: &str) -> Result<()> {
                 "Exposure process is no longer running; its gateway lease will expire automatically"
             );
         }
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {}
         Err(error) => return Err(error.into()),
     }
     crate::profile::write_private(&stop_path(layout, &session.id)?, b"stop\n", true)?;

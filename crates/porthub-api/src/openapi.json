@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "PortHub API",
-    "version": "1.5.0",
+    "version": "1.5.1",
     "description": "PortHub gateway API. Request and response bodies are JSON unless an operation specifies otherwise."
   },
   "servers": [
