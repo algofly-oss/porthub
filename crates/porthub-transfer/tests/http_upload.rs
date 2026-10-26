@@ -70,7 +70,7 @@ async fn nested_destination_syncs_empty_directories_and_same_second_edits() -> R
         filetime::FileTime::from_unix_time(1_700_000_000, 100),
     )?;
     let receiver = http(
-        porthub_transfer::server::router(destination.path().to_owned())
+        porthub_transfer::server::router(std::fs::canonicalize(destination.path())?)
             .merge(upload::routes(destination.path().to_owned())?),
     )
     .await?;
@@ -121,7 +121,7 @@ async fn watch_syncs_changes_recovers_offline_and_stops_without_deleting_remote_
     let task = tokio::spawn(sync::watch(options, cancel.clone()));
     tokio::time::sleep(Duration::from_millis(200)).await;
     let listener = tokio::net::TcpListener::bind(address).await?;
-    let app = porthub_transfer::server::router(destination.path().to_owned())
+    let app = porthub_transfer::server::router(std::fs::canonicalize(destination.path())?)
         .merge(upload::routes(destination.path().to_owned())?);
     let server = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
@@ -168,8 +168,9 @@ async fn incremental_selection_does_not_scan_or_request_untouched_files() -> Res
     std::fs::create_dir_all(tree.join("untouched"))?;
     std::fs::write(tree.join("changed"), b"updated")?;
     std::fs::write(tree.join("untouched/file"), b"do not send")?;
+    let tree = std::fs::canonicalize(tree)?;
     let receiver = http(
-        porthub_transfer::server::router(destination.path().to_owned())
+        porthub_transfer::server::router(std::fs::canonicalize(destination.path())?)
             .merge(upload::routes(destination.path().to_owned())?),
     )
     .await?;

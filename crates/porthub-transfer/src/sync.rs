@@ -485,13 +485,14 @@ mod tests {
         };
         let cancel = CancellationToken::new();
         let task = tokio::spawn(watch(options, cancel.clone()));
+        let expected_source = std::fs::canonicalize(directory.path())?;
         let job = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if let Some(job) = list()
                     .await
                     .unwrap()
                     .into_iter()
-                    .find(|job| job.source == directory.path())
+                    .find(|job| job.source == expected_source)
                 {
                     break job;
                 }

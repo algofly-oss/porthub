@@ -369,12 +369,9 @@ async fn create_directories(
         for name in request.names {
             // destination validates every ancestor before creating it. A
             // synthetic final component lets the same checks create a folder.
-            let name = safe_name(&name)?;
-            destination(
-                &state.root,
-                &format!("{}/.porthub-directory", name.to_string_lossy()),
-            )
-            .await?;
+            safe_name(&name)?;
+            // Preserve wire-format `/` separators on Windows as well.
+            destination(&state.root, &format!("{name}/.porthub-directory")).await?;
         }
         Ok::<_, anyhow::Error>(())
     }
