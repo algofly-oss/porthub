@@ -29,6 +29,11 @@ fn expanded(rows: &[Document]) -> Vec<Bson> {
     }
     ids
 }
+/// Retiring owners stay fenced even if cleanup was interrupted before disabling resources.
+pub async fn retiring_owners(app: &App) -> ApiResult<Vec<Bson>> {
+    let users = rows(app, "users", doc! {"account_deletion":{"$exists":true}}).await?;
+    Ok(expanded(&users))
+}
 fn list(job: &Document, key: &str) -> Vec<Bson> {
     job.get_array(key).cloned().unwrap_or_default()
 }

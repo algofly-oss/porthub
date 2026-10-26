@@ -68,6 +68,13 @@ pub async fn authenticate(app: &App, id: &str, token: &str) -> ApiResult<Documen
             .header("x-porthub-machine-deleted", "true")
     };
     let machine = machine.ok_or_else(gone)?;
+    let retired = crate::account_delete::retiring_owners(app).await?;
+    if machine
+        .get("user_id")
+        .is_some_and(|id| retired.contains(id))
+    {
+        return Err(gone());
+    }
     if machine.get_bool("deletion_pending").unwrap_or(false) {
         return Err(gone());
     }

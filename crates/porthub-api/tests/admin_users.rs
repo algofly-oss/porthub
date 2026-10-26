@@ -235,3 +235,21 @@ async fn deletion_waits_for_inflight_browser_requests_but_invalid_passwords_do_n
         Ok(())
     }.await;case.db.drop().await?;result
 }
+
+#[tokio::test]
+#[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn interrupted_retirement_fences_enabled_resources_before_cleanup_resumes() -> Result<()> {
+    let case = Case::new(Config::default()).await?;
+    let result = async {
+        let (owner, _) = case.user("retiring@test.invalid", "user").await?;
+        let machine = ObjectId::new();
+        case.app.collection("machines").insert_one(doc! {"_id":machine,"user_id":owner,"token":"retired-token","enabled":true}).await?;
+        case.app.collection("users").update_one(doc! {"_id":owner}, doc! {"$set":{"account_deletion":{"next_attempt_at":DateTime::now()}}}).await?;
+        let snapshot = porthub_api::generated::preflight(&case.app).await.map_err(|_| anyhow::anyhow!("preflight failed"))?;
+        ensure!(snapshot.active_machines == 0 && snapshot.public_services == 0);
+        case.status("GET", &format!("/api/machines/client/config?machine_id={machine}&token=retired-token"), "", json!(null), StatusCode::GONE).await?;
+        Ok(())
+    }.await;
+    case.db.drop().await?;
+    result
+}

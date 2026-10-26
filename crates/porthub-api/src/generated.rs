@@ -141,8 +141,9 @@ async fn publish(app: &App, apply: bool) -> ApiResult<()> {
         return Ok(());
     };
     let _guard = app.gateway_config_lock.lock().await;
+    let retired = crate::account_delete::retiring_owners(app).await?;
     let machines:Vec<Document>=app.collection("machines")
-        .find(doc! {"enabled":{"$ne":false},"deletion_pending":{"$ne":true},"token":{"$nin":[Bson::Null,""]}})
+        .find(doc! {"user_id":{"$nin":retired},"enabled":{"$ne":false},"deletion_pending":{"$ne":true},"token":{"$nin":[Bson::Null,""]}})
         .await?.try_collect().await?;
     let ids: Vec<Bson> = machines
         .iter()
@@ -273,9 +274,10 @@ pub fn render_web_for_gateway(
 }
 
 async fn web_snapshot(app: &App) -> ApiResult<(usize, porthub_runtime::web_routes::Config)> {
+    let retired = crate::account_delete::retiring_owners(app).await?;
     let routes: Vec<Document> = app
         .collection("traffic_routes")
-        .find(doc! {"enabled":{"$ne":false}})
+        .find(doc! {"user_id":{"$nin":retired},"enabled":{"$ne":false}})
         .sort(doc! {"created_at":1,"_id":1})
         .await?
         .try_collect()
@@ -304,8 +306,9 @@ pub struct Preflight {
 /// Read-only production-data validation: no bootstrap, reconciliation, IPC,
 /// file publication, index creation or background workers are started.
 pub async fn preflight(app: &App) -> ApiResult<Preflight> {
+    let retired = crate::account_delete::retiring_owners(app).await?;
     let machines: Vec<Document> = app.collection("machines")
-        .find(doc! {"enabled":{"$ne":false},"deletion_pending":{"$ne":true},"token":{"$nin":[Bson::Null,""]}})
+        .find(doc! {"user_id":{"$nin":retired},"enabled":{"$ne":false},"deletion_pending":{"$ne":true},"token":{"$nin":[Bson::Null,""]}})
         .await?.try_collect().await?;
     let ids: Vec<Bson> = machines
         .iter()

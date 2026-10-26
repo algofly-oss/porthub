@@ -62,9 +62,13 @@ async fn active(
     app: &App,
     owner: ObjectId,
 ) -> ApiResult<(Vec<Document>, HashMap<String, Document>)> {
+    let retired = crate::account_delete::retiring_owners(app).await?;
+    if retired.contains(&mongodb::bson::Bson::ObjectId(owner)) {
+        return Ok((Vec::new(), HashMap::new()));
+    }
     let peers: Vec<Document> = app
         .collection("private_peers")
-        .find(doc! {"workspace_id":owner,"enabled":true})
+        .find(doc! {"workspace_id":owner,"owner_id":{"$nin":retired},"enabled":true})
         .await?
         .try_collect()
         .await?;
