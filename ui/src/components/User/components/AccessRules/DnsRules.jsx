@@ -7,7 +7,7 @@ import SearchSelect from "@/components/ui/search-select";
 import useToast from "@/shared/hooks/useToast";
 import { API, errorText } from "./shared";
 
-function Editor({ machine, initial, manage, params, onSaved }) {
+function Editor({ machine, initial, manage, params }) {
   const [rules, setRules] = useState(initial);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -21,7 +21,7 @@ function Editor({ machine, initial, manage, params, onSaved }) {
         action: rule.mode === "override" ? { type: "override", addresses: rule.addresses.split(/[\s,]+/).filter(Boolean) } : { type: "block" },
       })) }, { params });
       setRules(toForm(response.data.data.rules));
-      await onSaved(response.data.data.rules); toast.success("DNS rules saved");
+      toast.success("DNS rules saved");
     } catch (cause) { setError(errorText(cause)); }
     finally { setBusy(false); }
   }
@@ -31,7 +31,7 @@ function Editor({ machine, initial, manage, params, onSaved }) {
       <SearchSelect className="col-start-1 row-start-2 sm:col-start-auto sm:row-start-auto" label={`DNS action ${index + 1}`} value={rule.mode} disabled={!manage || busy} onChange={mode => change(index, { mode })} options={[{value:"block",label:"Block domain"},{value:"override",label:"Override addresses"}]} />
       {manage && <Button type="button" variant="ghost" size="icon" className="col-start-2 row-start-1 sm:col-start-auto" aria-label={`Remove rule ${index + 1}`} disabled={busy} onClick={() => setRules(current => current.filter((_, i) => i !== index))}><IconTrash size={16} /></Button>}
       <SearchSelect className="col-span-full" label={`DNS scope ${index + 1}`} value={rule.domain.trim().startsWith("*.") ? "wildcard" : rule.scope} disabled={!manage || busy || rule.domain.trim().startsWith("*.")} onChange={scope => change(index, { scope })} options={rule.domain.trim().startsWith("*.") ? [{value:"wildcard",label:"Subdomains only (apex excluded)"}] : [{value:"all",label:"This domain and all subdomains"},{value:"exact",label:"Only this exact domain"}]} />
-      {rule.mode === "override" && <Input className="col-span-full" required aria-label={`Replacement addresses ${index + 1}`} placeholder="192.0.2.10, 2001:db8::10" value={rule.addresses} disabled={!manage || busy} onChange={event => change(index, { addresses: event.target.value })} />}
+      {rule.mode === "override" && <Input className="col-span-full placeholder:!text-muted-foreground placeholder:!opacity-60" required aria-label={`Replacement addresses ${index + 1}`} placeholder="192.0.2.10, 2001:db8::10" value={rule.addresses} disabled={!manage || busy} onChange={event => change(index, { addresses: event.target.value })} />}
     </div>)}
     {!rules.length && <p className="text-sm text-muted-foreground">No DNS rules for this machine.</p>}
     {error && <p role="alert" className="text-sm text-red-600 dark:text-red-400">{error}</p>}
@@ -43,26 +43,26 @@ function toForm(rules) {
   return rules.map(rule => ({ domain: rule.domain, scope: rule.include_subdomains === false ? "exact" : "all", mode: rule.action.type, addresses: (rule.action.addresses || []).join(", ") }));
 }
 
-export default function DnsRules({ machine, opened, workspace = "", onCount }) {
+export default function DnsRules({ machine, opened, workspace = "" }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
   useEffect(() => {
     if (!opened || !machine) return;
     const controller = new AbortController();
-    setData(null); setError(""); onCount?.(null);
+    setData(null); setError("");
     axios.get(`${API}/dns-rules/${machine}`, { params: { workspace }, signal: controller.signal })
       .then(response => {
         if (controller.signal.aborted) return;
-        setData(response.data.data); onCount?.(response.data.data.rules.length);
+        setData(response.data.data);
       }).catch(cause => { if (!controller.signal.aborted) setError(errorText(cause)); });
     return () => controller.abort();
-  }, [machine, opened, workspace, onCount]);
+  }, [machine, opened, workspace]);
   return <section className="p-4">
     <h2 className="text-base font-semibold">DNS controls</h2>
     <p className="mt-2 text-sm leading-6 text-muted-foreground">Rules for this machine apply through its system DNS resolver while its private agent is running.</p>
     {error && <p role="alert" className="mt-3 text-sm text-red-600 dark:text-red-400">{error}</p>}
     {!data && !error && <p className="mt-3 text-sm text-muted-foreground">Loading DNS rules…</p>}
-    {data && <Editor key={`${workspace}:${machine}`} machine={machine} initial={toForm(data.rules)} manage={data.can_manage} params={{ workspace }} onSaved={rules => onCount?.(rules.length)} />}
+    {data && <Editor key={`${workspace}:${machine}`} machine={machine} initial={toForm(data.rules)} manage={data.can_manage} params={{ workspace }} />}
     <p className="mt-4 text-xs leading-5 text-muted-foreground">Use *.example.com for subdomains only, or choose exact matching for a specific name. Apps using their own encrypted DNS can bypass system DNS rules. Address overrides keep the original hostname; HTTPS still requires a matching certificate.</p>
   </section>;
 }

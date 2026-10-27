@@ -441,7 +441,6 @@ export default function HostConfigPopup({
 
   const [rules, setRules] = useState([]);
   const [machineSection, setMachineSection] = useState("groups");
-  const [dnsRuleCount, setDnsRuleCount] = useState(null);
   const [portSection, setPortSection] = useState("connection");
   const [linkedProxies, setLinkedProxies] = useState([]);
   const [proxiesOpen, setProxiesOpen] = useState(false);
@@ -2148,7 +2147,7 @@ export default function HostConfigPopup({
               }`}
             >
             <div className="flex flex-col gap-3">
-            {!selectedRule ? <div className="overflow-x-auto pb-1"><StatusTabs label="Machine configuration sections" value={machineSection} onChange={setMachineSection} options={[{value:"groups",label:"Details"},{value:"ports",label:"Ports"},{value:"dns",label:dnsRuleCount == null ? "DNS" : `DNS (${dnsRuleCount})`},{value:"credentials",label:"Client"},{value:"logs",label:"Logs"},{value:"uptime",label:"History"}]} /></div> : <div className="flex min-w-0 items-center gap-3"><WorkspaceButton type="button" variant="ghost" size="sm" onClick={handleDoneEditing}><IconArrowLeft size={16} />All Ports</WorkspaceButton><span className="text-muted-foreground" aria-hidden="true">/</span><h2 ref={portHeadingRef} tabIndex={-1} className="min-w-0 flex-1 truncate text-base font-semibold !outline-none">{selectedRule.serviceName || "New Port"}</h2><WorkspaceButton type="button" variant="ghost" size="icon" onClick={()=>handleRemoveRule(selectedRule.localId)} className="text-red-600 dark:text-red-400" aria-label="Remove Port"><IconTrash size={16} /></WorkspaceButton></div>}
+            {!selectedRule ? <div className="overflow-x-auto pb-1"><StatusTabs label="Machine configuration sections" value={machineSection} onChange={setMachineSection} options={[{value:"groups",label:"Details"},{value:"ports",label:"Ports"},{value:"dns",label:"DNS"},{value:"credentials",label:"Client"},{value:"logs",label:"Logs"},{value:"uptime",label:"History"}]} /></div> : <div className="flex min-w-0 items-center gap-3"><WorkspaceButton type="button" variant="ghost" size="sm" onClick={handleDoneEditing}><IconArrowLeft size={16} />All Ports</WorkspaceButton><span className="text-muted-foreground" aria-hidden="true">/</span><h2 ref={portHeadingRef} tabIndex={-1} className="min-w-0 flex-1 truncate text-base font-semibold !outline-none">{selectedRule.serviceName || "New Port"}</h2><WorkspaceButton type="button" variant="ghost" size="icon" onClick={()=>handleRemoveRule(selectedRule.localId)} className="text-red-600 dark:text-red-400" aria-label="Remove Port"><IconTrash size={16} /></WorkspaceButton></div>}
             {selectedRule && <div className="overflow-x-auto pb-1"><StatusTabs label="Port configuration sections" value={portSection} onChange={setPortSection} options={[{value:"connection",label:"Connection"},{value:"access",label:"Access"},{value:"traffic",label:"Traffic"},{value:"web",label:"Web Addresses"}]} /></div>}
             {!selectedRule && machineSection === "groups" && <div className="flex items-start justify-between gap-3">
               <Group spacing="xs">
@@ -2244,7 +2243,7 @@ export default function HostConfigPopup({
               >
                 <div className="divide-y divide-border/60">
                   <div hidden={machineSection !== "dns"}>
-                    <DnsRules machine={host.id} opened={opened} onCount={setDnsRuleCount} />
+                    <DnsRules machine={host.id} opened={opened} />
                   </div>
                   <div hidden={machineSection !== "groups"}>
                     <h2 className="px-4 py-3 text-base font-semibold">Machine Details</h2>
