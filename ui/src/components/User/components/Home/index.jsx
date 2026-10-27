@@ -557,6 +557,57 @@ export default function Home({ onStatsChange, active = true }) {
     };
   }, [socket, active]);
 
+  // Port inventory changes independently of presence (CLI exposures, expiry,
+  // and edits in another browser). Coalesce bursts without polling while idle.
+  useEffect(() => {
+    if (!socket) return;
+    const controller = new AbortController();
+    let running = false;
+    let pending = false;
+    let timer;
+    const refresh = async () => {
+      pending = true;
+      if (running) return;
+      running = true;
+      try {
+        while (pending && !controller.signal.aborted) {
+          pending = false;
+          const response = await axios.get(apiRoutes.listConnections, { signal: controller.signal });
+          if (controller.signal.aborted) return;
+          const byMachine = new Map();
+          for (const connection of response.data?.data || []) {
+            const entries = byMachine.get(connection.machine_id) || [];
+            entries.push(mapConnectionToForwardingConfig(connection));
+            byMachine.set(connection.machine_id, entries);
+          }
+          setHosts(current => current.map(host => {
+            const configs = byMachine.get(host.id) || [];
+            if (JSON.stringify(configs) === JSON.stringify(host.forwardingConfigs)) return host;
+            return { ...host, forwardingConfigs: configs, numPorts: configs.filter(config => config.enabled !== false).length };
+          }));
+        }
+      } catch (cause) {
+        // Reconnect, tab activation, or the next notification refreshes again.
+      } finally { running = false; }
+    };
+    const schedule = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(refresh, 100);
+    };
+    const visible = () => { if (active && !document.hidden) schedule(); };
+    socket.on(socketRoutes.stcMachineConnectionsChanged, schedule);
+    socket.on("connect", schedule);
+    document.addEventListener("visibilitychange", visible);
+    if (active && !isLoading) schedule();
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+      socket.off(socketRoutes.stcMachineConnectionsChanged, schedule);
+      socket.off("connect", schedule);
+      document.removeEventListener("visibilitychange", visible);
+    };
+  }, [socket, active, isLoading]);
+
   // Traffic ordering must rank the entire fleet, not only the current page.
   // Key requests by stable IDs so sorting a fresh snapshot cannot restart polls.
   const trafficTargets = (isTrafficSort(sort) ? hosts : paginatedHosts).flatMap(host =>

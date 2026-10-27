@@ -112,11 +112,14 @@ async fn main() -> Result<()> {
         std::env::var("PORT_HUB_PUBLIC_BASE_URL").unwrap_or_default(),
         std::env::var("PORT_HUB_HTTP_BASE_URL").unwrap_or_default(),
         std::env::var("PORT_HUB_FALLBACK_BASE_URLS").unwrap_or_default(),
+        std::env::var("PORTHUB_GATEWAY_ADVERTISED_URL").unwrap_or_default(),
+        std::env::var("PORT_HUB_SERVICE_DOMAIN").unwrap_or_default(),
     ];
     let gateway_hosts = gateway_bases
         .iter()
         .flat_map(|bases| bases.split(','))
-        .filter_map(|base| url::Url::parse(base.trim()).ok())
+        .filter(|base| !base.trim().is_empty())
+        .filter_map(|base| url::Url::parse(&if base.contains("://") { base.trim().to_owned() } else { format!("http://{}", base.trim()) }).ok())
         .filter_map(|url| url.host_str().map(str::to_owned));
     let activity = Arc::new(porthub_runtime::web_activity::WebActivity::default());
     let activity_path = std::env::var_os("PORTHUB_WEB_ACTIVITY_LOG_PATH")

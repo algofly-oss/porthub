@@ -130,7 +130,11 @@ impl WebRoutes {
         let host = authority.host().trim_end_matches('.').to_ascii_lowercase();
         let snapshot = self.snapshot.read().unwrap_or_else(|p| p.into_inner());
         let Some(route) = snapshot.hosts.get(&host) else {
-            return Selection::Unmatched;
+            // Only gateway identities may reach the portal. A removed proxy
+            // hostname must not become an alias for the gateway application.
+            return if self.gateways.contains(&host) || host == "localhost"
+                || host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().is_ok()
+            { Selection::Unmatched } else { Selection::Disabled };
         };
         if (secure && route.route.https) || (!secure && route.route.http) {
             if let Some(activity) = &self.activity {
@@ -154,4 +158,25 @@ pub fn valid_host(host: &str) -> bool {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-')
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn removed_proxy_hosts_never_fall_through_to_the_portal() {
+        let routes = WebRoutes::with_gateway_hosts(["gateway.example".into(),"fallback.example".into()]);
+        let request = |host: &str| Request::builder().uri("/account/signin").header("host",host).body(()).unwrap();
+        let config = Config { routes: vec![Route { id:"temp".into(),hosts:vec!["temp.example".into()],target_url:"http://127.0.0.1:8000".into(),pass_host:true,http:true,https:true,access:None }] };
+        routes.reload(config).unwrap();
+        assert!(matches!(routes.select(&request("temp.example"),true),Selection::Proxy(_)));
+        routes.reload(Config::default()).unwrap();
+        for secure in [false,true] {
+            assert!(matches!(routes.select(&request("temp.example"),secure),Selection::Disabled));
+            assert!(matches!(routes.select(&request("unknown.example"),secure),Selection::Disabled));
+            for host in ["gateway.example","fallback.example:8345","127.0.0.1:8345","[::1]:8345","localhost"] {
+                assert!(matches!(routes.select(&request(host),secure),Selection::Unmatched),"{host}");
+            }
+        }
+    }
 }

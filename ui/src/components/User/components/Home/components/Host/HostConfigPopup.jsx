@@ -457,7 +457,7 @@ export default function HostConfigPopup({
     const controller = new AbortController();
     axios.get(apiRoutes.listTrafficRoutes, {signal:controller.signal}).then(response=>setLinkedProxies((response.data?.data || []).filter(proxy=>proxy.connection?.machine_id === host.id))).catch(()=>{});
     return () => controller.abort();
-  }, [opened, host?.id, proxyEditorOpen]);
+  }, [opened, host?.id, host?.forwardingConfigs, proxyEditorOpen]);
   const [selectedRuleId, setSelectedRuleId] = useState(null);
   const [errorsByRuleId, setErrorsByRuleId] = useState({});
   const [availabilityByRuleId, setAvailabilityByRuleId] = useState({});
@@ -737,9 +737,15 @@ export default function HostConfigPopup({
     const isHostSwitch = previousHostIdRef.current !== host.id;
     previousHostIdRef.current = host.id;
 
-    setRules(nextRules);
-    setErrorsByRuleId({});
-    setAvailabilityByRuleId({});
+    const preserveDraft = !isHostSwitch && rulesSnapshotKey(rules) !== initialRulesSnapshotRef.current;
+    const visibleRules = preserveDraft
+      ? [...rules.filter(rule => !rule.temporary), ...nextRules.filter(rule => rule.temporary)]
+      : nextRules;
+    setRules(visibleRules);
+    if (!preserveDraft) {
+      setErrorsByRuleId({});
+      setAvailabilityByRuleId({});
+    }
     initialRulesSnapshotRef.current = rulesSnapshotKey(nextRules);
 
     if (isHostSwitch) {
@@ -769,13 +775,13 @@ export default function HostConfigPopup({
 
     setSelectedRuleId((currentSelectedRuleId) =>
       currentSelectedRuleId &&
-      nextRules.some((rule) => rule.localId === currentSelectedRuleId)
+      visibleRules.some((rule) => rule.localId === currentSelectedRuleId)
         ? currentSelectedRuleId
         : null
     );
     setEditingRuleSnapshot((currentSnapshot) =>
       currentSnapshot &&
-      nextRules.some((rule) => rule.localId === currentSnapshot.localId)
+      visibleRules.some((rule) => rule.localId === currentSnapshot.localId)
         ? currentSnapshot
         : null
     );

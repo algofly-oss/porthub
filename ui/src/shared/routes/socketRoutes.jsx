@@ -2,6 +2,7 @@ let socketRoutes = {
   ctsMachineStatusSnapshot: "/cts/machines/status-snapshot",
   stcMachineStatusSnapshot: "/stc/machines/status-snapshot",
   stcMachineStatusChanged: "/stc/machines/status-changed",
+  stcMachineConnectionsChanged: "/stc/machines/connections-changed",
   ctsMachineLogStreamSubscribe: "/cts/machines/log-stream-subscribe",
   ctsMachineLogStreamUnsubscribe: "/cts/machines/log-stream-unsubscribe",
   stcMachineLogStreamStatus: "/stc/machines/log-stream-status",

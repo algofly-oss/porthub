@@ -82,6 +82,8 @@ services:
       PORT_HUB_PUBLIC_BASE_URL: ${PORT_HUB_PUBLIC_BASE_URL:-}
       PORT_HUB_HTTP_BASE_URL: ${PORT_HUB_HTTP_BASE_URL:-}
       PORT_HUB_FALLBACK_BASE_URLS: ${PORT_HUB_FALLBACK_BASE_URLS:-}
+      PORTHUB_GATEWAY_ADVERTISED_URL: ${PORTHUB_GATEWAY_ADVERTISED_URL:-}
+      PORT_HUB_SERVICE_DOMAIN: ${PORT_HUB_SERVICE_DOMAIN:-}
     volumes:
       - "${PORTHUB_VOLUME_ROOT:-./volumes/porthub}/api-socket:/run/porthub-api:ro"
       - "${PORTHUB_VOLUME_ROOT:-./volumes/porthub}/edge-socket:/run/porthub-edge"

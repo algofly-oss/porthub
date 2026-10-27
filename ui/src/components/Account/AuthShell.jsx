@@ -7,7 +7,9 @@ export function PortHubBrand({ light = false, compact = false }) {
 }
 
 export default function AuthShell({ children }) {
-  return <main className="flex h-screen h-[100dvh] flex-col overflow-hidden bg-background text-foreground">
+  return <main className="grid h-screen h-[100dvh] overflow-hidden bg-background text-foreground md:grid-cols-2">
+    <div aria-hidden="true" className="hidden h-full bg-cover bg-center bg-no-repeat md:block" style={{backgroundImage:"url('/images/liquid-cheese.svg')"}} />
+    <div className="flex min-h-0 min-w-0 flex-col">
     <header className="box-border flex shrink-0 items-center justify-end gap-4 px-5 pt-[env(safe-area-inset-top)] sm:px-8" style={{minHeight:"calc(4rem + env(safe-area-inset-top))"}}>
       <Link href="/guide" className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"><IconBook2 size={16} />User guide</Link>
       <DarkThemeToggle compact />
@@ -15,5 +17,6 @@ export default function AuthShell({ children }) {
     <section className="flex min-h-0 flex-1 items-center justify-center overflow-hidden px-6 py-4">
       <div className="w-full max-w-[400px]">{children}</div>
     </section>
+    </div>
   </main>;
 }

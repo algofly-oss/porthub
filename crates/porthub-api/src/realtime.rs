@@ -29,6 +29,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 pub const CTS_STATUS: &str = "/cts/machines/status-snapshot";
 pub const STC_STATUS: &str = "/stc/machines/status-snapshot";
 pub const STC_CHANGED: &str = "/stc/machines/status-changed";
+pub const STC_CONNECTIONS_CHANGED: &str = "/stc/machines/connections-changed";
 pub const CTS_CONFIG: &str = "/cts/machines/config-snapshot";
 pub const STC_CONFIG: &str = "/stc/machines/config-snapshot";
 pub const STC_CONFIG_CHANGED: &str = "/stc/machines/config-changed";
@@ -304,14 +305,17 @@ impl Hub {
             .cloned()
             .unwrap_or_default();
         let valid = self.recipients(app, sids).await?;
-        if valid.is_empty() {
-            return Ok(());
-        }
         let id =
             ObjectId::parse_str(id).map_err(|_| ApiError::bad_request("Invalid machine id"))?;
         let Some(machine) = app.collection("machines").find_one(doc! {"_id":id}).await? else {
             return Ok(());
         };
+        let owner = store::id(machine.get("user_id"));
+        let browsers = self.registry().users.get(&owner).cloned().unwrap_or_default();
+        for sid in self.recipients(app, browsers).await? {
+            self.send(&sid, STC_CONNECTIONS_CHANGED, &json!({"machine_id":id.to_hex()}));
+        }
+        if valid.is_empty() { return Ok(()); }
         self.emit_config(app, &machine, valid, STC_CONFIG_CHANGED)
             .await
     }

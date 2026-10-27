@@ -459,3 +459,36 @@ async fn revoked_and_expired_sessions_are_revalidated_before_outgoing_data() -> 
     case.db.drop().await?;
     result
 }
+
+#[tokio::test]
+#[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn temporary_port_create_close_and_expiry_notify_only_the_owner_without_agent_socket() -> Result<()> {
+    let case = Case::new(Config { service_domain: "services.example.invalid".into(), external_port_range: Some((31000,31002)), ..Default::default() }).await?;
+    let (address, task) = serving(&case).await?;
+    let result = async {
+        let (owner, cookie) = case.user("exposure-events@test.invalid", "user").await?;
+        let (_, foreign_cookie) = case.user("other-exposure-events@test.invalid", "user").await?;
+        let id = ObjectId::new();
+        case.app.collection("machines").insert_one(doc! {"_id":id,"user_id":owner,"name":"Fixture","enabled":true,"token":"fixture-token"}).await?;
+        let (mut browser, accepted) = Wire::open(address, &cookie, json!({}), None).await?; ensure!(accepted);
+        let (mut outsider, accepted) = Wire::open(address, &foreign_cookie, json!({}), None).await?; ensure!(accepted);
+        for expire in [false,true] {
+            let created = case.status("POST", "/api/machines/client/expose", "", json!({"machine_id":id.to_hex(),"token":"fixture-token","request_id":uuid::Uuid::new_v4().simple().to_string(),"local_port":8000}), StatusCode::OK).await?;
+            ensure!(browser.expect(STC_CONNECTIONS_CHANGED).await? == json!({"machine_id":id.to_hex()}));
+            outsider.quiet().await?;
+            let exposure = created["data"]["exposure_id"].as_str().context("exposure id")?;
+            if expire {
+                case.app.collection("connections").update_one(doc! {"exposure_id":exposure},doc! {"$set":{"lease_expires_at":DateTime::from_millis(0)}}).await?;
+                porthub_api::routes::exposes::recover_due(&case.app).await.map_err(api_error)?;
+            } else {
+                case.status("POST", "/api/machines/client/expose/close", "", json!({"machine_id":id.to_hex(),"token":"fixture-token","exposure_id":exposure}), StatusCode::OK).await?;
+            }
+            ensure!(browser.expect(STC_CONNECTIONS_CHANGED).await? == json!({"machine_id":id.to_hex()}));
+            outsider.quiet().await?;
+        }
+        browser.close().await; outsider.close().await;
+        Ok(())
+    }.await;
+    case.app.realtime.close().await; task.abort(); case.db.drop().await?;
+    result
+}
