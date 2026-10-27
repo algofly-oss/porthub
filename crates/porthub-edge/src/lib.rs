@@ -194,6 +194,15 @@ pub fn listener_router_with_public_origin(
         });
     router.layer(axum::middleware::from_fn(
         move |mut request: Request, next: axum::middleware::Next| {
+            // HTTP/2 carries the host in :authority, not necessarily Host.
+            // Preserve it before the internal HTTP/1 proxy replaces the URI.
+            if request.version() == Version::HTTP_2 {
+                if let Some(host) = request.uri().authority()
+                    .and_then(|authority| authority.as_str().parse::<axum::http::HeaderValue>().ok())
+                {
+                    request.headers_mut().insert(header::HOST, host);
+                }
+            }
             let external_secure = secure
                 || authority.as_ref().is_some_and(|authority| {
                     request
