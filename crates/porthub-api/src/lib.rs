@@ -22,6 +22,7 @@ pub mod machine_delete;
 pub mod private_relay;
 pub mod private_transport;
 pub mod realtime;
+pub mod release_cache;
 pub mod routes;
 pub mod static_ui;
 pub mod status_monitor;
@@ -88,7 +89,11 @@ impl App {
             private_relay: Default::default(),
             legacy_turn: Default::default(),
             bootstrap_initialized: Default::default(),
-            artifacts: artifacts::Catalog::new(config.client_binary_dir.clone()),
+            artifacts: match &config.client_release_repository {
+                Some(repository) => artifacts::Catalog::github(config.client_binary_dir.clone().expect("release cache path configured"), repository)
+                    .expect("validated release repository"),
+                None => artifacts::Catalog::new(config.client_binary_dir.clone()),
+            },
             realtime: Default::default(),
             config_signals: Default::default(),
             firewall_changes: tokio::sync::Notify::new(),
@@ -119,6 +124,7 @@ impl App {
     pub fn collection(&self, name: &str) -> Collection<Document> {
         self.db.collection(name)
     }
+    pub fn client_version(&self) -> String { self.artifacts.version(&self.config.client_version) }
     pub async fn notify_config(&self, id: &str) {
         self.config_signals.changed(id);
         if let Err(error) = self.realtime.config_changed(self, id).await {

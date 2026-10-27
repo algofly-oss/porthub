@@ -88,6 +88,7 @@ async fn installer_response(
         .expect("installer capability")
         .to_owned();
     let enrollment = enrollment_ticket::resolve(app, &code).await?;
+    app.artifacts.refresh_latest().await?;
     let mut response_headers = headers();
     response_headers.insert(
         header::CONTENT_TYPE,
@@ -231,6 +232,7 @@ async fn enroll(
     request: Request,
 ) -> ApiResult<Response> {
     let enrollment = enrollment_ticket::resolve(&app, &ticket).await?;
+    app.artifacts.refresh_latest().await?;
     let mut headers = headers();
     headers.insert(
         "x-porthub-machine-id",
@@ -255,6 +257,7 @@ async fn windows_installer(
     State(app): State<Arc<App>>, Path(ticket): Path<String>, request: Request,
 ) -> ApiResult<Response> {
     let enrollment = enrollment_ticket::resolve(&app, &ticket).await?;
+    app.artifacts.refresh_latest().await?;
     let values = enrollment.values(&app, request.headers())?;
     let base = values["server"].as_str().or_else(|| values["profile"]["server"].as_str())
         .ok_or_else(|| ApiError::bad_request("Missing installer gateway"))?;

@@ -29,27 +29,40 @@ and `porthub:firewall`. It also tags the same images with the release, for examp
 `porthub:core-1.2.0`, and records that version in their OCI labels. All three
 labels must match before deployment starts any containers.
 
-The Rust API serves release metadata and binaries from a read-only bundle. It
-does not run a downloader, shell script or Go handler to deliver these assets.
-The production core image embeds exactly the latest release for all ten
-platforms in `/app/client-bin`, including version and SHA256 sidecars. No client
-artifact volume or runtime download is required. Retired development releases are removed after the new release is deployed
-and online clients have updated. The active production image retains only the
-current release.
-
-Generated binaries are not tracked in the source repository. They remain in
-GitHub Releases and are embedded in the production image. Stage the verified
-bundle before a production build:
+The Rust API resolves the latest stable GitHub release and caches requested
+platform binaries under `/data/agent-releases`, inside the existing persistent
+host bind mount. Production images contain no agent binaries and deployments
+require no manual bundle staging:
 
 ```sh
-PORTHUB_RELEASE_BUNDLE=/path/to/verified/bundle ./deploy.sh
+./deploy.sh
 ```
 
-The build stages only one release and rejects missing platforms, mixed versions,
-unexpected history directories, and checksum mismatches. `porthub-api
---check-artifacts /app/client-bin VERSION` verifies an image offline. Development
-images may build the host agent locally; production consumes the complete
-prebuilt bundle instead of recompiling an agent during deployment.
+An authenticated installer request checks the latest release. Concurrent checks
+are coalesced, and routine agent heartbeats schedule metadata refreshes at most
+once every five minutes without waiting for GitHub. The catalog lists all ten
+platforms from release metadata; listing it does not download their binaries.
+Only a requested target is fetched. The API checks the declared size and GitHub
+SHA256 digest before publishing the cache file atomically. Concurrent requests
+for that target share one download; at most two target downloads run together.
+
+The latest index and verified binaries survive container recreation. GitHub
+errors retain the last known complete catalog, and cached targets remain
+available. A platform that has never been cached still needs GitHub access.
+After a newer release is cached, older version directories are removed; already
+open downloads retain their file descriptors and continue uninterrupted.
+
+`PORTHUB_AGENT_RELEASE_REPOSITORY` defaults to `algofly-oss/porthub`.
+`PORTHUB_AGENT_RELEASE_SOURCE=local` provides an explicit offline mode using
+`PORTHUB_CLIENT_BINARY_DIR`; normal production uses `github`. Agent versions are
+resolved independently of the gateway image version, so publishing a new agent
+release does not require rebuilding the gateway. Source releases still validate
+one consistent version across all ten platforms before publication. The CI
+publisher uploads a draft first and makes it latest only when uploads finish.
+
+Generated binaries remain outside Git. The offline `porthub-api --check-artifacts
+DIRECTORY VERSION` command and release-bundle validator remain available for CI
+and publishing checks; neither is part of the production image build.
 
 All routes require the current enabled machine's ID and token; account cookies
 cannot substitute for the machine credential. Retirement returns the existing
@@ -57,7 +70,7 @@ cannot substitute for the machine credential. Retirement returns the existing
 
 | Route | Behavior |
 | --- | --- |
-| `/api/machines/{id}/{token}/downloads/releases` | Versioned JSON catalog with actual bundled assets and missing targets |
+| `/api/machines/{id}/{token}/downloads/releases` | Versioned JSON catalog from the latest complete release metadata |
 | `/api/machines/{id}/{token}/downloads/agent/{target}` | Native binary with attachment filename, SHA256 and release headers |
 | `/api/machines/{id}/{token}/downloads/rathole/{target}` | Compatibility URL serving the native binary with existing Rathole headers |
 | `/api/machines/{id}/{token}/downloads/porthub` and `/client.sh` | Transitional CLI for old self-updaters; invokes native bootstrap while preserving a legacy rollback CLI |
@@ -65,9 +78,9 @@ cannot substitute for the machine credential. Retirement returns the existing
 The catalog has `format_version: 1`, `machine_id`, `releases` and
 `missing_targets`. Each release supplies `target`, `os`, `arch`, `asset`,
 `version`, `sha256`, `size` and an authenticated download `url`. Generated URLs
-retain the machine's configured public authority and path prefix. The API
-advertises only files it actually finds; accepted target names do not establish
-that a platform build or installed lifecycle has been verified.
+retain the machine's configured public authority and path prefix. The API advertises the complete published platform matrix after validating release
+metadata. Binaries are fetched only when requested; accepted target names alone
+do not establish that a platform build or installed lifecycle has been verified.
 
 | OS | Native target names | Asset names |
 | --- | --- | --- |

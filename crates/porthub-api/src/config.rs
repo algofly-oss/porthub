@@ -23,6 +23,7 @@ pub struct Config {
     pub machine_offline_alert_grace_millis: i64,
     pub client_version: String,
     pub client_binary_dir: Option<std::path::PathBuf>,
+    pub client_release_repository: Option<String>,
     pub gateway_public_ip: Option<String>,
     pub gateway_advertised_url: Option<String>,
     pub gateway_ip_sources: Vec<String>,
@@ -62,6 +63,7 @@ impl Default for Config {
             machine_offline_alert_grace_millis: 60_000,
             client_version: String::new(),
             client_binary_dir: None,
+            client_release_repository: None,
             gateway_public_ip: None,
             gateway_advertised_url: None,
             gateway_config_path: None,
@@ -319,10 +321,15 @@ impl Config {
             client_binary_dir: Some(
                 env(
                     "PORTHUB_CLIENT_BINARY_DIR",
-                    &env("CLIENT_BINARY_DIR", "/app/client-bin"),
+                    &env("CLIENT_BINARY_DIR", "/data/agent-releases"),
                 )
                 .into(),
             ),
+            client_release_repository: match env("PORTHUB_AGENT_RELEASE_SOURCE", "github").as_str() {
+                "github" => Some(env("PORTHUB_AGENT_RELEASE_REPOSITORY", "algofly-oss/porthub")),
+                "local" => None,
+                _ => anyhow::bail!("PORTHUB_AGENT_RELEASE_SOURCE must be github or local"),
+            },
         })
     }
 }

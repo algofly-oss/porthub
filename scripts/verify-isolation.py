@@ -373,7 +373,6 @@ def main():
         assert api("POST", "/api/access/test", policy_preview)["data"]["allowed"] is False
         checks.append("native rule-book validation, revision conflict detection and deletion drive allow-only policy previews through production ingress")
         agent_name = "porthub-" + {"aarch64": "arm64", "arm64": "arm64", "x86_64": "x86_64", "AMD64": "x86_64"}[platform.machine()]
-        agent = "/app/client-bin/" + agent_name
         def run_agent(*args):
             return docker("exec", "-e", "PORTHUB_STATE_DIR=/tmp/porthub-state", prefix + "-core", agent, *args)
         def start_core(*args):
@@ -383,17 +382,22 @@ def main():
             return child
         releases = json.loads(request(f"/api/machines/{machine_id}/{created['data']['token']}/downloads/releases")[2])
         release = next(item for item in releases["releases"] if item["asset"] == agent_name)
+        agent = "/data/agent-releases/" + release["version"] + "/" + agent_name
         assert releases["format_version"] == 1 and release["size"] > 0
         release_path = f"/api/machines/{machine_id}/{created['data']['token']}/downloads/agent/{release['target']}"
         status, headers, content = request(release_path, headers={"Range": "bytes=0-4095"})
         assert status == 206 and len(content) == 4096 and headers["X-PortHub-Agent-Sha256"] == release["sha256"]
+        # The API fetched this target lazily into the test-only writable data
+        # mount. Mark that cached fixture executable for the lifecycle checks.
+        docker("exec", prefix + "-core", "chmod", "0700", agent)
+        docker("exec", prefix + "-core", "sh", "-c", "test ! -e /app/client-bin")
         legacy_path = f"/api/machines/{machine_id}/{created['data']['token']}/downloads/rathole/{release['target']}"
         assert request(legacy_path, method="HEAD")[1]["X-PortHub-Rathole-Asset"] == agent_name
         run_agent("get", f"http://{edge_ip}:8345{release_path}", "--dir", "/tmp/agent-release-get",
                   "--connections", "4", "--segment-size", "65536", "--sha256", release["sha256"])
         downloaded = docker("exec", prefix + "-core", "sha256sum", "/tmp/agent-release-get/" + agent_name).stdout.split()[0]
         assert downloaded == release["sha256"]
-        checks.append("authenticated native release catalog, legacy alias, HTTP ranges and packaged agent self-download preserve SHA256 integrity")
+        checks.append("lazy GitHub cache, authenticated release catalog, legacy alias, HTTP ranges and cached agent self-download preserve SHA256 integrity without an image bundle")
         with tempfile.TemporaryDirectory(prefix="porthub-transfer-check-") as directory:
             source = pathlib.Path(directory) / "payload.bin"
             chunk = bytes(range(256)) * 4096

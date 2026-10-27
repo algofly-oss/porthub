@@ -1,13 +1,14 @@
 //! Native release assets. Hashing is bounded and cached by the opened file's
 //! identity; downloads keep that descriptor across atomic bundle replacement.
-//! Published release directories must be immutable, as in the read-only image.
+//! GitHub assets are fetched lazily into a persistent verified cache. Local
+//! immutable bundles remain available for offline validation and fixtures.
 use crate::error::{ApiError, ApiResult};
 use axum::{
     body::Body,
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -33,7 +34,7 @@ pub const TARGETS: &[(&str, &str, &str)] = &[
     ("windows_x86", "windows", "x86"),
     ("windows_arm64", "windows", "aarch64"),
 ];
-/// Build-time/offline validation of the single release embedded in an image.
+/// Offline validation of a complete release before publishing it to GitHub.
 /// No database, credentials, network, or running API is needed.
 pub async fn verify_complete(root: &Path, version: &str) -> anyhow::Result<Vec<Release>> {
     use std::collections::BTreeSet;
@@ -67,7 +68,7 @@ pub async fn verify_complete(root: &Path, version: &str) -> anyhow::Result<Vec<R
     }
     anyhow::ensure!(
         actual == expected,
-        "production image requires exactly one complete ten-platform release"
+        "release bundle requires exactly one complete ten-platform release"
     );
     let catalog = Catalog::new(Some(root.into()));
     let mut releases = Vec::new();
@@ -113,7 +114,7 @@ pub fn normalize(target: &str, legacy: bool) -> ApiResult<&'static str> {
             )
         })
 }
-#[derive(Clone, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct Release {
     pub target: String,
     pub os: String,
@@ -150,6 +151,7 @@ pub struct Artifact {
 pub struct Catalog {
     root: Option<PathBuf>,
     cache: Mutex<BTreeMap<PathBuf, (Fingerprint, String)>>,
+    remote: Option<std::sync::Arc<crate::release_cache::Remote>>,
 }
 fn unavailable() -> ApiError {
     ApiError::new(
@@ -197,9 +199,47 @@ impl Catalog {
         Self {
             root,
             cache: Mutex::new(BTreeMap::new()),
+            remote: None,
         }
     }
+    pub fn github(root: PathBuf, repository: &str) -> anyhow::Result<Self> {
+        Ok(Self { root: None, cache: Mutex::new(BTreeMap::new()), remote: Some(crate::release_cache::Remote::github(root, repository)?) })
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture(remote: std::sync::Arc<crate::release_cache::Remote>) -> Self {
+        Self { root: None, cache: Mutex::new(BTreeMap::new()), remote: Some(remote) }
+    }
+    pub fn version(&self, fallback: &str) -> String {
+        match &self.remote { Some(remote) => remote.version().unwrap_or_default(), None => fallback.to_owned() }
+    }
+    pub fn refresh_background(&self) {
+        if let Some(remote) = &self.remote { remote.refresh_background(); }
+    }
+    pub async fn refresh_latest(&self) -> ApiResult<()> {
+        if let Some(remote) = &self.remote { remote.refresh_latest().await.map_err(|_| unavailable())?; }
+        Ok(())
+    }
+    /// Catalog listing must not populate every platform's binary cache.
+    pub async fn release(&self, target: &'static str) -> ApiResult<Release> {
+        if let Some(remote) = &self.remote {
+            return remote.release(target).await.map_err(|_| unavailable());
+        }
+        Ok(self.get(target).await?.release)
+    }
     pub async fn get(&self, target: &'static str) -> ApiResult<Artifact> {
+        if let Some(remote) = &self.remote {
+            let root = remote.ensure(target, false).await.map_err(|_| unavailable())?;
+            match self.get_local(target, Some(&root)).await {
+                Ok(artifact) => return Ok(artifact),
+                Err(_) => {
+                    let root = remote.ensure(target, true).await.map_err(|_| unavailable())?;
+                    return self.get_local(target, Some(&root)).await;
+                }
+            }
+        }
+        self.get_local(target, self.root.as_deref()).await
+    }
+    async fn get_local(&self, target: &'static str, root: Option<&Path>) -> ApiResult<Artifact> {
         let (target, os, arch) = TARGETS
             .iter()
             .find(|(name, _, _)| *name == target)
@@ -208,7 +248,7 @@ impl Catalog {
             "porthub-{target}{}",
             if *os == "windows" { ".exe" } else { "" }
         );
-        let root = self.root.as_ref().ok_or_else(|| absent(&asset))?;
+        let root = root.ok_or_else(|| absent(&asset))?;
         let root = tokio::fs::canonicalize(root)
             .await
             .map_err(|_| absent(&asset))?;

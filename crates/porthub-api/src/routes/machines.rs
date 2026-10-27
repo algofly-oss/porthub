@@ -219,6 +219,8 @@ async fn request_update(
     model.finish()?;
     let user = auth::current_user(&app, &headers).await?;
     let id = object_id(&id, "Invalid machine id")?;
+    app.artifacts.refresh_latest().await?;
+    let latest_client_version = app.client_version();
     let mut bytes = [0u8; 8];
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
     let request = bytes
@@ -228,7 +230,7 @@ async fn request_update(
     let now = DateTime::now();
     let updated=app.collection("machines").find_one_and_update(
         doc! {"_id":id,"user_id":user.get("_id"),"deletion_pending":{"$ne":true},"native_deletion":{"$exists":false}},
-        doc! {"$set":{"client_update_target_version":&app.config.client_version,"client_update_request_id":request,
+        doc! {"$set":{"client_update_target_version":&latest_client_version,"client_update_request_id":request,
             "client_update_requested_at":now,"updated_at":now}})
         .return_document(mongodb::options::ReturnDocument::After).await?
         .ok_or_else(||ApiError::bad_request("Machine not found"))?;

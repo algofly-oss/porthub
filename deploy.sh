@@ -18,13 +18,6 @@ PORTHUB_VOLUME_ROOT="${PORTHUB_VOLUME_ROOT:-./volumes/porthub}"
 mkdir -p "$PORTHUB_VOLUME_ROOT"
 PORTHUB_VOLUME_ROOT=$(CDPATH= cd -- "$PORTHUB_VOLUME_ROOT" && pwd)
 export PORTHUB_VERSION PORTHUB_SOURCE_REVISION PORTHUB_MODE PORTHUB_READ_ONLY PORTHUB_VOLUME_ROOT
-if [ "$PORTHUB_MODE" = prod ] && [ -n "${PORTHUB_RELEASE_BUNDLE:-}" ]; then
-  python3 "$ROOT_DIR/deploy/native/stage_client_bundle.py" --source "$PORTHUB_RELEASE_BUNDLE" --version "$PORTHUB_VERSION"
-fi
-if [ "$PORTHUB_MODE" = prod ] && [ ! -f "$ROOT_DIR/deploy/native/client-bin/porthub-x86_64.version" ]; then
-  echo "Stage the verified release bundle first, or set PORTHUB_RELEASE_BUNDLE=/path/to/bundle" >&2
-  exit 1
-fi
 docker compose --project-name porthub config --quiet
 docker compose --project-name porthub build core edge firewall
 # Stable role tags select the current build; version aliases identify the release.

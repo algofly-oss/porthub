@@ -512,6 +512,8 @@ async fn sync_inner(
     headers: &HeaderMap,
     legacy: bool,
 ) -> ApiResult<Document> {
+    app.artifacts.refresh_background();
+    let latest_client_version = app.client_version();
     let now = DateTime::now();
     let client_hostname = if input.hostname.trim().is_empty() {
         store::string(machine, "client_hostname").trim()
@@ -574,7 +576,7 @@ async fn sync_inner(
             set.insert("client_update_last_handled_request_id", request_id);
             set.insert("client_update_target_version", "");
             set.insert("client_updated_at", now);
-        } else if version == app.config.client_version {
+        } else if version == latest_client_version {
             set.insert("client_updated_at", now);
         }
     } else if !handled.is_empty()
@@ -587,7 +589,7 @@ async fn sync_inner(
     if input.native_update_protocol
         && should_auto_update(
             version,
-            &app.config.client_version,
+            &latest_client_version,
             store::string(machine, "client_update_request_id"),
             store::string(machine, "client_update_target_version"),
             handled,
@@ -601,7 +603,7 @@ async fn sync_inner(
             .collect::<String>();
         set.insert(
             "client_update_target_version",
-            app.config.client_version.as_str(),
+            latest_client_version.as_str(),
         );
         set.insert("client_update_request_id", request);
         set.insert("client_update_requested_at", now);
@@ -679,10 +681,11 @@ pub async fn private_ips(app: &App, machine: &Document) -> ApiResult<Vec<String>
 
 pub fn control_headers(app: &App, machine: &Document) -> HeaderMap {
     let mut headers = HeaderMap::new();
+    let latest_client_version = app.client_version();
     for (key, value) in [
         (
             "x-porthub-client-latest-version",
-            app.config.client_version.as_str(),
+            latest_client_version.as_str(),
         ),
         (
             "x-porthub-client-current-version",

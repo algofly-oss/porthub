@@ -24,7 +24,9 @@ services:
     environment:
       PORTHUB_MODE: ${PORTHUB_MODE:-prod}
       PORTHUB_VERSION: ${PORTHUB_VERSION:-1.7.0}
-      PORTHUB_CLIENT_BINARY_DIR: /app/client-bin
+      PORTHUB_CLIENT_BINARY_DIR: /data/agent-releases
+      PORTHUB_AGENT_RELEASE_SOURCE: ${PORTHUB_AGENT_RELEASE_SOURCE:-github}
+      PORTHUB_AGENT_RELEASE_REPOSITORY: ${PORTHUB_AGENT_RELEASE_REPOSITORY:-algofly-oss/porthub}
       PORTHUB_API_SOCKET: /run/porthub-api/api.sock
       PORTHUB_EDGE_SOCKET: /run/porthub-edge/control.sock
       PORTHUB_DB_INITIALIZE: "true"

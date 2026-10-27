@@ -68,9 +68,13 @@ jobs:
             exit 1
           fi
           gh release create "$tag" release-assets/porthub-* \
+            --draft \
             --target "$GITHUB_SHA" \
             --title "PortHub ${version}" \
             --notes "Consistent ${version} native client release for Linux, macOS, and Windows. Includes binaries, SHA256 checksums, and version metadata for every supported CPU architecture."
+          # Publish only after every asset has uploaded, so API caches never
+          # observe an incomplete platform matrix as the latest release.
+          gh release edit "$tag" --draft=false --latest
   native:
     needs: [select-platforms]
     if: needs.select-platforms.outputs.has_native == 'true'

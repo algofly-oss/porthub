@@ -72,7 +72,7 @@ FROM runtime-base AS core-runtime
 LABEL io.porthub.api-preflight=v1
 RUN apt-get update && apt-get install -y --no-install-recommends libcurl4 libssl3 && \
     rm -rf /var/lib/apt/lists/* && \
-    mkdir -p /data/mongo /run/porthub-api /run/porthub-edge /run/porthub-firewall /run/porthub-config /run/porthub-activity /app/ui /app/client-bin && \
+    mkdir -p /data/mongo /run/porthub-api /run/porthub-edge /run/porthub-firewall /run/porthub-config /run/porthub-activity /app/ui && \
     chown -R 10001:10001 /data /run/porthub-api /run/porthub-edge /run/porthub-firewall /run/porthub-config /run/porthub-activity /app && \
     chmod 0750 /run/porthub-api /run/porthub-config && chmod 0770 /run/porthub-edge /run/porthub-firewall /run/porthub-activity && \
     printf '[server.services]\n' > /run/porthub-config/gateway.toml && \
@@ -85,10 +85,7 @@ USER 10001:10001
 ENTRYPOINT ["porthub-runtime", "supervise", "--config", "/app/core.toml"]
 
 FROM core-runtime AS prod-core
-COPY --chown=10001:10001 deploy/native/client-bin/ /app/client-bin/
-RUN rm -f /app/client-bin/.gitkeep && \
-    porthub-api --check-artifacts /app/client-bin "$PORTHUB_VERSION"
-LABEL io.porthub.image-client-bundle=complete-v1
+LABEL io.porthub.agent-distribution=github-cache-v1
 
 FROM core-runtime AS dev-core
 USER root
@@ -100,7 +97,6 @@ COPY --from=rust-build /usr/local/cargo /usr/local/cargo
 COPY --from=rust-build /usr/local/rustup /usr/local/rustup
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
 COPY --from=ui-build --chown=10001:10001 /src/ui /app/ui-dev
-COPY --chown=10001:10001 deploy/native/client-bin/ /app/client-bin/
 ENV CARGO_HOME=/opt/porthub-cargo CARGO_TARGET_DIR=/src/target RUSTUP_HOME=/usr/local/rustup \
     PATH=/src/target/release:/usr/local/cargo/bin:$PATH
 RUN mkdir -p /opt/porthub-cargo /src/target && \

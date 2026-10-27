@@ -3,7 +3,7 @@ use porthub_api::artifacts::{verify_complete, TARGETS};
 use sha2::{Digest, Sha256};
 
 #[tokio::test]
-async fn production_bundle_contains_exactly_one_verified_release_and_needs_no_database(
+async fn release_validation_accepts_one_complete_bundle_and_needs_no_database(
 ) -> Result<()> {
     let directory = tempfile::tempdir()?;
     for (target, _, _) in TARGETS {

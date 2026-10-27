@@ -78,12 +78,11 @@ async fn public_list(
     let base = public_base(&app.config.public_base_url, &headers)?;
     let mut items = Vec::new();
     for &(target, os, arch) in TARGETS {
-        let artifact = match app.artifacts.get(target).await {
-            Ok(artifact) => artifact,
+        let release = match app.artifacts.release(target).await {
+            Ok(release) => release,
             Err(error) if error.status == StatusCode::NOT_FOUND => continue,
             Err(error) => return Err(error),
         };
-        let release = artifact.release;
         items.push(json!({
             "target": target,
             "os": os,
@@ -189,10 +188,10 @@ async fn manifest(
     let mut releases = Vec::new();
     let mut missing = Vec::new();
     for (target, _, _) in TARGETS {
-        match app.artifacts.get(target).await {
-            Ok(artifact) => {
+        match app.artifacts.release(target).await {
+            Ok(metadata) => {
                 let mut release =
-                    serde_json::to_value(&artifact.release).expect("fixed release schema");
+                    serde_json::to_value(&metadata).expect("fixed release schema");
                 let mut url = base.clone();
                 url.path_segments_mut()
                     .map_err(|_| ApiError::bad_request("Invalid PortHub public base URL"))?

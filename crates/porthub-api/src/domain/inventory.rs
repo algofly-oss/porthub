@@ -72,6 +72,7 @@ pub fn status_at(app: &App, machine: &Document, now: DateTime) -> &'static str {
 
 pub fn machine(app: &App, machine: &Document) -> Value {
     let status = status(app, machine);
+    let latest_client_version = app.client_version();
     let version = store::string(machine, "client_version").trim();
     let request = store::string(machine, "client_update_request_id").trim();
     let handled = store::string(machine, "client_update_last_handled_request_id").trim();
@@ -83,8 +84,8 @@ pub fn machine(app: &App, machine: &Document) -> Value {
         "enabled":default_field(machine,"enabled",json!(true)),"telegram_alerts_excluded":machine.get_bool("telegram_alerts_excluded").unwrap_or(false),
         "local_ip":default_field(machine,"local_ip",default_field(machine,"ip_address",json!(""))),"public_ip":default_field(machine,"public_ip",json!("")),
         "token":default_field(machine,"token",json!("")),"is_active":matches!(status,"online"|"auth_required"),"connection_status":status,
-        "auth_required":status=="auth_required","client_version":version,"latest_client_version":app.config.client_version,
-        "client_update_available":!version.is_empty() && version!=app.config.client_version,"client_update_requested":!request.is_empty() && request!=handled,
+        "auth_required":status=="auth_required","client_version":version,"latest_client_version":latest_client_version,
+        "client_update_available":!version.is_empty() && !latest_client_version.is_empty() && version!=latest_client_version,"client_update_requested":!request.is_empty() && request!=handled,
         "client_update_request_id":request,
     });
     for key in [
