@@ -1,5 +1,5 @@
 use crate::config::{ClientServiceConfig, ServerServiceConfig, TcpConfig, TransportConfig};
-use crate::helper::{to_socket_addr, try_set_tcp_keepalive};
+use crate::helper::try_set_tcp_keepalive;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::fmt::{Debug, Display};
@@ -28,14 +28,31 @@ impl AddrMaybeCached {
         }
     }
 
-    pub async fn resolve(&mut self) -> Result<()> {
-        match to_socket_addr(&self.addr).await {
-            Ok(s) => {
-                self.socket_addr = Some(s);
-                Ok(())
-            }
-            Err(e) => Err(e),
-        }
+    pub async fn resolve(&mut self, source: Option<std::net::IpAddr>) -> Result<()> {
+        self.socket_addr = select_address(tokio::net::lookup_host(&self.addr).await?, source);
+        anyhow::ensure!(self.socket_addr.is_some(), "no compatible gateway address");
+        Ok(())
+    }
+}
+
+fn select_address(mut addresses: impl Iterator<Item = SocketAddr>, source: Option<std::net::IpAddr>) -> Option<SocketAddr> {
+    addresses.find(|address| address.ip().is_loopback()
+        || source.is_none_or(|source| source.is_ipv4() == address.is_ipv4()))
+}
+
+#[cfg(test)]
+mod source_binding_tests {
+    use super::*;
+    #[test]
+    fn ipv6_first_dns_results_do_not_poison_ipv4_bound_channel_cache() {
+        let ipv6 = "[2001:db8::10]:443".parse().unwrap();
+        let ipv4 = "192.0.2.10:443".parse().unwrap();
+        let source = Some("192.0.2.20".parse().unwrap());
+        assert_eq!(select_address([ipv6, ipv4].into_iter(), source), Some(ipv4));
+        assert_eq!(select_address([ipv6].into_iter(), source), None);
+        assert_eq!(select_address([ipv6, ipv4].into_iter(), None), Some(ipv6));
+        let loopback = "[::1]:443".parse().unwrap();
+        assert_eq!(select_address([loopback].into_iter(), source), Some(loopback));
     }
 }
 

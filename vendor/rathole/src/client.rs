@@ -318,6 +318,7 @@ impl<T: 'static + Transport> Client<T> {
                 self.config.remote_addr.clone(),
                 self.transport.clone(),
                 self.config.heartbeat_timeout,
+                self.config.transport.tcp.source_address,
             );
             self.service_handles.insert(name.clone(), handle);
         }
@@ -348,6 +349,7 @@ impl<T: 'static + Transport> Client<T> {
                         self.config.remote_addr.clone(),
                         self.transport.clone(),
                         self.config.heartbeat_timeout,
+                        self.config.transport.tcp.source_address,
                     );
                     let _ = self.service_handles.insert(name, handle);
                 }
@@ -589,6 +591,7 @@ async fn run_udp_forwarder(
 
 // Control channel, using T as the transport layer
 struct ControlChannel<T: Transport> {
+    source_address: Option<std::net::IpAddr>,
     digest: ServiceDigest,        // SHA256 of the service name
     service: ClientServiceConfig, // `[client.services.foo]` config block
     remote_addr: String,          // `client.remote_addr`
@@ -617,7 +620,7 @@ impl<T: 'static + Transport> ControlChannel<T> {
     #[instrument(skip_all)]
     async fn run(&mut self) -> Result<()> {
         let mut remote_addr = AddrMaybeCached::new(&self.remote_addr);
-        remote_addr.resolve().await?;
+        remote_addr.resolve(self.source_address).await?;
 
         let mut conn = self
             .transport
@@ -714,6 +717,7 @@ impl ControlChannelHandle {
         remote_addr: String,
         transport: Arc<T>,
         heartbeat_timeout: u64,
+        source_address: Option<std::net::IpAddr>,
     ) -> ControlChannelHandle {
         let digest = protocol::digest(service.name.as_bytes());
 
@@ -724,6 +728,7 @@ impl ControlChannelHandle {
         let mut retry_backoff = run_control_chan_backoff(service.retry_interval.unwrap());
 
         let mut s = ControlChannel {
+            source_address,
             digest,
             service,
             remote_addr,
@@ -831,7 +836,7 @@ pub async fn probe_client_transport(mut config: Config) -> Result<()> {
     let kind = ClientKind::prepare(client.clone()).await?;
     async fn probe<T: Transport>(client: &Client<T>) -> Result<()> {
         let mut address = AddrMaybeCached::new(&client.config.remote_addr);
-        address.resolve().await?;
+        address.resolve(client.config.transport.tcp.source_address).await?;
         let _stream = client.transport.connect(&address).await?;
         Ok(())
     }
