@@ -208,8 +208,6 @@ pub async fn run_with_logs(
     };
     let mut exit_selection = super::exit_selection::FlowTable::new(profile.peer_id.clone());
     #[cfg(target_os = "linux")]
-    let mut exit_kernel: Option<super::exit_kernel::Kernel> = None;
-    #[cfg(target_os = "linux")]
     let mut exit_clients = std::collections::BTreeSet::new();
     #[cfg(target_os = "linux")]
     let exit_refresh = {
@@ -281,9 +279,7 @@ pub async fn run_with_logs(
                         .flat_map(|route| &route.clients)
                         .filter_map(|id| snapshot.peers.iter().find(|peer| &peer.id == id).map(|peer| peer.ip)).collect();
                     if clients != exit_clients {
-                        if exit_kernel.is_none() && !clients.is_empty() { exit_kernel = Some(super::exit_kernel::Kernel::new(&name)?); }
                         exit_refresh.send_replace(clients.clone());
-                        if let Some(kernel) = &exit_kernel { kernel.apply(&clients).await?; }
                         exit_clients = clients;
                     }
                 }
@@ -561,10 +557,6 @@ pub async fn run_with_logs(
     while tasks.join_next().await.is_some() {}
     for session in sessions.write().await.drain().map(|(_, session)| session) {
         session.close().await;
-    }
-    #[cfg(target_os = "linux")]
-    if let Some(kernel) = &exit_kernel {
-        if kernel.clear().await.is_err() { tracing::warn!("exit firewall cleanup pending; owned TUN removal disables forwarding"); }
     }
     drop(dns_registration);
     drop(device);

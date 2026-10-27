@@ -18,6 +18,8 @@ mod exit_forwarding;
 pub mod exit_routes;
 #[cfg(target_os = "linux")]
 mod exit_containers;
+#[cfg(target_os = "linux")]
+mod nft;
 #[cfg(target_os = "macos")]
 #[path = "exit_routes_macos.rs"]
 pub mod exit_routes;

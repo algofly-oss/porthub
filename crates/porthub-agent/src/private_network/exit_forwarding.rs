@@ -24,28 +24,33 @@ pub async fn watch(
     mut enabled: tokio::sync::watch::Receiver<BTreeSet<std::net::Ipv4Addr>>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
+    let kernel = super::exit_kernel::Kernel::new(&owner)?;
     let mut tick = tokio::time::interval(Duration::from_secs(30));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut retry = false;
+    let mut used = false;
     loop {
         tokio::select! {
-            _ = cancel.cancelled() => return Ok(()),
+            _ = cancel.cancelled() => break,
             changed = enabled.changed() => {
-                if changed.is_err() { return Ok(()); }
+                if changed.is_err() { break; }
                 tick.reset();
             },
             _ = tick.tick(), if !enabled.borrow().is_empty() || retry => {},
         }
         let wanted = enabled.borrow_and_update().clone();
-        let result = async {
-            super::exit_kernel::Kernel::new(&owner)?.docker_forwarding(&wanted).await?;
-            update(&owner, !wanted.is_empty()).await
-        }.await;
+        used |= !wanted.is_empty();
+        // A host firewall writer can invalidate our snapshot. Exhausted
+        // retries leave the last committed rules intact and keep private
+        // control/heartbeats running while this worker retries later.
+        let result = kernel.apply(&wanted).await;
         if result.is_err() && !retry {
             tracing::warn!("exit forwarding refresh failed; retrying while private control stays connected");
         }
         retry = result.is_err();
     }
+    if used { kernel.clear().await?; }
+    Ok(())
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Entry {
@@ -220,7 +225,7 @@ pub async fn update(owner: &str, enabled: bool) -> Result<()> {
             }
             table
         });
-        rules.diff(&nft).await?.apply(&nft).await?;
+        super::nft::apply(&rules, &nft).await?;
     }
     for name in guarded {
         if tokio::fs::read_to_string(path(name)).await?.trim() != "1" {

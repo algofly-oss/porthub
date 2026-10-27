@@ -160,6 +160,22 @@ async fn isolated_exit_worker() -> Result<()> {
     let runtime = porthub_agent::private_network::runtime::run(path, cancel.clone());
     tokio::pin!(runtime);
     let role = std::env::var("PORTHUB_TEST_ROLE")?;
+    // Real foreign firewall commits race the provider's initial exit setup.
+    // The private runtime must stay alive and retry after the writer settles.
+    // This worker only runs inside the explicitly owned disposable namespace.
+    let churn = if role == "exit" {
+        Some(tokio::spawn(async {
+            use nlink::netlink::{nftables::Family, Connection, Nftables};
+            let connection = Connection::<Nftables>::new()?;
+            let until = tokio::time::Instant::now() + Duration::from_secs(5);
+            while tokio::time::Instant::now() < until {
+                connection.add_table("foreign_exit_test", Family::Ip).await?;
+                connection.del_table("foreign_exit_test", Family::Ip).await?;
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            Ok::<_, anyhow::Error>(())
+        }))
+    } else { None };
     if role == "consumer" {
         // Internal Docker networks omit a default route. Supply a normal
         // underlay inside this disposable namespace to exercise opt-in bypass.
@@ -193,6 +209,7 @@ async fn isolated_exit_worker() -> Result<()> {
     };
     cancel.cancel();
     tokio::time::timeout(Duration::from_secs(5), runtime).await??;
+    if let Some(churn) = churn { churn.await??; }
     result
 }
 

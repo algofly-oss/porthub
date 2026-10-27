@@ -71,11 +71,7 @@ impl Kernel {
             }
             table
         });
-        rules
-            .diff(&self.connection)
-            .await?
-            .apply(&self.connection)
-            .await?;
+        super::nft::apply(&rules, &self.connection).await?;
         self.docker_forwarding(clients).await?;
         super::exit_forwarding::update(&self.interface, true).await?;
         // Per-interface forwarding is sufficient for packets entering this TUN.

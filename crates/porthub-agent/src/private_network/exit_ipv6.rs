@@ -84,7 +84,7 @@ pub async fn apply_mode(routes: &Connection<Route>, name: &str, bypass: bool) ->
         }
         table
     });
-    rules.diff(&connection).await?.apply(&connection).await?;
+    super::nft::apply(&rules, &connection).await?;
     Ok(())
 }
 

@@ -127,7 +127,7 @@ pub(super) async fn apply(name: &str, index: u32, bypass: bool) -> Result<()> {
                 rule.match_oif(name).match_ct_mark(exit).masquerade()
             })
     });
-    config.diff(&connection).await?.apply(&connection).await?;
+    super::nft::apply(&config, &connection).await?;
     docker_rules(&connection, name, Some(exit)).await?;
     // Only the owned ephemeral TUN needs return-path forwarding. Existing
     // Docker bridge forwarding and global host sysctls remain managed by Docker.

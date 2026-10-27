@@ -26,6 +26,15 @@ as its exit, and installed both scoped SYN-direction clamps. Temporary rules,
 policies, and candidate services were removed and the installed service restored.
 This fix is pending release 1.6.1 deployment.
 
+A subsequent Condor private-agent interruption was traced to nftables rejecting
+a stale ruleset generation (`ERESTART`, errno 85). The public agent remained
+connected. The patch recomputes refused changes with a bounded retry budget and
+moves provider firewall refresh off the private heartbeat/packet loop. Local
+kernel tests force a real conflicting foreign commit, verify that its table is
+preserved, and check that permission failures are not retried. The updated
+native candidate also passed Miro's ordinary Docker bridge download through
+Luna; temporary policies and candidate services were removed afterward.
+
 An additional 1.4.6 Luna → Miro public gateway test sustained only about
 0.72 MB/s before cancellation. The gateway's accepted public socket used CUBIC
 and showed retransmissions and a small congestion window. Applying the existing
