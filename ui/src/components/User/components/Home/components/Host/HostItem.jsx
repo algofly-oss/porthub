@@ -2,7 +2,7 @@ import { Tooltip } from "@/components/ui/tooltip";
 import MachineOsIcon from "@/components/ui/machine-os-icon";
 import { countryDetails, platformLabel } from "@/shared/utils/machine-platform.mjs";
 import { TableRow, TableCell } from "@/components/ui/table";
-import { IconCopy, IconFolder } from "@tabler/icons-react";
+import { IconClock, IconCopy, IconFolder } from "@tabler/icons-react";
 import useToast from "@/shared/hooks/useToast";
 import TrafficSparkline from "@/components/ui/traffic-sparkline";
 import { formatClientVersion } from "@/shared/utils/client-version.mjs";
@@ -42,6 +42,7 @@ export default function HostItem({ name, hostname, privateDomain = "", groupLabe
   const statusLabel = { online: "Online", offline: "Offline", disabled: "Disabled", auth_required: "Auth required" }[status] || "Offline";
   const labels = groupLabels.filter(Boolean);
   const activePorts = forwardingConfigs.filter(port => port.enabled !== false).length;
+  const temporaryPorts = forwardingConfigs.filter(port => port.temporary === true && port.enabled !== false).length;
   const clientVersionLabel = formatClientVersion(clientVersion, "");
   const latestClientVersionLabel = formatClientVersion(latestClientVersion);
   const osLabel = platformLabel(clientOs, clientOsName, clientArch);
@@ -58,6 +59,12 @@ export default function HostItem({ name, hostname, privateDomain = "", groupLabe
               className="inline-flex shrink-0 items-center rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline focus-visible:outline-2">
               <IconCopy size={14} />
             </button>}
+            {temporaryPorts > 0 && <Tooltip label={`${temporaryPorts} active temporary ${temporaryPorts === 1 ? "port" : "ports"} · Removed when the CLI exposure stops or expires`} withArrow openDelay={150}>
+              <span aria-label={`${temporaryPorts} active temporary ${temporaryPorts === 1 ? "port" : "ports"}`} className="ml-1 inline-flex shrink-0 items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-200">
+                <IconClock size={12} aria-hidden="true" />
+                {temporaryPorts} temporary
+              </span>
+            </Tooltip>}
             {(osLabel || flag) && <span className="ml-1 inline-flex h-7 shrink-0 items-center rounded-lg border border-border/60 bg-muted/60 px-1">
               {osLabel && <Tooltip label={osLabel} withArrow openDelay={150}>
                 <span className="inline-flex h-5 w-6 items-center justify-center text-foreground/75" role="img" aria-label={osLabel}>
