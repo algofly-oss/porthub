@@ -7,6 +7,18 @@ use std::{
 };
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
+// Preference directories are small. Kqueue gives macOS immediate vnode events
+// without FSEvents batching/coalescing an atomic replacement with its removal.
+#[cfg(target_os="macos")]
+type SettingsWatcher=notify::KqueueWatcher;
+#[cfg(not(target_os="macos"))]
+type SettingsWatcher=notify::RecommendedWatcher;
+
+fn relevant(event:&notify::Event,target:&Path)->bool {
+    if event.need_rescan(){return true;}
+    if !matches!(event.kind,notify::EventKind::Any|notify::EventKind::Other|notify::EventKind::Create(_)|notify::EventKind::Modify(_)|notify::EventKind::Remove(_)){return false;}
+    event.paths.iter().any(|path|path==target || target.parent()==Some(path.as_path()))
+}
 
 pub(crate) async fn run<T: Clone + PartialEq + Send + Sync + 'static>(
     profile: PathBuf,
@@ -21,17 +33,10 @@ pub(crate) async fn run<T: Clone + PartialEq + Send + Sync + 'static>(
     let (sender, mut changes) = mpsc::channel(1);
     let notifications = sender.clone();
     let target = wanted.clone();
-    let mut watcher = (|| -> Result<notify::RecommendedWatcher> {
+    let mut watcher = (|| -> Result<SettingsWatcher> {
         let mut watcher =
-            notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
-                Ok(event)
-                    if event.paths.iter().any(|path| path == &target)
-                        && matches!(
-                            event.kind,
-                            notify::EventKind::Create(_)
-                                | notify::EventKind::Modify(_)
-                                | notify::EventKind::Remove(_)
-                        ) =>
+            SettingsWatcher::new(move |event: notify::Result<notify::Event>| match event {
+                Ok(event) if relevant(&event,&target) =>
                 {
                     let _ = notifications.try_send(false);
                 }
@@ -39,7 +44,7 @@ pub(crate) async fn run<T: Clone + PartialEq + Send + Sync + 'static>(
                     let _ = notifications.try_send(true);
                 }
                 _ => {}
-            })?;
+            },notify::Config::default())?;
         watcher.watch(wanted.parent().unwrap(), RecursiveMode::NonRecursive)?;
         Ok(watcher)
     })()
@@ -96,5 +101,19 @@ pub(crate) async fn run<T: Clone + PartialEq + Send + Sync + 'static>(
                 )
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn atomic_file_and_parent_notifications_reload_but_unrelated_files_do_not() {
+        let target=Path::new("/owned/agent.json.tor-settings.json");
+        let event=|kind,path:&str|notify::Event::new(kind).add_path(path.into());
+        assert!(relevant(&event(notify::EventKind::Modify(notify::event::ModifyKind::Any),target.to_str().unwrap()),target));
+        assert!(relevant(&event(notify::EventKind::Other,"/owned"),target));
+        assert!(!relevant(&event(notify::EventKind::Modify(notify::event::ModifyKind::Any),"/owned/other-profile.json"),target));
+        assert!(!relevant(&event(notify::EventKind::Access(notify::event::AccessKind::Read),target.to_str().unwrap()),target));
     }
 }
