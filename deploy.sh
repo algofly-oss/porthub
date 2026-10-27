@@ -29,7 +29,17 @@ docker compose --project-name porthub config --quiet
 docker compose --project-name porthub build core edge firewall
 # Stable role tags select the current build; version aliases identify the release.
 # Check every role before starting any container or publishing release aliases.
+host_arch=$(docker info --format '{{.Architecture}}')
+case "$host_arch" in
+  x86_64) host_arch=amd64 ;;
+  aarch64) host_arch=arm64 ;;
+esac
 for role in core edge firewall; do
+  image_arch=$(docker image inspect --format '{{.Architecture}}' "porthub:$role")
+  if [ "$image_arch" != "$host_arch" ]; then
+    echo "porthub:$role architecture $image_arch does not match Docker host $host_arch" >&2
+    exit 1
+  fi
   image_version=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "porthub:$role")
   if [ "$image_version" != "$PORTHUB_VERSION" ]; then
     echo "porthub:$role does not match release $PORTHUB_VERSION" >&2
