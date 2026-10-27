@@ -59,7 +59,7 @@ async fn same_process_private_status(public: &Path, private: &Path) -> Result<()
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-    }).await?
+    }).await.context("private module did not publish same-process status")?
 }
 
 async fn toggle_private_module(public: &Path, private: &Path, enabled: bool) -> Result<()> {
@@ -72,7 +72,7 @@ async fn toggle_private_module(public: &Path, private: &Path, enabled: bool) -> 
             if porthub_agent::profile::Lease::running(private)? == enabled { return Ok::<_, anyhow::Error>(()); }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-    }).await?
+    }).await.context("private module did not observe its filesystem configuration change")?
 }
 #[derive(Clone)]
 struct Snapshot {

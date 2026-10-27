@@ -512,6 +512,23 @@ mod tcp_tests {
     use hickory_proto::{op::Query, rr::Name};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    // Windows reserves different dynamic port ranges for TCP and UDP. A UDP
+    // ephemeral port can be forbidden for TCP even when nothing is listening.
+    // Reserve a port accepted by both stacks without changing host exclusions.
+    #[cfg(windows)]
+    async fn test_sockets() -> Result<(UdpSocket, TcpListener)> {
+        let mut last = None;
+        for _ in 0..32 {
+            let tcp = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+            match UdpSocket::bind(tcp.local_addr()?).await {
+                Ok(socket) => return Ok((socket, tcp)),
+                Err(error) if matches!(error.kind(), std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied) => last = Some(error),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(last.unwrap().into())
+    }
+
     #[tokio::test]
     #[ignore = "requires the machine's configured upstream DNS and internet access"]
     async fn configured_upstream_resolves_apex_while_wildcard_blocks_children() -> Result<()> {
@@ -550,8 +567,12 @@ mod tcp_tests {
                 mock.send_to(&response.to_vec().unwrap(), peer).await.unwrap();
             }
         });
+        #[cfg(windows)]
+        let (socket, tcp) = test_sockets().await?;
+        #[cfg(not(windows))]
         let socket = UdpSocket::bind("127.0.0.1:0").await?;
         let address = socket.local_addr()?;
+        #[cfg(not(windows))]
         let tcp = TcpListener::bind(address).await?;
         let zone = Zone {
             suffixes: HashSet::from(["private.test.".into()]),
@@ -594,8 +615,12 @@ mod tcp_tests {
 
     #[tokio::test]
     async fn tcp_and_udp_share_policy_and_shutdown_closes_idle_clients() -> Result<()> {
+        #[cfg(windows)]
+        let (socket, tcp) = test_sockets().await?;
+        #[cfg(not(windows))]
         let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         let address = socket.local_addr()?;
+        #[cfg(not(windows))]
         let tcp = TcpListener::bind(address).await?;
         let zone = Zone { rules: vec![porthub_mesh::dns_policy::Rule {
             domain: "blocked.example".into(), action: porthub_mesh::dns_policy::Action::Block,

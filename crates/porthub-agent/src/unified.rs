@@ -95,6 +95,11 @@ impl Controller {
         logs: crate::logs::Buffer,
     ) -> Result<Self> {
         use notify::Watcher;
+        // FSEvents reports canonical paths (for example /private/var instead
+        // of /var). Match the watched path in the same spelling on macOS.
+        #[cfg(target_os = "macos")]
+        let wanted = configuration_path(&std::fs::canonicalize(public_path)?);
+        #[cfg(not(target_os = "macos"))]
         let wanted = configuration_path(public_path);
         let (changes, mut changed) = tokio::sync::mpsc::channel(1);
         let notifications = changes.clone();
