@@ -35,7 +35,9 @@ pub(crate) async fn run<T: Clone + PartialEq + Send + Sync + 'static>(
     let target = wanted.clone();
     let mut watcher = (|| -> Result<SettingsWatcher> {
         let mut watcher =
-            SettingsWatcher::new(move |event: notify::Result<notify::Event>| match event {
+            SettingsWatcher::new(move |event: notify::Result<notify::Event>| {
+                if let Ok(event)=&event {tracing::trace!(settings=label,kind=?event.kind,paths=?event.paths,"preference filesystem notification");}
+                match event {
                 Ok(event) if relevant(&event,&target) =>
                 {
                     let _ = notifications.try_send(false);
@@ -44,6 +46,7 @@ pub(crate) async fn run<T: Clone + PartialEq + Send + Sync + 'static>(
                     let _ = notifications.try_send(true);
                 }
                 _ => {}
+                }
             },notify::Config::default())?;
         watcher.watch(wanted.parent().unwrap(), RecursiveMode::NonRecursive)?;
         Ok(watcher)
@@ -64,10 +67,10 @@ pub(crate) async fn run<T: Clone + PartialEq + Send + Sync + 'static>(
         Ok(settings) => {
             updates.send_replace(settings);
         }
-        Err(_) => tracing::warn!(
-            settings = label,
-            "settings update rejected; retaining previous preference"
-        ),
+        Err(error) => {
+            tracing::debug!(settings=label,error=%error,"initial preference read failed");
+            tracing::warn!(settings = label,"settings update rejected; retaining previous preference");
+        },
     }
     loop {
         tokio::select! {

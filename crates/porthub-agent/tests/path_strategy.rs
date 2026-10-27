@@ -1,5 +1,5 @@
 #![cfg(unix)]
-use anyhow::Result;
+use anyhow::{Context,Result};
 use porthub_agent::{
     private_network::strategy::{self, Mode, Settings},
     private_profile::Profile,
@@ -74,15 +74,16 @@ fn cli_overrides_persist_reset_to_defaults_and_preserve_enrollment() -> Result<(
 
 #[tokio::test]
 async fn background_control_reloads_atomic_overrides_and_retains_last_good_setting() -> Result<()> {
+    let _=tracing_subscriber::fmt().with_max_level(tracing::Level::TRACE).with_test_writer().try_init();
     let directory = tempfile::tempdir()?;
     let path = fixture(directory.path())?;
     let (updates, mut current) = tokio::sync::watch::channel(Mode::PreferGateway);
     let cancel = CancellationToken::new();
     let task = tokio::spawn(strategy::run(path.clone(), updates, cancel.clone()));
-    tokio::time::timeout(Duration::from_secs(3), current.changed()).await??;
+    tokio::time::timeout(Duration::from_secs(3), current.changed()).await.context("initial preference load timed out")??;
     assert_eq!(*current.borrow_and_update(), Mode::Auto);
     strategy::save(&path, Mode::PreferGateway)?;
-    tokio::time::timeout(Duration::from_secs(3), current.changed()).await??;
+    tokio::time::timeout(Duration::from_secs(3), current.changed()).await.context("atomic preference replacement timed out")??;
     assert_eq!(*current.borrow_and_update(), Mode::PreferGateway);
     profile::write_private(&strategy::path(&path), b"invalid settings", true)?;
     assert!(
@@ -92,7 +93,7 @@ async fn background_control_reloads_atomic_overrides_and_retains_last_good_setti
     );
     assert_eq!(*current.borrow(), Mode::PreferGateway);
     strategy::reset(&path)?;
-    tokio::time::timeout(Duration::from_secs(3), current.changed()).await??;
+    tokio::time::timeout(Duration::from_secs(3), current.changed()).await.context("preference reset timed out")??;
     assert_eq!(*current.borrow_and_update(), Mode::Auto);
     cancel.cancel();
     tokio::time::timeout(Duration::from_secs(1), task).await???;
