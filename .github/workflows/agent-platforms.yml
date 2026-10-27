@@ -8,6 +8,10 @@ on:
         description: 'Platform artifact names (comma separated), windows, or all'
         default: all
         type: string
+      verify_only:
+        description: 'Run platform tests and native service checks without building release artifacts'
+        default: false
+        type: boolean
 permissions:
   contents: read
 jobs:
@@ -26,7 +30,7 @@ jobs:
         run: python3 scripts/select-agent-platforms.py
   release-bundle:
     name: Validate complete release bundle
-    if: inputs.platform == '' || inputs.platform == 'all'
+    if: inputs.verify_only != true && (inputs.platform == '' || inputs.platform == 'all')
     needs: [native, linux-32]
     runs-on: ubuntu-24.04
     steps:
@@ -120,15 +124,15 @@ jobs:
         shell: bash
         run: python scripts/run-with-timeout.py 240 cargo test --locked -p porthub-agent -p porthub-transfer -p porthub-tunnel -p porthub-identity -p porthub-mesh --target ${{ matrix.target }}
       - name: Build self-contained agent
-        if: runner.os != 'Linux'
+        if: inputs.verify_only != true && runner.os != 'Linux'
         shell: bash
         run: cargo build --locked --release -p porthub-agent --target ${{ matrix.target }}
       - name: Build static Linux agent bundle
-        if: runner.os == 'Linux'
+        if: inputs.verify_only != true && runner.os == 'Linux'
         shell: bash
         run: docker build --target agent-artifacts --build-arg PORTHUB_VERSION="$PORTHUB_VERSION" --build-arg PORTHUB_SOURCE_REVISION="$PORTHUB_SOURCE_REVISION" --output type=local,dest=dist .
       - name: Prepare versioned artifact metadata
-        if: runner.os != 'Linux'
+        if: inputs.verify_only != true && runner.os != 'Linux'
         shell: bash
         run: |
           python - <<'PY'
@@ -141,6 +145,7 @@ jobs:
           output.with_name(output.name+'.sha256').write_text(hashlib.sha256(output.read_bytes()).hexdigest()+'  '+output.name+'\n')
           PY
       - name: Test packaged HTTP server lifecycle
+        if: inputs.verify_only != true
         shell: bash
         env:
           PORTHUB_TEST_AGENT_EXECUTABLE: ${{ github.workspace }}/dist/porthub-${{ matrix.artifact }}${{ matrix.extension }}
@@ -152,6 +157,7 @@ jobs:
           PORTHUB_TEST_LAUNCHD: "1"
         run: cargo test --locked -p porthub-agent --test launchd_live --target ${{ matrix.target }} -- --include-ignored
       - uses: actions/upload-artifact@v4
+        if: inputs.verify_only != true
         with:
           name: porthub-${{ matrix.artifact }}
           path: dist/

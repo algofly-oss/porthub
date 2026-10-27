@@ -74,7 +74,7 @@ fn cli_overrides_persist_reset_to_defaults_and_preserve_enrollment() -> Result<(
 
 #[tokio::test]
 async fn background_control_reloads_atomic_overrides_and_retains_last_good_setting() -> Result<()> {
-    let _=tracing_subscriber::fmt().with_max_level(tracing::Level::TRACE).with_test_writer().try_init();
+    let _=tracing_subscriber::fmt().with_max_level(tracing::Level::TRACE).with_writer(std::io::stderr).try_init();
     let directory = tempfile::tempdir()?;
     let path = fixture(directory.path())?;
     let (updates, mut current) = tokio::sync::watch::channel(Mode::PreferGateway);
@@ -95,6 +95,15 @@ async fn background_control_reloads_atomic_overrides_and_retains_last_good_setti
     strategy::reset(&path)?;
     tokio::time::timeout(Duration::from_secs(3), current.changed()).await.context("preference reset timed out")??;
     assert_eq!(*current.borrow_and_update(), Mode::Auto);
+    // Exercise repeated atomic replacements: kqueue may coalesce directory
+    // events and report a previously unseen sibling instead of this file.
+    for iteration in 0..12 {
+        let expected=if iteration%2==0 {Mode::PreferDirect}else{Mode::PreferGateway};
+        strategy::save(&path,expected)?;
+        tokio::time::timeout(Duration::from_secs(3),current.changed()).await
+            .with_context(||format!("atomic preference replacement {iteration} timed out"))??;
+        assert_eq!(*current.borrow_and_update(),expected);
+    }
     cancel.cancel();
     tokio::time::timeout(Duration::from_secs(1), task).await???;
     Ok(())

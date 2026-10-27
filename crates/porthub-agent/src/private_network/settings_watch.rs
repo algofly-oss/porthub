@@ -17,7 +17,11 @@ type SettingsWatcher=notify::RecommendedWatcher;
 fn relevant(event:&notify::Event,target:&Path)->bool {
     if event.need_rescan(){return true;}
     if !matches!(event.kind,notify::EventKind::Any|notify::EventKind::Other|notify::EventKind::Create(_)|notify::EventKind::Modify(_)|notify::EventKind::Remove(_)){return false;}
-    event.paths.iter().any(|path|path==target || target.parent()==Some(path.as_path()))
+    event.paths.iter().any(|path|path==target || target.parent()==Some(path.as_path())
+        // Kqueue reports one previously unseen child for a directory write.
+        // It may name a sibling rather than the atomically replaced setting.
+        // Every mutation of this small owned directory must trigger a read.
+        || cfg!(target_os="macos") && path.parent()==target.parent())
 }
 
 pub(crate) async fn run<T: Clone + PartialEq + Send + Sync + 'static>(
@@ -111,12 +115,13 @@ pub(crate) async fn run<T: Clone + PartialEq + Send + Sync + 'static>(
 mod tests {
     use super::*;
     #[test]
-    fn atomic_file_and_parent_notifications_reload_but_unrelated_files_do_not() {
+    fn atomic_file_and_owned_directory_notifications_reload() {
         let target=Path::new("/owned/agent.json.tor-settings.json");
         let event=|kind,path:&str|notify::Event::new(kind).add_path(path.into());
         assert!(relevant(&event(notify::EventKind::Modify(notify::event::ModifyKind::Any),target.to_str().unwrap()),target));
         assert!(relevant(&event(notify::EventKind::Other,"/owned"),target));
-        assert!(!relevant(&event(notify::EventKind::Modify(notify::event::ModifyKind::Any),"/owned/other-profile.json"),target));
+        assert_eq!(relevant(&event(notify::EventKind::Modify(notify::event::ModifyKind::Any),"/owned/other-profile.json"),target),cfg!(target_os="macos"));
+        assert!(!relevant(&event(notify::EventKind::Modify(notify::event::ModifyKind::Any),"/other/other-profile.json"),target));
         assert!(!relevant(&event(notify::EventKind::Access(notify::event::AccessKind::Read),target.to_str().unwrap()),target));
     }
 }
