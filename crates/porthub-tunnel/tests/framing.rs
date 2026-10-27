@@ -2,7 +2,10 @@ use porthub_tunnel::{FramedIo, DIRECT_FRAME_SIZE, WEBSOCKET_FRAME_SIZE};
 use std::{io::ErrorKind, time::Duration};
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 
-#[tokio::test]
+// This is a protocol/deadlock check over an entirely in-memory stream. The
+// virtual clock advances to the deadline only when no task can make progress;
+// a slow shared CI runner must not turn seven-byte scheduling into a failure.
+#[tokio::test(start_paused = true)]
 async fn half_close_keeps_response_readable_under_backpressure() {
     tokio::time::timeout(Duration::from_secs(5), async {
         let (a, b) = duplex(7);
