@@ -7,9 +7,71 @@ destinations and SHA256 verification. This directory retains only this summary.
 
 ## Current deployment
 
-URM2 currently serves agent release 1.6.2 from the isolated Rust core, edge and
-firewall deployment. The throughput measurements below retain their measured
-release versions; newer functional tests do not establish new bandwidth results.
+Luna and URM2 run production gateway 1.8.2 with isolated core, edge and firewall
+containers. All eight machines online during rollout acknowledged automatic
+agent upgrades to 1.8.2. Offline machines remain pending. All ten platform
+artifacts passed their platform checks and share release version 1.8.2; only the
+latest GitHub release and tag remain.
+
+## Release 1.8.2 live qualification
+
+The installed `porthub http.server --expose -d` on Luna and installed
+`porthub get` on Condor transferred fresh files sequentially. Public traffic used
+the temporary DuckDNS TCP mapping, without Cloudflare carrying the payload.
+Private traffic used `luna.phub`. Existing policy denied Condor-initiated access;
+a temporary allow rule permitted only Condor → Luna TCP 17987 for the tests.
+Each completed transfer passed SHA256 verification. Rates below include CLI
+startup and checksum time; they are not instantaneous progress estimates.
+
+| Route | Connections | Payload | MB/s |
+| --- | ---: | ---: | ---: |
+| Public gateway | 1 | 1 GiB | 50.97 |
+| Private domain | 1 | 1 GiB | 41.48 |
+| Public gateway | 1 | 10 GiB | 47.28 |
+| Private domain | 1 | 10 GiB | 45.59 |
+| Public gateway | 16 | 10 GiB | 47.10 |
+| Private domain | 16 | 10 GiB | 45.32 |
+
+For matching 10 GiB payloads, private was 3.6% below public with one connection
+and 3.8% below public with sixteen. Private single-stream throughput matched its
+parallel result. The shorter runs include startup and ISP burst effects; none of
+these sequential measurements proves identical route capacity. Test downloads
+were deleted after verification. The temporary access rule, server and public
+mapping were removed.
+
+Installed 1.8.2 functional checks also passed:
+
+- Miro ordinary HTTPS used embedded local Tor without application proxy settings.
+  Private DNS, LAN access, gateway leases and SSH remained available. Six fresh
+  connections with Condor and Tor selected alternated Condor/Tor exactly; the
+  Condor connections matched its independently recorded egress.
+- LAN-only exit routing reached a service on Condor's remote LAN while retaining
+  Miro's normal internet egress. All mode reached both that LAN and the internet
+  through Condor. Removing each test policy restored normal routing.
+- The installed standalone local Tor proxy passed authenticated HTTP CONNECT
+  and SOCKS5 requests without a registration or UI grant. Stop removed its
+  listener and credential files.
+- Condor used UI-authorized gateway and Luna peer proxies over authenticated
+  HTTP CONNECT and SOCKS5. Both peer protocols returned the exact requested
+  1 MiB byte range. Missing credentials returned HTTP 407. Disabling a grant
+  denied new streams and terminated an active, rate-limited transfer with an
+  incomplete-body error; already-buffered bytes drained before EOF.
+- The rendered production UI passed mobile-width checks for Tor, circuit groups,
+  fail-closed defaults, LAN-only exclusion and proxy draft retention. Browser
+  verification saved no policies.
+- After Tor stopped, Miro ran one agent process at 46.82 MiB RSS and about 0.1%
+  of one CPU core during a ten-second idle sample. This is an observation, not a
+  universal resource limit.
+
+Peer application proxies currently carry their stream through the existing
+gateway API transport. Their destination egress is the selected peer; these
+checks do not claim direct peer-to-peer proxy data transport or Tor bandwidth
+parity with ordinary exits. The MacBook briefly reconnected and received an automatic update request, but
+went offline before acknowledging it; its last reported version remains 1.7.0.
+No Mac routing policy was changed. Both macOS architectures passed CI tests,
+including native service lifecycle; live Mac Tor routing remains unverified.
+
+## Historical deployment checks
 
 Release 1.6.0 was deployed in production on Luna and URM2, and all nine online
 machines acknowledged gateway-driven upgrades. Installed HTTP server/receiver
