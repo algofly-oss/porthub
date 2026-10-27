@@ -36,6 +36,8 @@ pub async fn connect(url: &url::Url, local: &[IpAddr]) -> Result<TcpStream> {
                 } else {
                     TcpSocket::new_v6()?
                 };
+                #[cfg(target_os = "macos")]
+                if bind_interface(&socket2::SockRef::from(&socket), *source).is_err() { continue; }
                 if socket.bind(SocketAddr::new(*source, 0)).is_err() {
                     continue;
                 }
@@ -66,4 +68,21 @@ mod tests {
         assert!(connect(&url, &["192.0.2.123".parse()?]).await.is_err());
         Ok(())
     }
+}
+
+/// Bind the physical interface as well as its address. macOS source binding
+/// alone does not bypass an unrelated VPN's more-specific routes or PF states.
+#[cfg(target_os = "macos")]
+pub fn bind_interface(socket: &socket2::Socket, source: IpAddr) -> std::io::Result<()> {
+    let index = getifaddrs::getifaddrs()?.find(|interface| interface.address.ip_addr() == Some(source))
+        .and_then(|interface| interface.index).and_then(std::num::NonZeroU32::new)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "physical interface unavailable"))?;
+    if source.is_ipv4() { socket.bind_device_by_index_v4(Some(index)) }
+    else { socket.bind_device_by_index_v6(Some(index)) }
+}
+#[cfg(target_os = "macos")]
+pub fn interface_name(source: IpAddr) -> std::io::Result<String> {
+    getifaddrs::getifaddrs()?.find(|interface| interface.address.ip_addr() == Some(source))
+        .map(|interface| interface.name)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "physical interface unavailable"))
 }

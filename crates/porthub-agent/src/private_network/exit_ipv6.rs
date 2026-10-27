@@ -43,29 +43,46 @@ pub async fn apply_mode(routes: &Connection<Route>, name: &str, bypass: bool) ->
                     .base(BaseChain::filter(FilterHook::Output, Priority::Filter))
                     .exclusive()
             })
-            .rule_keyed("output", "established", |rule| {
-                rule.match_ct_state(CtState::ESTABLISHED | CtState::RELATED)
-                    .accept()
+            .chain("forward", |chain| {
+                chain
+                    .base(BaseChain::filter(FilterHook::Forward, Priority::Filter))
+                    .exclusive()
             })
-            .rule_keyed("output", "loopback", |rule| rule.match_oif("lo").accept())
-            .rule_keyed("output", "link_local", |rule| {
-                rule.match_daddr_v6("fe80::".parse().unwrap(), 10).accept()
+            .chain("containers", |chain| chain.exclusive())
+            .rule_keyed("forward", "docker", |rule| {
+                rule.match_iif_prefix("docker")
+                    .jump("containers".parse().unwrap())
             })
-            .rule_keyed("output", "multicast", |rule| {
-                rule.match_daddr_v6("ff00::".parse().unwrap(), 8).accept()
+            .rule_keyed("forward", "compose", |rule| {
+                rule.match_iif_prefix("br-")
+                    .jump("containers".parse().unwrap())
             });
-        for (address, prefix) in local {
-            table = table.rule_keyed("output", format!("lan_{address}_{prefix}"), |rule| {
-                rule.match_daddr_v6(address, prefix).accept()
-            });
+        for chain in ["output", "containers"] {
+            table = table
+                .rule_keyed(chain, "established", |rule| {
+                    rule.match_ct_state(CtState::ESTABLISHED | CtState::RELATED)
+                        .accept()
+                })
+                .rule_keyed(chain, "loopback", |rule| rule.match_oif("lo").accept())
+                .rule_keyed(chain, "link_local", |rule| {
+                    rule.match_daddr_v6("fe80::".parse().unwrap(), 10).accept()
+                })
+                .rule_keyed(chain, "multicast", |rule| {
+                    rule.match_daddr_v6("ff00::".parse().unwrap(), 8).accept()
+                });
+            for (address, prefix) in &local {
+                table = table.rule_keyed(chain, format!("lan_{address}_{prefix}"), |rule| {
+                    rule.match_daddr_v6(*address, *prefix).accept()
+                });
+            }
+            table = if bypass {
+                // Preserve connection tracking while allowing opt-in fallback.
+                table.rule_keyed(chain, "allow_direct_fallback", |rule| rule.accept())
+            } else {
+                table.rule_keyed(chain, "reject_new_internet", |rule| rule.reject())
+            };
         }
-        if bypass {
-            // Retain the conntrack rule and hooks while allowing new traffic,
-            // so direct connections remain established when exit routing resumes.
-            table.rule_keyed("output", "allow_direct_fallback", |rule| rule.accept())
-        } else {
-            table.rule_keyed("output", "reject_new_internet", |rule| rule.reject())
-        }
+        table
     });
     rules.diff(&connection).await?.apply(&connection).await?;
     Ok(())

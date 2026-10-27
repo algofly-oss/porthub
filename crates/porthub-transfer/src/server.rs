@@ -388,6 +388,12 @@ async fn files(State(root): State<Arc<PathBuf>>, mut request: Request) -> Respon
 }
 
 pub async fn serve(options: Options, shutdown: CancellationToken) -> Result<()> {
+    serve_ready(options, shutdown, None).await
+}
+
+/// Publish the bound port only after root validation, listener binding and
+/// local lifecycle registration succeed. Used by integrated CLI exposures.
+pub async fn serve_ready(options: Options, shutdown: CancellationToken, ready: Option<tokio::sync::oneshot::Sender<u16>>) -> Result<()> {
     let root = tokio::fs::canonicalize(&options.root)
         .await
         .context("document root is unavailable")?;
@@ -449,6 +455,7 @@ pub async fn serve(options: Options, shutdown: CancellationToken) -> Result<()> 
         options.bind,
         options.accept_uploads
     );
+    if let Some(ready) = ready { let _ = ready.send(port); }
     let result = tokio::select! {result=data_server=>result,result=control_server=>result};
     #[cfg(unix)]
     hangup_guard.abort();

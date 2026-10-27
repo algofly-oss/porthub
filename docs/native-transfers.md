@@ -20,6 +20,35 @@ porthub push ./archive.bin http://machine:8001/
 porthub push ./dataset/ http://machine:8001/ --connections 16
 ```
 
+Both server commands can create their public mapping in the same invocation:
+
+```sh
+porthub http.server ./public --expose
+```
+
+```sh
+porthub http.receive ./drop --expose --subdomain drop -d
+```
+
+Use `--public-port 35000` to request an available gateway port; `--port` still
+selects the local listening port. `--subdomain` is optional. Public mappings
+use the existing registered account, the normal port pool and conflict checks.
+Use `--registration ID` when more than one account is registered. The installed
+agent authorizes the local caller and retains the machine credential; the CLI
+does not need sudo to create an exposure. Local system administrators and the
+account recorded during installation can use a system registration. Existing
+Windows installations without a local-account grant need one reinstall by that
+account. A stopped agent must be started before exposing a service.
+
+`-d` / `--detach` also works without `--expose`. Without this flag, the command
+occupies the terminal. `http.server list` / `http.receive list` show owned running
+servers; `stop PORT` stops the selected server and closes its attached temporary
+mapping. Ctrl-C has the same effect in foreground mode. If the process or network
+fails before cleanup can reach the gateway, the temporary lease expires there.
+Jobs run as the invoking OS user; jobs started with sudo must be managed with sudo.
+Binding a low-numbered local port or reading protected files can still require
+OS privileges. An external public port alone never requires local elevation.
+
 `porthub-transfer` contains the implementation. The native server supports
 directory listings, GET/HEAD, byte ranges, validators, and safe document-root
 resolution. A separate authenticated control listener binds only to loopback;

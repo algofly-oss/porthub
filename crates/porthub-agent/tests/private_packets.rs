@@ -801,3 +801,89 @@ async fn owned_exit_ipv6_guard_blocks_new_internet_connections_and_restores_rout
     nft.del_table_if_exists("exit_test_tracking", Family::Ip6).await?;
     Ok(())
 }
+
+#[cfg(all(target_os = "linux", feature = "netns-tests"))]
+#[tokio::test]
+#[ignore = "requires an explicitly owned disposable network namespace"]
+async fn container_forwarding_uses_host_exit_and_pins_flows_across_fallback() -> anyhow::Result<()> {
+    use anyhow::{ensure, Context};
+    use std::{collections::BTreeSet, net::Ipv4Addr, time::Duration as StdDuration};
+    use porthub_agent::private_network::{device::Tun, exit_routes::Consumer};
+    use nlink::netlink::{Connection, Nftables, Route, route::Ipv4Route, types::route::RouteScope,
+        nftables::{config::NftablesConfig, BaseChain, Family, FilterHook, Policy, Priority}};
+    ensure!(std::env::var("PORTHUB_TEST_OWNED_NETNS").as_deref() == Ok("1") && std::path::Path::new("/.dockerenv").is_file(), "requires owned disposable container");
+    let routes = Connection::<Route>::new()?;
+    let exit_ip: Ipv4Addr = "10.234.251.1".parse()?;
+    let underlay_ip: Ipv4Addr = "10.234.253.1".parse()?;
+    let client: Ipv4Addr = "172.28.251.2".parse()?;
+    let internet: Ipv4Addr = "203.0.113.90".parse()?;
+    let exit = Tun::open("phab12cd51", exit_ip, &[]).await?;
+    let underlay = Tun::open("phab12cd52", underlay_ip, &[]).await?;
+    let bridge = Tun::open("phab12cd53", "172.28.251.1".parse()?, &[client]).await?;
+    // A TUN named like Docker's bridge injects real forwarded IP packets without
+    // creating nested containers or changing any host Docker/firewall resources.
+    routes.set_link_name_by_index(bridge.index, "br-phubtest").await?;
+    tokio::fs::write("/proc/sys/net/ipv4/conf/br-phubtest/forwarding", b"1\n").await?;
+    routes.add_route(Ipv4Route::new(Ipv4Addr::UNSPECIFIED, 0).dev_index(underlay.index).scope(RouteScope::Link)).await?;
+    let nft = Connection::<Nftables>::new()?;
+    NftablesConfig::new().table("filter", Family::Ip, |table| table
+        .chain("FORWARD", |chain| chain.base(BaseChain::filter(FilterHook::Forward, Priority::Filter).policy(Policy::Drop)))
+        .chain("DOCKER-USER", |chain| chain)
+        .rule_keyed("FORWARD", "docker", |rule| rule.jump("DOCKER-USER".parse().unwrap()))
+        .rule_keyed("DOCKER-USER", "original_uplink", |rule| rule.match_oif(&underlay.name).accept())
+        .rule_keyed("DOCKER-USER", "published_port", |rule| rule.match_iif(&underlay.name).match_oif("br-phubtest").accept())
+        .rule_keyed("DOCKER-USER", "return", |rule| rule.then(nlink::netlink::nftables::Verdict::Return)))
+        .diff(&nft).await?.apply(&nft).await?;
+    let original_rules = nft.list_rules("filter", Family::Ip).await?;
+    let mut owner = Consumer::activate(exit.index, exit_ip, &BTreeSet::from([underlay_ip])).await?;
+    fn udp(src: Ipv4Addr, dst: Ipv4Addr, sport: u16, dport: u16) -> Vec<u8> {
+        let mut p = vec![0u8; 32]; p[0] = 0x45; p[2..4].copy_from_slice(&32u16.to_be_bytes()); p[8] = 64; p[9] = 17;
+        p[12..16].copy_from_slice(&src.octets()); p[16..20].copy_from_slice(&dst.octets());
+        p[20..22].copy_from_slice(&sport.to_be_bytes()); p[22..24].copy_from_slice(&dport.to_be_bytes()); p[24..26].copy_from_slice(&12u16.to_be_bytes()); p[28..].copy_from_slice(b"test");
+        let mut sum: u32 = p[..20].as_chunks::<2>().0.iter().map(|bytes| u16::from_be_bytes(*bytes) as u32).sum();
+        while sum >> 16 != 0 { sum = (sum & 65535) + (sum >> 16); }
+        p[10..12].copy_from_slice(&(!(sum as u16)).to_be_bytes()); p
+    }
+    async fn read(tun: &Tun) -> anyhow::Result<Vec<u8>> {
+        let mut bytes = vec![0u8; 2048];
+        tokio::time::timeout(StdDuration::from_secs(3), async {
+            loop {
+                let size = tun.read(&mut bytes).await?;
+                // Kernel IPv6 link-local solicitation is unrelated to the IPv4
+                // flow under test and can appear immediately after TUN setup.
+                if size >= 28 && bytes[0] >> 4 == 4 && bytes[9] == 17 {
+                    bytes.truncate(size); return Ok::<_, anyhow::Error>(bytes);
+                }
+            }
+        }).await.context("forwarded packet did not reach expected interface")?
+    }
+    // A published-port request arrived through the ordinary uplink. Its
+    // container reply must not unexpectedly change its source exit identity.
+    tokio::fs::write(format!("/proc/sys/net/ipv4/conf/{}/forwarding", underlay.name), b"1\n").await?;
+    underlay.write(&udp(internet, client, 9000, 45104)).await?;
+    ensure!(&read(&bridge).await?[16..20] == client.octets(), "incoming published-port request did not reach container");
+    bridge.write(&udp(client, internet, 45104, 9000)).await?;
+    ensure!(&read(&underlay).await?[12..16] == client.octets(), "published-port reply was diverted through exit");
+    bridge.write(&udp(client, internet, 45101, 9000)).await?;
+    let outgoing = read(&exit).await?;
+    ensure!(&outgoing[12..16] == exit_ip.octets(), "container source was not translated to enrolled host: {:?}", &outgoing[..outgoing.len().min(32)]);
+    let source_port = u16::from_be_bytes([outgoing[20], outgoing[21]]);
+    exit.write(&udp(internet, exit_ip, 9000, source_port)).await?;
+    let reply = read(&bridge).await?;
+    ensure!(&reply[16..20] == client.octets(), "reply was not restored to original container");
+    owner.set_bypass(true).await?;
+    bridge.write(&udp(client, internet, 45101, 9000)).await?;
+    ensure!(&read(&exit).await?[12..16] == exit_ip.octets(), "existing container exit flow moved during fallback");
+    bridge.write(&udp(client, internet, 45102, 9000)).await?;
+    ensure!(&read(&underlay).await?[12..16] == client.octets(), "new fallback connection did not use underlay");
+    owner.set_bypass(false).await?;
+    bridge.write(&udp(client, internet, 45102, 9000)).await?;
+    ensure!(&read(&underlay).await?[12..16] == client.octets(), "existing direct container flow moved on recovery");
+    bridge.write(&udp(client, internet, 45103, 9000)).await?;
+    ensure!(&read(&exit).await?[12..16] == exit_ip.octets(), "new container connection did not resume exit");
+    owner.clear().await?;
+    let remaining = nft.list_rules("filter", Family::Ip).await?;
+    ensure!(remaining.len() == original_rules.len() && original_rules.iter().all(|old| remaining.iter().any(|rule| rule.handle == old.handle && rule.nft_syntax() == old.nft_syntax())), "container cleanup changed foreign Docker rules");
+    ensure!(routes.get_rules_v4().await?.iter().all(|rule| !(22500..=22600).contains(&rule.priority())), "container route rules leaked after cleanup");
+    Ok(())
+}

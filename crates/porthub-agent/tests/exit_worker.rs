@@ -25,6 +25,32 @@ async fn ping(stream: &mut Stream) -> Result<IpAddr> {
     tokio::time::timeout(Duration::from_secs(3), stream.read_line(&mut line)).await.context("TCP response timeout")??;
     Ok(line.trim().parse()?)
 }
+async fn udp_ip(socket: &tokio::net::UdpSocket) -> Result<IpAddr> {
+    socket.send(b"exit UDP identity").await?;
+    let mut bytes = [0u8; 128];
+    let size = tokio::time::timeout(Duration::from_secs(3), socket.recv(&mut bytes)).await.context("UDP exit response timeout")??;
+    Ok(std::str::from_utf8(&bytes[..size])?.parse()?)
+}
+fn icmp_echo(target: std::net::Ipv4Addr) -> Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let raw = unsafe { libc::socket(libc::AF_INET, libc::SOCK_RAW, libc::IPPROTO_ICMP) };
+    ensure!(raw >= 0, "cannot open scoped ICMP test socket");
+    let socket = unsafe { OwnedFd::from_raw_fd(raw) };
+    let timeout = libc::timeval { tv_sec: 3, tv_usec: 0 };
+    ensure!(unsafe { libc::setsockopt(socket.as_raw_fd(), libc::SOL_SOCKET, libc::SO_RCVTIMEO, (&timeout as *const libc::timeval).cast(), std::mem::size_of_val(&timeout) as _) } == 0, "cannot bound ICMP test");
+    let address = libc::sockaddr_in { sin_family: libc::AF_INET as _, sin_port: 0, sin_addr: libc::in_addr { s_addr: u32::from_ne_bytes(target.octets()) }, sin_zero: [0; 8] };
+    let mut echo = [8u8, 0, 0, 0, 0x50, 0x48, 0, 1, 0x45, 0x58, 0x49, 0x54];
+    let mut sum: u32 = echo.as_chunks::<2>().0.iter().map(|bytes| u16::from_be_bytes(*bytes) as u32).sum();
+    while sum >> 16 != 0 { sum = (sum & 65535) + (sum >> 16); }
+    echo[2..4].copy_from_slice(&(!(sum as u16)).to_be_bytes());
+    ensure!(unsafe { libc::sendto(socket.as_raw_fd(), echo.as_ptr().cast(), echo.len(), 0, (&address as *const libc::sockaddr_in).cast(), std::mem::size_of_val(&address) as _) } == echo.len() as isize, "ICMP exit send failed");
+    let mut bytes = [0u8; 2048];
+    let size = unsafe { libc::recv(socket.as_raw_fd(), bytes.as_mut_ptr().cast(), bytes.len(), 0) };
+    ensure!(size >= 32, "ICMP exit reply did not arrive");
+    let header = usize::from(bytes[0] & 15) * 4;
+    ensure!(header + echo.len() <= size as usize && bytes[header] == 0 && bytes[header + 4..header + echo.len()] == echo[4..], "ICMP exit reply mismatch");
+    Ok(())
+}
 async fn consumer(target: &str) -> Result<()> {
     let expected: Vec<IpAddr> = ["203.0.113.2", "203.0.113.3"].into_iter().map(|s| s.parse().unwrap()).collect();
     tokio::time::timeout(Duration::from_secs(60), async {
@@ -37,11 +63,19 @@ async fn consumer(target: &str) -> Result<()> {
     }).await??;
     println!("both exits reached; opening persistent connection");
     let (mut established, original) = open(target).await.context("open persistent connection")?;
+    let udp = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+    udp.connect(target).await?;
+    let udp_exit = udp_ip(&udp).await?;
+    ensure!(expected.contains(&udp_exit), "UDP traffic bypassed exits");
+    let target_ip = target.parse::<std::net::SocketAddr>()?.ip();
+    if let IpAddr::V4(target_ip) = target_ip { tokio::task::spawn_blocking(move || icmp_echo(target_ip)).await??; }
+    println!("UDP and ICMP traffic used the IP exit transport");
     for mode in ["round_robin", "sticky", "random"] {
         established.get_mut().write_all(format!("mode:{mode}\n").as_bytes()).await?;
         let mut confirmation = String::new(); established.read_line(&mut confirmation).await?;
         ensure!(confirmation.trim() == "updated", "mode update failed");
         wait_for_selection(mode).await?;
+        ensure!(udp_ip(&udp).await? == udp_exit, "established UDP flow changed exit on policy update");
         let count = if mode == "random" { 64 } else { 16 };
         let mut counts = BTreeMap::new();
         for index in 0..count {

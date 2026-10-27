@@ -65,181 +65,11 @@ fn save_session(layout: &crate::service::Layout, session: &Session) -> Result<()
 fn load_session(path: &Path) -> Result<Session> {
     let bytes = crate::profile::read_private(path)?;
     let session: Session = serde_json::from_slice(&bytes)?;
-    ensure!(session.id.len() == 32 && session.id.bytes().all(|byte| byte.is_ascii_hexdigit()), "invalid exposure state identity");
-    Ok(session)
-}
-
-fn base_url(server: &str, path: &str) -> String {
-    format!("{}/api/{path}", server.trim_end_matches('/'))
-}
-
-async fn request(
-    client: &reqwest::Client,
-    profile: &crate::profile::Profile,
-    path: &str,
-    body: &serde_json::Value,
-) -> Result<serde_json::Value> {
-    let mut last = None;
-    for server in std::iter::once(&profile.server).chain(profile.fallback_servers.iter()) {
-        let response = match client.post(base_url(server, path)).json(body).send().await {
-            Ok(response) => response,
-            Err(error) => {
-                last = Some(error.without_url().to_string());
-                continue;
-            }
-        };
-        let status = response.status();
-        let payload: serde_json::Value = response.json().await.unwrap_or_default();
-        if status.is_success() {
-            return Ok(payload.get("data").cloned().unwrap_or(payload));
-        }
-        let detail = payload
-            .get("detail")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("Gateway rejected the exposure request");
-        if status.is_server_error() {
-            last = Some(detail.to_owned());
-            continue;
-        }
-        bail!("{detail} (HTTP {status})");
-    }
-    bail!(
-        "{}",
-        last.unwrap_or_else(|| "Could not reach the PortHub gateway".into())
-    )
-}
-
-async fn ready_registration(profile_path: &Path, user: bool) -> Result<crate::profile::Profile> {
-    let profile = crate::profile::Profile::load(profile_path)?;
-    let layout = if user {
-        crate::service::Layout::user()?
-    } else {
-        crate::service::Layout::system()?
-    };
-    let manager = crate::service::system_manager(user).await?;
-    let state = crate::service::status(&layout, profile_path, manager.as_ref()).await?;
     ensure!(
-        state.installed,
-        "selected registration has no managed service"
+        session.id.len() == 32 && session.id.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "invalid exposure state identity"
     );
-    if !state.active {
-        if !user {
-            crate::service::require_administrator()?;
-        }
-        crate::service::action(
-            &layout,
-            profile_path,
-            crate::service::Action::Start,
-            manager.as_ref(),
-        )
-        .await?;
-    }
-    tokio::time::timeout(Duration::from_secs(45), async {
-        loop {
-            if crate::runtime::status(profile_path).is_ok_and(|status| status.state == "running") {
-                return Ok::<(), anyhow::Error>(());
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
-    })
-    .await
-    .context("PortHub service did not become ready")??;
-    Ok(profile)
-}
-
-fn state_value(
-    profile: &crate::profile::Profile,
-    local_port: u16,
-    external_port: Option<u16>,
-    subdomain: Option<&str>,
-) -> serde_json::Value {
-    serde_json::json!({"machine_id":profile.machine_id,"token":profile.token,"local_port":local_port,
-        "external_port":external_port,"subdomain":subdomain})
-}
-
-async fn run_worker(
-    layout: crate::service::Layout,
-    profile_path: PathBuf,
-    id: String,
-    local_port: u16,
-    external_port: Option<u16>,
-    subdomain: Option<String>,
-) -> Result<()> {
-    let lock_path = exposure_dir(&layout, true)?.join(format!("{id}.lock"));
-    let lock = OpenOptions::new()
-        .create_new(true)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .context("exposure session already exists")?;
-    lock.lock_exclusive()?;
-    let profile = crate::profile::Profile::load(&profile_path)?;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(4))
-        .timeout(Duration::from_secs(12))
-        .build()?;
-
-    let mut session = Session {
-        id: id.clone(),
-        pid: std::process::id(),
-        profile: profile_path,
-        local_port,
-        external_port,
-        subdomain: subdomain.clone(),
-        status: "starting".into(),
-        exposure_id: None,
-        tcp_url: None,
-        proxy_url: None,
-        message: None,
-    };
-    save_session(&layout, &session)?;
-    let result = async {
-        let mut body = state_value(&profile, local_port, external_port, subdomain.as_deref());
-        body["request_id"] = serde_json::json!(id);
-        let created = request(&client, &profile, "machines/client/expose", &body).await?;
-        session.exposure_id = created.get("exposure_id").and_then(serde_json::Value::as_str).map(str::to_owned);
-        ensure!(session.exposure_id.is_some(), "gateway did not return an exposure identity");
-        session.external_port = created.get("external_port").and_then(serde_json::Value::as_u64).map(|p| p as u16);
-        session.tcp_url = created.get("tcp_url").and_then(serde_json::Value::as_str).map(str::to_owned);
-        session.proxy_url = created.get("proxy_url").and_then(serde_json::Value::as_str).map(str::to_owned);
-        session.status = "running".into();
-        save_session(&layout, &session)?;
-        println!("Public TCP: {}", session.tcp_url.as_deref().unwrap_or("unavailable"));
-        if let Some(url) = &session.proxy_url { println!("Web address: https://{url} (HTTP is also available)"); }
-        println!("Local target: 127.0.0.1:{local_port}");
-        println!("Exposure ID: {id}");
-        let exposure_id = session.exposure_id.as_deref().context("missing exposure identity")?;
-        let stopped = wait_for_stop(&layout, &id);
-        let shutdown = wait_shutdown();
-        tokio::pin!(stopped, shutdown);
-        loop {
-            tokio::select! {
-                _ = &mut stopped => break,
-                _ = tokio::time::sleep(Duration::from_secs(30)) => {
-                    request(&client, &profile, "machines/client/expose/renew", &serde_json::json!({"machine_id":profile.machine_id,"token":profile.token,"exposure_id":exposure_id})).await?;
-                }
-                result = &mut shutdown => { result?; break; }
-            }
-        }
-        request(&client, &profile, "machines/client/expose/close", &serde_json::json!({"machine_id":profile.machine_id,"token":profile.token,"exposure_id":exposure_id})).await?;
-        Ok::<(), anyhow::Error>(())
-    }.await;
-    if let Err(error) = result {
-        if let Some(exposure_id) = session.exposure_id.as_deref() {
-            let _ = request(&client, &profile, "machines/client/expose/close", &serde_json::json!({"machine_id":profile.machine_id,"token":profile.token,"exposure_id":exposure_id})).await;
-        }
-        session.status = "failed".into();
-        session.message = Some(error.to_string());
-        save_session(&layout, &session)?;
-        return Err(error);
-    }
-    let _ = fs::remove_file(session_path(&layout, &id, false)?);
-    let _ = fs::remove_file(stop_path(&layout, &id)?);
-    let _ = lock.unlock();
-    let _ = fs::remove_file(lock_path);
-    println!("Temporary exposure closed.");
-    Ok(())
+    Ok(session)
 }
 
 #[cfg(unix)]
@@ -265,16 +95,27 @@ fn stop_path(layout: &crate::service::Layout, id: &str) -> Result<PathBuf> {
 
 async fn wait_for_stop(layout: &crate::service::Layout, id: &str) {
     use notify::Watcher;
-    let Ok(path) = stop_path(layout, id) else { return; };
+    let Ok(path) = stop_path(layout, id) else {
+        return;
+    };
     let (send, mut changes) = tokio::sync::mpsc::channel(1);
-    let watcher = notify::recommended_watcher(move |_event: notify::Result<notify::Event>| { let _ = send.try_send(()); })
-        .ok().and_then(|mut watcher| {
-            watcher.watch(path.parent()?, notify::RecursiveMode::NonRecursive).ok()?;
-            Some(watcher)
-        });
+    let watcher = notify::recommended_watcher(move |_event: notify::Result<notify::Event>| {
+        let _ = send.try_send(());
+    })
+    .ok()
+    .and_then(|mut watcher| {
+        watcher
+            .watch(path.parent()?, notify::RecursiveMode::NonRecursive)
+            .ok()?;
+        Some(watcher)
+    });
     loop {
-        if path.exists() { return; }
-        if watcher.is_some() && changes.recv().await.is_some() { continue; }
+        if path.exists() {
+            return;
+        }
+        if watcher.is_some() && changes.recv().await.is_some() {
+            continue;
+        }
         // Filesystem notification may be unavailable on a mounted state
         // directory. Keep a low-frequency fallback for that case only.
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -321,13 +162,19 @@ pub fn list(layout: &crate::service::Layout) -> Result<()> {
             match OpenOptions::new().read(true).write(true).open(lock_path) {
                 Ok(lock) => match lock.try_lock_exclusive() {
                     Ok(()) => "stopped",
-                    Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => &session.status,
+                    Err(error)
+                        if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+                    {
+                        &session.status
+                    }
                     Err(_) => "unknown",
                 },
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => "stopped",
                 Err(_) => "unknown",
             }
-        } else { &session.status };
+        } else {
+            &session.status
+        };
         println!(
             "{:<12} {:<8} {:<24} {}",
             &session.id[..12],
@@ -381,50 +228,180 @@ pub fn stop(layout: &crate::service::Layout, id: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn start(
-    layout: crate::service::Layout,
-    profile_path: PathBuf,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_state_does_not_crash_list_or_match_a_stop_request() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
+        }
+        let path = directory.path().join("bad.json");
+        crate::profile::write_private(&path, br#"{"id":"x","pid":1,"profile":"/unused","local_port":8000,"external_port":null,"subdomain":null,"status":"running","exposure_id":null,"tcp_url":null,"proxy_url":null,"message":null}"#, false)?;
+        assert!(load_session(&path).is_err());
+        Ok(())
+    }
+}
+
+/// Exposure jobs belong to the invoking OS account, independently of whether
+/// the selected registration runs as a system or per-user service.
+pub fn job_layout() -> Result<crate::service::Layout> {
+    let base = match std::env::var_os("PORTHUB_STATE_DIR") {
+        Some(path) => PathBuf::from(path),
+        None => directories::BaseDirs::new()
+            .context("cannot locate user state")?
+            .data_local_dir().join("porthub"),
+    };
+    let root = base.join("jobs");
+    Ok(crate::service::Layout {
+        user: true,
+        state: root.clone(),
+        releases: root.join("unused-releases"),
+        units: root.join("unused-units"),
+    })
+}
+
+#[cfg(any(unix, windows))]
+pub async fn broker_worker(
+    registration_layout: crate::service::Layout,
+    registration: String,
+    id: String,
+    local_port: u16,
+    external_port: Option<u16>,
+    subdomain: Option<String>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    let layout = job_layout()?;
+    let lock_path = exposure_dir(&layout, true)?.join(format!("{id}.lock"));
+    let lock = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+    lock.lock_exclusive()?;
+    let mut session = Session {
+        id: id.clone(),
+        pid: std::process::id(),
+        profile: registration.clone().into(),
+        local_port,
+        external_port,
+        subdomain: subdomain.clone(),
+        status: "starting".into(),
+        exposure_id: None,
+        tcp_url: None,
+        proxy_url: None,
+        message: None,
+    };
+    save_session(&layout, &session)?;
+    let result = async {
+        let request = crate::exposure_broker::Request { request_id: id.clone(), local_port, external_port, subdomain };
+        let (mut connection, reply) = crate::exposure_broker::connect(&registration_layout, &registration, &request).await?;
+        session.exposure_id = reply.exposure_id;
+        session.external_port = reply.external_port;
+        session.tcp_url = reply.tcp_url;
+        session.proxy_url = reply.proxy_url;
+        session.status = "running".into();
+        save_session(&layout, &session)?;
+        print_session(&session);
+        let mut closed = String::new();
+        tokio::select! {
+            _ = cancel.cancelled() => {},
+            _ = wait_for_stop(&layout, &id) => {},
+            signal = wait_shutdown() => { signal?; },
+            _ = connection.read_line(&mut closed) => { bail!("registration agent closed the exposure"); }
+        }
+        connection.get_mut().write_all(b"stop\n").await?;
+        let count = tokio::time::timeout(Duration::from_secs(15), connection.read_line(&mut closed)).await??;
+        ensure!(count > 0 && closed == "closed\n", "exposure disconnected; its gateway lease will expire automatically");
+        Ok::<_, anyhow::Error>(())
+    }.await;
+    if let Err(error) = result {
+        session.status = "failed".into();
+        session.message = Some(error.to_string());
+        save_session(&layout, &session)?;
+        return Err(error);
+    }
+    let _ = fs::remove_file(session_path(&layout, &id, false)?);
+    let _ = fs::remove_file(stop_path(&layout, &id)?);
+    let _ = lock.unlock();
+    drop(lock);
+    let _ = fs::remove_file(lock_path);
+    println!("Temporary exposure closed.");
+    Ok(())
+}
+fn print_session(session: &Session) {
+    println!(
+        "Public TCP: {}",
+        session.tcp_url.as_deref().unwrap_or("unavailable")
+    );
+    if let Some(url) = &session.proxy_url {
+        println!("Web address: https://{url} (HTTP is also available)");
+    }
+    println!("Local target: 127.0.0.1:{}", session.local_port);
+    println!("Exposure ID: {}", &session.id[..12]);
+}
+
+#[cfg(any(unix, windows))]
+pub async fn start_registered(
+    user: bool,
+    selector: Option<&str>,
     local_port: u16,
     external_port: Option<u16>,
     subdomain: Option<String>,
     detach: bool,
+    cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
-    ensure!(local_port > 0, "local port must be from 1 to 65535");
-    let _profile = ready_registration(&profile_path, layout.user).await?;
+    let registration_layout = if user {
+        crate::service::Layout::user()?
+    } else {
+        crate::service::Layout::system()?
+    };
+    let registration =
+        crate::service::readable::select(&registration_layout, selector, Some(false))?;
     let id = uuid::Uuid::new_v4().simple().to_string();
     if !detach {
-        return run_worker(
-            layout,
-            profile_path,
+        return broker_worker(
+            registration_layout,
+            registration.id,
             id,
             local_port,
             external_port,
             subdomain,
+            cancel,
         )
         .await;
     }
+    let layout = job_layout()?;
     let mut command = Command::new(std::env::current_exe()?);
-    command
-        .args(["expose", &local_port.to_string(), "--worker"])
-        .arg("--profile")
-        .arg(&profile_path)
-        .arg("--session-id")
-        .arg(&id);
-    if layout.user {
+    command.args([
+        "expose",
+        &local_port.to_string(),
+        "--worker",
+        "--registration",
+        &registration.id,
+        "--session-id",
+        &id,
+    ]);
+    if user {
         command.arg("--user");
     }
     if let Some(port) = external_port {
         command.arg("--port").arg(port.to_string());
     }
-    if let Some(domain) = &subdomain {
+    if let Some(domain) = subdomain {
         command.arg("--subdomain").arg(domain);
     }
-    command.stdin(Stdio::null());
     let log = OpenOptions::new()
-        .create(true)
-        .append(true)
+        .create_new(true)
+        .write(true)
         .open(exposure_dir(&layout, true)?.join(format!("{id}.log")))?;
     command
+        .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log));
     #[cfg(unix)]
@@ -435,130 +412,55 @@ pub async fn start(
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        command.creation_flags(0x00000200 | 0x00000008); // DETACHED_PROCESS | DETACHED_PROCESS_GROUP
+        command.creation_flags(0x00000200 | 0x00000008);
     }
-    let child = command
-        .spawn()
-        .context("could not start detached PortHub exposure")?;
-    drop(child);
-    let path = session_path(&layout, &id, false)?;
-    let ready = tokio::time::timeout(Duration::from_secs(30), async {
+    let mut child = command.spawn()?;
+    let ready = tokio::time::timeout(Duration::from_secs(50), async {
         loop {
-            if let Ok(session) = load_session(&path) {
+            if let Ok(session) = load_session(&session_path(&layout, &id, false)?) {
                 if session.status == "running" {
-                    return Ok::<Session, anyhow::Error>(session);
+                    return Ok::<_, anyhow::Error>(session);
                 }
                 if session.status == "failed" {
                     bail!(
-                        "background exposure failed: {}",
-                        session.message.as_deref().unwrap_or("unknown error")
+                        "{}",
+                        session.message.as_deref().unwrap_or("exposure failed")
                     );
                 }
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            ensure!(
+                child.try_wait()?.is_none(),
+                "background exposure stopped before becoming ready"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
-    .await
-    .context(
-        "background exposure did not become ready; run `porthub expose list` to check its status",
-    )??;
-    println!(
-        "Public TCP: {}",
-        ready.tcp_url.as_deref().unwrap_or("unavailable")
-    );
-    if let Some(url) = &ready.proxy_url {
-        println!("Web address: https://{url} (HTTP is also available)");
-    }
-    println!("Local target: 127.0.0.1:{local_port}");
-    println!("Exposure ID: {}", &id[..12]);
-    println!("Stop with: porthub expose stop {}", &id[..12]);
-    Ok(())
-}
-
-pub async fn worker(
-    layout: crate::service::Layout,
-    profile: PathBuf,
-    id: String,
-    local_port: u16,
-    port: Option<u16>,
-    subdomain: Option<String>,
-) -> Result<()> {
-    let registered = crate::service::registrations(&layout)?
-        .into_iter()
-        .any(|entry| entry.spec.profile == profile);
-    ensure!(
-        registered,
-        "exposure worker profile is not an installed registration"
-    );
-    run_worker(layout, profile, id, local_port, port, subdomain).await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
-
-    #[tokio::test]
-    async fn worker_uses_installed_credentials_and_stop_removes_gateway_mapping() -> Result<()> {
-        use axum::{routing::post, Json, Router};
-        let closed = Arc::new(AtomicUsize::new(0));
-        let count = closed.clone();
-        let router = Router::new()
-            .route("/api/machines/client/expose", post(|Json(body): Json<serde_json::Value>| async move {
-                assert_eq!(body["token"], "test-only-token");
-                assert_eq!(body["machine_id"], "0123456789abcdef01234567");
-                assert_eq!(body["local_port"], 8000);
-                assert_eq!(body["request_id"].as_str().unwrap().len(), 32);
-                Json(serde_json::json!({"data":{"exposure_id":"test-exposure","external_port":31000,"tcp_url":"gateway.invalid:31000"}}))
-            }))
-            .route("/api/machines/client/expose/close", post(move |Json(body): Json<serde_json::Value>| {
-                let count = count.clone();
-                async move {
-                    assert_eq!(body["token"], "test-only-token");
-                    assert_eq!(body["exposure_id"], "test-exposure");
-                    count.fetch_add(1, Ordering::SeqCst);
-                    Json(serde_json::json!({"data":{"closed":true}}))
-                }
-            }));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let server = format!("http://{}", listener.local_addr()?);
-        let gateway = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
-        let directory = tempfile::tempdir()?;
-        #[cfg(unix)] {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
+    .await;
+    match ready {
+        Ok(Ok(session)) => {
+            print_session(&session);
+            println!("Stop with: porthub expose stop {}", &id[..12]);
+            Ok(())
         }
-        let layout = crate::service::Layout { user: true, state: directory.path().join("state"), releases: directory.path().join("releases"), units: directory.path().join("units") };
-        let profile = directory.path().join("profile.json");
-        crate::profile::write_private(&profile, &serde_json::to_vec(&serde_json::json!({"server":server,"machine_id":"0123456789abcdef01234567","token":"test-only-token","allow_insecure_http_for_tests":true}))?, false)?;
-        let id = uuid::Uuid::new_v4().simple().to_string();
-        let worker = tokio::spawn(run_worker(layout.clone(), profile, id.clone(), 8000, None, None));
-        tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                if load_session(&session_path(&layout, &id, false)?).is_ok_and(|session| session.status == "running") { return Ok::<_, anyhow::Error>(()); }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+        result => {
+            let _ = child.kill();
+            let _ = child.wait();
+            match result {
+                Ok(Err(error)) => Err(error),
+                Err(_) => bail!("background exposure timed out"),
+                _ => unreachable!(),
             }
-        }).await??;
-        stop(&layout, &id[..12])?;
-        tokio::time::timeout(Duration::from_secs(3), worker).await???;
-        assert_eq!(closed.load(Ordering::SeqCst), 1);
-        assert!(read_sessions(&layout)?.is_empty());
-        assert!(!stop_path(&layout, &id)?.exists());
-        assert!(!exposure_dir(&layout, false)?.join(format!("{id}.lock")).exists());
-        gateway.abort();
-        Ok(())
-    }
-
-    #[test]
-    fn malformed_state_does_not_crash_list_or_match_a_stop_request() -> Result<()> {
-        let directory = tempfile::tempdir()?;
-        #[cfg(unix)] {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
         }
-        let path = directory.path().join("bad.json");
-        crate::profile::write_private(&path, br#"{"id":"x","pid":1,"profile":"/unused","local_port":8000,"external_port":null,"subdomain":null,"status":"running","exposure_id":null,"tcp_url":null,"proxy_url":null,"message":null}"#, false)?;
-        assert!(load_session(&path).is_err());
-        Ok(())
     }
+}
+
+/// Used only by the detached HTTP parent to print its own child's exposure.
+pub fn print_ready_for_pid(pid: u32, port: u16) -> Result<bool> {
+    if let Some(session) = read_sessions(&job_layout()?)?.into_iter().find(|session| {
+        session.pid == pid && session.local_port == port && session.status == "running"
+    }) {
+        print_session(&session);
+        return Ok(true);
+    }
+    Ok(false)
 }

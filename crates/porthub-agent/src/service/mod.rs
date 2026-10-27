@@ -847,6 +847,12 @@ async fn install_locked_mode(
         .transpose()?;
     let mut files = Files::new();
     files.write(&spec.profile, &profile.bytes()?, true)?;
+    #[cfg(any(unix, windows))]
+    if matches!(&profile, RegistrationProfile::Public(_)) {
+        let grant = profile::sibling(&spec.profile, ".local-access.json");
+        files.saved.push((grant.clone(), regular(&grant)?, true));
+        crate::exposure_broker::record_installer(&spec.profile)?;
+    }
     files.write(&spec.unit, unit(&spec)?.as_bytes(), false)?;
     files.write(
         &manifest(layout, &id),
@@ -860,7 +866,8 @@ async fn install_locked_mode(
         manager.reset_failed(&spec).await?;
         attempted_start = true;
         manager.start(&spec).await?;
-        readable::install(layout, &spec, &profile).await
+        readable::install(layout, &spec, &profile).await?;
+        Ok::<_, anyhow::Error>(())
     }
     .await;
     if let Err(error) = result {
@@ -953,6 +960,7 @@ pub async fn action(
                 );
                 for suffix in [
                     ".config.json",
+                    ".local-access.json",
                     ".status.json",
                     ".update-attempt.json",
                     ".update-commit.json",

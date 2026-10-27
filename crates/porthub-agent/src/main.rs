@@ -75,7 +75,7 @@ fn requires_system_privileges(args: &Args) -> bool {
             (*port_override).is_some_and(is_privileged_port)
                 || target.parse::<u16>().is_ok_and(is_privileged_port)
         }
-        Command::Expose { user, worker, .. } => !user && !worker,
+        Command::Expose { .. } => false,
         Command::Run { profile } => {
             porthub_agent::private_network::is_profile(profile).unwrap_or(false)
         }
@@ -138,6 +138,27 @@ fn print_help() -> Result<()> {
 
 fn short_version_requested(arguments: &[OsString]) -> bool {
     arguments.len() == 2 && arguments[1] == OsStr::new("-v")
+}
+
+#[derive(clap::Args, Default)]
+struct HttpPublicOptions {
+    /// Create a temporary public mapping through the registered PortHub agent.
+    #[arg(long)]
+    expose: bool,
+    /// Reserve this external gateway port (the server's --port remains local).
+    #[arg(long, requires = "expose")]
+    public_port: Option<u16>,
+    /// Create a temporary web address for the public server.
+    #[arg(long, requires = "expose")]
+    subdomain: Option<String>,
+    /// Select the registered account when this machine has multiple registrations.
+    #[arg(long, requires = "expose")]
+    registration: Option<String>,
+    #[arg(long, requires = "expose")]
+    user: bool,
+    /// Keep this server and its optional public mapping running in the background.
+    #[arg(short = 'd', long)]
+    detach: bool,
 }
 
 #[derive(Subcommand)]
@@ -242,6 +263,8 @@ enum Command {
         all: bool,
         #[arg(long)]
         upload: bool,
+        #[command(flatten)]
+        public: HttpPublicOptions,
     },
     /// Receive direct HTTP uploads from curl/wget or `porthub push`.
     #[command(name = "http.receive", alias = "http-receive")]
@@ -258,6 +281,8 @@ enum Command {
         root: Option<PathBuf>,
         #[arg(long)]
         all: bool,
+        #[command(flatten)]
+        public: HttpPublicOptions,
     },
     /// Expose a local port temporarily through the PortHub gateway.
     #[command(name = "expose")]
@@ -279,10 +304,8 @@ enum Command {
         #[arg(long)]
         user: bool,
         /// Select a registration by ID from `porthub ls` when multiple exist.
-        #[arg(long, conflicts_with = "profile")]
+        #[arg(long)]
         registration: Option<String>,
-        #[arg(long, hide = true)]
-        profile: Option<PathBuf>,
         #[arg(long, hide = true)]
         worker: bool,
         #[arg(long, hide = true, requires = "worker")]
@@ -410,6 +433,7 @@ struct HttpCommandOptions {
     root: Option<PathBuf>,
     all: bool,
     accept_uploads: bool,
+    public: HttpPublicOptions,
 }
 async fn run_http_command(options: HttpCommandOptions, cancel: CancellationToken) -> Result<()> {
     let HttpCommandOptions {
@@ -420,7 +444,9 @@ async fn run_http_command(options: HttpCommandOptions, cancel: CancellationToken
         root,
         all,
         accept_uploads,
+        public,
     } = options;
+    anyhow::ensure!(!matches!(target.as_str(), "list" | "stop") || (!public.detach && !public.expose), "--detach and --expose apply when starting a server");
     if target == "list" {
         for record in server::list().await? {
             println!(
@@ -464,13 +490,15 @@ async fn run_http_command(options: HttpCommandOptions, cancel: CancellationToken
             )
         }
     };
-    server::serve(
+    porthub_agent::http_tools::run(
         server::Options {
             port: port_override.unwrap_or(port),
             bind,
             root: root.unwrap_or(default_root),
             accept_uploads,
         },
+        porthub_agent::http_tools::Exposure { enabled: public.expose, public_port: public.public_port, subdomain: public.subdomain, registration: public.registration, user: public.user },
+        public.detach,
         cancel,
     )
     .await
@@ -1186,6 +1214,7 @@ async fn main() -> Result<()> {
             root,
             all,
             upload,
+            public,
         }) => {
             run_http_command(
                 HttpCommandOptions {
@@ -1196,6 +1225,7 @@ async fn main() -> Result<()> {
                     root,
                     all,
                     accept_uploads: upload,
+                    public,
                 },
                 cancel,
             )
@@ -1208,6 +1238,7 @@ async fn main() -> Result<()> {
             port_override,
             root,
             all,
+            public,
         }) => {
             run_http_command(
                 HttpCommandOptions {
@@ -1218,6 +1249,7 @@ async fn main() -> Result<()> {
                     root,
                     all,
                     accept_uploads: true,
+                    public,
                 },
                 cancel,
             )
@@ -1231,70 +1263,25 @@ async fn main() -> Result<()> {
             detach,
             user,
             registration,
-            profile,
             worker,
             session_id,
         }) => {
-            let selected_layout = layout(user)?;
-            if worker {
-                let profile = profile.context("missing exposure profile")?;
-                let id = session_id.context("missing exposure session identity")?;
-                let local_port = target.context("missing local port")?.parse::<u16>()?;
-                porthub_agent::expose::worker(
-                    selected_layout,
-                    profile,
-                    id,
-                    local_port,
-                    port,
-                    subdomain,
-                )
-                .await
-            } else {
+            #[cfg(any(unix, windows))]
+            {
+                let selected_layout = layout(user)?;
+                let jobs = porthub_agent::expose::job_layout()?;
                 let target = target.unwrap_or_default();
-                match target.as_str() {
-                    "list" => porthub_agent::expose::list(&selected_layout),
-                    "stop" => porthub_agent::expose::stop(
-                        &selected_layout,
-                        id.as_deref().context("usage: porthub expose stop ID")?,
-                    ),
-                    _ => {
-                        anyhow::ensure!(
-                            !target.is_empty(),
-                            "usage: porthub expose LOCAL_PORT [--port EXTERNAL_PORT] [--subdomain NAME] [--detach]"
-                        );
-                        let local_port = target
-                            .parse::<u16>()
-                            .context("local port must be from 1 to 65535")?;
-                        let registrations =
-                            porthub_agent::service::registrations(&selected_layout)?;
-                        let selector = registration.as_deref().map(str::to_ascii_lowercase);
-                        let candidates = registrations
-                            .into_iter()
-                            .filter(|entry| {
-                                !porthub_agent::private_network::is_profile(&entry.spec.profile)
-                                    .unwrap_or(true)
-                                    && selector.as_ref().is_none_or(|value| {
-                                        entry.machine_id.starts_with(value)
-                                            || entry.spec.service == *value
-                                    })
-                            })
-                            .collect::<Vec<_>>();
-                        anyhow::ensure!(
-                            candidates.len() == 1,
-                            "select one public registration with --registration from porthub ls"
-                        );
-                        porthub_agent::expose::start(
-                            selected_layout,
-                            candidates[0].spec.profile.clone(),
-                            local_port,
-                            port,
-                            subdomain,
-                            detach,
-                        )
-                        .await
-                    }
+                if worker {
+                    return porthub_agent::expose::broker_worker(selected_layout, registration.context("missing exposure registration")?, session_id.context("missing exposure session identity")?, target.parse()?, port, subdomain, cancel).await;
                 }
+                return match target.as_str() {
+                    "list" => porthub_agent::expose::list(&jobs),
+                    "stop" => porthub_agent::expose::stop(&jobs, id.as_deref().context("usage: porthub expose stop ID")?),
+                    _ => porthub_agent::expose::start_registered(user, registration.as_deref(), target.parse().context("usage: porthub expose LOCAL_PORT [--port EXTERNAL_PORT] [--subdomain NAME] [--detach]")?, port, subdomain, detach, cancel).await,
+                };
             }
+            #[cfg(not(any(unix, windows)))]
+            anyhow::bail!("temporary exposure is not supported on this platform")
         }
         Some(Command::Get {
             url,
@@ -1592,6 +1579,22 @@ mod cli_tests {
         ] {
             assert!(!requires_system_privileges(&args(&command)));
         }
+    }
+
+    #[test]
+    fn http_tools_share_exposure_and_docker_detach_flags_without_elevation() {
+        for command in ["http.server", "http.receive"] {
+            for detach in ["-d", "--detach"] {
+                let parsed = args(&["porthub", command, "./files", "--expose", "--public-port", "12345", "--subdomain", "files", detach]);
+                assert!(!super::requires_system_privileges(&parsed));
+                let Some(super::Command::HttpServer { public, .. } | super::Command::HttpReceive { public, .. }) = parsed.command else { panic!("expected HTTP command"); };
+                assert!(public.expose && public.detach);
+                assert_eq!(public.public_port, Some(12345));
+            }
+            assert!(Args::try_parse_from(["porthub", command, "--subdomain", "files"]).is_err());
+        }
+        assert!(!super::requires_system_privileges(&args(&["porthub", "expose", "8080"])));
+        assert!(!super::requires_system_privileges(&args(&["porthub", "expose", "list"])));
     }
 
     #[test]

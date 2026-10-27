@@ -91,3 +91,6 @@ tokio-tungstenite = { version="0.20.1", optional = true}
 tokio-util = { version="0.7.9", optional = true, features = ["io"] }
 futures-core = { version="0.3.28", optional = true  }
 futures-sink = { version="0.3.28", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+getifaddrs = "0.6.2"

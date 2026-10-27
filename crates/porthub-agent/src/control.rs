@@ -51,7 +51,7 @@ pub struct Control {
     private_peer_id: Option<String>,
     http: reqwest::Client,
     preferred: Mutex<Option<(String, Instant)>>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     underlay: tokio::sync::Mutex<Option<(std::net::IpAddr, reqwest::Client, Instant)>>,
 }
 impl Control {
@@ -69,7 +69,7 @@ impl Control {
             private_peer_id: None,
             http,
             preferred: Mutex::new(None),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             underlay: tokio::sync::Mutex::new(None),
         })
     }
@@ -77,7 +77,7 @@ impl Control {
     /// physical source selects the consumer's preserved main-table source rule.
     /// Refresh lazily: no timer or discovery work runs while control is idle.
     async fn http_for(&self, base: &str) -> Result<reqwest::Client, Failure> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let loopback = url::Url::parse(base).ok().and_then(|url| url.host_str().map(str::to_owned))
                 .is_some_and(|host| host == "localhost" || host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback()));
@@ -94,19 +94,21 @@ impl Control {
                     return Ok(client.clone());
                 }
             }
-            let client = reqwest::Client::builder().local_address(local)
-                .redirect(reqwest::redirect::Policy::none())
+            let builder = reqwest::Client::builder().local_address(local);
+            #[cfg(target_os = "macos")]
+            let builder = builder.interface(&porthub_mesh::underlay::interface_name(local).map_err(|_| Failure::Unavailable)?);
+            let client = builder.redirect(reqwest::redirect::Policy::none())
                 .pool_max_idle_per_host(2).pool_idle_timeout(Duration::from_secs(60))
                 .connect_timeout(Duration::from_secs(3)).timeout(Duration::from_secs(40))
                 .build().map_err(|_| Failure::Unavailable)?;
             *cached = Some((local, client.clone(), Instant::now() + Duration::from_secs(30)));
             return Ok(client);
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         { let _ = base; Ok(self.http.clone()) }
     }
     async fn refresh_underlay(&self) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some((_, _, until)) = self.underlay.lock().await.as_mut() { *until = Instant::now(); }
     }
     pub fn new_private(profile: &crate::private_profile::Profile) -> anyhow::Result<Self> {

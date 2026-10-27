@@ -188,3 +188,40 @@ fn upgraded_cli_can_manage_the_previous_go_control_socket_protocol() {
     );
     handle.join().unwrap();
 }
+
+#[tokio::test]
+async fn detached_server_and_receiver_survive_the_launcher_and_stop_independently() {
+    let state = tempfile::tempdir().unwrap();
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(state.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("served.txt"), b"served by detached process").unwrap();
+    let client = reqwest::Client::new();
+    let mut ports = Vec::new();
+    for tool in ["http.server", "http.receive"] {
+        let output = command(state.path()).args([tool, "0"]).arg(root.path()).arg("-d").output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let items = records(state.path());
+        let record = items.iter().find(|(_, value)| !ports.contains(&(value["port"].as_u64().unwrap() as u16))).unwrap();
+        let port = record.1["port"].as_u64().unwrap() as u16;
+        ports.push(port);
+        let response = client.get(format!("http://127.0.0.1:{port}/served.txt")).send().await.unwrap();
+        assert_eq!(response.bytes().await.unwrap().as_ref(), b"served by detached process");
+        if tool == "http.receive" {
+            let response = client.put(format!("http://127.0.0.1:{port}/.porthub/raw/nested/uploaded.txt"))
+                .body("uploaded through detached receiver").send().await.unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+            assert_eq!(std::fs::read(root.path().join("nested/uploaded.txt")).unwrap(), b"uploaded through detached receiver");
+        }
+    }
+    for (index, port) in ports.iter().enumerate() {
+        let output = command(state.path()).args(["http.server", "stop", &port.to_string()]).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        if index == 0 {
+            assert!(client.get(format!("http://127.0.0.1:{}/served.txt", ports[1])).send().await.unwrap().status().is_success());
+        }
+    }
+    wait_until(|| records(state.path()).is_empty());
+}

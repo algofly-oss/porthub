@@ -165,6 +165,7 @@ impl Consumer {
                 sources: Vec::new(),
                 ipv6_guard: true,
                 own_source_rule: true,
+                container_forwarding: true,
             },
         };
         owner.journal.save()?;
@@ -200,6 +201,8 @@ impl Consumer {
         self.add(RuleBuilder::v4().priority(FIRST + 65).protocol(PROTOCOL)
             .from_prefix(&self.own.to_string(), 32).table(self.table)).await?;
         self.update_sources(underlay).await?;
+        for rule in super::exit_containers::routes(self.index, self.table)? { self.add(rule).await?; }
+        super::exit_containers::apply(&self.journal.name, self.index, false).await?;
         super::exit_ipv6::apply(&self.netlink, &self.journal.name).await?;
         // Install the catch-all last, once every management bypass is present.
         self.add(
@@ -220,6 +223,7 @@ impl Consumer {
     pub async fn refresh(&mut self, underlay: &BTreeSet<Ipv4Addr>) -> Result<()> {
         let _lock = super::exit_forwarding::lock().await?;
         self.update_sources(underlay).await?;
+        super::exit_containers::apply(&self.journal.name, self.index, self.bypass).await?;
         super::exit_ipv6::apply_mode(&self.netlink, &self.journal.name, self.bypass).await?;
         Ok(())
     }
@@ -236,6 +240,7 @@ impl Consumer {
             super::exit_ipv6::apply(&self.netlink, &self.journal.name).await?;
             self.netlink.add_rule(catch_all).await?;
         }
+        super::exit_containers::apply(&self.journal.name, self.index, bypass).await?;
         self.bypass = bypass;
         Ok(())
     }

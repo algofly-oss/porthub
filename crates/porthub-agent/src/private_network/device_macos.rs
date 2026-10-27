@@ -117,6 +117,14 @@ impl Tun {
         Ok(())
     }
 
+    pub async fn exit_mtu(&self, enabled: bool) -> Result<()> {
+        let mtu = porthub_mesh::MAX_PACKET - if enabled { 20 } else { 0 };
+        if self.device.mtu()? != mtu as u16 {
+            self.device.set_mtu(mtu as u16).context("exit MTU configuration failed")?;
+        }
+        Ok(())
+    }
+
     pub async fn read(&self, buffer: &mut [u8]) -> Result<usize> {
         self.device
             .recv(buffer)

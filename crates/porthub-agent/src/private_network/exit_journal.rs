@@ -23,6 +23,8 @@ pub(super) struct Journal {
     pub ipv6_guard: bool,
     #[serde(default)]
     pub own_source_rule: bool,
+    #[serde(default)]
+    pub container_forwarding: bool,
 }
 impl Journal {
     pub fn table(&self) -> u32 {
@@ -91,6 +93,12 @@ impl Journal {
                 current.index == self.index && current.name == self.name && current.own == self.own,
                 "exit route ownership changed"
             );
+        }
+        if self.container_forwarding {
+            super::exit_containers::clear(&self.name).await?;
+            for rule in super::exit_containers::routes(self.index, self.table())? {
+                netlink.del_rule_if_exists(rule).await?;
+            }
         }
         if self.ipv6_guard {
             super::exit_ipv6::clear(&self.name).await?;

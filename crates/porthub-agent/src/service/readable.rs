@@ -40,7 +40,7 @@ fn now() -> u64 {
 fn valid_id(id: &str) -> bool {
     id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
-fn directory(layout: &Layout) -> Result<PathBuf> {
+pub(crate) fn directory(layout: &Layout) -> Result<PathBuf> {
     if layout.user || layout.state != Layout::system()?.state {
         return Ok(layout.state.with_file_name("status"));
     }

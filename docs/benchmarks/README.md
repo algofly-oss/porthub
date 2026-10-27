@@ -7,9 +7,9 @@ destinations and SHA256 verification. This directory retains only this summary.
 
 ## Current deployment
 
-URM2 runs release 1.4.8 in the isolated Rust core, edge and firewall images.
-All nine enabled machines, including the MacBook, report agent 1.4.8. All ten
-platform binaries in the production image and GitHub release are 1.4.8.
+URM2 currently serves agent release 1.5.3 from the isolated Rust core, edge and
+firewall deployment. The throughput measurements below retain their measured
+release versions; newer functional tests do not establish new bandwidth results.
 
 An additional 1.4.6 Luna → Miro public gateway test sustained only about
 0.72 MB/s before cancellation. The gateway's accepted public socket used CUBIC

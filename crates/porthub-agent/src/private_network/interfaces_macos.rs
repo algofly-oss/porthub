@@ -11,7 +11,7 @@ use std::{
 use tokio::{sync::watch, time::MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
-pub(super) async fn current() -> Result<Vec<SocketAddr>> {
+pub(crate) async fn current() -> Result<Vec<SocketAddr>> {
     let mut head = std::ptr::null_mut();
     // SAFETY: getifaddrs initializes head, and the list is freed below.
     anyhow::ensure!(

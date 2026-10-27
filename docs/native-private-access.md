@@ -85,15 +85,31 @@ starts a new selection; retransmissions retain their original exit. Policy
 leases, revocation, and peer identity changes are enforced
 independently of idle lifetimes.
 
-The current exit data plane is Linux IPv4. IPv6 routing and other operating
-systems remain rollout gates. While an exit is active, an owned IPv6 output
-filter rejects new internet traffic so applications can fall back to IPv4. It
-preserves conntrack-established traffic, loopback, link-local/multicast and
-directly attached LAN prefixes. Explicit source binding cannot bypass this
-filter. Disabling the exit or recovering its stale journal removes only the
-owned filter. The disposable network test verifies blocked new sockets, blocked
-source-bound sockets, an established UDP round trip, LAN access and restoration.
-Do not describe this implementation as an IPv6 full tunnel. Local verification uses `scripts/verify-exit-network.py` with an
+Linux agents provide exit egress. Linux and macOS consumers route IPv4 TCP,
+UDP, and ICMP echo at the IP layer, independently of the originating application.
+The transport to an exit uses the same cached quality decisions and flow pinning
+as private peer traffic. Parallel application connections benefit independently;
+the agent does not turn a single TCP stream into multiple application connections.
+HTTP keep-alive and HTTP/2 requests sharing a connection retain that connection's
+exit, even with round robin selected.
+
+Standard Linux Docker bridges (`docker*` and `br-*`) follow the host policy.
+Owned forwarding and source translation bind container packets to the enrolled
+host identity. Conntrack pins established container flows during fallback and
+recovery, and incoming published-port replies keep their original route.
+Explicit packet marks used by other routers are preserved. Custom bridge names,
+container VPNs, and custom routing remain separate configurations. Docker Desktop
+on macOS/Windows runs inside a VM and is not covered by the Linux bridge tests.
+
+IPv6 exit forwarding is not implemented. While an exit is active, Linux rejects
+new IPv6 internet traffic while preserving established connections and attached
+LAN prefixes. macOS preserves local IPv6 and established TCP, but restricts
+non-TCP internet IPv6, including existing UDP, for the active policy's duration.
+Neither implementation is an IPv6 full tunnel. Cleanup removes only the owned
+filter and routes. The macOS consumer keeps the ordinary default route and adds
+an owned interface-scoped physical route so gateway heartbeats and peer sockets
+continue outside the exit. A root-only journal recovers owned changes after a
+crash. Local verification uses `scripts/verify-exit-network.py` with an
 isolated test MongoDB: three native agent processes, two separate exit interfaces,
 round-robin/sticky/random connections, a persistent TCP stream across mode
 changes, final responses after a client half-close, and removal of an unused exit. These fixtures do not prove fleet
@@ -182,3 +198,24 @@ On Linux, gateway HTTP and public tunnel sockets bind to the physical source;
 source changes affect future channels while established streams are retained.
 Disposable-network tests verified new heartbeat and tunnel SYN packets escaping
 a dead exit while application packets still follow the configured exit policy.
+
+
+## macOS and container qualification for 1.6.0
+
+A native Mac candidate passed a guarded full-route test: four HTTPS requests used
+both configured exits, gateway access remained available, and LAN, private-peer,
+and external SSH connections succeeded. A separate native consumer test verified
+normal-internet fallback, reactivation, and removal of owned routes and PF state.
+The installed release and ordinary internet route were restored after testing.
+The Mac has no Docker installation, so container tests run on Linux.
+
+The disposable Linux full-agent test additionally verifies UDP egress identity,
+ICMP echo, and an established UDP flow across selection changes. Its existing TCP
+checks cover round robin, sticky/random selection, half-close, an offline exit,
+blocked all-exit outage, opt-in normal fallback, and stable direct flows on
+recovery. An isolated forwarding test injects container-source traffic through
+the actual kernel NAT/conntrack path, reproduces Docker's forwarding policy,
+verifies return translation and preservation of incoming service replies, pins
+flows across fallback/recovery, and checks exact cleanup of owned Docker rules.
+These checks establish functionality; they do not establish new exit-route
+throughput measurements or Docker Desktop coverage.

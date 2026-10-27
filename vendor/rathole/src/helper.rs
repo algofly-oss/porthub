@@ -130,6 +130,15 @@ async fn tcp_connect_bound<A: ToSocketAddrs>(address: A, source: Option<std::net
         if destination.ip().is_loopback() { return TcpStream::connect(destination).await; }
         if source.is_ipv4() != destination.is_ipv4() { continue; }
         let socket = if destination.is_ipv4() { tokio::net::TcpSocket::new_v4()? } else { tokio::net::TcpSocket::new_v6()? };
+        #[cfg(target_os = "macos")]
+        {
+            let index = getifaddrs::getifaddrs()?.find(|interface| interface.address.ip_addr() == Some(source))
+                .and_then(|interface| interface.index).and_then(std::num::NonZeroU32::new)
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "physical interface unavailable"))?;
+            let bound = socket2_modern::SockRef::from(&socket);
+            if source.is_ipv4() { bound.bind_device_by_index_v4(Some(index))?; }
+            else { bound.bind_device_by_index_v6(Some(index))?; }
+        }
         socket.bind(SocketAddr::new(source, 0))?;
         match socket.connect(destination).await {
             Ok(stream) => return Ok(stream),

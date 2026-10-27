@@ -24,7 +24,13 @@ notifications fail, a slow 60-second refresh keeps overrides usable. Malformed
 or unsafe files retain the previous setting; explicit reset repairs a corrupt
 but correctly owned private settings file.
 
-Automatic mode currently prefers a ready peer transport. Background measured
-capacity/latency comparison, demand-sensitive selection, hysteresis, and seamless
-handover remain work in progress. These commands do not establish those features
-as complete.
+Automatic mode uses cached capacity and latency measurements collected over
+already established peer and gateway transports. Measurements run outside the
+application packet path and pause during recent activity. An exit connection
+uses the same cached choice and flow pinning as ordinary private IP traffic.
+Changing the exit-selection strategy affects which exit owns a new connection;
+changing the path strategy affects transport to that exit. These are independent
+choices. An active flow retains its transport preference until that transport
+becomes unavailable. Carrier fallback keeps the same inner source and exit;
+it does not replace a failed exit with a different public IP for an existing TCP
+connection. File-transfer concurrency remains an application-level setting.

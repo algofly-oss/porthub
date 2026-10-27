@@ -28,3 +28,13 @@ pub const BUILD_REVISION: &str = match option_env!("PORTHUB_SOURCE_REVISION") {
 
 #[cfg(target_os = "macos")]
 mod macos_private_migration;
+
+#[cfg(unix)]
+pub mod exposure_broker;
+
+pub mod http_tools;
+
+mod exposure_protocol;
+#[cfg(windows)]
+#[path = "exposure_broker_windows.rs"]
+pub mod exposure_broker;

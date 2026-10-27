@@ -156,6 +156,8 @@ impl Session {
             let socket = UdpSocket::bind(local)
                 .await
                 .map_err(|_| anyhow::anyhow!("private UDP bind failed"))?;
+            #[cfg(target_os = "macos")]
+            crate::underlay::bind_interface(&socket2::SockRef::from(&socket), local.ip())?;
             let address = socket
                 .local_addr()
                 .map_err(|_| anyhow::anyhow!("private UDP address unavailable"))?;

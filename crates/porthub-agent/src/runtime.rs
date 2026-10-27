@@ -103,7 +103,7 @@ struct Session {
 }
 impl Session {
     async fn refresh_source(&mut self) -> Result<()> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let (Some(plan), Some(current), Some(client)) = (&self.plan, &self.candidate, &mut self.client) {
             let source = crate::private_network::interfaces::current().await?.first()
                 .context("gateway underlay unavailable")?.ip();
@@ -205,7 +205,7 @@ impl Session {
             return self.refresh_source().await;
         }
         let plan = ClientPlan::parse(&content)?;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let plan = {
             let mut plan = plan;
             plan.bind_source(crate::private_network::interfaces::current().await?.first()
@@ -398,6 +398,9 @@ pub async fn run_with_logs(
     let profile = Profile::load(&path)?;
     let _lease = Lease::acquire(&path)?;
     let control = std::sync::Arc::new(Control::new(profile.clone())?);
+    #[cfg(any(unix, windows))]
+    let exposure_broker = crate::exposure_broker::start(&path, control.clone(), cancel.clone())
+        .unwrap_or_else(|_| { tracing::warn!("local exposure control unavailable; forwarding remains active"); None });
     logs.configure(&profile);
     tracing::info!("machine agent started");
     let mut log_stream = crate::logs::Guard::start(control.clone(), logs, cancel.child_token());
@@ -577,6 +580,8 @@ pub async fn run_with_logs(
     session.stop().await;
     log_stream.stop().await;
     state(&path, &session, "stopped")?;
+    #[cfg(any(unix, windows))]
+    if let Some(broker) = exposure_broker { broker.shutdown().await; }
     Ok(())
 }
 pub fn status(path: &Path) -> Result<Status> {

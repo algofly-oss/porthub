@@ -54,21 +54,6 @@ fn relay_probe(
     sender.send(peer, &packet)
 }
 
-async fn send_exit(
-    sessions: &Sessions, relay: &super::relay::Sender,
-    ips: &HashMap<String, std::net::Ipv4Addr>, own: &str, peer: &str,
-    payload: &[u8], prefer_direct: bool,
-) -> Result<()> {
-    let (Some(source), Some(destination)) = (ips.get(own), ips.get(peer)) else { return Ok(()); };
-    let packet = porthub_mesh::control_packet::encode(porthub_mesh::control_packet::EXIT, *source, *destination, payload)?;
-    let peers = sessions.read().await;
-    let direct = peers.get(peer).filter(|session| session.state() == porthub_mesh::State::Ready);
-    if let Some(session) = direct.filter(|_| prefer_direct || !relay.is_ready()) {
-        let _ = session.send(packet);
-    } else if relay.is_ready() { let _ = relay.send(peer, &packet); }
-    Ok(())
-}
-
 #[cfg(feature = "private-stream")]
 #[derive(Clone, Default)]
 struct StreamCarrierPlan {
@@ -210,11 +195,11 @@ pub async fn run_with_logs(
     let mut policy = Engine::default();
     let mut private_status = crate::runtime::PrivateStatus::default();
     let mut exit_route = None;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let mut exit_fallback = super::exit_selection::Fallback::default();
     let mut exit_available = 0;
     let mut online_peers = std::collections::HashSet::new();
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let (exit_consumer, exit_applied) = {
         let (sender, receiver) = watch::channel(None);
         let (report, applied) = watch::channel("pending");
@@ -291,21 +276,24 @@ pub async fn run_with_logs(
                 } else { exit_available = 0; exit_selection.configure(Vec::new(), Default::default()); }
                 #[cfg(target_os = "linux")]
                 {
-                    let tun = device.as_ref().expect("private tunnel initialized");
-                    tun.exit_mtu(!snapshot.exit_routes.is_empty()).await?;
                     let clients: std::collections::BTreeSet<_> = snapshot.exit_routes.iter()
                         .filter(|route| route.routing_peers.contains(&profile.peer_id))
                         .flat_map(|route| &route.clients)
                         .filter_map(|id| snapshot.peers.iter().find(|peer| &peer.id == id).map(|peer| peer.ip)).collect();
-                    let bypass = exit_fallback.update(exit_route.as_ref().is_some_and(|(_, _, allowed)| *allowed), exit_available, policy.valid_lease(), Instant::now());
-                    let desired = exit_route.as_ref().map(|_| (tun.index, own.ip, bypass));
-                    if *exit_consumer.borrow() != desired { exit_consumer.send_replace(desired); }
                     if clients != exit_clients {
                         if exit_kernel.is_none() && !clients.is_empty() { exit_kernel = Some(super::exit_kernel::Kernel::new(&name)?); }
                         exit_refresh.send_replace(clients.clone());
                         if let Some(kernel) = &exit_kernel { kernel.apply(&clients).await?; }
                         exit_clients = clients;
                     }
+                }
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                {
+                    let tun = device.as_ref().expect("private tunnel initialized");
+                    tun.exit_mtu(!snapshot.exit_routes.is_empty()).await?;
+                    let bypass = exit_fallback.update(exit_route.as_ref().is_some_and(|(_, _, allowed)| *allowed), exit_available, policy.valid_lease(), Instant::now());
+                    let desired = exit_route.as_ref().map(|_| (tun.index, own.ip, bypass));
+                    if *exit_consumer.borrow() != desired { exit_consumer.send_replace(desired); }
                 }
                 // Register every advertised private DNS suffix on the owned
                 // tunnel resolver. This also applies suffix changes live.
@@ -344,6 +332,8 @@ pub async fn run_with_logs(
                     #[cfg(not(target_os = "linux"))]
                     let can_forward = false;
                     if (is_reply || can_forward) && policy.check_exit(&envelope.payload, &peer, true) {
+                        mark_activity(&mut last_activity, &peer, now);
+                        paths.observe(packet, direct);
                         if is_reply {
                             exit_selection.observe(&packet.flow_id(), &peer, Instant::now(), packet.flow_ttl());
                             exit_selection.observe_close(&packet.flow_id(), &peer, false, packet.is_finish(), packet.is_reset(), Instant::now());
@@ -418,8 +408,24 @@ pub async fn run_with_logs(
             if let Some(peer) = exit_peer {
                 if size <= porthub_mesh::MAX_PACKET - 20 && policy.check_exit(&buffer[..size], &peer, false) {
                     exit_selection.observe_close(&parsed.flow_id(), &peer, true, parsed.is_finish(), parsed.is_reset(), Instant::now());
-                    let prefer = *strategy.borrow() != super::strategy::Mode::PreferGateway;
-                    send_exit(&sessions, &relay_sender, &peer_ips, &profile.peer_id, &peer, &buffer[..size], prefer).await?;
+                    mark_activity(&mut last_activity, &peer, Instant::now());
+                    let peers = sessions.read().await;
+                    let direct = peers.get(&peer).filter(|session| session.state() == porthub_mesh::State::Ready);
+                    let relay_ready = relay_sender.is_ready();
+                    let mode = *strategy.borrow();
+                    let default = mode.prefer_peer_transport(direct.is_some_and(|session| session.is_relay()), relay_ready);
+                    let prefer = if mode == super::strategy::Mode::Auto {
+                        path_quality.prefer_peer(&peer, default, Instant::now())
+                    } else { default };
+                    if let (Some(source), Some(destination), Some(use_direct)) = (
+                        peer_ips.get(&profile.peer_id), peer_ips.get(&peer),
+                        paths.choose_preferred(parsed, direct.is_some(), relay_ready, prefer),
+                    ) {
+                        let packet = porthub_mesh::control_packet::encode(porthub_mesh::control_packet::EXIT, *source, *destination, &buffer[..size])?;
+                        if use_direct {
+                            if let Some(session) = direct { let _ = session.send(packet); }
+                        } else { let _ = relay_sender.send(&peer, &packet); }
+                    }
                 }
                 continue;
             }
@@ -453,7 +459,7 @@ pub async fn run_with_logs(
                 exit_selection.configure(available, *mode);
             } else { exit_available = 0; exit_selection.configure(Vec::new(), Default::default()); }
             let now=std::time::Instant::now();
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             if let (Some(tun), Some(own)) = (&device, peer_ips.get(&profile.peer_id)) {
                 let bypass = exit_fallback.update(exit_route.as_ref().is_some_and(|(_, _, allowed)| *allowed), exit_available, policy.valid_lease(), now);
                 let desired = exit_route.as_ref().map(|_| (tun.index, *own, bypass));
@@ -529,9 +535,9 @@ pub async fn run_with_logs(
             private_status.lease_valid = policy.valid_lease();
             if let Some(exit) = &mut private_status.exit {
                 exit.available = exit_available;
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
                 { exit.state = (*exit_applied.borrow()).to_owned(); }
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
                 { exit.state = "not supported on this platform".into(); }
                 if !private_status.lease_valid { exit.state.push_str("; policy expired"); }
                 else if exit_available == 0 && exit.state == "exit routing active" { exit.state = "blocked: no reachable exit".into(); }

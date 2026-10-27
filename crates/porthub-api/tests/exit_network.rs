@@ -38,6 +38,16 @@ async fn native_agents_use_two_exits_and_preserve_established_tcp() -> Result<()
     let mut containers: Vec<String> = Vec::new();
     let target_listener = TcpListener::bind("203.0.113.1:0").await?;
     let target = target_listener.local_addr()?.to_string();
+    let udp_listener = tokio::net::UdpSocket::bind(&target).await?;
+    let udp_cancel = cancel.clone();
+    let udp_server = tokio::spawn(async move {
+        let mut buffer = [0u8; 256];
+        loop {
+            let (_, peer) = tokio::select! { _ = udp_cancel.cancelled() => break, result = udp_listener.recv_from(&mut buffer) => result? };
+            udp_listener.send_to(peer.ip().to_string().as_bytes(), peer).await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    });
     let control_listener = TcpListener::bind("198.18.10.1:0").await?;
     let control_target = control_listener.local_addr()?.to_string();
     let (owner, _) = case.user("exit-network@example.invalid", "user").await?;
@@ -113,7 +123,7 @@ async fn native_agents_use_two_exits_and_preserve_established_tcp() -> Result<()
             let env_control = format!("PORTHUB_TEST_CONTROL_TARGET={control_target}");
             docker(args(&["create", "--name", &name, "--network", &network, "--ip", &ip, "--read-only",
                 "--tmpfs", "/state:rw,mode=700", "--tmpfs", "/run/porthub-exits:rw,mode=700", "--tmpfs", "/tmp:rw,mode=1777",
-                "--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--security-opt", "no-new-privileges:true", "--security-opt", "systempaths=unconfined",
+                "--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--cap-add", "NET_RAW", "--security-opt", "no-new-privileges:true", "--security-opt", "systempaths=unconfined",
                 "--security-opt", "apparmor=unconfined", "--sysctl", "net.ipv4.ip_forward=0", "--device", "/dev/net/tun",
                 "--env", "PORTHUB_TEST_OWNED_NETNS=1", "--env", &env_profile, "--env", &env_role, "--env", &env_target, "--env", &env_control,
                 "--mount", &mount, "--entrypoint", "/worker", "porthub:edge", "--ignored", "--exact", "isolated_exit_worker", "--nocapture"])).await?;
@@ -132,7 +142,7 @@ async fn native_agents_use_two_exits_and_preserve_established_tcp() -> Result<()
         let _ = docker(args(&["stop", "--time", "5", name])).await;
         let _ = docker(args(&["rm", "-f", name])).await;
     }
-    cancel.cancel(); api.abort(); let _ = server.await; case.db.drop().await?;
+    cancel.cancel(); api.abort(); let _ = server.await; let _ = udp_server.await; case.db.drop().await?;
     result
 }
 use std::future::IntoFuture;

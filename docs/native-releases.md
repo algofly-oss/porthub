@@ -33,8 +33,9 @@ The Rust API serves release metadata and binaries from a read-only bundle. It
 does not run a downloader, shell script or Go handler to deliver these assets.
 The production core image embeds exactly the latest release for all ten
 platforms in `/app/client-bin`, including version and SHA256 sidecars. No client
-artifact volume or runtime download is required. Historical releases are kept
-outside the active image for operator rollback.
+artifact volume or runtime download is required. Retired development releases are removed after the new release is deployed
+and online clients have updated. The active production image retains only the
+current release.
 
 Generated binaries are not tracked in the source repository. They remain in
 GitHub Releases and are embedded in the production image. Stage the verified
@@ -199,10 +200,8 @@ download per request, and keep rejected/rolled-back requests unacknowledged.
 Interrupted worker recovery remains available through the explicit rollback
 command above.
 
-The legacy updater compatibility bridge is implemented and locally tested;
-complete automatic production adoption remains a rollout gate. Linux ticket
-enrollment and legacy adoption are described in their native documents; complete non-Linux lifecycle
-and all required platform builds remain unfinished. The production isolation
-check exercises its packaged Linux architecture; other platform entries are
-catalog/transport fixtures, not executed platform releases. Final remote client
-upgrades and physical bandwidth tests have not occurred.
+A complete release requires all ten platform builds and package checks. Native
+Linux and macOS lifecycle tests provide runtime evidence for their exercised
+platforms; compiling a Windows target does not establish installation or routing
+behavior on a Windows machine. Current transfer results remain in the single
+`docs/benchmarks/README.md` summary with their measured release versions.

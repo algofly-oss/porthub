@@ -1183,6 +1183,31 @@ export const guideArticles = [
         ]
       },
       {
+        "id": "file-server-exposure",
+        "title": "Serve or receive files with one command",
+        "blocks": [
+          {
+            "type": "code",
+            "label": "Terminal",
+            "text": "porthub http.server ./public --expose"
+          },
+          {
+            "type": "code",
+            "label": "Terminal",
+            "text": "porthub http.receive ./drop --expose --subdomain drop -d"
+          },
+          {
+            "type": "paragraph",
+            "text": "Both commands support -d / --detach; omit it to keep the server in the terminal. Use --public-port for the gateway port and --port for the local port. The existing registered account authorizes the exposure without sudo. The installed agent retains its credentials. Stopping the server also removes its temporary public mapping."
+          },
+          {
+            "type": "code",
+            "label": "Terminal",
+            "text": "porthub http.receive stop 8001"
+          }
+        ]
+      },
+      {
         "id": "manage",
         "title": "List and stop temporary tunnels",
         "blocks": [
@@ -1247,7 +1272,7 @@ export const guideArticles = [
           },
           {
             "type": "paragraph",
-            "text": "The “Use normal internet if all exits are offline” switch is off by default: clients keep internet traffic blocked. If enabled, new connections use the client’s normal internet connection and public IP during an outage. New connections return to exit routing after stable recovery; existing direct connections remain on their original path. Established connections retain their selected exit when you change the strategy. Round robin balances connection counts, not bytes. A single long transfer uses one exit. If that exit goes offline, the connection can fail; another public source address cannot transparently take over its TCP session."
+            "text": "The “Use normal internet if all exits are offline” switch is off by default: clients keep internet traffic blocked. If enabled, new connections use the client’s normal internet connection and public IP during an outage. New connections return to exit routing after stable recovery; existing direct connections remain on their original path. Established connections retain their selected exit when you change the strategy. Round robin balances connection counts, not bytes. A single long transfer uses one exit. HTTP keep-alive and HTTP/2 reuse a connection, so multiple requests on that connection keep the same exit. If that exit goes offline, the connection can fail; another public source address cannot transparently take over its TCP session."
           }
         ]
       },
@@ -1257,7 +1282,7 @@ export const guideArticles = [
         "blocks": [
           {
             "type": "paragraph",
-            "text": "Exit routing currently requires compatible Linux agents and transports IPv4. New IPv6 internet traffic is rejected while the exit is active so applications can fall back to IPv4. Established IPv6 traffic and directly attached LAN access remain available. This is not an IPv6 full tunnel. One machine can have only one active system-wide exit policy."
+            "text": "Linux routing peers provide IPv4 egress for Linux and macOS consumers. Routing covers application TCP and UDP connections and ICMP echo, rather than only browser traffic. Standard Linux Docker bridges follow the host policy; explicit container VPNs, proxies, and routing overrides can choose another path. Local-network and PortHub gateway access remain available. IPv6 internet forwarding is not implemented; new IPv6 internet traffic is restricted while an exit is active. One machine can have only one active system-wide exit policy."
           }
         ]
       }
