@@ -706,14 +706,8 @@ fn path_profile(args: &PathArgs) -> Result<PathBuf> {
         );
     }
     let mut matches = Vec::new();
-    for entry in service::registrations(&layout(args.user)?)? {
-        if private_network::is_profile(&entry.spec.profile)?
-            && selector.as_ref().is_none_or(|value| {
-                entry.spec.identity.starts_with(value)
-                    || entry.machine_id.starts_with(value)
-                    || entry.spec.service == *value
-            })
-        {
+    for entry in service::select_pair(&layout(args.user)?, selector.as_deref())? {
+        if private_network::is_profile(&entry.spec.profile)? {
             matches.push(entry.spec.profile);
         }
     }
@@ -802,22 +796,32 @@ async fn tenant_action(args: TenantArgs, action: porthub_agent::service::Action)
         porthub_agent::service::require_administrator()?;
     }
     let layout = layout(args.user)?;
-    let selected = porthub_agent::service::select(&layout, args.selector.as_deref())?;
     let manager = porthub_agent::service::system_manager(args.user).await?;
-    porthub_agent::service::action(&layout, &selected.spec.profile, action, manager.as_ref())
+    let selected = porthub_agent::service::registration_action(&layout, args.selector.as_deref(), action, manager.as_ref())
         .await?;
     println!(
         "PortHub service operation completed: {}",
-        &selected.spec.identity[..12]
+        &selected.identity[..12]
     );
     Ok(())
 }
 
 fn render_registration_table(rows: &[serde_json::Value]) -> String {
+    let public_state = |row: &serde_json::Value| -> String {
+        if row["private"].as_bool() == Some(true) { "-".into() }
+        else { row["state"].as_str().unwrap_or("-").into() }
+    };
+    let private_state = |row: &serde_json::Value| -> String {
+        row["private_state"].as_str().or_else(|| {
+            (row["private"].as_bool() == Some(true)).then(|| row["state"].as_str()).flatten()
+        }).unwrap_or("-").into()
+    };
+    let public_width = rows.iter().map(|row| public_state(row).len()).max().unwrap_or(0).max(21);
+    let private_width = rows.iter().map(|row| private_state(row).len()).max().unwrap_or(0).max(21);
     let header = paint(
         format!(
-            "{:<12}  {:<24}  {:<27}  {:<6}  {:<21}  {:<5}  {:<8}  GATEWAY",
-            "ID", "MACHINE", "ACCOUNT EMAIL", "ACTIVE", "STATE", "PORTS", "ROUTE"
+            "{:<12}  {:<24}  {:<27}  {:<6}  {:<public_width$}  {:<private_width$}  {:<5}  {:<8}  GATEWAY",
+            "ID", "MACHINE", "ACCOUNT EMAIL", "ACTIVE", "PUBLIC", "PRIVATE", "PORTS", "ROUTE"
         ),
         "1;36",
     );
@@ -829,13 +833,22 @@ fn render_registration_table(rows: &[serde_json::Value]) -> String {
             None => ("?", "33"),
         };
         let active = paint(format!("{active:<6}"), active_style);
-        let state = row["state"].as_str().unwrap();
+        let state = public_state(row);
+        let state = state.as_str();
         let state_style = match state {
             "running" => "32",
             "configuration-rejected" | "stopped" | "interrupted" => "1;31",
             _ => "33",
         };
-        let state = paint(format!("{state:<21}"), state_style);
+        let state = paint(format!("{state:<public_width$}"), state_style);
+        let private = private_state(row);
+        let private_style = match private.as_str() {
+            "running" => "32",
+            "configuration-rejected" | "stopped" | "interrupted" => "1;31",
+            "-" => "2",
+            _ => "33",
+        };
+        let private = paint(format!("{private:<private_width$}"), private_style);
         let route = row["route"].as_str().unwrap();
         let route_style = match route {
             "direct" => "1;32",
@@ -850,12 +863,13 @@ fn render_registration_table(rows: &[serde_json::Value]) -> String {
             .unwrap_or("-");
         let ports = row["ports"].to_string();
         output.push(format!(
-            "{}  {:<24}  {:<27}  {}  {}  {:<5}  {}  {}",
+            "{}  {:<24}  {:<27}  {}  {}  {}  {:<5}  {}  {}",
             &row["id"].as_str().unwrap()[..12],
             row["machine_id"].as_str().unwrap(),
             email,
             active,
             state,
+            private,
             ports,
             route,
             gateway
@@ -864,12 +878,28 @@ fn render_registration_table(rows: &[serde_json::Value]) -> String {
     output.join("\n")
 }
 
+fn registration_rows(records: Vec<porthub_agent::service::readable::Record>) -> Result<Vec<serde_json::Value>> {
+    let mut groups = std::collections::BTreeMap::<_, Vec<_>>::new();
+    for record in records {
+        groups.entry((record.gateway.clone(), record.machine_id.clone())).or_default().push(record);
+    }
+    groups.into_values().map(|mut group| {
+        anyhow::ensure!(group.iter().filter(|record| !record.private).count() <= 1
+            && group.iter().filter(|record| record.private).count() <= 1,
+            "duplicate registration components require explicit cleanup");
+        let primary = group.remove(group.iter().position(|record| !record.private).unwrap_or(0));
+        let private = if primary.private { Some(&primary) } else { group.iter().find(|record| record.private) };
+        let mut row = serde_json::to_value(&primary)?;
+        row["private_state"] = serde_json::to_value(private.map(|record| &record.state))?;
+        row["private_active"] = serde_json::to_value(private.and_then(|record| record.active))?;
+        row["private_version"] = serde_json::to_value(private.map(|record| &record.agent_version))?;
+        Ok(row)
+    }).collect()
+}
+
 async fn list_registrations(user: bool, json: bool) -> Result<()> {
     let records = porthub_agent::service::readable::list(&layout(user)?)?;
-    let rows: Vec<_> = records
-        .into_iter()
-        .map(serde_json::to_value)
-        .collect::<std::result::Result<_, _>>()?;
+    let rows = registration_rows(records)?;
     if json {
         println!("{}", serde_json::to_string(&rows)?);
     } else if rows.is_empty() {
@@ -1777,6 +1807,7 @@ mod cli_tests {
             "email": "mneonizer@gmail.com",
             "active": true,
             "state": "running",
+            "private_state": "stopped",
             "ports": 0,
             "route": "primary",
             "gateway": "https://porthub.algofly.in"
@@ -1789,7 +1820,8 @@ mod cli_tests {
             ("MACHINE", "6ad9f6aeeaf54977a4f930f7"),
             ("ACCOUNT EMAIL", "mneonizer@gmail.com"),
             ("ACTIVE", "yes"),
-            ("STATE", "running"),
+            ("PUBLIC", "running"),
+            ("PRIVATE", "stopped"),
             ("ROUTE", "primary"),
             ("GATEWAY", "https://porthub.algofly.in"),
         ] {
@@ -1809,6 +1841,32 @@ mod cli_tests {
         assert!(args.command.is_none());
         assert!(!requires_system_privileges(&args));
         print_help().expect("help should print successfully");
+    }
+
+    #[test]
+    fn registration_rows_share_one_id_but_keep_tenants_and_gateways_separate() {
+        let record = |id: char, private: bool, machine: &str, gateway: &str| {
+            porthub_agent::service::readable::Record {
+                format_version: 1, id: id.to_string().repeat(64), machine_id: machine.into(),
+                email: "owner@example.com".into(), gateway: gateway.into(), private,
+                enabled: true, active: Some(!private), state: if private { "stopped" } else { "running" }.into(),
+                agent_version: porthub_agent::VERSION.into(), ports: if private { 0 } else { 2 },
+                route: if private { "private" } else { "origin" }.into(), updated_at: 1,
+                strategy: Default::default(), strategy_override: false, private_status: None,
+            }
+        };
+        let rows = super::registration_rows(vec![
+            record('a', false, "machine-one", "https://one.example"),
+            record('b', true, "machine-one", "https://one.example"),
+            record('c', false, "machine-two", "https://one.example"),
+            record('d', false, "machine-one", "https://two.example"),
+        ]).unwrap();
+        assert_eq!(rows.len(), 3);
+        let paired = rows.iter().find(|row| row["id"] == "a".repeat(64)).unwrap();
+        assert_eq!(paired["state"], "running");
+        assert_eq!(paired["private_state"], "stopped");
+        assert_eq!(paired["ports"], 2);
+        assert!(rows.iter().all(|row| row["id"] != "b".repeat(64)));
     }
 
     #[test]

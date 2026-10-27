@@ -7,7 +7,7 @@ destinations and SHA256 verification. This directory retains only this summary.
 
 ## Current deployment
 
-URM2 currently serves agent release 1.6.0 from the isolated Rust core, edge and
+URM2 currently serves agent release 1.6.1 from the isolated Rust core, edge and
 firewall deployment. The throughput measurements below retain their measured
 release versions; newer functional tests do not establish new bandwidth results.
 
@@ -24,7 +24,11 @@ segments were missing. A temporary scoped MSS 1320 clamp restored the same
 Condor egress download. The native agent fix then passed with Miro using Luna
 as its exit, and installed both scoped SYN-direction clamps. Temporary rules,
 policies, and candidate services were removed and the installed service restored.
-This fix is pending release 1.6.1 deployment.
+Release 1.6.1 is now deployed on Luna and URM2, and all nine online machines
+acknowledged automatic upgrades. Installed Miro host and ordinary Docker bridge
+requests both used Condor's egress. The temporary policy was removed afterward;
+Condor's private process kept the same PID and recorded zero restarts through
+policy addition and removal. Miro returned to its normal route.
 
 A subsequent Condor private-agent interruption was traced to nftables rejecting
 a stale ruleset generation (`ERESTART`, errno 85). The public agent remained

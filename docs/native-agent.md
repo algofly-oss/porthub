@@ -158,6 +158,14 @@ porthub restart ID_FROM_LS --user
 porthub remove ID_FROM_LS --user
 ```
 
+One row represents one registration for an account. Its public control/forwarding
+service and private-network service share the primary registration ID; `PUBLIC`
+and `PRIVATE` show their individual states. `start`, `stop`, `restart`, and
+`remove` apply to both components. `status`, `update`, and `path` accept the same
+ID. Registrations belonging to other accounts or gateway authorities stay
+separate, even when machine IDs coincide across gateways. A unique registration
+needs no explicit selector; multiple registrations require a selected ID.
+
 Omit `--user` for system registrations. `ls`, `status`, `service status` and
 `path show` do not request administrator access. Commands that change system
 services or their settings request elevation when needed.

@@ -489,18 +489,19 @@ pub fn select(layout: &Layout, selector: Option<&str>, private: Option<bool>) ->
             "invalid registration selector"
         );
     }
-    let mut rows: Vec<_> = list(layout)?
+    let records = list(layout)?;
+    let keys: std::collections::BTreeSet<_> = records.iter().filter(|r| {
+        selector.as_deref().is_none_or(|id| r.id.starts_with(id)
+            || r.machine_id.starts_with(id) || format!("porthub-{}", &r.id[..24]) == id)
+    }).map(|r| (r.gateway.clone(), r.machine_id.clone())).collect();
+    let mut rows: Vec<_> = records
         .into_iter()
         .filter(|r| private.is_none_or(|v| r.private == v))
         .filter(|r| {
-            selector.as_deref().is_none_or(|id| {
-                r.id.starts_with(id)
-                    || r.machine_id.starts_with(id)
-                    || format!("porthub-{}", &r.id[..24]) == id
-            })
+            keys.contains(&(r.gateway.clone(), r.machine_id.clone()))
         })
         .collect();
-    if selector.is_none() && private.is_none() {
+    if private.is_none() {
         if let Some(public) = rows.iter().find(|r| !r.private) {
             if rows.iter().all(|r| {
                 r.id == public.id
@@ -682,6 +683,8 @@ mod tests {
         private.email.clear();
         write(&layout, &private)?;
         assert_eq!(select(&layout, None, None)?.id, public.id);
+        assert_eq!(select(&layout, Some(&public.id[..12]), Some(true))?.id, private.id);
+        assert_eq!(select(&layout, Some(&private.id[..12]), None)?.id, public.id);
         assert_eq!(
             select(&layout, Some("BBBBBB"), Some(true))?.email,
             public.email

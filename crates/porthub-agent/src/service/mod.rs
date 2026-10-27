@@ -683,8 +683,13 @@ pub(crate) fn owned_registrations(layout: &Layout) -> Result<Vec<Registration>> 
     Ok(entries)
 }
 pub fn select(layout: &Layout, selector: Option<&str>) -> Result<Registration> {
+    Ok(select_pair(layout, selector)?.remove(0))
+}
+/// Resolve one tenant registration from either component's ID. The primary
+/// service is canonical; grouping always includes the credential authority.
+pub fn select_pair(layout: &Layout, selector: Option<&str>) -> Result<Vec<Registration>> {
     let entries = registrations(layout)?;
-    let mut matches: Vec<_> = if let Some(selector) = selector {
+    let selector = if let Some(selector) = selector {
         let id = selector.to_ascii_lowercase();
         anyhow::ensure!(
             (id.len() >= 6 && id.len() <= 64 && id.bytes().all(|ch| ch.is_ascii_hexdigit()))
@@ -693,17 +698,24 @@ pub fn select(layout: &Layout, selector: Option<&str>) -> Result<Registration> {
                     && id[8..].bytes().all(|ch| ch.is_ascii_hexdigit())),
             "invalid tenant selector"
         );
-        entries
-            .into_iter()
-            .filter(|entry| {
-                entry.spec.identity.starts_with(&id)
-                    || entry.machine_id.starts_with(&id)
-                    || entry.spec.service == id
-            })
-            .collect()
+        Some(id)
     } else {
-        entries
+        None
     };
+    let mut groups = std::collections::BTreeMap::<_, Vec<_>>::new();
+    for entry in entries {
+        let profile = RegistrationProfile::load(&entry.spec.profile)?;
+        let (server, private) = match profile {
+            RegistrationProfile::Public(profile) => (profile.server, false),
+            RegistrationProfile::Private(profile) => (profile.server, true),
+        };
+        groups.entry((server, entry.machine_id.clone())).or_default().push((private, entry));
+    }
+    let mut matches: Vec<_> = groups.into_values().filter(|group| {
+        selector.as_deref().is_none_or(|id| group.iter().any(|(_, entry)| {
+            entry.spec.identity.starts_with(id) || entry.machine_id.starts_with(id) || entry.spec.service == id
+        }))
+    }).collect();
     anyhow::ensure!(
         !matches.is_empty(),
         "no matching native PortHub registration"
@@ -712,7 +724,12 @@ pub fn select(layout: &Layout, selector: Option<&str>) -> Result<Registration> {
         matches.len() == 1,
         "multiple native registrations match; pass a longer id from porthub ls"
     );
-    Ok(matches.remove(0))
+    let mut pair = matches.remove(0);
+    anyhow::ensure!(pair.iter().filter(|(private, _)| !private).count() <= 1
+        && pair.iter().filter(|(private, _)| *private).count() <= 1,
+        "duplicate registration components require explicit cleanup");
+    pair.sort_by_key(|(private, _)| *private);
+    Ok(pair.into_iter().map(|(_, entry)| entry).collect())
 }
 pub(crate) fn lock(layout: &Layout) -> Result<crate::profile::Lease> {
     crate::profile::Lease::acquire(&layout.state.join("installations"))
@@ -926,14 +943,43 @@ pub async fn action(
     action: Action,
     manager: &dyn Manager,
 ) -> Result<Spec> {
-    let profile = RegistrationProfile::load(source)?;
-    let id = profile.identity();
     directory(&layout.state, true)?;
     let _lock = lock(layout)?;
+    action_locked(layout, source, action, manager).await
+}
+/// Apply an ordinary CLI lifecycle operation to the complete selected tenant.
+/// Resolve and validate every owned component before mutating any service.
+pub async fn registration_action(
+    layout: &Layout,
+    selector: Option<&str>,
+    action: Action,
+    manager: &dyn Manager,
+) -> Result<Spec> {
+    directory(&layout.state, true)?;
+    let _lock = lock(layout)?;
+    let pair = select_pair(layout, selector)?;
+    let canonical = pair[0].spec.clone();
+    if matches!(action, Action::Stop | Action::Restart | Action::Uninstall { .. }) {
+        let stop = if matches!(action, Action::Restart) { Action::Stop } else { action };
+        for entry in pair.iter().rev() {
+            action_locked(layout, &entry.spec.profile, stop, manager).await?;
+        }
+    }
+    if matches!(action, Action::Start | Action::Restart) {
+        for entry in &pair {
+            action_locked(layout, &entry.spec.profile, Action::Start, manager).await?;
+        }
+    }
+    Ok(canonical)
+}
+async fn action_locked(layout: &Layout, source: &Path, action: Action, manager: &dyn Manager) -> Result<Spec> {
+    let profile = RegistrationProfile::load(source)?;
+    let id = profile.identity();
     let spec = installed(layout, &id)?.context("this PortHub profile has no managed service")?;
     match action {
         Action::Start => {
             if !manager.state(&spec).await?.active {
+                manager.reset_failed(&spec).await?;
                 manager.start(&spec).await?;
             }
         }

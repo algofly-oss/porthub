@@ -131,7 +131,7 @@ export const guideArticles = [
           },
           {
             "type": "paragraph",
-            "text": "The list shows registration IDs, the registered account email, service state, number of ports and gateway. When a command cannot choose between multiple registrations, pass the ID from porthub ls."
+            "text": "Each account registration appears once, with one ID, its account email, separate public/private component states, ports and gateway. Public forwarding and private networking share that ID. For multiple registrations, pass the ID from porthub ls."
           }
         ]
       },
@@ -198,7 +198,7 @@ export const guideArticles = [
           },
           {
             "type": "paragraph",
-            "text": "These commands select the available registration when it is unambiguous. For multiple accounts or registrations, append the registration ID shown by porthub ls. System-service mutations may request elevated privileges; ordinary inspection and transfers do not inherently require administrator access."
+            "text": "These commands control both public and private components of the selected registration. With one registration, no ID is needed. For multiple accounts or registrations, append the shared registration ID shown by porthub ls. System-service mutations may request elevated privileges; ordinary inspection and transfers do not inherently require administrator access."
           }
         ]
       },
@@ -213,7 +213,7 @@ export const guideArticles = [
           },
           {
             "type": "note",
-            "text": "Removing a registration is different from stopping it. Stop temporarily suspends the service. Remove retires the selected local profile. Review the command’s confirmation and the dashboard before deleting anything you intend to keep."
+            "text": "Stop temporarily suspends both components. Remove retires both local components of the selected registration while preserving other accounts and the shared CLI. It does not delete the dashboard machine record."
           }
         ]
       }

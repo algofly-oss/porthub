@@ -665,3 +665,73 @@ async fn private_service_registration_preserves_private_wire_format_and_scopes_i
     );
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires root in an owned disposable container; all services use the fake manager"]
+async fn one_registration_id_controls_its_pair_without_touching_other_tenants() -> Result<()> {
+    let temp = common::private_dir()?;
+    let layout = layout(temp.path());
+    let source = profile(temp.path(), "0123456789abcdef01234567")?;
+    let private_source = temp.path().join("private-source.json");
+    let private = porthub_agent::private_profile::Profile {
+        server: "https://porthub.example".into(),
+        peer_id: "aaaaaaaaaaaaaaaaaaaaaaaa:0123456789abcdef01234567".into(),
+        workspace: "aaaaaaaaaaaaaaaaaaaaaaaa".into(), token: "p".repeat(40),
+        account_email: None, fallback_servers: vec![], allow_insecure_http_for_tests: false,
+    };
+    porthub_agent::profile::write_private(&private_source, &serde_json::to_vec(&private)?, false)?;
+    let executable = temp.path().join("agent");
+    std::fs::write(&executable, b"native release")?;
+    let manager = Fake::default();
+    let public = service::install(&layout, &source, &executable, &manager).await?;
+    let private = service::install(&layout, &private_source, &executable, &manager).await?;
+    ensure!(service::select(&layout, None)?.spec.identity == public.identity);
+    ensure!(service::select(&layout, Some(&private.identity[..12]))?.spec.identity == public.identity);
+    let saved_unit = std::fs::read(&private.unit)?;
+    std::fs::write(&private.unit, b"foreign unit without PortHub ownership")?;
+    manager.calls.lock().unwrap().clear();
+    ensure!(service::registration_action(&layout, Some(&public.identity[..12]), Action::Stop, &manager).await.is_err());
+    ensure!(manager.calls.lock().unwrap().is_empty());
+    ensure!(manager.state_value(&public).active && manager.state_value(&private).active);
+    std::fs::write(&private.unit, saved_unit)?;
+    service::registration_action(&layout, None, Action::Stop, &manager).await?;
+    ensure!(!manager.state_value(&public).active && !manager.state_value(&private).active);
+    service::registration_action(&layout, Some(&public.identity[..12]), Action::Start, &manager).await?;
+
+    let other_source = profile(temp.path(), "ffffffffffffffffffffffff")?;
+    let other = service::install(&layout, &other_source, &executable, &manager).await?;
+    let other_private_source = temp.path().join("other-private.json");
+    let mut other_private_profile = porthub_agent::private_profile::Profile::load(&private_source)?;
+    other_private_profile.workspace = "bbbbbbbbbbbbbbbbbbbbbbbb".into();
+    other_private_profile.peer_id = "bbbbbbbbbbbbbbbbbbbbbbbb:ffffffffffffffffffffffff".into();
+    porthub_agent::profile::write_private(&other_private_source, &serde_json::to_vec(&other_private_profile)?, false)?;
+    let other_private = service::install(&layout, &other_private_source, &executable, &manager).await?;
+    let gateway_source = temp.path().join("other-gateway.json");
+    let mut gateway_profile = Profile::load(&source)?;
+    gateway_profile.server = "https://other-gateway.example".into();
+    gateway_profile.save_new(&gateway_source)?;
+    let other_gateway = service::install(&layout, &gateway_source, &executable, &manager).await?;
+    let gateway_private_source = temp.path().join("gateway-private.json");
+    let mut gateway_private_profile = porthub_agent::private_profile::Profile::load(&private_source)?;
+    gateway_private_profile.server = gateway_profile.server.clone();
+    porthub_agent::profile::write_private(&gateway_private_source, &serde_json::to_vec(&gateway_private_profile)?, false)?;
+    let gateway_private = service::install(&layout, &gateway_private_source, &executable, &manager).await?;
+    ensure!(service::select(&layout, None).is_err());
+    manager.calls.lock().unwrap().clear();
+    service::registration_action(&layout, Some(&public.identity[..12]), Action::Restart, &manager).await?;
+    let calls = manager.calls.lock().unwrap().clone();
+    ensure!(calls == vec![("stop".into(), private.service.clone()), ("stop".into(), public.service.clone()),
+        ("start".into(), public.service.clone()), ("start".into(), private.service.clone())]);
+    ensure!(manager.state_value(&other).active && manager.state_value(&other_gateway).active);
+    ensure!(manager.state_value(&other_private).active && manager.state_value(&gateway_private).active);
+    service::registration_action(&layout, Some(&public.identity[..12]), Action::Uninstall { purge: true }, &manager).await?;
+    let remaining = service::registrations(&layout)?;
+    ensure!(remaining.len() == 4);
+    ensure!(remaining.iter().any(|entry| entry.spec.identity == other.identity));
+    ensure!(remaining.iter().any(|entry| entry.spec.identity == other_gateway.identity));
+    ensure!(remaining.iter().any(|entry| entry.spec.identity == other_private.identity));
+    ensure!(remaining.iter().any(|entry| entry.spec.identity == gateway_private.identity));
+    ensure!(manager.state_value(&other).active && manager.state_value(&other_gateway).active);
+    ensure!(manager.state_value(&other_private).active && manager.state_value(&gateway_private).active);
+    Ok(())
+}
