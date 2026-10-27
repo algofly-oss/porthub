@@ -88,7 +88,6 @@ export default function ExitRoutes({ data, manage, params, onSaved }) {
         </div>
         {manage && <Button onClick={() => open()} disabled={busy}><IconPlus size={16} />Exit node</Button>}
       </div>
-      <p className="mb-4 rounded-lg bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-200">Exit routing currently requires compatible Linux agents and handles IPv4 traffic. New IPv6 internet connections are blocked while an exit is active so applications can use IPv4. Local IPv6 and established connections remain available.</p>
       {error && !editing && !removing && <p role="alert" className="mb-3 text-sm text-red-500">{error}</p>}
       {!data.exit_nodes?.length && <p className="py-5 text-center text-sm text-muted-foreground">No exit nodes configured.</p>}
       <div className="space-y-2">
