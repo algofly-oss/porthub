@@ -426,6 +426,7 @@ export default function HostConfigPopup({
   onRefreshMachineToken,
   onRequestClientUpdate,
   onRefreshConnection,
+  onRefreshPorts,
   onCreateGroup,
   onAddMachineToGroup,
   onRemoveMachineFromGroup,
@@ -446,6 +447,8 @@ export default function HostConfigPopup({
   const [proxiesOpen, setProxiesOpen] = useState(false);
   const [proxyEditorOpen, setProxyEditorOpen] = useState(false);
   const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
+  useEffect(() => { if (opened) onRefreshPorts?.(); }, [opened, host?.id, onRefreshPorts]);
+  useEffect(() => { if (opened && machineSection === "ports") onRefreshPorts?.(); }, [opened, machineSection, onRefreshPorts]);
   useEffect(() => { if (opened) setMachineSection(initialSection); }, [opened, host?.id, initialSection]);
   useEffect(() => {
     if (opened && additionalDomainsRef.current) additionalDomainsRef.current.open = false;

@@ -3,7 +3,7 @@ import ResultsPagination from "@/components/ui/results-pagination";
 import { normalizeTrafficSamples, trafficSummary } from "@/shared/utils/traffic.mjs";
 import { compareInventoryEntries, INVENTORY_SORT_OPTIONS, isTrafficSort } from "@/shared/utils/inventory-sort.mjs";
 import { preserveNewerClientVersion } from "@/shared/utils/client-version.mjs";
-import { useContext, useEffect, useMemo, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { useRouter } from "next/router";
 import { Button as WorkspaceButton } from "@/components/ui/button";
@@ -298,6 +298,8 @@ export default function Home({ onStatsChange, active = true }) {
   const [hosts, setHosts] = useWorkspaceState("machines.hosts", []);
   const [privateAccess] = useWorkspaceState("access.data", null);
   const [selectedHostId, setSelectedHostId] = useState(null);
+  const [inventoryRefresh, setInventoryRefresh] = useState(0);
+  const refreshPorts = useCallback(() => setInventoryRefresh(value => value + 1), []);
   const [configStartSection, setConfigStartSection] = useState("groups");
   const [isLoading, setIsLoading] = useWorkspaceState("machines.loading", true);
   const [isSaving, setIsSaving] = useState(false);
@@ -606,7 +608,7 @@ export default function Home({ onStatsChange, active = true }) {
       socket.off("connect", schedule);
       document.removeEventListener("visibilitychange", visible);
     };
-  }, [socket, active, isLoading]);
+  }, [socket, active, isLoading, inventoryRefresh]);
 
   // Traffic ordering must rank the entire fleet, not only the current page.
   // Key requests by stable IDs so sorting a fresh snapshot cannot restart polls.
@@ -1430,6 +1432,7 @@ export default function Home({ onStatsChange, active = true }) {
         onRemoveMachineFromGroup={handleRemoveMachineFromGroup}
       />
       <HostConfigPopup
+        onRefreshPorts={refreshPorts}
         initialSection={configStartSection}
         host={selectedHost}
         privateDomain={selectedHost ? privateDomain(selectedHost) : ""}
