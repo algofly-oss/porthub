@@ -512,14 +512,21 @@ mod tcp_tests {
     use hickory_proto::{op::Query, rr::Name};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    // Windows reserves different dynamic port ranges for TCP and UDP. A UDP
-    // ephemeral port can be forbidden for TCP even when nothing is listening.
-    // Reserve a port accepted by both stacks without changing host exclusions.
+    // Windows runner images can exclude dynamic port ranges independently for
+    // TCP and UDP. Probe bounded random non-dynamic ports accepted by both
+    // stacks, without changing host exclusions or enabling address reuse.
     #[cfg(windows)]
     async fn test_sockets() -> Result<(UdpSocket, TcpListener)> {
         let mut last = None;
         for _ in 0..32 {
-            let tcp = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+            let mut random = [0; 2];
+            getrandom::fill(&mut random)?;
+            let port = 10000 + u16::from_ne_bytes(random) % 30000;
+            let tcp = match TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await {
+                Ok(tcp) => tcp,
+                Err(error) if matches!(error.kind(), std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied) => { last = Some(error); continue; },
+                Err(error) => return Err(error.into()),
+            };
             match UdpSocket::bind(tcp.local_addr()?).await {
                 Ok(socket) => return Ok((socket, tcp)),
                 Err(error) if matches!(error.kind(), std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied) => last = Some(error),
