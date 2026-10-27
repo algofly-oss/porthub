@@ -1,3 +1,4 @@
+import { Tooltip } from "@/components/ui/tooltip";
 import MachineOsIcon from "@/components/ui/machine-os-icon";
 import { countryDetails, platformLabel } from "@/shared/utils/machine-platform.mjs";
 import { TableRow, TableCell } from "@/components/ui/table";
@@ -52,13 +53,22 @@ export default function HostItem({ name, hostname, privateDomain = "", groupLabe
         <span className="min-w-0 flex-1">
           <span className="flex min-w-0 items-center gap-1">
             <button type="button" className="min-w-0 truncate rounded text-left text-[15px] font-medium" aria-label={`Configure ${name}`}>{name}</button>
-            {osLabel && <span className="inline-flex shrink-0 items-center text-muted-foreground" title={osLabel} aria-label={osLabel}><MachineOsIcon os={clientOs} distribution={clientOsId} size={15} /></span>}
-            {flag && <span className="shrink-0 text-sm" title={countryName} aria-label={countryName}>{flag}</span>}
             {privateDomain && <button type="button" onClick={event => copyValue(event, `http://${privateDomain}`, "PortHub domain address")}
               aria-label={`Copy PortHub address http://${privateDomain}`} title={`Copy http://${privateDomain}`}
               className="inline-flex shrink-0 items-center rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline focus-visible:outline-2">
               <IconCopy size={14} />
             </button>}
+            {(osLabel || flag) && <span className="ml-1 inline-flex h-7 shrink-0 items-center rounded-lg border border-border/60 bg-muted/60 px-1">
+              {osLabel && <Tooltip label={osLabel} withArrow openDelay={150}>
+                <span className="inline-flex h-5 w-6 items-center justify-center text-foreground/75" role="img" aria-label={osLabel}>
+                  <MachineOsIcon os={clientOs} distribution={clientOsId} size={15} className={clientOsId === "ubuntu" ? "text-orange-600 dark:text-orange-400" : clientOs === "windows" ? "text-sky-600 dark:text-sky-400" : ""} />
+                </span>
+              </Tooltip>}
+              {osLabel && flag && <span className="mx-0.5 h-3 w-px bg-border" aria-hidden="true" />}
+              {flag && <Tooltip label={countryName} withArrow openDelay={150}>
+                <span className="inline-flex h-5 w-6 items-center justify-center text-base leading-none" role="img" aria-label={countryName}>{flag}</span>
+              </Tooltip>}
+            </span>}
           </span>
           <span className="mt-1 block truncate text-xs text-muted-foreground"><span className={status === "online" ? "text-emerald-700 dark:text-emerald-400" : status === "offline" ? "text-red-700 dark:text-red-400" : status === "auth_required" ? "text-amber-700 dark:text-amber-400" : ""}>{statusLabel}</span> · {status !== "online" && lastSeen ? lastSeen : hostname || "Awaiting client"}{clientVersionLabel ? <> · <span className={clientUpdateAvailable ? "text-amber-700 dark:text-amber-400" : ""} title={clientUpdateAvailable ? `Update available: ${latestClientVersionLabel}` : "Latest client version"}>{clientVersionLabel}</span></> : ""}</span>
         </span>
