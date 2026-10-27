@@ -42,13 +42,14 @@ pub(super) fn routes(index: u32, table: u32) -> Result<[RuleBuilder; 2]> {
             .table(254),
     ])
 }
-pub(super) async fn apply(name: &str, index: u32, bypass: bool) -> Result<()> {
+pub(super) async fn apply_with_lan(name:&str,index:u32,bypass:bool,networks:&[porthub_mesh::lan_routes::Network])->Result<()> {
+    ensure!(networks.len()<=256,"too many container LAN prefixes");
     let table = table(name)?;
     let (exit, direct) = marks(index)?;
     let selected = if bypass { direct } else { exit };
     let connection = Connection::<Nftables>::new()?;
-    let config = NftablesConfig::new().table(&table, Family::Ip, |table| {
-        table
+    let config = NftablesConfig::new().table(&table, Family::Ip, |mut table| {
+        table=table
             .chain("incoming", |chain| {
                 chain
                     .base(BaseChain::filter(FilterHook::Prerouting, Priority::Mangle))
@@ -92,6 +93,23 @@ pub(super) async fn apply(name: &str, index: u32, bypass: bool) -> Result<()> {
                     .set_mark(direct)
                     .accept()
             })
+            ;
+        // Existing flows above retain their conntrack decision. New private
+        // flows select only authorized LAN prefixes; other private traffic
+        // keeps its ordinary host route even when an internet exit is active.
+        for network in networks {
+            table=table.rule_keyed("classify",format!("lan_{network}"),|rule| {
+                rule.match_ct_mark(0).match_daddr_v4(network.address(),network.prefix())
+                    .set_ct_mark(exit).set_mark(exit).accept()
+            });
+        }
+        for (address,prefix) in [(std::net::Ipv4Addr::new(10,0,0,0),8),(std::net::Ipv4Addr::new(172,16,0,0),12),(std::net::Ipv4Addr::new(192,168,0,0),16)] {
+            table=table.rule_keyed("classify",format!("private_{address}"),|rule| {
+                rule.match_ct_mark(0).match_daddr_v4(address,prefix)
+                    .set_ct_mark(direct).set_mark(direct).accept()
+            });
+        }
+        table
             .rule_keyed("classify", "new_connection", |rule| {
                 rule.match_ct_mark(0)
                     .set_ct_mark(selected)

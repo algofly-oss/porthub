@@ -39,6 +39,10 @@ struct Reply {
     direct_relay_url: Option<String>,
     #[serde(default)]
     relay_auth_token: String,
+    #[serde(default)]
+    proxy_jobs: Vec<String>,
+    #[serde(default)]
+    proxy_provider: bool,
 }
 #[derive(Clone, Deserialize)]
 struct IceServer {
@@ -165,6 +169,8 @@ struct Live {
     created: Instant,
 }
 pub enum Event {
+    #[cfg(feature = "local-tor")]
+    TorLocal { bytes: Bytes },
     Snapshot(Snapshot),
     Packet {
         peer: String,
@@ -290,7 +296,22 @@ pub async fn run_watched_identity(
     let mut pending: Vec<Signal> = Vec::new();
     let mut acks: Vec<String> = Vec::new();
     let mut seen: HashMap<String, Instant> = HashMap::new();
+    #[cfg(feature="local-tor")]
+    let proxy_manager=super::proxy_egress::Manager::start(profile.clone(),interfaces.clone(),cancel.clone());
+    let mut lan_interfaces = Vec::new();
+    let mut lan_networks = Vec::new();
+    let mut lan_refreshed = None::<Instant>;
     loop {
+        let current_interfaces = interfaces.borrow().clone();
+        if current_interfaces != lan_interfaces
+            || lan_refreshed.is_none_or(|at| at.elapsed() >= Duration::from_secs(60))
+        {
+            // Refresh outside the packet loop. Failure clears stale advertisements
+            // without blocking the authenticated control heartbeat.
+            lan_networks = super::lan_discovery::connected(&current_interfaces).unwrap_or_default();
+            lan_interfaces = current_interfaces;
+            lan_refreshed = Some(Instant::now());
+        }
         let next_bind = interfaces.borrow().first().map(|address| address.ip());
         if next_bind != bound { client = make_client(next_bind)?; bound = next_bind; }
         let sent = pending.len().min(16);
@@ -313,8 +334,8 @@ pub async fn run_watched_identity(
             })
             .collect();
         let body = serde_json::json!({"peer_id":profile.peer_id,"token":profile.token,
-            "fingerprint":identity.fingerprint(),"instance":instance,"stream_transport":if cfg!(feature="private-stream") {"quic1"} else {""},"signals":&pending[..sent],
-            "acks":&acks[..acked],"paths":paths});
+            "fingerprint":identity.fingerprint(),"instance":instance,"stream_transport":if cfg!(feature="private-stream") {"quic1"} else {""},"tor_exit":cfg!(all(feature="local-tor",any(target_os="linux",target_os="macos"))),"signals":&pending[..sent],
+            "acks":&acks[..acked],"paths":paths,"lan_networks":lan_networks,"lan_exit":cfg!(any(target_os="linux",target_os="macos")),"application_proxy":cfg!(feature="local-tor")});
         let mut reply = None;
         for offset in 0..bases.len() {
             let index = (preferred + offset) % bases.len();
@@ -369,9 +390,16 @@ pub async fn run_watched_identity(
                 "private gateway returned a different identity"
             );
             ensure!(
-                reply.snapshot.peers.len() <= 4096 && reply.signals.len() <= 128,
+                reply.snapshot.peers.len() <= 4096 && reply.signals.len() <= 128 && reply.proxy_jobs.len() <=64,
                 "private sync exceeds limits"
             );
+            #[cfg(feature="local-tor")]
+            {
+                let mut origins=Vec::new();
+                if let Some(origin)=&reply.direct_relay_url {origins.push(origin.clone());}
+                origins.extend(bases.iter().cloned());origins.dedup();
+                proxy_manager.update(origins,reply.proxy_provider,&reply.proxy_jobs);
+            }
             pending.drain(..sent);
             acks.drain(..acked);
             let now = Instant::now();

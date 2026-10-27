@@ -23,10 +23,19 @@ pub struct Sync {
     pub instance: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub stream_transport: String,
+    #[serde(skip_serializing_if="is_false")]
+    pub tor_exit: bool,
+    #[serde(skip_serializing_if="Vec::is_empty")]
+    pub lan_networks: Vec<String>,
+    #[serde(skip_serializing_if="is_false")]
+    pub lan_exit: bool,
+    #[serde(skip_serializing_if="is_false")]
+    pub application_proxy: bool,
     pub signals: Vec<Signal>,
     pub acks: Vec<String>,
     pub paths: BTreeMap<String, String>,
 }
+fn is_false(value:&bool)->bool {!*value}
 static SESSION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\A[a-zA-Z0-9-]{16,64}\n?\z").unwrap());
 static FINGERPRINT: LazyLock<Regex> =
@@ -57,6 +66,22 @@ pub fn parse(raw: Value) -> ApiResult<Sync> {
         );
     }
     let instance = session(&mut model, "instance");
+    if model.field(&["tor_exit"]).is_some_and(|value| !value.is_boolean()) { model.add("tor_exit", "Expected a boolean", "type_error.bool"); }
+    let tor_exit = if model.field(&["tor_exit"]).is_some() { model.required_bool("tor_exit") } else { false };
+    let lan_networks = model.string_list("lan_networks", 32);
+    if model.field(&["lan_exit"]).is_some_and(|value| !value.is_boolean()) {
+        model.add("lan_exit", "Expected a boolean", "type_error.bool");
+    }
+    let lan_exit = model.optional_bool("lan_exit").unwrap_or(false);
+    if model.field(&["application_proxy"]).is_some_and(|value|!value.is_boolean()) {
+        model.add("application_proxy","Expected a boolean","type_error.bool");
+    }
+    let application_proxy=model.optional_bool("application_proxy").unwrap_or(false);
+    for network in &lan_networks {
+        if network.parse::<porthub_mesh::lan_routes::Network>().is_err() {
+            model.add("lan_networks", "Expected a canonical private IPv4 network prefix", "value_error");
+        }
+    }
     let stream_transport = model.literal("stream_transport", "", &["", "quic1"]);
     let mut signals = Vec::new();
     for mut child in model.objects("signals", false, 0, 16) {
@@ -100,6 +125,10 @@ pub fn parse(raw: Value) -> ApiResult<Sync> {
         fingerprint: fingerprint.to_ascii_uppercase(),
         instance,
         stream_transport,
+        tor_exit,
+        lan_networks,
+        lan_exit,
+        application_proxy,
         signals,
         acks,
         paths,

@@ -151,6 +151,25 @@ fn exit_traffic_is_peer_bound_stateful_and_separate_from_private_acl() {
 }
 
 #[test]
+fn exit_traffic_mode_is_enforced_by_client_and_serving_peer() {
+    use porthub_mesh::exit_policy::TrafficMode;
+    for mode in [TrafficMode::All, TrafficMode::InternetOnly, TrafficMode::LanOnly] {
+        let mut config = snapshot();
+        config.grants.clear();
+        for peer in &mut config.peers { peer.fingerprint = "test-fingerprint".into(); peer.instance = "test-instance".into(); }
+        config.exit_routes = serde_json::from_value(json!([{"id":"exit","name":"Exit","routing_peers":["b"],"clients":["a"],"traffic_mode":mode}])).unwrap();
+        let mut client = Engine::default(); client.apply(config.clone()).unwrap();
+        config.self_ = "b".into();
+        let mut exit = Engine::default(); exit.apply(config).unwrap();
+        for (target, allowed) in [([8,8,8,8], mode.internet()), ([192,168,80,7], mode.lan()), ([169,254,169,254], false), ([10,203,0,2], false)] {
+            let syn = addressed_packet([10,203,0,1], target, 40000, 443, 2);
+            assert_eq!(client.check_exit(&syn, "b", false), allowed, "client: {mode:?} {target:?}");
+            assert_eq!(exit.check_exit(&syn, "a", true), allowed, "exit: {mode:?} {target:?}");
+        }
+    }
+}
+
+#[test]
 fn exit_policies_reject_unknown_peers_overlaps_and_recursive_routing() {
     use porthub_agent::private_network::policy::ExitRoute;
     let route: ExitRoute = serde_json::from_value(json!({"id":"exit", "name":"Internet", "routing_peers":["b"], "clients":["a"]})).unwrap();
@@ -228,7 +247,6 @@ fn domain_rules_block_all_record_types_and_restore_when_removed() {
     let mut snapshot = snapshot();
     snapshot.dns_rules = vec![
         Rule { domain: "blocked.example".into(), action: Action::Block, include_subdomains: true },
-        Rule { domain: "mapped.example".into(), action: Action::Override { addresses: vec!["192.0.2.40".parse().unwrap(), "2001:db8::40".parse().unwrap()] }, include_subdomains: true },
     ];
     let mut zone = Zone::default(); zone.update(&snapshot).unwrap();
     let answer = |zone: &Zone, name, kind| {
@@ -241,13 +259,6 @@ fn domain_rules_block_all_record_types_and_restore_when_removed() {
         assert_eq!(answer(&zone, "www.blocked.example", kind).metadata.response_code, ResponseCode::NXDomain);
     }
     assert_eq!(answer(&zone, "notblocked.example", RecordType::A).metadata.response_code, ResponseCode::Refused);
-    for (kind, value) in [(RecordType::A, "192.0.2.40"), (RecordType::AAAA, "2001:db8::40")] {
-        let reply = answer(&zone, "mapped.example", kind);
-        assert_eq!(reply.answers.len(), 1);
-        assert_eq!(reply.answers[0].data.to_string(), value);
-        assert_eq!(reply.answers[0].name.to_ascii(), "mapped.example.");
-    }
-    assert!(answer(&zone, "mapped.example", RecordType::HTTPS).answers.is_empty());
     snapshot.dns_rules.push(Rule { domain: "miro.phub".into(), action: Action::Block, include_subdomains: true });
     assert!(zone.update(&snapshot).is_err());
     assert_eq!(answer(&zone, "blocked.example", RecordType::A).metadata.response_code, ResponseCode::NXDomain);
@@ -519,7 +530,6 @@ async fn linux_private_dns_resolves_through_the_owned_link_without_claiming_port
     policy.grants.clear();
     policy.dns_rules = vec![
         porthub_mesh::dns_policy::Rule { domain: "blocked.ph-policy-test".into(), action: porthub_mesh::dns_policy::Action::Block, include_subdomains: true },
-        porthub_mesh::dns_policy::Rule { domain: "mapped.ph-policy-test".into(), action: porthub_mesh::dns_policy::Action::Override { addresses: vec!["203.0.113.45".parse()?] }, include_subdomains: true },
     ];
     server.zone.write().await.update(&policy)?;
     let cancel = tokio_util::sync::CancellationToken::new();
@@ -528,7 +538,7 @@ async fn linux_private_dns_resolves_through_the_owned_link_without_claiming_port
         tun.index,
         Ipv4Addr::new(10, 234, 251, 1),
         port,
-        &["ph-native-test".to_owned(), "blocked.ph-policy-test".to_owned(), "mapped.ph-policy-test".to_owned()],
+        &["ph-native-test".to_owned(), "blocked.ph-policy-test".to_owned()],
     )
     .await?;
     let connection = zbus::Connection::system().await?;
@@ -556,10 +566,6 @@ async fn linux_private_dns_resolves_through_the_owned_link_without_claiming_port
     assert!(addresses
         .iter()
         .any(|(_, family, ip)| *family == libc::AF_INET && ip == &[10, 234, 251, 1]));
-    let (mapped, _, _): (ResolvedAddresses, String, u64) = tokio::time::timeout(
-        Duration::from_secs(8), proxy.call("ResolveHostname", &(0i32, "mapped.ph-policy-test", libc::AF_INET, 0u64)),
-    ).await??;
-    assert!(mapped.iter().any(|(_, family, ip)| *family == libc::AF_INET && ip == &[203, 0, 113, 45]));
     let blocked: std::result::Result<(ResolvedAddresses, String, u64), _> = tokio::time::timeout(
         Duration::from_secs(8), proxy.call("ResolveHostname", &(0i32, "blocked.ph-policy-test", libc::AF_INET, 0u64)),
     ).await?;
@@ -881,9 +887,141 @@ async fn container_forwarding_uses_host_exit_and_pins_flows_across_fallback() ->
     ensure!(&read(&underlay).await?[12..16] == client.octets(), "existing direct container flow moved on recovery");
     bridge.write(&udp(client, internet, 45103, 9000)).await?;
     ensure!(&read(&exit).await?[12..16] == exit_ip.octets(), "new container connection did not resume exit");
+    let remote_lan:Ipv4Addr="10.80.0.7".parse()?;
+    bridge.write(&udp(client, remote_lan, 45105, 9000)).await?;
+    ensure!(&read(&underlay).await?[12..16] == client.octets(), "internet-only captured private traffic");
+    owner.set_lan_networks(&["10.80.0.0/16".parse()?]).await?;
+    owner.set_bypass(true).await?;
+    bridge.write(&udp(client, remote_lan, 45106, 9000)).await?;
+    ensure!(&read(&exit).await?[12..16] == exit_ip.octets(), "LAN-only did not select an authorized private destination");
+    bridge.write(&udp(client, internet, 45107, 9000)).await?;
+    ensure!(&read(&underlay).await?[12..16] == client.octets(), "LAN-only captured internet traffic");
+    bridge.write(&udp(client, remote_lan, 45105, 9000)).await?;
+    ensure!(&read(&underlay).await?[12..16] == client.octets(), "existing private connection moved after enabling LAN routing");
+    bridge.write(&udp(client, internet, 45103, 9000)).await?;
+    ensure!(&read(&exit).await?[12..16] == exit_ip.octets(), "existing internet exit connection moved after selecting LAN-only");
     owner.clear().await?;
     let remaining = nft.list_rules("filter", Family::Ip).await?;
     ensure!(remaining.len() == original_rules.len() && original_rules.iter().all(|old| remaining.iter().any(|rule| rule.handle == old.handle && rule.nft_syntax() == old.nft_syntax())), "container cleanup changed foreign Docker rules");
     ensure!(routes.get_rules_v4().await?.iter().all(|rule| !(22500..=22600).contains(&rule.priority())), "container route rules leaked after cleanup");
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", feature = "netns-tests"))]
+#[tokio::test]
+#[ignore = "requires explicitly owned disposable network namespace"]
+async fn lan_only_routes_remote_subnets_and_preserves_local_and_internet_routes() -> anyhow::Result<()> {
+    use nlink::netlink::{Connection, Route, route::Ipv4Route, types::route::RouteScope};
+    use porthub_agent::private_network::device::Tun;
+    use std::{net::Ipv4Addr, time::Duration};
+    anyhow::ensure!(std::env::var("PORTHUB_TEST_OWNED_NETNS").as_deref() == Ok("1")
+        && std::path::Path::new("/.dockerenv").is_file(), "requires owned test container");
+    let overlay: Ipv4Addr = "10.234.251.1".parse()?;
+    let physical: Ipv4Addr = "10.234.252.1".parse()?;
+    let tun = Tun::open("phab12cd51", overlay, &[]).await?;
+    let uplink = Tun::open("phab12cd52", physical, &[]).await?;
+    let netlink = Connection::<Route>::new()?;
+    netlink.add_route(Ipv4Route::new(Ipv4Addr::UNSPECIFIED, 0).dev_index(uplink.index).prefsrc(physical).scope(RouteScope::Link)).await?;
+    netlink.add_route(Ipv4Route::new("192.168.0.0".parse()?, 16).dev_index(uplink.index).prefsrc(physical).scope(RouteScope::Link)).await?;
+    // A narrower remote advertisement cannot take over the existing local LAN.
+    tun.update_lan_routes(&["192.168.80.0/24".parse()?, "10.80.0.0/24".parse()?]).await?;
+    async fn send_and_receive(destination: &str, device: &Tun, source: Ipv4Addr) -> anyhow::Result<()> {
+        let socket = tokio::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+        socket.send_to(b"lan-mode", destination).await?;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut packet = [0u8; 1380];
+            loop {
+                let size = device.read(&mut packet).await?;
+                if size >= 36 && packet[0] >> 4 == 4 && packet[9] == 17 {
+                    assert_eq!(&packet[12..16], &source.octets());
+                    assert_eq!(&packet[28..size], b"lan-mode");
+                    return Ok::<_, anyhow::Error>(());
+                }
+            }
+        }).await??;
+        Ok(())
+    }
+    send_and_receive("10.80.0.7:8000", &tun, overlay).await?;
+    send_and_receive("192.168.80.7:8000", &uplink, physical).await?;
+    send_and_receive("8.8.8.8:8000", &uplink, physical).await?;
+    tun.update_lan_routes(&[]).await?;
+    send_and_receive("10.80.0.7:8000", &uplink, physical).await?;
+    Ok(())
+}
+
+#[cfg(all(target_os="linux",feature="netns-tests"))]
+#[tokio::test]
+#[ignore="requires explicitly owned disposable network namespace"]
+async fn lan_policy_keeps_main_routes_and_physical_control_connections_unchanged()->anyhow::Result<()> {
+    use nlink::netlink::{Connection,Route,route::Ipv4Route,types::route::RouteScope};
+    use porthub_agent::private_network::{device::Tun,exit_routes::Consumer};
+    use std::{collections::BTreeSet,net::Ipv4Addr,time::Duration};
+    anyhow::ensure!(std::env::var("PORTHUB_TEST_OWNED_NETNS").as_deref()==Ok("1") && std::path::Path::new("/.dockerenv").is_file(),"requires owned test container");
+    let own:Ipv4Addr="10.234.251.1".parse()?;let physical:Ipv4Addr="10.234.252.1".parse()?;
+    let tun=Tun::open("phab12cd71",own,&[]).await?;
+    let uplink=Tun::open("phab12cd72",physical,&[]).await?;
+    let netlink=Connection::<Route>::new()?;
+    netlink.add_route(Ipv4Route::new(Ipv4Addr::UNSPECIFIED,0).dev_index(uplink.index).prefsrc(physical).scope(RouteScope::Link)).await?;
+    netlink.add_route(Ipv4Route::new("192.168.86.0".parse()?,24).dev_index(uplink.index).prefsrc(physical).scope(RouteScope::Link)).await?;
+    let mut before:Vec<_>=netlink.get_routes_for_table(254).await?.iter().filter(|route|route.is_ipv4()).map(|route|(route.destination().cloned(),route.dst_len(),route.oif(),route.prefsrc().cloned())).collect();before.sort();
+    let mut policy=Consumer::activate_with_bypass(tun.index,own,&BTreeSet::from([physical]),true).await?;
+    let networks=["10.0.0.0/8".parse()?,"172.16.0.0/12".parse()?,"192.168.0.0/16".parse()?];
+    policy.set_lan_networks(&networks).await?;policy.set_lan_networks(&networks).await?;
+    assert_eq!(netlink.get_rules_v4().await?.iter().filter(|rule|rule.priority()==22568 && rule.protocol()==Some(186)).count(),3);
+    async fn receive(device:&Tun,source:Ipv4Addr)->anyhow::Result<()> {
+        tokio::time::timeout(Duration::from_secs(2),async {
+            let mut packet=[0u8;1380];
+            loop {
+                let size=device.read(&mut packet).await?;
+                if size>=32 && packet[0]>>4==4 && packet[9]==17 {
+                    assert_eq!(&packet[12..16],&source.octets());assert_eq!(&packet[28..size],b"test");return Ok::<_,anyhow::Error>(());
+                }
+            }
+        }).await??;Ok(())
+    }
+    for (target,device,source) in [
+        ("10.80.0.7:8000",&tun,own),
+        ("192.168.0.153:8000",&tun,own),
+        ("192.168.86.7:8000",&uplink,physical),
+        ("8.8.8.8:8000",&uplink,physical),
+    ] {
+        let socket=tokio::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED,0)).await?;
+        socket.send_to(b"test",target).await?;receive(device,source).await?;
+    }
+    let control=tokio::net::UdpSocket::bind((physical,0)).await?;
+    control.send_to(b"test","10.80.0.7:8000").await?;receive(&uplink,physical).await?;
+    let mut after:Vec<_>=netlink.get_routes_for_table(254).await?.iter().filter(|route|route.is_ipv4()).map(|route|(route.destination().cloned(),route.dst_len(),route.oif(),route.prefsrc().cloned())).collect();after.sort();assert_eq!(before,after);
+    policy.set_lan_networks(&[]).await?;
+    let socket=tokio::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED,0)).await?;
+    socket.send_to(b"test","10.80.0.7:8000").await?;receive(&uplink,physical).await?;
+    // Internet-only must leave private destinations behind the ordinary
+    // router reachable, while still selecting the exit for public traffic.
+    policy.set_bypass(false).await?;
+    let socket=tokio::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED,0)).await?;
+    socket.send_to(b"test","10.80.0.7:8000").await?;receive(&uplink,physical).await?;
+    let socket=tokio::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED,0)).await?;
+    socket.send_to(b"test","8.8.8.8:8000").await?;receive(&tun,own).await?;
+    policy.clear().await?;
+    assert!(!netlink.get_rules_v4().await?.iter().any(|rule|(22500..=22600).contains(&rule.priority())));
+    let (desired,receiver)=tokio::sync::watch::channel(None);
+    let (_sources,interfaces)=tokio::sync::watch::channel(vec![std::net::SocketAddr::from((physical,0))]);
+    let cancel=tokio_util::sync::CancellationToken::new();
+    let (report,mut state)=tokio::sync::watch::channel("pending");
+    let worker=tokio::spawn(porthub_agent::private_network::exit_routes::watch_plans_reported(receiver,interfaces,cancel.clone(),Some(report)));
+    desired.send_replace(Some(porthub_agent::private_network::exit_plan::Plan {
+        index:tun.index,own,mode:porthub_mesh::exit_policy::TrafficMode::LanOnly,bypass:false,networks:networks.to_vec(),
+    }));
+    tokio::time::timeout(Duration::from_secs(3),async {
+        while *state.borrow_and_update()!="LAN routing active" {state.changed().await?;}
+        Ok::<_,anyhow::Error>(())
+    }).await??;
+    let socket=tokio::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED,0)).await?;
+    socket.send_to(b"test","10.80.0.7:8000").await?;receive(&tun,own).await?;
+    let socket=tokio::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED,0)).await?;
+    socket.send_to(b"test","8.8.8.8:8000").await?;receive(&uplink,physical).await?;
+    control.send_to(b"test","10.80.0.7:8000").await?;receive(&uplink,physical).await?;
+    cancel.cancel();tokio::time::timeout(Duration::from_secs(3),worker).await???;
+    assert_eq!(*state.borrow(),"inactive");
+    assert!(!netlink.get_rules_v4().await?.iter().any(|rule|(22500..=22600).contains(&rule.priority())));
     Ok(())
 }

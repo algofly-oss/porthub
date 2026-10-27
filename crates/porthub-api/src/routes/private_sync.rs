@@ -58,7 +58,7 @@ async fn indexes(app: &App) -> ApiResult<()> {
         .await?;
     Ok(())
 }
-async fn active(
+pub(crate) async fn active(
     app: &App,
     owner: ObjectId,
 ) -> ApiResult<(Vec<Document>, HashMap<String, Document>)> {
@@ -156,7 +156,7 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
     }
     indexes(&app).await?;
     let now = DateTime::now();
-    let updated=app.collection("private_peers").find_one_and_update(filter.clone(),doc!{"$set":{"fingerprint":&input.fingerprint,"instance":&input.instance,"stream_transport":&input.stream_transport,"last_seen_at":now,
+    let updated=app.collection("private_peers").find_one_and_update(filter.clone(),doc!{"$set":{"fingerprint":&input.fingerprint,"instance":&input.instance,"stream_transport":&input.stream_transport,"tor_exit":input.tor_exit,"lan_networks":&input.lan_networks,"lan_exit":input.lan_exit,"application_proxy":input.application_proxy,"last_seen_at":now,
         "paths":mongodb::bson::to_document(&input.paths).expect("string map")},"$inc":{"revision":1_i64}}).return_document(ReturnDocument::After).await?
         .ok_or_else(||forbidden("Private credential revoked"))?;
     for p in &mut peers {
@@ -175,11 +175,20 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
         .sort(doc! {"created_at":1,"_id":1})
         .await?.try_collect().await?;
     let exit_routes: Vec<Value> = exit_definitions.iter().filter_map(|route| {
-        let mut routing_peers: Vec<_> = peers.iter().filter(|p| {
-            let machine_id=store::id(p.get("machine_id"));
-            inventory.get(&machine_id).is_some_and(|machine| crate::routes::exit_nodes::matches_selectors(route,"routing_selectors",&machine_id,machine))
-        }).map(|p|store::string(p,"_id").to_owned()).collect();
+        let mut ranked_peers: Vec<_> = peers.iter().filter_map(|peer| {
+            if route.get_str("traffic_mode").unwrap_or("internet_only") != "internet_only"
+                && peer.get_bool("lan_exit") != Ok(true) { return None; }
+            let machine_id = store::id(peer.get("machine_id"));
+            let machine = inventory.get(&machine_id)?;
+            let priority = crate::routes::exit_nodes::selector_priority(route, "routing_selectors", &machine_id, machine)?;
+            Some((priority, machine_id, store::string(peer, "_id").to_owned()))
+        }).collect();
+        ranked_peers.sort();
+        let mut routing_peers: Vec<_> = ranked_peers.into_iter().map(|(_, _, id)| id).collect();
         let mut clients: Vec<_> = peers.iter().filter(|p| {
+            if route.get_str("traffic_mode").unwrap_or("internet_only") != "internet_only"
+                && p.get_bool("lan_exit") != Ok(true) { return false; }
+            if route.get_bool("tor_enabled") == Ok(true) && p.get_bool("tor_exit") != Ok(true) { return false; }
             let machine_id=store::id(p.get("machine_id"));
             inventory.get(&machine_id).is_some_and(|machine| crate::routes::exit_nodes::matches_selectors(route,"distribution_selectors",&machine_id,machine))
         }).map(|p|store::string(p,"_id").to_owned()).collect();
@@ -190,8 +199,8 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
         // Transport reachability does not add ordinary private-port grants.
         if !is_exit { clients.retain(|id| id == &input.peer_id); }
         if !is_client { routing_peers.retain(|id| id == &input.peer_id); }
-        (!routing_peers.is_empty() && !clients.is_empty()).then(|| json!({"id":store::id(route.get("_id")),"name":store::string(route,"name"),"routing_peers":routing_peers,"clients":clients,
-            "selection":route.get_str("selection").unwrap_or("sticky"),"allow_direct_fallback":route.get_bool("allow_direct_fallback").unwrap_or(false),"masquerade":true,"block_lan_access":true}))
+        ((!routing_peers.is_empty() || route.get_bool("tor_enabled")==Ok(true)) && !clients.is_empty()).then(|| json!({"id":store::id(route.get("_id")),"name":store::string(route,"name"),"routing_peers":routing_peers,"clients":clients,
+            "selection":route.get_str("selection").unwrap_or("sticky"),"allow_direct_fallback":route.get_bool("allow_direct_fallback").unwrap_or(false),"tor_enabled":is_client && route.get_bool("tor_enabled").unwrap_or(false),"tor_circuit_groups":route.get_i64("tor_circuit_groups").unwrap_or(4),"traffic_mode":route.get_str("traffic_mode").unwrap_or("internet_only"),"masquerade":true,"block_lan_access":route.get_str("traffic_mode").unwrap_or("internet_only") == "internet_only"}))
     }).collect();
     let books: Vec<Document> = app
         .collection("access_rulebooks")
@@ -326,7 +335,7 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
             let age = now.timestamp_millis() - seen.timestamp_millis();
             (0..15_000).contains(&age)
         }) && !store::string(p, "fingerprint").is_empty() && !store::string(p, "instance").is_empty();
-        json!({"id":id,"online":online,"ip":store::field(p,"ip"),"fingerprint":store::string(p,"fingerprint"),"instance":store::string(p,"instance"),"stream_transport":store::string(p,"stream_transport"),
+        json!({"id":id,"online":online,"ip":store::field(p,"ip"),"fingerprint":store::string(p,"fingerprint"),"instance":store::string(p,"instance"),"stream_transport":store::string(p,"stream_transport"),"lan_networks":p.get_array("lan_networks").cloned().unwrap_or_default(),
             "hostname":format!("{}.{suffix}",names.primary.get(id).map(String::as_str).unwrap_or("machine")),"aliases":aliases})
     }).collect();
     let current = app
@@ -388,10 +397,15 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
         .filter(|url| url.starts_with("http://") || url.starts_with("https://"))
         .map(|url| url.trim_end_matches('/').to_owned());
     let dns_document = app.collection("private_dns_rules").find_one(doc! {"workspace_id":owner,"machine_id":current.get("machine_id")}).await?;
-    let dns_rules = dns_document.as_ref().map(|value|store::field(value,"rules")).unwrap_or_else(||json!([]));
+    let dns_rules = dns_document.as_ref().map(|value|crate::routes::dns_rules::blocking_rules(store::field(value,"rules"))).unwrap_or_else(||json!([]));
+    let proxy_provider = if input.application_proxy {
+        if let Ok(machine)=current.get_object_id("machine_id") {app.proxy_pending.is_provider(&app,owner,machine).await} else {false}
+    } else {false};
+    app.proxy_pending.publish(crate::peer_proxy::Binding {id:input.peer_id.clone(),instance:input.instance.clone(),fingerprint:input.fingerprint.clone()},&hash,owner.to_hex(),proxy_provider);
+    let proxy_jobs=app.proxy_pending.jobs(&input.peer_id,&input.instance,&input.fingerprint);
     Ok(([(header::CACHE_CONTROL,"no-store")],Json(json!({"snapshot":{"workspace":owner.to_hex(),"self":input.peer_id,"revision":store::field(&updated,"revision"),"dns_rules":dns_rules,
         "expires_at":chrono::DateTime::from_timestamp_millis(now.timestamp_millis()+15_000).expect("current timestamp").to_rfc3339_opts(chrono::SecondsFormat::Millis,true),"peers":peers,"dns_suffixes":dns_suffixes,"grants":grants,"exit_routes":exit_routes},"signals":signals,
         "ice_servers":app.config.private_transport.ice(&input.peer_id,now.timestamp_millis()/1000),"relay_routes":app.config.private_transport.relay_routes,
-        "direct_relay_url":direct_relay_url,"relay_auth_token":relay_auth_token,
+        "direct_relay_url":direct_relay_url,"relay_auth_token":relay_auth_token,"proxy_jobs":proxy_jobs,"proxy_provider":proxy_provider,
         "control_fallback_urls":fallback,"poll_seconds":1}))).into_response())
 }

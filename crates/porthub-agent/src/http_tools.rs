@@ -105,8 +105,7 @@ pub async fn run(
 async fn background(options: server::Options, exposure: Exposure) -> Result<()> {
     let root = std::fs::canonicalize(&options.root).context("document root is unavailable")?;
     ensure!(root.is_dir(), "document root must be a directory");
-    let state = crate::expose::job_layout()?.state;
-    crate::service::directory(&state, true)?;
+    let state = crate::expose::prepare_job_directory()?;
     let log_path = state.join(format!("http-{}.log", uuid::Uuid::new_v4().simple()));
     let log = OpenOptions::new()
         .create_new(true)

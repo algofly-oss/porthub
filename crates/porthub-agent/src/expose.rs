@@ -265,6 +265,25 @@ pub fn job_layout() -> Result<crate::service::Layout> {
     })
 }
 
+/// Prepare this account's dedicated PortHub job state. Older transfer tools
+/// could create the default app directory with a group-writable umask. Tighten
+/// only that owned app directory; never chmod an arbitrary environment path.
+pub(crate) fn prepare_job_directory()->Result<PathBuf> {
+    let root=job_layout()?.state;
+    if std::env::var_os("PORTHUB_STATE_DIR").is_none() {
+        let base=root.parent().context("job state parent missing")?;
+        #[cfg(unix)]
+        if let Ok(metadata)=fs::symlink_metadata(base) {
+            use std::os::unix::fs::{MetadataExt,PermissionsExt};
+            ensure!(metadata.is_dir() && metadata.uid()==rustix::process::getuid().as_raw(),"PortHub user state ownership is unsafe");
+            crate::service::directory(base.parent().context("user state parent missing")?,false)?;
+            fs::set_permissions(base,fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    crate::service::directory(&root,true)?;
+    Ok(root)
+}
+
 #[cfg(any(unix, windows))]
 pub async fn broker_worker(
     registration_layout: crate::service::Layout,

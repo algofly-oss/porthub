@@ -119,6 +119,56 @@ impl Control {
     pub fn profile(&self) -> &Profile {
         &self.profile
     }
+    #[cfg(feature="local-tor")]
+    pub(crate) fn prefer_proxy_authority(&self,base:String) {
+        *self.preferred.lock().unwrap_or_else(|poison|poison.into_inner())=Some((base,Instant::now()+Duration::from_secs(60)));
+    }
+    #[cfg(feature="local-tor")]
+    pub(crate) async fn proxy_check(&self,private:&crate::private_profile::Profile,grant:&str)->Result<bool,Failure> {
+        let mut failure=Failure::Unavailable;
+        for base in self.authorities() {
+            let Ok(http)=self.http_for(&base).await else {continue;};
+            let response=http.get(format!("{base}/api/access/proxy-check/{grant}"))
+                .header("x-porthub-peer",&private.peer_id).bearer_auth(&private.token)
+                .timeout(Duration::from_secs(5)).send().await;
+            let Ok(mut response)=response else {continue;};
+            if !response.status().is_success() {failure=Failure::Rejected(response.status().as_u16());continue;}
+            let mut bytes=Vec::new();
+            loop {
+                match response.chunk().await {
+                    Ok(Some(chunk)) if bytes.len()+chunk.len()<=1024=>bytes.extend_from_slice(&chunk),
+                    Ok(None)=>break,
+                    _=>return Err(Failure::InvalidResponse),
+                }
+            }
+            let ready=serde_json::from_slice::<Value>(&bytes).ok().and_then(|value|value.get("ready").and_then(Value::as_bool)).ok_or(Failure::InvalidResponse)?;
+            self.prefer_proxy_authority(base);
+            return Ok(ready);
+        }
+        Err(failure)
+    }
+    #[cfg(feature="local-tor")]
+    pub(crate) async fn stream_sources(&self, base: &str) -> Result<Vec<std::net::IpAddr>, Failure> {
+        let host = url::Url::parse(base).ok().and_then(|url|url.host_str().map(str::to_owned));
+        if host.as_deref()==Some("localhost") { return Ok(vec![std::net::Ipv4Addr::LOCALHOST.into()]); }
+        if let Some(ip)=host.and_then(|host|host.trim_matches(['[',']']).parse::<std::net::IpAddr>().ok()).filter(std::net::IpAddr::is_loopback) {
+            return Ok(vec![ip]);
+        }
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        {
+            // Reuse control's bounded underlay cache; no new discovery timer
+            // or origin probe is added for application connections.
+            let _=self.http_for(base).await?;
+            if let Some((source,_,_))=&*self.underlay.lock().await { return Ok(vec![*source]); }
+            Err(Failure::Unavailable)
+        }
+        #[cfg(not(any(target_os="linux",target_os="macos")))]
+        {
+            let sources=crate::private_network::interfaces::current().await.map_err(|_|Failure::Unavailable)?;
+            if sources.is_empty() {return Err(Failure::Unavailable);}
+            Ok(sources.iter().map(std::net::SocketAddr::ip).collect())
+        }
+    }
     pub(crate) fn authorities(&self) -> Vec<String> {
         let preferred = self
             .preferred
@@ -367,5 +417,40 @@ impl Control {
             return Err(Failure::InvalidResponse);
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test,feature="local-tor"))]
+mod proxy_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt,AsyncWriteExt};
+    async fn reply(listener:tokio::net::TcpListener,status:&str,body:&str)->anyhow::Result<()> {
+        let (mut socket,_)=listener.accept().await?;let mut request=Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            let mut bytes=[0u8;1024];let count=socket.read(&mut bytes).await?;
+            anyhow::ensure!(count>0 && request.len()+count<=8192,"invalid test request");request.extend_from_slice(&bytes[..count]);
+        }
+        let request=String::from_utf8(request)?;
+        assert!(request.starts_with(&format!("GET /api/access/proxy-check/{} ","a".repeat(24))));
+        let headers=request.to_ascii_lowercase();
+        assert!(headers.contains("x-porthub-peer: fixture-peer"));
+        assert!(headers.contains("authorization: bearer private-test-token-01234567890123456789"));
+        assert!(!headers.contains("public-test-token"));
+        socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await?;
+        socket.shutdown().await?;Ok(())
+    }
+    #[tokio::test]
+    async fn proxy_preflight_authenticates_privately_and_caches_a_working_fallback()->anyhow::Result<()> {
+        let primary=tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let fallback=tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let origin=format!("http://{}",primary.local_addr()?);let available=format!("http://{}",fallback.local_addr()?);
+        let first=tokio::spawn(reply(primary,"403 Forbidden",""));
+        let second=tokio::spawn(reply(fallback,"200 OK",r#"{"ready":true}"#));
+        let profile:Profile=serde_json::from_value(serde_json::json!({"server":origin,"machine_id":"0123456789abcdef01234567","token":"public-test-token","fallback_servers":[available.clone()],"allow_insecure_http_for_tests":true}))?;
+        let private=crate::private_profile::Profile {server:profile.server.clone(),peer_id:"fixture-peer".into(),token:"private-test-token-01234567890123456789".into(),workspace:"fixture".into(),account_email:None,fallback_servers:vec![],allow_insecure_http_for_tests:true};
+        let control=Control::new(profile)?;
+        assert!(control.proxy_check(&private,&"a".repeat(24)).await?);
+        assert_eq!(control.authorities().first(),Some(&available));
+        first.await??;second.await??;Ok(())
     }
 }

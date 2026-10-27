@@ -115,19 +115,31 @@ round-robin/sticky/random connections, a persistent TCP stream across mode
 changes, final responses after a client half-close, and removal of an unused exit. These fixtures do not prove fleet
 rollout or real Luna/Miro/Condor throughput.
 
+## Embedded Tor state lifecycle
+
+Tor runs inside the agent and opens no local listener for exit routing. Circuit
+state and directory caches belong to the registration's dedicated `.tor`
+directory. Stopping Tor retains these files for the next bootstrap. Removing a
+registration with credential purge also removes its Tor directory after its
+runtime has stopped. Cleanup rejects a symlink in place of that directory and
+does not follow nested symlinks into other application data.
+
+Explicit `porthub proxy start --via tor` jobs use their own per-user proxy-state
+cache, shared between that user's jobs. Stopping a job removes its credentials,
+curl configuration and job files; it retains the Tor cache for later jobs.
+
 ## Device DNS policy verification
 
 The private resolver handles both UDP and TCP queries on the same endpoint.
 TCP clients are bounded, have a timeout, and close when the resolver shuts down.
-Domain blocks return NXDOMAIN; address overrides return configured A/AAAA records.
+Domain blocks return NXDOMAIN. DNS address replacement is not supported.
 These policies operate through the OS resolver. Applications using their own
-DoH resolvers can bypass them, and DNS address overrides do not replace HTTPS
-certificate validation or rewrite a URL path.
+DoH resolvers can bypass them.
 
 On 2026-10-27, the current native test binary passed on Miro against its actual
 systemd-resolved service. An owned temporary interface registered test-only
-suffixes. The test verified a private name, an address override, and an NXDOMAIN
-block. Override and block queries used ordinary resolver selection (interface
+suffixes. The test verified private name resolution and an NXDOMAIN
+block. Block queries used ordinary resolver selection (interface
 index zero). Main routes and policy rules matched their pre-test snapshots;
 the temporary interface and copied test binary were removed. This verification
 did not replace Miro’s running registration or change its normal default route.

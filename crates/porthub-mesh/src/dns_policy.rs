@@ -16,7 +16,6 @@ pub struct Rule {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
     Block,
-    Override { addresses: Vec<IpAddr> },
 }
 
 fn yes() -> bool {
@@ -63,25 +62,13 @@ pub fn prepare(rules: &[Rule]) -> Result<Vec<Rule>> {
         } else {
             domain(&rule.domain)?
         };
-        if rule.domain.starts_with("*.") { rule.include_subdomains = true; }
+        if rule.domain.starts_with("*.") {
+            rule.include_subdomains = true;
+        }
         ensure!(
             seen.insert(rule.domain.clone()),
             "Conflicting DNS rules for the same domain"
         );
-        if let Action::Override { addresses } = &mut rule.action {
-            ensure!(
-                !addresses.is_empty() && addresses.len() <= 8,
-                "DNS overrides require between one and eight addresses"
-            );
-            ensure!(
-                addresses
-                    .iter()
-                    .all(|ip| !ip.is_unspecified() && !ip.is_multicast()),
-                "Invalid DNS override address"
-            );
-            addresses.sort_unstable();
-            addresses.dedup();
-        }
         result.push(rule);
     }
     result.sort_by(|a, b| {
@@ -113,7 +100,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn domain_matching_respects_label_boundaries_and_specific_exceptions() {
+    fn domain_matching_respects_label_boundaries_and_specific_rules() {
         let rules = prepare(&[
             Rule {
                 domain: "Example.COM.".into(),
@@ -122,9 +109,7 @@ mod tests {
             },
             Rule {
                 domain: "allowed.example.com".into(),
-                action: Action::Override {
-                    addresses: vec!["192.0.2.1".parse().unwrap()],
-                },
+                action: Action::Block,
                 include_subdomains: false,
             },
         ])
@@ -139,7 +124,7 @@ mod tests {
         ));
         assert!(matches!(
             matching(&rules, "allowed.example.com.").unwrap().action,
-            Action::Override { .. }
+            Action::Block
         ));
         assert!(matching(&rules, "notexample.com.").is_none());
         assert!(matching(&rules, "example.com.evil.test.").is_none());
@@ -147,6 +132,14 @@ mod tests {
             matching(&rules, "a.allowed.example.com.").unwrap().action,
             Action::Block
         ));
+    }
+
+    #[test]
+    fn address_replacement_actions_are_rejected() {
+        assert!(serde_json::from_str::<Rule>(
+            r#"{"domain":"example.com","action":{"type":"override","addresses":["192.0.2.1"]}}"#
+        )
+        .is_err());
     }
 
     #[test]
@@ -172,7 +165,11 @@ mod tests {
 
     #[test]
     fn exact_and_wildcard_rules_have_distinct_scopes() {
-        let rule = |domain: &str, include_subdomains| Rule { domain: domain.into(), include_subdomains, action: Action::Block };
+        let rule = |domain: &str, include_subdomains| Rule {
+            domain: domain.into(),
+            include_subdomains,
+            action: Action::Block,
+        };
         let wildcard = prepare(&[rule("*.Example.COM.", false)]).unwrap();
         assert_eq!(zone(&wildcard[0]), "example.com");
         assert!(matching(&wildcard, "example.com.").is_none());
@@ -182,7 +179,12 @@ mod tests {
         assert!(matching(&exact, "www.example.com.").is_some());
         assert!(matching(&exact, "child.www.example.com.").is_none());
         assert!(matching(&exact, "example.com.").is_none());
-        for invalid in ["*example.com", "a.*.example.com", "*.*.example.com", "*.com"] {
+        for invalid in [
+            "*example.com",
+            "a.*.example.com",
+            "*.*.example.com",
+            "*.com",
+        ] {
             assert!(prepare(&[rule(invalid, true)]).is_err());
         }
     }

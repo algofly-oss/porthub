@@ -37,7 +37,36 @@ struct Ownership {
     token: Option<String>,
     #[serde(default)]
     physical_routes: Vec<PhysicalRoute>,
+    #[serde(default)]
+    lan_networks: Vec<porthub_mesh::lan_routes::Network>,
+    #[serde(default)]
+    private_bypasses: Vec<PrivateBypass>,
 }
+#[derive(Clone,Debug,PartialEq,Eq,Serialize,Deserialize)]
+struct PrivateBypass {
+    network:porthub_mesh::lan_routes::Network,
+    index:u32,
+    gateway:Ipv4Addr,
+}
+impl PrivateBypass {
+    fn route(&self)->Route {
+        Route::new(self.network.address().into(),self.network.prefix())
+            .with_gateway(self.gateway.into()).with_if_index(self.index)
+    }
+    fn matches(&self,route:&Route)->bool {
+        route.destination()==IpAddr::V4(self.network.address()) && route.prefix()==self.network.prefix()
+            && route.if_index()==Some(self.index) && route.gateway()==Some(self.gateway.into())
+    }
+}
+const PRIVATE_PREFIXES:[&str;3]=["10.0.0.0/8","172.16.0.0/12","192.168.0.0/16"];
+fn default_underlay<'a>(text:&str,underlay:&'a [Underlay])->Result<&'a Underlay> {
+    let field=|key:&str|text.lines().find_map(|line|line.trim().strip_prefix(key)).map(str::trim);
+    let interface=field("interface:").context("physical default interface unavailable")?;
+    let gateway:Ipv4Addr=field("gateway:").context("physical default gateway unavailable")?.parse()?;
+    underlay.iter().find(|route|route.interface==interface && route.gateway==gateway)
+        .context("system default is not an available physical interface")
+}
+
 struct Consumer {
     ownership: Ownership,
     _lock: File,
@@ -361,10 +390,10 @@ impl Ownership {
                 && meta.uid() == 0
                 && meta.nlink() == 1
                 && meta.mode() & 0o077 == 0
-                && meta.len() <= 4096,
+                && meta.len() <= 65536,
             "invalid macOS exit journal"
         );
-        let owner: Self = serde_json::from_reader(file.take(4096))?;
+        let owner: Self = serde_json::from_reader(file.take(65536))?;
         ensure!(
             owner.index > 0
                 && owner.own.is_private()
@@ -380,7 +409,11 @@ impl Ownership {
             "invalid macOS exit ownership"
         );
         ensure!(
-            owner.physical_routes.len() <= 16
+            owner.lan_networks.len() <= 512 && owner.physical_routes.len() <= 16
+                && owner.private_bypasses.len()<=6
+                && owner.private_bypasses.iter().all(|route|route.index>0
+                    && PRIVATE_PREFIXES.iter().any(|prefix|*prefix==route.network.to_string())
+                    && !route.gateway.is_unspecified() && !route.gateway.is_multicast() && !route.gateway.is_loopback())
                 && owner
                     .physical_routes
                     .iter()
@@ -416,8 +449,34 @@ impl Ownership {
         }
         Ok(())
     }
+    fn remove_private_bypasses(&mut self)->Result<()> {
+        if self.private_bypasses.is_empty(){return Ok(());}
+        let mut manager=RouteManager::new()?;
+        let existing=manager.list()?;
+        for route in &self.private_bypasses {
+            if existing.iter().any(|actual|route.matches(actual)) {manager.delete(&route.route())?;}
+        }
+        self.private_bypasses.clear();self.save()?;Ok(())
+    }
+    fn remove_lan_routes(&mut self) -> Result<()> {
+        if self.lan_networks.is_empty(){return Ok(());}
+        let mut manager = RouteManager::new()?;
+        let existing = manager.list()?;
+        for network in &self.lan_networks {
+            if existing.iter().any(|route| route.destination()==IpAddr::V4(network.address())
+                && route.prefix()==network.prefix() && route.if_index()==Some(self.index)) {
+                ensure!(interface_name(self.index)?==self.name && source_interface(self.own)?==Some(self.index),"exit LAN route ownership changed");
+                manager.delete(&Route::new(network.address().into(),network.prefix()).with_if_index(self.index))?;
+            }
+        }
+        self.lan_networks.clear();
+        self.save()?;
+        Ok(())
+    }
     fn clear(&mut self) -> Result<()> {
         self.remove_routes()?;
+        self.remove_lan_routes()?;
+        self.remove_private_bypasses()?;
         for route in &self.physical_routes {
             route.remove_owned()?;
         }
@@ -490,6 +549,8 @@ impl Consumer {
                 anchor: format!("com.apple/porthub-{}", uuid::Uuid::new_v4().simple()),
                 token: None,
                 physical_routes: Vec::new(),
+                lan_networks: Vec::new(),
+                private_bypasses: Vec::new(),
             },
             _lock: lock,
             rules: String::new(),
@@ -601,6 +662,63 @@ impl Consumer {
         self.bypass = bypass;
         Ok(())
     }
+    fn set_private_bypass(&mut self,sources:&BTreeSet<Ipv4Addr>,enabled:bool)->Result<()> {
+        if !enabled {return self.ownership.remove_private_bypasses();}
+        let mut manager=RouteManager::new()?;
+        let existing=manager.list()?;
+        let underlay=underlays(sources,&existing,&self.ownership.physical_routes)?;
+        let text=native("/sbin/route",&["-n","get","default"],None)?;
+        let physical=default_underlay(&text,&underlay)?;
+        let index=source_interface(physical.source)?.context("physical default interface unavailable")?;
+        let wanted:Vec<_>=PRIVATE_PREFIXES.iter().map(|prefix|prefix.parse::<porthub_mesh::lan_routes::Network>().expect("valid private prefix"))
+            .filter(|network|!existing.iter().any(|route|
+                !self.ownership.private_bypasses.iter().any(|owned|owned.matches(route))
+                && route.if_index()!=Some(self.ownership.index)
+                && match route.destination(){IpAddr::V4(address)=>super::lan_discovery::would_shadow_local(*network,address,route.prefix()),_=>false}))
+            .map(|network|PrivateBypass{network,index,gateway:physical.gateway}).collect();
+        if self.ownership.private_bypasses==wanted && wanted.iter().all(|route|existing.iter().any(|actual|route.matches(actual))) {return Ok(());}
+        let previous=self.ownership.private_bypasses.clone();
+        for route in &wanted {
+            if !self.ownership.private_bypasses.contains(route) {self.ownership.private_bypasses.push(route.clone());}
+        }
+        self.ownership.save()?;
+        for route in previous.iter().filter(|route|!wanted.contains(route)) {
+            if existing.iter().any(|actual|route.matches(actual)) {manager.delete(&route.route())?;}
+        }
+        for route in &wanted {
+            if !existing.iter().any(|actual|route.matches(actual)) {manager.add(&route.route())?;}
+        }
+        self.ownership.private_bypasses=wanted;self.ownership.save()?;Ok(())
+    }
+    fn set_lan_networks(&mut self, networks:&[porthub_mesh::lan_routes::Network])->Result<()> {
+        ensure!(networks.len()<=256,"too many exit LAN networks");
+        let mut manager=RouteManager::new()?;
+        let existing=manager.list()?;
+        let wanted: BTreeSet<_>=networks.iter().copied().filter(|network| !existing.iter().any(|route|
+            route.if_index()!=Some(self.ownership.index) && match route.destination() {
+                IpAddr::V4(address)=>super::lan_discovery::would_shadow_local(*network,address,route.prefix()),
+                _=>false,
+            })).collect();
+        let previous: BTreeSet<_>=self.ownership.lan_networks.iter().copied().collect();
+        if previous==wanted && wanted.iter().all(|network|existing.iter().any(|route|route.destination()==IpAddr::V4(network.address()) && route.prefix()==network.prefix() && route.if_index()==Some(self.ownership.index))) {return Ok(());}
+        // Journal both sets before mutation so crash recovery owns every route
+        // that may have been added, including an interrupted replacement.
+        self.ownership.lan_networks=previous.union(&wanted).copied().collect();
+        self.ownership.save()?;
+        for network in previous.difference(&wanted) {
+            if existing.iter().any(|route|route.destination()==IpAddr::V4(network.address()) && route.prefix()==network.prefix() && route.if_index()==Some(self.ownership.index)) {
+                manager.delete(&Route::new(network.address().into(),network.prefix()).with_if_index(self.ownership.index))?;
+            }
+        }
+        for network in &wanted {
+            if !existing.iter().any(|route|route.destination()==IpAddr::V4(network.address()) && route.prefix()==network.prefix() && route.if_index()==Some(self.ownership.index)) {
+                manager.add(&Route::new(network.address().into(),network.prefix()).with_if_index(self.ownership.index))?;
+            }
+        }
+        self.ownership.lan_networks=wanted.into_iter().collect();
+        self.ownership.save()?;
+        Ok(())
+    }
     fn clear(&mut self) -> Result<()> {
         self.ownership.clear()
     }
@@ -614,7 +732,23 @@ impl Drop for Consumer {
 }
 
 pub async fn watch_reported(
-    mut desired: watch::Receiver<Option<(u32, Ipv4Addr, bool)>>,
+    desired: watch::Receiver<Option<(u32, Ipv4Addr, bool)>>,
+    interfaces: watch::Receiver<Vec<SocketAddr>>,
+    cancel: CancellationToken,
+    report: Option<watch::Sender<&'static str>>,
+) -> Result<()> {
+    watch_configuration(desired,interfaces,cancel,report).await
+}
+pub async fn watch_plans_reported(
+    desired: watch::Receiver<Option<super::exit_plan::Plan>>,
+    interfaces: watch::Receiver<Vec<SocketAddr>>,
+    cancel: CancellationToken,
+    report: Option<watch::Sender<&'static str>>,
+) -> Result<()> {
+    watch_configuration(desired,interfaces,cancel,report).await
+}
+async fn watch_configuration<T:Clone+Into<super::exit_plan::Plan>+Send+Sync+'static>(
+    mut desired: watch::Receiver<Option<T>>,
     mut interfaces: watch::Receiver<Vec<SocketAddr>>,
     cancel: CancellationToken,
     report: Option<watch::Sender<&'static str>>,
@@ -632,7 +766,8 @@ pub async fn watch_reported(
             changed = interfaces.changed() => if changed.is_err() { break; },
             _ = timer.tick(), if retry || active.is_some() => {},
         }
-        let wanted = *desired.borrow_and_update();
+        let wanted = desired.borrow_and_update().clone().map(Into::into);
+        let lan_only=wanted.as_ref().is_some_and(|plan|!plan.mode.internet());
         let sources = interfaces
             .borrow_and_update()
             .iter()
@@ -647,7 +782,7 @@ pub async fn watch_reported(
         let (next, failed) = tokio::task::spawn_blocking(move || {
             let result = (|| -> Result<()> {
                 if active.as_ref().is_some_and(|route| {
-                    wanted.map(|(index, own, _)| (index, own))
+                    wanted.as_ref().map(|plan| (plan.index, plan.own))
                         != Some((route.ownership.index, route.ownership.own))
                 }) {
                     active.as_mut().unwrap().clear()?;
@@ -660,11 +795,22 @@ pub async fn watch_reported(
                         }
                     }
                 }
-                if let Some((index, own, bypass)) = wanted {
+                if let Some(plan) = wanted {
+                    let bypass=plan.internet_bypass();
                     if let Some(route) = &mut active {
                         route.refresh(&sources, bypass)?;
                     } else {
-                        active = Some(Consumer::activate(index, own, &sources, bypass)?);
+                        active = Some(Consumer::activate(plan.index, plan.own, &sources, bypass)?);
+                    }
+                    // Physical scoped defaults and PF source bypasses must
+                    // exist before any private prefix is redirected to utun.
+                    let route=active.as_mut().unwrap();
+                    if plan.mode.lan() {
+                        route.set_private_bypass(&sources,false)?;
+                        route.set_lan_networks(plan.lan_networks())?;
+                    } else {
+                        route.set_lan_networks(&[])?;
+                        route.set_private_bypass(&sources,true)?;
                     }
                 }
                 Ok(())
@@ -681,7 +827,9 @@ pub async fn watch_reported(
             let state = if failed {
                 "configuration error"
             } else if let Some(route) = &active {
-                if route.bypass {
+                if lan_only {
+                    "LAN routing active"
+                } else if route.bypass {
                     "normal internet fallback"
                 } else {
                     "exit routing active"
@@ -770,6 +918,20 @@ mod tests {
         .is_none());
     }
     #[test]
+    fn private_bypass_uses_system_default_and_matches_exact_route_ownership() {
+        let alternatives=vec![
+            Underlay{source:"192.168.1.2".parse().unwrap(),interface:"en0".into(),gateway:"192.168.1.1".parse().unwrap()},
+            Underlay{source:"10.0.0.2".parse().unwrap(),interface:"en1".into(),gateway:"10.0.0.1".parse().unwrap()},
+        ];
+        let selected=default_underlay("gateway: 10.0.0.1\ninterface: en1\n",&alternatives).unwrap();
+        assert_eq!(selected.interface,"en1");
+        assert!(default_underlay("gateway: 10.0.0.1\ninterface: utun9\n",&alternatives).is_err());
+        let owned=PrivateBypass{network:"192.168.0.0/16".parse().unwrap(),index:4,gateway:selected.gateway};
+        assert!(owned.matches(&owned.route()));
+        assert!(!owned.matches(&Route::new("192.168.0.0".parse().unwrap(),16).with_if_index(5).with_gateway(selected.gateway.into())));
+        assert!(!owned.matches(&Route::new("192.168.0.0".parse().unwrap(),24).with_if_index(4).with_gateway(selected.gateway.into())));
+    }
+    #[test]
     fn rules_keep_underlay_and_overlay_sources_pinned_across_fallback() {
         let owner = Ownership {
             index: 10,
@@ -778,6 +940,8 @@ mod tests {
             anchor: "unused".into(),
             token: None,
             physical_routes: Vec::new(),
+                lan_networks: Vec::new(),
+                private_bypasses: Vec::new(),
         };
         let underlay = vec![Underlay {
             source: "192.168.0.40".parse().unwrap(),
@@ -802,6 +966,8 @@ mod tests {
             anchor: "com.apple/porthub-test".into(),
             token: None,
             physical_routes: Vec::new(),
+                lan_networks: Vec::new(),
+                private_bypasses: Vec::new(),
         };
         let underlay = vec![Underlay {
             source: "192.168.0.40".parse()?,

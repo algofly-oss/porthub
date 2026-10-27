@@ -33,10 +33,10 @@ pub fn router() -> Router<Arc<App>> {
         )
 }
 
-fn selectors(model: &mut Model, key: &str) -> Vec<Selector> {
+fn selectors(model: &mut Model, key: &str, allow_empty: bool) -> Vec<Selector> {
     let mut result = Vec::new();
     let mut seen = HashSet::new();
-    for mut child in model.objects(key, false, 1, 32) {
+    for mut child in model.objects(key, false, if allow_empty { 0 } else { 1 }, 32) {
         let kind = child.literal("kind", "", &["machine", "group"]);
         let id = child.required_string("id");
         child.string_length("id", &id, 24, Some(24));
@@ -49,7 +49,7 @@ fn selectors(model: &mut Model, key: &str) -> Vec<Selector> {
         }
         model.merge(child);
     }
-    if result.is_empty() {
+    if result.is_empty() && !allow_empty {
         model.add(key, "Select at least one machine or group", "value_error");
     }
     result
@@ -150,19 +150,25 @@ pub(crate) fn matches_selectors(
     machine_id: &str,
     machine: &Document,
 ) -> bool {
-    route.get_array(key).is_ok_and(|selectors| {
-        selectors.iter().any(|selector| {
-            let Some(selector) = selector.as_document() else {
-                return false;
-            };
-            match store::string(selector, "kind") {
-                "machine" => store::string(selector, "id") == machine_id,
-                "group" => ObjectId::parse_str(store::string(selector, "id"))
-                    .ok()
-                    .is_some_and(|group| inventory::group_ids(machine).contains(&group)),
-                _ => false,
-            }
-        })
+    selector_priority(route, key, machine_id, machine).is_some()
+}
+
+/// First selector wins; direct machines and dynamic groups share one priority
+/// order. The authenticated inventory supplies group membership.
+pub(crate) fn selector_priority(
+    route: &Document,
+    key: &str,
+    machine_id: &str,
+    machine: &Document,
+) -> Option<usize> {
+    route.get_array(key).ok()?.iter().position(|selector| {
+        let Some(selector) = selector.as_document() else { return false; };
+        match store::string(selector, "kind") {
+            "machine" => store::string(selector, "id") == machine_id,
+            "group" => ObjectId::parse_str(store::string(selector, "id"))
+                .ok().is_some_and(|group| inventory::group_ids(machine).contains(&group)),
+            _ => false,
+        }
     })
 }
 
@@ -173,6 +179,7 @@ async fn validate_routing_peers(
 ) -> ApiResult<()> {
     let machines = machine_ids(app, owner, selectors).await?;
     if machines.is_empty() {
+        if selectors.is_empty() { return Ok(()); }
         return Err(ApiError::bad_request(
             "Routing-peer selections contain no machines",
         ));
@@ -184,6 +191,30 @@ async fn validate_routing_peers(
         return Err(ApiError::bad_request(
             "Routing peers must have an enrolled private-network client",
         ));
+    }
+    Ok(())
+}
+
+async fn require_tor_support(app: &App, owner: ObjectId, machines: &HashSet<ObjectId>) -> ApiResult<()> {
+    let capable: Vec<Document> = app.collection("private_peers").find(doc! {
+        "workspace_id":owner,"enabled":true,"tor_exit":true,
+        "machine_id":{"$in":machines.iter().copied().collect::<Vec<_>>()}
+    }).projection(doc! {"machine_id":1}).await?.try_collect().await?;
+    let capable: HashSet<ObjectId> = capable.iter().filter_map(|peer| peer.get_object_id("machine_id").ok()).collect();
+    if !machines.is_subset(&capable) {
+        return Err(ApiError::bad_request("Selected machines must advertise local Tor exit support before this rule can be enabled"));
+    }
+    Ok(())
+}
+
+async fn require_lan_support(app: &App, owner: ObjectId, machines: &HashSet<ObjectId>) -> ApiResult<()> {
+    let capable: Vec<Document> = app.collection("private_peers").find(doc! {
+        "workspace_id":owner,"enabled":true,"lan_exit":true,
+        "machine_id":{"$in":machines.iter().copied().collect::<Vec<_>>()}
+    }).projection(doc! {"machine_id":1}).await?.try_collect().await?;
+    let capable: HashSet<ObjectId> = capable.iter().filter_map(|peer| peer.get_object_id("machine_id").ok()).collect();
+    if !machines.is_subset(&capable) {
+        return Err(ApiError::bad_request("Selected machines must advertise LAN exit support before this traffic mode can be enabled"));
     }
     Ok(())
 }
@@ -208,11 +239,18 @@ async fn reject_overlapping_assignments(
             "Select machines that will use this exit node",
         ));
     }
+    if candidate.get_bool("tor_enabled") == Ok(true) {
+        require_tor_support(app, owner, &candidate_machines).await?;
+    }
     let candidate_peers = machine_ids(
         app,
         owner,
         &read_selectors(candidate, "routing_selectors")?,
     ).await?;
+    if candidate.get_str("traffic_mode").unwrap_or("internet_only") != "internet_only" {
+        require_lan_support(app, owner, &candidate_machines).await?;
+        require_lan_support(app, owner, &candidate_peers).await?;
+    }
     if !candidate_machines.is_disjoint(&candidate_peers) {
         return Err(ApiError::bad_request(
             "A routing peer cannot use its own exit node",
@@ -256,7 +294,7 @@ async fn reject_overlapping_assignments(
     Ok(())
 }
 
-fn parse(raw: Value) -> ApiResult<(String, Vec<Selector>, Vec<Selector>, bool, String, bool)> {
+fn parse(raw: Value) -> ApiResult<(String, Vec<Selector>, Vec<Selector>, bool, String, bool, bool, i64, String)> {
     let mut model = Model::new(raw)?;
     let name = model.required_string("name");
     model.string_length("name", &name, 1, Some(80));
@@ -264,20 +302,34 @@ fn parse(raw: Value) -> ApiResult<(String, Vec<Selector>, Vec<Selector>, bool, S
     if name.is_empty() {
         model.add("name", "An exit-node name is required", "value_error");
     }
-    let routing = selectors(&mut model, "routing_selectors");
-    let distribution = selectors(&mut model, "distribution_selectors");
+    if model.field(&["tor_enabled"]).is_some_and(|value| !value.is_boolean()) { model.add("tor_enabled", "Expected a boolean", "type_error.bool"); }
+    let tor_enabled = if model.field(&["tor_enabled"]).is_some() { model.required_bool("tor_enabled") } else { false };
+    let tor_circuit_groups = match model.field(&["tor_circuit_groups"]) {
+        None => 4,
+        Some(value) => match value.as_i64() {
+            Some(value) if (1..=16).contains(&value) => value,
+            _ => { model.add("tor_circuit_groups", "Choose between 1 and 16 Tor circuit groups", "value_error"); 4 }
+        }
+    };
+    let routing = selectors(&mut model, "routing_selectors", tor_enabled);
+    let distribution = selectors(&mut model, "distribution_selectors", false);
     let enabled = if model.field(&["enabled"]).is_some() {
         model.required_bool("enabled")
     } else {
         true
     };
+    let traffic_mode = model.literal("traffic_mode", "internet_only", &["all", "internet_only", "lan_only"]);
+    if traffic_mode == "lan_only" && tor_enabled {model.add("tor_enabled", "Tor carries internet traffic; disable it for LAN only", "value_error");}
+    if traffic_mode == "lan_only" && routing.is_empty() {
+        model.add("routing_selectors", "LAN only requires a machine or group exit; Tor cannot reach private networks", "value_error");
+    }
     let selection = model.literal("selection", "sticky", &["sticky", "round_robin", "random"]);
     if model.field(&["allow_direct_fallback"]).is_some_and(|value| !value.is_boolean()) {
         model.add("allow_direct_fallback", "Expected a boolean", "type_error.bool");
     }
     let allow_direct_fallback = model.optional_bool("allow_direct_fallback").unwrap_or(false);
     model.finish()?;
-    Ok((name, routing, distribution, enabled, selection, allow_direct_fallback))
+    Ok((name, routing, distribution, enabled, selection, allow_direct_fallback, tor_enabled, tor_circuit_groups, traffic_mode))
 }
 
 async fn create(
@@ -286,7 +338,7 @@ async fn create(
     Query(query): Query<WorkspaceQuery>,
     ApiBody(raw): ApiBody,
 ) -> ApiResult<Json<Value>> {
-    let (name, routing, distribution, enabled, selection, allow_direct_fallback) = parse(raw)?;
+    let (name, routing, distribution, enabled, selection, allow_direct_fallback, tor_enabled, tor_circuit_groups, traffic_mode) = parse(raw)?;
     let (_, owner, _) = browser(&app, &headers, &Method::POST, &query.workspace, true).await?;
     let _guard = app.connection_lock.lock().await;
     let owner_id = owner;
@@ -303,7 +355,7 @@ async fn create(
         ));
     }
     let now = DateTime::now();
-    let route = doc! {"_id":ObjectId::new(),"workspace_id":owner_id,"name":&name,"routing_selectors":selector_docs(&routing),"distribution_selectors":selector_docs(&distribution),"enabled":enabled,"selection":selection,"allow_direct_fallback":allow_direct_fallback,"masquerade":true,"block_lan_access":true,"created_at":now,"updated_at":now};
+    let route = doc! {"_id":ObjectId::new(),"workspace_id":owner_id,"name":&name,"routing_selectors":selector_docs(&routing),"distribution_selectors":selector_docs(&distribution),"enabled":enabled,"selection":selection,"allow_direct_fallback":allow_direct_fallback,"tor_enabled":tor_enabled,"tor_circuit_groups":tor_circuit_groups,"traffic_mode":&traffic_mode,"masquerade":true,"block_lan_access":traffic_mode == "internet_only","created_at":now,"updated_at":now};
     reject_overlapping_assignments(&app, owner_id, &route, None).await?;
     app.collection("private_exit_nodes")
         .insert_one(&route)
@@ -318,7 +370,7 @@ async fn update(
     Path(id): Path<String>,
     ApiBody(raw): ApiBody,
 ) -> ApiResult<Json<Value>> {
-    let (name, routing, distribution, enabled, selection, allow_direct_fallback) = parse(raw)?;
+    let (name, routing, distribution, enabled, selection, allow_direct_fallback, tor_enabled, tor_circuit_groups, traffic_mode) = parse(raw)?;
     let (_, owner, _) = browser(&app, &headers, &Method::PUT, &query.workspace, true).await?;
     let owner_id = owner;
     let route_id = object_id(&id, "Invalid exit-node id")?;
@@ -340,7 +392,7 @@ async fn update(
         .find_one(doc! {"_id":route_id,"workspace_id":owner_id})
         .await?
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "Exit node not found"))?;
-    let candidate = doc! {"_id":route_id,"workspace_id":owner_id,"name":&name,"routing_selectors":selector_docs(&routing),"distribution_selectors":selector_docs(&distribution),"enabled":enabled,"selection":selection,"allow_direct_fallback":allow_direct_fallback,"masquerade":true,"block_lan_access":true,"created_at":previous.get("created_at").cloned().unwrap_or(Bson::DateTime(DateTime::now())),"updated_at":DateTime::now()};
+    let candidate = doc! {"_id":route_id,"workspace_id":owner_id,"name":&name,"routing_selectors":selector_docs(&routing),"distribution_selectors":selector_docs(&distribution),"enabled":enabled,"selection":selection,"allow_direct_fallback":allow_direct_fallback,"tor_enabled":tor_enabled,"tor_circuit_groups":tor_circuit_groups,"traffic_mode":&traffic_mode,"masquerade":true,"block_lan_access":traffic_mode == "internet_only","created_at":previous.get("created_at").cloned().unwrap_or(Bson::DateTime(DateTime::now())),"updated_at":DateTime::now()};
     reject_overlapping_assignments(&app, owner_id, &candidate, Some(route_id)).await?;
     app.collection("private_exit_nodes")
         .replace_one(doc! {"_id":route_id,"workspace_id":owner_id}, &candidate)
@@ -376,7 +428,7 @@ pub fn serialize(route: &Document) -> Value {
             .map(|s| json!({"kind":store::string(s,"kind"),"id":store::string(s,"id")}))
             .collect::<Vec<_>>()
     };
-    json!({"_id":store::id(route.get("_id")),"name":store::string(route,"name"),"routing_selectors":selectors("routing_selectors"),"distribution_selectors":selectors("distribution_selectors"),"enabled":route.get_bool("enabled").unwrap_or(true),"selection":route.get_str("selection").unwrap_or("sticky"),"allow_direct_fallback":route.get_bool("allow_direct_fallback").unwrap_or(false),"masquerade":true,"block_lan_access":true,"created_at":store::field(route,"created_at"),"updated_at":store::field(route,"updated_at")})
+    json!({"_id":store::id(route.get("_id")),"name":store::string(route,"name"),"routing_selectors":selectors("routing_selectors"),"distribution_selectors":selectors("distribution_selectors"),"enabled":route.get_bool("enabled").unwrap_or(true),"selection":route.get_str("selection").unwrap_or("sticky"),"allow_direct_fallback":route.get_bool("allow_direct_fallback").unwrap_or(false),"tor_enabled":route.get_bool("tor_enabled").unwrap_or(false),"tor_circuit_groups":route.get_i64("tor_circuit_groups").unwrap_or(4),"traffic_mode":route.get_str("traffic_mode").unwrap_or("internet_only"),"masquerade":true,"block_lan_access":route.get_str("traffic_mode").unwrap_or("internet_only") == "internet_only","created_at":store::field(route,"created_at"),"updated_at":store::field(route,"updated_at")})
 }
 
 /// Validate the complete enabled route graph against proposed machine records.
@@ -394,7 +446,17 @@ pub(crate) async fn validate_machine_changes(app: &App, owner: &Bson, proposed: 
     for route in &routes {
         let routing: HashSet<String> = machines.iter().filter(|machine| matches_selectors(route, "routing_selectors", &store::id(machine.get("_id")), machine)).map(|machine| store::id(machine.get("_id"))).collect();
         let consuming: HashSet<String> = machines.iter().filter(|machine| matches_selectors(route, "distribution_selectors", &store::id(machine.get("_id")), machine)).map(|machine| store::id(machine.get("_id"))).collect();
-        if !consuming.is_empty() && routing.is_empty() {
+        if route.get_bool("tor_enabled") == Ok(true) {
+            let owner=owner.as_object_id().ok_or_else(||ApiError::bad_request("Invalid exit-node workspace"))?;
+            let ids=consuming.iter().map(|id|object_id(id,"Invalid Tor client")).collect::<ApiResult<HashSet<_>>>()?;
+            require_tor_support(app,owner,&ids).await?;
+        }
+        if route.get_str("traffic_mode").unwrap_or("internet_only") != "internet_only" {
+            let owner = owner.as_object_id().ok_or_else(|| ApiError::bad_request("Invalid exit-node workspace"))?;
+            let ids = consuming.union(&routing).map(|id| object_id(id, "Invalid LAN exit client")).collect::<ApiResult<HashSet<_>>>()?;
+            require_lan_support(app, owner, &ids).await?;
+        }
+        if !consuming.is_empty() && routing.is_empty() && route.get_bool("tor_enabled") != Ok(true) {
             return Err(ApiError::new(StatusCode::CONFLICT, "This group change would leave an enabled exit node without routing peers"));
         }
         if !clients.is_disjoint(&consuming) {
@@ -407,4 +469,56 @@ pub(crate) async fn validate_machine_changes(app: &App, owner: &Bson, proposed: 
         return Err(ApiError::new(StatusCode::CONFLICT, "This group change would make an exit routing peer also consume an exit route"));
     }
     Ok(())
+}
+
+
+#[cfg(test)]
+mod tor_tests {
+    use super::*;
+    fn route() -> Value { json!({"name":"Tor","routing_selectors":[],"distribution_selectors":[{"kind":"machine","id":"69db167e3d094f3142d04ff8"}],"tor_enabled":true}) }
+    #[test]
+    fn tor_only_route_needs_no_remote_peer_but_requires_explicit_enable() {
+        let parsed=parse(route()).ok().expect("valid Tor route"); assert!(parsed.1.is_empty()); assert!(parsed.6);assert_eq!(parsed.7,4);
+        let mut ordinary=route();ordinary["tor_enabled"]=json!(false);assert!(parse(ordinary).is_err());
+    }
+    #[test]
+    fn tor_limits_and_boolean_types_are_validated() {
+        for count in [json!(0),json!(17),json!("4"),json!(4.5)] {
+            let mut raw=route();raw["tor_circuit_groups"]=count;assert!(parse(raw).is_err());
+        }
+        let mut raw=route();raw["tor_enabled"]=json!("true");assert!(parse(raw).is_err());
+    }
+    #[test]
+    fn traffic_modes_default_safely_and_lan_needs_a_real_exit() {
+        assert_eq!(parse(route()).ok().expect("valid default route").8, "internet_only");
+        let mut raw = route();
+        raw["traffic_mode"] = json!("lan_only");
+        assert!(parse(raw.clone()).is_err());
+        raw["routing_selectors"] = json!([{"kind":"machine","id":"69db167e3d094f3142d04ff9"}]);
+        for mode in ["all", "internet_only", "lan_only"] {
+            raw["traffic_mode"] = json!(mode);
+            raw["tor_enabled"] = json!(mode != "lan_only");
+            assert_eq!(parse(raw.clone()).ok().expect("valid traffic mode").8, mode);
+        }
+        for invalid in [json!("public"), json!(true), json!(null)] {
+            raw["traffic_mode"] = invalid;
+            assert!(parse(raw.clone()).is_err());
+        }
+    }
+
+    #[test]
+    fn selector_priority_respects_group_order_and_first_match() {
+        let machine = ObjectId::new();
+        let group = ObjectId::new();
+        let other = ObjectId::new();
+        let inventory = doc! {"_id":machine,"group_ids":[group]};
+        let route = doc! {"routing_selectors":[
+            {"kind":"machine","id":other.to_hex()},
+            {"kind":"group","id":group.to_hex()},
+            {"kind":"machine","id":machine.to_hex()}
+        ]};
+        assert_eq!(selector_priority(&route, "routing_selectors", &machine.to_hex(), &inventory), Some(1));
+        assert_eq!(selector_priority(&route, "routing_selectors", &other.to_hex(), &doc!{}), Some(0));
+        assert_eq!(selector_priority(&route, "routing_selectors", &ObjectId::new().to_hex(), &doc!{}), None);
+    }
 }

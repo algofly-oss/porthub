@@ -692,7 +692,16 @@ async fn private_enrollment_attaches_to_one_public_service_and_purge_removes_bot
         .filter(|entry| entry.file_name().to_string_lossy().ends_with(".service.json")).count();
     ensure!(manifests == 1);
     ensure!(manager.calls.lock().unwrap().iter().all(|(_, service)| service == &public.service));
+    use std::os::unix::fs::DirBuilderExt;
+    let tor=module.with_extension("tor");
+    std::fs::DirBuilder::new().mode(0o700).create(&tor)?;
+    std::fs::create_dir(tor.join("state"))?;
+    std::fs::write(tor.join("state/guards.json"),b"private Tor guard state")?;
+    let outside=temp.path().join("other-application-data");
+    std::fs::create_dir(&outside)?;std::fs::write(outside.join("keep"),b"unrelated")?;
+    std::os::unix::fs::symlink(&outside,tor.join("external-link"))?;
     service::action(&layout, &public.profile, Action::Uninstall { purge: true }, &manager).await?;
+    ensure!(!tor.try_exists()? && outside.join("keep").try_exists()?,"Tor purge must preserve symlink targets");
     ensure!(!module.try_exists()? && !public.profile.try_exists()?);
     ensure!(!porthub_agent::profile::sibling(&public.profile, ".private-module.json").try_exists()?);
     Ok(())

@@ -11,7 +11,7 @@ use std::{
 use tokio::{sync::watch, time::MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
-pub(super) async fn current() -> Result<Vec<SocketAddr>> {
+pub(crate) async fn current() -> Result<Vec<SocketAddr>> {
     let mut found = Vec::new();
     for interface in getifaddrs()? {
         if !interface.flags.contains(InterfaceFlags::UP)
@@ -53,7 +53,7 @@ pub(super) async fn current() -> Result<Vec<SocketAddr>> {
     Ok(found.into_iter().map(|(_, address)| address).collect())
 }
 
-pub(super) async fn watch(
+pub(crate) async fn watch(
     output: watch::Sender<Vec<SocketAddr>>,
     cancel: CancellationToken,
 ) -> Result<()> {

@@ -59,6 +59,11 @@ async fn main() -> Result<()> {
     let db = porthub_api::bootstrap::database(&config).await?;
     let tcp_address = config.listen.clone();
     let app = Arc::new(App::new(config, db));
+    if !matches!(tokio::time::timeout(std::time::Duration::from_secs(5),
+        porthub_api::routes::dns_rules::remove_address_overrides(&app)).await,Ok(Ok(()))) {
+        tracing::warn!("Retired DNS address settings could not be cleaned; only blocking rules will be served");
+    }
+
     porthub_api::enrollment_ticket::initialize(&app)
         .await
         .map_err(|error| anyhow::anyhow!("bootstrap initialization failed: {}", error.detail))?;

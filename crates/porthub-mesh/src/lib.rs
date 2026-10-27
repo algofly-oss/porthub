@@ -8,6 +8,7 @@ pub mod control_packet;
 pub mod underlay;
 pub mod dns_policy;
 pub mod exit_policy;
+pub mod lan_routes;
 pub mod protocol;
 pub mod relay;
 #[cfg(feature = "streams")]

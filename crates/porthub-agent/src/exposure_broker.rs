@@ -133,7 +133,8 @@ async fn serve_one(
     cancel: CancellationToken,
 ) -> Result<()> {
     let uid = stream.peer_cred()?.uid();
-    if !tokio::task::spawn_blocking(move || authorized(uid, &profile)).await? {
+    let checked_profile = profile.clone();
+    if !tokio::task::spawn_blocking(move || authorized(uid, &checked_profile)).await? {
         let mut stream = stream;
         return crate::exposure_protocol::send(
             &mut stream,
@@ -147,7 +148,7 @@ async fn serve_one(
         )
         .await;
     }
-    crate::exposure_protocol::serve_connection(stream, control, cancel).await
+    crate::exposure_protocol::serve_connection(stream, control, cancel, profile).await
 }
 pub struct Guard {
     cancel: CancellationToken,
@@ -248,25 +249,8 @@ pub async fn connect(
     registration: &str,
     request: &Request,
 ) -> Result<(BufReader<UnixStream>, Reply)> {
-    use std::os::unix::fs::{FileTypeExt, MetadataExt};
     request.validate()?;
-    let path = endpoint(layout, registration)?;
-    let meta = std::fs::symlink_metadata(&path)
-        .context("registration agent is unavailable; start or update it first")?;
-    let expected = if layout.user {
-        rustix::process::geteuid().as_raw()
-    } else {
-        0
-    };
-    ensure!(
-        meta.file_type().is_socket() && meta.uid() == expected,
-        "local registration endpoint is not trusted"
-    );
-    let mut stream = UnixStream::connect(path).await?;
-    ensure!(
-        stream.peer_cred()?.uid() == expected,
-        "local registration agent identity mismatch"
-    );
+    let mut stream = connect_stream(layout, registration).await?;
     let mut bytes = serde_json::to_vec(request)?;
     bytes.push(b'\n');
     stream.write_all(&bytes).await?;
@@ -285,6 +269,28 @@ pub async fn connect(
             .unwrap_or("exposure request failed")
     );
     Ok((reader, response))
+}
+
+pub(crate) async fn connect_stream(layout: &crate::service::Layout, registration: &str) -> Result<UnixStream> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let path = endpoint(layout, registration)?;
+    let meta = std::fs::symlink_metadata(&path)
+        .context("registration agent is unavailable; start or update it first")?;
+    let expected = if layout.user {
+        rustix::process::geteuid().as_raw()
+    } else {
+        0
+    };
+    ensure!(
+        meta.file_type().is_socket() && meta.uid() == expected,
+        "local registration endpoint is not trusted"
+    );
+    let stream = UnixStream::connect(path).await?;
+    ensure!(
+        stream.peer_cred()?.uid() == expected,
+        "local registration agent identity mismatch"
+    );
+    Ok(stream)
 }
 
 #[cfg(test)]

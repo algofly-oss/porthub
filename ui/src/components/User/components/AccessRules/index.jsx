@@ -25,6 +25,7 @@ import NetworkSettings from "./NetworkSettings";
 import InviteEditor from "./InviteEditor";
 import PolicyTable from "./PolicyTable";
 import ExitRoutes from "./ExitRoutes";
+import ProxyGrants from "./ProxyGrants";
 
 export default function AccessRules({ active = true }) {
   const router = useRouter(),
@@ -312,7 +313,7 @@ export default function AccessRules({ active = true }) {
             />
           )}
           {section === "routes" && (
-            <ExitRoutes data={data} manage={manage} params={params} onSaved={load} />
+            <div><ExitRoutes data={data} manage={manage} params={params} onSaved={load} /><ProxyGrants data={data} manage={manage} params={params} /></div>
           )}
           {section === "people" && (
             <section className="data-scroll overflow-auto rounded-xl bg-surface p-4">

@@ -10,6 +10,7 @@ pub mod connections;
 pub mod dns_rules;
 pub mod exposes;
 pub mod exit_nodes;
+pub mod proxy_grants;
 pub mod gateway;
 pub mod groups;
 pub mod machine_client;
@@ -35,6 +36,8 @@ pub fn router() -> Router<Arc<App>> {
         .merge(connections::router())
         .merge(exposes::router())
         .merge(exit_nodes::router())
+        .merge(proxy_grants::router())
+        .merge(crate::application_proxy::router())
         .merge(dns_rules::router())
         .merge(connection_firewall::router())
         .merge(connection_access::router())

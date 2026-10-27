@@ -1145,7 +1145,7 @@ export const guideArticles = [
         "blocks": [
           {
             "type": "paragraph",
-            "text": "Start your local application first. PortHub authenticates with the selected machine registration and reserves a free port from the gateway\u2019s normal public port range. The terminal prints the public address."
+            "text": "Start your local application first. PortHub authenticates with the selected machine registration and reserves a free port from the gateway’s normal public port range. The terminal prints the public address."
           },
           {
             "type": "code",
@@ -1178,7 +1178,7 @@ export const guideArticles = [
           },
           {
             "type": "paragraph",
-            "text": "The optional subdomain creates a web proxy under the gateway\u2019s configured domain. Without this flag, only the public port is created. Use --registration ID when the machine has multiple registrations."
+            "text": "The optional subdomain creates a web proxy under the gateway’s configured domain. Without this flag, only the public port is created. Use --registration ID when the machine has multiple registrations."
           }
         ]
       },
@@ -1241,7 +1241,38 @@ export const guideArticles = [
         "blocks": [
           {
             "type": "paragraph",
-            "text": "Open Access rules \u2192 Routes and create an exit node. Select machines or groups as routing peers, then select the machines or groups that will use them. Routing peers provide internet egress; consuming machines send their internet traffic through the selected peers. A machine cannot be both roles in a routing loop."
+            "text": "Open Access rules → Routes and create an exit node. Select machines or groups as routing peers, then select the machines or groups that will use them. Routing peers provide internet egress; consuming machines send their internet traffic through the selected peers. A machine cannot be both roles in a routing loop."
+          }
+        ]
+      },
+      {
+        "id": "traffic-mode",
+        "title": "Choose which traffic uses exits",
+        "blocks": [
+          {
+            "type": "table",
+            "columns": [
+              "Mode",
+              "Behavior"
+            ],
+            "rows": [
+              [
+                "All",
+                "Internet and matching remote LAN destinations use the configured exits."
+              ],
+              [
+                "Internet only (default)",
+                "Internet uses exits; local network access remains normal."
+              ],
+              [
+                "LAN only",
+                "Matching remote LAN destinations use peer exits; internet uses the client’s normal connection."
+              ]
+            ]
+          },
+          {
+            "type": "paragraph",
+            "text": "Remote LAN routes use advertised private subnets. The most specific network wins, then the configured peer priority. Put a preferred machine before a group to give it priority over members of that group. Existing local and VPN networks keep priority when addresses overlap. Tor cannot provide remote LAN access."
           }
         ]
       },
@@ -1258,7 +1289,7 @@ export const guideArticles = [
             "rows": [
               [
                 "Sticky (default)",
-                "A stable client hash selects one available exit for that client\u2019s new connections."
+                "A stable client hash selects one available exit for that client’s new connections."
               ],
               [
                 "Round robin",
@@ -1282,7 +1313,7 @@ export const guideArticles = [
         "blocks": [
           {
             "type": "paragraph",
-            "text": "Linux routing peers provide IPv4 egress for Linux and macOS consumers. Routing covers application TCP and UDP connections and ICMP echo, rather than only browser traffic. Standard Linux Docker bridges follow the host policy; explicit container VPNs, proxies, and routing overrides can choose another path. Local-network and PortHub gateway access remain available. IPv6 internet forwarding is not implemented; new IPv6 internet traffic is restricted while an exit is active. One machine can have only one active system-wide exit policy."
+            "text": "Linux routing peers provide IPv4 egress for Linux and macOS consumers. Routing covers application TCP and UDP connections and ICMP echo, rather than only browser traffic. Standard Linux Docker bridges follow the host policy; explicit container VPNs, proxies, and routing overrides can choose another path. Local-network and PortHub gateway access remain available. IPv6 internet forwarding is not implemented; new IPv6 internet traffic is restricted when internet routing through an exit is active. One machine can have only one active system-wide exit policy."
           }
         ]
       }
@@ -1300,7 +1331,7 @@ export const guideArticles = [
         "blocks": [
           {
             "type": "paragraph",
-            "text": "Open a machine\u2019s port configuration and its Access settings. Choose Off, a six-digit PIN, or an API key. Locks are off by default. Save a new secret to replace the previous one; existing browser sessions are invalidated when the gate is replaced. The same mapping\u2019s direct gateway port and web proxy enforce the lock."
+            "text": "Open a machine’s port configuration and its Access settings. Choose Off, a six-digit PIN, or an API key. Locks are off by default. Save a new secret to replace the previous one; existing browser sessions are invalidated when the gate is replaced. The same mapping’s direct gateway port and web proxy enforce the lock."
           }
         ]
       },
@@ -1349,7 +1380,7 @@ export const guideArticles = [
     "slug": "dns-controls",
     "group": "Networking",
     "title": "DNS controls",
-    "description": "Block or override domains for selected registered machines.",
+    "description": "Block domains for selected registered machines.",
     "sections": [
       {
         "id": "rules",
@@ -1357,7 +1388,7 @@ export const guideArticles = [
         "blocks": [
           {
             "type": "paragraph",
-            "text": "Open a machine’s configuration and select DNS. Add a domain rule, then choose Block or Override. A block returns a DNS failure for the configured domain. An override returns the configured IP address. Choose whether a plain domain includes all its subdomains or matches only that exact name. Enter *.example.com to match all subdomains while leaving example.com itself accessible. Unmatched names under a controlled domain resolve through the machine’s existing upstream DNS servers. Private PortHub identity zones cannot be replaced by these rules."
+            "text": "Open a machine’s configuration and select DNS. Add a domain to block. A blocked domain returns a DNS failure. Choose whether a plain domain includes all its subdomains or matches only that exact name. Enter *.example.com to match all subdomains while leaving example.com itself accessible. Unmatched names under a controlled domain resolve through the machine’s existing upstream DNS servers. Private PortHub identity zones cannot be replaced by these rules."
           }
         ]
       },
@@ -1367,7 +1398,134 @@ export const guideArticles = [
         "blocks": [
           {
             "type": "paragraph",
-            "text": "These rules apply to the managed operating-system DNS path. They do not guarantee blocking for applications using their own encrypted DNS, a VPN, cached addresses or direct IP connections. An IP override does not rewrite a URL or provide a certificate for another website. HTTPS still checks the original hostname, so mapping one unrelated HTTPS site to another will usually produce a certificate error."
+            "text": "These rules apply to the managed operating-system DNS path. They do not guarantee blocking for applications using their own encrypted DNS, a VPN, cached addresses or direct IP connections."
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "slug": "local-tor",
+    "group": "Networking",
+    "title": "Local Tor exits",
+    "description": "Use each machine’s embedded Tor client alone or alongside peer exits.",
+    "sections": [
+      {
+        "id": "enable",
+        "title": "Enable Tor from Routes",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "Open Access Rules → Routes and enable Include local Tor as an exit. Tor runs inside each assigned machine’s agent, using its own network connection. It needs no Tor daemon, container, gateway relay, or listening port. Assign Tor alone or combine it with routing peers. Tor applies to internet traffic; remote LAN destinations use eligible peer exits."
+          },
+          {
+            "type": "paragraph",
+            "text": "Four circuit groups are used by default; choose between one and sixteen. Groups isolate concurrent connections into separate circuit contexts. More groups do not guarantee a different public IP per request or higher throughput. HTTP connection reuse and established streams keep their selected exit."
+          }
+        ]
+      },
+      {
+        "id": "controls",
+        "title": "Inspect or override the registered agent",
+        "blocks": [
+          {
+            "type": "code",
+            "text": "porthub tor status\nporthub tor start --circuit-groups 4\nporthub tor stop\nporthub tor reset",
+            "label": "Terminal"
+          },
+          {
+            "type": "paragraph",
+            "text": "Start prepares the local Tor runtime; selecting Tor for device traffic remains an exit-policy setting in the UI. Stop disables local Tor and closes its active streams. Reset follows the UI policy again. Read-only status needs no elevation; changing a system registration may request administrative access. These controls are separate from application proxy jobs."
+          }
+        ]
+      },
+      {
+        "id": "fallback",
+        "title": "Fallback and supported traffic",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "Tor supports TCP. Unsupported traffic is blocked when Tor is its selected exit. With other peer exits configured, the connection strategy chooses among available exits. The normal-internet fallback switch controls whether new connections may bypass exit routing when all exits are unavailable; it is off by default. First bootstrap can take several minutes. Gateway control traffic and private PortHub DNS remain outside the Tor path."
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "slug": "application-proxies",
+    "group": "Networking",
+    "title": "Application proxies",
+    "description": "Run an authenticated local HTTP or SOCKS5 proxy through Tor, the gateway, or an authorized peer.",
+    "sections": [
+      {
+        "id": "tor",
+        "title": "Start a local Tor proxy",
+        "blocks": [
+          {
+            "type": "code",
+            "text": "porthub proxy start -d\nporthub proxy status",
+            "label": "Terminal"
+          },
+          {
+            "type": "paragraph",
+            "text": "The default provider is local Tor. HTTP and SOCKS5 share one loopback listener at port 1080. The command prints the proxy addresses and a private curl configuration-file location. Bootstrap runs only when requested; use status to check readiness. No registration or UI permission is needed to use your own local Tor connection."
+          }
+        ]
+      },
+      {
+        "id": "shared",
+        "title": "Authorize a gateway or peer proxy",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "In Access Rules → Routes → Application proxies, create a proxy grant. Choose the gateway or a registered machine, select the machines allowed to use it, and save. Only workspace managers can change grants. Registration alone does not authorize a client to use other machines as proxies. Access to the target’s LAN is off by default and requires an explicit grant."
+          },
+          {
+            "type": "paragraph",
+            "text": "Open the saved grant and copy its command. Run it on an authorized machine; add -d for background operation. The CLI checks permission and peer readiness before creating a listener. Registration credentials stay inside the installed agent. Consuming a shared proxy does not start the source machine’s private overlay; the selected peer provider needs its private agent running. If several registrations exist, select one with --registration and the ID from porthub ls."
+          },
+          {
+            "type": "code",
+            "text": "porthub proxy start --via GRANT_ID -d",
+            "label": "Terminal"
+          },
+          {
+            "type": "paragraph",
+            "text": "Replace GRANT_ID with the saved grant’s ID, or use the exact command copied from the UI. Gateway and peer stream transport uses the existing gateway API port. Peer proxies send destination traffic from the selected peer; Tor proxies use the local machine’s embedded Tor client. No additional public proxy listener is opened on a gateway or peer."
+          }
+        ]
+      },
+      {
+        "id": "clients",
+        "title": "Connect applications",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "Use the printed HTTP proxy address for HTTP/HTTPS clients, or the socks5h address for SOCKS5 clients with remote DNS. Clients must supply the generated proxy credentials. For curl, use --config with the exact private file path printed by PortHub. This keeps the proxy password out of command arguments. HTTPS tunnels preserve the destination’s TLS and application Authorization headers."
+          },
+          {
+            "type": "code",
+            "text": "porthub proxy credentials\nporthub proxy ls",
+            "label": "Terminal"
+          },
+          {
+            "type": "paragraph",
+            "text": "The credentials command explicitly reveals the local job’s username and password when another application requires them. Keep them private. They are different from your PortHub login and the destination application’s credentials."
+          }
+        ]
+      },
+      {
+        "id": "manage",
+        "title": "Multiple proxies and cleanup",
+        "blocks": [
+          {
+            "type": "code",
+            "text": "porthub proxy start --port 1081 -d\nporthub proxy ls\nporthub proxy stop 1081",
+            "label": "Terminal"
+          },
+          {
+            "type": "paragraph",
+            "text": "Choose a different --port for each simultaneous proxy. Omitting -d keeps the terminal attached. Jobs belong to the OS account that started them and can be listed or stopped after a terminal is lost. Stopping a job closes its sessions and removes its credential files. Deleting or disabling a shared grant revokes active sessions within the permission lease window."
           }
         ]
       }

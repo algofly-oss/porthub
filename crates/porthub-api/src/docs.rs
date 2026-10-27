@@ -11,7 +11,9 @@ use serde_json::Value;
 use std::sync::{Arc, LazyLock};
 
 static OPENAPI: LazyLock<Value> = LazyLock::new(|| {
-    serde_json::from_str(include_str!("openapi.json")).expect("bundled OpenAPI document is valid")
+    let mut document:Value=serde_json::from_str(include_str!("openapi.json")).expect("bundled OpenAPI document is valid");
+    document["info"]["version"]=env!("CARGO_PKG_VERSION").into();
+    document
 });
 
 const SWAGGER: &str = r##"<!doctype html>
@@ -148,6 +150,21 @@ mod tests {
                 ["properties"]["data"]["properties"]["ticket"]["type"],
             "string"
         );
+    }
+
+    #[test]
+    fn proxy_permissions_exit_modes_and_block_only_dns_are_documented() {
+        let value=&*OPENAPI;
+        assert_eq!(value["info"]["version"],env!("CARGO_PKG_VERSION"));
+        let properties=&value["paths"]["/api/access/exit-nodes"]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"];
+        assert_eq!(properties["traffic_mode"]["enum"],serde_json::json!(["all","internet_only","lan_only"]));
+        assert_eq!(properties["tor_circuit_groups"]["maximum"],16);
+        let rule=&value["paths"]["/api/access/dns-rules/{machine}"]["put"]["requestBody"]["content"]["application/json"]["schema"]["properties"]["rules"]["items"];
+        assert_eq!(rule["properties"]["action"]["properties"]["type"]["enum"],serde_json::json!(["block"]));
+        assert_eq!(value["paths"]["/api/access/proxy-grants"]["post"]["security"],serde_json::json!([{"SessionCookie":[]}]));
+        for path in ["/api/access/proxy-check/{grant}","/api/access/proxy-stream/{grant}","/api/access/proxy-serve/{session}","/api/access/proxy-jobs"] {
+            assert_eq!(value["paths"][path]["get"]["security"],serde_json::json!([{"PrivateAgentBearer":[]}]));
+        }
     }
 
     #[test]

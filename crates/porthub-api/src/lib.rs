@@ -20,6 +20,8 @@ pub mod legacy_turn;
 mod legacy_upgrade;
 pub mod machine_delete;
 pub mod private_relay;
+pub mod application_proxy;
+mod peer_proxy;
 pub mod private_transport;
 pub mod realtime;
 pub mod release_cache;
@@ -41,6 +43,8 @@ use std::sync::Arc;
 pub struct App {
     pub account_lifecycle: tokio::sync::RwLock<()>,
     pub private_relay: private_relay::Hub,
+    pub proxy_capacity: application_proxy::Capacity,
+    pub(crate) proxy_pending: Arc<peer_proxy::Hub>,
     pub legacy_turn: legacy_turn::Network,
     pub private_enrollment_initialized: tokio::sync::OnceCell<()>,
     pub private_initialized: tokio::sync::OnceCell<()>,
@@ -87,6 +91,8 @@ impl App {
             private_initialized: Default::default(),
             account_lifecycle: tokio::sync::RwLock::new(()),
             private_relay: Default::default(),
+            proxy_capacity: Default::default(),
+            proxy_pending: Default::default(),
             legacy_turn: Default::default(),
             bootstrap_initialized: Default::default(),
             artifacts: match &config.client_release_repository {

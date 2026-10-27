@@ -38,12 +38,26 @@ async fn load(
         return Err(ApiError::new(StatusCode::NOT_FOUND, "Machine not found in this workspace"));
     }
     let document = app.collection("private_dns_rules").find_one(doc! {"workspace_id":owner,"machine_id":machine_id}).await?;
-    let rules = document.as_ref().map(|value| store::field(value,"rules")).unwrap_or_else(|| json!([]));
+    let rules = document.as_ref().map(|value| blocking_rules(store::field(value,"rules"))).unwrap_or_else(|| json!([]));
     Ok(Json(json!({"data":{"machine_id":machine_id.to_hex(),"rules":rules,"can_manage":matches!(role.as_str(),"owner"|"admin")}})))
 }
 
+/// Retired address rules must neither be shown nor delivered during rollout.
+pub(crate) fn blocking_rules(value:Value)->Value {
+    match value {
+        Value::Array(rules)=>Value::Array(rules.into_iter().filter(|rule|rule["action"]["type"]!="override").collect()),
+        other=>other,
+    }
+}
+/// One bounded startup migration removes the retired settings from storage.
+/// Existing block rules and machine registrations remain intact.
+pub async fn remove_address_overrides(app:&App)->ApiResult<()> {
+    app.collection("private_dns_rules").update_many(doc! {"rules.action.type":"override"},doc! {"$pull":{"rules":{"action.type":"override"}}}).await?;
+    Ok(())
+}
+
 pub fn serialize(value: &Document) -> Value {
-    json!({"machine_id":store::id(value.get("machine_id")),"rules":store::field(value,"rules")})
+    json!({"machine_id":store::id(value.get("machine_id")),"rules":blocking_rules(store::field(value,"rules"))})
 }
 
 /// Caller holds connection_lock across this check and the identity-zone edit.
@@ -52,7 +66,7 @@ pub(crate) async fn ensure_zones_available(app: &App, owner: &mongodb::bson::Bso
     let policies: Vec<Document> = app.collection("private_dns_rules")
         .find(doc! {"workspace_id":owner}).await?.try_collect().await?;
     for policy in policies {
-        let rules: Vec<Rule> = serde_json::from_value(store::field(&policy, "rules"))
+        let rules: Vec<Rule> = serde_json::from_value(blocking_rules(store::field(&policy, "rules")))
             .map_err(|_| ApiError::bad_request("Stored DNS rules need review before changing private domains"))?;
         for rule in dns_policy::prepare(&rules).map_err(|_| ApiError::bad_request("Stored DNS rules need review before changing private domains"))? {
             if zones.iter().any(|zone| dns_policy::zone(&rule) == zone || dns_policy::zone(&rule).ends_with(&format!(".{zone}")) || zone.ends_with(&format!(".{}", dns_policy::zone(&rule)))) {

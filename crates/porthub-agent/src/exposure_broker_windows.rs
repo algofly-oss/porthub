@@ -191,6 +191,7 @@ pub fn start(
     let mut listener = pipe(&path, owner.as_deref(), true)?;
     let token = cancel.child_token();
     let work = token.clone();
+    let profile = profile.to_owned();
     let task = tokio::spawn(async move {
         let capacity = Arc::new(tokio::sync::Semaphore::new(32));
         let mut tasks = tokio::task::JoinSet::new();
@@ -203,8 +204,8 @@ pub fn start(
                     let next = match pipe(&path, owner.as_deref(), false) { Ok(next) => next, Err(_) => break };
                     let stream = std::mem::replace(&mut listener, next);
                     let Ok(permit) = capacity.clone().try_acquire_owned() else { continue; };
-                    let control = control.clone(); let cancel = work.clone();
-                    tasks.spawn(async move { let _permit = permit; let _ = crate::exposure_protocol::serve_connection(stream, control, cancel).await; });
+                    let control = control.clone(); let cancel = work.clone(); let profile = profile.clone();
+                    tasks.spawn(async move { let _permit = permit; let _ = crate::exposure_protocol::serve_connection(stream, control, cancel, profile).await; });
                 }
             }
         }
@@ -278,7 +279,7 @@ pub async fn connect(
     request.validate()?;
     // Native SCM handles are not Send. Finish identity verification and drop
     // every synchronous handle before the async pipe exchange can suspend.
-    let stream = verified_pipe(layout, registration)?;
+    let stream = connect_stream(layout, registration).await?;
     let mut reader = BufReader::new(stream);
     let mut bytes = serde_json::to_vec(request)?;
     bytes.push(b'\n');
@@ -297,6 +298,10 @@ pub async fn connect(
         reply.error.as_deref().unwrap_or("exposure request failed")
     );
     Ok((reader, reply))
+}
+
+pub(crate) async fn connect_stream(layout: &crate::service::Layout, registration: &str) -> Result<NamedPipeClient> {
+    verified_pipe(layout, registration)
 }
 
 #[cfg(test)]

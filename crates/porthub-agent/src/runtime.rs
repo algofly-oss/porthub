@@ -23,11 +23,27 @@ pub struct PrivateStatus {
     pub dns_rules: usize,
     pub lease_valid: bool,
     pub exit: Option<ExitStatus>,
+    #[serde(default, skip_serializing_if="Option::is_none")]
+    pub tor: Option<TorStatus>,
+}
+#[derive(Clone,Debug,Deserialize,Serialize)]
+pub struct TorStatus {
+    pub state:String,
+    pub mode:String,
+    pub circuit_groups:usize,
+}
+impl TorStatus {
+    pub fn display(&self)->String {
+        let clean=|value:&str|value.chars().filter(|c|!c.is_control()).take(40).collect::<String>();
+        format!("Local Tor: {}; {} circuit groups; {}; no listening port",clean(&self.state),self.circuit_groups,clean(&self.mode))
+    }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ExitStatus {
     pub name: String,
     pub selection: String,
+    #[serde(default)]
+    pub traffic_mode: porthub_mesh::exit_policy::TrafficMode,
     pub state: String,
     pub peers: usize,
     pub available: usize,
@@ -44,10 +60,16 @@ impl PrivateStatus {
             output.push_str(&format!("\nExit route: {}; {}; {}; {}/{} peers reachable; all offline: {}",
                 clean(&exit.name), clean(&exit.selection), clean(&exit.state), exit.available, exit.peers,
                 if exit.allow_direct_fallback { "allow normal internet" } else { "block" }));
+            output.push_str(match exit.traffic_mode {
+                porthub_mesh::exit_policy::TrafficMode::All => "\nExit mode: all",
+                porthub_mesh::exit_policy::TrafficMode::InternetOnly => "\nExit mode: internet only",
+                porthub_mesh::exit_policy::TrafficMode::LanOnly => "\nExit mode: LAN only; internet uses the normal connection",
+            });
             if !exit.peer_names.is_empty() {
                 output.push_str(&format!("\nConfigured exit peers: {}", exit.peer_names.iter().take(16).map(|name| clean(name)).collect::<Vec<_>>().join(", ")));
             }
         } else { output.push_str("\nExit route: none"); }
+        if let Some(tor)=&self.tor {output.push('\n');output.push_str(&tor.display());}
         output
     }
 }
@@ -615,12 +637,13 @@ mod private_status_tests {
         let old = serde_json::json!({"pid":1,"state":"running","agent_version":"1.5.2","config_version":"","service_count":0,"route":"private","updated_at":1,"update_request_id":""});
         assert!(serde_json::from_value::<Status>(old).unwrap().private_status.is_none());
         let status = PrivateStatus {
-            revision: 7, grants: 2, dns_rules: 1, lease_valid: false,
-            exit: Some(ExitStatus { name: "Exit\u{1b}\nspoof".into(), selection: "sticky".into(), state: "configuration error".into(), peers: 2, available: 0, allow_direct_fallback: false, peer_names: vec!["condor.phub".into()] }),
+            revision: 7, grants: 2, dns_rules: 1, lease_valid: false, tor:None,
+            exit: Some(ExitStatus { name: "Exit\u{1b}\nspoof".into(), selection: "sticky".into(), traffic_mode: Default::default(), state: "configuration error".into(), peers: 2, available: 0, allow_direct_fallback: false, peer_names: vec!["condor.phub".into()] }),
         };
         let rendered = status.display();
         assert!(!rendered.contains('\u{1b}'));
-        assert_eq!(rendered.lines().count(), 3);
+        assert_eq!(rendered.lines().count(), 4);
+        assert!(rendered.contains("Exit mode: internet only"));
         assert!(rendered.contains("lease expired or unavailable"));
         assert!(rendered.contains("configuration error"));
         assert!(rendered.contains("all offline: block"));

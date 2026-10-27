@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "PortHub API",
-    "version": "1.5.2",
+    "version": "1.8.0",
     "description": "PortHub gateway API. Request and response bodies are JSON unless an operation specifies otherwise."
   },
   "servers": [
@@ -3720,7 +3720,7 @@
       "post": {
         "operationId": "post_api_access_exit_nodes",
         "summary": "Create exit node",
-        "description": "Requires workspace administrator access. Select routing peers and consumers. Selection applies only to new connections.",
+        "description": "Requires workspace administrator access. Select routing peers and consumers. Selection applies only to new connections. Existing routes default to Internet only. LAN/Tor modes require compatible agents. Established flows retain their selected exit.",
         "tags": [
           "Private access"
         ],
@@ -3767,7 +3767,7 @@
                   },
                   "routing_selectors": {
                     "type": "array",
-                    "minItems": 1,
+                    "minItems": 0,
                     "maxItems": 32,
                     "items": {
                       "type": "object",
@@ -3787,7 +3787,8 @@
                           "type": "string"
                         }
                       }
-                    }
+                    },
+                    "description": "Ordered machine/group priorities for conflicting remote LAN prefixes. May be empty only when local Tor is enabled; LAN-only mode requires peer exits."
                   },
                   "distribution_selectors": {
                     "type": "array",
@@ -3817,6 +3818,27 @@
                     "type": "boolean",
                     "default": false,
                     "description": "When all routing peers are unavailable, allow new connections over the client’s normal internet connection. Existing connections retain their original path. Disabled by default."
+                  },
+                  "traffic_mode": {
+                    "type": "string",
+                    "enum": [
+                      "all",
+                      "internet_only",
+                      "lan_only"
+                    ],
+                    "default": "internet_only",
+                    "description": "All: internet and matching remote LANs. Internet only: internet through exits. LAN only: matching remote LANs through peers while internet stays local."
+                  },
+                  "tor_enabled": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Include the consumer’s own embedded Tor client for internet TCP traffic."
+                  },
+                  "tor_circuit_groups": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 16,
+                    "default": 4
                   }
                 },
                 "required": [
@@ -3834,7 +3856,7 @@
       "put": {
         "operationId": "put_api_access_exit_nodes_id",
         "summary": "Update exit node",
-        "description": "Requires workspace administrator access. Rejects routing loops and conflicting consumer assignments.",
+        "description": "Requires workspace administrator access. Rejects routing loops and conflicting consumer assignments. Existing routes default to Internet only. LAN/Tor modes require compatible agents. Established flows retain their selected exit.",
         "tags": [
           "Private access"
         ],
@@ -3891,7 +3913,7 @@
                   },
                   "routing_selectors": {
                     "type": "array",
-                    "minItems": 1,
+                    "minItems": 0,
                     "maxItems": 32,
                     "items": {
                       "type": "object",
@@ -3911,7 +3933,8 @@
                           "type": "string"
                         }
                       }
-                    }
+                    },
+                    "description": "Ordered machine/group priorities for conflicting remote LAN prefixes. May be empty only when local Tor is enabled; LAN-only mode requires peer exits."
                   },
                   "distribution_selectors": {
                     "type": "array",
@@ -3941,6 +3964,27 @@
                     "type": "boolean",
                     "default": false,
                     "description": "When all routing peers are unavailable, allow new connections over the client’s normal internet connection. Existing connections retain their original path. Disabled by default."
+                  },
+                  "traffic_mode": {
+                    "type": "string",
+                    "enum": [
+                      "all",
+                      "internet_only",
+                      "lan_only"
+                    ],
+                    "default": "internet_only",
+                    "description": "All: internet and matching remote LANs. Internet only: internet through exits. LAN only: matching remote LANs through peers while internet stays local."
+                  },
+                  "tor_enabled": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Include the consumer’s own embedded Tor client for internet TCP traffic."
+                  },
+                  "tor_circuit_groups": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 16,
+                    "default": 4
                   }
                 },
                 "required": [
@@ -3993,7 +4037,7 @@
       "put": {
         "operationId": "put_api_access_dns_rules_machine",
         "summary": "Replace machine DNS rules",
-        "description": "Requires workspace administrator access. Plain domains include subdomains by default; set include_subdomains=false for exact matching. A leading *. matches subdomains only, excluding the apex. An empty list clears the policy.",
+        "description": "Requires workspace administrator access. Plain domains include subdomains by default; set include_subdomains=false for exact matching. A leading *. matches subdomains only, excluding the apex. An empty list clears the policy. Blocking is the only supported action; address replacement is rejected.",
         "tags": [
           "Private access"
         ],
@@ -4035,7 +4079,38 @@
                     "type": "array",
                     "maxItems": 256,
                     "items": {
-                      "type": "object"
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "domain",
+                        "action"
+                      ],
+                      "properties": {
+                        "domain": {
+                          "type": "string",
+                          "maxLength": 255,
+                          "example": "*.example.com"
+                        },
+                        "include_subdomains": {
+                          "type": "boolean",
+                          "default": true
+                        },
+                        "action": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "type"
+                          ],
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "enum": [
+                                "block"
+                              ]
+                            }
+                          }
+                        }
+                      }
                     }
                   }
                 },
@@ -4044,6 +4119,34 @@
                 ]
               }
             }
+          }
+        }
+      },
+      "get": {
+        "operationId": "get_api_access_dns_rules_machine",
+        "summary": "Read machine domain blocks",
+        "tags": [
+          "Private access"
+        ],
+        "parameters": [
+          {
+            "name": "machine",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Machine block rules and can_manage permission"
+          },
+          "403": {
+            "description": "Not permitted"
+          },
+          "404": {
+            "description": "Machine not found"
           }
         }
       }
@@ -4289,6 +4392,491 @@
           }
         }
       }
+    },
+    "/api/access/proxy-grants": {
+      "get": {
+        "operationId": "list_proxy_grants",
+        "summary": "List workspace proxy grants",
+        "tags": [
+          "Application proxies"
+        ],
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "403": {
+            "description": "Not permitted"
+          },
+          "404": {
+            "description": "Resource not found"
+          }
+        }
+      },
+      "post": {
+        "operationId": "create_proxy_grant",
+        "summary": "Authorize a shared application proxy",
+        "tags": [
+          "Application proxies"
+        ],
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "403": {
+            "description": "Not permitted"
+          },
+          "404": {
+            "description": "Resource not found"
+          }
+        },
+        "description": "Requires a workspace manager’s browser session. Agent credentials cannot create or modify grants. A grant does not open a public listener.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "client_machine_ids"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80
+                  },
+                  "target_kind": {
+                    "type": "string",
+                    "enum": [
+                      "gateway",
+                      "machine"
+                    ],
+                    "default": "gateway"
+                  },
+                  "target_machine_id": {
+                    "type": "string",
+                    "description": "Required for a machine target; must belong to the workspace."
+                  },
+                  "client_machine_ids": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 128,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "enabled": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "allow_lan": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Explicitly permit private destinations reachable through the target; loopback, metadata and overlay identities remain excluded."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/access/proxy-grants/{id}": {
+      "put": {
+        "operationId": "put_proxy_grant",
+        "summary": "Replace proxy grant",
+        "tags": [
+          "Application proxies"
+        ],
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{24}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "403": {
+            "description": "Not permitted"
+          },
+          "404": {
+            "description": "Resource not found"
+          }
+        },
+        "description": "Requires a workspace manager’s browser session. Agent credentials cannot create or modify grants. A grant does not open a public listener.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "client_machine_ids"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80
+                  },
+                  "target_kind": {
+                    "type": "string",
+                    "enum": [
+                      "gateway",
+                      "machine"
+                    ],
+                    "default": "gateway"
+                  },
+                  "target_machine_id": {
+                    "type": "string",
+                    "description": "Required for a machine target; must belong to the workspace."
+                  },
+                  "client_machine_ids": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 128,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "enabled": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "allow_lan": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Explicitly permit private destinations reachable through the target; loopback, metadata and overlay identities remain excluded."
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "delete_proxy_grant",
+        "summary": "Revoke proxy grant",
+        "tags": [
+          "Application proxies"
+        ],
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{24}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "403": {
+            "description": "Not permitted"
+          },
+          "404": {
+            "description": "Resource not found"
+          }
+        }
+      }
+    },
+    "/api/access/proxy-check/{grant}": {
+      "get": {
+        "operationId": "get__api_access_proxy-check_grant",
+        "summary": "Check authorized proxy readiness",
+        "description": "Checks current grant and membership without opening a destination connection. Returns ready=false until a peer’s authenticated notification connection is ready.",
+        "tags": [
+          "Application proxies"
+        ],
+        "security": [
+          {
+            "PrivateAgentBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "x-porthub-peer",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 60
+            }
+          },
+          {
+            "name": "grant",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "403": {
+            "description": "Permission unavailable or revoked"
+          },
+          "429": {
+            "description": "Capacity in use"
+          },
+          "503": {
+            "description": "Provider unavailable"
+          },
+          "200": {
+            "description": "Current readiness",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ready": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/access/proxy-stream/{grant}": {
+      "get": {
+        "operationId": "get__api_access_proxy-stream_grant",
+        "summary": "Open an authorized gateway or peer stream",
+        "description": "WebSocket upgrade on the existing API port. Each stream checks the grant and membership. Binary messages carry bytes; text eof half-closes the upload direction. Active permissions renew through a bounded lease.",
+        "tags": [
+          "Application proxies"
+        ],
+        "security": [
+          {
+            "PrivateAgentBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "x-porthub-peer",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 60
+            }
+          },
+          {
+            "name": "grant",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "host",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 253
+            }
+          },
+          {
+            "name": "port",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            }
+          }
+        ],
+        "responses": {
+          "403": {
+            "description": "Permission unavailable or revoked"
+          },
+          "429": {
+            "description": "Capacity in use"
+          },
+          "503": {
+            "description": "Provider unavailable"
+          },
+          "101": {
+            "description": "Authenticated WebSocket stream or notification channel"
+          }
+        }
+      }
+    },
+    "/api/access/proxy-serve/{session}": {
+      "get": {
+        "operationId": "get__api_access_proxy-serve_session",
+        "summary": "Accept a one-use peer proxy session",
+        "description": "Only the selected peer identity may accept. The gateway sends current destination policy, and the provider reports destination_ip after connecting. Stream forwarding begins only after readiness. No extra listener is created.",
+        "tags": [
+          "Application proxies"
+        ],
+        "security": [
+          {
+            "PrivateAgentBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "x-porthub-peer",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 60
+            }
+          },
+          {
+            "name": "session",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "403": {
+            "description": "Permission unavailable or revoked"
+          },
+          "429": {
+            "description": "Capacity in use"
+          },
+          "503": {
+            "description": "Provider unavailable"
+          },
+          "101": {
+            "description": "Authenticated WebSocket stream or notification channel"
+          }
+        }
+      }
+    },
+    "/api/access/proxy-jobs": {
+      "get": {
+        "operationId": "get__api_access_proxy-jobs",
+        "summary": "Receive authorized peer proxy jobs",
+        "description": "A notification WebSocket exists only for a peer with an enabled UI grant and a valid authenticated private-sync lease. Text messages contain session IDs; ping/pong keeps the idle connection alive.",
+        "tags": [
+          "Application proxies"
+        ],
+        "security": [
+          {
+            "PrivateAgentBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "x-porthub-peer",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 60
+            }
+          }
+        ],
+        "responses": {
+          "403": {
+            "description": "Permission unavailable or revoked"
+          },
+          "429": {
+            "description": "Capacity in use"
+          },
+          "503": {
+            "description": "Provider unavailable"
+          },
+          "101": {
+            "description": "Authenticated WebSocket stream or notification channel"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -4298,6 +4886,11 @@
         "in": "cookie",
         "name": "porthub_session",
         "description": "A signed-in platform administrator session. The cookie name can be configured by the operator."
+      },
+      "PrivateAgentBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Private registration credential. Must be paired with the x-porthub-peer header. This grants no browser management permission."
       }
     }
   }

@@ -220,6 +220,20 @@ fn directory_permissions(path: &Path, owner: u32, group: u32, mode: u32, current
         && path == Path::new("/etc/systemd/system");
     owner == current && mode & 0o002 == 0 && (mode & 0o020 == 0 || root_system_units)
 }
+/// Purge only a stopped registration's dedicated embedded-Tor directory.
+/// remove_dir_all removes nested symlinks themselves rather than their targets.
+fn purge_tor_directory(profile:&Path)->Result<()> {
+    let cache=profile.with_extension("tor");
+    match std::fs::symlink_metadata(&cache) {
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound=>return Ok(()),
+        Err(error)=>return Err(error.into()),
+        Ok(metadata)=>anyhow::ensure!(metadata.is_dir(),"Tor state must be a real directory"),
+    }
+    directory(&cache,true)?;
+    std::fs::remove_dir_all(cache)?;
+    Ok(())
+}
+
 pub(crate) fn directory(path: &Path, private: bool) -> Result<()> {
     #[cfg(windows)]
     let _ = private;
@@ -1048,6 +1062,7 @@ async fn action_locked(layout: &Layout, source: &Path, action: Action, manager: 
                     !profile::Lease::running(&spec.profile)?,
                     "managed profile still has a running owner"
                 );
+                purge_tor_directory(&spec.profile)?;
                 for suffix in [
                     ".config.json",
                     ".local-access.json",
@@ -1065,7 +1080,8 @@ async fn action_locked(layout: &Layout, source: &Path, action: Action, manager: 
                 }
                 if let Some(module) = &module {
                     anyhow::ensure!(!profile::Lease::running(&module.private_profile)?, "private module still has a running owner");
-                    for suffix in [".status.json", ".path-strategy.json", ".lock", ""] {
+                    purge_tor_directory(&module.private_profile)?;
+                    for suffix in [".status.json", ".path-strategy.json", ".tor-settings.json", ".lock", ""] {
                         let path = profile::sibling(&module.private_profile, suffix);
                         if regular(&path)?.is_some() { std::fs::remove_file(path)?; }
                     }

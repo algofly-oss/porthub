@@ -70,6 +70,10 @@ impl<K: Eq + Hash> FlowTable<K> {
         test_selection_sender().send_replace(Some((mode, self.peers.len())));
     }
 
+    pub fn available(&self, peer: &str) -> bool {
+        self.peers.binary_search_by(|candidate| candidate.as_str().cmp(peer)).is_ok()
+    }
+
     /// Refresh only an authenticated reply from the assigned exit. Never
     /// create an assignment from unsolicited incoming packets.
     pub fn observe(&mut self, flow: &K, peer: &str, now: Instant, ttl: Duration) {
@@ -97,6 +101,21 @@ impl<K: Eq + Hash> FlowTable<K> {
     }
 
     pub fn select_with_syn(&mut self, flow: K, now: Instant, ttl: Duration, syn_sequence: Option<u32>) -> Option<&str> {
+        self.select_inner(flow, now, ttl, syn_sequence, None::<fn(&[String])->Option<String>>)
+    }
+
+    /// Prefix routing supplies a peer for a new LAN flow. A missing match
+    /// blocks new flows; it never falls through to internet balancing.
+    pub fn select_for_peer(&mut self, flow: K, now: Instant, ttl: Duration, syn_sequence: Option<u32>, peer: Option<&str>) -> Option<&str> {
+        self.select_inner(flow, now, ttl, syn_sequence, Some(|_:&[String]|peer.map(str::to_owned)))
+    }
+
+    /// Evaluate cached LAN reachability only for a new flow, never on each
+    /// packet or after an established assignment becomes temporarily unhealthy.
+    pub fn select_for_peer_with<F:FnOnce(&[String])->Option<String>>(&mut self,flow:K,now:Instant,ttl:Duration,syn_sequence:Option<u32>,choose:F)->Option<&str> {
+        self.select_inner(flow,now,ttl,syn_sequence,Some(choose))
+    }
+    fn select_inner<F:FnOnce(&[String])->Option<String>>(&mut self, flow: K, now: Instant, ttl: Duration, syn_sequence: Option<u32>, preferred: Option<F>) -> Option<&str> {
         if now >= self.next_reap {
             self.flows.retain(|_, entry| entry.deadline > now);
             self.next_reap = now + Duration::from_secs(30);
@@ -122,7 +141,10 @@ impl<K: Eq + Hash> FlowTable<K> {
         if self.peers.is_empty() || self.flows.len() >= self.capacity {
             return None;
         }
-        let index = match self.mode {
+        let index = if let Some(choose) = preferred {
+            let preferred = choose(&self.peers)?;
+            self.peers.binary_search(&preferred).ok()?
+        } else { match self.mode {
             Selection::Sticky => self
                 .peers
                 .iter()
@@ -139,7 +161,7 @@ impl<K: Eq + Hash> FlowTable<K> {
             Selection::Random => {
                 (self.random.hash_one((&flow, self.cursor)) % self.peers.len() as u64) as usize
             }
-        };
+        }};
         self.cursor = self.cursor.wrapping_add(1);
         let peer = self.peers[index].clone();
         Some(
@@ -157,6 +179,33 @@ mod tests {
     use super::*;
     fn peers() -> Vec<String> {
         vec!["luna".into(), "condor".into()]
+    }
+
+    #[test]
+    fn cached_lan_choice_is_evaluated_once_for_an_established_flow() {
+        let mut table=FlowTable::new("macbook".into());table.configure(peers(),Selection::RoundRobin);
+        let now=Instant::now();let ttl=Duration::from_secs(300);
+        assert_eq!(table.select_for_peer_with(1,now,ttl,Some(10),|available|available.first().cloned()),Some("condor"));
+        assert_eq!(table.select_for_peer_with(1,now,ttl,None,|_|panic!("existing flow must not rescan LAN advertisements")),Some("condor"));
+        table.configure(vec!["luna".into()],Selection::RoundRobin);
+        assert_eq!(table.select_for_peer_with(1,now,ttl,None,|_|panic!("an unavailable flow must not change its exit")),None);
+    }
+
+    #[test]
+    fn lan_match_controls_only_new_flows_and_never_falls_back_to_random_exit() {
+        let mut table = FlowTable::new("macbook".into());
+        table.configure(peers(), Selection::RoundRobin);
+        let now = Instant::now();
+        let ttl = Duration::from_secs(300);
+        assert_eq!(table.select_for_peer(1, now, ttl, Some(10), Some("luna")), Some("luna"));
+        assert_eq!(table.select_for_peer(1, now, ttl, Some(10), Some("condor")), Some("luna"));
+        assert_eq!(table.select_for_peer(1, now, ttl, None, None), Some("luna"));
+        assert_eq!(table.select_for_peer(2, now, ttl, Some(20), None), None);
+        assert_eq!(table.select_for_peer(2, now, ttl, Some(20), Some("unknown")), None);
+        table.configure(vec!["condor".into()], Selection::RoundRobin);
+        assert_eq!(table.select_for_peer(1, now, ttl, None, Some("condor")), None);
+        // Reusing a tuple for an actual new connection can select its new match.
+        assert_eq!(table.select_for_peer(1, now, ttl, Some(11), Some("condor")), Some("condor"));
     }
 
     #[test]

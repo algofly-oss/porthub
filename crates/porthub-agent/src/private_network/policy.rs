@@ -18,6 +18,8 @@ pub struct PeerInfo {
     pub online: bool,
     #[serde(default)]
     pub stream_transport: String,
+    #[serde(default)]
+    pub lan_networks: Vec<porthub_mesh::lan_routes::Network>,
     pub hostname: String,
     #[serde(default)]
     pub aliases: Vec<String>,
@@ -39,9 +41,15 @@ pub struct ExitRoute {
     pub id: String,
     pub name: String,
     pub routing_peers: Vec<String>,
+    #[serde(default)]
+    pub tor_enabled: bool,
+    #[serde(default = "default_tor_groups")]
+    pub tor_circuit_groups: usize,
     pub clients: Vec<String>,
     #[serde(default)]
     pub selection: porthub_mesh::exit_policy::Selection,
+    #[serde(default)]
+    pub traffic_mode: porthub_mesh::exit_policy::TrafficMode,
     #[serde(default)]
     pub allow_direct_fallback: bool,
     #[serde(default = "yes")]
@@ -49,8 +57,50 @@ pub struct ExitRoute {
     #[serde(default = "yes")]
     pub block_lan_access: bool,
 }
+fn default_tor_groups() -> usize { 4 }
 fn yes() -> bool {
     true
+}
+
+#[cfg(test)]
+mod tor_route_tests {
+    use super::*;
+    fn snapshot() -> Snapshot {
+        serde_json::from_value(serde_json::json!({
+            "workspace":"workspace","self":"client","revision":1,
+            "expires_at":Utc::now()+chrono::Duration::seconds(30),
+            "peers":[{"id":"client","ip":"10.203.0.2","fingerprint":"local","instance":"instance","hostname":"client"}],
+            "grants":[],"exit_routes":[{"id":"route","name":"Tor","routing_peers":[],"clients":["client"],"tor_enabled":true}]
+        })).unwrap()
+    }
+    #[test]
+    fn explicit_local_tor_is_valid_without_remote_exit_permissions() {
+        let mut engine=Engine::default();
+        assert!(engine.apply(snapshot()).is_ok());
+        assert!(engine.valid_lease());
+        let mut invalid=snapshot();invalid.exit_routes[0].tor_enabled=false;
+        assert!(engine.apply(invalid).is_err());
+        assert!(!engine.valid_lease());
+    }
+    #[test]
+    fn retired_address_rules_do_not_replace_answers_or_discard_valid_blocks() {
+        let mut raw=serde_json::to_value(snapshot()).unwrap();
+        raw["dns_rules"]=serde_json::json!([
+            {"domain":"blocked.test","action":{"type":"block"}},
+            {"domain":"mapped.test","action":{"type":"override","addresses":["192.0.2.1"]}}
+        ]);
+        let policy:Snapshot=serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(policy.dns_rules.len(),1);assert_eq!(policy.dns_rules[0].domain,"blocked.test");
+        raw["dns_rules"][0]["action"]=serde_json::json!({"type":"unknown"});
+        assert!(serde_json::from_value::<Snapshot>(raw).is_err());
+    }
+    #[test]
+    fn tor_groups_and_client_identity_are_enforced() {
+        let mut invalid=snapshot();invalid.exit_routes[0].tor_circuit_groups=17;
+        assert!(Engine::default().apply(invalid).is_err());
+        let mut invalid=snapshot();invalid.exit_routes[0].clients=vec!["unregistered".into()];
+        assert!(Engine::default().apply(invalid).is_err());
+    }
 }
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Snapshot {
@@ -65,8 +115,15 @@ pub struct Snapshot {
     pub grants: Vec<Grant>,
     #[serde(default)]
     pub exit_routes: Vec<ExitRoute>,
-    #[serde(default)]
+    #[serde(default, deserialize_with="blocking_dns_rules")]
     pub dns_rules: Vec<porthub_mesh::dns_policy::Rule>,
+}
+// A rolling upgrade may still receive an old gateway's address rules. Ignore
+// only that retired action, retaining blocks and rejecting malformed blocks.
+fn blocking_dns_rules<'de,D:serde::Deserializer<'de>>(deserializer:D)->std::result::Result<Vec<porthub_mesh::dns_policy::Rule>,D::Error> {
+    let rules=Vec::<serde_json::Value>::deserialize(deserializer)?;
+    rules.into_iter().filter(|rule|rule["action"]["type"]!="override")
+        .map(|rule|serde_json::from_value(rule).map_err(serde::de::Error::custom)).collect()
 }
 // The control protocol calls the identity field "self".
 #[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -272,7 +329,9 @@ impl Engine {
             for route in &snapshot.exit_routes {
                 ensure!(
                     !route.id.is_empty() && route_ids.insert(&route.id)
-                        && !route.routing_peers.is_empty() && !route.clients.is_empty()
+                        && (!route.routing_peers.is_empty() || route.tor_enabled) && !route.clients.is_empty()
+                        && (route.traffic_mode.internet() || (!route.routing_peers.is_empty() && !route.tor_enabled))
+                        && (1..=16).contains(&route.tor_circuit_groups)
                         && route.routing_peers.len() <= 4096 && route.clients.len() <= 4096,
                     "invalid exit route"
                 );
@@ -350,6 +409,8 @@ impl Engine {
         }
         result
     }
+    #[cfg(feature="local-tor")]
+    pub(super) fn lease_deadline(&self) -> Option<Instant> { self.deadline }
     pub fn valid_lease(&self) -> bool {
         self.deadline.is_some_and(|deadline| deadline > Instant::now())
     }
@@ -437,7 +498,9 @@ impl Engine {
             };
             // Never make overlay peers, loopback or host metadata reachable by
             // granting internet access. LAN access is separately opt-in.
-            if self.ips.values().any(|ip| *ip == target) || !exit_target(target, route.block_lan_access) {
+            if self.ips.values().any(|ip| *ip == target)
+                || !route.traffic_mode.permits(target)
+                || !exit_target(target, false) {
                 return None;
             }
             return Some((request, local_is_client));

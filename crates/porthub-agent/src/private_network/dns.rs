@@ -1,14 +1,14 @@
-//! Authoritative private-zone DNS with bounded forwarding for unmatched names
-//! under controlled domains. No global resolver files or host DNS takeover.
+//! Authoritative private-zone DNS with bounded forwarding for controlled names.
+//! Explicit local-Tor exit policies also route public-name resolution through Tor.
 use super::policy::Snapshot;
 use anyhow::{ensure, Result};
 use hickory_proto::{
     op::{Message, MessageType, OpCode, ResponseCode},
-    rr::{rdata::{A, AAAA}, DNSClass, RData, Record, RecordType},
+    rr::{rdata::A, DNSClass, RData, Record, RecordType},
 };
 use std::{
     collections::{HashMap, HashSet},
-    net::{IpAddr, Ipv4Addr},
+    net::Ipv4Addr,
     sync::Arc,
 };
 use tokio::{net::{TcpListener, UdpSocket}, sync::RwLock};
@@ -18,6 +18,8 @@ pub struct Zone {
     suffixes: HashSet<String>,
     records: HashMap<String, Ipv4Addr>,
     rules: Vec<porthub_mesh::dns_policy::Rule>,
+    forward_all: bool,
+    management_names: HashSet<String>,
 }
 impl Zone {
     pub fn update(&mut self, snapshot: &Snapshot) -> Result<()> {
@@ -73,6 +75,7 @@ impl Zone {
         self.rules = rules;
         self.suffixes = suffixes;
         self.records = records;
+        self.forward_all=snapshot.exit_routes.iter().any(|route|route.tor_enabled && route.traffic_mode.internet() && route.clients.contains(&snapshot.self_));
         Ok(())
     }
     pub fn answer(&self, bytes: &[u8]) -> Option<Vec<u8>> {
@@ -94,23 +97,8 @@ impl Zone {
         reply.metadata.recursion_desired = query.metadata.recursion_desired;
         reply.add_query(q.clone());
         if query.metadata.op_code == OpCode::Query {
-            if let Some(rule) = porthub_mesh::dns_policy::matching(&self.rules, &name) {
-                use porthub_mesh::dns_policy::Action;
-                match &rule.action {
-                    Action::Block => reply.metadata.response_code = ResponseCode::NXDomain,
-                    Action::Override { addresses } => {
-                        if q.query_class() == DNSClass::IN {
-                            for address in addresses {
-                                let data = match (q.query_type(), address) {
-                                    (RecordType::A, IpAddr::V4(ip)) => Some(RData::A(A(*ip))),
-                                    (RecordType::AAAA, IpAddr::V6(ip)) => Some(RData::AAAA(AAAA(*ip))),
-                                    _ => None,
-                                };
-                                if let Some(data) = data { reply.add_answer(Record::from_rdata(q.name().clone(), 5, data)); }
-                            }
-                        }
-                    }
-                }
+            if porthub_mesh::dns_policy::matching(&self.rules, &name).is_some() {
+                reply.metadata.response_code = ResponseCode::NXDomain;
                 return reply.to_vec().ok();
             }
         }
@@ -147,20 +135,51 @@ impl Zone {
         if question.query_class() != DNSClass::IN { return false; }
         let name = question.name().to_ascii().trim_end_matches('.').to_ascii_lowercase();
         if self.suffixes.iter().any(|suffix| within(&name, suffix.trim_end_matches('.'))) { return false; }
+        if self.management_names.contains(&name) {return true;}
         porthub_mesh::dns_policy::matching(&self.rules, &name).is_none()
-            && self.rules.iter().any(|rule| within(&name, porthub_mesh::dns_policy::zone(rule)))
+            && (self.forward_all || self.rules.iter().any(|rule| within(&name, porthub_mesh::dns_policy::zone(rule))))
     }
 }
 
 fn within(name: &str, suffix: &str) -> bool {
     name == suffix || name.strip_suffix(suffix).is_some_and(|prefix| prefix.ends_with('.'))
 }
+
+#[cfg(test)]
+mod tor_coexistence_tests {
+    use super::*;
+    use hickory_proto::{op::Query,rr::Name};
+    #[test]
+    fn private_identity_and_dns_rules_win_while_control_hosts_stay_reachable() -> Result<()> {
+        use porthub_mesh::dns_policy::{Rule,Action};
+        let zone=Zone {
+            suffixes:HashSet::from(["phub.".into()]),
+            records:HashMap::from([("miro.phub.".into(),"10.203.0.2".parse()?)]),
+            rules:vec![Rule {domain:"blocked.test".into(),include_subdomains:false,action:Action::Block},Rule {domain:"gateway.test".into(),include_subdomains:false,action:Action::Block}],
+            forward_all:true,management_names:HashSet::from(["gateway.test".into()]),
+        };
+        let query=|name:&str|->Result<Vec<u8>> {let mut query=Message::query();query.add_query(Query::query(Name::from_ascii(name)?,RecordType::A));Ok(query.to_vec()?)};
+        let private=query("miro.phub.")?;assert!(!zone.needs_upstream(&private));
+        assert_eq!(Message::from_vec(&zone.answer(&private).unwrap())?.answers.len(),1);
+        let blocked=query("blocked.test.")?;assert!(!zone.needs_upstream(&blocked));
+        assert_eq!(Message::from_vec(&zone.answer(&blocked).unwrap())?.metadata.response_code,ResponseCode::NXDomain);
+        assert!(zone.needs_upstream(&query("public.test.")?));
+        assert!(zone.needs_upstream(&query("gateway.test.")?));
+        Ok(())
+    }
+}
 pub struct Server {
     socket: UdpSocket,
     tcp: TcpListener,
     pub zone: Arc<RwLock<Zone>>,
+    pub(super) upstream: Arc<super::dns_upstream::Upstream>,
 }
 impl Server {
+    #[cfg(feature="local-tor")]
+    pub(super) async fn protect_management(&self,names:HashSet<String>,sources:tokio::sync::watch::Receiver<Vec<std::net::SocketAddr>>) {
+        self.zone.write().await.management_names=names.clone();
+        self.upstream.protect_management(names,sources);
+    }
     pub async fn bind(own: Ipv4Addr) -> Result<Self> {
         ensure!(
             own.is_private(),
@@ -176,13 +195,14 @@ impl Server {
         let address = (Ipv4Addr::LOCALHOST, 53);
         let socket = UdpSocket::bind(address).await?;
         let tcp = TcpListener::bind(socket.local_addr()?).await?;
-        Ok(Self { socket, tcp, zone: Default::default() })
+        Ok(Self { socket, tcp, zone: Default::default(), upstream: Default::default() })
     }
     pub fn port(&self) -> Result<u16> {
         Ok(self.socket.local_addr()?.port())
     }
     pub async fn serve(self, cancel: CancellationToken) -> Result<()> {
-        self.serve_with(cancel, Arc::new(super::dns_upstream::Upstream::default())).await
+        let upstream=self.upstream.clone();
+        self.serve_with(cancel, upstream).await
     }
     async fn serve_with(self, cancel: CancellationToken, upstream: Arc<super::dns_upstream::Upstream>) -> Result<()> {
         let address = self.socket.local_addr()?;
@@ -256,6 +276,8 @@ async fn answer_with_upstream(zone: &RwLock<Zone>, upstream: &super::dns_upstrea
 pub struct Registration {
     #[cfg(target_os = "macos")]
     paths: Vec<(std::path::PathBuf, Vec<u8>)>,
+    #[cfg(target_os="macos")]
+    tor_default: Option<super::dns_default_macos::Registration>,
     #[cfg(windows)]
     interface: Option<windows_sys::core::GUID>,
 }
@@ -351,7 +373,12 @@ pub async fn register(
     port: u16,
     suffixes: &[String],
 ) -> Result<Registration> {
-    register_files(std::path::Path::new("/etc/resolver"), port, suffixes)
+    let private:Vec<_>=suffixes.iter().filter(|suffix|suffix.as_str()!=".").cloned().collect();
+    let mut registration=register_files(std::path::Path::new("/etc/resolver"), port, &private)?;
+    if suffixes.iter().any(|suffix|suffix==".") {
+        registration.tor_default=Some(super::dns_default_macos::register(port).await?);
+    }
+    Ok(registration)
 }
 
 #[cfg(target_os = "macos")]
@@ -588,7 +615,7 @@ mod tcp_tests {
                 Rule { domain: "exact.test".into(), include_subdomains: false, action: Action::Block },
             ])?, ..Default::default()
         };
-        let server = Server { socket, tcp, zone: Arc::new(RwLock::new(zone)) };
+        let server = Server { socket, tcp, zone: Arc::new(RwLock::new(zone)), upstream: Default::default() };
         let cancel = CancellationToken::new();
         let task = tokio::spawn(server.serve_with(cancel.clone(), upstream));
         let client = UdpSocket::bind("127.0.0.1:0").await?;
@@ -633,7 +660,7 @@ mod tcp_tests {
             domain: "blocked.example".into(), action: porthub_mesh::dns_policy::Action::Block,
             include_subdomains: true,
         }], ..Default::default() };
-        let server = Server { socket, tcp, zone: Arc::new(RwLock::new(zone)) };
+        let server = Server { socket, tcp, zone: Arc::new(RwLock::new(zone)), upstream: Default::default() };
         let cancel = CancellationToken::new();
         let task = tokio::spawn(server.serve(cancel.clone()));
         let mut query = Message::query();

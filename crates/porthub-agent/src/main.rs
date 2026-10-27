@@ -51,6 +51,11 @@ fn requires_system_privileges(args: &Args) -> bool {
                 !registration.user && registration.profile.is_none()
             }
         },
+        #[cfg(feature="local-tor")]
+        Command::Tor {command}=>match command {
+            TorCommand::Status(_)=>false,
+            TorCommand::Start {registration,..}|TorCommand::Stop(registration)|TorCommand::Reset(registration)=>!registration.user && registration.profile.is_none(),
+        },
         Command::Start(args) | Command::Stop(args) | Command::Restart(args) => !args.user,
         Command::Remove(args) => !args.user,
         Command::Status { .. } => false,
@@ -76,6 +81,8 @@ fn requires_system_privileges(args: &Args) -> bool {
                 || target.parse::<u16>().is_ok_and(is_privileged_port)
         }
         Command::Expose { .. } => false,
+        #[cfg(feature="local-tor")]
+        Command::Proxy {command}=>matches!(command,porthub_agent::proxy_cli::Command::Start {port,..} if is_privileged_port(*port)),
         Command::Run { profile } => {
             porthub_agent::private_network::is_profile(profile).unwrap_or(false)
         }
@@ -214,6 +221,18 @@ enum Command {
     Path {
         #[command(subcommand)]
         command: PathCommand,
+    },
+    /// Start and manage authenticated application proxies.
+    #[cfg(feature="local-tor")]
+    Proxy {
+        #[command(subcommand)]
+        command:porthub_agent::proxy_cli::Command,
+    },
+    /// Control this registration's embedded local Tor client.
+    #[cfg(feature="local-tor")]
+    Tor {
+        #[command(subcommand)]
+        command:TorCommand,
     },
     /// Start one native registration selected by id from porthub ls.
     #[command(alias = "up")]
@@ -687,6 +706,54 @@ enum PathCommand {
     },
     Reset(PathArgs),
 }
+#[cfg(feature="local-tor")]
+#[derive(Subcommand)]
+enum TorCommand {
+    /// Prepare local Tor without opening a listening port.
+    Start {
+        #[arg(long,value_parser=clap::value_parser!(u8).range(1..=16))]
+        circuit_groups:Option<u8>,
+        #[command(flatten)]
+        registration:PathArgs,
+    },
+    /// Stop local Tor, closing its active streams.
+    Stop(PathArgs),
+    /// Show Tor readiness without administrative access.
+    Status(TenantArgs),
+    /// Follow the UI exit policy again.
+    Reset(PathArgs),
+}
+#[cfg(feature="local-tor")]
+fn tor_command(command:TorCommand)->Result<()> {
+    use porthub_agent::{private_network::tor_preferences::{self,Mode},service::readable};
+    if let TorCommand::Status(args)=command {
+        let layout=layout(args.user)?;
+        let owner=readable::select(&layout,args.selector.as_deref(),None)?;
+        let private=if owner.private {owner} else {
+            readable::list(&layout)?.into_iter().find(|record|record.private && record.machine_id==owner.machine_id && record.gateway==owner.gateway)
+                .context("registration has no private agent")?
+        };
+        if let Some(tor)=private.private_status.as_ref().and_then(|status|status.tor.as_ref()) {
+            println!("{}{}",tor.display(),if private.active==Some(true) {""} else {"; agent inactive, last reported state"});
+        } else {println!("Local Tor status is unavailable from this agent version");}
+        return Ok(());
+    }
+    let (args,mode,groups)=match command {
+        TorCommand::Start {registration,circuit_groups}=>(registration,Mode::Enabled,circuit_groups.map(usize::from)),
+        TorCommand::Stop(args)=>(args,Mode::Disabled,None),
+        TorCommand::Reset(args)=>(args,Mode::Auto,None),
+        TorCommand::Status(_)=>unreachable!(),
+    };
+    let path=path_profile(&args)?;
+    let settings=tor_preferences::save(&path,mode,groups)?;
+    if args.json {println!("{}",serde_json::to_string_pretty(&settings)?);}
+    else {println!("{}",match mode {
+        Mode::Enabled=>"Local Tor enabled; the agent will prepare circuits in the background. No listening port is opened.",
+        Mode::Disabled=>"Local Tor disabled; its active connections will close.",
+        Mode::Auto=>"Local Tor now follows the UI exit policy.",
+    });}
+    Ok(())
+}
 fn path_profile(args: &PathArgs) -> Result<PathBuf> {
     use porthub_agent::{private_network, private_profile, service};
     if let Some(path) = &args.profile {
@@ -1043,7 +1110,7 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .with_writer(logs.clone())
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,arti_client=warn,tor_=warn".into()),
         )
         .init();
     let cancel = CancellationToken::new();
@@ -1133,6 +1200,10 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Some(Command::Path { command }) => path_strategy(command),
+        #[cfg(feature="local-tor")]
+        Some(Command::Tor {command})=>tor_command(command),
+        #[cfg(feature="local-tor")]
+        Some(Command::Proxy {command})=>porthub_agent::proxy_cli::run(command,cancel).await,
         Some(Command::Start(args)) => {
             tenant_action(args, porthub_agent::service::Action::Start).await
         }
@@ -1698,6 +1769,21 @@ mod cli_tests {
                 ..
             })
         ));
+    }
+
+    #[cfg(feature="local-tor")]
+    #[test]
+    fn tor_and_proxy_commands_keep_read_only_and_user_operations_unprivileged() {
+        for command in [vec!["porthub","tor","status"],vec!["porthub","proxy","ls"],vec!["porthub","proxy","status"],vec!["porthub","proxy","stop"],vec!["porthub","proxy","start","-d"],vec!["porthub","proxy","start","--detach"]] {
+            assert!(!requires_system_privileges(&args(&command)));
+        }
+        assert!(requires_system_privileges(&args(&["porthub","tor","start"])));
+        assert!(requires_system_privileges(&args(&["porthub","tor","stop"])));
+        assert!(requires_system_privileges(&args(&["porthub","proxy","start","--port","80"])));
+        assert!(!requires_system_privileges(&args(&["porthub","tor","start","--user"])));
+        assert!(Args::try_parse_from(["porthub","proxy","start","--detached"]).is_err());
+        assert!(Args::try_parse_from(["porthub","proxy","start","--circuit-groups","17"]).is_err());
+        assert!(Args::try_parse_from(["porthub","tor","start","--circuit-groups","0"]).is_err());
     }
 
     #[test]

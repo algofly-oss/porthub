@@ -1,5 +1,5 @@
 //! Exact policy ownership, written before mutation and recovered after a crash.
-use super::exit_routes::{FIRST, LAST, PROTOCOL};
+use super::exit_routes::{FIRST, LAST, PROTOCOL,LAN_PRIORITY};
 use anyhow::{ensure, Result};
 use nlink::netlink::{
     route::Ipv4Route, rule::RuleBuilder, types::route::RouteScope, Connection, Route,
@@ -19,6 +19,10 @@ pub(super) struct Journal {
     pub name: String,
     pub own: Ipv4Addr,
     pub sources: Vec<(Ipv4Addr, u32)>,
+    #[serde(default)]
+    pub lan_networks:Vec<porthub_mesh::lan_routes::Network>,
+    #[serde(default)]
+    pub private_bypass:bool,
     #[serde(default)]
     pub ipv6_guard: bool,
     #[serde(default)]
@@ -66,6 +70,7 @@ impl Journal {
                 && journal.name.starts_with("ph")
                 && journal.name[2..].bytes().all(|c| c.is_ascii_hexdigit())
                 && journal.sources.len() <= 128
+                && journal.lan_networks.len()<=512
                 && journal
                     .sources
                     .iter()
@@ -99,6 +104,16 @@ impl Journal {
             for rule in super::exit_containers::routes(self.index, self.table())? {
                 netlink.del_rule_if_exists(rule).await?;
             }
+        }
+        if self.private_bypass {
+            for (address,prefix) in super::exit_routes::PRIVATE_NETWORKS {
+                netlink.del_rule_if_exists(RuleBuilder::v4().priority(super::exit_routes::PRIVATE_BYPASS_PRIORITY)
+                    .protocol(PROTOCOL).to_prefix(&address.to_string(),prefix).table(254)).await?;
+            }
+        }
+        for network in &self.lan_networks {
+            netlink.del_rule_if_exists(RuleBuilder::v4().priority(LAN_PRIORITY).protocol(PROTOCOL)
+                .to_prefix(&network.address().to_string(),network.prefix()).table(self.table())).await?;
         }
         if self.ipv6_guard {
             super::exit_ipv6::clear(&self.name).await?;

@@ -33,9 +33,14 @@ pub mod exposure_broker;
 pub mod http_tools;
 
 mod exposure_protocol;
+#[cfg(feature="local-tor")]
+mod proxy_transport;
 #[cfg(windows)]
 #[path = "exposure_broker_windows.rs"]
 pub mod exposure_broker;
 
 #[cfg(windows)]
 mod detached_windows;
+
+#[cfg(feature="local-tor")]
+pub mod proxy_cli;

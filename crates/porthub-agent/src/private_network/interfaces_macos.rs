@@ -74,7 +74,7 @@ pub(crate) async fn current() -> Result<Vec<SocketAddr>> {
     Ok(found.into_iter().map(|(_, address)| address).collect())
 }
 
-pub(super) async fn watch(
+pub(crate) async fn watch(
     output: watch::Sender<Vec<SocketAddr>>,
     cancel: CancellationToken,
 ) -> Result<()> {

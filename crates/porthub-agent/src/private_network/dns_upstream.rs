@@ -11,12 +11,39 @@ use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpStream, UdpSocket}, sync
 #[derive(Default)]
 pub(super) struct Upstream {
     cache: Mutex<Option<(Instant, Vec<SocketAddr>)>>,
+    #[cfg(feature="local-tor")]
+    tor: std::sync::RwLock<Option<TorDns>>,
+    #[cfg(feature="local-tor")]
+    management: std::sync::RwLock<Option<Management>>,
+}
+
+#[cfg(feature="local-tor")]
+#[derive(Clone)]
+struct Management {
+    names: std::collections::HashSet<String>,
+    sources: tokio::sync::watch::Receiver<Vec<SocketAddr>>,
+}
+
+#[cfg(feature="local-tor")]
+#[derive(Clone)]
+pub(super) struct TorDns {
+    pub resolver: Option<std::sync::Arc<dyn porthub_egress::Resolver>>,
+    pub allow_other: bool,
+    pub valid_until: Instant,
 }
 
 impl Upstream {
     #[cfg(test)]
     pub(super) fn fixture(server: SocketAddr) -> Self {
-        Self { cache: Mutex::new(Some((Instant::now(), vec![server]))) }
+        Self { cache: Mutex::new(Some((Instant::now(), vec![server]))), ..Self::default() }
+    }
+    #[cfg(feature="local-tor")]
+    pub(super) fn set_tor(&self, configuration: Option<TorDns>) {
+        *self.tor.write().unwrap_or_else(|poison|poison.into_inner())=configuration;
+    }
+    #[cfg(feature="local-tor")]
+    pub(super) fn protect_management(&self,names:std::collections::HashSet<String>,sources:tokio::sync::watch::Receiver<Vec<SocketAddr>>) {
+        *self.management.write().unwrap_or_else(|poison|poison.into_inner())=Some(Management {names,sources});
     }
     async fn servers(&self, own: SocketAddr) -> Vec<SocketAddr> {
         let mut cache = self.cache.lock().await;
@@ -35,6 +62,29 @@ impl Upstream {
 
     pub(super) async fn answer(&self, bytes: &[u8], own: SocketAddr, tcp: bool) -> Option<Vec<u8>> {
         let query = Message::from_vec(bytes).ok()?;
+        #[cfg(feature="local-tor")]
+        {
+            let management=self.management.read().unwrap_or_else(|poison|poison.into_inner()).clone();
+            if let Some(management)=management.filter(|management|query.queries.len()==1 && management.names.contains(&query.queries[0].name().to_ascii().trim_end_matches('.').to_ascii_lowercase())) {
+                let sources=management.sources.borrow().clone();
+                for server in self.servers(own).await {
+                    for source in sources.iter().filter(|source|source.is_ipv4()==server.is_ipv4()).take(2) {
+                        if let Ok(Ok(reply))=tokio::time::timeout(Duration::from_secs(2),exchange_from(bytes,&query,server,tcp,Some(source.ip()))).await {return Some(reply);}
+                    }
+                }
+                return failure(&query);
+            }
+        }
+        #[cfg(feature="local-tor")]
+        {
+            let tor=self.tor.read().unwrap_or_else(|poison|poison.into_inner()).clone();
+            if let Some(tor)=tor {
+                if let Some(resolver)=&tor.resolver {
+                    if let Some(answer)=tor_answer(&query,resolver.as_ref()).await {return Some(answer);}
+                }
+                if !tor.allow_other || tor.valid_until <= Instant::now() {return failure(&query);}
+            }
+        }
         let servers = self.servers(own).await;
         for server in servers {
             let result = tokio::time::timeout(Duration::from_secs(2), exchange(bytes, &query, server, tcp)).await;
@@ -42,6 +92,31 @@ impl Upstream {
         }
         failure(&query)
     }
+}
+
+#[cfg(feature="local-tor")]
+async fn tor_answer(query:&Message,resolver:&dyn porthub_egress::Resolver)->Option<Vec<u8>> {
+    use hickory_proto::{op::OpCode,rr::{DNSClass,RecordType,RData,Record,rdata::{A,AAAA}}};
+    if query.metadata.message_type!=MessageType::Query || query.metadata.op_code!=OpCode::Query || query.queries.len()!=1 {return failure(query);}
+    let question=&query.queries[0];
+    let mut reply=Message::new(query.metadata.id,MessageType::Response,query.metadata.op_code);
+    reply.metadata.recursion_desired=query.metadata.recursion_desired;
+    reply.metadata.recursion_available=true;
+    reply.add_query(question.clone());
+    // Tor's RESOLVE protocol returns address records. Return NODATA for other
+    // types rather than leak an unsupported query to an underlay DNS server.
+    if question.query_class()!=DNSClass::IN || !matches!(question.query_type(),RecordType::A|RecordType::AAAA) {return reply.to_vec().ok();}
+    let name=question.name().to_ascii();
+    let addresses=resolver.resolve(name.trim_end_matches('.')).await.ok()?;
+    for address in addresses.into_iter().take(16) {
+        let data=match (question.query_type(),address) {
+            (RecordType::A,std::net::IpAddr::V4(ip))=>Some(RData::A(A(ip))),
+            (RecordType::AAAA,std::net::IpAddr::V6(ip))=>Some(RData::AAAA(AAAA(ip))),
+            _=>None,
+        };
+        if let Some(data)=data {reply.add_answer(Record::from_rdata(question.name().clone(),30,data));}
+    }
+    reply.to_vec().ok()
 }
 
 fn usable(server: SocketAddr, own: SocketAddr) -> bool {
@@ -60,11 +135,17 @@ fn failure(query: &Message) -> Option<Vec<u8>> {
 }
 
 async fn exchange(bytes: &[u8], query: &Message, server: SocketAddr, tcp: bool) -> Result<Vec<u8>> {
+    exchange_from(bytes,query,server,tcp,None).await
+}
+async fn exchange_from(bytes: &[u8], query: &Message, server: SocketAddr, tcp: bool,source:Option<std::net::IpAddr>) -> Result<Vec<u8>> {
     let mut bytes = bytes.to_vec();
     let id = getrandom::u32()? as u16;
     bytes[..2].copy_from_slice(&id.to_be_bytes());
     let reply = if tcp {
-        let mut stream = TcpStream::connect(server).await?;
+        let mut stream = if let Some(source)=source {
+            let socket=if server.is_ipv4(){tokio::net::TcpSocket::new_v4()?}else{tokio::net::TcpSocket::new_v6()?};
+            socket.bind(SocketAddr::new(source,0))?;socket.connect(server).await?
+        } else {TcpStream::connect(server).await?};
         stream.write_u16(bytes.len() as u16).await?;
         stream.write_all(&bytes).await?;
         let len = stream.read_u16().await? as usize;
@@ -74,7 +155,7 @@ async fn exchange(bytes: &[u8], query: &Message, server: SocketAddr, tcp: bool) 
         reply
     } else {
         let local: SocketAddr = if server.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" }.parse()?;
-        let socket = UdpSocket::bind(local).await?;
+        let socket = UdpSocket::bind(source.map_or(local,|source|SocketAddr::new(source,0))).await?;
         socket.connect(server).await?;
         socket.send(&bytes).await?;
         let mut reply = vec![0; 65535];
@@ -153,6 +234,108 @@ async fn resolved_servers() -> Result<Vec<SocketAddr>> {
 mod tests {
     use super::*;
     use hickory_proto::{op::Query, rr::{Name, RecordType}};
+
+    #[cfg(feature="local-tor")]
+    struct TorFixture(bool);
+    #[cfg(feature="local-tor")]
+    #[async_trait::async_trait]
+    impl porthub_egress::Resolver for TorFixture {
+        async fn resolve(&self, hostname:&str)->Result<Vec<std::net::IpAddr>> {
+            ensure!(hostname=="example.test","unexpected DNS destination");
+            ensure!(self.0,"Tor unavailable");
+            Ok(vec!["93.184.216.34".parse()?])
+        }
+    }
+
+    #[cfg(feature="local-tor")]
+    #[tokio::test]
+    async fn only_exact_control_hosts_bypass_tor_and_require_a_physical_source() -> Result<()> {
+        let listener=UdpSocket::bind("127.0.0.1:0").await?;
+        let upstream=Upstream::fixture(listener.local_addr()?);
+        upstream.set_tor(Some(TorDns {resolver:None,allow_other:false,valid_until:Instant::now()}));
+        let (sources,receiver)=tokio::sync::watch::channel(vec!["127.0.0.1:0".parse()?]);
+        upstream.protect_management(std::collections::HashSet::from(["gateway.example.test".into()]),receiver);
+        let server=tokio::spawn(async move {
+            let mut bytes=[0;1500];let(n,source)=listener.recv_from(&mut bytes).await?;
+            assert_eq!(source.ip(),"127.0.0.1".parse::<std::net::IpAddr>()?);
+            let mut reply=Message::from_vec(&bytes[..n])?;
+            reply.metadata.message_type=MessageType::Response;reply.metadata.response_code=ResponseCode::NXDomain;
+            listener.send_to(&reply.to_vec()?,source).await?;
+            let mut next=[0;1500];
+            assert!(tokio::time::timeout(Duration::from_millis(50),listener.recv_from(&mut next)).await.is_err());
+            anyhow::Ok(())
+        });
+        let mut query=Message::query();query.add_query(Query::query(Name::from_ascii("gateway.example.test.")?,RecordType::A));
+        let answer=upstream.answer(&query.to_vec()?,"127.0.0.1:53000".parse()?,false).await.unwrap();
+        assert_eq!(Message::from_vec(&answer)?.metadata.response_code,ResponseCode::NXDomain);
+        sources.send_replace(Vec::new());
+        let answer=upstream.answer(&query.to_vec()?,"127.0.0.1:53000".parse()?,false).await.unwrap();
+        assert_eq!(Message::from_vec(&answer)?.metadata.response_code,ResponseCode::ServFail);
+        sources.send_replace(vec!["127.0.0.1:0".parse()?]);
+        let mut other=Message::query();other.add_query(Query::query(Name::from_ascii("child.gateway.example.test.")?,RecordType::A));
+        let answer=upstream.answer(&other.to_vec()?,"127.0.0.1:53000".parse()?,false).await.unwrap();
+        assert_eq!(Message::from_vec(&answer)?.metadata.response_code,ResponseCode::ServFail);
+        server.await??;Ok(())
+    }
+
+    #[cfg(feature="local-tor")]
+    #[tokio::test]
+    async fn tor_dns_keeps_queries_off_the_underlay_and_honors_lease() -> Result<()> {
+        let underlay=UdpSocket::bind("127.0.0.1:0").await?;
+        let upstream=Upstream::fixture(underlay.local_addr()?);
+        let mut query=Message::query();query.metadata.id=321;
+        query.add_query(Query::query(Name::from_ascii("example.test.")?,RecordType::A));
+        let wire=query.to_vec()?;
+        let configuration=|ready,valid_until|Some(TorDns {resolver:Some(std::sync::Arc::new(TorFixture(ready))),allow_other:false,valid_until});
+        upstream.set_tor(configuration(true,Instant::now()+Duration::from_secs(30)));
+        let answer=Message::from_vec(&upstream.answer(&wire,"127.0.0.1:53000".parse()?,false).await.unwrap())?;
+        assert_eq!(answer.metadata.id,321);assert_eq!(answer.answers.len(),1);
+        upstream.set_tor(configuration(false,Instant::now()+Duration::from_secs(30)));
+        let answer=Message::from_vec(&upstream.answer(&wire,"127.0.0.1:53000".parse()?,false).await.unwrap())?;
+        assert_eq!(answer.metadata.response_code,ResponseCode::ServFail);
+        upstream.set_tor(configuration(true,Instant::now()));
+        let answer=Message::from_vec(&upstream.answer(&wire,"127.0.0.1:53000".parse()?,false).await.unwrap())?;
+        assert_eq!(answer.answers.len(),1);
+        upstream.set_tor(Some(TorDns {resolver:Some(std::sync::Arc::new(TorFixture(false))),allow_other:true,valid_until:Instant::now()}));
+        let answer=Message::from_vec(&upstream.answer(&wire,"127.0.0.1:53000".parse()?,false).await.unwrap())?;
+        assert_eq!(answer.metadata.response_code,ResponseCode::ServFail);
+        upstream.set_tor(Some(TorDns {resolver:None,allow_other:false,valid_until:Instant::now()+Duration::from_secs(30)}));
+        let answer=Message::from_vec(&upstream.answer(&wire,"127.0.0.1:53000".parse()?,false).await.unwrap())?;
+        assert_eq!(answer.metadata.response_code,ResponseCode::ServFail);
+        let mut buffer=[0;1500];
+        assert!(tokio::time::timeout(Duration::from_millis(30),underlay.recv_from(&mut buffer)).await.is_err());
+        Ok(())
+    }
+
+    #[cfg(feature="local-tor")]
+    #[tokio::test]
+    async fn unsupported_tor_dns_types_return_nodata_without_fallback() -> Result<()> {
+        let mut query=Message::query();
+        query.add_query(Query::query(Name::from_ascii("example.test.")?,RecordType::TXT));
+        let reply=Message::from_vec(&tor_answer(&query,&TorFixture(false)).await.unwrap())?;
+        assert_eq!(reply.metadata.response_code,ResponseCode::NoError);
+        assert!(reply.answers.is_empty());
+        Ok(())
+    }
+
+    #[cfg(feature="local-tor")]
+    #[tokio::test]
+    async fn dns_underlay_fallback_requires_explicit_permission() -> Result<()> {
+        let listener=UdpSocket::bind("127.0.0.1:0").await?;
+        let upstream=Upstream::fixture(listener.local_addr()?);
+        upstream.set_tor(Some(TorDns {resolver:Some(std::sync::Arc::new(TorFixture(false))),allow_other:true,valid_until:Instant::now()+Duration::from_secs(30)}));
+        let server=tokio::spawn(async move {
+            let mut bytes=[0;1500];let(n,source)=listener.recv_from(&mut bytes).await?;
+            let mut reply=Message::from_vec(&bytes[..n])?;
+            reply.metadata.message_type=MessageType::Response;
+            reply.metadata.response_code=ResponseCode::NXDomain;
+            listener.send_to(&reply.to_vec()?,source).await?;anyhow::Ok(())
+        });
+        let mut query=Message::query();query.add_query(Query::query(Name::from_ascii("example.test.")?,RecordType::A));
+        let answer=Message::from_vec(&upstream.answer(&query.to_vec()?,"127.0.0.1:53000".parse()?,false).await.unwrap())?;
+        assert_eq!(answer.metadata.response_code,ResponseCode::NXDomain);
+        server.await??;Ok(())
+    }
 
     #[tokio::test]
     async fn tcp_upstream_uses_dns_framing_and_restores_client_id() -> Result<()> {

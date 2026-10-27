@@ -9,19 +9,22 @@ name = "porthub"
 path = "src/main.rs"
 
 [features]
-default = ["private-stream"]
+default = ["private-stream", "local-tor"]
+local-tor = ["private-stream", "dep:porthub-egress"]
 netns-tests = []
 private-stream = ["dep:smoltcp", "porthub-mesh/streams"]
 root-dns-test = []
 handoff-service-test = []
 
 [dependencies]
+getifaddrs = "0.6.2"
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
 porthub-tunnel.workspace = true
 porthub-transfer = { path = "../porthub-transfer" }
+porthub-egress = { path = "../porthub-egress", optional = true }
 porthub-mesh = { path = "../porthub-mesh" }
 chrono = { version = "0.4", features = ["serde"] }
 bytes = "1.12"
@@ -67,6 +70,8 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 zbus = { version = "5", default-features = false, features = ["tokio", "p2p"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+system-configuration = "0.7"
+core-foundation = "0.9"
 tun-rs = { version = "=2.8.13", default-features = false, features = ["async"] }
 route_manager = { version = "=0.2.9", features = ["async"] }
 
@@ -76,4 +81,3 @@ windows-registry = "0.6.1"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_System_Pipes", "Win32_System_Threading"] }
 tun-rs = { version = "=2.8.13", default-features = false, features = ["async"] }
 route_manager = { version = "=0.2.9", features = ["async"] }
-getifaddrs = "0.6.2"

@@ -42,7 +42,17 @@ async fn dns_policies_are_owned_scoped_validated_and_removable() -> Result<()> {
             case.status("PUT", &route, &cookie, json!({"rules":[{"domain":invalid,"action":{"type":"block"}}]}), StatusCode::BAD_REQUEST).await?;
         }
         case.status("PUT", &route, &cookie, json!({"rules":[{"domain":"mapped.example","action":{"type":"override","addresses":["not-an-ip"]}}]}), StatusCode::BAD_REQUEST).await?;
-        case.status("PUT", &route, &cookie, json!({"rules":[{"domain":"mapped.example","action":{"type":"override","addresses":["192.0.2.30","2001:db8::30"]}}]}), StatusCode::OK).await?;
+        case.status("PUT", &route, &cookie, json!({"rules":[{"domain":"mapped.example","action":{"type":"override","addresses":["192.0.2.30","2001:db8::30"]}}]}), StatusCode::BAD_REQUEST).await?;
+        // A rolling upgrade hides old address rules before the one-time
+        // storage migration, without converting them into unwanted blocks.
+        case.app.collection("private_dns_rules").update_one(doc! {"workspace_id":owner,"machine_id":machine},
+            doc! {"$push":{"rules":{"domain":"old-mapping.example","include_subdomains":true,"action":{"type":"override","addresses":["192.0.2.30"]}}}}).await?;
+        let loaded=case.status("GET", &route, &cookie, Value::Null, StatusCode::OK).await?;
+        ensure!(loaded["data"]["rules"].as_array().unwrap().len()==1);
+        porthub_api::routes::dns_rules::remove_address_overrides(&case.app).await.map_err(|error|anyhow::anyhow!(error.detail))?;
+        let stored=case.app.collection("private_dns_rules").find_one(doc! {"workspace_id":owner,"machine_id":machine}).await?.unwrap();
+        ensure!(stored.get_array("rules")?.len()==1);
+        ensure!(stored.get_array("rules")?[0].as_document().unwrap().get_str("domain")?=="blocked.example.com");
         let own = case.status("GET", "/api/access/snapshot", &cookie, Value::Null, StatusCode::OK).await?;
         ensure!(own["dns_rules"].as_array().unwrap().len() == 1);
         let others = case.status("GET", "/api/access/snapshot", &other_cookie, Value::Null, StatusCode::OK).await?;

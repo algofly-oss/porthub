@@ -73,6 +73,16 @@ impl Flow {
         );
         Ok(())
     }
+    fn validate_exit(self) -> Result<()> {
+        let destination = *self.destination.ip();
+        ensure!(self.source.ip().is_private() && self.source.port() != 0 && self.destination.port() != 0
+            && !destination.is_private() && !destination.is_loopback() && !destination.is_link_local()
+            && !destination.is_multicast() && !destination.is_broadcast()
+            && destination.octets()[0] != 0 && destination.octets()[0] < 224
+            && !(destination.octets()[0] == 100 && (64..=127).contains(&destination.octets()[1])),
+            "invalid internet TCP tuple");
+        Ok(())
+    }
 }
 
 type Connected = oneshot::Sender<Result<DuplexStream>>;
@@ -93,6 +103,7 @@ enum Command {
 pub struct Handle {
     commands: mpsc::Sender<Command>,
     active: Arc<RwLock<HashSet<Flow>>>,
+    internet: bool,
 }
 impl Handle {
     pub fn owns(&self, flow: Flow) -> bool {
@@ -104,7 +115,7 @@ impl Handle {
     pub async fn accept_syn(&self, syn: Bytes) -> Result<(Flow, DuplexStream)> {
         let flow =
             Flow::from_packet(&syn).ok_or_else(|| anyhow::anyhow!("invalid private TCP SYN"))?;
-        flow.validate()?;
+        if self.internet { flow.validate_exit()?; } else { flow.validate()?; }
         let ip = Ipv4Packet::new_checked(syn.as_ref())?;
         let tcp = TcpPacket::new_checked(ip.payload())?;
         ensure!(
@@ -259,6 +270,14 @@ pub struct Runner {
     active: Arc<RwLock<HashSet<Flow>>>,
 }
 pub fn stack() -> Result<(Handle, mpsc::Receiver<Bytes>, Runner)> {
+    stack_with_internet(false)
+}
+/// Separate stack instance for locally authorized internet TCP termination.
+/// Ordinary private stream adapters retain their stricter private-only ACL.
+pub(crate) fn exit_stack() -> Result<(Handle, mpsc::Receiver<Bytes>, Runner)> {
+    stack_with_internet(true)
+}
+fn stack_with_internet(internet: bool) -> Result<(Handle, mpsc::Receiver<Bytes>, Runner)> {
     let (commands, input) = mpsc::channel(PACKET_QUEUE);
     let (output, packets) = mpsc::channel(PACKET_QUEUE);
     let active = Arc::new(RwLock::new(HashSet::new()));
@@ -283,6 +302,7 @@ pub fn stack() -> Result<(Handle, mpsc::Receiver<Bytes>, Runner)> {
         Handle {
             commands,
             active: active.clone(),
+            internet,
         },
         packets,
         Runner {
@@ -548,5 +568,20 @@ impl Drop for Runner {
             .write()
             .unwrap_or_else(|p| p.into_inner())
             .clear();
+    }
+}
+
+#[cfg(test)]
+mod exit_admission_tests {
+    use super::*;
+    #[test]
+    fn exit_adapter_does_not_weaken_private_stream_validation() {
+        let flow=Flow {source:"10.203.0.2:12345".parse().unwrap(),destination:"93.184.216.34:443".parse().unwrap()};
+        assert!(flow.validate().is_err());
+        assert!(flow.validate_exit().is_ok());
+        for destination in ["127.0.0.1:443","169.254.169.254:80","10.0.0.1:80","192.168.1.1:80","100.64.0.1:80","224.0.0.1:80","0.0.0.1:80","255.255.255.255:80"] {
+            assert!(Flow {destination:destination.parse().unwrap(),..flow}.validate_exit().is_err());
+        }
+        assert!(Flow {source:"8.8.8.8:12345".parse().unwrap(),..flow}.validate_exit().is_err());
     }
 }
