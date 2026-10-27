@@ -7,11 +7,11 @@ destinations and SHA256 verification. This directory retains only this summary.
 
 ## Current deployment
 
-URM2 currently serves agent release 1.6.1 from the isolated Rust core, edge and
+URM2 currently serves agent release 1.6.2 from the isolated Rust core, edge and
 firewall deployment. The throughput measurements below retain their measured
 release versions; newer functional tests do not establish new bandwidth results.
 
-Release 1.6.0 is deployed in production on Luna and URM2, and all nine online
+Release 1.6.0 was deployed in production on Luna and URM2, and all nine online
 machines acknowledged gateway-driven upgrades. Installed HTTP server/receiver
 public exposure, upload, stop, and proxy removal passed. Native macOS HTTPS
 requests used both configured exits; UDP, ICMP, LAN/private/external SSH, and
@@ -24,7 +24,7 @@ segments were missing. A temporary scoped MSS 1320 clamp restored the same
 Condor egress download. The native agent fix then passed with Miro using Luna
 as its exit, and installed both scoped SYN-direction clamps. Temporary rules,
 policies, and candidate services were removed and the installed service restored.
-Release 1.6.1 is now deployed on Luna and URM2, and all nine online machines
+Release 1.6.1 was deployed on Luna and URM2, and all nine online machines
 acknowledged automatic upgrades. Installed Miro host and ordinary Docker bridge
 requests both used Condor's egress. The temporary policy was removed afterward;
 Condor's private process kept the same PID and recorded zero restarts through
@@ -38,6 +38,22 @@ kernel tests force a real conflicting foreign commit, verify that its table is
 preserved, and check that permission failures are not retried. The updated
 native candidate also passed Miro's ordinary Docker bridge download through
 Luna; temporary policies and candidate services were removed afterward.
+
+Release 1.6.2 is deployed in production on Luna and URM2. All nine online
+machines acknowledged gateway-driven updates. The MacBook, Luna, Miro and
+Condor show one registration row with separate public/private states and the
+existing primary ID. Non-administrator MacBook inspection and path selection
+use that shared ID. Lifecycle tests cover three isolated registration pairs,
+including another tenant and a matching machine ID on another gateway; foreign
+unit ownership fails before any service changes. The native suite passed 209
+tests, with scoped checks run separately. All ten platform builds and the
+production isolation check passed.
+
+Installed 1.6.2 HTTP server and receiver checks passed detached exposure,
+Condor public-port/proxy access, receiver uploads, stop/removal, foreground
+terminal blocking and Ctrl-C cleanup. Old releases, stale PortHub images and
+unused deployment sources were removed. These checks do not establish new
+bandwidth measurements.
 
 An additional 1.4.6 Luna → Miro public gateway test sustained only about
 0.72 MB/s before cancellation. The gateway's accepted public socket used CUBIC
