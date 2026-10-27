@@ -30,19 +30,24 @@ async fn transport_probe_verifies_key_identity_and_canonical_host_before_http() 
     ));
     let requests = Arc::new(AtomicUsize::new(0));
     let captured = requests.clone();
-    let router = porthub_edge::router(server.clone()).layer(middleware::from_fn(
-        move |request: Request, next: Next| {
-            let count = captured.clone();
-            async move {
-                assert_eq!(
-                    request.headers().get("host").and_then(|h| h.to_str().ok()),
-                    Some("porthub.example")
-                );
-                count.fetch_add(1, Ordering::SeqCst);
-                next.run(request).await
-            }
-        },
-    ));
+    let router = porthub_edge::router_with_web(
+        server.clone(),
+        None,
+        Arc::new(porthub_runtime::web_routes::WebRoutes::with_gateway_hosts(
+            ["porthub.example".into()],
+        )),
+    )
+    .layer(middleware::from_fn(move |request: Request, next: Next| {
+        let count = captured.clone();
+        async move {
+            assert_eq!(
+                request.headers().get("host").and_then(|h| h.to_str().ok()),
+                Some("porthub.example")
+            );
+            count.fetch_add(1, Ordering::SeqCst);
+            next.run(request).await
+        }
+    }));
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?;
     listener.set_nonblocking(true)?;
@@ -114,17 +119,22 @@ async fn https_authority_can_stream_through_an_explicit_http_origin_port() -> Re
     let origin = listener.local_addr()?;
     let requests = Arc::new(AtomicUsize::new(0));
     let captured = requests.clone();
-    let router = porthub_edge::router(gateway.clone()).layer(middleware::from_fn(
-        move |request: Request, next: Next| {
-            let count = captured.clone();
-            async move {
-                assert_eq!(request.uri().path(), "/api/tunnel");
-                assert_eq!(request.headers()["host"], "porthub.example");
-                count.fetch_add(1, Ordering::SeqCst);
-                next.run(request).await
-            }
-        },
-    ));
+    let router = porthub_edge::router_with_web(
+        gateway.clone(),
+        None,
+        Arc::new(porthub_runtime::web_routes::WebRoutes::with_gateway_hosts(
+            ["porthub.example".into()],
+        )),
+    )
+    .layer(middleware::from_fn(move |request: Request, next: Next| {
+        let count = captured.clone();
+        async move {
+            assert_eq!(request.uri().path(), "/api/tunnel");
+            assert_eq!(request.headers()["host"], "porthub.example");
+            count.fetch_add(1, Ordering::SeqCst);
+            next.run(request).await
+        }
+    }));
     let edge = tokio::spawn(async move { axum::serve(listener, router).await });
     let plan = ClientPlan::parse(&format!(
         "[client]\nremote_addr='wss://porthub.example/api/tunnel'\n\

@@ -57,6 +57,7 @@ rcgen = "0.14"
 axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 porthub-identity = { path = "../porthub-identity" }
 porthub-edge = { path = "../porthub-edge" }
+porthub-runtime = { path = "../porthub-runtime" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nlink = "0.33"

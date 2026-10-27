@@ -223,12 +223,7 @@ pub fn start(
         task,
     }))
 }
-pub async fn connect(
-    layout: &crate::service::Layout,
-    registration: &str,
-    request: &Request,
-) -> Result<(BufReader<NamedPipeClient>, Reply)> {
-    request.validate()?;
+fn verified_pipe(layout: &crate::service::Layout, registration: &str) -> Result<NamedPipeClient> {
     ensure!(
         !layout.user,
         "Windows exposures use the installed system registration"
@@ -272,6 +267,18 @@ pub async fn connect(
         service.query_status()?.process_id == Some(server_pid),
         "local exposure pipe is not served by the registered agent"
     );
+    Ok(stream)
+}
+
+pub async fn connect(
+    layout: &crate::service::Layout,
+    registration: &str,
+    request: &Request,
+) -> Result<(BufReader<NamedPipeClient>, Reply)> {
+    request.validate()?;
+    // Native SCM handles are not Send. Finish identity verification and drop
+    // every synchronous handle before the async pipe exchange can suspend.
+    let stream = verified_pipe(layout, registration)?;
     let mut reader = BufReader::new(stream);
     let mut bytes = serde_json::to_vec(request)?;
     bytes.push(b'\n');
@@ -290,4 +297,21 @@ pub async fn connect(
         reply.error.as_deref().unwrap_or("exposure request failed")
     );
     Ok((reader, reply))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn connection_future_can_run_in_a_background_task() {
+        let layout = crate::service::Layout::system().unwrap();
+        let registration = "a".repeat(64);
+        let request = super::Request {
+            request_id: "b".repeat(32),
+            local_port: 8000,
+            external_port: None,
+            subdomain: None,
+        };
+        fn assert_send<T: Send>(_: T) {}
+        assert_send(super::connect(&layout, &registration, &request));
+    }
 }
