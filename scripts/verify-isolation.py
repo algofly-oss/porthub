@@ -43,6 +43,9 @@ def main():
         assert not network.get("external")
     bind_sources = {}
     for role, service in config["services"].items():
+        if release := os.environ.get("PORTHUB_VERIFY_RELEASE"):
+            assert len(release.split(".")) == 3 and all(part.isdigit() for part in release.split("."))
+            service["image"] = f"porthub:candidate-{role}-{release}"
         service["container_name"] = prefix + "-" + role
         for mount in service.get("volumes", []):
             if mount.get("type") == "bind":

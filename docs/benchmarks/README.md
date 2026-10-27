@@ -431,3 +431,39 @@ edge, firewall and unrelated applications were not restarted. Temporary
 receivers, agent units, rollback timers, candidate image, source staging,
 upload checkpoints and payloads were cleaned up. Luna returned to approximately
 119 GiB free. No source change was committed and no production client upgraded.
+
+
+## Unified agent 1.7.0 — 2026-10-27
+
+Public forwarding and private networking now share one native service per
+registration. Gateway-driven updates reached all nine online machines; the
+offline personal laptop remains untested. Seven private peers are online.
+Harshitha AGX and Spark last reported private presence before this rollout;
+Spark's embedded module is explicitly disabled. Stopped modules stay stopped.
+Direct process checks on Luna, Miro, Condor, Clear and the Mac found one agent
+process per registration. The Mac's obsolete legacy retry job was retired after
+matching its full machine identity.
+
+A 64 MiB SHA256-verified Luna-to-Miro download regression check produced:
+
+| Route | Connections | MB/s |
+| --- | ---: | ---: |
+| Private | 1 | 98.99 |
+| Private | 16 | 100.14 |
+| Public gateway | 1 | 24.65 |
+| Public gateway | 16 | 19.83 |
+
+These short samples verify the migration; they are not sustained ISP capacity
+measurements. The temporary HTTP server and exposure were stopped afterward.
+
+Validation included 217 native tests, five isolated TUN/routing checks,
+35 API unit tests, 27 API integration tests, 16 publishing/migration checks,
+and production container isolation/end-to-end verification. Isolated unified
+agent tests exercised TCP, UDP, ICMP, exit strategies, outages, recovery and
+existing-flow preservation. All ten release targets passed their platform
+checks.
+
+Production images contain no agent bundle. The API fetches and verifies only
+the requested GitHub release binary, caches it persistently and retains the
+latest release. A real cold Linux download took 3.025 seconds; its cached
+repeat took 0.001 seconds. API/UI updates do not rebuild agent releases.
