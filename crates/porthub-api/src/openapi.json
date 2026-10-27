@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "PortHub API",
-    "version": "1.8.1",
+    "version": "1.8.2",
     "description": "PortHub gateway API. Request and response bodies are JSON unless an operation specifies otherwise."
   },
   "servers": [
@@ -4465,7 +4465,7 @@
             "description": "Resource not found"
           }
         },
-        "description": "Requires a workspace manager’s browser session. Agent credentials cannot create or modify grants. A grant does not open a public listener.",
+        "description": "Requires a workspace manager’s browser session. Gateway LAN access additionally requires a platform administrator. Agent credentials cannot create or modify grants. A grant does not open a public listener.",
         "requestBody": {
           "required": true,
           "content": {
@@ -4564,7 +4564,7 @@
             "description": "Resource not found"
           }
         },
-        "description": "Requires a workspace manager’s browser session. Agent credentials cannot create or modify grants. A grant does not open a public listener.",
+        "description": "Requires a workspace manager’s browser session. Gateway LAN access additionally requires a platform administrator. Agent credentials cannot create or modify grants. A grant does not open a public listener.",
         "requestBody": {
           "required": true,
           "content": {

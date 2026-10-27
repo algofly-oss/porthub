@@ -23,6 +23,7 @@ async fn proxy_sharing_requires_browser_authorization_and_stays_workspace_scoped
         let (status, _, _) = case.call("POST", "/api/access/proxy-grants", "", body.clone(), &[("authorization", "Bearer private-agent-token")]).await?;
         ensure!(status.is_client_error(), "agent credential created a proxy grant");
         case.status("POST", "/api/access/proxy-grants", &foreign_cookie, body.clone(), StatusCode::BAD_REQUEST).await?;
+        case.status("POST","/api/access/proxy-grants",&cookie,json!({"name":"Unauthorized gateway LAN","client_machine_ids":[client.to_hex()],"allow_lan":true,"gateway_lan_authorized":true}),StatusCode::FORBIDDEN).await?;
         let saved = case.status("POST", "/api/access/proxy-grants", &cookie, body.clone(), StatusCode::OK).await?;
         ensure!(saved["allow_lan"] == false && saved["enabled"] == true);
         let route = format!("/api/access/proxy-grants/{}", saved["_id"].as_str().unwrap());
@@ -30,6 +31,7 @@ async fn proxy_sharing_requires_browser_authorization_and_stays_workspace_scoped
         case.status("DELETE", &route, &foreign_cookie, Value::Null, StatusCode::NOT_FOUND).await?;
         let list = case.status("GET", "/api/access/proxy-grants", &cookie, Value::Null, StatusCode::OK).await?;
         ensure!(list["data"].as_array().unwrap().len() == 1);
+        ensure!(list["can_allow_gateway_lan"]==false);
         let list = case.status("GET", "/api/access/proxy-grants", &foreign_cookie, Value::Null, StatusCode::OK).await?;
         ensure!(list["data"].as_array().unwrap().is_empty());
         let mut changed = body; changed["enabled"] = json!(false);
@@ -57,7 +59,7 @@ async fn gateway_proxy_stream_is_authorized_duplex_and_revoked() -> Result<()> {
     let case = Case::new(Config::default()).await?;
     let result =
         async {
-            let (owner, cookie) = case.user("stream-owner@example.invalid", "user").await?;
+            let (owner, cookie) = case.user("stream-owner@example.invalid", "admin").await?;
             let machine = ObjectId::new();
             let peer = format!("{owner}:{machine}");
             let token = "proxy-test-private-credential-0123456789";
@@ -102,6 +104,11 @@ async fn gateway_proxy_stream_is_authorized_duplex_and_revoked() -> Result<()> {
                     "unauthorized target or credential accepted"
                 );
             }
+            // A legacy or manually forged gateway-LAN record has no trusted
+            // approval marker and must not authorize streams.
+            case.app.collection("private_proxy_grants").update_one(doc! {"_id":ObjectId::parse_str(grant)?},doc! {"$unset":{"gateway_lan_authorized":""}}).await?;
+            ensure!(connect_async(request(&target_host,token)?).await.is_err(),"unapproved gateway LAN grant was consumed");
+            case.status("PUT",&format!("/api/access/proxy-grants/{grant}"),&cookie,json!({"name":"Gateway stream","client_machine_ids":[machine.to_hex()],"allow_lan":true}),StatusCode::OK).await?;
             let destination_task = tokio::spawn(async move {
                 let (mut socket, _) = destination.accept().await?;
                 let mut buffer = [0u8; 32768];

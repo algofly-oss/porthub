@@ -174,6 +174,8 @@ pub(crate) async fn authorize(
         }
         _ => return Err(denied()),
     };
+    if target_machine.is_none() && record.get_bool("allow_lan")==Ok(true)
+        && record.get_bool("gateway_lan_authorized")!=Ok(true) {return Err(denied());}
     let target_peer = target_machine
         .as_ref()
         .map(|machine| {

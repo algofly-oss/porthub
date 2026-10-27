@@ -113,7 +113,7 @@ async fn list(
     headers: HeaderMap,
     Query(query): Query<WorkspaceQuery>,
 ) -> ApiResult<Json<Value>> {
-    let (_, owner, _) = browser(&app, &headers, &Method::GET, &query.workspace, false).await?;
+    let (user, owner, _) = browser(&app, &headers, &Method::GET, &query.workspace, false).await?;
     let records: Vec<Document> = app
         .collection(COLLECTION)
         .find(doc! {"workspace_id":owner})
@@ -122,7 +122,7 @@ async fn list(
         .try_collect()
         .await?;
     Ok(Json(
-        json!({"data":records.iter().map(public).collect::<Vec<_>>()}),
+        json!({"data":records.iter().map(public).collect::<Vec<_>>(),"can_allow_gateway_lan":store::string(&user,"role")=="admin"}),
     ))
 }
 async fn validate_inventory(app: &App, owner: ObjectId, input: &GrantInput) -> ApiResult<()> {
@@ -143,8 +143,15 @@ async fn validate_inventory(app: &App, owner: ObjectId, input: &GrantInput) -> A
     }
     Ok(())
 }
+fn check_gateway_permission(user:&Document,input:&GrantInput)->ApiResult<()> {
+    if input.target.is_none() && input.allow_lan && store::string(user,"role")!="admin" {
+        return Err(ApiError::new(StatusCode::FORBIDDEN,"Gateway LAN access requires a platform administrator"));
+    }
+    Ok(())
+}
 fn document(owner: ObjectId, input: GrantInput) -> Document {
     doc! {"workspace_id":owner,"name":input.name,"target_kind":if input.target.is_some(){"machine"}else{"gateway"},
+    "gateway_lan_authorized":input.target.is_none()&&input.allow_lan,
     "target_machine_id":input.target.map(Bson::ObjectId).unwrap_or(Bson::Null),"client_machine_ids":input.clients,
     "enabled":input.enabled,"allow_lan":input.allow_lan,"updated_at":DateTime::now()}
 }
@@ -154,8 +161,9 @@ async fn create(
     Query(query): Query<WorkspaceQuery>,
     ApiBody(raw): ApiBody,
 ) -> ApiResult<Json<Value>> {
-    let (_, owner, _) = browser(&app, &headers, &Method::POST, &query.workspace, true).await?;
+    let (user, owner, _) = browser(&app, &headers, &Method::POST, &query.workspace, true).await?;
     let input = parse(raw)?;
+    check_gateway_permission(&user,&input)?;
     validate_inventory(&app, owner, &input).await?;
     let _lock = app.private_network_lock.lock().await;
     if app
@@ -180,9 +188,10 @@ async fn update(
     Path(id): Path<String>,
     ApiBody(raw): ApiBody,
 ) -> ApiResult<Json<Value>> {
-    let (_, owner, _) = browser(&app, &headers, &Method::PUT, &query.workspace, true).await?;
+    let (user, owner, _) = browser(&app, &headers, &Method::PUT, &query.workspace, true).await?;
     let id = crate::domain::workspaces::object_id(&id, "Invalid proxy grant")?;
     let input = parse(raw)?;
+    check_gateway_permission(&user,&input)?;
     validate_inventory(&app, owner, &input).await?;
     let record = document(owner, input);
     if app

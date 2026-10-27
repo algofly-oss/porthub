@@ -1478,7 +1478,7 @@ export const guideArticles = [
         "blocks": [
           {
             "type": "paragraph",
-            "text": "In Access Rules → Routes → Application proxies, create a proxy grant. Choose the gateway or a registered machine, select the machines allowed to use it, and save. Only workspace managers can change grants. Registration alone does not authorize a client to use other machines as proxies. Access to the target’s LAN is off by default and requires an explicit grant."
+            "text": "In Access Rules → Routes → Application proxies, create a proxy grant. Choose the gateway or a registered machine, select the machines allowed to use it, and save. Only workspace managers can change grants. Registration alone does not authorize a client to use other machines as proxies. Access to the target’s LAN is off by default and requires an explicit grant. Only a platform administrator can authorize access to the gateway’s LAN."
           },
           {
             "type": "paragraph",
