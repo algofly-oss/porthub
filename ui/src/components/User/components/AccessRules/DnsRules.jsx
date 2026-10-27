@@ -7,6 +7,15 @@ import SearchSelect from "@/components/ui/search-select";
 import useToast from "@/shared/hooks/useToast";
 import { API, errorText } from "./shared";
 
+function isAddress(value) {
+  if (value.includes(":")) {
+    if (!/^[0-9a-f:.]+$/i.test(value)) return false;
+    try { return Boolean(new URL(`http://[${value}]/`).hostname); } catch { return false; }
+  }
+  const parts = value.split(".");
+  return parts.length === 4 && parts.every(part => /^(0|[1-9]\d{0,2})$/.test(part) && Number(part) <= 255);
+}
+
 function Editor({ machine, initial, manage, params }) {
   const [rules, setRules] = useState(initial);
   const [busy, setBusy] = useState(false);
@@ -14,7 +23,16 @@ function Editor({ machine, initial, manage, params }) {
   const toast = useToast();
   const change = (index, patch) => setRules(current => current.map((rule, i) => i === index ? { ...rule, ...patch } : rule));
   async function save(event) {
-    event.preventDefault(); setBusy(true); setError("");
+    event.preventDefault(); setError("");
+    for (const rule of rules) {
+      if (rule.mode !== "override") continue;
+      const addresses = rule.addresses.split(/[\s,]+/).filter(Boolean);
+      if (!addresses.length || addresses.some(address => !isAddress(address))) {
+        setError("Enter IPv4 or IPv6 addresses for the override. Domain names and website URLs are not supported; DNS overrides do not redirect browsers.");
+        return;
+      }
+    }
+    setBusy(true);
     try {
       const response = await axios.put(`${API}/dns-rules/${machine}`, { rules: rules.map(rule => ({
         domain: rule.domain, include_subdomains: rule.scope !== "exact",
@@ -31,7 +49,7 @@ function Editor({ machine, initial, manage, params }) {
       <SearchSelect className="col-start-1 row-start-2 sm:col-start-auto sm:row-start-auto" label={`DNS action ${index + 1}`} value={rule.mode} disabled={!manage || busy} onChange={mode => change(index, { mode })} options={[{value:"block",label:"Block domain"},{value:"override",label:"Override addresses"}]} />
       {manage && <Button type="button" variant="ghost" size="icon" className="col-start-2 row-start-1 sm:col-start-auto" aria-label={`Remove rule ${index + 1}`} disabled={busy} onClick={() => setRules(current => current.filter((_, i) => i !== index))}><IconTrash size={16} /></Button>}
       <SearchSelect className="col-span-full" label={`DNS scope ${index + 1}`} value={rule.domain.trim().startsWith("*.") ? "wildcard" : rule.scope} disabled={!manage || busy || rule.domain.trim().startsWith("*.")} onChange={scope => change(index, { scope })} options={rule.domain.trim().startsWith("*.") ? [{value:"wildcard",label:"Subdomains only (apex excluded)"}] : [{value:"all",label:"This domain and all subdomains"},{value:"exact",label:"Only this exact domain"}]} />
-      {rule.mode === "override" && <Input className="col-span-full placeholder:!text-muted-foreground placeholder:!opacity-60" required aria-label={`Replacement addresses ${index + 1}`} placeholder="192.0.2.10, 2001:db8::10" value={rule.addresses} disabled={!manage || busy} onChange={event => change(index, { addresses: event.target.value })} />}
+      {rule.mode === "override" && <div className="col-span-full space-y-1.5"><Input className="placeholder:!text-muted-foreground placeholder:!opacity-60" required aria-label={`Replacement addresses ${index + 1}`} aria-describedby={`dns-address-help-${index}`} placeholder="192.0.2.10, 2001:db8::10" value={rule.addresses} disabled={!manage || busy} onChange={event => change(index, { addresses: event.target.value })} /><p id={`dns-address-help-${index}`} className="text-xs text-muted-foreground">IPv4 or IPv6 addresses only, separated by commas. This changes DNS answers; it does not redirect to another website.</p></div>}
     </div>)}
     {!rules.length && <p className="text-sm text-muted-foreground">No DNS rules for this machine.</p>}
     {error && <p role="alert" className="text-sm text-red-600 dark:text-red-400">{error}</p>}
