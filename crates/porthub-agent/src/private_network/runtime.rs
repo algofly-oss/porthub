@@ -208,13 +208,18 @@ pub async fn run_with_logs(
     let mut registered_rules = Vec::new();
     let mut dns_port: Option<u16> = None;
     let mut policy = Engine::default();
+    let mut private_status = crate::runtime::PrivateStatus::default();
     let mut exit_route = None;
+    #[cfg(target_os = "linux")]
+    let mut exit_fallback = super::exit_selection::Fallback::default();
+    let mut exit_available = 0;
     let mut online_peers = std::collections::HashSet::new();
     #[cfg(target_os = "linux")]
-    let exit_consumer = {
+    let (exit_consumer, exit_applied) = {
         let (sender, receiver) = watch::channel(None);
-        tasks.spawn(super::exit_routes::watch(receiver, interfaces.clone(), work.clone()));
-        sender
+        let (report, applied) = watch::channel("pending");
+        tasks.spawn(super::exit_routes::watch_reported(receiver, interfaces.clone(), work.clone(), Some(report)));
+        (sender, applied)
     };
     let mut exit_selection = super::exit_selection::FlowTable::new(profile.peer_id.clone());
     #[cfg(target_os = "linux")]
@@ -223,7 +228,7 @@ pub async fn run_with_logs(
     let mut exit_clients = std::collections::BTreeSet::new();
     #[cfg(target_os = "linux")]
     let exit_refresh = {
-        let (sender, receiver) = watch::channel(false);
+        let (sender, receiver) = watch::channel(std::collections::BTreeSet::new());
         tasks.spawn(super::exit_forwarding::watch(name.clone(), receiver, work.clone()));
         sender
     };
@@ -246,6 +251,7 @@ pub async fn run_with_logs(
                 ensure!(snapshot.self_==profile.peer_id && snapshot.workspace==profile.workspace,"private policy identity changed");
                 let own=snapshot.peers.iter().find(|p|p.id==profile.peer_id).ok_or_else(||anyhow::anyhow!("private policy omits local peer"))?;
                 let routes:Vec<_>=snapshot.peers.iter().filter(|p|p.id!=profile.peer_id).map(|p|p.ip).collect();
+                let first_ready = device.is_none();
                 policy.apply(snapshot.clone())?;
                 #[cfg(feature="private-stream")]
                 {
@@ -265,15 +271,24 @@ pub async fn run_with_logs(
                     device=Some(tun);
                 }
                 online_peers = snapshot.peers.iter().filter(|peer| peer.online).map(|peer| peer.id.clone()).collect();
+                private_status.revision = snapshot.revision;
+                private_status.grants = snapshot.grants.len();
+                private_status.dns_rules = snapshot.dns_rules.len();
+                private_status.exit = snapshot.exit_routes.iter().find(|route| route.clients.contains(&profile.peer_id)).map(|route| crate::runtime::ExitStatus {
+                    name: route.name.clone(), selection: match route.selection { porthub_mesh::exit_policy::Selection::Sticky => "sticky", porthub_mesh::exit_policy::Selection::RoundRobin => "round robin", porthub_mesh::exit_policy::Selection::Random => "random" }.into(), state: "pending".into(),
+                    peers: route.routing_peers.len(), available: 0, allow_direct_fallback: route.allow_direct_fallback,
+                    peer_names: route.routing_peers.iter().take(16).filter_map(|id| snapshot.peers.iter().find(|peer| &peer.id == id).map(|peer| peer.hostname.clone())).collect(),
+                });
                 exit_route = snapshot.exit_routes.iter().find(|route| route.clients.contains(&profile.peer_id))
-                    .map(|route| (route.routing_peers.clone(), route.selection));
+                    .map(|route| (route.routing_peers.clone(), route.selection, route.allow_direct_fallback));
                 // Apply a received policy before processing another packet;
                 // the periodic tick only refreshes transport availability.
-                if let Some((peers, mode)) = &exit_route {
+                if let Some((peers, mode, _)) = &exit_route {
                     let live = sessions.read().await;
                     let available = peers.iter().filter(|peer| online_peers.contains(*peer) && (relay_sender.is_ready() || live.get(*peer).is_some_and(|session| session.state() == porthub_mesh::State::Ready))).cloned().collect::<Vec<_>>();
+                    exit_available = available.len();
                     exit_selection.configure(available, *mode);
-                } else { exit_selection.configure(Vec::new(), Default::default()); }
+                } else { exit_available = 0; exit_selection.configure(Vec::new(), Default::default()); }
                 #[cfg(target_os = "linux")]
                 {
                     let tun = device.as_ref().expect("private tunnel initialized");
@@ -282,11 +297,12 @@ pub async fn run_with_logs(
                         .filter(|route| route.routing_peers.contains(&profile.peer_id))
                         .flat_map(|route| &route.clients)
                         .filter_map(|id| snapshot.peers.iter().find(|peer| &peer.id == id).map(|peer| peer.ip)).collect();
-                    let desired = exit_route.as_ref().map(|_| (tun.index, own.ip));
+                    let bypass = exit_fallback.update(exit_route.as_ref().is_some_and(|(_, _, allowed)| *allowed), exit_available, policy.valid_lease(), Instant::now());
+                    let desired = exit_route.as_ref().map(|_| (tun.index, own.ip, bypass));
                     if *exit_consumer.borrow() != desired { exit_consumer.send_replace(desired); }
                     if clients != exit_clients {
                         if exit_kernel.is_none() && !clients.is_empty() { exit_kernel = Some(super::exit_kernel::Kernel::new(&name)?); }
-                        exit_refresh.send_replace(!clients.is_empty());
+                        exit_refresh.send_replace(clients.clone());
                         if let Some(kernel) = &exit_kernel { kernel.apply(&clients).await?; }
                         exit_clients = clients;
                     }
@@ -296,7 +312,7 @@ pub async fn run_with_logs(
                 zone.as_ref().unwrap().write().await.update(&snapshot)?;
                 let mut suffixes=snapshot.dns_suffixes.iter().map(|suffix|suffix.trim_matches('.').to_ascii_lowercase()).filter(|suffix|!suffix.is_empty()).collect::<Vec<_>>();
                 if let Some((_,suffix))=own.hostname.split_once('.') { suffixes.push(suffix.trim_matches('.').to_ascii_lowercase()); }
-                suffixes.extend(snapshot.dns_rules.iter().map(|rule|rule.domain.trim_end_matches('.').to_ascii_lowercase()));
+                suffixes.extend(snapshot.dns_rules.iter().map(|rule|porthub_mesh::dns_policy::zone(rule).trim_end_matches('.').to_ascii_lowercase()));
                 suffixes.sort();suffixes.dedup();
                 if registered_suffixes!=suffixes || registered_rules!=snapshot.dns_rules {
                     let tun=device.as_ref().expect("private tunnel initialized");
@@ -312,6 +328,10 @@ pub async fn run_with_logs(
                 }
                 by_ip=snapshot.peers.iter().map(|p|(p.ip,p.id.clone())).collect();
                 peer_ips=snapshot.peers.iter().map(|p|(p.id.clone(),p.ip)).collect();
+                // Publish initial readiness immediately. Waiting for
+                // the periodic refresh can make a healthy service miss the
+                // installer's readiness deadline after a slow initial sync.
+                if first_ready { status_tick.reset_immediately(); }
             },
             Some(Event::Packet{peer,bytes,direct,received_at})=>{
                 let now=received_at;
@@ -426,12 +446,19 @@ pub async fn run_with_logs(
             }
         },
         _=probe_tick.tick(),if device.is_some()=>{
-            if let Some((peers, mode)) = &exit_route {
+            if let Some((peers, mode, _)) = &exit_route {
                 let live = sessions.read().await;
                 let available = peers.iter().filter(|peer| online_peers.contains(*peer) && (relay_sender.is_ready() || live.get(*peer).is_some_and(|session| session.state() == porthub_mesh::State::Ready))).cloned().collect::<Vec<_>>();
+                exit_available = available.len();
                 exit_selection.configure(available, *mode);
-            } else { exit_selection.configure(Vec::new(), Default::default()); }
+            } else { exit_available = 0; exit_selection.configure(Vec::new(), Default::default()); }
             let now=std::time::Instant::now();
+            #[cfg(target_os = "linux")]
+            if let (Some(tun), Some(own)) = (&device, peer_ips.get(&profile.peer_id)) {
+                let bypass = exit_fallback.update(exit_route.as_ref().is_some_and(|(_, _, allowed)| *allowed), exit_available, policy.valid_lease(), now);
+                let desired = exit_route.as_ref().map(|_| (tun.index, *own, bypass));
+                if *exit_consumer.borrow() != desired { exit_consumer.send_replace(desired); }
+            }
             #[cfg(feature="private-stream")]
             {
                 let mode=*strategy.borrow();
@@ -499,7 +526,17 @@ pub async fn run_with_logs(
                     }
                 }
             }
-            let status=crate::runtime::Status{pid:std::process::id(),state:if device.is_some(){"running"}else{"connecting"}.into(),agent_version:crate::VERSION.into(),config_version:String::new(),service_count:count,route:"private".into(),updated_at:SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),update_request_id:String::new()};
+            private_status.lease_valid = policy.valid_lease();
+            if let Some(exit) = &mut private_status.exit {
+                exit.available = exit_available;
+                #[cfg(target_os = "linux")]
+                { exit.state = (*exit_applied.borrow()).to_owned(); }
+                #[cfg(not(target_os = "linux"))]
+                { exit.state = "not supported on this platform".into(); }
+                if !private_status.lease_valid { exit.state.push_str("; policy expired"); }
+                else if exit_available == 0 && exit.state == "exit routing active" { exit.state = "blocked: no reachable exit".into(); }
+            }
+            let status=crate::runtime::Status{pid:std::process::id(),state:if device.is_some(){"running"}else{"connecting"}.into(),agent_version:crate::VERSION.into(),config_version:String::new(),service_count:count,route:"private".into(),updated_at:SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),update_request_id:String::new(),private_status:Some(private_status.clone())};
             profile::write_private(&profile::sibling(&path,".status.json"),&serde_json::to_vec(&status)?,true)?;
             if crate::service::readable::refresh(&path,&status).is_err(){tracing::debug!("local registration display snapshot unavailable");}
         }

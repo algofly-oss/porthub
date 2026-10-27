@@ -42,6 +42,8 @@ pub struct ExitRoute {
     pub clients: Vec<String>,
     #[serde(default)]
     pub selection: porthub_mesh::exit_policy::Selection,
+    #[serde(default)]
+    pub allow_direct_fallback: bool,
     #[serde(default = "yes")]
     pub masquerade: bool,
     #[serde(default = "yes")]
@@ -347,6 +349,9 @@ impl Engine {
             self.revoke();
         }
         result
+    }
+    pub fn valid_lease(&self) -> bool {
+        self.deadline.is_some_and(|deadline| deadline > Instant::now())
     }
     fn allowed(&self, packet: Packet) -> bool {
         let Some(snapshot) = &self.snapshot else {

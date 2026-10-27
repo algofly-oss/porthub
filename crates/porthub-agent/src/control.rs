@@ -51,6 +51,8 @@ pub struct Control {
     private_peer_id: Option<String>,
     http: reqwest::Client,
     preferred: Mutex<Option<(String, Instant)>>,
+    #[cfg(target_os = "linux")]
+    underlay: tokio::sync::Mutex<Option<(std::net::IpAddr, reqwest::Client, Instant)>>,
 }
 impl Control {
     pub fn new(mut profile: Profile) -> anyhow::Result<Self> {
@@ -67,7 +69,45 @@ impl Control {
             private_peer_id: None,
             http,
             preferred: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            underlay: tokio::sync::Mutex::new(None),
         })
+    }
+    /// Control traffic must not inherit an application exit route. Binding a
+    /// physical source selects the consumer's preserved main-table source rule.
+    /// Refresh lazily: no timer or discovery work runs while control is idle.
+    async fn http_for(&self, base: &str) -> Result<reqwest::Client, Failure> {
+        #[cfg(target_os = "linux")]
+        {
+            let loopback = url::Url::parse(base).ok().and_then(|url| url.host_str().map(str::to_owned))
+                .is_some_and(|host| host == "localhost" || host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback()));
+            if loopback { return Ok(self.http.clone()); }
+            let mut cached = self.underlay.lock().await;
+            if let Some((_, client, until)) = &*cached {
+                if Instant::now() < *until { return Ok(client.clone()); }
+            }
+            let addresses = crate::private_network::interfaces::current().await.map_err(|_| Failure::Unavailable)?;
+            let local = addresses.first().ok_or(Failure::Unavailable)?.ip();
+            if let Some((previous, client, until)) = cached.as_mut() {
+                if *previous == local {
+                    *until = Instant::now() + Duration::from_secs(30);
+                    return Ok(client.clone());
+                }
+            }
+            let client = reqwest::Client::builder().local_address(local)
+                .redirect(reqwest::redirect::Policy::none())
+                .pool_max_idle_per_host(2).pool_idle_timeout(Duration::from_secs(60))
+                .connect_timeout(Duration::from_secs(3)).timeout(Duration::from_secs(40))
+                .build().map_err(|_| Failure::Unavailable)?;
+            *cached = Some((local, client.clone(), Instant::now() + Duration::from_secs(30)));
+            return Ok(client);
+        }
+        #[cfg(not(target_os = "linux"))]
+        { let _ = base; Ok(self.http.clone()) }
+    }
+    async fn refresh_underlay(&self) {
+        #[cfg(target_os = "linux")]
+        if let Some((_, _, until)) = self.underlay.lock().await.as_mut() { *until = Instant::now(); }
     }
     pub fn new_private(profile: &crate::private_profile::Profile) -> anyhow::Result<Self> {
         let mut control = Self::new(profile.control_profile())?;
@@ -97,11 +137,11 @@ impl Control {
         }
         bases
     }
-    pub(crate) fn release_request(&self, base: &str, target: &str) -> reqwest::RequestBuilder {
-        self.http
+    pub(crate) async fn release_request(&self, base: &str, target: &str) -> Result<reqwest::RequestBuilder, Failure> {
+        Ok(self.http_for(base).await?
             .get(format!("{base}/api/{}", self.release_path(Some(target))))
             .header("x-porthub-agent-protocol", "rust-v1")
-            .timeout(Duration::from_secs(600))
+            .timeout(Duration::from_secs(600)))
     }
     pub(crate) fn release_path(&self, target: Option<&str>) -> String {
         // URL path segments encode enrollment secrets without allowing '/',
@@ -161,8 +201,8 @@ impl Control {
             );
         }
         for base in self.authorities() {
-            let mut request = self
-                .http
+            let http = self.http_for(&base).await?;
+            let mut request = http
                 .request(method.clone(), format!("{base}/api/{path}"))
                 .header("x-porthub-agent-protocol", "rust-v1");
             if let Some(accept) = accept {
@@ -176,7 +216,7 @@ impl Control {
             }
             let mut response = match request.send().await {
                 Ok(response) => response,
-                Err(_) => continue,
+                Err(_) => { self.refresh_underlay().await; continue; },
             };
             if response.status().is_redirection() || response.status().is_server_error() {
                 continue;
@@ -221,7 +261,7 @@ impl Control {
         .await
     }
     pub async fn sync(&self, hostname: &str, handled: &str) -> Result<Reply, Failure> {
-        self.request(Method::POST,"machines/client/sync",Some(serde_json::json!({"machine_id":self.profile.machine_id,"token":self.profile.token,"hostname":hostname,"local_ip":local_address(),"client_os":std::env::consts::OS,"client_arch":std::env::consts::ARCH,"client_version":crate::VERSION,"client_update_last_handled_request_id":handled,"is_active":true})),&[]).await
+        self.request(Method::POST,"machines/client/sync",Some(serde_json::json!({"machine_id":self.profile.machine_id,"token":self.profile.token,"hostname":hostname,"local_ip":local_address(),"client_os":std::env::consts::OS,"client_arch":std::env::consts::ARCH,"client_os_id":crate::os_info::current().id,"client_os_name":crate::os_info::current().name,"client_version":crate::VERSION,"client_update_last_handled_request_id":handled,"is_active":true})),&[]).await
     }
     pub async fn changes(&self, version: &str) -> Result<Reply, Failure> {
         self.request(

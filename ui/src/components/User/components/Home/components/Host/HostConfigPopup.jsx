@@ -1,3 +1,6 @@
+import DnsRules from "../../../AccessRules/DnsRules";
+import MachineOsIcon from "@/components/ui/machine-os-icon";
+import { platformLabel } from "@/shared/utils/machine-platform.mjs";
 import { externalEndpoint, internalEndpoint } from "@/shared/utils/endpoints.mjs";
 import PublicAccessLock from "./PublicAccessLock";
 import Pagination from "@/components/ui/pagination";
@@ -30,8 +33,6 @@ import {
 import { useDebouncedValue } from "@mantine/hooks";
 import {
   IconArrowLeft,
-  IconBrandApple,
-  IconBrandWindows,
   IconChevronDown,
   IconChevronUp,
   IconCopy,
@@ -65,22 +66,13 @@ const getLabelClassName = () => "mb-2 block text-sm font-medium text-foreground"
 const errorClassName = "mt-1 text-xs text-red-600 dark:text-red-400";
 const getDetailInputClassName = getInputClassName;
 
-const setupTargets = {
-  linux: ["x86_64", "arm64", "armv7", "armhf"],
-  macos: ["x86_64", "arm64"],
-  windows: ["x86_64", "x86", "arm64"],
-};
 const quoteShell = value => `'${String(value).replaceAll("'", "'\\''")}'`;
 const quotePowerShell = value => `'${String(value).replaceAll("'", "''")}'`;
-function setupCommand(url, os, arch) {
+function setupCommand(url, os) {
   if (!url) return "";
-  const target = os === "macos" ? `darwin_${arch}` : os === "windows" ? `windows_${arch}` : arch;
-  if (os === "windows") {
-    const escapedUrl = quotePowerShell(url);
-    return `& { $ErrorActionPreference = 'Stop'; $url = ${escapedUrl}; $dir = Join-Path $env:TEMP ('porthub-' + [Guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $dir | Out-Null; $file = Join-Path $dir 'porthub.exe'; try { Invoke-WebRequest -Uri ($url + '/agent/${target}') -OutFile $file; & $file setup --ticket $url; if ($LASTEXITCODE -ne 0) { throw 'PortHub setup failed' } } finally { Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue } }`;
-  }
-  const q = quoteShell(url);
-  return `(set -eu; url=${q}; dir="$(mktemp -d)"; trap 'rm -rf "$dir"' EXIT; curl -fsSL "$url/agent/${target}" -o "$dir/porthub"; chmod 700 "$dir/porthub"; if [ "$(id -u)" -eq 0 ]; then "$dir/porthub" setup --ticket "$url"; else sudo -- "$dir/porthub" setup --ticket "$url"; fi)`;
+  return os === "windows"
+    ? `irm ${quotePowerShell(`${url}/windows.ps1`)} | iex`
+    : `curl -fsSL ${quoteShell(url)} | bash`;
 }
 
 const getInfoBadgeClassName = () => "!bg-control !text-muted-foreground";
@@ -449,6 +441,7 @@ export default function HostConfigPopup({
 
   const [rules, setRules] = useState([]);
   const [machineSection, setMachineSection] = useState("groups");
+  const [dnsRuleCount, setDnsRuleCount] = useState(null);
   const [portSection, setPortSection] = useState("connection");
   const [linkedProxies, setLinkedProxies] = useState([]);
   const [proxiesOpen, setProxiesOpen] = useState(false);
@@ -474,7 +467,6 @@ export default function HostConfigPopup({
   const [machineCommand, setMachineCommand] = useState("");
   const [bootstrapUrl, setBootstrapUrl] = useState("");
   const [setupOs, setSetupOs] = useState("linux");
-  const [setupArch, setSetupArch] = useState("x86_64");
   const machineCommandPreviewsRef = useRef({ identity: "", commands: new Map() });
   const [isLoadingMachineCommand, setIsLoadingMachineCommand] = useState(false);
   const [showClientSetupAdvanced, setShowClientSetupAdvanced] = useState(false);
@@ -564,8 +556,7 @@ export default function HostConfigPopup({
   const savedRuleCount = host?.forwardingConfigs?.length || 0;
   const hostConnectionStatus =
     host?.connectionStatus || (host?.isActive ? "online" : "offline");
-  const ClientOsIcon = host?.clientOs === "windows" ? IconBrandWindows : host?.clientOs === "macos" ? IconBrandApple : IconTerminal2;
-  const clientOsLabel = { linux: "Linux", macos: "macOS", windows: "Windows" }[host?.clientOs] || "";
+  const clientOsLabel = platformLabel(host?.clientOs, host?.clientOsName, host?.clientArch);
   const showClientUpdateAction = Boolean(host?.id);
   const clientVersionLabel = formatClientVersion(
     host?.clientVersion,
@@ -2034,7 +2025,7 @@ export default function HostConfigPopup({
   );
 
   const installCommand = bootstrapUrl
-    ? setupCommand(bootstrapUrl, setupOs, setupArch)
+    ? setupCommand(bootstrapUrl, setupOs)
     : machineCommand;
 
   return (
@@ -2139,6 +2130,7 @@ export default function HostConfigPopup({
             onSubmit={async event => {
               event.preventDefault();
               event.stopPropagation();
+              if (!selectedRule && machineSection === "dns") return;
               if (!selectedRule && machineSection === "groups") handleSaveMachineDetails();
               else if (!selectedRule && machineSection === "credentials") handleSaveClientSetup();
               else if (await handleSubmit(event) && selectedRule) handleDoneEditing();
@@ -2156,7 +2148,7 @@ export default function HostConfigPopup({
               }`}
             >
             <div className="flex flex-col gap-3">
-            {!selectedRule ? <div className="overflow-x-auto pb-1"><StatusTabs label="Machine configuration sections" value={machineSection} onChange={setMachineSection} options={[{value:"groups",label:"Details"},{value:"ports",label:"Ports"},{value:"credentials",label:"Client"},{value:"logs",label:"Logs"},{value:"uptime",label:"History"}]} /></div> : <div className="flex min-w-0 items-center gap-3"><WorkspaceButton type="button" variant="ghost" size="sm" onClick={handleDoneEditing}><IconArrowLeft size={16} />All Ports</WorkspaceButton><span className="text-muted-foreground" aria-hidden="true">/</span><h2 ref={portHeadingRef} tabIndex={-1} className="min-w-0 flex-1 truncate text-base font-semibold !outline-none">{selectedRule.serviceName || "New Port"}</h2><WorkspaceButton type="button" variant="ghost" size="icon" onClick={()=>handleRemoveRule(selectedRule.localId)} className="text-red-600 dark:text-red-400" aria-label="Remove Port"><IconTrash size={16} /></WorkspaceButton></div>}
+            {!selectedRule ? <div className="overflow-x-auto pb-1"><StatusTabs label="Machine configuration sections" value={machineSection} onChange={setMachineSection} options={[{value:"groups",label:"Details"},{value:"ports",label:"Ports"},{value:"dns",label:dnsRuleCount == null ? "DNS" : `DNS (${dnsRuleCount})`},{value:"credentials",label:"Client"},{value:"logs",label:"Logs"},{value:"uptime",label:"History"}]} /></div> : <div className="flex min-w-0 items-center gap-3"><WorkspaceButton type="button" variant="ghost" size="sm" onClick={handleDoneEditing}><IconArrowLeft size={16} />All Ports</WorkspaceButton><span className="text-muted-foreground" aria-hidden="true">/</span><h2 ref={portHeadingRef} tabIndex={-1} className="min-w-0 flex-1 truncate text-base font-semibold !outline-none">{selectedRule.serviceName || "New Port"}</h2><WorkspaceButton type="button" variant="ghost" size="icon" onClick={()=>handleRemoveRule(selectedRule.localId)} className="text-red-600 dark:text-red-400" aria-label="Remove Port"><IconTrash size={16} /></WorkspaceButton></div>}
             {selectedRule && <div className="overflow-x-auto pb-1"><StatusTabs label="Port configuration sections" value={portSection} onChange={setPortSection} options={[{value:"connection",label:"Connection"},{value:"access",label:"Access"},{value:"traffic",label:"Traffic"},{value:"web",label:"Web Addresses"}]} /></div>}
             {!selectedRule && machineSection === "groups" && <div className="flex items-start justify-between gap-3">
               <Group spacing="xs">
@@ -2193,7 +2185,7 @@ export default function HostConfigPopup({
                 <Badge color="blue" variant="light" className={getInfoBadgeClassName(isDark)}>
                   {host.name || "Untitled machine"}
                 </Badge>
-                {clientOsLabel && <Badge color="blue" variant="light" leftSection={<ClientOsIcon size={13} />} className={getInfoBadgeClassName(isDark)} title={host.clientArch ? `${clientOsLabel} · ${host.clientArch}` : clientOsLabel}>{clientOsLabel}{host.clientArch ? ` · ${host.clientArch}` : ""}</Badge>}
+                {clientOsLabel && <Badge color="blue" variant="light" leftSection={<MachineOsIcon os={host.clientOs} distribution={host.clientOsId} size={13} />} className={getInfoBadgeClassName(isDark)} title={clientOsLabel}>{clientOsLabel}</Badge>}
                 {privateDomain && <Badge component="button" type="button" color="blue" variant="light"
                   onClick={() => handleCopy("PortHub domain address", `http://${privateDomain}`)}
                   aria-label={`Copy PortHub address http://${privateDomain}`}
@@ -2251,6 +2243,9 @@ export default function HostConfigPopup({
                 className="rounded-lg bg-control/40"
               >
                 <div className="divide-y divide-border/60">
+                  <div hidden={machineSection !== "dns"}>
+                    <DnsRules machine={host.id} opened={opened} onCount={setDnsRuleCount} />
+                  </div>
                   <div hidden={machineSection !== "groups"}>
                     <h2 className="px-4 py-3 text-base font-semibold">Machine Details</h2>
 
@@ -2628,11 +2623,7 @@ export default function HostConfigPopup({
                             <div className="mb-3 space-y-3">
                               <div>
                                 <p className="mb-1.5 text-xs font-medium text-muted-foreground">Operating system</p>
-                                <StatusTabs label="Install operating system" value={setupOs} onChange={value => { setSetupOs(value); setSetupArch(setupTargets[value][0]); }} options={[{value:"linux",label:"Linux"},{value:"macos",label:"macOS"},{value:"windows",label:"Windows"}]} />
-                              </div>
-                              <div>
-                                <p className="mb-1.5 text-xs font-medium text-muted-foreground">Architecture</p>
-                                <StatusTabs label="Install CPU architecture" value={setupArch} onChange={setSetupArch} options={setupTargets[setupOs].map(value => ({value,label:({x86_64:setupOs==="windows"?"x64":"x86_64",x86:"x86",arm64:"ARM64",armv7:"ARMv7",armhf:"ARMv6 / ARMhf"})[value]}))} />
+                                <StatusTabs label="Install operating system" value={setupOs} onChange={setSetupOs} options={[{value:"linux",label:"Linux"},{value:"macos",label:"macOS"},{value:"windows",label:"Windows"}]} />
                               </div>
                               {setupOs === "windows" && <p className="text-xs text-muted-foreground">Run this command in an Administrator PowerShell window.</p>}
                             </div>

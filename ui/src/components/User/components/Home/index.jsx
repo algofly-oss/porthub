@@ -217,6 +217,8 @@ const mapMachineToHost = (machine) => ({
   hostname: machine.hostname || "",
   clientHostname: machine.client_hostname || "",
   clientOs: machine.client_os || "",
+  clientOsId: machine.client_os_id || "",
+  clientOsName: machine.client_os_name || "",
   clientArch: machine.client_arch || "",
   clientCountry: machine.client_country || "",
   privateDomains: Array.isArray(machine.private_domains) ? machine.private_domains : [],
@@ -1309,6 +1311,8 @@ export default function Home({ onStatsChange, active = true }) {
                               defaultPrivateDomain={defaultPrivateDomain(host)}
                               hostname={host.hostname}
                               clientOs={host.clientOs}
+                              clientOsId={host.clientOsId}
+                              clientOsName={host.clientOsName}
                               clientArch={host.clientArch}
                               clientCountry={host.clientCountry}
                               groupLabels={(host.groupIds || [])

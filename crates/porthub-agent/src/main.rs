@@ -852,6 +852,20 @@ async fn list_registrations(user: bool, json: bool) -> Result<()> {
     Ok(())
 }
 
+fn print_private_status(record: &porthub_agent::service::readable::Record, layout: &porthub_agent::service::Layout) -> Result<()> {
+    use porthub_agent::service::readable;
+    let records = if record.private { vec![record.clone()] } else {
+        readable::list(layout)?.into_iter().filter(|peer| peer.private && peer.machine_id == record.machine_id && peer.gateway == record.gateway).collect()
+    };
+    for peer in records {
+        println!("Private agent: {}; version {}", peer.state, peer.agent_version);
+        if peer.active != Some(true) { println!("Private policy below is the last reported state."); }
+        if let Some(status) = &peer.private_status { println!("{}", status.display()); }
+        else { println!("Private policy details unavailable from this agent version."); }
+    }
+    Ok(())
+}
+
 #[derive(Subcommand)]
 enum ServiceCommand {
     Install {
@@ -920,7 +934,7 @@ async fn service_command(command: ServiceCommand, user: bool) -> Result<()> {
                     service::install(
                         &layout,
                         &profile,
-                        &std::env::current_exe()?,
+                        &std::env::current_exe()?.canonicalize()?,
                         manager.as_ref(),
                     )
                     .await?
@@ -1061,7 +1075,7 @@ async fn main() -> Result<()> {
                 porthub_agent::service::install_published(
                     &layout,
                     &saved,
-                    &std::env::current_exe()?,
+                    &std::env::current_exe()?.canonicalize()?,
                     manager.as_ref(),
                     Some(&cli),
                 )
@@ -1133,7 +1147,7 @@ async fn main() -> Result<()> {
                         enrollment,
                         profile.as_deref(),
                         &layout,
-                        &std::env::current_exe()?,
+                        &std::env::current_exe()?.canonicalize()?,
                         manager.as_ref(),
                         &cli,
                     )
@@ -1145,7 +1159,7 @@ async fn main() -> Result<()> {
                         enrollment,
                         profile.as_deref(),
                         &layout,
-                        &std::env::current_exe()?,
+                        &std::env::current_exe()?.canonicalize()?,
                         manager.as_ref(),
                         Some(&cli),
                     )
@@ -1428,6 +1442,7 @@ async fn main() -> Result<()> {
                         "{}; agent {}; ports {}; route {}",
                         record.state, record.agent_version, record.ports, record.route
                     );
+                    print_private_status(&record, &layout(user)?)?;
                     return Ok(());
                 }
                 let status = porthub_agent::runtime::status(&profile)?;
@@ -1435,6 +1450,7 @@ async fn main() -> Result<()> {
                     "{}; agent {}; ports {}; route {}",
                     status.state, status.agent_version, status.service_count, status.route
                 );
+                if let Some(details) = status.private_status { println!("{}", details.display()); }
             } else {
                 let record = porthub_agent::service::readable::select(
                     &layout(user)?,
@@ -1445,6 +1461,7 @@ async fn main() -> Result<()> {
                     "{}; agent {}; ports {}; route {}",
                     record.state, record.agent_version, record.ports, record.route
                 );
+                print_private_status(&record, &layout(user)?)?;
             }
             Ok(())
         }

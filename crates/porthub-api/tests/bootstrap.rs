@@ -89,6 +89,12 @@ async fn unchanged_bootstrap_previews_reuse_code_and_different_cached_previews_r
         ensure!(launcher.contains("setup $porthub_bootstrap_adopt --ticket ") && launcher.contains("-e \"$porthub_bootstrap_bin_dir/porthub\"") && launcher.contains("--proto '=https'") && !launcher.contains(TOKEN));
         let mut syntax=std::process::Command::new("sh").arg("-n").stdin(std::process::Stdio::piped()).spawn()?;
         use std::io::Write;syntax.stdin.take().unwrap().write_all(launcher.as_bytes())?;ensure!(syntax.wait()?.success());
+        let response=case.router.clone().oneshot(Request::builder().uri(format!("/install/{ticket}/windows.ps1")).body(Body::empty())?).await?;
+        ensure!(response.status()==StatusCode::OK && response.headers()["cache-control"]=="no-store");
+        let powershell=String::from_utf8(to_bytes(response.into_body(),65536).await?.to_vec())?;
+        ensure!(powershell.contains("RuntimeInformation]::OSArchitecture") && powershell.contains("PROCESSOR_ARCHITEW6432"));
+        ensure!(["windows_x86_64","windows_x86","windows_arm64"].iter().all(|target| powershell.contains(target)));
+        ensure!(powershell.contains("& $porthubFile setup --ticket $porthubUrl") && !powershell.contains(TOKEN) && !powershell.contains("{{"));
         let stored=case.app.collection("machines").find_one(doc! {"_id":id}).await?.unwrap();
         ensure!(!stored.contains_key("client_setup_public_base_url"),"preview must not change the saved machine configuration");
         Ok::<_,anyhow::Error>(())

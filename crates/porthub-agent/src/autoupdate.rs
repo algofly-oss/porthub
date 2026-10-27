@@ -132,7 +132,7 @@ impl Controller {
             task,
         }))
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn private_activation_context(&self) -> Option<(Layout, PathBuf)> {
         (!self.native.layout.user)
             .then(|| (self.native.layout.clone(), self.native.executable.clone()))

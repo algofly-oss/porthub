@@ -21,7 +21,7 @@ const TABLE: &str = "porthub_exit_return";
 
 pub async fn watch(
     owner: String,
-    mut enabled: tokio::sync::watch::Receiver<bool>,
+    mut enabled: tokio::sync::watch::Receiver<BTreeSet<std::net::Ipv4Addr>>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     let mut tick = tokio::time::interval(Duration::from_secs(30));
@@ -34,10 +34,13 @@ pub async fn watch(
                 if changed.is_err() { return Ok(()); }
                 tick.reset();
             },
-            _ = tick.tick(), if *enabled.borrow() || retry => {},
+            _ = tick.tick(), if !enabled.borrow().is_empty() || retry => {},
         }
-        let wanted = *enabled.borrow_and_update();
-        let result = update(&owner, wanted).await;
+        let wanted = enabled.borrow_and_update().clone();
+        let result = async {
+            super::exit_kernel::Kernel::new(&owner)?.docker_forwarding(&wanted).await?;
+            update(&owner, !wanted.is_empty()).await
+        }.await;
         if result.is_err() && !retry {
             tracing::warn!("exit forwarding refresh failed; retrying while private control stays connected");
         }

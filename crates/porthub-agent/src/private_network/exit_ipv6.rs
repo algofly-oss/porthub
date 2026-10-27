@@ -19,6 +19,10 @@ fn table(name: &str) -> Result<String> {
 }
 
 pub async fn apply(routes: &Connection<Route>, name: &str) -> Result<()> {
+    apply_mode(routes, name, false).await
+}
+
+pub async fn apply_mode(routes: &Connection<Route>, name: &str, bypass: bool) -> Result<()> {
     let name = table(name)?;
     // Preserve directly attached LAN prefixes, not routes through another
     // gateway (which could include a split default such as two /1 routes).
@@ -55,7 +59,13 @@ pub async fn apply(routes: &Connection<Route>, name: &str) -> Result<()> {
                 rule.match_daddr_v6(address, prefix).accept()
             });
         }
-        table.rule_keyed("output", "reject_new_internet", |rule| rule.reject())
+        if bypass {
+            // Retain the conntrack rule and hooks while allowing new traffic,
+            // so direct connections remain established when exit routing resumes.
+            table.rule_keyed("output", "allow_direct_fallback", |rule| rule.accept())
+        } else {
+            table.rule_keyed("output", "reject_new_internet", |rule| rule.reject())
+        }
     });
     rules.diff(&connection).await?.apply(&connection).await?;
     Ok(())

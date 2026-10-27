@@ -191,7 +191,7 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
         if !is_exit { clients.retain(|id| id == &input.peer_id); }
         if !is_client { routing_peers.retain(|id| id == &input.peer_id); }
         (!routing_peers.is_empty() && !clients.is_empty()).then(|| json!({"id":store::id(route.get("_id")),"name":store::string(route,"name"),"routing_peers":routing_peers,"clients":clients,
-            "selection":route.get_str("selection").unwrap_or("sticky"),"masquerade":true,"block_lan_access":true}))
+            "selection":route.get_str("selection").unwrap_or("sticky"),"allow_direct_fallback":route.get_bool("allow_direct_fallback").unwrap_or(false),"masquerade":true,"block_lan_access":true}))
     }).collect();
     let books: Vec<Document> = app
         .collection("access_rulebooks")

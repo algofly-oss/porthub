@@ -29,6 +29,7 @@ async fn exit_selection_is_owned_and_rejects_ambiguous_or_recursive_routes() -> 
         case.status("POST", endpoint, &cookie, route("unknown-mode", &[luna], &[miro], "per_packet"), StatusCode::UNPROCESSABLE_ENTITY).await?;
         let created = case.status("POST", endpoint, &cookie, route("balanced", &[luna, condor], &[miro], "round_robin"), StatusCode::OK).await?;
         ensure!(created["data"]["selection"] == "round_robin");
+        ensure!(created["data"]["allow_direct_fallback"] == false);
         let id = created["data"]["_id"].as_str().unwrap();
         let item = format!("{endpoint}/{id}");
         case.status("POST", endpoint, &cookie, route("duplicate", &[luna], &[miro], "random"), StatusCode::CONFLICT).await?;
@@ -38,6 +39,14 @@ async fn exit_selection_is_owned_and_rejects_ambiguous_or_recursive_routes() -> 
             let updated = case.status("PUT", &item, &cookie, route("balanced", &[luna, condor], &[miro], mode), StatusCode::OK).await?;
             ensure!(updated["data"]["selection"] == mode);
         }
+        let mut direct = route("balanced", &[luna, condor], &[miro], "sticky");
+        direct["allow_direct_fallback"] = json!(true);
+        let updated = case.status("PUT", &item, &cookie, direct.clone(), StatusCode::OK).await?;
+        ensure!(updated["data"]["allow_direct_fallback"] == true);
+        let stored = case.app.collection("private_exit_nodes").find_one(doc! {"_id":ObjectId::parse_str(id)?}).await?.unwrap();
+        ensure!(stored.get_bool("allow_direct_fallback") == Ok(true));
+        direct["allow_direct_fallback"] = json!("yes");
+        case.status("PUT", &item, &cookie, direct, StatusCode::UNPROCESSABLE_ENTITY).await?;
         case.status("DELETE", &item, &other_cookie, Value::Null, StatusCode::NOT_FOUND).await?;
         case.status("DELETE", &item, &cookie, Value::Null, StatusCode::OK).await?;
         ensure!(case.app.collection("private_exit_nodes").count_documents(doc! {}).await? == 0);

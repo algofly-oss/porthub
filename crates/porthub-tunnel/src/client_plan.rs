@@ -41,6 +41,14 @@ impl Candidate {
 pub struct ClientPlan {
     pub candidates: Vec<Candidate>,
 }
+impl ClientPlan {
+    /// Applies only to gateway transport sockets, never the forwarded service.
+    pub fn bind_source(&mut self, source: std::net::IpAddr) {
+        for candidate in &mut self.candidates {
+            if let Some(client) = &mut candidate.config.client { client.transport.tcp.source_address = Some(source); }
+        }
+    }
+}
 fn string(table: &mut toml::value::Table, key: &str) -> Result<Option<String>> {
     match table.remove(key) {
         None => Ok(None),

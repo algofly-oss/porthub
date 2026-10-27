@@ -276,6 +276,16 @@ async fn owned_exit_nat_preserves_global_forwarding_and_cleans_up() -> anyhow::R
     let internet_ip = "10.234.253.2".parse()?;
     let uplink = Tun::open("phab12cd36", uplink_ip, &[internet_ip]).await?;
     Connection::<Route>::new()?.add_route(Ipv4Route::new(std::net::Ipv4Addr::UNSPECIFIED, 0).dev_index(uplink.index).scope(RouteScope::Link)).await?;
+    // Reproduce Docker's host forwarding policy without touching host Docker.
+    use nlink::netlink::nftables::{config::NftablesConfig, BaseChain, FilterHook, Policy, Priority};
+    let docker_nft = Connection::<Nftables>::new()?;
+    NftablesConfig::new().table("filter", Family::Ip, |table| table
+        .chain("FORWARD", |chain| chain.base(BaseChain::filter(FilterHook::Forward, Priority::Filter).policy(Policy::Drop)))
+        .chain("DOCKER-USER", |chain| chain)
+        .rule_keyed("FORWARD", "fixture_docker_user", |rule| rule.jump("DOCKER-USER".parse().unwrap()))
+        .rule_keyed("DOCKER-USER", "fixture_return", |rule| rule.then(nlink::netlink::nftables::Verdict::Return)))
+        .diff(&docker_nft).await?.apply(&docker_nft).await?;
+    let original_docker_rules = docker_nft.list_rules("filter", Family::Ip).await?;
     let kernel = Kernel::new(&tun.name)?;
     kernel.apply(&BTreeSet::from([client])).await.context("apply scoped exit NAT")?;
     assert_eq!(tokio::fs::read("/proc/sys/net/ipv4/ip_forward").await?, global);
@@ -339,6 +349,14 @@ async fn owned_exit_nat_preserves_global_forwarding_and_cleans_up() -> anyhow::R
     assert_eq!(tokio::fs::read("/proc/sys/net/ipv4/ip_forward").await?, global);
     let netlink = Connection::<Nftables>::new()?;
     assert!(!netlink.del_table_if_exists("porthub_exit_phab12cd35", Family::Ip).await?);
+    let remaining = docker_nft.list_rules("filter", Family::Ip).await?;
+    assert_eq!(remaining.len(), original_docker_rules.len());
+    assert_eq!(remaining[0].handle, original_docker_rules[0].handle);
+    assert_eq!(remaining[0].expression_bytes, original_docker_rules[0].expression_bytes);
+    assert_eq!(remaining[1].handle, original_docker_rules[1].handle);
+    assert_eq!(remaining[1].expression_bytes, original_docker_rules[1].expression_bytes);
+    let forward = docker_nft.list_chains_in("filter", Family::Ip).await?.into_iter().find(|chain| chain.name == "FORWARD").unwrap();
+    assert_eq!(forward.policy, Some(0), "Docker forwarding policy must stay DROP");
     drop(tun);
     Ok(())
 }
@@ -566,6 +584,9 @@ async fn owned_exit_consumer_routes_new_connections_and_preserves_underlay_socke
     let tun = Tun::open("phab12cd41", overlay, &[]).await?;
     let uplink = Tun::open("phab12cd42", external, &[]).await?;
     let netlink = Connection::<Route>::new()?;
+    netlink.set_link_down(&uplink.name).await?;
+    netlink.set_link_name_by_index(uplink.index, "enphcontrol").await?;
+    netlink.set_link_up("enphcontrol").await?;
     netlink.add_route(Ipv4Route::new(Ipv4Addr::UNSPECIFIED, 0).dev_index(uplink.index).prefsrc(external).scope(RouteScope::Link)).await?;
     async fn receive(tun: &Tun) -> anyhow::Result<Vec<u8>> {
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -592,6 +613,59 @@ async fn owned_exit_consumer_routes_new_connections_and_preserves_underlay_socke
     let packet = receive(&tun).await?;
     assert_eq!(&packet[12..16], &overlay.octets());
     assert_eq!(&packet[28..], b"exit");
+    // A fresh gateway request must escape through the physical source even
+    // while new application traffic goes into the nonresponding exit TUN.
+    let control = porthub_agent::control::Control::new(serde_json::from_value(json!({
+        "server":"http://8.8.8.8:8001", "machine_id":"0123456789abcdef01234567",
+        "token":"isolated-test", "allow_insecure_http_for_tests":true
+    }))?)?;
+    let heartbeat = tokio::spawn(async move { control.request(reqwest::Method::POST, "machines/client/sync", None, &[]).await });
+    let mut syn = vec![0;1380];
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let length = uplink.read(&mut syn).await?;
+            if length >= 40 && syn[0] >> 4 == 4 && syn[9] == 6 && syn[22..24] == 8001u16.to_be_bytes() {
+                assert_eq!(&syn[12..16], &external.octets());
+                break Ok::<_, anyhow::Error>(());
+            }
+        }
+    }).await??;
+    heartbeat.abort();
+    let _ = heartbeat.await;
+    // Public tunnel control/data transports also bypass the dead exit, using
+    // the same source binding as scheduled endpoint reachability checks.
+    let mut plan = porthub_tunnel::client_plan::ClientPlan::parse(
+        "[client]\nremote_addr='ws://8.8.8.8:8002/api/tunnel'\n[client.services.test]\ntoken='isolated-test'\nlocal_addr='127.0.0.1:22'\n"
+    )?;
+    plan.bind_source(external.into());
+    let candidate = plan.candidates.remove(0);
+    let probe = tokio::spawn(async move { candidate.probe(Duration::from_secs(10)).await });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let length = uplink.read(&mut syn).await?;
+            if length >= 40 && syn[0] >> 4 == 4 && syn[9] == 6 && syn[22..24] == 8002u16.to_be_bytes() {
+                assert_eq!(&syn[12..16], &external.octets());
+                break Ok::<_, anyhow::Error>(());
+            }
+        }
+    }).await??;
+    probe.abort();
+    let _ = probe.await;
+    let pinned_exit = tokio::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+    pinned_exit.connect("8.8.8.8:8000").await?;
+    route.set_bypass(true).await?;
+    pinned_exit.send(b"exit flow must stay on its original path").await?;
+    assert_eq!(&receive(&tun).await?[12..16], &overlay.octets());
+    let fallback = tokio::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+    fallback.connect("8.8.8.8:8000").await?;
+    fallback.send(b"new direct fallback").await?;
+    assert_eq!(&receive(&uplink).await?[12..16], &external.octets());
+    route.set_bypass(false).await?;
+    fallback.send(b"direct connection survives exit recovery").await?;
+    assert_eq!(&receive(&uplink).await?[12..16], &external.octets());
+    let recovered_exit = tokio::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+    recovered_exit.send_to(b"new connections use the exit again", "8.8.8.8:8000").await?;
+    assert_eq!(&receive(&tun).await?[12..16], &overlay.octets());
     let control = tokio::net::UdpSocket::bind((external, 0)).await?;
     control.send_to(b"control", "8.8.8.8:8000").await?;
     assert_eq!(&receive(&uplink).await?[12..16], &external.octets());
@@ -612,19 +686,25 @@ async fn owned_exit_consumer_routes_new_connections_and_preserves_underlay_socke
     let (wanted, desired) = tokio::sync::watch::channel(None);
     let (_addresses, interfaces) = tokio::sync::watch::channel(vec![std::net::SocketAddr::new(external.into(), 0)]);
     let cancel = tokio_util::sync::CancellationToken::new();
-    let owner = tokio::spawn(porthub_agent::private_network::exit_routes::watch(desired, interfaces, cancel.clone()));
-    wanted.send_replace(Some((tun.index, overlay)));
+    let (report, mut applied) = tokio::sync::watch::channel("pending");
+    let owner = tokio::spawn(porthub_agent::private_network::exit_routes::watch_reported(desired, interfaces, cancel.clone(), Some(report)));
+    wanted.send_replace(Some((tun.index, overlay, false)));
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if netlink.get_rules_v4().await?.iter().any(|rule| rule.priority() == 22600) { break Ok::<_,anyhow::Error>(()); }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }).await??;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while *applied.borrow_and_update() != "exit routing active" { applied.changed().await?; }
+        Ok::<_, anyhow::Error>(())
+    }).await??;
     let watched = tokio::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
     watched.send_to(b"background owner", "8.8.8.8:8000").await?;
     assert_eq!(&receive(&tun).await?[12..16], &overlay.octets());
     cancel.cancel();
     tokio::time::timeout(Duration::from_secs(2), owner).await???;
+    assert_eq!(*applied.borrow(), "inactive");
     assert!(!netlink.get_rules_v4().await?.iter().any(|rule| (22500..=22600).contains(&rule.priority())));
     let sentinel = nlink::netlink::rule::RuleBuilder::v4().priority(20000).protocol(99).from_prefix("192.0.2.99",32).table(254);
     netlink.add_rule(sentinel.clone()).await?;
@@ -687,6 +767,7 @@ async fn owned_exit_ipv6_guard_blocks_new_internet_connections_and_restores_rout
     assert_eq!(&reply[..size], b"before activation");
     let tun = Tun::open("phab12cd61", "10.234.250.1".parse()?, &[]).await?;
     let mut policy = Consumer::activate(tun.index, "10.234.250.1".parse()?, &BTreeSet::from([Ipv4Addr::new(192,0,2,1)])).await?;
+    nft.del_table_if_exists("exit_test_tracking", Family::Ip6).await?;
     established.send(b"existing flow survives").await?;
     echo(&wire).await?;
     let size = tokio::time::timeout(Duration::from_secs(2), established.recv(&mut reply)).await??;
@@ -697,6 +778,19 @@ async fn owned_exit_ipv6_guard_blocks_new_internet_connections_and_restores_rout
     let control = tokio::net::UdpSocket::bind((source, 0)).await?;
     control.connect((destination, 8000)).await?;
     assert!(control.send(b"bound sockets cannot bypass either").await.is_err());
+    policy.set_bypass(true).await?;
+    let bypass = tokio::net::UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0)).await?;
+    bypass.connect((destination, 8000)).await?;
+    bypass.send(b"normal IPv6 during authorized fallback").await?;
+    echo(&wire).await?;
+    tokio::time::timeout(Duration::from_secs(2), bypass.recv(&mut reply)).await??;
+    policy.set_bypass(false).await?;
+    bypass.send(b"established fallback survives recovery").await?;
+    echo(&wire).await?;
+    tokio::time::timeout(Duration::from_secs(2), bypass.recv(&mut reply)).await??;
+    let blocked_again = tokio::net::UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0)).await?;
+    blocked_again.connect((destination, 8000)).await?;
+    assert!(blocked_again.send(b"new IPv6 blocked after recovery").await.is_err());
     let lan = tokio::net::UdpSocket::bind((source, 0)).await?;
     lan.send_to(b"local IPv6 remains available", ("2001:db8:1::2".parse::<Ipv6Addr>()?, 8000)).await?;
     policy.clear().await?;

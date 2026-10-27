@@ -1247,7 +1247,7 @@ export const guideArticles = [
           },
           {
             "type": "paragraph",
-            "text": "Established connections retain their selected exit when you change the strategy. Round robin balances connection counts, not bytes. A single long transfer uses one exit. If that exit goes offline, the connection can fail; another public source address cannot transparently take over its TCP session."
+            "text": "The “Use normal internet if all exits are offline” switch is off by default: clients keep internet traffic blocked. If enabled, new connections use the client’s normal internet connection and public IP during an outage. New connections return to exit routing after stable recovery; existing direct connections remain on their original path. Established connections retain their selected exit when you change the strategy. Round robin balances connection counts, not bytes. A single long transfer uses one exit. If that exit goes offline, the connection can fail; another public source address cannot transparently take over its TCP session."
           }
         ]
       },
@@ -1294,7 +1294,17 @@ export const guideArticles = [
           },
           {
             "type": "paragraph",
-            "text": "The gateway removes the authentication header before forwarding to the application. Use HTTPS when available to protect credentials in transit; an HTTP URL does not encrypt them."
+            "text": "X-PortHub-Key authenticates PortHub and is removed before forwarding. Your application’s Authorization header is preserved. Alternatively, Authorization: Bearer YOUR_PORTHUB_KEY can unlock PortHub when the application does not need that header; PortHub removes that consumed Bearer token. Use HTTPS when available to protect credentials in transit; HTTP does not encrypt them."
+          },
+          {
+            "type": "code",
+            "label": "Application with its own Bearer token",
+            "text": "curl -H 'X-PortHub-Key: YOUR_PORTHUB_KEY' -H 'Authorization: Bearer YOUR_APP_TOKEN' https://YOUR_SERVICE/"
+          },
+          {
+            "type": "code",
+            "label": "PortHub Bearer alternative",
+            "text": "curl -H 'Authorization: Bearer YOUR_PORTHUB_KEY' https://YOUR_SERVICE/"
           }
         ]
       },
@@ -1322,7 +1332,7 @@ export const guideArticles = [
         "blocks": [
           {
             "type": "paragraph",
-            "text": "Open the DNS controls in Access rules. Select the machines that should receive the rule, then choose Block or Override. A block returns a DNS failure for the configured domain. An override returns the configured IP address. Private PortHub identity zones cannot be replaced by these rules."
+            "text": "Open a machine’s configuration and select DNS. Add a domain rule, then choose Block or Override. A block returns a DNS failure for the configured domain. An override returns the configured IP address. Choose whether a plain domain includes all its subdomains or matches only that exact name. Enter *.example.com to match all subdomains while leaving example.com itself accessible. Unmatched names under a controlled domain resolve through the machine’s existing upstream DNS servers. Private PortHub identity zones cannot be replaced by these rules."
           }
         ]
       },

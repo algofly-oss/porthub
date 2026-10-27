@@ -103,6 +103,15 @@ impl Gate {
         if session_ok && !login {
             return Ok(request);
         }
+        // A dedicated gate header takes precedence, leaving application
+        // Authorization untouched. A valid gate session likewise returned above.
+        let bearer = if supplied.is_none() && !login {
+            request.headers().get(header::AUTHORIZATION).and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split_once(' '))
+                .filter(|(scheme, value)| scheme.eq_ignore_ascii_case("bearer") && !value.is_empty())
+                .map(|(_, value)| value.to_owned())
+        } else { None };
+        let consumes_authorization = bearer.is_some();
         let credential = if login {
             let bytes = tokio::time::timeout(
                 Duration::from_secs(10),
@@ -115,7 +124,7 @@ impl Gate {
                 .find(|(name, _)| name == "key")
                 .map(|(_, value)| value.into_owned())
         } else {
-            supplied
+            supplied.or(bearer)
         };
         let Some(credential) = credential else {
             return Err(prompt(self.config.pin));
@@ -125,7 +134,7 @@ impl Gate {
             || (self.config.pin
                 && (credential.len() != 6 || !credential.bytes().all(|b| b.is_ascii_digit())))
         {
-            return Err(response(StatusCode::UNAUTHORIZED, "Access denied"));
+            return Err(if login { access_page(self.config.pin, "That credential was not accepted. Please try again.") } else { response(StatusCode::UNAUTHORIZED, "Access denied") });
         }
         let mut digest = Sha256::new();
         digest.update(self.credential_salt);
@@ -174,7 +183,7 @@ impl Gate {
                     )
                 })?;
                 if !valid {
-                    return Err(response(StatusCode::UNAUTHORIZED, "Access denied"));
+                    return Err(if login { access_page(self.config.pin, "That credential was not accepted. Please try again.") } else { response(StatusCode::UNAUTHORIZED, "Access denied") });
                 }
                 *self
                     .verified
@@ -215,6 +224,7 @@ impl Gate {
             );
             return Err(result);
         }
+        if consumes_authorization { request.headers_mut().remove(header::AUTHORIZATION); }
         // The body is consumed only by the reserved login endpoint.
         Ok(request)
     }
@@ -230,17 +240,22 @@ fn response(status: StatusCode, message: &str) -> Response<Body> {
         .body(Body::from(message.to_owned()))
         .unwrap()
 }
-fn prompt(pin: bool) -> Response<Body> {
-    let label = if pin { "Six-digit PIN" } else { "API key" };
-    let input = if pin {
-        "inputmode=\"numeric\" pattern=\"[0-9]{6}\" maxlength=\"6\""
-    } else {
-        "maxlength=\"128\""
-    };
-    Response::builder().status(StatusCode::UNAUTHORIZED).header(header::CACHE_CONTROL, "no-store")
+fn prompt(pin: bool) -> Response<Body> { access_page(pin, "") }
+fn access_page(pin: bool, error: &str) -> Response<Body> {
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let html = include_str!("../assets/access.html")
+        .replace("{{nonce}}", &nonce)
+        .replace("{{label}}", if pin { "Six-digit PIN" } else { "API key" })
+        .replace("{{description}}", if pin { "six-digit PIN" } else { "API key" })
+        .replace("{{input}}", if pin { "inputmode=\"numeric\" pattern=\"[0-9]{6}\" minlength=\"6\" maxlength=\"6\"" } else { "maxlength=\"72\"" })
+        .replace("{{error}}", error);
+    Response::builder().status(StatusCode::UNAUTHORIZED)
+        .header(header::CACHE_CONTROL, "no-store")
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .header("content-security-policy", "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
-        .body(Body::from(format!("<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>PortHub access</title></head><body><main><h1>Protected service</h1><form method=\"post\" action=\"/_porthub/access\"><label>{label} <input type=\"password\" name=\"key\" autocomplete=\"current-password\" required {input}></label><button type=\"submit\">Continue</button></form></main></body></html>"))).unwrap()
+        .header("x-content-type-options", "nosniff")
+        .header("referrer-policy", "no-referrer")
+        .header("content-security-policy", format!("default-src 'none'; style-src 'nonce-{nonce}'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"))
+        .body(Body::from(html)).unwrap()
 }
 
 #[cfg(test)]
@@ -292,6 +307,35 @@ mod tests {
         );
     }
     #[tokio::test]
+    async fn bearer_gate_credentials_never_replace_application_authorization() {
+        let gate = gate("headers");
+        let request = Request::builder().header(header::AUTHORIZATION, "Bearer 123456")
+            .body(Body::from("streaming body")).unwrap();
+        let accepted = gate.authorize(request, false).await.unwrap();
+        assert!(!accepted.headers().contains_key(header::AUTHORIZATION));
+        assert_eq!(to_bytes(accepted.into_body(), 100).await.unwrap(), "streaming body");
+        for app in ["Bearer application-token", "Basic application-credentials"] {
+            let request = Request::builder().header("x-porthub-key", "123456")
+                .header(header::AUTHORIZATION, app).body(Body::empty()).unwrap();
+            let accepted = gate.authorize(request, false).await.unwrap();
+            assert_eq!(accepted.headers()[header::AUTHORIZATION], app);
+            assert!(!accepted.headers().contains_key("x-porthub-key"));
+        }
+        let invalid = Request::builder().header("x-porthub-key", "654321")
+            .header(header::AUTHORIZATION, "Bearer 123456").body(Body::empty()).unwrap();
+        assert_eq!(gate.authorize(invalid, false).await.unwrap_err().status(), StatusCode::UNAUTHORIZED);
+        let prompt = prompt(true);
+        assert!(prompt.headers()["content-security-policy"].to_str().unwrap().contains("style-src 'nonce-"));
+        let html = String::from_utf8(to_bytes(prompt.into_body(), 16384).await.unwrap().to_vec()).unwrap();
+        assert!(html.contains("pattern=\"[0-9]{6}\""));
+        assert!(!html.contains("{{"));
+        let invalid_login = Request::builder().method("POST").uri("/_porthub/access")
+            .body(Body::from("key=wrong")).unwrap();
+        let denied = gate.authorize(invalid_login, false).await.unwrap_err();
+        assert_eq!(denied.headers()[header::CONTENT_TYPE], "text/html; charset=utf-8");
+    }
+
+    #[tokio::test]
     async fn browser_cookie_is_scoped_revocable_and_removed_from_upstream() {
         let gate = gate("mapping-a");
         let login = Request::builder()
@@ -311,11 +355,13 @@ mod tests {
         let request = || {
             Request::builder()
                 .header(header::COOKIE, format!("{token}; app=value"))
+                .header(header::AUTHORIZATION, "Bearer app-session-token")
                 .body(Body::empty())
                 .unwrap()
         };
         let accepted = gate.authorize(request(), true).await.unwrap();
         assert_eq!(accepted.headers()[header::COOKIE], "app=value");
+        assert_eq!(accepted.headers()[header::AUTHORIZATION], "Bearer app-session-token");
         let other = super::tests::gate("mapping-b");
         assert_eq!(
             other.authorize(request(), true).await.unwrap_err().status(),

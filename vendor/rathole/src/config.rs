@@ -180,6 +180,9 @@ fn default_keepalive_interval() -> u64 {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TcpConfig {
+    /// Set only by the embedding agent. Never accepted from remote TOML.
+    #[serde(skip)]
+    pub source_address: Option<std::net::IpAddr>,
     #[serde(default = "default_nodelay")]
     pub nodelay: bool,
     #[serde(default = "default_keepalive_secs")]
@@ -192,6 +195,7 @@ pub struct TcpConfig {
 impl Default for TcpConfig {
     fn default() -> Self {
         Self {
+            source_address: None,
             nodelay: default_nodelay(),
             keepalive_secs: default_keepalive_secs(),
             keepalive_interval: default_keepalive_interval(),

@@ -1,10 +1,12 @@
+import MachineOsIcon from "@/components/ui/machine-os-icon";
+import { countryDetails, platformLabel } from "@/shared/utils/machine-platform.mjs";
 import { TableRow, TableCell } from "@/components/ui/table";
-import { IconBrandApple, IconBrandWindows, IconCopy, IconFolder, IconTerminal2 } from "@tabler/icons-react";
+import { IconCopy, IconFolder } from "@tabler/icons-react";
 import useToast from "@/shared/hooks/useToast";
 import TrafficSparkline from "@/components/ui/traffic-sparkline";
 import { formatClientVersion } from "@/shared/utils/client-version.mjs";
 
-export default function HostItem({ name, hostname, privateDomain = "", groupLabels = [], localIp, privateIps = [], clientVersion, clientUpdateAvailable, latestClientVersion, clientOs = "", clientArch = "", clientCountry = "", forwardingConfigs = [], isActive, connectionStatus, lastSeen, trafficSamples = [], onClick }) {
+export default function HostItem({ name, hostname, privateDomain = "", groupLabels = [], localIp, privateIps = [], clientVersion, clientUpdateAvailable, latestClientVersion, clientOs = "", clientOsId = "", clientOsName = "", clientArch = "", clientCountry = "", forwardingConfigs = [], isActive, connectionStatus, lastSeen, trafficSamples = [], onClick }) {
   const { success, error } = useToast();
   const copyValue = async (event, value, label) => {
     event.stopPropagation();
@@ -41,11 +43,8 @@ export default function HostItem({ name, hostname, privateDomain = "", groupLabe
   const activePorts = forwardingConfigs.filter(port => port.enabled !== false).length;
   const clientVersionLabel = formatClientVersion(clientVersion, "");
   const latestClientVersionLabel = formatClientVersion(latestClientVersion);
-  const osLabel = { linux: "Linux", macos: "macOS", windows: "Windows" }[clientOs] || "";
-  const OsIcon = clientOs === "windows" ? IconBrandWindows : clientOs === "macos" ? IconBrandApple : IconTerminal2;
-  const flag = /^[A-Z]{2}$/.test(clientCountry) && clientCountry !== "XX" && clientCountry !== "T1"
-    ? String.fromCodePoint(...[...clientCountry].map(letter => letter.codePointAt(0) + 127397))
-    : "";
+  const osLabel = platformLabel(clientOs, clientOsName, clientArch);
+  const { flag, name: countryName } = countryDetails(clientCountry);
   return <TableRow className="group cursor-pointer" data-machine-status={status} onClick={onClick}>
     <TableCell className="py-3">
       <div className="flex min-w-0 items-start gap-3">
@@ -53,8 +52,8 @@ export default function HostItem({ name, hostname, privateDomain = "", groupLabe
         <span className="min-w-0 flex-1">
           <span className="flex min-w-0 items-center gap-1">
             <button type="button" className="min-w-0 truncate rounded text-left text-[15px] font-medium" aria-label={`Configure ${name}`}>{name}</button>
-            {osLabel && <span className="inline-flex shrink-0 items-center text-muted-foreground" title={`${osLabel}${clientArch ? ` · ${clientArch}` : ""}`} aria-label={`${osLabel}${clientArch ? `, ${clientArch}` : ""}`}><OsIcon size={15} /></span>}
-            {flag && <span className="shrink-0 text-sm" title={`Country: ${clientCountry}`} aria-label={`Country: ${clientCountry}`}>{flag}</span>}
+            {osLabel && <span className="inline-flex shrink-0 items-center text-muted-foreground" title={osLabel} aria-label={osLabel}><MachineOsIcon os={clientOs} distribution={clientOsId} size={15} /></span>}
+            {flag && <span className="shrink-0 text-sm" title={countryName} aria-label={countryName}>{flag}</span>}
             {privateDomain && <button type="button" onClick={event => copyValue(event, `http://${privateDomain}`, "PortHub domain address")}
               aria-label={`Copy PortHub address http://${privateDomain}`} title={`Copy http://${privateDomain}`}
               className="inline-flex shrink-0 items-center rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline focus-visible:outline-2">

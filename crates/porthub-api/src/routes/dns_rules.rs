@@ -9,7 +9,7 @@ use crate::{
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, Method, StatusCode},
-    routing::put,
+    routing::get,
     Json, Router,
 };
 use mongodb::bson::{doc, DateTime, Document};
@@ -25,7 +25,21 @@ struct Input {
 }
 
 pub fn router() -> Router<Arc<App>> {
-    Router::new().route("/api/access/dns-rules/{machine}", put(save))
+    Router::new().route("/api/access/dns-rules/{machine}", get(load).put(save))
+}
+
+async fn load(
+    State(app): State<Arc<App>>, headers: HeaderMap,
+    Query(query): Query<WorkspaceQuery>, Path(machine): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let (_, owner, role) = browser(&app, &headers, &Method::GET, &query.workspace, false).await?;
+    let machine_id = object_id(&machine, "Invalid machine id")?;
+    if app.collection("machines").find_one(doc! {"_id":machine_id,"user_id":owner,"deletion_pending":{"$ne":true}}).await?.is_none() {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "Machine not found in this workspace"));
+    }
+    let document = app.collection("private_dns_rules").find_one(doc! {"workspace_id":owner,"machine_id":machine_id}).await?;
+    let rules = document.as_ref().map(|value| store::field(value,"rules")).unwrap_or_else(|| json!([]));
+    Ok(Json(json!({"data":{"machine_id":machine_id.to_hex(),"rules":rules,"can_manage":matches!(role.as_str(),"owner"|"admin")}})))
 }
 
 pub fn serialize(value: &Document) -> Value {
@@ -41,7 +55,7 @@ pub(crate) async fn ensure_zones_available(app: &App, owner: &mongodb::bson::Bso
         let rules: Vec<Rule> = serde_json::from_value(store::field(&policy, "rules"))
             .map_err(|_| ApiError::bad_request("Stored DNS rules need review before changing private domains"))?;
         for rule in dns_policy::prepare(&rules).map_err(|_| ApiError::bad_request("Stored DNS rules need review before changing private domains"))? {
-            if zones.iter().any(|zone| rule.domain == *zone || rule.domain.ends_with(&format!(".{zone}")) || zone.ends_with(&format!(".{}", rule.domain))) {
+            if zones.iter().any(|zone| dns_policy::zone(&rule) == zone || dns_policy::zone(&rule).ends_with(&format!(".{zone}")) || zone.ends_with(&format!(".{}", dns_policy::zone(&rule)))) {
                 return Err(ApiError::bad_request("Private domain suffix conflicts with an existing DNS rule; change that rule first"));
             }
         }
@@ -62,11 +76,6 @@ async fn save(
         serde_json::from_value(raw).map_err(|_| ApiError::bad_request("Invalid DNS rules"))?;
     let rules = dns_policy::prepare(&input.rules)
         .map_err(|error| ApiError::bad_request(&error.to_string()))?;
-    // Resolver registration covers a domain and all its children. Exact-only
-    // rules need upstream recursion before they can be offered by this API.
-    if rules.iter().any(|rule| !rule.include_subdomains) {
-        return Err(ApiError::bad_request("DNS rules must include subdomains"));
-    }
     let _guard = app.connection_lock.lock().await;
     if app
         .collection("machines")
@@ -104,9 +113,9 @@ async fn save(
     }
     for rule in &rules {
         if zones.iter().any(|zone| {
-            rule.domain == *zone
-                || rule.domain.ends_with(&format!(".{zone}"))
-                || zone.ends_with(&format!(".{}", rule.domain))
+            dns_policy::zone(rule) == zone
+                || dns_policy::zone(rule).ends_with(&format!(".{zone}"))
+                || zone.ends_with(&format!(".{}", dns_policy::zone(rule)))
         }) {
             return Err(ApiError::bad_request(
                 "DNS rule conflicts with a private identity zone",

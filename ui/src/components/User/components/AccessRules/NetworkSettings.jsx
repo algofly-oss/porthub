@@ -64,17 +64,6 @@ export default function NetworkSettings({ data, manage, params, onSaved }) {
             machine&apos;s normal DNS.
           </span>
         </label>
-        <div className="rounded-lg bg-control p-4 text-sm leading-6 text-muted-foreground">
-          <p className="font-medium text-foreground">
-            Coexistence is a requirement
-          </p>
-          <p className="mt-1">
-            No default-route changes. No whole-network DNS takeover. No
-            automatic overlay activation during a client update. Publicly
-            trusted certificates for private names require a separate
-            certificate strategy.
-          </p>
-        </div>
         {error && (
           <p role="alert" className="text-sm text-red-500">
             {error}

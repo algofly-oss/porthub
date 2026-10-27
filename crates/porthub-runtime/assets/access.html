@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Protected service · PortHub</title>
+<style nonce="{{nonce}}">
+*{box-sizing:border-box}body{margin:0;background:#f4f4f5;color:#18181b;font:15px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;min-height:100svh;display:grid;place-items:center;padding:24px}main{width:100%;max-width:420px;background:#fff;border:1px solid #e4e4e7;border-radius:16px;padding:32px;box-shadow:0 8px 32px #18181b08}.icon{display:grid;place-items:center;width:44px;height:44px;border-radius:12px;background:#eff6ff;color:#2563eb;margin-bottom:24px}svg{width:22px;height:22px}h1{font-size:24px;line-height:1.25;letter-spacing:-.6px;margin:0 0 10px;font-weight:600}p{color:#71717a;margin:0 0 24px}label{display:block;font-size:14px;font-weight:500;margin-bottom:8px}input,button{font:inherit;width:100%;min-height:44px;border-radius:8px}input{background:#fafafa;color:inherit;border:1px solid #d4d4d8;padding:10px 12px;margin-bottom:16px}input:focus-visible,button:focus-visible{outline:2px solid #2563eb;outline-offset:3px}button{border:0;background:#2563eb;color:white;font-weight:500;padding:10px 16px;cursor:pointer}button:hover{background:#1d4ed8}.footer{margin:24px 0 0;text-align:center;font-size:12px;color:#71717a}.error{color:#b91c1c;background:#fef2f2;border-radius:8px;padding:10px 12px;font-size:14px}.error:empty{display:none}@media(prefers-color-scheme:dark){body{background:#09090b;color:#fafafa}main{background:#18191d;border-color:#27272a;box-shadow:none}p,.footer{color:#a1a1aa}.icon{background:#172554;color:#60a5fa}input{background:#27272a;border-color:#3f3f46}.error{background:#450a0a;color:#fca5a5}}@media(max-width:420px){body{padding:16px}main{padding:24px}}
+</style>
+</head>
+<body><main>
+<div class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></svg></div>
+<h1>Protected service</h1><p>Enter the {{description}} provided by the service owner to continue.</p>
+<p class="error" role="alert">{{error}}</p>
+<form method="post" action="/_porthub/access">
+<label for="access-key">{{label}}</label><input id="access-key" type="password" name="key" autocomplete="current-password" required {{input}}>
+<button type="submit">Continue</button></form>
+<p class="footer">Access protected by PortHub</p>
+</main></body></html>

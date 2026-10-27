@@ -220,6 +220,10 @@ async fn session(
     let public_ip = model.optional_string("public_ip").unwrap_or_default();
     let client_os = model.optional_string("client_os").unwrap_or_default();
     let client_arch = model.optional_string("client_arch").unwrap_or_default();
+    let client_os_id = model.optional_string("client_os_id").unwrap_or_default();
+    let client_os_name = model.optional_string("client_os_name").unwrap_or_default();
+    model.string_length("client_os_id", &client_os_id, 0, Some(64));
+    model.string_length("client_os_name", &client_os_name, 0, Some(160));
     let _active = model.optional_bool("is_active");
     let version = if legacy {
         String::new()
@@ -241,6 +245,8 @@ async fn session(
         public_ip,
         client_os,
         client_arch,
+        client_os_id,
+        client_os_name,
         version,
         handled,
         native_update_protocol,

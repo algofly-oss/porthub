@@ -226,3 +226,9 @@ input[type="number"] {
 
 /* Composite fields draw one border around the icon, input and action. */
 html:not(.dark) .compound-field input { border: 0 !important; background: transparent !important; }
+
+/* Clicking a checkbox must not inherit a keyboard-only focus ring. */
+html:not([data-keyboard-navigation]) :is([role="checkbox"], input[type="checkbox"]):focus {
+  outline: none !important;
+  box-shadow: none !important;
+}

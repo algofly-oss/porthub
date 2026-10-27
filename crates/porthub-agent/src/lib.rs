@@ -7,6 +7,7 @@ pub mod control;
 pub mod expose;
 pub mod legacy;
 pub mod logs;
+mod os_info;
 pub mod private_network;
 pub mod private_profile;
 pub mod profile;
@@ -24,3 +25,6 @@ pub const BUILD_REVISION: &str = match option_env!("PORTHUB_SOURCE_REVISION") {
     Some(value) => value,
     None => "unknown",
 };
+
+#[cfg(target_os = "macos")]
+mod macos_private_migration;

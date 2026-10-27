@@ -3812,6 +3812,11 @@
                         }
                       }
                     }
+                  },
+                  "allow_direct_fallback": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When all routing peers are unavailable, allow new connections over the client’s normal internet connection. Existing connections retain their original path. Disabled by default."
                   }
                 },
                 "required": [
@@ -3931,6 +3936,11 @@
                         }
                       }
                     }
+                  },
+                  "allow_direct_fallback": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When all routing peers are unavailable, allow new connections over the client’s normal internet connection. Existing connections retain their original path. Disabled by default."
                   }
                 },
                 "required": [
@@ -3983,7 +3993,7 @@
       "put": {
         "operationId": "put_api_access_dns_rules_machine",
         "summary": "Replace machine DNS rules",
-        "description": "Requires workspace administrator access. Rules cover the domain and its subdomains. An empty list clears the policy.",
+        "description": "Requires workspace administrator access. Plain domains include subdomains by default; set include_subdomains=false for exact matching. A leading *. matches subdomains only, excluding the apex. An empty list clears the policy.",
         "tags": [
           "Private access"
         ],

@@ -28,6 +28,8 @@ pub struct Record {
     pub updated_at: u64,
     pub strategy: crate::private_network::strategy::Mode,
     pub strategy_override: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_status: Option<crate::runtime::PrivateStatus>,
 }
 fn now() -> u64 {
     SystemTime::now()
@@ -309,6 +311,7 @@ pub(super) async fn install(
             updated_at: now(),
             strategy: Default::default(),
             strategy_override: false,
+            private_status: None,
         },
     )
 }
@@ -349,6 +352,7 @@ pub(crate) fn refresh(path: &Path, status: &crate::runtime::Status) -> Result<()
     record.state = status.state.clone();
     record.agent_version = status.agent_version.clone();
     record.route = status.route.clone();
+    record.private_status = status.private_status.clone();
     record.updated_at = status.updated_at;
     record.active = Some(!matches!(
         status.state.as_str(),

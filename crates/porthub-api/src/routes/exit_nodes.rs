@@ -256,7 +256,7 @@ async fn reject_overlapping_assignments(
     Ok(())
 }
 
-fn parse(raw: Value) -> ApiResult<(String, Vec<Selector>, Vec<Selector>, bool, String)> {
+fn parse(raw: Value) -> ApiResult<(String, Vec<Selector>, Vec<Selector>, bool, String, bool)> {
     let mut model = Model::new(raw)?;
     let name = model.required_string("name");
     model.string_length("name", &name, 1, Some(80));
@@ -272,8 +272,12 @@ fn parse(raw: Value) -> ApiResult<(String, Vec<Selector>, Vec<Selector>, bool, S
         true
     };
     let selection = model.literal("selection", "sticky", &["sticky", "round_robin", "random"]);
+    if model.field(&["allow_direct_fallback"]).is_some_and(|value| !value.is_boolean()) {
+        model.add("allow_direct_fallback", "Expected a boolean", "type_error.bool");
+    }
+    let allow_direct_fallback = model.optional_bool("allow_direct_fallback").unwrap_or(false);
     model.finish()?;
-    Ok((name, routing, distribution, enabled, selection))
+    Ok((name, routing, distribution, enabled, selection, allow_direct_fallback))
 }
 
 async fn create(
@@ -282,7 +286,7 @@ async fn create(
     Query(query): Query<WorkspaceQuery>,
     ApiBody(raw): ApiBody,
 ) -> ApiResult<Json<Value>> {
-    let (name, routing, distribution, enabled, selection) = parse(raw)?;
+    let (name, routing, distribution, enabled, selection, allow_direct_fallback) = parse(raw)?;
     let (_, owner, _) = browser(&app, &headers, &Method::POST, &query.workspace, true).await?;
     let _guard = app.connection_lock.lock().await;
     let owner_id = owner;
@@ -299,7 +303,7 @@ async fn create(
         ));
     }
     let now = DateTime::now();
-    let route = doc! {"_id":ObjectId::new(),"workspace_id":owner_id,"name":&name,"routing_selectors":selector_docs(&routing),"distribution_selectors":selector_docs(&distribution),"enabled":enabled,"selection":selection,"masquerade":true,"block_lan_access":true,"created_at":now,"updated_at":now};
+    let route = doc! {"_id":ObjectId::new(),"workspace_id":owner_id,"name":&name,"routing_selectors":selector_docs(&routing),"distribution_selectors":selector_docs(&distribution),"enabled":enabled,"selection":selection,"allow_direct_fallback":allow_direct_fallback,"masquerade":true,"block_lan_access":true,"created_at":now,"updated_at":now};
     reject_overlapping_assignments(&app, owner_id, &route, None).await?;
     app.collection("private_exit_nodes")
         .insert_one(&route)
@@ -314,7 +318,7 @@ async fn update(
     Path(id): Path<String>,
     ApiBody(raw): ApiBody,
 ) -> ApiResult<Json<Value>> {
-    let (name, routing, distribution, enabled, selection) = parse(raw)?;
+    let (name, routing, distribution, enabled, selection, allow_direct_fallback) = parse(raw)?;
     let (_, owner, _) = browser(&app, &headers, &Method::PUT, &query.workspace, true).await?;
     let owner_id = owner;
     let route_id = object_id(&id, "Invalid exit-node id")?;
@@ -336,7 +340,7 @@ async fn update(
         .find_one(doc! {"_id":route_id,"workspace_id":owner_id})
         .await?
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "Exit node not found"))?;
-    let candidate = doc! {"_id":route_id,"workspace_id":owner_id,"name":&name,"routing_selectors":selector_docs(&routing),"distribution_selectors":selector_docs(&distribution),"enabled":enabled,"selection":selection,"masquerade":true,"block_lan_access":true,"created_at":previous.get("created_at").cloned().unwrap_or(Bson::DateTime(DateTime::now())),"updated_at":DateTime::now()};
+    let candidate = doc! {"_id":route_id,"workspace_id":owner_id,"name":&name,"routing_selectors":selector_docs(&routing),"distribution_selectors":selector_docs(&distribution),"enabled":enabled,"selection":selection,"allow_direct_fallback":allow_direct_fallback,"masquerade":true,"block_lan_access":true,"created_at":previous.get("created_at").cloned().unwrap_or(Bson::DateTime(DateTime::now())),"updated_at":DateTime::now()};
     reject_overlapping_assignments(&app, owner_id, &candidate, Some(route_id)).await?;
     app.collection("private_exit_nodes")
         .replace_one(doc! {"_id":route_id,"workspace_id":owner_id}, &candidate)
@@ -372,7 +376,7 @@ pub fn serialize(route: &Document) -> Value {
             .map(|s| json!({"kind":store::string(s,"kind"),"id":store::string(s,"id")}))
             .collect::<Vec<_>>()
     };
-    json!({"_id":store::id(route.get("_id")),"name":store::string(route,"name"),"routing_selectors":selectors("routing_selectors"),"distribution_selectors":selectors("distribution_selectors"),"enabled":route.get_bool("enabled").unwrap_or(true),"selection":route.get_str("selection").unwrap_or("sticky"),"masquerade":true,"block_lan_access":true,"created_at":store::field(route,"created_at"),"updated_at":store::field(route,"updated_at")})
+    json!({"_id":store::id(route.get("_id")),"name":store::string(route,"name"),"routing_selectors":selectors("routing_selectors"),"distribution_selectors":selectors("distribution_selectors"),"enabled":route.get_bool("enabled").unwrap_or(true),"selection":route.get_str("selection").unwrap_or("sticky"),"allow_direct_fallback":route.get_bool("allow_direct_fallback").unwrap_or(false),"masquerade":true,"block_lan_access":true,"created_at":store::field(route,"created_at"),"updated_at":store::field(route,"updated_at")})
 }
 
 /// Validate the complete enabled route graph against proposed machine records.

@@ -73,13 +73,14 @@ pub async fn udp_connect<A: ToSocketAddrs>(addr: A) -> Result<UdpSocket> {
 pub async fn tcp_connect_with_proxy(
     addr: &AddrMaybeCached,
     proxy: Option<&Url>,
+    source: Option<std::net::IpAddr>,
 ) -> Result<TcpStream> {
     if let Some(url) = proxy {
         let addr = &addr.addr;
-        let mut s = TcpStream::connect((
+        let mut s = tcp_connect_bound((
             url.host_str().expect("proxy url should have host field"),
             url.port().expect("proxy url should have port field"),
-        ))
+        ), source)
         .await?;
 
         let auth = if !url.username().is_empty() || url.password().is_some() {
@@ -115,10 +116,27 @@ pub async fn tcp_connect_with_proxy(
         Ok(s)
     } else {
         Ok(match addr.socket_addr {
-            Some(s) => TcpStream::connect(s).await?,
-            None => TcpStream::connect(&addr.addr).await?,
+            Some(s) => tcp_connect_bound(s, source).await?,
+            None => tcp_connect_bound(&addr.addr, source).await?,
         })
     }
+}
+
+async fn tcp_connect_bound<A: ToSocketAddrs>(address: A, source: Option<std::net::IpAddr>) -> std::io::Result<TcpStream> {
+    let Some(source) = source else { return TcpStream::connect(address).await; };
+    let mut failure = std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "no compatible gateway address");
+    for destination in lookup_host(address).await? {
+        // Local gateways and test listeners must keep their loopback route.
+        if destination.ip().is_loopback() { return TcpStream::connect(destination).await; }
+        if source.is_ipv4() != destination.is_ipv4() { continue; }
+        let socket = if destination.is_ipv4() { tokio::net::TcpSocket::new_v4()? } else { tokio::net::TcpSocket::new_v6()? };
+        socket.bind(SocketAddr::new(source, 0))?;
+        match socket.connect(destination).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => failure = error,
+        }
+    }
+    Err(failure)
 }
 
 // Wrapper of retry_notify

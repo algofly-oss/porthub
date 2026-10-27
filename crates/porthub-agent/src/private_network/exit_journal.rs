@@ -21,6 +21,8 @@ pub(super) struct Journal {
     pub sources: Vec<(Ipv4Addr, u32)>,
     #[serde(default)]
     pub ipv6_guard: bool,
+    #[serde(default)]
+    pub own_source_rule: bool,
 }
 impl Journal {
     pub fn table(&self) -> u32 {
@@ -101,6 +103,10 @@ impl Journal {
                     .table(self.table()),
             )
             .await?;
+        if self.own_source_rule {
+            netlink.del_rule_if_exists(RuleBuilder::v4().priority(FIRST + 65).protocol(PROTOCOL)
+                .from_prefix(&self.own.to_string(), 32).table(self.table())).await?;
+        }
         for (ip, priority) in &self.sources {
             netlink
                 .del_rule_if_exists(

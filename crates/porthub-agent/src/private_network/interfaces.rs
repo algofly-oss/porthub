@@ -14,7 +14,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-pub(super) async fn current() -> Result<Vec<SocketAddr>> {
+pub(crate) async fn current() -> Result<Vec<SocketAddr>> {
     let netlink = Connection::<Route>::new()?;
     let links = netlink.get_links().await?;
     let default = netlink.get_routes().await?.iter()

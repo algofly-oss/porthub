@@ -16,6 +16,7 @@ use std::sync::Arc;
 pub fn router() -> Router<Arc<App>> {
     Router::new()
         .route("/install/{ticket}", get(enroll))
+        .route("/install/{ticket}/windows.ps1", get(windows_installer))
         .route("/install/{ticket}/agent/{target}", get(asset))
         .route(
             "/api/machines/{first}/{second}/install.sh",
@@ -250,6 +251,23 @@ async fn enroll(
             .into_response())
     }
 }
+async fn windows_installer(
+    State(app): State<Arc<App>>, Path(ticket): Path<String>, request: Request,
+) -> ApiResult<Response> {
+    let enrollment = enrollment_ticket::resolve(&app, &ticket).await?;
+    let values = enrollment.values(&app, request.headers())?;
+    let base = values["server"].as_str().or_else(|| values["profile"]["server"].as_str())
+        .ok_or_else(|| ApiError::bad_request("Missing installer gateway"))?;
+    let link = enrollment_ticket::link(base, &ticket)?;
+    let quote = format!("'{}'", link.replace('\'', "''"));
+    let script = include_str!("../../assets/client/install.ps1")
+        .replace("{{URL}}", &quote)
+        .replace("{{ACTION}}", if values["kind"] == "private" { "enroll --install-service" } else { "setup" });
+    let mut response_headers = headers();
+    response_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
+    Ok((response_headers, script).into_response())
+}
+
 async fn asset(
     State(app): State<Arc<App>>,
     Path((ticket, target)): Path<(String, String)>,

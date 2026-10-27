@@ -169,7 +169,7 @@ pub(crate) fn default_path(user: bool, server: &str, peer: &str) -> Result<PathB
     )))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Deserialize)]
 struct PendingInstall {
     format_version: u32,
@@ -183,9 +183,9 @@ struct PendingInstall {
     fallback_servers: Vec<String>,
 }
 
-/// Linux system services can activate a pending private enrollment in a
+/// Native system services can activate a pending private enrollment in a
 /// separate, identity-scoped service. This never restarts the public service.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) async fn run_auto_install(
     control: std::sync::Arc<crate::control::Control>,
     public: crate::profile::Profile,
@@ -212,7 +212,7 @@ pub(crate) async fn run_auto_install(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn auto_install_once(
     control: &crate::control::Control,
     public: &crate::profile::Profile,
@@ -224,6 +224,8 @@ async fn auto_install_once(
     use reqwest::StatusCode;
 
     crate::service::require_administrator()?;
+    #[cfg(target_os = "macos")]
+    if crate::macos_private_migration::migrate(public, layout, executable).await? { return Ok(()); }
     activate_pending_profiles(layout, &public.machine_id, executable).await?;
 
     let reply = tokio::select! {
@@ -296,7 +298,7 @@ async fn auto_install_once(
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn pending_profiles(layout: &crate::service::Layout) -> Result<Vec<(PathBuf, PathBuf)>> {
     let root = layout.state.join("private");
     let metadata = match std::fs::symlink_metadata(&root) {
@@ -329,7 +331,7 @@ fn pending_profiles(layout: &crate::service::Layout) -> Result<Vec<(PathBuf, Pat
     Ok(profiles)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn activate_pending_profiles(
     layout: &crate::service::Layout,
     machine_id: &str,
@@ -350,7 +352,7 @@ async fn activate_pending_profiles(
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn activate_profile(
     layout: &crate::service::Layout,
     path: &Path,

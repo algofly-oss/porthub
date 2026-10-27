@@ -90,6 +90,14 @@ impl Tun {
         }
 
         for address in additions {
+            // macOS installs the utun's own /32 while assigning its address.
+            // Reuse only an exact route on this newly owned interface; another
+            // interface's route was rejected above and must never be adopted.
+            if existing.iter().any(|route| route.destination() == IpAddr::V4(address)
+                && route.prefix() == 32 && route.if_index() == Some(self.index)) {
+                current.insert(address);
+                continue;
+            }
             let route = Route::new(IpAddr::V4(address), 32).with_if_index(self.index);
             routes
                 .add(&route)

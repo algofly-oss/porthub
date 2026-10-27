@@ -16,6 +16,42 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[derive(Clone, Debug, Deserialize, Serialize, Default)]
+pub struct PrivateStatus {
+    pub revision: u64,
+    pub grants: usize,
+    pub dns_rules: usize,
+    pub lease_valid: bool,
+    pub exit: Option<ExitStatus>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ExitStatus {
+    pub name: String,
+    pub selection: String,
+    pub state: String,
+    pub peers: usize,
+    pub available: usize,
+    pub allow_direct_fallback: bool,
+    #[serde(default)]
+    pub peer_names: Vec<String>,
+}
+impl PrivateStatus {
+    pub fn display(&self) -> String {
+        let clean = |text: &str| text.chars().filter(|c| !c.is_control()).take(160).collect::<String>();
+        let mut output = format!("Private policy: revision {}; lease {}; {} access grants; {} DNS rules", self.revision,
+            if self.lease_valid { "valid" } else { "expired or unavailable" }, self.grants, self.dns_rules);
+        if let Some(exit) = &self.exit {
+            output.push_str(&format!("\nExit route: {}; {}; {}; {}/{} peers reachable; all offline: {}",
+                clean(&exit.name), clean(&exit.selection), clean(&exit.state), exit.available, exit.peers,
+                if exit.allow_direct_fallback { "allow normal internet" } else { "block" }));
+            if !exit.peer_names.is_empty() {
+                output.push_str(&format!("\nConfigured exit peers: {}", exit.peer_names.iter().take(16).map(|name| clean(name)).collect::<Vec<_>>().join(", ")));
+            }
+        } else { output.push_str("\nExit route: none"); }
+        output
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 pub struct Status {
     pub pid: u32,
@@ -26,6 +62,8 @@ pub struct Status {
     pub route: String,
     pub updated_at: u64,
     pub update_request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_status: Option<PrivateStatus>,
 }
 fn now() -> u64 {
     SystemTime::now()
@@ -64,6 +102,26 @@ struct Session {
     pending_update: Option<crate::update::Request>,
 }
 impl Session {
+    async fn refresh_source(&mut self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        if let (Some(plan), Some(current), Some(client)) = (&self.plan, &self.candidate, &mut self.client) {
+            let source = crate::private_network::interfaces::current().await?.first()
+                .context("gateway underlay unavailable")?.ip();
+            if current.config.client.as_ref().and_then(|config| config.transport.tcp.source_address) != Some(source) {
+                let mut plan = plan.as_ref().clone();
+                plan.bind_source(source);
+                let mut current = current.clone();
+                current.config.client.as_mut().context("missing client configuration")?.transport.tcp.source_address = Some(source);
+                // Rathole retains established streams while replacing the
+                // control connection and source used by future data channels.
+                client.reroute(current.config.clone()).await?;
+                self.candidate = Some(current);
+                self.plan = Some(std::sync::Arc::new(plan));
+                self.revision = self.revision.wrapping_add(1);
+            }
+        }
+        Ok(())
+    }
     fn new() -> Self {
         Self {
             client: None,
@@ -124,6 +182,7 @@ impl Session {
                 .unwrap_or_default(),
             updated_at: now(),
             update_request_id: self.update.clone(),
+            private_status: None,
         }
     }
     async fn apply(
@@ -143,9 +202,16 @@ impl Session {
             "invalid configuration version"
         );
         if self.version == version && self.client.is_some() {
-            return Ok(());
+            return self.refresh_source().await;
         }
         let plan = ClientPlan::parse(&content)?;
+        #[cfg(target_os = "linux")]
+        let plan = {
+            let mut plan = plan;
+            plan.bind_source(crate::private_network::interfaces::current().await?.first()
+                .context("gateway underlay unavailable")?.ip());
+            plan
+        };
         for candidate in &plan.candidates {
             let config = candidate
                 .config
@@ -239,6 +305,7 @@ impl Session {
                 "configuration response belongs to another machine"
             );
             if reply.status == reqwest::StatusCode::NO_CONTENT {
+                self.refresh_source().await?;
                 self.record_update(requested);
                 return Ok(());
             }
@@ -348,9 +415,9 @@ pub async fn run_with_logs(
             );
             None
         });
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let private_install_cancel = cancel.child_token();
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let _private_install_task = updater
         .as_ref()
         .and_then(crate::autoupdate::Controller::private_activation_context)
@@ -461,7 +528,7 @@ pub async fn run_with_logs(
                 }
             }
             Err(Failure::Rejected(410)) => {
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
                 private_install_cancel.cancel();
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 if let Some(updater) = &mut updater {
@@ -505,7 +572,7 @@ pub async fn run_with_logs(
     if let Some(updater) = &mut updater {
         updater.stop().await;
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     private_install_cancel.cancel();
     session.stop().await;
     log_stream.stop().await;
@@ -527,4 +594,25 @@ pub fn status(path: &Path) -> Result<Status> {
         status.state = "interrupted".into();
     }
     Ok(status)
+}
+
+#[cfg(test)]
+mod private_status_tests {
+    use super::*;
+    #[test]
+    fn private_policy_status_is_backwards_compatible_and_safe_for_terminals() {
+        let old = serde_json::json!({"pid":1,"state":"running","agent_version":"1.5.2","config_version":"","service_count":0,"route":"private","updated_at":1,"update_request_id":""});
+        assert!(serde_json::from_value::<Status>(old).unwrap().private_status.is_none());
+        let status = PrivateStatus {
+            revision: 7, grants: 2, dns_rules: 1, lease_valid: false,
+            exit: Some(ExitStatus { name: "Exit\u{1b}\nspoof".into(), selection: "sticky".into(), state: "configuration error".into(), peers: 2, available: 0, allow_direct_fallback: false, peer_names: vec!["condor.phub".into()] }),
+        };
+        let rendered = status.display();
+        assert!(!rendered.contains('\u{1b}'));
+        assert_eq!(rendered.lines().count(), 3);
+        assert!(rendered.contains("lease expired or unavailable"));
+        assert!(rendered.contains("configuration error"));
+        assert!(rendered.contains("all offline: block"));
+        assert!(rendered.contains("condor.phub"));
+    }
 }

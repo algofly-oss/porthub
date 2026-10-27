@@ -283,7 +283,7 @@ pub async fn stage(
     service::directory(directory, false)?;
     let download = async {
         for base in control.authorities() {
-            let mut response = match control.release_request(&base, &release.target).send().await {
+            let mut response = match control.release_request(&base, &release.target).await?.send().await {
                 Ok(response) => response,
                 Err(_) => continue,
             };

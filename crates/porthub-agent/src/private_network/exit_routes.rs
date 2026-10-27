@@ -14,9 +14,18 @@ pub(super) const LAST: u32 = 22600;
 pub(super) const PROTOCOL: u8 = 186;
 
 pub async fn watch(
-    mut desired: tokio::sync::watch::Receiver<Option<(u32, Ipv4Addr)>>,
+    desired: tokio::sync::watch::Receiver<Option<(u32, Ipv4Addr, bool)>>,
+    interfaces: tokio::sync::watch::Receiver<Vec<std::net::SocketAddr>>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    watch_reported(desired, interfaces, cancel, None).await
+}
+
+pub async fn watch_reported(
+    mut desired: tokio::sync::watch::Receiver<Option<(u32, Ipv4Addr, bool)>>,
     mut interfaces: tokio::sync::watch::Receiver<Vec<std::net::SocketAddr>>,
     cancel: tokio_util::sync::CancellationToken,
+    report: Option<tokio::sync::watch::Sender<&'static str>>,
 ) -> Result<()> {
     let mut active: Option<Consumer> = None;
     let mut retry = false;
@@ -41,17 +50,18 @@ pub async fn watch(
         let update: Result<()> = async {
             if active
                 .as_ref()
-                .is_some_and(|route| Some((route.index, route.own)) != wanted)
+                .is_some_and(|route| Some((route.index, route.own)) != wanted.map(|(index, own, _)| (index, own)))
             {
                 active.as_mut().unwrap().clear().await?;
                 active = None;
             }
-            if let Some((index, own)) = wanted {
+            if let Some((index, own, bypass)) = wanted {
                 if let Some(route) = &mut active {
                     route.refresh(&next).await?;
                 } else if !next.is_empty() {
                     active = Some(Consumer::activate(index, own, &next).await?);
                 }
+                if let Some(route) = &mut active { route.set_bypass(bypass).await?; }
             }
             Ok(())
         }
@@ -61,10 +71,17 @@ pub async fn watch(
             timer.reset();
         }
         retry = update.is_err();
+        if let Some(report) = &report {
+            let state = if retry { "configuration error" }
+                else if let Some(route) = &active { if route.bypass { "normal internet fallback" } else { "exit routing active" } }
+                else if wanted.is_some() { "waiting for underlay" } else { "inactive" };
+            if *report.borrow() != state { report.send_replace(state); }
+        }
     }
     if let Some(route) = &mut active {
         route.clear().await?;
     }
+    if let Some(report) = report { report.send_replace("inactive"); }
     Ok(())
 }
 
@@ -77,6 +94,7 @@ pub struct Consumer {
     sources: BTreeMap<Ipv4Addr, u32>,
     installed_route: bool,
     claimed: bool,
+    bypass: bool,
     journal: super::exit_journal::Journal,
 }
 
@@ -139,12 +157,14 @@ impl Consumer {
             sources: BTreeMap::new(),
             installed_route: false,
             claimed: true,
+            bypass: false,
             journal: super::exit_journal::Journal {
                 index,
                 name,
                 own,
                 sources: Vec::new(),
                 ipv6_guard: true,
+                own_source_rule: true,
             },
         };
         owner.journal.save()?;
@@ -177,6 +197,8 @@ impl Consumer {
                 .suppress_prefixlen(0),
         )
         .await?;
+        self.add(RuleBuilder::v4().priority(FIRST + 65).protocol(PROTOCOL)
+            .from_prefix(&self.own.to_string(), 32).table(self.table)).await?;
         self.update_sources(underlay).await?;
         super::exit_ipv6::apply(&self.netlink, &self.journal.name).await?;
         // Install the catch-all last, once every management bypass is present.
@@ -198,7 +220,24 @@ impl Consumer {
     pub async fn refresh(&mut self, underlay: &BTreeSet<Ipv4Addr>) -> Result<()> {
         let _lock = super::exit_forwarding::lock().await?;
         self.update_sources(underlay).await?;
-        super::exit_ipv6::apply(&self.netlink, &self.journal.name).await
+        super::exit_ipv6::apply_mode(&self.netlink, &self.journal.name, self.bypass).await?;
+        Ok(())
+    }
+    /// Change only new-connection routing. Overlay-source connections retain
+    /// their TUN rule; underlay-source connections retain their main-table rule.
+    pub async fn set_bypass(&mut self, bypass: bool) -> Result<()> {
+        if self.bypass == bypass { return Ok(()); }
+        let _lock = super::exit_forwarding::lock().await?;
+        let catch_all = RuleBuilder::v4().priority(LAST).protocol(PROTOCOL).table(self.table);
+        if bypass {
+            super::exit_ipv6::apply_mode(&self.netlink, &self.journal.name, true).await?;
+            self.netlink.del_rule_if_exists(catch_all).await?;
+        } else {
+            super::exit_ipv6::apply(&self.netlink, &self.journal.name).await?;
+            self.netlink.add_rule(catch_all).await?;
+        }
+        self.bypass = bypass;
+        Ok(())
     }
     async fn update_sources(&mut self, underlay: &BTreeSet<Ipv4Addr>) -> Result<()> {
         ensure!(

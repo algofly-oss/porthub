@@ -25,7 +25,6 @@ import NetworkSettings from "./NetworkSettings";
 import InviteEditor from "./InviteEditor";
 import PolicyTable from "./PolicyTable";
 import ExitRoutes from "./ExitRoutes";
-import DnsRules from "./DnsRules";
 
 export default function AccessRules({ active = true }) {
   const router = useRouter(),
@@ -413,7 +412,6 @@ export default function AccessRules({ active = true }) {
                 params={params}
                 onSaved={load}
               />
-              <DnsRules data={data} manage={manage} params={params} onSaved={load} />
             </div>
           )}
         </>

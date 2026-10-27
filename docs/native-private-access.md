@@ -142,3 +142,43 @@ The isolated three-agent test verified final responses and orderly shutdown
 after a client half-close in every selection mode. A further Miro test through
 Luna and Condor exits produced round robin 4/4, sticky 0/8, and random 3/13.
 These are functional connection-distribution checks, not throughput benchmarks.
+
+## All exits unavailable
+
+Each route defaults to blocking internet traffic when no exit is available.
+`allow_direct_fallback: true` permits new connections to use the client's normal
+internet connection after five seconds of continuous unavailability, following
+peer presence/transport availability detection. Five seconds of stable recovery
+returns new connections to exit routing. Withdrawing permission or losing the
+policy lease ends bypass immediately. Existing overlay-source flows keep their
+exit route; connections opened through the normal interface retain that path.
+This does not repair a TCP connection whose exit disappeared. The owned IPv6
+filter permits normal IPv6 during bypass while retaining connection tracking,
+then blocks new IPv6 internet flows after exit routing resumes. Private-network
+ACLs and DNS controls remain enforced. Only the PortHub-owned catch-all rule and
+IPv6 filter mode change; host default routes and management connections remain.
+
+## DNS scopes and native macOS handover
+
+Machine DNS settings offer an exact name, a name with all subdomains, or a
+`*.example.com` wildcard that excludes the apex. Only unmatched queries inside
+those configured resolver domains are forwarded to the machine's existing DNS
+servers. Private identity zones remain authoritative and are never forwarded.
+Forwarding has bounded concurrency and timeouts, supports UDP and TCP, validates
+response identity, and refreshes upstream settings lazily without idle polling.
+System stubs and PortHub's own resolvers are excluded to prevent recursion.
+
+The native macOS public service can adopt its matching generated private service.
+It checks machine/gateway identity, journals the original resolver configuration,
+and restores the legacy service if native readiness fails. Operator-stopped
+private services remain stopped. Installing a healthy candidate on the Mac
+verified both native services, private SSH access to Luna and Miro, Instagram
+blocking in Chrome with its default DNS settings, and unrelated HTTPS access.
+The DNS wildcard apex/child check also passed against the Mac's actual upstream.
+
+`porthub status` reports the paired private agent, policy lease, rule counts,
+configured exit peers, selection mode, and applied routing/fallback state.
+On Linux, gateway HTTP and public tunnel sockets bind to the physical source;
+source changes affect future channels while established streams are retained.
+Disposable-network tests verified new heartbeat and tunnel SYN packets escaping
+a dead exit while application packets still follow the configured exit policy.

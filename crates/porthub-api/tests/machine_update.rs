@@ -28,6 +28,8 @@ async fn concurrent_legacy_heartbeat_cannot_replace_a_reported_release() -> Resu
             version: version.into(),
             client_os: String::new(),
             client_arch: String::new(),
+            client_os_id: String::new(),
+            client_os_name: String::new(),
             handled: String::new(),
             native_update_protocol: false,
         };
@@ -371,6 +373,32 @@ async fn enable_changes_sync_only_owned_ports_and_recover_partial_firewall_failu
     serving.abort();
     control.abort();
     let _ = control.await;
+    case.db.drop().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn agent_distribution_metadata_is_bounded_and_survives_older_heartbeats() -> Result<()> {
+    let case = Case::new(Config::default()).await?;
+    let result = async {
+        let (owner, _) = case.user("distribution@test.invalid", "user").await?;
+        let id = ObjectId::new();
+        case.app.collection("machines").insert_one(doc! {"_id":id,"user_id":owner,"name":"distribution-test","enabled":true,"token":"distribution-fixture-token"}).await?;
+        let base = json!({"machine_id":id.to_hex(),"token":"distribution-fixture-token","client_version":"1.5.2","client_os":"linux","client_arch":"x86_64"});
+        let mut report = base.clone();
+        report["client_os_id"] = json!("ubuntu");
+        report["client_os_name"] = json!("Ubuntu 24.04.3 LTS");
+        case.status("POST", "/api/machines/client/sync", "", report.clone(), StatusCode::OK).await?;
+        // An older agent in a paired registration must not erase useful metadata.
+        case.status("POST", "/api/machines/client/sync", "", base, StatusCode::OK).await?;
+        let stored = case.app.collection("machines").find_one(doc! {"_id":id}).await?.unwrap();
+        let view = porthub_api::domain::inventory::machine(&case.app, &stored);
+        ensure!(view["client_os_id"] == "ubuntu" && view["client_os_name"] == "Ubuntu 24.04.3 LTS");
+        report["client_os_name"] = json!("x".repeat(161));
+        case.status("POST", "/api/machines/client/sync", "", report, StatusCode::UNPROCESSABLE_ENTITY).await?;
+        Ok::<_, anyhow::Error>(())
+    }.await;
     case.db.drop().await?;
     result
 }

@@ -290,3 +290,54 @@ mod tests {
         assert_eq!(table.flows.len(), 1);
     }
 }
+
+/// Debounce transport churn without probing on the packet path. Policy expiry
+/// or withdrawing permission closes bypass immediately.
+#[derive(Default)]
+pub struct Fallback {
+    bypass: bool,
+    candidate: Option<(bool, Instant)>,
+}
+impl Fallback {
+    pub fn update(&mut self, allowed: bool, available: usize, valid: bool, now: Instant) -> bool {
+        if !allowed || !valid {
+            self.bypass = false;
+            self.candidate = None;
+            return false;
+        }
+        let wanted = available == 0;
+        if wanted == self.bypass { self.candidate = None; }
+        else {
+            let (candidate, since) = self.candidate.get_or_insert((wanted, now));
+            if *candidate != wanted { *candidate = wanted; *since = now; }
+            if now.saturating_duration_since(*since) >= Duration::from_secs(5) {
+                self.bypass = wanted;
+                self.candidate = None;
+            }
+        }
+        self.bypass
+    }
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+    #[test]
+    fn bypass_requires_permission_stable_outage_and_a_valid_policy() {
+        let mut state = Fallback::default();
+        let now = Instant::now();
+        assert!(!state.update(false, 0, true, now));
+        assert!(!state.update(true, 0, true, now));
+        assert!(!state.update(true, 1, true, now + Duration::from_secs(4)));
+        assert!(!state.update(true, 0, true, now + Duration::from_secs(5)));
+        assert!(state.update(true, 0, true, now + Duration::from_secs(10)));
+        assert!(state.update(true, 1, true, now + Duration::from_secs(11)));
+        assert!(!state.update(true, 1, true, now + Duration::from_secs(16)));
+        assert!(!state.update(true, 0, true, now + Duration::from_secs(17)));
+        assert!(state.update(true, 0, true, now + Duration::from_secs(22)));
+        assert!(!state.update(true, 0, false, now + Duration::from_secs(23)));
+        assert!(!state.update(true, 0, true, now + Duration::from_secs(24)));
+        assert!(state.update(true, 0, true, now + Duration::from_secs(29)));
+        assert!(!state.update(false, 0, true, now + Duration::from_secs(30)));
+    }
+}

@@ -28,6 +28,7 @@ bytes = "1.12"
 getrandom = "0.3"
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 hickory-proto = { version = "0.26", default-features = false, features = ["std"] }
+hickory-resolver = { version = "0.26", default-features = false, features = ["system-config"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 
 serde = { version = "1", features = ["derive"] }

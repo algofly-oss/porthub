@@ -91,6 +91,8 @@ pub fn machine(app: &App, machine: &Document) -> Value {
         "client_hostname",
         "client_os",
         "client_arch",
+        "client_os_id",
+        "client_os_name",
         "client_country",
         "hostname_override",
         "client_setup_public_base_url",

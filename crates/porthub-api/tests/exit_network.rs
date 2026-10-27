@@ -38,6 +38,8 @@ async fn native_agents_use_two_exits_and_preserve_established_tcp() -> Result<()
     let mut containers: Vec<String> = Vec::new();
     let target_listener = TcpListener::bind("203.0.113.1:0").await?;
     let target = target_listener.local_addr()?.to_string();
+    let control_listener = TcpListener::bind("198.18.10.1:0").await?;
+    let control_target = control_listener.local_addr()?.to_string();
     let (owner, _) = case.user("exit-network@example.invalid", "user").await?;
     let ids = [ObjectId::new(), ObjectId::new(), ObjectId::new()];
     let exit_id = ObjectId::new();
@@ -46,7 +48,7 @@ async fn native_agents_use_two_exits_and_preserve_established_tcp() -> Result<()
     let test_network = network.clone();
     let server = tokio::spawn(async move {
         loop {
-            let (mut stream, peer) = tokio::select! { _ = stopped.cancelled() => break, value = target_listener.accept() => value? };
+            let (mut stream, peer) = tokio::select! { _ = stopped.cancelled() => break, value = target_listener.accept() => value?, value = control_listener.accept() => value? };
             let app = app.clone(); let stopped = stopped.clone(); let test_network = test_network.clone();
             tokio::spawn(async move {
                 stream.write_all(format!("{}\n", peer.ip()).as_bytes()).await?;
@@ -64,6 +66,18 @@ async fn native_agents_use_two_exits_and_preserve_established_tcp() -> Result<()
                     let response = if let Some(mode) = line.trim().strip_prefix("mode:") {
                         ensure!(["round_robin", "sticky", "random"].contains(&mode), "invalid test mode");
                         app.collection("private_exit_nodes").update_one(doc! {"_id":exit_id}, doc! {"$set":{"selection":mode}}).await?;
+                        "updated\n".to_owned()
+                    } else if let Some(value) = line.trim().strip_prefix("fallback:") {
+                        ensure!(["on", "off"].contains(&value), "invalid fallback fixture command");
+                        app.collection("private_exit_nodes").update_one(doc! {"_id":exit_id}, doc! {"$set":{"allow_direct_fallback":value == "on"}}).await?;
+                        "updated\n".to_owned()
+                    } else if let Some(action) = line.trim().strip_prefix("exits:") {
+                        ensure!(["start", "stop"].contains(&action), "invalid exit fixture command");
+                        for node in [1, 2] {
+                            let name = format!("{test_network}-node-{node}");
+                            if action == "stop" { docker(args(&["stop", "--time", "5", &name])).await?; }
+                            else { docker(args(&["start", &name])).await?; }
+                        }
                         "updated\n".to_owned()
                     } else if let Some(ip) = line.trim().strip_prefix("offline:") {
                         let node = match ip { "203.0.113.2" => 1, "203.0.113.3" => 2, _ => anyhow::bail!("invalid test exit") };
@@ -96,17 +110,18 @@ async fn native_agents_use_two_exits_and_preserve_established_tcp() -> Result<()
             let env_profile = format!("PORTHUB_TEST_PROFILE={profile}");
             let env_role = format!("PORTHUB_TEST_ROLE={}", if i == 0 { "consumer" } else { "exit" });
             let env_target = format!("PORTHUB_TEST_TARGET={target}");
+            let env_control = format!("PORTHUB_TEST_CONTROL_TARGET={control_target}");
             docker(args(&["create", "--name", &name, "--network", &network, "--ip", &ip, "--read-only",
                 "--tmpfs", "/state:rw,mode=700", "--tmpfs", "/run/porthub-exits:rw,mode=700", "--tmpfs", "/tmp:rw,mode=1777",
                 "--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--security-opt", "no-new-privileges:true", "--security-opt", "systempaths=unconfined",
                 "--security-opt", "apparmor=unconfined", "--sysctl", "net.ipv4.ip_forward=0", "--device", "/dev/net/tun",
-                "--env", "PORTHUB_TEST_OWNED_NETNS=1", "--env", &env_profile, "--env", &env_role, "--env", &env_target,
+                "--env", "PORTHUB_TEST_OWNED_NETNS=1", "--env", &env_profile, "--env", &env_role, "--env", &env_target, "--env", &env_control,
                 "--mount", &mount, "--entrypoint", "/worker", "porthub:edge", "--ignored", "--exact", "isolated_exit_worker", "--nocapture"])).await?;
             if i > 0 { docker(args(&["network", "connect", "--ip", &format!("203.0.113.{}",i+1), &external, &name])).await?; }
             docker(args(&["start", &name])).await?;
         }
         let consumer = containers.last().unwrap();
-        let status = tokio::time::timeout(Duration::from_secs(110), docker(args(&["wait", consumer]))).await.context("exit consumer timed out")??;
+        let status = tokio::time::timeout(Duration::from_secs(180), docker(args(&["wait", consumer]))).await.context("exit consumer timed out")??;
         let logs = docker(args(&["logs", consumer])).await?;
         println!("{logs}");
         ensure!(status == "0", "exit consumer failed with status {status}");

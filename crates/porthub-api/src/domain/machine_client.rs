@@ -483,6 +483,8 @@ pub struct Sync {
     pub public_ip: String,
     pub client_os: String,
     pub client_arch: String,
+    pub client_os_id: String,
+    pub client_os_name: String,
     pub version: String,
     pub handled: String,
     pub native_update_protocol: bool,
@@ -553,6 +555,12 @@ async fn sync_inner(
     }
     if matches!(input.client_arch.as_str(), "x86_64" | "x86" | "aarch64" | "arm" | "armv7") {
         set.insert("client_arch", &input.client_arch);
+    }
+    if !input.client_os_id.is_empty() && input.client_os_id.len() <= 64 && input.client_os_id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b)) {
+        set.insert("client_os_id", &input.client_os_id);
+    }
+    if !input.client_os_name.is_empty() && input.client_os_name.chars().count() <= 160 && !input.client_os_name.chars().any(char::is_control) {
+        set.insert("client_os_name", &input.client_os_name);
     }
     let version = input.version.trim();
     let handled = input.handled.trim();

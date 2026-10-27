@@ -8,6 +8,7 @@ pub mod device;
 #[path = "device_windows.rs"]
 pub mod device;
 pub mod dns;
+mod dns_upstream;
 pub mod exit_selection;
 #[cfg(target_os = "linux")]
 pub mod exit_kernel;
@@ -20,13 +21,13 @@ mod exit_journal;
 #[cfg(target_os = "linux")]
 mod exit_ipv6;
 #[cfg(target_os = "linux")]
-mod interfaces;
+pub(crate) mod interfaces;
 #[cfg(target_os = "macos")]
 #[path = "interfaces_macos.rs"]
-mod interfaces;
+pub(crate) mod interfaces;
 #[cfg(windows)]
 #[path = "interfaces_windows.rs"]
-mod interfaces;
+pub(crate) mod interfaces;
 pub mod policy;
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub mod runtime;

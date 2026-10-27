@@ -42,6 +42,11 @@ pub fn domain(raw: &str) -> Result<String> {
     Ok(name)
 }
 
+/// The resolver route covers the base domain even for a subdomains-only rule.
+pub fn zone(rule: &Rule) -> &str {
+    rule.domain.strip_prefix("*.").unwrap_or(&rule.domain)
+}
+
 /// Validate the complete replacement before publishing it to the responder.
 /// A more specific domain wins; duplicate domains are rejected, never reordered.
 pub fn prepare(rules: &[Rule]) -> Result<Vec<Rule>> {
@@ -53,7 +58,12 @@ pub fn prepare(rules: &[Rule]) -> Result<Vec<Rule>> {
     let mut seen = HashSet::new();
     for rule in rules {
         let mut rule = rule.clone();
-        rule.domain = domain(&rule.domain)?;
+        rule.domain = if let Some(base) = rule.domain.trim().strip_prefix("*.") {
+            format!("*.{}", domain(base)?)
+        } else {
+            domain(&rule.domain)?
+        };
+        if rule.domain.starts_with("*.") { rule.include_subdomains = true; }
         ensure!(
             seen.insert(rule.domain.clone()),
             "Conflicting DNS rules for the same domain"
@@ -75,9 +85,12 @@ pub fn prepare(rules: &[Rule]) -> Result<Vec<Rule>> {
         result.push(rule);
     }
     result.sort_by(|a, b| {
-        b.domain
+        zone(b)
             .len()
-            .cmp(&a.domain.len())
+            .cmp(&zone(a).len())
+            // A wildcard specializes the children; its apex remains eligible
+            // for the plain-domain rule at the same depth.
+            .then(b.domain.starts_with("*.").cmp(&a.domain.starts_with("*.")))
             .then(a.domain.cmp(&b.domain))
     });
     Ok(result)
@@ -86,10 +99,11 @@ pub fn prepare(rules: &[Rule]) -> Result<Vec<Rule>> {
 pub fn matching<'a>(rules: &'a [Rule], query: &str) -> Option<&'a Rule> {
     let name = query.trim_end_matches('.');
     rules.iter().find(|rule| {
-        name == rule.domain
+        let base = zone(rule);
+        (!rule.domain.starts_with("*.") && name == base)
             || rule.include_subdomains
                 && name
-                    .strip_suffix(&rule.domain)
+                    .strip_suffix(base)
                     .is_some_and(|prefix| prefix.ends_with('.'))
     })
 }
@@ -154,5 +168,22 @@ mod tests {
             include_subdomains: true,
         };
         assert!(prepare(&[rule.clone(), rule]).is_err());
+    }
+
+    #[test]
+    fn exact_and_wildcard_rules_have_distinct_scopes() {
+        let rule = |domain: &str, include_subdomains| Rule { domain: domain.into(), include_subdomains, action: Action::Block };
+        let wildcard = prepare(&[rule("*.Example.COM.", false)]).unwrap();
+        assert_eq!(zone(&wildcard[0]), "example.com");
+        assert!(matching(&wildcard, "example.com.").is_none());
+        assert!(matching(&wildcard, "one.two.example.com.").is_some());
+        assert!(matching(&wildcard, "notexample.com.").is_none());
+        let exact = prepare(&[rule("www.example.com", false)]).unwrap();
+        assert!(matching(&exact, "www.example.com.").is_some());
+        assert!(matching(&exact, "child.www.example.com.").is_none());
+        assert!(matching(&exact, "example.com.").is_none());
+        for invalid in ["*example.com", "a.*.example.com", "*.*.example.com", "*.com"] {
+            assert!(prepare(&[rule(invalid, true)]).is_err());
+        }
     }
 }

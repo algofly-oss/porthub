@@ -30,7 +30,7 @@ async fn consumer(target: &str) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(60), async {
         let mut seen = std::collections::BTreeSet::new();
         loop {
-            if let Ok((_, ip)) = open(target).await { ensure!(expected.contains(&ip), "traffic bypassed the exits"); seen.insert(ip); }
+            if let Ok((_, ip)) = open(target).await { if expected.contains(&ip) { seen.insert(ip); } }
             if seen.len() == 2 { return Ok::<_,anyhow::Error>(()); }
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
@@ -76,6 +76,41 @@ async fn consumer(target: &str) -> Result<()> {
         ensure!(ping(&mut established).await? == original, "healthy established flow broke");
     }
     println!("offline exit excluded: 16 new connections used the surviving exit; established connection preserved");
+    let control = std::env::var("PORTHUB_TEST_CONTROL_TARGET")?;
+    async fn command(control: &str, command: &str) -> Result<()> {
+        let (mut stream, _) = open(control).await?;
+        stream.get_mut().write_all(format!("{command}\n").as_bytes()).await?;
+        let mut reply = String::new();
+        tokio::time::timeout(Duration::from_secs(20), stream.read_line(&mut reply)).await??;
+        ensure!(reply.trim() == "updated", "fixture command failed");
+        Ok(())
+    }
+    command(&control, "exits:stop").await?;
+    ensure!(open(target).await.is_err(), "blocked exit route leaked normal internet access");
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    ensure!(open(target).await.is_err(), "blocked exit route leaked after presence expiry");
+    command(&control, "fallback:on").await?;
+    let (mut direct, direct_ip) = tokio::time::timeout(Duration::from_secs(40), async {
+        loop {
+            if let Ok(pair) = open(target).await {
+                if !expected.contains(&pair.1) { break pair; }
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }).await.context("authorized normal internet fallback did not activate")?;
+    ensure!(direct_ip == "198.18.10.2".parse::<IpAddr>()?, "unexpected fallback source");
+    command(&control, "exits:start").await?;
+    tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            ensure!(ping(&mut direct).await? == direct_ip, "existing direct connection moved on exit recovery");
+            if let Ok((_, ip)) = open(target).await {
+                if expected.contains(&ip) { break Ok::<_, anyhow::Error>(()); }
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }).await.context("recovered exits did not resume new connections")??;
+    command(&control, "fallback:off").await?;
+    println!("all-exit outage: default blocking, opt-in direct fallback, recovery and direct TCP pinning verified");
     Ok(())
 }
 
@@ -91,6 +126,18 @@ async fn isolated_exit_worker() -> Result<()> {
     let runtime = porthub_agent::private_network::runtime::run(path, cancel.clone());
     tokio::pin!(runtime);
     let role = std::env::var("PORTHUB_TEST_ROLE")?;
+    if role == "consumer" {
+        // Internal Docker networks omit a default route. Supply a normal
+        // underlay inside this disposable namespace to exercise opt-in bypass.
+        use nlink::netlink::{Connection, Route, route::Ipv4Route};
+        let connection = Connection::<Route>::new()?;
+        let link = connection.get_link_by_name("eth0").await?.context("fixture underlay missing")?;
+        connection.add_route(Ipv4Route::new(std::net::Ipv4Addr::UNSPECIFIED, 0)
+            .gateway("198.18.10.1".parse()?).dev_index(link.ifindex())).await?;
+        let (_, source) = open(&std::env::var("PORTHUB_TEST_TARGET")?).await.context("normal underlay preflight")?;
+        ensure!(source == "198.18.10.2".parse::<IpAddr>()?, "fixture underlay source differs");
+        println!("normal underlay verified before activating exit policy");
+    }
     let result = if role == "http-consumer" {
         tokio::select! {
             result = http_consumer() => result,

@@ -2332,7 +2332,7 @@ impl Transaction {
     /// positioned one; [`add_rule`](Self::add_rule)'s `NLM_F_APPEND` puts it
     /// after. Rule order is policy, so the declarative apply uses this to
     /// put a rule back exactly where it was.
-    pub(crate) fn insert_rule_before(self, rule: Rule, before: u64) -> Self {
+    pub fn insert_rule_before(self, rule: Rule, before: u64) -> Self {
         self.push_newrule(rule, NLM_F_REQUEST | NLM_F_CREATE, Some(before))
     }
 
