@@ -257,3 +257,17 @@ retry `40311118200`; the stalled original job was cancelled after the other
 platforms completed. All 30 release assets were checksum/version validated and
 published together. Temporary artifact copies and the intermediate core build
 image were removed after verification.
+
+
+### UI-only production updates
+
+When Rust sources, Cargo files, the toolchain, and runtime configuration are
+unchanged, a `prod-core` build can use
+`--build-arg PORTHUB_CORE_ARTIFACT_SOURCE=porthub:core-<version>` to reuse
+verified API/runtime binaries from an existing core image. The source image
+must match the deployment version and native architecture. Build the UI and
+assemble the final image on the normal clean runtime base; old UI layers do
+not accumulate. Verify the reused binary hashes before promotion.
+
+The default artifact source is `rust-build`, so normal builds still compile
+the backend from source. Development builds retain their container toolchain.

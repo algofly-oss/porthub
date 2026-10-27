@@ -6,7 +6,7 @@ import { Button as WorkspaceButton } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import SearchSelect from "@/components/ui/search-select";
 import { StatusTabs } from "@/components/ui/status-tabs";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActionIcon,
   Switch,
@@ -270,15 +270,7 @@ export default function ProxyConfigModal({
   const [machineOnlineFilter, setMachineOnlineFilter] = useState("online_only");
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
 
-  useEffect(() => {
-    if (!opened) {
-      return;
-    }
-    setForm(createInitialForm(proxy, defaultDomainSuffix));
-    setErrors({});
-    setSection("address");
-    setIsDeleteConfirmOpen(false);
-  }, [opened, proxy, defaultDomainSuffix]);
+  const initializedEditor = useRef(null);
 
   const machineOptions = useMemo(() => {
     const grouped = new Map();
@@ -454,8 +446,18 @@ export default function ProxyConfigModal({
 
   useEffect(() => {
     if (!opened) {
+      initializedEditor.current = null;
       return;
     }
+    const editorKey = proxy?._id || `new:${proxy?.connection?.data_id || ""}`;
+    if (initializedEditor.current === editorKey) return;
+    initializedEditor.current = editorKey;
+    // Inventory refreshes update the options, not the user's open draft.
+    // Initialize again only when opening the editor or choosing another proxy.
+    setForm(createInitialForm(proxy, defaultDomainSuffix));
+    setErrors({});
+    setSection("address");
+    setIsDeleteConfirmOpen(false);
 
     const initialConnection =
       connections.find((connection) => connection._id === createInitialForm(proxy, defaultDomainSuffix).connectionDataId) ||
@@ -586,7 +588,7 @@ export default function ProxyConfigModal({
       const currentConnection = connections.find(
         (connection) => connection._id === current.connectionDataId
       );
-      if (!currentConnection || currentConnection.machine_id === machineId) {
+      if (currentConnection?.machine_id === machineId) {
         return current;
       }
       return { ...current, connectionDataId: "", targetUrl: "" };

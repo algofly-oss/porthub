@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # Independent slim runtime images; one Compose file chooses prod/dev targets.
+ARG PORTHUB_CORE_ARTIFACT_SOURCE=rust-build
 FROM rust:1.99.1-slim-bookworm AS rust-build
 WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev pkg-config && rm -rf /var/lib/apt/lists/*
@@ -14,7 +15,8 @@ ENV PORTHUB_VERSION=$PORTHUB_VERSION RUST_MIN_STACK=33554432 CARGO_BUILD_JOBS=$P
 RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/src/target \
     cargo build --locked --release -p porthub-api -p porthub-edge -p porthub-firewall -p porthub-runtime && mkdir -p /out && \
     cp target/release/porthub-api target/release/porthub-edge \
-       target/release/porthub-firewall target/release/porthub-runtime /out/
+       target/release/porthub-firewall target/release/porthub-runtime /out/ && \
+    cp /out/porthub-api /out/porthub-runtime /usr/local/bin/
 
 # Agents run on hosts with different libc versions. Native musl builds provide
 # one self-contained Linux executable without a distribution-specific loader.
@@ -68,6 +70,10 @@ LABEL org.opencontainers.image.version=$PORTHUB_VERSION
 ARG PORTHUB_SOURCE_REVISION=unknown
 LABEL org.opencontainers.image.revision=$PORTHUB_SOURCE_REVISION
 
+# UI-only builds can reuse matching, already verified core artifacts. Building
+# from runtime-base keeps old UI assets out of the final image's layer history.
+FROM ${PORTHUB_CORE_ARTIFACT_SOURCE} AS core-artifacts
+
 FROM runtime-base AS core-runtime
 LABEL io.porthub.api-preflight=v1
 RUN apt-get update && apt-get install -y --no-install-recommends libcurl4 libssl3 && \
@@ -77,7 +83,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends libcurl4 libssl
     chmod 0750 /run/porthub-api /run/porthub-config && chmod 0770 /run/porthub-edge /run/porthub-firewall /run/porthub-activity && \
     printf '[server.services]\n' > /run/porthub-config/gateway.toml && \
     chown 10001:10001 /run/porthub-config/gateway.toml
-COPY --from=rust-build /out/porthub-api /out/porthub-runtime /usr/local/bin/
+COPY --from=core-artifacts /usr/local/bin/porthub-api /usr/local/bin/porthub-runtime /usr/local/bin/
 COPY --from=database /usr/bin/mongod /usr/local/bin/mongod
 COPY --from=ui-build --chown=10001:10001 /out/ui /app/ui/
 COPY deploy/native/core.toml /app/core.toml

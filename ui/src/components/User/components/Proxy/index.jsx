@@ -130,6 +130,8 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
     } catch (err) { error(err?.response?.data?.detail || "Could not delete proxy"); return false; }
     finally { setDeleting(false); }
   }
+  const editableConnections = useMemo(() => connections.filter(connection => !connection.temporary && (!machineId || connection.machine_id === machineId)), [connections, machineId]);
+  const editableMachines = useMemo(() => machineId ? machines.filter(machine => machine._id === machineId) : machines, [machines, machineId]);
   const createButton = <Button type="button" aria-label="Create proxy" onClick={create} disabled={loading}><IconPlus size={16} /><span className="md:hidden">Create</span><span className="hidden md:inline">Create proxy</span></Button>;
   const edit = p => { if (p.temporary) return; setEditing(p); changeEditor(true); };
   const reset = () => { setQuery(""); setStatus("all"); setGroup("all"); setMachine("all"); };
@@ -168,7 +170,7 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
       </section>)}</div>
       <ResultsPagination count={filtered.length} noun="Proxies" page={currentPage} pages={totalPages} pageSize={pageSize} onPage={setPage} onPageSize={setPageSize} />
     </div>}
-    <ProxyConfigModal opened={opened} onClose={() => changeEditor(false)} onSubmit={save} onDelete={remove} proxy={editing} connections={(machineId ? connections.filter(c => c.machine_id === machineId) : connections).filter(c => !c.temporary)} machines={machineId ? machines.filter(m => m._id === machineId) : machines} defaultDomainSuffix={settings.web_proxy_domain_suffix || ""} serviceDomain={settings.port_hub_service_domain || ""} isSaving={saving} isDeleting={deleting} />
+    <ProxyConfigModal opened={opened} onClose={() => changeEditor(false)} onSubmit={save} onDelete={remove} proxy={editing} connections={editableConnections} machines={editableMachines} defaultDomainSuffix={settings.web_proxy_domain_suffix || ""} serviceDomain={settings.port_hub_service_domain || ""} isSaving={saving} isDeleting={deleting} />
   </div>;
 }
 
