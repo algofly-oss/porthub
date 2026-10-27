@@ -38,3 +38,6 @@ mod exposure_protocol;
 #[cfg(windows)]
 #[path = "exposure_broker_windows.rs"]
 pub mod exposure_broker;
+
+#[cfg(windows)]
+mod detached_windows;

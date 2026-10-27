@@ -138,6 +138,8 @@ async fn background(options: server::Options, exposure: Exposure) -> Result<()> 
     if exposure.user {
         command.arg("--user");
     }
+    #[cfg(windows)]
+    let detached_log = log.try_clone()?;
     command
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
@@ -148,10 +150,8 @@ async fn background(options: server::Options, exposure: Exposure) -> Result<()> 
         command.process_group(0);
     }
     #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x00000200 | 0x00000008);
-    }
+    let mut child = crate::detached_windows::spawn(&command, &detached_log)?;
+    #[cfg(not(windows))]
     let mut child = command.spawn()?;
     let started = tokio::time::timeout(Duration::from_secs(55), async {
         loop {

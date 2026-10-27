@@ -109,9 +109,13 @@ jobs:
         run: |
           python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-transfer --target ${{ matrix.target }} -- --nocapture
           python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --test upload --target ${{ matrix.target }} -- --nocapture
+      - name: Compile complete Windows checks
+        if: runner.os == 'Windows'
+        shell: bash
+        run: cargo test --locked -p porthub-agent -p porthub-transfer -p porthub-tunnel -p porthub-identity -p porthub-mesh --target ${{ matrix.target }} --no-run
       - name: Test transfers, management and tunnel adapters
         shell: bash
-        run: cargo test --locked -p porthub-agent -p porthub-transfer -p porthub-tunnel -p porthub-identity -p porthub-mesh --target ${{ matrix.target }}
+        run: python scripts/run-with-timeout.py 240 cargo test --locked -p porthub-agent -p porthub-transfer -p porthub-tunnel -p porthub-identity -p porthub-mesh --target ${{ matrix.target }}
       - name: Build self-contained agent
         if: runner.os != 'Linux'
         shell: bash

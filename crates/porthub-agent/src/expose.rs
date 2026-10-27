@@ -400,6 +400,8 @@ pub async fn start_registered(
         .create_new(true)
         .write(true)
         .open(exposure_dir(&layout, true)?.join(format!("{id}.log")))?;
+    #[cfg(windows)]
+    let detached_log = log.try_clone()?;
     command
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
@@ -410,10 +412,8 @@ pub async fn start_registered(
         command.process_group(0);
     }
     #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x00000200 | 0x00000008);
-    }
+    let mut child = crate::detached_windows::spawn(&command, &detached_log)?;
+    #[cfg(not(windows))]
     let mut child = command.spawn()?;
     let ready = tokio::time::timeout(Duration::from_secs(50), async {
         loop {
