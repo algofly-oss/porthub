@@ -118,6 +118,17 @@ impl PhysicalRoute {
             ],
             None,
         )?;
+        // BSD route can print a routing-socket error yet exit successfully.
+        // Check kernel state before treating the mutation as committed.
+        let current = self.inspect()?;
+        ensure!(
+            match action {
+                "add" => current.as_ref() == Some(self),
+                "delete" => current.as_ref() != Some(self),
+                _ => false,
+            },
+            "physical scoped route change did not take effect"
+        );
         Ok(())
     }
     fn remove_owned(&self) -> Result<()> {
@@ -169,7 +180,11 @@ fn valid_name(name: &str) -> bool {
         && name.len() < libc::IF_NAMESIZE
         && name.bytes().all(|c| c.is_ascii_alphanumeric())
 }
-fn underlays(sources: &BTreeSet<Ipv4Addr>, routes: &[Route]) -> Result<Vec<Underlay>> {
+fn underlays(
+    sources: &BTreeSet<Ipv4Addr>,
+    routes: &[Route],
+    owned: &[PhysicalRoute],
+) -> Result<Vec<Underlay>> {
     let mut result = Vec::new();
     for route in routes {
         if route.destination() != IpAddr::V4(Ipv4Addr::UNSPECIFIED) || route.prefix() != 0 {
@@ -192,7 +207,19 @@ fn underlays(sources: &BTreeSet<Ipv4Addr>, routes: &[Route]) -> Result<Vec<Under
             }
         }
     }
-    result.sort_by_key(|route| route.source);
+    choose_underlays(result, owned)
+}
+fn choose_underlays(mut result: Vec<Underlay>, owned: &[PhysicalRoute]) -> Result<Vec<Underlay>> {
+    // Prefer a newly supplied system gateway over our retained scoped route
+    // after DHCP/network changes. With no replacement, keep the current route.
+    result.sort_by_key(|route| {
+        (
+            route.source,
+            owned.iter().any(|previous| {
+                previous.interface == route.interface && previous.gateway == route.gateway
+            }),
+        )
+    });
     result.dedup_by_key(|route| route.source);
     ensure!(
         !result.is_empty() && result.len() <= 16,
@@ -200,6 +227,25 @@ fn underlays(sources: &BTreeSet<Ipv4Addr>, routes: &[Route]) -> Result<Vec<Under
     );
     Ok(result)
 }
+#[derive(Debug, PartialEq, Eq)]
+enum ScopedAction {
+    Keep,
+    Add,
+    Replace(PhysicalRoute),
+}
+fn scoped_action(
+    wanted: &PhysicalRoute,
+    existing: Option<PhysicalRoute>,
+    owned: &[PhysicalRoute],
+) -> Result<ScopedAction> {
+    match existing {
+        None => Ok(ScopedAction::Add),
+        Some(current) if current == *wanted => Ok(ScopedAction::Keep),
+        Some(current) if owned.contains(&current) => Ok(ScopedAction::Replace(current)),
+        Some(_) => anyhow::bail!("physical scoped gateway differs from default"),
+    }
+}
+
 fn source_interface(source: Ipv4Addr) -> Result<Option<u32>> {
     let mut head = std::ptr::null_mut();
     // SAFETY: getifaddrs writes a linked list, freed once by Guard.
@@ -429,7 +475,7 @@ impl Consumer {
                 .any(|route| matches!(route.destination(), IpAddr::V4(_)) && route.prefix() == 1),
             "another VPN owns split default routes"
         );
-        let underlay = underlays(sources, &existing)?;
+        let underlay = underlays(sources, &existing, &[])?;
         let root = pf(&["-sr"], None)?;
         ensure!(
             root.lines()
@@ -484,12 +530,16 @@ impl Consumer {
                 interface: route.interface.clone(),
                 gateway: route.gateway,
             };
-            if let Some(existing) = wanted.inspect()? {
-                ensure!(
-                    existing == wanted,
-                    "physical scoped gateway differs from default"
-                );
-                continue; // Existing system or previously owned route.
+            match scoped_action(&wanted, wanted.inspect()?, &self.ownership.physical_routes)? {
+                ScopedAction::Keep => continue,
+                ScopedAction::Add => {}
+                ScopedAction::Replace(previous) => {
+                    previous.remove_owned()?;
+                    self.ownership
+                        .physical_routes
+                        .retain(|route| *route != previous);
+                    self.ownership.save()?;
+                }
             }
             if !self.ownership.physical_routes.contains(&wanted) {
                 self.ownership.physical_routes.push(wanted.clone());
@@ -520,7 +570,7 @@ impl Consumer {
     fn refresh(&mut self, sources: &BTreeSet<Ipv4Addr>, bypass: bool) -> Result<()> {
         let mut manager = RouteManager::new()?;
         let existing = manager.list()?;
-        let underlay = underlays(sources, &existing)?;
+        let underlay = underlays(sources, &existing, &self.ownership.physical_routes)?;
         self.preserve_physical_routes(&underlay)?;
         let next = rules(&self.ownership, &underlay, bypass);
         if next != self.rules {
@@ -665,6 +715,44 @@ pub async fn watch_reported(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn network_changes_replace_only_the_owned_scoped_gateway() -> Result<()> {
+        let previous = PhysicalRoute {
+            interface: "en0".into(),
+            gateway: "192.168.0.1".parse()?,
+        };
+        let wanted = PhysicalRoute {
+            interface: "en0".into(),
+            gateway: "192.168.1.1".parse()?,
+        };
+        assert_eq!(
+            scoped_action(&wanted, Some(previous.clone()), &[previous.clone()])?,
+            ScopedAction::Replace(previous.clone())
+        );
+        assert!(scoped_action(&wanted, Some(previous.clone()), &[]).is_err());
+        assert_eq!(
+            scoped_action(&wanted, Some(wanted.clone()), &[])?,
+            ScopedAction::Keep
+        );
+        assert_eq!(scoped_action(&wanted, None, &[])?, ScopedAction::Add);
+        let source = "192.168.1.40".parse()?;
+        let old = Underlay {
+            source,
+            interface: "en0".into(),
+            gateway: previous.gateway,
+        };
+        let new = Underlay {
+            source,
+            interface: "en0".into(),
+            gateway: wanted.gateway,
+        };
+        assert_eq!(
+            choose_underlays(vec![old.clone(), new.clone()], &[previous.clone()])?,
+            vec![new]
+        );
+        assert_eq!(choose_underlays(vec![old.clone()], &[previous])?, vec![old]);
+        Ok(())
+    }
     #[test]
     fn scoped_route_inspection_does_not_claim_global_or_host_routes() {
         let scoped = "destination: default\ngateway: 192.168.0.1\ninterface: en0\nflags: <UP,GATEWAY,DONE,STATIC,IFSCOPE>\n";
