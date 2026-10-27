@@ -5,6 +5,7 @@ use anyhow::{ensure, Result};
 use nlink::netlink::{
     nftables::{
         config::NftablesConfig, BaseChain, CtState, Family, FilterHook, NatHook, Priority, Rule,
+        TcpFlags,
     },
     rule::RuleBuilder,
     Connection, Nftables,
@@ -96,6 +97,22 @@ pub(super) async fn apply(name: &str, index: u32, bypass: bool) -> Result<()> {
                     .set_ct_mark(selected)
                     .set_mark(selected)
                     .accept()
+            })
+            // Bridged containers retain their own larger interface MTU. Bound
+            // both SYN directions to the exit envelope before accepting them;
+            // otherwise the remote sender's TLS records can exceed the tunnel
+            // packet limit even though small requests and DNS work.
+            .rule_keyed("forward", "mss_out", |rule| {
+                rule.match_oif(name)
+                    .match_ct_mark(exit)
+                    .match_tcp_flags(TcpFlags::SYN, TcpFlags::SYN | TcpFlags::RST)
+                    .clamp_tcp_mss((porthub_mesh::MAX_PACKET - 20 - 40) as u16)
+            })
+            .rule_keyed("forward", "mss_reply", |rule| {
+                rule.match_iif(name)
+                    .match_ct_mark(exit)
+                    .match_tcp_flags(TcpFlags::SYN, TcpFlags::SYN | TcpFlags::RST)
+                    .clamp_tcp_mss((porthub_mesh::MAX_PACKET - 20 - 40) as u16)
             })
             .rule_keyed("forward", "out", |rule| {
                 rule.match_oif(name).match_ct_mark(exit).accept()

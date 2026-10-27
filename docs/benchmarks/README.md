@@ -7,9 +7,24 @@ destinations and SHA256 verification. This directory retains only this summary.
 
 ## Current deployment
 
-URM2 currently serves agent release 1.5.3 from the isolated Rust core, edge and
+URM2 currently serves agent release 1.6.0 from the isolated Rust core, edge and
 firewall deployment. The throughput measurements below retain their measured
 release versions; newer functional tests do not establish new bandwidth results.
+
+Release 1.6.0 is deployed in production on Luna and URM2, and all nine online
+machines acknowledged gateway-driven upgrades. Installed HTTP server/receiver
+public exposure, upload, stop, and proxy removal passed. Native macOS HTTPS
+requests used both configured exits; UDP, ICMP, LAN/private/external SSH, and
+gateway connectivity also passed. These are functional checks, not new throughput
+measurements.
+
+The ordinary Miro Docker bridge exposed an exit-path MTU regression: its TCP SYN
+advertised MSS 1460 while the exit packet budget was 1360 bytes. Large TLS reply
+segments were missing. A temporary scoped MSS 1320 clamp restored the same
+Condor egress download. The native agent fix then passed with Miro using Luna
+as its exit, and installed both scoped SYN-direction clamps. Temporary rules,
+policies, and candidate services were removed and the installed service restored.
+This fix is pending release 1.6.1 deployment.
 
 An additional 1.4.6 Luna → Miro public gateway test sustained only about
 0.72 MB/s before cancellation. The gateway's accepted public socket used CUBIC
