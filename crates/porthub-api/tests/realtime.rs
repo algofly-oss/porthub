@@ -407,8 +407,11 @@ async fn legacy_sync_preserves_top_level_response_and_disabled_configuration() -
         let id=ObjectId::new();
         case.app.collection("machines").insert_one(doc! {"_id":id,"name":"Legacy","token":"legacy-secret","enabled":false,
             "hostname_override":"fixed-host","client_hostname":"previous","client_version":"original-version","client_update_request_id":"pending-request"}).await?;
-        let body=json!({"machine_id":id.to_hex(),"token":"legacy-secret","hostname":" new-runtime ","local_ip":" 192.168.1.9 ",
+        let mut body=json!({"machine_id":id.to_hex(),"token":"legacy-secret","hostname":" new-runtime ","local_ip":" 192.168.1.9 ",
             "public_ip":"198.51.100.7","is_active":true,"client_version":{},"client_update_last_handled_request_id":[]});
+        // Malformed update acknowledgements are rejected, including legacy callers.
+        case.status("POST","/api/machines/sync","",body.clone(),StatusCode::UNPROCESSABLE_ENTITY).await?;
+        body.as_object_mut().unwrap().remove("client_update_last_handled_request_id");
         let (status,headers,result)=case.call("POST","/api/machines/sync","",body.clone(),&[]).await?;
         ensure!(status==StatusCode::OK && result["msg"]=="Machine synced successfully");
         ensure!(result["data"]["_id"]==id.to_hex() && result["data"]["hostname"]=="fixed-host" && result["data"]["enabled"]==false);
