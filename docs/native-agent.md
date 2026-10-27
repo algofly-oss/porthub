@@ -1,10 +1,11 @@
 # Native machine profiles
 
-The Rust agent can run an authenticated public machine profile in the foreground.
-It owns the control client and embedded Rathole sessions directly; it starts no
-shell client or tunnel subprocess. This is a local migration milestone, not yet
-a complete replacement for the installed agent's service/update/private-network
-lifecycle.
+The Rust agent owns authenticated public forwarding and private networking in
+one process per registration. It runs embedded Rathole sessions and the private
+packet runtime directly, with no shell client or tunnel subprocess. Installed
+registrations share one OS service and update lifecycle. See
+[agent unification](native-agent-unification.md) for ownership, supervision, and
+the journaled handover from earlier paired services.
 
 Create a directory owned by the account that will run the agent, with no group
 or other write access. Configure a new profile with its machine token on stdin:

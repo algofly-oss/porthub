@@ -124,10 +124,19 @@ pub async fn run_with_logs(
     cancel: CancellationToken,
     logs: crate::logs::Buffer,
 ) -> Result<()> {
+    run_inner(path, cancel, Some(logs)).await
+}
+
+/// The parent registration owns the single log stream and update lifecycle.
+pub(crate) async fn run_embedded(path: PathBuf, cancel: CancellationToken) -> Result<()> {
+    run_inner(path, cancel, None).await
+}
+
+async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate::logs::Buffer>) -> Result<()> {
     let profile = Profile::load(&path)?;
     let _lease = Lease::acquire(&path)?;
     let control = Arc::new(crate::control::Control::new_private(&profile)?);
-    let mut log_stream = crate::logs::Guard::start(control, logs, cancel.child_token());
+    let mut log_stream = logs.map(|logs| crate::logs::Guard::start(control, logs, cancel.child_token()));
     let name = format!(
         "ph{}",
         &format!("{:x}", Sha256::digest(profile.peer_id.as_bytes()))[..8]
@@ -563,6 +572,6 @@ pub async fn run_with_logs(
     if crate::service::readable::stopped(&path).is_err() {
         tracing::debug!("local registration display snapshot unavailable");
     }
-    log_stream.stop().await;
+    if let Some(log_stream) = &mut log_stream { log_stream.stop().await; }
     result
 }

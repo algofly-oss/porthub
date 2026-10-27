@@ -68,7 +68,7 @@ impl RegistrationProfile {
                 .into(),
         }
     }
-    fn bytes(&self) -> Result<Vec<u8>> {
+    pub(crate) fn bytes(&self) -> Result<Vec<u8>> {
         Ok(match self {
             Self::Public(profile) => serde_json::to_vec_pretty(profile)?,
             Self::Private(profile) => serde_json::to_vec_pretty(profile)?,
@@ -417,7 +417,7 @@ pub fn unit(spec: &Spec) -> Result<String> {
         serde_json::to_string(spec)?
     ))
 }
-fn unit_name(service: &str) -> String {
+pub(crate) fn unit_name(service: &str) -> String {
     format!(
         "{service}.{}",
         if cfg!(target_os = "macos") {
@@ -685,6 +685,13 @@ pub(crate) fn owned_registrations(layout: &Layout) -> Result<Vec<Registration>> 
 pub fn select(layout: &Layout, selector: Option<&str>) -> Result<Registration> {
     Ok(select_pair(layout, selector)?.remove(0))
 }
+
+/// Resolve the private module using securely owned configuration, not the
+/// credential-free display record used by non-administrative status commands.
+pub fn private_module_profile(public_path: &Path) -> Result<Option<PathBuf>> {
+    let public = Profile::load(public_path)?;
+    Ok(crate::unified::load(public_path, &public)?.map(|config| config.private_profile))
+}
 /// Resolve one tenant registration from either component's ID. The primary
 /// service is canonical; grouping always includes the credential authority.
 pub fn select_pair(layout: &Layout, selector: Option<&str>) -> Result<Vec<Registration>> {
@@ -834,6 +841,39 @@ async fn install_locked_mode(
         "Windows private-network service activation is not supported"
     );
     let executable = binary(executable, &layout.releases)?;
+    if let RegistrationProfile::Private(private) = &profile {
+        let mut owners = Vec::new();
+        for registration in owned_registrations(layout)? {
+            if let RegistrationProfile::Public(public) = RegistrationProfile::load(&registration.spec.profile)? {
+                if crate::unified::matches(&public, private) { owners.push((registration.spec, public)); }
+            }
+        }
+        anyhow::ensure!(owners.len() <= 1, "multiple public owners match this private identity");
+        if let Some((owner, public)) = owners.pop() {
+            anyhow::ensure!(previous.is_none(), "update the paired registration before enrolling its private module");
+            anyhow::ensure!(owner.executable == executable, "update the registered agent before activating private networking");
+            if let Some(existing) = crate::unified::load(&owner.profile, &public)? {
+                anyhow::ensure!(existing.private_profile == layout.state.join(format!("{id}.json")),
+                    "this registration already owns another private identity");
+                let saved = crate::private_profile::Profile::load(&existing.private_profile)?;
+                anyhow::ensure!(saved.token == private.token, "private credentials changed; use the registration update workflow");
+            }
+            let private_path = layout.state.join(format!("{id}.json"));
+            let mut files = Files::new();
+            files.write(&private_path, &profile.bytes()?, true)?;
+            let configuration = crate::unified::Configuration {
+                format_version: 1, private_profile: private_path.clone(), enabled: true,
+            };
+            files.write(&crate::unified::configuration_path(&owner.profile), &serde_json::to_vec(&configuration)?, true)?;
+            let mut display = owner.clone();
+            display.identity = id;
+            display.profile = private_path;
+            readable::install(layout, &display, &profile).await?;
+            manager.start(&owner).await?;
+            files.committed = true;
+            return Ok(owner);
+        }
+    }
     let spec = Spec {
         user: layout.user,
         identity: id.clone(),
@@ -974,6 +1014,10 @@ pub async fn registration_action(
 }
 async fn action_locked(layout: &Layout, source: &Path, action: Action, manager: &dyn Manager) -> Result<Spec> {
     let profile = RegistrationProfile::load(source)?;
+    let module = match &profile {
+        RegistrationProfile::Public(public) => crate::unified::load(source, public)?,
+        _ => None,
+    };
     let id = profile.identity();
     let spec = installed(layout, &id)?.context("this PortHub profile has no managed service")?;
     match action {
@@ -1010,6 +1054,7 @@ async fn action_locked(layout: &Layout, source: &Path, action: Action, manager: 
                     ".status.json",
                     ".update-attempt.json",
                     ".update-commit.json",
+                    ".private-module.json",
                     ".lock",
                     "",
                 ] {
@@ -1017,6 +1062,18 @@ async fn action_locked(layout: &Layout, source: &Path, action: Action, manager: 
                     if regular(&path)?.is_some() {
                         std::fs::remove_file(path)?;
                     }
+                }
+                if let Some(module) = &module {
+                    anyhow::ensure!(!profile::Lease::running(&module.private_profile)?, "private module still has a running owner");
+                    for suffix in [".status.json", ".path-strategy.json", ".lock", ""] {
+                        let path = profile::sibling(&module.private_profile, suffix);
+                        if regular(&path)?.is_some() { std::fs::remove_file(path)?; }
+                    }
+                }
+            }
+            if let Some(module) = &module {
+                if let Some(id) = module.private_profile.file_stem().and_then(|id| id.to_str()) {
+                    readable::remove(layout, id)?;
                 }
             }
             std::fs::remove_file(manifest(layout, &id))?;

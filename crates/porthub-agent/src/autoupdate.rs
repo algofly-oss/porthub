@@ -133,9 +133,9 @@ impl Controller {
         }))
     }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub(crate) fn private_activation_context(&self) -> Option<(Layout, PathBuf)> {
+    pub(crate) fn private_enrollment_layout(&self) -> Option<Layout> {
         (!self.native.layout.user)
-            .then(|| (self.native.layout.clone(), self.native.executable.clone()))
+            .then(|| self.native.layout.clone())
     }
     pub fn request(&mut self, request: Option<Request>) {
         if self.current != request {

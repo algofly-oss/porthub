@@ -50,17 +50,21 @@ impl Tun {
                 .open("/dev/net/tun"),
             "cannot open private TUN device",
         )?;
-        // ifreq is entirely zero-initialized before setting its defined fields.
-        let mut request: libc::ifreq = unsafe { std::mem::zeroed() };
-        for (slot, byte) in request.ifr_name.iter_mut().zip(name.bytes()) {
-            *slot = byte as libc::c_char;
+        // Keep the ioctl union local to the synchronous attachment. Its raw
+        // pointer variants must not remain live across an asynchronous wait.
+        {
+            // ifreq is entirely zero-initialized before setting its defined fields.
+            let mut request: libc::ifreq = unsafe { std::mem::zeroed() };
+            for (slot, byte) in request.ifr_name.iter_mut().zip(name.bytes()) {
+                *slot = byte as libc::c_char;
+            }
+            request.ifr_ifru.ifru_flags =
+                (libc::IFF_TUN | libc::IFF_NO_PI | libc::IFF_TUN_EXCL) as libc::c_short;
+            ensure!(
+                unsafe { libc::ioctl(file.as_raw_fd(), libc::TUNSETIFF, &mut request) } == 0,
+                "private TUN attachment failed"
+            );
         }
-        request.ifr_ifru.ifru_flags =
-            (libc::IFF_TUN | libc::IFF_NO_PI | libc::IFF_TUN_EXCL) as libc::c_short;
-        ensure!(
-            unsafe { libc::ioctl(file.as_raw_fd(), libc::TUNSETIFF, &mut request) } == 0,
-            "private TUN attachment failed"
-        );
         let link = safe(
             netlink.get_link_by_name(name).await,
             "private TUN lookup failed",

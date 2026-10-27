@@ -399,7 +399,7 @@ enum Command {
         #[arg(long)]
         verbose: bool,
     },
-    /// Check or update an existing native registration and its private pair.
+    /// Check or update an installed registration and its networking modules.
     #[command(hide = true)]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     Update {
@@ -709,6 +709,8 @@ fn path_profile(args: &PathArgs) -> Result<PathBuf> {
     for entry in service::select_pair(&layout(args.user)?, selector.as_deref())? {
         if private_network::is_profile(&entry.spec.profile)? {
             matches.push(entry.spec.profile);
+        } else if let Some(profile) = service::private_module_profile(&entry.spec.profile)? {
+            matches.push(profile);
         }
     }
     anyhow::ensure!(
@@ -807,73 +809,48 @@ async fn tenant_action(args: TenantArgs, action: porthub_agent::service::Action)
 }
 
 fn render_registration_table(rows: &[serde_json::Value]) -> String {
-    let public_state = |row: &serde_json::Value| -> String {
-        if row["private"].as_bool() == Some(true) { "-".into() }
-        else { row["state"].as_str().unwrap_or("-").into() }
+    const HEADERS: [&str; 9] = ["ID", "MACHINE", "ACCOUNT EMAIL", "ACTIVE", "PUBLIC", "PRIVATE", "PORTS", "ROUTE", "GATEWAY"];
+    let cells: Vec<[String; 9]> = rows.iter().map(|row| {
+        let private = row["private"].as_bool() == Some(true);
+        [
+            row["id"].as_str().unwrap().chars().take(12).collect(),
+            row["machine_id"].as_str().unwrap().into(),
+            row["email"].as_str().filter(|value| !value.is_empty()).unwrap_or("-").into(),
+            match row["active"].as_bool() { Some(true) => "yes", Some(false) => "no", None => "?" }.into(),
+            if private { "-" } else { row["state"].as_str().unwrap_or("-") }.into(),
+            row["private_state"].as_str().or_else(|| private.then(|| row["state"].as_str()).flatten()).unwrap_or("-").into(),
+            row["ports"].to_string(),
+            row["route"].as_str().unwrap().into(),
+            display_gateway_url(row["gateway"].as_str().unwrap()),
+        ]
+    }).collect();
+    let widths: [usize; 9] = std::array::from_fn(|column| {
+        cells.iter().map(|row| row[column].chars().count()).chain([HEADERS[column].len()]).max().unwrap()
+    });
+    let padded = |value: &str, column: usize| {
+        if column == HEADERS.len() - 1 { value.to_owned() }
+        else { format!("{value:<width$}", width = widths[column]) }
     };
-    let private_state = |row: &serde_json::Value| -> String {
-        row["private_state"].as_str().or_else(|| {
-            (row["private"].as_bool() == Some(true)).then(|| row["state"].as_str()).flatten()
-        }).unwrap_or("-").into()
-    };
-    let public_width = rows.iter().map(|row| public_state(row).len()).max().unwrap_or(0).max(21);
-    let private_width = rows.iter().map(|row| private_state(row).len()).max().unwrap_or(0).max(21);
-    let header = paint(
-        format!(
-            "{:<12}  {:<24}  {:<27}  {:<6}  {:<public_width$}  {:<private_width$}  {:<5}  {:<8}  GATEWAY",
-            "ID", "MACHINE", "ACCOUNT EMAIL", "ACTIVE", "PUBLIC", "PRIVATE", "PORTS", "ROUTE"
-        ),
-        "1;36",
-    );
-    let mut output = vec![header];
-    for row in rows {
-        let (active, active_style) = match row["active"].as_bool() {
-            Some(true) => ("yes", "1;32"),
-            Some(false) => ("no", "2"),
-            None => ("?", "33"),
-        };
-        let active = paint(format!("{active:<6}"), active_style);
-        let state = public_state(row);
-        let state = state.as_str();
-        let state_style = match state {
-            "running" => "32",
-            "configuration-rejected" | "stopped" | "interrupted" => "1;31",
-            _ => "33",
-        };
-        let state = paint(format!("{state:<public_width$}"), state_style);
-        let private = private_state(row);
-        let private_style = match private.as_str() {
-            "running" => "32",
-            "configuration-rejected" | "stopped" | "interrupted" => "1;31",
-            "-" => "2",
-            _ => "33",
-        };
-        let private = paint(format!("{private:<private_width$}"), private_style);
-        let route = row["route"].as_str().unwrap();
-        let route_style = match route {
-            "direct" => "1;32",
-            "relay" | "gateway" => "36",
-            _ => "2",
-        };
-        let route = paint(format!("{route:<8}"), route_style);
-        let gateway = paint(display_gateway_url(row["gateway"].as_str().unwrap()), "36");
-        let email = row["email"]
-            .as_str()
-            .filter(|email| !email.is_empty())
-            .unwrap_or("-");
-        let ports = row["ports"].to_string();
-        output.push(format!(
-            "{}  {:<24}  {:<27}  {}  {}  {}  {:<5}  {}  {}",
-            &row["id"].as_str().unwrap()[..12],
-            row["machine_id"].as_str().unwrap(),
-            email,
-            active,
-            state,
-            private,
-            ports,
-            route,
-            gateway
-        ));
+    let mut output = vec![paint(HEADERS.iter().enumerate().map(|(column, value)| padded(value, column)).collect::<Vec<_>>().join("  "), "1;36")];
+    for row in cells {
+        let line = row.iter().enumerate().map(|(column, value)| {
+            let style = match (column, value.as_str()) {
+                (3, "yes") => "1;32",
+                (3, "no") => "2",
+                (3, _) => "33",
+                (4 | 5, "running") => "32",
+                (4 | 5, "configuration-rejected" | "stopped" | "interrupted") => "1;31",
+                (4 | 5, "-") => "2",
+                (4 | 5, _) => "33",
+                (7, "direct") => "1;32",
+                (7, "relay" | "gateway") | (8, _) => "36",
+                (7, _) => "2",
+                _ => "",
+            };
+            let value = padded(value, column);
+            if style.is_empty() { value } else { paint(value, style) }
+        }).collect::<Vec<_>>().join("  ");
+        output.push(line);
     }
     output.join("\n")
 }
@@ -916,7 +893,7 @@ fn print_private_status(record: &porthub_agent::service::readable::Record, layou
         readable::list(layout)?.into_iter().filter(|peer| peer.private && peer.machine_id == record.machine_id && peer.gateway == record.gateway).collect()
     };
     for peer in records {
-        println!("Private agent: {}; version {}", peer.state, peer.agent_version);
+        println!("Private networking: {}", peer.state);
         if peer.active != Some(true) { println!("Private policy below is the last reported state."); }
         if let Some(status) = &peer.private_status { println!("{}", status.display()); }
         else { println!("Private policy details unavailable from this agent version."); }
@@ -1138,7 +1115,7 @@ async fn main() -> Result<()> {
                     Some(&cli),
                 )
                 .await?;
-                println!("PortHub private service activated; CLI installed");
+                println!("PortHub private networking activated; CLI installed");
             } else {
                 println!("PortHub private credentials saved; private networking service is not activated");
             }
@@ -1833,6 +1810,26 @@ mod cli_tests {
         }
         let ports_column = header.find("PORTS").unwrap();
         assert_eq!(row[ports_column..].split_whitespace().next(), Some("0"));
+        assert_eq!(header.find("PRIVATE").unwrap() - header.find("PUBLIC").unwrap(), "running".len() + 2);
+        assert_eq!(ports_column - header.find("PRIVATE").unwrap(), "PRIVATE".len() + 2);
+        assert_eq!(header.find("ACTIVE").unwrap() - header.find("ACCOUNT EMAIL").unwrap(), "mneonizer@gmail.com".len() + 2);
+    }
+
+    #[test]
+    fn registration_columns_expand_for_long_account_and_state_values() {
+        let email = "longer.account.registration@example.com";
+        let state = "configuration-rejected";
+        let table = super::render_registration_table(&[serde_json::json!({
+            "id":"0d2bab5a347aabcdef123456", "machine_id":"6ad9f6aeeaf54977a4f930f7",
+            "email":email, "active":false, "state":state, "private_state":"running",
+            "ports":12, "route":"primary", "gateway":"https://porthub.algofly.in"
+        })]);
+        let lines: Vec<_> = table.lines().collect();
+        assert_eq!(lines[0].find("ACTIVE"), lines[1].find("no"));
+        assert_eq!(lines[0].find("PUBLIC"), lines[1].find(state));
+        assert_eq!(lines[0].find("PRIVATE"), lines[1].find("running"));
+        assert_eq!(lines[0].find("ACTIVE").unwrap() - lines[0].find("ACCOUNT EMAIL").unwrap(), email.len() + 2);
+        assert_eq!(lines[0].find("PRIVATE").unwrap() - lines[0].find("PUBLIC").unwrap(), state.len() + 2);
     }
 
     #[test]

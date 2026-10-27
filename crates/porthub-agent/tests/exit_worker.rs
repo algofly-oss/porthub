@@ -154,10 +154,23 @@ async fn isolated_exit_worker() -> Result<()> {
     ensure!(std::env::var("PORTHUB_TEST_OWNED_NETNS").as_deref() == Ok("1") && std::path::Path::new("/.dockerenv").is_file(), "requires owned test container");
     let _ = tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).try_init();
     let profile = std::env::var("PORTHUB_TEST_PROFILE")?;
-    let path = std::path::PathBuf::from("/state/profile.json");
+    let private: porthub_agent::private_profile::Profile = serde_json::from_str(&profile)?;
+    use sha2::{Digest, Sha256};
+    let id = format!("{:x}", Sha256::digest(format!("private\n{}\n{}", private.server, private.peer_id).as_bytes()));
+    let path = std::path::PathBuf::from(format!("/state/{id}.json"));
     porthub_agent::profile::write_private(&path, profile.as_bytes(), false)?;
     let cancel = CancellationToken::new();
-    let runtime = porthub_agent::private_network::runtime::run(path, cancel.clone());
+    let public_path = std::path::PathBuf::from("/state/profile.json");
+    let unified = std::env::var("PORTHUB_TEST_PUBLIC_PROFILE").ok();
+    let combined = unified.is_some();
+    let runtime: std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>>>> = if let Some(public) = unified {
+        porthub_agent::profile::write_private(&public_path, public.as_bytes(), false)?;
+        porthub_agent::profile::write_private(&porthub_agent::profile::sibling(&public_path, ".private-module.json"),
+            &serde_json::to_vec(&serde_json::json!({"format_version":1,"private_profile":path,"enabled":true}))?, false)?;
+        Box::pin(porthub_agent::runtime::run(public_path.clone(), cancel.clone(), Default::default()))
+    } else {
+        Box::pin(porthub_agent::private_network::runtime::run(path.clone(), cancel.clone()))
+    };
     tokio::pin!(runtime);
     let role = std::env::var("PORTHUB_TEST_ROLE")?;
     // Real foreign firewall commits race the provider's initial exit setup.
@@ -207,6 +220,17 @@ async fn isolated_exit_worker() -> Result<()> {
             result = &mut runtime => anyhow::bail!("agent stopped: {result:?}"),
         }
     };
+    let result = result.and_then(|()| {
+        if combined {
+            let public = porthub_agent::runtime::status(&public_path)?;
+            let private = porthub_agent::runtime::status(&path)?;
+            ensure!(public.pid == std::process::id() && private.pid == public.pid,
+                "public and private packet runtimes do not share one process");
+            ensure!(public.state == "running", "unified public control is unavailable");
+            println!("one process verified for public control and private IP packet transport");
+        }
+        Ok(())
+    });
     cancel.cancel();
     tokio::time::timeout(Duration::from_secs(5), runtime).await??;
     if let Some(churn) = churn { churn.await??; }

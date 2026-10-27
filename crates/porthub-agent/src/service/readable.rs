@@ -259,7 +259,7 @@ async fn lookup_email(profile: &crate::profile::Profile) -> Option<String> {
     (email.len() <= 320 && !email.chars().any(char::is_control)).then(|| email.to_owned())
 }
 /// The root/user agent publishes only explicit display fields, never credentials.
-pub(super) async fn install(
+pub(crate) async fn install(
     layout: &Layout,
     spec: &Spec,
     profile: &RegistrationProfile,

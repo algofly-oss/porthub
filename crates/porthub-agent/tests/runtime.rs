@@ -31,6 +31,49 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 const MACHINE: &str = "0123456789abcdef01234567";
 const TOKEN: &str = "secret-machine-runtime-token";
+
+async fn attach_unavailable_private_module(path: &Path) -> Result<std::path::PathBuf> {
+    use sha2::{Digest, Sha256};
+    let public = Profile::load(path)?;
+    let private = porthub_agent::private_profile::Profile {
+        server: public.server.clone(), workspace: "abcdef0123456789abcdef01".into(),
+        peer_id: format!("abcdef0123456789abcdef01:{}", public.machine_id),
+        token: "private-module-failure-isolation-token".into(), account_email: None,
+        fallback_servers: vec![], allow_insecure_http_for_tests: true,
+    };
+    let id = format!("{:x}", Sha256::digest(format!("private\n{}\n{}", private.server, private.peer_id).as_bytes()));
+    let private_path = path.parent().unwrap().join(format!("{id}.json"));
+    porthub_agent::profile::write_private(&private_path, &serde_json::to_vec(&private)?, false)?;
+    porthub_agent::profile::write_private(&porthub_agent::profile::sibling(path, ".private-module.json"),
+        &serde_json::to_vec(&json!({"format_version":1,"private_profile":private_path,"enabled":true}))?, false)?;
+    Ok(private_path)
+}
+
+async fn same_process_private_status(public: &Path, private: &Path) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(status) = runtime::status(private) {
+                ensure!(status.pid == runtime::status(public)?.pid && status.pid == std::process::id(),
+                    "private module escaped into another process");
+                return Ok::<_, anyhow::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await?
+}
+
+async fn toggle_private_module(public: &Path, private: &Path, enabled: bool) -> Result<()> {
+    let configuration = porthub_agent::profile::sibling(public, ".private-module.json");
+    let mut value: Value = serde_json::from_slice(&porthub_agent::profile::read_private(&configuration)?)?;
+    value["enabled"] = json!(enabled);
+    porthub_agent::profile::write_private(&configuration, &serde_json::to_vec(&value)?, true)?;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if porthub_agent::profile::Lease::running(private)? == enabled { return Ok::<_, anyhow::Error>(()); }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await?
+}
 #[derive(Clone)]
 struct Snapshot {
     text: String,
@@ -317,9 +360,14 @@ async fn saved_profile_syncs_reload_in_place_and_revoke_without_a_helper_process
         let listener=TcpListener::bind("127.0.0.1:0").await?;let server=format!("http://{}",listener.local_addr()?);let api=tokio::spawn(async move{axum::serve(listener,router).await});
         let directory=common::private_dir()?;let path=directory.path().join("machine.json");
         Profile{format_version:1,server,machine_id:MACHINE.into(),token:TOKEN.into(),account_email:None,setup_overrides: Default::default(), fallback_servers:Vec::new(),allow_insecure_http_for_tests:true}.save_new(&path)?;
+        let private = attach_unavailable_private_module(&path).await?;
         let cancel=CancellationToken::new();let worker=tokio::spawn(runtime::run(path.clone(),cancel.clone(),Options{heartbeat:Duration::from_secs(1),retry:Duration::from_millis(30),probe_timeout:Duration::from_millis(100)}));
-        status(&path,"running").await?;ensure!(runtime::run(path.clone(),CancellationToken::new(),Options::default()).await.is_err(),"duplicate profile owner accepted");
+        status(&path,"running").await?;same_process_private_status(&path,&private).await?;ensure!(runtime::run(path.clone(),CancellationToken::new(),Options::default()).await.is_err(),"duplicate profile owner accepted");
         let mut stream=connected(public).await?;let payload:Vec<u8>=(0..1024*1024).map(|i|(i%251)as u8).collect();echo(&mut stream,&payload).await.context("initial payload")?;
+        toggle_private_module(&path, &private, false).await?;
+        echo(&mut stream, b"private module shutdown must preserve this public connection").await?;
+        toggle_private_module(&path, &private, true).await?;
+        echo(&mut stream, b"private module restart must preserve this public connection").await?;
         state.snapshot.lock().unwrap().version="v2".into();tokio::time::sleep(Duration::from_millis(1200)).await;echo(&mut stream,b"unchanged sessions survive sync and version changes").await.context("unchanged sessions survive sync and version changes")?;
         ensure!(runtime::status(&path)?.config_version=="v2");ensure!(state.syncs.load(Ordering::SeqCst)>=2);
         {let mut snapshot=state.snapshot.lock().unwrap();snapshot.machine="ffffffffffffffffffffffff".into();snapshot.version="v3".into();}
@@ -333,6 +381,7 @@ async fn saved_profile_syncs_reload_in_place_and_revoke_without_a_helper_process
         {let mut snapshot=state.snapshot.lock().unwrap();snapshot.version="v5".into();snapshot.text=config;}
         let mut stream=connected(public).await?;echo(&mut stream,b"service added again through native synchronization").await.context("service added again through native synchronization")?;
         state.snapshot.lock().unwrap().deleted=true;worker.await??;ensure!(runtime::status(&path)?.state=="deleted"&&state.acks.load(Ordering::SeqCst)==1);closed(&mut stream).await?;
+        ensure!(!porthub_agent::profile::Lease::running(&private)?, "private module survived registration deletion");
         let status=std::fs::read_to_string(porthub_agent::profile::sibling(&path,".status.json"))?;ensure!(!status.contains(TOKEN)&&!status.contains(&gateway_address.to_string()));
         ensure!(Profile::load(&path)?.machine_id==MACHINE);edge.abort();api.abort();echo_server.abort();gateway.write().await.shutdown().await;Ok::<(),anyhow::Error>(())
     }).await.context("native profile runtime timed out")?

@@ -139,9 +139,7 @@ impl Fixture {
         std::fs::DirBuilder::new().mode(0o755).create(&bin)?;
         let cli = bin.join("porthub");
         let manager = Arc::new(Fake::default());
-        let first =
-            service::install_published(&layout, &source, &old, manager.as_ref(), Some(&cli))
-                .await?;
+        let public_source = source;
         let private = private_profile::Profile {
             server: public.server.clone(),
             workspace: "abcdef0123456789abcdef01".into(),
@@ -158,6 +156,9 @@ impl Fixture {
             false,
         )?;
         let second = service::install(&layout, &source, &old, manager.as_ref()).await?;
+        // Recreate the historical two-service installation. New private
+        // enrollments with an existing public owner now attach in process.
+        let first = service::install_published(&layout, &public_source, &old, manager.as_ref(), Some(&cli)).await?;
         let mut foreign = public.clone();
         foreign.machine_id = "ffffffffffffffffffffffff".into();
         let source = root.path().join("foreign.json");
@@ -207,7 +208,7 @@ impl Fixture {
 }
 
 #[tokio::test]
-async fn native_update_activates_its_pair_preserves_stopped_state_and_can_restore_the_committed_release(
+async fn native_update_unifies_its_pair_preserves_stopped_state_and_can_restore_the_committed_release(
 ) -> Result<()> {
     let f = Fixture::new().await?;
     f.manager.stop(&f.specs[1]).await?;
@@ -221,9 +222,13 @@ async fn native_update_activates_its_pair_preserves_stopped_state_and_can_restor
     };
     let receipt = upgrade::apply(&f.layout, plan, &f.new, f.manager.as_ref(), &ready).await?;
     ensure!(ready.calls.load(Ordering::SeqCst) == 1);
-    for spec in &f.specs[..2] {
-        ensure!(f.spec(&spec.identity)?.executable != spec.executable);
-    }
+    ensure!(f.spec(&f.specs[0].identity)?.executable != f.specs[0].executable);
+    ensure!(!f.layout.state.join(format!("{}.service.json", f.specs[1].identity)).try_exists()?);
+    ensure!(!f.specs[1].unit.try_exists()?);
+    let module = porthub_agent::profile::sibling(&f.specs[0].profile, ".private-module.json");
+    let configuration: serde_json::Value = serde_json::from_slice(&std::fs::read(&module)?)?;
+    ensure!(configuration["enabled"] == false);
+    ensure!(configuration["private_profile"] == f.specs[1].profile.to_str().unwrap());
     ensure!(std::fs::read_link(&f.cli)? == f.spec(&f.specs[0].identity)?.executable);
     ensure!(
         !f.manager.state(&f.specs[1]).await?.active && !f.manager.state(&f.specs[1]).await?.enabled
@@ -238,12 +243,57 @@ async fn native_update_activates_its_pair_preserves_stopped_state_and_can_restor
     f.foreign_untouched()?;
     upgrade::rollback(&f.layout, &receipt, f.manager.as_ref()).await?;
     f.restored().await?;
+    ensure!(!module.try_exists()?);
     ensure!(
         f.manager.state(&f.specs[0]).await?.active && !f.manager.state(&f.specs[1]).await?.active
     );
     let calls = f.manager.calls.lock().unwrap().len();
     upgrade::rollback(&f.layout, &receipt, f.manager.as_ref()).await?;
     ensure!(f.manager.calls.lock().unwrap().len() == calls);
+    Ok(())
+}
+
+#[tokio::test]
+async fn private_retirement_recovers_partial_unit_and_manifest_removal() -> Result<()> {
+    for (unit_present, manifest_present) in [(true, false), (false, true), (true, true)] {
+        let f = Fixture::new().await?;
+        let plan = upgrade::plan(&f.layout, &f.public, Some(&f.cli), f.manager.as_ref()).await?;
+        let receipt = upgrade::apply(&f.layout, plan, &f.new, f.manager.as_ref(), &Ready { calls: AtomicUsize::new(0), fail_at: 0 }).await?;
+        let journal: serde_json::Value = serde_json::from_slice(&std::fs::read(receipt.join("journal.json"))?)?;
+        let index = journal["entries"].as_array().unwrap().iter().position(|entry| entry["spec"]["identity"] == f.specs[1].identity).unwrap();
+        if unit_present { std::fs::copy(receipt.join(format!("{index}.unit")), &f.specs[1].unit)?; }
+        if manifest_present { std::fs::copy(receipt.join(format!("{index}.manifest")), f.layout.state.join(format!("{}.service.json", f.specs[1].identity)))?; }
+        upgrade::rollback(&f.layout, &receipt, f.manager.as_ref()).await?;
+        f.restored().await?;
+        ensure!(!porthub_agent::profile::sibling(&f.specs[0].profile, ".private-module.json").try_exists()?);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn later_unified_updates_verify_private_readiness_without_recreating_its_service() -> Result<()> {
+    let f = Fixture::new().await?;
+    let plan = upgrade::plan(&f.layout, &f.public, Some(&f.cli), f.manager.as_ref()).await?;
+    upgrade::apply(&f.layout, plan, &f.new, f.manager.as_ref(), &Ready { calls: AtomicUsize::new(0), fail_at: 0 }).await?;
+    let previous = f.spec(&f.specs[0].identity)?;
+    let module_path = porthub_agent::profile::sibling(&previous.profile, ".private-module.json");
+    let module = std::fs::read(&module_path)?;
+    let next = f.new.with_file_name("next-binary");
+    std::fs::write(&next, b"next unified binary fixture")?;
+    let plan = upgrade::plan(&f.layout, &f.public, Some(&f.cli), f.manager.as_ref()).await?;
+    ensure!(plan.registrations() == 1);
+    ensure!(upgrade::apply(&f.layout, plan, &next, f.manager.as_ref(), &Ready { calls: AtomicUsize::new(0), fail_at: 2 }).await.is_err());
+    ensure!(f.spec(&previous.identity)? == previous);
+    ensure!(std::fs::read_link(&f.cli)? == previous.executable);
+    ensure!(std::fs::read(&module_path)? == module);
+    let plan = upgrade::plan(&f.layout, &f.public, Some(&f.cli), f.manager.as_ref()).await?;
+    let ready = Ready { calls: AtomicUsize::new(0), fail_at: 0 };
+    upgrade::apply(&f.layout, plan, &next, f.manager.as_ref(), &ready).await?;
+    ensure!(ready.calls.load(Ordering::SeqCst) == 2);
+    ensure!(!f.specs[1].unit.try_exists()?);
+    ensure!(!f.layout.state.join(format!("{}.service.json", f.specs[1].identity)).try_exists()?);
+    ensure!(std::fs::read(&module_path)? == module);
+    f.foreign_untouched()?;
     Ok(())
 }
 
@@ -314,7 +364,7 @@ async fn interrupted_activation_and_partial_unit_manifest_writes_recover_without
             .enumerate()
             .filter_map(|(i, entry)| {
                 let id = entry["spec"]["identity"].as_str().unwrap();
-                (f.spec(id).unwrap().executable != f.specs[0].executable)
+                f.spec(id).is_ok_and(|spec| spec.executable != f.specs[0].executable)
                     .then_some((i, id.to_owned()))
             })
             .collect();
@@ -338,7 +388,8 @@ async fn interrupted_activation_and_partial_unit_manifest_writes_recover_without
             .filter(|(name, _)| name == "start")
             .cloned()
             .collect();
-        ensure!(starts.len() == 1 && starts[0].1 == changed[0].1);
+        ensure!(starts.len() == 2 && starts.iter().any(|(_, id)| id == &changed[0].1)
+            && starts.iter().any(|(_, id)| id == &f.specs[1].identity));
     }
     Ok(())
 }

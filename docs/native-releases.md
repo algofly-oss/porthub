@@ -186,8 +186,11 @@ each gets a fresh identity. Revocation or cancellation stops preparation.
 
 The worker's private receipt binds the request and target to the public
 enrollment. The agent reports a handled request only when that receipt is
-committed and its installed public/private executable paths match the running
-release. Merely observing the new version during readiness does not acknowledge
+committed and its installed executable matches the running release. A paired
+installation is migrated to one service with an embedded private module; the
+receipt also proves retirement of the old private unit and preservation of its
+credential binding. See [agent unification](native-agent-unification.md).
+Merely observing the new version during readiness does not acknowledge
 it. Rollback invalidates the proof. The API's ordinary sync acknowledgement then
 clears the request target. No credentials or origin addresses are included in
 routine update diagnostics.

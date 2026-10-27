@@ -133,6 +133,16 @@ impl Buffer {
     pub fn configure_private(&self, profile: &crate::private_profile::Profile) {
         self.configure(&profile.control_profile());
     }
+    pub(crate) fn include_private(&self, profile: &crate::private_profile::Profile) {
+        let extra = Redaction::profile(&profile.control_profile());
+        let mut current = self.0.redaction.lock().unwrap_or_else(|p| p.into_inner());
+        current.secrets.extend(extra.secrets);
+        current.secrets.sort_by_key(|value| std::cmp::Reverse(value.len()));
+        current.secrets.dedup();
+        current.hosts.extend(extra.hosts);
+        current.hosts.sort();
+        current.hosts.dedup();
+    }
     fn clean(&self, text: &str) -> String {
         self.0
             .redaction

@@ -132,6 +132,24 @@ struct Journal {
     request: Option<crate::update::Request>,
     #[serde(default)]
     public_id: String,
+    #[serde(default)]
+    retired_private: Option<String>,
+    #[serde(default)]
+    previous_module: Option<Vec<u8>>,
+}
+
+fn module_configuration(journal: &Journal) -> Result<Option<crate::unified::Configuration>> {
+    let Some(id) = &journal.retired_private else { return Ok(None); };
+    let entry = journal.entries.iter().find(|entry| &entry.spec.identity == id)
+        .context("private migration entry missing")?;
+    let public = journal.entries.iter().find(|entry| entry.spec.identity == journal.public_id)
+        .context("public migration entry missing")?;
+    let private = crate::private_profile::Profile::load(&entry.spec.profile)?;
+    let public = Profile::load(&public.spec.profile)?;
+    ensure!(crate::unified::matches(&public, &private), "private migration authority mismatch");
+    Ok(Some(crate::unified::Configuration {
+        format_version: 1, private_profile: entry.spec.profile.clone(), enabled: entry.state.active,
+    }))
 }
 fn write(receipt: &Path, journal: &Journal) -> Result<()> {
     profile::write_private(
@@ -281,6 +299,13 @@ pub async fn apply_requested(
             },
         )
         .context("public update identity missing")?;
+    let retired_private = plan.entries.iter().find_map(|entry| {
+        matches!(service::RegistrationProfile::load(&entry.spec.profile), Ok(service::RegistrationProfile::Private(_)))
+            .then(|| entry.spec.identity.clone())
+    });
+    let public_path = layout.state.join(format!("{public_id}.json"));
+    let module_path = crate::unified::configuration_path(&public_path);
+    let previous_module = if module_path.try_exists()? { Some(profile::read_private(&module_path)?) } else { None };
     let mut journal = Journal {
         format_version: 1,
         state: "prepared".into(),
@@ -289,6 +314,8 @@ pub async fn apply_requested(
         cli: plan.cli,
         request,
         public_id,
+        retired_private,
+        previous_module,
     };
     write(&receipt, &journal)?;
     // Persist the receipt's directory entry before any installed state changes.
@@ -303,7 +330,19 @@ pub async fn apply_requested(
     let result: Result<()> = async {
         journal.state = "activating".into();
         write(&receipt, &journal)?;
+        if let Some(configuration) = module_configuration(&journal)? {
+            let entry = journal.entries.iter().find(|entry| Some(&entry.spec.identity) == journal.retired_private.as_ref()).unwrap();
+            manager.stop(&entry.spec).await?;
+            ensure!(!profile::Lease::running(&entry.spec.profile)?, "private service did not release its runtime");
+            manager.disable(&entry.spec).await?;
+            manager.remove(&entry.spec).await?;
+            std::fs::remove_file(&entry.spec.unit)?;
+            std::fs::remove_file(manifest(layout, &entry.spec.identity))?;
+            manager.reload().await?;
+            crate::unified::save(&public_path, &Profile::load(&public_path)?, &configuration)?;
+        }
         for (i, entry) in journal.entries.iter().enumerate() {
+            if Some(&entry.spec.identity) == journal.retired_private.as_ref() { continue; }
             if entry.spec.executable == journal.executable {
                 if entry.state.active {
                     ready.wait(&entry.spec).await?;
@@ -323,6 +362,15 @@ pub async fn apply_requested(
             .await?;
             if entry.state.active {
                 ready.wait(&spec).await?;
+            }
+        }
+        if let Some(configuration) = crate::unified::load(&public_path, &Profile::load(&public_path)?)? {
+            let public = journal.entries.iter().find(|entry| entry.spec.identity == journal.public_id).context("public update entry missing")?;
+            if configuration.enabled && public.state.active {
+                let mut embedded = public.spec.clone();
+                embedded.profile = configuration.private_profile;
+                embedded.executable = journal.executable.clone();
+                ready.wait(&embedded).await?;
             }
         }
         let mut publication = if let Some((path, previous)) = &journal.cli {
@@ -429,6 +477,16 @@ fn proves(
         return Ok(false);
     }
     for entry in &journal.entries {
+        if Some(&entry.spec.identity) == journal.retired_private.as_ref() {
+            let expected = module_configuration(&journal)?.context("private migration configuration missing")?;
+            let current = crate::unified::load(source, &bound)?.context("private module missing after migration")?;
+            if service::installed(layout, &entry.spec.identity)?.is_some()
+                || entry.spec.unit.try_exists()?
+                || current.private_profile != expected.private_profile
+                || current.enabled != expected.enabled
+                || hash(&read(&entry.spec.profile)?) != entry.profile_hash { return Ok(false); }
+            continue;
+        }
         let Some(installed) = service::installed(layout, &entry.spec.identity)? else {
             return Ok(false);
         };
@@ -555,7 +613,7 @@ fn validate(layout: &Layout, receipt: &Path, journal: &Journal) -> Result<()> {
                 && previous.user == layout.user
                 && previous.service == format!("porthub-{}", &previous.identity[..24])
                 && previous.profile == layout.state.join(format!("{}.json", previous.identity))
-                && previous.unit == layout.units.join(format!("{}.service", previous.service))
+                && previous.unit == layout.units.join(service::unit_name(&previous.service))
                 && previous.executable.parent().and_then(Path::parent)
                     == Some(layout.releases.as_path()),
             "invalid native update backup paths"
@@ -604,9 +662,32 @@ async fn recover_locked(
 ) -> Result<()> {
     validate(layout, receipt, journal)?;
     let mut changed = Vec::new();
+    // Reject changed module ownership before stopping any service or changing
+    // the shared CLI, just as we do for credentials and native unit files.
+    if journal.retired_private.is_some() {
+        let public_path = layout.state.join(format!("{}.json", journal.public_id));
+        let path = crate::unified::configuration_path(&public_path);
+        if path.try_exists()? {
+            let current = crate::unified::load(&public_path, &Profile::load(&public_path)?)?.context("private module disappeared")?;
+            let expected = module_configuration(journal)?.context("private migration configuration missing")?;
+            ensure!(current.private_profile == expected.private_profile && current.enabled == expected.enabled,
+                "private module changed after update");
+        }
+    }
     for entry in &journal.entries {
-        let current = service::installed(layout, &entry.spec.identity)?
-            .context("native registration disappeared after update")?;
+        let current = service::installed(layout, &entry.spec.identity)?;
+        if Some(&entry.spec.identity) == journal.retired_private.as_ref() {
+            ensure!(current.as_ref().is_none_or(|current| current == &entry.spec),
+                "retired private service changed after migration");
+            ensure!(hash(&read(&entry.spec.profile)?) == entry.profile_hash,
+                "private credentials changed after migration");
+            if entry.spec.unit.try_exists()? {
+                ensure!(read(&entry.spec.unit)? == service::unit(&entry.spec)?.as_bytes(), "private unit changed after migration");
+            }
+            changed.push(true);
+            continue;
+        }
+        let current = current.context("native registration disappeared after update")?;
         ensure!(
             current.executable == entry.spec.executable || current.executable == journal.executable,
             "native service changed after update"
@@ -623,7 +704,8 @@ async fn recover_locked(
                 || unit == service::unit(&replacement)?.as_bytes(),
             "native service unit changed after update"
         );
-        changed.push(current != entry.spec || hash(&unit) != entry.unit_hash);
+        changed.push(current != entry.spec || hash(&unit) != entry.unit_hash
+            || journal.retired_private.is_some() && entry.spec.identity == journal.public_id);
     }
     journal.state = "rolling-back".into();
     write(receipt, journal)?;
@@ -633,6 +715,20 @@ async fn recover_locked(
     for (entry, changed) in journal.entries.iter().zip(&changed) {
         if *changed {
             manager.stop(&entry.spec).await?;
+        }
+    }
+    if journal.retired_private.is_some() {
+        let public_path = layout.state.join(format!("{}.json", journal.public_id));
+        let path = crate::unified::configuration_path(&public_path);
+        if let Some(bytes) = &journal.previous_module {
+            profile::write_private(&path, bytes, true)?;
+        } else if path.try_exists()? {
+            let public = Profile::load(&public_path)?;
+            let current = crate::unified::load(&public_path, &public)?.context("private module disappeared")?;
+            let expected = module_configuration(journal)?.context("private migration configuration missing")?;
+            ensure!(current.private_profile == expected.private_profile && current.enabled == expected.enabled,
+                "private module changed after update");
+            std::fs::remove_file(path)?;
         }
     }
     for (i, entry) in journal.entries.iter().enumerate() {

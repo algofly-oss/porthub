@@ -403,7 +403,12 @@ pub async fn run_with_logs(
         .unwrap_or_else(|_| { tracing::warn!("local exposure control unavailable; forwarding remains active"); None });
     logs.configure(&profile);
     tracing::info!("machine agent started");
-    let mut log_stream = crate::logs::Guard::start(control.clone(), logs, cancel.child_token());
+    let mut private_module = crate::unified::Controller::start(&path, &profile, logs.clone())
+        .map(Some).unwrap_or_else(|_| {
+            tracing::warn!("private module configuration unavailable; public forwarding remains active");
+            None
+        });
+    let mut log_stream = crate::logs::Guard::start(control.clone(), logs.clone(), cancel.child_token());
     let hostname = hostname::get()
         .ok()
         .and_then(|v| v.into_string().ok())
@@ -423,13 +428,12 @@ pub async fn run_with_logs(
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let _private_install_task = updater
         .as_ref()
-        .and_then(crate::autoupdate::Controller::private_activation_context)
-        .map(|(layout, executable)| {
+        .and_then(crate::autoupdate::Controller::private_enrollment_layout)
+        .map(|layout| {
             tokio::spawn(crate::private_profile::run_auto_install(
                 control.clone(),
                 profile.clone(),
                 layout,
-                executable,
                 private_install_cancel.clone(),
             ))
         });
@@ -533,6 +537,7 @@ pub async fn run_with_logs(
             Err(Failure::Rejected(410)) => {
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 private_install_cancel.cancel();
+                if let Some(module) = &mut private_module { module.stop().await; }
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 if let Some(updater) = &mut updater {
                     updater.stop().await;
@@ -577,6 +582,7 @@ pub async fn run_with_logs(
     }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     private_install_cancel.cancel();
+    if let Some(module) = &mut private_module { module.stop().await; }
     session.stop().await;
     log_stream.stop().await;
     state(&path, &session, "stopped")?;

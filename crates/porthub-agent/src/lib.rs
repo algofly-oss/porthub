@@ -15,6 +15,7 @@ mod routes;
 pub mod runtime;
 pub mod service;
 pub mod update;
+mod unified;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod upgrade;
 pub const VERSION: &str = match option_env!("PORTHUB_VERSION") {
@@ -25,9 +26,6 @@ pub const BUILD_REVISION: &str = match option_env!("PORTHUB_SOURCE_REVISION") {
     Some(value) => value,
     None => "unknown",
 };
-
-#[cfg(target_os = "macos")]
-mod macos_private_migration;
 
 #[cfg(unix)]
 pub mod exposure_broker;

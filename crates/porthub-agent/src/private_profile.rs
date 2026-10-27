@@ -183,14 +183,12 @@ struct PendingInstall {
     fallback_servers: Vec<String>,
 }
 
-/// Native system services can activate a pending private enrollment in a
-/// separate, identity-scoped service. This never restarts the public service.
+/// The native registration activates private networking inside its own process.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) async fn run_auto_install(
     control: std::sync::Arc<crate::control::Control>,
     public: crate::profile::Profile,
     layout: crate::service::Layout,
-    executable: PathBuf,
     cancel: CancellationToken,
 ) {
     use std::time::Duration;
@@ -198,7 +196,7 @@ pub(crate) async fn run_auto_install(
         if cancel.is_cancelled() {
             return;
         }
-        let result = auto_install_once(&control, &public, &layout, &executable, &cancel).await;
+        let result = auto_install_once(&control, &public, &layout, &cancel).await;
         let delay = if result.is_ok() {
             Duration::from_secs(6 * 60 * 60)
         } else {
@@ -217,16 +215,13 @@ async fn auto_install_once(
     control: &crate::control::Control,
     public: &crate::profile::Profile,
     layout: &crate::service::Layout,
-    executable: &Path,
     cancel: &CancellationToken,
 ) -> Result<()> {
     use anyhow::ensure;
     use reqwest::StatusCode;
 
     crate::service::require_administrator()?;
-    #[cfg(target_os = "macos")]
-    if crate::macos_private_migration::migrate(public, layout, executable).await? { return Ok(()); }
-    activate_pending_profiles(layout, &public.machine_id, executable).await?;
+    activate_pending_profiles(layout, public).await?;
 
     let reply = tokio::select! {
         _ = cancel.cancelled() => anyhow::bail!("private enrollment cancelled"),
@@ -293,7 +288,7 @@ async fn auto_install_once(
     enrolled.account_email = pending.account_email.or(public.account_email.clone());
     enrolled.validate()?;
     profile::write_private(&path, &serde_json::to_vec_pretty(&enrolled)?, true)?;
-    activate_profile(layout, &path, executable).await?;
+    activate_profile(layout, public, &path).await?;
     std::fs::remove_file(marker)?;
     Ok(())
 }
@@ -334,19 +329,14 @@ fn pending_profiles(layout: &crate::service::Layout) -> Result<Vec<(PathBuf, Pat
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn activate_pending_profiles(
     layout: &crate::service::Layout,
-    machine_id: &str,
-    executable: &Path,
+    public: &crate::profile::Profile,
 ) -> Result<()> {
     for (path, marker) in pending_profiles(layout)? {
         let profile = Profile::load(&path)?;
-        if !profile
-            .peer_id
-            .rsplit_once(':')
-            .is_some_and(|(_, id)| id.eq_ignore_ascii_case(machine_id))
-        {
+        if !crate::unified::matches(public, &profile) {
             continue;
         }
-        activate_profile(layout, &path, executable).await?;
+        activate_profile(layout, public, &path).await?;
         std::fs::remove_file(marker)?;
     }
     Ok(())
@@ -355,10 +345,11 @@ async fn activate_pending_profiles(
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn activate_profile(
     layout: &crate::service::Layout,
+    public: &crate::profile::Profile,
     path: &Path,
-    executable: &Path,
 ) -> Result<()> {
     let profile = Profile::load(path)?;
+    anyhow::ensure!(crate::unified::matches(public, &profile), "private enrollment authority mismatch");
     let registration = crate::service::RegistrationProfile::Private(profile);
     let id = registration.identity();
     if crate::service::installed(layout, &id)?.is_some() {
@@ -366,9 +357,14 @@ async fn activate_profile(
         // enrollment only activates an identity with no owned service yet.
         return Ok(());
     }
-    let manager = crate::service::system_manager(false).await?;
-    crate::service::install_published(layout, path, executable, manager.as_ref(), None).await?;
-    tracing::info!("private network service activated");
+    let _lock = crate::service::lock(layout)?;
+    let public_path = layout.state.join(format!("{}.json", crate::service::identity(public)));
+    if crate::unified::load(&public_path, public)?.is_some() { return Ok(()); }
+    let owner = crate::service::installed(layout, &crate::service::identity(public))?
+        .context("public registration disappeared during private enrollment")?;
+    let manager = crate::service::system_manager(layout.user).await?;
+    crate::service::install_locked(layout, path, &owner.executable, manager.as_ref(), None).await?;
+    tracing::info!("private network module activated");
     Ok(())
 }
 /// Read either an installer capability or an existing long ticket supplied on

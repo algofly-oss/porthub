@@ -104,7 +104,7 @@ async fn native_agents_use_two_exits_and_preserve_established_tcp() -> Result<()
     let result = async {
         let token = "exit-network-fixture-token-0123456789abcdef";
         for (i, machine) in ids.iter().enumerate() {
-            case.app.collection("machines").insert_one(doc! {"_id":machine,"user_id":owner,"name":format!("exit-test-{i}")}).await?;
+            case.app.collection("machines").insert_one(doc! {"_id":machine,"user_id":owner,"name":format!("exit-test-{i}"),"token":"unified-public-fixture-token"}).await?;
             case.app.collection("private_peers").insert_one(doc! {"_id":format!("{owner}:{machine}"),"workspace_id":owner,"machine_id":machine,"owner_id":owner,
                 "ip":format!("10.234.240.{}",i+10),"enabled":true,"credential_hash":token_digest(token)}).await?;
         }
@@ -121,11 +121,13 @@ async fn native_agents_use_two_exits_and_preserve_established_tcp() -> Result<()
             let env_role = format!("PORTHUB_TEST_ROLE={}", if i == 0 { "consumer" } else { "exit" });
             let env_target = format!("PORTHUB_TEST_TARGET={target}");
             let env_control = format!("PORTHUB_TEST_CONTROL_TARGET={control_target}");
+            let public_profile = json!({"server":base,"machine_id":ids[i].to_hex(),"token":"unified-public-fixture-token","allow_insecure_http_for_tests":true}).to_string();
+            let env_public = format!("PORTHUB_TEST_PUBLIC_PROFILE={public_profile}");
             docker(args(&["create", "--name", &name, "--network", &network, "--ip", &ip, "--read-only",
                 "--tmpfs", "/state:rw,mode=700", "--tmpfs", "/run/porthub-exits:rw,mode=700", "--tmpfs", "/tmp:rw,mode=1777",
                 "--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--cap-add", "NET_RAW", "--security-opt", "no-new-privileges:true", "--security-opt", "systempaths=unconfined",
                 "--security-opt", "apparmor=unconfined", "--sysctl", "net.ipv4.ip_forward=0", "--device", "/dev/net/tun",
-                "--env", "PORTHUB_TEST_OWNED_NETNS=1", "--env", &env_profile, "--env", &env_role, "--env", &env_target, "--env", &env_control,
+                "--env", "PORTHUB_TEST_OWNED_NETNS=1", "--env", &env_profile, "--env", &env_public, "--env", &env_role, "--env", &env_target, "--env", &env_control,
                 "--mount", &mount, "--entrypoint", "/worker", "porthub:edge", "--ignored", "--exact", "isolated_exit_worker", "--nocapture"])).await?;
             if i > 0 { docker(args(&["network", "connect", "--ip", &format!("203.0.113.{}",i+1), &external, &name])).await?; }
             docker(args(&["start", &name])).await?;
