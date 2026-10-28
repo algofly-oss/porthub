@@ -128,6 +128,13 @@ Explicit `porthub proxy start --via tor` jobs use their own per-user proxy-state
 cache, shared between that user's jobs. Stopping a job removes its credentials,
 curl configuration and job files; it retains the Tor cache for later jobs.
 
+`porthub tor start --system-wide` is a separate, administrator-authorized local
+override. The registered private agent applies an Internet-only Tor exit while
+leaving local and private destinations direct; traffic Tor cannot carry is
+blocked. It does not change the gateway policy. `porthub tor reset` removes the
+override and resumes the UI policy. The standalone proxy and system-wide mode
+use separate Tor pools, so both can run at the same time.
+
 macOS preference notifications retain one directory vnode and one kqueue per
 watcher, without enumerating sibling Tor caches or upgrade backup directories.
 General application and transfer watches explicitly use FSEvents. This selection

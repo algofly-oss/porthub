@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Switch } from "@mantine/core";
-import { IconChevronRight, IconPlus, IconWorld, IconCopy, IconCheck } from "@tabler/icons-react";
+import { IconChevronDown, IconChevronRight, IconPlus, IconWorld, IconCopy, IconCheck } from "@tabler/icons-react";
 import axios from "axios";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
@@ -17,6 +17,7 @@ export default function ProxyGrants({ data, manage, params }) {
   const [editing, setEditing] = useState(null);
   const [removing, setRemoving] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const [form, setForm] = useState(empty);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -38,7 +39,7 @@ export default function ProxyGrants({ data, manage, params }) {
   const names = new Map(machines.map(machine => [machine.value, machine.label]));
   function open(grant) {
     setForm(grant ? { ...empty(), ...grant } : empty());
-    setEditing(grant?._id || "new"); setRemoving(false); setCopied(false); setError("");
+    setEditing(grant?._id || "new"); setRemoving(false); setCopied(false); setError(""); setExpanded(true);
   }
   async function save(event) {
     event.preventDefault(); setBusy(true);
@@ -58,11 +59,22 @@ export default function ProxyGrants({ data, manage, params }) {
     } catch (cause) { setError(errorText(cause)); }
     finally { setBusy(false); }
   }
-  return <section className="mt-3 rounded-xl bg-surface p-4">
-    <div className="mb-4 flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-base font-semibold">Application proxies</h2><p className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">Authorize machines to use a gateway or peer as an authenticated HTTP/SOCKS5 proxy. A grant does not start a listener; clients start their local proxy when needed.</p></div>{manage && <Button onClick={() => open(null)}><IconPlus size={16} />Proxy grant</Button>}</div>
-    {error && !editing && <p role="alert" className="mb-3 text-sm text-red-500">{error}</p>}
-    {!grants.length && <p className="py-5 text-center text-sm text-muted-foreground">No shared proxies authorized.</p>}
-    <div className="space-y-2">{grants.map(grant => <button type="button" key={grant._id} onClick={() => open(grant)} className="flex w-full items-center gap-3 rounded-lg border border-border p-3 text-left hover:bg-accent/30"><IconWorld size={18} className="shrink-0 text-primary" /><div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{grant.name}</p><p className="mt-1 truncate text-xs text-muted-foreground">{grant.target_kind === "gateway" ? "Gateway" : names.get(grant.target_machine_id) || "Unavailable machine"} · {grant.client_machine_ids.length} authorized machines · {grant.enabled ? "Enabled" : "Disabled"}</p></div><IconChevronRight size={16} className="shrink-0 text-muted-foreground" /></button>)}</div>
+  return <section className="mt-3 rounded-xl border border-border bg-surface px-3 py-2">
+    <div className="flex min-h-10 items-center gap-2">
+      <button type="button" aria-expanded={expanded} onClick={() => setExpanded(value => !value)} className="flex min-w-0 flex-1 items-center gap-2 rounded-md text-left hover:text-foreground">
+        {expanded ? <IconChevronDown size={16} className="shrink-0 text-muted-foreground" /> : <IconChevronRight size={16} className="shrink-0 text-muted-foreground" />}
+        <IconWorld size={17} className="shrink-0 text-primary" />
+        <span className="truncate text-sm font-semibold">Application proxies</span>
+        <span className="rounded-full bg-control px-2 py-0.5 text-xs text-muted-foreground">{grants.length}</span>
+      </button>
+      {manage && <Button size="sm" variant="outline" onClick={() => open(null)}><IconPlus size={15} />Add</Button>}
+    </div>
+    {error && !editing && <p role="alert" className="mt-2 text-sm text-red-500">{error}</p>}
+    {expanded && <div className="pb-2 pt-2">
+      <p className="mb-2 text-xs text-muted-foreground">Shared proxy permissions. No listener starts until an authorized client requests one.</p>
+      {!grants.length && <p className="py-3 text-sm text-muted-foreground">No shared proxies authorized.</p>}
+      <div className="space-y-1">{grants.map(grant => <button type="button" key={grant._id} onClick={() => open(grant)} className="flex w-full items-center gap-3 rounded-lg border border-border px-3 py-2 text-left hover:bg-accent/30"><IconWorld size={17} className="shrink-0 text-primary" /><div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{grant.name}</p><p className="mt-0.5 truncate text-xs text-muted-foreground">{grant.target_kind === "gateway" ? "Gateway" : names.get(grant.target_machine_id) || "Unavailable machine"} · {grant.client_machine_ids.length} machines · {grant.enabled ? "Enabled" : "Disabled"}</p></div><IconChevronRight size={16} className="shrink-0 text-muted-foreground" /></button>)}</div>
+    </div>}
     <Dialog opened={Boolean(editing)} onClose={() => { if (!busy) setEditing(null); }} title={editing === "new" ? "Create proxy grant" : "Proxy grant"} size="lg">
       {error && <p role="alert" className="mb-3 text-sm text-red-500">{error}</p>}
       <form onSubmit={save} className="space-y-3"><fieldset disabled={busy || !canEdit} className="space-y-3">

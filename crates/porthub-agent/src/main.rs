@@ -54,7 +54,8 @@ fn requires_system_privileges(args: &Args) -> bool {
         #[cfg(feature="local-tor")]
         Command::Tor {command}=>match command {
             TorCommand::Status(_)=>false,
-            TorCommand::Start {registration,..}|TorCommand::Stop(registration)|TorCommand::Reset(registration)=>!registration.user && registration.profile.is_none(),
+            TorCommand::Start {registration,system_wide,..}=>*system_wide || (!registration.user && registration.profile.is_none()),
+            TorCommand::Stop(registration)|TorCommand::Reset(registration)=>!registration.user && registration.profile.is_none(),
         },
         Command::Start(args) | Command::Stop(args) | Command::Restart(args) => !args.user,
         Command::Remove(args) => !args.user,
@@ -709,10 +710,13 @@ enum PathCommand {
 #[cfg(feature="local-tor")]
 #[derive(Subcommand)]
 enum TorCommand {
-    /// Prepare local Tor without opening a listening port.
+    /// Prepare local Tor; optionally route this machine's internet traffic through it.
     Start {
         #[arg(long,value_parser=clap::value_parser!(u8).range(1..=16))]
         circuit_groups:Option<u8>,
+        /// Route system-wide internet traffic through Tor until `porthub tor reset`.
+        #[arg(long, conflicts_with = "user")]
+        system_wide:bool,
         #[command(flatten)]
         registration:PathArgs,
     },
@@ -738,19 +742,29 @@ fn tor_command(command:TorCommand)->Result<()> {
         } else {println!("Local Tor status is unavailable from this agent version");}
         return Ok(());
     }
-    let (args,mode,groups)=match command {
-        TorCommand::Start {registration,circuit_groups}=>(registration,Mode::Enabled,circuit_groups.map(usize::from)),
-        TorCommand::Stop(args)=>(args,Mode::Disabled,None),
-        TorCommand::Reset(args)=>(args,Mode::Auto,None),
+    let (args,mode,groups,system_wide,reset)=match command {
+        TorCommand::Start {registration,circuit_groups,system_wide}=>(registration,Mode::Enabled,circuit_groups.map(usize::from),system_wide,false),
+        TorCommand::Stop(args)=>(args,Mode::Disabled,None,false,true),
+        TorCommand::Reset(args)=>(args,Mode::Auto,None,false,true),
         TorCommand::Status(_)=>unreachable!(),
     };
+    anyhow::ensure!(!(system_wide && args.user), "system-wide Tor requires a system registration, not --user");
+    #[cfg(not(any(target_os="linux",target_os="macos")))]
+    anyhow::ensure!(!system_wide, "system-wide Tor routing is supported on Linux and macOS only");
     let path=path_profile(&args)?;
-    let settings=tor_preferences::save(&path,mode,groups)?;
+    let mut settings=tor_preferences::load(&path)?;
+    settings.mode=mode;
+    if let Some(groups)=groups { settings.circuit_groups=Some(groups); }
+    if system_wide { settings.system_wide=true; }
+    if reset { settings.system_wide=false; }
+    if matches!(mode,Mode::Auto) { settings.circuit_groups=None; }
+    let settings=tor_preferences::save(&path,settings)?;
     if args.json {println!("{}",serde_json::to_string_pretty(&settings)?);}
     else {println!("{}",match mode {
+        Mode::Enabled if settings.system_wide=>"System-wide Tor requested; internet TCP will use the local Tor exit, LAN stays direct, and unsupported traffic fails closed. Use `porthub tor reset` to return to the UI policy.",
         Mode::Enabled=>"Local Tor enabled; the agent will prepare circuits in the background. No listening port is opened.",
-        Mode::Disabled=>"Local Tor disabled; its active connections will close.",
-        Mode::Auto=>"Local Tor now follows the UI exit policy.",
+        Mode::Disabled=>"Local Tor disabled and system-wide Tor routing removed; active Tor connections will close.",
+        Mode::Auto=>"Local Tor and exit routing now follow the UI policy.",
     });}
     Ok(())
 }
@@ -1778,12 +1792,14 @@ mod cli_tests {
             assert!(!requires_system_privileges(&args(&command)));
         }
         assert!(requires_system_privileges(&args(&["porthub","tor","start"])));
+        assert!(requires_system_privileges(&args(&["porthub","tor","start","--system-wide"])));
         assert!(requires_system_privileges(&args(&["porthub","tor","stop"])));
         assert!(requires_system_privileges(&args(&["porthub","proxy","start","--port","80"])));
         assert!(!requires_system_privileges(&args(&["porthub","tor","start","--user"])));
         assert!(Args::try_parse_from(["porthub","proxy","start","--detached"]).is_err());
         assert!(Args::try_parse_from(["porthub","proxy","start","--circuit-groups","17"]).is_err());
         assert!(Args::try_parse_from(["porthub","tor","start","--circuit-groups","0"]).is_err());
+        assert!(Args::try_parse_from(["porthub","tor","start","--system-wide","--user"]).is_err());
     }
 
     #[test]

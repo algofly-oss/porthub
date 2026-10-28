@@ -4,7 +4,7 @@ use super::{
     controller::{self, Event, Sessions},
     device::Tun,
     dns,
-    policy::{Engine, Packet},
+    policy::{Engine, ExitRoute, Packet, Snapshot},
 };
 use crate::{
     private_profile::Profile,
@@ -52,6 +52,75 @@ fn relay_probe(
         payload,
     )?;
     sender.send(peer, &packet)
+}
+
+#[cfg(feature = "local-tor")]
+fn apply_cli_system_tor(
+    snapshot: &mut Snapshot,
+    settings: &super::tor_preferences::Settings,
+) {
+    if !settings.system_wide {
+        return;
+    }
+    let local_peer = snapshot.self_.clone();
+    for route in &mut snapshot.exit_routes {
+        route.clients.retain(|client| client != &local_peer);
+    }
+    snapshot.exit_routes.retain(|route| !route.clients.is_empty());
+    snapshot.exit_routes.push(ExitRoute {
+        id: format!("cli-tor-{local_peer}"),
+        name: "Local Tor (CLI)".into(),
+        routing_peers: Vec::new(),
+        tor_enabled: true,
+        tor_circuit_groups: settings.circuit_groups.unwrap_or(4),
+        clients: vec![local_peer],
+        selection: porthub_mesh::exit_policy::Selection::Sticky,
+        traffic_mode: porthub_mesh::exit_policy::TrafficMode::InternetOnly,
+        allow_direct_fallback: false,
+        masquerade: true,
+        block_lan_access: true,
+    });
+}
+
+#[cfg(all(test, feature = "local-tor"))]
+mod cli_system_tor_tests {
+    use super::*;
+
+    #[test]
+    fn local_tor_override_preserves_the_gateway_acl_and_peer_exit_role() {
+        let snapshot: Snapshot = serde_json::from_value(serde_json::json!({
+            "workspace":"workspace",
+            "self":"local",
+            "revision":7,
+            "expires_at":chrono::Utc::now()+chrono::Duration::seconds(60),
+            "peers":[
+                {"id":"local","ip":"10.203.0.2","fingerprint":"local-fp","instance":"local-i","hostname":"local.phub"},
+                {"id":"consumer","ip":"10.203.0.3","fingerprint":"consumer-fp","instance":"consumer-i","hostname":"consumer.phub"}
+            ],
+            "grants":[],
+            "exit_routes":[{
+                "id":"peer-exit","name":"Local peer exit","routing_peers":["local"],
+                "clients":["consumer"],"traffic_mode":"internet_only"
+            }]
+        })).unwrap();
+        Engine::default().apply(snapshot.clone()).unwrap();
+
+        let mut effective = snapshot.clone();
+        apply_cli_system_tor(&mut effective, &super::super::tor_preferences::Settings {
+            mode: super::super::tor_preferences::Mode::Enabled,
+            circuit_groups: Some(8),
+            system_wide: true,
+        });
+
+        assert_eq!(snapshot.exit_routes.len(), 1);
+        assert_eq!(effective.exit_routes.len(), 2);
+        assert!(effective.exit_routes.iter().any(|route| route.id == "peer-exit"
+            && route.routing_peers == vec!["local".to_owned()]
+            && route.clients == vec!["consumer".to_owned()]));
+        assert!(effective.exit_routes.iter().any(|route| route.id == "cli-tor-local"
+            && route.tor_enabled && route.clients == vec!["local".to_owned()]
+            && route.tor_circuit_groups == 8 && !route.allow_direct_fallback));
+    }
 }
 
 #[cfg(feature = "private-stream")]
@@ -218,6 +287,8 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     #[cfg(feature="local-tor")]
     let (tor_changes,mut tor_settings)=watch::channel(super::tor_preferences::load(&path)?);
     #[cfg(feature="local-tor")]
+    let mut latest_snapshot: Option<Snapshot> = None;
+    #[cfg(feature="local-tor")]
     tasks.spawn(super::tor_preferences::run(path.clone(),tor_changes,work.clone()));
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let mut exit_fallback = super::exit_selection::Fallback::default();
@@ -256,6 +327,12 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         event=input.recv()=>match event {
             Some(Event::Snapshot(snapshot))=>{
                 ensure!(snapshot.self_==profile.peer_id && snapshot.workspace==profile.workspace,"private policy identity changed");
+                let mut route_snapshot=snapshot.clone();
+                #[cfg(feature="local-tor")]
+                {
+                    latest_snapshot=Some(snapshot.clone());
+                    apply_cli_system_tor(&mut route_snapshot,&tor_settings.borrow());
+                }
                 let own=snapshot.peers.iter().find(|p|p.id==profile.peer_id).ok_or_else(||anyhow::anyhow!("private policy omits local peer"))?;
                 let routes:Vec<_>=snapshot.peers.iter().filter(|p|p.id!=profile.peer_id).map(|p|p.ip).collect();
                 let first_ready = device.is_none();
@@ -291,17 +368,17 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 private_status.revision = snapshot.revision;
                 private_status.grants = snapshot.grants.len();
                 private_status.dns_rules = snapshot.dns_rules.len();
-                private_status.exit = snapshot.exit_routes.iter().find(|route| route.clients.contains(&profile.peer_id)).map(|route| crate::runtime::ExitStatus {
+                private_status.exit = route_snapshot.exit_routes.iter().find(|route| route.clients.contains(&profile.peer_id)).map(|route| crate::runtime::ExitStatus {
                     name: route.name.clone(), traffic_mode: route.traffic_mode, selection: match route.selection { porthub_mesh::exit_policy::Selection::Sticky => "sticky", porthub_mesh::exit_policy::Selection::RoundRobin => "round robin", porthub_mesh::exit_policy::Selection::Random => "random" }.into(), state: "pending".into(),
                     peers: route.routing_peers.len()+usize::from(route.tor_enabled && route.traffic_mode.internet()), available: 0, allow_direct_fallback: route.allow_direct_fallback,
                     peer_names: route.routing_peers.iter().take(16).filter_map(|id| snapshot.peers.iter().find(|peer| &peer.id == id).map(|peer| peer.hostname.clone())).chain((route.tor_enabled && route.traffic_mode.internet()).then(||"Local Tor".into())).collect(),
                 });
                 #[cfg(feature="local-tor")]
                 {
-                    tor_route_groups=snapshot.exit_routes.iter().find(|route|route.clients.contains(&profile.peer_id) && route.tor_enabled && route.traffic_mode.internet()).map(|route|route.tor_circuit_groups);
+                    tor_route_groups=route_snapshot.exit_routes.iter().find(|route|route.clients.contains(&profile.peer_id) && route.tor_enabled && route.traffic_mode.internet()).map(|route|route.tor_circuit_groups);
                     super::tor_exit::reconcile(&mut local_tor,tor_route_groups,&tor_settings.borrow(),&path.with_extension("tor"),interfaces.clone(),events.clone(),work.child_token())?;
                 }
-                exit_route = snapshot.exit_routes.iter().find(|route| route.clients.contains(&profile.peer_id))
+                exit_route = route_snapshot.exit_routes.iter().find(|route| route.clients.contains(&profile.peer_id))
                     .map(|route| {
                         exit_traffic_mode = route.traffic_mode;
                         exit_lan_peers = route.routing_peers.iter().filter_map(|id| {
@@ -337,7 +414,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 {
                     let tun = device.as_ref().expect("private tunnel initialized");
-                    tun.exit_mtu(!snapshot.exit_routes.is_empty()).await?;
+                    tun.exit_mtu(!route_snapshot.exit_routes.is_empty()).await?;
                     let bypass = exit_fallback.update(exit_route.as_ref().is_some_and(|(_, _, allowed)| *allowed), exit_available, policy.valid_lease(), Instant::now());
                     exit_lan_networks=if exit_route.is_some() && exit_traffic_mode.lan() {
                         super::exit_plan::lan_networks(&exit_lan_peers,|id|exit_selection.available(id))
@@ -349,11 +426,11 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 refresh_tor_dns(&dns_upstream,&local_tor,&exit_route,exit_available,&policy);
                 // Register every advertised private DNS suffix on the owned
                 // tunnel resolver. This also applies suffix changes live.
-                zone.as_ref().unwrap().write().await.update(&snapshot)?;
+                zone.as_ref().unwrap().write().await.update(&route_snapshot)?;
                 let mut suffixes=snapshot.dns_suffixes.iter().map(|suffix|suffix.trim_matches('.').to_ascii_lowercase()).filter(|suffix|!suffix.is_empty()).collect::<Vec<_>>();
                 if let Some((_,suffix))=own.hostname.split_once('.') { suffixes.push(suffix.trim_matches('.').to_ascii_lowercase()); }
                 suffixes.extend(snapshot.dns_rules.iter().map(|rule|porthub_mesh::dns_policy::zone(rule).trim_end_matches('.').to_ascii_lowercase()));
-                if snapshot.exit_routes.iter().any(|route|route.tor_enabled && route.traffic_mode.internet() && route.clients.contains(&profile.peer_id)) {suffixes.push(".".into());}
+                if route_snapshot.exit_routes.iter().any(|route|route.tor_enabled && route.traffic_mode.internet() && route.clients.contains(&profile.peer_id)) {suffixes.push(".".into());}
                 suffixes.sort();suffixes.dedup();
                 if registered_suffixes!=suffixes || registered_rules!=snapshot.dns_rules {
                     let tun=device.as_ref().expect("private tunnel initialized");
@@ -539,6 +616,9 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             {
                 super::tor_exit::reconcile(&mut local_tor,tor_route_groups,&tor_settings.borrow(),&path.with_extension("tor"),interfaces.clone(),events.clone(),work.child_token())?;
                 refresh_tor_dns(&dns_upstream,&local_tor,&exit_route,exit_available,&policy);
+                if let Some(snapshot)=latest_snapshot.clone().filter(|snapshot| snapshot.expires_at > chrono::Utc::now()) {
+                    events.send(Event::Snapshot(snapshot)).await.map_err(|_|anyhow::anyhow!("private packet owner closed"))?;
+                }
             }
         },
         changed=interfaces.changed(),if interface_changes_open=>{

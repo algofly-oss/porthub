@@ -30,6 +30,9 @@ impl Mode {
 pub struct Settings {
     pub mode: Mode,
     pub circuit_groups: Option<usize>,
+    /// Locally managed, fail-closed system-wide internet exit through Tor.
+    #[serde(default)]
+    pub system_wide: bool,
 }
 impl Settings {
     fn validate(&self) -> Result<()> {
@@ -58,12 +61,8 @@ pub fn load(profile: &Path) -> Result<Settings> {
     settings.validate()?;
     Ok(settings)
 }
-pub fn save(profile: &Path, mode: Mode, circuit_groups: Option<usize>) -> Result<Settings> {
+pub fn save(profile: &Path, settings: Settings) -> Result<Settings> {
     Profile::load(profile)?;
-    let settings = Settings {
-        mode,
-        circuit_groups,
-    };
     settings.validate()?;
     profile::write_private(&path(profile), &serde_json::to_vec_pretty(&settings)?, true)?;
     Ok(settings)
@@ -82,17 +81,22 @@ mod tests {
     #[test]
     fn local_settings_are_explicit_and_bounded() {
         assert_eq!(Settings::default().mode, Mode::Auto);
+        assert!(!Settings::default().system_wide);
+        let legacy: Settings = serde_json::from_str(r#"{"mode":"auto","circuit_groups":null}"#).unwrap();
+        assert!(!legacy.system_wide);
         for groups in [0, 17, usize::MAX] {
             assert!(Settings {
                 mode: Mode::Enabled,
-                circuit_groups: Some(groups)
+                circuit_groups: Some(groups),
+                system_wide: false,
             }
             .validate()
             .is_err());
         }
         assert!(Settings {
             mode: Mode::Enabled,
-            circuit_groups: Some(16)
+            circuit_groups: Some(16),
+            system_wide: false,
         }
         .validate()
         .is_ok());

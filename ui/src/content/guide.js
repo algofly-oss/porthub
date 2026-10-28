@@ -1416,7 +1416,7 @@ export const guideArticles = [
         "blocks": [
           {
             "type": "paragraph",
-            "text": "Open Access Rules → Routes and enable Include local Tor as an exit. Tor runs inside each assigned machine’s agent, using its own network connection. It needs no Tor daemon, container, gateway relay, or listening port. Assign Tor alone or combine it with routing peers. Tor applies to internet traffic; remote LAN destinations use eligible peer exits."
+            "text": "Open Access Rules → Routes and add Local Tor in Routing peers. Tor runs inside each assigned machine’s agent, using its own network connection. It needs no Tor daemon, container, gateway relay, or listening port. Select Tor alone or combine it with machine or group peers, then choose the exit-selection strategy. Tor applies to internet traffic; remote LAN destinations use eligible peer exits."
           },
           {
             "type": "paragraph",
@@ -1430,12 +1430,12 @@ export const guideArticles = [
         "blocks": [
           {
             "type": "code",
-            "text": "porthub tor status\nporthub tor start --circuit-groups 4\nporthub tor stop\nporthub tor reset",
+            "text": "# Terminal 1: app-specific proxy\nporthub proxy start -d\n# Configure an app with the printed HTTP or SOCKS5 URL\n\n# Terminal 2: system-wide Tor (Linux/macOS)\nsudo porthub tor start --system-wide\n\nporthub tor status\nporthub tor reset",
             "label": "Terminal"
           },
           {
             "type": "paragraph",
-            "text": "Start prepares the local Tor runtime; selecting Tor for device traffic remains an exit-policy setting in the UI. Stop disables local Tor and closes its active streams. Reset follows the UI policy again. Read-only status needs no elevation; changing a system registration may request administrative access. These controls are separate from application proxy jobs."
+            "text": "Run these modes in separate terminals if you want both: the app proxy listens only on loopback and has its own Tor circuits; system-wide mode is managed by the registered agent and requires administrative privileges. They can run together because they use separate Tor pools. System-wide mode sends internet TCP through this machine’s embedded Tor client, leaves local/private networks direct, and blocks traffic Tor cannot carry. It takes precedence over this registration’s UI exit policy until reset. `porthub tor reset` returns to the UI policy; `porthub tor stop` also stops local Tor."
           }
         ]
       },
@@ -1468,7 +1468,7 @@ export const guideArticles = [
           },
           {
             "type": "paragraph",
-            "text": "The default provider is local Tor. HTTP and SOCKS5 share one loopback listener at port 1080. The command prints the proxy addresses and a private curl configuration-file location. Bootstrap runs only when requested; use status to check readiness. No registration or UI permission is needed to use your own local Tor connection."
+            "text": "The default provider is local Tor. HTTP and SOCKS5 share one loopback listener at port 1080. The command prints the proxy addresses and a private curl configuration-file location. Bootstrap runs only when requested; use status to check readiness. No registration or UI permission is needed to use your own local Tor connection. This proxy mode can run alongside system-wide Tor mode; the two use separate Tor pools."
           }
         ]
       },
