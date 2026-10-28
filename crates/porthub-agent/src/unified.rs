@@ -104,8 +104,8 @@ impl Controller {
         let (changes, mut changed) = tokio::sync::mpsc::channel(1);
         let notifications = changes.clone();
         let target = wanted.clone();
-        let mut watcher = (|| -> Result<notify::RecommendedWatcher> {
-            let mut watcher = notify::recommended_watcher(
+        let mut watcher = (|| -> Result<porthub_transfer::notifications::FileWatcher> {
+            let mut watcher = porthub_transfer::notifications::watcher(
                 move |event: notify::Result<notify::Event>| match event {
                     Ok(event)
                         if event.paths.iter().any(|path| path == &target)

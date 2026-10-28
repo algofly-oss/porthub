@@ -1,2 +1,4 @@
 *.sh text eol=lf
 Cargo.toml text eol=lf
+# Preserve upstream source and license whitespace in this vendored crate.
+vendor/notify/** -whitespace

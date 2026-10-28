@@ -1,16 +1,22 @@
 //! Shared bounded filesystem notifications for local agent preferences.
 use anyhow::Result;
-use notify::{RecursiveMode, Watcher};
+use notify::RecursiveMode;
+#[cfg(not(target_os="macos"))]
+use notify::Watcher;
 use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
-// Preference directories are small. Kqueue gives macOS immediate vnode events
-// without FSEvents batching/coalescing an atomic replacement with its removal.
+// Watch only the directory vnode on macOS. notify's kqueue backend discovers
+// children after directory writes, including recursively populated Tor caches.
+// A preference watcher must never open those children or their descendants.
 #[cfg(target_os="macos")]
-type SettingsWatcher=notify::KqueueWatcher;
+#[path="settings_watch_macos.rs"]
+mod macos;
+#[cfg(target_os="macos")]
+type SettingsWatcher=macos::DirectoryWatcher;
 #[cfg(not(target_os="macos"))]
 type SettingsWatcher=notify::RecommendedWatcher;
 
@@ -18,9 +24,8 @@ fn relevant(event:&notify::Event,target:&Path)->bool {
     if event.need_rescan(){return true;}
     if !matches!(event.kind,notify::EventKind::Any|notify::EventKind::Other|notify::EventKind::Create(_)|notify::EventKind::Modify(_)|notify::EventKind::Remove(_)){return false;}
     event.paths.iter().any(|path|path==target || target.parent()==Some(path.as_path())
-        // Kqueue reports one previously unseen child for a directory write.
-        // It may name a sibling rather than the atomically replaced setting.
-        // Every mutation of this small owned directory must trigger a read.
+        // Directory vnode events represent mutations of any direct entry,
+        // including atomic preference replacements.
         || cfg!(target_os="macos") && path.parent()==target.parent())
 }
 
@@ -123,5 +128,62 @@ mod tests {
         assert_eq!(relevant(&event(notify::EventKind::Modify(notify::event::ModifyKind::Any),"/owned/other-profile.json"),target),cfg!(target_os="macos"));
         assert!(!relevant(&event(notify::EventKind::Modify(notify::event::ModifyKind::Any),"/other/other-profile.json"),target));
         assert!(!relevant(&event(notify::EventKind::Access(notify::event::AccessKind::Read),target.to_str().unwrap()),target));
+    }
+
+    #[cfg(target_os="macos")]
+    #[tokio::test]
+    async fn mac_preferences_do_not_watch_populated_sibling_trees() -> Result<()> {
+        fn path(profile:&Path)->PathBuf {profile.with_extension("prefs")}
+        fn load(profile:&Path)->Result<u64> {Ok(std::fs::read_to_string(path(profile))?.parse()?)}
+        fn descriptors()->usize {
+            // SAFETY: F_GETFD only queries a descriptor and never takes ownership.
+            (0..4096).filter(|fd| unsafe {libc::fcntl(*fd,libc::F_GETFD)}>=0).count()
+        }
+        let root=tempfile::tempdir()?;
+        let profile=root.path().join("agent.json");
+        std::fs::write(&profile,b"profile")?;
+        std::fs::write(path(&profile),b"1")?;
+        let before=descriptors();
+        // General agent/job watches share this parent too. Arti's additive
+        // backend features must not make them enumerate its descendants.
+        use notify::Watcher;
+        let mut general=Vec::new();
+        for _ in 0..2 {
+            let mut watcher=porthub_transfer::notifications::watcher(|_:notify::Result<notify::Event>|{})?;
+            watcher.watch(root.path(),RecursiveMode::NonRecursive)?;
+            general.push(watcher);
+        }
+        let (updates,mut values)=watch::channel(0);
+        let cancel=CancellationToken::new();
+        let task=tokio::spawn(run(profile.clone(),path,load,updates,"test",cancel.clone()));
+        tokio::time::timeout(Duration::from_secs(3),values.changed()).await??;
+        assert_eq!(*values.borrow_and_update(),1);
+        // Simulate a Tor cache or upgrade backup appearing after registration.
+        // A non-recursive preference watch must not open these descendants.
+        let cache=root.path().join("tor-cache");
+        for directory in 0..40 {
+            let directory=cache.join(directory.to_string());
+            std::fs::create_dir_all(&directory)?;
+            for file in 0..32 {std::fs::write(directory.join(file.to_string()),b"cache")?;}
+            tokio::task::yield_now().await;
+        }
+        for value in 2..=24 {
+            let next=root.path().join("next-setting");
+            std::fs::write(&next,value.to_string())?;
+            std::fs::rename(next,path(&profile))?;
+            tokio::time::timeout(Duration::from_secs(3),async {
+                while *values.borrow_and_update()!=value {values.changed().await?;}
+                Ok::<_,watch::error::RecvError>(())
+            }).await??;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Other tests may create their own runtime descriptors concurrently.
+        assert!(descriptors()<=before+32,"preference notifications opened sibling files");
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(3),task).await???;
+        drop(general);
+        tokio::task::yield_now().await;
+        assert!(descriptors()<=before+32,"cancelled preference watcher retained descriptors");
+        Ok(())
     }
 }

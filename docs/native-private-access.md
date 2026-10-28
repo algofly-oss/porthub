@@ -128,6 +128,15 @@ Explicit `porthub proxy start --via tor` jobs use their own per-user proxy-state
 cache, shared between that user's jobs. Stopping a job removes its credentials,
 curl configuration and job files; it retains the Tor cache for later jobs.
 
+macOS preference notifications retain one directory vnode and one kqueue per
+watcher, without enumerating sibling Tor caches or upgrade backup directories.
+General application and transfer watches explicitly use FSEvents. This selection
+is independent of Arti's additive `notify` backend features. A native regression
+exercise populated 1,280 cache files and repeatedly replaced preferences while
+running all three application watches; descriptor count returned to its baseline
+after cancellation. The small `vendor/notify` patch exposes both macOS backends
+without changing the upstream default selection; see its patch notes.
+
 ## Device DNS policy verification
 
 The private resolver handles both UDP and TCP queries on the same endpoint.

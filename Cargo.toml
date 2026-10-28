@@ -1,13 +1,14 @@
 [workspace]
 resolver = "2"
 members = ["crates/porthub-identity", "crates/porthub-tunnel", "crates/porthub-agent", "crates/porthub-edge", "crates/porthub-api", "crates/porthub-transfer", "crates/porthub-runtime", "crates/porthub-firewall", "crates/porthub-mesh", "crates/porthub-egress"]
-exclude = ["vendor/rathole", "vendor/nlink"]
+exclude = ["vendor/rathole", "vendor/nlink", "vendor/notify"]
 
 [patch.crates-io]
 nlink = { path = "vendor/nlink" }
+notify = { path = "vendor/notify" }
 
 [workspace.package]
-version = "1.8.2"
+version = "1.8.3"
 edition = "2021"
 publish = false
 

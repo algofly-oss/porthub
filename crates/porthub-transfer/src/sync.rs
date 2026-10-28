@@ -269,7 +269,7 @@ async fn run_registered(id: String, mut record: Record, cancel: CancellationToke
     }));
     let changes = dirty.clone();
     let watched_root = record.options.path.clone();
-    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+    let mut watcher = crate::notifications::watcher(move |event: notify::Result<notify::Event>| {
         if matches!(event, Ok(ref event) if matches!(event.kind, EventKind::Access(_))) {
             return;
         }
@@ -349,7 +349,7 @@ async fn sync_loop(
     options: &Options,
     state: Arc<RwLock<Status>>,
     events: &mut tokio::sync::mpsc::Receiver<()>,
-    watcher: &mut notify::RecommendedWatcher,
+    watcher: &mut crate::notifications::FileWatcher,
     dirty: Arc<Mutex<Dirty>>,
     cancel: CancellationToken,
 ) -> Result<()> {

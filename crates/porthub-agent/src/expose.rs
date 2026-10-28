@@ -99,7 +99,7 @@ async fn wait_for_stop(layout: &crate::service::Layout, id: &str) {
         return;
     };
     let (send, mut changes) = tokio::sync::mpsc::channel(1);
-    let watcher = notify::recommended_watcher(move |_event: notify::Result<notify::Event>| {
+    let watcher = porthub_transfer::notifications::watcher(move |_event: notify::Result<notify::Event>| {
         let _ = send.try_send(());
     })
     .ok()

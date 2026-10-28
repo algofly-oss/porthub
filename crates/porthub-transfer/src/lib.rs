@@ -2,6 +2,7 @@
 //! into the agent; there are no helper executables or runtime package installs.
 mod directory;
 pub mod download;
+pub mod notifications;
 pub mod server;
 mod state;
 pub mod upload;
