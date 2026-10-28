@@ -8,10 +8,10 @@ destinations and SHA256 verification. This directory retains only this summary.
 ## Current deployment
 
 Luna and URM2 run production gateway 1.8.2 with isolated core, edge and firewall
-containers. All eight machines online during rollout acknowledged automatic
-agent upgrades to 1.8.2. Offline machines remain pending. All ten platform
-artifacts passed their platform checks and share release version 1.8.2; only the
-latest GitHub release and tag remain.
+containers. Release 1.8.3 is published with all ten platform binaries and their
+checksums. All nine online machines acknowledged gateway-driven agent upgrades
+to 1.8.3; offline machines remain unchanged. The gateway containers need no
+redeployment for this agent-only release.
 
 ## Release 1.8.2 live qualification
 
@@ -66,10 +66,15 @@ Installed 1.8.2 functional checks also passed:
 Peer application proxies currently carry their stream through the existing
 gateway API transport. Their destination egress is the selected peer; these
 checks do not claim direct peer-to-peer proxy data transport or Tor bandwidth
-parity with ordinary exits. The MacBook briefly reconnected and received an automatic update request, but
-went offline before acknowledging it; its last reported version remains 1.7.0.
-No Mac routing policy was changed. Both macOS architectures passed CI tests,
-including native service lifecycle; live Mac Tor routing remains unverified.
+parity with ordinary exits. Both macOS architectures passed CI tests, including
+native service lifecycle. The MacBook also passed a live 1.8.3 Tor exit check:
+an HTTPS request reached a Tor exit, a private SSH service and gateway lease
+remained available, and the agent stayed at 51 descriptors with the Tor cache
+restored. Removing the temporary exit policy restored non-Tor HTTPS, private
+SSH and the `no exit route` / Tor-off state. Its descriptor count returned to
+46. The bounded macOS watcher regression test populated 1,280 cache files,
+performed 23 settings replacements across three watchers, and held descriptor
+usage to 9 before and after cancellation.
 
 ## Historical deployment checks
 
