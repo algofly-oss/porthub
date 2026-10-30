@@ -1,0 +1,12 @@
+[package]
+name = "porthub-io"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

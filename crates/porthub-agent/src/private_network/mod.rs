@@ -11,8 +11,8 @@ pub mod dns;
 #[cfg(target_os="macos")]
 mod dns_default_macos;
 mod dns_upstream;
-pub mod exit_selection;
-pub mod exit_plan;
+pub use porthub_network::exit_selection;
+pub use porthub_network::exit_plan;
 #[cfg(target_os = "linux")]
 pub mod exit_kernel;
 #[cfg(target_os = "linux")]
@@ -38,7 +38,7 @@ pub(crate) mod interfaces;
 #[cfg(windows)]
 #[path = "interfaces_windows.rs"]
 pub(crate) mod interfaces;
-pub mod policy;
+pub use porthub_network::policy;
 mod lan_discovery;
 #[cfg(feature="local-tor")]
 mod proxy_egress;
@@ -52,7 +52,7 @@ pub fn is_profile(path: &std::path::Path) -> anyhow::Result<bool> {
         serde_json::from_slice(&bytes).map_err(|_| anyhow::anyhow!("invalid agent profile"))?;
     Ok(value.get("peer_id").is_some())
 }
-pub mod paths;
+pub use porthub_network::paths;
 mod probe;
 pub mod relay;
 pub mod strategy;
@@ -62,6 +62,6 @@ pub mod tor_preferences;
 #[cfg(feature = "private-stream")]
 pub mod stream_router;
 #[cfg(feature = "private-stream")]
-pub mod tcp_stream;
+pub use porthub_network::tcp_stream;
 #[cfg(feature = "local-tor")]
 mod tor_exit;

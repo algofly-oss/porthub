@@ -1,0 +1,34 @@
+{
+  "version": "1.8.5",
+  "scope": "Local regression and release preparation; production rollout recorded separately.",
+  "regressions": {
+    "closed_idle_carriers": "Failed on the original server; passes after proactive EOF polling and replenishment.",
+    "half_close_cleanup": "Real TCP and duplex tests release abandoned half-closed sessions while preserving progressing responses and quiet fully open sessions.",
+    "enrollment": "All 13 service tests pass in a disposable root container, including attachment without restarting its owner.",
+    "framing": "Existing wire encoding, backpressure and half-close tests pass; silent carriers expire while heartbeats extend liveness."
+  },
+  "checks": {
+    "targeted_rust_tests_passed": 126,
+    "targeted_rust_tests_ignored": 3,
+    "deployment_python_tests_passed": 16,
+    "strict_clippy": "porthub-io, porthub-network and porthub-edge, all targets/features, no dependencies",
+    "workflow": "actionlint v1.7.12 passed",
+    "static_linux_package": "Local x86_64 musl build, no ELF interpreter, checksum and three packaged CLI lifecycle tests passed before the version-only bump."
+  },
+  "build_cache": {
+    "elapsed_seconds": 64.83,
+    "exit_code": 0,
+    "rebuilt": [
+      "porthub_io",
+      "rathole",
+      "porthub_tunnel",
+      "porthub_agent",
+      "porthub"
+    ],
+    "cached_count": 689,
+    "network_cached": true,
+    "egress_cached": true
+  },
+  "build_cache_limit": "Local rebuild includes an IO edit plus an agent runtime mtime change; it is not a controlled before/after CI performance comparison. Release linking remains required.",
+  "rollout_safety": "Preserve routing, access rules and non-PortHub services. Back up the edge image/Compose settings and each agent registration before activation."
+}

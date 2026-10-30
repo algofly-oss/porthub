@@ -55,6 +55,7 @@ lto = true
 codegen-units = 1
 
 [dependencies]
+porthub-io = { path = "../../crates/porthub-io" }
 porthub-runtime = { path = "../../crates/porthub-runtime", optional = true }
 porthub-identity = { path = "../../crates/porthub-identity" }
 tokio = { version = "1", features = ["full"] }

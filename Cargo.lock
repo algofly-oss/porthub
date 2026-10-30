@@ -4240,7 +4240,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-agent"
-version = "1.8.4"
+version = "1.8.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4265,6 +4265,7 @@ dependencies = [
  "porthub-egress",
  "porthub-identity",
  "porthub-mesh",
+ "porthub-network",
  "porthub-runtime",
  "porthub-transfer",
  "porthub-tunnel",
@@ -4294,7 +4295,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-api"
-version = "1.8.4"
+version = "1.8.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4341,7 +4342,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-edge"
-version = "1.8.4"
+version = "1.8.5"
 dependencies = [
  "anyhow",
  "axum",
@@ -4391,7 +4392,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-firewall"
-version = "1.8.4"
+version = "1.8.5"
 dependencies = [
  "anyhow",
  "axum",
@@ -4425,6 +4426,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "porthub-io"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "porthub-mesh"
 version = "1.8.4"
 dependencies = [
@@ -4454,8 +4463,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "porthub-network"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "chrono",
+ "getrandom 0.3.4",
+ "porthub-mesh",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "smoltcp",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "porthub-runtime"
-version = "1.8.4"
+version = "1.8.5"
 dependencies = [
  "anyhow",
  "axum",
@@ -4473,6 +4499,7 @@ dependencies = [
  "libc",
  "notify 5.2.0",
  "percent-encoding",
+ "porthub-io",
  "rcgen",
  "reqwest",
  "rustix",
@@ -4903,6 +4930,7 @@ dependencies = [
  "lazy_static",
  "notify 5.2.0",
  "porthub-identity",
+ "porthub-io",
  "porthub-runtime",
  "rand 0.8.8",
  "rustls-pemfile",

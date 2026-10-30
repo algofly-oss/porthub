@@ -45,6 +45,35 @@ Production keeps read-only roots and excludes build toolchains and source trees.
 The default images are `porthub:core`, `porthub:edge` and `porthub:firewall`,
 with the release version recorded in image labels.
 
+## Agent development builds
+
+The `porthub` CLI links the transfer, tunnel, mesh, egress, packet-network and
+stream-lifetime libraries into one executable. `porthub-network` owns portable
+packet policy/TCP termination; `porthub-io` owns tunnel cleanup. CLI and service
+changes can reuse those library artifacts. Internal library versions
+are independent of the CLI release; bump them when their interfaces require it.
+
+```sh
+# Fast optimized iteration, with incremental compilation and no cross-crate LTO.
+cargo build --locked -p porthub-agent --profile agent-dev --timings
+./target/agent-dev/porthub --help
+
+# Shipping build retains release optimization.
+cargo build --locked -p porthub-agent --release --timings
+```
+
+The first build of each profile/target is cold. Later builds still relink the
+executable; edits to a dependency also rebuild its consumers. Adding Rust `mod`
+files alone does not establish a separate compilation/cache boundary. Existing
+libraries should be reused before introducing helper processes or embedded
+executables with their own installation/update lifecycle.
+
+GitHub platform jobs restore Cargo artifacts (including workspace libraries)
+per target/toolchain. Native Linux jobs build the static musl binary in that
+cached target directory through `scripts/build-agent-linux.sh`; they verify
+that it has no dynamic loader and keep the existing release/checksum format.
+The Docker `agent-artifacts` target remains available for local packaging.
+
 ## Agent transfer tools
 
 The Rust `porthub` binary includes HTTP serving, receiving, parallel downloads
@@ -72,6 +101,21 @@ matrix](docs/agent-platforms.md) for details.
 | `deploy/` | Compose runtime configuration and deployment preflight tools |
 | `vendor/` | Pinned upstream Rust dependencies and documented local patches |
 | `docs/` | Architecture, operations, platform support and verification records |
+
+## Tunnel lifetime and edge health
+
+The edge replaces closed idle data carriers automatically. Framed carriers that
+stop delivering bytes expire after 60 seconds (agents send 15-second transport
+heartbeats). TCP sessions stay open while both sides remain open, including
+quiet SSH sessions. Once one side sends EOF, two minutes without application
+reads or writes releases the connection; progressing responses can run longer.
+`PORTHUB_TUNNEL_HALF_CLOSE_IDLE_SECONDS` selects 1..86400 seconds, or 0 to disable
+that cleanup policy. Set it in the edge/agent process environment as needed.
+
+Compose preserves the edge's descriptor limits (soft 65536, hard 524288).
+Its real HTTP `/healthz` response reports `x-porthub-fd-used` and
+`x-porthub-fd-limit`; on Linux it returns 503 at 90% of the soft limit or if
+sampling fails. Applying Compose limits requires a planned container recreation.
 
 ## Checks
 

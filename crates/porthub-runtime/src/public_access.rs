@@ -424,9 +424,10 @@ where
                                         if let Ok((downstream, upstream)) =
                                             tokio::try_join!(downstream, upstream)
                                         {
-                                            let _ = tokio::io::copy_bidirectional(
+                                            let _ = porthub_io::copy_bidirectional(
                                                 &mut TokioIo::new(downstream),
                                                 &mut TokioIo::new(upstream),
+                                                porthub_io::half_close_idle_timeout(),
                                             )
                                             .await;
                                         }

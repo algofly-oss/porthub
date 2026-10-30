@@ -274,7 +274,7 @@ pub fn stack() -> Result<(Handle, mpsc::Receiver<Bytes>, Runner)> {
 }
 /// Separate stack instance for locally authorized internet TCP termination.
 /// Ordinary private stream adapters retain their stricter private-only ACL.
-pub(crate) fn exit_stack() -> Result<(Handle, mpsc::Receiver<Bytes>, Runner)> {
+pub fn exit_stack() -> Result<(Handle, mpsc::Receiver<Bytes>, Runner)> {
     stack_with_internet(true)
 }
 fn stack_with_internet(internet: bool) -> Result<(Handle, mpsc::Receiver<Bytes>, Runner)> {

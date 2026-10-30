@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/porthub-identity", "crates/porthub-tunnel", "crates/porthub-agent", "crates/porthub-edge", "crates/porthub-api", "crates/porthub-transfer", "crates/porthub-runtime", "crates/porthub-firewall", "crates/porthub-mesh", "crates/porthub-egress"]
+members = ["crates/porthub-identity", "crates/porthub-io", "crates/porthub-tunnel", "crates/porthub-agent", "crates/porthub-edge", "crates/porthub-api", "crates/porthub-transfer", "crates/porthub-runtime", "crates/porthub-firewall", "crates/porthub-mesh", "crates/porthub-network", "crates/porthub-egress"]
 exclude = ["vendor/rathole", "vendor/nlink", "vendor/notify"]
 
 [patch.crates-io]
@@ -8,7 +8,7 @@ nlink = { path = "vendor/nlink" }
 notify = { path = "vendor/notify" }
 
 [workspace.package]
-version = "1.8.4"
+version = "1.8.5"
 edition = "2021"
 publish = false
 
@@ -26,3 +26,11 @@ porthub-tunnel = { path = "crates/porthub-tunnel" }
 [profile.release]
 lto = "thin"
 strip = true
+
+# Optimized local iteration without repeating cross-crate link-time optimization.
+# Shipping artifacts continue to use the existing release profile.
+[profile.agent-dev]
+inherits = "release"
+lto = false
+incremental = true
+codegen-units = 16

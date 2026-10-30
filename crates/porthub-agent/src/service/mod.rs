@@ -883,7 +883,11 @@ async fn install_locked_mode(
             display.identity = id;
             display.profile = private_path;
             readable::install(layout, &display, &profile).await?;
-            manager.start(&owner).await?;
+            // The running owner's module watcher activates this configuration.
+            // Manager::start restarts an active unit; calling it from the
+            // owner's enrollment task would kill that task before commit and
+            // roll the module back on every start, hitting systemd's rate limit.
+            // Preserve an operator's stopped/disabled service state as well.
             files.committed = true;
             return Ok(owner);
         }

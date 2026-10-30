@@ -105,6 +105,20 @@ jobs:
         run: |
           rustup toolchain install 1.99.1 --profile minimal
           rustup target add --toolchain 1.99.1 ${{ matrix.target }}
+      - name: Prepare static Linux toolchain
+        if: inputs.verify_only != true && runner.os == 'Linux'
+        shell: bash
+        run: |
+          musl_target="$(echo '${{ matrix.target }}' | sed 's/-gnu$/-musl/')"
+          rustup target add "$musl_target"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+      - name: Cache compiled Rust dependencies and workspace libraries
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: native-${{ matrix.target }}
+          cache-workspace-crates: true
+          cache-on-failure: true
       - name: Compile focused Windows watch checks
         if: runner.os == 'Windows'
         shell: bash
@@ -119,10 +133,10 @@ jobs:
           python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --test upload --target ${{ matrix.target }} -- --nocapture
       - name: Compile complete platform checks
         shell: bash
-        run: cargo test --locked -p porthub-agent -p porthub-transfer -p porthub-tunnel -p porthub-identity -p porthub-mesh --target ${{ matrix.target }} --no-run
+        run: cargo test --locked -p porthub-agent -p porthub-transfer -p porthub-tunnel -p porthub-identity -p porthub-mesh -p porthub-network -p porthub-io --target ${{ matrix.target }} --no-run
       - name: Test transfers, management and tunnel adapters
         shell: bash
-        run: python scripts/run-with-timeout.py 240 cargo test --locked -p porthub-agent -p porthub-transfer -p porthub-tunnel -p porthub-identity -p porthub-mesh --target ${{ matrix.target }}
+        run: python scripts/run-with-timeout.py 240 cargo test --locked -p porthub-agent -p porthub-transfer -p porthub-tunnel -p porthub-identity -p porthub-mesh -p porthub-network -p porthub-io --target ${{ matrix.target }}
       - name: Build self-contained agent
         if: inputs.verify_only != true && runner.os != 'Linux'
         shell: bash
@@ -130,7 +144,10 @@ jobs:
       - name: Build static Linux agent bundle
         if: inputs.verify_only != true && runner.os == 'Linux'
         shell: bash
-        run: docker build --target agent-artifacts --build-arg PORTHUB_VERSION="$PORTHUB_VERSION" --build-arg PORTHUB_SOURCE_REVISION="$PORTHUB_SOURCE_REVISION" --output type=local,dest=dist .
+        run: |
+          # Keep Cargo artifacts in the restored host cache instead of a fresh
+          # Docker cache mount that disappears with each hosted runner.
+          sh scripts/build-agent-linux.sh "$(echo '${{ matrix.target }}' | sed 's/-gnu$/-musl/')" '${{ matrix.artifact }}'
       - name: Prepare versioned artifact metadata
         if: inputs.verify_only != true && runner.os != 'Linux'
         shell: bash
@@ -156,6 +173,32 @@ jobs:
         env:
           PORTHUB_TEST_LAUNCHD: "1"
         run: cargo test --locked -p porthub-agent --test launchd_live --target ${{ matrix.target }} -- --include-ignored
+      - name: Build static ARM gateway binaries for scoped deployments
+        if: inputs.verify_only != true && matrix.artifact == 'arm64'
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        shell: bash
+        run: |
+          cargo build --locked --release -p porthub-edge -p porthub-runtime --target aarch64-unknown-linux-musl --timings
+          mkdir -p edge-dist
+          for binary in porthub-edge porthub-runtime; do
+            source="target/aarch64-unknown-linux-musl/release/$binary"
+            readelf -l "$source" > "$RUNNER_TEMP/$binary.elf"
+            if grep -q INTERP "$RUNNER_TEMP/$binary.elf"; then
+              echo "$binary must not require a dynamic loader" >&2
+              exit 1
+            fi
+            cp "$source" "edge-dist/$binary"
+          done
+          (cd edge-dist && sha256sum porthub-edge porthub-runtime > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        if: inputs.verify_only != true && matrix.artifact == 'arm64'
+        with:
+          # Keep server artifacts out of the client release-bundle glob.
+          name: edge-runtime-arm64
+          path: edge-dist/
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: inputs.verify_only != true
         with:
@@ -181,6 +224,12 @@ jobs:
       - name: Install build-only cross compiler
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ${{ matrix.packages }}
       - run: rustup target add ${{ matrix.target }}
+      - name: Cache compiled 32-bit Rust libraries
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: linux32-${{ matrix.target }}
+          cache-workspace-crates: true
+          cache-on-failure: true
       - name: Build agent for 32-bit Linux
         shell: bash
         run: |

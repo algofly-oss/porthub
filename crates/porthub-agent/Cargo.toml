@@ -11,8 +11,8 @@ path = "src/main.rs"
 [features]
 default = ["private-stream", "local-tor"]
 local-tor = ["private-stream", "dep:porthub-egress"]
-netns-tests = []
-private-stream = ["dep:smoltcp", "porthub-mesh/streams"]
+netns-tests = ["porthub-network/netns-tests"]
+private-stream = ["dep:smoltcp", "porthub-network/private-stream", "porthub-mesh/streams"]
 root-dns-test = []
 handoff-service-test = []
 
@@ -26,6 +26,7 @@ porthub-tunnel.workspace = true
 porthub-transfer = { path = "../porthub-transfer" }
 porthub-egress = { path = "../porthub-egress", optional = true }
 porthub-mesh = { path = "../porthub-mesh" }
+porthub-network = { path = "../porthub-network" }
 chrono = { version = "0.4", features = ["serde"] }
 bytes = "1.12"
 getrandom = "0.3"

@@ -1,4 +1,4 @@
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use porthub_tunnel::{gateway_config, Config, EmbeddedClient, EmbeddedServer};
 use std::{
     net::SocketAddr,
@@ -296,5 +296,134 @@ async fn locked_public_port_and_hostname_proxy_share_enforcement() -> Result<()>
         workers.shutdown().await;
         Ok::<_, anyhow::Error>(())
     }).await??;
+    Ok(())
+}
+
+/// Idle data carriers can close independently of the still healthy control
+/// connection (for example at a reverse proxy). The next visitor must not be
+/// sacrificed to a carrier left in the gateway's pool.
+#[tokio::test]
+async fn closed_idle_carriers_are_replaced_without_refreshing_the_service() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(12), async {
+        let mut workers = JoinSet::new();
+        let backend = TcpListener::bind("127.0.0.1:0").await?;
+        let target = backend.local_addr()?;
+        workers.spawn(echo(backend, Arc::new(AtomicUsize::new(0))));
+        let public = unused().await?;
+        let server = Arc::new(RwLock::new(
+            EmbeddedServer::new(gateway_config(&format!(
+                "[server.services.fixture]\ntoken=\"fixture-secret\"\nbind_addr=\"{public}\"\n"
+            ))?)
+            .await?,
+        ));
+        let http = TcpListener::bind("127.0.0.1:0").await?;
+        let address = http.local_addr()?;
+        let router = porthub_edge::router(server.clone());
+        workers.spawn(async move {
+            let _ = axum::serve(http, router).await;
+        });
+
+        // The control carrier is opened first. Hold eight subsequent idle data
+        // carriers behind a proxy so they can all be severed without touching it.
+        let proxy = TcpListener::bind("127.0.0.1:0").await?;
+        let proxy_address = proxy.local_addr()?;
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let observed = accepted.clone();
+        let (drop_idle, stopped) = tokio::sync::watch::channel(false);
+        workers.spawn(async move {
+            let mut connections = JoinSet::new();
+            while let Ok((mut incoming, _)) = proxy.accept().await {
+                let index = observed.fetch_add(1, Ordering::SeqCst);
+                let mut stopped = stopped.clone();
+                connections.spawn(async move {
+                    let Ok(mut outgoing) = TcpStream::connect(address).await else {
+                        return;
+                    };
+                    if (1..=8).contains(&index) {
+                        tokio::select! {
+                            _ = tokio::io::copy_bidirectional(&mut incoming, &mut outgoing) => {},
+                            _ = stopped.changed() => {},
+                        }
+                    } else {
+                        let _ = tokio::io::copy_bidirectional(&mut incoming, &mut outgoing).await;
+                    }
+                });
+                while connections.try_join_next().is_some() {}
+            }
+        });
+        let agent =
+            EmbeddedClient::new(client(proxy_address, &[("fixture".into(), target)])?).await?;
+        while accepted.load(Ordering::SeqCst) < 9 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // A successful exchange proves the initial pool has completed handshakes.
+        let mut established = TcpStream::connect(public).await?;
+        exchange(&mut established, 41).await?;
+        drop(established);
+        drop_idle.send_replace(true);
+        // Wait for proactive replenishment, not for a visitor or UI refresh to
+        // trigger it. The old pool never reads EOF and cannot satisfy this.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while accepted.load(Ordering::SeqCst) < 17 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .context("idle carriers were not replenished")?;
+        let mut visitor = TcpStream::connect(public).await?;
+        exchange(&mut visitor, 42).await?;
+        agent.shutdown().await;
+        server.write().await.shutdown().await;
+        workers.shutdown().await;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_first_protocol_receives_greeting_without_visitor_writing_first() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut workers = JoinSet::new();
+        let backend = TcpListener::bind("127.0.0.1:0").await?;
+        let target = backend.local_addr()?;
+        workers.spawn(async move {
+            let mut connections = JoinSet::new();
+            while let Ok((mut stream, _)) = backend.accept().await {
+                connections.spawn(async move {
+                    let _ = stream.write_all(b"SSH-2.0-fixture\r\n").await;
+                });
+                while connections.try_join_next().is_some() {}
+            }
+        });
+        let public = unused().await?;
+        let server = Arc::new(RwLock::new(
+            EmbeddedServer::new(gateway_config(&format!(
+                "[server.services.fixture]\ntoken=\"fixture-secret\"\nbind_addr=\"{public}\"\n"
+            ))?)
+            .await?,
+        ));
+        let http = TcpListener::bind("127.0.0.1:0").await?;
+        let address = http.local_addr()?;
+        let router = porthub_edge::router(server.clone());
+        workers.spawn(async move {
+            let _ = axum::serve(http, router).await;
+        });
+        let agent = EmbeddedClient::new(client(address, &[("fixture".into(), target)])?).await?;
+        let mut visitor = loop {
+            match TcpStream::connect(public).await {
+                Ok(visitor) => break visitor,
+                Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
+            }
+        };
+        let mut greeting = [0; 17];
+        visitor.read_exact(&mut greeting).await?;
+        ensure!(&greeting == b"SSH-2.0-fixture\r\n");
+        agent.shutdown().await;
+        server.write().await.shutdown().await;
+        workers.shutdown().await;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
     Ok(())
 }

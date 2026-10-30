@@ -14,7 +14,7 @@ use bytes::{Bytes, BytesMut};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::io::{self, copy_bidirectional, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
 use tokio::time::{self, Duration, Instant};
@@ -447,7 +447,7 @@ async fn run_data_channel_for_tcp<T: Transport>(
     let mut local = TcpStream::connect(local_addr)
         .await
         .with_context(|| format!("Failed to connect to {}", local_addr))?;
-    let _ = copy_bidirectional(&mut conn, &mut local).await;
+    let _ = porthub_io::copy_bidirectional(&mut conn, &mut local, porthub_io::half_close_idle_timeout()).await;
     Ok(())
 }
 

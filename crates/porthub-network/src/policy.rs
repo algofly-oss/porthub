@@ -409,8 +409,7 @@ impl Engine {
         }
         result
     }
-    #[cfg(feature="local-tor")]
-    pub(super) fn lease_deadline(&self) -> Option<Instant> { self.deadline }
+    pub fn lease_deadline(&self) -> Option<Instant> { self.deadline }
     pub fn valid_lease(&self) -> bool {
         self.deadline.is_some_and(|deadline| deadline > Instant::now())
     }

@@ -8,3 +8,5 @@ volumes/
 /target/
 /deploy/native/client-bin/*
 !/deploy/native/client-bin/.gitkeep
+
+/dist/

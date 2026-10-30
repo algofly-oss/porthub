@@ -14,10 +14,11 @@ use backoff::backoff::Backoff;
 use backoff::ExponentialBackoff;
 
 use rand::RngCore;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::{future::poll_fn, pin::Pin, task::{Context as TaskContext, Poll}};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{self, copy_bidirectional, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
 use tokio::time;
@@ -824,6 +825,19 @@ fn tcp_listen_and_send(
     (rx, task)
 }
 
+// A client sends no application bytes until the gateway starts forwarding.
+// Poll every idle stream so closed carriers cannot hide behind a healthy one.
+fn poll_idle<S: AsyncRead + Unpin>(channels: &mut [S], cx: &mut TaskContext<'_>) -> Poll<usize> {
+    for (index, channel) in channels.iter_mut().enumerate() {
+        let mut byte = [0];
+        let mut buffer = ReadBuf::new(&mut byte);
+        if Pin::new(channel).poll_read(cx, &mut buffer).is_ready() {
+            return Poll::Ready(index);
+        }
+    }
+    Poll::Pending
+}
+
 #[instrument(skip_all)]
 async fn run_tcp_connection_pool<T: Transport>(
     bind_addr: String,
@@ -841,48 +855,99 @@ async fn run_tcp_connection_pool<T: Transport>(
         visitor_socket_opts,
     );
     #[cfg(feature = "http-access")]
-    let access_gate = public_access.map(|access| porthub_runtime::public_access::Gate::new(
-        &bind_addr, porthub_runtime::public_access::Config { verifier: access.verifier.to_string(), pin: access.pin }
-    ).map(Arc::new)).transpose()?;
+    let access_gate = public_access
+        .map(|access| {
+            porthub_runtime::public_access::Gate::new(
+                &bind_addr,
+                porthub_runtime::public_access::Config {
+                    verifier: access.verifier.to_string(),
+                    pin: access.pin,
+                },
+            )
+            .map(Arc::new)
+        })
+        .transpose()?;
     #[cfg(not(feature = "http-access"))]
     anyhow::ensure!(public_access.is_none(), "HTTP access locks are unavailable");
     let cmd = bincode::serialize(&DataChannelCmd::StartForwardTcp).unwrap();
     let mut copies = tokio::task::JoinSet::new();
+    let mut idle: VecDeque<T::Stream> = VecDeque::new();
+    let mut waiting: Option<TcpStream> = None;
+    let mut retry_at = time::Instant::now() + Duration::from_secs(HANDSHAKE_TIMEOUT);
     let forwarding = async {
-        'pool: loop {
-            let visitor = tokio::select! {
-                visitor=visitor_rx.recv()=>visitor,
-                result=copies.join_next(), if !copies.is_empty()=> {
-                    if let Some(Err(error)) = result { warn!(%error,"TCP copy task failed"); }
+        loop {
+            // Idle carriers must be read even when no visitors arrive. Framing
+            // heartbeats are consumed by the transport; EOF/error (or unexpected
+            // application bytes before StartForwardTcp) retires this carrier.
+            if let Some(mut visitor) = waiting.take() {
+                if let Some(mut ch) = idle.pop_front() {
+                    let closed = poll_fn(|cx| {
+                        Poll::Ready(poll_idle(std::slice::from_mut(&mut ch), cx).is_ready())
+                    })
+                    .await;
+                    let ready = !closed
+                        && matches!(
+                            time::timeout(Duration::from_secs(HANDSHAKE_TIMEOUT), async {
+                                ch.write_all(&cmd).await?;
+                                // A buffered/framed write alone is not a live-channel
+                                // check. Flush before handing the visitor to a copy.
+                                ch.flush().await
+                            },)
+                            .await,
+                            Ok(Ok(()))
+                        );
+                    if !ready {
+                        if data_ch_req_tx.send(true).is_err() {
+                            break;
+                        }
+                        waiting = Some(visitor);
+                        continue;
+                    }
+                    #[cfg(feature = "http-access")]
+                    let gate = access_gate.clone();
+                    copies.spawn(async move {
+                        #[cfg(feature = "http-access")]
+                        if let Some(gate) = gate {
+                            let _ =
+                                porthub_runtime::public_access::forward_io(visitor, ch, gate).await;
+                            return;
+                        }
+                        let _ = porthub_io::copy_bidirectional(
+                            &mut ch,
+                            &mut visitor,
+                            porthub_io::half_close_idle_timeout(),
+                        )
+                        .await;
+                    });
                     continue;
                 }
-            };
-            let Some(mut visitor) = visitor else {
-                break;
-            };
-            loop {
-                if let Some(mut ch) = data_ch_rx.recv().await {
-                    if ch.write_all(&cmd).await.is_ok() {
-                        #[cfg(feature = "http-access")]
-                        let gate = access_gate.clone();
-                        copies.spawn(async move {
-                            #[cfg(feature = "http-access")]
-                            if let Some(gate) = gate {
-                                let _ = porthub_runtime::public_access::forward_io(visitor, ch, gate).await;
-                                return;
-                            }
-                            let _ = copy_bidirectional(&mut ch, &mut visitor).await;
-                        });
-                        break;
-                    } else {
-                        // Current data channel is broken. Request for a new one
-                        if data_ch_req_tx.send(true).is_err() {
-                            break 'pool;
-                        }
-                    }
-                } else {
-                    break 'pool;
-                }
+                waiting = Some(visitor);
+            }
+            tokio::select! {
+                stale = poll_fn(|cx| poll_idle(idle.make_contiguous(), cx)), if !idle.is_empty() => {
+                    idle.remove(stale);
+                    if data_ch_req_tx.send(true).is_err() { break; }
+                    debug!("idle data carrier closed; replacement requested");
+                },
+                channel = data_ch_rx.recv(), if idle.len() < CHAN_SIZE => {
+                    let Some(channel) = channel else { break; };
+                    idle.push_back(channel);
+                },
+                visitor = visitor_rx.recv(), if waiting.is_none() => {
+                    let Some(visitor) = visitor else { break; };
+                    waiting = Some(visitor);
+                    retry_at = time::Instant::now() + Duration::from_secs(HANDSHAKE_TIMEOUT);
+                },
+                _ = time::sleep_until(retry_at), if waiting.is_some() && idle.is_empty() => {
+                    // A data handshake can fail before it reaches this pool.
+                    // Its control session may still be healthy: request another
+                    // carrier instead of leaving the visitor stuck indefinitely.
+                    if data_ch_req_tx.send(true).is_err() { break; }
+                    retry_at = time::Instant::now() + Duration::from_secs(HANDSHAKE_TIMEOUT);
+                },
+                result = copies.join_next(), if !copies.is_empty() => {
+                    if let Some(Err(error)) = result { warn!(%error,"TCP copy task failed"); }
+                },
             }
         }
     };
@@ -894,6 +959,8 @@ async fn run_tcp_connection_pool<T: Transport>(
     // Drop queued visitors and idle old-session channels before acknowledging
     // release. Only copies that already started forwarding may survive.
     drop(visitor_rx);
+    drop(waiting);
+    drop(idle);
     drop(data_ch_rx);
     let _ = listener_closed.send(());
     if drain {
@@ -914,7 +981,6 @@ async fn run_tcp_connection_pool<T: Transport>(
     info!("Shutdown");
     Ok(())
 }
-
 #[instrument(skip_all)]
 async fn run_udp_connection_pool<T: Transport>(
     bind_addr: String,

@@ -26,6 +26,7 @@ pub struct FramedIo<S> {
     written: usize,
     write_eof: bool,
     heartbeat: Option<Heartbeat>,
+    read_deadline: Option<(Pin<Box<Sleep>>, Duration)>,
 }
 
 #[derive(Debug)]
@@ -50,6 +51,7 @@ impl<S> FramedIo<S> {
             written: 0,
             write_eof: false,
             heartbeat: None,
+            read_deadline: None,
         }
     }
 
@@ -65,6 +67,22 @@ impl<S> FramedIo<S> {
             writer_waiter: None,
         });
         stream
+    }
+
+    /// Gateway-side liveness for framed agents, which send transport heartbeats
+    /// while waiting for a forwarding command. Bound silent/blackholed pooled
+    /// carriers without placing a lifetime limit on active application streams.
+    pub fn with_read_timeout(inner: S, limit: usize, timeout: Duration) -> Self {
+        assert!(!timeout.is_zero());
+        let mut stream = Self::new(inner, limit);
+        stream.read_deadline = Some((Box::pin(tokio::time::sleep(timeout)), timeout));
+        stream
+    }
+
+    fn received(&mut self) {
+        if let Some((deadline, timeout)) = &mut self.read_deadline {
+            deadline.as_mut().reset(Instant::now() + *timeout);
+        }
     }
 
     pub fn get_ref(&self) -> &S {
@@ -92,6 +110,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for FramedIo<S> {
         if buf.remaining() == 0 || this.read_eof {
             return Poll::Ready(Ok(()));
         }
+        if let Some((deadline, _)) = &mut this.read_deadline {
+            if deadline.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::TimedOut, "tunnel carrier stopped receiving frames")));
+            }
+        }
         // A blocked heartbeat writer must never prevent reading: both peers may
         // have full outgoing buffers and need reads to relieve backpressure.
         if let Poll::Ready(Err(error)) = this.poll_heartbeat(cx) {
@@ -107,6 +130,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for FramedIo<S> {
                 if n == 0 {
                     return Poll::Ready(Err(truncated()));
                 }
+                this.received();
                 buf.advance(n);
                 this.remaining -= n;
                 return Poll::Ready(Ok(()));
@@ -119,6 +143,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for FramedIo<S> {
                     return Poll::Ready(Err(truncated()));
                 }
                 this.header_read += n;
+                this.received();
             }
             let length = u32::from_be_bytes(this.header[1..].try_into().unwrap()) as usize;
             this.header_read = 0;

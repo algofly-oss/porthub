@@ -1,5 +1,7 @@
 //! Shared HTTP ingress for the embedded Rathole server.
 pub mod apply;
+mod health;
+
 use axum::{
     extract::{ws::WebSocketUpgrade, FromRequestParts, Request, State},
     http::{header, StatusCode, Version},
@@ -65,7 +67,7 @@ async fn tunnel(State(edge): State<Edge>, mut request: Request) -> Response {
                 Ok(Ok(stream)) => {
                     accept(
                         edge,
-                        Box::new(FramedIo::new(TokioIo::new(stream), DIRECT_FRAME_SIZE)),
+                        Box::new(FramedIo::with_read_timeout(TokioIo::new(stream), DIRECT_FRAME_SIZE, Duration::from_secs(60))),
                     )
                     .await
                 }
@@ -94,9 +96,10 @@ async fn tunnel(State(edge): State<Edge>, mut request: Request) -> Response {
             let _permit = permit;
             let framed = socket.protocol().is_some_and(|p| p == SUBPROTOCOL);
             let io: Box<dyn TunnelIo> = if framed {
-                Box::new(FramedIo::new(
+                Box::new(FramedIo::with_read_timeout(
                     WebSocketIo::new(socket),
                     WEBSOCKET_FRAME_SIZE,
+                    Duration::from_secs(60),
                 ))
             } else {
                 Box::new(WebSocketIo::new(socket))
@@ -144,7 +147,7 @@ pub fn router_with_web(
     };
     Router::new()
         .route("/api/tunnel", get(tunnel))
-        .route("/healthz", get(|| async { "ok" }))
+        .route("/healthz", get(health::check))
         .fallback(upstream)
         .with_state(edge)
         .layer(axum::middleware::from_fn(

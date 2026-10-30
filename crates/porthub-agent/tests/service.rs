@@ -691,7 +691,14 @@ async fn private_enrollment_attaches_to_one_public_service_and_purge_removes_bot
     let manifests = std::fs::read_dir(&layout.state)?.filter_map(Result::ok)
         .filter(|entry| entry.file_name().to_string_lossy().ends_with(".service.json")).count();
     ensure!(manifests == 1);
-    ensure!(manager.calls.lock().unwrap().iter().all(|(_, service)| service == &public.service));
+    ensure!(manager.calls.lock().unwrap().is_empty(), "private enrollment must not restart its running owner");
+    // Repeating activation after interruption is idempotent, and must not start
+    // a deliberately stopped owner either.
+    manager.stop(&public).await?;
+    manager.calls.lock().unwrap().clear();
+    service::install(&layout, &private_source, &executable, &manager).await?;
+    ensure!(manager.calls.lock().unwrap().is_empty(), "enrollment changed operator service state");
+    ensure!(!manager.state(&public).await?.active);
     use std::os::unix::fs::DirBuilderExt;
     let tor=module.with_extension("tor");
     std::fs::DirBuilder::new().mode(0o700).create(&tor)?;

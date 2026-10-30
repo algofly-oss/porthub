@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+porthub-io = { path = "../porthub-io" }
 anyhow.workspace = true
 axum.workspace = true
 hyper = { version = "1", features = ["http1", "client", "server"] }

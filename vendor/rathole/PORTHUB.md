@@ -75,3 +75,17 @@ and client lifecycle verification. Vendoring is not proof of deployment parity.
   generation in the service map. Token rotation, service deletion and shutdown
   cancel and join all generations. UDP pools retain their immediate replacement
   behavior. This change does not alter the Rathole wire protocol.
+
+- TCP pools poll idle carriers, consume framing heartbeats, and replace closed
+  carriers proactively. Starting a TCP forward flushes its command with a
+  bounded wait before assigning the visitor, retaining that visitor when a
+  cached channel fails. Framed edge carriers expire after 60 seconds without
+  incoming frames; native agents send 15-second transport heartbeats.
+- TCP forwarding on both agent and edge uses `porthub-io` lifetime policy.
+  Established full-duplex sessions have no idle deadline. After one side sends
+  EOF, 120 seconds without application progress reclaims the connection; reads
+  and writes extend that window so long responses can finish. Set
+  `PORTHUB_TUNNEL_HALF_CLOSE_IDLE_SECONDS` in the process environment to 0 to
+  disable this policy, or 1..86400 to select another interval. Framing
+  heartbeats do not count as application progress. The same policy applies
+  to authenticated HTTP upgraded forwards.

@@ -1,6 +1,7 @@
 [package]
 name = "porthub-identity"
-version.workspace = true
+# Internal library version: CLI/server release bumps must not invalidate this cache.
+version = "1.8.4"
 edition.workspace = true
 publish.workspace = true
 

@@ -157,3 +157,22 @@ async fn simultaneous_partial_heartbeats_cannot_deadlock_bidirectional_forwardin
     .await
     .unwrap();
 }
+
+#[tokio::test(start_paused = true)]
+async fn silent_open_carrier_expires_but_heartbeats_keep_an_idle_carrier_healthy() {
+    use futures_util::poll;
+    let (server, mut peer) = duplex(128);
+    let mut server = FramedIo::with_read_timeout(server, WEBSOCKET_FRAME_SIZE, Duration::from_secs(60));
+    let mut byte = [0];
+    let mut waiting = Box::pin(server.read(&mut byte));
+    assert!(poll!(&mut waiting).is_pending());
+    for _ in 0..8 {
+        tokio::time::advance(Duration::from_secs(15)).await;
+        peer.write_all(&[2, 0, 0, 0, 0]).await.unwrap();
+        assert!(poll!(&mut waiting).is_pending());
+    }
+    // Keep both socket halves open but stop delivering bytes, as a blackhole
+    // would. No socket EOF is available to rescue the old pool.
+    tokio::time::advance(Duration::from_secs(61)).await;
+    assert_eq!(waiting.await.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+}
