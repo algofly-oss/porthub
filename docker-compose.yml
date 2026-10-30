@@ -19,11 +19,11 @@ services:
     build:
       context: .
       target: ${PORTHUB_MODE:-prod}-core
-      args: {PORTHUB_VERSION: "${PORTHUB_VERSION:-1.8.7}", PORTHUB_SOURCE_REVISION: "${PORTHUB_SOURCE_REVISION:-unknown}", PORTHUB_BUILD_JOBS: "${PORTHUB_BUILD_JOBS:-4}"}
+      args: {PORTHUB_VERSION: "${PORTHUB_VERSION:-1.8.8}", PORTHUB_SOURCE_REVISION: "${PORTHUB_SOURCE_REVISION:-unknown}", PORTHUB_BUILD_JOBS: "${PORTHUB_BUILD_JOBS:-4}"}
     env_file: [.env]
     environment:
       PORTHUB_MODE: ${PORTHUB_MODE:-prod}
-      PORTHUB_VERSION: ${PORTHUB_VERSION:-1.8.7}
+      PORTHUB_VERSION: ${PORTHUB_VERSION:-1.8.8}
       PORTHUB_CLIENT_BINARY_DIR: /data/agent-releases
       PORTHUB_AGENT_RELEASE_SOURCE: ${PORTHUB_AGENT_RELEASE_SOURCE:-github}
       PORTHUB_AGENT_RELEASE_REPOSITORY: ${PORTHUB_AGENT_RELEASE_REPOSITORY:-algofly-oss/porthub}
@@ -68,7 +68,7 @@ services:
     build:
       context: .
       target: ${PORTHUB_MODE:-prod}-edge
-      args: {PORTHUB_VERSION: "${PORTHUB_VERSION:-1.8.7}", PORTHUB_SOURCE_REVISION: "${PORTHUB_SOURCE_REVISION:-unknown}", PORTHUB_BUILD_JOBS: "${PORTHUB_BUILD_JOBS:-4}"}
+      args: {PORTHUB_VERSION: "${PORTHUB_VERSION:-1.8.8}", PORTHUB_SOURCE_REVISION: "${PORTHUB_SOURCE_REVISION:-unknown}", PORTHUB_BUILD_JOBS: "${PORTHUB_BUILD_JOBS:-4}"}
     network_mode: host
     ulimits:
       nofile: {soft: 65536, hard: 524288}
@@ -117,7 +117,7 @@ services:
     build:
       context: .
       target: ${PORTHUB_MODE:-prod}-firewall
-      args: {PORTHUB_VERSION: "${PORTHUB_VERSION:-1.8.7}", PORTHUB_SOURCE_REVISION: "${PORTHUB_SOURCE_REVISION:-unknown}", PORTHUB_BUILD_JOBS: "${PORTHUB_BUILD_JOBS:-4}"}
+      args: {PORTHUB_VERSION: "${PORTHUB_VERSION:-1.8.8}", PORTHUB_SOURCE_REVISION: "${PORTHUB_SOURCE_REVISION:-unknown}", PORTHUB_BUILD_JOBS: "${PORTHUB_BUILD_JOBS:-4}"}
     network_mode: host
     cap_add: [NET_ADMIN]
     environment:

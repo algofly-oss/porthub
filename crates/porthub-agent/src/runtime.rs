@@ -122,6 +122,7 @@ struct Session {
     plan: Option<std::sync::Arc<ClientPlan>>,
     revision: u64,
     pending_update: Option<crate::update::Request>,
+    health:Option<crate::service_health::Monitor>,
 }
 impl Session {
     async fn refresh_source(&mut self) -> Result<()> {
@@ -137,6 +138,7 @@ impl Session {
                 // Rathole retains established streams while replacing the
                 // control connection and source used by future data channels.
                 client.reroute(current.config.clone()).await?;
+                if let Some(health)=&self.health {health.configure(client.health_handles());}
                 self.candidate = Some(current);
                 self.plan = Some(std::sync::Arc::new(plan));
                 self.revision = self.revision.wrapping_add(1);
@@ -154,9 +156,11 @@ impl Session {
             plan: None,
             revision: 0,
             pending_update: None,
+            health:None,
         }
     }
     async fn stop(&mut self) {
+        if let Some(health)=&self.health {health.clear();}
         if let Some(client) = self.client.take() {
             client.shutdown().await;
         }
@@ -186,6 +190,7 @@ impl Session {
             return Ok(false);
         };
         client.reroute(update.candidate.config.clone()).await?;
+        if let Some(health)=&self.health {health.configure(client.health_handles());}
         self.candidate = Some(update.candidate);
         self.revision = self.revision.wrapping_add(1);
         Ok(true)
@@ -284,6 +289,7 @@ impl Session {
         } else {
             self.client = Some(EmbeddedClient::new(config).await?);
         }
+        if let (Some(health),Some(client))=(&self.health,&self.client){health.configure(client.health_handles());}
         self.version = version;
         self.candidate = Some(candidate);
         self.plan = Some(std::sync::Arc::new(plan));
@@ -436,6 +442,7 @@ pub async fn run_with_logs(
         .and_then(|v| v.into_string().ok())
         .unwrap_or_default();
     let mut session = Session::new();
+    session.health=Some(crate::service_health::Monitor::new(&path));
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let mut updater = crate::autoupdate::Controller::new(&path, &profile)
         .await

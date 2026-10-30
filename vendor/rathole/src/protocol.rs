@@ -20,6 +20,9 @@ pub type Digest = [u8; HASH_WIDTH_IN_BYTES];
 pub enum Hello {
     ControlChannelHello(ProtocolVersion, Digest), // sha256sum(service name) or a nonce
     DataChannelHello(ProtocolVersion, Digest),    // token provided by CreateDataChannel
+    // Append variants to preserve the existing native/Go wire discriminants.
+    ControlChannelHealthHello(ProtocolVersion, Digest),
+    DataChannelHealthHello(ProtocolVersion, Digest),
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -30,6 +33,8 @@ pub enum Ack {
     Ok,
     ServiceNotExist,
     AuthFailed,
+    OkWithHealth,
+    TargetUnavailable,
 }
 
 impl std::fmt::Display for Ack {
@@ -41,6 +46,8 @@ impl std::fmt::Display for Ack {
                 Ack::Ok => "Ok",
                 Ack::ServiceNotExist => "Service not exist",
                 Ack::AuthFailed => "Incorrect token",
+                Ack::OkWithHealth => "Ok with health acknowledgements",
+                Ack::TargetUnavailable => "Local target unavailable",
             }
         )
     }
@@ -56,6 +63,7 @@ pub enum ControlChannelCmd {
 pub enum DataChannelCmd {
     StartForwardTcp,
     StartForwardUdp,
+    HealthCheck,
 }
 
 type UdpPacketLen = u16; // `u16` should be enough for any practical UDP traffic on the Internet
@@ -186,7 +194,7 @@ pub async fn read_hello<T: AsyncRead + AsyncWrite + Unpin>(conn: &mut T) -> Resu
     let hello = bincode::deserialize(&buf).with_context(|| "Failed to deserialize hello")?;
 
     match hello {
-        Hello::ControlChannelHello(v, _) => {
+        Hello::ControlChannelHello(v, _) | Hello::ControlChannelHealthHello(v, _) => {
             if v != CURRENT_PROTO_VERSION {
                 bail!(
                     "Protocol version mismatched. Expected {}, got {}. Please update `rathole`.",
@@ -195,7 +203,7 @@ pub async fn read_hello<T: AsyncRead + AsyncWrite + Unpin>(conn: &mut T) -> Resu
                 );
             }
         }
-        Hello::DataChannelHello(v, _) => {
+        Hello::DataChannelHello(v, _) | Hello::DataChannelHealthHello(v, _) => {
             if v != CURRENT_PROTO_VERSION {
                 bail!(
                     "Protocol version mismatched. Expected {}, got {}. Please update `rathole`.",

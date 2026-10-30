@@ -14,6 +14,7 @@ pub mod profile;
 mod routes;
 pub mod runtime;
 pub mod service;
+pub mod service_health;
 pub mod update;
 mod unified;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

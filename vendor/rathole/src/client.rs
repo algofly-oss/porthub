@@ -1,3 +1,4 @@
+use crate::service_health::{ServiceHealthHandle,Guard as HealthGuard};
 use crate::config::{ClientConfig, ClientServiceConfig, Config, ServiceType, TransportType};
 use crate::config_watcher::{ClientServiceChange, ConfigChange};
 use crate::helper::udp_connect;
@@ -111,6 +112,15 @@ impl ClientKind {
             _ => bail!("client transport is not compiled in"),
         }
     }
+    fn health_handles(&self)->HashMap<String,ServiceHealthHandle>{
+        let handles=match self {
+            Self::Tcp(client)=>&client.service_handles,
+            #[cfg(feature="websocket")] Self::Websocket(client)=>&client.service_handles,
+            #[cfg(feature="tls")] Self::Tls(client)=>&client.service_handles,
+            #[cfg(feature="noise")] Self::Noise(client)=>&client.service_handles,
+        };
+        handles.iter().map(|(name,handle)|(name.clone(),handle.health.clone())).collect()
+    }
     fn start(&mut self) {
         match self {
             Self::Tcp(client) => client.start_services(),
@@ -172,6 +182,7 @@ impl ClientKind {
 }
 
 impl EmbeddedClient {
+    pub fn health_handles(&self)->HashMap<String,ServiceHealthHandle>{self.inner.health_handles()}
     fn validated(mut config: Config) -> Result<Config> {
         anyhow::ensure!(
             config.server.is_none(),
@@ -371,6 +382,7 @@ struct RunDataChannelArgs<T: Transport> {
     connector: Arc<T>,
     socket_opts: SocketOpts,
     service: ClientServiceConfig,
+    health: bool,
 }
 
 async fn do_data_channel_handshake<T: Transport>(
@@ -407,7 +419,7 @@ async fn do_data_channel_handshake<T: Transport>(
 
     // Send nonce
     let v: &[u8; HASH_WIDTH_IN_BYTES] = args.session_key[..].try_into().unwrap();
-    let hello = Hello::DataChannelHello(CURRENT_PROTO_VERSION, v.to_owned());
+    let hello = if args.health { Hello::DataChannelHealthHello(CURRENT_PROTO_VERSION, v.to_owned()) } else { Hello::DataChannelHello(CURRENT_PROTO_VERSION, v.to_owned()) };
     conn.write_all(&bincode::serialize(&hello).unwrap()).await?;
     conn.flush().await?;
 
@@ -416,23 +428,48 @@ async fn do_data_channel_handshake<T: Transport>(
 
 async fn run_data_channel<T: Transport>(args: Arc<RunDataChannelArgs<T>>) -> Result<()> {
     // Do the handshake
-    let mut conn = do_data_channel_handshake(args.clone()).await?;
+    let mut conn = time::timeout(Duration::from_secs(10),do_data_channel_handshake(args.clone())).await.context("data handshake timed out")??;
 
     // Forward
-    match read_data_cmd(&mut conn).await? {
+    loop { match read_data_cmd(&mut conn).await? {
         DataChannelCmd::StartForwardTcp => {
             if args.service.service_type != ServiceType::Tcp {
                 bail!("Expect TCP traffic. Please check the configuration.")
             }
-            run_data_channel_for_tcp::<T>(conn, &args.service.local_addr).await?;
+            if args.health {
+                // The gateway receives confirmation before committing a visitor
+                // to this carrier. A silently dead idle socket cannot swallow
+                // an application request indefinitely.
+                let local = time::timeout(Duration::from_secs(3), TcpStream::connect(&args.service.local_addr)).await;
+                let mut local = match local {
+                    Ok(Ok(local)) => local,
+                    _ => {
+                        conn.write_all(&bincode::serialize(&Ack::TargetUnavailable)?).await?;
+                        conn.flush().await?;
+                        bail!("local target unavailable");
+                    }
+                };
+                conn.write_all(&bincode::serialize(&Ack::Ok)?).await?;
+                conn.flush().await?;
+                let _=porthub_io::copy_bidirectional(&mut conn,&mut local,porthub_io::half_close_idle_timeout()).await;
+            } else {
+                run_data_channel_for_tcp::<T>(conn, &args.service.local_addr).await?;
+            }
+            break;
         }
+        DataChannelCmd::HealthCheck => {
+            if !args.health {bail!("unnegotiated data health check");}
+            conn.write_all(&bincode::serialize(&Ack::Ok)?).await?;
+            conn.flush().await?;
+        },
         DataChannelCmd::StartForwardUdp => {
             if args.service.service_type != ServiceType::Udp {
                 bail!("Expect UDP traffic. Please check the configuration.")
             }
             run_data_channel_for_udp::<T>(conn, &args.service.local_addr).await?;
+            break;
         }
-    }
+    } }
     Ok(())
 }
 
@@ -444,8 +481,8 @@ async fn run_data_channel_for_tcp<T: Transport>(
 ) -> Result<()> {
     debug!("New data channel starts forwarding");
 
-    let mut local = TcpStream::connect(local_addr)
-        .await
+    let mut local = time::timeout(Duration::from_secs(3), TcpStream::connect(local_addr))
+        .await.context("local target connection timed out")?
         .with_context(|| format!("Failed to connect to {}", local_addr))?;
     let _ = porthub_io::copy_bidirectional(&mut conn, &mut local, porthub_io::half_close_idle_timeout()).await;
     Ok(())
@@ -598,6 +635,7 @@ struct ControlChannel<T: Transport> {
     transport: Arc<T>,            // Wrapper around the transport layer
     heartbeat_timeout: u64,       // Application layer heartbeat timeout in secs
     data_channels: tokio::task::JoinSet<()>,
+    health: ServiceHealthHandle,
 }
 
 // Handle of a control channel
@@ -606,6 +644,7 @@ struct ControlChannelHandle {
     shutdown_tx: Option<oneshot::Sender<u8>>,
     retire_tx: Option<oneshot::Sender<oneshot::Sender<()>>>,
     task: Option<tokio::task::JoinHandle<()>>,
+    health: ServiceHealthHandle,
 }
 
 impl<T: 'static + Transport> ControlChannel<T> {
@@ -617,14 +656,10 @@ impl<T: 'static + Transport> ControlChannel<T> {
             }
         }
     }
-    #[instrument(skip_all)]
-    async fn run(&mut self) -> Result<()> {
-        let mut remote_addr = AddrMaybeCached::new(&self.remote_addr);
-        remote_addr.resolve(self.source_address).await?;
-
+    async fn handshake(&self, remote_addr: &AddrMaybeCached, health: bool) -> Result<(T::Stream, Nonce, bool)> {
         let mut conn = self
             .transport
-            .connect(&remote_addr)
+            .connect(remote_addr)
             .await
             .with_context(|| format!("Failed to connect to {}", &self.remote_addr))?;
         T::hint(&conn, SocketOpts::for_control_channel());
@@ -632,7 +667,7 @@ impl<T: 'static + Transport> ControlChannel<T> {
         // Send hello
         debug!("Sending hello");
         let hello_send =
-            Hello::ControlChannelHello(CURRENT_PROTO_VERSION, self.digest[..].try_into().unwrap());
+            if health { Hello::ControlChannelHealthHello(CURRENT_PROTO_VERSION, self.digest[..].try_into().unwrap()) } else { Hello::ControlChannelHello(CURRENT_PROTO_VERSION, self.digest[..].try_into().unwrap()) };
         conn.write_all(&bincode::serialize(&hello_send).unwrap())
             .await?;
         conn.flush().await?;
@@ -658,15 +693,29 @@ impl<T: 'static + Transport> ControlChannel<T> {
 
         // Read ack
         debug!("Reading ack");
-        match read_ack(&mut conn).await? {
-            Ack::Ok => {}
-            v => {
-                return Err(anyhow!("{}", v))
-                    .with_context(|| format!("Authentication failed: {}", self.service.name));
-            }
-        }
+        let health = match read_ack(&mut conn).await? {
+            Ack::Ok => false,
+            Ack::OkWithHealth => true,
+            v => return Err(anyhow!("{}", v)).with_context(||format!("Authentication failed: {}",self.service.name)),
+        };
+        Ok((conn, session_key, health))
 
+    }
+    #[instrument(skip_all)]
+    async fn run(&mut self) -> Result<()> {
+        let mut remote_addr = AddrMaybeCached::new(&self.remote_addr);
+        time::timeout(Duration::from_secs(3),remote_addr.resolve(self.source_address)).await.context("gateway resolution timed out")??;
+
+        // Probe the optional protocol extension first. A legacy gateway gets
+        // the exact previous hello on fallback; neither attempt owns data copies.
+        let negotiated = time::timeout(Duration::from_secs(10),self.handshake(&remote_addr,true)).await;
+        let (mut conn, session_key, health) = match negotiated {
+            Ok(Ok(result)) => result,
+            _ => time::timeout(Duration::from_secs(10),self.handshake(&remote_addr,false)).await
+                .context("control handshake timed out")??,
+        };
         // Channel ready
+        self.health.connected(health && self.service.service_type==ServiceType::Tcp);
         info!("Control channel established");
 
         // Socket options for the data channel
@@ -677,6 +726,7 @@ impl<T: 'static + Transport> ControlChannel<T> {
             connector: self.transport.clone(),
             socket_opts,
             service: self.service.clone(),
+            health: health && self.service.service_type == ServiceType::Tcp,
         });
 
         loop {
@@ -685,26 +735,32 @@ impl<T: 'static + Transport> ControlChannel<T> {
                     debug!(%error,"data channel task stopped");
                 }
             }
-            tokio::select! {
-                val = read_control_cmd(&mut conn) => {
-                    let val = val?;
-                    debug!( "Received {:?}", val);
-                    match val {
-                        ControlChannelCmd::CreateDataChannel => {
-                            let args = data_ch_args.clone();
-                            self.data_channels.spawn(async move {
-                                if let Err(e) = run_data_channel(args).await.with_context(|| "Failed to run the data channel") {
-                                    warn!("data channel stopped");
-                                    debug!("{:#}",e);
-                                }
-                            }.instrument(Span::current()));
-                        },
-                        ControlChannelCmd::HeartBeat => ()
-                    }
-                },
-                _ = time::sleep(Duration::from_secs(self.heartbeat_timeout)), if self.heartbeat_timeout != 0 => {
-                    return Err(anyhow!("Heartbeat timed out"))
+            // Keep a partially read command alive across health notifications.
+            // Cancelling/recreating read_exact here would corrupt its framing.
+            let command = read_control_cmd(&mut conn);
+            tokio::pin!(command);
+            let deadline=Instant::now()+Duration::from_secs(self.heartbeat_timeout);
+            let val=loop {
+                tokio::select! {
+                    biased;
+                    val=&mut command=>break val?,
+                    _=self.health.notified()=>{
+                        if self.health.stale(){bail!("control liveness expired");}
+                    },
+                    _=time::sleep_until(deadline),if self.heartbeat_timeout!=0=>bail!("Heartbeat timed out"),
                 }
+            };
+            self.health.command();
+            match val {
+                ControlChannelCmd::CreateDataChannel=>{
+                    let args=data_ch_args.clone();
+                    self.data_channels.spawn(async move {
+                        if let Err(e)=run_data_channel(args).await.with_context(||"Failed to run the data channel") {
+                            warn!("data channel stopped");debug!("{:#}",e);
+                        }
+                    }.instrument(Span::current()));
+                },
+                ControlChannelCmd::HeartBeat=>{},
             }
         }
     }
@@ -727,7 +783,9 @@ impl ControlChannelHandle {
 
         let mut retry_backoff = run_control_chan_backoff(service.retry_interval.unwrap());
 
+        let health=ServiceHealthHandle::new(heartbeat_timeout);
         let mut s = ControlChannel {
+            health:health.clone(),
             source_address,
             digest,
             service,
@@ -739,6 +797,7 @@ impl ControlChannelHandle {
 
         let task = tokio::spawn(
             async move {
+                let _health_guard=HealthGuard(s.health.clone());
                 let mut start = Instant::now();
 
                 'control: loop {
@@ -751,6 +810,7 @@ impl ControlChannelHandle {
                             break;
                         },
                     };
+                    s.health.disconnected();
                     let Err(err) = result else {
                         break;
                     };
@@ -791,6 +851,7 @@ impl ControlChannelHandle {
             shutdown_tx: Some(shutdown_tx),
             retire_tx: Some(retire_tx),
             task: Some(task),
+            health,
         }
     }
 

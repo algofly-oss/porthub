@@ -1,0 +1,31 @@
+{
+  "feature": "Always-on client tunnel self-healing",
+  "release": "1.8.8",
+  "user_contract": {
+    "automatic": "Built-in and independent of UI refresh preferences or API connectivity. Healthy sessions are not restarted by health checks.",
+    "force_refresh": "Manual Refresh Now and Scheduled Refresh remain explicit disruptive reconnect controls, with existing server/UI behavior unchanged."
+  },
+  "implementation": {
+    "agent": "Independent local 30-second monitor of authenticated control liveness; private local health snapshot. No API requests or settings needed to run.",
+    "client_transport": "Bound control/data establishment and local target dialing; preserve established data tasks when control reconnects. Preserve partially-read control command across check notifications.",
+    "gateway": "Negotiate optional data-carrier health support. Probe only idle carriers with bounded acknowledgement; validate readiness before committing a new visitor. Replace proven-stale carriers without resetting a mapping or active transfers.",
+    "compatibility": "Existing native/Go wire discriminants unchanged; extension variants appended. Legacy clients remain supported; new client falls back to legacy gateway control handshake.",
+    "security": "Policy removal, token rotation and explicit shutdown retain existing revocation semantics. No application request bodies are replayed."
+  },
+  "ui_fixes": {
+    "bindings": "Replace unsupported border-primary/35 with supported border-primary/40; selected binding no longer falls back to a pale border in dark mode.",
+    "description": "Remove default textarea border and pointer-focus outline/ring; use subtle focus background while retaining the app keyboard-focus convention."
+  },
+  "verification": {
+    "new_transport_tests": [
+      "healthy checks preserve serving tunnel and control identity",
+      "expired control reconnects while established transfer continues",
+      "silent idle-pool blackhole recovers with same mapping/control",
+      "new client interoperates with legacy gateway handshake"
+    ],
+    "local_monitor_test": "Checks continue without API/UI preferences; clearing revoked handles stops supervision.",
+    "existing_regressions": "Agent runtime/API-backoff failover, endpoint rerouting, revocation, embedded reload/UDP/half-close/framing, and UI utility tests.",
+    "browser": "Chromium dark/light1440/402/320; WebKit dark/light402/320. Computed styles assert selected dark binding accent and description border/focus appearance."
+  },
+  "rollout_status": "Local tests and production UI build passed; native CI artifacts and scoped deployment pending."
+}

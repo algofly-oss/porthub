@@ -2,6 +2,7 @@
 //! process, or additional tunnel listener is required.
 pub mod client_plan;
 pub mod websocket;
+pub use rathole::{ServiceHealth, ServiceHealthHandle};
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;

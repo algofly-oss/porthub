@@ -33,6 +33,10 @@ mod client;
 use client::run_client;
 #[cfg(feature = "client")]
 pub use client::{probe_client_transport, EmbeddedClient};
+#[cfg(feature = "client")]
+mod service_health;
+#[cfg(feature = "client")]
+pub use service_health::{ServiceHealth, ServiceHealthHandle};
 
 #[cfg(feature = "server")]
 mod server;

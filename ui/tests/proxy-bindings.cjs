@@ -12,7 +12,23 @@ const {launchBrowser}=require("./browser.cjs");
       await page.goto(`${root}/home?demo=1&view=proxies`);
       const row=page.locator('[aria-label^="Edit proxy "]:visible').first();await row.waitFor();await row.focus();await page.keyboard.press("Enter");
       const dialog=page.getByRole("dialog");await dialog.waitFor();
+      await dialog.getByRole("button",{name:"Options",exact:true}).click();
+      const description=dialog.getByLabel("Description",{exact:true});
+      for(const focused of [false,true]){
+        if(focused)await description.focus();
+        const style=await description.evaluate(el=>{const s=getComputedStyle(el);return {border:s.borderTopWidth,outline:s.outlineStyle,shadow:s.boxShadow};});
+        if(theme==="dark")assert.equal(style.border,"0px",`description border while focused=${focused}`);
+        assert.equal(style.outline,"none",`description outline while focused=${focused}`);
+        assert(!style.shadow || style.shadow==="none" || !style.shadow.includes("rgb(37, 99, 235)"),`description must not gain a blue focus ring: ${style.shadow}`);
+      }
       await dialog.getByRole("button",{name:"Bindings",exact:true}).click();
+      if(theme==="dark") {
+        const active=dialog.getByRole("list",{name:"Proxy bindings",exact:true}).getByRole("listitem").first();
+        const border=await active.evaluate(el=>getComputedStyle(el).borderTopColor);
+        const channels=border.match(/[\d.]+/g).map(Number);
+        assert(channels[0]<150 && channels[2]>channels[0]+50,`expanded dark binding must have its accent border, not a white fallback: ${border}`);
+      }
+
       assert(await dialog.getByRole("radio",{name:/My priority order/}).isChecked());
       await dialog.getByRole("button",{name:"Add binding",exact:true}).click();
       await dialog.getByLabel("Binding 2 URL",{exact:true}).fill("https://backup.example.invalid/app");

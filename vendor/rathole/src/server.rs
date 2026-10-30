@@ -3,13 +3,13 @@ use crate::config_watcher::{ConfigChange, ServerServiceChange};
 use crate::constants::{listen_backoff, UDP_BUFFER_SIZE};
 use crate::helper::retry_notify_with_deadline;
 use crate::multi_map::MultiMap;
-use crate::protocol::Hello::{ControlChannelHello, DataChannelHello};
+use crate::protocol::Hello::{ControlChannelHello, DataChannelHello, ControlChannelHealthHello, DataChannelHealthHello};
 use crate::protocol::{
     self, read_auth, read_hello, Ack, ControlChannelCmd, DataChannelCmd, Hello, UdpTraffic,
     HASH_WIDTH_IN_BYTES,
 };
 use crate::transport::{SocketOpts, TcpTransport, Transport};
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use backoff::backoff::Backoff;
 use backoff::ExponentialBackoff;
 
@@ -362,18 +362,21 @@ async fn handle_connection<T: 'static + Transport>(
     // Read hello
     let hello = read_hello(&mut conn).await?;
     match hello {
-        ControlChannelHello(_, service_digest) => {
+        ControlChannelHello(_, service_digest) | ControlChannelHealthHello(_, service_digest) => {
+            let health = matches!(hello, ControlChannelHealthHello(..));
             do_control_channel_handshake(
                 conn,
                 services,
                 control_channels,
                 service_digest,
                 server_config,
+                health,
             )
             .await?;
         }
-        DataChannelHello(_, nonce) => {
-            do_data_channel_handshake(conn, control_channels, nonce).await?;
+        DataChannelHello(_, nonce) | DataChannelHealthHello(_, nonce) => {
+            let health = matches!(hello, DataChannelHealthHello(..));
+            do_data_channel_handshake(conn, control_channels, nonce, health).await?;
         }
     }
     Ok(())
@@ -385,6 +388,7 @@ async fn do_control_channel_handshake<T: 'static + Transport>(
     control_channels: Arc<RwLock<ControlChannelMap<T>>>,
     service_digest: ServiceDigest,
     server_config: Arc<ServerConfig>,
+    health: bool,
 ) -> Result<()> {
     info!("Try to handshake a control channel");
 
@@ -458,7 +462,7 @@ async fn do_control_channel_handshake<T: 'static + Transport>(
         }
 
         // Send ack
-        conn.write_all(&bincode::serialize(&Ack::Ok).unwrap())
+        conn.write_all(&bincode::serialize(&if health { Ack::OkWithHealth } else { Ack::Ok }).unwrap())
             .await?;
         conn.flush().await?;
 
@@ -491,6 +495,7 @@ async fn do_data_channel_handshake<T: 'static + Transport>(
     conn: T::Stream,
     control_channels: Arc<RwLock<ControlChannelMap<T>>>,
     nonce: Nonce,
+    health: bool,
 ) -> Result<()> {
     debug!("Try to handshake a data channel");
 
@@ -503,7 +508,7 @@ async fn do_data_channel_handshake<T: 'static + Transport>(
             // Send the data channel to the corresponding control channel
             handle
                 .data_ch_tx
-                .send(conn)
+                .send((conn, health))
                 .await
                 .map_err(|_| anyhow!("Data channel for a stale control channel"))?;
         }
@@ -517,7 +522,7 @@ async fn do_data_channel_handshake<T: 'static + Transport>(
 pub struct ControlChannelHandle<T: Transport> {
     // Shutdown the control channel by dropping it
     _shutdown_tx: broadcast::Sender<bool>,
-    data_ch_tx: mpsc::Sender<T::Stream>,
+    data_ch_tx: mpsc::Sender<(T::Stream, bool)>,
     service: ServerServiceConfig,
     tasks: Vec<tokio::task::JoinHandle<()>>,
     listener_closed: Option<oneshot::Receiver<()>>,
@@ -827,8 +832,8 @@ fn tcp_listen_and_send(
 
 // A client sends no application bytes until the gateway starts forwarding.
 // Poll every idle stream so closed carriers cannot hide behind a healthy one.
-fn poll_idle<S: AsyncRead + Unpin>(channels: &mut [S], cx: &mut TaskContext<'_>) -> Poll<usize> {
-    for (index, channel) in channels.iter_mut().enumerate() {
+fn poll_idle<S: AsyncRead + Unpin>(channels: &mut [(S, bool)], cx: &mut TaskContext<'_>) -> Poll<usize> {
+    for (index, (channel, _)) in channels.iter_mut().enumerate() {
         let mut byte = [0];
         let mut buffer = ReadBuf::new(&mut byte);
         if Pin::new(channel).poll_read(cx, &mut buffer).is_ready() {
@@ -838,10 +843,28 @@ fn poll_idle<S: AsyncRead + Unpin>(channels: &mut [S], cx: &mut TaskContext<'_>)
     Poll::Pending
 }
 
+// A probe owns only an idle carrier. Established copies are never borrowed.
+fn probe_idle<S>(idle:&mut VecDeque<(S,bool)>,probes:&mut tokio::task::JoinSet<Option<(S,bool)>>)
+where S:AsyncRead+tokio::io::AsyncWrite+Unpin+Send+'static {
+    let mut legacy=VecDeque::new();
+    while let Some((mut stream,health))=idle.pop_front(){
+        if !health {legacy.push_back((stream,false));continue;}
+        probes.spawn(async move {
+            let probe=async {
+                stream.write_all(&bincode::serialize(&DataChannelCmd::HealthCheck)?).await?;
+                stream.flush().await?;
+                ensure!(matches!(crate::protocol::read_ack(&mut stream).await?,Ack::Ok),"invalid idle carrier acknowledgement");
+                Ok::<(),anyhow::Error>(())
+            };
+            if matches!(time::timeout(Duration::from_secs(3),probe).await,Ok(Ok(()))){Some((stream,true))}else{None}
+        });
+    }
+    *idle=legacy;
+}
 #[instrument(skip_all)]
 async fn run_tcp_connection_pool<T: Transport>(
     bind_addr: String,
-    mut data_ch_rx: mpsc::Receiver<T::Stream>,
+    mut data_ch_rx: mpsc::Receiver<(T::Stream, bool)>,
     data_ch_req_tx: mpsc::UnboundedSender<bool>,
     mut shutdown_rx: broadcast::Receiver<bool>,
     listener_closed: oneshot::Sender<()>,
@@ -871,8 +894,11 @@ async fn run_tcp_connection_pool<T: Transport>(
     anyhow::ensure!(public_access.is_none(), "HTTP access locks are unavailable");
     let cmd = bincode::serialize(&DataChannelCmd::StartForwardTcp).unwrap();
     let mut copies = tokio::task::JoinSet::new();
-    let mut idle: VecDeque<T::Stream> = VecDeque::new();
+    let mut probes=tokio::task::JoinSet::new();
+    let mut probe_at=time::Instant::now()+Duration::from_secs(30);
+    let mut idle: VecDeque<(T::Stream, bool)> = VecDeque::new();
     let mut waiting: Option<TcpStream> = None;
+    let mut visitor_deadline=time::Instant::now();
     let mut retry_at = time::Instant::now() + Duration::from_secs(HANDSHAKE_TIMEOUT);
     let forwarding = async {
         loop {
@@ -880,27 +906,34 @@ async fn run_tcp_connection_pool<T: Transport>(
             // heartbeats are consumed by the transport; EOF/error (or unexpected
             // application bytes before StartForwardTcp) retires this carrier.
             if let Some(mut visitor) = waiting.take() {
-                if let Some(mut ch) = idle.pop_front() {
+                if let Some(mut carrier) = idle.pop_front() {
                     let closed = poll_fn(|cx| {
-                        Poll::Ready(poll_idle(std::slice::from_mut(&mut ch), cx).is_ready())
+                        Poll::Ready(poll_idle(std::slice::from_mut(&mut carrier), cx).is_ready())
                     })
                     .await;
-                    let ready = !closed
-                        && matches!(
-                            time::timeout(Duration::from_secs(HANDSHAKE_TIMEOUT), async {
-                                ch.write_all(&cmd).await?;
-                                // A buffered/framed write alone is not a live-channel
-                                // check. Flush before handing the visitor to a copy.
-                                ch.flush().await
-                            },)
-                            .await,
-                            Ok(Ok(()))
-                        );
-                    if !ready {
-                        if data_ch_req_tx.send(true).is_err() {
-                            break;
+                    let (mut ch, health) = carrier;
+                    let ready = if closed { None } else {
+                        time::timeout(Duration::from_secs(HANDSHAKE_TIMEOUT), async {
+                            ch.write_all(&cmd).await?;
+                            ch.flush().await?;
+                            if health {
+                                match crate::protocol::read_ack(&mut ch).await? {
+                                    Ack::Ok => {},
+                                    Ack::TargetUnavailable => return Ok(false),
+                                    _ => bail!("invalid data channel health acknowledgement"),
+                                }
+                            }
+                            Ok::<bool,anyhow::Error>(true)
+                        }).await.ok().and_then(Result::ok)
+                    };
+                    if ready != Some(true) {
+                        if data_ch_req_tx.send(true).is_err() { break; }
+                        if ready.is_none(){probe_idle(&mut idle,&mut probes);}
+                        // A failed local target is not a stale transport. Close
+                        // this uncommitted visitor rather than reset a service.
+                        if ready.is_none() && time::Instant::now()<visitor_deadline {
+                            waiting=Some(visitor);
                         }
-                        waiting = Some(visitor);
                         continue;
                     }
                     #[cfg(feature = "http-access")]
@@ -924,6 +957,17 @@ async fn run_tcp_connection_pool<T: Transport>(
                 waiting = Some(visitor);
             }
             tokio::select! {
+                _=time::sleep_until(probe_at)=>{
+                    probe_idle(&mut idle,&mut probes);
+                    probe_at=time::Instant::now()+Duration::from_secs(30);
+                },
+                result=probes.join_next(),if !probes.is_empty()=>{
+                    match result {
+                        Some(Ok(Some(channel)))=>idle.push_front(channel),
+                        Some(_)=>{debug!("idle data carrier failed liveness probe; replacement requested");if data_ch_req_tx.send(true).is_err(){break;}},
+                        None=>{},
+                    }
+                },
                 stale = poll_fn(|cx| poll_idle(idle.make_contiguous(), cx)), if !idle.is_empty() => {
                     idle.remove(stale);
                     if data_ch_req_tx.send(true).is_err() { break; }
@@ -931,18 +975,20 @@ async fn run_tcp_connection_pool<T: Transport>(
                 },
                 channel = data_ch_rx.recv(), if idle.len() < CHAN_SIZE => {
                     let Some(channel) = channel else { break; };
-                    idle.push_back(channel);
+                    idle.push_front(channel);
                 },
                 visitor = visitor_rx.recv(), if waiting.is_none() => {
                     let Some(visitor) = visitor else { break; };
                     waiting = Some(visitor);
+                    visitor_deadline=time::Instant::now()+Duration::from_secs(30);
                     retry_at = time::Instant::now() + Duration::from_secs(HANDSHAKE_TIMEOUT);
                 },
                 _ = time::sleep_until(retry_at), if waiting.is_some() && idle.is_empty() => {
                     // A data handshake can fail before it reaches this pool.
                     // Its control session may still be healthy: request another
                     // carrier instead of leaving the visitor stuck indefinitely.
-                    if data_ch_req_tx.send(true).is_err() { break; }
+                    if time::Instant::now()>=visitor_deadline { waiting=None; }
+                    else if data_ch_req_tx.send(true).is_err() { break; }
                     retry_at = time::Instant::now() + Duration::from_secs(HANDSHAKE_TIMEOUT);
                 },
                 result = copies.join_next(), if !copies.is_empty() => {
@@ -961,6 +1007,7 @@ async fn run_tcp_connection_pool<T: Transport>(
     drop(visitor_rx);
     drop(waiting);
     drop(idle);
+    probes.shutdown().await;
     drop(data_ch_rx);
     let _ = listener_closed.send(());
     if drain {
@@ -984,7 +1031,7 @@ async fn run_tcp_connection_pool<T: Transport>(
 #[instrument(skip_all)]
 async fn run_udp_connection_pool<T: Transport>(
     bind_addr: String,
-    mut data_ch_rx: mpsc::Receiver<T::Stream>,
+    mut data_ch_rx: mpsc::Receiver<(T::Stream, bool)>,
     _data_ch_req_tx: mpsc::UnboundedSender<bool>,
     mut shutdown_rx: broadcast::Receiver<bool>,
 ) -> Result<()> {
@@ -1006,7 +1053,7 @@ async fn run_udp_connection_pool<T: Transport>(
     let cmd = bincode::serialize(&DataChannelCmd::StartForwardUdp).unwrap();
 
     // Receive one data channel
-    let mut conn = data_ch_rx
+    let (mut conn, _) = data_ch_rx
         .recv()
         .await
         .ok_or_else(|| anyhow!("No available data channels"))?;
