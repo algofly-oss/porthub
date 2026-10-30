@@ -1,0 +1,94 @@
+{
+  "server_version": "1.8.6",
+  "source_commit": "1726b62ca1bceb8752cfd13284d25e6dd1ea7561",
+  "workflow": "https://github.com/algofly-oss/porthub/actions/runs/41054533280",
+  "scope": "Multi-binding public web proxies. Server-only build and rollout; installed agents and the published agent release remain 1.8.5.",
+  "features": {
+    "bindings": "1\u2013128 mixed owned machine-port and standalone HTTP(S) targets; stable IDs, labels, enable switches, reorder/priority, weights, Host-header policy and health-path overrides.",
+    "priority": "Separate priority mode with manual order or automatic consecutive-failure/smoothed health-probe-latency selection.",
+    "balance": "Separate load-balance mode with round robin, smooth weighted round robin, least active connections, optional one-day cookie affinity. Manual priorities do not restrict eligible bindings in balance mode.",
+    "health": "Bounded active probes, passive failure detection, failed/passed-check thresholds, cooldown, status range, per-binding availability, latency and counters.",
+    "retries": "Only empty GET/HEAD requests may retry. POST/uploads/upgrades are not replayed. Existing streams remain on their chosen binding. Default maximum 4 attempts, configurable from 1 to 128.",
+    "compatibility": "Existing single-target records remain readable with passive-only checks; no data migration. Old single-target writes cannot erase an explicit pool."
+  },
+  "checks": {
+    "selected_rust_tests": 83,
+    "rust_failures": 0,
+    "ui_unit_tests": 17,
+    "chromium_editor_cases": 8,
+    "chromium_widths": [
+      1440,
+      768,
+      402,
+      320
+    ],
+    "themes": [
+      "dark",
+      "light"
+    ],
+    "webkit_mobile_cases": 2,
+    "webkit_widths": [
+      402,
+      320
+    ],
+    "production_chromium_cases": 4,
+    "production_widths": [
+      1440,
+      402
+    ],
+    "full_story": "Exported production UI \u2192 authenticated local API \u2192 isolated MongoDB \u2192 generated routing snapshot \u2192 real edge \u2192 two real HTTP backends. Created mixed bindings, observed primary/backup failover, fresh owner-scoped health, automatic recovery, then round-robin routing after a browser edit.",
+    "production_ui_build_and_export": "passed",
+    "workflow_lint": "actionlint 1.7.12 passed",
+    "clippy": "Runtime/API/edge lib+bins passed with existing warnings in public_access.rs/private_relay.rs/exposes.rs/exit_nodes.rs; no new upstream-pool warnings.",
+    "other_checks": "Existing proxy-row checks passed in both themes at 1512/402; proxy activity checks passed at 1512/402/320. A broader navigation script timed out in its group-dropdown check after proxy navigation checks; it is not counted as a pass."
+  },
+  "deployment": {
+    "roles_updated": [
+      "edge",
+      "core/API/UI"
+    ],
+    "roles_preserved": [
+      "firewall"
+    ],
+    "other_container_ids_preserved": 17,
+    "image_version": "1.8.6",
+    "image_revision": "1726b62ca1bceb8752cfd13284d25e6dd1ea7561",
+    "core_started_at": "2026-10-30T12:31:36.247764594Z",
+    "edge_started_at": "2026-10-30T12:30:32.480569329Z",
+    "preflight": {
+      "read_only": true,
+      "active_machines": 12,
+      "public_services": 19,
+      "web_routes": 27,
+      "proxy_routes": 25,
+      "gateway_alias_routes": 2
+    },
+    "persistent_mounts_preserved": {
+      "core": 6,
+      "edge": 5
+    },
+    "existing_proxy_records_unchanged": 27,
+    "existing_mapping_settings": "Stable mapping fields unchanged",
+    "health": "Both updated roles healthy; HTTP health 200; observed descriptor use 450 of 65,536.",
+    "agent_heartbeats": "EC2/Reid/Thor fresh at 1.8.5 after server rollout. No client update requested.",
+    "ibi": "Observed a temporary listener reconnect during rollout; reattached automatically without a refresh click. HTTP 200 and OpenAPI SHA256 unchanged.",
+    "ibi_openapi_sha256": "659f4415158f550a8711767cc1dd95cd5059b1bcb616312ef66d01cf3eb398c4",
+    "thor_ui_http": 200,
+    "rollback": "Protected before-config snapshot and old core/edge image tags retained on the gateway. No production test accounts or routes were created."
+  },
+  "artifacts": {
+    "source_tar_sha256": "6f2ce5c9c62cd319a92655b975990f20ca89008f013125238430f9ceea0a50f2",
+    "ui_tar_sha256": "4d496dafcced48fe7fb081fcdc4f0925486f2602d574e0a74a15bbcc623e93f7",
+    "server": "Native ARM CI binaries validated against SHA256SUMS/source-revision, ELF architecture and absence of a dynamic loader.",
+    "binary_sha256": {
+      "porthub-api": "f9b1646a1412f30b0956397908b342fb15a6cbbdadd6f090b988ec9365dcc3d2",
+      "porthub-edge": "c8ea76727168676e1e2a9506eba6e8a099d7e218a791f61d9ea369135e51981e",
+      "porthub-runtime": "3de39dd91c049a1063448023054d56567a704baf17aba2060902a62aa5922d82"
+    }
+  },
+  "limitations": [
+    "Application sessions and data must be shared appropriately when balancing separate application instances.",
+    "A response already started cannot migrate to another binding; upgraded connections reconnect to use failover.",
+    "EC2 private DNS and inaccessible Condor/Harshitha investigation remain separate outstanding issues from the previous rollout."
+  ]
+}

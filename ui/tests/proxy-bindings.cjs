@@ -5,7 +5,7 @@ const {launchBrowser}=require("./browser.cjs");
   const browser=await launchBrowser();const root=process.env.REVIEW_ORIGIN || "http://127.0.0.1:3105";
   const dir="/tmp/porthub-proxy-bindings-review";fs.mkdirSync(dir,{recursive:true});
   try{
-    for(const theme of ["dark","light"])for(const width of [1440,768,402,320]){
+    for(const theme of (process.env.REVIEW_THEMES || "dark,light").split(","))for(const width of (process.env.REVIEW_WIDTHS || "1440,768,402,320").split(",").map(Number)){
       const context=await browser.newContext({viewport:{width,height:1000}});
       await context.addInitScript(theme=>localStorage.setItem("mantine-color-scheme",JSON.stringify(theme)),theme);
       const page=await context.newPage();const errors=[];page.on("pageerror",e=>errors.push(e.message));
