@@ -1,3 +1,6 @@
+import ResultsPagination from "@/components/ui/results-pagination";
+import useInventoryPage from "@/shared/hooks/useInventoryPage";
+import { mapConnectionToForwardingConfig } from "@/shared/utils/connection-draft.mjs";
 import DnsRules from "../../../AccessRules/DnsRules";
 import MachineOsIcon from "@/components/ui/machine-os-icon";
 import { platformLabel } from "@/shared/utils/machine-platform.mjs";
@@ -443,7 +446,6 @@ export default function HostConfigPopup({
   const [rules, setRules] = useState([]);
   const [machineSection, setMachineSection] = useState("groups");
   const [portSection, setPortSection] = useState("connection");
-  const [linkedProxies, setLinkedProxies] = useState([]);
   const [proxiesOpen, setProxiesOpen] = useState(false);
   const [proxyEditorOpen, setProxyEditorOpen] = useState(false);
   const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
@@ -453,14 +455,6 @@ export default function HostConfigPopup({
   useEffect(() => {
     if (opened && additionalDomainsRef.current) additionalDomainsRef.current.open = false;
   }, [opened, host?.id]);
-  const allPortTraffic = useTrafficSnapshot({ ids: rules.map(rule=>rule.dataId), enabled: opened });
-  const samplesByConnection = new Map(allPortTraffic.rows.map(row=>[row.connection?._id,row.traffic]));
-  useEffect(() => {
-    if (!opened || !host?.id) return;
-    const controller = new AbortController();
-    axios.get(apiRoutes.listTrafficRoutes, {signal:controller.signal}).then(response=>setLinkedProxies((response.data?.data || []).filter(proxy=>proxy.connection?.machine_id === host.id))).catch(()=>{});
-    return () => controller.abort();
-  }, [opened, host?.id, host?.forwardingConfigs, proxyEditorOpen]);
   const [selectedRuleId, setSelectedRuleId] = useState(null);
   const [errorsByRuleId, setErrorsByRuleId] = useState({});
   const [availabilityByRuleId, setAvailabilityByRuleId] = useState({});
@@ -504,9 +498,16 @@ export default function HostConfigPopup({
   const [shouldAutoScrollClientLogs, setShouldAutoScrollClientLogs] = useState(true);
   const [editingRuleSnapshot, setEditingRuleSnapshot] = useState(null);
   const [rulesPage, setRulesPage] = useState(1);
+  const [portQuery,setPortQuery]=useState("");
+  const portInventory=useInventoryPage("connections",{machine:host?.id,q:portQuery,page:rulesPage,page_size:RULES_PER_PAGE},{enabled:opened && !!host?.id && machineSection==="ports"});
+  const originalPorts=useRef(new Map());
+  useEffect(()=>{setRulesPage(1);},[portQuery]);
   const [groupSaving, setGroupSaving] = useState(false);
   const [isGroupPickerOpen, setIsGroupPickerOpen] = useState(false);
   const [groupQuery, setGroupQuery] = useState("");
+  const [groupPage, setGroupPage] = useState(1);
+  const groupInventory = useInventoryPage("groups", { q: groupQuery, page: groupPage, page_size: 20 }, { enabled: opened && isGroupPickerOpen && machineSection === "groups" });
+  useEffect(() => { setGroupPage(1); }, [groupQuery]);
   const [privateAddresses, setPrivateAddresses] = useState(null);
   const [privateAddressError, setPrivateAddressError] = useState(false);
   useEffect(() => {
@@ -546,6 +547,10 @@ export default function HostConfigPopup({
 
   const selectedRuleCandidate = rules.find((rule) => rule.localId === selectedRuleId) || null;
   const selectedRule = selectedRuleCandidate?.temporary ? null : selectedRuleCandidate;
+  const visibleTrafficIds = selectedRule ? [selectedRule.dataId] : portInventory.rows.map(row => row._id);
+  const allPortTraffic = useTrafficSnapshot({ ids: visibleTrafficIds, enabled: opened && machineSection === "ports", preload: false });
+  const samplesByConnection = new Map(allPortTraffic.rows.map(row => [row.connection?._id, row.traffic]));
+
   useEffect(() => {
     if (!opened) return;
     const form = editorFormRef.current;
@@ -555,7 +560,7 @@ export default function HostConfigPopup({
   }, [opened, selectedRuleId, machineSection, portSection]);
   const hasUnsavedChanges =
     host && rulesSnapshotKey(rules) !== initialRulesSnapshotRef.current;
-  const savedRuleCount = host?.forwardingConfigs?.length || 0;
+  const savedRuleCount = host?.portsTotal ?? host?.forwardingConfigs?.length ?? 0;
   const hostConnectionStatus =
     host?.connectionStatus || (host?.isActive ? "online" : "offline");
   const clientOsLabel = platformLabel(host?.clientOs, host?.clientOsName, host?.clientArch);
@@ -569,11 +574,7 @@ export default function HostConfigPopup({
     host?.clientUpdateRequested &&
       host?.clientUpdateTargetVersion === host?.latestClientVersion
   );
-  const savedRulesById = new Map(
-    (host?.forwardingConfigs || [])
-      .filter((rule) => rule.dataId)
-      .map((rule) => [rule.dataId, rule])
-  );
+  const savedRulesById=originalPorts.current;
   const visibleClientLogs = clientLogs.reduce((result, line, index) => {
     if (!showVerboseClientLogs && line.includes("[DEBUG]")) {
       return result;
@@ -585,27 +586,25 @@ export default function HostConfigPopup({
     });
     return result;
   }, []);
-  const totalRulePages = Math.max(1, Math.ceil(rules.length / RULES_PER_PAGE));
-  const paginatedRules = rules.slice(
-    (rulesPage - 1) * RULES_PER_PAGE,
-    rulesPage * RULES_PER_PAGE
-  );
+  const totalRulePages=portInventory.pagination.pages;
+  const pageIds=new Set(portInventory.rows.map(row=>row._id));
+  const paginatedRules=rules.filter(rule=>!rule.dataId || pageIds.has(rule.dataId));
   const assignedGroupIds = Array.isArray(host?.groupIds) ? host.groupIds : [];
   const assignedGroups = assignedGroupIds
-    .map((groupId) => groups.find((group) => group._id === groupId))
+    .map((groupId) => (host?.groupLabels || []).find(group => group._id === groupId) || groups.find((group) => group._id === groupId))
     .filter(Boolean);
-  const availableGroups = groups.filter(
+  const availableGroups = groupInventory.rows.filter(
     (group) => !assignedGroupIds.includes(group._id)
   );
   const normalizedGroupQuery = groupQuery.trim().toLowerCase();
   const filteredAvailableGroups = availableGroups.filter((group) =>
     group.name.toLowerCase().includes(normalizedGroupQuery)
   );
-  const hasExactGroupName = groups.some(
+  const hasExactGroupName = groupInventory.rows.some(
     (group) => group.name.trim().toLowerCase() === normalizedGroupQuery
   );
   const canCreateGroupFromQuery = Boolean(
-    onCreateGroup && normalizedGroupQuery && !hasExactGroupName
+    onCreateGroup && normalizedGroupQuery && !hasExactGroupName && !groupInventory.loading && !groupInventory.searchPending
   );
   const machineNameValue = machineDetails.name.trim();
   const machineHostnameValue = machineDetails.hostname.trim();
@@ -676,10 +675,10 @@ export default function HostConfigPopup({
   };
 
   useEffect(() => {
-    if (rulesPage > totalRulePages) {
+    if (!portInventory.loading && rulesPage > totalRulePages) {
       setRulesPage(totalRulePages);
     }
-  }, [rulesPage, totalRulePages]);
+  }, [rulesPage, totalRulePages, portInventory.loading]);
 
   const selectedRuleHasErrors = selectedRule
     ? (() => {
@@ -740,16 +739,11 @@ export default function HostConfigPopup({
     const isHostSwitch = previousHostIdRef.current !== host.id;
     previousHostIdRef.current = host.id;
 
-    const preserveDraft = !isHostSwitch && rulesSnapshotKey(rules) !== initialRulesSnapshotRef.current;
-    const visibleRules = preserveDraft
-      ? [...rules.filter(rule => !rule.temporary), ...nextRules.filter(rule => rule.temporary)]
-      : nextRules;
-    setRules(visibleRules);
-    if (!preserveDraft) {
-      setErrorsByRuleId({});
-      setAvailabilityByRuleId({});
-    }
-    initialRulesSnapshotRef.current = rulesSnapshotKey(nextRules);
+    if(!isHostSwitch)return;
+    originalPorts.current=new Map((host.forwardingConfigs || []).filter(c=>c.dataId).map(c=>[c.dataId,c]));
+    const visibleRules=nextRules;
+    setRules(visibleRules);setErrorsByRuleId({});setAvailabilityByRuleId({});
+    initialRulesSnapshotRef.current=rulesSnapshotKey(nextRules);
 
     if (isHostSwitch) {
       setSelectedRuleId(null);
@@ -789,9 +783,21 @@ export default function HostConfigPopup({
         : null
     );
   }, [
+    host,
     host?.id,
     host?.forwardingConfigs,
   ]);
+
+  useEffect(()=>{
+    if(!opened || !host?.id || !portInventory.data)return;
+    const additions=[];
+    for(const row of portInventory.rows){
+      const config=mapConnectionToForwardingConfig(row);
+      if(!originalPorts.current.has(config.dataId)){originalPorts.current.set(config.dataId,config);additions.push(mapRuleFromConfig(config));}
+    }
+    if(additions.length)setRules(current=>[...current,...additions.filter(r=>!current.some(c=>c.dataId===r.dataId))]);
+    initialRulesSnapshotRef.current=rulesSnapshotKey([...originalPorts.current.values()].map(mapRuleFromConfig));
+  },[opened,host?.id,portInventory.data,portInventory.rows]);
 
   // Metadata saves must not reset draft port edits, or vice versa.
   useEffect(() => {
@@ -807,8 +813,9 @@ export default function HostConfigPopup({
     setShowUptimeHistory(machineSection === "uptime");
   }, [machineSection, opened, host?.id]);
 
+  const selectedPortId=selectedRule?.localId;
   useEffect(() => {
-    if (!selectedRule) {
+    if (!selectedPortId) {
       setShowRuleAdvanced(true);
       setAllowIpDraft("");
       setIsAllowIpPickerOpen(false);
@@ -817,7 +824,7 @@ export default function HostConfigPopup({
 
     setAllowIpDraft("");
     setShowRuleAdvanced(true);
-  }, [selectedRule?.localId]);
+  }, [selectedPortId]);
 
   useEffect(() => {
     if (!opened || !selectedRule?.dataId || (!showRuleAdvanced && !isAllowIpPickerOpen)) {
@@ -1551,7 +1558,7 @@ export default function HostConfigPopup({
     setRules((currentRules) => [...currentRules, nextRule]);
     setEditingRuleSnapshot(null);
     setSelectedRuleId(nextRule.localId);
-    setRulesPage(Math.ceil((rules.length + 1) / RULES_PER_PAGE));
+
     setRandomizingRuleId(nextRule.localId);
 
     try {
@@ -1921,6 +1928,8 @@ export default function HostConfigPopup({
     try {
       const refreshedConfig = await onRefreshConnection(host.id, rule.dataId);
       if (refreshedConfig) {
+        originalPorts.current.set(refreshedConfig.dataId,refreshedConfig);
+        initialRulesSnapshotRef.current=rulesSnapshotKey([...originalPorts.current.values()].map(mapRuleFromConfig));
         setRules((currentRules) =>
           currentRules.map((currentRule) =>
             currentRule.localId === rule.localId
@@ -1970,6 +1979,10 @@ export default function HostConfigPopup({
 
     const payload = normalizedRules.map((rule) => ({
       dataId: rule.dataId,
+      temporary:rule.temporary,
+      managedBy: rule.managedBy,
+      publicAccess: rule.publicAccess,
+      externalBindIp: rule.externalBindIp,
       serviceName: rule.serviceName.trim(),
       serviceDescription: rule.serviceDescription.trim(),
       internalIp: rule.internalIp,
@@ -1985,11 +1998,22 @@ export default function HostConfigPopup({
       },
     }));
 
-    const saved = await onSave(host.id, payload);
+    const saved = await onSave(host.id, payload, [...originalPorts.current.values()]);
 
     if (saved) {
-      setRules(normalizedRules);
-      initialRulesSnapshotRef.current = rulesSnapshotKey(normalizedRules);
+      // Keep newly assigned IDs so a second save updates instead of recreating ports.
+      const savedRules = saved.savedConfigs
+        ? saved.savedConfigs.map((config, index) => ({
+            ...mapRuleFromConfig(config),
+            localId: normalizedRules[index]?.localId || config.dataId,
+          }))
+        : normalizedRules;
+      setRules(savedRules);
+      originalPorts.current = new Map(
+        (saved.savedConfigs || savedRules).filter(config => config.dataId).map(config => [config.dataId, config])
+      );
+      portInventory.refresh();
+      initialRulesSnapshotRef.current = rulesSnapshotKey(savedRules);
     }
     return Boolean(saved);
   };
@@ -2363,7 +2387,7 @@ export default function HostConfigPopup({
                           </details>
                         </div>
 
-                        {groups.length > 0 && onAddMachineToGroup && onRemoveMachineFromGroup ? (
+                        {onAddMachineToGroup && onRemoveMachineFromGroup ? (
                           <div>
                             <p className="mb-2 text-xs text-muted-foreground">
                               Search existing groups, add new ones, or remove assignments for this machine.
@@ -2553,6 +2577,9 @@ export default function HostConfigPopup({
                                     ))}
                                   </div>
                                 )}
+                                {groupInventory.loading && <p role="status" className="p-2 text-xs text-muted-foreground">Loading groups…</p>}
+                                {groupInventory.error && <p role="alert" className="p-2 text-xs text-red-600 dark:text-red-400">{groupInventory.error}</p>}
+                                {groupInventory.pagination.pages > 1 && <ResultsPagination count={groupInventory.pagination.total} noun="Groups" page={groupPage} pages={groupInventory.pagination.pages} pageSize={20} onPage={setGroupPage} />}
                               </Popover.Dropdown>
                             </Popover>
                           </div>
@@ -3003,11 +3030,12 @@ export default function HostConfigPopup({
                   <div className="min-w-0"><h2 ref={portsHeadingRef} tabIndex={-1} className="text-base font-semibold !outline-none">Forwarded Ports</h2><p className="mt-1 hidden text-xs text-muted-foreground sm:block">Live traffic and linked web addresses for every port.</p></div>
                   <WorkspaceButton type="button" onClick={handleAddRule}><IconPlus size={16} />Add Port</WorkspaceButton>
                 </div>
+                <WorkspaceInput aria-label="Search machine ports" placeholder="Search ports…" value={portQuery} onChange={event => setPortQuery(event.target.value)} />
                 {allPortTraffic.error && <p role="status" className="text-xs text-amber-700 dark:text-amber-300">{allPortTraffic.error}</p>}
                 <div className="min-h-0 overflow-auto rounded-lg bg-surface">
                   <Table aria-label="Forwarded ports"><TableHeader><TableRow><TableHead>Service</TableHead><TableHead className="hidden w-[19%] md:table-cell">Forwarding</TableHead><TableHead className="w-36 md:w-44">Live Traffic</TableHead><TableHead className="hidden w-[25%] md:table-cell">Web Addresses</TableHead><TableHead className="w-20"><span className="sr-only">Enabled</span></TableHead></TableRow></TableHeader><TableBody>
                     {paginatedRules.map(rule => {
-                      const addresses = linkedProxies.filter(proxy => (proxy.connection?.data_id || proxy.connection?._id) === rule.dataId);
+                      const addresses = (portInventory.rows.find(row => row._id === rule.dataId)?.linked_proxies || []);
                       const openAddresses = event => { event.stopPropagation(); if (rule.temporary) return; openRuleEditor(rule); setPortSection("web"); };
                       return <TableRow key={rule.localId} className={rule.temporary ? "" : "cursor-pointer"} onClick={rule.temporary ? undefined : ()=>openRuleEditor(rule)}>
                         <TableCell className="!py-2"><div className="flex max-w-full flex-wrap items-center gap-2"><button type="button" aria-label={`Edit forwarding rule ${rule.serviceName.trim() || "untitled rule"}`} disabled={rule.temporary} className="block max-w-full text-left disabled:cursor-default"><span className="block truncate text-sm font-medium">{rule.serviceName || "Untitled service"}</span></button>{rule.temporary && <span title="Removed when the PortHub CLI exposure stops or its lease expires" className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-200">Temporary · PortHub agent</span>}</div><span className="mt-1 hidden truncate text-xs text-muted-foreground md:block">{rule.serviceDescription || `Port ${rule.externalPort}`}</span><p className="mt-1 text-xs text-muted-foreground md:hidden">{externalEndpoint(rule)} → {internalEndpoint(rule)}</p>{rule.temporary && <p className="mt-1 text-xs text-muted-foreground md:hidden">Removed when the CLI exposure stops.</p>}<div className="md:hidden">{gatewayLink(rule)}</div><button type="button" onClick={openAddresses} disabled={rule.temporary} className="mt-1 max-w-full truncate text-left text-xs text-blue-700 disabled:opacity-60 dark:text-blue-300 md:hidden">{addresses[0]?.hosts?.[0] || (rule.temporary ? "Managed by temporary exposure" : "Add web address")}</button></TableCell>
@@ -3018,8 +3046,10 @@ export default function HostConfigPopup({
                       </TableRow>;
                     })}
                   </TableBody></Table>
-                  {!rules.length && <p className="px-4 py-8 text-center text-sm text-muted-foreground">Add a port to expose a service on this machine.</p>}
-                  {rules.length > RULES_PER_PAGE && <div className="flex justify-end border-t border-border p-3"><Pagination value={rulesPage} onChange={setRulesPage} total={totalRulePages} size="sm" siblings={0} /></div>}
+                        {portInventory.loading && <p role="status" className="px-4 py-4 text-sm text-muted-foreground">Loading ports…</p>}
+                  {portInventory.error && <p role="alert" className="px-4 py-4 text-sm text-red-600">{portInventory.error}</p>}
+                  {!portInventory.loading && !paginatedRules.length && <p className="px-4 py-8 text-center text-sm text-muted-foreground">Add a port to expose a service on this machine.</p>}
+                  {portInventory.pagination.total > RULES_PER_PAGE && <div className="flex justify-end border-t border-border p-3"><Pagination value={rulesPage} onChange={setRulesPage} total={totalRulePages} size="sm" siblings={0} /></div>}
                 </div>
               </div>
             )}

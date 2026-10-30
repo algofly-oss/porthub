@@ -1,3 +1,4 @@
+import InventorySelect from "@/components/ui/inventory-select";
 import { useEffect, useState } from "react";
 import WorkspaceDrawer from "@/components/ui/workspace-drawer";
 import { Input } from "@/components/ui/input";
@@ -21,7 +22,7 @@ export default function MachineCreateModal({opened,onClose,onCreate,isCreating,g
         <p className="text-sm leading-6 text-muted-foreground">Name your machine, then install its client. IP addresses and connection details appear automatically when it connects.</p>
         <label htmlFor="machine-name" className="block text-sm font-medium">Machine name<Input id="machine-name" className="mt-2" placeholder="e.g. edge-node-1" value={form.name} onChange={event=>setForm(current=>({...current,name:event.target.value}))} required aria-invalid={!!error} />{error && <span className="mt-1 block text-xs text-red-500">{error}</span>}</label>
         <label htmlFor="machine-hostname" className="block text-sm font-medium">Hostname <span className="font-normal text-muted-foreground">(optional)</span><Input id="machine-hostname" className="mt-2" placeholder="Reported by the client when left empty" value={form.hostname} onChange={event=>setForm(current=>({...current,hostname:event.target.value}))} /></label>
-        <div><label htmlFor="machine-group" className="mb-2 block text-sm font-medium">Group <span className="font-normal text-muted-foreground">(optional)</span></label><SearchSelect id="machine-group" label="Machine group" value={form.groupId} onChange={value=>setForm(current=>({...current,groupId:value}))} options={[{value:"",label:"Ungrouped"},...groups.map(group=>({value:group._id,label:group.name}))]} /></div>
+        <div><label htmlFor="machine-group" className="mb-2 block text-sm font-medium">Group <span className="font-normal text-muted-foreground">(optional)</span></label><InventorySelect kind="groups" id="machine-group" label="Machine group" value={form.groupId} onChange={value=>setForm(current=>({...current,groupId:value}))} extraOptions={[{value:"",label:"Ungrouped"}]} /></div>
       </div>
       <div className="flex shrink-0 justify-end gap-2 border-t border-border pt-4"><Button type="button" variant="secondary" onClick={onClose} disabled={isCreating}>Cancel</Button><Button type="submit" disabled={isCreating}>{isCreating ? "Creating…" : "Create Machine"}</Button></div>
     </form>

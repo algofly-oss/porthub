@@ -2,7 +2,7 @@
 //! the read checkpoint share one revision-guarded Mongo document.
 use crate::{auth, error::ApiResult, store, App};
 use anyhow::{Context, Result};
-use axum::{extract::State, http::HeaderMap, Json};
+use axum::{extract::{State, Query}, http::HeaderMap, response::Response};
 use futures_util::TryStreamExt;
 use mongodb::bson::{doc, Bson, Document};
 use porthub_runtime::web_activity::{self as journal, Checkpoint};
@@ -224,12 +224,21 @@ pub async fn run(
     }
 }
 
-pub async fn activity(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+pub async fn activity(State(app): State<Arc<App>>, Query(query): Query<std::collections::HashMap<String,String>>, headers: HeaderMap) -> ApiResult<Response> {
     let user = auth::current_user(&app, &headers).await?;
+    let mut filter=doc! {"user_id":user.get("_id").cloned().unwrap_or(Bson::Null)};
+    let scoped=query.contains_key("ids");
+    if let Some(ids)=query.get("ids") {
+        let ids=ids.split(',').filter(|id|!id.is_empty()).map(|id|mongodb::bson::oid::ObjectId::parse_str(id).map_err(|_|crate::error::ApiError::bad_request("Invalid proxy ID"))).collect::<ApiResult<Vec<_>>>()?;
+        if ids.len()>100 {return Err(crate::error::ApiError::bad_request("At most 100 proxy IDs are supported"));}
+        filter.insert("_id",doc! {"$in":ids});
+    }
+    let recent=query.get("recent").map(|v|v.parse::<usize>()).transpose().map_err(|_|crate::error::ApiError::bad_request("Invalid recent proxy limit"))?;
+    if recent.is_some_and(|n|n==0 || n>25) {return Err(crate::error::ApiError::bad_request("Recent proxy limit must be 1–25"));}
     let routes: Vec<Document> = app
         .collection("traffic_routes")
-        .find(doc! {"user_id":user.get("_id").cloned().unwrap_or(Bson::Null)})
-        .projection(doc! {"_id":1})
+        .find(filter)
+        .projection(if recent.is_some() {doc! {"_id":1,"name":1,"hosts":1,"entry_points":1,"connection.data_id":1}}else{doc! {"_id":1}})
         .await?
         .try_collect()
         .await?;
@@ -241,7 +250,7 @@ pub async fn activity(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiRes
     let state = state.unwrap_or_default();
     let metrics = state.get_document("metrics").cloned().unwrap_or_default();
     let month = chrono::Utc::now().format("%Y-%m").to_string();
-    let data: Vec<Value> = routes
+    let mut data: Vec<Value> = routes
         .iter()
         .map(|route| {
             let id = store::id(route.get("_id"));
@@ -263,11 +272,19 @@ pub async fn activity(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiRes
             store::document(&metric)
         })
         .collect();
-    Ok(Json(
-        json! ({"tracking_since":store::field(&state,"tracking_since"),"updated_at":store::field(&state,"updated_at"),
-        "month":month,"monthly_tracking_since":store::field(&state,"monthly_tracking_since"),"available":available,
-        "coverage_warning":state.get_bool("coverage_warning").unwrap_or(false),"data":data}),
-    ))
+    let mut previews=Vec::new();
+    if let Some(limit)=recent {
+        data.retain(|metric|metric["last_requested_at"].as_str().is_some_and(|s|!s.is_empty()));
+        data.sort_by(|a,b|b["last_requested_at"].as_str().cmp(&a["last_requested_at"].as_str()).then_with(||a["route_id"].as_str().cmp(&b["route_id"].as_str())));
+        data.truncate(limit);
+        for metric in &data {
+            if let Some(route)=routes.iter().find(|route|store::id(route.get("_id"))==metric["route_id"].as_str().unwrap_or("")) {previews.push(store::document(route));}
+        }
+    }
+    let mut body=json!({"tracking_since":store::field(&state,"tracking_since"),"month":month,"monthly_tracking_since":store::field(&state,"monthly_tracking_since"),"available":available,"coverage_warning":state.get_bool("coverage_warning").unwrap_or(false),"data":data});
+    if !scoped && recent.is_none() {body["updated_at"]=store::field(&state,"updated_at");}
+    if recent.is_some() {body["routes"]=json!(previews);}
+    crate::inventory_query::conditional(&headers,body)
 }
 
 #[cfg(test)]

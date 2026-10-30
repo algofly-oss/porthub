@@ -1,5 +1,5 @@
+import InventoryMultiSelect from "@/components/ui/inventory-multi-select";
 import { useState } from "react";
-import { MultiSelect } from "@mantine/core";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 
@@ -32,44 +32,8 @@ export const selector = (value) => ({
   id: value.slice(value.indexOf(":") + 1),
 });
 
-export function MultiEntities({ label, value, onChange, options, disabled }) {
-  const [opened, setOpened] = useState(false);
-  return (
-    <label className="block text-sm font-medium">
-      {label}
-      <MultiSelect
-        aria-label={label}
-        className="mt-2"
-        searchable
-        onDropdownOpen={() => setOpened(true)}
-        onDropdownClose={() => setOpened(false)}
-        onKeyDown={(event) => {
-          if (event.key === "Escape" && opened) event.stopPropagation();
-        }}
-        clearable
-        disabled={disabled}
-        value={value.map(key)}
-        onChange={(values) => onChange(values.map(selector))}
-        data={options}
-        placeholder="Search machines, people or groups…"
-        nothingFound="No matching entities"
-        withinPortal
-        zIndex={400}
-        maxDropdownHeight={210}
-        dropdownPosition="flip"
-        classNames={{
-          input:
-            "!min-h-[40px] !rounded-lg !border-transparent !bg-control !text-foreground",
-          searchInput:
-            "!border-0 !bg-transparent !text-foreground !shadow-none !outline-none",
-          dropdown: "!rounded-lg !border-border !bg-dialog !p-1",
-          item: "!cursor-pointer !rounded-md !text-sm !text-foreground data-[hovered]:!bg-accent data-[selected]:!bg-primary/10",
-          value: "!bg-surface !text-foreground",
-          values: "max-h-20 overflow-auto",
-        }}
-      />
-    </label>
-  );
+export function MultiEntities({label,value,onChange,disabled,params}) {
+  return <label className="block text-sm font-medium">{label}<InventoryMultiSelect className="mt-2" kind="access-entities" label={label} filters={params} disabled={disabled} value={value.map(key)} onChange={values=>onChange(values.map(selector))} extraOptions={[{value:"all:machines",label:"All machines"}]} placeholder="Search machines, people or groups…"/></label>;
 }
 
 export function DirtyGuard({ dirty, busy, onClose, children }) {

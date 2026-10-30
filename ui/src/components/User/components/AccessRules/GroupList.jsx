@@ -1,4 +1,6 @@
-import { useState } from "react";
+import useInventoryPage from "@/shared/hooks/useInventoryPage";
+import ResultsPagination from "@/components/ui/results-pagination";
+import { useEffect, useState } from "react";
 import axios from "axios";
 import {
   IconPlus,
@@ -21,6 +23,10 @@ export default function GroupList({
     [query, setQuery] = useState(""),
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
+  const [page,setPage]=useState(1);
+  const inventory=useInventoryPage("access-groups",{...params,q:query,page,page_size:25});
+  useEffect(()=>setPage(1),[query]);
+  useEffect(()=>{if(!inventory.loading && page>inventory.pagination.pages)setPage(inventory.pagination.pages);},[page,inventory.loading,inventory.pagination.pages]);
   async function create(event) {
     event.preventDefault();
     setBusy(true);
@@ -73,9 +79,10 @@ export default function GroupList({
           {error}
         </p>
       )}
+      {inventory.loading && <p role="status" className="p-3 text-sm text-muted-foreground">Loading groups…</p>}
+      {inventory.error && <p role="alert" className="p-3 text-sm text-red-600">{inventory.error}</p>}
       <div className="data-scroll">
-        {data.groups
-          .filter((g) => g.name.toLowerCase().includes(query.toLowerCase()))
+        {inventory.rows
           .map((group) => (
             <div key={group._id} className="flex items-center gap-1">
               <button
@@ -93,14 +100,7 @@ export default function GroupList({
                     {group.name}
                   </span>
                   <span className="mt-1 block text-xs text-muted-foreground">
-                    {
-                      data.machines.filter((m) =>
-                        m.group_ids.includes(group._id),
-                      ).length
-                    }{" "}
-                    machines · {group.user_ids.length}{" "}
-                    {group.user_ids.length === 1 ? "person" : "people"} ·{" "}
-                    {data.books.filter((b) => b.group_id === group._id).length}{" "}
+                    {group.machine_count} machines · {group.user_count} {group.user_count===1 ? "person" : "people"} · {group.book_count}{" "}
                     policies
                   </span>
                 </span>
@@ -108,12 +108,13 @@ export default function GroupList({
               </button>
             </div>
           ))}
-        {!data.groups.length && (
+        {!inventory.loading && !inventory.rows.length && (
           <p className="p-4 text-sm text-muted-foreground">
             Create your first group to organise policies.
           </p>
         )}
       </div>
+      <ResultsPagination count={inventory.pagination.total} noun="Groups" page={page} pages={inventory.pagination.pages} pageSize={25} onPage={setPage}/>
     </section>
   );
 }

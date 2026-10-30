@@ -1,3 +1,4 @@
+import useInventoryPage from "@/shared/hooks/useInventoryPage";
 import useBackgroundRefresh from "@/shared/hooks/useBackgroundRefresh";
 import { useWorkspaceState } from "@/shared/contexts/workspaceCache";
 import ResultsPagination from "@/components/ui/results-pagination";
@@ -16,6 +17,7 @@ import ProxyConfigModal from "./ProxyConfigModal";
 import { proxyBindings, routingLabel, bindingTitle } from "@/shared/utils/proxy-bindings.mjs";
 import { Button } from "@/components/ui/button";
 import SearchSelect from "@/components/ui/search-select";
+import InventorySelect from "@/components/ui/inventory-select";
 import { StatusTabs } from "@/components/ui/status-tabs";
 import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell } from "@/components/ui/table";
 import useTrafficSnapshot from "@/shared/hooks/useTrafficSnapshot";
@@ -27,20 +29,16 @@ import { externalEndpoint, internalEndpoint } from "@/shared/utils/endpoints.mjs
 
 export default function Proxy({ machineId = "", compact = false, connectionId = "", onEditorOpenChange, active = true }) {
   const router = useRouter();
-  const activity = useProxyActivity({ enabled: active, preload: false });
-  const activityById = new Map(activity.data.map(metric=>[metric.route_id,metric]));
   const { success, error } = useToast();
-  const [proxies, setProxies] = useWorkspaceState("proxies.routes", []);
-  const [connections, setConnections] = useWorkspaceState("proxies.connections", []);
-  const [machines, setMachines] = useWorkspaceState("proxies.machines", []);
+  const [proxies, setProxies] = useState([]);
   const [settings, setSettings] = useWorkspaceState("proxies.settings", {});
-  const [loading, setLoading] = useWorkspaceState("proxies.loading", true);
+  const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [health,setHealth]=useState({available:false,data:{}});
   useBackgroundRefresh(async signal=>{
-    try {const response=await axios.get(apiRoutes.proxyHealth,{signal});setHealth(response.data);}
+    try {const response=await axios.get(`${apiRoutes.proxyHealth}?${new URLSearchParams({ids:proxies.map(p=>p._id).join(","),summary:"true"})}`,{signal});setHealth(response.data);}
     catch(error){if(!axios.isCancel(error))setHealth({available:false,data:{}});}
-  },{enabled:active,preload:false,interval:10000});
+  },{enabled:active && proxies.length>0,preload:false,interval:10000,refreshKey:proxies.map(p=>p._id).join(",")});
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [query, setQuery] = useState("");
@@ -58,37 +56,43 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
     setOpened(nextOpened);
   }
 
-  async function load(signal) {
-    const options = signal instanceof AbortSignal ? { signal } : {};
-    try {
-      const [routes, ports, clients, defaults] = await Promise.all([
-        axios.get(apiRoutes.listTrafficRoutes, options), axios.get(apiRoutes.listConnections, options),
-        axios.get(apiRoutes.listMachines, options), axios.get(apiRoutes.authSettings, options),
-      ]);
-      setProxies(routes.data?.data || []); setConnections(ports.data?.data || []);
-      setMachines(clients.data?.data || []); setSettings(defaults.data || {}); setLoadError("");
-    } catch (error) { if (axios.isCancel(error)) return; setLoadError("Could not load proxies. Check your connection and try again."); }
-    finally { if (!options.signal?.aborted) setLoading(false); }
-  }
-  useBackgroundRefresh(load, { enabled: active });
+  const inventory=useInventoryPage("proxies",{q:query,page,page_size:pageSize,status,group,machine:machineId || machine,connection:connectionId,sort},{enabled:active});
+  useBackgroundRefresh(inventory.refresh,{enabled:active && isTrafficSort(sort),interval:5000,refreshKey:sort});
+  useEffect(()=>{if(!inventory.loading && page>inventory.pagination.pages)setPage(inventory.pagination.pages);},[page,inventory.loading,inventory.pagination.pages]);
+  function load(){inventory.refresh();}
+  useEffect(()=>{
+    if(inventory.data){setProxies(inventory.rows);setLoading(false);setLoadError("");}
+    else if(inventory.error){setLoading(false);setLoadError(inventory.error);}
+  },[inventory.data,inventory.rows,inventory.error,setProxies,setLoading]);
+  useEffect(()=>{
+    if(!active)return;const controller=new AbortController();
+    axios.get(apiRoutes.authSettings,{signal:controller.signal}).then(response=>setSettings(response.data || {})).catch(()=>{});
+    return()=>controller.abort();
+  },[active,setSettings]);
   useCreateFromUrl("proxies", create, active && !compact && !loading);
   useEffect(() => { if (!active) { onEditorOpenChange?.(false); setOpened(false); } }, [active, onEditorOpenChange]);
   useEffect(() => {
     if (!compact && typeof router.query.search === "string") setQuery(router.query.search);
   }, [router.query.search, compact]);
   useEffect(() => { setPage(1); }, [query, status, group, machine, sort, groupBy, pageSize, machineId, connectionId]);
-  const scoped = useMemo(() => proxies.filter(p => (!machineId || proxyBindings(p).some(b=>b.connection?.machine_id === machineId))
-    && (!connectionId || proxyBindings(p).some(b=>b.connection?.data_id === connectionId))), [proxies, machineId, connectionId]);
-  const groups = [...new Set(scoped.map(p => p.group || "").filter(Boolean))].sort();
-  const candidates = useMemo(() => selectProxies(scoped, { query, status, group, machine, sort: isTrafficSort(sort) ? "name" : sort }), [scoped, query, status, group, machine, sort]);
-  const totalPages = Math.max(1, Math.ceil(candidates.length / pageSize));
-  const currentPage = Math.min(page, totalPages);
-  const trafficTargets = isTrafficSort(sort) ? candidates : candidates.slice((currentPage - 1) * pageSize, currentPage * pageSize);
-  const traffic = useTrafficSnapshot({ ids: trafficTargets.map(proxy => proxy.connection?.data_id || proxy.connection?._id), enabled: active && !loading });
-  const trafficById = new Map(traffic.rows.map(row=>[row.connection?._id,row.traffic]));
-  const trafficMetrics = useMemo(()=>new Map(traffic.rows.map(row=>[row.connection?._id,trafficSummary(row.traffic,30)])),[traffic.rows]);
-  const filtered = useMemo(()=>isTrafficSort(sort) ? selectProxies(scoped,{query,status,group,machine,sort,trafficById:trafficMetrics}) : candidates,[sort,scoped,query,status,group,machine,trafficMetrics,candidates]);
-  const visible = filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const hasFilters=Boolean(query.trim() || status!=="all" || group!=="all" || machine!=="all");
+  const scoped=proxies;
+  const groups=[...new Set(proxies.map(p=>p.group || "").filter(Boolean))].sort();
+  const filtered=proxies;
+  const totalPages=inventory.pagination.pages;
+  const currentPage=Math.min(page,totalPages);
+  const visible=proxies;
+  const activity = useProxyActivity({ids: visible.map(proxy => proxy._id), enabled: active});
+  const activityById = new Map(activity.data.map(metric => [metric.route_id, metric]));
+  const traffic=useTrafficSnapshot({ids:visible.map(proxy=>proxy.connection?.data_id || proxy.connection?._id),enabled:active && !loading});
+  const trafficById=new Map(traffic.rows.map(row=>[row.connection?._id,row.traffic]));
+  const connectionIds=visible.map(proxy=>proxy.connection?.machine_id).filter(Boolean);
+  const statusIds=[...new Set(connectionIds)].sort().join(",");
+  const presence=useInventoryPage("status",{ids:statusIds},{enabled:active && !!statusIds,ttl:15000});
+  useBackgroundRefresh(presence.refresh,{enabled:active && !!statusIds,refreshKey:statusIds,interval:15000});
+  const machines=presence.rows;
+  const connections=traffic.rows.map(row=>row.connection);
+
   const sections = new Map();
   const rowInteraction = proxy => ({
     tabIndex: proxy.temporary ? -1 : 0,
@@ -114,7 +118,7 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
   });
   function create() {
     const port = connections.find(c => c._id === connectionId && !c.temporary) || connections.find(c => c.machine_id === machineId && !c.temporary);
-    setEditing(machineId && port ? { target_mode: "connection", connection: { data_id: port._id } } : null);
+    setEditing(machineId ? {target_mode:"connection",connection:{data_id:connectionId || "",machine_id:machineId}} : null);
     changeEditor(true);
   }
   async function save(payload) {
@@ -149,9 +153,9 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
       status={<StatusTabs label="Proxy status" value={status} onChange={setStatus} options={[{value:"all",label:"All"},{value:"enabled",label:"Enabled"},{value:"disabled",label:"Disabled"}]} />}
       filtered={group !== "all" || machine !== "all" || sort !== "name" || groupBy !== "none"}
       filters={[
-        {label:"Group",control:<SearchSelect label="Filter proxy group" value={group} onChange={setGroup} options={[{value:"all",label:"All groups"},{value:"",label:"Ungrouped"},...groups.map(g=>({value:g,label:g}))]} />},
+        {label:"Group",control:<InventorySelect kind="proxy-groups" label="Filter proxy group" value={group} onChange={setGroup} selected={group} extraOptions={[{value:"all",label:"All groups"},{value:"",label:"Ungrouped"}]} />},
         {label:"Sort proxies",control:<SearchSelect label="Sort proxies" value={sort} onChange={setSort} options={[...INVENTORY_SORT_OPTIONS,{value:"updated",label:"Recently updated"},{value:"status",label:"Enabled first"}]} />},
-        {label:"Machine",advanced:true,control:<SearchSelect label="Filter proxy machine" value={machine} onChange={setMachine} options={[{value:"all",label:"All machines"},{value:"manual",label:"Manual targets"},...machines.map(m=>({value:m._id,label:m.name}))]} />},
+        {label:"Machine",advanced:true,control:<InventorySelect kind="machines" label="Filter proxy machine" value={machine} onChange={setMachine} extraOptions={[{value:"all",label:"All machines"},{value:"manual",label:"Standalone URLs"}]} />},
         {label:"Group rows",advanced:true,control:<SearchSelect label="Group proxies by" value={groupBy} onChange={setGroupBy} options={[{value:"none",label:"No grouping"},{value:"group",label:"Group by project"},{value:"machine",label:"Group by machine"},{value:"domain",label:"Group by domain"}]} />},
       ]}
       primaryActions={createButton}
@@ -163,18 +167,18 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
     </div>}
     {loadError ? <EmptyState icon={IconWorld} title="Proxies unavailable" description={loadError} action={<button className="action-secondary" onClick={load}>Try again</button>} />
       : loading ? <div role="status" className="surface p-8 text-sm text-muted-foreground">Loading proxies…</div>
-      : !filtered.length ? <EmptyState icon={IconWorld} title={scoped.length ? "No matching proxies" : "Your services, one address away"} description={scoped.length ? "Try another hostname, service, machine, or port, or clear your filters." : "Create a public address linked to a machine port or an HTTP target."} action={scoped.length ? <button className="action-secondary" onClick={reset}>Clear filters</button> : undefined} />
+      : !filtered.length ? <EmptyState icon={IconWorld} title={hasFilters ? "No matching proxies" : "Your services, one address away"} description={hasFilters ? "Try another hostname, service, machine, or port, or clear your filters." : "Create a public address linked to a machine port or an HTTP target."} action={hasFilters ? <button className="action-secondary" onClick={reset}>Clear filters</button> : undefined} />
       : <div className="proxy-results overflow-hidden rounded-xl bg-surface"><div className="data-scroll">{[...sections].map(([label, entries]) => <section key={label}>
         {groupBy !== "none" && <h2 className="flex items-center gap-2 bg-muted px-4 py-2 text-xs font-semibold"><IconFolder size={14} />{label}<span className="ml-auto text-muted-foreground">{entries.length}</span></h2>}
         <div className="hidden md:block"><Table aria-label="Web proxies"><TableHeader><TableRow><TableHead className="w-[30%]">Hostname</TableHead><TableHead className="w-[25%]">Routing</TableHead><TableHead>Bindings</TableHead><TableHead className="hidden w-48 lg:table-cell"><span title="All traffic on the linked machine port; not individual HTTP requests">Linked port traffic</span></TableHead></TableRow></TableHeader><TableBody>{entries.map(p => <TableRow key={p._id} {...rowInteraction(p)} className={p.temporary ? "bg-amber-500/[0.04]" : "cursor-pointer focus-visible:bg-accent/40"}>
           <TableCell>{host(p)}<div className="pl-4"><ProxyActivity group={p.group} metric={activityById.get(p._id)} activity={activity} /></div></TableCell>
-          <TableCell><p className="truncate text-sm font-medium">{routingLabel(p.routing)}</p><p className="mt-1 text-xs text-muted-foreground">{proxyBindings(p).length} {proxyBindings(p).length===1 ? "binding" : "bindings"}{health.available && health.data?.[p._id] ? ` · ${health.data[p._id].filter(b=>b.state==="healthy").length} healthy` : ""}</p></TableCell>
+          <TableCell><p className="truncate text-sm font-medium">{routingLabel(p.routing)}</p><p className="mt-1 text-xs text-muted-foreground">{(p.bindings_count ?? proxyBindings(p).length)} {(p.bindings_count ?? proxyBindings(p).length)===1 ? "binding" : "bindings"}{health.available && health.data?.[p._id] ? ` · ${health.data[p._id].healthy ?? 0} healthy` : ""}</p></TableCell>
           <TableCell><ProxyDestinations proxy={p} /></TableCell>
           <TableCell className="hidden lg:table-cell">{p.connection ? <TrafficSparkline samples={trafficById.get(p.connection.data_id || p.connection._id) || []} label="Linked port traffic" /> : <span className="text-xs text-muted-foreground">Standalone target</span>}</TableCell>
         </TableRow>)}</TableBody></Table></div>
-        <div className="md:hidden">{entries.map(p => <div className={`proxy-row-mobile ${p.temporary ? "" : "cursor-pointer"} focus-visible:bg-accent/40`} key={p._id} {...rowInteraction(p)}><div className="min-w-0 flex-1">{host(p)}<div className="pl-4"><ProxyActivity metric={activityById.get(p._id)} activity={activity} /></div><div className="mt-2 pl-4"><p className="mb-1 text-[11px] text-muted-foreground">{routingLabel(p.routing)} · {proxyBindings(p).length} {proxyBindings(p).length===1 ? "binding" : "bindings"}</p><ProxyDestinations proxy={p} /></div></div></div>)}</div>
+        <div className="md:hidden">{entries.map(p => <div className={`proxy-row-mobile ${p.temporary ? "" : "cursor-pointer"} focus-visible:bg-accent/40`} key={p._id} {...rowInteraction(p)}><div className="min-w-0 flex-1">{host(p)}<div className="pl-4"><ProxyActivity metric={activityById.get(p._id)} activity={activity} /></div><div className="mt-2 pl-4"><p className="mb-1 text-[11px] text-muted-foreground">{routingLabel(p.routing)} · {(p.bindings_count ?? proxyBindings(p).length)} {(p.bindings_count ?? proxyBindings(p).length)===1 ? "binding" : "bindings"}</p><ProxyDestinations proxy={p} /></div></div></div>)}</div>
       </section>)}</div>
-      <ResultsPagination count={filtered.length} noun="Proxies" page={currentPage} pages={totalPages} pageSize={pageSize} onPage={setPage} onPageSize={setPageSize} />
+      <ResultsPagination count={inventory.pagination.total} noun="Proxies" page={currentPage} pages={totalPages} pageSize={pageSize} onPage={setPage} onPageSize={setPageSize} />
     </div>}
     <ProxyConfigModal opened={opened} onClose={() => changeEditor(false)} onSubmit={save} onDelete={remove} proxy={editing} connections={connections.filter(c=>!c.temporary)} machines={machines} health={health} defaultDomainSuffix={settings.web_proxy_domain_suffix || ""} serviceDomain={settings.port_hub_service_domain || ""} isSaving={saving} isDeleting={deleting} />
   </div>;
@@ -192,11 +196,11 @@ function ProxyHost({ proxy: p, connection, machine, onCopy, health }) {
   else if (machineStatus === "online") status = "Enabled · Machine online";
   else if (port) { status = "Machine status unknown"; color = "bg-amber-600 dark:bg-amber-400"; }
   if(p.enabled !== false && Array.isArray(p.bindings)) {
-    const states=health?.available ? health.data?.[p._id] || [] : [];
-    const healthy=states.filter(b=>b.state==="healthy").length;
-    const unknown=states.filter(b=>b.state==="unknown").length;
-    status=healthy ? `${healthy} healthy bindings` : unknown || !states.length ? "Binding health not yet available" : "No healthy bindings";
-    color=healthy ? "bg-emerald-600 dark:bg-emerald-400" : unknown || !states.length ? "bg-zinc-500" : "bg-red-600 dark:bg-red-400";
+    const states=health?.available ? health.data?.[p._id] : null;
+    const healthy=Array.isArray(states) ? states.filter(b=>b.state==="healthy").length : states?.healthy || 0;
+    const unknown=Array.isArray(states) ? states.filter(b=>b.state==="unknown").length : states?.unknown || 0;
+    status=healthy ? `${healthy} healthy bindings` : unknown || !states || (Array.isArray(states) ? !states.length : !states.total) ? "Binding health not yet available" : "No healthy bindings";
+    color=healthy ? "bg-emerald-600 dark:bg-emerald-400" : unknown || !states || (Array.isArray(states) ? !states.length : !states.total) ? "bg-zinc-500" : "bg-red-600 dark:bg-red-400";
   }
   const url = `${p.entry_points?.includes("websecure") ? "https" : "http"}://${p.hosts?.[0] || p.name}`;
   return <div className="flex min-w-0 flex-wrap items-center gap-2"><span role="img" aria-label={status} title={status} className={`h-2 w-2 shrink-0 rounded-full ${color}`} /><a className="inline-flex min-w-0 max-w-full items-center gap-1 truncate text-[15px] font-medium text-blue-600 hover:underline dark:text-blue-400" href={url} target="_blank" rel="noreferrer"><span className="truncate">{p.hosts?.[0] || p.name}</span>{p.hosts?.length > 1 && <span className="text-[10px] text-muted-foreground">+{p.hosts.length - 1}</span>}<IconArrowUpRight size={12} className="shrink-0 opacity-60" /></a>{p.temporary && <span title="Removed when the PortHub CLI exposure stops or its lease expires" className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-200">Temporary · PortHub agent</span>}<button type="button" onClick={onCopy} aria-label={`Copy proxy URL ${url}`} title="Copy proxy URL" className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"><IconCopy size={14} /></button></div>;
@@ -204,5 +208,5 @@ function ProxyHost({ proxy: p, connection, machine, onCopy, health }) {
 
 function ProxyDestinations({proxy}) {
   const bindings=proxyBindings(proxy);
-  return <div className="min-w-0 space-y-1">{bindings.slice(0,2).map(b=><p key={b.id} className="truncate text-xs text-muted-foreground" title={bindingTitle(b)}>{bindingTitle(b)}</p>)}{bindings.length>2 && <p className="text-[11px] text-muted-foreground">+{bindings.length-2} more</p>}</div>;
+  return <div className="min-w-0 space-y-1">{bindings.slice(0,2).map(b=><p key={b.id} className="truncate text-xs text-muted-foreground" title={bindingTitle(b)}>{bindingTitle(b)}</p>)}{(proxy.bindings_count ?? bindings.length)>2 && <p className="text-[11px] text-muted-foreground">+{(proxy.bindings_count ?? bindings.length)-2} more</p>}</div>;
 }

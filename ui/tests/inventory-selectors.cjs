@@ -1,0 +1,47 @@
+const assert=require('node:assert/strict'),fs=require('node:fs');
+const {launchBrowser,navigateWorkspace}=require('./browser.cjs');
+(async()=>{
+ const f=JSON.parse(fs.readFileSync(process.env.INVENTORY_FIXTURE || '/tmp/porthub-inventory-fixture/fixture.json','utf8'));
+ const origin=process.env.REVIEW_ORIGIN || 'http://127.0.0.1:3114',browser=await launchBrowser();
+ try{
+  const context=await browser.newContext({viewport:{width:402,height:1000}});
+  await context.addCookies([{name:'porthub_session',value:f.cookie,url:origin}]);
+  const page=await context.newPage(),requests=[],errors=[];
+  page.on('request',request=>{if(new URL(request.url()).pathname.startsWith('/api/inventory/'))requests.push(new URL(request.url()));});
+  page.on('pageerror',error=>errors.push(error.message));
+  await page.goto(`${origin}/home?view=access`);
+  await page.getByRole('button',{name:'Policy',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'New Policy',exact:true});
+  const groups=dialog.getByLabel('Policy group',{exact:true});await groups.click();
+  await page.getByRole('option',{name:'Group 000',exact:true}).waitFor();
+  assert.equal(await page.getByRole('option').count(),20);
+  await page.getByRole('button',{name:'Load more results',exact:true}).click();
+  await page.getByRole('option',{name:'Group 039',exact:true}).click();
+  assert.equal(await groups.inputValue(),'Group 039');
+  await groups.click();await groups.fill('Group 124');
+  await page.getByRole('option',{name:'Group 124',exact:true}).click();
+  assert.equal(await groups.inputValue(),'Group 124');
+  const source=dialog.getByLabel('Source entities',{exact:true});await source.click();await source.fill('Group · Group 124');
+  await page.getByRole('option',{name:'Group · Group 124',exact:true}).click();
+  if(await page.getByRole('listbox').isVisible().catch(()=>false))await page.keyboard.press('Escape');
+  await source.click();await source.fill('Reid');
+  await page.getByRole('option',{name:'Machine · Reid',exact:true}).click();if(await page.getByRole('listbox').isVisible().catch(()=>false))await page.keyboard.press('Escape');
+  assert(await dialog.getByText('Group · Group 124',{exact:true}).isVisible(),'Selection must survive a different query page');
+  assert(await dialog.getByText('Machine · Reid',{exact:true}).isVisible());
+  assert(requests.some(url=>url.pathname.endsWith('/access-groups') && url.searchParams.get('page')==='2'));
+  assert(requests.filter(url=>url.searchParams.get('options')==='true' && !url.searchParams.get('ids')).every(url=>Number(url.searchParams.get('page_size'))<=20));
+  await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
+  await page.getByRole('button',{name:'Discard Changes',exact:true}).click();
+  await navigateWorkspace(page,'Platform');
+  await page.getByRole('heading',{name:'Platform Overview',exact:true}).waitFor();
+  const search=page.getByLabel('Search platform',{exact:true});await search.fill('Inventory review');
+  const expand=page.locator('[aria-label="View machines for Inventory review"]:visible');await expand.waitFor();
+  const before=requests.length;await expand.click();
+  await page.getByLabel('Search account machines',{exact:true}).locator('visible=true').waitFor();
+  await page.getByText('A large inventory target',{exact:true}).locator('visible=true').waitFor();
+  const children=requests.slice(before).filter(url=>url.pathname==='/api/inventory/machines');
+  assert(children.length>0);assert(children.every(url=>url.searchParams.get('account')===f.owner && url.searchParams.get('page_size')==='10'));
+  assert.deepEqual(errors,[]);assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+  console.log('PASS real selectors/admin: 20-option pages, on-demand load more/search, multiple retained selections, account-scoped child pages');
+ }finally{await browser.close();}
+})().catch(error=>{console.error(error);process.exitCode=1;});

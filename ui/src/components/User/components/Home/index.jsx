@@ -1,3 +1,9 @@
+import useTrafficPage from "@/shared/hooks/useTrafficPage";
+import useInventoryPage from "@/shared/hooks/useInventoryPage";
+import useBackgroundRefresh from "@/shared/hooks/useBackgroundRefresh";
+import InventorySelect from "@/components/ui/inventory-select";
+import { portDraftChanges } from "@/shared/utils/port-draft-changes.mjs";
+import { mapConnectionToForwardingConfig } from "@/shared/utils/connection-draft.mjs";
 import { useWorkspaceState } from "@/shared/contexts/workspaceCache";
 import ResultsPagination from "@/components/ui/results-pagination";
 import { normalizeTrafficSamples, trafficSummary } from "@/shared/utils/traffic.mjs";
@@ -76,62 +82,6 @@ const formatRelativeFromNow = (parsed) => {
 
   const daysAgo = Math.floor(hoursAgo / 24);
   return daysAgo === 1 ? "1 day ago" : `${daysAgo} days ago`;
-};
-
-const readConnectionValue = (connection, snakeKey, camelKey, fallback = "") => {
-  const snakeValue = connection[snakeKey];
-  if (snakeValue !== undefined && snakeValue !== null && snakeValue !== "") {
-    return snakeValue;
-  }
-
-  const camelValue = connection[camelKey];
-  if (camelValue !== undefined && camelValue !== null && camelValue !== "") {
-    return camelValue;
-  }
-
-  return fallback;
-};
-
-const mapConnectionToForwardingConfig = (connection) => {
-  const autoRefreshIntervalMinutes =
-    connection.autoRefreshIntervalMinutes ??
-    connection.auto_refresh_interval_minutes;
-
-  return {
-    dataId: connection._id || connection.dataId,
-    serviceName: connection.service_name || connection.serviceName || "",
-    serviceDescription:
-      connection.service_description || connection.serviceDescription || "",
-    internalIp: connection.internal_ip || connection.internalIp || "0.0.0.0",
-    internalPort: readConnectionValue(connection, "internal_port", "internalPort"),
-    externalPort: readConnectionValue(connection, "external_port", "externalPort"),
-    externalBindIp: connection.external_bind_ip || connection.externalBindIp || "0.0.0.0",
-    temporary: connection.temporary === true,
-    publicAccess: connection.public_access || connection.publicAccess || { mode: "off" },
-    managedBy: connection.managed_by || connection.managedBy || "",
-    enabled: connection.enabled ?? true,
-    autoRefreshEnabled:
-      connection.autoRefreshEnabled ?? connection.auto_refresh_enabled ?? false,
-    autoRefreshIntervalMinutes:
-      autoRefreshIntervalMinutes === undefined ||
-      autoRefreshIntervalMinutes === null ||
-      autoRefreshIntervalMinutes === ""
-        ? 60
-        : autoRefreshIntervalMinutes,
-    autoRefreshedAt:
-      connection.autoRefreshedAt || connection.auto_refreshed_at || null,
-    autoRefreshNextAt:
-      connection.autoRefreshNextAt || connection.auto_refresh_next_at || null,
-    firewall: {
-      isPublic:
-        connection.firewall?.isPublic ?? connection.firewall?.is_public ?? true,
-      allowedIps: Array.isArray(connection.firewall?.allowedIps)
-        ? connection.firewall.allowedIps
-        : Array.isArray(connection.firewall?.allowed_ips)
-          ? connection.firewall.allowed_ips
-          : [],
-    },
-  };
 };
 
 const mergeMachineTrafficSamples = samples => normalizeTrafficSamples(samples, 30);
@@ -252,7 +202,10 @@ const mapMachineToHost = (machine) => ({
   clientUpdateAvailable: machine.client_update_available ?? false,
   clientUpdateRequested: machine.client_update_requested ?? false,
   clientUpdateTargetVersion: machine.client_update_target_version || "",
-  numPorts: 0,
+  numPorts: machine.num_ports ?? 0,
+  portsTotal: machine.ports_total ?? machine.num_ports ?? 0,
+  defaultPrivateDomain: machine.default_private_domain || "",
+  groupLabels: machine.group_labels || [],
   lastSeenAt: machine.last_seen_at || null,
   lastSeen: formatLastSeen(machine),
   forwardingConfigs: [],
@@ -265,7 +218,8 @@ const mergeMachineIntoHost = (host, machine) => {
   return {
     ...currentVersionState,
     privateIps: Array.isArray(machine.private_ips) ? machine.private_ips : (host?.privateIps || []),
-    numPorts: host?.numPorts ?? 0,
+    numPorts: machine.num_ports ?? host?.numPorts ?? 0,
+    portsTotal: machine.ports_total ?? host?.portsTotal ?? 0,
     forwardingConfigs: host?.forwardingConfigs ?? [],
   };
 };
@@ -296,12 +250,13 @@ export default function Home({ onStatsChange, active = true }) {
   const isDark = colorScheme === "dark";
   const socket = useContext(SocketContext);
   const [hosts, setHosts] = useWorkspaceState("machines.hosts", []);
-  const [privateAccess] = useWorkspaceState("access.data", null);
+  const privateMetadata=useInventoryPage("access-summary",{}, {enabled:active});
+  const privateAccess=privateMetadata.data?.data;
+  const [workspaceSummary] = useWorkspaceState("inventory.summary", null);
   const [selectedHostId, setSelectedHostId] = useState(null);
   const [inventoryRefresh, setInventoryRefresh] = useState(0);
   const refreshPorts = useCallback(() => setInventoryRefresh(value => value + 1), []);
   const [configStartSection, setConfigStartSection] = useState("groups");
-  const [isLoading, setIsLoading] = useWorkspaceState("machines.loading", true);
   const [isSaving, setIsSaving] = useState(false);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isCreatingMachine, setIsCreatingMachine] = useState(false);
@@ -322,6 +277,59 @@ export default function Home({ onStatsChange, active = true }) {
     if (["online", "offline", "disabled"].includes(router.query.status)) setStatusFilter(String(router.query.status));
   }, [router.query.machine, router.query.status]);
 
+  const inventory = useInventoryPage("machines", {
+    q: query, page, page_size: Number(pageSize), sort,
+    status: statusFilter === "all" ? "enabled" : statusFilter, group: groupFilter,
+  }, { enabled: active });
+  const detailInventory = useInventoryPage("machines", { ids: selectedHostId || "", page_size: 1 }, {
+    enabled: active && !!selectedHostId && !inventory.rows.some(row => row._id === selectedHostId),
+  });
+  const visibleIds = inventory.rows.map(row => row._id).sort().join(",");
+  const statusInventory = useInventoryPage("status", { ids: visibleIds }, { enabled: active && !!visibleIds, ttl: 15000 });
+  useBackgroundRefresh(statusInventory.refresh, { enabled: active && !!visibleIds, preload: false, refreshKey: visibleIds });
+  useBackgroundRefresh(inventory.refresh, {enabled:active && isTrafficSort(sort),interval:5000,refreshKey:sort});
+  const refreshInventory=inventory.refresh;
+  const refreshDetailInventory=detailInventory.refresh;
+  const refreshPresence=statusInventory.refresh;
+  const [hasLoadedInventory,setHasLoadedInventory]=useState(false);
+  useEffect(()=>{if(inventory.data)setHasLoadedInventory(true);},[inventory.data]);
+  const isLoading=inventory.loading && !hasLoadedInventory;
+  useEffect(() => {
+    if (!inventory.data) return;
+    setHosts(previous => {
+      const old = new Map(previous.map(host => [host.id, host]));
+      const ports = inventory.data.connections || [];
+      const rows = inventory.rows.map(machine => ({
+        ...mergeMachineIntoHost(old.get(machine._id), machine),
+        numPorts: machine.num_ports || 0,
+        forwardingConfigs: ports.filter(port => port.machine_id === machine._id).map(mapConnectionToForwardingConfig),
+      }));
+      const selected = old.get(selectedHostId);
+      if (selected && !rows.some(host => host.id === selectedHostId)) rows.push(selected);
+      return rows;
+    });
+  }, [inventory.data, inventory.rows, selectedHostId, setHosts]);
+  useEffect(() => {
+    const machine = detailInventory.rows.find(row => row._id === selectedHostId);
+    if (!machine) return;
+    setHosts(previous => [...previous.filter(host => host.id !== machine._id), {
+      ...mapMachineToHost(machine),
+      numPorts: machine.num_ports || 0,
+      forwardingConfigs: (detailInventory.data.connections || []).map(mapConnectionToForwardingConfig),
+    }]);
+  }, [detailInventory.data, detailInventory.rows, selectedHostId, setHosts]);
+  useEffect(() => {
+    if (!statusInventory.data) return;
+    const states = new Map(statusInventory.rows.map(row => [row._id, row]));
+    setHosts(previous => previous.map(host => {
+      const row = states.get(host.id);
+      return row ? { ...host, enabled: row.enabled, connectionStatus: row.connection_status,
+        isActive: row.is_active, lastSeenAt: row.last_seen_at, lastSeen: formatLastSeen(row),
+        clientVersion: row.client_version, clientUpdateAvailable: row.client_update_available,
+        latestClientVersion: row.latest_client_version, clientUpdateRequested: row.client_update_requested } : host;
+    }));
+  }, [statusInventory.data, statusInventory.rows, setHosts]);
+  useEffect(() => { if (inventoryRefresh) { refreshInventory(); refreshDetailInventory(); } }, [inventoryRefresh, refreshInventory, refreshDetailInventory]);
   const selectedHost = hosts.find((host) => host.id === selectedHostId) || null;
   const selectedGroupFilterLabel = useMemo(() => {
     if (groupFilter === ALL_GROUPS_FILTER) {
@@ -344,56 +352,16 @@ export default function Home({ onStatsChange, active = true }) {
     [hosts, machineGroups]
   );
 
-  const machineTrafficMetrics = useMemo(() => isTrafficSort(sort)
-    ? new Map(hosts.map(host => [host.id, trafficSummary(machineTrafficByHostId[host.id] || [], 30)]))
-    : new Map(), [hosts, machineTrafficByHostId, sort]);
-  const filteredHosts = useMemo(
-    () =>
-      hosts.filter((host) => {
-        if (!Number.isFinite(searchScore(query, [host.name, host.hostname, host.localIp, host.publicIp, ...(host.privateIps || []), ...(host.forwardingConfigs || []).flatMap(c => [c.serviceName, c.internalPort, c.externalPort])]))) return false;
-        const disabled = host.enabled === false || host.connectionStatus === "disabled";
-        const matchesStatus =
-          statusFilter === "all"
-            ? !disabled
-            : statusFilter === "disabled"
-              ? disabled
-              : statusFilter === "online"
-                ? host.isActive
-                : !host.isActive;
-
-        if (!matchesStatus) {
-          return false;
-        }
-
-        if (groupFilter === ALL_GROUPS_FILTER) {
-          return true;
-        }
-
-        const hostGroupIds = Array.isArray(host.groupIds) ? host.groupIds : [];
-        return hostGroupIds.includes(groupFilter);
-      }).sort((a, b) => {
-        const entry = host => ({ id: host.id, name: host.name, createdAt: host.createdAt, traffic: machineTrafficMetrics.get(host.id) });
-        return compareInventoryEntries(entry(a), entry(b), sort);
-      }),
-    [groupFilter, hosts, statusFilter, query, sort, machineTrafficMetrics]
-  );
-
   const numericPageSize = Number(pageSize);
-  const totalPages = Math.max(1, Math.ceil(filteredHosts.length / numericPageSize));
-  const paginatedHosts = useMemo(
-    () =>
-      filteredHosts.slice(
-        (page - 1) * numericPageSize,
-        page * numericPageSize
-      ),
-    [filteredHosts, numericPageSize, page]
-  );
+  const totalPages = inventory.pagination.pages;
+  const filteredHosts = inventory.rows.map(row => hosts.find(host => host.id === row._id)).filter(Boolean);
+  const paginatedHosts = filteredHosts;
 
   useEffect(() => {
-    if (page > totalPages) {
+    if (!inventory.loading && page > totalPages) {
       setPage(totalPages);
     }
-  }, [page, totalPages]);
+  }, [page, totalPages, inventory.loading]);
 
   useEffect(() => {
     if (!active) return undefined;
@@ -423,200 +391,33 @@ export default function Home({ onStatsChange, active = true }) {
           : "Never seen",
       }))
     );
-  }, [lastSeenRefreshTick]);
+  }, [lastSeenRefreshTick, setHosts]);
 
   useEffect(() => {
     setPage(1);
   }, [groupFilter, pageSize, statusFilter, query, sort]);
 
   useEffect(() => {
-    if (
-      groupFilter !== ALL_GROUPS_FILTER &&
-      !machineGroups.some((group) => group._id === groupFilter)
-    ) {
-      setGroupFilter(ALL_GROUPS_FILTER);
-    }
-  }, [groupFilter, machineGroups]);
+    if (!socket || !active) return;
+    const reconnect = () => { refreshInventory(); refreshPresence(); };
+    const statusChanged = ({ machine } = {}) => {
+      if (!machine?._id) return;
+      // An off-page machine can enter the current presence-filtered result.
+      if (["online", "offline"].includes(statusFilter)) refreshInventory();
+      if (visibleIds.split(",").includes(machine._id)) refreshPresence();
+    };
+    socket.on("connect", reconnect);
+    socket.on(socketRoutes.stcMachineStatusChanged, statusChanged);
+    return () => { socket.off("connect", reconnect); socket.off(socketRoutes.stcMachineStatusChanged, statusChanged); };
+  }, [socket, active, visibleIds, statusFilter, refreshInventory, refreshPresence]);
 
+  const fleetTraffic = useTrafficPage({ids: visibleIds, seconds: 30}, {enabled: active && !!visibleIds, kind: "machine-traffic"});
   useEffect(() => {
-    if (!onStatsChange) {
-      return;
-    }
-
-    let online = 0;
-    let offline = 0;
-
-    hosts.forEach((host) => {
-      if (host.isActive) {
-        online += 1;
-      } else {
-        offline += 1;
-      }
-    });
-
-    onStatsChange({
-      registered: hosts.length,
-      online,
-      offline,
-    });
-  }, [hosts, onStatsChange]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    const loadData = async () => {
-      try {
-        const [machinesResponse, connectionsResponse, groupsResponse] = await Promise.all([
-          axios.get(apiRoutes.listMachines, { signal: controller.signal }),
-          axios.get(apiRoutes.listConnections, { signal: controller.signal }),
-          axios.get(apiRoutes.listGroups, { signal: controller.signal }).catch(() => ({ data: { data: [] } })),
-        ]);
-
-        if (controller.signal.aborted) return;
-
-        const machines = machinesResponse.data?.data || [];
-        const connections = connectionsResponse.data?.data || [];
-        setMachineGroups(groupsResponse.data?.data || []);
-
-        setHosts((currentHosts) => {
-          const previousHosts = new Map(currentHosts.map((host) => [host.id, host]));
-          return machines.map((machine) => {
-            const hostConnections = connections.filter(
-              (item) => item.machine_id === machine._id
-            );
-
-            return {
-              ...mergeMachineIntoHost(previousHosts.get(machine._id), machine),
-              numPorts: hostConnections.filter((item) => item.enabled !== false).length,
-              forwardingConfigs: hostConnections.map(mapConnectionToForwardingConfig),
-            };
-          });
-        });
-      } catch (loadError) {
-        if (axios.isCancel(loadError)) return;
-        if (loadError?.response?.data?.detail !== "User not logged in") {
-          error("Could not load saved machines");
-        }
-      } finally {
-        if (!controller.signal.aborted) setIsLoading(false);
-      }
-    };
-
-    loadData();
-    return () => controller.abort();
-  }, []);
-
-  useEffect(() => {
-    if (!socket) {
-      return undefined;
-    }
-
-    const requestMachineStatusSnapshot = () => {
-      socket.emit(socketRoutes.ctsMachineStatusSnapshot);
-    };
-
-    const handleMachineStatusSnapshot = (payload) => {
-      const machines = payload?.machines || [];
-
-      if (machines.length === 0) {
-        return;
-      }
-
-      setHosts((currentHosts) =>
-        machines.reduce(
-          (nextHosts, machine) => upsertHostWithMachine(nextHosts, machine),
-          currentHosts
-        )
-      );
-    };
-
-    const handleMachineStatusChanged = (payload) => {
-      const machine = payload?.machine;
-
-      if (!machine?._id) {
-        return;
-      }
-
-      setHosts((currentHosts) => upsertHostWithMachine(currentHosts, machine));
-    };
-
-    if (socket.connected) {
-      requestMachineStatusSnapshot();
-    }
-
-    const snapshotIntervalId = active ? window.setInterval(() => {
-      if (socket.connected) requestMachineStatusSnapshot();
-    }, 30 * 1000) : null;
-
-    socket.on("connect", requestMachineStatusSnapshot);
-    socket.on(socketRoutes.stcMachineStatusSnapshot, handleMachineStatusSnapshot);
-    socket.on(socketRoutes.stcMachineStatusChanged, handleMachineStatusChanged);
-
-    return () => {
-      window.clearInterval(snapshotIntervalId);
-      socket.off("connect", requestMachineStatusSnapshot);
-      socket.off(socketRoutes.stcMachineStatusSnapshot, handleMachineStatusSnapshot);
-      socket.off(socketRoutes.stcMachineStatusChanged, handleMachineStatusChanged);
-    };
-  }, [socket, active]);
-
-  // Port inventory changes independently of presence (CLI exposures, expiry,
-  // and edits in another browser). Coalesce bursts without polling while idle.
-  useEffect(() => {
-    if (!socket) return;
-    const controller = new AbortController();
-    let running = false;
-    let pending = false;
-    let timer;
-    const refresh = async () => {
-      pending = true;
-      if (running) return;
-      running = true;
-      try {
-        while (pending && !controller.signal.aborted) {
-          pending = false;
-          const response = await axios.get(apiRoutes.listConnections, { signal: controller.signal });
-          if (controller.signal.aborted) return;
-          const byMachine = new Map();
-          for (const connection of response.data?.data || []) {
-            const entries = byMachine.get(connection.machine_id) || [];
-            entries.push(mapConnectionToForwardingConfig(connection));
-            byMachine.set(connection.machine_id, entries);
-          }
-          setHosts(current => current.map(host => {
-            const configs = byMachine.get(host.id) || [];
-            if (JSON.stringify(configs) === JSON.stringify(host.forwardingConfigs)) return host;
-            return { ...host, forwardingConfigs: configs, numPorts: configs.filter(config => config.enabled !== false).length };
-          }));
-        }
-      } catch (cause) {
-        // Reconnect, tab activation, or the next notification refreshes again.
-      } finally { running = false; }
-    };
-    const schedule = () => {
-      window.clearTimeout(timer);
-      timer = window.setTimeout(refresh, 100);
-    };
-    const visible = () => { if (active && !document.hidden) schedule(); };
-    socket.on(socketRoutes.stcMachineConnectionsChanged, schedule);
-    socket.on("connect", schedule);
-    document.addEventListener("visibilitychange", visible);
-    if (active && !isLoading) schedule();
-    return () => {
-      controller.abort();
-      window.clearTimeout(timer);
-      socket.off(socketRoutes.stcMachineConnectionsChanged, schedule);
-      socket.off("connect", schedule);
-      document.removeEventListener("visibilitychange", visible);
-    };
-  }, [socket, active, isLoading, inventoryRefresh]);
-
-  // Traffic ordering must rank the entire fleet, not only the current page.
-  // Key requests by stable IDs so sorting a fresh snapshot cannot restart polls.
-  const trafficTargets = (isTrafficSort(sort) ? hosts : paginatedHosts).flatMap(host =>
-    (host.forwardingConfigs || []).filter(config => config.dataId).map(config => [config.dataId, host.id]));
-  const trafficTargetKey = JSON.stringify(trafficTargets.sort(([a], [b]) => a.localeCompare(b)));
+    setMachineTrafficByHostId(Object.fromEntries(fleetTraffic.rows.map(row => [row.connection._id, row.traffic])));
+  }, [fleetTraffic.rows, setMachineTrafficByHostId]);
   const privateDnsSuffix = String(privateAccess?.network?.dns_suffix || "").trim().replace(/^\.+|\.+$/g, "");
   const defaultPrivateDomain = host => {
+    if (host.defaultPrivateDomain) return host.defaultPrivateDomain;
     if (!privateDnsSuffix) return "";
     const peer = (privateAccess?.private_peers || []).find(item => item.machine_id === host.id);
     const label = String(peer?.hostname || "").trim();
@@ -629,84 +430,6 @@ export default function Home({ onStatsChange, active = true }) {
       ? `${first.host}.${first.suffix}`
       : defaultPrivateDomain(host);
   };
-  useEffect(() => {
-    const targets = JSON.parse(trafficTargetKey);
-    if (targets.length === 0) {
-      setMachineTrafficByHostId({});
-      return;
-    }
-
-    const hostIdByConnectionId = {};
-    const dataIds = [];
-
-    targets.forEach(([connectionId, hostId]) => {
-      hostIdByConnectionId[connectionId] = hostId;
-      dataIds.push(connectionId);
-    });
-
-    if (dataIds.length === 0) {
-      setMachineTrafficByHostId(
-        {}
-      );
-      return;
-    }
-
-    let isActive = true;
-    const controller = new AbortController();
-    let timeout;
-
-    const loadMachineTraffic = async () => {
-      try {
-        const response = await axios.post(apiRoutes.trafficSnapshot, {
-          data_ids: dataIds,
-        }, { signal: controller.signal });
-
-        if (!isActive) {
-          return;
-        }
-
-        const nextTrafficByHostId = Object.fromEntries(
-          [...new Set(targets.map(([, hostId]) => hostId))].map(id => [id, []])
-        );
-
-        (Array.isArray(response.data?.data) ? response.data.data : []).forEach((item) => {
-          const connectionId = item?.connection?._id;
-          const hostId = hostIdByConnectionId[connectionId];
-          if (!hostId) {
-            return;
-          }
-
-          nextTrafficByHostId[hostId] = mergeMachineTrafficSamples([
-            ...(nextTrafficByHostId[hostId] || []),
-            ...(Array.isArray(item?.traffic) ? item.traffic : []),
-          ]);
-        });
-
-        setMachineTrafficByHostId(nextTrafficByHostId);
-      } catch {
-        if (!isActive) {
-          return;
-        }
-
-        setMachineTrafficByHostId((current) =>
-          Object.fromEntries(
-            [...new Set(targets.map(([, hostId]) => hostId))].map(id => [id, current[id] || []])
-          )
-        );
-      } finally {
-        if (isActive && active) timeout = setTimeout(loadMachineTraffic, 2000);
-      }
-    };
-
-    loadMachineTraffic();
-
-    return () => {
-      isActive = false;
-      clearTimeout(timeout);
-      controller.abort();
-    };
-  }, [trafficTargetKey, active]);
-
   const handleOpenConfig = (hostId) => { setConfigStartSection("groups"); setSelectedHostId(hostId); };
 
   const handleCloseConfig = () => { setSelectedHostId(null); setConfigStartSection("groups"); };
@@ -739,29 +462,17 @@ export default function Home({ onStatsChange, active = true }) {
     }
   };
 
-  const handleSaveConfig = async (hostId, forwardingConfigs) => {
+  const handleSaveConfig = async (hostId, forwardingConfigs, baselineConfigs) => {
     const currentHost = hosts.find((host) => host.id === hostId);
     if (!currentHost) {
       return false;
     }
 
-    const currentConfigs = currentHost.forwardingConfigs || [];
-    const currentConfigsById = new Map(
-      currentConfigs.filter((config) => config.dataId).map((config) => [config.dataId, config])
-    );
-    const nextConfigIds = new Set(
-      forwardingConfigs.filter((config) => config.dataId).map((config) => config.dataId)
-    );
-    const configsToDelete = currentConfigs.filter(
-      (config) => config.dataId && !config.temporary && !nextConfigIds.has(config.dataId)
-    );
-    const configsToCreate = forwardingConfigs.filter((config) => !config.dataId && !config.temporary);
-    const configsToUpdate = forwardingConfigs.filter(
-      (config) =>
-        config.dataId &&
-        !config.temporary &&
-        forwardingConfigChanged(currentConfigsById.get(config.dataId), config)
-    );
+    // Only explicitly loaded originals can be updated or deleted. Missing
+    // records on another page are never inferred to be deleted.
+    const currentConfigs = baselineConfigs || currentHost.forwardingConfigs || [];
+    const changes=portDraftChanges(currentConfigs,forwardingConfigs,(a,b)=>!forwardingConfigChanged(a,b));
+    const configsToDelete=changes.deleted,configsToCreate=changes.created,configsToUpdate=changes.updated;
 
     setIsSaving(true);
 
@@ -808,6 +519,7 @@ export default function Home({ onStatsChange, active = true }) {
           const normalizedFirewall = normalizeFirewallPolicy(config);
 
           savedConfigsById.set(config.dataId, {
+            ...config,
             dataId: config.dataId,
             serviceName: config.serviceName,
             serviceDescription: config.serviceDescription,
@@ -935,15 +647,17 @@ export default function Home({ onStatsChange, active = true }) {
           host.id === hostId
             ? {
               ...mergeMachineIntoHost(host, machineResponse.data.data),
-              numPorts: savedConfigs.filter((config) => config.enabled !== false).length,
-              forwardingConfigs: savedConfigs,
+              numPorts: Math.max(0,(host.numPorts || 0)-currentConfigs.filter(c=>c.enabled!==false).length+savedConfigs.filter(c=>c.enabled!==false).length),
+              portsTotal: Math.max(0,(host.portsTotal || 0)-currentConfigs.length+savedConfigs.length),
+              forwardingConfigs: [...(host.forwardingConfigs || []).filter(c=>!currentConfigs.some(original=>original.dataId===c.dataId)),...savedConfigs],
             }
             : host
         )
       );
 
+      refreshPorts();
       success(`Saved port forwarding config for ${currentHost.name}`);
-      return true;
+      return { savedConfigs };
     } catch (saveError) {
       error(saveError?.response?.data?.detail || "Could not save port config");
       return false;
@@ -1212,14 +926,7 @@ export default function Home({ onStatsChange, active = true }) {
           host.id === hostId
             ? {
               ...host,
-              numPorts: (host.forwardingConfigs || []).filter((config) =>
-                config.dataId === refreshedConfig.dataId
-                  ? refreshedConfig.enabled !== false
-                  : config.enabled !== false
-              ).length,
-              forwardingConfigs: (host.forwardingConfigs || []).map((config) =>
-                config.dataId === refreshedConfig.dataId ? refreshedConfig : config
-              ),
+              forwardingConfigs: [...(host.forwardingConfigs || []).filter(config=>config.dataId!==refreshedConfig.dataId),refreshedConfig],
             }
             : host
         )
@@ -1266,8 +973,8 @@ export default function Home({ onStatsChange, active = true }) {
   };
 
   const reloadMachineGroups = async () => {
-    const res = await axios.get(apiRoutes.listGroups);
-    setMachineGroups(res.data?.data || []);
+    inventory.resource.invalidate("groups");
+    inventory.refresh();
   };
 
   const handleCreateGroup = async (name) => {
@@ -1316,13 +1023,14 @@ export default function Home({ onStatsChange, active = true }) {
         <PageHeader eyebrow="Infrastructure" title="Machines" description="Your fleet at a glance. Manage ports, public addresses, and client connections." />
 
         <div className="machine-list-pane flex min-h-0 flex-1 flex-col">
+          {inventory.error && <p role="alert" className="mb-3 text-sm text-red-600 dark:text-red-400">{inventory.error} <button type="button" onClick={inventory.refresh} className="underline">Try again</button></p>}
           {isLoading ? (
             <p className="text-sm text-zinc-500 dark:text-zinc-400">
               Loading machines...
             </p>
           ) : (
             <>
-              {hosts.length === 0 ? (
+              {workspaceSummary?.machines?.total === 0 && !query && groupFilter === "all" && statusFilter === "all" ? (
                 <div className="rounded-2xl border border-dashed border-zinc-300 bg-zinc-50 px-6 py-10 text-center dark:border-zinc-700 dark:bg-zinc-900/60">
                   <p className="text-lg font-medium text-zinc-900 dark:text-zinc-100">
                     No machines yet
@@ -1340,7 +1048,7 @@ export default function Home({ onStatsChange, active = true }) {
                     status={<StatusTabs label="Machine status" value={statusFilter} onChange={setStatusFilter} options={[{value:"all",label:"All"},{value:"online",label:"Online"},{value:"offline",label:"Offline"}]} />}
                     filtered={groupFilter !== ALL_GROUPS_FILTER || sort !== "name"}
                     filters={[
-                      {label:"Group",control:<SearchSelect label="Filter machine group" value={groupFilter} onChange={setGroupFilter} options={[{value:ALL_GROUPS_FILTER,label:"All groups"},...machineGroups.map(group=>({value:group._id,label:group.name}))]} />},
+                      {label:"Group",control:<InventorySelect kind="groups" label="Filter machine group" value={groupFilter} onChange={setGroupFilter} extraOptions={[{value:ALL_GROUPS_FILTER,label:"All groups"}]} />},
                       {label:"Sort machines",control:<SearchSelect label="Sort machines" value={sort} onChange={setSort} options={INVENTORY_SORT_OPTIONS} />},
                     ]}
                     secondaryActions={<WorkspaceButton variant="secondary" aria-label="Groups" onClick={()=>setIsGroupsModalOpen(true)}><IconFolder size={16} />Groups</WorkspaceButton>}
@@ -1349,7 +1057,7 @@ export default function Home({ onStatsChange, active = true }) {
 
                   <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-surface">
 
-                    {paginatedHosts.length > 0 ? (
+                    {inventory.loading ? <p role="status" className="p-5 text-sm text-muted-foreground">Loading matches…</p> : paginatedHosts.length > 0 ? (
                       <div
                         className="data-scroll"
                         style={{ scrollbarGutter: "stable" }}
@@ -1368,9 +1076,7 @@ export default function Home({ onStatsChange, active = true }) {
                               clientOsName={host.clientOsName}
                               clientArch={host.clientArch}
                               clientCountry={host.clientCountry}
-                              groupLabels={(host.groupIds || [])
-                                .map((id) => groupLabelById[id])
-                                .filter(Boolean)}
+                              groupLabels={(host.groupLabels || []).map(group => group.name)}
                               localIp={host.localIp}
                               privateIps={host.privateIps}
                               clientVersion={host.clientVersion}
@@ -1404,7 +1110,7 @@ export default function Home({ onStatsChange, active = true }) {
                     )}
 
                     {filteredHosts.length > 0 ? (
-                      <ResultsPagination count={filteredHosts.length} noun="Machines" page={page} pages={totalPages} pageSize={numericPageSize} onPage={setPage} onPageSize={setPageSize} sizes={MACHINE_PAGE_SIZE_OPTIONS.map(option => Number(option.value))} />
+                      <ResultsPagination count={inventory.pagination.total} noun="Machines" page={page} pages={totalPages} pageSize={numericPageSize} onPage={setPage} onPageSize={setPageSize} sizes={MACHINE_PAGE_SIZE_OPTIONS.map(option => Number(option.value))} />
                     ) : null}
                   </div>
                 </>

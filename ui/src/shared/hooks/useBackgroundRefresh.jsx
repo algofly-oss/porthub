@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 
 // Revalidate mounted views without polling inactive tabs or overlapping slow
 // requests. Keep the callback fresh without restarting the polling interval.
-export default function useBackgroundRefresh(refresh, { enabled = true, preload = true, interval = 15000, refreshKey } = {}) {
+export default function useBackgroundRefresh(refresh, { enabled = true, preload = false, interval = 15000, refreshKey } = {}) {
   const callback = useRef(refresh);
   const preloaded = useRef({ key: refreshKey, done: false });
   callback.current = refresh;

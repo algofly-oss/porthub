@@ -1,3 +1,5 @@
+import useInventoryPage from "@/shared/hooks/useInventoryPage";
+import useTrafficPage from "@/shared/hooks/useTrafficPage";
 import useBackgroundRefresh from "@/shared/hooks/useBackgroundRefresh";
 import { externalEndpoint, internalEndpoint } from "@/shared/utils/endpoints.mjs";
 import { useWorkspaceState } from "@/shared/contexts/workspaceCache";
@@ -33,37 +35,32 @@ function DashboardSkeleton() {
 export default function Dashboard({ active = true }) {
   const router = useRouter();
   const { colorScheme } = useMantineColorScheme();
-  const [data, setData] = useWorkspaceState("dashboard.data", { machines: [], proxies: [], ports: [] });
-  const [loading, setLoading] = useWorkspaceState("dashboard.loading", true), [error, setError] = useState("");
+  const [counts] = useWorkspaceState("inventory.summary", null);
   const seconds = 300;
-  const traffic = useTrafficSnapshot({ enabled: active });
-  const activity = useProxyActivity({ enabled: active });
+  const traffic = useTrafficPage({sort:"traffic",page_size:5,seconds}, {enabled:active});
+  const activity = useProxyActivity({ recent: 5, enabled: active });
+  const data = { proxies: activity.routes };
+  const loading = !counts || activity.loading;
+  const error = activity.error;
   const activityById = useMemo(()=>new Map(activity.data.map(metric=>[metric.route_id,metric])),[activity.data]);
-  async function load(signal) {
-    try {
-      const responses = await Promise.all([apiRoutes.listMachines, apiRoutes.listTrafficRoutes, apiRoutes.listConnections].map(url => axios.get(url, { signal })));
-      setData({ machines: responses[0].data?.data || [], proxies: responses[1].data?.data || [], ports: responses[2].data?.data || [] });
-      setError("");
-    } catch (error) { if (!axios.isCancel(error)) setError("Could not refresh the workspace. Try again."); }
-    finally { if (!signal?.aborted) setLoading(false); }
-  }
-  useBackgroundRefresh(load, { enabled: active });
+  const summaryResource = useInventoryPage("summary", {}, {enabled:active,ttl:15000});
+  const load = () => { summaryResource.resource.invalidate("proxy-activity"); summaryResource.refresh(); };
   const navigate = (view, query = {}) => router.push({ pathname: "/home", query: { ...(router.query.demo ? { demo: router.query.demo } : {}), view, ...query } }, undefined, { shallow: true });
-  const status = machine => machine.connection_status || (machine.enabled === false ? "disabled" : machine.is_active ? "online" : "offline");
-  const online = data.machines.filter(machine => status(machine) === "online");
-  const attention = data.machines.filter(machine => status(machine) === "offline" || status(machine) === "auth_required");
-  const disabled = data.machines.filter(machine => status(machine) === "disabled");
-  const samples = useMemo(() => aggregateTraffic(traffic.rows), [traffic.rows]);
+  const online = counts?.machines?.online || 0;
+  const attention = (counts?.machines?.offline || 0) + (counts?.machines?.auth_required || 0);
+  const disabled = counts?.machines?.disabled || 0;
+  const machineTotal = counts?.machines?.total || 0;
+  const samples = traffic.aggregate;
   const trafficById = useMemo(() => new Map(traffic.rows.map(row => [row.connection?._id, row.traffic])), [traffic.rows]);
   const summary = trafficSummary(samples, Number(seconds), (traffic.updated || Date.now()) / 1000);
   const busiest = useMemo(() => traffic.rows.map(row => ({ ...row, summary: trafficSummary(row.traffic, Number(seconds), (traffic.updated || Date.now()) / 1000) })).sort((a,b) => b.summary.volume - a.summary.volume).slice(0, 5), [traffic.rows, seconds, traffic.updated]);
   const peak = Math.max(1, ...busiest.map(row => row.summary.volume));
-  const ratio = data.machines.length ? online.length / data.machines.length : 0;
+  const ratio = machineTotal ? online / machineTotal : 0;
   const recentlyVisited = useMemo(() => data.proxies.filter(proxy=>activityById.get(proxy._id)?.last_requested_at).sort((a,b) => Date.parse(activityById.get(b._id).last_requested_at)-Date.parse(activityById.get(a._id).last_requested_at)).slice(0,5),[data.proxies,activityById]);
   return <div className="h-full min-h-0 overflow-y-auto overscroll-contain" aria-label="Dashboard content"><div className="workspace-page !h-auto !min-h-full !overflow-visible">
     <PageHeader title="Dashboard" actions={<div className="flex items-center gap-2"><span className="hidden items-center gap-1.5 text-xs text-muted-foreground sm:flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />Live workspace</span><Button variant="ghost" size="icon" aria-label="Refresh dashboard" onClick={()=>load()}><IconRefresh size={17} /></Button></div>} />
     {error && <p role="alert" className="mb-3 rounded-lg bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">{error}</p>}
-    {loading ? <DashboardSkeleton /> : !data.machines.length && !data.proxies.length ? <EmptyState icon={IconServer} title="Your workspace starts here" description="Enroll a machine to expose its ports, or create a standalone web proxy." action={<div className="flex flex-wrap justify-center gap-2"><Button onClick={()=>navigate("machines", {create:"1"})}><IconPlus size={16} />Enroll a Machine</Button><Button variant="secondary" onClick={()=>navigate("proxies", {create:"1"})}>Create a Proxy</Button></div>} /> : <div className="space-y-4 pb-1">
+    {loading ? <DashboardSkeleton /> : !machineTotal && !counts?.proxies ? <EmptyState icon={IconServer} title="Your workspace starts here" description="Enroll a machine to expose its ports, or create a standalone web proxy." action={<div className="flex flex-wrap justify-center gap-2"><Button onClick={()=>navigate("machines", {create:"1"})}><IconPlus size={16} />Enroll a Machine</Button><Button variant="secondary" onClick={()=>navigate("proxies", {create:"1"})}>Create a Proxy</Button></div>} /> : <div className="space-y-4 pb-1">
       <div className="grid items-stretch gap-4 lg:grid-cols-[minmax(0,1.8fr)_minmax(290px,1fr)]">
         <section className="flex min-w-0 flex-col overflow-hidden rounded-xl bg-surface">
           <div className="px-5 pt-5"><h2 className="text-base font-semibold">Network Activity</h2><p className="mt-1 text-xs text-muted-foreground">Last 5 minutes · all forwarded ports · bytes per second</p></div>
@@ -74,8 +71,8 @@ export default function Dashboard({ active = true }) {
         </section>
         <section className="flex min-w-0 flex-col rounded-xl bg-surface p-5">
           <div className="flex items-center justify-between gap-2"><h2 className="text-base font-semibold">Fleet Health</h2><IconServer size={18} className="text-muted-foreground" /></div>
-          <div className="my-5 grid grid-cols-[100px_minmax(0,1fr)] items-center gap-4"><div className="relative h-[100px] w-[100px]"><svg aria-hidden="true" viewBox="0 0 120 120" className="h-full w-full -rotate-90"><circle cx="60" cy="60" r="50" fill="none" className="stroke-muted" strokeWidth="9" /><circle cx="60" cy="60" r="50" fill="none" className="stroke-emerald-500" strokeWidth="9" strokeDasharray={`${ratio * 314.16} 314.16`} strokeLinecap="round" /></svg><div className="absolute inset-0 flex flex-col items-center justify-center"><p className="text-2xl font-semibold tabular-nums">{Math.round(ratio*100)}<span className="text-sm text-muted-foreground">%</span></p><p className="mt-1 text-[11px] text-muted-foreground">online</p></div></div><div className="space-y-1">{[["online","Online",online.length,"bg-emerald-500"],["offline","Attention",attention.length,"bg-amber-500"],["disabled","Disabled",disabled.length,"bg-zinc-500"]].map(([filter,label,count,color])=><button key={filter} onClick={()=>navigate("machines",{status:filter})} className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-sm hover:bg-muted"><span className={`h-1.5 w-1.5 rounded-full ${color}`} /><span>{label}</span><span className="ml-auto font-medium tabular-nums">{count}</span><IconArrowUpRight size={13} className="text-muted-foreground" /></button>)}</div></div>
-          {attention.length ? <button onClick={()=>navigate("machines",{status:"offline"})} className="mb-4 flex items-start gap-2.5 rounded-lg bg-amber-500/5 p-3 text-left hover:bg-amber-500/10"><IconAlertCircle size={18} className="mt-0.5 shrink-0 text-amber-700 dark:text-amber-400" /><span><span className="block text-sm font-medium">{attention.length} {attention.length===1 ? "machine needs" : "machines need"} attention</span><span className="mt-1 block text-xs leading-5 text-muted-foreground">Review offline clients and authentication issues.</span></span></button> : <div className="mb-4 flex items-start gap-2 rounded-lg bg-emerald-500/5 p-3"><IconCheck size={18} className="shrink-0 text-emerald-600" /><p className="text-sm">All enabled machines are connected.</p></div>}
+          <div className="my-5 grid grid-cols-[100px_minmax(0,1fr)] items-center gap-4"><div className="relative h-[100px] w-[100px]"><svg aria-hidden="true" viewBox="0 0 120 120" className="h-full w-full -rotate-90"><circle cx="60" cy="60" r="50" fill="none" className="stroke-muted" strokeWidth="9" /><circle cx="60" cy="60" r="50" fill="none" className="stroke-emerald-500" strokeWidth="9" strokeDasharray={`${ratio * 314.16} 314.16`} strokeLinecap="round" /></svg><div className="absolute inset-0 flex flex-col items-center justify-center"><p className="text-2xl font-semibold tabular-nums">{Math.round(ratio*100)}<span className="text-sm text-muted-foreground">%</span></p><p className="mt-1 text-[11px] text-muted-foreground">online</p></div></div><div className="space-y-1">{[["online","Online",online,"bg-emerald-500"],["offline","Attention",attention,"bg-amber-500"],["disabled","Disabled",disabled,"bg-zinc-500"]].map(([filter,label,count,color])=><button key={filter} onClick={()=>navigate("machines",{status:filter})} className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-sm hover:bg-muted"><span className={`h-1.5 w-1.5 rounded-full ${color}`} /><span>{label}</span><span className="ml-auto font-medium tabular-nums">{count}</span><IconArrowUpRight size={13} className="text-muted-foreground" /></button>)}</div></div>
+          {attention ? <button onClick={()=>navigate("machines",{status:"offline"})} className="mb-4 flex items-start gap-2.5 rounded-lg bg-amber-500/5 p-3 text-left hover:bg-amber-500/10"><IconAlertCircle size={18} className="mt-0.5 shrink-0 text-amber-700 dark:text-amber-400" /><span><span className="block text-sm font-medium">{attention} {attention===1 ? "machine needs" : "machines need"} attention</span><span className="mt-1 block text-xs leading-5 text-muted-foreground">Review offline clients and authentication issues.</span></span></button> : <div className="mb-4 flex items-start gap-2 rounded-lg bg-emerald-500/5 p-3"><IconCheck size={18} className="shrink-0 text-emerald-600" /><p className="text-sm">All enabled machines are connected.</p></div>}
           <div className="mt-auto"><Button variant="secondary" className="w-full" onClick={()=>navigate("machines",{create:"1"})}><IconPlus size={16} />Enroll a Machine</Button></div>
         </section>
       </div>

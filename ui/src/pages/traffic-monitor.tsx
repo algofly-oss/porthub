@@ -1,3 +1,5 @@
+import useInventoryPage from "@/shared/hooks/useInventoryPage";
+import useTrafficPage from "@/shared/hooks/useTrafficPage";
 import TrafficMonitorPanel from "@/components/User/components/Home/components/Host/TrafficMonitorPanel";
 import useAuth from "@/shared/hooks/useAuth";
 import apiRoutes from "@/shared/routes/apiRoutes";
@@ -6,7 +8,7 @@ import { Alert, Loader, useMantineColorScheme } from "@mantine/core";
 import axios from "axios";
 import Head from "next/head";
 import { useRouter } from "next/router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type TrafficSample = {
   timestamp?: number;
@@ -46,22 +48,27 @@ export default function TrafficMonitorPage() {
   const externalPort =
     typeof router.query.external_port === "string" ? router.query.external_port : "";
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
-  const [isLoading, setIsLoading] = useState(false);
-  const [samples, setSamples] = useState<TrafficSample[]>([]);
-  const [loadError, setLoadError] = useState("");
-  const [connectionDetails, setConnectionDetails] = useState<ConnectionDetails | null>(null);
+  const details=useInventoryPage("connections",{ids:dataId,page_size:1},{enabled:!isCheckingAuth && !!dataId});
+  const traffic=useTrafficPage({ids:dataId,page_size:1,seconds:300,expanded:dataId},{enabled:!isCheckingAuth && !!dataId});
+  const connectionDetails:ConnectionDetails | null=details.rows[0] || null;
+  const samples:TrafficSample[]=useMemo(()=>traffic.rows[0]?.traffic || [],[traffic.rows]);
+  const isLoading=!!dataId && traffic.loading;
+  const loadError=traffic.error || details.error;
 
+  const checkAccount=useRef(auth.getAccountInfo);
+  const navigation=useRef(router);
+  navigation.current=router;
   useEffect(() => {
     let isActive = true;
 
     const checkAuth = async () => {
-      const account = await auth.getAccountInfo();
+      const account = await checkAccount.current();
       if (!isActive) {
         return;
       }
 
       if (!account?.role) {
-        router.replace(uiRoutes.signIn);
+        navigation.current.replace(uiRoutes.signIn);
         return;
       }
 
@@ -74,94 +81,6 @@ export default function TrafficMonitorPage() {
       isActive = false;
     };
   }, []);
-
-  useEffect(() => {
-    if (isCheckingAuth || !dataId) {
-      return;
-    }
-
-    let isActive = true;
-
-    const loadConnectionDetails = async () => {
-      try {
-        const response = await axios.get(apiRoutes.listConnections);
-        if (!isActive) {
-          return;
-        }
-
-        const connections = Array.isArray(response.data?.data) ? response.data.data : [];
-        const matchedConnection = connections
-          ? connections.find((item: any) => item?._id === dataId)
-          : null;
-
-        setConnectionDetails(matchedConnection || null);
-      } catch {
-        if (isActive) {
-          setConnectionDetails(null);
-        }
-      }
-    };
-
-    loadConnectionDetails();
-
-    return () => {
-      isActive = false;
-    };
-  }, [dataId, isCheckingAuth]);
-
-  useEffect(() => {
-    if (isCheckingAuth || !dataId) {
-      return;
-    }
-
-    let isActive = true;
-    const controller = new AbortController();
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-
-    const loadTrafficSamples = async ({ showLoading = false } = {}) => {
-      if (showLoading) {
-        setIsLoading(true);
-      }
-
-      try {
-        const response = await axios.post(apiRoutes.trafficSnapshot, {
-          data_ids: [dataId],
-        }, { signal: controller.signal });
-        if (!isActive) {
-          return;
-        }
-
-        const traffic =
-          Array.isArray(response.data?.data) && response.data.data.length > 0
-            ? response.data.data[0]?.traffic
-            : [];
-
-        setSamples(Array.isArray(traffic) ? traffic : []);
-        setLoadError("");
-      } catch (loadTrafficError: any) {
-        if (!isActive) {
-          return;
-        }
-        setLoadError(
-          loadTrafficError?.response?.data?.detail ||
-            "Could not load the live traffic stream."
-        );
-      } finally {
-        if (isActive) {
-          setIsLoading(false);
-          timeout = setTimeout(loadTrafficSamples, 1000);
-        }
-      }
-    };
-
-    loadTrafficSamples({ showLoading: true });
-
-    return () => {
-      isActive = false;
-      clearTimeout(timeout);
-      controller.abort();
-    };
-  }, [dataId, isCheckingAuth]);
 
   const resolvedMachineName = useMemo(
     () =>

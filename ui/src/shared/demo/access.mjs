@@ -139,7 +139,20 @@ export function demoAccess(state, method, path, body, id) {
       books: access.books,
       invitations: access.invitations,
       private_peers: privatePeers,
+      exit_nodes:access.exit_nodes || [],
+      proxy_grants:access.proxy_grants || [],
     };
+  for(const [route,collection] of [["exit-nodes","exit_nodes"],["proxy-grants","proxy_grants"]]) {
+    if(path===`/access/${route}` || path.startsWith(`/access/${route}/`)) {
+      access[collection] ||= [];
+      if(method==="get")return {data:access[collection],can_allow_gateway_lan:state.user.role==="admin"};
+      const key=path.split("/").pop();
+      if(method==="post"){const record={...body,_id:id(state.nextId++)};access[collection].push(record);return {data:record};}
+      const record=access[collection].find(record=>record._id===key);if(!record)throw Error("Record no longer exists");
+      if(method==="delete")access[collection]=access[collection].filter(record=>record._id!==key);else Object.assign(record,body);
+      return {data:record,msg:"Saved"};
+    }
+  }
   if (method === "delete" && path.startsWith("/access/members/")) {
     const member = path.split("/").pop();
     if (member === owner) throw Error("The owner cannot be removed");
@@ -163,6 +176,11 @@ export function demoAccess(state, method, path, body, id) {
   if (groupMatch) {
     const group = state.groups.find((g) => g._id === groupMatch[1]);
     if (!group) throw Error("Group not found");
+    if(method==="patch") {
+      group.user_ids=[...new Set([...(group.user_ids || []).filter(id=>!body.user_remove.includes(id)),...body.user_add])];
+      state.machines.forEach(m=>{if(body.machine_remove.includes(m._id))m.group_ids=m.group_ids.filter(id=>id!==group._id);if(body.machine_add.includes(m._id)&&!m.group_ids.includes(group._id))m.group_ids.push(group._id);});
+      return {msg:"Group members saved"};
+    }
     group.user_ids = body.user_ids;
     state.machines.forEach((m) => {
       m.group_ids = m.group_ids.filter((g) => g !== group._id);

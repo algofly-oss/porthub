@@ -1,0 +1,57 @@
+const assert=require("node:assert/strict");
+const {launchBrowser}=require("./browser.cjs");
+(async()=>{
+ const {makeDemoData}=await import("../src/shared/demo/data.mjs");
+ const {newBinding,defaultRouting}=await import("../src/shared/utils/proxy-bindings.mjs");
+ const browser=await launchBrowser();
+ try{for(const width of (process.env.REVIEW_WIDTHS || "1440,402").split(",").map(Number)){
+  const state=makeDemoData(),target=state.machines[1];target.name="A inventory target";
+  const originalPorts=state.connections.filter(c=>c.machine_id===target._id);
+  for(let i=0;i<23;i++)state.connections.push({...originalPorts[0],_id:(90000+i).toString(16).padStart(24,"0"),service_name:`bulk-${String(i).padStart(2,"0")}`,external_port:40000+i,firewall:{is_public:false,allowed_ips:["192.0.2.20"]}});
+  const proxy=state.proxies[1];proxy.name="many.preview.invalid";proxy.hosts=[proxy.name];proxy.target_mode="manual";proxy.connection=null;
+  proxy.bindings=Array.from({length:12},(_,i)=>({...newBinding(i),id:`bulk-binding-${i}`,label:`Route ${i+1}`,target_url:`https://route-${i}.example.invalid`}));proxy.routing=defaultRouting();
+  const context=await browser.newContext({viewport:{width,height:1000}});
+  await context.addInitScript(state=>{sessionStorage.setItem("porthub-demo-v1",JSON.stringify(state));},state);
+  const page=await context.newPage(),errors=[];page.on("pageerror",error=>errors.push(error.message));
+  const origin=process.env.REVIEW_ORIGIN || "http://127.0.0.1:3107";
+  await page.goto(`${origin}/home?demo=1&view=machines`);
+  const first=page.locator('[aria-label^="Configure "]:visible').first();await first.waitFor();const firstName=await first.getAttribute("aria-label");
+  const pager=page.locator('footer[aria-label="Machines pagination"]:visible');
+  if(width<640)await pager.getByRole("button",{name:"Next page",exact:true}).click();else await pager.getByRole("button",{name:"2",exact:true}).click();
+  await page.waitForFunction(name=>document.querySelector('[aria-label^="Configure "]')?.getAttribute('aria-label')!==name,firstName);
+  await page.waitForTimeout(350);assert.notEqual(await first.getAttribute("aria-label"),firstName,"Machine page two must not reset during a page request");
+  await page.getByLabel("Search machines",{exact:true}).fill(target.name);
+  await page.getByRole("button",{name:`Configure ${target.name}`,exact:true}).waitFor();
+  await page.getByRole("button",{name:`Configure ${target.name}`,exact:true}).click();
+  let dialog=page.getByRole("dialog");await dialog.getByRole("button",{name:"Ports",exact:true}).click();
+  const table=dialog.getByRole("table",{name:"Forwarded ports",exact:true});await table.locator("tbody tr").first().waitFor();
+  assert.equal(await table.locator("tbody tr").count(),5);
+  await dialog.getByRole("button",{name:"3",exact:true}).click();
+  await page.waitForTimeout(500);
+  await dialog.screenshot({path:`/tmp/porthub-inventory-port-pagination-${width}.png`});
+  await table.getByRole("button",{name:"Edit forwarding rule bulk-10",exact:true}).waitFor();
+  await page.waitForTimeout(250);assert(await table.getByRole("button",{name:"Edit forwarding rule bulk-10",exact:true}).isVisible(),"Port page three must remain selected");
+  await table.getByRole("button",{name:"Edit forwarding rule bulk-10",exact:true}).click();
+  await dialog.getByLabel("Service name",{exact:true}).fill("Updated bulk-10");
+  await dialog.getByRole("button",{name:"Save Changes",exact:true}).click();
+  await page.waitForFunction(()=>JSON.parse(sessionStorage.getItem("porthub-demo-v1")).connections.some(c=>c.service_name==="Updated bulk-10"));
+  await dialog.getByText("All changes saved",{exact:true}).waitFor();
+  const after=await page.evaluate(()=>JSON.parse(sessionStorage.getItem("porthub-demo-v1")));
+  assert.equal(after.connections.length,state.connections.length,"Saving a loaded port must preserve every unloaded port");
+  const untouched=after.connections.find(c=>c.service_name==="bulk-22");assert.deepEqual(untouched.firewall,{is_public:false,allowed_ips:["192.0.2.20"]});
+  await dialog.screenshot({path:`/tmp/porthub-inventory-port-page-${width}.png`});
+  // Navigate through the workspace controls to preserve the test's saved state.
+  await dialog.getByRole("button",{name:"Close",exact:true}).click();
+  const proxies=page.getByRole("button",{name:"Proxies",exact:true});await proxies.click();
+  const row=page.locator('[aria-label="Edit proxy many.preview.invalid"]:visible');await row.waitFor();
+  assert((await row.textContent()).includes("12 bindings"));await row.click();dialog=page.getByRole("dialog");
+  await dialog.getByRole("button",{name:"Bindings",exact:true}).click();
+  assert.equal(await dialog.getByRole("list",{name:"Proxy bindings",exact:true}).getByRole("listitem").count(),12,"Editing loads every binding, including those omitted from the list preview");
+  await dialog.getByLabel("Binding 1 label",{exact:true}).fill("Updated first route");
+  await dialog.getByRole("button",{name:"Save Proxy",exact:true}).click();await dialog.waitFor({state:"hidden"});
+  const saved=await page.evaluate(id=>JSON.parse(sessionStorage.getItem("porthub-demo-v1")).proxies.find(p=>p._id===id),proxy._id);
+  assert.equal(saved.bindings.length,12);assert.equal(saved.bindings[11].target_url,proxy.bindings[11].target_url);
+  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));assert.deepEqual(errors,[]);
+  await context.close();console.log(`PASS ${width}: server-style pages, unloaded port/firewall preservation, complete proxy binding edits`);
+ }}finally{await browser.close();}
+})().catch(error=>{console.error(error);process.exitCode=1;});

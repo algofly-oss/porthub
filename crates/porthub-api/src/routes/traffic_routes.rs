@@ -12,7 +12,7 @@ use crate::{
     store, App,
 };
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::HeaderMap,
     routing::{get, post, put},
     Json, Router,
@@ -344,11 +344,29 @@ async fn delete(
     ))
 }
 
-async fn health(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+async fn health(
+    State(app): State<Arc<App>>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Value>> {
     let user = auth::current_user(&app, &headers).await?;
+    let mut filter = doc! {"user_id":user.get("_id")};
+    if let Some(raw) = query.get("ids") {
+        let ids = raw
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(|s| object_id(s, "Invalid proxy ID"))
+            .collect::<ApiResult<Vec<_>>>()?;
+        if ids.len() > 100 {
+            return Err(ApiError::bad_request(
+                "Health requests support at most 100 proxies",
+            ));
+        }
+        filter.insert("_id", doc! {"$in":ids});
+    }
     let owned: Vec<Document> = app
         .collection("traffic_routes")
-        .find(doc! {"user_id":user.get("_id")})
+        .find(filter)
         .projection(doc! {"_id":1,"bindings.id":1})
         .await?
         .try_collect()
@@ -420,7 +438,10 @@ async fn health(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Js
                 })
                 .cloned()
                 .collect();
-            data.insert(id, json!(valid));
+            if query.get("summary").is_some_and(|value|value=="true") {
+                let count=|state:&str|valid.iter().filter(|binding|binding["state"]==state).count();
+                data.insert(id,json!({"healthy":count("healthy"),"unknown":count("unknown"),"unhealthy":count("unhealthy"),"disabled":count("disabled"),"total":valid.len()}));
+            }else {data.insert(id,json!(valid));}
         }
     }
     Ok(Json(

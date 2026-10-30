@@ -59,6 +59,8 @@ async fn main() -> Result<()> {
     let db = porthub_api::bootstrap::database(&config).await?;
     let tcp_address = config.listen.clone();
     let app = Arc::new(App::new(config, db));
+    porthub_api::inventory_query::ensure_indexes(&app).await
+        .map_err(|e| anyhow::anyhow!("inventory index initialization failed: {}", e.detail))?;
     if !matches!(tokio::time::timeout(std::time::Duration::from_secs(5),
         porthub_api::routes::dns_rules::remove_address_overrides(&app)).await,Ok(Ok(()))) {
         tracing::warn!("Retired DNS address settings could not be cleaned; only blocking rules will be served");

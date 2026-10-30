@@ -46,7 +46,7 @@ export function CreateUser({onChanged}) {
 export function DeleteUser({entry,onChanged,currentEmail}) {
   const [opened,setOpened]=useState(false),[confirmation,setConfirmation]=useState(""),[busy,setBusy]=useState(false),[error,setError]=useState("");
   const email=entry.user.email||"",own=email.toLowerCase()===String(currentEmail||"").toLowerCase();
-  const ports=entry.machines.reduce((total,machine)=>total+(machine.ports?.length||0),0);
+  const ports=entry.port_count ?? (entry.machines || []).reduce((total,machine)=>total+(machine.ports?.length||0),0);
   function close(){if(!busy){setOpened(false);setConfirmation("");setError("");}}
   async function remove(){
     if(busy||confirmation.trim().toLowerCase()!==email.toLowerCase())return;
@@ -58,7 +58,7 @@ export function DeleteUser({entry,onChanged,currentEmail}) {
   return <><Button type="button" variant="ghost" size="icon" disabled={own} title={own?"Manage your own account in Settings":entry.user.deleting?"Retry account cleanup":"Delete account"} aria-label={`Delete account ${email}`} onClick={event=>{event.stopPropagation();setOpened(true);}} className="text-muted-foreground hover:bg-red-500/10 hover:text-red-600"><IconTrash size={16}/></Button>
     <Dialog opened={opened} onClose={close} closeOnClickOutside={!busy} closeOnEscape={!busy} withCloseButton={!busy} title={entry.user.deleting?"Complete account deletion":"Delete account?"} size="md">
       <p className="text-sm leading-6">Permanently delete <strong className="break-all">{email}</strong> and its PortHub resources? This cannot be undone.</p>
-      <div className="my-5 grid grid-cols-2 gap-3 rounded-lg border border-red-500/20 bg-red-500/5 p-4"><div><p className="text-xl font-semibold">{entry.machines.length}</p><p className="text-xs text-muted-foreground">Machine registrations</p></div><div><p className="text-xl font-semibold">{ports}</p><p className="text-xs text-muted-foreground">Public mappings</p></div></div>
+      <div className="my-5 grid grid-cols-2 gap-3 rounded-lg border border-red-500/20 bg-red-500/5 p-4"><div><p className="text-xl font-semibold">{entry.machine_count ?? entry.machines?.length ?? 0}</p><p className="text-xs text-muted-foreground">Machine registrations</p></div><div><p className="text-xl font-semibold">{ports}</p><p className="text-xs text-muted-foreground">Public mappings</p></div></div>
       <p className="text-xs leading-6 text-muted-foreground">This also removes the account’s proxies, groups, private peers, access rules, invitations, membership records, sessions and saved settings. Connected clients lose access. Files stored on their computers are not deleted.</p>
       <label className="mt-5 block text-xs font-medium">Type {email} to confirm<input className={inputClass} autoComplete="off" value={confirmation} onChange={event=>setConfirmation(event.target.value)} placeholder="Account email"/></label>
       {error&&<p role="alert" className="mt-3 text-sm text-red-600 dark:text-red-400">{error}</p>}

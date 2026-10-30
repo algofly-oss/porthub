@@ -1,3 +1,7 @@
+import axios from "axios";
+import apiRoutes from "@/shared/routes/apiRoutes";
+import { inventoryUrl } from "@/shared/utils/inventory-resource.mjs";
+import useBackgroundRefresh from "@/shared/hooks/useBackgroundRefresh";
 import { useEffect, useRef, useState } from "react";
 import { Switch } from "@mantine/core";
 import { IconDotsVertical, IconPlus, IconTrash, IconRoute } from "@tabler/icons-react";
@@ -117,7 +121,7 @@ const initialForm=(proxy,suffix)=>{
 };
 const sections=[{value:"address",label:"Address"},{value:"bindings",label:"Bindings"},{value:"health",label:"Health"},{value:"options",label:"Options"}];
 
-export default function ProxyConfigModal({ opened,onClose,onSubmit,onDelete,proxy=null,connections=[],machines=[],defaultDomainSuffix="",isSaving=false,isDeleting=false,health=null }) {
+function LoadedProxyConfigModal({ opened,onClose,onSubmit,onDelete,proxy=null,connections=[],machines=[],defaultDomainSuffix="",isSaving=false,isDeleting=false,health=null }) {
   const [form,setForm]=useState(()=>initialForm(proxy,defaultDomainSuffix));
   const [section,setSection]=useState("address"),[errors,setErrors]=useState({}),[confirmDelete,setConfirmDelete]=useState(false);
   const initialized=useRef(null),scrollArea=useRef(null);
@@ -154,4 +158,21 @@ export default function ProxyConfigModal({ opened,onClose,onSubmit,onDelete,prox
       <div className="mt-4 shrink-0 border-t border-border pt-3"><div className="mb-3 flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground"><IconRoute size={14} className="shrink-0" /><span className="truncate">{form.bindings.filter(b=>b.enabled).length} enabled {form.bindings.filter(b=>b.enabled).length === 1 ? "binding" : "bindings"} · {routingLabel(form.routing)}</span></div><div className="flex items-center justify-between gap-2"><Button type="button" variant="secondary" onClick={onClose} disabled={isSaving}>Cancel</Button><div className="flex gap-2">{sectionIndex>0 && <Button type="button" variant="ghost" onClick={()=>setSection(sections[sectionIndex-1].value)}>Back</Button>}{!persisted && sectionIndex<sections.length-1 ? <Button key="continue" type="button" onClick={()=>setSection(sections[sectionIndex+1].value)}>Continue</Button> : <Button key="save" type="submit" disabled={isSaving}>{isSaving ? "Saving…" : persisted ? "Save Proxy" : "Create Proxy"}</Button>}</div></div></div>
     </form>
   </WorkspaceDrawer><Dialog opened={confirmDelete} onClose={()=>setConfirmDelete(false)} zIndex={230} size="sm" title="Delete proxy" closeOnEscape={!isDeleting} closeOnClickOutside={!isDeleting}><p className="text-sm leading-6 text-muted-foreground">Remove this public address and all its bindings? The underlying machine ports and applications remain available.</p><div className="mt-5 flex justify-end gap-2"><Button type="button" variant="secondary" onClick={()=>setConfirmDelete(false)} disabled={isDeleting}>Cancel</Button><Button type="button" variant="destructive" disabled={isDeleting} onClick={async()=>{if(await onDelete(form.dataId)){setConfirmDelete(false);onClose();}}}>{isDeleting ? "Deleting…" : "Delete proxy"}</Button></div></Dialog></>;
+}
+
+export default function ProxyConfigModal(props) {
+  const [source,setSource]=useState(null),[error,setError]=useState(""),[retry,setRetry]=useState(0),[health,setHealth]=useState({available:false,data:{}});
+  const id=props.proxy?._id;
+  useEffect(()=>{
+    setSource(null);setError("");
+    if(!props.opened || !id)return;
+    const controller=new AbortController();
+    axios.get(inventoryUrl("proxies",{ids:id,detail:true,page_size:1}),{signal:controller.signal}).then(response=>{if(!controller.signal.aborted){const row=response.data.data?.[0];if(row)setSource(row);else setError("Proxy no longer exists.");}}).catch(error=>{if(!controller.signal.aborted)setError(error.response?.data?.detail || "Could not load the complete proxy.");});
+    return()=>controller.abort();
+  },[props.opened,id,retry]);
+  useBackgroundRefresh(async signal=>{try{const response=await axios.get(`${apiRoutes.proxyHealth}?${new URLSearchParams({ids:id})}`,{signal});setHealth(response.data);}catch(error){if(!signal.aborted)setHealth({available:false,data:{}});}},{enabled:props.opened && !!id,refreshKey:id,interval:10000});
+  if(!props.opened)return null;
+  if(!id)return <LoadedProxyConfigModal {...props} health={health}/>;
+  if(!source || source._id!==id)return <WorkspaceDrawer opened onClose={props.onClose} title="Proxy" size="xl"><p role={error ? "alert" : "status"} className="p-4 text-sm text-muted-foreground">{error || "Loading complete proxy…"}</p>{error && <Button type="button" variant="secondary" onClick={()=>setRetry(value=>value+1)}>Try again</Button>}</WorkspaceDrawer>;
+  return <LoadedProxyConfigModal {...props} proxy={source} health={health}/>;
 }

@@ -1,3 +1,7 @@
+import useInventoryPage from "@/shared/hooks/useInventoryPage";
+import InventorySelect from "@/components/ui/inventory-select";
+import ResultsPagination from "@/components/ui/results-pagination";
+import { inventoryUrl } from "@/shared/utils/inventory-resource.mjs";
 import useBackgroundRefresh from "@/shared/hooks/useBackgroundRefresh";
 import { useWorkspaceState } from "@/shared/contexts/workspaceCache";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -30,97 +34,37 @@ import ProxyGrants from "./ProxyGrants";
 export default function AccessRules({ active = true }) {
   const router = useRouter(),
     toast = useToast();
-  const [workspaces, setWorkspaces] = useWorkspaceState("access.workspaces", []),
-    [workspace, setWorkspace] = useWorkspaceState("access.workspace", "");
-  const [data, setData] = useWorkspaceState("access.data", null),
-    [error, setError] = useState(""),
-    [busy, setBusy] = useState(false);
+  const workspace=String(router.query.workspace || "");
+  const [manualError,setError]=useState("");
+  const [busy,setBusy]=useState(false);
   const [section, setSection] = useState("rules"),
     [query, setQuery] = useState(""),
     [group, setGroup] = useState("all");
   const [editor, setEditor] = useState(null),
     [confirmation, setConfirmation] = useState(null);
   const [invite, setInvite] = useState(false);
-  const [dataWorkspace, setDataWorkspace] = useWorkspaceState("access.dataWorkspace", "");
-  const params = useMemo(() => (workspace ? { workspace } : {}), [workspace]);
-  const load = useCallback(async (signal) => {
-    try {
-      const response = await axios.get(`${API}/snapshot`, { params, ...(signal instanceof AbortSignal ? { signal } : {}) });
-      setData(response.data);
-      setError("");
-    } catch (error) {
-      if (axios.isCancel(error)) return;
-      setError(errorText(error));
-    }
-  }, [params]);
-  useEffect(() => {
-    let alive = true;
-    axios
-      .get(`${API}/workspaces`)
-      .then((response) => {
-        if (!alive) return;
-        const items = response.data.data || [];
-        setWorkspaces(items);
-        const requested = String(router.query.workspace || "");
-        setWorkspace(
-          items.some((item) => item.id === requested)
-            ? requested
-            : items.some((item) => item.id === workspace) ? workspace
-            : items.find((item) => item.role === "owner")?.id ||
-                items[0]?.id ||
-                "",
-        );
-      })
-      .catch((error) => {
-        if (alive) setError(errorText(error));
-      });
-    return () => {
-      alive = false;
-    };
-  }, [router.query.workspace]);
-  useEffect(() => {
-    if (workspace) {
-      if (dataWorkspace !== workspace) setData(null);
-      setDataWorkspace(workspace);
-      setGroup("all");
-      setQuery("");
-    }
-  }, [workspace, load]);
-  useBackgroundRefresh(load, { enabled: active && Boolean(workspace), preload: Boolean(workspace), refreshKey: workspace });
-  const manage = data?.role === "owner" || data?.role === "admin";
-  const options = useMemo(
-    () =>
-      data
-        ? [
-            // Every machine in the workspace, including ones added later.
-            { value: "all:machines", label: "All machines" },
-            ...data.groups.map((g) => ({
-              value: `group:${g._id}`,
-              label: `Group · ${g.name}`,
-            })),
-            ...data.machines.map((m) => ({
-              value: `machine:${m._id}`,
-              label: `Machine · ${m.name}`,
-            })),
-            ...data.users.map((u) => ({
-              value: `user:${u._id}`,
-              label: `Person · ${u.name || u.email}`,
-            })),
-          ]
-        : [],
-    [data],
-  );
-  const names = new Map(
-    options.map((item) => [item.value, item.label.replace(/^[^·]+· /, "")]),
-  );
-  const filtered =
-    data?.books.filter(
-      (book) =>
-        (group === "all" || book.group_id === group) &&
-        `${book.name} ${book.rules.map((rule) => `${rule.name} ${[...rule.sources, ...rule.destinations].map((item) => names.get(key(item))).join(" ")}`).join(" ")}`
-          .toLowerCase()
-          .includes(query.toLowerCase()),
-    ) || [];
+  const [page,setPage]=useState(1),[peoplePage,setPeoplePage]=useState(1),[invitePage,setInvitePage]=useState(1);
+  const params=useMemo(()=>({workspace}),[workspace]);
+  const metadata=useInventoryPage("access-summary",params,{enabled:active});
+  const manage=["owner","admin"].includes(metadata.data?.data?.role);
+  const books=useInventoryPage("access-books",{...params,q:query,group,page,page_size:25},{enabled:active && section==="rules"});
+  const people=useInventoryPage("access-people",{...params,q:query,page:peoplePage,page_size:25},{enabled:active && section==="people"});
+  const invitations=useInventoryPage("access-invitations",{...params,page:invitePage,page_size:25},{enabled:active && section==="people" && manage});
+  useEffect(()=>{if(!books.loading && page>books.pagination.pages)setPage(books.pagination.pages);},[page,books.loading,books.pagination.pages]);
+  useEffect(()=>{if(!people.loading && peoplePage>people.pagination.pages)setPeoplePage(people.pagination.pages);},[peoplePage,people.loading,people.pagination.pages]);
+  useEffect(()=>{if(!invitations.loading && invitePage>invitations.pagination.pages)setInvitePage(invitations.pagination.pages);},[invitePage,invitations.loading,invitations.pagination.pages]);
+  const load=useCallback(()=>{
+    for(const kind of ["summary","books","groups","machines","people","entities","peers","exits","proxy-grants","invitations"])metadata.resource.invalidate(`access-${kind}`);
+    setError("");
+  },[metadata.resource]);
+  useBackgroundRefresh(load,{enabled:active,refreshKey:workspace,interval:30000});
+  useEffect(()=>{setQuery("");setGroup("all");setPage(1);setPeoplePage(1);setInvitePage(1);setEditor(null);setInvite(false);setError("");},[workspace]);
+  useEffect(()=>{setPage(1);setPeoplePage(1);},[query,group]);
+  useEffect(()=>{if(!active){setEditor(null);setInvite(false);}},[active]);
+  const data=metadata.data?.data && !metadata.error ? {...metadata.data.data,groups:[],machines:[],users:people.rows,books:books.rows,invitations:invitations.rows,exit_nodes:[]} : null;
+  const error=manualError || metadata.error || (section==="rules" ? books.error : section==="people" ? people.error || (manage ? invitations.error : "") : "");
+  const names=new Map(Object.entries(books.data?.labels || {}));
+  const filtered=books.rows;
   async function mutate(action, success) {
     setBusy(true);
     try {
@@ -136,11 +80,13 @@ export default function AccessRules({ active = true }) {
     }
   }
   async function toggle(book) {
-    const { name, group_id, rules, revision } = book;
-    await mutate(
-      () => axios.put(`${API}/books/${book._id}`, { name, group_id, rules, revision, enabled: !book.enabled }, { params }),
-      book.enabled ? `Paused ${book.name}` : `Resumed ${book.name}`,
-    );
+    await mutate(async()=>{
+      const response=await axios.get(inventoryUrl("access-books",{...params,ids:book._id,detail:true,page_size:1}));
+      const full=response.data.data?.[0];
+      if(!full)throw Error("Policy no longer exists");
+      const {name,group_id,rules,revision}=full;
+      await axios.put(`${API}/books/${book._id}`,{name,group_id,rules,revision,enabled:!book.enabled},{params});
+    },book.enabled ? `Paused ${book.name}` : `Resumed ${book.name}`);
   }
   async function remove(item) {
     const ok = await mutate(
@@ -167,7 +113,7 @@ export default function AccessRules({ active = true }) {
       <PageHeader title="Access Rules" />
       {data && data.role !== "owner" && (
         <p className="mb-3 text-xs text-muted-foreground">
-          {workspaces.find((item) => item.id === workspace)?.name} · {data.role}
+          {data.workspace_name} · {data.role}
         </p>
       )}
       <nav
@@ -234,7 +180,7 @@ export default function AccessRules({ active = true }) {
                         data: {
                           name: "",
                           group_id:
-                            group === "all" ? data.groups[0]?._id || "" : group,
+                            group === "all" ? "" : group,
                           enabled: true,
                           rules: [blankRule()],
                           revision: 0,
@@ -246,25 +192,13 @@ export default function AccessRules({ active = true }) {
                     <span>Policy</span>
                   </Button>
                 )}
-                <SearchSelect
-                  className="col-span-2 min-w-0 sm:w-44"
-                  label="Filter rule group"
-                  value={group}
-                  onChange={setGroup}
-                  options={[
-                    { value: "all", label: "All groups" },
-                    ...data.groups.map((g) => ({
-                      value: g._id,
-                      label: g.name,
-                    })),
-                  ]}
-                />
+                <InventorySelect kind="access-groups" className="col-span-2 min-w-0 sm:w-44" label="Filter rule group" value={group} onChange={setGroup} filters={params} extraOptions={[{value:"all",label:"All groups"}]}/>
               </div>
               <section
                 aria-label="Private policies"
                 className="data-scroll rounded-xl bg-surface"
               >
-                {!filtered.length ? (
+                {books.loading ? <p role="status" className="p-5 text-sm text-muted-foreground">Loading policies…</p> : !filtered.length ? (
                   <EmptyState
                     icon={IconShieldLock}
                     title={
@@ -278,7 +212,7 @@ export default function AccessRules({ active = true }) {
                         : "Create a group → Add members → Add a policy."
                     }
                     action={
-                      manage && !data.groups.length ? (
+                      manage && !data.counts.groups ? (
                         <Button onClick={() => setSection("groups")}>
                           <IconPlus size={15} />
                           Create a Group
@@ -301,6 +235,7 @@ export default function AccessRules({ active = true }) {
                   />
                 )}
               </section>
+              <ResultsPagination count={books.pagination.total} noun="Policies" page={page} pages={books.pagination.pages} pageSize={25} onPage={setPage}/>
             </>
           )}
           {section === "groups" && (
@@ -332,6 +267,8 @@ export default function AccessRules({ active = true }) {
                   </Button>
                 )}
               </div>
+              <SearchField label="Search workspace people" value={query} onChange={setQuery} placeholder="Find a person…"/>
+              {people.loading && <p role="status" className="py-3 text-sm text-muted-foreground">Loading people…</p>}
               {data.users.map((person) => (
                 <div
                   key={person._id}
@@ -371,6 +308,7 @@ export default function AccessRules({ active = true }) {
                     )}
                 </div>
               ))}
+              <ResultsPagination count={people.pagination.total} noun="People" page={peoplePage} pages={people.pagination.pages} pageSize={25} onPage={setPeoplePage}/>
               {data.invitations.length > 0 && (
                 <h3 className="mb-1 mt-6 text-sm font-semibold">
                   Pending Invitations
@@ -403,11 +341,13 @@ export default function AccessRules({ active = true }) {
                   </Button>
                 </div>
               ))}
+              {manage && <ResultsPagination count={invitations.pagination.total} noun="Invitations" page={invitePage} pages={invitations.pagination.pages} pageSize={25} onPage={setInvitePage}/>}
             </section>
           )}
           {section === "network" && (
             <div className="data-scroll overflow-auto">
               <NetworkSettings
+                key={workspace}
                 data={data}
                 manage={manage}
                 params={params}
@@ -417,12 +357,11 @@ export default function AccessRules({ active = true }) {
           )}
         </>
       )}
-      {editor?.kind === "book" && (
+      {data && editor?.kind === "book" && (
         <BookEditor
           book={editor.data}
           initialIndex={editor.index || 0}
           groups={data.groups}
-          options={options}
           manage={manage}
           params={params}
           onClose={() => setEditor(null)}
@@ -432,7 +371,7 @@ export default function AccessRules({ active = true }) {
           }}
         />
       )}
-      {editor?.kind === "group" && (
+      {data && editor?.kind === "group" && (
         <GroupEditor
           group={editor.data}
           data={data}
@@ -445,7 +384,7 @@ export default function AccessRules({ active = true }) {
           }}
         />
       )}
-      {invite && (
+      {data && invite && (
         <InviteEditor
           role={data.role}
           params={params}

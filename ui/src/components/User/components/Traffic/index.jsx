@@ -1,3 +1,5 @@
+import useTrafficPage from "@/shared/hooks/useTrafficPage";
+import InventorySelect from "@/components/ui/inventory-select";
 import { externalEndpoint, internalEndpoint } from "@/shared/utils/endpoints.mjs";
 import { useWorkspaceState } from "@/shared/contexts/workspaceCache";
 import ResultsPagination from "@/components/ui/results-pagination";
@@ -31,9 +33,6 @@ function TrafficSkeleton() {
 export default function Traffic({ active = true }) {
   const demo = useDemo();
   const { colorScheme } = useMantineColorScheme();
-  const [rows, setRows] = useWorkspaceState("traffic.rows", []);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useWorkspaceState("traffic.loading", true);
   const [paused, setPaused] = useState(false);
   const [query, setQuery] = useState("");
   const [machine, setMachine] = useState("all");
@@ -42,50 +41,22 @@ export default function Traffic({ active = true }) {
   const [expanded, setExpanded] = useState("");
   const [page, setPage] = useState(1);
   const [refresh, setRefresh] = useState(0);
-  const [updated, setUpdated] = useWorkspaceState("traffic.updated", null);
-  const hasSnapshot = useRef(updated !== null);
-  useEffect(() => {
-    if (paused) return;
-    let alive = true, timeout;
-    const controller = new AbortController();
-    async function poll() {
-      if (document.hidden) {
-        if (active) timeout = setTimeout(poll, 2000);
-        return;
-      }
-      try {
-        const response = await axios.post(apiRoutes.trafficSnapshot, {}, { signal: controller.signal });
-        if (!alive) return;
-        hasSnapshot.current = true;
-        setRows(response.data?.data || []); setUpdated(Date.now()); setError("");
-      } catch (err) {
-        if (alive) { hasSnapshot.current = true; setError(err?.response?.data?.detail || "Could not load traffic. Check the firewall service and try again."); }
-      } finally {
-        if (alive) { setLoading(false); if (active) timeout = setTimeout(poll, 2000); }
-      }
-    }
-    const visible = () => { if (!document.hidden && (active || !hasSnapshot.current)) poll(); };
-    poll();
-    document.addEventListener("visibilitychange", visible);
-    return () => { alive = false; clearTimeout(timeout); controller.abort(); document.removeEventListener("visibilitychange", visible); };
-  }, [paused, refresh, active]);
-  useEffect(() => { setPage(1); }, [query, machine, sort]);
-  const machines = [...new Map(rows.map(r => [r.connection.machine_id, r.connection.machine_name || "Unknown machine"]))];
-  const filtered = useMemo(() => rows.filter(r => (machine === "all" || r.connection.machine_id === machine)
-    && Number.isFinite(searchScore(query, Object.values(r.connection))))
-    .map(r => ({ ...r, summary: trafficSummary(r.traffic, seconds, (updated || Date.now()) / 1000) }))
-    .sort((a, b) => sort === "name" ? (a.connection.service_name || "").localeCompare(b.connection.service_name || "")
-      : sort === "blocked" ? b.summary.blockedVolume - a.summary.blockedVolume : b.summary.volume - a.summary.volume),
-  [rows, machine, query, sort, seconds, updated]);
-  const samples = useMemo(() => aggregateTraffic(filtered), [filtered]);
+  const traffic = useTrafficPage({ q: query, machine, sort, seconds, expanded, page, page_size: 10 }, { enabled: active, live: !paused, refresh });
+  const { rows, loading, error, updated } = traffic;
+  useEffect(() => { setPage(1); }, [query, machine, sort, seconds]);
+  useEffect(() => { setExpanded(""); }, [query, machine, page]);
+  const filtered = useMemo(() => rows.map(row => ({ ...row, summary: trafficSummary(row.traffic, seconds, (updated || Date.now()) / 1000) })), [rows, seconds, updated]);
+  const samples = traffic.aggregate;
   const summary = trafficSummary(samples, seconds, (updated || Date.now()) / 1000);
-  const pages = Math.max(1, Math.ceil(filtered.length / 10));
+  const pages = traffic.pagination?.pages || 1;
+  const total = traffic.pagination?.total || 0;
   const currentPage = Math.min(page, pages);
+  useEffect(()=>{if(!loading && page>pages)setPage(pages);},[page,pages,loading]);
   return <div className="workspace-page">
     <PageHeader title="Traffic Explorer" />
     <div className="toolbar"><div className="flex flex-wrap items-center gap-2">
       <div className="min-w-0 basis-full lg:flex-1 lg:basis-48"><SearchField label="Search traffic" value={query} onChange={setQuery} placeholder="Search ports…" /></div>
-      <SearchSelect className="min-w-0 flex-1 basis-[calc(50%-4px)] sm:w-40 sm:flex-none sm:basis-auto" label="Traffic machine" value={machine} onChange={setMachine} options={[{value:"all",label:"All machines"},...machines.map(([id,name])=>({value:id,label:name}))]} />
+      <InventorySelect kind="machines" className="min-w-0 flex-1 basis-[calc(50%-4px)] sm:w-40 sm:flex-none sm:basis-auto" label="Traffic machine" value={machine} onChange={setMachine} extraOptions={[{value:"all",label:"All machines"}]} />
       <SearchSelect className="min-w-0 flex-1 basis-[calc(50%-4px)] sm:w-40 sm:flex-none sm:basis-auto" label="Sort traffic" value={sort} onChange={setSort} options={[{value:"traffic",label:"Most traffic"},{value:"blocked",label:"Most blocked"},{value:"name",label:"Service A–Z"}]} />
       <SearchSelect className="min-w-0 flex-1 basis-[calc(50%-4px)] sm:w-40 sm:flex-none sm:basis-auto" label="Traffic window" value={seconds} onChange={value=>setSeconds(Number(value))} options={[{value:60,label:"Last 60 seconds"},{value:120,label:"Last 2 minutes"}]} />
       <div className="ml-auto flex shrink-0 items-center gap-2">
@@ -96,10 +67,10 @@ export default function Traffic({ active = true }) {
     {error && rows.length > 0 && <div role="alert" className="mb-3 rounded-lg bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-300">{error} Showing the last successful snapshot.</div>}
     {loading ? <TrafficSkeleton />
       : error && !rows.length ? <div role="alert"><EmptyState icon={IconActivity} title="Traffic Unavailable" description={error} action={<Button type="button" variant="secondary" onClick={()=>setRefresh(value=>value+1)}><IconRefresh size={16} />Try Again</Button>} /></div>
-      : !filtered.length ? <EmptyState icon={IconActivity} title={rows.length ? "No matching services" : "No port traffic to explore yet"} description={rows.length ? "Change your search or machine filter." : "Traffic appears here when a machine has a forwarded port and the firewall service is available."} />
-      : <section aria-label="Traffic results" className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-surface"><div className="data-scroll"><details className="border-b border-border"><summary className="cursor-pointer px-4 py-3 text-sm font-medium">Combined traffic · {filtered.length} ports</summary><div className="p-3"><TrafficMonitorPanel isDark={colorScheme === "dark"} samples={samples} isLoading={false} title="Combined traffic" subtitle="Bytes per second" windowSeconds={seconds} /></div></details>
+      : !filtered.length ? <EmptyState icon={IconActivity} title={query.trim() || machine!=="all" ? "No matching services" : "No port traffic to explore yet"} description={query.trim() || machine!=="all" ? "Change your search or machine filter." : "Traffic appears here when a machine has a forwarded port and the firewall service is available."} />
+      : <section aria-label="Traffic results" className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-surface"><div className="data-scroll"><details className="border-b border-border"><summary className="cursor-pointer px-4 py-3 text-sm font-medium">Combined traffic · {total} ports</summary><div className="p-3"><TrafficMonitorPanel isDark={colorScheme === "dark"} samples={samples} isLoading={false} title="Combined traffic" subtitle="Bytes per second" windowSeconds={seconds} /></div></details>
       <section><div className="border-b border-border px-4 py-3"><h2 className="text-sm font-semibold">Port Activity</h2></div>
-      <div className="divide-y divide-border/60">{filtered.slice((currentPage - 1) * 10, currentPage * 10).map(row => {
+      <div className="divide-y divide-border/60">{filtered.map(row => {
         const c = row.connection, s = row.summary, open = expanded === c._id;
         return <div key={c._id}>
           <button type="button" aria-expanded={open} aria-controls={`traffic-${c._id}`} onClick={() => setExpanded(open ? "" : c._id)} className="relative grid w-full grid-cols-3 items-center gap-3 px-4 py-3 text-left hover:bg-accent/40 md:grid-cols-[minmax(0,1.4fr)_minmax(120px,1fr)_minmax(100px,0.8fr)_20px]">
@@ -114,7 +85,7 @@ export default function Traffic({ active = true }) {
             <Button asChild variant="secondary"><a href={uiRoutes.getTrafficMonitor({dataId:c._id,demo})} target="_blank" rel="noreferrer">Open Dedicated Monitor<IconArrowUpRight size={15} /></a></Button>
           </div>}
         </div>;
-      })}</div></section></div><ResultsPagination count={filtered.length} noun="Ports" page={currentPage} pages={pages} pageSize={10} onPage={setPage} /></section>}
+      })}</div></section></div><ResultsPagination count={total} noun="Ports" page={currentPage} pages={pages} pageSize={10} onPage={setPage} /></section>}
   </div>;
 }
 

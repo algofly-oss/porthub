@@ -1,4 +1,5 @@
 pub mod account_delete;
+pub mod access_inventory;
 pub mod artifacts;
 pub mod auth;
 pub mod bootstrap;
@@ -16,6 +17,8 @@ pub mod generated;
 pub mod http;
 pub mod input;
 pub mod input_compat;
+pub mod inventory_query;
+pub mod inventory_traffic;
 pub mod legacy_turn;
 mod legacy_upgrade;
 pub mod machine_delete;
@@ -41,6 +44,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 pub struct App {
+    pub inventory_traffic: inventory_traffic::Cache,
     pub account_lifecycle: tokio::sync::RwLock<()>,
     pub private_relay: private_relay::Hub,
     pub proxy_capacity: application_proxy::Capacity,
@@ -87,6 +91,7 @@ impl App {
             )
         };
         Self {
+            inventory_traffic: Default::default(),
             private_enrollment_initialized: Default::default(),
             private_initialized: Default::default(),
             account_lifecycle: tokio::sync::RwLock::new(()),

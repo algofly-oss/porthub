@@ -1,4 +1,7 @@
-import { useState } from "react";
+import { inventoryUrl } from "@/shared/utils/inventory-resource.mjs";
+import useInventoryPage from "@/shared/hooks/useInventoryPage";
+import InventorySelect from "@/components/ui/inventory-select";
+import { useEffect, useState } from "react";
 import axios from "axios";
 import { Switch } from "@mantine/core";
 import {
@@ -13,7 +16,7 @@ import SearchSelect from "@/components/ui/search-select";
 import WorkspaceDrawer from "@/components/ui/workspace-drawer";
 import { API, blankRule, errorText, DirtyGuard, MultiEntities } from "./shared";
 
-export default function BookEditor({
+function LoadedBookEditor({
   book,
   initialIndex,
   groups,
@@ -40,6 +43,7 @@ export default function BookEditor({
     }));
   async function save(event) {
     event.preventDefault();
+    if(!form.group_id){setError("Choose an organising group.");return;}
     const incomplete = form.rules.findIndex(
       (item) =>
         !item.name.trim() || !item.sources.length || !item.destinations.length,
@@ -102,18 +106,7 @@ export default function BookEditor({
                 </label>
                 <label className="text-sm font-medium">
                   Organising group
-                  <SearchSelect
-                    className="mt-2"
-                    label="Policy group"
-                    value={form.group_id}
-                    onChange={(value) => update("group_id", value)}
-                    disabled={!manage}
-                    options={groups.map((g) => ({
-                      value: g._id,
-                      label: g.name,
-                    }))}
-                    placeholder="Create a group first"
-                  />
+                  <InventorySelect kind="access-groups" className="mt-2" label="Policy group" value={form.group_id} selected={book.group_name ? {_id:book.group_id,name:book.group_name} : undefined} filters={params} onChange={value=>update("group_id",value)} disabled={!manage} placeholder="Create a group first"/>
                 </label>
               </div>
               <div className="flex items-center justify-between gap-3 rounded-lg bg-control p-3">
@@ -212,14 +205,14 @@ export default function BookEditor({
                   </div>
                   <MultiEntities
                     label="Source entities"
-                    options={options}
+                    params={params}
                     value={rule.sources}
                     onChange={(value) => updateRule("sources", value)}
                     disabled={!manage}
                   />
                   <MultiEntities
                     label="Destination entities"
-                    options={options}
+                    params={params}
                     value={rule.destinations}
                     onChange={(value) => updateRule("destinations", value)}
                     disabled={!manage}
@@ -332,4 +325,18 @@ export default function BookEditor({
       )}
     </DirtyGuard>
   );
+}
+
+export default function BookEditor(props) {
+  const [source,setSource]=useState(null),[error,setError]=useState(""),[retry,setRetry]=useState(0);
+  const id=props.book._id, workspace=props.params?.workspace || "";
+  useEffect(()=>{
+    if(!id)return;
+    const controller=new AbortController();setSource(null);setError("");
+    axios.get(inventoryUrl("access-books",{workspace,ids:id,detail:true,page_size:1}),{signal:controller.signal}).then(response=>{if(!controller.signal.aborted){const row=response.data.data?.[0];if(row)setSource(row);else setError("Policy no longer exists.");}}).catch(error=>{if(!controller.signal.aborted)setError(error.response?.data?.detail || "Could not load the complete policy.");});
+    return()=>controller.abort();
+  },[id,workspace,retry]);
+  if(!id)return <LoadedBookEditor {...props}/>;
+  if(!source || source._id!==id)return <WorkspaceDrawer opened onClose={props.onClose} title="Policy" size="xl"><p role={error ? "alert" : "status"} className="p-4 text-sm text-muted-foreground">{error || "Loading complete policy…"}</p>{error && <Button type="button" variant="secondary" onClick={()=>setRetry(value=>value+1)}>Try again</Button>}</WorkspaceDrawer>;
+  return <LoadedBookEditor {...props} book={source}/>;
 }

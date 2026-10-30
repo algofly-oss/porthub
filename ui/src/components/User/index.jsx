@@ -1,3 +1,4 @@
+import { WorkspaceInventorySummary } from "@/shared/hooks/useInventorySummary";
 import { useContext, useEffect, useState } from "react";
 import { SocketContext } from "@/shared/contexts/socket";
 import UserNavBar from "./components/NavBar";
@@ -81,6 +82,7 @@ export default function UserHome() {
   }
 
   return (
+    <WorkspaceCacheProvider key={`${user?.username || "anonymous"}:${router.query.demo === "1"}`}>
     <div className="workspace flex flex-col-reverse md:flex-row">
       <a href="#workspace-content" className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-lg focus:bg-blue-600 focus:p-3 focus:text-white">Skip to content</a>
       <aside
@@ -111,19 +113,19 @@ export default function UserHome() {
       <div className={`workspace-body w-full min-w-0 ${collapsed ? "md:ml-16" : "md:ml-56"}`}>
         <DemoNotice />
         <main id="workspace-content" tabIndex={-1}>
-        <WorkspaceCacheProvider key={`${user?.username || "anonymous"}:${router.query.demo === "1"}`}>
+        <WorkspaceInventorySummary onStatsChange={setMachineStats} />
         <motion.div initial={reducedMotion ? false : { opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.16 }} className="h-full min-h-0">
         <div hidden={tab !== "Dashboard"} aria-hidden={tab !== "Dashboard"} className="h-full min-h-0"><Dashboard active={tab === "Dashboard"} /></div>
-        <div hidden={tab !== "Home"} aria-hidden={tab !== "Home"} className="h-full min-h-0"><Home active={tab === "Home"} onStatsChange={setMachineStats} /></div>
+        <div hidden={tab !== "Home"} aria-hidden={tab !== "Home"} className="h-full min-h-0"><Home active={tab === "Home"} /></div>
         <div hidden={tab !== "Access"} aria-hidden={tab !== "Access"} className="h-full min-h-0"><AccessRules active={tab === "Access"} /></div>
         <div hidden={tab !== "Proxy"} aria-hidden={tab !== "Proxy"} className="h-full min-h-0"><Proxy active={tab === "Proxy"} /></div>
         <div hidden={tab !== "Traffic"} aria-hidden={tab !== "Traffic"} className="h-full min-h-0"><Traffic active={tab === "Traffic"} /></div>
         <div hidden={tab !== "Settings"} aria-hidden={tab !== "Settings"} className="h-full min-h-0"><Settings /></div>
         {isAdmin && <div hidden={tab !== "Platform"} aria-hidden={tab !== "Platform"} className="h-full min-h-0"><PlatformOverview active={tab === "Platform"} /></div>}
         </motion.div>
-        </WorkspaceCacheProvider>
         </main>
       </div>
     </div>
+    </WorkspaceCacheProvider>
   );
 }

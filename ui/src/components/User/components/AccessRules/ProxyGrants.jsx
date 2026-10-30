@@ -1,3 +1,8 @@
+import useInventoryPage from "@/shared/hooks/useInventoryPage";
+import InventorySelect from "@/components/ui/inventory-select";
+import InventoryMultiSelect from "@/components/ui/inventory-multi-select";
+import ResultsPagination from "@/components/ui/results-pagination";
+import { SearchField } from "@/components/ui/workspace";
 import { useCallback, useEffect, useState } from "react";
 import { Switch } from "@mantine/core";
 import { IconChevronDown, IconChevronRight, IconPlus, IconWorld, IconCopy, IconCheck } from "@tabler/icons-react";
@@ -12,8 +17,6 @@ import { API, errorText } from "./shared";
 
 const empty = () => ({ name: "", target_kind: "gateway", target_machine_id: "", client_machine_ids: [], enabled: true, allow_lan: false });
 export default function ProxyGrants({ data, manage, params }) {
-  const [grants, setGrants] = useState([]);
-  const [gatewayLanAllowed,setGatewayLanAllowed]=useState(false);
   const [editing, setEditing] = useState(null);
   const [removing, setRemoving] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -21,22 +24,17 @@ export default function ProxyGrants({ data, manage, params }) {
   const [form, setForm] = useState(empty);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const load = useCallback(async signal => {
-    try {
-      const result = await axios.get(`${API}/proxy-grants`, { params, signal });
-      setGrants(result.data.data || []);
-      setGatewayLanAllowed(result.data.can_allow_gateway_lan===true);
-      setError("");
-    } catch (cause) { if (!axios.isCancel(cause)) setError(errorText(cause)); }
-  }, [params]);
-  useEffect(() => {
-    setGrants([]); setEditing(null);
-    const controller = new AbortController(); load(controller.signal);
-    return () => controller.abort();
-  }, [load]);
+  const [query,setQuery]=useState(""),[page,setPage]=useState(1);
+  const inventory=useInventoryPage("access-proxy-grants",{...params,q:query,page,page_size:25},{enabled:expanded || !!editing});
+  const grants=inventory.rows;
+  const gatewayLanAllowed=inventory.data?.can_allow_gateway_lan===true;
+  const load=inventory.refresh;
+  useEffect(()=>setPage(1),[query]);
+  useEffect(()=>{if(!inventory.loading && page>inventory.pagination.pages)setPage(inventory.pagination.pages);},[page,inventory.loading,inventory.pagination.pages]);
+  const targetIds=[...new Set(grants.map(grant=>grant.target_machine_id).filter(Boolean))].sort().join(",");
+  const targets=useInventoryPage("access-machines",{...params,ids:targetIds,page_size:100},{enabled:!!targetIds && expanded});
+  const names=new Map(targets.rows.map(machine=>[machine._id,machine.name]));
   const canEdit=manage && !(form.target_kind==="gateway" && form.allow_lan && !gatewayLanAllowed);
-  const machines = data.machines.map(machine => ({ value: machine._id, label: machine.name }));
-  const names = new Map(machines.map(machine => [machine.value, machine.label]));
   function open(grant) {
     setForm(grant ? { ...empty(), ...grant } : empty());
     setEditing(grant?._id || "new"); setRemoving(false); setCopied(false); setError(""); setExpanded(true);
@@ -65,22 +63,26 @@ export default function ProxyGrants({ data, manage, params }) {
         {expanded ? <IconChevronDown size={16} className="shrink-0 text-muted-foreground" /> : <IconChevronRight size={16} className="shrink-0 text-muted-foreground" />}
         <IconWorld size={17} className="shrink-0 text-primary" />
         <span className="truncate text-sm font-semibold">Application proxies</span>
-        <span className="rounded-full bg-control px-2 py-0.5 text-xs text-muted-foreground">{grants.length}</span>
+        <span className="rounded-full bg-control px-2 py-0.5 text-xs text-muted-foreground">{inventory.data ? inventory.pagination.total : "…"}</span>
       </button>
       {manage && <Button size="sm" variant="outline" onClick={() => open(null)}><IconPlus size={15} />Add</Button>}
     </div>
     {error && !editing && <p role="alert" className="mt-2 text-sm text-red-500">{error}</p>}
     {expanded && <div className="pb-2 pt-2">
       <p className="mb-2 text-xs text-muted-foreground">Shared proxy permissions. No listener starts until an authorized client requests one.</p>
-      {!grants.length && <p className="py-3 text-sm text-muted-foreground">No shared proxies authorized.</p>}
+      <SearchField label="Search proxy grants" value={query} onChange={setQuery} placeholder="Find a proxy grant…"/>
+      {inventory.loading && <p role="status" className="py-3 text-sm text-muted-foreground">Loading proxy grants…</p>}
+      {inventory.error && <p role="alert" className="py-3 text-sm text-red-600">{inventory.error}</p>}
+      {!inventory.loading && !grants.length && <p className="py-3 text-sm text-muted-foreground">No shared proxies authorized.</p>}
       <div className="space-y-1">{grants.map(grant => <button type="button" key={grant._id} onClick={() => open(grant)} className="flex w-full items-center gap-3 rounded-lg border border-border px-3 py-2 text-left hover:bg-accent/30"><IconWorld size={17} className="shrink-0 text-primary" /><div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{grant.name}</p><p className="mt-0.5 truncate text-xs text-muted-foreground">{grant.target_kind === "gateway" ? "Gateway" : names.get(grant.target_machine_id) || "Unavailable machine"} · {grant.client_machine_ids.length} machines · {grant.enabled ? "Enabled" : "Disabled"}</p></div><IconChevronRight size={16} className="shrink-0 text-muted-foreground" /></button>)}</div>
+      <ResultsPagination count={inventory.pagination.total} noun="Proxy grants" page={page} pages={inventory.pagination.pages} pageSize={25} onPage={setPage}/>
     </div>}
     <Dialog opened={Boolean(editing)} onClose={() => { if (!busy) setEditing(null); }} title={editing === "new" ? "Create proxy grant" : "Proxy grant"} size="lg">
       {error && <p role="alert" className="mb-3 text-sm text-red-500">{error}</p>}
       <form onSubmit={save} className="space-y-3"><fieldset disabled={busy || !canEdit} className="space-y-3">
         <Input aria-label="Proxy grant name" placeholder="Proxy grant name" required maxLength={80} value={form.name} onChange={event => setForm(current => ({ ...current, name: event.target.value }))} />
-        <SearchSelect label="Proxy runs through" value={form.target_kind === "gateway" ? "gateway" : form.target_machine_id} options={[{ value: "gateway", label: "PortHub gateway" }, ...machines]} onChange={value => setForm(current => ({ ...current, target_kind: value === "gateway" ? "gateway" : "machine", target_machine_id: value === "gateway" ? "" : value, allow_lan: value === "gateway" && !gatewayLanAllowed ? false : current.allow_lan, client_machine_ids: current.client_machine_ids.filter(id => id !== value) }))} />
-        <SearchMultiSelect label="Machines allowed to use this proxy" placeholder="Search machines…" options={machines.filter(machine => machine.value !== form.target_machine_id)} value={form.client_machine_ids} onChange={client_machine_ids => setForm(current => ({ ...current, client_machine_ids }))} />
+        <InventorySelect kind="access-machines" filters={params} label="Proxy runs through" value={form.target_kind === "gateway" ? "gateway" : form.target_machine_id} extraOptions={[{value:"gateway",label:"PortHub gateway"}]} onChange={value => setForm(current => ({ ...current, target_kind: value === "gateway" ? "gateway" : "machine", target_machine_id: value === "gateway" ? "" : value, allow_lan: value === "gateway" && !gatewayLanAllowed ? false : current.allow_lan, client_machine_ids: current.client_machine_ids.filter(id => id !== value) }))} />
+        <InventoryMultiSelect kind="access-machines" filters={params} label="Machines allowed to use this proxy" placeholder="Search machines…" value={form.client_machine_ids} onChange={ids => setForm(current => ({ ...current, client_machine_ids:ids.filter(id=>id!==current.target_machine_id) }))} />
         <div className="rounded-lg border border-border p-3"><Switch label="Allow access to the target’s LAN" disabled={form.target_kind==="gateway" && !gatewayLanAllowed} checked={form.allow_lan} onChange={event => { const allow_lan = event.currentTarget.checked; setForm(current => ({ ...current, allow_lan })); }} /><p className="mt-2 text-xs text-muted-foreground">Off by default. Enabling this grants the selected clients access to private destinations reachable by this proxy target. {form.target_kind==="gateway" && "Gateway LAN access requires a platform administrator."}</p></div>
         <Switch label="Enabled" checked={form.enabled} onChange={event => { const enabled = event.currentTarget.checked; setForm(current => ({ ...current, enabled })); }} />
       </fieldset>

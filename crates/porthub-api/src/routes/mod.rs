@@ -61,4 +61,5 @@ pub fn router() -> Router<Arc<App>> {
         .merge(private_sync::router())
         .merge(crate::private_relay::router())
         .merge(traffic_routes::router())
+        .merge(crate::inventory_query::router())
 }

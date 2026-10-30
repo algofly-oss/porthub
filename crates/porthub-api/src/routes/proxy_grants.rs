@@ -93,7 +93,7 @@ fn parse(raw: Value) -> ApiResult<GrantInput> {
         allow_lan,
     })
 }
-fn public(record: &Document) -> Value {
+pub(crate) fn public(record: &Document) -> Value {
     json!({"_id":store::id(record.get("_id")),"name":store::string(record,"name"),
         "target_kind":record.get_str("target_kind").unwrap_or("gateway"),
         "target_machine_id":store::id(record.get("target_machine_id")),

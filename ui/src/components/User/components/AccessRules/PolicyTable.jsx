@@ -29,7 +29,7 @@ function Rules({ book, names, limit = 2 }) {
   return (
     <div className="min-w-0 space-y-1">
       {book.rules.slice(0, limit).map((rule) => <Flow key={rule.id} rule={rule} names={names} />)}
-      {book.rules.length > limit && <p className="text-xs text-muted-foreground">+{book.rules.length - limit} more rules</p>}
+      {(book.rules_count ?? book.rules.length) > limit && <p className="text-xs text-muted-foreground">+{(book.rules_count ?? book.rules.length) - limit} more rules</p>}
       {!book.rules.length && <p className="text-xs text-muted-foreground">No rules yet</p>}
     </div>
   );
@@ -63,7 +63,7 @@ function StatusSwitch({ book, manage, busy, onToggle }) {
 }
 
 export default function PolicyTable({ books, groups, names, manage, busy, onOpen, onToggle, onDelete }) {
-  const groupName = (book) => groups.find((g) => g._id === book.group_id)?.name || "Deleted group · inactive";
+  const groupName = (book) => book.group_name || groups.find((g) => g._id === book.group_id)?.name || "Deleted group · inactive";
   const interaction = (book) => ({
     tabIndex: 0,
     "aria-label": `${manage ? "Edit" : "View"} policy ${book.name}`,
@@ -95,7 +95,7 @@ export default function PolicyTable({ books, groups, names, manage, busy, onOpen
               <TableRow key={book._id} {...interaction(book)} className={`cursor-pointer focus-visible:bg-accent/40 ${book.enabled ? "" : "text-muted-foreground"}`}>
                 <TableCell className="py-2.5">
                   <p className="truncate font-medium text-foreground">{book.name}</p>
-                  <p className="mt-0.5 truncate text-xs text-muted-foreground">{groupName(book)}{book.rules.length > 1 ? ` · ${book.rules.length} rules` : ""}</p>
+                  <p className="mt-0.5 truncate text-xs text-muted-foreground">{groupName(book)}{(book.rules_count ?? book.rules.length) > 1 ? ` · ${book.rules_count ?? book.rules.length} rules` : ""}</p>
                 </TableCell>
                 <TableCell className="py-2.5"><Rules book={book} names={names} /></TableCell>
                 <TableCell className="py-2.5"><Protocols book={book} /></TableCell>

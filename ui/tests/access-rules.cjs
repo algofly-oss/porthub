@@ -4,7 +4,7 @@ const {launchBrowser, navigateWorkspace, seedEmptyPolicies} = require("./browser
 (async () => {
   const browser = await launchBrowser();
   try {
-    for (const theme of ["dark", "light"]) for (const width of [1512, 402, 320]) {
+    for (const theme of (process.env.REVIEW_THEMES || "dark,light").split(",")) for (const width of (process.env.REVIEW_WIDTHS || "1512,402,320").split(",").map(Number)) {
       const context = await browser.newContext({viewport:{width,height:982}});
       await seedEmptyPolicies(context);
       await context.addInitScript(theme=>localStorage.setItem("mantine-color-scheme",JSON.stringify(theme)),theme);
@@ -24,6 +24,7 @@ const {launchBrowser, navigateWorkspace, seedEmptyPolicies} = require("./browser
         await page.getByRole("option",{name:option,exact:true}).click();
         if(await page.getByRole("listbox").isVisible().catch(()=>false))await page.keyboard.press("Escape");
       }
+      await pick("Policy group","Development");
       await pick("Source entities","Group · Development");
       await pick("Destination entities","Group · Production");
       await editor.getByLabel("Rule ports",{exact:true}).fill("22");
@@ -61,7 +62,8 @@ const {launchBrowser, navigateWorkspace, seedEmptyPolicies} = require("./browser
       await page.getByRole("button",{name:"Group",exact:true}).click();
       await page.getByRole("button",{name:"Manage members of Engineering",exact:true}).click();
       const members=page.getByRole("dialog",{name:"Engineering · Members",exact:true});
-      await members.getByLabel("Tag Demo Workspace",{exact:true}).click();
+      await members.getByRole("button",{name:"People",exact:true}).click();
+      await members.getByLabel("Include Demo Workspace",{exact:true}).click();
       await members.getByRole("button",{name:"Save Members",exact:true}).click();
       await members.waitFor({state:"hidden"});
       await page.getByText(/0 machines · 1 person · 0 policies/).waitFor();

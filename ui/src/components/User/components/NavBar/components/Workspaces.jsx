@@ -1,3 +1,5 @@
+import useInventoryPage from "@/shared/hooks/useInventoryPage";
+import { useEffect } from "react";
 import { useState } from "react";
 import { useRouter } from "next/router";
 import axios from "axios";
@@ -8,20 +10,13 @@ import { SearchField } from "@/components/ui/workspace";
 export default function Workspaces({ collapsed = false, withinPortal = true, onSelected }) {
   const router = useRouter();
   const [opened, setOpened] = useState(false);
-  const [items, setItems] = useState([]);
-  const [error, setError] = useState(false);
   const [query, setQuery] = useState("");
-  async function open(value) {
-    setOpened(value);
-    if (!value) return;
-    setError(false);
-    setQuery("");
-    try {
-      setItems((await axios.get("/api/access/workspaces")).data.data || []);
-    } catch {
-      setError(true);
-    }
-  }
+  const [page,setPage]=useState(1);
+  const inventory=useInventoryPage("access-workspaces",{q:query,page,page_size:20},{enabled:opened});
+  const items=inventory.rows, error=inventory.error;
+  useEffect(()=>setPage(1),[query]);
+  useEffect(()=>{if(!inventory.loading && page>inventory.pagination.pages)setPage(inventory.pagination.pages);},[page,inventory.loading,inventory.pagination.pages]);
+  function open(value){setOpened(value);if(value){setQuery("");setPage(1);}}
   const value = String(
     router.query.workspace ||
       items.find((item) => item.role === "owner")?.id ||
@@ -63,15 +58,12 @@ export default function Workspaces({ collapsed = false, withinPortal = true, onS
             <button
               type="button"
               className="p-2 text-sm text-muted-foreground"
-              onClick={() => open(true)}
+              onClick={inventory.refresh}
             >
               Could not load. Retry
             </button>
           ) : (
             items
-              .filter((item) =>
-                item.name.toLowerCase().includes(query.toLowerCase()),
-              )
               .map((item) => (
                 <button
                   key={item.id}
@@ -104,16 +96,10 @@ export default function Workspaces({ collapsed = false, withinPortal = true, onS
                 </button>
               ))
           )}
-          {!error &&
-            items.length > 0 &&
-            !items.some((item) =>
-              item.name.toLowerCase().includes(query.toLowerCase()),
-            ) && (
-              <p className="p-2 text-sm text-muted-foreground">
-                No matching workspaces
-              </p>
-            )}
+          {inventory.loading && <p role="status" className="p-2 text-sm text-muted-foreground">Loading workspaces…</p>}
+          {!inventory.loading && !error && !items.length && <p className="p-2 text-sm text-muted-foreground">No matching workspaces</p>}
         </div>
+        {inventory.pagination.pages>1 && <div className="mt-2 flex items-center justify-between gap-2 border-t border-border pt-2 text-xs"><button type="button" onClick={()=>setPage(p=>p-1)} disabled={page<=1} className="rounded px-2 py-2 hover:bg-control disabled:opacity-40">Previous</button><span>{page} / {inventory.pagination.pages}</span><button type="button" onClick={()=>setPage(p=>p+1)} disabled={page>=inventory.pagination.pages} className="rounded px-2 py-2 hover:bg-control disabled:opacity-40">Next</button></div>}
       </Popover.Dropdown>
     </Popover>
   );

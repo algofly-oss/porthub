@@ -22,7 +22,7 @@ use std::{collections::HashSet, sync::Arc};
 pub fn router() -> Router<Arc<App>> {
     Router::new()
         .route("/api/access/groups", post(create))
-        .route("/api/access/groups/{id}/members", put(members))
+        .route("/api/access/groups/{id}/members", put(members).patch(members))
 }
 async fn create(
     State(app): State<Arc<App>>,
@@ -77,28 +77,38 @@ async fn members(
     headers: HeaderMap,
     Query(query): Query<WorkspaceQuery>,
     Path(id): Path<String>,
+    method: Method,
     ApiBody(raw): ApiBody,
 ) -> ApiResult<Json<Value>> {
+    let patch=method==Method::PATCH;
     let raw = input_compat::dictionary(raw.clone())
         .map(Value::Object)
         .unwrap_or(raw);
     let mut model = Model::new(raw)?;
-    let machines = model.string_list("machine_ids", 1000);
-    let users = model.string_list("user_ids", 1000);
+    let machines = model.string_list(if patch {"machine_add"}else{"machine_ids"}, 1000);
+    let users = model.string_list(if patch {"user_add"}else{"user_ids"}, 1000);
+    let machine_remove=if patch {model.string_list("machine_remove",1000)}else{Vec::new()};
+    let user_remove=if patch {model.string_list("user_remove",1000)}else{Vec::new()};
     model.finish()?;
-    let (_, owner, _) = browser(&app, &headers, &Method::PUT, &query.workspace, true).await?;
+    let (_, owner, _) = browser(&app, &headers, &method, &query.workspace, true).await?;
     let group = object_id(&id, "Invalid group")?;
     let _guard = app.connection_lock.lock().await;
-    if app
-        .collection("machine_groups")
-        .find_one(doc! {"_id":group,"user_id":owner})
-        .await?
-        .is_none()
-    {
-        return Err(ApiError::new(StatusCode::NOT_FOUND, "Group not found"));
+    let group_record=app.collection("machine_groups").find_one(doc! {"_id":group,"user_id":owner}).await?.ok_or_else(||ApiError::new(StatusCode::NOT_FOUND,"Group not found"))?;
+    let mut machines = ids(machines, "Invalid machine")?;
+    let mut users = ids(users, "Invalid user")?;
+    let added_users=users.clone();
+    if patch {
+        let machine_remove=ids(machine_remove,"Invalid machine")?;
+        let user_remove=ids(user_remove,"Invalid user")?;
+        if machines.iter().any(|id|machine_remove.contains(id)) || users.iter().any(|id|user_remove.contains(id)) {return Err(ApiError::bad_request("A member cannot be added and removed in the same request"));}
+        // Resolve the complete existing membership under the same mutation lock.
+        // A page of checkboxes changes only explicitly edited IDs.
+        let existing=app.collection("machines").find(doc! {"user_id":owner}).projection(doc! {"group_id":1,"group_ids":1}).await?.try_collect::<Vec<_>>().await?;
+        let mut selected=existing.iter().filter(|record|inventory::group_ids(record).contains(&group)).filter_map(|record|record.get_object_id("_id").ok()).filter(|id|!machine_remove.contains(id)).collect::<HashSet<_>>();
+        selected.extend(machines);machines=selected.into_iter().collect();
+        let mut selected=group_record.get_array("user_ids").ok().into_iter().flatten().filter_map(|id|ObjectId::parse_str(store::id(Some(id))).ok()).filter(|id|!user_remove.contains(id)).collect::<HashSet<_>>();
+        selected.extend(users);users=selected.into_iter().collect();
     }
-    let machines = ids(machines, "Invalid machine")?;
-    let users = ids(users, "Invalid user")?;
     if !machines.is_empty()
         && app
             .collection("machines")
@@ -123,6 +133,8 @@ async fn members(
             allowed.insert(id);
         }
     }
+    if patch && added_users.iter().any(|id| !allowed.contains(id)) {return Err(ApiError::bad_request("Selected users must belong to this workspace"));}
+    if patch {users.retain(|id|allowed.contains(id));}
     if users.iter().any(|id| !allowed.contains(id)) {
         return Err(ApiError::bad_request(
             "Selected users must belong to this workspace",

@@ -1,3 +1,7 @@
+import { demoAccessInventory } from "./access-inventory.mjs";
+import { searchScore } from "../utils/search.mjs";
+import { normalizeTrafficSamples } from "../utils/traffic.mjs";
+import { demoInventory } from "./inventory.mjs";
 import { demoAccess } from "./access.mjs";
 const id = value => value.toString(16).padStart(24, "0");
 const stamp = () => new Date().toISOString();
@@ -33,12 +37,37 @@ function traffic(connection, index) {
 }
 
 export function handleDemoRequest(state, method, rawPath, payload = {}) {
-  const path = rawPath.split("?")[0].replace(/^.*\/api/, "");
+  const url=new URL(rawPath,"http://demo.invalid");
+  const path = url.pathname.replace(/^.*\/api/, "");
+  if(path==="/inventory/summary")return {data:{machines:{total:state.machines.length,online:state.machines.filter(m=>m.connection_status==="online").length,offline:state.machines.filter(m=>m.enabled!==false&&m.connection_status==="offline").length,disabled:state.machines.filter(m=>m.enabled===false).length,auth_required:state.machines.filter(m=>m.enabled!==false&&m.connection_status==="auth_required").length},ports:state.connections.length,proxies:state.proxies.length}};
+  if(path==="/inventory/status") {const ids=new Set((url.searchParams.get("ids") || "").split(","));return {data:state.machines.filter(m=>ids.has(m._id))};}
+  if(path==="/inventory/machine-traffic") {
+    const ids=new Set((url.searchParams.get("ids") || "").split(","));
+    const data=state.machines.filter(m=>ids.has(m._id)).map(m=>({connection:{_id:m._id},traffic:normalizeTrafficSamples(state.connections.filter(c=>c.machine_id===m._id).map(traffic).flatMap(row=>row.traffic))}));
+    return {data,aggregate:[],cursor:Math.floor(Date.now()/1000),pagination:{page:1,page_size:data.length,total:data.length,pages:1}};
+  }
+  if(path==="/inventory/traffic") {
+    const params=Object.fromEntries(url.searchParams), inventory=demoInventory(state,"connections",params);
+    const samples=state.connections.filter(c=>(!params.machine || params.machine==="all" || c.machine_id===params.machine) && Number.isFinite(searchScore(params.q || "",Object.values(c)))).map(traffic);
+    const byId=new Map(samples.map(row=>[row.connection._id,row]));
+    return {...inventory,data:inventory.data.map(connection=>byId.get(connection._id) || traffic(connection,0)),aggregate:normalizeTrafficSamples(samples.flatMap(row=>row.traffic)),cursor:Math.floor(Date.now()/1000)};
+  }
+  if(path==="/inventory/proxy-activity") {
+    const activity=state.proxyActivity || {available:true,tracking_since:new Date(Date.now()-86400000).toISOString(),data:state.proxies.map((proxy,index)=>({route_id:proxy._id,requests:(index+1)*27000,monthly_requests:(index+1)*1200,last_requested_at:new Date(Date.now()-index*60000).toISOString(),last_host:proxy.hosts[0]}))};
+    const recent=Number(url.searchParams.get("recent")), ids=new Set((url.searchParams.get("ids") || "").split(","));
+    const data=recent ? [...activity.data].filter(m=>m.last_requested_at).sort((a,b)=>Date.parse(b.last_requested_at)-Date.parse(a.last_requested_at)).slice(0,recent) : activity.data.filter(m=>ids.has(m.route_id));
+    return {...activity,data,routes:recent ? state.proxies.filter(p=>data.some(m=>m.route_id===p._id)).map(p=>({_id:p._id,name:p.name,hosts:p.hosts,entry_points:p.entry_points,connection:p.connection})) : []};
+  }
+  if(path.startsWith("/inventory/access-"))return demoAccessInventory(state,path.split("access-").pop(),Object.fromEntries(url.searchParams),id);
+  if(path.startsWith("/inventory/"))return demoInventory(state,path.split("/").pop(),Object.fromEntries(url.searchParams));
   const read = method === "get";
   const body = typeof payload === "string" ? JSON.parse(payload) : payload || {};
   if (path.startsWith("/access/")) return demoAccess(state,method,path,body,id);
   if (path === "/auth/me") return state.user;
-  if (path === "/traffic-routes/health") return {available:true,updated_at:Date.now(),data:Object.fromEntries(state.proxies.map(p=>[p._id,(p.bindings || [{id:"primary",enabled:p.enabled}]).map((b,index)=>({id:b.id,state:b.enabled===false ? "disabled" : "healthy",latency_ms:12+index*9,requests:200-index*20,failures:0,active_connections:0,last_checked_at:Date.now()}))]))};
+  if (path === "/traffic-routes/health") {
+    const ids=url.searchParams.has("ids") ? new Set((url.searchParams.get("ids") || "").split(",")) : null;
+    return {available:true,updated_at:Date.now(),data:Object.fromEntries(state.proxies.filter(p=>!ids || ids.has(p._id)).map(p=>{const bindings=(p.bindings || [{id:"primary",enabled:p.enabled}]).map((b,index)=>({id:b.id,state:b.enabled===false ? "disabled" : "healthy",latency_ms:12+index*9,requests:200-index*20,failures:0,active_connections:0,last_checked_at:Date.now()}));return [p._id,url.searchParams.get("summary")==="true" ? {healthy:bindings.filter(b=>b.state==="healthy").length,unknown:0,unhealthy:0,disabled:bindings.filter(b=>b.state==="disabled").length,total:bindings.length} : bindings];}))};
+  }
   if (path === "/traffic-routes/activity") return state.proxyActivity || {available:true,tracking_since:new Date(Date.now()-86400000).toISOString(),data:state.proxies.map((proxy,index)=>({route_id:proxy._id,requests:(index+1)*27000,monthly_requests:(index+1)*1200,last_requested_at:new Date(Date.now()-index*60000).toISOString(),last_host:proxy.hosts[0]}))};
   if (path === "/auth/settings") return { signup_disabled: true, web_proxy_domain_suffix: "preview.invalid", port_hub_service_domain: "preview.invalid" };
   if (path === "/auth/preferences") { state.user.preferences = { ...state.user.preferences, ...body }; return state.user.preferences; }
