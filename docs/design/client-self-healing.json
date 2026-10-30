@@ -27,10 +27,11 @@
     "existing_regressions": "Agent runtime/API-backoff failover, endpoint rerouting, revocation, embedded reload/UDP/half-close/framing, and UI utility tests.",
     "browser": "Chromium dark/light1440/402/320; WebKit dark/light402/320. Computed styles assert selected dark binding accent and description border/focus appearance."
   },
-  "rollout_status": "API/UI and gateway 1.8.8 deployed and healthy on URM2. All ten native platform jobs and complete release validation passed (GitHub Actions 41105109631, source 0e88842). Client publication currently blocked by GitHub artifact storage HTTP 503: Egress is over the account limit; existing clients remain 1.8.5 until the complete validated bundle can be downloaded and published.",
+  "rollout_status": "Complete for all eight connected clients: API/UI, gateway and Luna, Clear, Deep, Miro, Reid, Nitin-MBP, Thor and EC2 report 1.8.8. All ten platform builds and complete bundle validation passed (Actions 41105109631, source 0e88842). Temporary GitHub artifact storage 503 cleared on retry; all 30 release files revalidated, uploaded and verified before v1.8.8 publication. Latest-only release/tag policy applied. Four enabled offline clients await reconnection; disabled Clearsight left unchanged.",
   "deployment_verification": {
     "routes": "IBI 46119/openapi.json and Thor 42731/ returned HTTP 200 with unchanged response hashes after gateway rollout.",
     "configuration": "27 proxy records, 33 mappings, 18 machine configurations and auxiliary network/access configuration preserved. Only core/edge containers recreated; other nine containers unchanged.",
-    "image_user": "Gateway overlay preserves prior USER 0:10001. Initial incorrect USER 10001:10001 caused startup permission failure; immediately rolled back, corrected and verified mounted file access before successful redeployment."
+    "image_user": "Gateway overlay preserves prior USER 0:10001. Initial incorrect USER 10001:10001 caused startup permission failure; immediately rolled back, corrected and verified mounted file access before successful redeployment.",
+    "client_update": "Eight connected clients confirmed on 1.8.8 via authenticated presence records. EC2 and Reid services active, NRestarts=0; core/edge healthy with RestartCount=0. IBI/Thor response hashes still match after client upgrades. Redundant tag-triggered build cancelled; validated source artifacts reused."
   }
 }
