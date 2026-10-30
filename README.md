@@ -74,6 +74,24 @@ cached target directory through `scripts/build-agent-linux.sh`; they verify
 that it has no dynamic loader and keep the existing release/checksum format.
 The Docker `agent-artifacts` target remains available for local packaging.
 
+Start releases from the default branch so later versions can restore the same
+build caches. GitHub isolates caches written on one version tag from other tags;
+merely caching a tag-only workflow does not solve reuse across releases.
+After committing the new workspace release version to `main`, run:
+
+```sh
+gh workflow run agent-platforms.yml --ref main -f platform=all -F publish_release=true
+```
+
+This builds and validates the full platform bundle before creating the release
+tag, then retains only the latest verified stable release and older version
+releases/tags are removed. Git history remains available for rebuilding an older
+commit. Non-version tags and newer in-flight versions are preserved. Dispatch
+without `publish_release` for checks or cache warming. Tag-push builds remain
+supported, but the default-branch entry point is preferred for cache reuse.
+CI staging artifacts expire after three days; build caches remain available for
+subsequent builds, while the latest published release stays downloadable.
+
 ## Agent transfer tools
 
 The Rust `porthub` binary includes HTTP serving, receiving, parallel downloads

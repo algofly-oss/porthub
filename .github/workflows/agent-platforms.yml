@@ -12,6 +12,10 @@ on:
         description: 'Run platform tests and native service checks without building release artifacts'
         default: false
         type: boolean
+      publish_release:
+        description: 'Publish the complete validated bundle; retain only the latest version release/tag'
+        default: false
+        type: boolean
 permissions:
   contents: read
 jobs:
@@ -24,6 +28,16 @@ jobs:
       has_linux: ${{ steps.select.outputs.has_linux }}
     steps:
       - uses: actions/checkout@v4
+      - name: Validate publishing scope
+        if: inputs.publish_release == true
+        env:
+          BUILD_PLATFORM: ${{ inputs.platform }}
+          VERIFY_ONLY: ${{ inputs.verify_only }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          test "$BUILD_PLATFORM" = all
+          test "$VERIFY_ONLY" != true
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
       - id: select
         env:
           PORTHUB_BUILD_PLATFORM: ${{ inputs.platform || 'all' }}
@@ -48,10 +62,14 @@ jobs:
           name: porthub-release-bundle
           path: deploy/native/client-bin/
           if-no-files-found: error
+          retention-days: 3
   publish-release:
     name: Publish versioned GitHub release
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: inputs.verify_only != true && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true))
     needs: [release-bundle]
+    concurrency:
+      group: porthub-release-publication
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -79,6 +97,10 @@ jobs:
           # Publish only after every asset has uploaded, so API caches never
           # observe an incomplete platform matrix as the latest release.
           gh release edit "$tag" --draft=false --latest
+      - name: Retain only the latest verified release and version tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/prune-github-releases.py --repository "$GITHUB_REPOSITORY" --keep "v$(sh scripts/release-version.sh)" --expected-commit "$GITHUB_SHA" --execute
   native:
     needs: [select-platforms]
     if: needs.select-platforms.outputs.has_native == 'true'
@@ -199,12 +221,14 @@ jobs:
           name: edge-runtime-arm64
           path: edge-dist/
           if-no-files-found: error
+          retention-days: 3
       - uses: actions/upload-artifact@v4
         if: inputs.verify_only != true
         with:
           name: porthub-${{ matrix.artifact }}
           path: dist/
           if-no-files-found: error
+          retention-days: 3
   linux-32:
     needs: [select-platforms]
     if: needs.select-platforms.outputs.has_linux == 'true'
@@ -248,3 +272,4 @@ jobs:
           name: porthub-${{ matrix.artifact }}
           path: dist/
           if-no-files-found: error
+          retention-days: 3
