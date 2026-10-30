@@ -40,8 +40,21 @@ class GitHub:
         return json.loads(result.stdout) if result.stdout.strip() else None
 
     def pages(self, suffix):
-        result = subprocess.run(["gh", "api", "--paginate", "--slurp", self.prefix + suffix], check=True, capture_output=True, text=True)
-        return [item for page in json.loads(result.stdout) for item in page]
+        result = subprocess.run(["gh", "api", "--paginate", self.prefix + suffix], check=True, capture_output=True, text=True)
+        # Older gh versions emit concatenated JSON arrays without --slurp.
+        remaining = result.stdout.strip()
+        items = []
+        decoder = json.JSONDecoder()
+        while remaining:
+            page, end = decoder.raw_decode(remaining)
+            if not isinstance(page, list):
+                raise ValueError("Expected a GitHub list response")
+            items.extend(page)
+            remaining = remaining[end:].lstrip()
+        return items
+
+    def contains_commit(self, older, current):
+        return self.api("/compare/" + older + "..." + current)["status"] in ("ahead", "identical")
 
     def commit(self, tag):
         obj = self.api("/git/ref/tags/" + quote(tag, safe=""))["object"]
@@ -59,6 +72,13 @@ def prune(github, keep, expected_commit, execute=False):
     if github.commit(keep) != expected_commit:
         raise ValueError("Kept tag does not match the verified release commit")
     releases, tags = plan(github.pages("/releases?per_page=100"), [t["name"] for t in github.pages("/tags?per_page=100")], keep)
+    # Deleting a tag must not make an old release's source unreachable. Every
+    # retired release commit must remain in the kept release's Git history.
+    for tag in sorted(set(tags) | {r["tag_name"] for r in releases}):
+        commit = github.commit(tag)
+        if not github.contains_commit(commit, expected_commit):
+            raise ValueError("Older release source is not retained in the kept history: " + tag)
+        print("Retained source:", tag, commit)
     print("Keep:", keep)
     print("Older releases:", ", ".join(r["tag_name"] for r in releases) or "none")
     print("Older version tags:", ", ".join(tags) or "none")

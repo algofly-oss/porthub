@@ -60,6 +60,20 @@ release does not require rebuilding the gateway. Source releases still validate
 one consistent version across all ten platforms before publication. The CI
 publisher uploads a draft first and makes it latest only when uploads finish.
 
+During active development, GitHub retains only the latest verified versioned
+release and its version tag. After publication, CI removes older versioned
+releases (including their binary assets) and version tags. Git commit history
+remains intact; cleanup verifies that every retired release commit is an
+ancestor of the retained release before deleting anything. Non-version tags and
+newer releases in progress are preserved. Keep release commit IDs in verification
+records to rebuild older versions with `git checkout COMMIT`.
+
+Preview cleanup with `python3 scripts/prune-github-releases.py --repository
+algofly-oss/porthub --keep vVERSION --expected-commit FULL_COMMIT_SHA`; add
+`--execute` to apply it. The script refuses cleanup unless the retained release
+is the latest published stable release and its tag matches the verified commit.
+CI artifacts expire after three days; compilation caches are retained for reuse.
+
 Generated binaries remain outside Git. The offline `porthub-api --check-artifacts
 DIRECTORY VERSION` command and release-bundle validator remain available for CI
 and publishing checks; neither is part of the production image build.

@@ -1,0 +1,78 @@
+{
+  "version": "1.8.5",
+  "source_commit": "31e82b6491b8553bd7cf990c3a209325fa015b21",
+  "workflow": "https://github.com/algofly-oss/porthub/actions/runs/41037266701",
+  "release": {
+    "url": "https://github.com/algofly-oss/porthub/releases/tag/v1.8.5",
+    "platforms": 10,
+    "assets": 30,
+    "verification": "All platform jobs and complete-bundle validation passed. Workflow publication returned HTTP403 despite Contents:write. Authenticated CLI created a draft; the same CI bundle was revalidated and all uploaded asset sizes and GitHub SHA256 digests verified before publication."
+  },
+  "deployment": {
+    "scope": "Only PortHub gateway edge and the EC2, Reid and Thor native agents were updated. Existing core, firewall and unrelated containers were not recreated.",
+    "edge": {
+      "healthy": true,
+      "fd_soft_limit": 65536,
+      "fd_used_observed": 442,
+      "persistent_backup": true
+    },
+    "agents": {
+      "ec2": {
+        "version": "1.8.5",
+        "public": "running",
+        "private": "connecting; RHEL10.2 has no systemd-resolved, so per-interface DNS registration fails",
+        "restarts": 0,
+        "credential_profiles_preserved": 3,
+        "unrelated_service_pids_preserved": 24
+      },
+      "reid": {
+        "version": "1.8.5",
+        "public": "running",
+        "private": "running",
+        "restarts": 0,
+        "credential_profiles_preserved": 5,
+        "unrelated_service_pids_preserved": 34
+      },
+      "thor": {
+        "version": "1.8.5",
+        "public": "running",
+        "private": "running",
+        "restarts": 0,
+        "credential_profiles_preserved": 3,
+        "unrelated_service_pids_preserved": 42
+      }
+    },
+    "ibi": {
+      "http_status": 200,
+      "openapi_sha256": "659f4415158f550a8711767cc1dd95cd5059b1bcb616312ef66d01cf3eb398c4",
+      "unchanged_from_baseline": true,
+      "existing_hourly_refresh_setting": "preserved"
+    },
+    "rollback": "Protected host backups, previous images and native upgrade receipts retained."
+  },
+  "binary_sha256": {
+    "linux_x86_64": "efd1a28cb993e43eb73389683e826ab967c62a6f644a0882a81674aa815bdfd3",
+    "linux_arm64": "6eeaf2f7b0a8e540e60280e73a2d8e1fcbf9aaa05f02415a0c4d8a9602df0dd4"
+  },
+  "build_reuse": {
+    "elapsed_seconds": 61.49,
+    "exit_code": 0,
+    "cached_artifacts": 691,
+    "rebuilt": [
+      "build-script-build",
+      "porthub_agent",
+      "porthub"
+    ],
+    "network_cached": true,
+    "egress_cached": true
+  },
+  "retired_release_commits": {
+    "v1.8.3": "1b733f991a4287c515df35bfbb907e441b1efc19",
+    "v1.8.4": "9b6c65d2cf5f510e595b71daeab776d286e63b33"
+  },
+  "limitations": [
+    "EC2 private DNS integration requires follow-up; global DNS and NetworkManager configuration were left unchanged.",
+    "Condor and Harshitha AGX remain unreachable through configured private/direct SSH routes. Public SSH mappings remain disabled. ZeroTier route overlaps the workstation Docker network and ZeroTier is not installed locally; no network changes made. Host-side versus agent-side cause is unconfirmed.",
+    "Build cache timing is a measured local rebuild, not a quantified before/after GitHub CI comparison."
+  ]
+}
