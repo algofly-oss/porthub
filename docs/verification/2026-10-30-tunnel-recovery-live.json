@@ -6,7 +6,10 @@
     "url": "https://github.com/algofly-oss/porthub/releases/tag/v1.8.5",
     "platforms": 10,
     "assets": 30,
-    "verification": "All platform jobs and complete-bundle validation passed. Workflow publication returned HTTP403 despite Contents:write. Authenticated CLI created a draft; the same CI bundle was revalidated and all uploaded asset sizes and GitHub SHA256 digests verified before publication."
+    "verification": "All platform jobs and complete-bundle validation passed. Workflow publication returned HTTP403 despite Contents:write. Authenticated CLI created a draft; the same CI bundle was revalidated and all uploaded asset sizes and GitHub SHA256 digests verified before publication.",
+    "live_api_catalog": "All ten targets report1.8.5; live x86_64 download SHA256 matches the verified CI binary.",
+    "retention": "Executed latest-only cleanup: v1.8.3 and v1.8.4 GitHub releases/assets and version tags removed; remote inventory confirms only v1.8.5 remains. Both retired source commits are ancestors of the retained release.",
+    "retention_tests_passed": 7
   },
   "deployment": {
     "scope": "Only PortHub gateway edge and the EC2, Reid and Thor native agents were updated. Existing core, firewall and unrelated containers were not recreated.",
