@@ -1,0 +1,59 @@
+import { useState } from "react";
+import { Switch } from "@mantine/core";
+import { IconArrowUp, IconArrowDown, IconChevronDown, IconPlus, IconServer, IconTrash, IconWorld } from "@tabler/icons-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import SearchSelect from "@/components/ui/search-select";
+import { StatusTabs } from "@/components/ui/status-tabs";
+import { newBinding, bindingTitle } from "@/shared/utils/proxy-bindings.mjs";
+
+export function BindingHealth({ status, enabled = true, stale = false }) {
+  const state = !enabled ? "disabled" : stale ? "unknown" : status?.state || "unknown";
+  const colors = { healthy: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300", degraded: "bg-amber-500/10 text-amber-700 dark:text-amber-300", unhealthy: "bg-red-500/10 text-red-700 dark:text-red-300", disabled: "bg-muted text-muted-foreground", unknown: "bg-muted text-muted-foreground" };
+  const label = { healthy: "Healthy", degraded: "Degraded", unhealthy: "Unavailable", disabled: "Disabled", unknown: "Not checked" }[state] || "Not checked";
+  return <span className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2 py-1 text-[11px] font-medium ${colors[state] || colors.unknown}`} title={status?.last_error === "unexpected_status" ? `Health check returned HTTP ${status.last_status}` : status?.last_error === "connection_or_timeout" ? "Connection failed or timed out" : status?.last_checked_at ? `Last checked ${new Date(status.last_checked_at).toLocaleTimeString()}` : "Status appears after saving and checking the target"}><span className={`h-1.5 w-1.5 rounded-full ${state === "healthy" ? "bg-emerald-500" : state === "unhealthy" ? "bg-red-500" : state === "degraded" ? "bg-amber-500" : "bg-zinc-400"}`} />{label}{state === "healthy" && status?.latency_ms != null ? ` · ${status.latency_ms} ms` : ""}</span>;
+}
+
+export default function ProxyBindings({ bindings, routing, onChange, connections, machines, errors, statuses = [], healthAvailable = false, savedBindings = [], disabled = false }) {
+  const [expanded, setExpanded] = useState(bindings[0]?.id);
+  const manual = routing.mode === "priority" && routing.priority_policy === "manual";
+  const update = (id, patch) => onChange(bindings.map(b => b.id === id ? { ...b, ...patch } : b));
+  const move = (index, direction) => {
+    const result = [...bindings], priorities = result.map(b => b.priority);
+    [result[index],result[index + direction]] = [result[index + direction],result[index]];
+    onChange(result.map((b,i) => ({...b, priority: priorities[i]})));
+  };
+  const add = () => { const b = newBinding(bindings.length); b.priority = Math.min(10000,Math.max(0,...bindings.map(b => Number(b.priority)||1))+1); onChange([...bindings,b]); setExpanded(b.id); };
+  return <div className="space-y-3">
+    <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-base font-semibold">Bindings <span className="ml-1 text-sm font-normal text-muted-foreground">{bindings.length}/128</span></h2><p className="mt-1 text-xs leading-5 text-muted-foreground">{manual ? "Lower numbers are tried first. Reorder bindings or edit their priority." : routing.mode === "balance" ? "Traffic is shared across healthy, enabled bindings." : "Health checks choose the most responsive healthy binding."}</p></div><Button type="button" size="sm" variant="secondary" onClick={add} disabled={disabled || bindings.length >= 128}><IconPlus size={15} />Add binding</Button></div>
+    {errors.bindings && <p role="alert" className="text-sm text-red-600 dark:text-red-400">{errors.bindings}</p>}
+    <div className="space-y-3" role="list" aria-label="Proxy bindings">{bindings.map((b,index) => {
+      const open = expanded === b.id || !!errors[`binding-${b.id}`];
+      const connection = connections.find(c => c._id === b.connection_data_id) || b.connection;
+      const machineId = connection?.machine_id || "";
+      const saved=savedBindings.find(s=>s.id===b.id);
+      const changed=!saved || ["target_mode","target_url","connection_data_id","health_path","pass_host"].some(key=>(saved[key] ?? null)!==(b[key] ?? null));
+      const status = changed ? null : statuses.find(s => s.id === b.id);
+      const Icon = b.target_mode === "connection" ? IconServer : IconWorld;
+      return <div role="listitem" key={b.id} className={`min-w-0 overflow-hidden rounded-xl border ${errors[`binding-${b.id}`] ? "border-red-500/50" : open ? "border-primary/35" : "border-border"} ${b.enabled ? "bg-surface" : "bg-muted/40"}`}>
+        <div className="flex min-w-0 items-center gap-2 p-3 sm:gap-3 sm:p-4">
+          <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${open ? "bg-primary/10 text-blue-600 dark:text-blue-300" : "bg-control text-muted-foreground"}`}><Icon size={18} /></span>
+          <button type="button" aria-label={`Edit binding ${index+1}`} aria-expanded={open} onClick={() => setExpanded(open ? null : b.id)} className="min-w-0 flex-1 rounded text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"><span className="block truncate text-sm font-semibold">{bindingTitle(b,connections)}</span><span className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground"><span>{b.target_mode === "connection" ? "Machine port" : "Standalone URL"}</span>{manual && <span className="rounded bg-control px-1.5 py-0.5 font-medium">Priority {b.priority}</span>}{routing.mode === "balance" && routing.strategy === "weighted_round_robin" && <span>Weight {b.weight}</span>}</span></button>
+          <div className="hidden sm:block"><BindingHealth status={status} enabled={b.enabled} stale={!healthAvailable} /></div>
+          <Switch aria-label={`Enable binding ${index+1}`} size="sm" checked={b.enabled} disabled={disabled} onChange={event=>update(b.id,{enabled:event.currentTarget.checked})} />
+          <button type="button" aria-label={`${open ? "Collapse" : "Expand"} binding ${index+1}`} onClick={()=>setExpanded(open ? null : b.id)} className="flex h-10 w-8 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent"><IconChevronDown size={16} className={open ? "rotate-180" : ""} /></button>
+        </div>
+        <div className="px-3 pb-3 sm:hidden"><BindingHealth status={status} enabled={b.enabled} stale={!healthAvailable} /></div>
+        {open && <div className="space-y-4 border-t border-border px-3 py-4 sm:px-4">
+          <StatusTabs label={`Binding ${index+1} type`} value={b.target_mode} onChange={value=>update(b.id,{target_mode:value})} options={[{value:"connection",label:"Machine port"},{value:"manual",label:"Standalone URL"}]} />
+          {b.target_mode === "connection" ? <div className="grid gap-3 sm:grid-cols-2"><div><p className="mb-2 text-xs font-medium">Machine</p><SearchSelect label={`Binding ${index+1} machine`} value={machineId} onChange={id=>{const c=connections.find(c=>c.machine_id===id);update(b.id,{connection_data_id:c?._id || "",connection:c || {machine_id:id,machine_name:machines.find(m=>m._id===id)?.name}});}} placeholder="Choose a machine" options={machines.map(m=>({value:m._id,label:m.name}))} /></div><div><p className="mb-2 text-xs font-medium">Mapped port / service</p><SearchSelect label={`Binding ${index+1} port`} value={b.connection_data_id} onChange={id=>update(b.id,{connection_data_id:id})} placeholder={machineId ? "Choose a port" : "Choose machine or search ports"} options={connections.filter(c=>!machineId || c.machine_id===machineId).map(c=>({value:c._id,label:`${c.service_name || "Port"} · ${c.internal_port} → ${c.external_port}${c.enabled === false ? " · disabled" : ""}`}))} /></div>{b.connection_data_id && !connections.some(c=>c._id===b.connection_data_id) && <p className="text-xs text-amber-700 dark:text-amber-300 sm:col-span-2">This mapping is no longer available. Choose another port to restore this binding.</p>}{connection && <p className="text-xs leading-5 text-muted-foreground sm:col-span-2">{connection.machine_name} · {connection.internal_ip || "127.0.0.1"}:{connection.internal_port} through gateway port {connection.external_port}{connection.machine_connection_status === "offline" ? " · machine offline" : ""}</p>}</div>
+            : <label className="block text-xs font-medium">Target URL<Input aria-label={`Binding ${index+1} URL`} type="url" className="mt-2 font-mono text-xs" placeholder="https://app.example.com" value={b.target_url} onChange={event=>update(b.id,{target_url:event.target.value})} /></label>}
+          {errors[`binding-${b.id}`] && <p role="alert" className="text-xs leading-5 text-red-600 dark:text-red-400">{errors[`binding-${b.id}`]}</p>}
+          <div className={`grid gap-3 ${manual || routing.mode === "balance" && routing.strategy === "weighted_round_robin" ? "sm:grid-cols-[1fr_120px]" : ""}`}><label className="block text-xs font-medium">Label <span className="font-normal text-muted-foreground">optional</span><Input aria-label={`Binding ${index+1} label`} className="mt-2" maxLength={120} value={b.label} placeholder="e.g. Primary office route" onChange={event=>update(b.id,{label:event.target.value})} /></label>{manual && <label className="block text-xs font-medium">Priority<Input aria-label={`Binding ${index+1} priority`} type="number" min={1} max={10000} className="mt-2" value={b.priority} onChange={event=>update(b.id,{priority:event.target.value})} onBlur={()=>onChange([...bindings].sort((a,b)=>Number(a.priority)-Number(b.priority)))} /></label>}{routing.mode === "balance" && routing.strategy === "weighted_round_robin" && <label className="block text-xs font-medium">Weight<Input aria-label={`Binding ${index+1} weight`} type="number" min={1} max={100} className="mt-2" value={b.weight} onChange={event=>update(b.id,{weight:event.target.value})} /></label>}</div>
+          <details className="rounded-lg bg-control/60 px-3 py-2.5"><summary className="cursor-pointer text-xs font-medium text-muted-foreground">Advanced binding options</summary><div className="mt-3 grid gap-3 sm:grid-cols-2"><label className="block text-xs font-medium">Health path override<Input aria-label={`Binding ${index+1} health path`} className="mt-2 font-mono text-xs" value={b.health_path || ""} placeholder={`Use ${routing.health.path}`} onChange={event=>update(b.id,{health_path:event.target.value || null})} /></label><div><p className="mb-2 text-xs font-medium">Host header</p><SearchSelect label={`Binding ${index+1} host header`} value={b.pass_host == null ? "auto" : b.pass_host ? "original" : "target"} onChange={value=>update(b.id,{pass_host:value === "auto" ? null : value === "original"})} options={[{value:"auto",label:"Automatic"},{value:"original",label:"Public proxy hostname"},{value:"target",label:"Target hostname"}]} /></div></div></details>
+          <div className="flex items-center justify-between gap-2">{manual ? <div className="flex gap-1"><Button type="button" variant="ghost" size="icon" aria-label={`Move binding ${index+1} up`} disabled={disabled || index === 0} onClick={()=>move(index,-1)}><IconArrowUp size={16} /></Button><Button type="button" variant="ghost" size="icon" aria-label={`Move binding ${index+1} down`} disabled={disabled || index === bindings.length-1} onClick={()=>move(index,1)}><IconArrowDown size={16} /></Button></div> : <p className="text-[11px] text-muted-foreground">{status?.requests != null ? `${status.requests.toLocaleString()} attempts · ${status.active_connections || 0} active` : "Health appears after saving"}</p>}<Button type="button" variant="ghost" size="sm" className="text-red-600 dark:text-red-400" aria-label={`Remove binding ${index+1}`} disabled={disabled || bindings.length === 1} onClick={()=>onChange(bindings.filter(item=>item.id!==b.id))}><IconTrash size={14} />Remove</Button></div>
+        </div>}
+      </div>;
+    })}</div>
+  </div>;
+}

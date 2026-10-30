@@ -269,7 +269,7 @@ async fn locked_public_port_and_hostname_proxy_share_enforcement() -> Result<()>
         let web = Arc::new(WebRoutes::new(None));
         // Machine proxies target the protected public listener, so there is
         // one authoritative gate and no second credential-stripping gate.
-        web.reload(WebConfig { routes: vec![Route { id: "protected".into(), hosts: vec!["protected.example".into()], target_url: format!("http://{public}"), pass_host: true, http: true, https: true, access: None }] })?;
+        web.reload(WebConfig { routes: vec![Route { id: "protected".into(), hosts: vec!["protected.example".into()], target_url: format!("http://{public}"), pass_host: true, http: true, https: true, bindings: vec![], routing: None, access: None }] })?;
         let ingress = TcpListener::bind("127.0.0.1:0").await?;
         let address = ingress.local_addr()?;
         let router = porthub_edge::router_with_web(gateway.clone(), None, web);

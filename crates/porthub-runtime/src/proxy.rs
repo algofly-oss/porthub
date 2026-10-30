@@ -158,8 +158,14 @@ impl HttpProxy {
         })
     }
 
-    pub fn with_access(mut self, id: &str, config: Option<crate::public_access::Config>) -> anyhow::Result<Self> {
-        self.access = config.map(|config| crate::public_access::Gate::new(id, config).map(Arc::new)).transpose()?;
+    pub fn with_access(
+        mut self,
+        id: &str,
+        config: Option<crate::public_access::Config>,
+    ) -> anyhow::Result<Self> {
+        self.access = config
+            .map(|config| crate::public_access::Gate::new(id, config).map(Arc::new))
+            .transpose()?;
         Ok(self)
     }
 
@@ -167,13 +173,32 @@ impl HttpProxy {
         self.forward_with_security(request, false).await
     }
 
-    pub async fn forward_with_security(&self, request: Request<Body>, secure: bool) -> Response<Body> {
-        let mut request = if let Some(gate) = &self.access {
+    pub async fn forward_with_security(
+        &self,
+        request: Request<Body>,
+        secure: bool,
+    ) -> Response<Body> {
+        let request = if let Some(gate) = &self.access {
             match gate.authorize(request, secure).await {
                 Ok(request) => request,
                 Err(response) => return response,
             }
-        } else { request };
+        } else {
+            request
+        };
+        self.try_forward(request, Duration::from_secs(310), None)
+            .await
+            .unwrap_or_else(|_| failure())
+    }
+
+    /// Return transport errors separately from real upstream HTTP responses.
+    /// The optional lease follows an upgraded connection until it closes.
+    pub(crate) async fn try_forward(
+        &self,
+        mut request: Request<Body>,
+        response_timeout: Duration,
+        lease: Option<Arc<dyn Send + Sync>>,
+    ) -> Result<Response<Body>, ()> {
         let upgrade = is_upgrade(request.headers());
         let downstream = upgrade.then(|| hyper::upgrade::on(&mut request));
         let path = request
@@ -207,7 +232,7 @@ impl HttpProxy {
                 );
                 match target.parse() {
                     Ok(uri) => uri,
-                    Err(_) => return failure(),
+                    Err(_) => return Err(()),
                 }
             }
         };
@@ -234,7 +259,7 @@ impl HttpProxy {
         {
             if !pass_host {
                 let Ok(host) = base.authority().unwrap().as_str().parse() else {
-                    return failure();
+                    return Err(());
                 };
                 request.headers_mut().insert(header::HOST, host);
             }
@@ -271,33 +296,37 @@ impl HttpProxy {
         // uploads stay streamed and configured five-minute API waits still fit.
         let result = tokio::select! {
             result=&mut forwarding=>Ok(result),
-            _=uploaded=>tokio::time::timeout(Duration::from_secs(310),&mut forwarding).await,
+            _=uploaded=>tokio::time::timeout(response_timeout,&mut forwarding).await,
         };
         let mut response = match result {
             Ok(Ok(response)) => response,
-            _ => return failure(),
+            _ => return Err(()),
         };
         if response.status() == StatusCode::SWITCHING_PROTOCOLS {
             let Some(downstream) = downstream else {
-                return failure();
+                return Err(());
             };
             let upstream = hyper::upgrade::on(&mut response);
             tokio::spawn(async move {
+                let _lease = lease;
                 let upgraded = tokio::time::timeout(Duration::from_secs(10), async {
                     tokio::try_join!(downstream, upstream)
                 })
                 .await;
                 if let Ok(Ok((a, b))) = upgraded {
-                    let _ =
-                        tokio::io::copy_bidirectional(&mut TokioIo::new(a), &mut TokioIo::new(b))
-                            .await;
+                    let _ = porthub_io::copy_bidirectional(
+                        &mut TokioIo::new(a),
+                        &mut TokioIo::new(b),
+                        porthub_io::half_close_idle_timeout(),
+                    )
+                    .await;
                 }
             });
         } else {
             strip_hop_headers(response.headers_mut());
         }
         let (parts, body) = response.into_parts();
-        Response::from_parts(parts, Body::new(body))
+        Ok(Response::from_parts(parts, Body::new(body)))
     }
 }
 fn is_upgrade(headers: &HeaderMap) -> bool {

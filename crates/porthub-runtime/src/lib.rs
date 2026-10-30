@@ -15,6 +15,8 @@ pub mod supervise;
 pub mod web_activity;
 #[cfg(unix)]
 pub mod web_routes;
+#[cfg(unix)]
+pub mod upstreams;
 
 pub async fn shutdown_signal() {
     #[cfg(unix)]

@@ -1,6 +1,7 @@
 //! A validated, atomically swapped routing snapshot. Requests clone a prepared
 //! proxy then release the lock before I/O; unchanged routes retain their pools.
-use crate::proxy::{HttpProxy, ProxyPool};
+use crate::proxy::ProxyPool;
+use crate::upstreams::{Binding, Routing, Upstreams};
 use anyhow::{ensure, Result};
 use axum::http::{header, Request};
 use serde::{Deserialize, Serialize};
@@ -19,7 +20,12 @@ pub struct Config {
 pub struct Route {
     pub id: String,
     pub hosts: Vec<String>,
+    #[serde(default)]
     pub target_url: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<Binding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<Routing>,
     pub pass_host: bool,
     pub http: bool,
     pub https: bool,
@@ -28,7 +34,7 @@ pub struct Route {
 }
 struct Prepared {
     route: Route,
-    proxy: HttpProxy,
+    proxy: Upstreams,
 }
 #[derive(Default)]
 struct Snapshot {
@@ -36,7 +42,7 @@ struct Snapshot {
     hosts: HashMap<String, Arc<Prepared>>,
 }
 pub enum Selection {
-    Proxy(HttpProxy),
+    Proxy(Upstreams),
     Disabled,
     Unmatched,
 }
@@ -104,8 +110,30 @@ impl WebRoutes {
             {
                 old.clone()
             } else {
-                let proxy = HttpProxy::web(&route.target_url, route.pass_host, self.pool.clone())?
-                    .with_access(&route.id, route.access.clone())?;
+                let mut routing = route.routing.clone().unwrap_or_default();
+                let bindings = if route.bindings.is_empty() {
+                    // Existing single-target records keep passive-only health checks.
+                    routing.health.enabled = false;
+                    vec![Binding {
+                        id: "primary".into(),
+                        target_url: route.target_url.clone(),
+                        pass_host: route.pass_host,
+                        enabled: true,
+                        priority: 1,
+                        weight: 1,
+                        health_path: None,
+                    }]
+                } else {
+                    route.bindings.clone()
+                };
+                let proxy = Upstreams::new(
+                    &route.id,
+                    &route.hosts,
+                    bindings,
+                    routing,
+                    route.access.clone(),
+                    self.pool.clone(),
+                )?;
                 Arc::new(Prepared { route, proxy })
             };
             next.by_id
@@ -116,6 +144,21 @@ impl WebRoutes {
         }
         *self.snapshot.write().unwrap_or_else(|p| p.into_inner()) = Arc::new(next);
         Ok(())
+    }
+    pub fn health_snapshot(&self) -> serde_json::Value {
+        let snapshot = self.snapshot.read().unwrap_or_else(|p| p.into_inner());
+        serde_json::json!({"updated_at":chrono::Utc::now().timestamp_millis(),"routes":snapshot.by_id.iter().map(|(id,prepared)| (id.clone(),serde_json::json!(prepared.proxy.status()))).collect::<std::collections::BTreeMap<_,_>>()})
+    }
+    pub async fn check_health(&self) {
+        use futures_util::StreamExt;
+        let pools: Vec<_> = {
+            let snapshot = self.snapshot.read().unwrap_or_else(|p| p.into_inner());
+            snapshot.by_id.values().map(|p| p.proxy.clone()).collect()
+        };
+        // A single edge worker bounds probes across routes; no per-route timers.
+        futures_util::stream::iter(pools)
+            .for_each_concurrent(8, |pool| async move { pool.check_health().await })
+            .await;
     }
     pub fn select<B>(&self, request: &Request<B>, secure: bool) -> Selection {
         let authority = request
@@ -132,9 +175,17 @@ impl WebRoutes {
         let Some(route) = snapshot.hosts.get(&host) else {
             // Only gateway identities may reach the portal. A removed proxy
             // hostname must not become an alias for the gateway application.
-            return if self.gateways.contains(&host) || host == "localhost"
-                || host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().is_ok()
-            { Selection::Unmatched } else { Selection::Disabled };
+            return if self.gateways.contains(&host)
+                || host == "localhost"
+                || host
+                    .trim_matches(['[', ']'])
+                    .parse::<std::net::IpAddr>()
+                    .is_ok()
+            {
+                Selection::Unmatched
+            } else {
+                Selection::Disabled
+            };
         };
         if (secure && route.route.https) || (!secure && route.route.http) {
             if let Some(activity) = &self.activity {
@@ -165,17 +216,103 @@ mod tests {
     use super::*;
     #[test]
     fn removed_proxy_hosts_never_fall_through_to_the_portal() {
-        let routes = WebRoutes::with_gateway_hosts(["gateway.example".into(),"fallback.example".into()]);
-        let request = |host: &str| Request::builder().uri("/account/signin").header("host",host).body(()).unwrap();
-        let config = Config { routes: vec![Route { id:"temp".into(),hosts:vec!["temp.example".into()],target_url:"http://127.0.0.1:8000".into(),pass_host:true,http:true,https:true,access:None }] };
+        let routes =
+            WebRoutes::with_gateway_hosts(["gateway.example".into(), "fallback.example".into()]);
+        let request = |host: &str| {
+            Request::builder()
+                .uri("/account/signin")
+                .header("host", host)
+                .body(())
+                .unwrap()
+        };
+        let config = Config {
+            routes: vec![Route {
+                id: "temp".into(),
+                hosts: vec!["temp.example".into()],
+                target_url: "http://127.0.0.1:8000".into(),
+                pass_host: true,
+                http: true,
+                https: true,
+                access: None,
+                bindings: vec![],
+                routing: None,
+            }],
+        };
         routes.reload(config).unwrap();
-        assert!(matches!(routes.select(&request("temp.example"),true),Selection::Proxy(_)));
+        assert!(matches!(
+            routes.select(&request("temp.example"), true),
+            Selection::Proxy(_)
+        ));
         routes.reload(Config::default()).unwrap();
-        for secure in [false,true] {
-            assert!(matches!(routes.select(&request("temp.example"),secure),Selection::Disabled));
-            assert!(matches!(routes.select(&request("unknown.example"),secure),Selection::Disabled));
-            for host in ["gateway.example","fallback.example:8345","127.0.0.1:8345","[::1]:8345","localhost"] {
-                assert!(matches!(routes.select(&request(host),secure),Selection::Unmatched),"{host}");
+        for secure in [false, true] {
+            assert!(matches!(
+                routes.select(&request("temp.example"), secure),
+                Selection::Disabled
+            ));
+            assert!(matches!(
+                routes.select(&request("unknown.example"), secure),
+                Selection::Disabled
+            ));
+            for host in [
+                "gateway.example",
+                "fallback.example:8345",
+                "127.0.0.1:8345",
+                "[::1]:8345",
+                "localhost",
+            ] {
+                assert!(
+                    matches!(routes.select(&request(host), secure), Selection::Unmatched),
+                    "{host}"
+                );
+            }
+        }
+    }
+}
+
+/// Bounded health work and an atomically replaced, credential-free status file.
+/// Core mounts the existing activity volume read-only and filters these IDs by owner.
+impl WebRoutes {
+    pub async fn run_health(
+        self: Arc<Self>,
+        path: Option<std::path::PathBuf>,
+        mut stop: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<()> {
+        let mut ticks = tokio::time::interval(std::time::Duration::from_secs(2));
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {biased;_=stop.changed()=>return Ok(()),_=ticks.tick()=>{}}
+            tokio::select! {biased;_=stop.changed()=>return Ok(()),_=self.check_health()=>{}}
+            if let Some(path) = &path {
+                let data = serde_json::to_vec(&self.health_snapshot())?;
+                if data.len() > 8 * 1024 * 1024 {
+                    tracing::warn!("proxy health snapshot exceeds size limit");
+                    continue;
+                }
+                let path = path.clone();
+                if let Err(error) = tokio::task::spawn_blocking(move || -> Result<()> {
+                    use std::io::Write;
+                    let parent = path
+                        .parent()
+                        .ok_or_else(|| anyhow::anyhow!("Health snapshot needs a parent"))?;
+                    std::fs::create_dir_all(parent)?;
+                    let temporary =
+                        parent.join(format!(".web-health-{}.tmp", uuid::Uuid::new_v4().simple()));
+                    let result = (|| -> Result<()> {
+                        let mut f = std::fs::OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(&temporary)?;
+                        f.write_all(&data)?;
+                        std::fs::rename(&temporary, &path)?;
+                        Ok(())
+                    })();
+                    let _ = std::fs::remove_file(temporary);
+                    result
+                })
+                .await?
+                {
+                    tracing::warn!(%error,"proxy health status publication failed");
+                }
             }
         }
     }

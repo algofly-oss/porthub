@@ -175,7 +175,7 @@ async fn main() -> Result<()> {
         server.clone(),
         args.api_socket
             .or_else(|| std::env::var_os("PORTHUB_API_SOCKET").map(PathBuf::from)),
-        web,
+        web.clone(),
     );
     let _ = rustls::crypto::ring::default_provider().install_default();
     let mut serving = tokio::task::JoinSet::new();
@@ -237,6 +237,10 @@ async fn main() -> Result<()> {
         }
     }
     let (activity_stop, activity_stopping) = tokio::sync::watch::channel(false);
+    let health_path=activity_path.as_ref().map(|p|p.with_file_name("web-health.json"));
+    let health_routes=web.clone();
+    let health_stop=activity_stopping.clone();
+    let health_worker=tokio::spawn(async move {health_routes.run_health(health_path,health_stop).await});
     let mut activity_worker = activity_path.map(|path| {
         tokio::spawn(async move {
             activity
@@ -270,6 +274,7 @@ async fn main() -> Result<()> {
     }
     drop(control_lease);
     let _ = activity_stop.send(true);
+    health_worker.abort();
     if let Some(mut worker) = activity_worker.take() {
         match tokio::time::timeout(Duration::from_secs(5), &mut worker).await {
             Ok(Ok(Ok(()))) => {}

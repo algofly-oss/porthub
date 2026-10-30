@@ -13,6 +13,7 @@ import { INVENTORY_SORT_OPTIONS, isTrafficSort } from "@/shared/utils/inventory-
 import { trafficSummary } from "@/shared/utils/traffic.mjs";
 import InventoryToolbar from "@/components/ui/inventory-toolbar";
 import ProxyConfigModal from "./ProxyConfigModal";
+import { proxyBindings, routingLabel, bindingTitle } from "@/shared/utils/proxy-bindings.mjs";
 import { Button } from "@/components/ui/button";
 import SearchSelect from "@/components/ui/search-select";
 import { StatusTabs } from "@/components/ui/status-tabs";
@@ -35,6 +36,11 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
   const [settings, setSettings] = useWorkspaceState("proxies.settings", {});
   const [loading, setLoading] = useWorkspaceState("proxies.loading", true);
   const [loadError, setLoadError] = useState("");
+  const [health,setHealth]=useState({available:false,data:{}});
+  useBackgroundRefresh(async signal=>{
+    try {const response=await axios.get(apiRoutes.proxyHealth,{signal});setHealth(response.data);}
+    catch(error){if(!axios.isCancel(error))setHealth({available:false,data:{}});}
+  },{enabled:active,preload:false,interval:10000});
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [query, setQuery] = useState("");
@@ -71,8 +77,8 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
     if (!compact && typeof router.query.search === "string") setQuery(router.query.search);
   }, [router.query.search, compact]);
   useEffect(() => { setPage(1); }, [query, status, group, machine, sort, groupBy, pageSize, machineId, connectionId]);
-  const scoped = useMemo(() => proxies.filter(p => (!machineId || p.connection?.machine_id === machineId)
-    && (!connectionId || p.connection?.data_id === connectionId)), [proxies, machineId, connectionId]);
+  const scoped = useMemo(() => proxies.filter(p => (!machineId || proxyBindings(p).some(b=>b.connection?.machine_id === machineId))
+    && (!connectionId || proxyBindings(p).some(b=>b.connection?.data_id === connectionId))), [proxies, machineId, connectionId]);
   const groups = [...new Set(scoped.map(p => p.group || "").filter(Boolean))].sort();
   const candidates = useMemo(() => selectProxies(scoped, { query, status, group, machine, sort: isTrafficSort(sort) ? "name" : sort }), [scoped, query, status, group, machine, sort]);
   const totalPages = Math.max(1, Math.ceil(candidates.length / pageSize));
@@ -100,7 +106,7 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
     try { await navigator.clipboard.writeText(url); success("Proxy URL copied"); }
     catch { error("Could not copy proxy URL"); }
   };
-  const host = proxy => <ProxyHost proxy={proxy} connection={connections.find(connection => connection._id === (proxy.connection?.data_id || proxy.connection?._id))} machine={machines.find(machine => machine._id === proxy.connection?.machine_id)} onCopy={event => copyProxyUrl(event, proxy)} />;
+  const host = proxy => <ProxyHost proxy={proxy} connection={connections.find(connection => connection._id === (proxy.connection?.data_id || proxy.connection?._id))} machine={machines.find(machine => machine._id === proxy.connection?.machine_id)} health={health} onCopy={event => copyProxyUrl(event, proxy)} />;
   visible.forEach(p => {
     const key = groupBy === "group" ? p.group || "Ungrouped" : groupBy === "machine" ? p.connection?.machine_name || "Manual targets"
       : groupBy === "domain" ? (p.hosts?.[0] || "").split(".").slice(-2).join(".") : "All proxies";
@@ -119,7 +125,7 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
       setProxies(current => [...current.filter(p => p._id !== route._id), route]);
       setEditing(route); success(`Proxy ${payload.data_id ? "updated" : "created"}`); changeEditor(false);
       return route;
-    } catch (err) { error(err?.response?.data?.detail || "Could not save proxy"); return null; }
+    } catch (err) { error(typeof err?.response?.data?.detail === "string" ? err.response.data.detail : "Could not save proxy. Check the fields and try again."); return null; }
     finally { setSaving(false); }
   }
   async function remove(id) {
@@ -160,21 +166,21 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
       : !filtered.length ? <EmptyState icon={IconWorld} title={scoped.length ? "No matching proxies" : "Your services, one address away"} description={scoped.length ? "Try another hostname, service, machine, or port, or clear your filters." : "Create a public address linked to a machine port or an HTTP target."} action={scoped.length ? <button className="action-secondary" onClick={reset}>Clear filters</button> : undefined} />
       : <div className="proxy-results overflow-hidden rounded-xl bg-surface"><div className="data-scroll">{[...sections].map(([label, entries]) => <section key={label}>
         {groupBy !== "none" && <h2 className="flex items-center gap-2 bg-muted px-4 py-2 text-xs font-semibold"><IconFolder size={14} />{label}<span className="ml-auto text-muted-foreground">{entries.length}</span></h2>}
-        <div className="hidden md:block"><Table aria-label="Web proxies"><TableHeader><TableRow><TableHead className="w-[30%]">Hostname</TableHead><TableHead className="w-[25%]">Machine / service</TableHead><TableHead>Target</TableHead><TableHead className="hidden w-48 lg:table-cell"><span title="All traffic on the linked machine port; not individual HTTP requests">Linked port traffic</span></TableHead></TableRow></TableHeader><TableBody>{entries.map(p => <TableRow key={p._id} {...rowInteraction(p)} className={p.temporary ? "bg-amber-500/[0.04]" : "cursor-pointer focus-visible:bg-accent/40"}>
+        <div className="hidden md:block"><Table aria-label="Web proxies"><TableHeader><TableRow><TableHead className="w-[30%]">Hostname</TableHead><TableHead className="w-[25%]">Routing</TableHead><TableHead>Bindings</TableHead><TableHead className="hidden w-48 lg:table-cell"><span title="All traffic on the linked machine port; not individual HTTP requests">Linked port traffic</span></TableHead></TableRow></TableHeader><TableBody>{entries.map(p => <TableRow key={p._id} {...rowInteraction(p)} className={p.temporary ? "bg-amber-500/[0.04]" : "cursor-pointer focus-visible:bg-accent/40"}>
           <TableCell>{host(p)}<div className="pl-4"><ProxyActivity group={p.group} metric={activityById.get(p._id)} activity={activity} /></div></TableCell>
-          <TableCell><p className="truncate font-medium">{p.connection?.machine_name || "Manual target"}</p><p className="mt-0.5 truncate text-[13px] text-muted-foreground">{p.connection?.service_name || p.description || "HTTP endpoint"}</p></TableCell>
-          <TableCell>{p.connection ? <p className="truncate font-mono text-xs" title={`${externalEndpoint(p.connection)} → ${internalEndpoint(p.connection)}`}>{externalEndpoint(p.connection)} → {internalEndpoint(p.connection)}</p> : <p className="truncate font-mono text-[13px]" title={p.target_url}>{p.target_url}</p>}</TableCell>
+          <TableCell><p className="truncate text-sm font-medium">{routingLabel(p.routing)}</p><p className="mt-1 text-xs text-muted-foreground">{proxyBindings(p).length} {proxyBindings(p).length===1 ? "binding" : "bindings"}{health.available && health.data?.[p._id] ? ` · ${health.data[p._id].filter(b=>b.state==="healthy").length} healthy` : ""}</p></TableCell>
+          <TableCell><ProxyDestinations proxy={p} /></TableCell>
           <TableCell className="hidden lg:table-cell">{p.connection ? <TrafficSparkline samples={trafficById.get(p.connection.data_id || p.connection._id) || []} label="Linked port traffic" /> : <span className="text-xs text-muted-foreground">Standalone target</span>}</TableCell>
         </TableRow>)}</TableBody></Table></div>
-        <div className="md:hidden">{entries.map(p => <div className={`proxy-row-mobile ${p.temporary ? "" : "cursor-pointer"} focus-visible:bg-accent/40`} key={p._id} {...rowInteraction(p)}><div className="min-w-0 flex-1">{host(p)}<div className="pl-4"><ProxyActivity metric={activityById.get(p._id)} activity={activity} /></div><p className="mt-1 truncate pl-4 font-mono text-[13px] text-muted-foreground">{p.connection ? `${externalEndpoint(p.connection)} → ${internalEndpoint(p.connection)}` : p.target_url}</p></div></div>)}</div>
+        <div className="md:hidden">{entries.map(p => <div className={`proxy-row-mobile ${p.temporary ? "" : "cursor-pointer"} focus-visible:bg-accent/40`} key={p._id} {...rowInteraction(p)}><div className="min-w-0 flex-1">{host(p)}<div className="pl-4"><ProxyActivity metric={activityById.get(p._id)} activity={activity} /></div><div className="mt-2 pl-4"><p className="mb-1 text-[11px] text-muted-foreground">{routingLabel(p.routing)} · {proxyBindings(p).length} {proxyBindings(p).length===1 ? "binding" : "bindings"}</p><ProxyDestinations proxy={p} /></div></div></div>)}</div>
       </section>)}</div>
       <ResultsPagination count={filtered.length} noun="Proxies" page={currentPage} pages={totalPages} pageSize={pageSize} onPage={setPage} onPageSize={setPageSize} />
     </div>}
-    <ProxyConfigModal opened={opened} onClose={() => changeEditor(false)} onSubmit={save} onDelete={remove} proxy={editing} connections={editableConnections} machines={editableMachines} defaultDomainSuffix={settings.web_proxy_domain_suffix || ""} serviceDomain={settings.port_hub_service_domain || ""} isSaving={saving} isDeleting={deleting} />
+    <ProxyConfigModal opened={opened} onClose={() => changeEditor(false)} onSubmit={save} onDelete={remove} proxy={editing} connections={connections.filter(c=>!c.temporary)} machines={machines} health={health} defaultDomainSuffix={settings.web_proxy_domain_suffix || ""} serviceDomain={settings.port_hub_service_domain || ""} isSaving={saving} isDeleting={deleting} />
   </div>;
 }
 
-function ProxyHost({ proxy: p, connection, machine, onCopy }) {
+function ProxyHost({ proxy: p, connection, machine, onCopy, health }) {
   const port = connection || p.connection;
   const machineStatus = machine?.connection_status || port?.machine_connection_status;
   let status = "Enabled · Target health is not monitored", color = "bg-emerald-600 dark:bg-emerald-400";
@@ -185,6 +191,18 @@ function ProxyHost({ proxy: p, connection, machine, onCopy }) {
   else if (machineStatus === "auth_required") { status = "Machine authentication required"; color = "bg-amber-600 dark:bg-amber-400"; }
   else if (machineStatus === "online") status = "Enabled · Machine online";
   else if (port) { status = "Machine status unknown"; color = "bg-amber-600 dark:bg-amber-400"; }
+  if(p.enabled !== false && Array.isArray(p.bindings)) {
+    const states=health?.available ? health.data?.[p._id] || [] : [];
+    const healthy=states.filter(b=>b.state==="healthy").length;
+    const unknown=states.filter(b=>b.state==="unknown").length;
+    status=healthy ? `${healthy} healthy bindings` : unknown || !states.length ? "Binding health not yet available" : "No healthy bindings";
+    color=healthy ? "bg-emerald-600 dark:bg-emerald-400" : unknown || !states.length ? "bg-zinc-500" : "bg-red-600 dark:bg-red-400";
+  }
   const url = `${p.entry_points?.includes("websecure") ? "https" : "http"}://${p.hosts?.[0] || p.name}`;
   return <div className="flex min-w-0 flex-wrap items-center gap-2"><span role="img" aria-label={status} title={status} className={`h-2 w-2 shrink-0 rounded-full ${color}`} /><a className="inline-flex min-w-0 max-w-full items-center gap-1 truncate text-[15px] font-medium text-blue-600 hover:underline dark:text-blue-400" href={url} target="_blank" rel="noreferrer"><span className="truncate">{p.hosts?.[0] || p.name}</span>{p.hosts?.length > 1 && <span className="text-[10px] text-muted-foreground">+{p.hosts.length - 1}</span>}<IconArrowUpRight size={12} className="shrink-0 opacity-60" /></a>{p.temporary && <span title="Removed when the PortHub CLI exposure stops or its lease expires" className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-200">Temporary · PortHub agent</span>}<button type="button" onClick={onCopy} aria-label={`Copy proxy URL ${url}`} title="Copy proxy URL" className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"><IconCopy size={14} /></button></div>;
+}
+
+function ProxyDestinations({proxy}) {
+  const bindings=proxyBindings(proxy);
+  return <div className="min-w-0 space-y-1">{bindings.slice(0,2).map(b=><p key={b.id} className="truncate text-xs text-muted-foreground" title={bindingTitle(b)}>{bindingTitle(b)}</p>)}{bindings.length>2 && <p className="text-[11px] text-muted-foreground">+{bindings.length-2} more</p>}</div>;
 }

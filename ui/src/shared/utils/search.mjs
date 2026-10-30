@@ -41,7 +41,7 @@ export function searchScore(query, values) {
 
 export function proxySearchValues(proxy) {
   return [proxy.name, proxy.description, proxy.group, proxy.hosts || [], proxy.target_url,
-    ...Object.values(proxy.connection || {})];
+    ...Object.values(proxy.connection || {}), ...(proxy.bindings || []).flatMap(b=>[b.label,b.target_url,...Object.values(b.connection || {})])];
 }
 
 export function selectProxies(proxies, { query = "", status = "all", group = "all", machine = "all", sort = "name", trafficById = new Map() } = {}) {
@@ -49,7 +49,7 @@ export function selectProxies(proxies, { query = "", status = "all", group = "al
     .filter(({ proxy, score }) => Number.isFinite(score)
       && (status === "all" || (status === "enabled" ? proxy.enabled : !proxy.enabled))
       && (group === "all" || (proxy.group || "") === group)
-      && (machine === "all" || (proxy.connection?.machine_id || "manual") === machine))
+      && (machine === "all" || (proxy.bindings?.length ? proxy.bindings.some(b=>(b.connection?.machine_id || "manual")===machine) : (proxy.connection?.machine_id || "manual") === machine)))
     .sort((a, b) => {
       if (sort === "name" && query.trim() && a.score !== b.score) return a.score - b.score;
       if (sort === "updated") return (Date.parse(b.proxy.updated_at) || 0) - (Date.parse(a.proxy.updated_at) || 0);

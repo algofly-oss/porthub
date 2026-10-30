@@ -3242,11 +3242,25 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "additionalProperties": true
+                "additionalProperties": true,
+                "properties": {
+                  "bindings": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 128,
+                    "items": {
+                      "$ref": "#/components/schemas/ProxyBinding"
+                    }
+                  },
+                  "routing": {
+                    "$ref": "#/components/schemas/ProxyRouting"
+                  }
+                }
               }
             }
           }
-        }
+        },
+        "description": "Supports legacy single targets or an explicit binding pool with separate priority and load-balancing modes."
       }
     },
     "/api/traffic-routes/delete": {
@@ -3342,11 +3356,25 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "additionalProperties": true
+                "additionalProperties": true,
+                "properties": {
+                  "bindings": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 128,
+                    "items": {
+                      "$ref": "#/components/schemas/ProxyBinding"
+                    }
+                  },
+                  "routing": {
+                    "$ref": "#/components/schemas/ProxyRouting"
+                  }
+                }
               }
             }
           }
-        }
+        },
+        "description": "Supports legacy single targets or an explicit binding pool with separate priority and load-balancing modes."
       }
     },
     "/healthz": {
@@ -4877,6 +4905,33 @@
           }
         }
       }
+    },
+    "/api/traffic-routes/health": {
+      "get": {
+        "operationId": "get_api_traffic_routes_health",
+        "summary": "Binding health",
+        "tags": [
+          "Traffic routes"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "404": {
+            "description": "Resource not found"
+          },
+          "500": {
+            "description": "Server error"
+          }
+        },
+        "description": "Fresh edge health and counters for the authenticated owner’s proxy bindings. Returns available=false when no fresh snapshot exists."
+      }
     }
   },
   "components": {
@@ -4891,6 +4946,111 @@
         "type": "http",
         "scheme": "bearer",
         "description": "Private registration credential. Must be paired with the x-porthub-peer header. This grants no browser management permission."
+      }
+    },
+    "schemas": {
+      "ProxyBinding": {
+        "type": "object",
+        "required": [
+          "target_mode"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Stable unique binding identifier; generated if omitted."
+          },
+          "label": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "target_mode": {
+            "type": "string",
+            "enum": [
+              "connection",
+              "manual"
+            ]
+          },
+          "target_url": {
+            "type": "string",
+            "description": "HTTP(S) target for standalone bindings. Managed target URLs are resolved by the server."
+          },
+          "connection_data_id": {
+            "type": "string",
+            "description": "Owned machine-port mapping ID for connection bindings."
+          },
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000
+          },
+          "weight": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "pass_host": {
+            "type": "boolean",
+            "nullable": true
+          },
+          "health_path": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "ProxyRouting": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "priority",
+              "balance"
+            ],
+            "default": "priority"
+          },
+          "priority_policy": {
+            "type": "string",
+            "enum": [
+              "manual",
+              "health"
+            ],
+            "description": "Used only in priority mode."
+          },
+          "strategy": {
+            "type": "string",
+            "enum": [
+              "round_robin",
+              "weighted_round_robin",
+              "least_connections"
+            ],
+            "description": "Used only in balance mode."
+          },
+          "sticky_sessions": {
+            "type": "boolean",
+            "default": false
+          },
+          "max_attempts": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 128,
+            "default": 4
+          },
+          "response_timeout_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 310,
+            "default": 310
+          },
+          "health": {
+            "type": "object",
+            "description": "Active HTTP probes, path, interval/timeout, failure/recovery thresholds, cooldown and healthy status range."
+          }
+        }
       }
     }
   }

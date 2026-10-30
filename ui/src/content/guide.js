@@ -289,7 +289,7 @@ export const guideArticles = [
     "slug": "web-proxies",
     "group": "Networking",
     "title": "Web proxies",
-    "description": "Give an HTTP service a hostname and inspect its complete target path.",
+    "description": "Give your application one hostname with multiple routes, failover and load balancing.",
     "sections": [
       {
         "id": "targets",
@@ -310,10 +310,21 @@ export const guideArticles = [
             "items": [
               "Open Proxies and create a route.",
               "Add the hostname that should serve the application. Configure its DNS to reach your gateway.",
-              "Choose the registered service or standalone target URL.",
+              "In Bindings, add one or more machine ports or standalone HTTP(S) URLs.",
+              "Choose Priority mode for your own order or automatic health priority. Choose Load balance for round robin, weighted round robin or least connections.",
+              "In Health, choose a lightweight application health endpoint and configure detection and recovery.",
               "Enable the route and open its URL. Use the copy icon to share it accurately."
             ]
           }
+        ]
+      },
+      {
+        "id": "balancing",
+        "title": "Priority and load balancing",
+        "blocks": [
+          { "type": "paragraph", "text": "Priority mode uses one available binding at a time. Choose My priority order to set lower numbers first, or Best health & response to let measured failures and smoothed probe response times decide. Load balance mode distributes requests across all available bindings; priority numbers are ignored." },
+          { "type": "paragraph", "text": "Round robin takes turns. Weighted round robin gives higher-weight bindings more traffic. Least connections prefers fewer active responses and upgraded connections. Optional visitor affinity uses a one-day cookie and falls back when its binding fails." },
+          { "type": "note", "text": "Requests with writes or uploads are never replayed across bindings. Only empty GET/HEAD requests can retry. Existing WebSockets stay on their selected route until reconnecting. Separate application instances must share session/data state as appropriate for your application." }
         ]
       },
       {

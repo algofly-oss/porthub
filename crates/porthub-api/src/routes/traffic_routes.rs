@@ -1,5 +1,5 @@
 use crate::{
-    App, auth,
+    auth,
     domain::{
         inventory,
         traffic_routes::{self, Input},
@@ -9,21 +9,21 @@ use crate::{
     generated,
     input::{ApiBody, Model},
     input_compat::strip,
-    store,
+    store, App,
 };
 use axum::{
-    Json, Router,
     extract::State,
     http::HeaderMap,
     routing::{get, post, put},
+    Json, Router,
 };
 use futures_util::TryStreamExt;
 use mongodb::{
-    IndexModel,
-    bson::{Bson, DateTime, Document, doc, oid::ObjectId},
+    bson::{doc, oid::ObjectId, Bson, DateTime, Document},
     options::IndexOptions,
+    IndexModel,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{collections::BTreeSet, sync::Arc};
 
 pub fn router() -> Router<Arc<App>> {
@@ -31,6 +31,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/api/traffic-routes/add", post(add))
         .route("/api/traffic-routes/update", put(update))
         .route("/api/traffic-routes/list", get(list))
+        .route("/api/traffic-routes/health", get(health))
         .route(
             "/api/traffic-routes/activity",
             get(crate::web_activity::activity),
@@ -127,6 +128,36 @@ async fn document(app: &App, owner: &Bson, input: Input) -> ApiResult<Document> 
     if strip(&input.name).is_empty() {
         return Err(ApiError::bad_request("Route name is required"));
     }
+    let mut binding_records = Vec::new();
+    if let Some(bindings) = &input.bindings {
+        for binding in bindings {
+            let connection = if binding.target_mode == "connection" {
+                metadata(
+                    app,
+                    owner,
+                    binding.connection_data_id.as_deref().unwrap_or(""),
+                )
+                .await?
+            } else {
+                Bson::Null
+            };
+            let target = if let Bson::Document(connection) = &connection {
+                generated::connection_web_target(connection).map_err(|_| {
+                    ApiError::bad_request("Machine port has no valid gateway listener")
+                })?
+            } else {
+                binding
+                    .target_url
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .to_owned()
+            };
+            binding_records.push(doc!{"id":&binding.id,"label":binding.label.trim(),"target_mode":&binding.target_mode,"target_url":target,
+                "priority":binding.priority as i64,"weight":binding.weight as i64,"enabled":binding.enabled,
+                "pass_host":binding.pass_host,"health_path":&binding.health_path,"connection":connection});
+        }
+    }
     let connection = metadata(
         app,
         owner,
@@ -134,10 +165,24 @@ async fn document(app: &App, owner: &Bson, input: Input) -> ApiResult<Document> 
     )
     .await?;
     let now = DateTime::now();
-    let record = doc! {"_id":ObjectId::new(),"user_id":owner,"name":strip(&input.name),"group":strip(&input.group),
+    let mut record = doc! {"_id":ObjectId::new(),"user_id":owner,"name":strip(&input.name),"group":strip(&input.group),
     "description":input.description.as_deref().map(strip).unwrap_or(""),"hosts":input.hosts,
     "target_mode":input.target_mode,"target_url":input.target_url.as_deref().map(strip).unwrap_or(""),
     "entry_points":input.entry_points,"enabled":input.enabled.unwrap_or(true),"connection":connection,"created_at":now,"updated_at":now};
+    if !binding_records.is_empty() {
+        let primary = &binding_records[0];
+        record.insert("target_url", primary.get_str("target_url").unwrap());
+        record.insert(
+            "connection",
+            primary.get("connection").cloned().unwrap_or(Bson::Null),
+        );
+        record.insert("bindings", binding_records);
+        record.insert(
+            "routing",
+            mongodb::bson::to_bson(&input.routing)
+                .map_err(|_| ApiError::bad_request("Invalid routing settings"))?,
+        );
+    }
     // Validate even a disabled route now, so enabling it cannot reserve gateway
     // aliases or poison the next published routing snapshot.
     let mut active = record.clone();
@@ -220,6 +265,11 @@ async fn update(
         ));
     }
     let id = previous.get_object_id("_id").unwrap();
+    if previous.get_array("bindings").is_ok() && input.bindings.is_none() {
+        return Err(ApiError::bad_request(
+            "This proxy uses multiple bindings; reload the editor before saving",
+        ));
+    }
     let patch = document(&app, owner, input).await?;
     let mut candidate = previous.clone();
     for (key, value) in patch {
@@ -291,5 +341,89 @@ async fn delete(
     }
     Ok(Json(
         json!({"msg":"Traffic route deleted successfully","data":traffic_routes::serialize(&previous)}),
+    ))
+}
+
+async fn health(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+    let user = auth::current_user(&app, &headers).await?;
+    let owned: Vec<Document> = app
+        .collection("traffic_routes")
+        .find(doc! {"user_id":user.get("_id")})
+        .projection(doc! {"_id":1,"bindings.id":1})
+        .await?
+        .try_collect()
+        .await?;
+    let Some(path) = app
+        .config
+        .web_activity_log_path
+        .as_ref()
+        .map(|p| p.with_file_name("web-health.json"))
+    else {
+        return Ok(Json(json!({"available":false,"data":{}})));
+    };
+    let snapshot = tokio::task::spawn_blocking(move || -> Option<Value> {
+        use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .ok()?;
+        if !file.metadata().ok()?.is_file() {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        file.by_ref()
+            .take(8 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() > 8 * 1024 * 1024 {
+            return None;
+        }
+        serde_json::from_slice(&bytes).ok()
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some(snapshot) = snapshot else {
+        return Ok(Json(json!({"available":false,"data":{}})));
+    };
+    let stamp = snapshot
+        .get("updated_at")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    if !(0..=30000).contains(&(chrono::Utc::now().timestamp_millis() - stamp)) {
+        return Ok(Json(json!({"available":false,"data":{}})));
+    }
+    let mut data = serde_json::Map::new();
+    for route in owned {
+        let id = store::id(route.get("_id"));
+        if let Some(bindings) = snapshot
+            .get("routes")
+            .and_then(|v| v.get(&id))
+            .and_then(Value::as_array)
+        {
+            let ids: Vec<_> = route
+                .get_array("bindings")
+                .ok()
+                .into_iter()
+                .flatten()
+                .filter_map(Bson::as_document)
+                .filter_map(|b| b.get_str("id").ok())
+                .collect();
+            let valid: Vec<_> = bindings
+                .iter()
+                .filter(|b| {
+                    b.get("id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| ids.contains(&id) || ids.is_empty() && id == "primary")
+                })
+                .cloned()
+                .collect();
+            data.insert(id, json!(valid));
+        }
+    }
+    Ok(Json(
+        json!({"available":true,"updated_at":stamp,"data":data}),
     ))
 }

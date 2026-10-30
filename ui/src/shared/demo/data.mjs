@@ -38,6 +38,7 @@ export function handleDemoRequest(state, method, rawPath, payload = {}) {
   const body = typeof payload === "string" ? JSON.parse(payload) : payload || {};
   if (path.startsWith("/access/")) return demoAccess(state,method,path,body,id);
   if (path === "/auth/me") return state.user;
+  if (path === "/traffic-routes/health") return {available:true,updated_at:Date.now(),data:Object.fromEntries(state.proxies.map(p=>[p._id,(p.bindings || [{id:"primary",enabled:p.enabled}]).map((b,index)=>({id:b.id,state:b.enabled===false ? "disabled" : "healthy",latency_ms:12+index*9,requests:200-index*20,failures:0,active_connections:0,last_checked_at:Date.now()}))]))};
   if (path === "/traffic-routes/activity") return state.proxyActivity || {available:true,tracking_since:new Date(Date.now()-86400000).toISOString(),data:state.proxies.map((proxy,index)=>({route_id:proxy._id,requests:(index+1)*27000,monthly_requests:(index+1)*1200,last_requested_at:new Date(Date.now()-index*60000).toISOString(),last_host:proxy.hosts[0]}))};
   if (path === "/auth/settings") return { signup_disabled: true, web_proxy_domain_suffix: "preview.invalid", port_hub_service_domain: "preview.invalid" };
   if (path === "/auth/preferences") { state.user.preferences = { ...state.user.preferences, ...body }; return state.user.preferences; }
@@ -92,6 +93,10 @@ export function handleDemoRequest(state, method, rawPath, payload = {}) {
   if (key === "proxies") {
     const c = state.connections.find(c => c._id === (body.connectionDataId || body.connection_data_id));
     Object.assign(item, { group: body.group || "", target_mode: body.targetMode || body.target_mode || "manual", target_url: body.targetUrl || body.target_url || "", entry_points: body.entryPoints || ["web"], connection: c ? { ...c, data_id: c._id } : null });
+    if(body.bindings){
+      item.bindings=body.bindings.map(b=>{const c=state.connections.find(c=>c._id===b.connection_data_id);return {...b,connection:c ? {...c,data_id:c._id}:null,target_url:c ? `http://127.0.0.1:${c.external_port}` : b.target_url};});
+      const primary=item.bindings[0];Object.assign(item,{target_mode:primary.target_mode,target_url:primary.target_url,connection:primary.connection,routing:body.routing});
+    }
   }
   if (key === "machines") Object.assign(item, { hostname: item.hostname || "", enabled: item.enabled ?? true, is_active: item.is_active ?? false, connection_status: item.enabled === false ? "disabled" : item.connection_status || "offline", token: "demo-token-not-valid-for-real-clients" });
   if (key === "connections") {

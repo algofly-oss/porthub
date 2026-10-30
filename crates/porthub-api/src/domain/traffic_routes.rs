@@ -5,8 +5,8 @@ use crate::{
     store,
 };
 use mongodb::bson::Document;
-use serde::Serialize;
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::collections::HashSet;
 
 #[derive(Debug, Serialize)]
@@ -21,6 +21,10 @@ pub struct Input {
     pub entry_points: Vec<String>,
     pub enabled: Option<bool>,
     pub connection_data_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bindings: Option<Vec<BindingInput>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routing: Option<porthub_runtime::upstreams::Routing>,
 }
 
 fn list(model: &mut Model, key: &str, default: Vec<Value>, lower: bool) -> Vec<String> {
@@ -61,6 +65,9 @@ fn list(model: &mut Model, key: &str, default: Vec<Value>, lower: bool) -> Vec<S
     result
 }
 pub fn parse(raw: Value) -> ApiResult<Input> {
+    if raw.get("bindings").is_some() {
+        return parse_multiple(raw);
+    }
     let mut model = Model::new(raw)?;
     for (primary, secondary) in [
         ("targetMode", "target_mode"),
@@ -181,6 +188,8 @@ pub fn parse(raw: Value) -> ApiResult<Input> {
         entry_points,
         enabled,
         connection_data_id,
+        bindings: None,
+        routing: None,
     })
 }
 
@@ -211,5 +220,129 @@ pub fn serialize(route: &Document) -> Value {
         "connection":route.get("connection").map(store::json).filter(compat::truthy).unwrap_or(Value::Null),
         "created_at":store::field(route,"created_at"),"updated_at":store::field(route,"updated_at"),
         "temporary":route.get_bool("temporary").unwrap_or(false),"managed_by":store::field(route,"managed_by"),
-        "exposure_id":store::field(route,"exposure_id"),"lease_expires_at":store::field(route,"lease_expires_at")})
+        "exposure_id":store::field(route,"exposure_id"),"lease_expires_at":store::field(route,"lease_expires_at"),
+        "bindings":route.get("bindings").map(store::json).unwrap_or(Value::Null),
+        "routing":route.get("routing").map(store::json).unwrap_or(Value::Null)})
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BindingInput {
+    #[serde(default = "binding_id")]
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+    pub target_mode: String,
+    #[serde(default)]
+    pub target_url: Option<String>,
+    #[serde(default)]
+    pub connection_data_id: Option<String>,
+    #[serde(default = "one")]
+    pub priority: u32,
+    #[serde(default = "one")]
+    pub weight: u32,
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub pass_host: Option<bool>,
+    #[serde(default)]
+    pub health_path: Option<String>,
+}
+fn binding_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+fn one() -> u32 {
+    1
+}
+fn yes() -> bool {
+    true
+}
+fn parse_multiple(mut raw: Value) -> ApiResult<Input> {
+    use crate::error::ApiError;
+    let bindings: Vec<BindingInput> = serde_json::from_value(raw["bindings"].clone())
+        .map_err(|e| ApiError::bad_request(&format!("Invalid bindings: {e}")))?;
+    if bindings.is_empty() || bindings.len() > 128 {
+        return Err(ApiError::bad_request("Provide between 1 and 128 bindings"));
+    }
+    let routing: porthub_runtime::upstreams::Routing =
+        serde_json::from_value(raw.get("routing").cloned().unwrap_or_else(|| json!({})))
+            .map_err(|e| ApiError::bad_request(&format!("Invalid routing settings: {e}")))?;
+    routing
+        .validate()
+        .map_err(|e| ApiError::bad_request(&e.to_string()))?;
+    let mut ids = HashSet::new();
+    let mut targets = HashSet::new();
+    for b in &bindings {
+        let fail = |message: &str| {
+            ApiError::bad_request(&format!(
+                "Binding {}: {message}",
+                b.label.chars().take(80).collect::<String>()
+            ))
+        };
+        if b.id.is_empty()
+            || b.id.len() > 80
+            || !b
+                .id
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+            || !ids.insert(&b.id)
+        {
+            return Err(fail("IDs must be unique identifiers"));
+        }
+        if b.label.len() > 120
+            || !(1..=10000).contains(&b.priority)
+            || !(1..=100).contains(&b.weight)
+        {
+            return Err(fail(
+                "Label must be at most 120 bytes, priority 1–10000, weight 1–100",
+            ));
+        }
+        let key = match b.target_mode.as_str() {
+            "manual" => {
+                let text = b.target_url.as_deref().unwrap_or("").trim();
+                let url =
+                    url::Url::parse(text).map_err(|_| fail("Enter a valid HTTP or HTTPS URL"))?;
+                if !matches!(url.scheme(), "http" | "https")
+                    || url.host_str().is_none()
+                    || url.fragment().is_some()
+                {
+                    return Err(fail("Enter an HTTP or HTTPS URL without a fragment"));
+                }
+                format!("url:{url}")
+            }
+            "connection" => {
+                let id = b.connection_data_id.as_deref().unwrap_or("");
+                crate::domain::workspaces::object_id(id, "Invalid machine port binding")?;
+                format!("connection:{}", id.to_lowercase())
+            }
+            _ => return Err(fail("Type must be manual or connection")),
+        };
+        if !targets.insert(key) {
+            return Err(fail("This target is already in the binding list"));
+        }
+        if let Some(path) = &b.health_path {
+            let mut health = routing.health.clone();
+            health.path = path.clone();
+            health.validate().map_err(|e| fail(&e.to_string()))?;
+        }
+    }
+    let object = raw
+        .as_object_mut()
+        .ok_or_else(|| ApiError::bad_request("Expected proxy settings"))?;
+    object.remove("bindings");
+    object.remove("routing");
+    // Use the compatibility parser for common fields without letting old
+    // single-target aliases override the explicit multi-binding configuration.
+    object.insert("targetMode".into(), json!("manual"));
+    object.insert("targetUrl".into(), json!("http://placeholder.invalid"));
+    object.remove("connectionDataId");
+    object.remove("connection_data_id");
+    let mut input = parse(raw)?;
+    let first = &bindings[0];
+    input.target_mode = first.target_mode.clone();
+    input.target_url = first.target_url.clone();
+    input.connection_data_id = first.connection_data_id.clone();
+    input.bindings = Some(bindings);
+    input.routing = Some(routing);
+    Ok(input)
 }

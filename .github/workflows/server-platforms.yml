@@ -1,0 +1,61 @@
+name: Native server artifacts
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Server architecture to build (agents are not rebuilt)
+        type: choice
+        options: [arm64, x86_64, all]
+        default: arm64
+permissions:
+  contents: read
+jobs:
+  server:
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.platform == 'all' && '[{"arch":"arm64","os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl"},{"arch":"x86_64","os":"ubuntu-24.04","target":"x86_64-unknown-linux-musl"}]' || inputs.platform == 'x86_64' && '[{"arch":"x86_64","os":"ubuntu-24.04","target":"x86_64-unknown-linux-musl"}]' || '[{"arch":"arm64","os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl"}]') }}
+    runs-on: ${{ matrix.os }}
+    env:
+      PORTHUB_SOURCE_REVISION: ${{ github.sha }}
+      RUST_MIN_STACK: '33554432'
+      CARGO_BUILD_JOBS: '4'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned native static toolchain
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup target add --toolchain 1.99.1 '${{ matrix.target }}'
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: server-${{ matrix.target }}
+          cache-workspace-crates: true
+          cache-on-failure: true
+      - name: Build server roles without rebuilding agents
+        run: |
+          target='${{ matrix.target }}'
+          target_key="$(echo "$target" | tr '[:lower:]-' '[:upper:]_')"
+          cc_key="$(echo "$target" | tr '-' '_')"
+          export "CARGO_TARGET_${target_key}_LINKER=musl-gcc"
+          export "CC_${cc_key}=musl-gcc"
+          cargo build --locked --release -p porthub-api -p porthub-edge -p porthub-runtime --target "$target" --timings
+          mkdir -p server-artifacts
+          for binary in porthub-api porthub-edge porthub-runtime; do
+            source="target/$target/release/$binary"
+            if readelf -l "$source" | grep -q INTERP; then
+              echo "$binary requires a dynamic loader" >&2
+              exit 1
+            fi
+            "$source" --help >/dev/null
+            cp "$source" server-artifacts/
+          done
+          printf '%s\n' "$GITHUB_SHA" > server-artifacts/source-revision
+          (cd server-artifacts && sha256sum porthub-*) > server-artifacts/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: porthub-server-${{ matrix.arch }}
+          path: server-artifacts/
+          if-no-files-found: error
+          retention-days: 3

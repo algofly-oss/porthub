@@ -197,6 +197,22 @@ pub async fn initialize(app: &App) -> ApiResult<()> {
     rebuild_web(app).await
 }
 
+/// Reach the actual managed listener in the edge namespace. Wildcard binds
+/// use loopback; specific and IPv6 binds retain their authoritative address.
+pub fn connection_web_target(connection: &Document) -> anyhow::Result<String> {
+    let port = store::field(connection, "external_port")
+        .as_u64()
+        .filter(|p| (1..=65535).contains(p))
+        .ok_or_else(|| anyhow::anyhow!("Machine port has no valid gateway port"))?;
+    let address = match store::string(connection, "external_bind_ip").trim() {
+        "" | "0.0.0.0" => "127.0.0.1",
+        "::" => "::1",
+        ip => ip,
+    }
+    .parse::<IpAddr>()?;
+    Ok(format!("http://{}", SocketAddr::new(address, port as u16)))
+}
+
 pub fn render_web(routes: &[Document]) -> anyhow::Result<porthub_runtime::web_routes::Config> {
     let mut result = Vec::new();
     for route in routes {
@@ -212,16 +228,62 @@ pub fn render_web(routes: &[Document]) -> anyhow::Result<porthub_runtime::web_ro
             .filter(|host| !host.is_empty())
             .collect();
         let target_url = store::string(route, "target_url").trim().to_owned();
-        let target = url::Url::parse(&target_url)?;
-        let mode = store::string(route, "target_mode").trim();
-        let pass_host = !matches!(mode, "" | "manual")
-            || target.host_str().is_none_or(|host| {
-                host.trim_start_matches('[')
-                    .trim_end_matches(']')
-                    .parse::<std::net::IpAddr>()
-                    .is_ok()
-                    || hosts.iter().any(|name| name.eq_ignore_ascii_case(host))
-            });
+        let auto_host = |target_url: &str, mode: &str| -> anyhow::Result<bool> {
+            let target = url::Url::parse(target_url)?;
+            Ok(!matches!(mode, "" | "manual")
+                || target.host_str().is_none_or(|host| {
+                    host.trim_matches(['[', ']'])
+                        .parse::<std::net::IpAddr>()
+                        .is_ok()
+                        || hosts.iter().any(|name| name.eq_ignore_ascii_case(host))
+                }))
+        };
+        let pass_host = auto_host(&target_url, store::string(route, "target_mode").trim())?;
+        let bindings = route
+            .get_array("bindings")
+            .ok()
+            .map(|records| {
+                records
+                    .iter()
+                    .map(
+                        |value| -> anyhow::Result<porthub_runtime::upstreams::Binding> {
+                            let binding = value
+                                .as_document()
+                                .ok_or_else(|| anyhow::anyhow!("Invalid binding document"))?;
+                            let target_url = store::string(binding, "target_url").trim().to_owned();
+                            let url = url::Url::parse(&target_url)?;
+                            anyhow::ensure!(
+                                !url.host_str().is_some_and(|host| hosts
+                                    .iter()
+                                    .any(|h| h.eq_ignore_ascii_case(host)))
+                                    || !matches!(url.port_or_known_default(), Some(80 | 443)),
+                                "Binding would route back to its own proxy hostname"
+                            );
+                            Ok(porthub_runtime::upstreams::Binding {
+                                id: store::string(binding, "id").into(),
+                                pass_host: binding.get_bool("pass_host").unwrap_or(auto_host(
+                                    &target_url,
+                                    store::string(binding, "target_mode"),
+                                )?),
+                                target_url,
+                                enabled: binding.get_bool("enabled") != Ok(false),
+                                priority: store::field(binding, "priority").as_u64().unwrap_or(1)
+                                    as u32,
+                                weight: store::field(binding, "weight").as_u64().unwrap_or(1)
+                                    as u32,
+                                health_path: binding.get_str("health_path").ok().map(str::to_owned),
+                            })
+                        },
+                    )
+                    .collect::<anyhow::Result<Vec<_>>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let routing = route
+            .get("routing")
+            .filter(|v| !matches!(v, Bson::Null))
+            .map(|v| mongodb::bson::from_bson(v.clone()))
+            .transpose()?;
         let entries: Vec<&str> = route
             .get_array("entry_points")
             .into_iter()
@@ -234,6 +296,8 @@ pub fn render_web(routes: &[Document]) -> anyhow::Result<porthub_runtime::web_ro
             id: store::id(route.get("_id")),
             hosts,
             target_url,
+            bindings,
+            routing,
             pass_host,
             http: entries.is_empty() || entries.contains(&"web"),
             https: true,
@@ -274,6 +338,14 @@ pub fn render_web_for_gateway(
         .filter_map(whole_origin)
         .collect();
     let mut config = render_web(routes)?;
+    for route in &config.routes {
+        for binding in &route.bindings {
+            anyhow::ensure!(
+                whole_origin(&binding.target_url).is_none_or(|origin| !origins.contains(&origin)),
+                "Binding would route back to gateway ingress"
+            );
+        }
+    }
     config.routes.retain(|route| {
         whole_origin(&route.target_url).is_none_or(|origin| !origins.contains(&origin))
     });
@@ -282,13 +354,14 @@ pub fn render_web_for_gateway(
 
 async fn web_snapshot(app: &App) -> ApiResult<(usize, porthub_runtime::web_routes::Config)> {
     let retired = crate::account_delete::retiring_owners(app).await?;
-    let routes: Vec<Document> = app
+    let mut routes: Vec<Document> = app
         .collection("traffic_routes")
         .find(doc! {"user_id":{"$nin":retired},"enabled":{"$ne":false}})
         .sort(doc! {"created_at":1,"_id":1})
         .await?
         .try_collect()
         .await?;
+    hydrate_bindings(app, &mut routes).await?;
     let config = render_web_for_gateway(&routes, &app.config).map_err(internal)?;
     let gateways = std::iter::once(&app.config.public_base_url)
         .chain(std::iter::once(&app.config.tunnel_http_base_url))
@@ -299,6 +372,70 @@ async fn web_snapshot(app: &App) -> ApiResult<(usize, porthub_runtime::web_route
         .reload(config.clone())
         .map_err(internal)?;
     Ok((routes.len(), config))
+}
+
+async fn hydrate_bindings(app: &App, routes: &mut [Document]) -> ApiResult<()> {
+    let ids: Vec<_> = routes
+        .iter()
+        .filter_map(|r| r.get_array("bindings").ok())
+        .flatten()
+        .filter_map(Bson::as_document)
+        .filter_map(|b| b.get_document("connection").ok())
+        .filter_map(|c| c.get_str("data_id").ok())
+        .filter_map(|s| mongodb::bson::oid::ObjectId::parse_str(s).ok())
+        .collect();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let connections: Vec<Document> = app
+        .collection("connections")
+        .find(doc! {"_id":{"$in":ids}})
+        .await?
+        .try_collect()
+        .await?;
+    let machine_ids: Vec<Bson> = connections
+        .iter()
+        .filter_map(|c| c.get("machine_id").cloned())
+        .collect();
+    let machines:Vec<Document>=app.collection("machines").find(doc!{"_id":{"$in":machine_ids},"enabled":{"$ne":false},"deletion_pending":{"$ne":true}}).await?.try_collect().await?;
+    for route in routes {
+        let owner = route.get("user_id").cloned();
+        if let Ok(bindings) = route.get_array_mut("bindings") {
+            for value in bindings {
+                let Some(binding) = value.as_document_mut() else {
+                    continue;
+                };
+                if binding.get_str("target_mode") != Ok("connection") {
+                    continue;
+                }
+                let id = binding
+                    .get_document("connection")
+                    .ok()
+                    .and_then(|c| c.get_str("data_id").ok())
+                    .unwrap_or("");
+                let connection = connections
+                    .iter()
+                    .find(|c| store::id(c.get("_id")) == id && c.get("user_id") == owner.as_ref());
+                let valid = connection.filter(|c| {
+                    c.get_bool("enabled") != Ok(false)
+                        && machines.iter().any(|m| {
+                            m.get("_id") == c.get("machine_id")
+                                && m.get("user_id") == owner.as_ref()
+                        })
+                });
+                if let Some(c) = valid {
+                    if let Ok(target) = connection_web_target(c) {
+                        binding.insert("target_url", target);
+                    } else {
+                        binding.insert("enabled", false);
+                    }
+                } else {
+                    binding.insert("enabled", false);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
