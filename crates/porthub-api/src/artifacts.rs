@@ -326,7 +326,7 @@ impl Catalog {
 fn header(headers: &HeaderMap, name: header::HeaderName) -> Option<&str> {
     headers.get(name).and_then(|value| value.to_str().ok())
 }
-fn matches_etag(value: &str, etag: &str, weak: bool) -> bool {
+pub(crate) fn matches_etag(value: &str, etag: &str, weak: bool) -> bool {
     value.split(',').any(|value| {
         let value = value.trim();
         value == "*"

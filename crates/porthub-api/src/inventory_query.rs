@@ -988,10 +988,13 @@ pub fn conditional(headers: &HeaderMap, body: Value) -> ApiResult<Response> {
     let bytes = serde_json::to_vec(&body)
         .map_err(|_| ApiError::bad_request("Invalid inventory response"))?;
     let etag = format!("\"{:x}\"", Sha256::digest(&bytes));
+    // Reverse proxies can weaken ETags after compression. If-None-Match uses
+    // weak comparison for GET, including validator lists and the wildcard.
     if headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|h| h.to_str().ok())
-        == Some(etag.as_str())
+        .get_all(header::IF_NONE_MATCH)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(|value| crate::artifacts::matches_etag(value, &etag, true))
     {
         return Ok((
             StatusCode::NOT_MODIFIED,
@@ -1228,4 +1231,49 @@ async fn machine_traffic(
         &headers,
         json!({"data":rows,"aggregate":[],"cursor":cursor,"scope_revision":revision,"reset":reset,"pagination":{"page":1,"page_size":rows.len(),"total":rows.len(),"pages":1}}),
     )
+}
+
+#[cfg(test)]
+mod conditional_tests {
+    use super::*;
+    #[test]
+    fn compressed_proxy_validators_use_weak_comparison() {
+        let body = json!({"data": {"total": 18}});
+        let initial = conditional(&HeaderMap::new(), body.clone())
+            .ok()
+            .expect("valid conditional response");
+        let etag = initial.headers()[header::ETAG]
+            .to_str()
+            .expect("valid ETag");
+        for validator in [
+            etag.to_owned(),
+            format!("W/{etag}"),
+            format!("\"older\", W/{etag}"),
+            "*".to_owned(),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::IF_NONE_MATCH,
+                validator.parse().expect("valid ETag"),
+            );
+            assert_eq!(
+                conditional(&headers, body.clone())
+                    .ok()
+                    .expect("valid conditional response")
+                    .status(),
+                StatusCode::NOT_MODIFIED
+            );
+            assert_eq!(
+                conditional(&headers, json!({"data": {"total": 19}}))
+                    .ok()
+                    .expect("valid conditional response")
+                    .status(),
+                if validator == "*" {
+                    StatusCode::NOT_MODIFIED
+                } else {
+                    StatusCode::OK
+                }
+            );
+        }
+    }
 }

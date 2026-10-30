@@ -54,6 +54,8 @@ async fn database_search_pages_totals_relevance_and_owner_scoping() -> Result<()
   ensure!(page["data"].as_array().unwrap().len()==25 && page["pagination"]["total"]==132 && page["pagination"]["pages"]==6);
   let names:Vec<_>=page["data"].as_array().unwrap().iter().map(|m|m["name"].as_str().unwrap()).collect();ensure!(names.windows(2).all(|n|n[0]<=n[1]));
   let(status,_,_)=case.call("GET",endpoint,&cookie,json!(null),&[("if-none-match",headers["etag"].to_str()?)]).await?;ensure!(status==StatusCode::NOT_MODIFIED);
+  let weak=format!("W/{}",headers["etag"].to_str()?);
+  let(status,_,_)=case.call("GET",endpoint,&cookie,json!(null),&[("if-none-match",&weak)]).await?;ensure!(status==StatusCode::NOT_MODIFIED,"Compressed public proxies may return weak validators");
   for query in ["Reid","reod","redi"]{
    let body=case.status("GET",&format!("/api/inventory/machines?q={query}"),&cookie,json!(null),StatusCode::OK).await?;
    ensure!(body["pagination"]["total"]==1 && body["data"][0]["name"]=="Reid","{query}: {body}");
