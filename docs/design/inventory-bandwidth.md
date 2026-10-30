@@ -1,9 +1,8 @@
 # App-wide inventory and search bandwidth
 
-Active goal: replace full-account inventory downloads throughout the app, not
-only proxies. Scope includes machines/ports, proxies, traffic, dashboard,
-admin overview, groups/access views and their selectors. Nothing from this
-change has been deployed yet.
+Full-account inventory downloads have been replaced throughout the app,
+including proxies. Scope includes machines/ports, proxies, traffic, dashboard,
+admin overview, groups/access views and their selectors. Server/UI version 1.8.7 is deployed and verified.
 
 The shared endpoint `/api/inventory/{kind}` performs owner filtering, bounded
 text matching, ranking, sorting and paging inside MongoDB. Page sizes are capped
@@ -65,7 +64,7 @@ ownership, exact/typo/numeric matching, natural pages/totals, child bounds, ETag
 index idempotency, full-match traffic ranking, corrected aggregate deltas and
 scope resets, admin authorization, private DNS, bounded activity, membership
 revocation, full policy details and preservation of unloaded group members.
-All 27 JavaScript utility tests pass. The API library suite passes 45 tests;
+All 27 JavaScript utility tests pass. The API library suite passes 46 tests;
 69 tests across the affected integration suites pass, including the firewall,
 policy, proxy, realtime, status and legacy route contracts. Artifact-download
 tests require separate agent executable prerequisites and are not part of this
@@ -108,9 +107,40 @@ multiple selections, and expanded account machines use scoped ten-row requests.
 The traffic browser test confirms 950-port totals, aggregate tokens, bounded
 rows, paused/hidden request suppression, resume, and exact numeric filtering.
 
-Version prepared: server 1.8.7. Agent releases remain unchanged. Final production
-UI rebuild, review/commit, native arm64 artifact build and deployment remain.
-The intended rollout updates only the core API/UI container; the edge, firewall,
-client installations, existing mappings/proxies and unrelated containers must
-remain intact. Verify those invariants and live connectivity before completion.
-Nothing from this goal has been deployed yet.
+Live rollout: the initial 1.8.7 build (`f79e489`) replaced only the core API/UI
+container. The edge, firewall and all ten other running containers retained
+their identities. A protected pre-rollout snapshot and rollback image remain on
+URM2. Exact comparisons preserve all 27 proxy records, 33 mapping IDs and their
+configuration, 18 machine configurations, groups, policy books, private network,
+DNS, exits, grants and workspace memberships. Agents remain 1.8.5; Reid, Thor
+and EC2 continue sending heartbeats. IBI and Thor respond HTTP 200 with unchanged
+body hashes. Authenticated Chromium and WebKit production checks pass at 1440
+and 402 pixels across machines, dashboard, proxies, policies, traffic and admin,
+without legacy full-list calls, failed API requests, runtime errors or overflow.
+
+The final live conditional-response check found that Cloudflare weakens ETags
+after compression (`W/"hash"`). The deployed correction, `02b0ff3`, uses HTTP
+weak validator comparison, including lists and wildcard, with regression
+coverage in the unit and isolated API suites. Its arm64 build passed in
+[run 41086376907](https://github.com/algofly-oss/porthub/actions/runs/41086376907);
+source revision, checksums and static linkage were verified before the
+read-only configuration preflight and core-only rollout. The UI is unchanged
+from the verified production export built with `f79e489`.
+
+Unchanged public summary, machine, proxy, account and policy queries now return
+HTTP 304. Chromium network instrumentation measured a proxy-page response at
+3269 transferred bytes (19064 decoded bytes), followed by 467 transferred bytes
+for its conditional response, with no JSON body. Policy responses measured
+1030 bytes followed by 466 bytes. These live transfer measurements include
+response overhead; larger-fixture comparisons above report decoded JSON bytes.
+
+A final all-field audit found only normal machine heartbeat timestamps and one
+connection's automatic-refresh timestamps changing. Configuration and unrelated
+container identities remain preserved. Production core health, live IBI/Thor
+response hashes and Reid/Thor/EC2 heartbeats were checked after rollout.
+The edge and firewall were never restarted, and agent binaries/releases were
+not rebuilt or changed. The sole GitHub binary release remains `v1.8.5`.
+
+The disposable local API/firewall fixture, its Mongo test container and the
+dedicated frontend review server have been stopped. Protected production
+backups and rollback instructions remain available on URM2.
