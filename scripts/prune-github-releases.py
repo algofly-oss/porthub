@@ -15,13 +15,18 @@ def version(tag):
     return tuple(map(int, match.groups())) if match else None
 
 
-def plan(releases, tags, keep):
+def plan(releases, tags, keep, protected=(), remove_previews=False):
     current = version(keep)
     if current is None:
         raise ValueError("The kept release must have a version tag")
-    old = lambda tag: tag != keep and version(tag) is not None and version(tag) <= current
-    releases = sorted((r for r in releases if old(r["tag_name"])), key=lambda r: version(r["tag_name"]))
-    return releases, sorted((t for t in tags if old(t)), key=version)
+    protected = set(protected) | {keep}
+    old = lambda tag: tag not in protected and version(tag) is not None and version(tag) <= current
+    preview = lambda release: remove_previews and release["tag_name"] not in protected and (release.get("draft") or release.get("prerelease"))
+    selected = [release for release in releases if old(release["tag_name"]) or preview(release)]
+    preview_tags = {release["tag_name"] for release in selected if preview(release)}
+    order = lambda tag: (version(tag) or (-1, -1, -1), tag)
+    return sorted(selected, key=lambda release: order(release["tag_name"])), sorted(
+        (tag for tag in tags if tag not in protected and (old(tag) or tag in preview_tags)), key=order)
 
 
 def validate_latest(latest, keep):
@@ -67,19 +72,34 @@ class GitHub:
         raise ValueError("Release tag does not resolve to a commit")
 
 
-def prune(github, keep, expected_commit, execute=False):
+def prune(github, keep, expected_commit, execute=False, protected=(), remove_previews=False):
     validate_latest(github.api("/releases/latest"), keep)
     if github.commit(keep) != expected_commit:
         raise ValueError("Kept tag does not match the verified release commit")
-    releases, tags = plan(github.pages("/releases?per_page=100"), [t["name"] for t in github.pages("/tags?per_page=100")], keep)
+    all_tags = [tag["name"] for tag in github.pages("/tags?per_page=100")]
+    releases, tags = plan(github.pages("/releases?per_page=100"), all_tags, keep, protected, remove_previews)
+    tagless_drafts = {release["tag_name"] for release in releases if release.get("draft") and release["tag_name"] not in all_tags}
+    previews = {release["tag_name"] for release in releases if release.get("draft") or release.get("prerelease")}
+    branches = None
     # Deleting a tag must not make an old release's source unreachable. Every
     # retired release commit must remain in the kept release's Git history.
     for tag in sorted(set(tags) | {r["tag_name"] for r in releases}):
+        if tag in tagless_drafts:
+            # Removing draft metadata does not delete a Git ref or source tag.
+            continue
         commit = github.commit(tag)
         if not github.contains_commit(commit, expected_commit):
-            raise ValueError("Older release source is not retained in the kept history: " + tag)
+            if tag in previews:
+                if branches is None:
+                    branches = github.pages("/branches?per_page=100")
+                reachable = any(github.contains_commit(commit, branch["commit"]["sha"]) for branch in branches)
+            else:
+                reachable = False
+            if not reachable:
+                raise ValueError("Older release source is not retained in the kept history or a source branch: " + tag)
         print("Retained source:", tag, commit)
     print("Keep:", keep)
+    print("Explicitly protected tags:", ", ".join(sorted(set(protected))) or "none")
     print("Older releases:", ", ".join(r["tag_name"] for r in releases) or "none")
     print("Older version tags:", ", ".join(tags) or "none")
     if not execute:
@@ -101,10 +121,13 @@ def main():
     parser.add_argument("--keep", required=True)
     parser.add_argument("--expected-commit", required=True)
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--protect", action="append", default=[], help="Preserve an explicitly requested tag and its release")
+    parser.add_argument("--remove-previews", action="store_true", help="Remove unprotected draft/prerelease metadata and tags while retaining their source")
     args = parser.parse_args()
     if not args.repository or not re.fullmatch(r"[a-f0-9]{40}", args.expected_commit):
         parser.error("An explicit repository and full verified commit SHA are required")
-    prune(GitHub(args.repository), args.keep, args.expected_commit, args.execute)
+    protected = set(args.protect) | set(filter(None, re.split(r"[,\s]+", os.environ.get("PORTHUB_RETAIN_TAGS", ""))))
+    prune(GitHub(args.repository), args.keep, args.expected_commit, args.execute, protected, args.remove_previews)
 
 
 if __name__ == "__main__":

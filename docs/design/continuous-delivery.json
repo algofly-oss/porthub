@@ -1,0 +1,25 @@
+{
+  "feature": "Automatic PortHub CI/CD",
+  "status": "Active implementation; not deployed or enabled on main yet",
+  "requirements": [
+    "A push to main starts validation, version preparation, client/server/UI packaging and scoped deployment without manual workflow dispatch.",
+    "An explicit numeric release tag starts the same pipeline with that version, after checking source/version agreement.",
+    "Default GitHub retention is latest stable release and version tag only; remove superseded unprotected previews.",
+    "Preserve versions only when the user explicitly requests retention; record exact tags in PORTHUB_RETAIN_TAGS.",
+    "Keep unchanged Rust modules/dependencies and the independently built terminal runtime cached. Do not mix incompatible binaries or reuse a version for different published contents.",
+    "Use built-in failed-job reruns for transient errors on unchanged source; source-changing fixes rebuild affected code and relink.",
+    "Publish only a fully validated consistent ten-platform bundle; keep the previous latest release if validation fails.",
+    "Scope deployments to PortHub services and agents, preserve unrelated machines/workloads and keep rollback evidence."
+  ],
+  "implemented": {
+    "retention": "Protected tag/release allowlist and unprotected draft/prerelease cleanup wired into the existing publisher. Source reachability and latest-release checks retained. Eleven tests pass; live dry run against v1.8.9 proposes no deletion.",
+    "cache": "Independent helper builds cached immediately after completion and before downstream Rust tests; workspace Rust crate/dependency cache retained."
+  },
+  "remaining": [
+    "Automatic main-push entry point, version preparation, explicit tag validation and reusable build orchestration.",
+    "Automatic server/UI packaging, authenticated scoped deployment job, health validation and rollback path.",
+    "Dedicated narrowly scoped production CI deployment credentials; repository currently has no deployment secrets.",
+    "Wire final publication/retention to successful release/deployment gates; test the complete automated path before declaring it live."
+  ],
+  "authorization": "User explicitly requested automatic CI/CD and authorized live PortHub deployment with a brief reconnect; no permission question is needed for routine setup within that scope."
+}

@@ -97,10 +97,11 @@ jobs:
           # Publish only after every asset has uploaded, so API caches never
           # observe an incomplete platform matrix as the latest release.
           gh release edit "$tag" --draft=false --latest
-      - name: Retain only the latest verified release and version tag
+      - name: Retain latest release plus explicitly protected tags
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/prune-github-releases.py --repository "$GITHUB_REPOSITORY" --keep "v$(sh scripts/release-version.sh)" --expected-commit "$GITHUB_SHA" --execute
+          PORTHUB_RETAIN_TAGS: ${{ vars.PORTHUB_RETAIN_TAGS }}
+        run: python3 scripts/prune-github-releases.py --repository "$GITHUB_REPOSITORY" --keep "v$(sh scripts/release-version.sh)" --expected-commit "$GITHUB_SHA" --remove-previews --execute
   native:
     needs: [select-platforms]
     if: needs.select-platforms.outputs.has_native == 'true'

@@ -61,11 +61,19 @@ one consistent version across all ten platforms before publication. The CI
 publisher uploads a draft first and makes it latest only when uploads finish.
 
 During active development, GitHub retains only the latest verified versioned
-release and its version tag. After publication, CI removes older versioned
-releases (including their binary assets) and version tags. Git commit history
-remains intact; cleanup verifies that every retired release commit is an
-ancestor of the retained release before deleting anything. Non-version tags and
-newer releases in progress are preserved. Keep release commit IDs in verification
+release and its version tag by default. After publication, CI removes older
+versioned releases (including binary assets) and version tags, plus unprotected
+drafts and prereleases. Explicitly retained tags and their releases are listed
+in the repository variable `PORTHUB_RETAIN_TAGS` (comma or whitespace separated).
+An empty list means latest only; add a tag only when the user explicitly asks
+to retain it. The cleanup command also accepts repeatable `--protect TAG`.
+
+Git commit history remains intact. Stable retired versions must remain in the
+retained release's ancestry; unmerged preview source must remain on an existing
+branch before its tag can be deleted. Tagless drafts remove only release
+metadata. Cleanup checks all source retention before deleting anything and
+rechecks the latest published release before each deletion. Unrelated
+non-release tags and newer stable version tags in progress are preserved. Keep release commit IDs in verification
 records to rebuild older versions with `git checkout COMMIT`.
 
 Preview cleanup with `python3 scripts/prune-github-releases.py --repository
