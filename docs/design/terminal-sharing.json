@@ -224,5 +224,15 @@
     "fix": "Read-only SSH history clips whole Unicode grapheme clusters by terminal display width, preserving joined emoji, flags, combining accents and wide characters. Empty-history messages also respect narrow viewport width. Existing control-character filtering remains in place.",
     "evidence": "Regression reproduces a joined emoji split before the fix. After the fix all twenty-two core tests, six bundled multiplexer tests and ordinary OpenSSH test pass with the locked dependencies. unicode-segmentation reuses the workspace existing locked version, with no dependency upgrade.",
     "limits": "Glyph appearance and ambiguous-width rendering still depend on the guest terminal and font. Stable history snapshots remain pending."
+  },
+  "host_terminal_hangup_validation": {
+    "test": "Extended the real native participant PTY fixture, already run by non-Windows native CI. It closes an actual controlling PTY without detach, waits for its attachment to exit, then releases a waiting background shell task. The task must produce its output after the hangup, a fresh attachment must retain a shell variable, and explicit Ctrl+D must change the final workspace state to ended.",
+    "local_result": "Passes on Linux with the bundled runtime. Private fixture workspace and marker only; no registered agent or unrelated workload changed.",
+    "limits": "This tests PTY/SIGHUP persistence, not an administrator killing all user processes through logind, container termination or machine reboot. Those policies require separate deployment checks."
+  },
+  "macos_platform_checkpoint": {
+    "source": "9b1e5aee313e8bc85a6836a5bb99f2c98f11dad4",
+    "run": 41231400968,
+    "result": "Both Darwin ARM64 and x86_64 platform checks pass, including actual bundled runtime, ordinary OpenSSH, local/sharing lifecycle and native participant PTY controls. Later scheduling/Unicode/hangup test changes still need final release validation."
   }
 }

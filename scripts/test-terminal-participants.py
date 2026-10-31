@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import pty
 import select
+import shlex
 import signal
 import socket
 import struct
@@ -181,6 +182,62 @@ def exercise(executable, environment, job, stalled=False, sidebar=False, columns
         os.close(report_read)
 
 
+def exercise_hangup(executable, environment, job):
+    """A lost controlling terminal must not kill tasks in the private server."""
+    marker = Path(environment["XDG_DATA_HOME"]) / "hangup-released"
+    def attach():
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+        def own_terminal():
+            os.setsid()
+            fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+        child = subprocess.Popen([executable, "terminal", "attach", job["id"]],
+                                 stdin=slave, stdout=slave, stderr=slave,
+                                 env=environment, preexec_fn=own_terminal)
+        os.close(slave)
+        return master, child
+    def call(*arguments):
+        return subprocess.run([executable, "terminal", *arguments], env=environment,
+                              capture_output=True, check=True, timeout=3).stdout
+    master, child = attach()
+    try:
+        wait_text(master, child, b"$")
+        command = ("persistvalue=porthublifetime; printf 'LIFETIME%s\\n' 'READY'; "
+                   f"(while [ ! -f {shlex.quote(str(marker))} ]; do sleep .05; done; "
+                   "printf 'TASK%s\\n' 'SURVIVED') &\n")
+        os.write(master, command.encode())
+        wait_text(master, child, b"LIFETIMEREADY")
+        os.close(master)
+        master = None
+        child.wait(timeout=3)
+        # Release the task only after the host terminal is gone, so scheduler
+        # timing cannot let it finish before the disconnect under test.
+        marker.touch()
+        deadline = time.monotonic() + 4
+        while b"TASKSURVIVED" not in call("tmux", job["id"], "--", "capture-pane", "-p", "-t", "%0"):
+            assert time.monotonic() < deadline, "background task must finish after the host terminal hangs up"
+            time.sleep(.05)
+        master, child = attach()
+        wait_text(master, child, b"$")
+        os.write(master, b"printf 'PERSIST%s\\n' \"$persistvalue\"\n")
+        wait_text(master, child, b"PERSISTporthublifetime")
+        os.write(master, b"\x04")
+        child.wait(timeout=3)
+        assert child.returncode == 0, "explicit Ctrl+D must close the final shell cleanly"
+        rows = json.loads(call("list", "--json"))
+        assert next(row for row in rows if row["id"] == job["id"])["state"] == "ended", "Ctrl+D must end the workspace"
+    finally:
+        if child.poll() is None:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.wait(timeout=3)
+        if master is not None:
+            os.close(master)
+        marker.unlink(missing_ok=True)
+
+
 def main():
     executable = str(Path(sys.argv[1]).resolve())
     with tempfile.TemporaryDirectory(prefix="phparticipants-", dir="/tmp") as temporary:
@@ -197,9 +254,10 @@ def main():
             exercise(executable, environment, job, sidebar=True, columns=36)
             listed = subprocess.run([executable, "terminal", "list", "--json"], env=environment, capture_output=True, check=True)
             assert any(row["id"] == identity and row["state"] == "running" for row in json.loads(listed.stdout)), "closing the owner view must preserve its workspace"
+            exercise_hangup(executable, environment, job)
         finally:
             subprocess.run([executable, "terminal", "stop", identity], env=environment, capture_output=True, check=True)
-    print("PASS owner participants PTY: selection, cancellation, targeted removal, resize, terminal restoration, responsive stalled-socket quit, owner-targeted right popup and workspace persistence")
+    print("PASS owner participants PTY: selection, cancellation, targeted removal, resize, terminal restoration, responsive stalled-socket quit, owner-targeted right popup, abrupt PTY hangup, background-task/shell-state persistence and explicit Ctrl+D teardown")
 
 
 if __name__ == "__main__":
