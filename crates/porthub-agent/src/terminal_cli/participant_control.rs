@@ -13,12 +13,17 @@ use tokio::sync::{mpsc, oneshot};
 enum Request {
     List,
     RevokeInvitations,
+    RotateInvitations { link_expires: u32 },
     Kick { client: u64 },
 }
 #[derive(Default, Serialize, Deserialize)]
 pub(super) struct Snapshot {
     #[serde(default)]
     pub invitations_revoked: bool,
+    #[serde(default)]
+    pub invitation_revision: u64,
+    #[serde(default)]
+    pub rotation_pending: bool,
     pub connected: bool,
     pub members: Vec<Participant>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -27,6 +32,7 @@ pub(super) struct Snapshot {
 pub(super) enum Action {
     Kick(u64),
     RevokeInvitations,
+    RotateInvitations(u32),
 }
 pub(super) type Removal = (Action, oneshot::Sender<std::result::Result<(), String>>);
 pub(super) struct Server {
@@ -87,6 +93,20 @@ impl Server {
                     ensure!(bytes.last() == Some(&b'\n'), "owner request too large");
                     match serde_json::from_slice::<Request>(&bytes)? {
                         Request::List => {}
+                        Request::RotateInvitations { link_expires } => {
+                            ensure!(
+                                link_expires <= 604800,
+                                "invitation lifetime exceeds seven days"
+                            );
+                            ensure!(
+                                snapshot.lock().expect("owner state").connected,
+                                "gateway reconnecting"
+                            );
+                            let (reply, result) = oneshot::channel();
+                            send.try_send((Action::RotateInvitations(link_expires), reply))
+                                .map_err(|_| anyhow::anyhow!("owner control busy"))?;
+                            result.await?.map_err(anyhow::Error::msg)?;
+                        }
                         Request::RevokeInvitations => {
                             let (connected, revoked) = {
                                 let state = snapshot.lock().expect("owner state");
@@ -219,5 +239,25 @@ pub(super) async fn revoke_invitations(job: &Job, json: bool) -> Result<()> {
     } else {
         println!("New invitation joins blocked. Attached guests and their recovery access remain available.");
     }
+    Ok(())
+}
+
+/// Confirm durable gateway acknowledgement, never just a successful socket write.
+pub(super) async fn rotate_invitations(job: &Job, link_expires: u32) -> Result<()> {
+    let before = fetch(job, None).await?;
+    let target = before
+        .invitation_revision
+        .checked_add(1)
+        .context("invitation revision exhausted")?;
+    let first = fetch_request(job, Request::RotateInvitations { link_expires }).await?;
+    let mut confirmed = first.invitation_revision >= target && !first.rotation_pending;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+    while !confirmed && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if let Ok(snapshot) = fetch(job, None).await {
+            confirmed = snapshot.invitation_revision >= target && !snapshot.rotation_pending;
+        }
+    }
+    ensure!(confirmed, "invitation rotation is saved but not confirmed; retry --rotate after connectivity returns (the pending links will be reused)");
     Ok(())
 }

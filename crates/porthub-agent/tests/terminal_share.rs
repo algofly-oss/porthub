@@ -1,6 +1,6 @@
 #![cfg(unix)]
 //! Real owner supervisor + bundled tmux + PTYs, using an isolated local broker.
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use porthub_terminal::protocol::*;
 use std::{
     collections::BTreeMap, os::unix::fs::PermissionsExt, path::PathBuf, process::Command,
@@ -278,6 +278,148 @@ async fn sharing_supervisor_reconnects_to_existing_shell_and_explicit_stop_annou
         },
     )
     .await?;
+    // Save the replacement privately before sending it, then kill the worker
+    // before gateway acknowledgement to exercise actual process-loss recovery.
+    let rotation = tokio::process::Command::new(&executable)
+        .args([
+            "terminal",
+            "invite",
+            "sharedtest",
+            "--rotate",
+            "--link-expires",
+            "3600",
+            "--json",
+        ])
+        .env("XDG_DATA_HOME", &data)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    async fn rotation_request(
+        stream: &mut BufReader<tokio::net::UnixStream>,
+    ) -> Result<InvitationUpdate> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let mut line = String::new();
+                ensure!(
+                    stream.read_line(&mut line).await? > 0,
+                    "missing rotation request"
+                );
+                if let HostOutput::RotateInvitations { update } = serde_json::from_str(&line)? {
+                    return Ok(update);
+                }
+            }
+        })
+        .await?
+    }
+    let pending = rotation_request(&mut resumed)
+        .await
+        .context("initial rotation request")?;
+    ensure!(pending.revision == 1 && pending.write_token != hello.write_token);
+    let persisted: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    ensure!(persisted["pending_invitations"]["write_token"] == pending.write_token);
+    ensure!(
+        persisted["hello"]["write_token"] == hello.write_token,
+        "host identity stays immutable"
+    );
+    let unconfirmed = Command::new(&executable)
+        .args(["terminal", "invite", "sharedtest", "--json"])
+        .env("XDG_DATA_HOME", &data)
+        .output()?;
+    ensure!(
+        !unconfirmed.status.success(),
+        "unconfirmed links must not be advertised"
+    );
+    worker.kill().await?;
+    worker.wait().await?;
+    drop(resumed);
+    worker = tokio::process::Command::new(&executable)
+        .args(["terminal", "__serve", &id])
+        .env("XDG_DATA_HOME", &data)
+        .env("XDG_CONFIG_HOME", &config)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .kill_on_drop(true)
+        .spawn()?;
+    let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .context("broker reconnect")??;
+    let mut resumed = BufReader::new(stream);
+    let mut handshake = String::new();
+    resumed.read_line(&mut handshake).await?;
+    let handshake: serde_json::Value = serde_json::from_str(&handshake)?;
+    ensure!(handshake["hello"]["write_token"] == hello.write_token);
+    send(
+        &mut resumed,
+        HostEvent::Ready {
+            ssh_host: "localhost".into(),
+            ssh_port: 8347,
+            public_base: "https://porthub.test".into(),
+            invitations_revoked: false,
+        },
+    )
+    .await?;
+    let retried = rotation_request(&mut resumed)
+        .await
+        .context("rotation replay after worker restart")?;
+    ensure!(
+        retried.revision == pending.revision
+            && retried.write_token == pending.write_token
+            && retried.read_token == pending.read_token
+    );
+    send(
+        &mut resumed,
+        HostEvent::InvitationsRotated {
+            revision: retried.revision,
+            expires_at: retried.expires_at,
+            invitations_revoked: false,
+        },
+    )
+    .await?;
+    let result =
+        tokio::time::timeout(Duration::from_secs(5), rotation.wait_with_output()).await??;
+    ensure!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let invitations: serde_json::Value = serde_json::from_slice(&result.stdout)?;
+    ensure!(invitations["interactive_url"]
+        .as_str()
+        .unwrap()
+        .ends_with(&pending.write_token));
+    ensure!(invitations["read_only_ssh"]
+        .as_str()
+        .unwrap()
+        .contains(&pending.read_token));
+    let persisted: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    ensure!(persisted["pending_invitations"].is_null());
+    ensure!(persisted["invitations"]["revision"] == 1);
+    ensure!(std::fs::metadata(&path)?.permissions().mode() & 0o077 == 0);
+    send(
+        &mut resumed,
+        HostEvent::Attach {
+            client: 1,
+            read_only: false,
+            cols: 80,
+            rows: 24,
+            term: "xterm-256color".into(),
+        },
+    )
+    .await?;
+    until(&mut resumed, &[1], "PortHub").await?;
+    send(
+        &mut resumed,
+        HostEvent::Presence {
+            members: vec![Participant {
+                id: 1,
+                read_only: false,
+                joined_at: now(),
+                last_active_at: now(),
+            }],
+        },
+    )
+    .await?;
     let revocation = tokio::process::Command::new(&executable)
         .args(["terminal", "invite", "sharedtest", "--revoke", "--json"])
         .env("XDG_DATA_HOME", &data)
@@ -334,6 +476,48 @@ async fn sharing_supervisor_reconnects_to_existing_shell_and_explicit_stop_annou
     )
     .await?;
     until(&mut resumed, &[1], "INVITESBLOCKED:preserved").await?;
+    let renewal = tokio::process::Command::new(&executable)
+        .args([
+            "terminal",
+            "invite",
+            "sharedtest",
+            "--renew",
+            "--link-expires",
+            "60",
+            "--json",
+        ])
+        .env("XDG_DATA_HOME", &data)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let renewed = rotation_request(&mut resumed).await?;
+    ensure!(
+        renewed.revision == 2
+            && renewed.write_token != pending.write_token
+            && renewed.expires_at > now()
+    );
+    send(
+        &mut resumed,
+        HostEvent::InvitationsRotated {
+            revision: renewed.revision,
+            expires_at: renewed.expires_at,
+            invitations_revoked: false,
+        },
+    )
+    .await?;
+    let result = tokio::time::timeout(Duration::from_secs(5), renewal.wait_with_output()).await??;
+    ensure!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&result.stdout)?;
+    ensure!(result["read_only_url"]
+        .as_str()
+        .unwrap()
+        .ends_with(&renewed.read_token));
+
     let stopped = Command::new(&executable)
         .args(["terminal", "stop", "sharedtest"])
         .env("XDG_DATA_HOME", &data)

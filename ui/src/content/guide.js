@@ -1578,7 +1578,7 @@ export const guideArticles = [
         {
           "type": "code",
           "label": "Terminal",
-          "text": "porthub terminal share datawork --detach\nporthub terminal invite datawork\nporthub terminal invite datawork --revoke --json"
+          "text": "porthub terminal share datawork --detach\nporthub terminal invite datawork\nporthub terminal invite datawork --rotate --link-expires 3600\nporthub terminal invite datawork --revoke --json"
         },
         {
           "type": "paragraph",
@@ -1612,6 +1612,10 @@ export const guideArticles = [
       "id": "controls",
       "title": "Participant controls and permissions",
       "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Use terminal invite NAME --rotate to replace both invitation links without disconnecting existing guests. --renew is an alias. Add --link-expires SECONDS to set the new links' lifetime (up to seven days); zero keeps them valid until the workspace ends. The CLI saves pending links privately and prints them only after gateway confirmation. If confirmation is lost, retry --rotate: the saved pending links are reused. If their short lifetime elapsed while offline, rotate once more after confirmation. Explicit rotation can issue new links after revocation; existing guests keep their roles and recovery access."
+        },
         {
           "type": "paragraph",
           "text": "The browser shows attached guests and their roles. Logged-in users with current owner/admin permission for the machine workspace can remove guests or block new invitation joins. Anonymous guests, ordinary members and unrelated accounts do not get those browser management controls. The API checks permission again for every action."

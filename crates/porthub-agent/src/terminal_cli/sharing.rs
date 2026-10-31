@@ -48,6 +48,10 @@ struct Ready {
 #[derive(Serialize, Deserialize)]
 struct Sharing {
     #[serde(default)]
+    invitations: Option<InvitationUpdate>,
+    #[serde(default)]
+    pending_invitations: Option<InvitationUpdate>,
+    #[serde(default)]
     invitations_revoked: bool,
     hello: HostHello,
     registration: String,
@@ -65,6 +69,21 @@ fn load(root: &Path, id: &str) -> Result<Sharing> {
         serde_json::from_slice(&crate::profile::read_private(&path(root, id)?)?)?;
     ensure!(sharing.hello.id == id, "terminal sharing identity mismatch");
     sharing.hello.validate(now())?;
+    if let Some(update) = &sharing.invitations {
+        update.validate(now())?;
+    }
+    if let Some(pending) = &sharing.pending_invitations {
+        pending.validate(now())?;
+        ensure!(
+            pending.revision
+                == sharing
+                    .invitations
+                    .as_ref()
+                    .map_or(0, |u| u.revision)
+                    .saturating_add(1),
+            "invalid pending invitation revision"
+        );
+    }
     Ok(sharing)
 }
 fn save(root: &Path, sharing: &Sharing, replace: bool) -> Result<()> {
@@ -197,6 +216,8 @@ pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
         let mut options = options;
         options.name = job.name.clone();
         let sharing = Sharing {
+            invitations: None,
+            pending_invitations: None,
             invitations_revoked: false,
             hello: HostHello {
                 id: job.id.clone(),
@@ -235,10 +256,27 @@ pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
 pub(super) fn invite(root: &Path, job: &Job, json: bool) -> Result<()> {
     let sharing = load(root, &job.id)?;
     ensure!(sharing.state != "ended", "sharing session has ended");
+    ensure!(sharing.pending_invitations.is_none(), "invitation rotation is pending gateway confirmation; retry terminal invite --rotate when connected");
     ensure!(
         !sharing.invitations_revoked,
         "invitation URLs were revoked; existing participants may continue"
     );
+    let write_token = sharing
+        .invitations
+        .as_ref()
+        .map_or(sharing.hello.write_token.as_str(), |update| {
+            update.write_token.as_str()
+        });
+    let read_token = sharing
+        .invitations
+        .as_ref()
+        .map_or(sharing.hello.read_token.as_str(), |update| {
+            update.read_token.as_str()
+        });
+    let expires_at = sharing
+        .invitations
+        .as_ref()
+        .map_or(sharing.hello.options.expires_at, |update| update.expires_at);
     let Some(ready) = sharing.ready else {
         anyhow::bail!("workspace {} is running locally, but sharing is still reconnecting; use terminal invite {} when the gateway is available",job.name,job.name);
     };
@@ -253,11 +291,11 @@ pub(super) fn invite(root: &Path, job: &Job, json: bool) -> Result<()> {
     let ssh_enabled = sharing.hello.options.access != Access::Web;
     let interactive = !sharing.hello.options.read_only;
     let data = serde_json::json!({"name":job.name,"id":job.id,"state":sharing.state,
-        "interactive_url":(web && interactive).then(||link(&sharing.hello.write_token)),
-        "read_only_url":web.then(||link(&sharing.hello.read_token)),
-        "interactive_ssh":(ssh_enabled && interactive).then(||ssh(&sharing.hello.write_token)),
-        "read_only_ssh":ssh_enabled.then(||ssh(&sharing.hello.read_token)),
-        "expires_at":sharing.hello.options.expires_at,"access":sharing.hello.options.access});
+        "interactive_url":(web && interactive).then(||link(write_token)),
+        "read_only_url":web.then(||link(read_token)),
+        "interactive_ssh":(ssh_enabled && interactive).then(||ssh(write_token)),
+        "read_only_ssh":ssh_enabled.then(||ssh(read_token)),
+        "expires_at":expires_at,"access":sharing.hello.options.access});
     if json {
         println!("{}", serde_json::to_string(&data)?);
     } else {
@@ -273,7 +311,7 @@ pub(super) fn invite(root: &Path, job: &Job, json: bool) -> Result<()> {
             }
         }
         println!("Reattach: porthub terminal attach {}", job.name);
-        if sharing.hello.options.expires_at != 0 && sharing.hello.options.expires_at <= now() {
+        if expires_at != 0 && expires_at <= now() {
             println!(
                 "Invitation expired: existing participants may continue; new joins are blocked."
             );
@@ -351,6 +389,36 @@ fn valid_ssh_host(host: &str) -> bool {
             })
 }
 
+fn prepare_rotation(root: &Path, sharing: &mut Sharing, seconds: u32) -> Result<InvitationUpdate> {
+    ensure!(seconds <= 604800, "invitation lifetime exceeds seven days");
+    if let Some(update) = &sharing.pending_invitations {
+        return Ok(update.clone());
+    }
+    let revision = sharing
+        .invitations
+        .as_ref()
+        .map_or(0, |u| u.revision)
+        .checked_add(1)
+        .context("invitation revision exhausted")?;
+    let update = InvitationUpdate {
+        revision,
+        write_token: random_token(32),
+        read_token: random_token(32),
+        expires_at: if seconds == 0 {
+            0
+        } else {
+            now() + i64::from(seconds)
+        },
+    };
+    update.validate(now())?;
+    sharing.pending_invitations = Some(update.clone());
+    if let Err(error) = save(root, sharing, true) {
+        sharing.pending_invitations = None;
+        return Err(error);
+    }
+    Ok(update)
+}
+
 pub(super) async fn serve(root: &Path, id: &str) -> Result<()> {
     let _guard = worker_lock(root, id)?;
     let job = select(root, id)?;
@@ -358,6 +426,12 @@ pub(super) async fn serve(root: &Path, id: &str) -> Result<()> {
     let mut owner = super::participant_control::Server::start(&job)?;
     let mut sharing = load(root, id)?;
     owner.state.lock().expect("owner state").invitations_revoked = sharing.invitations_revoked;
+    {
+        let mut state = owner.state.lock().expect("owner state");
+        state.invitation_revision = sharing.invitations.as_ref().map_or(0, |u| u.revision);
+        state.rotation_pending = sharing.pending_invitations.is_some();
+    }
+
     ensure!(sharing.state != "ended", "sharing session has ended");
     let layout = if sharing.user {
         crate::service::Layout::user()?
@@ -408,17 +482,45 @@ pub(super) async fn serve(root: &Path, id: &str) -> Result<()> {
                             if let HostEvent::Presence { members } = &event {
                                 let mut state=owner.state.lock().expect("owner state");state.connected=true;state.members=members.clone();
                             }
+                            if let HostEvent::InvitationsRotated {revision,expires_at,invitations_revoked}=&event {
+                                if sharing.pending_invitations.as_ref().is_some_and(|u| u.revision==*revision && u.expires_at==*expires_at) {
+                                    sharing.invitations=sharing.pending_invitations.take();
+                                    sharing.invitations_revoked=*invitations_revoked;
+                                    save(root,&sharing,true)?;
+                                    let mut state=owner.state.lock().expect("owner state");
+                                    state.invitation_revision=*revision;state.rotation_pending=false;state.invitations_revoked=*invitations_revoked;
+                                }
+                            }
                             if let HostEvent::InvitationsRevoked=&event {sharing.invitations_revoked=true;save(root,&sharing,true)?;owner.state.lock().expect("owner state").invitations_revoked=true;}
                             if let HostEvent::Ready{ssh_host,ssh_port,public_base,invitations_revoked}=&event {
                                 sharing.invitations_revoked|=*invitations_revoked;
                                 sharing.ready=Some(Ready{ssh_host:ssh_host.clone(),ssh_port:*ssh_port,public_base:public_base.clone()});
                                 sharing.state="connected".into();save(root,&sharing,true)?;owner.state.lock().expect("owner state").invitations_revoked=sharing.invitations_revoked;delay=1;
+                                if let Some(update)=sharing.pending_invitations.clone() {
+                                    let mut frame=serde_json::to_vec(&HostOutput::RotateInvitations {update})?;frame.push(b'\n');
+                                    if !matches!(tokio::time::timeout(Duration::from_secs(2),local.get_mut().write_all(&frame)).await,Ok(Ok(()))) {break;}
+                                }
+
                             }
                             if !attachments.apply(event)?{break;}
                         }
                         request=owner.requests.recv()=> {
                             let Some((action, reply))=request else {break;};
-                            let output=match action {super::participant_control::Action::Kick(client)=>HostOutput::Kick{client},super::participant_control::Action::RevokeInvitations=>HostOutput::RevokeInvitations};
+                            let output=match action {
+                                super::participant_control::Action::Kick(client)=>HostOutput::Kick{client},
+                                super::participant_control::Action::RevokeInvitations=>{
+                                    if sharing.pending_invitations.is_some() {let _=reply.send(Err("invitation rotation still pending".into()));continue;}
+                                    HostOutput::RevokeInvitations
+                                },
+                                super::participant_control::Action::RotateInvitations(seconds)=>{
+                                    let update=match prepare_rotation(root,&mut sharing,seconds) {
+                                        Ok(update)=>update,
+                                        Err(error)=>{let _=reply.send(Err(error.to_string()));continue;}
+                                    };
+                                    owner.state.lock().expect("owner state").rotation_pending=true;
+                                    HostOutput::RotateInvitations {update}
+                                }
+                            };
                             let bytes=serde_json::to_vec(&output)?;
                             let mut frame=bytes;frame.push(b'\n');
                             let result=tokio::time::timeout(Duration::from_secs(2),local.get_mut().write_all(&frame)).await;
@@ -461,5 +563,40 @@ pub(super) async fn serve(root: &Path, id: &str) -> Result<()> {
         }
         tokio::time::sleep(Duration::from_secs(delay)).await;
         delay = (delay * 2).min(15);
+    }
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    use super::*;
+    #[test]
+    fn failed_save_cannot_be_retried_as_unsaved_rotation_and_saved_retry_reuses_links() -> Result<()>
+    {
+        let temp = tempfile::tempdir()?;
+        fs::set_permissions(
+            temp.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )?;
+        let mut sharing: Sharing = serde_json::from_value(serde_json::json!({
+            "hello":{"id":random_token(16),"secret":random_token(32),"write_token":random_token(32),"read_token":random_token(32),
+                "options":{"name":"quietotter","expires_at":0,"idle_timeout":0,"reconnect_timeout":60,"history_limit":100000,"mouse":true,"read_only":false,"size_policy":"smallest"}},
+            "registration":random_token(32),"user":true,"ready":null,"state":"connected"
+        }))?;
+        let invalid = temp.path().join("file");
+        fs::write(&invalid, b"untouched")?;
+        assert!(prepare_rotation(&invalid, &mut sharing, 60).is_err());
+        assert!(
+            sharing.pending_invitations.is_none(),
+            "failed save cannot create a sendable in-memory update"
+        );
+        assert_eq!(fs::read(invalid)?, b"untouched");
+        let saved = prepare_rotation(temp.path(), &mut sharing, 60)?;
+        let mut restored = load(temp.path(), &sharing.hello.id)?;
+        let retry = prepare_rotation(temp.path(), &mut restored, 3600)?;
+        assert_eq!(saved.write_token, retry.write_token);
+        assert_eq!(saved.read_token, retry.read_token);
+        assert_eq!(saved.expires_at, retry.expires_at);
+        assert_eq!(retry.revision, 1);
+        Ok(())
     }
 }

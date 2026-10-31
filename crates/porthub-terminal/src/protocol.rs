@@ -204,7 +204,7 @@ impl InvitationUpdate {
             "invalid replacement invitation capabilities"
         );
         ensure!(
-            self.expires_at == 0 || self.expires_at > at && self.expires_at <= at + 604800,
+            self.expires_at >= 0 && self.expires_at <= at + 604800,
             "replacement invitation expiry must be within seven days"
         );
         Ok(())

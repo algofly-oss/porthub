@@ -30,14 +30,20 @@ pub enum Command {
     Share(sharing::Share),
     /// Join an invitation using your ordinary SSH client; no account required.
     Join { url: String },
-    /// Display invitations, or revoke new invitation joins with --revoke.
+    /// Show, replace or revoke invitation links.
     Invite {
         name: String,
         #[arg(long)]
         json: bool,
         /// Block new invitation joins without interrupting attached guests.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "rotate")]
         revoke: bool,
+        /// Replace invitation links without disconnecting existing participants.
+        #[arg(long, visible_alias = "renew")]
+        rotate: bool,
+        /// New invitation lifetime in seconds; zero means until workspace end.
+        #[arg(long, requires = "rotate", value_parser = clap::value_parser!(u32).range(0..=604800))]
+        link_expires: Option<u32>,
     },
     /// List guests attached to a shared workspace.
     Participants {
@@ -415,9 +421,18 @@ pub async fn run(command: Command) -> Result<()> {
         Command::Named(arguments) => open_named(&root, arguments)?,
         Command::Share(args) => sharing::start(&root, args).await?,
         Command::Join { url } => sharing::join(&url).await?,
-        Command::Invite { name, json, revoke } => {
+        Command::Invite {
+            name,
+            json,
+            revoke,
+            rotate,
+            link_expires,
+        } => {
             let job = select(&root, &name)?;
-            if revoke {
+            if rotate {
+                participant_control::rotate_invitations(&job, link_expires.unwrap_or(0)).await?;
+                sharing::invite(&root, &job, json)?;
+            } else if revoke {
                 participant_control::revoke_invitations(&job, json).await?;
             } else {
                 sharing::invite(&root, &job, json)?;

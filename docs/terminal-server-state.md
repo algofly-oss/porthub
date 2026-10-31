@@ -55,7 +55,20 @@ reconnecting. Attached guests and their recovery grants retain their roles.
 Replacement expiry does not extend a configured workspace lifetime. Raw
 replacement capabilities are omitted from Debug output and database records.
 
-The user-facing rotation command is still pending. It must persist a private
-pending capability pair before sending an update, recover across a lost
-acknowledgement and expose only confirmed invitation URLs. Do not advertise this
-protocol implementation as an available CLI/UI rotation command yet.
+Use `porthub terminal invite NAME --rotate --link-expires 3600` to replace the
+links, or `--renew` as an alias. Omitting the lifetime or setting it to zero keeps
+new links valid until workspace end. The sharing supervisor saves the pending
+capability pair privately with file and directory synchronization before sending
+it. After losing acknowledgement or restarting, it retries the same pair and
+revision. The CLI prints links only after gateway confirmation; plain `invite`
+refuses to display links while rotation is pending. Retrying `--rotate` resumes
+that pending operation rather than generating another pair. If a short lifetime
+elapsed while offline, confirmation may return already-expired links; rotate
+again to issue a new lifetime. This does not extend the workspace lifetime.
+
+A real bundled-supervisor test kills the sharing worker before acknowledgement,
+restarts it, verifies the exact saved pair is resent and confirms the same shell
+state survives. It also tests explicit renewal after invitation revocation.
+A filesystem-failure test verifies that an unsaved update cannot remain in memory
+and be sent on a later retry. Browser invitation rotation controls are separate
+from this native command and are not implemented yet.
