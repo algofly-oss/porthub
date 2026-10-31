@@ -175,6 +175,7 @@ pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
     };
     let registration =
         crate::service::readable::select(&layout, args.registration.as_deref(), Some(false))?;
+    let sidebar = args.local.sidebar;
     let detach = args.local.detach;
     let json = args.local.json;
     // Validate before starting any shells or publishing session capabilities.
@@ -261,7 +262,7 @@ pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
     }
     invite(root, &job, json)?;
     if !detach {
-        attach(&job)?;
+        attach(&job, sidebar)?;
     }
     Ok(())
 }

@@ -40,7 +40,7 @@ impl OwnerView {
             .create_new(true)
             .mode(0o600)
             .open(self.local.socket().with_file_name("tmux.conf"))?;
-        config.write_all(b"set -s exit-unattached on\nset -g exit-empty on\nset -g status off\nset -g prefix None\nunbind -a\nunbind -a -T root\nset -g mouse on\nset -g default-terminal tmux-256color\nset -s set-clipboard on\nset -g allow-passthrough on\nset -s escape-time 10\nbind -n F8 if-shell -F '#{==:#{pane_id},%0}' 'select-pane -t %1' 'select-pane -t %0'\nbind -n MouseDown1Pane select-pane -t = \\; send-keys -M\nbind -n MouseDrag1Pane send-keys -M\nbind -n MouseDragEnd1Pane send-keys -M\nbind -n WheelUpPane send-keys -M\nbind -n WheelDownPane send-keys -M\nset-hook -g pane-exited 'if-shell -F \"#{==:#{hook_pane},%0}\" \"kill-server\"'\n")?;
+        config.write_all(b"set -s exit-unattached on\nset -g exit-empty on\nset -g status off\nset -g prefix None\nunbind -a\nunbind -a -T root\nset -g mouse on\nset -g default-terminal tmux-256color\nset -s set-clipboard on\nset -g allow-passthrough on\nset -s escape-time 10\nbind -n F8 if-shell -F '#{==:#{pane_id},%0}' 'select-pane -t %1' 'select-pane -t %0'\nbind -n MouseDown1Pane select-pane -t = \\; send-keys -M\nbind -n MouseDrag1Pane send-keys -M\nbind -n MouseDragEnd1Pane send-keys -M\nbind -n WheelUpPane send-keys -M\nbind -n WheelDownPane send-keys -M\nset-hook -g pane-exited 'if-shell -F \"#{==:#{hook_pane},%0}\" \"kill-session -t =workspace\"'\n")?;
         config.sync_all()?;
         let inner = shared.attach(false);
         let mut inner_text = String::from("unset TMUX TMUX_PANE; exec ");

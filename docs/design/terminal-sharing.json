@@ -350,16 +350,16 @@
     }
   },
   "native_sidebar_development": {
-    "status": "Private per-owner presentation engine implemented and tested. CLI still uses the existing participant popup; sidebar flags and actual participant-panel integration remain incomplete. Not deployed.",
+    "status": "CLI attachment integration implemented and locally tested. --sidebar auto/on/off works for named open, new, share and attach. Not yet packaged across platforms or deployed.",
     "architecture": "Separate private presentation server from the same verified bundled runtime, with an inner attachment on the left and owner-only controls on the right. No panel is added to the shared workspace. Unique user-owned private directory and separate socket; an existing active view or the shared socket is refused.",
-    "lifecycle": "exit-unattached on ends the presentation when its owner attachment closes; pane-exited hook ends only the presentation when the inner attachment exits. Shared shell survives owner disconnect; explicit final shell exit ends both. Guard cleanup targets only the private presentation.",
+    "lifecycle": "exit-unattached on ends presentation after owner terminal loss; pane-exited closes only its private session when inner attachment exits, permitting normal detach and final-shell exit to return success. Guard cleanup targets only that private view. CLI temporary view directory is created with0700 permissions.",
     "controls": "Outer view has no prefix or status bar; Ctrl+A and F7 reach the shared workspace. F8 switches focus. Mouse wheel is forwarded into shared scrollback. OSC clipboard and passthrough settings are configured but end-to-end clipboard verification remains pending.",
-    "validation": "44 terminal tests pass:34 unit,9 bundled-runtime,1 stockOpenSSH test covering legacy and snapshot hosts. Additional focused sidebar mouse test passes. Actual PTY fixture verifies typing, private control input, no shared panel/transcript leakage, Ctrl+A splitting, F7 copy mode, mouse scrolling, disconnect persistence and final shell exit.",
+    "validation": "44 terminal tests pass:34 unit,9 bundled-runtime,1 stockOpenSSH test covering legacy and snapshot hosts.70 agent tests pass;2 unrelated tests remain ignored. Actual compiled CLI PTY fixture passes selection/cancel/confirmed targeted removal, resize120->100, F8/q focus, normal detach, terminal restoration, standalone stalled-socket quit, legacy narrow popup and sidebar hangup/background-task/shell-state persistence followed by clean Ctrl+D. Compiled CLI/helper smoke also passes; this is local debug packaging, not the full release matrix.",
     "reference": "https://man.openbsd.org/tmux",
     "next": [
-      "Integrate actual participant controls and sidebar auto/on/off flags into CLI attachment without breaking narrow terminal fallback",
-      "Verify removal confirmation, focus switching, resize/reflow, independent simultaneous owners, clipboard escape propagation and full CLI session lifecycle",
-      "Include the native UI in packaging, platform checks and the authorized scoped live release"
-    ]
+      "Verify narrow resize/reflow after opening a wide sidebar, independent simultaneous owners and clipboard escape propagation",
+      "Exercise real participant-control broker/API flow through the native sidebar, then include it in packaging, platform checks and the authorized scoped live release"
+    ],
+    "cli": "Auto chooses private sidebar for shared workspaces at100+ columns; on permits local or shared views at80+ columns; off and narrow auto attachments retain owner-leased popup. F8 changes focus; q/Escape/Ctrl+C in sidebar focuses shared shell. Separate watch mode still exits with q. Native panel uses existing private owner socket and confirmation/acknowledgement behavior."
   }
 }

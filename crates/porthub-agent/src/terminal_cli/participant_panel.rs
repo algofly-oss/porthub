@@ -20,6 +20,8 @@ fn render(
     message: &str,
     width: usize,
     height: usize,
+    shared: bool,
+    sidebar: bool,
 ) -> String {
     let mut lines = vec![
         format!("Participants · {}", job.name),
@@ -27,12 +29,12 @@ fn render(
             "{} · {} guest(s)",
             if snapshot.connected {
                 "Connected"
-            } else {
+            } else if !shared { "Local" } else {
                 "Reconnecting"
             },
             snapshot.members.len()
         ),
-        "↑/↓ select · k remove · q close view".into(),
+        if sidebar { "↑/↓ select · k remove · F8/q shell".into() } else { "↑/↓ select · k remove · q close view".into() },
         String::new(),
     ];
     let visible = height.saturating_sub(8).max(1);
@@ -77,7 +79,17 @@ fn render(
         .collect::<Vec<_>>()
         .join("\r\n")
 }
-pub(super) async fn run(job: Job) -> Result<()> {
+fn focus_shell(job: &Job) -> Result<()> {
+    let tmux=std::env::var("TMUX")?;
+    let socket=std::path::Path::new(tmux.split(',').next().unwrap_or(""));
+    super::private(socket.parent().ok_or_else(|| anyhow::anyhow!("owner view unavailable"))?)?;
+    ensure!(socket != job.workspace.join("tmux.sock"), "private owner view required");
+    let status=std::process::Command::new(&job.executable).arg("-S").arg(socket)
+        .args(["select-pane","-t","%0"]).env_remove("TMUX").status()?;
+    ensure!(status.success(), "owner view unavailable");
+    Ok(())
+}
+pub(super) async fn run(job: Job, sidebar: bool) -> Result<()> {
     ensure!(
         std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
         "--watch needs an interactive terminal; use --json for scripts"
@@ -93,10 +105,12 @@ pub(super) async fn run(job: Job) -> Result<()> {
     let mut pending: Option<AbortOnDropHandle<Result<Snapshot>>> = None;
     let mut removal: Option<(u64, Instant)> = None;
     loop {
+        let shared=super::root()?.join(format!("{}.share",job.id)).is_file();
         let selected_id = snapshot.members.get(selected).map(|member| member.id);
         tokio::select! {
             _=interval.tick()=>{
-                if pending.is_none(){let job=job.clone();pending=Some(AbortOnDropHandle::new(tokio::spawn(async move{fetch(&job,None).await})));}
+                if !shared && sidebar { message="Local workspace. Share it to invite guests.".into(); }
+                if (shared || !sidebar) && pending.is_none(){let job=job.clone();pending=Some(AbortOnDropHandle::new(tokio::spawn(async move{fetch(&job,None).await})));}
             }
             result=async{match &mut pending{Some(task)=>task.await,None=>std::future::pending().await}}=>{
                 pending=None;
@@ -116,9 +130,9 @@ pub(super) async fn run(job: Job) -> Result<()> {
             event=events.recv()=>{
                 match event {
                     Some(Ok(Event::Key(key))) if key.kind!=KeyEventKind::Release => match key.code {
-                        KeyCode::Char('q')=>break,
-                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL)=>break,
-                        KeyCode::Esc=>{if confirm.take().is_none(){break;}},
+                        KeyCode::Char('q')=>{if sidebar {focus_shell(&job)?;} else {break;}},
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL)=>{if sidebar {focus_shell(&job)?;} else {break;}},
+                        KeyCode::Esc=>{if confirm.take().is_none(){if sidebar {focus_shell(&job)?;} else {break;}}},
                         KeyCode::Up=>{selected=selected.saturating_sub(1);confirm=None;},
                         KeyCode::Down=>{selected=(selected+1).min(snapshot.members.len().saturating_sub(1));confirm=None;},
                         KeyCode::Char('k')|KeyCode::Delete if snapshot.connected && removal.is_none()=>{confirm=snapshot.members.get(selected).map(|member|member.id);},
@@ -145,7 +159,8 @@ pub(super) async fn run(job: Job) -> Result<()> {
                 confirm,
                 &message,
                 usize::from(width),
-                usize::from(height)
+                usize::from(height),
+                shared, sidebar
             ))
         )?;
         std::io::stdout().flush()?;

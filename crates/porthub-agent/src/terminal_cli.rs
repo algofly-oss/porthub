@@ -66,7 +66,7 @@ pub enum Command {
         client: u32,
     },
     #[command(name = "__participants-view", hide = true)]
-    ParticipantView { root: PathBuf, id: String },
+    ParticipantView { root: PathBuf, id: String, #[arg(long)] sidebar: bool },
     /// List this OS user's local and shared workspaces.
     #[command(alias = "ls")]
     List {
@@ -74,7 +74,7 @@ pub enum Command {
         json: bool,
     },
     /// Attach or reattach, including from inside another tmux session.
-    Attach { name: String },
+    Attach { name: String, #[arg(long, value_enum, default_value_t = Sidebar::Auto)] sidebar: Sidebar },
     /// Explicitly terminate a workspace and its running tasks.
     Stop { name: String },
     /// Rename a workspace without interrupting its tasks.
@@ -99,10 +99,14 @@ impl Default for Command {
             prefix: "C-a".into(),
             history_limit: 100_000,
             no_mouse: false,
+            sidebar: Sidebar::Auto,
             command: Vec::new(),
         })
     }
 }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum Sidebar { #[default] Auto, On, Off }
 
 #[derive(Args, Clone)]
 pub struct New {
@@ -127,6 +131,9 @@ pub struct New {
     history_limit: u32,
     #[arg(long)]
     no_mouse: bool,
+    /// Private participant sidebar; auto enables it for shared, wide terminals.
+    #[arg(long, value_enum, default_value_t = Sidebar::Auto)]
+    sidebar: Sidebar,
     /// Command and arguments; omit to start an interactive shell.
     #[arg(last = true)]
     command: Vec<OsString>,
@@ -276,7 +283,7 @@ fn name_valid(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn attach(job: &Job) -> Result<()> {
+fn attach(job: &Job, sidebar: Sidebar) -> Result<()> {
     let workspace = workspace(job)?;
     ensure!(workspace.is_alive(), "workspace has ended");
     // Recognize our own server instead of recursively attaching to ourselves.
@@ -286,7 +293,7 @@ fn attach(job: &Job) -> Result<()> {
         println!("Already attached to {}", job.name);
         return Ok(());
     }
-    participant_popup::attach(job, &workspace)
+    participant_popup::attach(job, &workspace, sidebar)
 }
 
 fn create(root: &Path, args: New) -> Result<Job> {
@@ -388,6 +395,7 @@ fn open_named(root: &Path, arguments: Vec<OsString>) -> Result<()> {
         "use the workspace name directly, without an additional --name"
     );
     flags.name = Some(name.clone());
+    let sidebar = flags.sidebar;
     let detach = flags.detach;
     let json = flags.json;
     let guard = lock(root)?;
@@ -424,7 +432,7 @@ fn open_named(root: &Path, arguments: Vec<OsString>) -> Result<()> {
         );
     }
     if !detach {
-        attach(&job)?;
+        attach(&job, sidebar)?;
     }
     Ok(())
 }
@@ -435,7 +443,7 @@ pub async fn run(command: Command) -> Result<()> {
         Command::ParticipantPopup { root, id, client } => {
             participant_popup::show(&root, &id, client)?
         }
-        Command::ParticipantView { root, id } => participant_popup::view(&root, &id).await?,
+        Command::ParticipantView { root, id, sidebar } => participant_popup::view(&root, &id, sidebar).await?,
         Command::Named(arguments) => open_named(&root, arguments)?,
         Command::Share(args) => sharing::start(&root, args).await?,
         Command::Join { url } => sharing::join(&url).await?,
@@ -459,7 +467,7 @@ pub async fn run(command: Command) -> Result<()> {
         Command::Participants { name, json, watch } => {
             let job = select(&root, &name)?;
             if watch {
-                participant_panel::run(job).await?;
+                participant_panel::run(job, false).await?;
             } else {
                 participant_control::request(&job, None, json).await?;
             }
@@ -469,6 +477,7 @@ pub async fn run(command: Command) -> Result<()> {
         }
         Command::Serve { id } => sharing::serve(&root, &id).await?,
         Command::New(args) => {
+            let sidebar = args.sidebar;
             let detach = args.detach;
             let json = args.json;
             let job = create(&root, args)?;
@@ -484,7 +493,7 @@ pub async fn run(command: Command) -> Result<()> {
                 );
             }
             if !detach {
-                attach(&job)?;
+                attach(&job, sidebar)?;
             }
         }
         Command::List { json } => {
@@ -505,7 +514,7 @@ pub async fn run(command: Command) -> Result<()> {
                 }
             }
         }
-        Command::Attach { name } => attach(&select(&root, &name)?)?,
+        Command::Attach { name, sidebar } => attach(&select(&root, &name)?, sidebar)?,
         Command::Stop { name } => {
             let job = select(&root, &name)?;
             workspace(&job)?.stop()?;
