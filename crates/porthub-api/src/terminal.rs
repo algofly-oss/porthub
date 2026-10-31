@@ -158,6 +158,7 @@ async fn host(
             let _permit = permit;
             host_socket(app, machine, token, socket).await
         });
+    response.headers_mut().insert("x-porthub-terminal-direct",axum::http::HeaderValue::from_static("1"));
     response.headers_mut().insert(
         "x-porthub-history-snapshots",
         axum::http::HeaderValue::from_static("1"),
@@ -347,6 +348,7 @@ async fn host_socket(app: Arc<App>, machine: String, token: String, mut socket: 
         return;
     };
     let ready = HostEvent::Ready {
+        direct_transport: hello.direct_transport,
         history_snapshots: hello.history_snapshots,
         invitations_revoked: host.session.invitations_revoked(),
         ssh_host: advertised_host(&app),
@@ -908,6 +910,7 @@ mod lifecycle_tests {
     use super::*;
     fn hello() -> HostHello {
         HostHello {
+            direct_transport: false,
             history_snapshots: false,
             id: random_token(16),
             secret: random_token(32),

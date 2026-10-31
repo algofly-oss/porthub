@@ -27,6 +27,7 @@ async fn browser_management_requires_current_machine_workspace_admin_and_no_gues
         .insert_one(doc! {"_id":machine,"user_id":owner,"enabled":true})
         .await?;
     let hello = HostHello {
+        direct_transport: false,
         history_snapshots: false,
         id: random_token(16),
         secret: random_token(32),

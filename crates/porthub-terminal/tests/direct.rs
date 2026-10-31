@@ -25,7 +25,8 @@ async fn browser_connects_to_bounded_terminal_data_channel() -> Result<()> {
         .spawn()?;
     let mut output = BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
-    tokio::time::timeout(Duration::from_secs(10), output.read_line(&mut line)).await??;
+    let count=tokio::time::timeout(Duration::from_secs(10), output.read_line(&mut line)).await??;
+    ensure!(count>0,"browser produced no SDP; check its stderr and Playwright/browser setup");
     let (mut peer, answer) = Peer::answer(Instant::now(), &line, &[local])?;
     let mut input = child.stdin.take().unwrap();
     input.write_all(answer.as_bytes()).await?;

@@ -114,6 +114,7 @@ async fn sharing_supervisor_reconnects_to_existing_shell_and_explicit_stop_annou
         send(
             &mut stream,
             HostEvent::Ready {
+                direct_transport: false,
                 history_snapshots: false,
                 invitations_revoked: false,
                 ssh_host: "example.test".into(),
@@ -370,6 +371,7 @@ async fn sharing_supervisor_reconnects_to_existing_shell_and_explicit_stop_annou
     send(
         &mut resumed,
         HostEvent::Ready {
+                direct_transport: false,
                 history_snapshots: false,
             ssh_host: "localhost".into(),
             ssh_port: 8347,

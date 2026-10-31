@@ -51,6 +51,9 @@ impl Attachments {
     /// A false result ends this transport, while keeping the shared workspace.
     pub fn apply(&mut self, event: HostEvent) -> Result<bool> {
         match event {
+            HostEvent::DirectOffer {client,request,..} => {
+                if self.clients.contains_key(&client) {self.send.try_send(HostOutput::DirectUnavailable {client,request})?;}
+            }
             HostEvent::Redraw { client } => {
                 if self.clients.contains_key(&client) {
                     self.pending_redraw.insert(client);

@@ -233,6 +233,7 @@ pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
             pending_invitations: None,
             invitations_revoked: false,
             hello: HostHello {
+                direct_transport: false,
                 history_snapshots: broker_has_history_snapshots(&registration.agent_version),
                 id: job.id.clone(),
                 secret: random_token(32),

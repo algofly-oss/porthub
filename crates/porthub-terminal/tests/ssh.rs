@@ -19,6 +19,7 @@ async fn ssh_participants(snapshots: bool) -> Result<()> {
     let config = porthub_terminal::ssh::config(key);
     let hub = Hub::default();
     let hello = HostHello {
+        direct_transport: false,
         history_snapshots: snapshots,
         id: random_token(16),
         secret: random_token(32),

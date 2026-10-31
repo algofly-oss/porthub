@@ -571,6 +571,7 @@ async fn frozen_history_routes_stable_pages_and_rejects_detached_guest_anchors()
     workspace.start(&start())?;
     let mut router = Attachments::new(workspace.clone(), 2)?;
     router.apply(HostEvent::Ready {
+        direct_transport: false,
         history_snapshots: true, invitations_revoked: false,
         ssh_host: String::new(), ssh_port: 0, public_base: String::new(),
     })?;

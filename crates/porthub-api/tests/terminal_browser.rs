@@ -190,6 +190,7 @@ async fn exercise(multiplex: bool) -> Result<()> {
         axum::serve(listener, router).await
     }));
     let hello = HostHello {
+        direct_transport: false,
         history_snapshots: true,
         id: random_token(16),
         secret: random_token(32),

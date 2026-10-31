@@ -19,9 +19,11 @@ struct Request {
     hello: HostHello,
 }
 
+struct GatewayFeatures { snapshots: bool, direct: bool }
+
 async fn open(
     control: &crate::control::Control,
-) -> Result<(WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>, bool)> {
+) -> Result<(WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>, GatewayFeatures)> {
     for base in control.authorities() {
         let Ok(mut url) = url::Url::parse(&format!("{base}/api/terminal/host")) else {
             continue;
@@ -61,7 +63,8 @@ async fn open(
             .await?;
             let snapshots = response.headers().get("x-porthub-history-snapshots")
                 .is_some_and(|value| value == "1");
-            Ok::<_, anyhow::Error>((socket, snapshots))
+            let direct=response.headers().get("x-porthub-terminal-direct").is_some_and(|value|value=="1");
+            Ok::<_, anyhow::Error>((socket, GatewayFeatures {snapshots,direct}))
         })
         .await;
         if let Ok(Ok(socket)) = result {
@@ -102,7 +105,7 @@ pub(crate) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         "invalid terminal broker operation"
     );
     request.hello.validate(porthub_terminal::protocol::now())?;
-    let (mut remote, snapshots) = tokio::select! {
+    let (mut remote, features) = tokio::select! {
         _ = cancel.cancelled() => return Ok(()),
         result = tokio::time::timeout(Duration::from_secs(40), open(control)) => match result {
             Ok(Ok(remote)) => remote,
@@ -114,7 +117,8 @@ pub(crate) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     };
     // Older gateways reject unknown fields. Advertise only capabilities that
     // both the local host and the authenticated gateway support.
-    request.hello.history_snapshots &= snapshots;
+    request.hello.history_snapshots &= features.snapshots;
+    request.hello.direct_transport &= features.direct;
     remote
         .send(Message::Text(serde_json::to_string(&request.hello)?.into()))
         .await?;
@@ -177,11 +181,11 @@ mod tests {
 
     #[tokio::test]
     async fn authenticated_broker_preserves_frames_and_keeps_machine_secret_private() -> Result<()> {
-        broker_gateway(false).await?;
-        broker_gateway(true).await
+        for snapshots in [false,true] {for direct in [false,true] {broker_gateway(snapshots,direct).await?;}}
+        Ok(())
     }
 
-    async fn broker_gateway(snapshots: bool) -> Result<()>
+    async fn broker_gateway(snapshots: bool, direct: bool) -> Result<()>
     {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let profile: crate::profile::Profile = serde_json::from_value(serde_json::json!({
@@ -207,6 +211,9 @@ mod tests {
                     if snapshots {
                         response.headers_mut().insert("x-porthub-history-snapshots", "1".parse().unwrap());
                     }
+                    if direct {
+                        response.headers_mut().insert("x-porthub-terminal-direct", "1".parse().unwrap());
+                    }
                     Ok(response)
                 },
             )
@@ -214,11 +221,14 @@ mod tests {
             let first = socket.next().await.unwrap()?.into_text()?;
             let hello: HostHello = serde_json::from_str(&first)?;
             assert_eq!(hello.history_snapshots, snapshots);
+            assert_eq!(hello.direct_transport,direct);
+            assert_eq!(first.contains("direct_transport"),direct);
             assert_eq!(first.contains("history_snapshots"), snapshots);
             assert!(!first.contains("broker-only-machine-secret"));
             socket
                 .send(Message::Text(
                     serde_json::to_string(&HostEvent::Ready {
+                        direct_transport: false,
                         history_snapshots: false,
                         invitations_revoked: false,
                         ssh_host: "example.test".into(),
@@ -245,7 +255,7 @@ mod tests {
             std::path::PathBuf::from("unused-test-profile"),
         ));
         let mut local = BufReader::new(local);
-        let request = serde_json::json!({"operation":"terminal_host","hello":{ "history_snapshots":true,
+        let request = serde_json::json!({"operation":"terminal_host","hello":{ "history_snapshots":true,"direct_transport":true,
             "id":"1".repeat(32),"secret":"2".repeat(64),"write_token":"3".repeat(64),"read_token":"4".repeat(64),
             "options":{"name":"quietfalcon","expires_at":0,"idle_timeout":0,"reconnect_timeout":60,
                 "history_limit":100000,"mouse":true,"read_only":false,"size_policy":"smallest"}
