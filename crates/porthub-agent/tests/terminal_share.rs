@@ -52,7 +52,7 @@ async fn sharing_supervisor_reconnects_to_existing_shell_and_explicit_stop_annou
         executable: executable.clone(),
         data: data.clone(),
     };
-    let registration = "a".repeat(64);
+    let registration = random_token(32);
     let hello: HostHello = serde_json::from_value(
         serde_json::json!({"id":id,"secret":"b".repeat(64),"write_token":"c".repeat(64),"read_token":"d".repeat(64),
         "options":{"name":"sharedtest","expires_at":0,"idle_timeout":0,"reconnect_timeout":60,"history_limit":100000,"mouse":true,"read_only":false,"size_policy":"smallest"}}),
@@ -65,10 +65,23 @@ async fn sharing_supervisor_reconnects_to_existing_shell_and_explicit_stop_annou
         )?,
     )?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    #[cfg(not(target_os = "macos"))]
     let status = config.join("porthub/status");
+    #[cfg(target_os = "macos")]
+    let status = directories::BaseDirs::new()
+        .context("native user configuration")?
+        .config_dir()
+        .join("porthub/status");
     std::fs::create_dir_all(&status)?;
-    let listener =
-        tokio::net::UnixListener::bind(status.join(format!("{}.sock", &registration[..24])))?;
+    let socket_path = status.join(format!("{}.sock", &registration[..24]));
+    struct SocketCleanup(PathBuf);
+    impl Drop for SocketCleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let _socket_cleanup = SocketCleanup(socket_path.clone());
+    let listener = tokio::net::UnixListener::bind(&socket_path)?;
     let mut worker = tokio::process::Command::new(&executable)
         .args(["terminal", "__serve", &id])
         .env("XDG_DATA_HOME", &data)

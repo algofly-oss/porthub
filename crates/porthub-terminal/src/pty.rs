@@ -3,14 +3,43 @@
 use crate::{multiplexer::Workspace, protocol::*};
 use anyhow::{ensure, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
-use std::io::{Read, Write};
+use std::{
+    collections::VecDeque,
+    io::{Read, Write},
+    sync::{Arc, Mutex},
+};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+const INPUT_CAPACITY: usize = 64 * 1024;
+const INPUT_BATCH: usize = 16 * 1024;
+#[derive(Default)]
+struct InputBuffer(Mutex<VecDeque<u8>>);
+impl InputBuffer {
+    fn enqueue(&self, bytes: &[u8]) -> Result<()> {
+        let mut pending = self.0.lock().expect("PTY input buffer");
+        ensure!(
+            pending.len() + bytes.len() <= INPUT_CAPACITY,
+            "terminal input is backpressured"
+        );
+        pending.extend(bytes);
+        Ok(())
+    }
+    fn next(&self) -> Vec<u8> {
+        let mut pending = self.0.lock().expect("PTY input buffer");
+        let length = pending.len().min(INPUT_BATCH);
+        pending.drain(..length).collect()
+    }
+    fn clear(&self) {
+        self.0.lock().expect("PTY input buffer").clear();
+    }
+}
 
 pub struct Client {
     master: Box<dyn MasterPty + Send>,
     child: Option<Box<dyn Child + Send + Sync>>,
-    input: mpsc::Sender<Vec<u8>>,
+    input: Arc<InputBuffer>,
+    input_wake: mpsc::Sender<()>,
     cancel: CancellationToken,
     read_only: bool,
 }
@@ -78,11 +107,22 @@ impl Client {
             }
             let _ = output.try_send(HostOutput::Closed { client });
         });
-        let (input, mut receive) = mpsc::channel::<Vec<u8>>(16);
+        // Bound bytes rather than keystroke messages. A fast typing/paste burst
+        // may contain hundreds of tiny frames before this writer is scheduled.
+        let input = Arc::new(InputBuffer::default());
+        let pending = input.clone();
+        let (input_wake, mut receive) = mpsc::channel::<()>(1);
         tokio::task::spawn_blocking(move || {
-            while let Some(bytes) = receive.blocking_recv() {
-                if writer.write_all(&bytes).is_err() {
-                    break;
+            while receive.blocking_recv().is_some() {
+                loop {
+                    let bytes = pending.next();
+                    if bytes.is_empty() {
+                        break;
+                    }
+                    if writer.write_all(&bytes).is_err() {
+                        pending.clear();
+                        return;
+                    }
                 }
             }
         });
@@ -90,6 +130,7 @@ impl Client {
             master: pty.master,
             child: Some(child),
             input,
+            input_wake,
             cancel,
             read_only,
         })
@@ -98,9 +139,11 @@ impl Client {
     pub fn input(&self, data: &str) -> Result<()> {
         ensure!(!self.read_only, "terminal participant is read-only");
         let bytes = decode_data(data)?;
-        self.input
-            .try_send(bytes)
-            .map_err(|_| anyhow::anyhow!("terminal input is backpressured or closed"))
+        self.input.enqueue(&bytes)?;
+        match self.input_wake.try_send(()) {
+            Ok(()) | Err(mpsc::error::TrySendError::Full(())) => Ok(()),
+            Err(mpsc::error::TrySendError::Closed(())) => anyhow::bail!("terminal input is closed"),
+        }
     }
 
     /// Redraw this attachment without injecting a key or changing shell state.
@@ -129,6 +172,7 @@ impl Client {
 impl Drop for Client {
     fn drop(&mut self) {
         self.cancel.cancel();
+        self.input.clear();
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             // Reap the detached tmux client, not the long-lived shared server.
@@ -137,5 +181,39 @@ impl Drop for Client {
                 let _ = child.wait();
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+    #[test]
+    fn tiny_keystrokes_are_coalesced_in_order_and_overflow_does_not_partially_enqueue() -> Result<()>
+    {
+        let input = InputBuffer::default();
+        for byte in 0..4000 {
+            input.enqueue(&[(byte % 251) as u8])?;
+        }
+        assert_eq!(
+            input.next(),
+            (0..4000).map(|byte| (byte % 251) as u8).collect::<Vec<_>>()
+        );
+        assert!(input.next().is_empty());
+        input.enqueue(&vec![b'a'; INPUT_CAPACITY])?;
+        assert!(input.enqueue(b"overflow").is_err());
+        let mut received = Vec::new();
+        loop {
+            let batch = input.next();
+            if batch.is_empty() {
+                break;
+            }
+            assert!(batch.len() <= INPUT_BATCH);
+            received.extend(batch);
+        }
+        assert_eq!(received, vec![b'a'; INPUT_CAPACITY]);
+        input.enqueue(b"after drain")?;
+        input.clear();
+        assert!(input.next().is_empty());
+        Ok(())
     }
 }

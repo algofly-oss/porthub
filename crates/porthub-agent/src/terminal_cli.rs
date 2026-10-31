@@ -158,7 +158,17 @@ fn private(path: &Path) -> Result<()> {
 
 fn root() -> Result<PathBuf> {
     let dirs = directories::BaseDirs::new().context("cannot locate user terminal storage")?;
-    let root = dirs.data_local_dir().join("porthub/terminal");
+    // Keep explicitly configured terminal data isolated on macOS too; BaseDirs
+    // follows native Library paths there and intentionally ignores XDG overrides.
+    let data = match std::env::var_os("XDG_DATA_HOME").filter(|path| !path.is_empty()) {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            ensure!(path.is_absolute(), "XDG_DATA_HOME must be absolute");
+            path
+        }
+        None => dirs.data_local_dir().to_path_buf(),
+    };
+    let root = data.join("porthub/terminal");
     if !root.exists() {
         fs::DirBuilder::new()
             .recursive(true)
