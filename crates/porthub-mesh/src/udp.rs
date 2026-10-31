@@ -153,11 +153,14 @@ impl Session {
         let mut bound = Vec::new();
         let mut gathering = JoinSet::new();
         for local in locals {
-            let socket = UdpSocket::bind(local)
-                .await
-                .map_err(|_| anyhow::anyhow!("private UDP bind failed"))?;
+            // Native snapshots race address removal and some hosts disable one
+            // IP family. Keep the other usable interfaces instead of losing
+            // every direct path because a single optional bind failed.
+            let Ok(socket) = UdpSocket::bind(local).await else { continue; };
             #[cfg(target_os = "macos")]
-            crate::underlay::bind_interface(&socket2::SockRef::from(&socket), local.ip())?;
+            if crate::underlay::bind_interface(&socket2::SockRef::from(&socket), local.ip()).is_err() {
+                continue;
+            }
             let address = socket
                 .local_addr()
                 .map_err(|_| anyhow::anyhow!("private UDP address unavailable"))?;
@@ -171,6 +174,7 @@ impl Session {
             }
             sockets.insert(address, socket as Socket);
         }
+        ensure!(!bound.is_empty(), "private UDP bind failed on every interface");
         let mut peer = Peer::new(Instant::now(), bound[0], local_id, remote_id, identity, pin)?;
         for address in &bound[1..] {
             peer.add_interface(*address)?;

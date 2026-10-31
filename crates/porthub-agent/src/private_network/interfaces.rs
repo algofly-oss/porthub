@@ -3,11 +3,7 @@
 use anyhow::Result;
 use futures_util::StreamExt;
 use nlink::netlink::{Connection, Route, RtnetlinkGroup};
-use std::{
-    collections::{HashMap, HashSet},
-    net::{IpAddr, SocketAddr},
-    time::Duration,
-};
+use std::{collections::HashMap, net::SocketAddr, time::Duration};
 use tokio::{
     sync::watch,
     time::{Instant, MissedTickBehavior},
@@ -17,9 +13,13 @@ use tokio_util::sync::CancellationToken;
 pub(crate) async fn current() -> Result<Vec<SocketAddr>> {
     let netlink = Connection::<Route>::new()?;
     let links = netlink.get_links().await?;
-    let default = netlink.get_routes().await?.iter()
+    let default = netlink
+        .get_routes()
+        .await?
+        .iter()
         .filter(|route| route.is_ipv4() && route.table_id() == 254 && route.dst_len() == 0)
-        .min_by_key(|route| route.priority().unwrap_or(0)).and_then(|route| route.oif());
+        .min_by_key(|route| route.priority().unwrap_or(0))
+        .and_then(|route| route.oif());
     let preference: HashMap<_, _> = links
         .iter()
         .filter(|link| {
@@ -46,33 +46,37 @@ pub(crate) async fn current() -> Result<Vec<SocketAddr>> {
             } else {
                 1
             };
-            (link.ifindex(), if Some(link.ifindex()) == default { 0 } else { rank + 1 })
+            (
+                link.ifindex(),
+                if Some(link.ifindex()) == default {
+                    0
+                } else {
+                    rank + 1
+                },
+            )
         })
         .collect();
-    let mut interfaces: Vec<_> = netlink
+    let interfaces: Vec<_> = netlink
         .get_addresses()
         .await?
         .iter()
         // A link created between the two dumps is unknown until the next
         // refresh. Never accidentally advertise a newly created overlay TUN.
-        .filter(|address| preference.contains_key(&address.ifindex()))
-        .filter_map(|address| match address.local().or(address.address()) {
-            Some(IpAddr::V4(ip))
-                if !ip.is_loopback() && !ip.is_link_local() && !ip.is_unspecified() =>
-            {
-                Some((
-                    preference.get(&address.ifindex()).copied().unwrap_or(1),
-                    SocketAddr::new(IpAddr::V4(*ip), 0),
-                ))
-            }
-            _ => None,
+        .filter(|address| {
+            preference.contains_key(&address.ifindex())
+                && !address.is_tentative()
+                && !address.is_dad_failed()
+                && !address.is_deprecated()
+        })
+        .filter_map(|address| {
+            let ip = *address.local().or(address.address())?;
+            Some((
+                preference.get(&address.ifindex()).copied().unwrap_or(1),
+                SocketAddr::new(ip, 0),
+            ))
         })
         .collect();
-    interfaces.sort();
-    let mut unique = HashSet::new();
-    interfaces.retain(|(_, address)| unique.insert(*address));
-    interfaces.truncate(16);
-    Ok(interfaces.into_iter().map(|(_, address)| address).collect())
+    Ok(porthub_mesh::underlay::candidates(interfaces))
 }
 
 pub(crate) async fn watch(
@@ -87,6 +91,8 @@ pub(crate) async fn watch(
                 RtnetlinkGroup::Link,
                 RtnetlinkGroup::Ipv4Addr,
                 RtnetlinkGroup::Ipv4Route,
+                RtnetlinkGroup::Ipv6Addr,
+                RtnetlinkGroup::Ipv6Route,
             ])?;
             Ok::<_, nlink::Error>(connection)
         })();
@@ -163,10 +169,11 @@ mod tests {
         observed??;
         let snapshot = input.borrow();
         anyhow::ensure!(snapshot.len() <= 16);
-        anyhow::ensure!(snapshot.iter().all(|address| address.is_ipv4()
-            && !address.ip().is_loopback()
-            && !address.ip().is_unspecified()
-            && address.port() == 0));
+        anyhow::ensure!(snapshot
+            .iter()
+            .all(
+                |address| porthub_mesh::underlay::candidate_ip(address.ip()) && address.port() == 0
+            ));
         Ok(())
     }
 

@@ -144,3 +144,61 @@ fn reflexive_only_peers_keep_enrolled_identity_and_send_from_the_original_interf
     assert_eq!(right.packet().as_deref(), Some(&[0x45; 1380][..]));
     Ok(())
 }
+
+async fn answer_once(server: UdpSocket, mapped: SocketAddr) -> Result<()> {
+    let mut bytes = [0u8; 2048];
+    let (size, source) = server.recv_from(&mut bytes).await?;
+    let mut request = Message::new();
+    request.unmarshal_binary(&bytes[..size])?;
+    let mut response = Message::new();
+    response.build(&[
+        Box::new(request.transaction_id),
+        Box::new(BINDING_SUCCESS),
+        Box::new(XorMappedAddress {
+            ip: mapped.ip(),
+            port: mapped.port(),
+        }),
+    ])?;
+    server.send_to(&response.raw, source).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn unreachable_first_stun_server_does_not_delay_the_working_server() -> Result<()> {
+    let silent = UdpSocket::bind("127.0.0.1:0").await?;
+    let working = UdpSocket::bind("127.0.0.1:0").await?;
+    let client = UdpSocket::bind("127.0.0.1:0").await?;
+    let servers = vec![
+        format!("stun:{}", silent.local_addr()?),
+        format!("stun:{}", working.local_addr()?),
+    ];
+    let mapped = "203.0.113.9:41000".parse()?;
+    let fixture = tokio::spawn(answer_once(working, mapped));
+    // The old sequential gather spent 750ms retrying the silent first server.
+    let result = tokio::time::timeout(
+        Duration::from_millis(600),
+        porthub_mesh::stun::mapped(&client, &servers),
+    )
+    .await?;
+    assert_eq!(result, Some(mapped));
+    fixture.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn ipv6_stun_uses_the_ipv6_socket_and_ignores_ipv4_servers() -> Result<()> {
+    let server = UdpSocket::bind("[::1]:0").await?;
+    let client = UdpSocket::bind("[::1]:0").await?;
+    let mapped = "[2001:db8::9]:41000".parse()?;
+    let servers = vec![
+        "stun:127.0.0.1:9".to_owned(),
+        format!("stun:{}", server.local_addr()?),
+    ];
+    let fixture = tokio::spawn(answer_once(server, mapped));
+    assert_eq!(
+        porthub_mesh::stun::mapped(&client, &servers).await,
+        Some(mapped)
+    );
+    fixture.await??;
+    Ok(())
+}

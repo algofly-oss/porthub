@@ -3,11 +3,7 @@ use anyhow::Result;
 use futures_util::FutureExt;
 use getifaddrs::{getifaddrs, InterfaceFlags};
 use route_manager::AsyncRouteManager;
-use std::{
-    collections::HashSet,
-    net::{IpAddr, SocketAddr},
-    time::Duration,
-};
+use std::{net::SocketAddr, time::Duration};
 use tokio::{sync::watch, time::MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
@@ -38,19 +34,12 @@ pub(crate) async fn current() -> Result<Vec<SocketAddr>> {
         } else {
             1
         };
-        let Some(IpAddr::V4(ip)) = interface.address.ip_addr() else {
+        let Some(ip) = interface.address.ip_addr() else {
             continue;
         };
-        if ip.is_loopback() || ip.is_link_local() || ip.is_unspecified() || ip.is_multicast() {
-            continue;
-        }
-        found.push((rank, SocketAddr::new(IpAddr::V4(ip), 0)));
+        found.push((rank, SocketAddr::new(ip, 0)));
     }
-    found.sort();
-    let mut unique = HashSet::new();
-    found.retain(|(_, address)| unique.insert(*address));
-    found.truncate(16);
-    Ok(found.into_iter().map(|(_, address)| address).collect())
+    Ok(porthub_mesh::underlay::candidates(found))
 }
 
 pub(crate) async fn watch(

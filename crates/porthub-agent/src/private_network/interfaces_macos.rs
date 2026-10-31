@@ -3,9 +3,8 @@ use anyhow::Result;
 use futures_util::FutureExt;
 use route_manager::AsyncRouteManager;
 use std::{
-    collections::HashSet,
     ffi::CStr,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     time::Duration,
 };
 use tokio::{sync::watch, time::MissedTickBehavior};
@@ -32,26 +31,32 @@ pub(crate) async fn current() -> Result<Vec<SocketAddr>> {
         // SAFETY: cursor is a node in the live getifaddrs list.
         let item = unsafe { &*cursor };
         cursor = item.ifa_next;
-        if item.ifa_addr.is_null()
-            || item.ifa_name.is_null()
-            // SAFETY: null was rejected above; this field is common to sockaddr.
-            || unsafe { (*item.ifa_addr).sa_family as i32 } != libc::AF_INET
-        {
+        if item.ifa_addr.is_null() || item.ifa_name.is_null() {
             continue;
         }
         if item.ifa_flags as i32 & (libc::IFF_UP as i32) == 0 {
             continue;
         }
-        // SAFETY: AF_INET guarantees sockaddr_in layout.
-        let address = unsafe {
-            (*(item.ifa_addr.cast::<libc::sockaddr_in>()))
-                .sin_addr
-                .s_addr
+        // SAFETY: the non-null sockaddr family selects its native layout.
+        let ip = match unsafe { (*item.ifa_addr).sa_family as i32 } {
+            libc::AF_INET => {
+                let address = unsafe {
+                    (*(item.ifa_addr.cast::<libc::sockaddr_in>()))
+                        .sin_addr
+                        .s_addr
+                };
+                IpAddr::V4(Ipv4Addr::from(u32::from_be(address)))
+            }
+            libc::AF_INET6 => {
+                let address = unsafe {
+                    (*(item.ifa_addr.cast::<libc::sockaddr_in6>()))
+                        .sin6_addr
+                        .s6_addr
+                };
+                IpAddr::V6(Ipv6Addr::from(address))
+            }
+            _ => continue,
         };
-        let ip = Ipv4Addr::from(u32::from_be(address));
-        if ip.is_loopback() || ip.is_link_local() || ip.is_unspecified() || ip.is_multicast() {
-            continue;
-        }
         // SAFETY: ifa_name is a NUL-terminated interface name from getifaddrs.
         let name = unsafe { CStr::from_ptr(item.ifa_name) }.to_string_lossy();
         if ["lo", "utun", "bridge", "awdl", "llw", "gif", "stf", "ph"]
@@ -65,13 +70,9 @@ pub(crate) async fn current() -> Result<Vec<SocketAddr>> {
         } else {
             1
         };
-        found.push((rank, SocketAddr::new(IpAddr::V4(ip), 0)));
+        found.push((rank, SocketAddr::new(ip, 0)));
     }
-    found.sort();
-    let mut unique = HashSet::new();
-    found.retain(|(_, address)| unique.insert(*address));
-    found.truncate(16);
-    Ok(found.into_iter().map(|(_, address)| address).collect())
+    Ok(porthub_mesh::underlay::candidates(found))
 }
 
 pub(crate) async fn watch(

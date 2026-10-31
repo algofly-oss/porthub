@@ -1,0 +1,26 @@
+{
+  "feature": "Dual-stack peer connectivity inspired by go2rtc",
+  "release": "1.8.9",
+  "references": [
+    "https://github.com/AlexxIT/go2rtc/blob/master/pkg/webrtc/api.go",
+    "https://github.com/AlexxIT/go2rtc/blob/master/internal/webrtc/webrtc.go",
+    "https://go2rtc.org/internal/webrtc/"
+  ],
+  "implementation": {
+    "native_discovery": "Linux, macOS and Windows advertise eligible IPv4 and IPv6 underlay addresses. Deduplicate and reserve room for both families within the existing 16-interface cap. IPv4 remains first for management-source preference; Linux tracks IPv6 kernel address/route events and rejects tentative, DAD-failed and deprecated addresses.",
+    "direct_peers": "Carry existing private IP packets through ICE and pinned DTLS over either UDP address family. One unavailable bind does not discard other working interfaces. IPv4-only peers remain compatible.",
+    "stun": "Resolve at most two STUN servers independently, try up to four family-compatible addresses per server on one receive owner, correlate source and random transaction IDs, and retain the 1.5-second total budget. No periodic discovery traffic is added.",
+    "underlay_tcp": "Race IPv4 and IPv6 for new relay/proxy TCP connections, with at most two concurrent attempts. Bind explicitly advertised sources, retain one-second attempt bounds, drop the losing socket and do not fall back to an unbound source.",
+    "scope": "Adopts address gathering and connection racing techniques in Rust without embedding go2rtc, adding dependencies or changing the wire protocol. This does not add an ICE-TCP peer data carrier, WebRTC browser DataChannels, media transcoding or private IPv6 exit routing."
+  },
+  "reliability": {
+    "existing_transfers": "Candidate/interface updates retain existing healthy peer sessions and flow pinning. Only the one-time agent binary update reconnects services.",
+    "privacy": "No router, firewall, host DNS or exit-policy exceptions are installed. Existing IPv6 leak protection on IPv4-only exits remains enforced; blocked IPv6 paths fall back to available existing transports.",
+    "fallback": "Existing authenticated relay and IPv4 routes retained. No claim of universal NAT traversal or unchanged throughput on every network."
+  },
+  "verification": {
+    "mesh": "37 tests passed, including real IPv6 full-size packet transfers, IPv4-blackhole simulation, IPv4-only peer interoperability, unreachable first STUN server, IPv6 STUN, source/transaction validation, relay cancellation, certificate rejection and active stream carrier-change regressions.",
+    "agent_network": "78 agent regressions and 19 network tests passed on release 1.8.9. Native ten-platform CI pending."
+  },
+  "rollout_status": "Local verification passed; agent-only 1.8.9 release pending full native matrix. Existing API/UI/gateway 1.8.8 require no restart."
+}

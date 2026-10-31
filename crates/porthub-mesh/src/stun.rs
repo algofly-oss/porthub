@@ -31,11 +31,54 @@ fn authority(raw: &str) -> Option<(String, u16)> {
     let port = url.port().unwrap_or(3478);
     (port != 0).then_some((host, port))
 }
-async fn query(socket: &UdpSocket, target: SocketAddr) -> Option<SocketAddr> {
-    let mut request = Message::new();
-    request
-        .build(&[Box::new(TransactionId::new()), Box::new(BINDING_REQUEST)])
-        .ok()?;
+/// Resolve independently: one broken DNS response/address must not consume the
+/// other server's entire discovery budget. A single receive owner below matches
+/// every response to its exact source and unpredictable transaction ID.
+async fn targets(servers: &[String], ipv4: bool) -> Vec<SocketAddr> {
+    let mut lookups = tokio::task::JoinSet::new();
+    for (host, port) in servers.iter().filter_map(|url| authority(url)).take(2) {
+        lookups.spawn(async move {
+            tokio::time::timeout(
+                Duration::from_millis(300),
+                tokio::net::lookup_host((host, port)),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .map(|addresses| {
+                addresses
+                    .filter(|address| address.is_ipv4() == ipv4)
+                    .take(4)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+        });
+    }
+    let mut targets = Vec::new();
+    while let Some(Ok(addresses)) = lookups.join_next().await {
+        for address in addresses {
+            if !targets.contains(&address) {
+                targets.push(address);
+            }
+        }
+    }
+    targets
+}
+async fn query(socket: &UdpSocket, targets: Vec<SocketAddr>) -> Option<SocketAddr> {
+    let ipv4 = socket.local_addr().ok()?.is_ipv4();
+    let requests: Vec<_> = targets
+        .into_iter()
+        .filter_map(|target| {
+            let mut request = Message::new();
+            request
+                .build(&[Box::new(TransactionId::new()), Box::new(BINDING_REQUEST)])
+                .ok()?;
+            Some((target, request))
+        })
+        .collect();
+    if requests.is_empty() {
+        return None;
+    }
     let mut retry = tokio::time::interval(Duration::from_millis(250));
     retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut bytes = [0u8; 2048];
@@ -44,43 +87,49 @@ async fn query(socket: &UdpSocket, target: SocketAddr) -> Option<SocketAddr> {
         tokio::select! {
             _ = retry.tick() => {
                 if sent >= 3 { return None; }
-                socket.send_to(&request.raw, target).await.ok()?;
+                for (target, request) in &requests {
+                    // An unreachable address is not evidence that every other
+                    // configured STUN address is unreachable too.
+                    let _ = socket.send_to(&request.raw, target).await;
+                }
                 sent += 1;
             },
             packet = socket.recv_from(&mut bytes) => {
-                let (size, source) = packet.ok()?;
-                if source != target || size < 20 { continue; }
+                let (size, source) = match packet {
+                    Ok(packet) => packet,
+                    Err(error) if matches!(error.kind(), std::io::ErrorKind::ConnectionRefused
+                        | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::Interrupted) => {
+                        // Some platforms surface ICMP from one destination on
+                        // this unconnected socket. Do not abandon the others.
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        continue;
+                    }
+                    Err(_) => return None,
+                };
+                if size < 20 { continue; }
                 let mut response = Message::new();
-                if response.unmarshal_binary(&bytes[..size]).is_err() || response.typ != BINDING_SUCCESS || response.transaction_id != request.transaction_id { continue; }
+                if response.unmarshal_binary(&bytes[..size]).is_err()
+                    || response.typ != BINDING_SUCCESS
+                    || !requests.iter().any(|(target, request)| *target == source && request.transaction_id == response.transaction_id) { continue; }
                 let mut mapped = XorMappedAddress::default();
-                if mapped.get_from(&response).is_err() || mapped.port == 0 || !mapped.ip.is_ipv4() || mapped.ip.is_unspecified() || mapped.ip.is_multicast() { continue; }
+                if mapped.get_from(&response).is_err() || mapped.port == 0
+                    || mapped.ip.is_ipv4() != ipv4 || mapped.ip.is_unspecified()
+                    || mapped.ip.is_multicast() { continue; }
+                if let std::net::IpAddr::V6(ip) = mapped.ip {
+                    if ip.is_unicast_link_local() || ip.to_ipv4_mapped().is_some() { continue; }
+                }
                 return Some(SocketAddr::new(mapped.ip, mapped.port));
             }
         }
     }
 }
-/// Gather once, before the packet reader owns this socket. DNS, retries and
-/// all configured servers share a 1.5-second budget. No idle probing task is
-/// created and no discovery request runs in the transfer path.
+/// Gather before the packet reader owns this socket. Both families use only
+/// matching STUN endpoints. Up to two servers/four addresses each share a
+/// 1.5-second DNS+retry budget; no idle task or transfer-path probing is added.
 pub async fn mapped(socket: &UdpSocket, servers: &[String]) -> Option<SocketAddr> {
+    let ipv4 = socket.local_addr().ok()?.is_ipv4();
     tokio::time::timeout(Duration::from_millis(1500), async {
-        for (host, port) in servers.iter().filter_map(|url| authority(url)).take(2) {
-            let addresses = tokio::time::timeout(
-                Duration::from_millis(300),
-                tokio::net::lookup_host((host, port)),
-            )
-            .await;
-            let Ok(Ok(mut addresses)) = addresses else {
-                continue;
-            };
-            let Some(target) = addresses.find(SocketAddr::is_ipv4) else {
-                continue;
-            };
-            if let Some(address) = query(socket, target).await {
-                return Some(address);
-            }
-        }
-        None
+        query(socket, targets(servers, ipv4).await).await
     })
     .await
     .ok()

@@ -341,7 +341,7 @@ impl Peer {
             "private interface limit exceeded"
         );
         ensure!(
-            local.is_ipv4() && !local.ip().is_unspecified() && local.port() != 0,
+            !local.ip().is_unspecified() && !local.ip().is_multicast() && local.port() != 0,
             "invalid private interface"
         );
         let candidate = safe(
@@ -373,7 +373,7 @@ impl Peer {
             "private candidate limit exceeded"
         );
         ensure!(
-            mapped.is_ipv4()
+            mapped.is_ipv4() == base.is_ipv4()
                 && !mapped.ip().is_unspecified()
                 && !mapped.ip().is_multicast()
                 && mapped.port() != 0
