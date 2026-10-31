@@ -1,7 +1,7 @@
 {
   "feature": "PortHub shared terminal workspaces",
-  "goal_status": "active implementation; core/edge 1.9.0 deployed, final client packaging and complete feature verification pending",
-  "baseline": "Production API/UI/edge 1.9.0 at b7b2765; firewall remains 1.8.4; registered agents remain 1.8.9 pending client rollout. Preserve unrelated workloads and existing tmux sessions.",
+  "goal_status": "active: terminal sharing1.9.0 published and live smoke passed; remaining transport/UX/automation work retained",
+  "baseline": "Latest GitHub release/tagv1.9.0 at2fb9d6e, all30 assets verified. Production core90d883e and edgeb7b2765 are1.9.0; firewall remains1.8.4. Nine clients acknowledged1.9.0; offline machines retain older versions. Preserve unrelated workloads and existing tmux sessions.",
   "latest_user_contract": {
     "lifetime": "Closing a local terminal, losing SSH, browser disconnect or explicit detach never destroys the workspace. It persists in a user-owned supervisor and private bundled tmux server. Only explicit terminal stop, exit/Ctrl+D closing the final shell, or explicitly configured idle/session timeout ends it. Earlier end-on-owner-disconnect proposal is superseded.",
     "expiry": "Invitation expiry prevents NEW joins only. Already attached participants continue without timer-driven resets. Browser reconnection credentials must preserve the same participant role independently of invitation expiry. Standard SSH connections remain alive until they disconnect/end/revoke; do not claim impossible transparent TCP reconnect for stock SSH clients.",
@@ -278,8 +278,6 @@
     "ssh": "External stock OpenSSH completes gateway key exchange on urm2.duckdns.org TCP443; invalid capability denied. HTTPS and SSH share existing TLS ingress. This does not yet prove a full live shared session.",
     "application_probes": "IBI, Thor, Home Presence and Autolycus passed activation probes. Subsequent IBI probe transiently failed; immediate retry returned 200 with original hash. Other three matched original hashes.",
     "not_complete": [
-      "Updater correction requires final ten-platform cohort41243155660, release publication and live client upgrades",
-      "Registered client upgrade and full live browser/SSH workspace smoke",
       "Optimized direct terminal participant transport with relay fallback",
       "Nonmodal native participant sidebar",
       "Stable history snapshot anchors under output/resize/eviction",
@@ -298,6 +296,38 @@
     "candidate_run": 41243155660,
     "updater_tests": "13 passed, including paired and existing unified disconnected-private cases, strict healthy/recovered/stale private readiness, mandatory public readiness, rollback and foreign-registration preservation.",
     "ec2_observation": "Installed CLI1.8.5 repeatedly rolls back1.8.9 while private module stays connecting. systemd-resolved service/D-Bus name absent; current Linux private DNS requires it. No host resolver, route or unrelated workload changes.",
-    "correction": "Recent explicit connecting report records pre-existing private failure. Healthy public upgrade may commit while private configuration remains enabled and supervised. Healthy, unknown, stale or recovered private modules retain strict readiness."
+    "correction": "Recent explicit connecting report records pre-existing private failure. Healthy public upgrade may commit while private configuration remains enabled and supervised. Healthy, unknown, stale or recovered private modules retain strict readiness.",
+    "result": "Nine enabled clients acknowledged committed1.9.0 updates; EC2 and Reid installed CLI source2fb9d6e directly verified with NRestarts0.",
+    "mac_note": "nitin-mbp acknowledged1.9.0; its last heartbeat was22:00:49UTC during22:06 inventory, so current reachability is not proven.",
+    "offline_unchanged": [
+      "condor",
+      "harshithaagx",
+      "spark"
+    ]
+  },
+  "published_release": {
+    "tag": "v1.9.0",
+    "source": "2fb9d6eac319942a22769c32bb3b8753abceb49e",
+    "client_ci": 41243155660,
+    "publication_ci": 41245715427,
+    "assets": 30,
+    "retention": "Onlyv1.9.0 release and tag remain; no explicit retained-tag exceptions.",
+    "main": "Fast-forwarded to exact verified release commit2fb9d6e. Redundant main continuous build41245452506 cancelled before client/server jobs; existing binaries promoted."
+  },
+  "live_deployment_smoke": {
+    "host": "otsi-reid",
+    "cli_source": "2fb9d6eac319942a22769c32bb3b8753abceb49e",
+    "result": "passed with actual unprivileged host CLI -> registered broker -> production gateway -> anonymous browser and stockSSH",
+    "checks": [
+      "Bundled100000-line history, mouse, Ctrl+A and F7 configuration",
+      "Shared output and retained scrollback",
+      "Detached workspace and SSH disconnect persistence",
+      "Revoked invitations reject new joins but preserve active guests and browser recovery",
+      "Host CLI removal revokes the read-only participant while writer continues",
+      "Explicit exit ends final shell/session",
+      "Owned workspace stopped, supervisor exited and private XDG fixture removed; services unchanged"
+    ],
+    "test_adjustment": "Initial fixture incorrectly expected a visible-screen marker in empty scrollback; corrected to generate80 lines before capturing history. No product change was needed.",
+    "production_export_e2e": "Chromium andWebKit full API/Mongo/bundledtmux/SSH flows passed;62 and83 concurrent fresh HTTPS checks respectively."
   }
 }
