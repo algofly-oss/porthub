@@ -278,12 +278,26 @@
     "ssh": "External stock OpenSSH completes gateway key exchange on urm2.duckdns.org TCP443; invalid capability denied. HTTPS and SSH share existing TLS ingress. This does not yet prove a full live shared session.",
     "application_probes": "IBI, Thor, Home Presence and Autolycus passed activation probes. Subsequent IBI probe transiently failed; immediate retry returned 200 with original hash. Other three matched original hashes.",
     "not_complete": [
-      "Final ten-platform client cohort and release publication",
+      "Updater correction requires final ten-platform cohort41243155660, release publication and live client upgrades",
       "Registered client upgrade and full live browser/SSH workspace smoke",
       "Optimized direct terminal participant transport with relay fallback",
       "Nonmodal native participant sidebar",
       "Stable history snapshot anchors under output/resize/eviction",
       "Authenticated automatic production deployment gate"
-    ]
+    ],
+    "core_revision": "90d883e47552044619278356257147392a1d86de",
+    "edge_revision": "b7b27650212a78f97fc401a86469b7f3c84442b7",
+    "ui_fix_server_ci": 41242715248,
+    "public_browser_check": "Live public /terminal initializes xterm at1440,402,320px; no page errors, failed requests or horizontal overflow. Mobile screenshot inspected. Clean browser profiles, normal certificate validation.",
+    "core_only_activation": "Verified cold backup plus all4 application probes passed. Edge/firewall and unrelated baseline container IDs retained."
+  },
+  "client_rollout_gate": {
+    "previous_cohort": 41239179569,
+    "previous_result": "All10 platform jobs and complete bundle passed, verified privately staged; superseded by updater correction before publication.",
+    "candidate_revision": "2fb9d6eac319942a22769c32bb3b8753abceb49e",
+    "candidate_run": 41243155660,
+    "updater_tests": "13 passed, including paired and existing unified disconnected-private cases, strict healthy/recovered/stale private readiness, mandatory public readiness, rollback and foreign-registration preservation.",
+    "ec2_observation": "Installed CLI1.8.5 repeatedly rolls back1.8.9 while private module stays connecting. systemd-resolved service/D-Bus name absent; current Linux private DNS requires it. No host resolver, route or unrelated workload changes.",
+    "correction": "Recent explicit connecting report records pre-existing private failure. Healthy public upgrade may commit while private configuration remains enabled and supervised. Healthy, unknown, stale or recovered private modules retain strict readiness."
   }
 }
