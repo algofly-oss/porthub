@@ -47,6 +47,9 @@ porthub-egress = { path = "../porthub-egress", default-features = false }
 
 
 [dev-dependencies]
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+rcgen = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-tungstenite = "0.30"
 porthub-tunnel = { workspace = true, features = ["http-access"] }
 porthub-edge = { path = "../porthub-edge" }

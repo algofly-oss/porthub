@@ -80,6 +80,7 @@ services:
       PORTHUB_API_SOCKET: /run/porthub-api/api.sock
       PORTHUB_TERMINAL_SSH_SOCKET: /run/porthub-api/terminal-ssh.sock
       PORTHUB_TERMINAL_SSH_LISTEN: ${PORTHUB_TERMINAL_SSH_LISTEN-0.0.0.0:8347}
+      PORTHUB_TERMINAL_SSH_MULTIPLEX: ${PORTHUB_TERMINAL_SSH_MULTIPLEX:-false}
       PORTHUB_EDGE_SOCKET: /run/porthub-edge/control.sock
       PORTHUB_TUNNEL_HALF_CLOSE_IDLE_SECONDS: ${PORTHUB_TUNNEL_HALF_CLOSE_IDLE_SECONDS:-120}
       PORTHUB_WEB_ROUTES_CONFIG_PATH: /run/porthub-config/web-routes.json

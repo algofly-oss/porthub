@@ -28,6 +28,8 @@ jobs:
       PORTHUB_SOURCE_REVISION: ${{ inputs.revision || github.sha }}
       RUST_MIN_STACK: '33554432'
       CARGO_BUILD_JOBS: '4'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -51,6 +53,7 @@ jobs:
           export "CARGO_TARGET_${target_key}_LINKER=musl-gcc"
           export "CC_${cc_key}=musl-gcc"
           cargo build --locked --release -p porthub-api -p porthub-edge -p porthub-runtime -p porthub-firewall --target "$target" --timings
+          cargo test --locked -p porthub-edge --target "$target"
           mkdir -p server-artifacts
           for binary in porthub-api porthub-edge porthub-runtime porthub-firewall; do
             source="target/$target/release/$binary"

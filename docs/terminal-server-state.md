@@ -14,6 +14,23 @@ advertised external port (8347 by default); it does not change the listener.
 Forward/allow only that PortHub TCP port through deployment-specific networking.
 The Compose update does not alter the host's SSH service or firewall policies.
 
+When a network permits the existing PortHub HTTPS port but blocks a separate SSH
+port, enable `PORTHUB_TERMINAL_SSH_MULTIPLEX=true` on the edge. The same PortHub TLS
+listener can then serve HTTPS and ordinary SSH. For public port 443, set
+`PORTHUB_TERMINAL_SSH_PORT=443` and use a directly reachable SSH hostname;
+`PORTHUB_TERMINAL_SSH_LISTEN=` disables the separate 8347 listener. SSH uses its
+own encrypted protocol on that TCP port and requires a standard SSH client.
+Networks enforcing HTTPS payloads may still block this SSH route.
+An HTTP-only CDN hostname still needs a separate directly reachable hostname.
+
+This mode is opt-in. The edge peeks at the first byte without consuming it,
+forwards SSH identification to the fixed private API socket, and leaves TLS
+bytes for the existing TLS acceptor. Silent connections have a three-second
+identification deadline. SSH forwarding has a shared 64-connection limit across
+the TLS listeners; reaching that limit does not reject ordinary TLS requests.
+API SSH authentication, invitation revocation and participant permissions remain
+the same as on the dedicated listener. Edge shutdown cancels active forwarding.
+
 Terminal sharing uses MongoDB for invitation hashes, authorization, recovery leases
 and session lifecycle records. Terminal contents are not stored in MongoDB or in
 the local journal.

@@ -27,6 +27,16 @@ impl Drop for Cleanup {
 #[ignore = "requires isolated MongoDB, running UI, bundled runtime and Playwright"]
 async fn anonymous_browser_and_machine_admin_share_real_shell_history_recovery_and_revocation(
 ) -> Result<()> {
+    exercise(false).await
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires isolated MongoDB, running UI, bundled runtime and Playwright"]
+async fn ordinary_ssh_and_https_share_one_tls_port_with_real_terminal_participants() -> Result<()> {
+    exercise(true).await
+}
+static BROWSER_FIXTURE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+async fn exercise(multiplex: bool) -> Result<()> {
+    let _exclusive = BROWSER_FIXTURE.lock().await;
     let ui = std::env::var("PORTHUB_TEST_UI_ORIGIN").context("set isolated UI origin")?;
     let fixture = tempfile::Builder::new()
         .prefix("phterm-browser-")
@@ -93,9 +103,75 @@ async fn anonymous_browser_and_machine_admin_share_real_shell_history_recovery_a
     })
     .await?;
     let (_edge_stop, receiver) = tokio::sync::watch::channel(false);
-    let _ssh_edge = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-        porthub_edge::terminal::run(ssh_listener, ssh_socket, receiver).await
-    }));
+    let ssh_task = if multiplex {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let key = rcgen::KeyPair::generate()?;
+        let certificate =
+            rcgen::CertificateParams::new(vec!["localhost".into()])?.self_signed(&key)?;
+        let tls = axum_server::tls_rustls::RustlsConfig::from_pem(
+            certificate.pem().into_bytes(),
+            key.serialize_pem().into_bytes(),
+        )
+        .await?;
+        let router = axum::Router::new().route(
+            "/tls-probe",
+            axum::routing::get(|| async { "porthub-tls-ok" }),
+        );
+        let ingress = porthub_edge::terminal::TlsIngress::with_ssh(ssh_socket, receiver);
+        // The shared SSH flow lasts longer than this TLS handshake budget.
+        // It must not become a lifetime deadline for an established SSH guest.
+        let server = axum_server::from_tcp(ssh_listener.into_std()?)?.acceptor(
+            axum_server::tls_rustls::RustlsAcceptor::new(tls)
+                .handshake_timeout(Duration::from_secs(1))
+                .acceptor(ingress),
+        );
+        let task = tokio::spawn(async move { server.serve(router.into_make_service()).await });
+        let response = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .timeout(Duration::from_secs(5))
+            .build()?
+            .get(format!("https://127.0.0.1:{ssh_port}/tls-probe"))
+            .send()
+            .await?;
+        ensure!(
+            response.status().is_success() && response.text().await? == "porthub-tls-ok",
+            "TLS must remain usable on the SSH ingress port"
+        );
+        task
+    } else {
+        tokio::spawn(async move {
+            porthub_edge::terminal::run(ssh_listener, ssh_socket, receiver).await
+        })
+    };
+    let _ssh_edge = tokio_util::task::AbortOnDropHandle::new(ssh_task);
+    let tls_probe_stop = tokio_util::sync::CancellationToken::new();
+    let tls_probe = if multiplex {
+        let stop = tls_probe_stop.clone();
+        Some(tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
+            async move {
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .pool_max_idle_per_host(0)
+                    .timeout(Duration::from_secs(5))
+                    .build()?;
+                let mut checks = 0usize;
+                let mut interval = tokio::time::interval(Duration::from_millis(100));
+                loop {
+                    tokio::select! {
+                        _=stop.cancelled()=>break,
+                        _=interval.tick()=>{
+                            let response=client.get(format!("https://127.0.0.1:{ssh_port}/tls-probe")).send().await?;
+                            ensure!(response.status().is_success() && response.text().await?=="porthub-tls-ok", "concurrent TLS probe failed");
+                            checks+=1;
+                        }
+                    }
+                }
+                Ok::<_, anyhow::Error>(checks)
+            },
+        )))
+    } else {
+        None
+    };
     let (owner, cookie) = case
         .user("terminal-browser-owner@example.test", "user")
         .await?;
@@ -185,6 +261,17 @@ async fn anonymous_browser_and_machine_admin_share_real_shell_history_recovery_a
         .env("PORTHUB_TEST_TERMINAL_SSH_PORT", ssh_port.to_string())
         .kill_on_drop(true);
     let output = tokio::time::timeout(Duration::from_secs(120), command.output()).await??;
+    tls_probe_stop.cancel();
+    if let Some(probe) = tls_probe {
+        let checks = tokio::time::timeout(Duration::from_secs(6), probe).await???;
+        ensure!(
+            checks >= 3,
+            "TLS probes must continue while SSH participants are attached"
+        );
+        println!(
+            "PASS concurrent TLS/SSH ingress: {checks} fresh HTTPS connections on the shared port"
+        );
+    }
     if !output.status.success() {
         eprintln!("Isolated fixture shell: {}", workspace.capture("%0", 200)?);
     }
