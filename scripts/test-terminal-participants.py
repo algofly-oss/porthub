@@ -156,6 +156,14 @@ def exercise(executable, environment, job, stalled=False, sidebar=False, columns
                 os.read(master, 65536)
         assert child.poll() == 0, "quit must not wait for a stalled owner socket"
         terminal_mode = json.loads(os.read(report_read, 8192))
+        # Darwin sets PENDIN itself when restoring ICANON, and preserves it
+        # even when tcsetattr's requested flags omit it. It describes queued
+        # input reprocessing, not an application-controlled terminal mode.
+        # See apple-oss-distributions/xnu, bsd/kern/tty.c, TIOCSETA handling.
+        # Compare every other bit, control character and speed unchanged.
+        if sys.platform == "darwin":
+            for state in terminal_mode.values():
+                state[3] &= ~termios.PENDIN
         assert terminal_mode["after"] == terminal_mode["before"], f"terminal mode must be restored before the controlling session exits: {terminal_mode!r}"
     finally:
         if child.poll() is None:
