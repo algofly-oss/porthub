@@ -126,6 +126,7 @@ jobs:
     env:
       PORTHUB_SOURCE_REVISION: ${{ inputs.revision || github.sha }}
       RUST_MIN_STACK: "33554432"
+      PORTHUB_TERMINAL_HELPER_CACHE_ROOT: ${{ github.workspace }}/.cache/terminal-helper
       RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static' || '' }}
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
@@ -158,7 +159,7 @@ jobs:
         if: runner.os != 'Windows'
         uses: actions/cache/restore@v4
         with:
-          path: target/terminal-helper
+          path: .cache/terminal-helper
           key: terminal-v1-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('vendor/terminal/sources.json', 'scripts/build-terminal-helper.py') }}
       - name: Build or reuse bundled terminal runtime
         if: runner.os != 'Windows'
@@ -172,16 +173,17 @@ jobs:
         if: runner.os != 'Windows' && steps.terminal_helper_cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          path: target/terminal-helper
+          path: .cache/terminal-helper
           key: ${{ steps.terminal_helper_cache.outputs.cache-primary-key }}
       - name: Save terminal helper failure log
         if: failure() && runner.os != 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: terminal-helper-log-${{ matrix.artifact }}
+          include-hidden-files: true
           path: |
-            target/terminal-helper/**/build.log
-            target/terminal-helper/**/config.log
+            .cache/terminal-helper/**/build.log
+            .cache/terminal-helper/**/config.log
           if-no-files-found: ignore
           retention-days: 3
       - name: Cache compiled Rust dependencies and workspace libraries
@@ -190,6 +192,10 @@ jobs:
           key: native-${{ matrix.target }}
           cache-workspace-crates: true
           cache-on-failure: true
+      - name: Verify terminal runtime survives Rust cache restoration
+        if: runner.os != 'Windows'
+        shell: bash
+        run: test -s "$PORTHUB_TERMINAL_BUNDLE"
       - name: Compile focused Windows watch checks
         if: runner.os == 'Windows'
         shell: bash
@@ -283,6 +289,7 @@ jobs:
     env:
       PORTHUB_SOURCE_REVISION: ${{ inputs.revision || github.sha }}
       RUST_MIN_STACK: "33554432"
+      PORTHUB_TERMINAL_HELPER_CACHE_ROOT: ${{ github.workspace }}/.cache/terminal-helper
     steps:
       - uses: actions/checkout@v4
         with:
@@ -297,7 +304,7 @@ jobs:
         id: terminal_helper_cache
         uses: actions/cache/restore@v4
         with:
-          path: target/terminal-helper
+          path: .cache/terminal-helper
           key: terminal-v1-linux32-${{ matrix.target }}-${{ hashFiles('vendor/terminal/sources.json', 'scripts/build-terminal-helper.py') }}
       - name: Build or reuse cross-compiled terminal runtime
         shell: bash
@@ -308,16 +315,17 @@ jobs:
         if: steps.terminal_helper_cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          path: target/terminal-helper
+          path: .cache/terminal-helper
           key: ${{ steps.terminal_helper_cache.outputs.cache-primary-key }}
       - name: Save cross-compiled terminal helper failure log
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: terminal-helper-log-${{ matrix.artifact }}
+          include-hidden-files: true
           path: |
-            target/terminal-helper/**/build.log
-            target/terminal-helper/**/config.log
+            .cache/terminal-helper/**/build.log
+            .cache/terminal-helper/**/config.log
           if-no-files-found: ignore
           retention-days: 3
       - name: Cache compiled 32-bit Rust libraries
@@ -326,6 +334,9 @@ jobs:
           key: linux32-${{ matrix.target }}
           cache-workspace-crates: true
           cache-on-failure: true
+      - name: Verify cross-compiled runtime survives Rust cache restoration
+        shell: bash
+        run: test -s "$PORTHUB_TERMINAL_BUNDLE"
       - name: Check agent for 32-bit Linux
         if: inputs.verify_only == true
         shell: bash

@@ -78,6 +78,10 @@ hosts need no separate tmux installation. Helper output shares the Docker target
 cache, so a Rust change can reuse the completed C build. Server binaries and
 runtime images have a separate workflow; client platform jobs do not rebuild
 the gateway.
+CI keeps helper builds in `.cache/terminal-helper`, outside Cargo's target tree,
+so Rust cache cleanup cannot remove them. Local helper builds keep their existing
+`target/terminal-helper` default; set the absolute
+`PORTHUB_TERMINAL_HELPER_CACHE_ROOT` to retain them independently of `cargo clean`.
 
 Start releases from the default branch so later versions can restore the same
 build caches. GitHub isolates caches written on one version tag from other tags;

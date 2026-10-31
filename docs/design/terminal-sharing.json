@@ -248,5 +248,10 @@
     "fix": "History captures now return an optional validated resolved pane ID. Browser history adopts it for subsequent Older/Newer requests; read-only SSH pins it until returning live and reopening history. Browser users can clear Pane and refresh to follow the active pane. Older host responses without the field remain accepted.",
     "evidence": "New browser regression fails before the change with an empty pane and passes afterward. Twenty-four core tests, six real bundled multiplexer tests and ordinary OpenSSH pass. Twelve Chromium/WebKit history layout cases and both combined real browser/API/edge/bundled-shell/OpenSSH flows pass, including an assertion that the actual browser received %0.",
     "limits": "This preserves pane identity between page requests; live output, eviction and resize can still shift row boundaries. Stable snapshots and pane/window discovery remain pending. Deploy the gateway before hosts that emit the new optional metadata field."
+  },
+  "terminal_helper_cache_isolation": {
+    "diagnosis": "Run 41233783102 produced an x86 helper bundle and then lost it before Rust embedding; upstream Swatinem/rust-cache v2 restore code cleans target directories on a partial cache match. Keeping helper source/output beneath Cargo target allowed that cleanup to remove bundles and leave empty source directories. ARMhf also saw a source-download network failure.",
+    "fix": "CI helper sources/output and their separate restore/save cache now live at .cache/terminal-helper, outside Cargo target, selected by absolute PORTHUB_TERMINAL_HELPER_CACHE_ROOT. Rust builds fail early if the helper bundle is absent after cache restore. Dedicated helper build log uploads include that hidden directory explicitly. Local/Docker target cache defaults stay unchanged.",
+    "validation": "Actionlint and the two real compiler/ELF helper-gate tests pass. Corrected 32-bit packaged jobs still need execution; no release is validated or deployed by these checks."
   }
 }

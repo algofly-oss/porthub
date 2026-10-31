@@ -6,6 +6,7 @@ volumes/
 .env*
 .DS_Store
 /target/
+/.cache/terminal-helper/
 /deploy/native/client-bin/*
 !/deploy/native/client-bin/.gitkeep
 /deploy/native/server-bin/

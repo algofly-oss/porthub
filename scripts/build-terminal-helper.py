@@ -42,7 +42,10 @@ def build(args):
     lock_path = ROOT / 'vendor/terminal/sources.json'
     lock = json.loads(lock_path.read_text())
     identity = hashlib.sha256(lock_path.read_bytes() + Path(__file__).read_bytes() + args.target.encode() + args.cc.encode()).hexdigest()[:20]
-    cache = ROOT / 'target/terminal-helper' / args.target / identity
+    cache_root = Path(os.environ.get('PORTHUB_TERMINAL_HELPER_CACHE_ROOT', ROOT / 'target/terminal-helper'))
+    if not cache_root.is_absolute():
+        raise ValueError('Terminal helper cache root must be absolute')
+    cache = cache_root / args.target / identity
     output = cache / 'bundle.tar.gz'
     if output.is_file():
         print(output)
