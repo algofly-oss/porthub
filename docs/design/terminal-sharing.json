@@ -329,5 +329,18 @@
     ],
     "test_adjustment": "Initial fixture incorrectly expected a visible-screen marker in empty scrollback; corrected to generate80 lines before capturing history. No product change was needed.",
     "production_export_e2e": "Chromium andWebKit full API/Mongo/bundledtmux/SSH flows passed;62 and83 concurrent fresh HTTPS checks respectively."
+  },
+  "history_snapshot_development": {
+    "status": "Host capture/cache engine implemented and locally tested; protocol, host attachment routing, browser and SSH pager integration remain incomplete. Production1.9.0 still uses live history slices.",
+    "capture": "Immutable in-memory bytes and line index; guarded metadata+capture in one synchronous tmux command queue; resolved workspace pane only;2-second capture deadline;64MiB maximum capture;128KiB maximum response. Visible screen is not retained scrollback.",
+    "cache": "128MiB default retained cache including line indexes;10-minute idle expiry renewed by valid paging; per-guest ownership; nonce-bound capture reservations fence transport generation, detach/re-attach and out-of-order refresh; quota failure keeps previous pages and does not evict another active reader. In-flight captures and tmux history have separate bounded costs.",
+    "tests": "39 terminal tests passed with SSH feature and actual bundled runtime:31 unit,7 multiplexer,1 stockOpenSSH. New real test proves stability across output, resize, eviction, clear-history and rejects another session.",
+    "next": [
+      "Negotiate snapshot support without sending unknown fields to older gateways or agents",
+      "Carry snapshot IDs through validated guest/host history messages and the per-attachment cache",
+      "Browser Older/Newer/Latest use the retained snapshot; explicit refresh captures new output; errors preserve the last page",
+      "Ordinary SSH read-only pager uses the same anchored pages and explicit refresh",
+      "Exercise new behavior in full production-export browser/API/SSH tests, package and deploy a new immutable version"
+    ]
   }
 }

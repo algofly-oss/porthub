@@ -492,3 +492,55 @@ async fn history_stays_on_resolved_pane_during_window_switches_and_rejects_other
     );
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires the verified bundled terminal runtime"]
+async fn frozen_history_survives_output_resize_eviction_and_clear() -> Result<()> {
+    use porthub_terminal::history::Snapshot;
+    let (_directory, workspace) = workspace()?;
+    let _cleanup = Cleanup(workspace.clone());
+    let mut options = start();
+    options.history_limit = 1000;
+    workspace.start(&options)?;
+    let empty = Snapshot::capture(&workspace, "").await?;
+    assert_eq!(empty.total(), 0, "visible screen is not retained history");
+    let generate = |command: &str| -> Result<()> {
+        let output = workspace.command().args(["send-keys", "-t", "%0", command, "Enter"]).output()?;
+        assert!(output.status.success());
+        Ok(())
+    };
+    generate("i=0; while [ $i -lt 220 ]; do printf 'seed-%04d\\n' \"$i\"; i=$((i+1)); done; printf 'SNAPSHOT%s\\n' 'SEEDDONE'")?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !workspace.capture("%0", 1500)?.contains("SNAPSHOTSEEDDONE") {
+        assert!(Instant::now() < deadline, "seed output did not finish");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let frozen = Snapshot::capture(&workspace, "").await?;
+    assert_eq!(frozen.pane(), "%0");
+    assert!(frozen.total() > 100);
+    let saved = frozen.page(0, 512)?.bytes;
+    let total = frozen.total();
+    let id = frozen.id().to_owned();
+    assert!(String::from_utf8_lossy(&saved).contains("seed-"));
+    assert!(workspace.command().args(["resize-window", "-t", "=workspace:0", "-x", "40", "-y", "12"]).status()?.success());
+    generate("i=0; while [ $i -lt 1500 ]; do printf 'later-%04d\\n' \"$i\"; i=$((i+1)); done; printf 'SNAPSHOT%s\\n' 'FLOODDONE'")?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !workspace.capture("%0", 1500)?.contains("SNAPSHOTFLOODDONE") {
+        assert!(Instant::now() < deadline, "later output did not finish");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let latest = Snapshot::capture(&workspace, "%0").await?;
+    assert!((900..=1000).contains(&latest.total()));
+    assert!(!String::from_utf8_lossy(&latest.page(0, 512)?.bytes).contains("seed-"));
+    assert_eq!(frozen.page(0, 512)?.bytes, saved);
+    assert_eq!(frozen.total(), total);
+    assert_eq!(frozen.clone().id(), id);
+    assert!(workspace.command().args(["clear-history", "-t", "%0"]).status()?.success());
+    assert_eq!(Snapshot::capture(&workspace, "%0").await?.total(), 0);
+    assert_eq!(frozen.page(0, 512)?.bytes, saved);
+    assert!(workspace.command().args(["new-session", "-d", "-s", "outside", "/bin/sh"]).status()?.success());
+    let pane = workspace.command().args(["list-panes", "-t", "outside:", "-F", "#{pane_id}"]).output()?;
+    let pane = String::from_utf8(pane.stdout)?;
+    assert!(Snapshot::capture(&workspace, pane.trim()).await.is_err(), "other sessions must remain inaccessible");
+    Ok(())
+}

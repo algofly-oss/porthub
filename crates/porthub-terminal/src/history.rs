@@ -1,5 +1,11 @@
 //! Read-only tmux capture. Never forwards guest keystrokes or executes a shell.
-//! Each request is a live, bounded slice; it does not alter anyone's copy mode.
+//! Legacy requests capture bounded live slices. Immutable host snapshots keep
+//! paging stable without changing anyone's copy mode.
+mod snapshot;
+mod snapshot_cache;
+pub use snapshot::Snapshot;
+pub use snapshot_cache::{CaptureReservation, SnapshotCache};
+
 use crate::{multiplexer::Workspace, protocol::*};
 use anyhow::{ensure, Result};
 use std::process::Stdio;
@@ -19,7 +25,7 @@ async fn capture(
         .stderr(Stdio::null())
         .kill_on_drop(true);
     let mut child = command.spawn()?;
-    let mut data = Vec::new();
+    let mut data = Vec::with_capacity(limit + 1);
     child
         .stdout
         .take()
