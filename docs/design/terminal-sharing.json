@@ -213,5 +213,11 @@
     "evidence": "Deterministic unit verifies 4000 individual keystrokes retain order, 64KiB overflow is rejected without partial enqueue, batch size is bounded and clearing works. Twenty core tests, six real bundled tmux tests and ordinary OpenSSH pass. Combined Chromium and WebKit flows pass six recovery cycles/eight attachments with concurrent shell output/history and role/identity preservation. Final Chromium and WebKit flows also assert the host retained one WebSocket for the entire run; both pass.",
     "limits": "This establishes the specific PTY queue fix and bounded mixed-pressure scenario; it does not retroactively prove the cause of an earlier intermittent WebKit timeout or replace sustained production monitoring."
   },
-  "continuous_delivery_contract": "User requested main-push or explicit release-tag automated CI/CD, with latest-only release/version-tag retention and explicit exceptions in PORTHUB_RETAIN_TAGS. Cross-run binary reuse is not being added; module/helper caches remain. Retention component is implemented and tested; automated version/build/deployment orchestration is active work tracked in docs/design/continuous-delivery.json."
+  "continuous_delivery_contract": "User requested main-push or explicit release-tag automated CI/CD, with latest-only release/version-tag retention and explicit exceptions in PORTHUB_RETAIN_TAGS. Cross-run binary reuse is not being added; module/helper caches remain. Retention component is implemented and tested; automated version/build/deployment orchestration is active work tracked in docs/design/continuous-delivery.json.",
+  "history_scheduling": {
+    "problem": "A continuously ready PTY output queue could indefinitely starve the separately bounded history queue because selection always preferred live output.",
+    "fix": "Retain live-output preference but service one waiting history chunk after at most eight live messages. No output or control frames are dropped.",
+    "evidence": "Deterministic queue regression fails before the fix and passes after it. Twenty-one core tests, six real bundled multiplexer tests, ordinary OpenSSH and the combined Chromium and WebKit browser/API/edge/bundled-shell history/recovery/admin flow pass.",
+    "remaining": "Stable history snapshot anchors remain pending; scheduling fairness does not prevent live output, eviction or resizing from shifting history rows."
+  }
 }

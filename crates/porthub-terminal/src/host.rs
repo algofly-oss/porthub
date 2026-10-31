@@ -17,6 +17,7 @@ pub struct Attachments {
     history_capacity: std::sync::Arc<tokio::sync::Semaphore>,
     pending_redraw: BTreeSet<u64>,
     redraw_capacity: std::sync::Arc<tokio::sync::Semaphore>,
+    live_burst: u8,
 }
 
 impl Attachments {
@@ -39,6 +40,7 @@ impl Attachments {
             history_capacity: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
             pending_redraw: BTreeSet::new(),
             redraw_capacity: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
+            live_burst: 0,
         })
     }
 
@@ -169,6 +171,15 @@ impl Attachments {
             // Reap completed background captures even during continuous PTY
             // output, so finished JoinSet entries cannot accumulate forever.
             while self.history_jobs.try_join_next().is_some() {}
+            // Prefer interactive output, but guarantee a waiting history chunk
+            // a turn after at most eight live messages. A permanently ready
+            // PTY must not starve an independent read-only history request.
+            if self.live_burst >= 8 {
+                if let Ok(output) = self.history_receive.try_recv() {
+                    self.live_burst = 0;
+                    break output;
+                }
+            }
             while let Some(client) = self.pending_redraw.first().copied() {
                 let Ok(permit) = self.redraw_capacity.clone().try_acquire_owned() else {
                     break;
@@ -196,8 +207,14 @@ impl Attachments {
 
             tokio::select! {
                 biased;
-                output=self.receive.recv()=>break output?,
-                output=self.history_receive.recv()=>break output?,
+                output=self.receive.recv()=>{
+                    self.live_burst=self.live_burst.saturating_add(1);
+                    break output?;
+                },
+                output=self.history_receive.recv()=>{
+                    self.live_burst=0;
+                    break output?;
+                },
                 _=self.history_jobs.join_next(), if !self.history_jobs.is_empty()=>{},
             }
         };
@@ -212,5 +229,52 @@ impl Attachments {
     }
     pub fn workspace(&self) -> &Workspace {
         &self.workspace
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn history_is_served_during_continuously_ready_live_output() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
+        let workspace = Workspace::open(
+            "/unused-runtime".into(),
+            "/unused-terminfo".into(),
+            directory.path().into(),
+        )?;
+        let mut attachments = Attachments::new(workspace, 1)?;
+        // Keep the live queue ready without OS scheduling or a running shell.
+        for _ in 0..128 {
+            attachments.send.try_send(HostOutput::Pong)?;
+        }
+        attachments.history_send.try_send(HostOutput::History {
+            client: 7,
+            page: HistoryChunk {
+                request: 19,
+                data: String::new(),
+                done: true,
+                total: 0,
+                before: 0,
+                lines: 0,
+                truncated: false,
+                error: None,
+            },
+        })?;
+        for _ in 0..8 {
+            assert!(matches!(attachments.next().await, Some(HostOutput::Pong)));
+        }
+        assert!(
+            matches!(
+                attachments.next().await,
+                Some(HostOutput::History { client: 7, .. })
+            ),
+            "history must not starve behind a busy live output queue"
+        );
+        assert!(matches!(attachments.next().await, Some(HostOutput::Pong)));
+        Ok(())
     }
 }
