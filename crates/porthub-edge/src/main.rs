@@ -119,7 +119,14 @@ async fn main() -> Result<()> {
         .iter()
         .flat_map(|bases| bases.split(','))
         .filter(|base| !base.trim().is_empty())
-        .filter_map(|base| url::Url::parse(&if base.contains("://") { base.trim().to_owned() } else { format!("http://{}", base.trim()) }).ok())
+        .filter_map(|base| {
+            url::Url::parse(&if base.contains("://") {
+                base.trim().to_owned()
+            } else {
+                format!("http://{}", base.trim())
+            })
+            .ok()
+        })
         .filter_map(|url| url.host_str().map(str::to_owned));
     let activity = Arc::new(porthub_runtime::web_activity::WebActivity::default());
     let activity_path = std::env::var_os("PORTHUB_WEB_ACTIVITY_LOG_PATH")
@@ -182,6 +189,23 @@ async fn main() -> Result<()> {
     let mut handles = Vec::new();
     let (control_stop, mut control_stopping) = tokio::sync::watch::channel(false);
     let mut control_lease = None;
+    if let Ok(address) = std::env::var("PORTHUB_TERMINAL_SSH_LISTEN") {
+        if !address.is_empty() {
+            let listener = tokio::net::TcpListener::bind(address.parse::<SocketAddr>()?).await?;
+            let socket = std::env::var_os("PORTHUB_TERMINAL_SSH_SOCKET")
+                .map(PathBuf::from)
+                .or_else(|| {
+                    std::env::var_os("PORTHUB_API_SOCKET")
+                        .map(|p| PathBuf::from(p).with_file_name("terminal-ssh.sock"))
+                })
+                .context("terminal SSH requires an API socket path")?;
+            serving.spawn(porthub_edge::terminal::run(
+                listener,
+                socket,
+                control_stopping.clone(),
+            ));
+        }
+    }
     if let Some(path) = args.control_socket.or_else(|| {
         std::env::var_os("PORTHUB_EDGE_SOCKET")
             .filter(|path| !path.is_empty())
@@ -237,10 +261,13 @@ async fn main() -> Result<()> {
         }
     }
     let (activity_stop, activity_stopping) = tokio::sync::watch::channel(false);
-    let health_path=activity_path.as_ref().map(|p|p.with_file_name("web-health.json"));
-    let health_routes=web.clone();
-    let health_stop=activity_stopping.clone();
-    let health_worker=tokio::spawn(async move {health_routes.run_health(health_path,health_stop).await});
+    let health_path = activity_path
+        .as_ref()
+        .map(|p| p.with_file_name("web-health.json"));
+    let health_routes = web.clone();
+    let health_stop = activity_stopping.clone();
+    let health_worker =
+        tokio::spawn(async move { health_routes.run_health(health_path, health_stop).await });
     let mut activity_worker = activity_path.map(|path| {
         tokio::spawn(async move {
             activity

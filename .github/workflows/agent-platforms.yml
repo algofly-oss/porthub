@@ -135,6 +135,23 @@ jobs:
           rustup target add "$musl_target"
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends musl-tools
+      - name: Install terminal build tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bison ncurses-bin
+      - name: Cache independent terminal runtime
+        if: runner.os != 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: target/terminal-helper
+          key: terminal-v1-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('vendor/terminal/sources.json', 'scripts/build-terminal-helper.py') }}
+      - name: Build or reuse bundled terminal runtime
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          terminal_bundle="$(python3 scripts/build-terminal-helper.py --target '${{ matrix.target }}')"
+          echo "PORTHUB_TERMINAL_BUNDLE=$terminal_bundle" >> "$GITHUB_ENV"
+          echo "PORTHUB_TEST_TERMINAL_BUNDLE=$terminal_bundle" >> "$GITHUB_ENV"
+          echo "PORTHUB_TEST_TERMINAL_TARGET=${{ matrix.target }}" >> "$GITHUB_ENV"
       - name: Cache compiled Rust dependencies and workspace libraries
         uses: Swatinem/rust-cache@v2
         with:
@@ -159,6 +176,10 @@ jobs:
       - name: Test transfers, management and tunnel adapters
         shell: bash
         run: python scripts/run-with-timeout.py 240 cargo test --locked -p porthub-agent -p porthub-transfer -p porthub-tunnel -p porthub-identity -p porthub-mesh -p porthub-network -p porthub-io --target ${{ matrix.target }}
+      - name: Test packaged terminal runtime and ordinary SSH participation
+        if: runner.os != 'Windows'
+        shell: bash
+        run: cargo test --locked -p porthub-terminal --features ssh --target ${{ matrix.target }} -- --include-ignored
       - name: Build self-contained agent
         if: inputs.verify_only != true && runner.os != 'Linux'
         shell: bash
@@ -189,6 +210,15 @@ jobs:
         env:
           PORTHUB_TEST_AGENT_EXECUTABLE: ${{ github.workspace }}/dist/porthub-${{ matrix.artifact }}${{ matrix.extension }}
         run: cargo test --locked -p porthub-agent --test http_management --target ${{ matrix.target }}
+      - name: Test packaged local terminal workspaces
+        if: inputs.verify_only != true && runner.os != 'Windows'
+        shell: bash
+        env:
+          PORTHUB_TEST_AGENT_EXECUTABLE: ${{ github.workspace }}/dist/porthub-${{ matrix.artifact }}${{ matrix.extension }}
+        run: |
+          cargo test --locked -p porthub-agent --test terminal_local --test terminal_share --target ${{ matrix.target }} -- --include-ignored
+          python3 scripts/test-stats-terminal.py "$PORTHUB_TEST_AGENT_EXECUTABLE"
+          python3 scripts/test-terminal-participants.py "$PORTHUB_TEST_AGENT_EXECUTABLE"
       - name: Test native macOS service lifecycle
         if: runner.os == 'macOS'
         shell: bash
@@ -246,8 +276,18 @@ jobs:
         shell: bash
         run: echo "PORTHUB_VERSION=$(sh scripts/release-version.sh)" >> "$GITHUB_ENV"
       - name: Install build-only cross compiler
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ${{ matrix.packages }}
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bison ncurses-bin ${{ matrix.packages }}
       - run: rustup target add ${{ matrix.target }}
+      - name: Cache independent cross-compiled terminal runtime
+        uses: actions/cache@v4
+        with:
+          path: target/terminal-helper
+          key: terminal-v1-linux32-${{ matrix.target }}-${{ hashFiles('vendor/terminal/sources.json', 'scripts/build-terminal-helper.py') }}
+      - name: Build or reuse cross-compiled terminal runtime
+        shell: bash
+        run: |
+          terminal_bundle="$(python3 scripts/build-terminal-helper.py --target '${{ matrix.target }}' --cc '${{ matrix.compiler }}' --ar '${{ matrix.ar }}')"
+          echo "PORTHUB_TERMINAL_BUNDLE=$terminal_bundle" >> "$GITHUB_ENV"
       - name: Cache compiled 32-bit Rust libraries
         uses: Swatinem/rust-cache@v2
         with:

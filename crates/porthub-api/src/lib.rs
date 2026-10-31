@@ -1,5 +1,6 @@
-pub mod account_delete;
 pub mod access_inventory;
+pub mod account_delete;
+pub mod application_proxy;
 pub mod artifacts;
 pub mod auth;
 pub mod bootstrap;
@@ -22,9 +23,8 @@ pub mod inventory_traffic;
 pub mod legacy_turn;
 mod legacy_upgrade;
 pub mod machine_delete;
-pub mod private_relay;
-pub mod application_proxy;
 mod peer_proxy;
+pub mod private_relay;
 pub mod private_transport;
 pub mod realtime;
 pub mod release_cache;
@@ -32,6 +32,8 @@ pub mod routes;
 pub mod static_ui;
 pub mod status_monitor;
 pub mod store;
+pub mod terminal;
+pub mod terminal_grants;
 pub mod web_activity;
 
 use axum::{
@@ -44,6 +46,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 pub struct App {
+    pub terminals: porthub_terminal::hub::Hub,
     pub inventory_traffic: inventory_traffic::Cache,
     pub account_lifecycle: tokio::sync::RwLock<()>,
     pub private_relay: private_relay::Hub,
@@ -91,6 +94,7 @@ impl App {
             )
         };
         Self {
+            terminals: Default::default(),
             inventory_traffic: Default::default(),
             private_enrollment_initialized: Default::default(),
             private_initialized: Default::default(),
@@ -101,8 +105,14 @@ impl App {
             legacy_turn: Default::default(),
             bootstrap_initialized: Default::default(),
             artifacts: match &config.client_release_repository {
-                Some(repository) => artifacts::Catalog::github(config.client_binary_dir.clone().expect("release cache path configured"), repository)
-                    .expect("validated release repository"),
+                Some(repository) => artifacts::Catalog::github(
+                    config
+                        .client_binary_dir
+                        .clone()
+                        .expect("release cache path configured"),
+                    repository,
+                )
+                .expect("validated release repository"),
                 None => artifacts::Catalog::new(config.client_binary_dir.clone()),
             },
             realtime: Default::default(),
@@ -135,7 +145,9 @@ impl App {
     pub fn collection(&self, name: &str) -> Collection<Document> {
         self.db.collection(name)
     }
-    pub fn client_version(&self) -> String { self.artifacts.version(&self.config.client_version) }
+    pub fn client_version(&self) -> String {
+        self.artifacts.version(&self.config.client_version)
+    }
     pub async fn notify_config(&self, id: &str) {
         self.config_signals.changed(id);
         if let Err(error) = self.realtime.config_changed(self, id).await {

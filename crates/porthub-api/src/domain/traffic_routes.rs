@@ -14,6 +14,8 @@ pub struct Input {
     pub data_id: Option<String>,
     pub name: String,
     pub group: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
     pub description: Option<String>,
     pub hosts: Vec<String>,
     pub target_mode: String,
@@ -87,6 +89,20 @@ pub fn parse(raw: Value) -> ApiResult<Input> {
         String::new()
     };
     model.string_length("group", &group, 0, Some(80));
+    let mut tags=Vec::new();
+    if let Some(raw)=model.field(&["tags"]) {
+        if let Some(values)=raw.as_array() {
+            if values.len()>20 {model.add("tags","At most 20 proxy tags are supported","value_error");}
+            for value in values {
+                let Some(value)=value.as_str() else {model.add("tags","Tags must be strings","type_error");continue;};
+                let value=value.trim().to_lowercase();
+                if value.is_empty() || value.chars().count()>40 || value.chars().any(char::is_control) {
+                    model.add("tags","Tags must contain 1–40 printable characters","value_error");
+                } else if !tags.contains(&value) {tags.push(value);}
+            }
+        } else {model.add("tags","Tags must be an array","type_error");}
+    }
+
     let description = if model.field(&["description"]).is_some() {
         model.optional_string("description")
     } else {
@@ -181,6 +197,7 @@ pub fn parse(raw: Value) -> ApiResult<Input> {
         data_id,
         name,
         group,
+        tags,
         description,
         hosts,
         target_mode,
@@ -214,7 +231,7 @@ pub fn serialize(route: &Document) -> Value {
     let entries = strings("entry_points", false);
     let mode = compat::strip(store::string(route, "target_mode"));
     json!({"_id":store::id(route.get("_id")),"user_id":store::id(route.get("user_id")),"name":compat::strip(store::string(route,"name")),
-        "group":compat::strip(store::string(route,"group")),"description":compat::strip(store::string(route,"description")),"hosts":strings("hosts",true),
+        "group":compat::strip(store::string(route,"group")),"tags":strings("tags",false),"inherited_groups":route.get("inherited_groups").map(store::json).unwrap_or(json!([])),"description":compat::strip(store::string(route,"description")),"hosts":strings("hosts",true),
         "target_mode":if mode.is_empty() {"manual"} else {mode},"target_url":compat::strip(store::string(route,"target_url")),
         "entry_points":if entries.is_empty() {vec!["web".to_owned()]} else {entries},"enabled":route.get_bool("enabled")!=Ok(false),
         "connection":route.get("connection").map(store::json).filter(compat::truthy).unwrap_or(Value::Null),

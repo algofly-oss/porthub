@@ -44,6 +44,7 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("all");
   const [group, setGroup] = useState("all");
+  const [tag,setTag]=useState("all"),[machineGroup,setMachineGroup]=useState("all");
   const [machine, setMachine] = useState("all");
   const [sort, setSort] = useState("name");
   const [groupBy, setGroupBy] = useState("none");
@@ -51,12 +52,22 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
   const [page, setPage] = useState(1);
   const [editing, setEditing] = useState(null);
   const [opened, setOpened] = useState(false);
-  function changeEditor(nextOpened) {
+  const ownsUrl = !compact || router.query.machine === machineId && router.query.port === connectionId;
+  function changeEditor(nextOpened, id = editing?._id || "new") {
     onEditorOpenChange?.(nextOpened);
     setOpened(nextOpened);
+    if(ownsUrl){const query={...router.query};if(nextOpened){query.proxy=id;query.proxyTab="address";}else{delete query.proxy;delete query.proxyTab;}router.push({pathname:router.pathname,query},undefined,{shallow:true,scroll:false});}
   }
+  const selectedProxyId=typeof router.query.proxy === "string" ? router.query.proxy : "";
+  useEffect(()=>{
+    if(!active || !ownsUrl)return;
+    if(!selectedProxyId){setOpened(false);return;}
+    if(selectedProxyId==="new"){setEditing(null);setOpened(true);return;}
+    if(/^[a-f0-9]{24}$/.test(selectedProxyId)){setEditing(current=>current?._id===selectedProxyId ? current : {_id:selectedProxyId});setOpened(true);}
+  },[active,ownsUrl,selectedProxyId]);
 
-  const inventory=useInventoryPage("proxies",{q:query,page,page_size:pageSize,status,group,machine:machineId || machine,connection:connectionId,sort},{enabled:active});
+
+  const inventory=useInventoryPage("proxies",{q:query,page,page_size:pageSize,status,group,tag,machine_group:machineGroup,machine:machineId || machine,connection:connectionId,sort},{enabled:active});
   useBackgroundRefresh(inventory.refresh,{enabled:active && isTrafficSort(sort),interval:5000,refreshKey:sort});
   useEffect(()=>{if(!inventory.loading && page>inventory.pagination.pages)setPage(inventory.pagination.pages);},[page,inventory.loading,inventory.pagination.pages]);
   function load(){inventory.refresh();}
@@ -74,8 +85,8 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
   useEffect(() => {
     if (!compact && typeof router.query.search === "string") setQuery(router.query.search);
   }, [router.query.search, compact]);
-  useEffect(() => { setPage(1); }, [query, status, group, machine, sort, groupBy, pageSize, machineId, connectionId]);
-  const hasFilters=Boolean(query.trim() || status!=="all" || group!=="all" || machine!=="all");
+  useEffect(() => { setPage(1); }, [query, status, group, tag, machineGroup, machine, sort, groupBy, pageSize, machineId, connectionId]);
+  const hasFilters=Boolean(query.trim() || status!=="all" || group!=="all" || tag!=="all" || machineGroup!=="all" || machine!=="all");
   const scoped=proxies;
   const groups=[...new Set(proxies.map(p=>p.group || "").filter(Boolean))].sort();
   const filtered=proxies;
@@ -119,7 +130,7 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
   function create() {
     const port = connections.find(c => c._id === connectionId && !c.temporary) || connections.find(c => c.machine_id === machineId && !c.temporary);
     setEditing(machineId ? {target_mode:"connection",connection:{data_id:connectionId || "",machine_id:machineId}} : null);
-    changeEditor(true);
+    changeEditor(true,"new");
   }
   async function save(payload) {
     setSaving(true);
@@ -143,17 +154,19 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
   const editableConnections = useMemo(() => connections.filter(connection => !connection.temporary && (!machineId || connection.machine_id === machineId)), [connections, machineId]);
   const editableMachines = useMemo(() => machineId ? machines.filter(machine => machine._id === machineId) : machines, [machines, machineId]);
   const createButton = <Button type="button" aria-label="Create proxy" onClick={create} disabled={loading}><IconPlus size={16} /><span className="md:hidden">Create</span><span className="hidden md:inline">Create proxy</span></Button>;
-  const edit = p => { if (p.temporary) return; setEditing(p); changeEditor(true); };
-  const reset = () => { setQuery(""); setStatus("all"); setGroup("all"); setMachine("all"); };
+  const edit = p => { if (p.temporary) return; setEditing(p); changeEditor(true,p._id); };
+  const reset = () => { setQuery(""); setStatus("all"); setGroup("all"); setTag("all"); setMachineGroup("all"); setMachine("all"); };
   return <div className={compact ? "flex min-h-0 max-h-[75dvh] flex-col gap-3" : "workspace-page"}>
     {compact ? <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="text-sm font-semibold">Linked web proxies</h3><p className="mt-1 text-xs text-muted-foreground">Create and edit addresses for this {connectionId ? "port" : "machine"} here.</p></div>{createButton}</div>
       : <PageHeader eyebrow="Routing" title="Public Web Proxies" description="Manage publicly reachable web addresses separately from private machine access." actions={<Button variant="ghost" size="icon" aria-label="Refresh proxies" onClick={load} disabled={loading}><IconRefresh size={17} /></Button>} />}
     {!compact ? <InventoryToolbar label="Proxy tools"
       search={<SearchField value={query} onChange={setQuery} label="Search proxies" placeholder="Search proxies…" />}
       status={<StatusTabs label="Proxy status" value={status} onChange={setStatus} options={[{value:"all",label:"All"},{value:"enabled",label:"Enabled"},{value:"disabled",label:"Disabled"}]} />}
-      filtered={group !== "all" || machine !== "all" || sort !== "name" || groupBy !== "none"}
+      filtered={tag !== "all" || machineGroup !== "all" || group !== "all" || machine !== "all" || sort !== "name" || groupBy !== "none"}
       filters={[
         {label:"Group",control:<InventorySelect kind="proxy-groups" label="Filter proxy group" value={group} onChange={setGroup} selected={group} extraOptions={[{value:"all",label:"All groups"},{value:"",label:"Ungrouped"}]} />},
+        {label:"Tag",control:<InventorySelect kind="proxy-tags" label="Filter proxy tag" value={tag} onChange={setTag} selected={tag} extraOptions={[{value:"all",label:"All tags"}]} />},
+        {label:"Machine group",advanced:true,control:<InventorySelect kind="groups" label="Filter inherited machine group" value={machineGroup} onChange={setMachineGroup} extraOptions={[{value:"all",label:"All machine groups"}]} />},
         {label:"Sort proxies",control:<SearchSelect label="Sort proxies" value={sort} onChange={setSort} options={[...INVENTORY_SORT_OPTIONS,{value:"updated",label:"Recently updated"},{value:"status",label:"Enabled first"}]} />},
         {label:"Machine",advanced:true,control:<InventorySelect kind="machines" label="Filter proxy machine" value={machine} onChange={setMachine} extraOptions={[{value:"all",label:"All machines"},{value:"manual",label:"Standalone URLs"}]} />},
         {label:"Group rows",advanced:true,control:<SearchSelect label="Group proxies by" value={groupBy} onChange={setGroupBy} options={[{value:"none",label:"No grouping"},{value:"group",label:"Group by project"},{value:"machine",label:"Group by machine"},{value:"domain",label:"Group by domain"}]} />},
@@ -171,16 +184,16 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
       : <div className="proxy-results overflow-hidden rounded-xl bg-surface"><div className="data-scroll">{[...sections].map(([label, entries]) => <section key={label}>
         {groupBy !== "none" && <h2 className="flex items-center gap-2 bg-muted px-4 py-2 text-xs font-semibold"><IconFolder size={14} />{label}<span className="ml-auto text-muted-foreground">{entries.length}</span></h2>}
         <div className="hidden md:block"><Table aria-label="Web proxies"><TableHeader><TableRow><TableHead className="w-[30%]">Hostname</TableHead><TableHead className="w-[25%]">Routing</TableHead><TableHead>Bindings</TableHead><TableHead className="hidden w-48 lg:table-cell"><span title="All traffic on the linked machine port; not individual HTTP requests">Linked port traffic</span></TableHead></TableRow></TableHeader><TableBody>{entries.map(p => <TableRow key={p._id} {...rowInteraction(p)} className={p.temporary ? "bg-amber-500/[0.04]" : "cursor-pointer focus-visible:bg-accent/40"}>
-          <TableCell>{host(p)}<div className="pl-4"><ProxyActivity group={p.group} metric={activityById.get(p._id)} activity={activity} /></div></TableCell>
+          <TableCell>{host(p)}<div className="pl-4"><ProxyActivity group={p.group} metric={activityById.get(p._id)} activity={activity} /><ProxyLabels proxy={p} /></div></TableCell>
           <TableCell><p className="truncate text-sm font-medium">{routingLabel(p.routing)}</p><p className="mt-1 text-xs text-muted-foreground">{(p.bindings_count ?? proxyBindings(p).length)} {(p.bindings_count ?? proxyBindings(p).length)===1 ? "binding" : "bindings"}{health.available && health.data?.[p._id] ? ` · ${health.data[p._id].healthy ?? 0} healthy` : ""}</p></TableCell>
           <TableCell><ProxyDestinations proxy={p} /></TableCell>
           <TableCell className="hidden lg:table-cell">{p.connection ? <TrafficSparkline samples={trafficById.get(p.connection.data_id || p.connection._id) || []} label="Linked port traffic" /> : <span className="text-xs text-muted-foreground">Standalone target</span>}</TableCell>
         </TableRow>)}</TableBody></Table></div>
-        <div className="md:hidden">{entries.map(p => <div className={`proxy-row-mobile ${p.temporary ? "" : "cursor-pointer"} focus-visible:bg-accent/40`} key={p._id} {...rowInteraction(p)}><div className="min-w-0 flex-1">{host(p)}<div className="pl-4"><ProxyActivity metric={activityById.get(p._id)} activity={activity} /></div><div className="mt-2 pl-4"><p className="mb-1 text-[11px] text-muted-foreground">{routingLabel(p.routing)} · {(p.bindings_count ?? proxyBindings(p).length)} {(p.bindings_count ?? proxyBindings(p).length)===1 ? "binding" : "bindings"}</p><ProxyDestinations proxy={p} /></div></div></div>)}</div>
+        <div className="md:hidden">{entries.map(p => <div className={`proxy-row-mobile ${p.temporary ? "" : "cursor-pointer"} focus-visible:bg-accent/40`} key={p._id} {...rowInteraction(p)}><div className="min-w-0 flex-1">{host(p)}<div className="pl-4"><ProxyActivity group={p.group} metric={activityById.get(p._id)} activity={activity} /><ProxyLabels proxy={p} /></div><div className="mt-2 pl-4"><p className="mb-1 text-[11px] text-muted-foreground">{routingLabel(p.routing)} · {(p.bindings_count ?? proxyBindings(p).length)} {(p.bindings_count ?? proxyBindings(p).length)===1 ? "binding" : "bindings"}</p><ProxyDestinations proxy={p} /></div></div></div>)}</div>
       </section>)}</div>
       <ResultsPagination count={inventory.pagination.total} noun="Proxies" page={currentPage} pages={totalPages} pageSize={pageSize} onPage={setPage} onPageSize={setPageSize} />
     </div>}
-    <ProxyConfigModal opened={opened} onClose={() => changeEditor(false)} onSubmit={save} onDelete={remove} proxy={editing} connections={connections.filter(c=>!c.temporary)} machines={machines} health={health} defaultDomainSuffix={settings.web_proxy_domain_suffix || ""} serviceDomain={settings.port_hub_service_domain || ""} isSaving={saving} isDeleting={deleting} />
+    <ProxyConfigModal urlState={ownsUrl} opened={opened} onClose={() => changeEditor(false)} onSubmit={save} onDelete={remove} proxy={editing} connections={connections.filter(c=>!c.temporary)} machines={machines} health={health} defaultDomainSuffix={settings.web_proxy_domain_suffix || ""} serviceDomain={settings.port_hub_service_domain || ""} isSaving={saving} isDeleting={deleting} />
   </div>;
 }
 
@@ -209,4 +222,9 @@ function ProxyHost({ proxy: p, connection, machine, onCopy, health }) {
 function ProxyDestinations({proxy}) {
   const bindings=proxyBindings(proxy);
   return <div className="min-w-0 space-y-1">{bindings.slice(0,2).map(b=><p key={b.id} className="truncate text-xs text-muted-foreground" title={bindingTitle(b)}>{bindingTitle(b)}</p>)}{(proxy.bindings_count ?? bindings.length)>2 && <p className="text-[11px] text-muted-foreground">+{(proxy.bindings_count ?? bindings.length)-2} more</p>}</div>;
+}
+
+function ProxyLabels({proxy}) {
+  if(!proxy.tags?.length && !proxy.inherited_groups?.length)return null;
+  return <div className="mt-1 flex flex-wrap gap-1">{proxy.tags?.map(tag=><span key={`tag:${tag}`} title={`Proxy tag: ${tag}`} className="max-w-40 truncate rounded bg-primary/10 px-1.5 py-0.5 text-[11px] text-primary">{tag}</span>)}{proxy.inherited_groups?.map(group=><span key={`group:${group._id}`} title={`Inherited machine group: ${group.name}`} className="flex max-w-40 items-center gap-1 rounded bg-control px-1.5 py-0.5 text-[11px] text-muted-foreground"><IconFolder size={11} className="shrink-0"/><span className="truncate">{group.name}</span></span>)}</div>;
 }

@@ -21,9 +21,11 @@ impl Monitor {
         Self { settings, task }
     }
     pub fn configure(&self, handles: HashMap<String, ServiceHealthHandle>) {
+        crate::stats::configure(handles.clone());
         self.settings.send_replace(handles);
     }
     pub fn clear(&self) {
+        crate::stats::configure(HashMap::new());
         self.settings.send_replace(HashMap::new());
     }
 }

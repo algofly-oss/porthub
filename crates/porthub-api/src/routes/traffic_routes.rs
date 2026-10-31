@@ -165,7 +165,7 @@ async fn document(app: &App, owner: &Bson, input: Input) -> ApiResult<Document> 
     )
     .await?;
     let now = DateTime::now();
-    let mut record = doc! {"_id":ObjectId::new(),"user_id":owner,"name":strip(&input.name),"group":strip(&input.group),
+    let mut record = doc! {"_id":ObjectId::new(),"user_id":owner,"name":strip(&input.name),"group":strip(&input.group),"tags":input.tags,
     "description":input.description.as_deref().map(strip).unwrap_or(""),"hosts":input.hosts,
     "target_mode":input.target_mode,"target_url":input.target_url.as_deref().map(strip).unwrap_or(""),
     "entry_points":input.entry_points,"enabled":input.enabled.unwrap_or(true),"connection":connection,"created_at":now,"updated_at":now};

@@ -15,6 +15,7 @@ mod routes;
 pub mod runtime;
 pub mod service;
 pub mod service_health;
+pub mod stats;
 pub mod update;
 mod unified;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -34,6 +35,11 @@ pub mod exposure_broker;
 pub mod http_tools;
 
 mod exposure_protocol;
+mod terminal_transport;
+#[cfg(unix)]
+pub mod terminal_runtime;
+#[cfg(unix)]
+pub mod terminal_cli;
 #[cfg(feature="local-tor")]
 mod proxy_transport;
 #[cfg(windows)]
@@ -45,3 +51,5 @@ mod detached_windows;
 
 #[cfg(feature="local-tor")]
 pub mod proxy_cli;
+
+mod terminal_ui;

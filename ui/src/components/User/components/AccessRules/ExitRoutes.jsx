@@ -107,7 +107,7 @@ export default function ExitRoutes({ data, manage, params, onSaved }) {
   const entityNames = selectors => selectors.map(item => names.get(`${item.kind}:${item.id}`) || "Unavailable selection").join(", ");
   const exitNames = route => [entityNames(route.routing_selectors), route.tor_enabled ? "Local Tor" : ""].filter(Boolean).join(", ");
   return (
-    <section className="rounded-xl bg-surface p-4">
+    <section className="flex min-h-0 flex-1 flex-col">
       <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-base font-semibold">Exit nodes</h2>
@@ -116,11 +116,11 @@ export default function ExitRoutes({ data, manage, params, onSaved }) {
         {manage && <Button onClick={() => open()} disabled={busy}><IconPlus size={16} />Exit node</Button>}
       </div>
       {error && !editing && !removing && <p role="alert" className="mb-3 text-sm text-red-500">{error}</p>}
-      <SearchField label="Search exit nodes" value={query} onChange={setQuery} placeholder="Find an exit node or peer…"/>
+      <div className="mb-3 shrink-0"><SearchField label="Search exit nodes" value={query} onChange={setQuery} placeholder="Find an exit node or peer…"/></div>
       {inventory.loading && <p role="status" className="py-3 text-sm text-muted-foreground">Loading exit nodes…</p>}
       {inventory.error && <p role="alert" className="py-3 text-sm text-red-600">{inventory.error}</p>}
       {!inventory.loading && !inventory.rows.length && <p className="py-5 text-center text-sm text-muted-foreground">No exit nodes configured.</p>}
-      <div className="space-y-2">
+      <div className="data-scroll space-y-2 rounded-xl bg-surface p-3">
         {inventory.rows.map(route => <article key={route._id} tabIndex={0} aria-label={`${manage ? "Edit" : "View"} exit node ${route.name}`}
           onClick={event => { if (!busy && !event.target.closest("button,input,label")) open(route); }}
           onKeyDown={event => { if (!busy && event.target === event.currentTarget && ["Enter", " "].includes(event.key)) { event.preventDefault(); open(route); } }}

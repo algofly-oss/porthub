@@ -3,6 +3,8 @@ mod config;
 mod config_watcher;
 mod constants;
 mod helper;
+mod telemetry;
+pub use telemetry::Traffic;
 mod multi_map;
 mod protocol;
 mod transport;

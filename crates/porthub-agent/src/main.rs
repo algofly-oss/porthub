@@ -223,6 +223,15 @@ enum Command {
         #[command(subcommand)]
         command: PathCommand,
     },
+    /// Live PortHub agent traffic, health and process resource statistics.
+    Stats(porthub_agent::stats::Options),
+    /// Start, reattach and manage persistent terminal workspaces.
+    #[cfg(unix)]
+    #[command(after_help = "Open or create a named workspace: porthub terminal NAME [--detach]\nOmit --detach to attach immediately. Local workspaces need no registration.")]
+    Terminal {
+        #[command(subcommand)]
+        command: Option<porthub_agent::terminal_cli::Command>,
+    },
     /// Start and manage authenticated application proxies.
     #[cfg(feature="local-tor")]
     Proxy {
@@ -1214,6 +1223,9 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Some(Command::Path { command }) => path_strategy(command),
+        Some(Command::Stats(options)) => porthub_agent::stats::run(options,cancel).await,
+        #[cfg(unix)]
+        Some(Command::Terminal { command }) => porthub_agent::terminal_cli::run(command.unwrap_or_default()).await,
         #[cfg(feature="local-tor")]
         Some(Command::Tor {command})=>tor_command(command),
         #[cfg(feature="local-tor")]

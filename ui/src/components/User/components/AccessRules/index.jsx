@@ -1,3 +1,4 @@
+import useUrlTab from "@/shared/hooks/useUrlTab";
 import useInventoryPage from "@/shared/hooks/useInventoryPage";
 import InventorySelect from "@/components/ui/inventory-select";
 import ResultsPagination from "@/components/ui/results-pagination";
@@ -37,8 +38,8 @@ export default function AccessRules({ active = true }) {
   const workspace=String(router.query.workspace || "");
   const [manualError,setError]=useState("");
   const [busy,setBusy]=useState(false);
-  const [section, setSection] = useState("rules"),
-    [query, setQuery] = useState(""),
+  const [section, setSection] = useUrlTab("tab",["policies","routes","groups","people","network"],"policies",{enabled:active});
+  const [query, setQuery] = useState(""),
     [group, setGroup] = useState("all");
   const [editor, setEditor] = useState(null),
     [confirmation, setConfirmation] = useState(null);
@@ -47,7 +48,7 @@ export default function AccessRules({ active = true }) {
   const params=useMemo(()=>({workspace}),[workspace]);
   const metadata=useInventoryPage("access-summary",params,{enabled:active});
   const manage=["owner","admin"].includes(metadata.data?.data?.role);
-  const books=useInventoryPage("access-books",{...params,q:query,group,page,page_size:25},{enabled:active && section==="rules"});
+  const books=useInventoryPage("access-books",{...params,q:query,group,page,page_size:25},{enabled:active && section==="policies"});
   const people=useInventoryPage("access-people",{...params,q:query,page:peoplePage,page_size:25},{enabled:active && section==="people"});
   const invitations=useInventoryPage("access-invitations",{...params,page:invitePage,page_size:25},{enabled:active && section==="people" && manage});
   useEffect(()=>{if(!books.loading && page>books.pagination.pages)setPage(books.pagination.pages);},[page,books.loading,books.pagination.pages]);
@@ -62,7 +63,7 @@ export default function AccessRules({ active = true }) {
   useEffect(()=>{setPage(1);setPeoplePage(1);},[query,group]);
   useEffect(()=>{if(!active){setEditor(null);setInvite(false);}},[active]);
   const data=metadata.data?.data && !metadata.error ? {...metadata.data.data,groups:[],machines:[],users:people.rows,books:books.rows,invitations:invitations.rows,exit_nodes:[]} : null;
-  const error=manualError || metadata.error || (section==="rules" ? books.error : section==="people" ? people.error || (manage ? invitations.error : "") : "");
+  const error=manualError || metadata.error || (section==="policies" ? books.error : section==="people" ? people.error || (manage ? invitations.error : "") : "");
   const names=new Map(Object.entries(books.data?.labels || {}));
   const filtered=books.rows;
   async function mutate(action, success) {
@@ -121,7 +122,7 @@ export default function AccessRules({ active = true }) {
         className="mb-3 flex shrink-0 gap-1 overflow-x-auto rounded-lg bg-surface p-1 sm:self-start"
       >
         {[
-          ["rules", "Policies", IconShieldLock],
+          ["policies", "Policies", IconShieldLock],
           ["routes", "Routes", IconRoute],
           ["groups", "Groups", IconFolder],
           ["people", "People", IconUsers],
@@ -161,7 +162,7 @@ export default function AccessRules({ active = true }) {
         )
       ) : (
         <>
-          {section === "rules" && (
+          {section === "policies" && (
             <>
               <div className="mb-3 grid shrink-0 grid-cols-[minmax(0,1fr)_auto] gap-2 sm:flex sm:items-center">
                 <div className="min-w-0 sm:flex-1">
@@ -248,10 +249,10 @@ export default function AccessRules({ active = true }) {
             />
           )}
           {section === "routes" && (
-            <div><ExitRoutes data={data} manage={manage} params={params} onSaved={load} /><ProxyGrants data={data} manage={manage} params={params} /></div>
+            <div className="flex min-h-0 flex-1 flex-col"><ExitRoutes data={data} manage={manage} params={params} onSaved={load} /><ProxyGrants data={data} manage={manage} params={params} /></div>
           )}
           {section === "people" && (
-            <section className="data-scroll overflow-auto rounded-xl bg-surface p-4">
+            <section className="flex min-h-0 flex-1 flex-col">
               <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h2 className="text-base font-semibold">Workspace People</h2>
@@ -267,7 +268,8 @@ export default function AccessRules({ active = true }) {
                   </Button>
                 )}
               </div>
-              <SearchField label="Search workspace people" value={query} onChange={setQuery} placeholder="Find a person…"/>
+              <div className="mb-3 shrink-0"><SearchField label="Search workspace people" value={query} onChange={setQuery} placeholder="Find a person…"/></div>
+              <div className="data-scroll rounded-xl bg-surface px-4">
               {people.loading && <p role="status" className="py-3 text-sm text-muted-foreground">Loading people…</p>}
               {data.users.map((person) => (
                 <div
@@ -308,9 +310,12 @@ export default function AccessRules({ active = true }) {
                     )}
                 </div>
               ))}
-              <ResultsPagination count={people.pagination.total} noun="People" page={peoplePage} pages={people.pagination.pages} pageSize={25} onPage={setPeoplePage}/>
+              {!people.loading && !data.users.length && <EmptyState icon={IconUsers} title="No matching people" description="Try another name or email address." />}
+              </div>
+              {manage && invitations.pagination.total > 0 && <section className="mt-3 shrink-0 rounded-xl bg-surface">
+              <div className="max-h-[24dvh] overflow-auto px-4">
               {data.invitations.length > 0 && (
-                <h3 className="mb-1 mt-6 text-sm font-semibold">
+                <h3 className="mb-1 mt-3 text-sm font-semibold">
                   Pending Invitations
                 </h3>
               )}
@@ -341,7 +346,10 @@ export default function AccessRules({ active = true }) {
                   </Button>
                 </div>
               ))}
+              </div>
               {manage && <ResultsPagination count={invitations.pagination.total} noun="Invitations" page={invitePage} pages={invitations.pagination.pages} pageSize={25} onPage={setInvitePage}/>}
+              </section>}
+              <ResultsPagination count={people.pagination.total} noun="People" page={peoplePage} pages={people.pagination.pages} pageSize={25} onPage={setPeoplePage}/>
             </section>
           )}
           {section === "network" && (

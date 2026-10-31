@@ -4,13 +4,12 @@ pub mod admin;
 pub mod admin_users;
 pub mod artifacts;
 pub mod bootstrap;
-pub mod connection_firewall;
 pub mod connection_access;
+pub mod connection_firewall;
 pub mod connections;
 pub mod dns_rules;
-pub mod exposes;
 pub mod exit_nodes;
-pub mod proxy_grants;
+pub mod exposes;
 pub mod gateway;
 pub mod groups;
 pub mod machine_client;
@@ -23,6 +22,7 @@ pub mod private_books;
 pub mod private_enrollment;
 pub mod private_groups;
 pub mod private_sync;
+pub mod proxy_grants;
 pub mod telegram;
 pub mod traffic_routes;
 
@@ -33,6 +33,7 @@ use std::sync::Arc;
 pub fn router() -> Router<Arc<App>> {
     Router::new()
         .merge(telegram::router())
+        .merge(crate::terminal::router())
         .merge(connections::router())
         .merge(exposes::router())
         .merge(exit_nodes::router())

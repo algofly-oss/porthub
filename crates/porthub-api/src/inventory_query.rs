@@ -31,6 +31,8 @@ pub struct Params {
     pub sort: String,
     pub status: String,
     pub group: String,
+    pub tag: String,
+    pub machine_group: String,
     pub machine: String,
     pub connection: String,
     pub role: String,
@@ -59,6 +61,8 @@ impl Default for Params {
             sort: "name".into(),
             status: "all".into(),
             group: "all".into(),
+            tag: "all".into(),
+            machine_group: "all".into(),
             machine: "all".into(),
             connection: String::new(),
             role: "all".into(),
@@ -160,6 +164,7 @@ impl Params {
                 "Traffic window must be 1–300 seconds",
             ));
         }
+        if self.tag.chars().count()>40 || self.machine_group.len()>24 {return Err(ApiError::bad_request("Invalid proxy tag or machine group"));}
         if self.q.chars().count() > 256 || self.q.split_whitespace().count() > 6 {
             return Err(ApiError::bad_request(
                 "Search supports up to six words and 256 characters total",
@@ -295,7 +300,7 @@ fn base(kind: &str, owner: Bson, p: &Params, app: &App) -> ApiResult<(String, Ve
         "connections" => "connections",
         "proxies" => "traffic_routes",
         "groups" => "machine_groups",
-        "proxy-groups" => "traffic_routes",
+        "proxy-groups" | "proxy-tags" => "traffic_routes",
         _ => return Err(ApiError::bad_request("Unknown inventory kind")),
     };
     let mut filter = if kind == "accounts" {
@@ -368,6 +373,7 @@ fn base(kind: &str, owner: Bson, p: &Params, app: &App) -> ApiResult<(String, Ve
         filter.insert("machine_id", user_id(&p.machine, "Invalid machine")?);
     }
     if kind == "proxies" {
+        if p.tag != "all" {filter.insert("tags",&p.tag);}
         if p.group != "all" {
             if p.group.is_empty() {
                 filter = doc! {"$and":[filter,{"$or":[{"group":""},{"group":Bson::Null}]}]};
@@ -412,6 +418,16 @@ fn base(kind: &str, owner: Bson, p: &Params, app: &App) -> ApiResult<(String, Ve
             pipeline.push(doc! {"$set":{"machine_count":{"$ifNull":[{"$arrayElemAt":["$_account_counts.total",0]},0]}}});
         }
     }
+    if kind == "proxy-tags" {
+        pipeline.push(doc!{"$unwind":"$tags"});
+        pipeline.push(doc!{"$group":{"_id":"$tags","count":{"$sum":1}}});
+        pipeline.push(doc!{"$set":{"name":"$_id"}});
+    }
+    if kind == "proxies" && p.machine_group != "all" {
+        user_id(&p.machine_group,"Invalid machine group")?;
+        pipeline.extend(proxy_inherited_groups(owner.clone()));
+        pipeline.push(doc!{"$match":{"inherited_groups._id":ObjectId::parse_str(&p.machine_group).unwrap()}});
+    }
     if kind == "proxy-groups" {
         pipeline.push(doc! {"$group":{"_id":{"$ifNull":["$group",""]},"count":{"$sum":1}}});
         pipeline.push(doc! {"$set":{"name":"$_id"}});
@@ -429,7 +445,7 @@ fn base(kind: &str, owner: Bson, p: &Params, app: &App) -> ApiResult<(String, Ve
    "accounts"=>doc!{"$concatArrays":[fields(&["name","email","username"]),list_fields("_account_machines",&["name","hostname","local_ip","public_ip"]),list_fields("_account_ports",&["service_name","external_port"])]}.into(),
    "machines"=>doc!{"$concatArrays":[fields(&["name","hostname","hostname_override","client_hostname","local_ip","public_ip"]),{"$ifNull":["$aliases",[]]},list_fields("_ports",&["service_name","service_description","internal_port","external_port","internal_ip"]),list_fields("_peers",&["ip","hostname"])]}.into(),
    "connections"=>doc!{"$concatArrays":[fields(&["service_name","service_description","internal_ip","internal_port","external_port"]),list_fields("_machines",&["name","hostname","hostname_override","client_hostname"])]}.into(),
-   "proxies"=>doc!{"$concatArrays":[fields(&["name","description","group","target_url","connection.machine_name","connection.service_name","connection.internal_port","connection.external_port"]),{"$ifNull":["$hosts",[]]},list_fields("bindings",&["label","target_url","connection.machine_name","connection.service_name","connection.internal_port","connection.external_port"])]}.into(),
+   "proxies"=>doc!{"$concatArrays":[fields(&["name","description","group","target_url","connection.machine_name","connection.service_name","connection.internal_port","connection.external_port"]),{"$ifNull":["$hosts",[]]},{"$ifNull":["$tags",[]]},list_fields("bindings",&["label","target_url","connection.machine_name","connection.service_name","connection.internal_port","connection.external_port"])]}.into(),
    _=>fields(&["name"]),
   };
         pipeline.push(doc! {"$set":{"_search_fields":search}});
@@ -437,6 +453,18 @@ fn base(kind: &str, owner: Bson, p: &Params, app: &App) -> ApiResult<(String, Ve
     }
     Ok((collection.into(), pipeline))
 }
+fn proxy_inherited_groups(owner:Bson)->Vec<Document> {
+    // Resolve only bound IDs through indexed lookups. Normal list pages hydrate
+    // after pagination; a group filter resolves before counting/pagination.
+    vec![
+        doc!{"$set":{"_bound_machine_ids":{"$map":{"input":{"$setUnion":[[{"$ifNull":["$connection.machine_id",""]}],{"$map":{"input":{"$ifNull":["$bindings",[]]},"as":"binding","in":{"$ifNull":["$$binding.connection.machine_id",""]}}}]},"as":"machine","in":{"$convert":{"input":"$$machine","to":"objectId","onError":Bson::Null,"onNull":Bson::Null}}}}}},
+        doc!{"$lookup":{"from":"machines","localField":"_bound_machine_ids","foreignField":"_id","pipeline":[{"$match":{"user_id":&owner,"deletion_pending":{"$ne":true}}},{"$project":{"group_ids":1,"group_id":1}}],"as":"_bound_machines"}},
+        doc!{"$set":{"_inherited_group_ids":{"$reduce":{"input":"$_bound_machines","initialValue":[],"in":{"$setUnion":["$$value",{"$map":{"input":{"$concatArrays":[{"$ifNull":["$$this.group_ids",[]]},[{"$ifNull":["$$this.group_id",Bson::Null]}]]},"as":"group","in":{"$convert":{"input":"$$group","to":"objectId","onError":Bson::Null,"onNull":Bson::Null}}}}]}}}}},
+        doc!{"$lookup":{"from":"machine_groups","localField":"_inherited_group_ids","foreignField":"_id","pipeline":[{"$match":{"user_id":&owner}},{"$project":{"name":1}},{"$sort":{"name":1,"_id":1}}],"as":"inherited_groups"}},
+        doc!{"$unset":["_bound_machines","_bound_machine_ids","_inherited_group_ids"]},
+    ]
+}
+
 fn quote(c: char) -> String {
     if ".^$*+?()[]{}|\\".contains(c) {
         format!("\\{c}")
@@ -683,6 +711,7 @@ async fn page(
         data.push(peers(owner.clone()));
     }
     if kind == "proxies" {
+        if params.machine_group == "all" {data.extend(proxy_inherited_groups(owner.clone()));}
         data.push(doc! {"$set":{"bindings_count":{"$cond":[{"$isArray":"$bindings"},{"$size":"$bindings"},1]}}});
         if !params.detail {
             data.push(doc! {"$set":{"bindings":{"$cond":[{"$isArray":"$bindings"},{"$slice":["$bindings",2]},Bson::Null]}}});

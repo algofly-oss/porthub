@@ -120,7 +120,7 @@ export default function UserHome() {
         <div hidden={tab !== "Access"} aria-hidden={tab !== "Access"} className="h-full min-h-0"><AccessRules active={tab === "Access"} /></div>
         <div hidden={tab !== "Proxy"} aria-hidden={tab !== "Proxy"} className="h-full min-h-0"><Proxy active={tab === "Proxy"} /></div>
         <div hidden={tab !== "Traffic"} aria-hidden={tab !== "Traffic"} className="h-full min-h-0"><Traffic active={tab === "Traffic"} /></div>
-        <div hidden={tab !== "Settings"} aria-hidden={tab !== "Settings"} className="h-full min-h-0"><Settings /></div>
+        <div hidden={tab !== "Settings"} aria-hidden={tab !== "Settings"} className="h-full min-h-0"><Settings active={tab === "Settings"} /></div>
         {isAdmin && <div hidden={tab !== "Platform"} aria-hidden={tab !== "Platform"} className="h-full min-h-0"><PlatformOverview active={tab === "Platform"} /></div>}
         </motion.div>
         </main>

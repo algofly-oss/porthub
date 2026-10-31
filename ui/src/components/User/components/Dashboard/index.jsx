@@ -1,16 +1,12 @@
 import useInventoryPage from "@/shared/hooks/useInventoryPage";
 import useTrafficPage from "@/shared/hooks/useTrafficPage";
-import useBackgroundRefresh from "@/shared/hooks/useBackgroundRefresh";
 import { externalEndpoint, internalEndpoint } from "@/shared/utils/endpoints.mjs";
 import { useWorkspaceState } from "@/shared/contexts/workspaceCache";
 import { useMemo, useState } from "react";
 import { useRouter } from "next/router";
-import axios from "axios";
 import { IconArrowUpRight, IconCheck, IconRefresh, IconServer, IconWorld, IconAlertCircle, IconPlus } from "@tabler/icons-react";
 import { useMantineColorScheme } from "@mantine/core";
-import apiRoutes from "@/shared/routes/apiRoutes";
-import useTrafficSnapshot from "@/shared/hooks/useTrafficSnapshot";
-import { aggregateTraffic, trafficSummary, formatBytes } from "@/shared/utils/traffic.mjs";
+import { trafficSummary, formatBytes } from "@/shared/utils/traffic.mjs";
 import TrafficMonitorPanel from "../Home/components/Host/TrafficMonitorPanel";
 import TrafficSparkline from "@/components/ui/traffic-sparkline";
 import { Button } from "@/components/ui/button";
@@ -36,15 +32,17 @@ export default function Dashboard({ active = true }) {
   const router = useRouter();
   const { colorScheme } = useMantineColorScheme();
   const [counts] = useWorkspaceState("inventory.summary", null);
-  const seconds = 300;
-  const traffic = useTrafficPage({sort:"traffic",page_size:5,seconds}, {enabled:active});
+  const [seconds, setSeconds] = useState(300);
+  const [refresh, setRefresh] = useState(0);
+  const rangeLabel = seconds === 3600 ? "hour" : `${seconds / 60} minutes`;
+  const traffic = useTrafficPage({sort:"traffic",page_size:5,seconds}, {enabled:active,refresh});
   const activity = useProxyActivity({ recent: 5, enabled: active });
   const data = { proxies: activity.routes };
   const loading = !counts || activity.loading;
   const error = activity.error;
   const activityById = useMemo(()=>new Map(activity.data.map(metric=>[metric.route_id,metric])),[activity.data]);
   const summaryResource = useInventoryPage("summary", {}, {enabled:active,ttl:15000});
-  const load = () => { summaryResource.resource.invalidate("proxy-activity"); summaryResource.refresh(); };
+  const load = () => { summaryResource.resource.invalidate("proxy-activity"); summaryResource.refresh(); setRefresh(value => value + 1); };
   const navigate = (view, query = {}) => router.push({ pathname: "/home", query: { ...(router.query.demo ? { demo: router.query.demo } : {}), view, ...query } }, undefined, { shallow: true });
   const online = counts?.machines?.online || 0;
   const attention = (counts?.machines?.offline || 0) + (counts?.machines?.auth_required || 0);
@@ -57,15 +55,21 @@ export default function Dashboard({ active = true }) {
   const peak = Math.max(1, ...busiest.map(row => row.summary.volume));
   const ratio = machineTotal ? online / machineTotal : 0;
   const recentlyVisited = useMemo(() => data.proxies.filter(proxy=>activityById.get(proxy._id)?.last_requested_at).sort((a,b) => Date.parse(activityById.get(b._id).last_requested_at)-Date.parse(activityById.get(a._id).last_requested_at)).slice(0,5),[data.proxies,activityById]);
-  return <div className="h-full min-h-0 overflow-y-auto overscroll-contain" aria-label="Dashboard content"><div className="workspace-page !h-auto !min-h-full !overflow-visible">
-    <PageHeader title="Dashboard" actions={<div className="flex items-center gap-2"><span className="hidden items-center gap-1.5 text-xs text-muted-foreground sm:flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />Live workspace</span><Button variant="ghost" size="icon" aria-label="Refresh dashboard" onClick={()=>load()}><IconRefresh size={17} /></Button></div>} />
+  return <div className="h-full min-h-0 overflow-y-auto overscroll-contain" aria-label="Dashboard content"><div className="workspace-page mx-auto max-w-[1600px] !h-auto !min-h-full !overflow-visible">
+    <PageHeader title="Dashboard" actions={<div className="flex items-center gap-2"><span className="hidden items-center gap-1.5 text-xs text-muted-foreground sm:flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />{traffic.error ? "Traffic unavailable" : traffic.updated ? "Live workspace" : "Connecting…"}</span><Button variant="ghost" size="icon" aria-label="Refresh dashboard" onClick={()=>load()}><IconRefresh size={17} /></Button></div>} />
     {error && <p role="alert" className="mb-3 rounded-lg bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">{error}</p>}
     {loading ? <DashboardSkeleton /> : !machineTotal && !counts?.proxies ? <EmptyState icon={IconServer} title="Your workspace starts here" description="Enroll a machine to expose its ports, or create a standalone web proxy." action={<div className="flex flex-wrap justify-center gap-2"><Button onClick={()=>navigate("machines", {create:"1"})}><IconPlus size={16} />Enroll a Machine</Button><Button variant="secondary" onClick={()=>navigate("proxies", {create:"1"})}>Create a Proxy</Button></div>} /> : <div className="space-y-4 pb-1">
+      <div aria-label="Workspace overview" className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <OverviewCard label="Registered machines" value={machineTotal} detail={`${online} online · ${disabled} disabled`} onClick={()=>navigate("machines")} />
+        <OverviewCard label="Needs attention" value={attention} detail={attention ? "Review connectivity and authentication" : "All enabled clients connected"} onClick={()=>navigate("machines",{status:"offline"})} tone={attention ? "text-amber-600 dark:text-amber-400" : "text-emerald-600 dark:text-emerald-400"} />
+        <OverviewCard label="Web proxies" value={counts?.proxies ?? 0} detail="Manage addresses and fallback routes" onClick={()=>navigate("proxies")} />
+        <OverviewCard label="Public port transfer" value={traffic.updated ? formatBytes(summary.volume) : "—"} detail={`Last ${rangeLabel} · gateway only`} onClick={()=>navigate("traffic")} />
+      </div>
       <div className="grid items-stretch gap-4 lg:grid-cols-[minmax(0,1.8fr)_minmax(290px,1fr)]">
         <section className="flex min-w-0 flex-col overflow-hidden rounded-xl bg-surface">
-          <div className="px-5 pt-5"><h2 className="text-base font-semibold">Network Activity</h2><p className="mt-1 text-xs text-muted-foreground">Last 5 minutes · all forwarded ports · bytes per second</p></div>
+          <div className="flex flex-wrap items-start justify-between gap-3 px-5 pt-5"><div><h2 className="text-base font-semibold">Public port traffic</h2><p className="mt-1 text-xs text-muted-foreground">Gateway public ports · bytes per second</p></div><div role="group" aria-label="Traffic time range" className="flex gap-1 rounded-lg bg-muted/60 p-1">{[[300,"5m"],[900,"15m"],[3600,"1h"]].map(([value,label])=><button key={value} type="button" aria-pressed={seconds===value} onClick={()=>setSeconds(value)} className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${seconds===value ? "bg-surface text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}>{label}</button>)}</div></div>
           <div className="grid grid-cols-3 gap-3 px-5 py-4"><Metric label="Incoming Speed" value={formatBytes(summary.incoming)} suffix="/s" color="text-emerald-700 dark:text-emerald-400" /><Metric label="Outgoing Speed" value={formatBytes(summary.outgoing)} suffix="/s" color="text-blue-600 dark:text-blue-400" /><Metric label="Transferred" value={formatBytes(summary.volume)} /></div>
-          <TrafficMonitorPanel isDark={colorScheme === "dark"} samples={samples} isLoading={traffic.loading} title="Network Activity" showTitle={false} plotHeight={160} className="!px-5 !pt-0" windowSeconds={Number(seconds)} />
+          <TrafficMonitorPanel isDark={colorScheme === "dark"} samples={samples} isLoading={traffic.loading} title="Public port traffic" showTitle={false} plotHeight={160} className="!px-5 !pt-0" windowSeconds={Number(seconds)} />
           {traffic.error && <p role="status" className="px-5 pb-3 text-xs text-amber-600">{traffic.error}</p>}
           <button onClick={()=>navigate("traffic")} className="mt-auto flex w-full items-center justify-between border-t border-border px-5 py-3 text-xs text-muted-foreground hover:bg-muted hover:text-foreground">Inspect ports and source addresses<IconArrowUpRight size={15} /></button>
         </section>
@@ -77,7 +81,7 @@ export default function Dashboard({ active = true }) {
         </section>
       </div>
       <div className="grid items-stretch gap-4 lg:grid-cols-[minmax(0,1.8fr)_minmax(290px,1fr)]">
-        <section className="min-w-0 overflow-hidden rounded-xl bg-surface"><PanelHeading title="Busiest Ports" description="Transferred in the last 5 minutes" onClick={()=>navigate("traffic")} />
+        <section className="min-w-0 overflow-hidden rounded-xl bg-surface"><PanelHeading title="Busiest Ports" description={`Transferred in the last ${rangeLabel}`} onClick={()=>navigate("traffic")} />
           <div className="grid grid-cols-[minmax(0,1fr)_100px_80px] gap-3 bg-muted/40 px-5 py-2 text-[11px] text-muted-foreground"><span>Service / machine</span><span>Activity</span><span className="text-right">Transferred</span></div>
           <div>{busiest.length ? busiest.map(row=><button key={row.connection._id} onClick={()=>navigate("machines",{machine:row.connection.machine_id})} className="grid w-full grid-cols-[minmax(0,1fr)_100px_80px] items-center gap-3 px-5 py-3 text-left hover:bg-muted/50"><div className="min-w-0"><p className="truncate text-sm font-medium">{row.connection.service_name || `Port ${row.connection.external_port}`}</p><p className="mt-1 truncate text-xs text-muted-foreground">{row.connection.machine_name} · {externalEndpoint(row.connection)} → {internalEndpoint(row.connection)}</p></div><div><TrafficSparkline samples={row.traffic} showRates={true} label={row.connection.service_name} /><div className="mt-1 h-0.5 rounded-full bg-muted"><div className="h-full rounded-full bg-primary/50" style={{width:`${row.summary.volume / peak * 100}%`}} /></div></div><p className="text-right text-xs font-medium tabular-nums">{formatBytes(row.summary.volume)}</p></button>) : <p className="p-5 text-sm text-muted-foreground">Traffic appears when a forwarded port is used.</p>}</div>
         </section>
@@ -104,4 +108,12 @@ function Metric({label,value,suffix,color=""}) {
 
 function PanelHeading({ title, description, onClick }) {
   return <div className="flex items-start justify-between gap-3 px-5 pb-3 pt-5"><div><h2 className="text-base font-semibold">{title}</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p></div><Button variant="ghost" size="icon" aria-label={`Open ${title}`} onClick={onClick}><IconArrowUpRight size={18} /></Button></div>;
+}
+
+function OverviewCard({ label, value, detail, onClick, tone = "" }) {
+  return <button type="button" onClick={onClick} className="group flex min-w-0 flex-col rounded-xl bg-surface p-4 text-left transition-colors hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary sm:p-5">
+    <span className="flex w-full items-start justify-between gap-2 text-xs text-muted-foreground"><span>{label}</span><IconArrowUpRight aria-hidden="true" size={14} className="shrink-0 opacity-50 group-hover:opacity-100" /></span>
+    <span className={`my-2 text-2xl font-semibold tracking-tight tabular-nums ${tone}`}>{value}</span>
+    <span className="text-xs leading-5 text-muted-foreground">{detail}</span>
+  </button>;
 }

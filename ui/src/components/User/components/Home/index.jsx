@@ -273,9 +273,9 @@ export default function Home({ onStatsChange, active = true }) {
   const { success, error } = useToast();
   useCreateFromUrl("machines", () => setIsCreateModalOpen(true), active);
   useEffect(() => {
-    if (router.query.machine) setSelectedHostId(String(router.query.machine));
+    if (active && router.isReady) setSelectedHostId(typeof router.query.machine === "string" ? router.query.machine : null);
     if (["online", "offline", "disabled"].includes(router.query.status)) setStatusFilter(String(router.query.status));
-  }, [router.query.machine, router.query.status]);
+  }, [router.query.machine, router.query.status, router.isReady, active]);
 
   const inventory = useInventoryPage("machines", {
     q: query, page, page_size: Number(pageSize), sort,
@@ -430,9 +430,9 @@ export default function Home({ onStatsChange, active = true }) {
       ? `${first.host}.${first.suffix}`
       : defaultPrivateDomain(host);
   };
-  const handleOpenConfig = (hostId) => { setConfigStartSection("groups"); setSelectedHostId(hostId); };
+  const handleOpenConfig = (hostId) => { setConfigStartSection("groups"); setSelectedHostId(hostId); router.push({pathname:router.pathname,query:{...router.query,machine:hostId,machineTab:"groups"}},undefined,{shallow:true,scroll:false}); };
 
-  const handleCloseConfig = () => { setSelectedHostId(null); setConfigStartSection("groups"); };
+  const handleCloseConfig = () => { setSelectedHostId(null); setConfigStartSection("groups"); const query={...router.query};for(const key of ["machine","machineTab","port","portTab","proxy","proxyTab"])delete query[key];router.push({pathname:router.pathname,query},undefined,{shallow:true,scroll:false}); };
 
   const handleCreateMachine = async (machine) => {
     setIsCreatingMachine(true);
@@ -451,6 +451,7 @@ export default function Home({ onStatsChange, active = true }) {
       setHosts((currentHosts) => [...currentHosts, createdHost]);
       setConfigStartSection("credentials");
       setSelectedHostId(createdHost.id);
+      router.push({pathname:router.pathname,query:{...router.query,machine:createdHost.id,machineTab:"credentials"}},undefined,{shallow:true,scroll:false});
       setIsCreateModalOpen(false);
       success(`Machine ${createdHost.name} created`);
       return true;

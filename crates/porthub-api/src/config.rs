@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 
 #[derive(Clone)]
 pub struct Config {
+    pub terminal: crate::terminal::Settings,
     pub private_transport: crate::private_transport::Settings,
     pub listen: String,
     pub external_port_range: Option<(u16, u16)>,
@@ -42,6 +43,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            terminal: Default::default(),
             private_transport: Default::default(),
             listen: "127.0.0.1:47080".into(),
             external_port_range: None,
@@ -264,6 +266,7 @@ impl Config {
             );
         }
         Ok(Self {
+            terminal: crate::terminal::Settings::load()?,
             private_transport: crate::private_transport::Settings::load(),
             external_port_range,
             firewall_socket: std::env::var_os("FIREWALL_SOCKET")
@@ -325,8 +328,12 @@ impl Config {
                 )
                 .into(),
             ),
-            client_release_repository: match env("PORTHUB_AGENT_RELEASE_SOURCE", "github").as_str() {
-                "github" => Some(env("PORTHUB_AGENT_RELEASE_REPOSITORY", "algofly-oss/porthub")),
+            client_release_repository: match env("PORTHUB_AGENT_RELEASE_SOURCE", "github").as_str()
+            {
+                "github" => Some(env(
+                    "PORTHUB_AGENT_RELEASE_REPOSITORY",
+                    "algofly-oss/porthub",
+                )),
                 "local" => None,
                 _ => anyhow::bail!("PORTHUB_AGENT_RELEASE_SOURCE must be github or local"),
             },

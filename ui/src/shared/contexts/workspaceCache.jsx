@@ -30,9 +30,9 @@ export function WorkspaceCacheProvider({ children }) {
           for(const suffix of ["summary","books","groups","machines","people","entities","peers","exits","proxy-grants","invitations","workspaces"])resource.invalidate(`access-${suffix}`);
           resource.invalidate("machines");resource.invalidate("groups");
         }
-        if (/\/api\/machines\/groups\/(add|remove)/.test(url)) { resource.invalidate("machines");resource.invalidate("groups"); }
+        if (/\/api\/machines\/groups\/(add|remove)/.test(url)) { resource.invalidate("machines");resource.invalidate("groups");resource.invalidate("proxies"); }
         const match=url.match(/\/api\/(machines|connections|traffic-routes|groups)\/(add|update|delete|refresh|enable|disable)(?:[/?]|$)/);
-        if(match){const kind={"traffic-routes":"proxies",groups:"groups",machines:"machines",connections:"connections"}[match[1]];resource.invalidate(kind);resource.invalidate("summary");if(kind==="proxies")resource.invalidate("proxy-groups");if(kind==="connections")resource.invalidate("machines");}
+        if(match){const kind={"traffic-routes":"proxies",groups:"groups",machines:"machines",connections:"connections"}[match[1]];resource.invalidate(kind);resource.invalidate("summary");if(kind==="proxies"){resource.invalidate("proxy-groups");resource.invalidate("proxy-tags");}if(kind==="groups" || kind==="machines")resource.invalidate("proxies");if(kind==="connections")resource.invalidate("machines");}
       }
       return response;
     });

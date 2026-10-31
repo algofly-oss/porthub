@@ -40,7 +40,7 @@ export function searchScore(query, values) {
 }
 
 export function proxySearchValues(proxy) {
-  return [proxy.name, proxy.description, proxy.group, proxy.hosts || [], proxy.target_url,
+  return [proxy.name, proxy.description, proxy.group, proxy.tags || [], proxy.hosts || [], proxy.target_url,
     ...Object.values(proxy.connection || {}), ...(proxy.bindings || []).flatMap(b=>[b.label,b.target_url,...Object.values(b.connection || {})])];
 }
 

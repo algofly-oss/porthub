@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/porthub-identity", "crates/porthub-io", "crates/porthub-tunnel", "crates/porthub-agent", "crates/porthub-edge", "crates/porthub-api", "crates/porthub-transfer", "crates/porthub-runtime", "crates/porthub-firewall", "crates/porthub-mesh", "crates/porthub-network", "crates/porthub-egress"]
+members = ["crates/porthub-terminal", "crates/porthub-identity", "crates/porthub-io", "crates/porthub-tunnel", "crates/porthub-agent", "crates/porthub-edge", "crates/porthub-api", "crates/porthub-transfer", "crates/porthub-runtime", "crates/porthub-firewall", "crates/porthub-mesh", "crates/porthub-network", "crates/porthub-egress"]
 exclude = ["vendor/rathole", "vendor/nlink", "vendor/notify"]
 
 [patch.crates-io]

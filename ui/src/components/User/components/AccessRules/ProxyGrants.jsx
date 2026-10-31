@@ -57,7 +57,7 @@ export default function ProxyGrants({ data, manage, params }) {
     } catch (cause) { setError(errorText(cause)); }
     finally { setBusy(false); }
   }
-  return <section className="mt-3 rounded-xl border border-border bg-surface px-3 py-2">
+  return <section className="mt-3 max-h-[40dvh] shrink-0 overflow-auto rounded-xl border border-border bg-surface px-3 py-2">
     <div className="flex min-h-10 items-center gap-2">
       <button type="button" aria-expanded={expanded} onClick={() => setExpanded(value => !value)} className="flex min-w-0 flex-1 items-center gap-2 rounded-md text-left hover:text-foreground">
         {expanded ? <IconChevronDown size={16} className="shrink-0 text-muted-foreground" /> : <IconChevronRight size={16} className="shrink-0 text-muted-foreground" />}

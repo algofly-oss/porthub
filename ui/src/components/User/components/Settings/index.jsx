@@ -1,3 +1,4 @@
+import useUrlTab from "@/shared/hooks/useUrlTab";
 import { useWorkspaceState } from "@/shared/contexts/workspaceCache";
 import SearchSelect from "@/components/ui/search-select";
 import { useEffect, useRef, useState } from "react";
@@ -160,9 +161,9 @@ const readProfilePictureFile = async (file) => {
   };
 };
 
-export default function Settings() {
+export default function Settings({ active = true }) {
   const theme = useTheme();
-  const [category, setCategory] = useState("profile");
+  const [category, setCategory] = useUrlTab("tab",["profile","security","notifications","appearance"],"profile",{enabled:active});
   const [savingNavigation, setSavingNavigation] = useState(false);
   const auth = useAuth();
   const toast = useToast();

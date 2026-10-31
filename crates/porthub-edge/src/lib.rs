@@ -67,7 +67,11 @@ async fn tunnel(State(edge): State<Edge>, mut request: Request) -> Response {
                 Ok(Ok(stream)) => {
                     accept(
                         edge,
-                        Box::new(FramedIo::with_read_timeout(TokioIo::new(stream), DIRECT_FRAME_SIZE, Duration::from_secs(60))),
+                        Box::new(FramedIo::with_read_timeout(
+                            TokioIo::new(stream),
+                            DIRECT_FRAME_SIZE,
+                            Duration::from_secs(60),
+                        )),
                     )
                     .await
                 }
@@ -200,9 +204,9 @@ pub fn listener_router_with_public_origin(
             // HTTP/2 carries the host in :authority, not necessarily Host.
             // Preserve it before the internal HTTP/1 proxy replaces the URI.
             if request.version() == Version::HTTP_2 {
-                if let Some(host) = request.uri().authority()
-                    .and_then(|authority| authority.as_str().parse::<axum::http::HeaderValue>().ok())
-                {
+                if let Some(host) = request.uri().authority().and_then(|authority| {
+                    authority.as_str().parse::<axum::http::HeaderValue>().ok()
+                }) {
                     request.headers_mut().insert(header::HOST, host);
                 }
             }
@@ -236,3 +240,5 @@ pub fn listener_router_with_public_origin(
         },
     ))
 }
+
+pub mod terminal;

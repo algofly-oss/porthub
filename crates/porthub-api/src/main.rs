@@ -59,11 +59,21 @@ async fn main() -> Result<()> {
     let db = porthub_api::bootstrap::database(&config).await?;
     let tcp_address = config.listen.clone();
     let app = Arc::new(App::new(config, db));
-    porthub_api::inventory_query::ensure_indexes(&app).await
+    porthub_api::terminal_grants::ensure_indexes(&app).await.map_err(|e|anyhow::anyhow!("terminal index initialization failed: {}",e.detail))?;
+    porthub_api::inventory_query::ensure_indexes(&app)
+        .await
         .map_err(|e| anyhow::anyhow!("inventory index initialization failed: {}", e.detail))?;
-    if !matches!(tokio::time::timeout(std::time::Duration::from_secs(5),
-        porthub_api::routes::dns_rules::remove_address_overrides(&app)).await,Ok(Ok(()))) {
-        tracing::warn!("Retired DNS address settings could not be cleaned; only blocking rules will be served");
+    if !matches!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            porthub_api::routes::dns_rules::remove_address_overrides(&app)
+        )
+        .await,
+        Ok(Ok(()))
+    ) {
+        tracing::warn!(
+            "Retired DNS address settings could not be cleaned; only blocking rules will be served"
+        );
     }
 
     porthub_api::enrollment_ticket::initialize(&app)
@@ -140,6 +150,19 @@ async fn main() -> Result<()> {
         app.clone(),
         activity_stop.subscribe(),
     ));
+    let terminal_stop = tokio_util::sync::CancellationToken::new();
+    let terminal_maintenance = tokio::spawn(porthub_api::terminal::maintenance(
+        app.clone(),
+        terminal_stop.clone(),
+    ));
+    let terminal_app = app.clone();
+    let terminal_ssh_stop = terminal_stop.clone();
+    let terminal_ssh = tokio::spawn(async move {
+        if let Err(error) = porthub_api::terminal::serve_ssh(terminal_app, terminal_ssh_stop).await
+        {
+            tracing::error!(%error,"terminal SSH gateway stopped");
+        }
+    });
     let realtime = app.clone();
     let router = porthub_api::router(app);
     let result = if let Some(path) = std::env::var_os("PORTHUB_API_SOCKET") {
@@ -155,6 +178,9 @@ async fn main() -> Result<()> {
             .with_graceful_shutdown(porthub_runtime::shutdown_signal())
             .await
     };
+    terminal_stop.cancel();
+    terminal_maintenance.await?;
+    terminal_ssh.await?;
     realtime.realtime.close().await;
     refresh.abort();
     let _ = activity_stop.send(true);

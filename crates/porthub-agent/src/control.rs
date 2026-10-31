@@ -119,7 +119,6 @@ impl Control {
     pub fn profile(&self) -> &Profile {
         &self.profile
     }
-    #[cfg(feature="local-tor")]
     pub(crate) fn prefer_proxy_authority(&self,base:String) {
         *self.preferred.lock().unwrap_or_else(|poison|poison.into_inner())=Some((base,Instant::now()+Duration::from_secs(60)));
     }
@@ -147,7 +146,6 @@ impl Control {
         }
         Err(failure)
     }
-    #[cfg(feature="local-tor")]
     pub(crate) async fn stream_sources(&self, base: &str) -> Result<Vec<std::net::IpAddr>, Failure> {
         let host = url::Url::parse(base).ok().and_then(|url|url.host_str().map(str::to_owned));
         if host.as_deref()==Some("localhost") { return Ok(vec![std::net::Ipv4Addr::LOCALHOST.into()]); }

@@ -1,3 +1,6 @@
+import { useRouter } from "next/router";
+import useUrlTab from "@/shared/hooks/useUrlTab";
+import ClientLogViewer from "./ClientLogViewer";
 import ResultsPagination from "@/components/ui/results-pagination";
 import useInventoryPage from "@/shared/hooks/useInventoryPage";
 import { mapConnectionToForwardingConfig } from "@/shared/utils/connection-draft.mjs";
@@ -442,20 +445,32 @@ export default function HostConfigPopup({
   const demo = useDemo();
   const { success, error } = useToast();
   const socket = useContext(SocketContext);
+  const router = useRouter();
 
   const [rules, setRules] = useState([]);
-  const [machineSection, setMachineSection] = useState("groups");
-  const [portSection, setPortSection] = useState("connection");
+  const [machineSection, setMachineSection] = useUrlTab("machineTab",["groups","ports","dns","credentials","logs","uptime"],initialSection,{context:{machine:host?.id || ""},enabled:opened && !!host?.id});
+  const [localPortSection, setLocalPortSection] = useState("connection");
   const [proxiesOpen, setProxiesOpen] = useState(false);
   const [proxyEditorOpen, setProxyEditorOpen] = useState(false);
   const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
   useEffect(() => { if (opened) onRefreshPorts?.(); }, [opened, host?.id, onRefreshPorts]);
   useEffect(() => { if (opened && machineSection === "ports") onRefreshPorts?.(); }, [opened, machineSection, onRefreshPorts]);
-  useEffect(() => { if (opened) setMachineSection(initialSection); }, [opened, host?.id, initialSection]);
   useEffect(() => {
     if (opened && additionalDomainsRef.current) additionalDomainsRef.current.open = false;
   }, [opened, host?.id]);
   const [selectedRuleId, setSelectedRuleId] = useState(null);
+  const urlPortId = rules.find(rule=>rule.localId===selectedRuleId)?.dataId;
+  const [urlPortSection,setUrlPortSection] = useUrlTab("portTab",["connection","access","traffic","web"],"connection",{context:{machine:host?.id || "",machineTab:"ports",port:urlPortId || ""},enabled:opened && !!urlPortId});
+  const portSection=urlPortId ? urlPortSection : localPortSection;
+  const setPortSection=urlPortId ? setUrlPortSection : setLocalPortSection;
+  const clearPortUrl=()=>{const query={...router.query};for(const key of ["port","portTab","proxy","proxyTab"])delete query[key];router.push({pathname:router.pathname,query},undefined,{shallow:true,scroll:false});};
+  useEffect(()=>{
+    if(!opened || machineSection!=="ports")return;
+    if(typeof router.query.port!=="string"){setSelectedRuleId(current=>rules.find(rule=>rule.localId===current)?.dataId ? null : current);return;}
+    const rule=rules.find(rule=>rule.dataId===router.query.port && !rule.temporary);
+    if(rule)setSelectedRuleId(rule.localId);
+  },[opened,machineSection,router.query.port,rules]);
+
   const [errorsByRuleId, setErrorsByRuleId] = useState({});
   const [availabilityByRuleId, setAvailabilityByRuleId] = useState({});
   const [isCheckingAvailability, setIsCheckingAvailability] = useState(false);
@@ -499,7 +514,7 @@ export default function HostConfigPopup({
   const [editingRuleSnapshot, setEditingRuleSnapshot] = useState(null);
   const [rulesPage, setRulesPage] = useState(1);
   const [portQuery,setPortQuery]=useState("");
-  const portInventory=useInventoryPage("connections",{machine:host?.id,q:portQuery,page:rulesPage,page_size:RULES_PER_PAGE},{enabled:opened && !!host?.id && machineSection==="ports"});
+  const portInventory=useInventoryPage("connections",{machine:host?.id,ids:typeof router.query.port==="string" ? router.query.port : "",q:typeof router.query.port==="string" ? "" : portQuery,page:typeof router.query.port==="string" ? 1 : rulesPage,page_size:RULES_PER_PAGE},{enabled:opened && !!host?.id && machineSection==="ports"});
   const originalPorts=useRef(new Map());
   useEffect(()=>{setRulesPage(1);},[portQuery]);
   const [groupSaving, setGroupSaving] = useState(false);
@@ -1123,7 +1138,7 @@ export default function HostConfigPopup({
     };
 
     const handleLogStreamLine = (payload) => {
-      if (payload?.machine_id !== host.id || !payload?.line) return;
+      if (payload?.machine_id !== host.id || typeof payload?.line !== "string" || !payload.line) return;
       setClientLogStreamStatus("streaming");
       setClientLogs((current) => {
         const next = [...current, payload.line];
@@ -1545,9 +1560,10 @@ export default function HostConfigPopup({
     throw new Error("Could not generate a unique external port");
   };
 
-  const openRuleEditor = (rule) => {
+  const openRuleEditor = (rule, section="connection") => {
     if (rule?.temporary) return;
-    setPortSection("connection");
+    setLocalPortSection(section);
+    if(rule?.dataId)router.push({pathname:router.pathname,query:{...router.query,machine:host.id,machineTab:"ports",port:rule.dataId,portTab:section}},undefined,{shallow:true,scroll:false});
     setEditingRuleSnapshot(rule?.dataId ? { ...rule } : null);
     setSelectedRuleId(rule.localId);
   };
@@ -1572,6 +1588,7 @@ export default function HostConfigPopup({
   };
 
   const handleDoneEditing = (e) => {
+    clearPortUrl();
     if (e) {
       e.preventDefault();
       e.stopPropagation();
@@ -1581,6 +1598,7 @@ export default function HostConfigPopup({
   };
 
   const handleCancelEditing = () => {
+    clearPortUrl();
     if (!selectedRule) {
       return;
     }
@@ -2140,7 +2158,7 @@ export default function HostConfigPopup({
         centered
         radius="md"
         size="min(960px, calc(100vw - 48px))"
-        fixedHeight="min(680px, calc(100dvh - 64px))"
+        fixedHeight={!selectedRule && machineSection === "logs" ? "calc(100dvh - 64px)" : "min(680px, calc(100dvh - 64px))"}
         classNames={modalClassNames}
         closeOnClickOutside={
           !proxyEditorOpen &&
@@ -2175,11 +2193,11 @@ export default function HostConfigPopup({
           >
             <Stack spacing="md" className="min-h-0 flex-1 overflow-hidden">
             <div
-              className={`min-h-0 flex-1 overflow-y-auto pr-1 ${
+              className={`min-h-0 flex-1 pr-1 ${machineSection === "logs" && !selectedRule ? "flex flex-col overflow-hidden" : "overflow-y-auto"} ${
                 isDark ? "dark-scrollbar" : "light-scrollbar"
               }`}
             >
-            <div className="flex flex-col gap-3">
+            <div className={`flex flex-col gap-3 ${machineSection === "logs" && !selectedRule ? "min-h-0 flex-1" : ""}`}>
             {!selectedRule ? <div className="overflow-x-auto pb-1"><StatusTabs label="Machine configuration sections" value={machineSection} onChange={setMachineSection} options={[{value:"groups",label:"Details"},{value:"ports",label:"Ports"},{value:"dns",label:"DNS"},{value:"credentials",label:"Client"},{value:"logs",label:"Logs"},{value:"uptime",label:"History"}]} /></div> : <div className="flex min-w-0 items-center gap-3"><WorkspaceButton type="button" variant="ghost" size="sm" onClick={handleDoneEditing}><IconArrowLeft size={16} />All Ports</WorkspaceButton><span className="text-muted-foreground" aria-hidden="true">/</span><h2 ref={portHeadingRef} tabIndex={-1} className="min-w-0 flex-1 truncate text-base font-semibold !outline-none">{selectedRule.serviceName || "New Port"}</h2><WorkspaceButton type="button" variant="ghost" size="icon" onClick={()=>handleRemoveRule(selectedRule.localId)} className="text-red-600 dark:text-red-400" aria-label="Remove Port"><IconTrash size={16} /></WorkspaceButton></div>}
             {selectedRule && <div className="overflow-x-auto pb-1"><StatusTabs label="Port configuration sections" value={portSection} onChange={setPortSection} options={[{value:"connection",label:"Connection"},{value:"access",label:"Access"},{value:"traffic",label:"Traffic"},{value:"web",label:"Web Addresses"}]} /></div>}
             {!selectedRule && machineSection === "groups" && <div className="flex items-start justify-between gap-3">
@@ -2272,9 +2290,9 @@ export default function HostConfigPopup({
 
             {!selectedRule && machineSection !== "ports" ? (
               <div
-                className="rounded-lg bg-control/40"
+                className={machineSection === "logs" ? "flex min-h-0 flex-1 flex-col" : "rounded-lg bg-control/40"}
               >
-                <div className="divide-y divide-border/60">
+                <div className={machineSection === "logs" ? "flex min-h-0 flex-1 flex-col" : "divide-y divide-border/60"}>
                   <div hidden={machineSection !== "dns"}>
                     <DnsRules machine={host.id} opened={opened} />
                   </div>
@@ -2876,90 +2894,15 @@ export default function HostConfigPopup({
                     </div>
                   </div>
 
-                  <div hidden={machineSection !== "logs"}>
-                    <h2 className="px-4 py-3 text-base font-semibold">Client Logs</h2>
-
-                    <div>
-                      <div className="space-y-3 px-4 py-4">
-                        <div className="flex items-center justify-between gap-3">
-                          <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-                            Live stream
-                          </p>
-                          <div className="flex items-center gap-3">
-                            <Switch
-                              size="xs"
-                              checked={showClientLogLineNumbers}
-                              onChange={(event) =>
-                                setShowClientLogLineNumbers(event.currentTarget.checked)
-                              }
-                              labelPosition="left"
-                              label="Line numbers"
-                            />
-                            <Switch
-                              size="xs"
-                              checked={showVerboseClientLogs}
-                              onChange={(event) =>
-                                setShowVerboseClientLogs(event.currentTarget.checked)
-                              }
-                              labelPosition="left"
-                              label="Verbose"
-                            />
-                          </div>
-                        </div>
-
-                        <div
-                          ref={clientLogsContainerRef}
-                          onScroll={handleClientLogsScroll}
-                          className="max-h-72 overflow-y-auto rounded-lg bg-control px-3 py-3 font-mono text-xs text-foreground"
-                        >
-                          {visibleClientLogs.length > 0 ? (
-                            <div className="space-y-0.5">
-                              {visibleClientLogs.map((entry) => (
-                                <div
-                                  key={entry.number}
-                                  className={
-                                    showClientLogLineNumbers
-                                      ? "grid grid-cols-[42px_minmax(0,1fr)] gap-2"
-                                      : "block"
-                                  }
-                                >
-                                  {showClientLogLineNumbers ? (
-                                    <span
-                                      className={`select-none text-right ${
-                                        isDark ? "text-muted-foreground" : "text-zinc-400"
-                                      }`}
-                                    >
-                                      {entry.number}
-                                    </span>
-                                  ) : null}
-                                  <span className="whitespace-pre-wrap break-words">
-                                    {entry.text}
-                                  </span>
-                                </div>
-                              ))}
-                            </div>
-                          ) : (
-                            <p className={isDark ? "text-zinc-400" : "text-muted-foreground"}>
-                              {clientLogs.length > 0
-                                ? "Verbose logs are currently hidden. Enable the verbose toggle to view them."
-                                : clientLogStreamStatus === "offline"
-                                  ? "The client must be online before logs can be streamed."
-                                  : clientLogStreamStatus === "connecting"
-                                    ? "Connecting to the client log stream..."
-                                    : clientLogStreamStatus === "idle"
-                                      ? "Waiting for the client log stream..."
-                                      : "Connected. Waiting for client logs..."}
-                            </p>
-                          )}
-                        </div>
-
-                        <p className="text-xs text-muted-foreground">
-                          Shows the same combined PortHub client and Rathole log stream
-                          available on the client via <code>porthub logs</code>. Turn on
-                          verbose to include debug noise.
-                        </p>
-                      </div>
-                    </div>
+                  <div hidden={machineSection !== "logs"} className={machineSection === "logs" ? "flex min-h-0 flex-1 flex-col" : undefined}>
+                    <ClientLogViewer lines={visibleClientLogs} total={clientLogs.length} status={clientLogStreamStatus}
+                      numbers={showClientLogLineNumbers} onNumbers={setShowClientLogLineNumbers}
+                      verbose={showVerboseClientLogs} onVerbose={setShowVerboseClientLogs}
+                      following={shouldAutoScrollClientLogs} onFollow={() => {
+                        setShouldAutoScrollClientLogs(true);
+                        const element = clientLogsContainerRef.current;
+                        if (element) element.scrollTop = element.scrollHeight;
+                      }} containerRef={clientLogsContainerRef} onScroll={handleClientLogsScroll} />
                   </div>
 
                   <div hidden={machineSection !== "uptime"}>
@@ -3036,7 +2979,7 @@ export default function HostConfigPopup({
                   <Table aria-label="Forwarded ports"><TableHeader><TableRow><TableHead>Service</TableHead><TableHead className="hidden w-[19%] md:table-cell">Forwarding</TableHead><TableHead className="w-36 md:w-44">Live Traffic</TableHead><TableHead className="hidden w-[25%] md:table-cell">Web Addresses</TableHead><TableHead className="w-20"><span className="sr-only">Enabled</span></TableHead></TableRow></TableHeader><TableBody>
                     {paginatedRules.map(rule => {
                       const addresses = (portInventory.rows.find(row => row._id === rule.dataId)?.linked_proxies || []);
-                      const openAddresses = event => { event.stopPropagation(); if (rule.temporary) return; openRuleEditor(rule); setPortSection("web"); };
+                      const openAddresses = event => { event.stopPropagation(); if (rule.temporary) return; openRuleEditor(rule,"web"); };
                       return <TableRow key={rule.localId} className={rule.temporary ? "" : "cursor-pointer"} onClick={rule.temporary ? undefined : ()=>openRuleEditor(rule)}>
                         <TableCell className="!py-2"><div className="flex max-w-full flex-wrap items-center gap-2"><button type="button" aria-label={`Edit forwarding rule ${rule.serviceName.trim() || "untitled rule"}`} disabled={rule.temporary} className="block max-w-full text-left disabled:cursor-default"><span className="block truncate text-sm font-medium">{rule.serviceName || "Untitled service"}</span></button>{rule.temporary && <span title="Removed when the PortHub CLI exposure stops or its lease expires" className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-200">Temporary · PortHub agent</span>}</div><span className="mt-1 hidden truncate text-xs text-muted-foreground md:block">{rule.serviceDescription || `Port ${rule.externalPort}`}</span><p className="mt-1 text-xs text-muted-foreground md:hidden">{externalEndpoint(rule)} → {internalEndpoint(rule)}</p>{rule.temporary && <p className="mt-1 text-xs text-muted-foreground md:hidden">Removed when the CLI exposure stops.</p>}<div className="md:hidden">{gatewayLink(rule)}</div><button type="button" onClick={openAddresses} disabled={rule.temporary} className="mt-1 max-w-full truncate text-left text-xs text-blue-700 disabled:opacity-60 dark:text-blue-300 md:hidden">{addresses[0]?.hosts?.[0] || (rule.temporary ? "Managed by temporary exposure" : "Add web address")}</button></TableCell>
                         <TableCell className="hidden md:table-cell !py-2"><p className="font-mono text-xs">{externalEndpoint(rule)} → {internalEndpoint(rule)}</p></TableCell>

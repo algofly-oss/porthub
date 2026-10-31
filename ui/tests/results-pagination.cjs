@@ -43,7 +43,7 @@ const { launchBrowser } = require("./browser.cjs");
       await page.goto(`${process.env.REVIEW_ORIGIN || "http://luna.local:8345"}/home?demo=1&view=dashboard`);
       await page.getByText("Last 5 minutes · all forwarded ports · bytes per second", {exact:true}).waitFor();
       assert.equal(await page.getByRole("group", {name: "Dashboard traffic window"}).count(), 0);
-      const chart = page.getByRole("img", {name: /Network Activity chart/i});
+      const chart = page.getByRole("img", {name: /Public port traffic chart/i});
       await chart.waitFor();
       await page.getByText("5m ago", {exact:true}).waitFor();
       assert.deepEqual(errors, []);

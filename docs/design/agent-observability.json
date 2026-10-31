@@ -1,0 +1,62 @@
+{
+  "status": "active implementation; not deployed",
+  "user_requirements": [
+    "porthub stats: interactive htop-style view focused on PortHub agent traffic, resource usage, health and connections, with live refresh and useful detail",
+    "Account dashboard must show client-to-client traffic, including direct server-bypassing links and which registered machines communicate",
+    "Keep client-link traffic separate from server/public-port traffic; no double counting of sender/receiver or summing overlapping relay views",
+    "Customize existing dashboard cards and charts for a polished, interactive full picture; use Home Sense Insights as a design reference",
+    "Preserve the terminal-sharing goal and previous UI fixes; deployment authorized, unrelated workloads must remain untouched"
+  ],
+  "design_reference": {
+    "repository": "/home/nitin/nitin/github/home-presence",
+    "ui": "http://127.0.0.1:8473/?view=insights",
+    "read_sources": [
+      "app/ui/src/dashboard/css/insights.css",
+      "app/ui/src/dashboard/insights/index.js",
+      "app/ui/src/dashboard/insights/charts.js"
+    ],
+    "patterns": "Compact summary tiles, section headings, time-range controls, paired charts, consistent directions/colors, responsive cards, drill-down and explicit unavailable data"
+  },
+  "stats_implemented_pending_validation": [
+    "Live TCP/UDP application-byte metering in the existing tunnel streams",
+    "Read-only local stats broker operation; no API polling or repair/nudges",
+    "Agent process CPU-milliseconds, RSS, uptime, PID, disk counters and Linux FD count",
+    "Interactive stats command with pause, select, details, CPU/memory/traffic/name sort, interval, once and JSON options"
+  ],
+  "stats_remaining": [
+    "Add private peer counters/routes with bounded local snapshots, covering direct and relay",
+    "Finish authenticated real broker/forwarding integration and all-platform checks; improve agent naming and private-peer details",
+    "Source commit/push, validated releases and authorized scoped rollout remain required"
+  ],
+  "dashboard_remaining": [
+    "Authenticated, bounded agent reports with instance IDs and monotonic counters; direct-link statistics require agent reports",
+    "Persist owner-scoped link samples and relationship/route changes, deduplicate report retries and avoid sender/receiver double counting",
+    "Bounded history/retention and server-side aggregation/search; no full client inventory downloads",
+    "Separate client-link and server/public-port graphs, per-machine/pair drill-down, route and time filters, freshness/coverage indicators",
+    "Account/workspace authorization tests and isolated browser/API/storage tests; deploy only verified complete artifacts"
+  ],
+  "integrity": "Report metadata/counters only, no terminal contents or application payload. Treat missing/stale telemetry as unavailable, never as zero. Expose only the account/workspace scope authorized by existing policies; PortHub metrics do not claim to monitor traffic outside PortHub.",
+  "verified_local": [
+    "68 normal agent unit tests pass; two tests explicitly requiring owned kernel namespace or configured internet DNS intentionally skipped",
+    "Stats CPU/rate restart handling, output bounds, interval bounds and credential-isolated broker unit tests pass",
+    "Real byte-counter test observes progress before transfer closure and releases active count on disconnect",
+    "Five consecutive real PTY runs pass: keyboard bursts, resize, pause/resume, sort, JSON, terminal restoration and responsive quit while an agent stalls",
+    "Default and no-default-feature agent checks pass; API and edge compile checks pass",
+    "Local and shared supervisor CLI integration tests pass after ergonomic named attach/create changes"
+  ],
+  "reporting_design": {
+    "client_graph": "Aggregate direct versus relayed link traffic; show directed machine pairs and A\u2192B/B\u2192A detail. Never add sender TX and receiver RX for the same transferred bytes. Display stale/missing coverage explicitly.",
+    "server_graph": "Show the account\u2019s gateway/public-port traffic separately; expand relay/proxy coverage only when measured and label the source. Relayed peer traffic can appear in both views and must not be summed into a misleading grand total.",
+    "source_requirements": "Measure actual routing branches including direct UDP/TURN and WebSocket relay fallback; include reliable stream carriers and route changes. Sampling only session.is_relay at report time cannot accurately attribute bytes across a path switch. Distinguish transport control/overhead from application traffic.",
+    "agent_publisher": "A bounded independent worker reports authenticated per-instance counter deltas and relationship changes, with idempotent report IDs/retries, low-rate baseline auditing and higher resolution while viewing. Never block forwarding on telemetry.",
+    "privacy": "Existing account/workspace authorization is authoritative. Verify sender registration and destination visibility, redact external endpoints where appropriate, store metadata/counters only and bound retention.",
+    "design_notes": "Home Sense source uses compact KPI tiles and paired charts; its chart runs deliberately leave gaps for missing readings. Local browser reference reached login, so no claim of authenticated live Insights viewing."
+  },
+  "dashboard_local_iteration": [
+    "Four clickable overview tiles: registered machines, attention, web proxies and gateway transfer",
+    "Accessible 5m/15m/1h selector drives the chart, transfer summary and busiest ports together",
+    "Responsive two-column phone cards, four-column desktop overview and constrained wide-screen content",
+    "Manual dashboard refresh now also refreshes traffic; source labels explicitly exclude unreported direct traffic",
+    "Chromium and WebKit interaction/overflow checks pass in dark/light themes at 1512, 402 and 320 pixels (12 combinations); production UI build passes"
+  ]
+}

@@ -83,6 +83,12 @@ pub(crate) async fn serve_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
     let mut reader = BufReader::new(stream);
     let bytes = tokio::time::timeout(Duration::from_secs(5), line(&mut reader)).await??;
     let message: serde_json::Value = serde_json::from_slice(&bytes)?;
+    if message.get("operation").and_then(serde_json::Value::as_str) == Some("agent_stats") {
+        return crate::stats::serve(reader,&control,&profile,message,cancel).await;
+    }
+    if message.get("operation").and_then(serde_json::Value::as_str) == Some("terminal_host") {
+        return crate::terminal_transport::serve(reader, &control, message, cancel).await;
+    }
     #[cfg(feature="local-tor")]
     if matches!(message.get("operation").and_then(serde_json::Value::as_str),Some("proxy_connect"|"proxy_check")) {
         return crate::proxy_transport::serve(reader, &control, &profile, message, cancel).await;

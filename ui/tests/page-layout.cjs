@@ -35,7 +35,7 @@ const { launchBrowser, navigateWorkspace, seedEmptyPolicies } = require("./brows
       assert.equal(await combined.evaluate(el => el.open), true);
       await navigateWorkspace(page, "Dashboard");
       const dashboard = page.locator('[aria-label="Dashboard content"]');
-      await page.getByRole("heading", { name: "Network Activity", exact: true }).waitFor();
+      await page.getByRole("heading", { name: "Public port traffic", exact: true }).waitFor();
       await page.locator('[aria-label="Recent Web Addresses"] [aria-label^="Linked port traffic"]').first().waitFor();
       await page.waitForTimeout(250);
       const geometry = await dashboard.evaluate(el => {

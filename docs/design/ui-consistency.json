@@ -1,0 +1,24 @@
+{
+  "status": "implemented locally and tested; not deployed",
+  "requests": [
+    "Expand live client log terminal to available area; compact non-copying line-number gutter, clean syntax highlighting, optional wrapping and follow control",
+    "Proxy-specific tags and groups independent of inherited machine groups, with assignment/creation/removal and filters",
+    "Consistent Access Rules layouts, exit-node search spacing and People pagination",
+    "Persist subtabs and editors in URL, with reload and Back/Forward support across Access Rules, Settings, machines, saved ports and web proxy editor"
+  ],
+  "evidence": [
+    "UI production build passed twice; latest /tmp/porthub-ui-review-final-build.log",
+    "Chromium/WebKit live-log tests: dark/light at 1512,402,320 widths",
+    "Chromium/WebKit URL tests: 1440 and402, all Access subtabs, Settings categories, machine logs, saved-port Web Addresses and proxy Options",
+    "Chromium proxy-tag create/save/filter: both themes at1440,402,320",
+    "Access layout/footer tests: both themes at1512,402,320",
+    "Existing proxy binding regression: both themes at1440,402",
+    "Isolated Mongo proxy_tags tests pass, including third-binding inherited groups, account isolation, current membership and tag filtering/search; original route vectors pass"
+  ],
+  "follow_up": [
+    "Review remaining nested/unsaved editor URL cases and fresh data invalidation paths",
+    "Run final consolidated required checks after remaining dashboard/terminal work",
+    "Commit/push and deploy validated API/UI with backups and scoped role updates; keep latest-only release policy"
+  ],
+  "unrelated_workloads": "No services restarted; only isolated test browser contexts, dedicated build directory and own Mongo container porthub-terminal-ui-review-mongo (127.0.0.1:32874). Existing UI development server on3107 used for review."
+}

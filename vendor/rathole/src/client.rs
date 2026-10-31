@@ -383,6 +383,7 @@ struct RunDataChannelArgs<T: Transport> {
     socket_opts: SocketOpts,
     service: ClientServiceConfig,
     health: bool,
+    counters: Arc<crate::telemetry::Counters>,
 }
 
 async fn do_data_channel_handshake<T: Transport>(
@@ -441,7 +442,7 @@ async fn run_data_channel<T: Transport>(args: Arc<RunDataChannelArgs<T>>) -> Res
                 // to this carrier. A silently dead idle socket cannot swallow
                 // an application request indefinitely.
                 let local = time::timeout(Duration::from_secs(3), TcpStream::connect(&args.service.local_addr)).await;
-                let mut local = match local {
+                let local = match local {
                     Ok(Ok(local)) => local,
                     _ => {
                         conn.write_all(&bincode::serialize(&Ack::TargetUnavailable)?).await?;
@@ -451,9 +452,10 @@ async fn run_data_channel<T: Transport>(args: Arc<RunDataChannelArgs<T>>) -> Res
                 };
                 conn.write_all(&bincode::serialize(&Ack::Ok)?).await?;
                 conn.flush().await?;
+                let mut local=args.counters.meter(local);
                 let _=porthub_io::copy_bidirectional(&mut conn,&mut local,porthub_io::half_close_idle_timeout()).await;
             } else {
-                run_data_channel_for_tcp::<T>(conn, &args.service.local_addr).await?;
+                run_data_channel_for_tcp::<T>(conn, &args.service.local_addr,args.counters.clone()).await?;
             }
             break;
         }
@@ -466,7 +468,7 @@ async fn run_data_channel<T: Transport>(args: Arc<RunDataChannelArgs<T>>) -> Res
             if args.service.service_type != ServiceType::Udp {
                 bail!("Expect UDP traffic. Please check the configuration.")
             }
-            run_data_channel_for_udp::<T>(conn, &args.service.local_addr).await?;
+            run_data_channel_for_udp::<T>(conn, &args.service.local_addr,args.counters.clone()).await?;
             break;
         }
     } }
@@ -474,16 +476,18 @@ async fn run_data_channel<T: Transport>(args: Arc<RunDataChannelArgs<T>>) -> Res
 }
 
 // Simply copying back and forth for TCP
-#[instrument(skip(conn))]
+#[instrument(skip(conn,counters))]
 async fn run_data_channel_for_tcp<T: Transport>(
     mut conn: T::Stream,
     local_addr: &str,
+    counters:Arc<crate::telemetry::Counters>,
 ) -> Result<()> {
     debug!("New data channel starts forwarding");
 
-    let mut local = time::timeout(Duration::from_secs(3), TcpStream::connect(local_addr))
+    let local = time::timeout(Duration::from_secs(3), TcpStream::connect(local_addr))
         .await.context("local target connection timed out")?
         .with_context(|| format!("Failed to connect to {}", local_addr))?;
+    let mut local=counters.meter(local);
     let _ = porthub_io::copy_bidirectional(&mut conn, &mut local, porthub_io::half_close_idle_timeout()).await;
     Ok(())
 }
@@ -494,8 +498,9 @@ async fn run_data_channel_for_tcp<T: Transport>(
 // to the socket will work fine for the map's value.
 type UdpPortMap = Arc<RwLock<HashMap<SocketAddr, mpsc::Sender<Bytes>>>>;
 
-#[instrument(skip(conn))]
-async fn run_data_channel_for_udp<T: Transport>(conn: T::Stream, local_addr: &str) -> Result<()> {
+#[instrument(skip(conn,counters))]
+async fn run_data_channel_for_udp<T: Transport>(conn: T::Stream, local_addr: &str,counters:Arc<crate::telemetry::Counters>) -> Result<()> {
+    let _active=counters.enter();
     debug!("New data channel starts forwarding");
 
     let port_map: UdpPortMap = Arc::new(RwLock::new(HashMap::new()));
@@ -509,8 +514,10 @@ async fn run_data_channel_for_udp<T: Transport>(conn: T::Stream, local_addr: &st
 
     // Keep sending items from the outbound channel to the server
     let mut tasks = tokio::task::JoinSet::new();
+    let outgoing_counters=counters.clone();
     tasks.spawn(async move {
         while let Some(t) = outbound_rx.recv().await {
+            let size=t.data.len();
             trace!("outbound {:?}", t);
             if let Err(e) = t
                 .write(&mut wr)
@@ -520,6 +527,7 @@ async fn run_data_channel_for_udp<T: Transport>(conn: T::Stream, local_addr: &st
                 debug!("{:?}", e);
                 break;
             }
+            outgoing_counters.sent(size);
         }
     });
 
@@ -530,6 +538,7 @@ async fn run_data_channel_for_udp<T: Transport>(conn: T::Stream, local_addr: &st
         let packet = UdpTraffic::read(&mut rd, hdr_len)
             .await
             .with_context(|| "Failed to read UDPTraffic from the server")?;
+        counters.received(packet.data.len());
         let m = port_map.read().await;
 
         if m.get(&packet.from).is_none() {
@@ -727,6 +736,7 @@ impl<T: 'static + Transport> ControlChannel<T> {
             socket_opts,
             service: self.service.clone(),
             health: health && self.service.service_type == ServiceType::Tcp,
+            counters:self.health.counters(),
         });
 
         loop {

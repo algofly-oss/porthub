@@ -24,6 +24,7 @@ struct State {
 struct Shared {
     state: Mutex<State>,
     wake: Notify,
+    traffic: Arc<crate::telemetry::Counters>,
 }
 #[derive(Clone)]
 pub struct ServiceHealthHandle(Arc<Shared>);
@@ -40,10 +41,21 @@ impl ServiceHealthHandle {
                 recoveries: 0,
             }),
             wake: Notify::new(),
+            traffic: Arc::new(crate::telemetry::Counters::default()),
         }))
     }
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
         self.0.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    pub fn traffic(&self)->crate::Traffic { self.0.traffic.snapshot() }
+    pub fn same_instance(&self,other:&Self)->bool {Arc::ptr_eq(&self.0,&other.0)}
+    /// Only fold retired counters after all actors and I/O writers release them.
+    pub fn traffic_finished(&self)->bool {Arc::strong_count(&self.0)==1 && Arc::strong_count(&self.0.traffic)==1}
+    pub(crate) fn counters(&self)->Arc<crate::telemetry::Counters>{self.0.traffic.clone()}
+    /// Observability must never nudge, probe or reconnect a healthy service.
+    pub fn observe(&self)->ServiceHealth {
+        let state=self.state();let healthy=state.connected && (state.timeout.is_zero() || state.last_command.elapsed()<state.timeout);
+        ServiceHealth{state:if healthy{"healthy"}else{"recovering"},data_health_acknowledged:state.data_health,checks:state.checks,control_recoveries:state.recoveries}
     }
     /// Uses authenticated control activity; never opens an application socket.
     pub fn check(&self) -> ServiceHealth {

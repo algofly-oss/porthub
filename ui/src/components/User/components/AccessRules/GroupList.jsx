@@ -42,7 +42,7 @@ export default function GroupList({
     }
   }
   return (
-    <section className="flex min-h-0 flex-1 flex-col rounded-xl bg-surface p-4">
+    <section className="flex min-h-0 flex-1 flex-col">
       <div className="mb-4">
         <h2 className="text-base font-semibold">Groups & Tags</h2>
         <p className="mt-1 text-sm leading-6 text-muted-foreground">
@@ -81,7 +81,7 @@ export default function GroupList({
       )}
       {inventory.loading && <p role="status" className="p-3 text-sm text-muted-foreground">Loading groups…</p>}
       {inventory.error && <p role="alert" className="p-3 text-sm text-red-600">{inventory.error}</p>}
-      <div className="data-scroll">
+      <div className="data-scroll rounded-xl bg-surface px-4">
         {inventory.rows
           .map((group) => (
             <div key={group._id} className="flex items-center gap-1">
