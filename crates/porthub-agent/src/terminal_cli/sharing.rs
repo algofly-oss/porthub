@@ -155,6 +155,18 @@ fn enforce_limits(workspace: &Workspace, options: &Options) -> Result<()> {
     Ok(())
 }
 
+// Credential-free broker metadata is a compatibility hint, never authority.
+// Legacy brokers reject unknown HostHello fields before opening the gateway.
+fn broker_has_history_snapshots(version: &str) -> bool {
+    let parts: Vec<_> = version.split('.').collect();
+    if parts.len() != 3 { return false; }
+    let parsed: Option<Vec<u32>> = parts.iter().map(|part| {
+        if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) { return None; }
+        part.parse().ok()
+    }).collect();
+    parsed.is_some_and(|v| (v[0], v[1], v[2]) >= (1, 10, 0))
+}
+
 pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
     let layout = if args.user {
         crate::service::Layout::user()?
@@ -220,7 +232,7 @@ pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
             pending_invitations: None,
             invitations_revoked: false,
             hello: HostHello {
-                history_snapshots: false,
+                history_snapshots: broker_has_history_snapshots(&registration.agent_version),
                 id: job.id.clone(),
                 secret: random_token(32),
                 write_token: random_token(32),
@@ -570,6 +582,16 @@ pub(super) async fn serve(root: &Path, id: &str) -> Result<()> {
 #[cfg(test)]
 mod rotation_tests {
     use super::*;
+    #[test]
+    fn snapshot_advertisement_requires_a_compatible_broker_version() {
+        for version in ["", "2fb9d6e", "1.9.0", "1.9.99", "1.10", "1.10.0.extra", "1.10.x", "1.10.0-preview"] {
+            assert!(!broker_has_history_snapshots(version), "{version}");
+        }
+        for version in ["1.10.0", "1.11.0", "2.0.0"] {
+            assert!(broker_has_history_snapshots(version), "{version}");
+        }
+    }
+
     #[test]
     fn failed_save_cannot_be_retried_as_unsaved_rotation_and_saved_retry_reuses_links() -> Result<()>
     {

@@ -16,6 +16,9 @@ pub(super) struct Pager {
     last_request: Option<Instant>,
     keys: Vec<u8>,
     pane: String,
+    snapshots: bool,
+    snapshot: Option<String>,
+    response_snapshot: Option<String>,
 }
 impl Pager {
     pub fn new(cols: u16, rows: u16) -> Self {
@@ -31,7 +34,12 @@ impl Pager {
             last_request: None,
             keys: Vec::new(),
             pane: String::new(),
+            snapshots: false, snapshot: None, response_snapshot: None,
         }
+    }
+    pub fn capabilities(&mut self, snapshots: bool) {
+        self.snapshots = snapshots;
+        self.snapshot = None;
     }
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.cols = cols;
@@ -47,6 +55,12 @@ impl Pager {
             if self.keys.is_empty() {
                 if byte == 0x1b {
                     self.keys.push(byte);
+                } else if self.active && byte == b'r' {
+                    self.snapshot = None;
+                    self.response_snapshot = None;
+                    self.before = 0;
+                    self.shown = None;
+                    self.pending = None;
                 } else if self.active && byte == b'q' {
                     self.active = false;
                     self.pending = None;
@@ -60,6 +74,7 @@ impl Pager {
                 self.active = !self.active;
                 if self.active {
                     self.pane.clear();
+                    self.snapshot = None;
                 }
                 self.before = 0;
                 self.shown = None;
@@ -165,9 +180,10 @@ impl Pager {
         }
         self.serial = self.serial.wrapping_add(1);
         self.pending = Some((self.serial, Vec::new(), Instant::now()));
+        self.response_snapshot = self.snapshot.clone();
         self.last_request = Some(Instant::now());
         Some(ViewerInput::History {
-            freeze: false, snapshot: None,
+            freeze: self.snapshots, snapshot: self.snapshot.clone(),
             request: self.serial,
             pane: self.pane.clone(),
             before: self.before,
@@ -185,6 +201,15 @@ impl Pager {
         if *request != page.request {
             return Ok(None);
         }
+        if page.error.is_none() {
+            if self.snapshots {
+                anyhow::ensure!(page.snapshot.is_some(), "history snapshot missing");
+                anyhow::ensure!(self.response_snapshot.as_ref().is_none_or(|id| Some(id) == page.snapshot.as_ref()), "history snapshot changed");
+                self.response_snapshot = page.snapshot.clone();
+            } else {
+                anyhow::ensure!(page.snapshot.is_none(), "unexpected history snapshot");
+            }
+        }
         let chunk = decode_data(&page.data)?;
         anyhow::ensure!(
             bytes.len() + chunk.len() <= 131072,
@@ -195,6 +220,11 @@ impl Pager {
             return Ok(None);
         }
         let (_, bytes, _) = self.pending.take().expect("pending history");
+        if let Some(error) = page.error.as_deref() {
+            self.shown = Some(self.before);
+            return Ok(Some(format!("\x1b[{};1H\x1b[2K{}", self.rows, clip(&format!("{error} · r refresh · F7 live"), self.cols)).into_bytes()));
+        }
+        self.snapshot = self.response_snapshot.take();
         if page.error.is_none() {
             if let Some(pane) = &page.pane {
                 self.pane = pane.clone();
@@ -231,7 +261,7 @@ impl Pager {
             "\x1b[{};1H\x1b[7m{}\x1b[0m",
             self.rows,
             clip(
-                "F7 or q live · Wheel/PgUp/PgDn · Home/End · terminal selection",
+                "F7 or q live · Wheel/PgUp/PgDn · Home/End · r refresh · selection",
                 self.cols
             )
         ));
@@ -277,6 +307,27 @@ mod tests {
             matches!(pager.request(),Some(ViewerInput::History {pane,before:0,..}) if pane.is_empty())
         );
     }
+    #[test]
+    fn frozen_pages_keep_their_anchor_until_explicit_refresh() {
+        let mut pager = Pager::new(80,24);
+        pager.capabilities(true);
+        pager.feed(b"\x1b[18~");
+        let Some(ViewerInput::History {request,freeze:true,snapshot:None,..}) = pager.request() else { panic!("fresh snapshot request") };
+        let mut page=response(request,b"retained\n",true);
+        page.pane=Some("%42".into());
+        page.snapshot=Some("a".repeat(32));
+        pager.page(page).unwrap();
+        pager.feed(b"\x1b[5~");
+        pager.last_request=None;
+        let Some(ViewerInput::History {request,snapshot:Some(id),..}) = pager.request() else { panic!("anchored request") };
+        assert_eq!(id,"a".repeat(32));
+        let mut wrong=response(request,b"wrong\n",true);
+        wrong.pane=Some("%42".into());wrong.snapshot=Some("b".repeat(32));
+        assert!(pager.page(wrong).is_err());
+        pager.feed(b"r");pager.last_request=None;
+        assert!(matches!(pager.request(),Some(ViewerInput::History {freeze:true,snapshot:None,before:0,..})));
+    }
+
     #[test]
     fn clipping_preserves_whole_graphemes_and_display_width() {
         assert_eq!(clip("a👩‍💻b", 4), "a👩‍💻");

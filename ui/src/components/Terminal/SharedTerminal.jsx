@@ -18,7 +18,7 @@ export default function SharedTerminal() {
   const retryDeadline = useRef(null), retryCount = useRef(0);
   const [participant, setParticipant] = useState(null);
   const [sessionId,setSessionId]=useState(null),[confirmRemoval,setConfirmRemoval]=useState(null),[confirmInvitations,setConfirmInvitations]=useState(false);
-  const history = useRef({serial:0,pending:null,timer:null}), historyAction=useRef(null), historyVisible=useRef(false);
+  const history = useRef({serial:0,pending:null,timer:null,supported:false,snapshot:null,pane:"",stale:false}), historyAction=useRef(null), historyVisible=useRef(false);
   const [historyOpen,setHistoryOpen]=useState(false),[historyPane,setHistoryPane]=useState(""),[historyPageSize,setHistoryPageSize]=useState(200);
   historyVisible.current=historyOpen;
   const [historyText,setHistoryText]=useState(""),[historyBusy,setHistoryBusy]=useState(false),[historyError,setHistoryError]=useState("");
@@ -124,12 +124,21 @@ export default function SharedTerminal() {
           if (!pending || page?.request!==pending.request) return;
           if (page.pane!=null && (typeof page.pane!=="string" || !/^%[0-9]{1,19}$/.test(page.pane))) throw new Error("Invalid history pane");
           if (typeof page.data!=="string" || page.data.length>21848 || typeof page.done!=="boolean" || !Number.isInteger(page.total) || page.total<0 || page.total>200000 || !Number.isInteger(page.before) || page.before<0 || page.before>200000 || !Number.isInteger(page.lines) || page.lines<0 || page.lines>512 || page.error!=null && (typeof page.error!=="string" || page.error.length>256)) throw new Error("Invalid history response");
+          if(page.error==null){
+            if(pending.freeze){
+              if(typeof page.snapshot!=="string" || !/^[a-f0-9]{32}$/.test(page.snapshot) || !page.pane) throw new Error("Invalid history snapshot");
+              if(pending.snapshot && pending.snapshot!==page.snapshot) throw new Error("History snapshot changed");
+              if(pending.pane && pending.pane!==page.pane) throw new Error("History pane changed");
+              pending.snapshot=page.snapshot;pending.pane=page.pane;
+            } else if(page.snapshot!=null) throw new Error("Unexpected history snapshot");
+          }
           const decoded=atob(page.data),bytes=Uint8Array.from(decoded,char=>char.charCodeAt(0));
           pending.size+=bytes.length;if(pending.size>131072) throw new Error("History capture exceeds limit");pending.chunks.push(bytes);
           if (page.done) {
             clearTimeout(history.current.timer);history.current.pending=null;
             const data=new Uint8Array(pending.size);let offset=0;for(const chunk of pending.chunks){data.set(chunk,offset);offset+=chunk.length;}
             if(page.error){setHistoryError(page.error);setHistoryBusy(false);return;}
+            history.current.snapshot=pending.snapshot;history.current.pane=page.pane || "";history.current.stale=false;
             if(page.pane)setHistoryPane(page.pane);
             setHistoryText(new TextDecoder().decode(data).replace(/[\x00-\x08\x0b-\x1f\x7f]/g,""));
             setHistoryMeta({total:page.total,before:page.before,lines:page.lines,truncated:page.truncated===true});
@@ -143,6 +152,7 @@ export default function SharedTerminal() {
           try { sessionStorage.setItem(storageKey, JSON.stringify(recovery.current)); } catch { /* Memory recovery still works when tab storage is unavailable. */ }
         } else if (event.type === "welcome") {
           if (typeof event.name !== "string" || typeof event.read_only !== "boolean") throw new Error("Invalid session");
+          history.current.supported=event.history_snapshots===true;
           welcome = true; retryDeadline.current = null; retryCount.current = 0; clearTimeout(handshake); setSession(event); setStatus("Connected");
           permission.current = event.read_only; instance.options.disableStdin = event.read_only;
           instance.reset(); instance.focus();
@@ -165,6 +175,7 @@ export default function SharedTerminal() {
       if (!alive) return;
       clearTimeout(handshake); permission.current = true; instance.options.disableStdin = true;
       setMembers([]);
+      if(history.current.snapshot)history.current.stale=true;
       if(history.current.pending){clearTimeout(history.current.timer);history.current.pending=null;setHistoryBusy(false);setHistoryError("Connection changed. Refresh history after reconnecting.");}
       if (!manualDisconnect.current && retryable && recovery.current) {
         if (!retryDeadline.current) retryDeadline.current = Date.now() + recovery.current.reconnect_timeout * 1000;
@@ -192,14 +203,19 @@ export default function SharedTerminal() {
     try { await navigator.clipboard.writeText(selected); setClipboardStatus("Selection copied"); }
     catch { setClipboardStatus("Clipboard unavailable. Use your browser’s Copy command."); }
   }
-  function loadHistory(before=0) {
+  function loadHistory(before=0,refresh=false) {
     const socket=connection.current;
     if(socket?.readyState!==WebSocket.OPEN || status!=="Connected"){setHistoryError("Connect to read retained history.");return;}
     if(history.current.pending)return;
     if(historyPane && !/^%[0-9]{1,19}$/.test(historyPane)){setHistoryError("Choose a pane ID such as %0, or leave it blank for the active pane.");return;}
+    if(!refresh && history.current.snapshot && (history.current.stale || historyPane!==history.current.pane)){
+      setHistoryError("Refresh history to capture this pane or connection.");return;
+    }
+    const freeze=history.current.supported;
+    const snapshot=refresh ? null : history.current.snapshot;
     const request=(history.current.serial+1)>>>0;history.current.serial=request;
-    history.current.pending={request,chunks:[],size:0};setHistoryBusy(true);setHistoryError("");
-    socket.send(JSON.stringify({type:"history",request,pane:historyPane,before,lines:historyPageSize}));
+    history.current.pending={request,chunks:[],size:0,freeze,snapshot,pane:historyPane};setHistoryBusy(true);setHistoryError("");
+    socket.send(JSON.stringify({type:"history",request,pane:historyPane,before,lines:historyPageSize,...(freeze ? {freeze:true,...(snapshot ? {snapshot} : {})} : {})}));
     history.current.timer=setTimeout(()=>{history.current.pending=null;setHistoryBusy(false);setHistoryError("History request timed out. The live terminal is still available; try Refresh history.");},5000);
   }
   historyAction.current=()=>{setHistoryOpen(!historyOpen);if(!historyOpen)loadHistory(0);else requestAnimationFrame(()=>terminal.current?.focus());};
@@ -211,7 +227,7 @@ export default function SharedTerminal() {
     </header>
     {error && <p role="alert" className="shrink-0 bg-amber-500/10 px-4 py-2 text-sm text-amber-700 dark:text-amber-300">{error}</p>}
     <div className="flex min-h-0 flex-1 flex-col md:flex-row">
-      {historyOpen && <HistoryPanel text={historyText} meta={historyMeta} pane={historyPane} setPane={setHistoryPane} pageSize={historyPageSize} setPageSize={setHistoryPageSize} busy={historyBusy} error={historyError} load={loadHistory} close={()=>{setHistoryOpen(false);requestAnimationFrame(()=>terminal.current?.focus());}} onSelection={()=>{if(autoCopy)copy();}} />}
+      {historyOpen && <HistoryPanel text={historyText} meta={historyMeta} pane={historyPane} setPane={setHistoryPane} pageSize={historyPageSize} setPageSize={setHistoryPageSize} busy={historyBusy} error={historyError} load={loadHistory} frozen={!!history.current.snapshot} close={()=>{setHistoryOpen(false);requestAnimationFrame(()=>terminal.current?.focus());}} onSelection={()=>{if(autoCopy)copy();}} />}
       <section className={`${historyOpen ? "hidden" : ""} min-h-0 min-w-0 flex-1 bg-[#101214] p-2`} aria-label="Terminal output"><div ref={container} className="h-full min-h-0 w-full overflow-hidden" /></section>
       <aside aria-label="Session participants" className="flex max-h-[45dvh] shrink-0 flex-col overflow-hidden border-t border-border bg-surface p-4 md:max-h-none md:w-72 md:border-l md:border-t-0">
         <h2 className="flex items-center gap-2 text-xs font-semibold"><IconUsers size={16} />Participants <span className="ml-auto tabular-nums text-muted-foreground">{members.length}</span></h2>

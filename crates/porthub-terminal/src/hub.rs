@@ -54,6 +54,8 @@ struct State {
 struct Viewer {
     identity: u64,
     history_pending: Option<u32>,
+    // Outer None is legacy; Some(None) awaits the first frozen chunk.
+    history_anchor: Option<Option<String>>,
     history_started: Option<Instant>,
     last_redraw: Option<Instant>,
     joined_at: i64,
@@ -511,6 +513,7 @@ impl Hub {
             Viewer {
                 identity: identity.unwrap_or(id),
                 history_pending: None,
+                history_anchor: None,
                 history_started: None,
                 last_redraw: None,
                 joined_at: now(),
@@ -754,6 +757,7 @@ impl Shared {
                 }
                 viewer.history_started = Some(Instant::now());
                 viewer.history_pending = Some(request);
+                viewer.history_anchor = (freeze && history_snapshots).then(|| snapshot.clone());
                 HostEvent::History {
                     freeze: freeze && history_snapshots, snapshot,
                     client,
@@ -808,6 +812,16 @@ impl Shared {
                 page.validate()?;
                 if let Some(viewer) = state.viewers.get_mut(&client) {
                     if viewer.history_pending == Some(page.request) {
+                        if page.error.is_none() {
+                            match &mut viewer.history_anchor {
+                                Some(anchor) => {
+                                    ensure!(page.snapshot.is_some(), "history snapshot missing");
+                                    ensure!(anchor.as_ref().is_none_or(|id| Some(id) == page.snapshot.as_ref()), "history snapshot changed");
+                                    *anchor = page.snapshot.clone();
+                                }
+                                None => ensure!(page.snapshot.is_none(), "unexpected history snapshot"),
+                            }
+                        }
                         if page.done {
                             viewer.history_pending = None;
                         }
@@ -1190,6 +1204,31 @@ mod tests {
         let lease = restarted.register_persisted("owner", &h, now(), true)?;
         assert!(lease.session.invitations_revoked());
         assert!(restarted.resolve(&h.read_token).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn frozen_history_rejects_anchor_changes_between_chunks() -> Result<()> {
+        let hub=Hub::default();
+        let mut h=hello();h.history_snapshots=true;
+        let host=hub.register("owner",&h,now())?;
+        let mut reader=hub.attach(&h.read_token,80,24,"xterm-256color")?;
+        while reader.events.try_recv().is_ok() {}
+        reader.session.input(reader.id,ViewerInput::History {
+            freeze:true,snapshot:None,request:1,pane:"%0".into(),before:0,lines:20,
+        })?;
+        let mut page=HistoryChunk {
+            snapshot:Some("a".repeat(32)),pane:Some("%0".into()),request:1,
+            data:encode_data(b"first"),done:false,total:20,before:0,lines:20,truncated:false,error:None,
+        };
+        host.session.output(host.generation,HostOutput::History {client:reader.id,page:page.clone()})?;
+        assert!(matches!(reader.events.try_recv(),Ok(ViewerEvent::History {..})));
+        page.snapshot=Some("b".repeat(32));page.done=true;
+        assert!(host.session.output(host.generation,HostOutput::History {client:reader.id,page:page.clone()}).is_err());
+        assert!(reader.events.try_recv().is_err());
+        page.snapshot=Some("a".repeat(32));
+        host.session.output(host.generation,HostOutput::History {client:reader.id,page})?;
+        assert!(matches!(reader.events.try_recv(),Ok(ViewerEvent::History {..})));
         Ok(())
     }
 

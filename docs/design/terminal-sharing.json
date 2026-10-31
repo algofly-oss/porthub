@@ -331,16 +331,15 @@
     "production_export_e2e": "Chromium andWebKit full API/Mongo/bundledtmux/SSH flows passed;62 and83 concurrent fresh HTTPS checks respectively."
   },
   "history_snapshot_development": {
-    "status": "Host capture/cache engine and capability-aware protocol/attachment routing implemented and locally tested. Browser and SSH pager integration, native broker-version gating and complete response-anchor validation remain incomplete. Production1.9.0 still uses live history slices.",
+    "status": "Host capture/cache, capability-aware protocol, browser and SSH pager integration implemented and locally tested. Production-export end-to-end tests and new-version packaging/deployment remain pending. Production1.9.0 still uses live history slices.",
     "capture": "Immutable in-memory bytes and line index; guarded metadata+capture in one synchronous tmux command queue; resolved workspace pane only;2-second capture deadline;64MiB maximum capture;128KiB maximum response. Visible screen is not retained scrollback.",
     "cache": "128MiB default retained cache including line indexes;10-minute idle expiry renewed by valid paging; per-guest ownership; nonce-bound capture reservations fence transport generation, detach/re-attach and out-of-order refresh; quota failure keeps previous pages and does not evict another active reader. In-flight captures and tmux history have separate bounded costs.",
-    "tests": "40 terminal tests passed before the additional actor test:32 unit,7 multiplexer,1 stockOpenSSH. Additional real bundled attachment test passes stable pages under new output and rejects detached guest anchors. Two broker tests pass, including both legacy gateway stripping and supported gateway advertisement. API cargo check passes.",
+    "tests": "43 terminal tests pass:34 unit,8 real bundled multiplexer,1 stockOpenSSH. The OpenSSH test additionally passes both legacy and snapshot-capable gateways and verifies anchored Older requests. Twelve browser cases pass: legacy/frozen x dark/light x1440/402/320, with error preservation, explicit refresh and no overflow. Broker version gate test passes;1.10.0 is the first compatible broker version.",
     "next": [
-      "Gate native snapshot advertisement on the selected broker version; complete per-response anchor validation",
-      "Add capability/fallback routing tests and verify snapshot identity consistency across chunked responses",
-      "Browser Older/Newer/Latest use the retained snapshot; explicit refresh captures new output; errors preserve the last page",
-      "Ordinary SSH read-only pager uses the same anchored pages and explicit refresh",
-      "Exercise new behavior in full production-export browser/API/SSH tests, package and deploy a new immutable version"
-    ]
+      "Exercise frozen pages with full production-export browser/API/Mongo/bundledtmux/stockSSH fixtures, including concurrent output and resize",
+      "Validate release1.10.0 packaging for all supported targets and deploy scoped roles/clients without disturbing other workloads",
+      "Retain separate outstanding goal requirements: optimized direct terminal transport with gateway fallback, native participant sidebar and authenticated automated production deployment gate"
+    ],
+    "viewer_behavior": "Older/Newer/Latest keep the retained snapshot; Refresh history in browser or r in SSH captures anew. SSH F7 reopening also starts fresh. Browser connection/pane changes require explicit refresh. Error responses preserve the previous browser page and SSH screen. Gateway and pager reject snapshot changes between chunks. Legacy hosts keep live offset paging with an explicit UI explanation."
   }
 }
