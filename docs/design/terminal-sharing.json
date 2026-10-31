@@ -184,9 +184,10 @@
     "source": "49f1d32945f7fea69d259765e72b8a0735f2dfbf",
     "run": "https://github.com/algofly-oss/porthub/actions/runs/41223275496",
     "mode": "All-platform verify-only; publication disabled. Existing 32-bit workflow incorrectly built release artifacts in this mode; fixed for subsequent runs.",
-    "observed": "Windows x86-64 job passed. All seven Linux/macOS helper-build jobs failed; Windows ARM64 and x86 remained running at last inspection. Compilation log tails were hidden by the helper wrapper, so diagnostics have been added and failed platforms must be rerun.",
+    "observed": "All three Windows verification jobs passed on 49f1d32. On retry 293f5d1, native Linux helper build and five real bundled tmux tests passed, followed by a stock-SSH timeout. Reproduced locally with TERM removed; safe empty-TERM fallback fixes the OpenSSH regression. All seven Linux/macOS jobs in that retry completed with failures, so none is claimed fully validated.",
     "changes": "Explicit -m32 for multilib i686 helper, bounded failure log tail and build-log artifact, ELF class/CPU plus static-loader validation; verify-only cross compilation no longer builds/uploads 32-bit release binaries.",
-    "local_validation": "Two real compiler-produced ELF checks pass: 32-bit binary accepted for i686 and rejected for x86-64/ARM, dynamically linked host binary rejected. Python syntax and workflow YAML/verify-only conditions verified.",
-    "status": "Not packaged or deployed. Do not claim Linux/macOS CI passes based on local native tests."
+    "local_validation": "Two real compiler-produced ELF checks pass. Stock OpenSSH test with TERM removed failed before the gateway fallback and passes after it. Python syntax and workflow YAML parse checks pass. Darwin jemalloc packaging and Linux cross-link probe still require CI results.",
+    "status": "Representative targeted CI retries required after this checkpoint; no release published or deployment applied.",
+    "diagnosed": "32-bit Linux ncurses reports absent setenv/putenv during configuration; underlying link diagnostic remains pending. macOS tmux explicitly requires allocator selection and recommends jemalloc. The helper now pins upstream jemalloc 5.3.1 for Darwin, statically force-loads its zone initializer and rejects non-system dylib dependencies. Linux configure link probes and config.log artifacts added for the remaining cross-compilation issue."
   }
 }

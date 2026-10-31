@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import sys
 import tarfile
@@ -58,7 +59,9 @@ def build(args):
 
     sources = {}
     for item in lock['sources']:
-        archive = cache / (item['name'] + '.tar.gz')
+        if item.get('platforms') and not any(platform in args.target for platform in item['platforms']):
+            continue
+        archive = cache / (item['name'] + ('.tar.bz2' if item['url'].endswith('.tar.bz2') else '.tar.gz'))
         if not archive.is_file():
             # Sources use canonical HTTPS release locations; subsequent builds
             # verify the committed SHA256 before touching the build tree.
@@ -101,6 +104,12 @@ def build(args):
             run(['./configure','--prefix='+str(musl_prefix),'--host='+args.target,'--disable-shared','--enable-wrapper=gcc'],sources['musl'])
             run(['make',jobs],sources['musl']);run(['make','install'],sources['musl'])
             env['CC'] = str(musl_prefix/'bin/musl-gcc')
+            # Fail early with the actual linker diagnostic rather than allowing
+            # configure to quietly mark required environment functions absent.
+            probe = cache/'libc-link-probe.c'
+            probe.write_text('#include <stdlib.h>\nint main(void) { setenv("PORTHUB_BUILD_PROBE", "1", 1); return putenv("PORTHUB_BUILD_PROBE=1"); }\n')
+            run([env['CC'], *shlex.split(env['CFLAGS']), str(probe), '-o', str(cache/'libc-link-probe')], cache)
+
         run(['./configure', *configure, '--disable-shared','--enable-static','--disable-openssl','--disable-thread-support','--disable-samples','--disable-libevent-regress'],sources['libevent'])
         run(['make',jobs],sources['libevent']);run(['make','install'],sources['libevent'])
         run(['./configure', *configure, '--without-shared','--with-normal','--enable-widec','--with-termlib','--without-cxx','--without-cxx-binding','--without-ada','--without-tests','--without-progs','--without-manpages','--without-debug','--with-build-cc=cc','--enable-pc-files','--with-pkg-config-libdir='+str(prefix/'lib/pkgconfig')],sources['ncurses'])
@@ -108,19 +117,38 @@ def build(args):
         libraries = [prefix/'lib/libncursesw.a',prefix/'lib/libtinfow.a']
         if not all(path.is_file() for path in libraries):
             raise RuntimeError('Static terminal libraries missing; see '+str(cache/'build.log'))
-        flags = {'LIBEVENT_CFLAGS':'-I'+str(prefix/'include'),'LIBEVENT_LIBS':str(prefix/'lib/libevent_core.a'),'NCURSES_CFLAGS':'-I'+str(prefix/'include/ncursesw'),'NCURSES_LIBS':' '.join(map(str,libraries)),'LDFLAGS':'-static' if 'linux' in args.target else ''}
-        run(['./configure', *configure,'--disable-utf8proc','--disable-systemd','--disable-utempter'],sources['tmux'],flags)
+        flags = {'LIBEVENT_CORE_CFLAGS':'-I'+str(prefix/'include'),
+                 'LIBEVENT_CORE_LIBS':str(prefix/'lib/libevent_core.a'),
+                 'LIBTINFOW_CFLAGS':'-I'+str(prefix/'include/ncursesw'),
+                 'LIBTINFOW_LIBS':str(prefix/'lib/libtinfow.a'),
+                 'LDFLAGS':'-static' if 'linux' in args.target else ''}
+        allocator = '--disable-jemalloc'
+        if 'jemalloc' in sources:
+            run(['./configure', *configure, '--disable-shared', '--enable-static', '--disable-cxx', '--disable-doc'],sources['jemalloc'])
+            run(['make',jobs],sources['jemalloc']);run(['make','install'],sources['jemalloc'])
+            # Darwin's default jemalloc zone initializer must be retained even
+            # when linking the archive instead of loading a shared library.
+            flags['JEMALLOC_CFLAGS'] = '-I'+str(prefix/'include')
+            flags['JEMALLOC_LIBS'] = '-Wl,-force_load,'+str(prefix/'lib/libjemalloc.a')
+            allocator = '--enable-jemalloc'
+        run(['./configure', *configure,'--disable-utf8proc','--disable-systemd','--disable-utempter',allocator],sources['tmux'],flags)
         run(['make',jobs],sources['tmux'],flags)
     stage = cache/'package';stage.mkdir(exist_ok=True)
     shutil.copy2(sources['tmux']/'tmux',stage/'tmux')
     if 'linux' in args.target:
         validate_linux_binary(stage/'tmux', args.target)
+    elif 'darwin' in args.target:
+        linked = subprocess.check_output(['otool', '-L', str(stage/'tmux')], text=True)
+        for line in linked.splitlines()[1:]:
+            dependency = line.strip().split(' (', 1)[0]
+            if not dependency.startswith(('/usr/lib/', '/System/Library/')):
+                raise RuntimeError('Terminal helper requires an unbundled library: '+dependency)
     terminfo=stage/'terminfo';terminfo.mkdir(exist_ok=True)
     tic=shutil.which('tic')
     if not tic:raise RuntimeError('Build host requires tic to package terminal definitions')
     subprocess.run([tic,'-x','-e','xterm,xterm-256color,screen,screen-256color,tmux,tmux-256color,vt100','-o',str(terminfo),str(sources['ncurses']/'misc/terminfo.src')],check=True)
     licenses=stage/'licenses';licenses.mkdir(exist_ok=True)
-    for name, source in [('tmux',sources['tmux']/'COPYING'),('libevent',sources['libevent']/'LICENSE'),('ncurses',sources['ncurses']/'COPYING')] + ([('musl',sources['musl']/'COPYRIGHT')] if 'linux' in args.target else []):
+    for name, source in [('tmux',sources['tmux']/'COPYING'),('libevent',sources['libevent']/'LICENSE'),('ncurses',sources['ncurses']/'COPYING')] + ([('musl',sources['musl']/'COPYRIGHT')] if 'linux' in args.target else []) + ([('jemalloc',sources['jemalloc']/'COPYING')] if 'jemalloc' in sources else []):
         if not source.is_file():raise RuntimeError('License notice missing: '+name)
         shutil.copyfile(source,licenses/(name+'.txt'))
     manifest={'version':next(item['version'] for item in lock['sources'] if item['name']=='tmux'),'target':args.target,'files':{str(path.relative_to(stage)):hashlib.sha256(path.read_bytes()).hexdigest() for path in sorted(stage.rglob('*')) if path.is_file()}}

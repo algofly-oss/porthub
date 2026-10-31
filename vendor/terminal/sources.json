@@ -23,6 +23,15 @@
       "version": "1.2.6-7813e9119eb5",
       "url": "https://git.musl-libc.org/cgit/musl/snapshot/musl-7813e9119eb5fe681b6750b8a033a0490bca0941.tar.gz",
       "sha256": "8c16adf94bfd61358cf884353a4c0b71837ed792e7b7f056c86354436cf05bdb"
+    },
+    {
+      "name": "jemalloc",
+      "version": "5.3.1",
+      "url": "https://github.com/jemalloc/jemalloc/releases/download/5.3.1/jemalloc-5.3.1.tar.bz2",
+      "sha256": "3826bc80232f22ed5c4662f3034f799ca316e819103bdc7bb99018a421706f92",
+      "platforms": [
+        "darwin"
+      ]
     }
   ]
 }

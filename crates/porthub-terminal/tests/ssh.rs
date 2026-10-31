@@ -51,6 +51,7 @@ async fn ordinary_openssh_joins_shared_terminal_and_read_only_invites_cannot_wri
     });
     for (token, read_only) in [(&hello.write_token, false), (&hello.read_token, true)] {
         let mut child = Command::new("ssh")
+            .env_remove("TERM")
             .args([
                 "-F",
                 "/dev/null",

@@ -157,7 +157,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: terminal-helper-log-${{ matrix.artifact }}
-          path: target/terminal-helper/**/build.log
+          path: |
+            target/terminal-helper/**/build.log
+            target/terminal-helper/**/config.log
           if-no-files-found: ignore
           retention-days: 3
       - name: Cache compiled Rust dependencies and workspace libraries
@@ -301,7 +303,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: terminal-helper-log-${{ matrix.artifact }}
-          path: target/terminal-helper/**/build.log
+          path: |
+            target/terminal-helper/**/build.log
+            target/terminal-helper/**/config.log
           if-no-files-found: ignore
           retention-days: 3
       - name: Cache compiled 32-bit Rust libraries

@@ -240,6 +240,14 @@ impl server::Handler for Viewer {
         _modes: &[(Pty, u32)],
         session: &mut Session,
     ) -> Result<()> {
+        // Forced-PTY stock SSH clients may have no TERM (for example in CI or
+        // headless SSH hops). Keep the normal safe default instead of accepting
+        // an empty type here and failing attachment later.
+        let term = if term.is_empty() {
+            "xterm-256color"
+        } else {
+            term
+        };
         let size = (
             u16::try_from(if cols == 0 { 80 } else { cols }).unwrap_or(0),
             u16::try_from(if rows == 0 { 24 } else { rows }).unwrap_or(0),
