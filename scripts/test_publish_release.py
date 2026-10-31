@@ -4,6 +4,8 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+import subprocess
 
 spec=importlib.util.spec_from_file_location('publisher',Path(__file__).with_name('publish-release.py'))
 publisher=importlib.util.module_from_spec(spec);spec.loader.exec_module(publisher)
@@ -86,5 +88,27 @@ class Publication(unittest.TestCase):
         self.draft();self.github.value['assets'].append({'name':'user-note.txt','state':'uploaded'})
         with self.assertRaises(ValueError):self.publish()
         self.assertEqual(self.github.writes,[])
+
+class DraftLookup(unittest.TestCase):
+    def test_unpublished_draft_is_found_when_tag_endpoint_returns404(self):
+        github=publisher.GitHub('owner/repo')
+        draft={'id':123,'tag_name':'v1.9.0','draft':True,'target_commitish':'a'*40}
+        with patch.object(github,'optional',return_value=None), patch.object(github,'pages',return_value=[draft]) as pages:
+            self.assertEqual(github.release('v1.9.0'),draft)
+            pages.assert_called_once_with('/releases?per_page=100')
+    def test_published_release_does_not_need_a_draft_listing(self):
+        github=publisher.GitHub('owner/repo');release={'tag_name':'v1.9.0','draft':False}
+        with patch.object(github,'optional',return_value=release), patch.object(github,'pages') as pages:
+            self.assertEqual(github.release('v1.9.0'),release);pages.assert_not_called()
+    def test_duplicate_drafts_are_rejected_instead_of_uploading_to_one(self):
+        github=publisher.GitHub('owner/repo');draft={'tag_name':'v1.9.0','draft':True}
+        with patch.object(github,'optional',return_value=None), patch.object(github,'pages',return_value=[draft,dict(draft,id=2)]):
+            with self.assertRaises(ValueError):github.release('v1.9.0')
+    def test_command_failure_keeps_status_but_redacts_endpoint_queries(self):
+        github=publisher.GitHub('owner/repo')
+        result=subprocess.CompletedProcess([],1,'','HTTP403: Resource not accessible by integration (https://api.github.com/private?secret=hidden)')
+        with patch.object(publisher.subprocess,'run',return_value=result):
+            with self.assertRaises(RuntimeError) as caught:github.command('create','v1.9.0')
+        self.assertIn('HTTP403',str(caught.exception));self.assertNotIn('secret=hidden',str(caught.exception))
 
 if __name__=='__main__':unittest.main()
