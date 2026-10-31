@@ -64,6 +64,21 @@ Retries can finish a draft pinned to the same source; published assets are
 immutable. Automatic version preparation skips versions reserved by another
 draft or tag, so a source fix after a failed upload advances the patch version.
 
+A completed full `Native agent platforms` dispatch can be promoted separately
+with `Promote verified client release`, selecting its numeric run ID. This
+workflow does not rebuild clients. The existing `Native agent platforms`
+dispatcher also accepts `promote_run_id` for the same operation, skipping its
+platform builds. Use it after server rollout and application
+checks: it verifies the successful ten-platform bundle gate, repository/source
+ancestry and artifact identity, downloads the exact ZIP, checks GitHub's SHA256
+and length, then validates all thirty canonical files before publication. The
+tag points to the original build commit, even when the promotion workflow has
+subsequently changed. Failed/partial/foreign/expired runs, corrupt downloads,
+archive links and mismatched platform versions cannot be promoted. Publication
+uses the workflow's temporary GitHub token; no personal credential is copied to
+a deployment machine. Existing publication and latest-only retention safeguards
+apply. This is an explicit promotion workflow, not an automatic deployment gate.
+
 During active development, GitHub retains only the latest verified versioned
 release and its version tag by default. After publication, CI removes older
 versioned releases (including binary assets) and version tags, plus unprotected

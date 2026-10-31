@@ -2,6 +2,10 @@ name: Native agent platforms
 on:
   workflow_call:
     inputs:
+      promote_run_id:
+        description: Promote an already successful full run instead of rebuilding clients
+        type: string
+        default: ''
       revision:
         description: Exact prepared release commit
         type: string
@@ -17,6 +21,10 @@ on:
         default: false
   workflow_dispatch:
     inputs:
+      promote_run_id:
+        description: Optional successful full run ID to promote without rebuilding
+        type: string
+        default: ''
       platform:
         description: 'Platform artifact names (comma separated), windows, or all'
         default: all
@@ -32,7 +40,16 @@ on:
 permissions:
   contents: read
 jobs:
+  promote-existing:
+    if: inputs.promote_run_id != ''
+    uses: ./.github/workflows/promote-client-release.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      run_id: ${{ inputs.promote_run_id }}
   select-platforms:
+    if: inputs.promote_run_id == ''
     runs-on: ubuntu-24.04
     outputs:
       native: ${{ steps.select.outputs.native }}
