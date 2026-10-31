@@ -45,6 +45,10 @@ struct State {
     viewers: HashMap<u64, Viewer>,
     close_event: Option<HostEvent>,
     invitations_revoked: bool,
+    invitation_revision: u64,
+    invitation_expires_at: i64,
+    invitation_write_hash: String,
+    invitation_read_hash: String,
 }
 struct Viewer {
     identity: u64,
@@ -131,6 +135,10 @@ impl Hub {
                     viewers: HashMap::new(),
                     close_event: None,
                     invitations_revoked,
+                    invitation_revision: 0,
+                    invitation_expires_at: hello.options.expires_at,
+                    invitation_write_hash: write_hash.clone(),
+                    invitation_read_hash: read_hash.clone(),
                 }),
             });
             inner
@@ -188,6 +196,64 @@ impl Hub {
             events,
         })
     }
+    /// Trusted gateway only: persist the matching revision and capabilities first.
+    /// Replaces new-join routes atomically; existing attachments/recovery stay live.
+    pub fn rotate_invitations(
+        &self,
+        id: &str,
+        generation: u64,
+        update: &InvitationUpdate,
+    ) -> Result<()> {
+        update.validate(now())?;
+        let mut inner = self.inner.lock().expect("terminal hub mutex");
+        let session = inner
+            .sessions
+            .get(id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("terminal host unavailable"))?;
+        let mut state = session.state.lock().expect("terminal session mutex");
+        ensure!(
+            !session.stop.is_cancelled()
+                && !session.expired(now())
+                && state.generation == generation
+                && state.host.is_some(),
+            "terminal host replaced or unavailable"
+        );
+        let write_hash = digest(&update.write_token);
+        let read_hash = digest(&update.read_token);
+        if update.revision == state.invitation_revision {
+            ensure!(
+                state.invitation_write_hash == write_hash
+                    && state.invitation_read_hash == read_hash
+                    && state.invitation_expires_at == update.expires_at,
+                "invitation revision conflicts"
+            );
+            // An idempotent retry must not undo a later explicit revocation.
+            return Ok(());
+        }
+        ensure!(
+            update.revision > state.invitation_revision,
+            "stale invitation revision"
+        );
+        ensure!(
+            !inner.tokens.contains_key(&write_hash) && !inner.tokens.contains_key(&read_hash),
+            "replacement capabilities must be fresh"
+        );
+        inner.tokens.retain(|_, (session_id, _)| session_id != id);
+        inner.tokens.insert(
+            write_hash.clone(),
+            (id.to_owned(), session.options.read_only),
+        );
+        inner
+            .tokens
+            .insert(read_hash.clone(), (id.to_owned(), true));
+        state.invitation_revision = update.revision;
+        state.invitation_expires_at = update.expires_at;
+        state.invitation_write_hash = write_hash;
+        state.invitation_read_hash = read_hash;
+        state.invitations_revoked = false;
+        Ok(())
+    }
     pub fn resolve(&self, capability: &str) -> Result<(Arc<Shared>, bool)> {
         ensure!(
             token(capability, 64),
@@ -203,8 +269,9 @@ impl Hub {
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("invalid or expired terminal invitation"))?
             .clone();
+        let expires_at = session.invitation_expires_at();
         ensure!(
-            session.options.expires_at == 0 || now() < session.options.expires_at,
+            expires_at == 0 || now() < expires_at,
             "terminal invitation expired"
         );
         ensure!(
@@ -236,7 +303,15 @@ impl Hub {
         term: &str,
     ) -> Result<Attachment> {
         let (session, read_only) = self.resolve(capability)?;
-        self.attach_inner(&session.id, identity, read_only, cols, rows, term, true)
+        self.attach_inner(
+            &session.id,
+            identity,
+            read_only,
+            cols,
+            rows,
+            term,
+            Some(digest(capability)),
+        )
     }
     /// Only the trusted gateway may call this after verifying a durable guest
     /// grant. It intentionally bypasses invitation expiry, never session expiry.
@@ -249,7 +324,7 @@ impl Hub {
         rows: u16,
         term: &str,
     ) -> Result<Attachment> {
-        self.attach_inner(session_id, identity, read_only, cols, rows, term, false)
+        self.attach_inner(session_id, identity, read_only, cols, rows, term, None)
     }
     #[allow(clippy::too_many_arguments)]
     fn attach_inner(
@@ -260,7 +335,7 @@ impl Hub {
         cols: u16,
         rows: u16,
         term: &str,
-        invited: bool,
+        invitation_hash: Option<String>,
     ) -> Result<Attachment> {
         dimensions(cols, rows)?;
         ensure!(
@@ -294,10 +369,17 @@ impl Hub {
             })
             .sum();
         let mut state = session.state.lock().expect("terminal session mutex");
-        if invited {
+        if let Some(hash) = invitation_hash {
+            ensure!(
+                inner
+                    .tokens
+                    .get(&hash)
+                    .is_some_and(|(id, role)| id == session_id && *role == read_only),
+                "terminal invitation replaced"
+            );
             ensure!(
                 !state.invitations_revoked
-                    && (session.options.expires_at == 0 || now() < session.options.expires_at),
+                    && (state.invitation_expires_at == 0 || now() < state.invitation_expires_at),
                 "terminal invitation expired or revoked"
             );
         }
@@ -356,7 +438,7 @@ impl Hub {
         events.try_send(ViewerEvent::Welcome {
             name: session.options.name.clone(),
             read_only,
-            expires_at: session.options.expires_at,
+            expires_at: state.invitation_expires_at,
             participants: state.viewers.len() + 1,
         })?;
         state.viewers.insert(
@@ -498,6 +580,12 @@ impl Shared {
             .len()
     }
 
+    pub fn invitation_expires_at(&self) -> i64 {
+        self.state
+            .lock()
+            .expect("terminal session mutex")
+            .invitation_expires_at
+    }
     pub fn invitations_revoked(&self) -> bool {
         self.state
             .lock()
@@ -728,6 +816,146 @@ mod tests {
                 max_viewers: 16,
             },
         }
+    }
+    fn replacement(revision: u64) -> InvitationUpdate {
+        InvitationUpdate {
+            revision,
+            write_token: random_token(32),
+            read_token: random_token(32),
+            expires_at: now() + 3600,
+        }
+    }
+    #[tokio::test]
+    async fn rotation_replaces_new_joins_preserves_attached_guests_and_cannot_undo_revocation(
+    ) -> Result<()> {
+        let hub = Hub::default();
+        let h = hello();
+        let host = hub.register("owner", &h, now())?;
+        let writer = hub.attach(&h.write_token, 80, 24, "xterm")?;
+        let reader = hub.attach(&h.read_token, 80, 24, "xterm")?;
+        let update = replacement(1);
+        hub.rotate_invitations(&h.id, host.generation, &update)?;
+        assert!(hub.resolve(&h.write_token).is_err());
+        assert!(hub.resolve(&h.read_token).is_err());
+        let next_writer = hub.attach(&update.write_token, 80, 24, "xterm")?;
+        let next_reader = hub.attach(&update.read_token, 80, 24, "xterm")?;
+        assert!(next_writer
+            .session
+            .input(
+                next_writer.id,
+                ViewerInput::Input {
+                    data: encode_data(b"write\r")
+                }
+            )
+            .is_ok());
+        assert!(next_reader
+            .session
+            .input(
+                next_reader.id,
+                ViewerInput::Input {
+                    data: encode_data(b"forbidden\r")
+                }
+            )
+            .is_err());
+        writer.session.input(
+            writer.id,
+            ViewerInput::Input {
+                data: encode_data(b"still attached\r"),
+            },
+        )?;
+        assert!(reader
+            .session
+            .input(
+                reader.id,
+                ViewerInput::Input {
+                    data: encode_data(b"cannot write\r")
+                }
+            )
+            .is_err());
+        assert_eq!(host.session.participant_list().len(), 4);
+        hub.rotate_invitations(&h.id, host.generation, &update)?;
+        host.session.revoke_invitations();
+        hub.rotate_invitations(&h.id, host.generation, &update)?;
+        assert!(
+            hub.resolve(&update.write_token).is_err(),
+            "retry must not reopen a revoked revision"
+        );
+        let renewed = replacement(2);
+        hub.rotate_invitations(&h.id, host.generation, &renewed)?;
+        assert!(hub.resolve(&renewed.read_token)?.1);
+        assert!(hub
+            .rotate_invitations(&h.id, host.generation, &update)
+            .is_err());
+        Ok(())
+    }
+    #[tokio::test]
+    async fn expired_links_can_be_renewed_without_changing_workspace_expiry_or_read_only_ceiling(
+    ) -> Result<()> {
+        let hub = Hub::default();
+        let mut h = hello();
+        h.options.expires_at = now() - 1;
+        h.options.read_only = true;
+        let host = hub.register("owner", &h, now())?;
+        assert!(hub.resolve(&h.read_token).is_err());
+        let update = replacement(1);
+        hub.rotate_invitations(&h.id, host.generation, &update)?;
+        assert!(hub.resolve(&update.write_token)?.1);
+        let guest = hub.attach(&update.write_token, 80, 24, "xterm")?;
+        assert!(guest
+            .session
+            .input(
+                guest.id,
+                ViewerInput::Input {
+                    data: encode_data(b"forbidden\r")
+                }
+            )
+            .is_err());
+        assert_eq!(host.session.options.expires_at, h.options.expires_at);
+        assert!(!host.session.expired(now()));
+        let mut conflict = update.clone();
+        conflict.read_token = random_token(32);
+        assert!(hub
+            .rotate_invitations(&h.id, host.generation, &conflict)
+            .is_err());
+        Ok(())
+    }
+    #[tokio::test]
+    async fn rotation_fences_stale_hosts_collisions_and_admission_from_an_old_resolve() -> Result<()>
+    {
+        let hub = Hub::default();
+        let h = hello();
+        let other = hello();
+        let first_host = hub.register("owner", &h, now())?;
+        let _other_host = hub.register("other", &other, now())?;
+        let current = hub.register("owner", &h, now())?;
+        let mut update = replacement(1);
+        assert!(hub
+            .rotate_invitations(&h.id, first_host.generation, &update)
+            .is_err());
+        update.read_token = other.read_token.clone();
+        assert!(hub
+            .rotate_invitations(&h.id, current.generation, &update)
+            .is_err());
+        assert!(
+            hub.resolve(&h.read_token).is_ok(),
+            "failed update leaves current routes intact"
+        );
+        let (resolved, role) = hub.resolve(&h.read_token)?;
+        let old_hash = digest(&h.read_token);
+        let update = replacement(1);
+        hub.rotate_invitations(&h.id, current.generation, &update)?;
+        assert!(
+            hub.attach_inner(&resolved.id, None, role, 80, 24, "xterm", Some(old_hash))
+                .is_err(),
+            "capability must be rechecked atomically at actual admission"
+        );
+        assert!(
+            hub.attach_authorized(&h.id, None, role, 80, 24, "xterm")
+                .is_ok(),
+            "verified recovery bypasses replaced invitations"
+        );
+        assert!(hub.resolve(&other.read_token).is_ok());
+        Ok(())
     }
     #[tokio::test]
     async fn capabilities_are_session_scoped_read_only_enforced_and_revocation_closes_everyone(

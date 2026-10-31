@@ -172,5 +172,10 @@
       "Combined Chromium browser/API/edge/ordinary SSH/bundled tmux flow passes with a configured end journal: public roles, read-only history, recovery, owner removal and explicit Ctrl+D teardown."
     ],
     "limits": "Simultaneous journal and database write failure cannot persist an end across restart. The process refuses new terminal host admissions and logs the failure; repair/reconciliation is required before restarting. See docs/terminal-server-state.md."
+  },
+  "invitation_rotation_checkpoint": {
+    "status": "Core routing implemented and tested; not yet exposed by CLI/API or deployed. Durable revision hydration, host acknowledgement and private pending-update recovery remain required before enabling it.",
+    "semantics": "Fresh capability pair and bounded revision replace new-join mappings atomically. The new expiry is independent of immutable workspace options. Current guests and verified recovery retain their role. Matching retries are idempotent and cannot reopen a subsequently revoked revision. Old hosts, conflicting revisions and cross-session token collisions are rejected. Capability identity is rechecked atomically during final admission.",
+    "tests": "Eighteen core tests, five real bundled tmux tests and one ordinary OpenSSH integration test pass, including three new rotation/admission tests. CLI/API exposure and persisted update recovery are not yet implemented."
   }
 }

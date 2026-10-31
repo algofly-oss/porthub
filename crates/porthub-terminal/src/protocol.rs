@@ -149,6 +149,37 @@ pub struct Participant {
     pub last_active_at: i64,
 }
 
+/// Replacement invitation capabilities, authorized and persisted by the gateway
+/// before installation. Revision makes retries idempotent and fences old updates.
+/// Deliberately does not implement Debug: capabilities must not enter logs.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InvitationUpdate {
+    pub revision: u64,
+    pub write_token: String,
+    pub read_token: String,
+    pub expires_at: i64,
+}
+impl InvitationUpdate {
+    pub fn validate(&self, at: i64) -> Result<()> {
+        ensure!(
+            self.revision > 0 && self.revision <= i64::MAX as u64,
+            "invalid invitation revision"
+        );
+        ensure!(
+            token(&self.write_token, 64)
+                && token(&self.read_token, 64)
+                && self.write_token != self.read_token,
+            "invalid replacement invitation capabilities"
+        );
+        ensure!(
+            self.expires_at == 0 || self.expires_at > at && self.expires_at <= at + 604800,
+            "replacement invitation expiry must be within seven days"
+        );
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryChunk {
