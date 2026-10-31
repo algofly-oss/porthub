@@ -36,12 +36,30 @@ async fn capture(
     ensure!(truncated || status.success(), "terminal pane unavailable");
     Ok((data, truncated))
 }
+pub struct CapturedPage {
+    pub bytes: Vec<u8>,
+    pub total: u32,
+    pub lines: u16,
+    pub truncated: bool,
+    pub pane: String,
+}
+
 pub async fn page(
     workspace: &Workspace,
     pane: &str,
     before: u32,
     lines: u16,
 ) -> Result<(Vec<u8>, u32, u16, bool)> {
+    let page = page_pinned(workspace, pane, before, lines).await?;
+    Ok((page.bytes, page.total, page.lines, page.truncated))
+}
+
+pub async fn page_pinned(
+    workspace: &Workspace,
+    pane: &str,
+    before: u32,
+    lines: u16,
+) -> Result<CapturedPage> {
     history_request(pane, before, lines)?;
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         let target = if pane.is_empty() { "=workspace:" } else { pane };
@@ -84,7 +102,13 @@ pub async fn page(
         let available = total.saturating_sub(before);
         let count = available.min(u32::from(lines)) as u16;
         if count == 0 {
-            return Ok((Vec::new(), total, 0, false));
+            return Ok(CapturedPage {
+                bytes: Vec::new(),
+                total,
+                lines: 0,
+                truncated: false,
+                pane: resolved_pane.into(),
+            });
         }
         let start = -(i64::from(before) + i64::from(count));
         let end = -(i64::from(before) + 1);
@@ -103,7 +127,13 @@ pub async fn page(
             MAX_CAPTURE,
         )
         .await?;
-        Ok((bytes, total, count, truncated))
+        Ok(CapturedPage {
+            bytes,
+            total,
+            lines: count,
+            truncated,
+            pane: resolved_pane.into(),
+        })
     })
     .await?
 }

@@ -120,6 +120,7 @@ export default function SharedTerminal() {
         if (event.type === "history") {
           const page=event.page, pending=history.current.pending;
           if (!pending || page?.request!==pending.request) return;
+          if (page.pane!=null && (typeof page.pane!=="string" || !/^%[0-9]{1,19}$/.test(page.pane))) throw new Error("Invalid history pane");
           if (typeof page.data!=="string" || page.data.length>21848 || typeof page.done!=="boolean" || !Number.isInteger(page.total) || page.total<0 || page.total>200000 || !Number.isInteger(page.before) || page.before<0 || page.before>200000 || !Number.isInteger(page.lines) || page.lines<0 || page.lines>512 || page.error!=null && (typeof page.error!=="string" || page.error.length>256)) throw new Error("Invalid history response");
           const decoded=atob(page.data),bytes=Uint8Array.from(decoded,char=>char.charCodeAt(0));
           pending.size+=bytes.length;if(pending.size>131072) throw new Error("History capture exceeds limit");pending.chunks.push(bytes);
@@ -127,6 +128,7 @@ export default function SharedTerminal() {
             clearTimeout(history.current.timer);history.current.pending=null;
             const data=new Uint8Array(pending.size);let offset=0;for(const chunk of pending.chunks){data.set(chunk,offset);offset+=chunk.length;}
             if(page.error){setHistoryError(page.error);setHistoryBusy(false);return;}
+            if(page.pane)setHistoryPane(page.pane);
             setHistoryText(new TextDecoder().decode(data).replace(/[\x00-\x08\x0b-\x1f\x7f]/g,""));
             setHistoryMeta({total:page.total,before:page.before,lines:page.lines,truncated:page.truncated===true});
             setHistoryError(page.error || "");setHistoryBusy(false);

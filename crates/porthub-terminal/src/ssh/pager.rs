@@ -15,6 +15,7 @@ pub(super) struct Pager {
     pending: Option<(u32, Vec<u8>, Instant)>,
     last_request: Option<Instant>,
     keys: Vec<u8>,
+    pane: String,
 }
 impl Pager {
     pub fn new(cols: u16, rows: u16) -> Self {
@@ -29,6 +30,7 @@ impl Pager {
             pending: None,
             last_request: None,
             keys: Vec::new(),
+            pane: String::new(),
         }
     }
     pub fn resize(&mut self, cols: u16, rows: u16) {
@@ -56,6 +58,9 @@ impl Pager {
             let key = self.keys.as_slice();
             if key == b"\x1b[18~" {
                 self.active = !self.active;
+                if self.active {
+                    self.pane.clear();
+                }
                 self.before = 0;
                 self.shown = None;
                 self.pending = None;
@@ -163,7 +168,7 @@ impl Pager {
         self.last_request = Some(Instant::now());
         Some(ViewerInput::History {
             request: self.serial,
-            pane: String::new(),
+            pane: self.pane.clone(),
             before: self.before,
             lines: self.page_lines(),
         })
@@ -189,6 +194,11 @@ impl Pager {
             return Ok(None);
         }
         let (_, bytes, _) = self.pending.take().expect("pending history");
+        if page.error.is_none() {
+            if let Some(pane) = &page.pane {
+                self.pane = pane.clone();
+            }
+        }
         self.total = page.total;
         self.shown = Some(page.before);
         if page.before >= page.total && page.total > 0 {
@@ -245,6 +255,28 @@ fn clip(text: &str, cols: u16) -> String {
 mod tests {
     use super::*;
     #[test]
+    fn history_pages_keep_the_resolved_pane_until_returning_live() {
+        let mut pager = Pager::new(80, 24);
+        pager.feed(b"\x1b[18~");
+        let Some(ViewerInput::History { request, pane, .. }) = pager.request() else {
+            panic!("initial history")
+        };
+        assert!(pane.is_empty());
+        let mut page = response(request, b"retained\n", true);
+        page.pane = Some("%42".into());
+        pager.page(page).unwrap();
+        pager.feed(b"\x1b[5~");
+        pager.last_request = Some(Instant::now() - Duration::from_secs(1));
+        assert!(
+            matches!(pager.request(),Some(ViewerInput::History {pane,before:21,..}) if pane=="%42")
+        );
+        pager.feed(b"\x1b[18~\x1b[18~");
+        pager.last_request = Some(Instant::now() - Duration::from_secs(1));
+        assert!(
+            matches!(pager.request(),Some(ViewerInput::History {pane,before:0,..}) if pane.is_empty())
+        );
+    }
+    #[test]
     fn clipping_preserves_whole_graphemes_and_display_width() {
         assert_eq!(clip("a👩‍💻b", 4), "a👩‍💻");
         assert_eq!(clip("a🇮🇳b", 4), "a🇮🇳");
@@ -255,6 +287,7 @@ mod tests {
     }
     fn response(request: u32, bytes: &[u8], done: bool) -> HistoryChunk {
         HistoryChunk {
+            pane: None,
             request,
             data: encode_data(bytes),
             done,

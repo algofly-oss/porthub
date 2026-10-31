@@ -70,15 +70,15 @@ impl Attachments {
                     Ok(permit) => {
                         self.history_jobs.spawn(async move {
                         let _permit=permit;
-                        let result=crate::history::page(&workspace,&pane,before,lines).await;
-                        let (bytes,total,count,truncated,error)=match result {
-                            Ok((bytes,total,count,truncated))=>(bytes,total,count,truncated,None),
-                            Err(_)=>(Vec::new(),0,0,false,Some("History is temporarily unavailable; the pane may have closed.".into())),
+                        let result=crate::history::page_pinned(&workspace,&pane,before,lines).await;
+                        let (bytes,total,count,truncated,error,resolved_pane)=match result {
+                            Ok(page)=>(page.bytes,page.total,page.lines,page.truncated,None,Some(page.pane)),
+                            Err(_)=>(Vec::new(),0,0,false,Some("History is temporarily unavailable; the pane may have closed.".into()),None),
                         };
                         let chunks=bytes.len().max(1).div_ceil(MAX_DATA);
                         for index in 0..chunks {
                             let start=(index*MAX_DATA).min(bytes.len());let end=((index+1)*MAX_DATA).min(bytes.len());
-                            let page=HistoryChunk {request,data:encode_data(&bytes[start..end]),done:index+1==chunks,total,before,lines:count,truncated,error:error.clone()};
+                            let page=HistoryChunk {request,pane:resolved_pane.clone(),data:encode_data(&bytes[start..end]),done:index+1==chunks,total,before,lines:count,truncated,error:error.clone()};
                             if send.send(HostOutput::History {client,page}).await.is_err() {break;}
                         }
                     });
@@ -87,6 +87,7 @@ impl Attachments {
                         let _ = self.history_send.try_send(HostOutput::History {
                             client,
                             page: HistoryChunk {
+                                pane: None,
                                 request,
                                 data: String::new(),
                                 done: true,
@@ -254,6 +255,7 @@ mod tests {
         attachments.history_send.try_send(HostOutput::History {
             client: 7,
             page: HistoryChunk {
+                pane: None,
                 request: 19,
                 data: String::new(),
                 done: true,

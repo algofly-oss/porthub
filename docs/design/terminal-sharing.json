@@ -241,6 +241,12 @@
   },
   "cross_platform_packaged_smoke": {
     "implementation": "32-bit client release jobs now execute the packaged CLI and embedded helper before uploading artifacts. x86 uses native 32-bit runtime libraries; ARM jobs register QEMU only on their isolated hosted CI runners and use the cross sysroot. The fixture requires no registration and tests named detached create/reopen, preserved shell variables/output and final Ctrl+D teardown.",
-    "local_evidence": "The new fixture passes against the local bundled CLI. Workflow syntax passes Actionlint. Actual 32-bit release execution is pending; emulation is not a claim of physical ARM hardware validation."
+    "local_evidence": "The new fixture passes against the local bundled CLI. Workflow syntax passes Actionlint. Actual 32-bit release execution is pending; emulation is not a claim of physical ARM hardware validation.",
+    "ci_evidence": "Run 41233783102 at f10657b failed before packaged execution: ARMhf source download network failure, ARMv7 missing configure and x86 missing bundle during Rust build. The new smoke test has not yet run on these platforms. Investigate helper/cache lifecycle before claiming release packaging validation."
+  },
+  "history_viewer_pane_pinning": {
+    "fix": "History captures now return an optional validated resolved pane ID. Browser history adopts it for subsequent Older/Newer requests; read-only SSH pins it until returning live and reopening history. Browser users can clear Pane and refresh to follow the active pane. Older host responses without the field remain accepted.",
+    "evidence": "New browser regression fails before the change with an empty pane and passes afterward. Twenty-four core tests, six real bundled multiplexer tests and ordinary OpenSSH pass. Twelve Chromium/WebKit history layout cases and both combined real browser/API/edge/bundled-shell/OpenSSH flows pass, including an assertion that the actual browser received %0.",
+    "limits": "This preserves pane identity between page requests; live output, eviction and resize can still shift row boundaries. Stable snapshots and pane/window discovery remain pending. Deploy the gateway before hosts that emit the new optional metadata field."
   }
 }

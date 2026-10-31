@@ -180,6 +180,7 @@ async fn actual_websocket_recovery_survives_invite_expiry_and_host_kick_revokes_
         HostOutput::History {
             client,
             page: HistoryChunk {
+                pane: None,
                 request: 77,
                 data: encode_data(b"read-only-scrollback"),
                 done: true,

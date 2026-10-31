@@ -149,6 +149,7 @@ async fn ordinary_openssh_joins_shared_terminal_and_read_only_invites_cannot_wri
                 HostOutput::History {
                     client,
                     page: HistoryChunk {
+                        pane: None,
                         request,
                         data: encode_data(b"retained-view\n"),
                         done: true,

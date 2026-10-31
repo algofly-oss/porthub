@@ -215,6 +215,8 @@ impl InvitationUpdate {
 #[serde(deny_unknown_fields)]
 pub struct HistoryChunk {
     pub request: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<String>,
     pub data: String,
     pub done: bool,
     pub total: u32,
@@ -241,6 +243,10 @@ pub fn history_request(pane: &str, before: u32, lines: u16) -> Result<()> {
 }
 impl HistoryChunk {
     pub fn validate(&self) -> Result<()> {
+        if let Some(pane) = &self.pane {
+            ensure!(!pane.is_empty(), "invalid resolved history pane");
+            history_request(pane, self.before, self.lines.max(1))?;
+        }
         ensure!(
             self.total <= 200_000
                 && self.before <= 200_000
@@ -392,4 +398,28 @@ pub fn decode_data(data: &str) -> Result<Vec<u8>> {
 pub fn encode_data(bytes: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+    #[test]
+    fn resolved_pane_is_optional_for_older_hosts_and_strict_when_present() {
+        let legacy = serde_json::json!({"request":1,"data":"","done":true,"total":0,"before":0,"lines":0,"truncated":false});
+        let mut page: HistoryChunk = serde_json::from_value(legacy).unwrap();
+        page.validate().unwrap();
+        assert!(page.pane.is_none());
+        for invalid in [
+            "",
+            "workspace:",
+            "%",
+            "%1;kill-server",
+            "%12345678901234567890",
+        ] {
+            page.pane = Some(invalid.into());
+            assert!(page.validate().is_err());
+        }
+        page.pane = Some("%42".into());
+        page.validate().unwrap();
+    }
 }

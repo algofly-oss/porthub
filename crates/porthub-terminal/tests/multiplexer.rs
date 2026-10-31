@@ -280,6 +280,7 @@ async fn read_only_history_pages_real_scrollback_without_entering_copy_mode() ->
                 Some(HostOutput::History { client, page }) => {
                     assert_eq!(client, 7);
                     assert_eq!(page.request, 19);
+                    assert_eq!(page.pane.as_deref(), Some("%0"));
                     assert!(page.error.is_none());
                     page.validate()?;
                     bytes.extend(decode_data(&page.data)?);

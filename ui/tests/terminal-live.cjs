@@ -77,6 +77,7 @@ readerText='';sshReader.stdin.write('q');await readerOutput('LIVESSHPAGER:preser
 sshReader.kill('SIGTERM');await new Promise(resolve=>sshReader.once('exit',resolve));sshReader=null;
 
 await watcher.getByRole('button',{name:'History',exact:true}).click();try{await watcher.getByLabel('Captured history text',{exact:true}).getByText('history-line-100',{exact:true}).waitFor({timeout:5000})}catch(error){await watcher.screenshot({path:'/tmp/porthub-terminal-live-history-failure.png'});throw new Error('Real history failed: '+(await watcher.getByLabel('Terminal history',{exact:true}).innerText()).slice(0,1600));}
+assert.equal(await watcher.getByLabel('History pane',{exact:true}).inputValue(),'%0','real history must pin the resolved workspace pane');
 await type(host,"printf 'LIVE%s:%s\\n' 'CONTINUES' \"$OWNVAR\"");await output(host,'LIVECONTINUES:preserved');await watcher.getByRole('button',{name:'Return to live',exact:true}).click();await output(watcher,'LIVECONTINUES:preserved');
 const identity=(await watcher.getByText(/Guest .*\(you\)/).innerText()).match(/Guest (\d+)/)[1];
 await watcher.reload();await watcher.getByRole('button',{name:'Connect',exact:true}).click();await watcher.getByRole('heading',{name:'amberotter',exact:true}).waitFor();await watcher.getByText(`Guest ${identity} (you)`,{exact:true}).waitFor();

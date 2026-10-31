@@ -223,6 +223,7 @@ impl Hub {
                 if let Some(request) = viewer.history_pending.take() {
                     let _ = viewer.events.try_send(ViewerEvent::History {
                         page: HistoryChunk {
+                            pane: None,
                             request,
                             data: String::new(),
                             done: true,
@@ -721,6 +722,7 @@ impl Shared {
                 }) {
                     viewer.events.try_send(ViewerEvent::History {
                         page: HistoryChunk {
+                            pane: None,
                             request,
                             data: String::new(),
                             done: true,
@@ -1208,6 +1210,7 @@ mod tests {
             )
             .is_err());
         let mut page = HistoryChunk {
+            pane: None,
             request: 99,
             data: encode_data(b"private scrollback"),
             done: true,
