@@ -5,6 +5,15 @@ on:
   pull_request:
     paths: ["deploy/native/*.py", ".github/workflows/migration-preflight.yml"]
   workflow_dispatch:
+    inputs:
+      verify_release_pipeline:
+        description: Verify the release workflow without publication or deployment
+        type: boolean
+        default: false
+      platform:
+        description: Client platform subset for release-pipeline verification
+        type: string
+        default: x86_64
 permissions:
   contents: read
 jobs:
@@ -14,3 +23,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check release validation and interrupted-stop recovery
         run: python3 -m unittest discover -s deploy/native -p 'test_*.py' -v
+
+  release-pipeline:
+    if: github.event_name == 'workflow_dispatch' && inputs.verify_release_pipeline == true
+    uses: ./.github/workflows/continuous-release.yml
+    permissions:
+      contents: write
+    with:
+      verify_only: true
+      platform: ${{ inputs.platform }}

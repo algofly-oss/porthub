@@ -1,5 +1,13 @@
 name: Continuous release
 on:
+  workflow_call:
+    inputs:
+      verify_only:
+        type: boolean
+        default: true
+      platform:
+        type: string
+        default: all
   push:
     branches: [main]
     tags: ['v*']
