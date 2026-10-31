@@ -19,3 +19,6 @@ pub mod history;
 
 #[cfg(unix)]
 pub mod owner_view;
+
+#[cfg(feature = "direct")]
+pub mod direct;

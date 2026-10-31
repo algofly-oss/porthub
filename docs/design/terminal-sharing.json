@@ -369,5 +369,21 @@
       "isolation": "Explicit temporary enrolled Layout validated by the production broker, same OS-peer authorization and machine credential injection; no OS manager calls, user/system units, production profiles, routes or workloads changed. Missing/mismatched enrollment is rejected before creating a listener.",
       "reproduce": "Set PORTHUB_TEST_NATIVE_HOST=1 and PORTHUB_TEST_AGENT_EXECUTABLE=/absolute/bundled/porthub alongside the documented UI/Mongo/runtime environment for terminal_browser. Linux-only native fixture; standard browser fixture remains available without those flags."
     }
+  },
+  "direct_transport_development": {
+    "status": "Feature-gated browser-compatible WebRTC engine implemented and tested. Not enabled in CLI/server releases, not connected to invitations, not deployed. Existing terminal traffic continues over the gateway.",
+    "implementation": "Optional terminal direct feature pins rtc0.21.1 with ring, matching the existing mesh ICE/DTLS dependency family. Peer owns no sockets or tasks; caller drives datagrams/timeouts. One reliable ordered channel named porthub-terminal/1;32KiB frame limit,64KiB send outstanding limit and SCTP receive buffer,64KiB SDP and64 local candidate limit. Rejects media offers, wrong description type, unspecified/multicast/zero-port candidates, premature sends and extra channels. Outbound packet buffers move without another payload copy.",
+    "validation": "Actual Chromium and WebKit RTCPeerConnection clients negotiate SDP with the Rust engine and exchange bidirectional data over loopback UDP. Combined SSH/direct library suite passes35 tests. Dedicated admission tests cover malformed/oversized offers and candidate/frame limits. These checks do not prove NAT traversal, terminal role enforcement or route handover.",
+    "source_reference": [
+      "https://github.com/webrtc-rs/rtc",
+      "https://crates.io/crates/rtc/0.21.1"
+    ],
+    "next": [
+      "Negotiate support without breaking older hosts, services or gateways; authorize signaling using existing terminal attachment/recovery identity and role",
+      "Integrate gathered host/STUN/TURN candidates and browser/PortHub-aware CLI participants; ordinary unmodified SSH continues to use the gateway",
+      "Add replay-safe input/output sequencing, bounded recovery and prioritized control traffic during direct-to-relay handover; preserve the workspace and participant identity",
+      "Prove terminal interactions, revocation/removal, blocked direct routes, reconnect and bandwidth/latency behavior with full browser/native/API tests",
+      "Package all targets, finish authenticated CI/CD deployment gate and perform authorized scoped live rollout"
+    ]
   }
 }
