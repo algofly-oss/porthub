@@ -1541,6 +1541,168 @@ export const guideArticles = [
         ]
       }
     ]
-  }
+  },
+{
+  "slug": "terminal",
+  "group": "Operations",
+  "title": "Persistent and shared terminals",
+  "description": "Keep work running, share one terminal over SSH or the browser, and manage invitations and guests.",
+  "sections": [
+    {
+      "id": "local",
+      "title": "Start locally and return later",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Run `porthub terminal datawork` to attach to a running workspace or create it. Bare `porthub terminal` chooses a random lowercase name without separators. Local workspaces need no PortHub account, registration or network connection."
+        },
+        {
+          "type": "code",
+          "label": "Terminal",
+          "text": "porthub terminal datawork --detach\nporthub terminal datawork\nporthub terminal list"
+        },
+        {
+          "type": "paragraph",
+          "text": "Closing a terminal, losing SSH or detaching leaves the workspace running. The last shell exiting with `exit` or Ctrl+D ends it. `porthub terminal stop datawork` explicitly stops the workspace and its tasks. OS shutdown, process termination and host login/session policies still govern background processes."
+        }
+      ]
+    },
+    {
+      "id": "share",
+      "title": "Share through a registered machine",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Sharing uses an enabled public machine registration. PortHub runs the shell as the invoking OS user and uses its bundled private tmux runtime; a separate tmux installation is not needed. Your existing tmux server and global configuration are separate from this workspace."
+        },
+        {
+          "type": "code",
+          "label": "Terminal",
+          "text": "porthub terminal share datawork --detach\nporthub terminal invite datawork\nporthub terminal invite datawork --revoke --json"
+        },
+        {
+          "type": "paragraph",
+          "text": "The share command prints interactive and read-only invitations for the enabled access methods. Guests can open a browser link or use its ordinary SSH command without an account or the PortHub CLI. `porthub terminal join URL` opens an invitation using the local SSH client. Invitations are bearer credentials: share each link only with its intended recipients."
+        },
+        {
+          "type": "paragraph",
+          "text": "Use `--read-only`, `--access ssh|web|both`, `--max-viewers`, `--link-expires`, `--session-timeout`, `--idle-timeout` and `--reconnect-timeout` to customize sharing. Lifetime values use seconds; zero disables the optional invitation/session/idle limit. Run the command with `--help` for bounds and installed-version support."
+        }
+      ]
+    },
+    {
+      "id": "lifetimes",
+      "title": "Invitations, recovery and teardown",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Invitation expiry blocks new joins; it does not interrupt already attached guests. Revoking invitation URLs also leaves attached guests and their independent recovery access in place. Revocation persists across API restarts, and a machine administrator can revoke stored invitations while the host is offline."
+        },
+        {
+          "type": "paragraph",
+          "text": "Browser guests receive a separate recovery credential and retry a lost connection within the configured recovery window. Tab session storage preserves it over a page reload; closing the tab clears that storage. A fresh tab needs a valid invitation. Ordinary SSH clients cannot transparently recover a broken TCP connection; reconnect with a valid invitation when necessary."
+        },
+        {
+          "type": "paragraph",
+          "text": "Optional idle and session timeouts explicitly end the workspace. Without those limits, disconnecting does not destroy it. Gateway restarts and host-transport reconnects preserve the user-owned shell while routing recovers."
+        }
+      ]
+    },
+    {
+      "id": "controls",
+      "title": "Participant controls and permissions",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The browser shows attached guests and their roles. Logged-in users with current owner/admin permission for the machine workspace can remove guests or block new invitation joins. Anonymous guests, ordinary members and unrelated accounts do not get those browser management controls. The API checks permission again for every action."
+        },
+        {
+          "type": "code",
+          "label": "Terminal",
+          "text": "porthub terminal participants datawork --watch\nporthub terminal participants datawork --json\nporthub terminal kick datawork GUEST_ID"
+        },
+        {
+          "type": "paragraph",
+          "text": "In the native participant view, arrows select a guest, `k` requests removal, `y` confirms and `n` cancels; `q` closes the view. Removing a guest revokes that recovery credential and leaves other attachments and the shell running. A holder of a still-valid invitation can intentionally join as a new guest; block invitation URLs to prevent that."
+        },
+        {
+          "type": "paragraph",
+          "text": "Interactive access shares the host OS user\u2019s shell permissions. Account-protected browser management is not a sandbox for commands typed into that shell. Read-only guests cannot send shell input. Administrative browser access does not automatically promote a read-only terminal invitation to typing access."
+        }
+      ]
+    },
+    {
+      "id": "navigation",
+      "title": "Panes, history and copying",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The default prefix is Ctrl+A; press it twice to send a literal Ctrl+A. Use the bundled tmux pane/window commands and prefix help for normal multiplexer features. `--prefix`, `--history-limit`, `--no-mouse`, `--cwd`, `--shell` and `--env` customize a new workspace. The default retained history is 100000 lines."
+        },
+        {
+          "type": "paragraph",
+          "text": "Browser F7 or History opens independent read-only scrollback with page navigation, pane selection, page-local search and selectable text. Read-only SSH guests use F7, PageUp/PageDown, Home/End and supported mouse-wheel reporting; F7 or `q` returns to live output. Reading history does not put other participants into copy mode."
+        },
+        {
+          "type": "paragraph",
+          "text": "History captures are bounded live slices. New output or resizing can shift page boundaries; a stable history snapshot is not yet provided. The browser offers smaller page sizes when a capture reaches its size bound."
+        },
+        {
+          "type": "table",
+          "columns": [
+            "Client",
+            "Clipboard behavior"
+          ],
+          "rows": [
+            [
+              "Browser",
+              "Copy selection and optional automatic copy use the local Clipboard API. Permission and a secure context are required; the browser\u2019s own Copy command remains a fallback."
+            ],
+            [
+              "iTerm2 on macOS",
+              "While mouse reporting is active, Option allows local selection. Automatic copy-on-selection is controlled by iTerm2 preferences."
+            ],
+            [
+              "Windows Terminal",
+              "While mouse mode is active, Shift allows local selection. The terminal\u2019s copyOnSelect setting controls automatic copying."
+            ],
+            [
+              "Other SSH terminals",
+              "Use the terminal\u2019s local selection/copy controls; modifiers and remote clipboard policies vary. PortHub cannot force the outer terminal to grant clipboard access."
+            ]
+          ]
+        },
+        {
+          "type": "links",
+          "links": [
+            {
+              "label": "iTerm2 selection and mouse-reporting documentation",
+              "url": "https://iterm2.com/documentation-one-page.html"
+            },
+            {
+              "label": "Windows Terminal selection and copy settings",
+              "url": "https://learn.microsoft.com/en-us/windows/terminal/selection"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "platforms",
+      "title": "Platform and transport limits",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "The host implementation uses bundled tmux on Linux/macOS; use a validated release artifact for your host architecture. Native Windows hosting is not implemented. Windows guests can use their browser or an ordinary SSH client. Local shell jobs remain subject to the host\u2019s OS permissions and process policies."
+        },
+        {
+          "type": "paragraph",
+          "text": "Current browser and ordinary SSH participation uses the gateway relay. A PortHub-aware direct peer path and browser-compatible direct transport are not yet implemented for terminal sharing; no direct-routing guarantee is made by these invitations."
+        }
+      ]
+    }
+  ]
+}
+
 ];
 export const guideGroups = ["Start here", "Networking", "Transfers", "Operations"];

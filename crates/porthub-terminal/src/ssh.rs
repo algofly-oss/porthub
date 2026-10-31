@@ -9,7 +9,13 @@ use russh::{
     server::{self, Msg, Session},
     Channel, ChannelId, Pty,
 };
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{
+    path::Path,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+mod pager;
+use pager::Pager;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 
@@ -76,6 +82,8 @@ where
         peer: None,
         worker: None,
         authenticated: Some(authenticated),
+        read_only: false,
+        pager: Arc::new(Mutex::new(Pager::new(80, 24))),
     };
     // Own the physical connection outside russh's spawned task. Cancellation
     // closes both halves even when authentication/output is stalled.
@@ -100,6 +108,8 @@ where
     Ok(())
 }
 struct Viewer {
+    read_only: bool,
+    pager: Arc<Mutex<Pager>>,
     hub: Hub,
     capability: Option<String>,
     channel: Option<ChannelId>,
@@ -116,11 +126,49 @@ impl Drop for Viewer {
         }
     }
 }
-async fn output(mut viewer: Attachment, channel: ChannelId, handle: server::Handle) {
+async fn output(
+    mut viewer: Attachment,
+    channel: ChannelId,
+    handle: server::Handle,
+    pager: Arc<Mutex<Pager>>,
+    read_only: bool,
+) {
+    let mut tick = tokio::time::interval(Duration::from_millis(100));
     loop {
-        let event = tokio::select! {_=viewer.session.stop.cancelled()=>break,event=viewer.events.recv()=>event};
+        let event = tokio::select! {
+            _=viewer.session.stop.cancelled()=>break,
+            _=tick.tick(),if read_only=>{
+                let request=pager.lock().expect("SSH pager").request();
+                if let Some(request)=request {if viewer.session.input(viewer.id,request).is_err(){break;}}
+                continue;
+            },
+            event=viewer.events.recv()=>event
+        };
         match event {
+            Some(ViewerEvent::History { page }) if read_only => {
+                let screen = pager.lock().expect("SSH pager").page(page);
+                match screen {
+                    Ok(Some(bytes)) => {
+                        if !matches!(
+                            tokio::time::timeout(
+                                Duration::from_secs(10),
+                                handle.data(channel, bytes)
+                            )
+                            .await,
+                            Ok(Ok(()))
+                        ) {
+                            break;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(_) => break,
+                }
+            }
             Some(ViewerEvent::Output { data }) => {
+                if read_only && pager.lock().expect("SSH pager").active {
+                    continue;
+                }
+
                 let Ok(bytes) = decode_data(&data) else {
                     break;
                 };
@@ -136,17 +184,23 @@ async fn output(mut viewer: Attachment, channel: ChannelId, handle: server::Hand
             _ => {}
         }
     }
-    let _ = handle.eof(channel).await;
-    let _ = handle.close(channel).await;
+    // Restore the caller's display on a graceful close, including when they
+    // were reading an independent history page. Do not wait on a stalled peer.
+    let reset = b"\x1b[0m\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1049l".to_vec();
+    let _ = tokio::time::timeout(Duration::from_millis(500), handle.data(channel, reset)).await;
+    let _ = tokio::time::timeout(Duration::from_millis(500), handle.eof(channel)).await;
+    let _ = tokio::time::timeout(Duration::from_millis(500), handle.close(channel)).await;
 }
 impl server::Handler for Viewer {
     type Error = anyhow::Error;
     async fn auth_none(&mut self, user: &str) -> Result<server::Auth> {
-        if self
+        if let Some((_, read_only)) = self
             .hub
             .resolve(user)
-            .is_ok_and(|(session, _)| session.options.access != Access::Web)
+            .ok()
+            .filter(|(session, _)| session.options.access != Access::Web)
         {
+            self.read_only = read_only;
             self.capability = Some(user.into());
             if let Some(done) = self.authenticated.take() {
                 let _ = done.send(());
@@ -218,9 +272,19 @@ impl server::Handler for Viewer {
             .attach(capability, self.size.0, self.size.1, &self.term)
         {
             Ok(viewer) => {
+                self.pager
+                    .lock()
+                    .expect("SSH pager")
+                    .resize(self.size.0, self.size.1);
                 self.peer = Some((viewer.id, viewer.session.clone()));
                 session.channel_success(channel)?;
-                self.worker = Some(tokio::spawn(output(viewer, channel, session.handle())));
+                self.worker = Some(tokio::spawn(output(
+                    viewer,
+                    channel,
+                    session.handle(),
+                    self.pager.clone(),
+                    self.read_only,
+                )));
             }
             Err(_) => {
                 session.channel_failure(channel)?;
@@ -235,6 +299,12 @@ impl server::Handler for Viewer {
         _session: &mut Session,
     ) -> Result<()> {
         if let Some((id, shared)) = &self.peer {
+            if self.read_only {
+                if self.pager.lock().expect("SSH pager").feed(data) {
+                    let _ = shared.input(*id, ViewerInput::Redraw);
+                }
+                return Ok(());
+            }
             for bytes in data.chunks(MAX_DATA) {
                 let _ = shared.input(
                     *id,
@@ -256,13 +326,13 @@ impl server::Handler for Viewer {
         _session: &mut Session,
     ) -> Result<()> {
         if let Some((id, shared)) = &self.peer {
-            let _ = shared.input(
-                *id,
-                ViewerInput::Resize {
-                    cols: u16::try_from(cols).unwrap_or(0),
-                    rows: u16::try_from(rows).unwrap_or(0),
-                },
-            );
+            let cols = u16::try_from(cols).unwrap_or(0);
+            let rows = u16::try_from(rows).unwrap_or(0);
+            if dimensions(cols, rows).is_err() {
+                return Ok(());
+            }
+            self.pager.lock().expect("SSH pager").resize(cols, rows);
+            let _ = shared.input(*id, ViewerInput::Resize { cols, rows });
         }
         Ok(())
     }

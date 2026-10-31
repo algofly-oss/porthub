@@ -50,6 +50,7 @@ struct Viewer {
     identity: u64,
     history_pending: Option<u32>,
     history_started: Option<Instant>,
+    last_redraw: Option<Instant>,
     joined_at: i64,
     last_active_at: i64,
     activity_published_at: i64,
@@ -364,6 +365,7 @@ impl Hub {
                 identity: identity.unwrap_or(id),
                 history_pending: None,
                 history_started: None,
+                last_redraw: None,
                 joined_at: now(),
                 last_active_at: now(),
                 activity_published_at: now(),
@@ -547,6 +549,17 @@ impl Shared {
             .ok_or_else(|| anyhow::anyhow!("terminal participant detached"))?;
         let mut publish_activity = false;
         let event = match input {
+            ViewerInput::Redraw => {
+                if viewer
+                    .last_redraw
+                    .is_some_and(|at| at.elapsed() < Duration::from_millis(250))
+                {
+                    return Ok(());
+                }
+                viewer.last_redraw = Some(Instant::now());
+                HostEvent::Redraw { client }
+            }
+
             ViewerInput::History {
                 request,
                 pane,
@@ -755,6 +768,33 @@ mod tests {
         while writer.events.recv().await.is_some() {}
         Ok(())
     }
+    #[tokio::test]
+    async fn read_only_redraw_targets_only_requesting_attachment_and_is_rate_limited() -> Result<()>
+    {
+        let hub = Hub::default();
+        let h = hello();
+        let mut host = hub.register("owner", &h, now())?;
+        let reader = hub.attach(&h.read_token, 80, 24, "xterm-256color")?;
+        while host.events.try_recv().is_ok() {}
+        reader.session.input(reader.id, ViewerInput::Redraw)?;
+        assert!(
+            matches!(host.events.try_recv(),Ok(HostEvent::Redraw{client}) if client==reader.id)
+        );
+        reader.session.input(reader.id, ViewerInput::Redraw)?;
+        assert!(host.events.try_recv().is_err());
+        assert!(reader
+            .session
+            .input(
+                reader.id,
+                ViewerInput::Input {
+                    data: encode_data(b"exit\r")
+                }
+            )
+            .is_err());
+        assert!(!host.session.stop.is_cancelled());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn invitation_revocation_blocks_new_joins_without_interrupting_guests_or_recovery(
     ) -> Result<()> {

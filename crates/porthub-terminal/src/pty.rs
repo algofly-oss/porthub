@@ -103,6 +103,17 @@ impl Client {
             .map_err(|_| anyhow::anyhow!("terminal input is backpressured or closed"))
     }
 
+    /// Redraw this attachment without injecting a key or changing shell state.
+    pub fn redraw_command(&self, workspace: &Workspace) -> Result<std::process::Command> {
+        let tty = self
+            .master
+            .tty_name()
+            .ok_or_else(|| anyhow::anyhow!("terminal TTY unavailable"))?;
+        ensure!(tty.is_absolute(), "invalid terminal TTY");
+        let mut command = workspace.command();
+        command.args(["refresh-client", "-t"]).arg(tty);
+        Ok(command)
+    }
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         dimensions(cols, rows)?;
         self.master.resize(PtySize {

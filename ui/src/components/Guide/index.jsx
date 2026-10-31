@@ -44,6 +44,7 @@ function CommandLine({ command, index, multiple }) {
   </div>;
 }
 function Block({block}) {
+  if(block.type==="links")return <ul className="my-4 space-y-2">{block.links.filter(link=>/^https:\/\//.test(link.url)).map(link=><li key={link.url}><a href={link.url} target="_blank" rel="noreferrer" className="text-sm text-primary underline underline-offset-4">{link.label}</a></li>)}</ul>;
   if(block.type==="code")return <CodeBlock {...block}/>;
   if(block.type==="steps")return <ol className="my-5 space-y-4">{block.items.map((item,i)=><li key={i} className="flex gap-3 text-sm leading-7"><span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-border bg-muted/50 text-[11px] font-medium">{i+1}</span><span><Inline text={item}/></span></li>)}</ol>;
   if(block.type==="note")return <aside className="my-6 flex items-start gap-3 rounded-xl border border-blue-500/20 bg-blue-500/5 p-4 text-sm leading-7"><IconInfoCircle className="mt-1 shrink-0 text-primary" size={18}/><p><Inline text={block.text}/></p></aside>;

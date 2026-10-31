@@ -494,6 +494,11 @@ pub async fn run(command: Command) -> Result<()> {
             )?;
         }
         Command::Tmux { name, args } => {
+            ensure!(
+                args.first()
+                    .is_some_and(|arg| !arg.is_empty() && !arg.to_string_lossy().starts_with('-')),
+                "pass a tmux command without global flags; PortHub selects this workspace's socket"
+            );
             let job = select(&root, &name)?;
             ensure!(
                 workspace(&job)?.command().args(args).status()?.success(),

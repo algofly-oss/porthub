@@ -126,6 +126,66 @@ async fn ordinary_openssh_joins_shared_terminal_and_read_only_invites_cannot_wri
             assert!(tokio::time::timeout(Duration::from_millis(200), next_input)
                 .await
                 .is_err());
+            child.stdin.as_mut().unwrap().write_all(b"\x1b[18~").await?;
+            let request = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match host.events.recv().await.unwrap() {
+                        HostEvent::History {
+                            client: id,
+                            request,
+                            ..
+                        } if id == client => break request,
+                        HostEvent::Input { .. } => {
+                            panic!("read-only navigation became shell input")
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await?;
+            host.session.output(
+                host.generation,
+                HostOutput::History {
+                    client,
+                    page: HistoryChunk {
+                        request,
+                        data: encode_data(b"retained-view\n"),
+                        done: true,
+                        total: 100,
+                        before: 0,
+                        lines: 1,
+                        truncated: false,
+                        error: None,
+                    },
+                },
+            )?;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let mut output = Vec::new();
+                let mut bytes = [0; 4096];
+                loop {
+                    let count = child.stdout.as_mut().unwrap().read(&mut bytes).await?;
+                    anyhow::ensure!(count > 0, "SSH viewer closed");
+                    output.extend_from_slice(&bytes[..count]);
+                    if String::from_utf8_lossy(&output).contains("retained-view") {
+                        break;
+                    }
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await??;
+            child.stdin.as_mut().unwrap().write_all(b"q").await?;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match host.events.recv().await.unwrap() {
+                        HostEvent::Redraw { client: id } if id == client => break,
+                        HostEvent::Input { .. } => {
+                            panic!("read-only pager exit became shell input")
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await?;
         } else {
             assert_eq!(
                 tokio::time::timeout(Duration::from_secs(5), next_input).await?,

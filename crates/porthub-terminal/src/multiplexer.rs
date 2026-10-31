@@ -138,13 +138,15 @@ impl Workspace {
         for (key, value) in &start.environment {
             command.arg("-e").arg(format!("{key}={value}"));
         }
-        // Set the initial shell without interpreting a user-supplied command
-        // string. Multiple arguments use tmux's direct exec form.
+        // tmux interprets a singleton command as shell text. Use its multi-
+        // argument exec form and a fixed POSIX trampoline, with user values
+        // only in argv, so paths and arguments retain their literal meaning.
         command.env("SHELL", &start.shell);
+        command.args(["--", "/bin/sh", "-c", "exec \"$@\"", "porthub-terminal"]);
         if start.command.is_empty() {
             command.arg(&start.shell);
         } else {
-            command.arg("--").args(&start.command);
+            command.args(&start.command);
         }
         let output = command
             .output()

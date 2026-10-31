@@ -2,7 +2,7 @@
 //! reconnect, retaining its Workspace; old PTY events cannot enter the new link.
 use crate::{multiplexer::Workspace, protocol::*, pty::Client};
 use anyhow::{ensure, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use tokio::sync::mpsc;
 
 pub struct Attachments {
@@ -15,6 +15,8 @@ pub struct Attachments {
     history_receive: mpsc::Receiver<HostOutput>,
     history_jobs: tokio::task::JoinSet<()>,
     history_capacity: std::sync::Arc<tokio::sync::Semaphore>,
+    pending_redraw: BTreeSet<u64>,
+    redraw_capacity: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
 impl Attachments {
@@ -35,12 +37,20 @@ impl Attachments {
             history_receive,
             history_jobs: tokio::task::JoinSet::new(),
             history_capacity: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
+            pending_redraw: BTreeSet::new(),
+            redraw_capacity: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
         })
     }
 
     /// A false result ends this transport, while keeping the shared workspace.
     pub fn apply(&mut self, event: HostEvent) -> Result<bool> {
         match event {
+            HostEvent::Redraw { client } => {
+                if self.clients.contains_key(&client) {
+                    self.pending_redraw.insert(client);
+                }
+            }
+
             HostEvent::History {
                 client,
                 request,
@@ -136,6 +146,7 @@ impl Attachments {
                 }
             }
             HostEvent::Detach { client } => {
+                self.pending_redraw.remove(&client);
                 self.clients.remove(&client);
             }
             HostEvent::Ping => {
@@ -154,6 +165,34 @@ impl Attachments {
 
     pub async fn next(&mut self) -> Option<HostOutput> {
         let output = loop {
+            // Reap completed background captures even during continuous PTY
+            // output, so finished JoinSet entries cannot accumulate forever.
+            while self.history_jobs.try_join_next().is_some() {}
+            while let Some(client) = self.pending_redraw.first().copied() {
+                let Ok(permit) = self.redraw_capacity.clone().try_acquire_owned() else {
+                    break;
+                };
+                self.pending_redraw.remove(&client);
+                let Some(pty) = self.clients.get(&client) else {
+                    continue;
+                };
+                let Ok(command) = pty.redraw_command(&self.workspace) else {
+                    continue;
+                };
+                self.history_jobs.spawn(async move {
+                    let _permit = permit;
+                    let mut command = tokio::process::Command::from(command);
+                    command
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .kill_on_drop(true);
+                    let _ =
+                        tokio::time::timeout(std::time::Duration::from_secs(1), command.status())
+                            .await;
+                });
+            }
+
             tokio::select! {
                 biased;
                 output=self.receive.recv()=>break output?,

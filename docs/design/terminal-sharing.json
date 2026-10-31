@@ -116,9 +116,9 @@
     "Isolated real API+Mongo/SSH/browser end-to-end tests incl disconnect persistence, exit cleanup, read-only and expiry",
     "Deployment preflight, backup, source/release validation and scoped live rollout",
     "Final source commit/push and goal complete only after required work",
-    "Invitation rotation/renewal and durable end/revocation journaling during database failures; integrated browser/API/bundled-shell test and owner UI controls still required",
-    "Stalled host/viewer deadlines are verified; DB failure journaling and real browser+API+bundled shell combined test remain pending",
-    "Stable history anchors across output/eviction/resizing, pane/window discovery and native read-only SSH history controls; validate mixed live output/history pressure",
+    "Invitation rotation/renewal and durable end/revocation journaling during database failures",
+    "Stalled host/viewer deadlines and combined real browser/API/bundled-shell tests are verified; DB failure journaling remains pending",
+    "Stable history anchors across output/eviction/resizing and pane/window discovery; native read-only SSH paging is implemented, with further mixed live output/history pressure validation required",
     "Native --watch view and combined real browser/API/bundled-shell/SSH flow are implemented and tested; native right-side presentation, invitation renewal/rotation and failure journaling remain required; invitation-wide revocation is now implemented",
     "Mixed browser/SSH attach-detach and output-pressure stress, including the recorded WebKit output-observation timeout, before release"
   ],
@@ -127,7 +127,7 @@
   "current_limits": {
     "platforms": "Hosting currently implemented on Unix using bundled tmux. Linux native static helper validated. macOS/all-platform packaging not yet validated; native Windows hosting not implemented. Ordinary SSH and browser guests do not require the PortHub CLI.",
     "clipboard": "Browser Copy selection and opt-in copy-on-selection use the local Clipboard API and require browser permission/secure context; browser menu Copy remains the fallback. No remote clipboard reads/writes are enabled. Native OSC52 support depends on the outer terminal/SSH client and its permissions.",
-    "history": "Tmux retains the configured history (100000 lines by default). Browser captures are read-only live slices, with explicit 128KiB response bounds and adjustable page size; navigation and search do not fetch the entire transcript. New output/resizing can shift page boundaries, so stable snapshot anchoring is still pending. Native read-only SSH F7/mouse paging is not yet implemented; ordinary interactive clients retain tmux copy mode.",
+    "history": "Tmux retains the configured history (100000 lines by default). Browser captures are read-only live slices, with explicit 128KiB response bounds and adjustable page size; navigation and search do not fetch the entire transcript. New output/resizing can shift page boundaries, so stable snapshot anchoring is still pending. Native read-only SSH supports independent F7 history, wheel, arrows, PageUp/PageDown and Home/End, with a targeted redraw when returning live. Captures are rate-limited live slices; stable anchors and richer Unicode grapheme clipping remain pending. Ordinary interactive clients retain tmux copy mode.",
     "disconnect": "Workspace survives attachment/transport disconnect. Browser recovers with a separate tab-scoped bearer credential, independent of invitation expiry, within Options.reconnect_timeout (10\u2013300 seconds after disconnect). Active sockets renew their lease, so connected guests are not interrupted by that deadline. Retrying uses bounded backoff. Tab closure clears sessionStorage; a fresh tab needs a valid invitation.",
     "eviction": "CLI kick revokes that guest recovery credential and closes only that guest. Revocation persists across API restart. Holders of a still-valid public invitation can intentionally join as a new guest; invitation rotation/renewal controls remain required.",
     "transport": "Browser and ordinary SSH guests currently relay through gateway. Optimized aware-client direct routing and a browser-compatible direct transport remain required.",
@@ -155,5 +155,12 @@
     "Thirty-six Chromium/WebKit role/layout checks pass, including block confirmation cancellation, successful block, retained connection and unchanged read-only access",
     "Normal agent library suite passes 68 tests; two environment-specific tests intentionally remain skipped; production UI build passes"
   ],
-  "ui_automation_observations": "One combined WebKit run timed out inspecting shell output immediately after SSH disconnect, before invitation revocation. Diagnostics were added; the next run and five additional unchanged runs passed. The UI harness now activates the page before typing/reading, matching foreground user interaction; no forwarding-code fix is claimed for that timeout. Mixed attach/detach stress remains required before release."
+  "ui_automation_observations": "One combined WebKit run timed out inspecting shell output immediately after SSH disconnect, before invitation revocation. Diagnostics were added; the next run and five additional unchanged runs passed. The UI harness now activates the page before typing/reading, matching foreground user interaction; no forwarding-code fix is claimed for that timeout. Mixed attach/detach stress remains required before release.",
+  "native_read_only_history_validation": [
+    "Thirteen terminal unit tests, five real bundled multiplexer tests and the ordinary OpenSSH integration test pass, including fragmented keys and single-line arrow navigation.",
+    "Combined Chromium and WebKit tests pass with a real read-only SSH guest browsing F7/PageUp history while the browser writer continues; returning live receives the actual scoped tmux redraw.",
+    "Guest history navigation never becomes shell input, and redraw targets only the requesting attachment with a per-viewer throttle and bounded worker concurrency."
+  ],
+  "launch_isolation_validation": "Regression reproduced a singleton tmux command being interpreted as shell text. Fixed with a constant exec wrapper and literal argv; real bundled multiplexer tests verify program and shell paths containing spaces and shell punctuation cannot create an injected sentinel. Advanced terminal tmux rejects global socket flags; a second private workspace survives the attempted override.",
+  "public_guide_validation": "Published source article /guide/terminal covers persistence, permissions, registration, public guests, revocation, platform and clipboard limits. Six Chromium layout checks pass in dark/light at 1440/402/320px; production UI build passes. Source only, not deployed."
 }

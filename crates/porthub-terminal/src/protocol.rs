@@ -193,6 +193,9 @@ impl HistoryChunk {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostEvent {
+    Redraw {
+        client: u64,
+    },
     InvitationsRevoked,
     History {
         client: u64,
@@ -285,6 +288,7 @@ pub enum ViewerEvent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ViewerInput {
+    Redraw,
     History {
         request: u32,
         pane: String,

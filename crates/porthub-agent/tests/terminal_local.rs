@@ -69,6 +69,29 @@ fn local_cli_needs_no_registration_and_preserves_independent_background_workspac
     )?;
     cleanup.names.push("secondworkspace".into());
     assert_ne!(second["id"], first["id"]);
+    let other_socket = format!(
+        "/tmp/porthub-terminal-{}/{}/tmux.sock",
+        unsafe { libc::geteuid() },
+        second["id"].as_str().unwrap()
+    );
+    let escaped = Command::new(&executable)
+        .args([
+            "terminal",
+            "tmux",
+            name,
+            "--",
+            "-S",
+            &other_socket,
+            "kill-server",
+        ])
+        .env("XDG_DATA_HOME", directory.path())
+        .output()?;
+    assert!(
+        !escaped.status.success(),
+        "advanced commands cannot override the selected workspace socket"
+    );
+    call(&["terminal", "tmux", "secondworkspace", "--", "has-session"])?;
+
     let reopened: serde_json::Value = serde_json::from_slice(
         &call(&["terminal", "secondworkspace", "--detach", "--json"])?.stdout,
     )?;

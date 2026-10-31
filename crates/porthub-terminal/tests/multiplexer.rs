@@ -295,6 +295,26 @@ async fn read_only_history_pages_real_scrollback_without_entering_copy_mode() ->
     })
     .await??;
     assert_eq!(routed, recent);
+    while tokio::time::timeout(Duration::from_millis(30), attachments.next())
+        .await
+        .is_ok()
+    {}
+    attachments.apply(HostEvent::Redraw { client: 7 })?;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let mut text = Vec::new();
+        loop {
+            if let Some(HostOutput::Output { client, data }) = attachments.next().await {
+                assert_eq!(client, 7);
+                text.extend(decode_data(&data)?);
+                if String::from_utf8_lossy(&text).contains("history-done") {
+                    break;
+                }
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+
     let mode = workspace
         .command()
         .args(["display-message", "-p", "-t", "%0", "#{pane_in_mode}"])
@@ -312,5 +332,53 @@ async fn read_only_history_pages_real_scrollback_without_entering_copy_mode() ->
     let (empty, _, count, _) =
         porthub_terminal::history::page(&workspace, "%0", 200000, 32).await?;
     assert!(empty.is_empty() && count == 0);
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires bundled terminal runtime"]
+fn singleton_program_path_is_literal_and_custom_shell_paths_can_contain_spaces() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for custom_shell in [false, true] {
+        let (directory, workspace) = workspace()?;
+        let _cleanup = Cleanup(workspace.clone());
+        let program = directory
+            .path()
+            .join("program with spaces; touch unexpected; #");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\nprintf 'literal-path-ran\\n'\nexec /bin/sh\n",
+        )?;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))?;
+        let mut options = start();
+        options.cwd = directory.path().into();
+        if custom_shell {
+            options.shell = program.clone();
+        } else {
+            options.command = vec![program.into_os_string()];
+        }
+        workspace.start(&options)?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut ran = false;
+        while Instant::now() < deadline {
+            if workspace
+                .capture("%0", 100)
+                .is_ok_and(|text| text.contains("literal-path-ran"))
+            {
+                ran = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !directory.path().join("unexpected").exists(),
+            "program path must never be interpreted as shell syntax"
+        );
+        assert!(
+            ran,
+            "the selected program must launch literally; custom_shell={custom_shell}"
+        );
+        assert!(workspace.is_alive());
+    }
     Ok(())
 }
