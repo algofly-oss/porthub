@@ -31,10 +31,10 @@ def inspect(kind, name):
     return json.loads(run(['docker', kind, 'inspect', name]))[0]
 
 
-def validate(current, images, configuration, revision, version, architecture, project):
+def validate(current, images, configuration, revision, version, architecture, project, roles=ROLES):
     if not re.fullmatch(r'[a-f0-9]{40}', revision) or not re.fullmatch(r'\d+\.\d+\.\d+', version):
         raise ValueError('A full source revision and numeric version are required')
-    for role in ROLES:
+    for role in roles:
         old, image = current[role], images[role]
         labels = old['Config'].get('Labels') or {}
         if labels.get('com.docker.compose.project') != project or labels.get('com.docker.compose.service') != role:
@@ -64,16 +64,17 @@ def validate(current, images, configuration, revision, version, architecture, pr
         candidate = {mount['target']: (mount['source'], mount.get('read_only', False)) for mount in service.get('volumes', []) if mount['type'] == 'bind'}
         if previous != candidate:
             raise ValueError('Candidate Compose changes existing persistent or socket mounts')
-    labels = [current[role]['Config']['Labels'] for role in ROLES]
+    labels = [current[role]['Config']['Labels'] for role in roles]
     origins = {(item.get('com.docker.compose.project.working_dir'), item.get('com.docker.compose.project.config_files')) for item in labels}
     if len(origins) != 1 or not all(next(iter(origins))):
-        raise ValueError('Existing roles must share a recoverable Compose deployment')
+        raise ValueError('Selected roles must share a recoverable Compose deployment')
     return next(iter(origins))
 
 
 def override(images, version):
-    result = {'services': {role: {'image': images[role]} for role in ROLES}}
-    result['services']['core']['environment'] = {'PORTHUB_VERSION': version}
+    result = {'services': {role: {'image': image} for role,image in images.items()}}
+    if 'core' in images:
+        result['services']['core']['environment'] = {'PORTHUB_VERSION': version}
     return result
 
 
@@ -91,7 +92,7 @@ def check_routes(urls):
             raise RuntimeError('PortHub route probe failed: '+str(index)) from None
 
 
-def activate(compose, previous_compose, ensure_others, verify_routes=lambda: None):
+def activate(compose, previous_compose, ensure_others, verify_routes=lambda: None, roles=ROLES):
     watched = (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)
     previous_handlers = {number: signal.getsignal(number) for number in watched}
     def interrupted(_number, _frame):
@@ -100,7 +101,7 @@ def activate(compose, previous_compose, ensure_others, verify_routes=lambda: Non
         for number in watched:
             signal.signal(number, interrupted)
         # No dependencies: each replacement is explicitly scoped to one role.
-        for role in ROLES:
+        for role in roles:
             run([*compose, 'up', '-d', '--no-deps', '--no-build', '--pull', 'never', '--force-recreate', '--wait', '--wait-timeout', '180', role])
         verify_routes()
         ensure_others()
@@ -110,7 +111,7 @@ def activate(compose, previous_compose, ensure_others, verify_routes=lambda: Non
         # A CLI error can follow an already-applied replacement. Restore all
         # three previous immutable image IDs, even for the first failed command.
         failures = []
-        for role in ROLES:
+        for role in roles:
             try:
                 run([*previous_compose, 'up', '-d', '--no-deps', '--no-build', '--pull', 'never', '--force-recreate', '--wait', '--wait-timeout', '180', role])
             except Exception:
@@ -134,12 +135,13 @@ def activate(compose, previous_compose, ensure_others, verify_routes=lambda: Non
 
 def perform(args):
     root = args.root.resolve()
-    current = {role: inspect('container', args.project+'-'+role) for role in ROLES}
-    images = {role: inspect('image', 'porthub-ci:'+role+'-'+args.revision) for role in ROLES}
+    roles = tuple(role for role in ROLES if role in args.roles)
+    current = {role: inspect('container', args.project+'-'+role) for role in roles}
+    images = {role: inspect('image', 'porthub-ci:'+role+'-'+args.revision) for role in roles}
     architecture = {'aarch64': 'arm64', 'x86_64': 'amd64'}.get(os.uname().machine, os.uname().machine)
     base = ['docker', 'compose', '--project-name', args.project, '--project-directory', str(root), '-f', str(root/'docker-compose.yml')]
     configuration = json.loads(run([*base, 'config', '--format', 'json']))
-    previous_root, previous_files = validate(current, images, configuration, args.revision, args.version, architecture, args.project)
+    previous_root, previous_files = validate(current, images, configuration, args.revision, args.version, architecture, args.project, roles)
     files = [Path(name) for name in previous_files.split(',')]
     if not Path(previous_root).is_dir() or any(not path.is_absolute() or not path.is_file() for path in files):
         raise ValueError('Previous Compose files are unavailable for rollback')
@@ -150,9 +152,9 @@ def perform(args):
             raise RuntimeError('An unrelated previously running container is no longer running')
     # Use full IDs for the baseline as well as the subsequent check.
     others = set(run(['docker', 'ps', '--quiet', '--no-trunc']).split()) - {item['Id'] for item in current.values()}
-    previous_version = next((value.split('=', 1)[1] for value in current['core']['Config'].get('Env', [])
+    previous_version = next((value.split('=', 1)[1] for value in current.get('core', {}).get('Config', {}).get('Env', [])
                              if value.startswith('PORTHUB_VERSION=')), None)
-    if not previous_version:
+    if 'core' in roles and not previous_version:
         raise ValueError('Previous runtime version is unavailable for rollback')
     check_routes(args.probe_url)
     print('Preflight passed: source, version, architecture, privileges, state mounts and rollback configuration')
@@ -161,8 +163,8 @@ def perform(args):
     records = root/'deploy/native/upgrade-records'
     records.mkdir(mode=0o700, parents=True, exist_ok=True)
     record = Path(tempfile.mkdtemp(prefix=args.revision+'-', dir=records))
-    for name, payload in [('candidate.json', override({role: images[role]['Id'] for role in ROLES}, args.version)),
-                          ('previous.json', override({role: current[role]['Image'] for role in ROLES}, previous_version))]:
+    for name, payload in [('candidate.json', override({role: images[role]['Id'] for role in roles}, args.version)),
+                          ('previous.json', override({role: current[role]['Image'] for role in roles}, previous_version))]:
         path = record/name
         path.write_text(json.dumps(payload)+'\n')
         path.chmod(0o600)
@@ -171,8 +173,8 @@ def perform(args):
         previous.extend(['-f', str(path)])
     previous.extend(['-f', str(record/'previous.json')])
     activate([*base, '-f', str(record/'candidate.json')], previous, ensure_others,
-             lambda: check_routes(args.probe_url))
-    print('PortHub roles healthy; previous immutable image references retained at '+str(record))
+             lambda: check_routes(args.probe_url), roles)
+    print('PortHub roles healthy ('+', '.join(roles)+'); unselected roles retained; previous immutable image references at '+str(record))
 
 
 def main():
@@ -181,6 +183,7 @@ def main():
     parser.add_argument('--revision', required=True)
     parser.add_argument('--version', required=True)
     parser.add_argument('--project', default='porthub')
+    parser.add_argument('--roles', nargs='+', choices=ROLES, default=list(ROLES), help='Replace only these roles; omitted roles must keep running unchanged')
     parser.add_argument('--probe-url', action='append', default=[], help='Existing application HTTP(S) URL to check before and after upgrade/rollback; repeatable')
     parser.add_argument('--apply', action='store_true')
     args = parser.parse_args()

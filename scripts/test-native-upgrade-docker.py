@@ -63,6 +63,7 @@ def main():
             unrelated = set(run('docker','ps','-q','--no-trunc').stdout.split()) - {inspect(project+'-'+role)['Id'] for role in ROLES}
             def upgrade(kind, apply=False):
                 arguments = [sys.executable,str(ROOT/'deploy/native/upgrade.py'),'--root',str(root/kind),'--revision',revisions[kind],'--version','1.9.0','--project',project]
+                arguments.extend(['--roles','core','edge'])
                 if apply:arguments.append('--apply')
                 return run(*arguments,check=False)
             before = {role:inspect(project+'-'+role)['Id'] for role in ROLES}
@@ -78,11 +79,12 @@ def main():
             assert success.returncode == 0, success.stderr[-2000:]
             for role in ROLES:
                 current=inspect(project+'-'+role)
-                expected=json.loads(run('docker','image','inspect','porthub-ci:'+role+'-'+revisions['good']).stdout)[0]['Id']
+                expected=original[role] if role=='firewall' else json.loads(run('docker','image','inspect','porthub-ci:'+role+'-'+revisions['good']).stdout)[0]['Id']
                 assert current['Image'] == expected, 'successful upgrade must run the pinned candidate: '+role
                 assert current['State']['Health']['Status'] == 'healthy'
+            assert inspect(project+'-firewall')['Id']==before['firewall'], 'unselected firewall must never be recreated'
             assert unrelated <= set(run('docker','ps','-q','--no-trunc').stdout.split()), 'unrelated containers must remain running'
-            print('PASS real Docker: read-only preflight, partial upgrade rollback, previous immutable images restored, healthy upgrade and unrelated containers retained')
+            print('PASS real Docker: read-only preflight, partial upgrade rollback, previous immutable images restored, healthy core/edge upgrade, unchanged firewall and unrelated containers retained')
         finally:
             # Fixture-specific names only; no compose down or global pruning.
             owned = run('docker','ps','-aq','--filter','label=com.docker.compose.project='+project,check=False).stdout.split()

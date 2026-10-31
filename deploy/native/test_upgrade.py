@@ -109,5 +109,20 @@ class Upgrade(unittest.TestCase):
         with patch.object(upgrade,'urlopen',side_effect=OSError('private URL details')):
             with self.assertRaisesRegex(RuntimeError,'^PortHub route probe failed: 1$'):
                 upgrade.check_routes(['https://example.test/private-route'])
+    def test_selected_core_edge_accept_an_independently_deployed_firewall(self):
+        self.current['firewall']['Config']['Labels']['com.docker.compose.project.working_dir']='/older-firewall'
+        current={role:self.current[role] for role in ('core','edge')}
+        images={role:self.images[role] for role in ('core','edge')}
+        self.assertEqual(upgrade.validate(current,images,self.configuration,self.revision,'1.9.0','arm64','porthub',('core','edge')),('/old','/old/docker-compose.yml'))
+        self.assertEqual(set(upgrade.override({'core':'sha256:core','edge':'sha256:edge'},'1.9.0')['services']),{'core','edge'})
+    def test_selected_role_failure_never_recreates_the_unselected_firewall(self):
+        calls=[]
+        def run(arguments):
+            calls.append(arguments)
+            if arguments[0]=='candidate':raise RuntimeError('partial replacement')
+        with patch.object(upgrade,'run',side_effect=run):
+            with self.assertRaisesRegex(RuntimeError,'partial replacement'):
+                upgrade.activate(['candidate'],['previous'],lambda:None,roles=('core','edge'))
+        self.assertEqual([call[-1] for call in calls],['core','core','edge'])
 
 if __name__=='__main__':unittest.main()
