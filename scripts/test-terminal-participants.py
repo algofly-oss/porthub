@@ -16,6 +16,7 @@ import tempfile
 import termios
 import threading
 import time
+from terminal_pty_fixture import TERMINAL_KEEPER, assert_terminal_restored
 
 
 def wait_text(master, child, expected, timeout=5):
@@ -28,22 +29,6 @@ def wait_text(master, child, expected, timeout=5):
     return output
 
 
-# Retain a controlling session leader until the app exits and its mode is read.
-# Darwin invalidates slave ioctls after the controlling session ends; checking
-# before that end verifies restoration without weakening the assertion.
-TERMINAL_KEEPER = r"""
-import json, os, subprocess, sys, termios
-report = int(sys.argv[1])
-def state():
-    value = termios.tcgetattr(0)
-    value[6] = [item[0] if isinstance(item, bytes) else item for item in value[6]]
-    return value
-before = state()
-result = subprocess.run(sys.argv[2:])
-os.write(report, json.dumps({"before":before,"after":state()}).encode())
-os.close(report)
-raise SystemExit(result.returncode)
-"""
 
 def exercise(executable, environment, job, stalled=False, sidebar=False, columns=100):
     path = Path(job["workspace"]) / "owner.sock"
@@ -156,16 +141,7 @@ def exercise(executable, environment, job, stalled=False, sidebar=False, columns
             if select.select([master], [], [], .02)[0]:
                 os.read(master, 65536)
         assert child.poll() == 0, "quit must not wait for a stalled owner socket"
-        terminal_mode = json.loads(os.read(report_read, 8192))
-        # Darwin sets PENDIN itself when restoring ICANON, and preserves it
-        # even when tcsetattr's requested flags omit it. It describes queued
-        # input reprocessing, not an application-controlled terminal mode.
-        # See apple-oss-distributions/xnu, bsd/kern/tty.c, TIOCSETA handling.
-        # Compare every other bit, control character and speed unchanged.
-        if sys.platform == "darwin":
-            for state in terminal_mode.values():
-                state[3] &= ~termios.PENDIN
-        assert terminal_mode["after"] == terminal_mode["before"], f"terminal mode must be restored before the controlling session exits: {terminal_mode!r}"
+        assert_terminal_restored(report_read)
     finally:
         if child.poll() is None:
             try:

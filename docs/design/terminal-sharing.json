@@ -253,5 +253,10 @@
     "diagnosis": "Run 41233783102 produced an x86 helper bundle and then lost it before Rust embedding; upstream Swatinem/rust-cache v2 restore code cleans target directories on a partial cache match. Keeping helper source/output beneath Cargo target allowed that cleanup to remove bundles and leave empty source directories. ARMhf also saw a source-download network failure.",
     "fix": "CI helper sources/output and their separate restore/save cache now live at .cache/terminal-helper, outside Cargo target, selected by absolute PORTHUB_TERMINAL_HELPER_CACHE_ROOT. Rust builds fail early if the helper bundle is absent after cache restore. Dedicated helper build log uploads include that hidden directory explicitly. Local/Docker target cache defaults stay unchanged.",
     "validation": "Actionlint and the two real compiler/ELF helper-gate tests pass. Corrected 32-bit packaged jobs still need execution; no release is validated or deployed by these checks."
+  },
+  "release190_stats_fixture_correction": {
+    "evidence": "Full client run 41234970045 passed eight non-Mac platform jobs at source 82e300c. Mac ARM64 passed packaged local/share Rust tests and then the stats Python fixture failed with ENOTTY while inspecting its slave PTY after the controlling process exited.",
+    "fix": "Stats and participant fixtures now share a controlling-session keeper and strict mode restoration comparison, with only Darwin kernel-managed PENDIN normalized. Stats uses the native macOS user status location with an empty-registry preflight, random fixture identity and cleanup, without changing application registration/configuration paths. Verify-only native CI now also runs the stats fixture.",
+    "local_result": "Both real stats and participant PTY fixtures pass on Linux. Corrected Mac execution is still pending. Server image build at source 82e300c passed and its ZIP digest plus all role checksums were verified during private staging on URM2; no container was replaced."
   }
 }

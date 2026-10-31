@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import pty
 import select
+import signal
 import socket
 import struct
 import subprocess
@@ -14,6 +15,7 @@ import tempfile
 import termios
 import threading
 import time
+from terminal_pty_fixture import TERMINAL_KEEPER, assert_terminal_restored
 
 
 def wait_text(master, child, expected, timeout=5):
@@ -30,12 +32,13 @@ def wait_text(master, child, expected, timeout=5):
 def screen(executable, config, stalled=False, accepted=None):
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
-    before = termios.tcgetattr(slave)
+    report_read, report_write = os.pipe()
     def own_terminal():
         os.setsid()
         fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
-    child = subprocess.Popen([executable, "stats", "--user"], stdin=slave, stdout=slave, stderr=slave,
-        env={**os.environ, "XDG_CONFIG_HOME": str(config), "TERM": "xterm-256color"}, preexec_fn=own_terminal)
+    child = subprocess.Popen([sys.executable, "-c", TERMINAL_KEEPER, str(report_write), executable, "stats", "--user"], stdin=slave, stdout=slave, stderr=slave,
+        env={**os.environ, "XDG_CONFIG_HOME": str(config), "TERM": "xterm-256color"}, pass_fds=(report_write,), preexec_fn=own_terminal)
+    os.close(report_write)
     try:
         wait_text(master, child, b"PortHub stats")
         if stalled:
@@ -57,13 +60,17 @@ def screen(executable, config, stalled=False, accepted=None):
                 output.extend(os.read(master, 65536))
         assert child.poll() == 0, f"stats quit must not wait for background collection: {bytes(output[-1200:])!r}"
         assert time.monotonic() - started < 1.5
-        assert termios.tcgetattr(slave) == before, "stats must restore terminal settings"
+        assert_terminal_restored(report_read)
     finally:
         if child.poll() is None:
-            child.kill()
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             child.wait(timeout=3)
         os.close(master)
         os.close(slave)
+        os.close(report_read)
 
 
 def main():
@@ -72,13 +79,15 @@ def main():
     with tempfile.TemporaryDirectory(prefix="phstats-", dir="/tmp") as directory:
         config = Path(directory) / "config"
         config.mkdir()
+        status = (Path.home() / "Library/Application Support/porthub/status") if sys.platform == "darwin" else config / "porthub/status"
+        if sys.platform == "darwin" and status.exists():
+            assert not list(status.glob("*.json")), "stats fixture requires an empty user status directory to avoid unrelated agents"
         screen(executable, config)
         single = subprocess.run([executable, "stats", "--user", "--once", "--json"],
             env={**os.environ, "XDG_CONFIG_HOME": str(config)}, capture_output=True, check=True, timeout=5)
         assert json.loads(single.stdout)["agents"] == []
-        status = config / "porthub/status"
-        status.mkdir(parents=True, mode=0o755)
-        identity = "a" * 64
+        status.mkdir(parents=True, mode=0o755, exist_ok=True)
+        identity = os.urandom(32).hex()
         record = {"format_version": 1, "id": identity, "machine_id": "b" * 24,
             "email": "fixture@example.test", "gateway": "https://example.test", "private": False,
             "enabled": True, "active": True, "state": "running", "agent_version": "test", "ports": 1,
@@ -110,6 +119,8 @@ def main():
             stop.set()
             listener.close()
             thread.join(timeout=1)
+            path.unlink(missing_ok=True)
+            (status / f"{identity[:24]}.sock").unlink(missing_ok=True)
     print("PASS stats PTY: raw-mode restoration, pause/resume, resize, sort keys, JSON, responsive quit with stalled agent")
 
 
