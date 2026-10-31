@@ -135,8 +135,17 @@ def exercise(executable, environment, job, stalled=False, sidebar=False, columns
             os.write(master, b"y")
             wait_text(master, child, b"Guest removed")
             assert removals == [200], "only the selected guest must be removed"
-            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 18, 100 if native else 40, 0, 0))
-            os.write(master, b"\x1b[A")
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 18, 40, 0, 0))
+            if native:
+                time.sleep(.1)
+                os.write(master,b"printf 'RESIZE%s\\n' 'SHELL'\r")
+                wait_text(master,child,b"RESIZESHELL")
+                fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack("HHHH",24,120,0,0))
+                time.sleep(.1)
+                os.write(master,b"\x1b[19~")
+                wait_text(master,child,b"Participants")
+            else:
+                os.write(master,b"\x1b[A")
         started = time.monotonic()
         os.write(master, b"q")
         if sidebar:

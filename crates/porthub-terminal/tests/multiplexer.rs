@@ -637,12 +637,14 @@ fn private_owner_sidebar_preserves_shared_shell_and_closes_with_its_attachment()
         let mut child=pty.slave.spawn_command(builder)?;
         drop(pty.slave);
         let mut reader=pty.master.try_clone_reader()?;
-        let drain=std::thread::spawn(move || {let mut bytes=[0;8192];while reader.read(&mut bytes).is_ok_and(|n|n>0) {}});
+        let observed=std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let sink=observed.clone();
+        let drain=std::thread::spawn(move || {let mut bytes=[0;8192];while let Ok(count)=reader.read(&mut bytes) {if count==0 {break;} let mut output=sink.lock().unwrap();output.extend_from_slice(&bytes[..count]);if output.len()>262144 {let excess=output.len()-262144;output.drain(..excess);}}});
         let mut writer=pty.master.take_writer()?;
         let wait = |predicate: &dyn Fn() -> bool| -> Result<()> {
             let deadline=Instant::now()+Duration::from_secs(5);
             while !predicate() {
-                anyhow::ensure!(Instant::now()<deadline,"private view fixture timed out");
+                anyhow::ensure!(Instant::now()<deadline,"private view fixture timed out: {:?}",view.workspace().command().args(["display-message","-p","#{pane_id}:#{window_width}:#{window_zoomed_flag}:#{pane_width}"]).output());
                 std::thread::sleep(Duration::from_millis(20));
             }
             Ok(())
@@ -668,11 +670,44 @@ fn private_owner_sidebar_preserves_shared_shell_and_closes_with_its_attachment()
             wait(&|| shared.command().args(["display-message","-p","-t","%0","#{pane_in_mode}"]).output().is_ok_and(|o|String::from_utf8_lossy(&o.stdout).trim()=="1"))?;
             writer.write_all(b"\x1b[18~")?;writer.flush()?;
             wait(&|| shared.command().args(["display-message","-p","-t","%0","#{pane_in_mode}"]).output().is_ok_and(|o|String::from_utf8_lossy(&o.stdout).trim()=="0"))?;
+            assert!(shared.command().args(["set-buffer","-w","porthubclipboard"]).output()?.status.success());
+            wait(&|| observed.lock().unwrap().windows(b"cG9ydGh1YmNsaXBib2FyZA==".len()).any(|bytes|bytes==b"cG9ydGh1YmNsaXBib2FyZA=="))?;
+            assert!(observed.lock().unwrap().windows(5).any(|bytes|bytes==b"\x1b]52;"),"copy request must retain OSC52 framing");
             writer.write_all(b"\x1b[19~")?;writer.flush()?;
             wait(&|| view.workspace().command().args(["display-message","-p","#{pane_id}"]).output().is_ok_and(|o|String::from_utf8_lossy(&o.stdout).trim()=="%1"))?;
             writer.write_all(b"owner-only\r")?;writer.flush()?;
             wait(&|| view.workspace().capture("%1",20).is_ok_and(|s|s.contains("private-control:owner-only")))?;
             assert!(!shared.capture("%0",100)?.contains("owner-only"));
+            let second_path=directory.path().join("secondowner");create_directory(&second_path)?;
+            let second=OwnerView::new(&shared,second_path)?;
+            let second_command=second.command(&shared,&panel,120,30)?;
+            let second_pty=native_pty_system().openpty(PtySize {rows:30,cols:120,pixel_width:0,pixel_height:0})?;
+            let mut second_builder=CommandBuilder::new(second_command.get_program());second_builder.args(second_command.get_args());
+            for (key,value) in second_command.get_envs() {if let Some(value)=value {second_builder.env(key,value);}else{second_builder.env_remove(key);}}
+            second_builder.env("TERM","xterm-256color");
+            let mut second_child=second_pty.slave.spawn_command(second_builder)?;drop(second_pty.slave);
+            let mut second_reader=second_pty.master.try_clone_reader()?;
+            let second_drain=std::thread::spawn(move||{let mut bytes=[0;8192];while second_reader.read(&mut bytes).is_ok_and(|n|n>0){}});
+            let mut second_writer=second_pty.master.take_writer()?;
+            wait(&|| second.workspace().capture("%1",20).is_ok_and(|s|s.contains("PRIVATE_OWNER_PANEL")))?;
+            assert!(!second.workspace().capture("%1",20)?.contains("owner-only"));
+            second_writer.write_all(b"\x1b[19~")?;second_writer.flush()?;
+            wait(&|| second.workspace().command().args(["display-message","-p","#{pane_id}"]).output().is_ok_and(|o|String::from_utf8_lossy(&o.stdout).trim()=="%1"))?;
+            second_writer.write_all(b"second-only\r")?;second_writer.flush()?;
+            wait(&|| second.workspace().capture("%1",20).is_ok_and(|s|s.contains("private-control:second-only")))?;
+            assert!(!view.workspace().capture("%1",20)?.contains("second-only"));
+            assert!(!shared.capture("%0",100)?.contains("second-only"));
+            second_child.kill()?;let _=second_child.wait()?;
+            wait(&|| !second.workspace().is_alive())?;
+            assert!(view.workspace().is_alive() && shared.is_alive(),"one owner disconnect must not affect another");
+            drop(second_writer);drop(second_pty.master);drop(second);second_drain.join().unwrap();
+            pty.master.resize(PtySize { rows:18, cols:40, pixel_width:0, pixel_height:0 })?;
+            wait(&|| view.workspace().command().args(["display-message","-p","#{window_zoomed_flag}:#{pane_id}:#{pane_width}"]).output().is_ok_and(|o|String::from_utf8_lossy(&o.stdout).trim()=="1:%0:40"))?;
+            writer.write_all(b"\x1b[19~")?;writer.flush()?;
+            writer.write_all(b"printf 'NARROW%s\\n' 'OWNER'\r")?;writer.flush()?;
+            wait(&|| shared.capture("%0",100).is_ok_and(|s|s.contains("NARROWOWNER")))?;
+            pty.master.resize(PtySize { rows:30, cols:120, pixel_width:0, pixel_height:0 })?;
+            wait(&|| view.workspace().command().args(["display-message","-p","#{window_zoomed_flag}"]).output().is_ok_and(|o|String::from_utf8_lossy(&o.stdout).trim()=="0"))?;
             child.kill()?;let _=child.wait()?;
             wait(&|| !view.workspace().is_alive())?;
             assert!(shared.is_alive(),"owner terminal closing must preserve the shared shell");
