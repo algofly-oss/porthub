@@ -591,3 +591,94 @@ async fn running_new_version_before_transaction_commit_is_not_an_update_acknowle
     ensure!(upgrade::failed(&f.layout, &f.specs[0].profile, &request)?);
     Ok(())
 }
+
+
+fn private_report(f: &Fixture, state: &str, age: u64) -> Result<()> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    let report = porthub_agent::runtime::Status {
+        pid: std::process::id(), state: state.into(), agent_version: "1.8.9".into(),
+        config_version: String::new(), service_count: 0, route: "private".into(),
+        updated_at: now.saturating_sub(age), update_request_id: String::new(), private_status: None,
+    };
+    porthub_agent::profile::write_private(
+        &porthub_agent::profile::sibling(&f.specs[1].profile, ".status.json"),
+        &serde_json::to_vec(&report)?, true,
+    )
+}
+
+#[tokio::test]
+async fn already_disconnected_private_module_does_not_roll_back_healthy_public_upgrade() -> Result<()> {
+    let f = Fixture::new().await?;
+    private_report(&f, "connecting", 0)?;
+    let private_credentials = std::fs::read(&f.specs[1].profile)?;
+    let plan = upgrade::plan(&f.layout, &f.public, Some(&f.cli), f.manager.as_ref()).await?;
+    let ready = Ready { calls: AtomicUsize::new(0), fail_at: 2 };
+    let receipt = upgrade::apply(&f.layout, plan, &f.new, f.manager.as_ref(), &ready).await?;
+    ensure!(ready.calls.load(Ordering::SeqCst) == 1, "public readiness remains mandatory");
+    let journal: serde_json::Value = serde_json::from_slice(&std::fs::read(receipt.join("journal.json"))?)?;
+    ensure!(journal["state"] == "committed" && journal["private_ready_required"] == false);
+    let module: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        porthub_agent::profile::sibling(&f.specs[0].profile, ".private-module.json"))?)?;
+    ensure!(module["enabled"] == true, "private recovery must remain enabled");
+    ensure!(std::fs::read(&f.specs[1].profile)? == private_credentials);
+    ensure!(std::fs::read_link(&f.cli)? == f.spec(&f.specs[0].identity)?.executable);
+    f.foreign_untouched()?;
+    upgrade::rollback(&f.layout, &receipt, f.manager.as_ref()).await?;
+    f.restored().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn recovered_or_stale_private_status_keeps_strict_upgrade_readiness() -> Result<()> {
+    for (state, age, recover) in [("running", 0, false), ("connecting", 120, false), ("connecting", 0, true)] {
+        let f = Fixture::new().await?;
+        private_report(&f, state, age)?;
+        let plan = upgrade::plan(&f.layout, &f.public, Some(&f.cli), f.manager.as_ref()).await?;
+        if recover { private_report(&f, "running", 0)?; }
+        ensure!(upgrade::apply(&f.layout, plan, &f.new, f.manager.as_ref(), &Ready {
+            calls: AtomicUsize::new(0), fail_at: 2,
+        }).await.is_err(), "healthy, unknown, stale, or recovered private modules must pass readiness");
+        f.restored().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn disconnected_private_module_does_not_bypass_failed_public_readiness() -> Result<()> {
+    let f = Fixture::new().await?;
+    private_report(&f, "connecting", 0)?;
+    let plan = upgrade::plan(&f.layout, &f.public, Some(&f.cli), f.manager.as_ref()).await?;
+    ensure!(upgrade::apply(&f.layout, plan, &f.new, f.manager.as_ref(), &Ready {
+        calls: AtomicUsize::new(0), fail_at: 1,
+    }).await.is_err());
+    f.restored().await?;
+    Ok(())
+}
+
+
+#[tokio::test]
+async fn disconnected_existing_unified_module_keeps_its_configuration_during_update() -> Result<()> {
+    let f = Fixture::new().await?;
+    let plan = upgrade::plan(&f.layout, &f.public, Some(&f.cli), f.manager.as_ref()).await?;
+    upgrade::apply(&f.layout, plan, &f.new, f.manager.as_ref(), &Ready {
+        calls: AtomicUsize::new(0), fail_at: 0,
+    }).await?;
+    let previous = f.spec(&f.specs[0].identity)?;
+    let module_path = porthub_agent::profile::sibling(&previous.profile, ".private-module.json");
+    let module = std::fs::read(&module_path)?;
+    private_report(&f, "connecting", 0)?;
+    let next = f.new.with_file_name("next-disconnected-fixture");
+    std::fs::write(&next, b"next native binary fixture")?;
+    let plan = upgrade::plan(&f.layout, &f.public, Some(&f.cli), f.manager.as_ref()).await?;
+    ensure!(plan.registrations() == 1);
+    let ready = Ready { calls: AtomicUsize::new(0), fail_at: 2 };
+    let receipt = upgrade::apply(&f.layout, plan, &next, f.manager.as_ref(), &ready).await?;
+    ensure!(ready.calls.load(Ordering::SeqCst) == 1);
+    ensure!(std::fs::read(&module_path)? == module);
+    ensure!(!f.specs[1].unit.try_exists()?);
+    f.foreign_untouched()?;
+    upgrade::rollback(&f.layout, &receipt, f.manager.as_ref()).await?;
+    ensure!(f.spec(&previous.identity)? == previous);
+    ensure!(std::fs::read(&module_path)? == module);
+    Ok(())
+}

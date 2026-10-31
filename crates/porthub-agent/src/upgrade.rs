@@ -21,6 +21,7 @@ struct Entry {
 pub struct Plan {
     entries: Vec<Entry>,
     cli: Option<(PathBuf, PathBuf)>,
+    private_ready_required: bool,
 }
 impl Plan {
     pub fn registrations(&self) -> usize {
@@ -66,6 +67,49 @@ fn belongs(profile: &service::RegistrationProfile, public: &Profile) -> bool {
         }
     }
 }
+fn require_private_ready() -> bool {
+    true
+}
+
+// A recent explicit connecting report is evidence of a pre-existing failure,
+// including a private worker that exits and is being retried by its supervisor.
+// Missing, stale or unfamiliar status must keep the strict readiness gate.
+fn private_readiness_required(entries: &[Entry]) -> Result<bool> {
+    let mut private = None;
+    let mut public = None;
+    for entry in entries {
+        match service::RegistrationProfile::load(&entry.spec.profile)? {
+            service::RegistrationProfile::Private(_) => private = Some(entry.spec.profile.clone()),
+            service::RegistrationProfile::Public(profile) => {
+                public = Some((&entry.spec.profile, profile))
+            }
+        }
+    }
+    if private.is_none() {
+        if let Some((path, public)) = public {
+            private = crate::unified::load(path, &public)?
+                .filter(|configuration| configuration.enabled)
+                .map(|configuration| configuration.private_profile);
+        }
+    }
+    let Some(path) = private else {
+        return Ok(true);
+    };
+    let status = profile::read_private(&profile::sibling(&path, ".status.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<crate::runtime::Status>(&bytes).ok());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    Ok(!status.is_some_and(|status| {
+        status.state == "connecting"
+            && status.pid > 0
+            && !status.agent_version.is_empty()
+            && status.updated_at <= now
+            && now - status.updated_at <= 90
+    }))
+}
+
 /// Inspection is read-only and must include the matching installed public
 /// identity. Profiles from another gateway or machine are never included.
 pub async fn plan(
@@ -119,7 +163,12 @@ pub async fn plan(
             service::publication::managed_link(layout, path).map(|target| (path.to_owned(), target))
         })
         .transpose()?;
-    Ok(Plan { entries, cli })
+    let private_ready_required = private_readiness_required(&entries)?;
+    Ok(Plan {
+        entries,
+        cli,
+        private_ready_required,
+    })
 }
 #[derive(Serialize, Deserialize)]
 struct Journal {
@@ -136,6 +185,8 @@ struct Journal {
     retired_private: Option<String>,
     #[serde(default)]
     previous_module: Option<Vec<u8>>,
+    #[serde(default = "require_private_ready")]
+    private_ready_required: bool,
 }
 
 fn module_configuration(journal: &Journal) -> Result<Option<crate::unified::Configuration>> {
@@ -306,6 +357,9 @@ pub async fn apply_requested(
     let public_path = layout.state.join(format!("{public_id}.json"));
     let module_path = crate::unified::configuration_path(&public_path);
     let previous_module = if module_path.try_exists()? { Some(profile::read_private(&module_path)?) } else { None };
+    // A recovered private module must not be treated as still disconnected.
+    let private_ready_required =
+        plan.private_ready_required || private_readiness_required(&plan.entries)?;
     let mut journal = Journal {
         format_version: 1,
         state: "prepared".into(),
@@ -316,6 +370,7 @@ pub async fn apply_requested(
         public_id,
         retired_private,
         previous_module,
+        private_ready_required,
     };
     write(&receipt, &journal)?;
     // Persist the receipt's directory entry before any installed state changes.
@@ -366,12 +421,15 @@ pub async fn apply_requested(
         }
         if let Some(configuration) = crate::unified::load(&public_path, &Profile::load(&public_path)?)? {
             let public = journal.entries.iter().find(|entry| entry.spec.identity == journal.public_id).context("public update entry missing")?;
-            if configuration.enabled && public.state.active {
+            if configuration.enabled && public.state.active && journal.private_ready_required {
                 let mut embedded = public.spec.clone();
                 embedded.profile = configuration.private_profile;
                 embedded.executable = journal.executable.clone();
                 ready.wait(&embedded).await?;
             }
+        }
+        if !journal.private_ready_required {
+            tracing::warn!("private module was disconnected before update; configuration retained and supervised recovery continues");
         }
         let mut publication = if let Some((path, previous)) = &journal.cli {
             ensure!(

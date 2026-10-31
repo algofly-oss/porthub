@@ -193,8 +193,16 @@ Before activation, a private `upgrade-*` receipt retains the original profiles,
 units, manifests, executable paths, CLI target and service states. The normal
 installation lock serializes other native service edits. Active registrations
 must report `running` with the worker's version and exact executable identity;
-stale status from another PID does not satisfy readiness. Only then is the shared
-CLI published and the transaction committed. An unchanged executable is not
+stale status from another PID does not satisfy public-agent readiness. Private
+readiness remains mandatory when its previous state was healthy, unknown or
+stale. A recent explicit `connecting` report (at most 90 seconds old) records
+a pre-existing private failure; this does not roll back a healthy public update.
+The private configuration stays enabled and supervised, its existing failure
+remains visible, and the receipt records that distinction. A private module that
+recovers between planning and activation regains its strict readiness gate.
+This does not repair or replace the host resolver: Linux private DNS currently
+requires the systemd-resolved D-Bus service. Once the required readiness checks
+pass, the shared CLI is published and the transaction committed. An unchanged executable is not
 restarted. Activation/readiness failure restores the prior service files and
 states. Backups and immutable releases remain for interrupted recovery:
 
