@@ -382,3 +382,112 @@ fn singleton_program_path_is_literal_and_custom_shell_paths_can_contain_spaces()
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires extracted bundled runtime"]
+async fn history_stays_on_resolved_pane_during_window_switches_and_rejects_other_sessions(
+) -> Result<()> {
+    let (_directory, workspace) = workspace()?;
+    let _cleanup = Cleanup(workspace.clone());
+    workspace.start(&start())?;
+    let second = workspace
+        .command()
+        .args([
+            "new-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            "=workspace:1",
+            "/bin/sh",
+        ])
+        .output()?;
+    anyhow::ensure!(second.status.success(), "second window must open");
+    let beta = String::from_utf8(second.stdout)?.trim().to_owned();
+    for (pane, label, count) in [("%0", "panealpha", 180), (beta.as_str(), "panebeta", 80)] {
+        let command = format!(
+            r#"i=0; while [ $i -lt {count} ]; do printf '{label}-%03d\n' "$i"; i=$((i+1)); done"#
+        );
+        let output = workspace
+            .command()
+            .args(["send-keys", "-t", pane, &command, "Enter"])
+            .output()?;
+        anyhow::ensure!(output.status.success());
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !workspace
+            .capture(pane, 1000)?
+            .contains(&format!("{label}-{:03}", count - 1))
+        {
+            anyhow::ensure!(Instant::now() < deadline, "fixture output missing");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    let total = |pane: &str| -> Result<u32> {
+        Ok(String::from_utf8(
+            workspace
+                .command()
+                .args(["display-message", "-p", "-t", pane, "#{history_size}"])
+                .output()?
+                .stdout,
+        )?
+        .trim()
+        .parse()?)
+    };
+    let alpha_total = total("%0")?;
+    let beta_total = total(&beta)?;
+    anyhow::ensure!(alpha_total != beta_total);
+    let switching = workspace.clone();
+    let switches = tokio::task::spawn_blocking(move || {
+        for index in 0..160 {
+            let target = if index % 2 == 0 {
+                "=workspace:0"
+            } else {
+                "=workspace:1"
+            };
+            let _ = switching
+                .command()
+                .args(["select-window", "-t", target])
+                .output();
+        }
+    });
+    for _ in 0..30 {
+        let (bytes, retained, _, _) =
+            porthub_terminal::history::page(&workspace, "", 0, 10).await?;
+        let text = String::from_utf8(bytes)?;
+        if retained == alpha_total {
+            anyhow::ensure!(
+                text.contains("panealpha") && !text.contains("panebeta"),
+                "history metadata and content came from different panes"
+            );
+        } else {
+            anyhow::ensure!(
+                retained == beta_total && text.contains("panebeta") && !text.contains("panealpha"),
+                "history metadata and content came from different panes"
+            );
+        }
+    }
+    switches.await?;
+    let other = workspace
+        .command()
+        .args([
+            "new-session",
+            "-d",
+            "-s",
+            "notshared",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "/bin/sh",
+        ])
+        .output()?;
+    anyhow::ensure!(other.status.success());
+    let hidden = String::from_utf8(other.stdout)?.trim().to_owned();
+    anyhow::ensure!(
+        porthub_terminal::history::page(&workspace, &hidden, 0, 10)
+            .await
+            .is_err(),
+        "history must remain within the advertised workspace session"
+    );
+    Ok(())
+}

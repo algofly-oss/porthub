@@ -188,7 +188,9 @@
     "changes": "Linux configure/probe linking now uses -static throughout. Darwin builds tic from the same pinned ncurses source to compile terminal definitions. Verify-only native jobs now exercise local CLI/share and actual owner popup PTYs.",
     "local_validation": "Two real compiler-produced ELF checks pass. Stock OpenSSH test with TERM removed failed before the gateway fallback and passes after it. Python syntax and workflow YAML parse checks pass. Darwin jemalloc packaging and Linux cross-link probe still require CI results.",
     "status": "Linux x86-64 verify-only and all three Windows verification jobs passed at their documented source checkpoints. Current ARM static-link and Darwin source-tic fixes plus new native-popup CI checks need representative reruns; no release published or deployment applied.",
-    "diagnosed": "32-bit Linux ncurses reports absent setenv/putenv during configuration; underlying link diagnostic remains pending. macOS tmux explicitly requires allocator selection and recommends jemalloc. The helper now pins upstream jemalloc 5.3.1 for Darwin, statically force-loads its zone initializer and rejects non-system dylib dependencies. Linux configure link probes and config.log artifacts added for the remaining cross-compilation issue."
+    "diagnosed": "32-bit Linux ncurses reports absent setenv/putenv during configuration; underlying link diagnostic remains pending. macOS tmux explicitly requires allocator selection and recommends jemalloc. The helper now pins upstream jemalloc 5.3.1 for Darwin, statically force-loads its zone initializer and rejects non-system dylib dependencies. Linux configure link probes and config.log artifacts added for the remaining cross-compilation issue.",
+    "representative_run": "https://github.com/algofly-oss/porthub/actions/runs/41225289309",
+    "current_progress": "On da35c29, ARM Linux helper build plus verify-only cross checks passed. Linux x86-64 reached native local terminal/popup tests; Darwin ARM64 reached compile-complete-platform checks. Both native jobs still running at last inspection. This run does not build/publish the complete release bundle."
   },
   "native_participant_popup": {
     "status": "Implemented and locally tested; cross-platform/release validation pending.",
@@ -196,5 +198,10 @@
     "authority": "The popup checks a private live owner-attachment lease and resolves the matching tmux PID to its client TTY. Unregistered client IDs and stale unlocked leases fail. This is OS-user-scoped native control, not a sandbox against interactive guests who already have the host shell OS permissions. Browser management remains separately account-authorized.",
     "tests": "Actual PTYs pass at 100 and 36 columns: selection, confirmation cancellation, selected removal, resize, q return and owner detach; validates no additional pane and retained workspace. Unregistered process and stale unlocked lease rejected. Existing full-screen stalled-control test also passes. Local CLI workspace/share regressions pass, including persisted shell state, invitation rotation process-loss recovery and explicit stop.",
     "limits": "A focused popup, not a continuously visible nonmodal split. Cross-platform CI now runs native terminal and popup checks in verify-only mode as well as final packaged tests."
+  },
+  "history_pane_consistency": {
+    "implementation": "History metadata resolves session name, pane ID and retained count together. Capture uses that resolved pane ID rather than resolving the active pane again; explicit pane IDs outside the advertised workspace session are rejected. This does not yet anchor rows against continuing output or reflow.",
+    "evidence": "New real bundled tmux test failed before the fix with mismatched pane metadata/content during rapid window changes. It passes after the fix and verifies other-session rejection. Nineteen core tests, six real bundled multiplexer tests and ordinary OpenSSH test pass. Combined Chromium/API/edge/bundled-shell/ordinary SSH history/recovery/admin flow passes.",
+    "limits": "Live output, eviction and resizing can still shift history rows. Stable snapshot anchoring remains pending."
   }
 }

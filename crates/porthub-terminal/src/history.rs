@@ -52,13 +52,31 @@ pub async fn page(
                 "-p".into(),
                 "-t".into(),
                 target.into(),
-                "#{history_size}".into(),
+                "#{session_name}|#{pane_id}|#{history_size}".into(),
             ],
             64,
         )
         .await?;
         ensure!(!truncated, "invalid terminal history metadata");
-        let total = std::str::from_utf8(&metadata)?.trim().parse::<u32>()?;
+        let metadata = std::str::from_utf8(&metadata)?.trim();
+        let mut fields = metadata.split('|');
+        ensure!(
+            fields.next() == Some("workspace"),
+            "terminal pane is outside the shared workspace"
+        );
+        let resolved_pane = fields
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("terminal pane identity missing"))?;
+        ensure!(
+            resolved_pane.starts_with('%'),
+            "terminal pane identity missing"
+        );
+        history_request(resolved_pane, before, lines)?;
+        let total = fields
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("terminal history size missing"))?
+            .parse::<u32>()?;
+        ensure!(fields.next().is_none(), "invalid terminal history metadata");
         ensure!(
             total <= 200_000,
             "terminal history exceeds configured bound"
@@ -76,7 +94,7 @@ pub async fn page(
                 "capture-pane".into(),
                 "-p".into(),
                 "-t".into(),
-                target.into(),
+                resolved_pane.into(),
                 "-S".into(),
                 start.to_string(),
                 "-E".into(),
