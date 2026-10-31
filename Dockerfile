@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # Independent slim runtime images; one Compose file chooses prod/dev targets.
-ARG PORTHUB_CORE_ARTIFACT_SOURCE=rust-build
+ARG PORTHUB_SERVER_ARTIFACT_SOURCE=rust-build
+ARG PORTHUB_CORE_ARTIFACT_SOURCE=${PORTHUB_SERVER_ARTIFACT_SOURCE}
 FROM rust:1.99.1-slim-bookworm AS rust-build
 WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev pkg-config && rm -rf /var/lib/apt/lists/*
@@ -56,6 +57,12 @@ COPY ui/ ./
 RUN yarn build && yarn next export --outdir /out/ui && \
     find /out/ui -type f \( -name '*.html' -o -name '*.js' -o -name '*.css' -o -name '*.json' -o -name '*.svg' \) -exec gzip --keep -9 {} +
 
+# CI supplies the verified native server bundle to package runtime images
+# without compiling Rust again. Normal developer builds retain rust-build.
+FROM scratch AS prebuilt-server
+COPY deploy/native/server-bin/porthub-api deploy/native/server-bin/porthub-runtime /usr/local/bin/
+COPY deploy/native/server-bin/porthub-api deploy/native/server-bin/porthub-runtime deploy/native/server-bin/porthub-edge deploy/native/server-bin/porthub-firewall /out/
+
 FROM mongo:7.0 AS database
 FROM node:22-bookworm-slim AS node-runtime
 
@@ -73,6 +80,7 @@ LABEL org.opencontainers.image.revision=$PORTHUB_SOURCE_REVISION
 # UI-only builds can reuse matching, already verified core artifacts. Building
 # from runtime-base keeps old UI assets out of the final image's layer history.
 FROM ${PORTHUB_CORE_ARTIFACT_SOURCE} AS core-artifacts
+FROM ${PORTHUB_SERVER_ARTIFACT_SOURCE} AS server-artifacts
 
 FROM runtime-base AS core-runtime
 LABEL io.porthub.api-preflight=v1
@@ -116,7 +124,7 @@ RUN mkdir -p /run/porthub-api /run/porthub-edge /run/porthub-config /run/porthub
     chown 0:10001 /run/porthub-edge && \
     chmod 0750 /run/porthub-api /run/porthub-config && chmod 0770 /run/porthub-edge /run/porthub-activity && \
     chown -R 0:10001 /data/certificates && chmod 0770 /data/certificates
-COPY --from=rust-build /out/porthub-edge /out/porthub-runtime /usr/local/bin/
+COPY --from=server-artifacts /out/porthub-edge /out/porthub-runtime /usr/local/bin/
 # Only NET_BIND_SERVICE is granted by Compose; no database or firewall access.
 USER 0:10001
 ENTRYPOINT ["porthub-edge", "--config", "/run/porthub-config/gateway.toml"]
@@ -140,7 +148,7 @@ ENTRYPOINT ["cargo", "run", "--locked", "-p", "porthub-edge", "--", "--config", 
 FROM runtime-base AS prod-firewall
 RUN mkdir -p /data/firewall /run/porthub-firewall && \
     chown -R 0:10001 /data/firewall /run/porthub-firewall && chmod 0770 /run/porthub-firewall
-COPY --from=rust-build /out/porthub-firewall /out/porthub-runtime /usr/local/bin/
+COPY --from=server-artifacts /out/porthub-firewall /out/porthub-runtime /usr/local/bin/
 # Root UID with only NET_ADMIN: non-root exec loses this capability on Docker.
 USER 0:10001
 ENTRYPOINT ["porthub-firewall"]

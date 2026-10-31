@@ -70,3 +70,53 @@ jobs:
           path: server-artifacts/
           if-no-files-found: error
           retention-days: 3
+  package:
+    name: Package server runtime images
+    needs: [server]
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.platform == 'all' && '[{"arch":"arm64","os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl"},{"arch":"x86_64","os":"ubuntu-24.04","target":"x86_64-unknown-linux-musl"}]' || inputs.platform == 'x86_64' && '[{"arch":"x86_64","os":"ubuntu-24.04","target":"x86_64-unknown-linux-musl"}]' || '[{"arch":"arm64","os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl"}]') }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: porthub-server-${{ matrix.arch }}
+          path: deploy/native/server-bin
+      - name: Verify pinned native server artifacts
+        env:
+          EXPECTED_REVISION: ${{ inputs.revision || github.sha }}
+        run: |
+          test "$(cat deploy/native/server-bin/source-revision)" = "$EXPECTED_REVISION"
+          (cd deploy/native/server-bin && sha256sum --check SHA256SUMS)
+          chmod 0755 deploy/native/server-bin/porthub-*
+      - uses: docker/setup-buildx-action@v3
+      - name: Package and smoke test each runtime role
+        env:
+          SOURCE_REVISION: ${{ inputs.revision || github.sha }}
+          SERVER_ARCH: ${{ matrix.arch }}
+        run: |
+          version="$(sh scripts/release-version.sh)"
+          mkdir -p server-images
+          for role in core edge firewall; do
+            image="porthub-ci:${role}-${SOURCE_REVISION}"
+            docker buildx build --load --target "prod-$role" --tag "$image"               --build-arg PORTHUB_SERVER_ARTIFACT_SOURCE=prebuilt-server               --build-arg PORTHUB_CORE_ARTIFACT_SOURCE=prebuilt-server               --build-arg "PORTHUB_VERSION=$version"               --build-arg "PORTHUB_SOURCE_REVISION=$SOURCE_REVISION"               --cache-from "type=gha,scope=server-${SERVER_ARCH}-${role}"               --cache-to "type=gha,scope=server-${SERVER_ARCH}-${role},mode=max" .
+            test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")" = "$SOURCE_REVISION"
+            case "$role" in core) binary=porthub-api; expected_user=10001:10001 ;; edge) binary=porthub-edge; expected_user=0:10001 ;; firewall) binary=porthub-firewall; expected_user=0:10001 ;; esac
+            test "$(docker image inspect --format '{{.Config.User}}' "$image")" = "$expected_user"
+            docker run --rm --network none --cap-drop ALL --entrypoint "$binary" "$image" --help
+            docker run --rm --network none --cap-drop ALL --entrypoint porthub-runtime "$image" --help
+            docker save "$image" | gzip -1 > "server-images/$role.tar.gz"
+          done
+          printf '%s\n' "$SOURCE_REVISION" > server-images/source-revision
+          printf '%s\n' "$version" > server-images/version
+          (cd server-images && sha256sum *.tar.gz) > server-images/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: porthub-server-images-${{ matrix.arch }}
+          path: server-images/
+          if-no-files-found: error
+          retention-days: 3
