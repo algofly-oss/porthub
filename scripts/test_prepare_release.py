@@ -65,6 +65,28 @@ class Repository(unittest.TestCase):
         self.assertEqual(packages,{'app':'1.8.10','stable':'0.1.0','external':'1.8.9'})
         self.assertEqual(set(self.run_git('diff-tree','--no-commit-id','--name-only','-r','HEAD').splitlines()),{'Cargo.toml','Cargo.lock'})
         self.assertEqual(self.run_git('status','--porcelain'),'')
+    def test_source_fix_skips_draft_and_reserved_tag_without_overwriting(self):
+        head=self.change()
+        self.run_git('tag','v1.8.11',self.run_git('rev-parse','v1.8.9'))
+        draft={'tag_name':'v1.8.10','draft':True,'target_commitish':'a'*40}
+        result=release.prepare(self.root,'refs/heads/main',head,self.latest,reservations=[draft])
+        self.assertEqual(result['version'],'1.8.12')
+        self.assertEqual(self.run_git('status','--porcelain'),'')
+    def test_same_source_draft_can_resume_without_version_change(self):
+        head=self.change()
+        prepared=release.prepare(self.root,'refs/heads/main',head,self.latest,execute=True)
+        draft={'tag_name':'v1.8.10','draft':True,'prerelease':False,'target_commitish':prepared['revision']}
+        result=release.prepare(self.root,'refs/heads/main',prepared['revision'],self.latest,reservations=[draft])
+        self.assertEqual(result['version'],'1.8.10')
+        self.assertFalse(result['would_commit'])
+        draft['target_commitish']='a'*40
+        result=release.prepare(self.root,'refs/heads/main',prepared['revision'],self.latest,reservations=[draft])
+        self.assertEqual(result['version'],'1.8.11')
+    def test_draft_cannot_reserve_the_future_version_commit_for_current_source(self):
+        head=self.change()
+        draft={'tag_name':'v1.8.10','draft':True,'target_commitish':head}
+        result=release.prepare(self.root,'refs/heads/main',head,self.latest,reservations=[draft])
+        self.assertEqual(result['version'],'1.8.11')
     def test_workspace_section_is_updated_without_touching_an_earlier_dependency_version(self):
         manifest=self.root/'Cargo.toml'
         manifest.write_text('[dependencies.external]\nversion = "1.8.9"\n'+manifest.read_text())

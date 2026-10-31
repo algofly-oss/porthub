@@ -97,7 +97,7 @@ def remote_head(root, branch):
         raise ValueError('Default branch source is unavailable')
     return output[0]
 
-def prepare(root, ref, trigger_sha, latest=None, branch='main', execute=False):
+def prepare(root, ref, trigger_sha, latest=None, branch='main', execute=False, reservations=()):
     if not re.fullmatch(r'[0-9a-f]{40}', trigger_sha):
         raise ValueError('A full source revision is required')
     root = Path(root).resolve()
@@ -120,6 +120,23 @@ def prepare(root, ref, trigger_sha, latest=None, branch='main', execute=False):
             raise ValueError('Latest release source must remain in the new release history')
     tag = ref.removeprefix('refs/tags/') if ref.startswith('refs/tags/') else None
     version = choose_version(workspace, latest_version, tag)
+    # A failed upload can leave a draft pinned to earlier source. A subsequent
+    # source fix must automatically advance rather than overwrite that draft.
+    # Same-source retries may resume their draft only without a version commit.
+    reserved = {item['tag_name']: item for item in reservations}
+    if tag is None and latest_commit != head:
+        for _ in range(1000):
+            candidate = 'v' + version
+            existing = reserved.get(candidate)
+            local = git(root, 'rev-parse', '--verify', 'refs/tags/' + candidate + '^{commit}', check=False)
+            resumable = version == workspace and (existing is None or
+                existing.get('draft') and not existing.get('prerelease') and existing.get('target_commitish') == head)
+            if (existing is None or resumable) and (local.returncode != 0 or resumable and local.stdout.strip() == head):
+                break
+            major, minor, patch = numeric(version)
+            version = f'{major}.{minor}.{patch + 1}'
+        else:
+            raise ValueError('Too many reserved release versions; no source was changed')
     result = {'version': version, 'revision': head, 'tag': 'v' + version,
               'skip': False, 'already_published': False, 'would_commit': version != workspace}
     if latest_commit == head and latest_version == workspace:
@@ -161,6 +178,13 @@ def latest_release(repository):
         raise RuntimeError('Latest release lookup failed; no source was changed')
     return json.loads(result.stdout)
 
+def release_reservations(repository):
+    result = subprocess.run(['gh', 'api', '--paginate', '--slurp',
+                             'repos/'+repository+'/releases?per_page=100'], capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError('Release reservations lookup failed; no source was changed')
+    return [release for page in json.loads(result.stdout) for release in page]
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=Path.cwd())
@@ -172,7 +196,9 @@ def main():
     args = parser.parse_args()
     if not args.ref or not args.trigger_sha or not args.repository:
         parser.error('repository, ref and trigger SHA are required')
-    result = prepare(args.root, args.ref, args.trigger_sha, latest_release(args.repository), args.default_branch, args.execute)
+    latest = latest_release(args.repository)
+    reservations = release_reservations(args.repository)
+    result = prepare(args.root, args.ref, args.trigger_sha, latest, args.default_branch, args.execute, reservations)
     print(json.dumps(result, sort_keys=True))
     if os.environ.get('GITHUB_OUTPUT'):
         with open(os.environ['GITHUB_OUTPUT'], 'a') as output:

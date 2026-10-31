@@ -59,6 +59,7 @@ jobs:
       - name: Verify automatic version preparation and retention
         run: |
           python3 scripts/test_prepare_release.py
+          python3 scripts/test_publish_release.py
           python3 scripts/test_prune_github_releases.py
       - name: Pin validation source without release mutations
         id: validation

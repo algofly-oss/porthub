@@ -59,6 +59,10 @@ resolved independently of the gateway image version, so publishing a new agent
 release does not require rebuilding the gateway. Source releases still validate
 one consistent version across all ten platforms before publication. The CI
 publisher uploads a draft first and makes it latest only when uploads finish.
+Before promotion it verifies every uploaded asset's size and SHA256 digest.
+Retries can finish a draft pinned to the same source; published assets are
+immutable. Automatic version preparation skips versions reserved by another
+draft or tag, so a source fix after a failed upload advances the patch version.
 
 During active development, GitHub retains only the latest verified versioned
 release and its version tag by default. After publication, CI removes older
