@@ -179,5 +179,14 @@
     "tests": "Real bundled CLI/supervisor fixture passes: kills worker before acknowledgement, reconstructs it, verifies identical pending replay and immutable host identity, prints confirmed new URLs, retains shell variables, blocks revoked links, renews after revocation and explicitly stops. Filesystem failure/private replay unit passes. Normal agent library suite passes 69 tests (two environment-specific tests skipped). Nineteen terminal core tests, five actual bundled tmux tests and ordinary OpenSSH test pass. Six Chromium guide checks pass across dark/light and 1440/402/320px. Gateway restart and authenticated WebSocket rotation tests passed in preceding checkpoint; the CLI fixture uses an isolated broker protocol simulator, not a live gateway.",
     "gateway_semantics": "A new rotation must be exactly the next durable revision. Gateway commits only hashes/expiry/revision before replacing live routes, then acknowledges the revision. Matching retries return durable revoked state without reopening links. Original host identity and workspace options remain immutable. Expired replacement links still permit the authenticated workspace host to reconnect.",
     "host_semantics": "The supervisor saves and syncs a pending capability pair before sending. Plain invite withholds links while pending. CLI waits for a matching gateway acknowledgement, and the supervisor replays the same revision and pair after Ready on reconnect/restart. A failed save rolls back the in-memory pending update. Matching acknowledgement saves confirmed state before exposing the revision. Expired pending lifetimes may be confirmed as already expired to resolve ambiguity; a subsequent rotation issues a fresh lifetime."
+  },
+  "platform_ci_checkpoint": {
+    "source": "49f1d32945f7fea69d259765e72b8a0735f2dfbf",
+    "run": "https://github.com/algofly-oss/porthub/actions/runs/41223275496",
+    "mode": "All-platform verify-only; publication disabled. Existing 32-bit workflow incorrectly built release artifacts in this mode; fixed for subsequent runs.",
+    "observed": "Windows x86-64 job passed. All seven Linux/macOS helper-build jobs failed; Windows ARM64 and x86 remained running at last inspection. Compilation log tails were hidden by the helper wrapper, so diagnostics have been added and failed platforms must be rerun.",
+    "changes": "Explicit -m32 for multilib i686 helper, bounded failure log tail and build-log artifact, ELF class/CPU plus static-loader validation; verify-only cross compilation no longer builds/uploads 32-bit release binaries.",
+    "local_validation": "Two real compiler-produced ELF checks pass: 32-bit binary accepted for i686 and rejected for x86-64/ARM, dynamically linked host binary rejected. Python syntax and workflow YAML/verify-only conditions verified.",
+    "status": "Not packaged or deployed. Do not claim Linux/macOS CI passes based on local native tests."
   }
 }

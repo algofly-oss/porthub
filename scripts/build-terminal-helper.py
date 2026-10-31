@@ -12,11 +12,30 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 import time
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
+
+def validate_linux_binary(binary, target):
+    environment = dict(os.environ, LC_ALL='C')
+    headers = subprocess.check_output(['readelf', '-h', str(binary)], text=True, env=environment)
+    architecture = target.split('-')[0]
+    expected = {
+        'x86_64': ('ELF64', 'Advanced Micro Devices X86-64'),
+        'aarch64': ('ELF64', 'AArch64'),
+        'i686': ('ELF32', 'Intel 80386'),
+        'i586': ('ELF32', 'Intel 80386'),
+        'arm': ('ELF32', 'ARM'),
+        'armv7': ('ELF32', 'ARM'),
+    }.get(architecture)
+    if expected is None or not all(value in headers for value in expected):
+        raise RuntimeError('Terminal helper ELF architecture does not match ' + target)
+    segments = subprocess.check_output(['readelf', '-l', str(binary)], text=True, env=environment)
+    if 'INTERP' in segments:
+        raise RuntimeError('Terminal helper must not require a dynamic loader')
 
 def build(args):
     lock_path = ROOT / 'vendor/terminal/sources.json'
@@ -32,6 +51,11 @@ def build(args):
     prefix.mkdir(exist_ok=True)
     env = dict(os.environ, CC=args.cc, AR=args.ar, RANLIB=args.ar[:-2]+'ranlib' if args.ar.endswith('ar') else 'ranlib', CFLAGS='-O2 -fPIC', PKG_CONFIG_PATH=str(prefix/'lib/pkgconfig'))
     env['PKG_CONFIG_LIBDIR'] = str(prefix/'lib/pkgconfig')
+    # The i686 CI target uses the multilib host compiler, whose default is x86_64.
+    # Carry -m32 through musl and every dependent compile/link invocation.
+    if args.target.startswith(('i686-', 'i586-', 'i386-')):
+        env['CFLAGS'] += ' -m32'
+
     sources = {}
     for item in lock['sources']:
         archive = cache / (item['name'] + '.tar.gz')
@@ -57,7 +81,16 @@ def build(args):
     def run(command, directory, extra=None):
         merged = dict(env)
         merged.update(extra or {})
-        subprocess.run(command, cwd=directory, env=merged, check=True, stdout=log, stderr=subprocess.STDOUT)
+        try:
+            subprocess.run(command, cwd=directory, env=merged, check=True, stdout=log, stderr=subprocess.STDOUT)
+        except subprocess.CalledProcessError:
+            log.flush()
+            with (cache/'build.log').open('rb') as failure_log:
+                failure_log.seek(max(0, failure_log.seek(0, 2) - 65536))
+                tail = failure_log.read().decode('utf-8', errors='replace').splitlines()[-80:]
+            print('Terminal helper build failed; final build log lines:', file=sys.stderr)
+            print('\n'.join(tail), file=sys.stderr)
+            raise
     configure = ['--prefix=' + str(prefix), '--host=' + args.target]
     jobs = '-j' + str(args.jobs)
     with (cache/'build.log').open('w') as log:
@@ -81,9 +114,7 @@ def build(args):
     stage = cache/'package';stage.mkdir(exist_ok=True)
     shutil.copy2(sources['tmux']/'tmux',stage/'tmux')
     if 'linux' in args.target:
-        result = subprocess.check_output(['readelf','-l',stage/'tmux'],text=True)
-        if 'INTERP' in result:
-            raise RuntimeError('Terminal helper must not require a dynamic loader')
+        validate_linux_binary(stage/'tmux', args.target)
     terminfo=stage/'terminfo';terminfo.mkdir(exist_ok=True)
     tic=shutil.which('tic')
     if not tic:raise RuntimeError('Build host requires tic to package terminal definitions')

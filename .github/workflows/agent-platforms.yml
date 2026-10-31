@@ -152,6 +152,14 @@ jobs:
           echo "PORTHUB_TERMINAL_BUNDLE=$terminal_bundle" >> "$GITHUB_ENV"
           echo "PORTHUB_TEST_TERMINAL_BUNDLE=$terminal_bundle" >> "$GITHUB_ENV"
           echo "PORTHUB_TEST_TERMINAL_TARGET=${{ matrix.target }}" >> "$GITHUB_ENV"
+      - name: Save terminal helper failure log
+        if: failure() && runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: terminal-helper-log-${{ matrix.artifact }}
+          path: target/terminal-helper/**/build.log
+          if-no-files-found: ignore
+          retention-days: 3
       - name: Cache compiled Rust dependencies and workspace libraries
         uses: Swatinem/rust-cache@v2
         with:
@@ -288,13 +296,32 @@ jobs:
         run: |
           terminal_bundle="$(python3 scripts/build-terminal-helper.py --target '${{ matrix.target }}' --cc '${{ matrix.compiler }}' --ar '${{ matrix.ar }}')"
           echo "PORTHUB_TERMINAL_BUNDLE=$terminal_bundle" >> "$GITHUB_ENV"
+      - name: Save cross-compiled terminal helper failure log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terminal-helper-log-${{ matrix.artifact }}
+          path: target/terminal-helper/**/build.log
+          if-no-files-found: ignore
+          retention-days: 3
       - name: Cache compiled 32-bit Rust libraries
         uses: Swatinem/rust-cache@v2
         with:
           key: linux32-${{ matrix.target }}
           cache-workspace-crates: true
           cache-on-failure: true
+      - name: Check agent for 32-bit Linux
+        if: inputs.verify_only == true
+        shell: bash
+        run: |
+          target_key=$(echo '${{ matrix.target }}' | tr '[:lower:]-' '[:upper:]_')
+          export "CARGO_TARGET_${target_key}_LINKER=${{ matrix.compiler }}"
+          cc_target_key=$(echo '${{ matrix.target }}' | tr '-' '_')
+          export "CC_${cc_target_key}=${{ matrix.compiler }}"
+          export "AR_${cc_target_key}=${{ matrix.ar }}"
+          cargo check --locked -p porthub-agent --all-targets --target ${{ matrix.target }}
       - name: Build agent for 32-bit Linux
+        if: inputs.verify_only != true
         shell: bash
         run: |
           target_key=$(echo '${{ matrix.target }}' | tr '[:lower:]-' '[:upper:]_')
@@ -308,6 +335,7 @@ jobs:
           printf '%s\n' "$PORTHUB_VERSION" > dist/porthub-${{ matrix.artifact }}.version
           cd dist && sha256sum porthub-${{ matrix.artifact }} > porthub-${{ matrix.artifact }}.sha256
       - uses: actions/upload-artifact@v4
+        if: inputs.verify_only != true
         with:
           name: porthub-${{ matrix.artifact }}
           path: dist/
