@@ -242,6 +242,93 @@ fn clip(text: &str, cols: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn response(request: u32, bytes: &[u8], done: bool) -> HistoryChunk {
+        HistoryChunk {
+            request,
+            data: encode_data(bytes),
+            done,
+            total: 1000,
+            before: 0,
+            lines: 21,
+            truncated: false,
+            error: None,
+        }
+    }
+    #[test]
+    fn capture_is_bounded_and_stale_responses_cannot_replace_current_page() {
+        let mut pager = Pager::new(80, 24);
+        pager.feed(b"\x1b[18~");
+        let Some(ViewerInput::History { request, .. }) = pager.request() else {
+            panic!("capture")
+        };
+        assert!(pager.request().is_none(), "only one capture may be pending");
+        assert!(pager
+            .page(response(request.wrapping_add(1), b"stale", true))
+            .unwrap()
+            .is_none());
+        assert!(
+            pager.pending.is_some(),
+            "stale response cannot consume current capture"
+        );
+        let chunk = vec![b'x'; MAX_DATA];
+        for _ in 0..131072 / MAX_DATA {
+            assert!(pager
+                .page(response(request, &chunk, false))
+                .unwrap()
+                .is_none());
+        }
+        assert!(pager.page(response(request, b"overflow", false)).is_err());
+        assert_eq!(pager.pending.as_ref().unwrap().1.len(), 131072);
+        pager.feed(b"q");
+        assert!(pager.pending.is_none());
+        assert!(pager
+            .page(response(request, b"late", true))
+            .unwrap()
+            .is_none());
+    }
+    #[test]
+    fn lost_capture_retries_with_a_new_identity_and_navigation_is_rate_limited() {
+        let mut pager = Pager::new(80, 24);
+        pager.feed(b"\x1b[18~");
+        let Some(ViewerInput::History { request, .. }) = pager.request() else {
+            panic!("capture")
+        };
+        pager.pending.as_mut().unwrap().2 = Instant::now() - Duration::from_secs(4);
+        pager.last_request = Some(Instant::now() - Duration::from_secs(4));
+        let Some(ViewerInput::History {
+            request: replacement,
+            ..
+        }) = pager.request()
+        else {
+            panic!("retry")
+        };
+        assert_ne!(request, replacement);
+        assert!(pager
+            .page(response(request, b"late", true))
+            .unwrap()
+            .is_none());
+        let screen = pager
+            .page(response(
+                replacement,
+                b"safe\x1b]52;c;clipboard\x07\n",
+                true,
+            ))
+            .unwrap()
+            .unwrap();
+        assert!(!screen.windows(4).any(|bytes| bytes == b"\x1b]52"));
+        pager.feed(b"\x1b[5~");
+        assert!(
+            pager.request().is_none(),
+            "navigation cannot bypass capture rate limit"
+        );
+        pager.last_request = Some(Instant::now() - Duration::from_secs(1));
+        assert!(matches!(
+            pager.request(),
+            Some(ViewerInput::History { before: 21, .. })
+        ));
+        pager.feed(&[b'x'; 1024]);
+        assert!(pager.keys.len() < 64);
+    }
     #[test]
     fn fragmented_keys_mouse_and_plain_input_never_become_shell_commands() {
         let mut pager = Pager::new(80, 24);
