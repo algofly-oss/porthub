@@ -265,33 +265,6 @@ jobs:
         env:
           PORTHUB_TEST_LAUNCHD: "1"
         run: cargo test --locked -p porthub-agent --test launchd_live --target ${{ matrix.target }} -- --include-ignored
-      - name: Build static ARM gateway binaries for scoped deployments
-        if: inputs.verify_only != true && matrix.artifact == 'arm64'
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
-          CC_aarch64_unknown_linux_musl: musl-gcc
-        shell: bash
-        run: |
-          cargo build --locked --release -p porthub-edge -p porthub-runtime --target aarch64-unknown-linux-musl --timings
-          mkdir -p edge-dist
-          for binary in porthub-edge porthub-runtime; do
-            source="target/aarch64-unknown-linux-musl/release/$binary"
-            readelf -l "$source" > "$RUNNER_TEMP/$binary.elf"
-            if grep -q INTERP "$RUNNER_TEMP/$binary.elf"; then
-              echo "$binary must not require a dynamic loader" >&2
-              exit 1
-            fi
-            cp "$source" "edge-dist/$binary"
-          done
-          (cd edge-dist && sha256sum porthub-edge porthub-runtime > SHA256SUMS)
-      - uses: actions/upload-artifact@v4
-        if: inputs.verify_only != true && matrix.artifact == 'arm64'
-        with:
-          # Keep server artifacts out of the client release-bundle glob.
-          name: edge-runtime-arm64
-          path: edge-dist/
-          if-no-files-found: error
-          retention-days: 3
       - uses: actions/upload-artifact@v4
         if: inputs.verify_only != true
         with:

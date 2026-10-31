@@ -21,12 +21,17 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,targe
 
 # Agents run on hosts with different libc versions. Native musl builds provide
 # one self-contained Linux executable without a distribution-specific loader.
-FROM rust:1.99.1-alpine AS agent-build
+# Trixie supplies Python's safe tar extraction filter used by helper builds.
+FROM rust:1.99.1-slim-trixie AS agent-build
 WORKDIR /src
-RUN apk add --no-cache build-base
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      gcc make libc6-dev musl-tools python3 bison ncurses-bin ca-certificates && \
+    rm -rf /var/lib/apt/lists/* && \
+    rustup target add "$(rustc -vV | sed -n 's/^host: //p' | sed 's/-gnu$/-musl/')"
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
 COPY vendor/ vendor/
+COPY scripts/build-terminal-helper.py scripts/build-agent-linux.sh scripts/
 ARG PORTHUB_VERSION=1.8.9
 ARG PORTHUB_BUILD_JOBS=4
 ARG TARGETARCH
@@ -35,15 +40,13 @@ ENV PORTHUB_SOURCE_REVISION=$PORTHUB_SOURCE_REVISION
 ENV PORTHUB_VERSION=$PORTHUB_VERSION RUST_MIN_STACK=33554432 CARGO_BUILD_JOBS=$PORTHUB_BUILD_JOBS
 RUN --mount=type=cache,id=porthub-agent-musl-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=porthub-agent-musl-target,target=/src/target \
-    cargo build --locked --release -p porthub-agent --bin porthub && \
-    target/release/porthub version && \
-    readelf -l target/release/porthub > /tmp/porthub-elf && \
-    if grep -q INTERP /tmp/porthub-elf; then echo 'Agent must not require a dynamic loader' >&2; exit 1; fi && \
-    mkdir -p /out/client-bin && \
-    case "$TARGETARCH" in amd64) agent_target=x86_64 ;; arm64) agent_target=arm64 ;; *) exit 1 ;; esac && \
-    cp target/release/porthub /out/client-bin/porthub-$agent_target && \
-    cd /out/client-bin && sha256sum porthub-$agent_target > porthub-$agent_target.sha256 && \
-    echo "$PORTHUB_VERSION" > /out/client-bin/porthub-$agent_target.version
+    helper_target="$(rustc -vV | sed -n 's/^host: //p')" && \
+    agent_target="$(printf '%s' "$helper_target" | sed 's/-gnu$/-musl/')" && \
+    terminal_bundle="$(python3 scripts/build-terminal-helper.py --target "$helper_target")" && \
+    export PORTHUB_TERMINAL_BUNDLE="$terminal_bundle" && \
+    case "$TARGETARCH" in amd64) agent_artifact=x86_64 ;; arm64) agent_artifact=arm64 ;; *) exit 1 ;; esac && \
+    sh scripts/build-agent-linux.sh "$agent_target" "$agent_artifact" && \
+    mkdir -p /out/client-bin && cp dist/porthub-* /out/client-bin/
 
 FROM scratch AS agent-artifacts
 COPY --from=agent-build /out/client-bin/ /

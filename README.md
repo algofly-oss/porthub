@@ -72,23 +72,31 @@ GitHub platform jobs restore Cargo artifacts (including workspace libraries)
 per target/toolchain. Native Linux jobs build the static musl binary in that
 cached target directory through `scripts/build-agent-linux.sh`; they verify
 that it has no dynamic loader and keep the existing release/checksum format.
-The Docker `agent-artifacts` target remains available for local packaging.
+The Docker `agent-artifacts` target remains available for local packaging. It
+builds the pinned, static terminal helper and embeds it in the CLI; supported
+hosts need no separate tmux installation. Helper output shares the Docker target
+cache, so a Rust change can reuse the completed C build. Server binaries and
+runtime images have a separate workflow; client platform jobs do not rebuild
+the gateway.
 
 Start releases from the default branch so later versions can restore the same
 build caches. GitHub isolates caches written on one version tag from other tags;
 merely caching a tag-only workflow does not solve reuse across releases.
-After committing the new workspace release version to `main`, run:
+The automatic main/tag release workflow is being integrated with deployment
+gates; it is not yet enabled on `main`. Until that integration is shipped, the
+existing explicit publication fallback is:
 
 ```sh
 gh workflow run agent-platforms.yml --ref main -f platform=all -F publish_release=true
 ```
 
 This builds and validates the full platform bundle before creating the release
-tag, then retains only the latest verified stable release and older version
-releases/tags are removed. Git history remains available for rebuilding an older
-commit. Non-version tags and newer in-flight versions are preserved. Dispatch
-without `publish_release` for checks or cache warming. Tag-push builds remain
-supported, but the default-branch entry point is preferred for cache reuse.
+tag, then retains the latest verified stable release plus any tags explicitly
+protected in `PORTHUB_RETAIN_TAGS`. Older unprotected releases/tags and previews
+are removed. Git history remains available for rebuilding an older commit.
+Non-version tags and newer in-flight stable versions are preserved. Dispatch
+without `publish_release` for checks or cache warming. The automatic workflow
+uses pinned source revisions for both default-branch and explicit-tag builds.
 CI staging artifacts expire after three days; build caches remain available for
 subsequent builds, while the latest published release stays downloadable.
 
