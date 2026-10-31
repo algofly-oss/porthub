@@ -60,14 +60,22 @@ class GitHub(retention.GitHub):
             if 'HTTP 404' in (error.stderr or ''):return None
             raise RuntimeError('GitHub release lookup failed') from None
     def latest(self):return self.optional('/releases/latest')
-    def release(self,tag):return self.optional('/releases/tags/'+quote(tag,safe=''))
+    def release(self,tag):
+        release=self.optional('/releases/tags/'+quote(tag,safe=''))
+        if release is not None:return release
+        # Unpublished drafts need not have a Git tag yet. The tag endpoint can
+        # return404 even though the authenticated release listing contains it.
+        matches=[release for release in self.pages('/releases?per_page=100') if release.get('tag_name')==tag]
+        if len(matches)>1:raise ValueError('Multiple releases claim the same tag')
+        return matches[0] if matches else None
     def tag_commit(self,tag):
         obj=self.optional('/git/ref/tags/'+quote(tag,safe=''))
         return self.commit(tag) if obj is not None else None
     def command(self,*arguments):
         result=subprocess.run(['gh','release',*arguments,'--repo',self.prefix.removeprefix('repos/')],capture_output=True,text=True)
         if result.returncode:
-            raise RuntimeError('GitHub release operation failed: '+arguments[0])
+            detail=re.sub(r'https?://\S+','[GitHub endpoint]',result.stderr or '').strip()[:500]
+            raise RuntimeError('GitHub release operation failed: '+arguments[0]+('; '+detail if detail else ''))
     def create(self,tag,revision,paths):
         self.command('create',tag,*map(str,paths),'--draft','--target',revision,'--title','PortHub '+tag.removeprefix('v'),
                      '--notes','Verified complete ten-platform PortHub release. Source: '+revision)
