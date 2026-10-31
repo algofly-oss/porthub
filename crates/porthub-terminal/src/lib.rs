@@ -16,3 +16,6 @@ pub mod ssh;
 
 #[cfg(unix)]
 pub mod history;
+
+#[cfg(unix)]
+pub mod owner_view;

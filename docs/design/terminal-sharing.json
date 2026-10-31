@@ -348,5 +348,18 @@
       "history": "Actual gateway capability header and frozen browser requests asserted; real bundled history remained byte-for-byte identical after80 new output lines and viewport resize; Older and Latest retained the same opaque anchor; explicit Refresh returned new output without an existing anchor.",
       "isolation": "Random fixture workspace and database; existing owned test MongoDB only; loopback static server and API; no production workload or route modified."
     }
+  },
+  "native_sidebar_development": {
+    "status": "Private per-owner presentation engine implemented and tested. CLI still uses the existing participant popup; sidebar flags and actual participant-panel integration remain incomplete. Not deployed.",
+    "architecture": "Separate private presentation server from the same verified bundled runtime, with an inner attachment on the left and owner-only controls on the right. No panel is added to the shared workspace. Unique user-owned private directory and separate socket; an existing active view or the shared socket is refused.",
+    "lifecycle": "exit-unattached on ends the presentation when its owner attachment closes; pane-exited hook ends only the presentation when the inner attachment exits. Shared shell survives owner disconnect; explicit final shell exit ends both. Guard cleanup targets only the private presentation.",
+    "controls": "Outer view has no prefix or status bar; Ctrl+A and F7 reach the shared workspace. F8 switches focus. Mouse wheel is forwarded into shared scrollback. OSC clipboard and passthrough settings are configured but end-to-end clipboard verification remains pending.",
+    "validation": "44 terminal tests pass:34 unit,9 bundled-runtime,1 stockOpenSSH test covering legacy and snapshot hosts. Additional focused sidebar mouse test passes. Actual PTY fixture verifies typing, private control input, no shared panel/transcript leakage, Ctrl+A splitting, F7 copy mode, mouse scrolling, disconnect persistence and final shell exit.",
+    "reference": "https://man.openbsd.org/tmux",
+    "next": [
+      "Integrate actual participant controls and sidebar auto/on/off flags into CLI attachment without breaking narrow terminal fallback",
+      "Verify removal confirmation, focus switching, resize/reflow, independent simultaneous owners, clipboard escape propagation and full CLI session lifecycle",
+      "Include the native UI in packaging, platform checks and the authorized scoped live release"
+    ]
   }
 }

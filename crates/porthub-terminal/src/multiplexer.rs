@@ -57,6 +57,12 @@ impl Workspace {
         })
     }
 
+    /// A separate local presentation server using the same verified runtime.
+    /// Its directory and socket are independent of the shared workspace.
+    pub fn local_view(&self, directory: PathBuf) -> Result<Self> {
+        Self::open(self.executable.clone(), self.terminfo.clone(), directory)
+    }
+
     pub fn socket(&self) -> PathBuf {
         self.directory.join("tmux.sock")
     }

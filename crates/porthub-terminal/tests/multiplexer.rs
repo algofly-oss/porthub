@@ -610,3 +610,81 @@ async fn frozen_history_routes_stable_pages_and_rejects_detached_guest_anchors()
     assert!(expired.data.is_empty());
     Ok(())
 }
+
+#[test]
+#[ignore = "requires bundled terminal runtime"]
+fn private_owner_sidebar_preserves_shared_shell_and_closes_with_its_attachment() -> Result<()> {
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use std::io::{Read, Write};
+    use porthub_terminal::owner_view::OwnerView;
+    let (directory, shared) = workspace()?;
+    let _cleanup = Cleanup(shared.clone());
+    shared.start(&start())?;
+    for round in 0..2 {
+        let path = directory.path().join(format!("view{round}"));
+        create_directory(&path)?;
+        let view = OwnerView::new(&shared,path)?;
+        let mut panel = std::process::Command::new("/bin/sh");
+        panel.args(["-c", "printf 'PRIVATE_OWNER_PANEL\\n'; while read line; do printf 'private-control:%s\\n' \"$line\"; done"]);
+        let command = view.command(&shared, &panel, 120, 30)?;
+        let pty = native_pty_system().openpty(PtySize { rows:30, cols:120, pixel_width:0, pixel_height:0 })?;
+        let mut builder = CommandBuilder::new(command.get_program());
+        builder.args(command.get_args());
+        for (key,value) in command.get_envs() {
+            if let Some(value)=value { builder.env(key,value); } else { builder.env_remove(key); }
+        }
+        builder.env("TERM","xterm-256color");
+        let mut child=pty.slave.spawn_command(builder)?;
+        drop(pty.slave);
+        let mut reader=pty.master.try_clone_reader()?;
+        let drain=std::thread::spawn(move || {let mut bytes=[0;8192];while reader.read(&mut bytes).is_ok_and(|n|n>0) {}});
+        let mut writer=pty.master.take_writer()?;
+        let wait = |predicate: &dyn Fn() -> bool| -> Result<()> {
+            let deadline=Instant::now()+Duration::from_secs(5);
+            while !predicate() {
+                anyhow::ensure!(Instant::now()<deadline,"private view fixture timed out");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(())
+        };
+        wait(&|| view.workspace().capture("%1",20).is_ok_and(|s|s.contains("PRIVATE_OWNER_PANEL")))?;
+        assert!(!shared.capture("%0",100)?.contains("PRIVATE_OWNER_PANEL"),"private controls must not enter the shared transcript");
+        let panes=shared.command().args(["list-panes","-F","#{pane_id}"]).output()?;
+        assert_eq!(String::from_utf8_lossy(&panes.stdout).lines().count(),1,"sidebar must not add shared panes");
+        if round==0 {
+            writer.write_all(b"printf 'OWNER%s\\n' 'TYPING'\r")?;writer.flush()?;
+            wait(&|| shared.capture("%0",100).is_ok_and(|s|s.contains("OWNERTYPING")))?;
+            // The private wrapper must not consume the shared prefix or F7.
+            writer.write_all(b"\x01%")?;writer.flush()?;
+            wait(&|| shared.command().args(["list-panes","-F","#{pane_id}"]).output().is_ok_and(|o|String::from_utf8_lossy(&o.stdout).lines().count()==2))?;
+            assert!(shared.command().args(["kill-pane","-t","%1"]).output()?.status.success());
+            writer.write_all(b"i=0; while [ $i -lt 80 ]; do echo scroll-$i; i=$((i+1)); done\r")?;writer.flush()?;
+            wait(&|| shared.capture("%0",100).is_ok_and(|s|s.contains("scroll-79")))?;
+            writer.write_all(b"\x1b[18~")?;writer.flush()?;
+            wait(&|| shared.command().args(["display-message","-p","-t","%0","#{pane_in_mode}"]).output().is_ok_and(|o|String::from_utf8_lossy(&o.stdout).trim()=="1"))?;
+            writer.write_all(b"\x1b[18~")?;writer.flush()?;
+            wait(&|| shared.command().args(["display-message","-p","-t","%0","#{pane_in_mode}"]).output().is_ok_and(|o|String::from_utf8_lossy(&o.stdout).trim()=="0"))?;
+            writer.write_all(b"\x1b[<64;5;5M")?;writer.flush()?;
+            wait(&|| shared.command().args(["display-message","-p","-t","%0","#{pane_in_mode}"]).output().is_ok_and(|o|String::from_utf8_lossy(&o.stdout).trim()=="1"))?;
+            writer.write_all(b"\x1b[18~")?;writer.flush()?;
+            wait(&|| shared.command().args(["display-message","-p","-t","%0","#{pane_in_mode}"]).output().is_ok_and(|o|String::from_utf8_lossy(&o.stdout).trim()=="0"))?;
+            writer.write_all(b"\x1b[19~")?;writer.flush()?;
+            wait(&|| view.workspace().command().args(["display-message","-p","#{pane_id}"]).output().is_ok_and(|o|String::from_utf8_lossy(&o.stdout).trim()=="%1"))?;
+            writer.write_all(b"owner-only\r")?;writer.flush()?;
+            wait(&|| view.workspace().capture("%1",20).is_ok_and(|s|s.contains("private-control:owner-only")))?;
+            assert!(!shared.capture("%0",100)?.contains("owner-only"));
+            child.kill()?;let _=child.wait()?;
+            wait(&|| !view.workspace().is_alive())?;
+            assert!(shared.is_alive(),"owner terminal closing must preserve the shared shell");
+        } else {
+            let result=shared.command().args(["send-keys","-t","%0","exit","Enter"]).output()?;
+            assert!(result.status.success());
+            wait(&|| !shared.is_alive())?;
+            wait(&|| !view.workspace().is_alive())?;
+            let _=child.wait()?;
+        }
+        drop(writer);drop(pty.master);drop(view);
+        drain.join().unwrap();
+    }
+    Ok(())
+}
