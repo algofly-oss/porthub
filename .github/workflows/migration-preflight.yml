@@ -1,9 +1,9 @@
 name: Migration preflight
 on:
   push:
-    paths: ["deploy/native/*.py", ".github/workflows/migration-preflight.yml"]
+    paths: ["deploy/native/*.py", "scripts/test-native-upgrade-docker.py", ".github/workflows/migration-preflight.yml"]
   pull_request:
-    paths: ["deploy/native/*.py", ".github/workflows/migration-preflight.yml"]
+    paths: ["deploy/native/*.py", "scripts/test-native-upgrade-docker.py", ".github/workflows/migration-preflight.yml"]
   workflow_dispatch:
     inputs:
       verify_release_pipeline:
@@ -23,6 +23,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check release validation and interrupted-stop recovery
         run: python3 -m unittest discover -s deploy/native -p 'test_*.py' -v
+      - name: Exercise isolated Docker upgrade and partial-failure rollback
+        run: python3 scripts/test-native-upgrade-docker.py
 
   release-pipeline:
     if: github.event_name == 'workflow_dispatch' && inputs.verify_release_pipeline == true

@@ -41,5 +41,11 @@ production workflow and its final deployment/publication gates are still pending
 Offline tests cover incorrect ownership/health/source/version/architecture/user,
 changed mounts/capabilities/network exposure, inconsistent rollback configuration,
 partial first-command failure, role scoping and SIGTERM restoration. These tests
-use a simulated Docker executor; live upgrade/rollback verification remains a
-separate requirement.
+use a simulated Docker executor. The migration preflight workflow also runs
+`python3 scripts/test-native-upgrade-docker.py`: an isolated real Docker fixture
+with private state directories, unique project/image names and no published
+ports. It verifies a read-only dry run, partial upgrade failure, restoration of
+all previous images, a successful healthy upgrade and continued operation of
+unrelated containers. Cleanup targets only its generated project resources.
+This validates orchestration with lightweight test processes; a live PortHub
+upgrade and application-level rollback verification remain separate requirements.
