@@ -34,6 +34,7 @@ pub mod status_monitor;
 pub mod store;
 pub mod terminal;
 pub mod terminal_grants;
+mod terminal_journal;
 pub mod web_activity;
 
 use axum::{
@@ -48,6 +49,7 @@ use std::sync::Arc;
 pub struct App {
     pub terminals: porthub_terminal::hub::Hub,
     pub terminal_lifecycle: tokio::sync::Mutex<()>,
+    pub terminal_admission_fault: std::sync::atomic::AtomicBool,
     pub inventory_traffic: inventory_traffic::Cache,
     pub account_lifecycle: tokio::sync::RwLock<()>,
     pub private_relay: private_relay::Hub,
@@ -97,6 +99,7 @@ impl App {
         Self {
             terminals: Default::default(),
             terminal_lifecycle: Default::default(),
+            terminal_admission_fault: Default::default(),
             inventory_traffic: Default::default(),
             private_enrollment_initialized: Default::default(),
             private_initialized: Default::default(),

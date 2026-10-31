@@ -116,10 +116,10 @@
     "Isolated real API+Mongo/SSH/browser end-to-end tests incl disconnect persistence, exit cleanup, read-only and expiry",
     "Deployment preflight, backup, source/release validation and scoped live rollout",
     "Final source commit/push and goal complete only after required work",
-    "Invitation rotation/renewal and durable end/revocation journaling during database failures",
-    "Stalled host/viewer deadlines and combined real browser/API/bundled-shell tests are verified; DB failure journaling remains pending",
+    "Invitation rotation/renewal; end journaling is implemented and isolated tests pass, with combined Chromium regression passed and release validation required",
+    "Stalled host/viewer deadlines and combined real browser/API/bundled-shell tests are verified; local end journaling is implemented; release validation remains pending",
     "Stable history anchors across output/eviction/resizing and pane/window discovery; native read-only SSH paging is implemented, with further mixed live output/history pressure validation required",
-    "Native --watch view and combined real browser/API/bundled-shell/SSH flow are implemented and tested; native right-side presentation, invitation renewal/rotation and failure journaling remain required; invitation-wide revocation is now implemented",
+    "Native --watch view and combined real browser/API/bundled-shell/SSH flow are implemented and tested; native right-side presentation, invitation renewal/rotation remains required; end journaling is now implemented; invitation-wide revocation is now implemented",
     "Mixed browser/SSH attach-detach and output-pressure stress, including the recorded WebKit output-observation timeout, before release"
   ],
   "browser_validation": "24 isolated terminal layout/role UI checks passed initially; 12 Chromium checks rerun after recovery changes. Four Chromium/WebKit recovery cases pass: automatic reconnect using separate credential, expired invitation, tab reload, role preservation and revocation. Production UI build passes. Combined real browser/API/bundled-shell verification remains required.",
@@ -162,5 +162,15 @@
     "Guest history navigation never becomes shell input, and redraw targets only the requesting attachment with a per-viewer throttle and bounded worker concurrency."
   ],
   "launch_isolation_validation": "Regression reproduced a singleton tmux command being interpreted as shell text. Fixed with a constant exec wrapper and literal argv; real bundled multiplexer tests verify program and shell paths containing spaces and shell punctuation cannot create an injected sentinel. Advanced terminal tmux rejects global socket flags; a second private workspace survives the attempted override.",
-  "public_guide_validation": "Published source article /guide/terminal covers persistence, permissions, registration, public guests, revocation, platform and clipboard limits. Six Chromium layout checks pass in dark/light at 1440/402/320px; production UI build passes. Source only, not deployed."
+  "public_guide_validation": "Published source article /guide/terminal covers persistence, permissions, registration, public guests, revocation, platform and clipboard limits. Six Chromium layout checks pass in dark/light at 1440/402/320px; production UI build passes. Source only, not deployed.",
+  "end_journal_validation": {
+    "implementation": "Persistent private end markers written and synced before hub teardown, checked before host registration, replayed in batches of at most 64. DB reconciliation revokes recovery and upserts an ended tombstone before removing a marker. Journal write failure latches new terminal-host admission closed while existing unrelated workspaces continue. Production load defaults to /data/terminal/ended; embedded/test Config defaults opt out unless a path is supplied.",
+    "evidence": [
+      "Two filesystem journal unit tests pass: reopen/idempotency/removal, traversal and symlink denial.",
+      "Two lifecycle tests pass with a refused database endpoint: end survives API reconstruction, invalid journal path closes admission while another workspace continues.",
+      "Isolated MongoDB reconciliation test passes, including a missing database row requiring an ended tombstone.",
+      "Combined Chromium browser/API/edge/ordinary SSH/bundled tmux flow passes with a configured end journal: public roles, read-only history, recovery, owner removal and explicit Ctrl+D teardown."
+    ],
+    "limits": "Simultaneous journal and database write failure cannot persist an end across restart. The process refuses new terminal host admissions and logs the failure; repair/reconciliation is required before restarting. See docs/terminal-server-state.md."
+  }
 }

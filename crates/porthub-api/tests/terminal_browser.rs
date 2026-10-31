@@ -63,6 +63,7 @@ async fn anonymous_browser_and_machine_admin_share_real_shell_history_recovery_a
     let ssh_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let ssh_port = ssh_listener.local_addr()?.port();
     let terminal = porthub_api::terminal::Settings {
+        end_journal_dir: Some(fixture.path().join("ended")),
         ssh_socket: Some(ssh_socket.clone()),
         host_key: ssh_directory.join("host_key"),
         ssh_host: "127.0.0.1".into(),

@@ -23,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 pub struct Settings {
+    pub end_journal_dir: Option<PathBuf>,
     pub ssh_socket: Option<PathBuf>,
     pub host_key: PathBuf,
     pub ssh_host: String,
@@ -31,6 +32,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            end_journal_dir: None,
             ssh_socket: None,
             host_key: PathBuf::from("/data/terminal/ssh_host_ed25519"),
             ssh_host: String::new(),
@@ -50,6 +52,18 @@ impl Settings {
         if let Some(path) = std::env::var_os("PORTHUB_TERMINAL_HOST_KEY") {
             settings.host_key = path.into();
         }
+        settings.end_journal_dir = Some(
+            std::env::var_os("PORTHUB_TERMINAL_END_JOURNAL")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| settings.host_key.with_file_name("ended")),
+        );
+        anyhow::ensure!(
+            settings
+                .end_journal_dir
+                .as_ref()
+                .is_none_or(|p| p.is_absolute()),
+            "terminal journal path must be absolute"
+        );
         settings.ssh_host = std::env::var("PORTHUB_TERMINAL_SSH_HOST").unwrap_or_default();
         if let Ok(port) = std::env::var("PORTHUB_TERMINAL_SSH_PORT") {
             settings.ssh_port = port.parse()?;
@@ -150,6 +164,25 @@ async fn register(app: &App, machine: &str, hello: &HostHello) -> ApiResult<bool
     hello
         .validate(now())
         .map_err(|_| bad("invalid terminal session settings"))?;
+    if app
+        .terminal_admission_fault
+        .load(std::sync::atomic::Ordering::Acquire)
+        || crate::terminal_journal::is_ended(
+            app.config.terminal.end_journal_dir.clone(),
+            hello.id.clone(),
+        )
+        .await
+        .map_err(|_| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "terminal lifecycle storage unavailable",
+            )
+        })?
+    {
+        return Err(bad(
+            "terminal session ended or lifecycle storage unavailable",
+        ));
+    }
     let collection = app.collection("terminal_sessions");
     if let Some(previous) = collection.find_one(doc! {"_id":&hello.id}).await? {
         invitations_revoked = previous.get_bool("invitations_revoked").unwrap_or(false);
@@ -179,19 +212,74 @@ async fn register(app: &App, machine: &str, hello: &HostHello) -> ApiResult<bool
     }
     Ok(invitations_revoked)
 }
+async fn persist_end(app: &App, id: &str) -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(3), crate::terminal_grants::end(app, id))
+        .await?
+        .map_err(|error| anyhow::anyhow!("{}", error.detail))?;
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        app.collection("terminal_sessions")
+            .update_one(
+                doc! {"_id":id},
+                doc! {"$set":{"state":"ended","ended_at":DateTime::now()}},
+            )
+            .upsert(true),
+    )
+    .await??;
+    Ok(())
+}
 async fn finish(app: &App, id: &str, reason: &str) {
     let _lifecycle = app.terminal_lifecycle.lock().await;
+    if let Some(path) = app.config.terminal.end_journal_dir.clone() {
+        let marker = id.to_owned();
+        if let Err(error) =
+            crate::terminal_journal::run(move || crate::terminal_journal::record(&path, &marker))
+                .await
+        {
+            // Stop further admissions if we cannot durably record an end. Existing
+            // unrelated workspaces and forwarding services continue normally.
+            app.terminal_admission_fault
+                .store(true, std::sync::atomic::Ordering::Release);
+            tracing::error!(%error, "terminal end journal unavailable; new terminal host admissions stopped");
+        }
+    }
     app.terminals.end(id, reason);
-    let _ =
-        tokio::time::timeout(Duration::from_secs(3), crate::terminal_grants::end(app, id)).await;
-    let _ = tokio::time::timeout(
-        Duration::from_secs(3),
-        app.collection("terminal_sessions").update_one(
-            doc! {"_id":id},
-            doc! {"$set":{"state":"ended","ended_at":DateTime::now()}},
-        ),
-    )
-    .await;
+    if let Err(error) = persist_end(app, id).await {
+        tracing::warn!(%error, "terminal end awaiting database reconciliation");
+        return;
+    }
+    remove_end_marker(app, id).await;
+}
+async fn remove_end_marker(app: &App, id: &str) {
+    if let Some(path) = app.config.terminal.end_journal_dir.clone() {
+        let id = id.to_owned();
+        if let Err(error) =
+            crate::terminal_journal::run(move || crate::terminal_journal::remove(&path, &id)).await
+        {
+            tracing::warn!(%error, "terminal end marker retained");
+        }
+    }
+}
+async fn reconcile_ends(app: &App) {
+    let Some(path) = app.config.terminal.end_journal_dir.clone() else {
+        return;
+    };
+    let ids =
+        match crate::terminal_journal::run(move || crate::terminal_journal::pending(&path)).await {
+            Ok(ids) => ids,
+            Err(error) => {
+                tracing::warn!(%error, "terminal end journal cannot be read");
+                return;
+            }
+        };
+    for id in ids {
+        let _lifecycle = app.terminal_lifecycle.lock().await;
+        app.terminals.end(&id, "session previously ended");
+        if persist_end(app, &id).await.is_err() {
+            break;
+        }
+        remove_end_marker(app, &id).await;
+    }
 }
 async fn send_host(socket: &mut WebSocket, event: &HostEvent) -> bool {
     matches!(
@@ -662,6 +750,7 @@ async fn viewer_socket(app: Arc<App>, mut socket: WebSocket) {
 pub async fn maintenance(app: Arc<App>, cancel: CancellationToken) {
     loop {
         tokio::select! {_=cancel.cancelled()=>break,_=tokio::time::sleep(Duration::from_secs(1))=>{}}
+        reconcile_ends(&app).await;
         for session in app.terminals.sessions() {
             if session.expired(now()) {
                 finish(&app, &session.id, "session expired or idle timeout reached").await;
@@ -710,4 +799,122 @@ pub async fn serve_ssh(app: Arc<App>, cancel: CancellationToken) -> anyhow::Resu
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
     Ok(())
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    fn hello() -> HostHello {
+        HostHello {
+            id: random_token(16),
+            secret: random_token(32),
+            write_token: random_token(32),
+            read_token: random_token(32),
+            options: Options {
+                name: "quietotter".into(),
+                expires_at: 0,
+                session_expires_at: None,
+                idle_timeout: 0,
+                reconnect_timeout: 60,
+                history_limit: 100000,
+                mouse: true,
+                read_only: false,
+                size_policy: SizePolicy::Smallest,
+                access: Access::Both,
+                max_viewers: 16,
+            },
+        }
+    }
+    async fn unavailable_db() -> mongodb::Database {
+        let mut options = mongodb::options::ClientOptions::parse("mongodb://127.0.0.1:9")
+            .await
+            .unwrap();
+        options.server_selection_timeout = Some(Duration::from_millis(100));
+        mongodb::Client::with_options(options)
+            .unwrap()
+            .database("porthub_unavailable_terminal_test")
+    }
+    #[tokio::test]
+    async fn explicit_end_survives_database_outage_and_api_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::default();
+        config.terminal.end_journal_dir = Some(temp.path().join("ended"));
+        let db = unavailable_db().await;
+        let app = App::new(config.clone(), db.clone());
+        let hello = hello();
+        let host = app.terminals.register("machine", &hello, now()).unwrap();
+        finish(&app, &hello.id, "explicit stop").await;
+        assert!(app
+            .terminals
+            .attach(&hello.write_token, 80, 24, "xterm")
+            .is_err());
+        assert!(crate::terminal_journal::contains(
+            config.terminal.end_journal_dir.as_ref().unwrap(),
+            &hello.id
+        )
+        .unwrap());
+        drop(host);
+        let restarted = App::new(config, db);
+        let failure = register(&restarted, "machine", &hello).await.unwrap_err();
+        assert!(
+            failure.detail.to_string().contains("session ended"),
+            "must deny from local journal before any database lookup"
+        );
+    }
+    #[tokio::test]
+    async fn unavailable_journal_stops_new_admissions_without_ending_other_workspaces() {
+        let temp = tempfile::tempdir().unwrap();
+        let invalid = temp.path().join("regular-file");
+        std::fs::write(&invalid, b"unrelated").unwrap();
+        let mut config = crate::config::Config::default();
+        config.terminal.end_journal_dir = Some(invalid.clone());
+        let app = App::new(config, unavailable_db().await);
+        let stopped = hello();
+        let other = hello();
+        let _stopped_host = app.terminals.register("machine", &stopped, now()).unwrap();
+        let _other_host = app.terminals.register("machine", &other, now()).unwrap();
+        finish(&app, &stopped.id, "explicit stop").await;
+        assert!(app
+            .terminal_admission_fault
+            .load(std::sync::atomic::Ordering::Acquire));
+        assert!(app
+            .terminals
+            .attach(&other.write_token, 80, 24, "xterm")
+            .is_ok());
+        assert_eq!(std::fs::read(invalid).unwrap(), b"unrelated");
+        assert!(register(&app, "machine", &hello())
+            .await
+            .unwrap_err()
+            .detail
+            .to_string()
+            .contains("lifecycle storage unavailable"));
+    }
+    #[tokio::test]
+    #[ignore = "requires isolated MongoDB"]
+    async fn pending_end_reconciles_to_database_before_marker_removal() -> anyhow::Result<()> {
+        let uri = std::env::var("PORTHUB_TEST_MONGO_URI")?;
+        let db = mongodb::Client::with_uri_str(uri)
+            .await?
+            .database(&format!("porthub_terminal_end_test_{}", random_token(8)));
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("ended");
+        let mut config = crate::config::Config::default();
+        config.terminal.end_journal_dir = Some(path.clone());
+        let app = App::new(config, db.clone());
+        let hello = hello();
+        // A marker without a database row still needs an ended tombstone so the
+        // same host identity cannot recreate it after reconciliation.
+        crate::terminal_journal::record(&path, &hello.id)?;
+        reconcile_ends(&app).await;
+        assert!(!crate::terminal_journal::contains(&path, &hello.id)?);
+        let record = app
+            .collection("terminal_sessions")
+            .find_one(doc! {"_id":&hello.id})
+            .await?
+            .unwrap();
+        assert_eq!(record.get_str("state")?, "ended");
+        assert!(register(&app, "machine", &hello).await.is_err());
+        db.drop().await?;
+        Ok(())
+    }
 }
