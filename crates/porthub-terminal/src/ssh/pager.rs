@@ -1,7 +1,8 @@
 //! A read-only viewer's navigation state. Guest bytes never become shell input.
 use crate::protocol::*;
 use std::time::{Duration, Instant};
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 pub(super) struct Pager {
     pub active: bool,
@@ -208,7 +209,7 @@ impl Pager {
             screen.push_str(&clip(error, self.cols));
             self.shown = None;
         } else if bytes.is_empty() {
-            screen.push_str("No retained scrollback yet.");
+            screen.push_str(&clip("No retained scrollback yet.", self.cols));
         } else {
             for line in text.lines().take(usize::from(self.page_lines())) {
                 screen.push_str(&clip(line, self.cols));
@@ -229,19 +230,29 @@ impl Pager {
 fn clip(text: &str, cols: u16) -> String {
     let mut width = 0;
     let mut output = String::new();
-    for ch in text.chars().filter(|ch| !ch.is_control()) {
-        let size = ch.width().unwrap_or(0);
+    let safe: String = text.chars().filter(|ch| !ch.is_control()).collect();
+    for grapheme in safe.graphemes(true) {
+        let size = grapheme.width();
         if width + size > usize::from(cols.saturating_sub(1)) {
             break;
         }
         width += size;
-        output.push(ch);
+        output.push_str(grapheme);
     }
     output
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clipping_preserves_whole_graphemes_and_display_width() {
+        assert_eq!(clip("a👩‍💻b", 4), "a👩‍💻");
+        assert_eq!(clip("a🇮🇳b", 4), "a🇮🇳");
+        assert_eq!(clip("e\u{301}界x", 4), "e\u{301}界");
+        assert_eq!(clip("a👩‍💻b", 3), "a");
+        assert_eq!(clip("\x1b\x07safe", 5), "safe");
+        assert_eq!(clip("界", 1), "");
+    }
     fn response(request: u32, bytes: &[u8], done: bool) -> HistoryChunk {
         HistoryChunk {
             request,

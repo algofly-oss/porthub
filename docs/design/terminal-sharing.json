@@ -219,5 +219,10 @@
     "fix": "Retain live-output preference but service one waiting history chunk after at most eight live messages. No output or control frames are dropped.",
     "evidence": "Deterministic queue regression fails before the fix and passes after it. Twenty-one core tests, six real bundled multiplexer tests, ordinary OpenSSH and the combined Chromium and WebKit browser/API/edge/bundled-shell history/recovery/admin flow pass.",
     "remaining": "Stable history snapshot anchors remain pending; scheduling fairness does not prevent live output, eviction or resizing from shifting history rows."
+  },
+  "native_history_graphemes": {
+    "fix": "Read-only SSH history clips whole Unicode grapheme clusters by terminal display width, preserving joined emoji, flags, combining accents and wide characters. Empty-history messages also respect narrow viewport width. Existing control-character filtering remains in place.",
+    "evidence": "Regression reproduces a joined emoji split before the fix. After the fix all twenty-two core tests, six bundled multiplexer tests and ordinary OpenSSH test pass with the locked dependencies. unicode-segmentation reuses the workspace existing locked version, with no dependency upgrade.",
+    "limits": "Glyph appearance and ambiguous-width rendering still depend on the guest terminal and font. Stable history snapshots remain pending."
   }
 }
