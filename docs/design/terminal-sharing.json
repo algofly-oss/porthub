@@ -331,15 +331,22 @@
     "production_export_e2e": "Chromium andWebKit full API/Mongo/bundledtmux/SSH flows passed;62 and83 concurrent fresh HTTPS checks respectively."
   },
   "history_snapshot_development": {
-    "status": "Host capture/cache, capability-aware protocol, browser and SSH pager integration implemented and locally tested. Production-export end-to-end tests and new-version packaging/deployment remain pending. Production1.9.0 still uses live history slices.",
+    "status": "Host/cache/protocol/browser/SSH implementation passes local unit, bundled runtime and full production-export browser/API/Mongo/SSH flows in Chromium and WebKit. New-version packaging and deployment remain pending. Production1.9.0 still uses live history slices.",
     "capture": "Immutable in-memory bytes and line index; guarded metadata+capture in one synchronous tmux command queue; resolved workspace pane only;2-second capture deadline;64MiB maximum capture;128KiB maximum response. Visible screen is not retained scrollback.",
     "cache": "128MiB default retained cache including line indexes;10-minute idle expiry renewed by valid paging; per-guest ownership; nonce-bound capture reservations fence transport generation, detach/re-attach and out-of-order refresh; quota failure keeps previous pages and does not evict another active reader. In-flight captures and tmux history have separate bounded costs.",
     "tests": "43 terminal tests pass:34 unit,8 real bundled multiplexer,1 stockOpenSSH. The OpenSSH test additionally passes both legacy and snapshot-capable gateways and verifies anchored Older requests. Twelve browser cases pass: legacy/frozen x dark/light x1440/402/320, with error preservation, explicit refresh and no overflow. Broker version gate test passes;1.10.0 is the first compatible broker version.",
     "next": [
-      "Exercise frozen pages with full production-export browser/API/Mongo/bundledtmux/stockSSH fixtures, including concurrent output and resize",
-      "Validate release1.10.0 packaging for all supported targets and deploy scoped roles/clients without disturbing other workloads",
-      "Retain separate outstanding goal requirements: optimized direct terminal transport with gateway fallback, native participant sidebar and authenticated automated production deployment gate"
+      "Validate release1.10.0 packaging for all supported targets and deploy scoped roles/clients after the full required feature set is ready",
+      "Complete outstanding optimized direct terminal transport with gateway fallback, nonmodal native participant sidebar and authenticated automated production deployment gate"
     ],
-    "viewer_behavior": "Older/Newer/Latest keep the retained snapshot; Refresh history in browser or r in SSH captures anew. SSH F7 reopening also starts fresh. Browser connection/pane changes require explicit refresh. Error responses preserve the previous browser page and SSH screen. Gateway and pager reject snapshot changes between chunks. Legacy hosts keep live offset paging with an explicit UI explanation."
+    "viewer_behavior": "Older/Newer/Latest keep the retained snapshot; Refresh history in browser or r in SSH captures anew. SSH F7 reopening also starts fresh. Browser connection/pane changes require explicit refresh. Error responses preserve the previous browser page and SSH screen. Gateway and pager reject snapshot changes between chunks. Legacy hosts keep live offset paging with an explicit UI explanation.",
+    "production_export_validation": {
+      "source": "a196ab2 plus the committed terminal_browser.rs and terminal-live.cjs regression tests",
+      "build": "Separate .next-terminal-snapshot build and /tmp/porthub-terminal-production-snapshot export; exported xterm initialization smoke passes.",
+      "chromium": "Full production-export flow passed;79 concurrent fresh HTTPS connections while ordinary SSH clients used the same TLS listener.",
+      "webkit": "Full production-export flow passed;99 concurrent fresh HTTPS connections while ordinary SSH clients used the same TLS listener.",
+      "history": "Actual gateway capability header and frozen browser requests asserted; real bundled history remained byte-for-byte identical after80 new output lines and viewport resize; Older and Latest retained the same opaque anchor; explicit Refresh returned new output without an existing anchor.",
+      "isolation": "Random fixture workspace and database; existing owned test MongoDB only; loopback static server and API; no production workload or route modified."
+    }
   }
 }

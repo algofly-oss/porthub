@@ -195,9 +195,10 @@ async fn exercise(multiplex: bool) -> Result<()> {
     request
         .headers_mut()
         .insert("authorization", format!("Bearer {credential}").parse()?);
-    let (mut socket, _) = connect_async(request).await?;
+    let (mut socket, response) = connect_async(request).await?;
+    ensure!(response.headers().get("x-porthub-history-snapshots").is_some_and(|v| v == "1"), "gateway must advertise snapshot support");
     let hello = HostHello {
-        history_snapshots: false,
+        history_snapshots: true,
         id: random_token(16),
         secret: random_token(32),
         write_token: random_token(32),

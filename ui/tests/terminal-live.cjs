@@ -7,6 +7,7 @@ const owner=await browser.newContext({viewport:{width:1440,height:900}}),guest=a
 const cookie=process.env.PORTHUB_TEST_TERMINAL_COOKIE;const separator=cookie.indexOf('=');await owner.addCookies([{name:cookie.slice(0,separator),value:cookie.slice(separator+1),url:origin,httpOnly:true,sameSite:'Lax'}]);
 const host=await owner.newPage(),watcher=await guest.newPage();let hostConnections=0;host.on('websocket',socket=>{if(new URL(socket.url()).pathname==='/api/terminal/join')hostConnections++;});const errors=[];for(const page of [host,watcher])page.on('pageerror',e=>errors.push(e.message));
 await host.goto(`${origin}/terminal#${write}`);await host.getByRole('button',{name:'Connect',exact:true}).click();await host.getByRole('heading',{name:'amberotter',exact:true}).waitFor();
+const historyFrames=[];watcher.on('websocket',socket=>socket.on('framesent',({payload})=>{try{const frame=JSON.parse(payload);if(frame.type==='history')historyFrames.push(frame)}catch{}}));
 await watcher.goto(`${origin}/terminal#${read}`);await watcher.getByRole('button',{name:'Connect',exact:true}).click();await watcher.getByRole('heading',{name:'amberotter',exact:true}).waitFor();
 await output(host,'porthub-test$');await output(watcher,'porthub-test$');
 await type(host,"OWNVAR=preserved; printf 'INITIAL%s\\n' 'SHARED'");await output(host,'INITIALSHARED');await output(watcher,'INITIALSHARED');
@@ -78,6 +79,22 @@ sshReader.kill('SIGTERM');await new Promise(resolve=>sshReader.once('exit',resol
 
 await watcher.getByRole('button',{name:'History',exact:true}).click();try{await watcher.getByLabel('Captured history text',{exact:true}).getByText('history-line-100',{exact:true}).waitFor({timeout:5000})}catch(error){await watcher.screenshot({path:'/tmp/porthub-terminal-live-history-failure.png'});throw new Error('Real history failed: '+(await watcher.getByLabel('Terminal history',{exact:true}).innerText()).slice(0,1600));}
 assert.equal(await watcher.getByLabel('History pane',{exact:true}).inputValue(),'%0','real history must pin the resolved workspace pane');
+const frozenText=await watcher.getByLabel('Captured history text',{exact:true}).innerText();
+assert.equal(historyFrames.at(-1).freeze,true,'real browser negotiates frozen history');
+assert.equal(historyFrames.at(-1).snapshot,undefined,'first capture has no existing anchor');
+await type(host,"i=0; while [ $i -lt 80 ]; do echo subsequent-$i; i=$((i+1)); done; printf 'AFTER%s\\n' 'SNAPSHOT'");await output(host,'AFTERSNAPSHOT');
+await watcher.setViewportSize({width:720,height:700});
+await watcher.waitForTimeout(550);await watcher.getByRole('button',{name:'Older',exact:true}).click();
+await watcher.waitForFunction(()=>!Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='Latest')?.disabled);
+const anchor=historyFrames.at(-1).snapshot;assert.match(anchor,/^[a-f0-9]{32}$/);
+await watcher.waitForTimeout(550);await watcher.getByRole('button',{name:'Latest',exact:true}).click();
+await watcher.waitForFunction(()=>!Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='Refresh history')?.disabled);
+assert.equal(await watcher.getByLabel('Captured history text',{exact:true}).innerText(),frozenText,'live output and resize cannot shift retained history');
+assert.equal(historyFrames.at(-1).snapshot,anchor,'Latest keeps the same anchor');
+await watcher.waitForTimeout(550);await watcher.getByRole('button',{name:'Refresh history',exact:true}).click();
+await watcher.getByLabel('Captured history text',{exact:true}).getByText('subsequent-0',{exact:true}).waitFor();
+assert.equal(historyFrames.at(-1).snapshot,undefined,'explicit refresh captures new history');
+
 await type(host,"printf 'LIVE%s:%s\\n' 'CONTINUES' \"$OWNVAR\"");await output(host,'LIVECONTINUES:preserved');await watcher.getByRole('button',{name:'Return to live',exact:true}).click();await output(watcher,'LIVECONTINUES:preserved');
 const identity=(await watcher.getByText(/Guest .*\(you\)/).innerText()).match(/Guest (\d+)/)[1];
 await watcher.reload();await watcher.getByRole('button',{name:'Connect',exact:true}).click();await watcher.getByRole('heading',{name:'amberotter',exact:true}).waitFor();await watcher.getByText(`Guest ${identity} (you)`,{exact:true}).waitFor();
