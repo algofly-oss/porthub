@@ -47,6 +47,8 @@ struct Ready {
 }
 #[derive(Serialize, Deserialize)]
 struct Sharing {
+    #[serde(default)]
+    invitations_revoked: bool,
     hello: HostHello,
     registration: String,
     user: bool,
@@ -195,6 +197,7 @@ pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
         let mut options = options;
         options.name = job.name.clone();
         let sharing = Sharing {
+            invitations_revoked: false,
             hello: HostHello {
                 id: job.id.clone(),
                 secret: random_token(32),
@@ -232,6 +235,10 @@ pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
 pub(super) fn invite(root: &Path, job: &Job, json: bool) -> Result<()> {
     let sharing = load(root, &job.id)?;
     ensure!(sharing.state != "ended", "sharing session has ended");
+    ensure!(
+        !sharing.invitations_revoked,
+        "invitation URLs were revoked; existing participants may continue"
+    );
     let Some(ready) = sharing.ready else {
         anyhow::bail!("workspace {} is running locally, but sharing is still reconnecting; use terminal invite {} when the gateway is available",job.name,job.name);
     };
@@ -350,6 +357,7 @@ pub(super) async fn serve(root: &Path, id: &str) -> Result<()> {
     let workspace = workspace(&job)?;
     let mut owner = super::participant_control::Server::start(&job)?;
     let mut sharing = load(root, id)?;
+    owner.state.lock().expect("owner state").invitations_revoked = sharing.invitations_revoked;
     ensure!(sharing.state != "ended", "sharing session has ended");
     let layout = if sharing.user {
         crate::service::Layout::user()?
@@ -400,15 +408,18 @@ pub(super) async fn serve(root: &Path, id: &str) -> Result<()> {
                             if let HostEvent::Presence { members } = &event {
                                 let mut state=owner.state.lock().expect("owner state");state.connected=true;state.members=members.clone();
                             }
-                            if let HostEvent::Ready{ssh_host,ssh_port,public_base}=&event {
+                            if let HostEvent::InvitationsRevoked=&event {sharing.invitations_revoked=true;save(root,&sharing,true)?;owner.state.lock().expect("owner state").invitations_revoked=true;}
+                            if let HostEvent::Ready{ssh_host,ssh_port,public_base,invitations_revoked}=&event {
+                                sharing.invitations_revoked|=*invitations_revoked;
                                 sharing.ready=Some(Ready{ssh_host:ssh_host.clone(),ssh_port:*ssh_port,public_base:public_base.clone()});
-                                sharing.state="connected".into();save(root,&sharing,true)?;delay=1;
+                                sharing.state="connected".into();save(root,&sharing,true)?;owner.state.lock().expect("owner state").invitations_revoked=sharing.invitations_revoked;delay=1;
                             }
                             if !attachments.apply(event)?{break;}
                         }
                         request=owner.requests.recv()=> {
-                            let Some((client, reply))=request else {break;};
-                            let bytes=serde_json::to_vec(&HostOutput::Kick {client})?;
+                            let Some((action, reply))=request else {break;};
+                            let output=match action {super::participant_control::Action::Kick(client)=>HostOutput::Kick{client},super::participant_control::Action::RevokeInvitations=>HostOutput::RevokeInvitations};
+                            let bytes=serde_json::to_vec(&output)?;
                             let mut frame=bytes;frame.push(b'\n');
                             let result=tokio::time::timeout(Duration::from_secs(2),local.get_mut().write_all(&frame)).await;
                             let ok=matches!(result,Ok(Ok(())));

@@ -12,16 +12,23 @@ use tokio::sync::{mpsc, oneshot};
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
     List,
+    RevokeInvitations,
     Kick { client: u64 },
 }
 #[derive(Default, Serialize, Deserialize)]
 pub(super) struct Snapshot {
+    #[serde(default)]
+    pub invitations_revoked: bool,
     pub connected: bool,
     pub members: Vec<Participant>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
-pub(super) type Removal = (u64, oneshot::Sender<std::result::Result<(), String>>);
+pub(super) enum Action {
+    Kick(u64),
+    RevokeInvitations,
+}
+pub(super) type Removal = (Action, oneshot::Sender<std::result::Result<(), String>>);
 pub(super) struct Server {
     task: tokio::task::JoinHandle<()>,
     pub state: Arc<Mutex<Snapshot>>,
@@ -80,6 +87,19 @@ impl Server {
                     ensure!(bytes.last() == Some(&b'\n'), "owner request too large");
                     match serde_json::from_slice::<Request>(&bytes)? {
                         Request::List => {}
+                        Request::RevokeInvitations => {
+                            let (connected, revoked) = {
+                                let state = snapshot.lock().expect("owner state");
+                                (state.connected, state.invitations_revoked)
+                            };
+                            if !revoked {
+                                ensure!(connected, "gateway reconnecting");
+                                let (reply, result) = oneshot::channel();
+                                send.try_send((Action::RevokeInvitations, reply))
+                                    .map_err(|_| anyhow::anyhow!("owner control busy"))?;
+                                result.await?.map_err(anyhow::Error::msg)?;
+                            }
+                        }
                         Request::Kick { client } => {
                             let allowed = {
                                 let state = snapshot.lock().expect("owner state");
@@ -90,7 +110,7 @@ impl Server {
                                 "participant unavailable; refresh the participant list"
                             );
                             let (reply, result) = oneshot::channel();
-                            send.try_send((client, reply))
+                            send.try_send((Action::Kick(client), reply))
                                 .map_err(|_| anyhow::anyhow!("owner control busy"))?;
                             result.await?.map_err(anyhow::Error::msg)?;
                         }
@@ -112,11 +132,17 @@ impl Server {
     }
 }
 pub(super) async fn fetch(job: &Job, client: Option<u64>) -> Result<Snapshot> {
+    fetch_request(
+        job,
+        client.map_or(Request::List, |client| Request::Kick { client }),
+    )
+    .await
+}
+async fn fetch_request(job: &Job, request: Request) -> Result<Snapshot> {
     let result = tokio::time::timeout(std::time::Duration::from_secs(3), async {
         let mut stream = UnixStream::connect(job.workspace.join("owner.sock"))
             .await
             .context("sharing supervisor unavailable")?;
-        let request = client.map_or(Request::List, |client| Request::Kick { client });
         let mut bytes = serde_json::to_vec(&request)?;
         bytes.push(b'\n');
         stream.write_all(&bytes).await?;
@@ -167,6 +193,31 @@ pub(super) async fn request(job: &Job, client: Option<u64>, json: bool) -> Resul
                 member.last_active_at
             );
         }
+    }
+    Ok(())
+}
+
+pub(super) async fn revoke_invitations(job: &Job, json: bool) -> Result<()> {
+    let first = fetch_request(job, Request::RevokeInvitations).await?;
+    let mut confirmed = first.invitations_revoked;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !confirmed && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if let Ok(snapshot) = fetch(job, None).await {
+            confirmed = snapshot.invitations_revoked;
+        }
+    }
+    ensure!(
+        confirmed,
+        "invitation revocation was not confirmed; check gateway connectivity before retrying"
+    );
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"id":job.id,"invitations_revoked":true})
+        );
+    } else {
+        println!("New invitation joins blocked. Attached guests and their recovery access remain available.");
     }
     Ok(())
 }

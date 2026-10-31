@@ -68,6 +68,7 @@ async fn browser_management_requires_current_machine_workspace_admin_and_no_gues
         .attach(&hello.write_token, 80, 24, "xterm-256color")?;
     let endpoint = format!("/api/terminal/{}/participants", hello.id);
     let kick = format!("/api/terminal/{}/kick", hello.id);
+    let revoke = format!("/api/terminal/{}/invitations/revoke", hello.id);
     for cookie in ["", &foreign_cookie, &member_cookie] {
         let (status, _, _) = case
             .call("GET", &endpoint, cookie, json!(null), &[])
@@ -83,6 +84,8 @@ async fn browser_management_requires_current_machine_workspace_admin_and_no_gues
             !status.is_success(),
             "login or invitation alone must not authorize guest removal"
         );
+        let (status, _, _) = case.call("POST", &revoke, cookie, json!({}), &[]).await?;
+        ensure!(!status.is_success() && !host.session.invitations_revoked());
         ensure!(host.session.participants() == 2);
     }
     for cookie in [&owner_cookie, &admin_cookie] {
@@ -91,6 +94,23 @@ async fn browser_management_requires_current_machine_workspace_admin_and_no_gues
             .await?;
         ensure!(result["can_manage"] == true && result["members"].as_array().unwrap().len() == 2);
     }
+    case.status("POST", &revoke, &owner_cookie, json!({}), StatusCode::OK)
+        .await?;
+    ensure!(host.session.invitations_revoked() && host.session.participants() == 2);
+    ensure!(
+        case.app.terminals.resolve(&hello.write_token).is_err()
+            && case.app.terminals.resolve(&hello.read_token).is_err()
+    );
+    ensure!(case
+        .app
+        .collection("terminal_sessions")
+        .find_one(doc! {"_id":&hello.id,"invitations_revoked":true})
+        .await?
+        .is_some());
+    let status = case
+        .status("GET", &endpoint, &owner_cookie, json!(null), StatusCode::OK)
+        .await?;
+    ensure!(status["invitations_revoked"] == true);
     let (status, _, _) = case
         .call(
             "POST",
@@ -145,6 +165,32 @@ async fn browser_management_requires_current_machine_workspace_admin_and_no_gues
         )
         .await?;
     ensure!(status == StatusCode::FORBIDDEN && host.session.participants() == 1);
+    // An administrator can revoke persisted invitations while the machine's
+    // terminal host is offline; no live in-memory session is needed.
+    let offline = random_token(16);
+    case.app
+        .collection("terminal_sessions")
+        .insert_one(doc! {"_id":&offline,"machine_id":machine.to_hex(),"state":"active"})
+        .await?;
+    let offline_revoke = format!("/api/terminal/{offline}/invitations/revoke");
+    let (status, _, _) = case
+        .call("POST", &offline_revoke, &foreign_cookie, json!({}), &[])
+        .await?;
+    ensure!(status == StatusCode::FORBIDDEN);
+    case.status(
+        "POST",
+        &offline_revoke,
+        &owner_cookie,
+        json!({}),
+        StatusCode::OK,
+    )
+    .await?;
+    ensure!(case
+        .app
+        .collection("terminal_sessions")
+        .find_one(doc! {"_id":&offline,"invitations_revoked":true})
+        .await?
+        .is_some());
     drop(reader);
     drop(writer);
     case.app.terminals.end(&hello.id, "fixture ended");

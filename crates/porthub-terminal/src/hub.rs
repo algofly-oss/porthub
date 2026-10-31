@@ -44,6 +44,7 @@ struct State {
     next_client: u64,
     viewers: HashMap<u64, Viewer>,
     close_event: Option<HostEvent>,
+    invitations_revoked: bool,
 }
 struct Viewer {
     identity: u64,
@@ -81,6 +82,16 @@ impl Hub {
             .map_err(|_| anyhow::anyhow!("terminal gateway capacity reached"))
     }
     pub fn register(&self, owner: &str, hello: &HostHello, now: i64) -> Result<HostLease> {
+        self.register_persisted(owner, hello, now, false)
+    }
+    /// Persisted invitation revocation is installed atomically with admission.
+    pub fn register_persisted(
+        &self,
+        owner: &str,
+        hello: &HostHello,
+        now: i64,
+        invitations_revoked: bool,
+    ) -> Result<HostLease> {
         hello.validate(now)?;
         let mut inner = self.inner.lock().expect("terminal hub mutex");
         let session = if let Some(session) = inner.sessions.get(&hello.id) {
@@ -118,6 +129,7 @@ impl Hub {
                     next_client: participant_id(),
                     viewers: HashMap::new(),
                     close_event: None,
+                    invitations_revoked,
                 }),
             });
             inner
@@ -130,6 +142,7 @@ impl Hub {
         let (send, events) = mpsc::channel(128);
         let generation = {
             let mut state = session.state.lock().expect("terminal session mutex");
+            state.invitations_revoked |= invitations_revoked;
             // A reconnect replaces the transport, not the shared shell/session.
             if let Some(previous) = state.host.take() {
                 let _ = previous.try_send(HostEvent::Reconnect {
@@ -160,6 +173,9 @@ impl Hub {
                     rows: viewer.rows,
                     term: viewer.term.clone(),
                 })?;
+            }
+            if state.invitations_revoked {
+                send.try_send(HostEvent::InvitationsRevoked)?;
             }
             state.host = Some(send);
             presence(&mut state);
@@ -201,11 +217,25 @@ impl Hub {
                     .is_some(),
             "terminal host is reconnecting or unavailable"
         );
+        ensure!(
+            !session.invitations_revoked(),
+            "terminal invitation revoked"
+        );
         Ok((session, *read_only))
     }
     pub fn attach(&self, capability: &str, cols: u16, rows: u16, term: &str) -> Result<Attachment> {
+        self.attach_invitation(capability, None, cols, rows, term)
+    }
+    pub fn attach_invitation(
+        &self,
+        capability: &str,
+        identity: Option<u64>,
+        cols: u16,
+        rows: u16,
+        term: &str,
+    ) -> Result<Attachment> {
         let (session, read_only) = self.resolve(capability)?;
-        self.attach_authorized(&session.id, None, read_only, cols, rows, term)
+        self.attach_inner(&session.id, identity, read_only, cols, rows, term, true)
     }
     /// Only the trusted gateway may call this after verifying a durable guest
     /// grant. It intentionally bypasses invitation expiry, never session expiry.
@@ -217,6 +247,19 @@ impl Hub {
         cols: u16,
         rows: u16,
         term: &str,
+    ) -> Result<Attachment> {
+        self.attach_inner(session_id, identity, read_only, cols, rows, term, false)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn attach_inner(
+        &self,
+        session_id: &str,
+        identity: Option<u64>,
+        read_only: bool,
+        cols: u16,
+        rows: u16,
+        term: &str,
+        invited: bool,
     ) -> Result<Attachment> {
         dimensions(cols, rows)?;
         ensure!(
@@ -250,6 +293,13 @@ impl Hub {
             })
             .sum();
         let mut state = session.state.lock().expect("terminal session mutex");
+        if invited {
+            ensure!(
+                !state.invitations_revoked
+                    && (session.options.expires_at == 0 || now() < session.options.expires_at),
+                "terminal invitation expired or revoked"
+            );
+        }
         ensure!(
             total < 128
                 || identity.is_some_and(|identity| state
@@ -446,6 +496,19 @@ impl Shared {
             .len()
     }
 
+    pub fn invitations_revoked(&self) -> bool {
+        self.state
+            .lock()
+            .expect("terminal session mutex")
+            .invitations_revoked
+    }
+    pub fn revoke_invitations(&self) {
+        let mut state = self.state.lock().expect("terminal session mutex");
+        state.invitations_revoked = true;
+        if let Some(host) = &state.host {
+            let _ = host.try_send(HostEvent::InvitationsRevoked);
+        }
+    }
     pub fn participant_list(&self) -> Vec<Participant> {
         let state = self.state.lock().expect("terminal session mutex");
         let mut members: Vec<_> = state
@@ -558,6 +621,9 @@ impl Shared {
             "stale terminal host connection"
         );
         match output {
+            HostOutput::RevokeInvitations => {
+                anyhow::bail!("invitation revocation must be persisted by the gateway")
+            }
             HostOutput::History { client, page } => {
                 page.validate()?;
                 if let Some(viewer) = state.viewers.get_mut(&client) {
@@ -689,6 +755,48 @@ mod tests {
         while writer.events.recv().await.is_some() {}
         Ok(())
     }
+    #[tokio::test]
+    async fn invitation_revocation_blocks_new_joins_without_interrupting_guests_or_recovery(
+    ) -> Result<()> {
+        let hub = Hub::default();
+        let mut h = hello();
+        h.options.expires_at = 0;
+        let host = hub.register("owner", &h, now())?;
+        let writer = hub.attach(&h.write_token, 80, 24, "xterm-256color")?;
+        let reader = hub.attach(&h.read_token, 80, 24, "xterm-256color")?;
+        host.session.revoke_invitations();
+        assert!(hub.resolve(&h.write_token).is_err() && hub.resolve(&h.read_token).is_err());
+        assert!(hub
+            .attach(&h.write_token, 80, 24, "xterm-256color")
+            .is_err());
+        assert!(hub
+            .attach_invitation(&h.read_token, Some(88), 80, 24, "xterm-256color")
+            .is_err());
+        writer.session.input(
+            writer.id,
+            ViewerInput::Input {
+                data: encode_data(b"echo alive\r"),
+            },
+        )?;
+        reader
+            .session
+            .input(reader.id, ViewerInput::Resize { cols: 90, rows: 30 })?;
+        let recovered = hub.attach_authorized(&h.id, Some(88), true, 80, 24, "xterm-256color")?;
+        recovered
+            .session
+            .input(recovered.id, ViewerInput::Resize { cols: 90, rows: 30 })?;
+        assert_eq!(host.session.participants(), 3);
+        assert!(!host.session.stop.is_cancelled());
+        let replacement = hub.register("owner", &h, now())?;
+        assert!(replacement.session.invitations_revoked());
+        assert!(hub.resolve(&h.write_token).is_err());
+        let restarted = Hub::default();
+        let lease = restarted.register_persisted("owner", &h, now(), true)?;
+        assert!(lease.session.invitations_revoked());
+        assert!(restarted.resolve(&h.read_token).is_err());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn read_only_history_is_request_scoped_bounded_and_does_not_authorize_input() -> Result<()>
     {

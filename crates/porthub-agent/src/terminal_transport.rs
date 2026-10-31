@@ -204,6 +204,7 @@ mod tests {
             socket
                 .send(Message::Text(
                     serde_json::to_string(&HostEvent::Ready {
+                        invitations_revoked: false,
                         ssh_host: "example.test".into(),
                         ssh_port: 8347,
                         public_base: "https://example.test".into(),

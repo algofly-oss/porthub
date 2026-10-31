@@ -193,6 +193,7 @@ impl HistoryChunk {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostEvent {
+    InvitationsRevoked,
     History {
         client: u64,
         request: u32,
@@ -201,6 +202,8 @@ pub enum HostEvent {
         lines: u16,
     },
     Ready {
+        #[serde(default)]
+        invitations_revoked: bool,
         ssh_host: String,
         ssh_port: u16,
         public_base: String,
@@ -238,6 +241,7 @@ pub enum HostEvent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostOutput {
+    RevokeInvitations,
     History { client: u64, page: HistoryChunk },
     Kick { client: u64 },
     Output { client: u64, data: String },

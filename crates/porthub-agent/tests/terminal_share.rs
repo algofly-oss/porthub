@@ -101,6 +101,7 @@ async fn sharing_supervisor_reconnects_to_existing_shell_and_explicit_stop_annou
         send(
             &mut stream,
             HostEvent::Ready {
+                invitations_revoked: false,
                 ssh_host: "example.test".into(),
                 ssh_port: 8347,
                 public_base: "https://example.test".into(),
@@ -265,6 +266,74 @@ async fn sharing_supervisor_reconnects_to_existing_shell_and_explicit_stop_annou
     )
     .await?;
     until(&mut resumed, &[1], "RECONNECTED:preserved").await?;
+    send(
+        &mut resumed,
+        HostEvent::Presence {
+            members: vec![Participant {
+                id: 1,
+                read_only: false,
+                joined_at: now(),
+                last_active_at: now(),
+            }],
+        },
+    )
+    .await?;
+    let revocation = tokio::process::Command::new(&executable)
+        .args(["terminal", "invite", "sharedtest", "--revoke", "--json"])
+        .env("XDG_DATA_HOME", &data)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let mut line = String::new();
+            ensure!(
+                resumed.read_line(&mut line).await? > 0,
+                "missing invitation revocation request"
+            );
+            if matches!(
+                serde_json::from_str::<HostOutput>(&line)?,
+                HostOutput::RevokeInvitations
+            ) {
+                break;
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+    send(&mut resumed, HostEvent::InvitationsRevoked).await?;
+    let result =
+        tokio::time::timeout(Duration::from_secs(5), revocation.wait_with_output()).await??;
+    ensure!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&result.stdout)?;
+    assert_eq!(result["invitations_revoked"], true);
+    let again = Command::new(&executable)
+        .args(["terminal", "invite", "sharedtest", "--revoke", "--json"])
+        .env("XDG_DATA_HOME", &data)
+        .output()?;
+    ensure!(again.status.success(), "revoking again must be idempotent");
+    let blocked = Command::new(&executable)
+        .args(["terminal", "invite", "sharedtest", "--json"])
+        .env("XDG_DATA_HOME", &data)
+        .output()?;
+    assert!(
+        !blocked.status.success(),
+        "revoked links must not be advertised"
+    );
+    send(
+        &mut resumed,
+        HostEvent::Input {
+            client: 1,
+            data: encode_data(b"printf 'INVITES%s:%s\\n' 'BLOCKED' \"$PORTSTATE\"\r"),
+        },
+    )
+    .await?;
+    until(&mut resumed, &[1], "INVITESBLOCKED:preserved").await?;
     let stopped = Command::new(&executable)
         .args(["terminal", "stop", "sharedtest"])
         .env("XDG_DATA_HOME", &data)

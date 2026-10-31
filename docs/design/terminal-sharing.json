@@ -99,7 +99,11 @@
     "Native terminal participants NAME --watch supports live selection, explicit cancel/confirm removal, bounded background polling and responsive quit; shared terminal screen/input guards also serve stats",
     "Real combined browser -> API -> bundled tmux test passes: anonymous read-only browser, logged-in machine admin, real shell variables/output/history, tab recovery, durable targeted removal and explicit Ctrl+D teardown",
     "Combined flow now includes ordinary stock OpenSSH through the actual edge TCP -> API Unix SSH gateway; SSH typing reaches the same shell and disconnect leaves browser participants/workspace alive",
-    "Combined test exposed and fixed blank active-pane lookup; real tmux test now verifies both explicit %0 and default active-pane captures"
+    "Combined test exposed and fixed blank active-pane lookup; real tmux test now verifies both explicit %0 and default active-pane captures",
+    "Machine-admin browser Block new joins and native terminal invite NAME --revoke [--json] persistently revoke invitation URLs while preserving attached guests and independent recovery grants",
+    "Host registration installs persisted invitation revocation atomically; a terminal-only lifecycle lock serializes host publication, invitation mutation and session finish without locking other PortHub forwarding",
+    "Offline persisted sessions can have invitations revoked by their current machine/workspace administrator; a reconnect loads the revoked state before admission",
+    "Native CLI waits for the gateway revocation event and local state persistence before reporting confirmation; repeated revocation is idempotent and revoked links are not advertised"
   ],
   "required_follow_up": [
     "Correct skeleton expiry/idle/offline semantics to latest persistence requirements before shipping",
@@ -115,7 +119,8 @@
     "Invitation rotation/renewal and durable end/revocation journaling during database failures; integrated browser/API/bundled-shell test and owner UI controls still required",
     "Stalled host/viewer deadlines are verified; DB failure journaling and real browser+API+bundled shell combined test remain pending",
     "Stable history anchors across output/eviction/resizing, pane/window discovery and native read-only SSH history controls; validate mixed live output/history pressure",
-    "Native --watch view and combined real browser/API/bundled-shell/SSH flow are implemented and tested; native right-side presentation, invitation-wide revocation/rotation and failure journaling remain required"
+    "Native --watch view and combined real browser/API/bundled-shell/SSH flow are implemented and tested; native right-side presentation, invitation renewal/rotation and failure journaling remain required; invitation-wide revocation is now implemented",
+    "Mixed browser/SSH attach-detach and output-pressure stress, including the recorded WebKit output-observation timeout, before release"
   ],
   "browser_validation": "24 isolated terminal layout/role UI checks passed initially; 12 Chromium checks rerun after recovery changes. Four Chromium/WebKit recovery cases pass: automatic reconnect using separate credential, expired invitation, tab reload, role preservation and revocation. Production UI build passes. Combined real browser/API/bundled-shell verification remains required.",
   "owner_validation": "All 13 terminal-engine checks pass: 9 units (including stable guest identity versus stale attachment fencing), 3 actual bundled multiplexer tests, 1 actual OpenSSH test. Real bundled supervisor/CLI integration passes after recovery changes. API/agent/edge compile checks pass.",
@@ -140,5 +145,15 @@
   "browser_management_validation": "Isolated Mongo/API permission test passes: owner and machine-workspace admin allowed, anonymous/member/unrelated site-admin denied, revoked membership denied, foreign-origin removal denied, same-origin admin removal allowed, other guest continues and removed guest recovery denied. Thirty-six Chromium/WebKit checks pass across dark/light, 1440/402/320px and guest/member/admin cases, including cancel/confirm, large IDs, authority removal/restoration on returning to tab, and unchanged read-only input. Ten terminal core unit tests and final production UI build pass.",
   "native_owner_validation": "Real Unix PTY test passes selected-guest removal, confirmation cancellation, resize, terminal restoration, responsive quit while owner socket stalls, and retained workspace after closing the view. Stats PTY regression passes after sharing the screen/input utilities. Packaged native CI runs both tests.",
   "full_flow_validation": "Chromium and WebKit combined browser/API/bundled-shell/ordinary SSH flows pass. Both browser engines exercised anonymous read-only participation, authenticated machine-owner management, real shared shell variables/output, scrollback, guest tab recovery, durable removal, SSH disconnect persistence and final Ctrl+D teardown through actual edge TCP -> API Unix SSH routing.",
-  "source_checkpoint": "Feature branch codex/terminal-sharing; tested foundation checkpoint, not a completed release. All-platform artifacts, remaining features and scoped deployment are still required."
+  "source_checkpoint": "Feature branch codex/terminal-sharing; tested foundation checkpoint, not a completed release. All-platform artifacts, remaining features and scoped deployment are still required.",
+  "invitation_revocation_validation": [
+    "Eleven terminal core tests, four actual bundled tmux tests and ordinary OpenSSH test pass",
+    "Real supervisor/bundled CLI test passes --revoke --json, gateway-confirmed state, idempotent repeat, blocked invitation display and continued existing shell state",
+    "Mongo/API tests pass owner/admin versus guest/member/foreign/revoked-admin authorization and revocation while host is offline",
+    "Actual host WebSocket revocation and API restart test passes persisted revoked state with continued unrevoked guest recovery",
+    "Chromium and WebKit real browser/API/edge/SSH/bundled-shell flows pass: newly joining browsers/SSH are rejected, an attached SSH guest continues typing, browser tab recovery remains valid, admin removal and explicit Ctrl+D teardown work",
+    "Thirty-six Chromium/WebKit role/layout checks pass, including block confirmation cancellation, successful block, retained connection and unchanged read-only access",
+    "Normal agent library suite passes 68 tests; two environment-specific tests intentionally remain skipped; production UI build passes"
+  ],
+  "ui_automation_observations": "One combined WebKit run timed out inspecting shell output immediately after SSH disconnect, before invitation revocation. Diagnostics were added; the next run and five additional unchanged runs passed. The UI harness now activates the page before typing/reading, matching foreground user interaction; no forwarding-code fix is claimed for that timeout. Mixed attach/detach stress remains required before release."
 }

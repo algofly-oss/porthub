@@ -30,11 +30,14 @@ pub enum Command {
     Share(sharing::Share),
     /// Join an invitation using your ordinary SSH client; no account required.
     Join { url: String },
-    /// Display this workspace's interactive and read-only invitations.
+    /// Display invitations, or revoke new invitation joins with --revoke.
     Invite {
         name: String,
         #[arg(long)]
         json: bool,
+        /// Block new invitation joins without interrupting attached guests.
+        #[arg(long)]
+        revoke: bool,
     },
     /// List guests attached to a shared workspace.
     Participants {
@@ -412,7 +415,14 @@ pub async fn run(command: Command) -> Result<()> {
         Command::Named(arguments) => open_named(&root, arguments)?,
         Command::Share(args) => sharing::start(&root, args).await?,
         Command::Join { url } => sharing::join(&url).await?,
-        Command::Invite { name, json } => sharing::invite(&root, &select(&root, &name)?, json)?,
+        Command::Invite { name, json, revoke } => {
+            let job = select(&root, &name)?;
+            if revoke {
+                participant_control::revoke_invitations(&job, json).await?;
+            } else {
+                sharing::invite(&root, &job, json)?;
+            }
+        }
         Command::Participants { name, json, watch } => {
             let job = select(&root, &name)?;
             if watch {

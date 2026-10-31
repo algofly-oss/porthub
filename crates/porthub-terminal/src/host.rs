@@ -145,7 +145,9 @@ impl Attachments {
                 self.clients.clear();
                 return Ok(false);
             }
-            HostEvent::Ready { .. } | HostEvent::Presence { .. } => {}
+            HostEvent::Ready { .. }
+            | HostEvent::Presence { .. }
+            | HostEvent::InvitationsRevoked => {}
         }
         Ok(true)
     }

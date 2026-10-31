@@ -76,7 +76,7 @@ async fn actual_websocket_recovery_survives_invite_expiry_and_host_kick_revokes_
     terminal_grants::ensure_indexes(&case.app)
         .await
         .map_err(|e| anyhow::anyhow!("{}", e.detail))?;
-    let (owner, _) = case.user("terminal-socket@example.test", "user").await?;
+    let (owner, owner_cookie) = case.user("terminal-socket@example.test", "user").await?;
     let machine = ObjectId::new();
     let credential = random_token(32);
     case.app
@@ -194,6 +194,24 @@ async fn actual_websocket_recovery_survives_invite_expiry_and_host_kick_revokes_
     .await?;
     let capture = event(&mut resumed, "history").await?;
     ensure!(decode_data(capture["page"]["data"].as_str().unwrap())? == b"read-only-scrollback");
+    send(&mut host, HostOutput::RevokeInvitations).await?;
+    event(&mut host, "invitations_revoked").await?;
+    case.status(
+        "POST",
+        &format!("/api/terminal/{}/invitations/revoke", hello.id),
+        &owner_cookie,
+        serde_json::json!({}),
+        axum::http::StatusCode::OK,
+    )
+    .await?;
+    ensure!(case
+        .app
+        .terminals
+        .sessions()
+        .iter()
+        .find(|s| s.id == hello.id)
+        .unwrap()
+        .invitations_revoked());
     send(&mut host, HostOutput::Kick { client: identity }).await?;
     ensure!(event(&mut resumed, "closed").await?["reason"] == "removed by the host");
     let (mut rejected, _) = connect_async(format!("{base}/api/terminal/join")).await?;
@@ -243,7 +261,10 @@ async fn actual_websocket_recovery_survives_invite_expiry_and_host_kick_revokes_
         .insert("authorization", format!("Bearer {credential}").parse()?);
     let (mut replacement, _) = connect_async(request).await?;
     send(&mut replacement, &hello).await?;
-    event(&mut replacement, "ready").await?;
+    ensure!(
+        event(&mut replacement, "ready").await?["invitations_revoked"] == true,
+        "invitation revocation must survive API restart"
+    );
     let (mut writer_after_restart, _, _) = join(&base, &writer_recovery, true).await?;
     let attach = event(&mut replacement, "attach").await?;
     send(

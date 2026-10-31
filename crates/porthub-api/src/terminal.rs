@@ -105,6 +105,10 @@ pub fn router() -> Router<Arc<App>> {
         .route("/api/terminal/info", post(info))
         .route("/api/terminal/{id}/participants", get(management))
         .route("/api/terminal/{id}/kick", post(kick))
+        .route(
+            "/api/terminal/{id}/invitations/revoke",
+            post(revoke_invitations),
+        )
 }
 fn bad(message: &str) -> ApiError {
     ApiError::bad_request(message)
@@ -141,12 +145,14 @@ async fn host(
             host_socket(app, machine, token, socket).await
         }))
 }
-async fn register(app: &App, machine: &str, hello: &HostHello) -> ApiResult<()> {
+async fn register(app: &App, machine: &str, hello: &HostHello) -> ApiResult<bool> {
+    let mut invitations_revoked = false;
     hello
         .validate(now())
         .map_err(|_| bad("invalid terminal session settings"))?;
     let collection = app.collection("terminal_sessions");
     if let Some(previous) = collection.find_one(doc! {"_id":&hello.id}).await? {
+        invitations_revoked = previous.get_bool("invitations_revoked").unwrap_or(false);
         let options: Options = mongodb::bson::from_bson(
             previous
                 .get("options")
@@ -171,9 +177,10 @@ async fn register(app: &App, machine: &str, hello: &HostHello) -> ApiResult<()> 
             mongodb::bson::to_bson(&hello.options).map_err(|_| bad("invalid terminal options"))?;
         collection.insert_one(doc!{"_id":&hello.id,"machine_id":machine,"secret_hash":digest(&hello.secret),"write_hash":digest(&hello.write_token),"read_hash":digest(&hello.read_token),"options":options,"state":"active","created_at":DateTime::now()}).await?;
     }
-    Ok(())
+    Ok(invitations_revoked)
 }
 async fn finish(app: &App, id: &str, reason: &str) {
+    let _lifecycle = app.terminal_lifecycle.lock().await;
     app.terminals.end(id, reason);
     let _ =
         tokio::time::timeout(Duration::from_secs(3), crate::terminal_grants::end(app, id)).await;
@@ -207,14 +214,19 @@ async fn host_socket(app: Arc<App>, machine: String, token: String, mut socket: 
     let Ok(hello) = serde_json::from_str::<HostHello>(&first) else {
         return;
     };
-    if register(&app, &machine, &hello).await.is_err() {
+    let registration = async {
+        let _lifecycle = app.terminal_lifecycle.lock().await;
+        let revoked = register(&app, &machine, &hello).await?;
+        app.terminals
+            .register_persisted(&machine, &hello, now(), revoked)
+            .map_err(|_| bad("terminal host registration unavailable"))
+    };
+    let Ok(Ok(mut host)) = tokio::time::timeout(Duration::from_secs(5), registration).await else {
         let _ = socket.send(Message::Close(None)).await;
-        return;
-    }
-    let Ok(mut host) = app.terminals.register(&machine, &hello, now()) else {
         return;
     };
     let ready = HostEvent::Ready {
+        invitations_revoked: host.session.invitations_revoked(),
         ssh_host: advertised_host(&app),
         ssh_port: app.config.terminal.ssh_port,
         public_base: app.config.public_base_url.trim_end_matches('/').into(),
@@ -275,6 +287,12 @@ async fn host_socket(app: Arc<App>, machine: String, token: String, mut socket: 
                         // Recovery admission rechecks this record after attaching.
                         if !matches!(tokio::time::timeout(Duration::from_secs(3),crate::terminal_grants::revoke(&app,&hello.id,*client)).await,Ok(Ok(()))) {break;}
                     }
+                    if matches!(output,HostOutput::RevokeInvitations) {
+                        let _lifecycle=app.terminal_lifecycle.lock().await;
+                        if host.session.output(host.generation,HostOutput::Pong).is_err() {break;}
+                        if !matches!(tokio::time::timeout(Duration::from_secs(3),persist_invitation_revocation(&app,&hello.id)).await,Ok(Ok(()))) {break;}
+                        continue;
+                    }
                     if matches!(output,HostOutput::End) {finish(&app,&hello.id,"owner ended session").await;break;}
                     if host.session.output(host.generation,output).is_err() {break;}
                 }
@@ -332,11 +350,11 @@ async fn info(
         serde_json::json!({"name":session.options.name,"read_only":read_only,"expires_at":session.options.expires_at,"participants":session.participants(),"max_viewers":session.options.max_viewers,"access":session.options.access,"ssh_host":advertised_host(&app),"ssh_port":app.config.terminal.ssh_port}),
     ))
 }
-async fn managed_session(
+async fn management_record(
     app: &App,
     headers: &HeaderMap,
     id: &str,
-) -> ApiResult<Arc<porthub_terminal::hub::Shared>> {
+) -> ApiResult<mongodb::bson::Document> {
     let user = crate::auth::current_user(app, headers).await?;
     if !token(id, 32) {
         return Err(bad("invalid terminal session"));
@@ -359,6 +377,14 @@ async fn managed_session(
         .get_object_id("user_id")
         .map_err(|_| bad("terminal machine ownership unavailable"))?;
     crate::domain::workspaces::access(app, &user, &owner.to_hex(), true).await?;
+    Ok(record)
+}
+async fn managed_session(
+    app: &App,
+    headers: &HeaderMap,
+    id: &str,
+) -> ApiResult<Arc<porthub_terminal::hub::Shared>> {
+    management_record(app, headers, id).await?;
     app.terminals
         .sessions()
         .into_iter()
@@ -407,7 +433,7 @@ async fn management(
     management_origin(&headers)?;
     let session = managed_session(&app, &headers, &id).await?;
     Ok(axum::Json(
-        serde_json::json!({"can_manage":true,"members":session.participant_list()}),
+        serde_json::json!({"can_manage":true,"invitations_revoked":session.invitations_revoked(),"members":session.participant_list()}),
     ))
 }
 #[derive(Deserialize)]
@@ -440,6 +466,43 @@ async fn kick(
     Ok(axum::Json(
         serde_json::json!({"ok":true,"members":session.participant_list()}),
     ))
+}
+async fn revoke_invitations(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<axum::Json<serde_json::Value>> {
+    management_origin(&headers)?;
+    management_record(&app, &headers, &id).await?;
+    let _lifecycle = app.terminal_lifecycle.lock().await;
+    management_record(&app, &headers, &id).await?;
+    persist_invitation_revocation(&app, &id).await?;
+    Ok(axum::Json(serde_json::json!({"invitations_revoked":true})))
+}
+/// Caller holds terminal_lifecycle while persisting and changing admission.
+async fn persist_invitation_revocation(app: &App, id: &str) -> ApiResult<()> {
+    let result = app
+        .collection("terminal_sessions")
+        .update_one(
+            doc! {"_id":&id,"state":"active"},
+            doc! {"$set":{"invitations_revoked":true}},
+        )
+        .await?;
+    if result.matched_count != 1 {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "terminal session changed",
+        ));
+    }
+    if let Some(session) = app
+        .terminals
+        .sessions()
+        .into_iter()
+        .find(|session| session.id == id)
+    {
+        session.revoke_invitations();
+    }
+    Ok(())
 }
 async fn viewer_socket(app: Arc<App>, mut socket: WebSocket) {
     let Ok(Some(Ok(Message::Text(first)))) =
@@ -477,9 +540,8 @@ async fn viewer_socket(app: Arc<App>, mut socket: WebSocket) {
             )
             .await?
         };
-        let viewer = app
-            .terminals
-            .attach_authorized(
+        let viewer = if recovered {
+            app.terminals.attach_authorized(
                 &grant.session,
                 Some(grant.identity),
                 grant.read_only,
@@ -487,12 +549,21 @@ async fn viewer_socket(app: Arc<App>, mut socket: WebSocket) {
                 hello.rows,
                 &hello.term,
             )
-            .map_err(|_| {
-                ApiError::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "terminal host unavailable or participant limit reached",
-                )
-            })?;
+        } else {
+            app.terminals.attach_invitation(
+                &hello.token,
+                Some(grant.identity),
+                hello.cols,
+                hello.rows,
+                &hello.term,
+            )
+        }
+        .map_err(|_| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "terminal host unavailable or participant limit reached",
+            )
+        })?;
         // Revocation can race a resume's database lookup. A second conditional
         // lease check closes that window before exposing any terminal frames.
         if crate::terminal_grants::renew(&app, &grant).await.is_err()

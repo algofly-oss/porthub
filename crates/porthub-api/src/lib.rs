@@ -47,6 +47,7 @@ use std::sync::Arc;
 
 pub struct App {
     pub terminals: porthub_terminal::hub::Hub,
+    pub terminal_lifecycle: tokio::sync::Mutex<()>,
     pub inventory_traffic: inventory_traffic::Cache,
     pub account_lifecycle: tokio::sync::RwLock<()>,
     pub private_relay: private_relay::Hub,
@@ -95,6 +96,7 @@ impl App {
         };
         Self {
             terminals: Default::default(),
+            terminal_lifecycle: Default::default(),
             inventory_traffic: Default::default(),
             private_enrollment_initialized: Default::default(),
             private_initialized: Default::default(),

@@ -184,6 +184,9 @@ async fn anonymous_browser_and_machine_admin_share_real_shell_history_recovery_a
         .env("PORTHUB_TEST_TERMINAL_SSH_PORT", ssh_port.to_string())
         .kill_on_drop(true);
     let output = tokio::time::timeout(Duration::from_secs(120), command.output()).await??;
+    if !output.status.success() {
+        eprintln!("Isolated fixture shell: {}", workspace.capture("%0", 200)?);
+    }
     ensure!(
         output.status.success(),
         "browser flow failed: {} {}",
