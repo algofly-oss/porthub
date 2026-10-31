@@ -357,9 +357,10 @@
     "validation": "44 terminal tests pass, plus updated focused test with explicit OSC52 framing assertion. Real PTY fixture verifies two simultaneous owner views with separate panel input/transcripts, independent disconnection,120->40->120 resize, narrow typing/F8 protection, Ctrl+A splitting, F7 and mouse history, shared-shell persistence and final exit. Compiled CLI participant test additionally passes120->40->120 reflow, selected-guest cancellation/confirmed removal, focus, restoration, hangup and explicit Ctrl+D.",
     "reference": "https://man.openbsd.org/tmux",
     "next": [
-      "Exercise actual sharing-supervisor/broker/API participant controls through the native sidebar",
+      "Exercise native sidebar together with the real API/broker and browser/SSH guests, rather than the isolated gateway fixture",
       "Include the native UI in packaging, platform checks and the authorized scoped live release"
     ],
-    "cli": "Auto chooses private sidebar for shared workspaces at100+ columns; on permits local or shared views at80+ columns; off and narrow auto attachments retain owner-leased popup. F8 changes focus; q/Escape/Ctrl+C in sidebar focuses shared shell. Separate watch mode still exits with q. Native panel uses existing private owner socket and confirmation/acknowledgement behavior."
+    "cli": "Auto chooses private sidebar for shared workspaces at100+ columns; on permits local or shared views at80+ columns; off and narrow auto attachments retain owner-leased popup. F8 changes focus; q/Escape/Ctrl+C in sidebar focuses shared shell. Separate watch mode still exits with q. Native panel uses existing private owner socket and confirmation/acknowledgement behavior.",
+    "supervisor_validation": "Actual compiled CLI sidebar now participates in terminal_share integration test, using the real sharing supervisor and its authenticated private owner socket. Fixture gateway provides presence and acknowledges only the observed Kick for selected guest2. Cancellation emits no removal; sidebar sees updated presence, preserves PORTSTATE in the shared shell, detaches cleanly and restores terminal modes. Existing supervisor restart/reconnect and invitation-rotation recovery tests run afterwards. Two Ready literals in this previously uncompiled integration fixture were updated for the capability field."
   }
 }
