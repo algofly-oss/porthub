@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import pty
 import select
+import signal
 import socket
 import struct
 import subprocess
@@ -25,6 +26,26 @@ def wait_text(master, child, expected, timeout=5):
             output.extend(os.read(master, 65536))
     return output
 
+
+def terminal_state(fd):
+    state = termios.tcgetattr(fd)
+    state[6] = [value[0] if isinstance(value, bytes) else value for value in state[6]]
+    return state
+
+
+# Retain a controlling session leader until the app exits and its mode is read.
+# Darwin invalidates slave ioctls after the controlling session ends; checking
+# before that end verifies restoration without weakening the assertion.
+TERMINAL_KEEPER = r"""
+import json, os, subprocess, sys, termios
+report = int(sys.argv[1])
+result = subprocess.run(sys.argv[2:])
+state = termios.tcgetattr(0)
+state[6] = [value[0] if isinstance(value, bytes) else value for value in state[6]]
+os.write(report, json.dumps(state).encode())
+os.close(report)
+raise SystemExit(result.returncode)
+"""
 
 def exercise(executable, environment, job, stalled=False, sidebar=False, columns=100):
     path = Path(job["workspace"]) / "owner.sock"
@@ -72,13 +93,16 @@ def exercise(executable, environment, job, stalled=False, sidebar=False, columns
     thread.start()
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, columns, 0, 0))
-    before = termios.tcgetattr(slave)
+    before = terminal_state(slave)
     def own_terminal():
         os.setsid()
         fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
     arguments = [executable, "terminal", "attach", job["id"]] if sidebar else [executable, "terminal", "participants", job["id"], "--watch"]
-    child = subprocess.Popen(arguments,
-                             stdin=slave, stdout=slave, stderr=slave, env=environment, preexec_fn=own_terminal)
+    report_read, report_write = os.pipe()
+    child = subprocess.Popen([sys.executable, "-c", TERMINAL_KEEPER, str(report_write), *arguments],
+                             stdin=slave, stdout=slave, stderr=slave, env=environment,
+                             pass_fds=(report_write,), preexec_fn=own_terminal)
+    os.close(report_write)
     try:
         if sidebar:
             wait_text(master, child, b"$" if columns < 60 else b"PortHub")
@@ -135,10 +159,13 @@ def exercise(executable, environment, job, stalled=False, sidebar=False, columns
             if select.select([master], [], [], .02)[0]:
                 os.read(master, 65536)
         assert child.poll() == 0, "quit must not wait for a stalled owner socket"
-        assert termios.tcgetattr(slave) == before, "terminal mode must be restored"
+        assert json.loads(os.read(report_read, 8192)) == before, "terminal mode must be restored before the controlling session exits"
     finally:
         if child.poll() is None:
-            child.kill()
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             child.wait(timeout=3)
         stop.set()
         listener.close()
@@ -146,6 +173,7 @@ def exercise(executable, environment, job, stalled=False, sidebar=False, columns
         path.unlink(missing_ok=True)
         os.close(master)
         os.close(slave)
+        os.close(report_read)
 
 
 def main():
