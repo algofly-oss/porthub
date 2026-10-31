@@ -379,11 +379,19 @@
       "https://crates.io/crates/rtc/0.21.1"
     ],
     "next": [
-      "Negotiate support without breaking older hosts, services or gateways; authorize signaling using existing terminal attachment/recovery identity and role",
+      "Negotiate support and authorize signaling using current terminal attachment/recovery identity and role, while preserving older host/service/gateway compatibility",
       "Integrate gathered host/STUN/TURN candidates and browser/PortHub-aware CLI participants; ordinary unmodified SSH continues to use the gateway",
-      "Add replay-safe input/output sequencing, bounded recovery and prioritized control traffic during direct-to-relay handover; preserve the workspace and participant identity",
+      "Wire replay journals into actual direct/relay terminal routes, prioritize controls, preserve identity/workspace during handover and account for direct traffic in existing monitoring",
       "Prove terminal interactions, revocation/removal, blocked direct routes, reconnect and bandwidth/latency behavior with full browser/native/API tests",
       "Package all targets, finish authenticated CI/CD deployment gate and perform authorized scoped live rollout"
-    ]
+    ],
+    "replay_journal": {
+      "status": "Implemented and tested as a transport component; not yet wired into session signaling or gateway relay messages.",
+      "bounds": "16KiB maximum payload;64KiB retained payload per sender/receiver and256-frame maximum; JS-safe sequence ceiling2^53-1. Future sequence gaps are bounded by256. Two directions/attachments must use their own authenticated epochs.",
+      "receive": "Stage out-of-order frames without acknowledging application progress; commit only the next frame after successful PTY/terminal acceptance. Duplicates on either carrier do not execute again. Conflicting queued payloads and invalid epochs/acknowledgements are rejected.",
+      "handover": "Sender retains unacknowledged frames with original sequence numbers for replay on another carrier; old acknowledged frames are freed. This preserves at-most-once application within the retained live epoch. A fresh host process/epoch must not blindly replay uncertain old input; no process-crash exactly-once claim is made.",
+      "wire": "Versioned by porthub-terminal/1 channel label. Binary header:1-byte data/ack type,16-byte epoch,8-byte big-endian sequence. Data payload follows directly, without JSON/base64 expansion. Ack is exactly25 bytes. Size, tag, sequence and payload validation precede use; no participant ID or role is accepted in this envelope.",
+      "validation": "39 combined SSH/direct unit tests pass, including reordered delivery, duplicate relay/direct replay, failed application cursor, conflicting replay, future/wrong-epoch ACK, full queues, invalid/truncated binary envelopes and sequence overflow. Actual Chromium and WebKit RTC clients send duplicated binary input and scoped ACKs; Rust receiver discards duplicate input and retains output until the browser acknowledges it. Native test releases browser shutdown only after those conditions, without sleep-based proof."
+    }
   }
 }

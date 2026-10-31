@@ -1,6 +1,8 @@
 //! Browser-compatible transport engine. Signaling must already be authorized by
 //! the terminal gateway; this engine never grants a role or opens a shell.
 //! Kept behind `direct` until signaling and relay handover are integrated.
+pub mod replay;
+
 use anyhow::{ensure, Context, Result};
 use bytes::BytesMut;
 use rtc::{
