@@ -37,7 +37,7 @@ def main():
                     tag = 'porthub-ci:'+role+'-'+revisions[kind]
                     tags.append(tag)
                     user = '10001:10001' if role == 'core' else '0:10001'
-                    entry = 'exit 1' if kind == 'bad' and role == 'core' else 'exec sleep 3600'
+                    entry = 'exit 1' if kind == 'bad' and role == 'core' else 'trap exit TERM; while :; do sleep 1 & wait $!; done'
                     (root/'Dockerfile').write_text(f'''FROM busybox:1.37.0
     LABEL org.opencontainers.image.revision="{revisions[kind]}" org.opencontainers.image.version="1.9.0"
     USER {user}
@@ -48,11 +48,14 @@ def main():
                 for role in ROLES:
                     state = root/('state-'+role)
                     state.mkdir(exist_ok=True)
+                    if role=='core':
+                        (state/'mongo').mkdir(exist_ok=True)
+                        (state/'mongo/WiredTiger.fixture').write_text('owned fixture database state')
                     service = {'image':'porthub-ci:'+role+'-'+revisions[kind],
                                'container_name':project+'-'+role, 'read_only':True, 'stop_grace_period':'1s',
                                'cap_drop':['ALL'], 'cap_add':{'core':[],'edge':['NET_BIND_SERVICE'],'firewall':['NET_ADMIN']}[role],
                                'environment':{'PORTHUB_VERSION':'1.9.0'},
-                               'volumes':[{'type':'bind','source':str(state),'target':'/state'}],
+                               'volumes':[{'type':'bind','source':str(state),'target':'/data' if role=='core' else '/state'}],
                                'healthcheck':{'test':['CMD','/bin/true'],'interval':'1s','timeout':'1s','retries':2}}
                     if role != 'core':service['network_mode']='host'
                     services[role]=service
@@ -83,8 +86,27 @@ def main():
                 assert current['Image'] == expected, 'successful upgrade must run the pinned candidate: '+role
                 assert current['State']['Health']['Status'] == 'healthy'
             assert inspect(project+'-firewall')['Id']==before['firewall'], 'unselected firewall must never be recreated'
-            assert unrelated <= set(run('docker','ps','-q','--no-trunc').stdout.split()), 'unrelated containers must remain running'
-            print('PASS real Docker: read-only preflight, partial upgrade rollback, previous immutable images restored, healthy core/edge upgrade, unchanged firewall and unrelated containers retained')
+            snapshots=list(root.glob('*/deploy/native/upgrade-records/*/core-backup/verified.json'))
+            assert len(snapshots)==2, 'both core replacement attempts require a verified backup'
+            for manifest in snapshots:
+                proof=json.loads(manifest.read_text())
+                assert proof['sha256']['mongo/WiredTiger.fixture']==hashlib.sha256(b'owned fixture database state').hexdigest()
+                assert (manifest.parent/'data/mongo/WiredTiger.fixture').read_bytes()==b'owned fixture database state'
+            missing = unrelated - set(run('docker','ps','-q','--no-trunc').stdout.split())
+            if missing:
+                details = []
+                for identity in sorted(missing):
+                    result = run('docker', 'container', 'inspect', identity, check=False)
+                    if result.returncode:
+                        details.append({'id': identity, 'state': 'removed externally'})
+                    else:
+                        container = json.loads(result.stdout)[0]
+                        state = container['State']
+                        details.append({'id': identity, 'name': container['Name'],
+                                        'status': state['Status'], 'exit_code': state['ExitCode'],
+                                        'oom_killed': state['OOMKilled'], 'finished_at': state['FinishedAt']})
+                raise AssertionError('Unrelated baseline containers no longer running: '+json.dumps(details))
+            print('PASS real Docker: read-only preflight, partial upgrade rollback, verified cold backups, previous immutable images restored, healthy core/edge upgrade, unchanged firewall and unrelated containers retained')
         finally:
             # Fixture-specific names only; no compose down or global pruning.
             owned = run('docker','ps','-aq','--filter','label=com.docker.compose.project='+project,check=False).stdout.split()

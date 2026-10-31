@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import signal
 import stat
+import shutil
 import subprocess
 import tempfile
 from urllib.parse import urlsplit
@@ -64,11 +65,14 @@ def validate(current, images, configuration, revision, version, architecture, pr
         candidate = {mount['target']: (mount['source'], mount.get('read_only', False)) for mount in service.get('volumes', []) if mount['type'] == 'bind'}
         if previous != candidate:
             raise ValueError('Candidate Compose changes existing persistent or socket mounts')
-    labels = [current[role]['Config']['Labels'] for role in roles]
-    origins = {(item.get('com.docker.compose.project.working_dir'), item.get('com.docker.compose.project.config_files')) for item in labels}
-    if len(origins) != 1 or not all(next(iter(origins))):
-        raise ValueError('Selected roles must share a recoverable Compose deployment')
-    return next(iter(origins))
+    origins = {}
+    for role in roles:
+        labels = current[role]['Config']['Labels']
+        origin = (labels.get('com.docker.compose.project.working_dir'), labels.get('com.docker.compose.project.config_files'))
+        if not all(origin):
+            raise ValueError('Selected role has no recoverable previous Compose deployment')
+        origins[role] = origin
+    return origins
 
 
 def override(images, version):
@@ -92,28 +96,85 @@ def check_routes(urls):
             raise RuntimeError('PortHub route probe failed: '+str(index)) from None
 
 
-def activate(compose, previous_compose, ensure_others, verify_routes=lambda: None, roles=ROLES):
+def core_data(container):
+    mounts = [mount for mount in container['Mounts'] if mount['Destination']=='/data' and mount['Type']=='bind']
+    if len(mounts)!=1:
+        raise ValueError('Core requires one persistent /data bind mount for its backup')
+    return Path(mounts[0]['Source'])
+
+
+def backup_core(container, destination, deadline=90):
+    from migrate import snapshot, file_hash, private_file
+    source = core_data(container)
+    if not isinstance(deadline,int) or not 1<=deadline<=3600:
+        raise ValueError('Core backup requires a bounded deadline')
+    if source.is_symlink() or destination.is_symlink():
+        raise ValueError('Backup paths must not be symlinks')
+    source = source.resolve()
+    destination = destination.resolve()
+    if destination==source or source in destination.parents or destination in source.parents:
+        raise ValueError('Backup destination must be independent of the live state directory')
+    if not (source/'mongo').is_dir():
+        raise ValueError('Core MongoDB directory is unavailable for backup')
+    destination.mkdir(mode=0o700)
+    previous = signal.getsignal(signal.SIGALRM)
+    def expired(_number, _frame):
+        raise TimeoutError('PortHub core backup exceeded its deadline')
+    signal.signal(signal.SIGALRM, expired)
+    signal.alarm(deadline)
+    try:
+        run(['docker','stop','--time','20',container['Id']])
+        ownership = snapshot(source,destination/'data')
+        files = {}
+        for relative,(uid,gid) in ownership.items():
+            copied = destination/'data'/relative
+            os.chown(copied,uid,gid,follow_symlinks=False)
+            if copied.is_file():
+                files[relative] = file_hash(copied).hex()
+                with copied.open('rb') as stream:os.fsync(stream.fileno())
+        for relative in reversed(list(ownership)):
+            copied=destination/'data'/relative
+            if copied.is_dir():
+                fd=os.open(copied,os.O_RDONLY|os.O_DIRECTORY)
+                try:os.fsync(fd)
+                finally:os.close(fd)
+        private_file(destination/'verified.json',json.dumps({'source':str(source),'container':container['Id'],'ownership':ownership,'sha256':files},sort_keys=True).encode())
+        for directory in (destination,destination.parent):
+            fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY)
+            try:os.fsync(fd)
+            finally:os.close(fd)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM,previous)
+
+
+def activate(compose, previous_compose, ensure_others, verify_routes=lambda: None, roles=ROLES, before_role=lambda role: None):
     watched = (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)
     previous_handlers = {number: signal.getsignal(number) for number in watched}
     def interrupted(_number, _frame):
         raise InterruptedError('PortHub upgrade interrupted; restoring previous images')
+    attempted = []
     try:
         for number in watched:
             signal.signal(number, interrupted)
         # No dependencies: each replacement is explicitly scoped to one role.
         for role in roles:
+            attempted.append(role)
+            before_role(role)
             run([*compose, 'up', '-d', '--no-deps', '--no-build', '--pull', 'never', '--force-recreate', '--wait', '--wait-timeout', '180', role])
         verify_routes()
         ensure_others()
     except BaseException as original:
         for number in watched:
             signal.signal(number, signal.SIG_IGN)
-        # A CLI error can follow an already-applied replacement. Restore all
-        # three previous immutable image IDs, even for the first failed command.
+        # A CLI error can follow an already-applied replacement. Restore each
+        # attempted role even if its command returned an error. Unattempted
+        # roles remain untouched by --no-deps and must not be recreated.
         failures = []
-        for role in roles:
+        for role in attempted:
             try:
-                run([*previous_compose, 'up', '-d', '--no-deps', '--no-build', '--pull', 'never', '--force-recreate', '--wait', '--wait-timeout', '180', role])
+                previous = previous_compose[role] if isinstance(previous_compose,dict) else previous_compose
+                run([*previous, 'up', '-d', '--no-deps', '--no-build', '--pull', 'never', '--force-recreate', '--wait', '--wait-timeout', '180', role])
             except Exception:
                 failures.append(role)
         try:
@@ -141,12 +202,13 @@ def perform(args):
     architecture = {'aarch64': 'arm64', 'x86_64': 'amd64'}.get(os.uname().machine, os.uname().machine)
     base = ['docker', 'compose', '--project-name', args.project, '--project-directory', str(root), '-f', str(root/'docker-compose.yml')]
     configuration = json.loads(run([*base, 'config', '--format', 'json']))
-    previous_root, previous_files = validate(current, images, configuration, args.revision, args.version, architecture, args.project, roles)
-    files = [Path(name) for name in previous_files.split(',')]
-    if not Path(previous_root).is_dir() or any(not path.is_absolute() or not path.is_file() for path in files):
-        raise ValueError('Previous Compose files are unavailable for rollback')
-    if root == Path(previous_root).resolve():
-        raise ValueError('Stage an independent deployment directory to preserve rollback configuration')
+    origins = validate(current, images, configuration, args.revision, args.version, architecture, args.project, roles)
+    for previous_root, previous_files in origins.values():
+        files = [Path(name) for name in previous_files.split(',')]
+        if not Path(previous_root).is_dir() or any(not path.is_absolute() or not path.is_file() for path in files):
+            raise ValueError('Previous Compose files are unavailable for rollback')
+        if root == Path(previous_root).resolve():
+            raise ValueError('Stage an independent deployment directory to preserve rollback configuration')
     def ensure_others():
         if not others <= set(run(['docker', 'ps', '--quiet', '--no-trunc']).split()):
             raise RuntimeError('An unrelated previously running container is no longer running')
@@ -160,20 +222,39 @@ def perform(args):
     print('Preflight passed: source, version, architecture, privileges, state mounts and rollback configuration')
     if not args.apply:
         return
+    if 'core' in roles:
+        source=core_data(current['core'])
+        if os.geteuid()!=0 and source.stat().st_uid!=os.geteuid():
+            raise ValueError('Core backup requires state ownership permissions; run the upgrade with sudo')
+        if not (source/'mongo').is_dir():
+            raise ValueError('Core MongoDB directory is unavailable for backup')
+        estimated=sum(path.stat().st_size for path in source.rglob('*') if path.is_file())
+        if shutil.disk_usage(root).free < estimated*2+64*1024*1024:
+            raise ValueError('Insufficient space for a verified core backup')
     records = root/'deploy/native/upgrade-records'
     records.mkdir(mode=0o700, parents=True, exist_ok=True)
     record = Path(tempfile.mkdtemp(prefix=args.revision+'-', dir=records))
+    from migrate import private_file
     for name, payload in [('candidate.json', override({role: images[role]['Id'] for role in roles}, args.version)),
                           ('previous.json', override({role: current[role]['Image'] for role in roles}, previous_version))]:
-        path = record/name
-        path.write_text(json.dumps(payload)+'\n')
-        path.chmod(0o600)
-    previous = ['docker', 'compose', '--project-name', args.project, '--project-directory', previous_root]
-    for path in files:
-        previous.extend(['-f', str(path)])
-    previous.extend(['-f', str(record/'previous.json')])
+        private_file(record/name,(json.dumps(payload)+'\n').encode())
+    for directory in (record,records,records.parent):
+        fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(fd)
+        finally:os.close(fd)
+    previous = {}
+    for role, (previous_root, previous_files) in origins.items():
+        command = ['docker', 'compose', '--project-name', args.project, '--project-directory', previous_root]
+        for path in previous_files.split(','):
+            command.extend(['-f', path])
+        command.extend(['-f', str(record/'previous.json')])
+        previous[role] = command
+    def before_role(role):
+        if role=='core':
+            backup_core(current['core'],record/'core-backup')
+            print('Verified PortHub core backup retained at '+str(record/'core-backup'),flush=True)
     activate([*base, '-f', str(record/'candidate.json')], previous, ensure_others,
-             lambda: check_routes(args.probe_url), roles)
+             lambda: check_routes(args.probe_url), roles, before_role)
     print('PortHub roles healthy ('+', '.join(roles)+'); unselected roles retained; previous immutable image references at '+str(record))
 
 
@@ -192,6 +273,10 @@ def main():
     if not args.apply:
         return perform(args)
     # Serialize even when separate release directories target the same project.
+    if 'core' in args.roles and os.geteuid()!=0:
+        source = core_data(inspect('container',args.project+'-core'))
+        if source.stat().st_uid!=os.geteuid():
+            raise ValueError('Core backup requires state ownership permissions; run the upgrade with sudo')
     path = Path(tempfile.gettempdir()) / ('porthub-native-upgrade-'+args.project+'.lock')
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, 'w') as lock:

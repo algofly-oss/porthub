@@ -2,6 +2,9 @@
 import copy
 import os
 import signal
+import json
+import hashlib
+import tempfile
 import importlib.util
 from pathlib import Path
 import unittest
@@ -24,7 +27,7 @@ class Upgrade(unittest.TestCase):
     def validate(self):
         return upgrade.validate(self.current,self.images,self.configuration,self.revision,'1.9.0','arm64','porthub')
     def test_matching_healthy_scoped_deployment_is_recoverable(self):
-        self.assertEqual(self.validate(),('/old','/old/docker-compose.yml'))
+        self.assertEqual(self.validate(),{role:('/old','/old/docker-compose.yml') for role in upgrade.ROLES})
     def test_foreign_or_unhealthy_container_is_rejected(self):
         for mutation in [lambda:self.current['core']['Config']['Labels'].update({'com.docker.compose.project':'foreign'}),lambda:self.current['edge']['State']['Health'].update(Status='unhealthy')]:
             original=copy.deepcopy(self.current);mutation()
@@ -50,10 +53,10 @@ class Upgrade(unittest.TestCase):
             self.configuration['services']['core'].update(change)
             with self.assertRaises(ValueError):self.validate()
             self.configuration=original
-    def test_inconsistent_previous_compose_origin_is_rejected(self):
+    def test_each_role_retains_its_independent_previous_compose_origin(self):
         self.current['edge']['Config']['Labels']['com.docker.compose.project.working_dir']='/different'
-        with self.assertRaises(ValueError):self.validate()
-    def test_failed_first_replacement_restores_every_previous_role_without_down(self):
+        self.assertEqual(self.validate()['edge'][0],'/different')
+    def test_failed_first_replacement_restores_only_the_attempted_role_without_down(self):
         calls=[]
         def run(arguments):
             calls.append(arguments)
@@ -61,7 +64,7 @@ class Upgrade(unittest.TestCase):
         with patch.object(upgrade,'run',side_effect=run):
             with self.assertRaisesRegex(RuntimeError,'partial replacement'):
                 upgrade.activate(['candidate'],['previous'],lambda:None)
-        self.assertEqual([call[-1] for call in calls],['firewall','firewall','core','edge'])
+        self.assertEqual([call[-1] for call in calls],['firewall','firewall'])
         for call in calls:
             self.assertIn('--no-deps',call);self.assertIn('--no-build',call);self.assertNotIn('down',call)
     def test_health_success_keeps_all_other_containers_checked(self):
@@ -81,18 +84,18 @@ class Upgrade(unittest.TestCase):
             with self.assertRaises(InterruptedError):
                 upgrade.activate(['candidate'],['previous'],lambda:None)
         self.assertEqual(signal.getsignal(signal.SIGTERM),previous)
-        self.assertEqual([call[-1] for call in calls],['firewall','firewall','core','edge'])
+        self.assertEqual([call[-1] for call in calls],['firewall','firewall'])
     def test_failed_rollback_role_does_not_prevent_other_restoration_attempts(self):
         calls=[]
         def run(arguments):
             calls.append(arguments)
-            if arguments[0]=='candidate' or arguments[-1]=='firewall':
+            if arguments[0]=='candidate' and arguments[-1]=='edge' or arguments[0]=='previous' and arguments[-1]=='firewall':
                 raise RuntimeError('Docker failure')
         checked=[]
         with patch.object(upgrade,'run',side_effect=run):
             with self.assertRaisesRegex(RuntimeError,'rollback incomplete: firewall'):
                 upgrade.activate(['candidate'],['previous'],lambda:checked.append(True))
-        self.assertEqual([call[-1] for call in calls],['firewall','firewall','core','edge'])
+        self.assertEqual([call[-1] for call in calls],['firewall','core','edge','firewall','core','edge'])
         self.assertEqual(checked,[True])
     def test_public_probe_failure_restores_images_and_rechecks_routes(self):
         attempts=[]
@@ -113,7 +116,7 @@ class Upgrade(unittest.TestCase):
         self.current['firewall']['Config']['Labels']['com.docker.compose.project.working_dir']='/older-firewall'
         current={role:self.current[role] for role in ('core','edge')}
         images={role:self.images[role] for role in ('core','edge')}
-        self.assertEqual(upgrade.validate(current,images,self.configuration,self.revision,'1.9.0','arm64','porthub',('core','edge')),('/old','/old/docker-compose.yml'))
+        self.assertEqual(upgrade.validate(current,images,self.configuration,self.revision,'1.9.0','arm64','porthub',('core','edge')), {role:('/old','/old/docker-compose.yml') for role in ('core','edge')})
         self.assertEqual(set(upgrade.override({'core':'sha256:core','edge':'sha256:edge'},'1.9.0')['services']),{'core','edge'})
     def test_selected_role_failure_never_recreates_the_unselected_firewall(self):
         calls=[]
@@ -123,6 +126,61 @@ class Upgrade(unittest.TestCase):
         with patch.object(upgrade,'run',side_effect=run):
             with self.assertRaisesRegex(RuntimeError,'partial replacement'):
                 upgrade.activate(['candidate'],['previous'],lambda:None,roles=('core','edge'))
-        self.assertEqual([call[-1] for call in calls],['core','core','edge'])
+        self.assertEqual([call[-1] for call in calls],['core','core'])
+
+class ColdBackup(unittest.TestCase):
+    def setUp(self):
+        self.root=Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.data=self.root/'live';(self.data/'mongo').mkdir(parents=True)
+        self.file=self.data/'mongo/WiredTiger.fixture';self.file.write_bytes(b'owned database state')
+        self.container={'Id':'owned-core','Mounts':[{'Destination':'/data','Type':'bind','Source':str(self.data)}]}
+    def test_cold_copy_is_hash_verified_and_preserves_ownership(self):
+        backup=self.root/'backup'
+        with patch.object(upgrade,'run') as run:
+            upgrade.backup_core(self.container,backup)
+        run.assert_called_once_with(['docker','stop','--time','20','owned-core'])
+        manifest=json.loads((backup/'verified.json').read_text())
+        self.assertEqual(manifest['sha256']['mongo/WiredTiger.fixture'],hashlib.sha256(self.file.read_bytes()).hexdigest())
+        copied=backup/'data/mongo/WiredTiger.fixture'
+        self.assertEqual(copied.read_bytes(),self.file.read_bytes())
+        self.assertEqual((copied.stat().st_uid,copied.stat().st_gid),(self.file.stat().st_uid,self.file.stat().st_gid))
+        self.assertEqual(backup.stat().st_mode&0o077,0)
+    def test_nested_backup_is_rejected_before_stopping_core(self):
+        with patch.object(upgrade,'run') as run:
+            with self.assertRaises(ValueError):upgrade.backup_core(self.container,self.data/'backup')
+        run.assert_not_called()
+    def test_bad_copy_is_never_marked_verified(self):
+        import migrate
+        original=migrate.shutil.copytree
+        def corrupt(source,destination,*args,**kwargs):
+            result=original(source,destination,*args,**kwargs)
+            if Path(source)==self.data:
+                (Path(destination)/'mongo/WiredTiger.fixture').write_bytes(b'corrupted copy')
+            return result
+        with patch.object(upgrade,'run'),patch.object(migrate.shutil,'copytree',side_effect=corrupt):
+            with self.assertRaisesRegex(RuntimeError,'integrity check failed'):
+                upgrade.backup_core(self.container,self.root/'backup')
+        self.assertFalse((self.root/'backup/verified.json').exists())
+        self.assertEqual(self.file.read_bytes(),b'owned database state')
+    def test_failed_backup_restores_core_without_touching_edge(self):
+        def failed(role):raise RuntimeError('backup failed after core stop')
+        with patch.object(upgrade,'run') as run:
+            with self.assertRaisesRegex(RuntimeError,'backup failed'):
+                upgrade.activate(['candidate'],{'core':['old-core'],'edge':['old-edge']},lambda:None,roles=('core','edge'),before_role=failed)
+        self.assertEqual([call.args[0][0] for call in run.call_args_list],['old-core'])
+    def test_backup_timeout_leaves_no_verified_marker_and_restores_alarm_handler(self):
+        import migrate
+        previous=signal.getsignal(signal.SIGALRM)
+        def stalled(*args):signal.raise_signal(signal.SIGALRM)
+        with patch.object(upgrade,'run'),patch.object(migrate,'snapshot',side_effect=stalled):
+            with self.assertRaises(TimeoutError):upgrade.backup_core(self.container,self.root/'backup')
+        self.assertEqual(signal.getsignal(signal.SIGALRM),previous)
+        self.assertFalse((self.root/'backup/verified.json').exists())
+    def test_symlinked_state_is_rejected_before_stopping_core(self):
+        alias=self.root/'alias';alias.symlink_to(self.data,target_is_directory=True)
+        self.container['Mounts'][0]['Source']=str(alias)
+        with patch.object(upgrade,'run') as run:
+            with self.assertRaises(ValueError):upgrade.backup_core(self.container,self.root/'backup')
+        run.assert_not_called()
 
 if __name__=='__main__':unittest.main()

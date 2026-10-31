@@ -20,8 +20,8 @@ A different staging directory preserves the previous configuration for rollback.
 
 Use `--roles core edge` for an API/UI/gateway upgrade that does not require a
 firewall change. Omitted roles keep their original container IDs and count as
-protected running containers during activation and rollback. Only selected roles
-must share a recoverable previous Compose configuration. This supports a stable
+protected running containers during activation and rollback. Each selected role
+must have its own recoverable previous Compose configuration. This supports a stable
 firewall deployed from an older release directory. The default selects all three
 roles; a firewall-only upgrade can use `--roles firewall`.
 
@@ -33,7 +33,8 @@ in the staging directory. Keep that directory with the release: Compose records
 its override path for subsequent upgrades. It does not retag shared images.
 
 A failed replacement, health check, SIGHUP, SIGTERM or Ctrl+C triggers restoration
-of the selected previous images using the previous Compose files. Further catchable
+of the attempted roles using each role’s previous Compose files. Roles not yet
+attempted remain running. Further catchable
 termination signals are ignored during restoration. Previously running unrelated
 container IDs must still be running after activation or rollback. SIGKILL, machine
 failure and Docker daemon failure require operator recovery from those records.
@@ -48,21 +49,30 @@ eight-second timeout and do not retain response bodies. Failures identify the
 probe by position without printing private URLs. Use URLs without credentials or
 fragments. HTTP redirects follow the deployment's normal route.
 
-This is an image/configuration rollback, not a database restore. Obtain and verify
-a PortHub database/terminal-journal backup before a production rollout and assess
-schema compatibility separately. Keep public application probes and a real
+When core is selected, activation stops it cleanly before copying its complete
+`/data` directory, including MongoDB and terminal journals. The private
+`core-backup` snapshot retains ownership metadata and SHA-256 hashes; every copied
+file is verified and the snapshot is synced to disk before core replacement.
+A 90-second deadline bounds the backup. Run with sudo when the deployment data
+belongs to the service UID. Stage both `upgrade.py` and its `migrate.py` helper.
+A failed backup triggers restoration of the attempted core role while edge and
+firewall remain running. Keep the snapshot with the upgrade records.
+
+Rollback restores images and configuration; it does not restore database files.
+Assess schema compatibility separately before upgrading. Keep public application probes and a real
 terminal/SSH/browser smoke check as deployment gates: container health alone does
 not prove the externally forwarded routes work. The automatic authenticated
 production workflow and its final deployment/publication gates are still pending.
 
 Offline tests cover incorrect ownership/health/source/version/architecture/user,
-changed mounts/capabilities/network exposure, inconsistent rollback configuration,
+changed mounts/capabilities/network exposure, independent rollback configurations,
+backup hashes/ownership/deadlines and unsafe backup paths,
 partial first-command failure, role scoping and SIGTERM restoration. These tests
 use a simulated Docker executor. The migration preflight workflow also runs
 `python3 scripts/test-native-upgrade-docker.py`: an isolated real Docker fixture
 with private state directories, unique project/image names and no published
 ports. It verifies a read-only dry run, partial core/edge upgrade failure,
-restoration of their previous images, a successful healthy upgrade, preservation
+restoration of their previous images, verified cold backups, a successful healthy upgrade, preservation
 of the unselected firewall's exact container ID, and continued operation of
 unrelated containers. Cleanup targets only its generated project resources.
 This validates orchestration with lightweight test processes; a live PortHub
