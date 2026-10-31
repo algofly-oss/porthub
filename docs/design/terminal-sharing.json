@@ -234,5 +234,9 @@
     "source": "9b1e5aee313e8bc85a6836a5bb99f2c98f11dad4",
     "run": 41231400968,
     "result": "Both Darwin ARM64 and x86_64 platform checks pass, including actual bundled runtime, ordinary OpenSSH, local/sharing lifecycle and native participant PTY controls. Later scheduling/Unicode/hangup test changes still need final release validation."
+  },
+  "compose_ssh_gateway": {
+    "fix": "Compose explicitly passes a common private terminal SSH socket to API and edge, enables a dedicated edge TCP 8347 listener, and supports disabling the listener or overriding advertised host/port. No core TCP port or system sshd change.",
+    "validation": "Docker Compose configuration checks pass for default listener/private socket, empty listener and custom advertised host/external port. Gateway routing itself is exercised in the existing real browser/API/edge/OpenSSH fixture. Production rollout remains pending."
   }
 }

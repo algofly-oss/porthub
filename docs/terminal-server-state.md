@@ -1,5 +1,19 @@
 # Terminal server persistence
 
+The standard Compose edge listens for ordinary terminal SSH guests on TCP 8347
+and forwards them to `/run/porthub-api/terminal-ssh.sock` on the existing private
+API socket volume. The API provides the SSH server; the machine's system sshd
+is not used. The core service publishes no TCP port. Keep API UID/GID
+`10001:10001` and edge UID/GID `0:10001` so the private socket is accessible.
+
+`PORTHUB_TERMINAL_SSH_LISTEN` changes the edge bind address; set it to an empty
+string to disable ordinary SSH access. Browser sharing uses the existing web
+endpoint. Set `PORTHUB_TERMINAL_SSH_HOST` to a directly reachable DNS name/IP if
+the web hostname is behind an HTTP-only CDN. `PORTHUB_TERMINAL_SSH_PORT` is the
+advertised external port (8347 by default); it does not change the listener.
+Forward/allow only that PortHub TCP port through deployment-specific networking.
+The Compose update does not alter the host's SSH service or firewall policies.
+
 Terminal sharing uses MongoDB for invitation hashes, authorization, recovery leases
 and session lifecycle records. Terminal contents are not stored in MongoDB or in
 the local journal.

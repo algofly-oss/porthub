@@ -28,6 +28,9 @@ services:
       PORTHUB_AGENT_RELEASE_SOURCE: ${PORTHUB_AGENT_RELEASE_SOURCE:-github}
       PORTHUB_AGENT_RELEASE_REPOSITORY: ${PORTHUB_AGENT_RELEASE_REPOSITORY:-algofly-oss/porthub}
       PORTHUB_API_SOCKET: /run/porthub-api/api.sock
+      PORTHUB_TERMINAL_SSH_SOCKET: /run/porthub-api/terminal-ssh.sock
+      PORTHUB_TERMINAL_SSH_HOST: ${PORTHUB_TERMINAL_SSH_HOST:-}
+      PORTHUB_TERMINAL_SSH_PORT: ${PORTHUB_TERMINAL_SSH_PORT:-8347}
       PORTHUB_EDGE_SOCKET: /run/porthub-edge/control.sock
       PORTHUB_DB_INITIALIZE: "true"
       MONGO_DATABASE_URI: mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@127.0.0.1:47017/${MONGO_DATABASE_NAME}?authSource=admin
@@ -75,6 +78,8 @@ services:
     cap_add: [NET_BIND_SERVICE]
     environment:
       PORTHUB_API_SOCKET: /run/porthub-api/api.sock
+      PORTHUB_TERMINAL_SSH_SOCKET: /run/porthub-api/terminal-ssh.sock
+      PORTHUB_TERMINAL_SSH_LISTEN: ${PORTHUB_TERMINAL_SSH_LISTEN-0.0.0.0:8347}
       PORTHUB_EDGE_SOCKET: /run/porthub-edge/control.sock
       PORTHUB_TUNNEL_HALF_CLOSE_IDLE_SECONDS: ${PORTHUB_TUNNEL_HALF_CLOSE_IDLE_SECONDS:-120}
       PORTHUB_WEB_ROUTES_CONFIG_PATH: /run/porthub-config/web-routes.json
