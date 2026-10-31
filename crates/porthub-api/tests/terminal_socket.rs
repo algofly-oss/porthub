@@ -421,3 +421,123 @@ async fn nonresponsive_peers_release_live_slots_but_keep_bounded_recovery() -> R
     case.db.drop().await?;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires isolated MongoDB"]
+async fn host_rotates_public_links_without_interrupting_attached_guests() -> Result<()> {
+    let case = Case::new(Config::default()).await?;
+    terminal_grants::ensure_indexes(&case.app)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e.detail))?;
+    let (owner, _) = case.user("terminal-rotation@example.test", "user").await?;
+    let machine = ObjectId::new();
+    let credential = random_token(32);
+    case.app
+        .collection("machines")
+        .insert_one(doc! {"_id":machine,"user_id":owner,"enabled":true,"token":&credential})
+        .await?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let base = format!("ws://{}", listener.local_addr()?);
+    let router = case.router.clone();
+    let _server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+        axum::serve(listener, router).await
+    }));
+    let mut request = format!("{base}/api/terminal/host").into_client_request()?;
+    request
+        .headers_mut()
+        .insert("x-porthub-machine-id", machine.to_hex().parse()?);
+    request
+        .headers_mut()
+        .insert("authorization", format!("Bearer {credential}").parse()?);
+    let (mut host, _) = connect_async(request).await?;
+    let hello = HostHello {
+        id: random_token(16),
+        secret: random_token(32),
+        write_token: random_token(32),
+        read_token: random_token(32),
+        options: Options {
+            name: "quietotter".into(),
+            expires_at: 0,
+            session_expires_at: None,
+            idle_timeout: 0,
+            reconnect_timeout: 60,
+            history_limit: 100000,
+            mouse: true,
+            read_only: false,
+            size_policy: SizePolicy::Smallest,
+            access: Access::Both,
+            max_viewers: 16,
+        },
+    };
+    send(&mut host, &hello).await?;
+    event(&mut host, "ready").await?;
+    let (mut writer, recovery, identity) = join(&base, &hello.write_token, false).await?;
+    let client = event(&mut host, "attach").await?["client"]
+        .as_u64()
+        .unwrap();
+    let update = InvitationUpdate {
+        revision: 1,
+        write_token: random_token(32),
+        read_token: random_token(32),
+        expires_at: now() + 3600,
+    };
+    send(
+        &mut host,
+        HostOutput::RotateInvitations {
+            update: update.clone(),
+        },
+    )
+    .await?;
+    ensure!(event(&mut host, "invitations_rotated").await?["revision"] == 1);
+    let (mut blocked, _) = connect_async(format!("{base}/api/terminal/join")).await?;
+    send(
+        &mut blocked,
+        serde_json::json!({"token":hello.write_token,"cols":80,"rows":24}),
+    )
+    .await?;
+    ensure!(event(&mut blocked, "closed").await?["reason"]
+        .as_str()
+        .unwrap()
+        .contains("Invitation"));
+    send(
+        &mut writer,
+        ViewerInput::Input {
+            data: encode_data(b"active writer\r"),
+        },
+    )
+    .await?;
+    let input = event(&mut host, "input").await?;
+    ensure!(input["client"].as_u64() == Some(client));
+    ensure!(decode_data(input["data"].as_str().unwrap())? == b"active writer\r");
+    let (mut reader, _, _) = join(&base, &update.read_token, false).await?;
+    let reader_attach = event(&mut host, "attach").await?;
+    ensure!(reader_attach["read_only"] == true);
+    let reader_client = reader_attach["client"].as_u64().unwrap();
+    writer.close(None).await?;
+    let (_resumed, _, restored_identity) = join(&base, &recovery, true).await?;
+    ensure!(restored_identity == identity);
+    send(&mut host, HostOutput::RevokeInvitations).await?;
+    event(&mut host, "invitations_revoked").await?;
+    send(&mut host, HostOutput::RotateInvitations { update }).await?;
+    ensure!(event(&mut host, "invitations_rotated").await?["invitations_revoked"] == true);
+    // Existing read-only guest stays attached after revocation and receives data.
+    send(
+        &mut host,
+        HostOutput::Output {
+            client: reader_client,
+            data: encode_data(b"reader remains attached"),
+        },
+    )
+    .await?;
+    ensure!(
+        decode_data(
+            event(&mut reader, "output").await?["data"]
+                .as_str()
+                .unwrap()
+        )? == b"reader remains attached"
+    );
+    reader.close(None).await?;
+    host.close(None).await?;
+    case.db.drop().await?;
+    Ok(())
+}

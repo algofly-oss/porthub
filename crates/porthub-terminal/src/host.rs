@@ -158,7 +158,8 @@ impl Attachments {
             }
             HostEvent::Ready { .. }
             | HostEvent::Presence { .. }
-            | HostEvent::InvitationsRevoked => {}
+            | HostEvent::InvitationsRevoked
+            | HostEvent::InvitationsRotated { .. } => {}
         }
         Ok(true)
     }

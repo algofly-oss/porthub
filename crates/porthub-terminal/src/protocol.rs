@@ -149,6 +149,29 @@ pub struct Participant {
     pub last_active_at: i64,
 }
 
+/// Hash-only invitation state loaded from the gateway's authoritative database.
+#[derive(Clone, Debug)]
+pub struct PersistedInvitations {
+    pub revision: u64,
+    pub write_hash: String,
+    pub read_hash: String,
+    pub expires_at: i64,
+    pub revoked: bool,
+}
+impl PersistedInvitations {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.revision <= i64::MAX as u64
+                && token(&self.write_hash, 64)
+                && token(&self.read_hash, 64)
+                && self.write_hash != self.read_hash
+                && self.expires_at >= 0,
+            "invalid persisted invitation state"
+        );
+        Ok(())
+    }
+}
+
 /// Replacement invitation capabilities, authorized and persisted by the gateway
 /// before installation. Revision makes retries idempotent and fences old updates.
 /// Deliberately does not implement Debug: capabilities must not enter logs.
@@ -159,6 +182,14 @@ pub struct InvitationUpdate {
     pub write_token: String,
     pub read_token: String,
     pub expires_at: i64,
+}
+impl std::fmt::Debug for InvitationUpdate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InvitationUpdate")
+            .field("revision", &self.revision)
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
 }
 impl InvitationUpdate {
     pub fn validate(&self, at: i64) -> Result<()> {
@@ -224,6 +255,11 @@ impl HistoryChunk {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostEvent {
+    InvitationsRotated {
+        revision: u64,
+        expires_at: i64,
+        invitations_revoked: bool,
+    },
     Redraw {
         client: u64,
     },
@@ -275,6 +311,7 @@ pub enum HostEvent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostOutput {
+    RotateInvitations { update: InvitationUpdate },
     RevokeInvitations,
     History { client: u64, page: HistoryChunk },
     Kick { client: u64 },

@@ -159,7 +159,12 @@ async fn host(
             host_socket(app, machine, token, socket).await
         }))
 }
-async fn register(app: &App, machine: &str, hello: &HostHello) -> ApiResult<bool> {
+async fn register(
+    app: &App,
+    machine: &str,
+    hello: &HostHello,
+) -> ApiResult<(bool, Option<PersistedInvitations>)> {
+    let mut persisted = None;
     let mut invitations_revoked = false;
     hello
         .validate(now())
@@ -186,6 +191,29 @@ async fn register(app: &App, machine: &str, hello: &HostHello) -> ApiResult<bool
     let collection = app.collection("terminal_sessions");
     if let Some(previous) = collection.find_one(doc! {"_id":&hello.id}).await? {
         invitations_revoked = previous.get_bool("invitations_revoked").unwrap_or(false);
+        if previous.contains_key("invitation_revision") {
+            let revision = previous
+                .get_i64("invitation_revision")
+                .map_err(|_| bad("invalid invitation state"))?;
+            if revision > 0 {
+                let state = PersistedInvitations {
+                    revision: revision as u64,
+                    write_hash: store::string(&previous, "invitation_write_hash").to_owned(),
+                    read_hash: store::string(&previous, "invitation_read_hash").to_owned(),
+                    expires_at: previous
+                        .get_i64("invitation_expires_at")
+                        .map_err(|_| bad("invalid invitation state"))?,
+                    revoked: invitations_revoked,
+                };
+                state
+                    .validate()
+                    .map_err(|_| bad("invalid invitation state"))?;
+                persisted = Some(state);
+            } else if revision != 0 {
+                return Err(bad("invalid invitation revision"));
+            }
+        }
+
         let options: Options = mongodb::bson::from_bson(
             previous
                 .get("options")
@@ -210,7 +238,7 @@ async fn register(app: &App, machine: &str, hello: &HostHello) -> ApiResult<bool
             mongodb::bson::to_bson(&hello.options).map_err(|_| bad("invalid terminal options"))?;
         collection.insert_one(doc!{"_id":&hello.id,"machine_id":machine,"secret_hash":digest(&hello.secret),"write_hash":digest(&hello.write_token),"read_hash":digest(&hello.read_token),"options":options,"state":"active","created_at":DateTime::now()}).await?;
     }
-    Ok(invitations_revoked)
+    Ok((invitations_revoked, persisted))
 }
 async fn persist_end(app: &App, id: &str) -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(3), crate::terminal_grants::end(app, id))
@@ -304,9 +332,9 @@ async fn host_socket(app: Arc<App>, machine: String, token: String, mut socket: 
     };
     let registration = async {
         let _lifecycle = app.terminal_lifecycle.lock().await;
-        let revoked = register(&app, &machine, &hello).await?;
+        let (revoked, persisted) = register(&app, &machine, &hello).await?;
         app.terminals
-            .register_persisted(&machine, &hello, now(), revoked)
+            .register_authorized(&machine, &hello, now(), revoked, persisted.as_ref())
             .map_err(|_| bad("terminal host registration unavailable"))
     };
     let Ok(Ok(mut host)) = tokio::time::timeout(Duration::from_secs(5), registration).await else {
@@ -374,6 +402,14 @@ async fn host_socket(app: Arc<App>, machine: String, token: String, mut socket: 
                         // Persist revocation before removing the live attachment.
                         // Recovery admission rechecks this record after attaching.
                         if !matches!(tokio::time::timeout(Duration::from_secs(3),crate::terminal_grants::revoke(&app,&hello.id,*client)).await,Ok(Ok(()))) {break;}
+                    }
+                    if let HostOutput::RotateInvitations {update} = &output {
+                        let _lifecycle = app.terminal_lifecycle.lock().await;
+                        if host.session.output(host.generation,HostOutput::Pong).is_err() {break;}
+                        let result = tokio::time::timeout(Duration::from_secs(3),persist_invitation_rotation(&app,&hello.id,host.generation,update)).await;
+                        let Ok(Ok(event)) = result else {break;};
+                        if !send_host(&mut socket,&event).await {break;}
+                        continue;
                     }
                     if matches!(output,HostOutput::RevokeInvitations) {
                         let _lifecycle=app.terminal_lifecycle.lock().await;
@@ -567,6 +603,66 @@ async fn revoke_invitations(
     persist_invitation_revocation(&app, &id).await?;
     Ok(axum::Json(serde_json::json!({"invitations_revoked":true})))
 }
+/// Caller holds terminal_lifecycle and has verified the current authenticated
+/// host generation. Capability hashes are committed before live routes change.
+async fn persist_invitation_rotation(
+    app: &App,
+    id: &str,
+    generation: u64,
+    update: &InvitationUpdate,
+) -> ApiResult<HostEvent> {
+    let collection = app.collection("terminal_sessions");
+    let record = collection
+        .find_one(doc! {"_id":id,"state":"active"})
+        .await?
+        .ok_or_else(|| bad("terminal session unavailable"))?;
+    let current = if record.contains_key("invitation_revision") {
+        record
+            .get_i64("invitation_revision")
+            .map_err(|_| bad("invalid invitation revision"))?
+    } else {
+        0
+    };
+    let write_hash = digest(&update.write_token);
+    let read_hash = digest(&update.read_token);
+    let revision =
+        i64::try_from(update.revision).map_err(|_| bad("invalid invitation revision"))?;
+    if revision == current && current > 0 {
+        if store::string(&record, "invitation_write_hash") != write_hash
+            || store::string(&record, "invitation_read_hash") != read_hash
+            || record.get_i64("invitation_expires_at").ok() != Some(update.expires_at)
+        {
+            return Err(bad("invitation revision conflicts"));
+        }
+        return Ok(HostEvent::InvitationsRotated {
+            revision: update.revision,
+            expires_at: update.expires_at,
+            invitations_revoked: record.get_bool("invitations_revoked").unwrap_or(false),
+        });
+    }
+    update
+        .validate(now())
+        .map_err(|_| bad("invalid replacement invitations"))?;
+    if current < 0 || revision != current.saturating_add(1) {
+        return Err(bad("stale invitation revision"));
+    }
+    let result = collection.update_one(doc! {"_id":id,"state":"active",
+        "$or":[{"invitation_revision":current},{"invitation_revision":{"$exists":false}}]},
+        doc! {"$set":{"invitation_revision":revision,"invitation_write_hash":&write_hash,
+            "invitation_read_hash":&read_hash,"invitation_expires_at":update.expires_at,"invitations_revoked":false}}).await?;
+    if result.matched_count != 1 {
+        return Err(bad("terminal invitation state changed"));
+    }
+    app.terminals
+        .rotate_invitations(id, generation, update)
+        .map_err(|_| bad("terminal invitation routes require host reconnect"))?;
+    Ok(HostEvent::InvitationsRotated {
+        revision: update.revision,
+        expires_at: update.expires_at,
+        invitations_revoked: false,
+    })
+}
+
 /// Caller holds terminal_lifecycle while persisting and changing admission.
 async fn persist_invitation_revocation(app: &App, id: &str) -> ApiResult<()> {
     let result = app
@@ -888,6 +984,105 @@ mod lifecycle_tests {
             .detail
             .to_string()
             .contains("lifecycle storage unavailable"));
+    }
+    #[tokio::test]
+    #[ignore = "requires isolated MongoDB"]
+    async fn rotated_invitation_state_survives_restart_without_restoring_original_links(
+    ) -> anyhow::Result<()> {
+        let uri = std::env::var("PORTHUB_TEST_MONGO_URI")?;
+        let db = mongodb::Client::with_uri_str(uri)
+            .await?
+            .database(&format!("porthub_terminal_rotate_test_{}", random_token(8)));
+        let config = crate::config::Config::default();
+        let app = App::new(config.clone(), db.clone());
+        let hello = hello();
+        register(&app, "machine", &hello)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e.detail))?;
+        let host = app.terminals.register("machine", &hello, now())?;
+        let writer = app.terminals.attach(&hello.write_token, 80, 24, "xterm")?;
+        let update = InvitationUpdate {
+            revision: 1,
+            write_token: random_token(32),
+            read_token: random_token(32),
+            expires_at: now() + 3600,
+        };
+        assert!(!format!("{update:?}").contains(&update.write_token));
+        let result = persist_invitation_rotation(&app, &hello.id, host.generation, &update)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e.detail))?;
+        assert!(matches!(
+            result,
+            HostEvent::InvitationsRotated {
+                revision: 1,
+                invitations_revoked: false,
+                ..
+            }
+        ));
+        writer.session.input(
+            writer.id,
+            ViewerInput::Input {
+                data: encode_data(b"still live\r"),
+            },
+        )?;
+        assert!(app.terminals.resolve(&hello.write_token).is_err());
+        assert!(app.terminals.resolve(&update.read_token)?.1);
+        let record = app
+            .collection("terminal_sessions")
+            .find_one(doc! {"_id":&hello.id})
+            .await?
+            .unwrap();
+        assert!(!format!("{record:?}").contains(&update.write_token));
+        assert!(!format!("{record:?}").contains(&update.read_token));
+        let restarted = App::new(config, db.clone());
+        let (revoked, state) = register(&restarted, "machine", &hello)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e.detail))?;
+        let restored = restarted.terminals.register_authorized(
+            "machine",
+            &hello,
+            now(),
+            revoked,
+            state.as_ref(),
+        )?;
+        assert!(restarted.terminals.resolve(&hello.read_token).is_err());
+        assert!(restarted.terminals.resolve(&update.write_token).is_ok());
+        persist_invitation_revocation(&restarted, &hello.id)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e.detail))?;
+        let retry =
+            persist_invitation_rotation(&restarted, &hello.id, restored.generation, &update)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e.detail))?;
+        assert!(matches!(
+            retry,
+            HostEvent::InvitationsRotated {
+                invitations_revoked: true,
+                ..
+            }
+        ));
+        assert!(restarted.terminals.resolve(&update.read_token).is_err());
+        // Expiry blocks invitations while allowing the authenticated host to restore.
+        app.collection("terminal_sessions")
+            .update_one(
+                doc! {"_id":&hello.id},
+                doc! {"$set":{"invitation_expires_at":now()-1}},
+            )
+            .await?;
+        let third = App::new(crate::config::Config::default(), db.clone());
+        let (revoked, state) = register(&third, "machine", &hello)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e.detail))?;
+        let _host = third.terminals.register_authorized(
+            "machine",
+            &hello,
+            now(),
+            revoked,
+            state.as_ref(),
+        )?;
+        assert!(third.terminals.resolve(&update.read_token).is_err());
+        db.drop().await?;
+        Ok(())
     }
     #[tokio::test]
     #[ignore = "requires isolated MongoDB"]

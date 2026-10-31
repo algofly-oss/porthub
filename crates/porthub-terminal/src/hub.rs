@@ -97,7 +97,28 @@ impl Hub {
         now: i64,
         invitations_revoked: bool,
     ) -> Result<HostLease> {
+        self.register_authorized(owner, hello, now, invitations_revoked, None)
+    }
+    /// Gateway-only restoration from authoritative hash-only persistent state.
+    /// Expired invitations do not prevent the workspace host from reconnecting.
+    pub fn register_authorized(
+        &self,
+        owner: &str,
+        hello: &HostHello,
+        now: i64,
+        invitations_revoked: bool,
+        persisted: Option<&PersistedInvitations>,
+    ) -> Result<HostLease> {
         hello.validate(now)?;
+        if let Some(persisted) = persisted {
+            persisted.validate()?;
+        }
+        let write_hash = persisted
+            .map(|p| p.write_hash.clone())
+            .unwrap_or_else(|| digest(&hello.write_token));
+        let read_hash = persisted
+            .map(|p| p.read_hash.clone())
+            .unwrap_or_else(|| digest(&hello.read_token));
         let mut inner = self.inner.lock().expect("terminal hub mutex");
         let session = if let Some(session) = inner.sessions.get(&hello.id) {
             ensure!(
@@ -107,15 +128,51 @@ impl Hub {
                     && !session.stop.is_cancelled(),
                 "terminal host identity does not match"
             );
-            session.clone()
+            let session = session.clone();
+            if let Some(persisted) = persisted {
+                let mut state = session.state.lock().expect("terminal session mutex");
+                ensure!(
+                    persisted.revision >= state.invitation_revision,
+                    "stale persisted invitation revision"
+                );
+                if persisted.revision == state.invitation_revision {
+                    ensure!(
+                        state.invitation_write_hash == write_hash
+                            && state.invitation_read_hash == read_hash
+                            && state.invitation_expires_at == persisted.expires_at,
+                        "persisted invitation revision conflicts"
+                    );
+                    state.invitations_revoked |= persisted.revoked;
+                } else {
+                    ensure!(
+                        [&write_hash, &read_hash].iter().all(|hash| inner
+                            .tokens
+                            .get(*hash)
+                            .is_none_or(|(id, _)| id == &hello.id)),
+                        "persisted capability collision"
+                    );
+                    inner.tokens.retain(|_, (id, _)| id != &hello.id);
+                    inner.tokens.insert(
+                        write_hash.clone(),
+                        (hello.id.clone(), hello.options.read_only),
+                    );
+                    inner
+                        .tokens
+                        .insert(read_hash.clone(), (hello.id.clone(), true));
+                    state.invitation_revision = persisted.revision;
+                    state.invitation_expires_at = persisted.expires_at;
+                    state.invitation_write_hash = write_hash.clone();
+                    state.invitation_read_hash = read_hash.clone();
+                    state.invitations_revoked = persisted.revoked;
+                }
+            }
+            session
         } else {
             ensure!(
                 inner.sessions.len() < 64
                     && inner.sessions.values().filter(|s| s.owner == owner).count() < 8,
                 "terminal session capacity reached"
             );
-            let write_hash = digest(&hello.write_token);
-            let read_hash = digest(&hello.read_token);
             ensure!(
                 !inner.tokens.contains_key(&write_hash) && !inner.tokens.contains_key(&read_hash),
                 "terminal capability already registered"
@@ -134,9 +191,11 @@ impl Hub {
                     next_client: participant_id(),
                     viewers: HashMap::new(),
                     close_event: None,
-                    invitations_revoked,
-                    invitation_revision: 0,
-                    invitation_expires_at: hello.options.expires_at,
+                    invitations_revoked: invitations_revoked
+                        || persisted.is_some_and(|p| p.revoked),
+                    invitation_revision: persisted.map_or(0, |p| p.revision),
+                    invitation_expires_at: persisted
+                        .map_or(hello.options.expires_at, |p| p.expires_at),
                     invitation_write_hash: write_hash.clone(),
                     invitation_read_hash: read_hash.clone(),
                 }),
@@ -722,7 +781,7 @@ impl Shared {
             "stale terminal host connection"
         );
         match output {
-            HostOutput::RevokeInvitations => {
+            HostOutput::RevokeInvitations | HostOutput::RotateInvitations { .. } => {
                 anyhow::bail!("invitation revocation must be persisted by the gateway")
             }
             HostOutput::History { client, page } => {
@@ -824,6 +883,54 @@ mod tests {
             read_token: random_token(32),
             expires_at: now() + 3600,
         }
+    }
+    #[tokio::test]
+    async fn authoritative_restore_installs_current_hashes_atomically_and_fences_stale_state(
+    ) -> Result<()> {
+        let h = hello();
+        let update = replacement(2);
+        let mut state = PersistedInvitations {
+            revision: 2,
+            write_hash: digest(&update.write_token),
+            read_hash: digest(&update.read_token),
+            expires_at: update.expires_at,
+            revoked: false,
+        };
+        let hub = Hub::default();
+        let host = hub.register_authorized("owner", &h, now(), false, Some(&state))?;
+        assert!(hub.resolve(&h.write_token).is_err());
+        assert!(hub.resolve(&update.read_token)?.1);
+        let guest = hub.attach(&update.write_token, 80, 24, "xterm")?;
+        let renewal = replacement(3);
+        state = PersistedInvitations {
+            revision: 3,
+            write_hash: digest(&renewal.write_token),
+            read_hash: digest(&renewal.read_token),
+            expires_at: renewal.expires_at,
+            revoked: false,
+        };
+        let _replacement_host = hub.register_authorized("owner", &h, now(), false, Some(&state))?;
+        assert!(hub.resolve(&update.write_token).is_err());
+        assert!(hub.resolve(&renewal.write_token).is_ok());
+        guest.session.input(
+            guest.id,
+            ViewerInput::Input {
+                data: encode_data(b"preserved\r"),
+            },
+        )?;
+        assert_eq!(host.session.participant_list().len(), 1);
+        state.revision = 2;
+        assert!(hub
+            .register_authorized("owner", &h, now(), false, Some(&state))
+            .is_err());
+        let restarted = Hub::default();
+        state.revision = 3;
+        state.expires_at = now() - 1;
+        let expired_host =
+            restarted.register_authorized("owner", &h, now(), false, Some(&state))?;
+        assert!(restarted.resolve(&renewal.read_token).is_err());
+        assert!(!expired_host.session.expired(now()));
+        Ok(())
     }
     #[tokio::test]
     async fn rotation_replaces_new_joins_preserves_attached_guests_and_cannot_undo_revocation(
