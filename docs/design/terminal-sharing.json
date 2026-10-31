@@ -1,7 +1,7 @@
 {
   "feature": "PortHub shared terminal workspaces",
-  "goal_status": "active implementation; not deployed",
-  "baseline": "CLI 1.8.9; production API/UI/gateway 1.8.8. Preserve unrelated workloads and existing tmux sessions.",
+  "goal_status": "active implementation; core/edge 1.9.0 deployed, final client packaging and complete feature verification pending",
+  "baseline": "Production API/UI/edge 1.9.0 at b7b2765; firewall remains 1.8.4; registered agents remain 1.8.9 pending client rollout. Preserve unrelated workloads and existing tmux sessions.",
   "latest_user_contract": {
     "lifetime": "Closing a local terminal, losing SSH, browser disconnect or explicit detach never destroys the workspace. It persists in a user-owned supervisor and private bundled tmux server. Only explicit terminal stop, exit/Ctrl+D closing the final shell, or explicitly configured idle/session timeout ends it. Earlier end-on-owner-disconnect proposal is superseded.",
     "expiry": "Invitation expiry prevents NEW joins only. Already attached participants continue without timer-driven resets. Browser reconnection credentials must preserve the same participant role independently of invitation expiry. Standard SSH connections remain alive until they disconnect/end/revoke; do not claim impossible transparent TCP reconnect for stock SSH clients.",
@@ -263,5 +263,27 @@
     "implementation": "Optional PORTHUB_TERMINAL_SSH_MULTIPLEX=true enables SSH/HTTPS protocol selection on existing PortHub TLS listeners. The edge peeks one byte without consuming TLS data, forwards SSH only to the fixed API Unix socket, limits forwarded SSH connections to 64 across TLS listeners and bounds silent identification to three seconds. Default remains disabled. API capability authentication, roles, recovery and revocation are unchanged. Explicit --api-socket also supplies the derived SSH socket default.",
     "validation": "All thirty-one edge tests pass, including six new selection/forwarding/quota/shutdown/deadline cases. Real Chromium and WebKit browser/API/bundled-shell/ordinary OpenSSH flows pass on the shared TLS port with 78 and 104 fresh concurrent HTTPS connections. A one-second TLS handshake budget does not truncate the longer-lived SSH guests. Both original dedicated-listener and multiplexed WebKit flows pass. Compose default-off and enabled/shared-port settings pass.",
     "deployment": "PortHub owns a reachable public TLS listener on 443 at URM2; dedicated 8347 probes did not reach the host. The new mode provides a deployment option on existing 443. Newly built images are required; previously staged source-82e300c images do not contain this mode. Production remains unchanged. Direct SSH hostname must bypass HTTP-only CDNs; HTTPS-payload-only middleboxes may still block raw SSH."
+  },
+  "live_server_rollout": {
+    "binary_revision": "b7b27650212a78f97fc401a86469b7f3c84442b7",
+    "operator_tool_revision": "0b6f63dbf2c4a8f0d2f34120a1fb429b8e6af8f7",
+    "server_ci": 41239182863,
+    "upgrade_fixture_ci": 41240698656,
+    "selected_roles": [
+      "core",
+      "edge"
+    ],
+    "health": "Both healthy with RestartCount=0 after activation; firewall retained unchanged at 1.8.4. All baseline unrelated containers retained by upgrade invariant.",
+    "backup": "Verified cold /data snapshot including MongoDB and terminal journal; ownership and SHA-256 manifest retained privately on URM2 before replacement.",
+    "ssh": "External stock OpenSSH completes gateway key exchange on urm2.duckdns.org TCP443; invalid capability denied. HTTPS and SSH share existing TLS ingress. This does not yet prove a full live shared session.",
+    "application_probes": "IBI, Thor, Home Presence and Autolycus passed activation probes. Subsequent IBI probe transiently failed; immediate retry returned 200 with original hash. Other three matched original hashes.",
+    "not_complete": [
+      "Final ten-platform client cohort and release publication",
+      "Registered client upgrade and full live browser/SSH workspace smoke",
+      "Optimized direct terminal participant transport with relay fallback",
+      "Nonmodal native participant sidebar",
+      "Stable history snapshot anchors under output/resize/eviction",
+      "Authenticated automatic production deployment gate"
+    ]
   }
 }
