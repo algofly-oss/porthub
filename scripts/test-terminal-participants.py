@@ -126,12 +126,12 @@ def exercise(executable, environment, job, stalled=False, sidebar=False, columns
         else:
             wait_text(master, child, b"200 read")
             os.write(master, b"\x1b[Bk")
-            wait_text(master, child, b"Remove 200? y / n")
+            wait_text(master, child, b"Remove 200?")
             os.write(master, b"n")
             wait_text(master, child, b"Removing a guest leaves")
             assert removals == [], "cancel must not remove a guest"
             os.write(master, b"k")
-            wait_text(master, child, b"Remove 200? y / n")
+            wait_text(master, child, b"Remove 200?")
             os.write(master, b"y")
             wait_text(master, child, b"Guest removed")
             assert removals == [200], "only the selected guest must be removed"

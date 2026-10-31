@@ -15,6 +15,8 @@ use tokio_tungstenite::{
     connect_async,
     tungstenite::{client::IntoClientRequest, Message},
 };
+#[path = "support/terminal_native.rs"]
+mod native;
 mod support;
 use support::Case;
 struct Cleanup(Workspace);
@@ -187,16 +189,6 @@ async fn exercise(multiplex: bool) -> Result<()> {
     let _server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
         axum::serve(listener, router).await
     }));
-    let mut request = format!("{}/api/terminal/host", origin.replacen("http:", "ws:", 1))
-        .into_client_request()?;
-    request
-        .headers_mut()
-        .insert("x-porthub-machine-id", machine.to_hex().parse()?);
-    request
-        .headers_mut()
-        .insert("authorization", format!("Bearer {credential}").parse()?);
-    let (mut socket, response) = connect_async(request).await?;
-    ensure!(response.headers().get("x-porthub-history-snapshots").is_some_and(|v| v == "1"), "gateway must advertise snapshot support");
     let hello = HostHello {
         history_snapshots: true,
         id: random_token(16),
@@ -217,42 +209,82 @@ async fn exercise(multiplex: bool) -> Result<()> {
             max_viewers: 16,
         },
     };
-    socket
-        .send(Message::Text(serde_json::to_string(&hello)?.into()))
-        .await?;
-    let mut attachments = Attachments::new(workspace.clone(), 16)?;
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let message = socket.next().await.context("host closed")??;
-            if let Message::Text(text) = message {
-                let event: HostEvent = serde_json::from_str(&text)?;
-                let ready = matches!(event, HostEvent::Ready { .. });
-                attachments.apply(event)?;
-                if ready {
-                    break;
+    let mut native = if std::env::var_os("PORTHUB_TEST_NATIVE_HOST").is_some() {
+        Some(
+            native::start(
+                fixture.path(),
+                &workspace,
+                &hello,
+                &origin,
+                &machine.to_hex(),
+                &credential,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let host = if let Some(native) = &mut native {
+        native.task.take().unwrap()
+    } else {
+        let mut request = format!("{}/api/terminal/host", origin.replacen("http:", "ws:", 1))
+            .into_client_request()?;
+        request
+            .headers_mut()
+            .insert("x-porthub-machine-id", machine.to_hex().parse()?);
+        request
+            .headers_mut()
+            .insert("authorization", format!("Bearer {credential}").parse()?);
+        let (mut socket, response) = connect_async(request).await?;
+        ensure!(
+            response
+                .headers()
+                .get("x-porthub-history-snapshots")
+                .is_some_and(|v| v == "1"),
+            "gateway must advertise snapshot support"
+        );
+        socket
+            .send(Message::Text(serde_json::to_string(&hello)?.into()))
+            .await?;
+        let mut attachments = Attachments::new(workspace.clone(), 16)?;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let message = socket.next().await.context("host closed")??;
+                if let Message::Text(text) = message {
+                    let event: HostEvent = serde_json::from_str(&text)?;
+                    let ready = matches!(event, HostEvent::Ready { .. });
+                    attachments.apply(event)?;
+                    if ready {
+                        break;
+                    }
                 }
             }
-        }
-        Ok::<_, anyhow::Error>(())
-    })
-    .await??;
-    let workspace_state = workspace.clone();
-    let host = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_millis(100));
-        loop {
-            tokio::select! {
-                message=socket.next()=>match message {
-                    Some(Ok(Message::Text(text)))=>{if !attachments.apply(serde_json::from_str(&text)?)?{break;}},
-                    Some(Ok(Message::Ping(_)|Message::Pong(_)))=>{},_=>break,
-                },
-                output=attachments.next()=>{let Some(output)=output else{break;};socket.send(Message::Text(serde_json::to_string(&output)?.into())).await?;},
-                _=tick.tick()=>{if !workspace_state.is_alive(){socket.send(Message::Text(serde_json::to_string(&HostOutput::End)?.into())).await?;break;}},
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        let workspace_state = workspace.clone();
+        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(100));
+            loop {
+                tokio::select! {
+                    message=socket.next()=>match message {
+                        Some(Ok(Message::Text(text)))=>{if !attachments.apply(serde_json::from_str(&text)?)?{break;}},
+                        Some(Ok(Message::Ping(_)|Message::Pong(_)))=>{},_=>break,
+                    },
+                    output=attachments.next()=>{let Some(output)=output else{break;};socket.send(Message::Text(serde_json::to_string(&output)?.into())).await?;},
+                    _=tick.tick()=>{if !workspace_state.is_alive(){socket.send(Message::Text(serde_json::to_string(&HostOutput::End)?.into())).await?;break;}},
+                }
             }
-        }
-        Ok::<_, anyhow::Error>(())
-    }));
+            Ok::<_, anyhow::Error>(())
+        }))
+    };
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ui/tests/terminal-live.cjs");
     let mut command = tokio::process::Command::new("node");
+    if let Some(native) = &native {
+        command
+            .env("PORTHUB_TEST_NATIVE_CLI", &native.executable)
+            .env("XDG_DATA_HOME", &native.data);
+    }
     command
         .arg(script)
         .env("REVIEW_ORIGIN", &origin)

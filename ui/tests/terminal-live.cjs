@@ -99,7 +99,17 @@ await type(host,"printf 'LIVE%s:%s\\n' 'CONTINUES' \"$OWNVAR\"");await output(ho
 const identity=(await watcher.getByText(/Guest .*\(you\)/).innerText()).match(/Guest (\d+)/)[1];
 await watcher.reload();await watcher.getByRole('button',{name:'Connect',exact:true}).click();await watcher.getByRole('heading',{name:'amberotter',exact:true}).waitFor();await watcher.getByText(`Guest ${identity} (you)`,{exact:true}).waitFor();
 await output(watcher,'LIVECONTINUES:preserved');
-const remove=host.getByRole('button',{name:`Remove Guest ${identity}`,exact:true});await remove.click();await host.getByRole('button',{name:'Remove guest',exact:true}).click();await watcher.getByRole('alert').filter({hasText:'removed by the host'}).waitFor();
+let nativeRemoval;
+if(process.env.PORTHUB_TEST_NATIVE_CLI){
+  const driver=spawn('python3',[require('node:path').join(__dirname,'../../scripts/test-terminal-supervisor-sidebar.py'),process.env.PORTHUB_TEST_NATIVE_CLI,session,identity],{stdio:['ignore','pipe','pipe']});
+  let diagnostics='';for(const stream of [driver.stdout,driver.stderr])stream.on('data',data=>diagnostics=(diagnostics+data.toString()).slice(-8192));
+  nativeRemoval=new Promise((resolve,reject)=>{driver.once('error',reject);driver.once('exit',code=>code===0?resolve():reject(new Error('Native sidebar failed: '+diagnostics)));});
+}else{
+  const remove=host.getByRole('button',{name:`Remove Guest ${identity}`,exact:true});await remove.click();await host.getByRole('button',{name:'Remove guest',exact:true}).click();
+}
+await watcher.getByRole('alert').filter({hasText:'removed by the host'}).waitFor();
+if(nativeRemoval){await nativeRemoval;await output(host,"SIDEBAROWNER:preserved");console.log("PASS native CLI sidebar -> real owner socket -> broker -> API: selected guest removed; remaining browser and shell preserved");}
+
 await type(host,"printf 'SURVIVED:%s:%s\\n' \"$OWNVAR\" \"${UNAUTHORIZED-unset}\"");await output(host,'SURVIVED:preserved:unset');
 await watcher.getByRole('button',{name:'Reconnect',exact:true}).click();await watcher.getByRole('alert').filter({hasText:'Recovery expired, revoked'}).waitFor();
 assert.equal(hostConnections,1,'host input must survive pressure without a hidden reconnect');

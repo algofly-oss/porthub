@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Real CLI sidebar against the sharing supervisor's private owner control socket."""
+import json
 import fcntl
 import os
 import pty
@@ -14,7 +15,9 @@ from terminal_pty_fixture import TERMINAL_KEEPER, assert_terminal_restored
 
 
 def main():
-    executable, identity = sys.argv[1:]
+    executable, identity = sys.argv[1:3]
+    target=int(sys.argv[3]) if len(sys.argv)>3 else 2
+    remote=len(sys.argv)>3
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 120, 0, 0))
     report_read, report_write = os.pipe()
@@ -34,20 +37,24 @@ def main():
                 pending.extend(os.read(master, 65536))
         pending.clear()
     try:
-        wait(b'2 read')
+        wait(f'{target} read'.encode())
+        listing=subprocess.run([executable,'terminal','participants',identity,'--json'],capture_output=True,check=True)
+        members=json.loads(listing.stdout)['members']
+        index=next(i for i,member in enumerate(members) if member['id']==target)
         os.write(master, b'\x1b[19~')  # Focus private sidebar.
         time.sleep(.1)
-        os.write(master, b'\x1b[Bk')
-        wait(b'Remove 2? y / n')
+        os.write(master, b'\x1b[B'*index+b'k')
+        wait(f'Remove {target}?'.encode())
         os.write(master, b'n')
         wait(b'Removing a guest leaves')
         os.write(master, b'k')
-        wait(b'Remove 2? y / n')
+        wait(f'Remove {target}?'.encode())
         os.write(master, b'y')
         wait(b'Guest removed')
         os.write(master, b'q')
         time.sleep(.1)
-        os.write(master, b'printf \'SIDEBAR%s:%s\\n\' \'OWNER\' "$PORTSTATE"\r')
+        variable=b"$OWNVAR" if remote else b"$PORTSTATE"
+        os.write(master,b'printf \'SIDEBAR%s:%s\\n\' \'OWNER\' "'+variable+b'"\r')
         wait(b'SIDEBAROWNER:preserved')
         os.write(master, b'\x01d')
         deadline=time.monotonic()+5

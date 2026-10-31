@@ -62,7 +62,8 @@ fn render(
         lines.push("No guests attached.".into());
     }
     if let Some(id) = confirm {
-        lines.push(format!("Remove {id}? y / n"));
+        lines.push(format!("Remove {id}?"));
+        lines.push("y confirm · n cancel".into());
     } else {
         lines.push("Removing a guest leaves the shell running.".into());
     }
