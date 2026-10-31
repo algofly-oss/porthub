@@ -1,12 +1,14 @@
 //! Remote attachments for one transport generation. Replace this router on
 //! reconnect, retaining its Workspace; old PTY events cannot enter the new link.
-use crate::{multiplexer::Workspace, protocol::*, pty::Client};
+use crate::{history::{Snapshot, SnapshotCache}, multiplexer::Workspace, protocol::*, pty::Client};
 use anyhow::{ensure, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use tokio::sync::mpsc;
 
 pub struct Attachments {
     workspace: Workspace,
+    snapshots: std::sync::Arc<std::sync::Mutex<SnapshotCache>>,
+    history_snapshots: bool,
     clients: BTreeMap<u64, Client>,
     send: mpsc::Sender<HostOutput>,
     receive: mpsc::Receiver<HostOutput>,
@@ -30,6 +32,8 @@ impl Attachments {
         let (history_send, history_receive) = mpsc::channel(8);
         Ok(Self {
             workspace,
+            snapshots: std::sync::Arc::new(std::sync::Mutex::new(SnapshotCache::default())),
+            history_snapshots: false,
             clients: BTreeMap::new(),
             send,
             receive,
@@ -54,6 +58,7 @@ impl Attachments {
             }
 
             HostEvent::History {
+                freeze, snapshot,
                 client,
                 request,
                 pane,
@@ -64,21 +69,43 @@ impl Attachments {
                 if !self.clients.contains_key(&client) {
                     return Ok(true);
                 }
+                ensure!(snapshot.as_ref().is_none_or(|id| freeze && token(id, 32)), "invalid history snapshot reference");
                 let workspace = self.workspace.clone();
+                let snapshots = self.snapshots.clone();
+                let enabled = self.history_snapshots;
                 let send = self.history_send.clone();
                 match self.history_capacity.clone().try_acquire_owned() {
                     Ok(permit) => {
                         self.history_jobs.spawn(async move {
                         let _permit=permit;
-                        let result=crate::history::page_pinned(&workspace,&pane,before,lines).await;
-                        let (bytes,total,count,truncated,error,resolved_pane)=match result {
-                            Ok(page)=>(page.bytes,page.total,page.lines,page.truncated,None,Some(page.pane)),
-                            Err(_)=>(Vec::new(),0,0,false,Some("History is temporarily unavailable; the pane may have closed.".into()),None),
+                        let result: Result<_> = async {
+                            if !freeze { return Ok((crate::history::page_pinned(&workspace,&pane,before,lines).await?, None)); }
+                            ensure!(enabled, "history snapshots unsupported; refresh history");
+                            let retained = if let Some(identity) = snapshot {
+                                snapshots.lock().expect("snapshot cache").get(client,&identity,&pane,std::time::Instant::now())?
+                            } else {
+                                let reservation = snapshots.lock().expect("snapshot cache").begin(client)?;
+                                let retained = Snapshot::capture(&workspace,&pane).await?;
+                                snapshots.lock().expect("snapshot cache").install(reservation,retained.clone(),std::time::Instant::now())?;
+                                retained
+                            };
+                            Ok((retained.page(before,lines)?,Some(retained.id().to_owned())))
+                        }.await;
+                        let (bytes,total,count,truncated,error,resolved_pane,snapshot)=match result {
+                            Ok((page,snapshot))=>(page.bytes,page.total,page.lines,page.truncated,None,Some(page.pane),snapshot),
+                            Err(error)=>{
+                                let detail=error.to_string();
+                                let message=if freeze && (detail.starts_with("history snapshot ") || detail.starts_with("history snapshots ")) {
+                                    detail.chars().take(200).collect()
+                                } else { "History is temporarily unavailable; the pane may have closed.".into() };
+                                (Vec::new(),0,0,false,Some(message),None,None)
+                            },
                         };
                         let chunks=bytes.len().max(1).div_ceil(MAX_DATA);
                         for index in 0..chunks {
                             let start=(index*MAX_DATA).min(bytes.len());let end=((index+1)*MAX_DATA).min(bytes.len());
-                            let page=HistoryChunk {request,pane:resolved_pane.clone(),data:encode_data(&bytes[start..end]),done:index+1==chunks,total,before,lines:count,truncated,error:error.clone()};
+                            let page=HistoryChunk {
+                                snapshot:snapshot.clone(),request,pane:resolved_pane.clone(),data:encode_data(&bytes[start..end]),done:index+1==chunks,total,before,lines:count,truncated,error:error.clone()};
                             if send.send(HostOutput::History {client,page}).await.is_err() {break;}
                         }
                     });
@@ -87,6 +114,7 @@ impl Attachments {
                         let _ = self.history_send.try_send(HostOutput::History {
                             client,
                             page: HistoryChunk {
+                                snapshot: None,
                                 pane: None,
                                 request,
                                 data: String::new(),
@@ -127,6 +155,7 @@ impl Attachments {
                     self.send.clone(),
                 ) {
                     Ok(pty) => {
+                        self.snapshots.lock().expect("snapshot cache").attach(client)?;
                         self.clients.insert(client, pty);
                     }
                     Err(_) => {
@@ -139,6 +168,7 @@ impl Attachments {
                     if pty.input(&data).is_err() {
                         // Disconnect only the offending or backpressured viewer.
                         self.clients.remove(&client);
+                        self.snapshots.lock().expect("snapshot cache").detach(client);
                         self.send.try_send(HostOutput::Closed { client })?;
                     }
                 }
@@ -151,16 +181,18 @@ impl Attachments {
             HostEvent::Detach { client } => {
                 self.pending_redraw.remove(&client);
                 self.clients.remove(&client);
+                self.snapshots.lock().expect("snapshot cache").detach(client);
             }
             HostEvent::Ping => {
                 self.send.try_send(HostOutput::Pong)?;
             }
             HostEvent::Stop { .. } | HostEvent::Reconnect { .. } => {
                 self.clients.clear();
+                *self.snapshots.lock().expect("snapshot cache") = SnapshotCache::default();
                 return Ok(false);
             }
-            HostEvent::Ready { .. }
-            | HostEvent::Presence { .. }
+            HostEvent::Ready { history_snapshots, .. } => self.history_snapshots = history_snapshots,
+            HostEvent::Presence { .. }
             | HostEvent::InvitationsRevoked
             | HostEvent::InvitationsRotated { .. } => {}
         }
@@ -221,6 +253,7 @@ impl Attachments {
         };
         if let HostOutput::Closed { client } = &output {
             self.clients.remove(client);
+            self.snapshots.lock().expect("snapshot cache").detach(*client);
         }
         Some(output)
     }
@@ -255,6 +288,7 @@ mod tests {
         attachments.history_send.try_send(HostOutput::History {
             client: 7,
             page: HistoryChunk {
+                snapshot: None,
                 pane: None,
                 request: 19,
                 data: String::new(),

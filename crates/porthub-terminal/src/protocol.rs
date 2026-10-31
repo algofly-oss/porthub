@@ -114,6 +114,8 @@ impl Options {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostHello {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub history_snapshots: bool,
     pub id: String,
     pub secret: String,
     pub write_token: String,
@@ -214,6 +216,8 @@ impl InvitationUpdate {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryChunk {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<String>,
     pub request: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane: Option<String>,
@@ -243,6 +247,9 @@ pub fn history_request(pane: &str, before: u32, lines: u16) -> Result<()> {
 }
 impl HistoryChunk {
     pub fn validate(&self) -> Result<()> {
+        if let Some(snapshot) = &self.snapshot {
+            ensure!(token(snapshot, 32) && self.pane.is_some(), "invalid anchored history response");
+        }
         if let Some(pane) = &self.pane {
             ensure!(!pane.is_empty(), "invalid resolved history pane");
             history_request(pane, self.before, self.lines.max(1))?;
@@ -271,6 +278,10 @@ pub enum HostEvent {
     },
     InvitationsRevoked,
     History {
+        #[serde(default, skip_serializing_if = "is_false")]
+        freeze: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        snapshot: Option<String>,
         client: u64,
         request: u32,
         pane: String,
@@ -278,6 +289,8 @@ pub enum HostEvent {
         lines: u16,
     },
     Ready {
+        #[serde(default, skip_serializing_if = "is_false")]
+        history_snapshots: bool,
         #[serde(default)]
         invitations_revoked: bool,
         ssh_host: String,
@@ -340,6 +353,8 @@ pub enum ViewerEvent {
         reconnect_timeout: u32,
     },
     Welcome {
+        #[serde(default, skip_serializing_if = "is_false")]
+        history_snapshots: bool,
         name: String,
         read_only: bool,
         expires_at: i64,
@@ -364,6 +379,10 @@ pub enum ViewerEvent {
 pub enum ViewerInput {
     Redraw,
     History {
+        #[serde(default, skip_serializing_if = "is_false")]
+        freeze: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        snapshot: Option<String>,
         request: u32,
         pane: String,
         before: u32,
@@ -404,6 +423,21 @@ pub fn encode_data(bytes: &[u8]) -> String {
 mod history_tests {
     use super::*;
     #[test]
+    fn frozen_history_requires_an_opaque_anchor_and_resolved_pane() {
+        let legacy = serde_json::json!({"request":1,"data":"","done":true,"total":0,"before":0,"lines":0,"truncated":false});
+        let mut page: HistoryChunk = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(serde_json::to_value(&page).unwrap().get("snapshot").is_none());
+        page.snapshot = Some("a".repeat(32));
+        assert!(page.validate().is_err());
+        page.pane = Some("%42".into());
+        page.validate().unwrap();
+        for invalid in ["", "%42", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "../another-session"] {
+            page.snapshot = Some(invalid.into());
+            assert!(page.validate().is_err());
+        }
+    }
+
+    #[test]
     fn resolved_pane_is_optional_for_older_hosts_and_strict_when_present() {
         let legacy = serde_json::json!({"request":1,"data":"","done":true,"total":0,"before":0,"lines":0,"truncated":false});
         let mut page: HistoryChunk = serde_json::from_value(legacy).unwrap();
@@ -423,3 +457,5 @@ mod history_tests {
         page.validate().unwrap();
     }
 }
+
+fn is_false(value: &bool) -> bool { !*value }

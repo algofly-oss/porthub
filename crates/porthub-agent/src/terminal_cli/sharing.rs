@@ -220,6 +220,7 @@ pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
             pending_invitations: None,
             invitations_revoked: false,
             hello: HostHello {
+                history_snapshots: false,
                 id: job.id.clone(),
                 secret: random_token(32),
                 write_token: random_token(32),
@@ -492,7 +493,7 @@ pub(super) async fn serve(root: &Path, id: &str) -> Result<()> {
                                 }
                             }
                             if let HostEvent::InvitationsRevoked=&event {sharing.invitations_revoked=true;save(root,&sharing,true)?;owner.state.lock().expect("owner state").invitations_revoked=true;}
-                            if let HostEvent::Ready{ssh_host,ssh_port,public_base,invitations_revoked}=&event {
+                            if let HostEvent::Ready{ssh_host,ssh_port,public_base,invitations_revoked,..}=&event {
                                 sharing.invitations_revoked|=*invitations_revoked;
                                 sharing.ready=Some(Ready{ssh_host:ssh_host.clone(),ssh_port:*ssh_port,public_base:public_base.clone()});
                                 sharing.state="connected".into();save(root,&sharing,true)?;owner.state.lock().expect("owner state").invitations_revoked=sharing.invitations_revoked;delay=1;

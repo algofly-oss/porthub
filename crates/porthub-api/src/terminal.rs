@@ -151,13 +151,18 @@ async fn host(
         .ok_or_else(|| bad("machine authorization required"))?
         .to_owned();
     machine_client::authenticate(&app, &machine, &token).await?;
-    Ok(upgrade
+    let mut response = upgrade
         .max_message_size(65536)
         .max_frame_size(65536)
         .on_upgrade(move |socket| async move {
             let _permit = permit;
             host_socket(app, machine, token, socket).await
-        }))
+        });
+    response.headers_mut().insert(
+        "x-porthub-history-snapshots",
+        axum::http::HeaderValue::from_static("1"),
+    );
+    Ok(response)
 }
 async fn register(
     app: &App,
@@ -342,6 +347,7 @@ async fn host_socket(app: Arc<App>, machine: String, token: String, mut socket: 
         return;
     };
     let ready = HostEvent::Ready {
+        history_snapshots: hello.history_snapshots,
         invitations_revoked: host.session.invitations_revoked(),
         ssh_host: advertised_host(&app),
         ssh_port: app.config.terminal.ssh_port,
@@ -902,6 +908,7 @@ mod lifecycle_tests {
     use super::*;
     fn hello() -> HostHello {
         HostHello {
+            history_snapshots: false,
             id: random_token(16),
             secret: random_token(32),
             write_token: random_token(32),

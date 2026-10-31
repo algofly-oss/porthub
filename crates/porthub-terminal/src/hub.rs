@@ -37,6 +37,7 @@ pub struct Shared {
     state: Mutex<State>,
 }
 struct State {
+    history_snapshots: bool,
     host: Option<mpsc::Sender<HostEvent>>,
     generation: u64,
     offline_at: Option<Instant>,
@@ -184,6 +185,7 @@ impl Hub {
                 secret_hash: digest(&hello.secret),
                 stop: CancellationToken::new(),
                 state: Mutex::new(State {
+                    history_snapshots: hello.history_snapshots,
                     host: None,
                     generation: 0,
                     offline_at: None,
@@ -210,6 +212,7 @@ impl Hub {
         let (send, events) = mpsc::channel(128);
         let generation = {
             let mut state = session.state.lock().expect("terminal session mutex");
+            state.history_snapshots = hello.history_snapshots;
             state.invitations_revoked |= invitations_revoked;
             // A reconnect replaces the transport, not the shared shell/session.
             if let Some(previous) = state.host.take() {
@@ -223,6 +226,7 @@ impl Hub {
                 if let Some(request) = viewer.history_pending.take() {
                     let _ = viewer.events.try_send(ViewerEvent::History {
                         page: HistoryChunk {
+                            snapshot: None,
                             pane: None,
                             request,
                             data: String::new(),
@@ -496,6 +500,7 @@ impl Hub {
                 term: term.into(),
             })?;
         events.try_send(ViewerEvent::Welcome {
+            history_snapshots: state.history_snapshots,
             name: session.options.name.clone(),
             read_only,
             expires_at: state.invitation_expires_at,
@@ -691,6 +696,7 @@ impl Shared {
     pub fn input(&self, client: u64, input: ViewerInput) -> Result<()> {
         ensure!(!self.stop.is_cancelled(), "terminal session ended");
         let mut state = self.state.lock().expect("terminal session mutex");
+        let history_snapshots = state.history_snapshots;
         let viewer = state
             .viewers
             .get_mut(&client)
@@ -709,12 +715,22 @@ impl Shared {
             }
 
             ViewerInput::History {
+                freeze, snapshot,
                 request,
                 pane,
                 before,
                 lines,
             } => {
                 history_request(&pane, before, lines)?;
+                ensure!(snapshot.as_ref().is_none_or(|id| freeze && token(id, 32)), "invalid history snapshot request");
+                if snapshot.is_some() && !history_snapshots {
+                    viewer.events.try_send(ViewerEvent::History { page: HistoryChunk {
+                        snapshot: None, pane: None, request, data: String::new(), done: true,
+                        total: 0, before, lines: 0, truncated: false,
+                        error: Some("History snapshot unavailable; refresh history.".into()),
+                    } })?;
+                    return Ok(());
+                }
                 if viewer.history_started.is_some_and(|started| {
                     started.elapsed() < Duration::from_millis(500)
                         || viewer.history_pending.is_some()
@@ -722,6 +738,7 @@ impl Shared {
                 }) {
                     viewer.events.try_send(ViewerEvent::History {
                         page: HistoryChunk {
+                            snapshot: None,
                             pane: None,
                             request,
                             data: String::new(),
@@ -738,6 +755,7 @@ impl Shared {
                 viewer.history_started = Some(Instant::now());
                 viewer.history_pending = Some(request);
                 HostEvent::History {
+                    freeze: freeze && history_snapshots, snapshot,
                     client,
                     request,
                     pane,
@@ -859,6 +877,7 @@ mod tests {
     use super::*;
     fn hello() -> HostHello {
         HostHello {
+            history_snapshots: false,
             id: random_token(16),
             secret: random_token(32),
             write_token: random_token(32),
@@ -1187,6 +1206,7 @@ mod tests {
         reader.session.input(
             reader.id,
             ViewerInput::History {
+                freeze: false, snapshot: None,
                 request: 11,
                 pane: "%0".into(),
                 before: 0,
@@ -1210,6 +1230,7 @@ mod tests {
             )
             .is_err());
         let mut page = HistoryChunk {
+            snapshot: None,
             pane: None,
             request: 99,
             data: encode_data(b"private scrollback"),
@@ -1250,6 +1271,7 @@ mod tests {
         reader.session.input(
             reader.id,
             ViewerInput::History {
+                freeze: false, snapshot: None,
                 request: 12,
                 pane: "%0".into(),
                 before: 0,
@@ -1266,6 +1288,7 @@ mod tests {
             .input(
                 reader.id,
                 ViewerInput::History {
+                    freeze: false, snapshot: None,
                     request: 13,
                     pane: "%0;bad".into(),
                     before: 0,
@@ -1278,6 +1301,7 @@ mod tests {
             .input(
                 reader.id,
                 ViewerInput::History {
+                    freeze: false, snapshot: None,
                     request: 13,
                     pane: "".into(),
                     before: 0,

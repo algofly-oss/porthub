@@ -103,6 +103,7 @@ async fn actual_websocket_recovery_survives_invite_expiry_and_host_kick_revokes_
         .insert("authorization", format!("Bearer {credential}").parse()?);
     let (mut host, _) = connect_async(request).await?;
     let hello = HostHello {
+        history_snapshots: false,
         id: random_token(16),
         secret: random_token(32),
         write_token: random_token(32),
@@ -166,6 +167,7 @@ async fn actual_websocket_recovery_survives_invite_expiry_and_host_kick_revokes_
     send(
         &mut resumed,
         ViewerInput::History {
+            freeze: false, snapshot: None,
             request: 77,
             pane: "%0".into(),
             before: 0,
@@ -180,6 +182,7 @@ async fn actual_websocket_recovery_survives_invite_expiry_and_host_kick_revokes_
         HostOutput::History {
             client,
             page: HistoryChunk {
+                snapshot: None,
                 pane: None,
                 request: 77,
                 data: encode_data(b"read-only-scrollback"),
@@ -349,6 +352,7 @@ async fn nonresponsive_peers_release_live_slots_but_keep_bounded_recovery() -> R
         .insert("authorization", format!("Bearer {credential}").parse()?);
     let (mut host, _) = connect_async(request).await?;
     let hello = HostHello {
+        history_snapshots: false,
         id: random_token(16),
         secret: random_token(32),
         write_token: random_token(32),
@@ -452,6 +456,7 @@ async fn host_rotates_public_links_without_interrupting_attached_guests() -> Res
         .insert("authorization", format!("Bearer {credential}").parse()?);
     let (mut host, _) = connect_async(request).await?;
     let hello = HostHello {
+        history_snapshots: false,
         id: random_token(16),
         secret: random_token(32),
         write_token: random_token(32),

@@ -267,6 +267,7 @@ async fn read_only_history_pages_real_scrollback_without_entering_copy_mode() ->
     assert_eq!(older_count, 32);
     assert_ne!(recent, older);
     attachments.apply(HostEvent::History {
+        freeze: false, snapshot: None,
         client: 7,
         request: 19,
         pane: "%0".into(),
@@ -505,7 +506,7 @@ async fn frozen_history_survives_output_resize_eviction_and_clear() -> Result<()
     let empty = Snapshot::capture(&workspace, "").await?;
     assert_eq!(empty.total(), 0, "visible screen is not retained history");
     let generate = |command: &str| -> Result<()> {
-        let output = workspace.command().args(["send-keys", "-t", "%0", command, "Enter"]).output()?;
+        let output = workspace.command().args(["send-keys", "-c", "porthub-history-owner", "-t", "%0", command, "Enter"]).output()?;
         assert!(output.status.success());
         Ok(())
     };
@@ -542,5 +543,70 @@ async fn frozen_history_survives_output_resize_eviction_and_clear() -> Result<()
     let pane = workspace.command().args(["list-panes", "-t", "outside:", "-F", "#{pane_id}"]).output()?;
     let pane = String::from_utf8(pane.stdout)?;
     assert!(Snapshot::capture(&workspace, pane.trim()).await.is_err(), "other sessions must remain inaccessible");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires bundled terminal runtime"]
+async fn frozen_history_routes_stable_pages_and_rejects_detached_guest_anchors() -> Result<()> {
+    use porthub_terminal::{host::Attachments, protocol::*};
+    async fn page(router: &mut Attachments, request: u32, anchor: Option<String>) -> Result<HistoryChunk> {
+        router.apply(HostEvent::History {
+            client: 7, request, pane: "%0".into(), before: 0, lines: 10,
+            freeze: true, snapshot: anchor,
+        })?;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(HostOutput::History { client: 7, page }) = router.next().await {
+                    assert_eq!(page.request, request);
+                    assert!(page.done, "small page should fit one frame");
+                    page.validate()?;
+                    return Ok(page);
+                }
+            }
+        }).await?
+    }
+    let (_directory, workspace) = workspace()?;
+    let _cleanup = Cleanup(workspace.clone());
+    workspace.start(&start())?;
+    let mut router = Attachments::new(workspace.clone(), 2)?;
+    router.apply(HostEvent::Ready {
+        history_snapshots: true, invitations_revoked: false,
+        ssh_host: String::new(), ssh_port: 0, public_base: String::new(),
+    })?;
+    let attach = || HostEvent::Attach {
+        client: 7, read_only: true, cols: 100, rows: 30, term: "xterm-256color".into(),
+    };
+    router.apply(attach())?;
+    let send = |command: &str| -> Result<()> {
+        let output = workspace.command().args(["send-keys", "-c", "porthub-history-owner", "-t", "%0", command, "Enter"]).output()?;
+        anyhow::ensure!(output.status.success(), "history fixture input failed");
+        Ok(())
+    };
+    send("i=0; while [ $i -lt 100 ]; do echo seed-$i; i=$((i+1)); done")?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !workspace.capture("%0", 200)?.contains("seed-99") {
+        anyhow::ensure!(Instant::now() < deadline, "history fixture timed out");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let frozen = page(&mut router, 1, None).await?;
+    assert!(frozen.error.is_none());
+    let identity = frozen.snapshot.clone().expect("snapshot identity");
+    send("i=0; while [ $i -lt 100 ]; do echo later-$i; i=$((i+1)); done")?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !workspace.capture("%0", 200)?.contains("later-99") {
+        anyhow::ensure!(Instant::now() < deadline, "later output timed out");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let retained = page(&mut router, 2, Some(identity.clone())).await?;
+    assert!(retained.error.is_none());
+    assert_eq!(retained.data, frozen.data);
+    assert_eq!(retained.total, frozen.total);
+    assert_eq!(retained.snapshot, frozen.snapshot);
+    router.apply(HostEvent::Detach { client: 7 })?;
+    router.apply(attach())?;
+    let expired = page(&mut router, 3, Some(identity)).await?;
+    assert!(expired.error.is_some(), "reattached guests cannot reuse old cache ownership");
+    assert!(expired.data.is_empty());
     Ok(())
 }

@@ -167,6 +167,7 @@ impl Pager {
         self.pending = Some((self.serial, Vec::new(), Instant::now()));
         self.last_request = Some(Instant::now());
         Some(ViewerInput::History {
+            freeze: false, snapshot: None,
             request: self.serial,
             pane: self.pane.clone(),
             before: self.before,
@@ -287,6 +288,7 @@ mod tests {
     }
     fn response(request: u32, bytes: &[u8], done: bool) -> HistoryChunk {
         HistoryChunk {
+            snapshot: None,
             pane: None,
             request,
             data: encode_data(bytes),

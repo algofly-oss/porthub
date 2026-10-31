@@ -15,6 +15,7 @@ async fn ordinary_openssh_joins_shared_terminal_and_read_only_invites_cannot_wri
     let config = porthub_terminal::ssh::config(key);
     let hub = Hub::default();
     let hello = HostHello {
+        history_snapshots: false,
         id: random_token(16),
         secret: random_token(32),
         write_token: random_token(32),
@@ -149,6 +150,7 @@ async fn ordinary_openssh_joins_shared_terminal_and_read_only_invites_cannot_wri
                 HostOutput::History {
                     client,
                     page: HistoryChunk {
+                        snapshot: None,
                         pane: None,
                         request,
                         data: encode_data(b"retained-view\n"),

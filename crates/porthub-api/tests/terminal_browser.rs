@@ -197,6 +197,7 @@ async fn exercise(multiplex: bool) -> Result<()> {
         .insert("authorization", format!("Bearer {credential}").parse()?);
     let (mut socket, _) = connect_async(request).await?;
     let hello = HostHello {
+        history_snapshots: false,
         id: random_token(16),
         secret: random_token(32),
         write_token: random_token(32),
