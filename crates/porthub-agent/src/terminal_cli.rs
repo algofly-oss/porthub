@@ -2,6 +2,7 @@
 //! Local mode needs no registration or network. Sharing uses the local broker.
 mod participant_control;
 mod participant_panel;
+mod participant_popup;
 mod sharing;
 use anyhow::{ensure, Context, Result};
 use clap::{Args, Subcommand};
@@ -58,6 +59,14 @@ pub enum Command {
     Kick { name: String, client: u64 },
     #[command(name = "__serve", hide = true)]
     Serve { id: String },
+    #[command(name = "__participants-popup", hide = true)]
+    ParticipantPopup {
+        root: PathBuf,
+        id: String,
+        client: u32,
+    },
+    #[command(name = "__participants-view", hide = true)]
+    ParticipantView { root: PathBuf, id: String },
     /// List this OS user's local and shared workspaces.
     #[command(alias = "ls")]
     List {
@@ -267,12 +276,7 @@ fn attach(job: &Job) -> Result<()> {
         println!("Already attached to {}", job.name);
         return Ok(());
     }
-    let status = workspace.attach(false).status()?;
-    ensure!(
-        status.success(),
-        "terminal attachment failed; the workspace may still be running"
-    );
-    Ok(())
+    participant_popup::attach(job, &workspace)
 }
 
 fn create(root: &Path, args: New) -> Result<Job> {
@@ -418,6 +422,10 @@ fn open_named(root: &Path, arguments: Vec<OsString>) -> Result<()> {
 pub async fn run(command: Command) -> Result<()> {
     let root = root()?;
     match command {
+        Command::ParticipantPopup { root, id, client } => {
+            participant_popup::show(&root, &id, client)?
+        }
+        Command::ParticipantView { root, id } => participant_popup::view(&root, &id).await?,
         Command::Named(arguments) => open_named(&root, arguments)?,
         Command::Share(args) => sharing::start(&root, args).await?,
         Command::Join { url } => sharing::join(&url).await?,

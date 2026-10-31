@@ -1627,7 +1627,7 @@ export const guideArticles = [
         },
         {
           "type": "paragraph",
-          "text": "In the native participant view, arrows select a guest, `k` requests removal, `y` confirms and `n` cancels; `q` closes the view. Removing a guest revokes that recovery credential and leaves other attachments and the shell running. A holder of a still-valid invitation can intentionally join as a new guest; block invitation URLs to prevent that."
+          "text": "In a local PortHub CLI attachment, press your prefix then Shift+P (Ctrl+A then Shift+P by default) to open the participant popup on the right. It takes focus while open; q closes it and returns to the shell. The shortcut requires an active local owner-attachment lease. You can also run participants NAME --watch in another terminal. In the native participant view, arrows select a guest, `k` requests removal, `y` confirms and `n` cancels; `q` closes the view. Removing a guest revokes that recovery credential and leaves other attachments and the shell running. A holder of a still-valid invitation can intentionally join as a new guest; block invitation URLs to prevent that."
         },
         {
           "type": "paragraph",

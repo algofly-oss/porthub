@@ -26,7 +26,7 @@ def wait_text(master, child, expected, timeout=5):
     return output
 
 
-def exercise(executable, environment, job, stalled=False):
+def exercise(executable, environment, job, stalled=False, sidebar=False, columns=100):
     path = Path(job["workspace"]) / "owner.sock"
     listener = socket.socket(socket.AF_UNIX)
     listener.bind(str(path))
@@ -71,15 +71,43 @@ def exercise(executable, environment, job, stalled=False):
     thread = threading.Thread(target=server, daemon=True)
     thread.start()
     master, slave = pty.openpty()
-    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, columns, 0, 0))
     before = termios.tcgetattr(slave)
     def own_terminal():
         os.setsid()
         fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
-    child = subprocess.Popen([executable, "terminal", "participants", job["id"], "--watch"],
+    arguments = [executable, "terminal", "attach", job["id"]] if sidebar else [executable, "terminal", "participants", job["id"], "--watch"]
+    child = subprocess.Popen(arguments,
                              stdin=slave, stdout=slave, stderr=slave, env=environment, preexec_fn=own_terminal)
     try:
-        wait_text(master, child, b"Participants")
+        if sidebar:
+            wait_text(master, child, b"$" if columns < 60 else b"PortHub")
+            root = Path(environment["XDG_DATA_HOME"]) / "porthub/terminal"
+            arguments = [executable,"terminal","__participants-popup",str(root),job["id"],str(child.pid)]
+            denied = subprocess.run(arguments,env=environment,capture_output=True,timeout=2)
+            assert denied.returncode != 0, "unregistered clients cannot open owner controls"
+            stale = Path(job["workspace"]) / f"owner-client-{child.pid}.lock"
+            stale.touch(mode=0o600)
+            try:
+                denied = subprocess.run(arguments,env=environment,capture_output=True,timeout=2)
+                assert denied.returncode != 0, "an unlocked stale lease cannot grant controls"
+            finally:
+                stale.unlink()
+            os.write(master, b"\x01P")
+        try:
+            wait_text(master, child, b"Participants")
+        except AssertionError:
+            if sidebar:
+                leases = list(Path(job["workspace"]).glob("owner-client-*.lock"))
+                assert leases, "owner attachment must hold a private lease"
+                client = leases[0].stem.split("-")[-1]
+                root = Path(environment["XDG_DATA_HOME"]) / "porthub/terminal"
+                probe = subprocess.run([executable,"terminal","__participants-popup",str(root),job["id"],client],env=environment,capture_output=True,timeout=2)
+                raise AssertionError(f"popup failed: {probe.stderr!r} {probe.stdout!r}")
+            raise
+        if sidebar:
+            panes = subprocess.run([executable,"terminal","tmux",job["id"],"--","list-panes","-a","-F","#{pane_id}"],env=environment,capture_output=True,check=True)
+            assert len(panes.stdout.splitlines()) == 1, "participant popup must not create a shell pane"
         if stalled:
             assert accepted.wait(3), "owner query must start"
         else:
@@ -98,6 +126,11 @@ def exercise(executable, environment, job, stalled=False):
             os.write(master, b"\x1b[A")
         started = time.monotonic()
         os.write(master, b"q")
+        if sidebar:
+            wait_text(master, child, b"$", timeout=1.5)
+            assert child.poll() is None, "closing the popup must keep the owner attached"
+            started = time.monotonic()
+            os.write(master, b"\x01d")
         while child.poll() is None and time.monotonic() - started < 1.5:
             if select.select([master], [], [], .02)[0]:
                 os.read(master, 65536)
@@ -127,11 +160,13 @@ def main():
         try:
             exercise(executable, environment, job)
             exercise(executable, environment, job, stalled=True)
+            exercise(executable, environment, job, sidebar=True)
+            exercise(executable, environment, job, sidebar=True, columns=36)
             listed = subprocess.run([executable, "terminal", "list", "--json"], env=environment, capture_output=True, check=True)
             assert any(row["id"] == identity and row["state"] == "running" for row in json.loads(listed.stdout)), "closing the owner view must preserve its workspace"
         finally:
             subprocess.run([executable, "terminal", "stop", identity], env=environment, capture_output=True, check=True)
-    print("PASS owner participants PTY: selection, cancellation, targeted removal, resize, terminal restoration, responsive stalled-socket quit and workspace persistence")
+    print("PASS owner participants PTY: selection, cancellation, targeted removal, resize, terminal restoration, responsive stalled-socket quit, owner-targeted right popup and workspace persistence")
 
 
 if __name__ == "__main__":

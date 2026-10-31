@@ -190,6 +190,14 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: cargo test --locked -p porthub-terminal --features ssh --target ${{ matrix.target }} -- --include-ignored
+      - name: Verify local terminals and native participant controls
+        if: inputs.verify_only == true && runner.os != 'Windows'
+        shell: bash
+        env:
+          PORTHUB_TEST_AGENT_EXECUTABLE: ${{ github.workspace }}/target/${{ matrix.target }}/debug/porthub
+        run: |
+          cargo test --locked -p porthub-agent --test terminal_local --test terminal_share --target ${{ matrix.target }} -- --include-ignored
+          python3 scripts/test-terminal-participants.py "$PORTHUB_TEST_AGENT_EXECUTABLE"
       - name: Build self-contained agent
         if: inputs.verify_only != true && runner.os != 'Linux'
         shell: bash

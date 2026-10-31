@@ -104,15 +104,16 @@ def build(args):
             run(['./configure','--prefix='+str(musl_prefix),'--host='+args.target,'--disable-shared','--enable-wrapper=gcc'],sources['musl'])
             run(['make',jobs],sources['musl']);run(['make','install'],sources['musl'])
             env['CC'] = str(musl_prefix/'bin/musl-gcc')
+            env['LDFLAGS'] = '-static'
             # Fail early with the actual linker diagnostic rather than allowing
             # configure to quietly mark required environment functions absent.
             probe = cache/'libc-link-probe.c'
             probe.write_text('#include <stdlib.h>\nint main(void) { setenv("PORTHUB_BUILD_PROBE", "1", 1); return putenv("PORTHUB_BUILD_PROBE=1"); }\n')
-            run([env['CC'], *shlex.split(env['CFLAGS']), str(probe), '-o', str(cache/'libc-link-probe')], cache)
+            run([env['CC'], *shlex.split(env['CFLAGS']), '-static', str(probe), '-o', str(cache/'libc-link-probe')], cache)
 
         run(['./configure', *configure, '--disable-shared','--enable-static','--disable-openssl','--disable-thread-support','--disable-samples','--disable-libevent-regress'],sources['libevent'])
         run(['make',jobs],sources['libevent']);run(['make','install'],sources['libevent'])
-        run(['./configure', *configure, '--without-shared','--with-normal','--enable-widec','--with-termlib','--without-cxx','--without-cxx-binding','--without-ada','--without-tests','--without-progs','--without-manpages','--without-debug','--with-build-cc=cc','--enable-pc-files','--with-pkg-config-libdir='+str(prefix/'lib/pkgconfig')],sources['ncurses'])
+        run(['./configure', *configure, '--without-shared','--with-normal','--enable-widec','--with-termlib','--without-cxx','--without-cxx-binding','--without-ada','--without-tests',('--with-progs' if 'darwin' in args.target else '--without-progs'),'--without-manpages','--without-debug','--with-build-cc=cc','--enable-pc-files','--with-pkg-config-libdir='+str(prefix/'lib/pkgconfig')],sources['ncurses'])
         run(['make',jobs],sources['ncurses']);run(['make','install.libs'],sources['ncurses'])
         libraries = [prefix/'lib/libncursesw.a',prefix/'lib/libtinfow.a']
         if not all(path.is_file() for path in libraries):
@@ -144,7 +145,9 @@ def build(args):
             if not dependency.startswith(('/usr/lib/', '/System/Library/')):
                 raise RuntimeError('Terminal helper requires an unbundled library: '+dependency)
     terminfo=stage/'terminfo';terminfo.mkdir(exist_ok=True)
-    tic=shutil.which('tic')
+    # Apple's system tic cannot write some current extended terminfo entries.
+    # Native Darwin builds use the compiler from the same pinned ncurses source.
+    tic=str(sources['ncurses']/'progs/tic') if 'darwin' in args.target else shutil.which('tic')
     if not tic:raise RuntimeError('Build host requires tic to package terminal definitions')
     subprocess.run([tic,'-x','-e','xterm,xterm-256color,screen,screen-256color,tmux,tmux-256color,vt100','-o',str(terminfo),str(sources['ncurses']/'misc/terminfo.src')],check=True)
     licenses=stage/'licenses';licenses.mkdir(exist_ok=True)

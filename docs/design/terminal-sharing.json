@@ -110,7 +110,7 @@
     "Full owned supervisor/multiplexer and broker integration",
     "CLI commands, customization and random names",
     "Integrate optimized peer transport for PortHub-aware joins with authenticated direct routing, relay fallback and latency/backpressure tests; document stock SSH transport limits",
-    "Native participant sidebar and owner management",
+    "Native owner popup implemented and locally tested; cross-platform validation and a continuously visible nonmodal presentation remain pending",
     "Browser terminal page and participant/history/clipboard controls",
     "Package embedding, all-platform helper CI caches and lifecycle tests",
     "Isolated real API+Mongo/SSH/browser end-to-end tests incl disconnect persistence, exit cleanup, read-only and expiry",
@@ -119,7 +119,7 @@
     "CLI rotation/renewal and end journaling are implemented; integrated release validation and browser rotation controls remain pending",
     "Stalled host/viewer deadlines and combined real browser/API/bundled-shell tests are verified; local end journaling is implemented; release validation remains pending",
     "Stable history anchors across output/eviction/resizing and pane/window discovery; native read-only SSH paging is implemented, with further mixed live output/history pressure validation required",
-    "Native --watch view and combined real browser/API/bundled-shell/SSH flow are implemented and tested; native right-side presentation, CLI invitation renewal/rotation and end journaling are implemented; integrated release validation remains required; invitation-wide revocation is now implemented",
+    "Native --watch view and combined real browser/API/bundled-shell/SSH flow are implemented and tested; native focused right-side popup implemented; nonmodal presentation and CLI invitation renewal/rotation and end journaling are implemented; integrated release validation remains required; invitation-wide revocation is now implemented",
     "Mixed browser/SSH attach-detach and output-pressure stress, including the recorded WebKit output-observation timeout, before release"
   ],
   "browser_validation": "24 isolated terminal layout/role UI checks passed initially; 12 Chromium checks rerun after recovery changes. Four Chromium/WebKit recovery cases pass: automatic reconnect using separate credential, expired invitation, tab reload, role preservation and revocation. Production UI build passes. Combined real browser/API/bundled-shell verification remains required.",
@@ -184,10 +184,17 @@
     "source": "49f1d32945f7fea69d259765e72b8a0735f2dfbf",
     "run": "https://github.com/algofly-oss/porthub/actions/runs/41223275496",
     "mode": "All-platform verify-only; publication disabled. Existing 32-bit workflow incorrectly built release artifacts in this mode; fixed for subsequent runs.",
-    "observed": "All three Windows verification jobs passed on 49f1d32. On retry 293f5d1, native Linux helper build and five real bundled tmux tests passed, followed by a stock-SSH timeout. Reproduced locally with TERM removed; safe empty-TERM fallback fixes the OpenSSH regression. All seven Linux/macOS jobs in that retry completed with failures, so none is claimed fully validated.",
-    "changes": "Explicit -m32 for multilib i686 helper, bounded failure log tail and build-log artifact, ELF class/CPU plus static-loader validation; verify-only cross compilation no longer builds/uploads 32-bit release binaries.",
+    "observed": "All three Windows verification jobs passed on 49f1d32; representative Linux x86-64 verify-only run passed on b12ea93, including terminal engine/SSH. Darwin ARM64 built static jemalloc and passed dependency inspection, then failed using Apple system tic on current extended terminfo. ARM helper link probe exposed libgcc raise dependency missing without static linking.",
+    "changes": "Linux configure/probe linking now uses -static throughout. Darwin builds tic from the same pinned ncurses source to compile terminal definitions. Verify-only native jobs now exercise local CLI/share and actual owner popup PTYs.",
     "local_validation": "Two real compiler-produced ELF checks pass. Stock OpenSSH test with TERM removed failed before the gateway fallback and passes after it. Python syntax and workflow YAML parse checks pass. Darwin jemalloc packaging and Linux cross-link probe still require CI results.",
-    "status": "Representative targeted CI retries required after this checkpoint; no release published or deployment applied.",
+    "status": "Linux x86-64 verify-only and all three Windows verification jobs passed at their documented source checkpoints. Current ARM static-link and Darwin source-tic fixes plus new native-popup CI checks need representative reruns; no release published or deployment applied.",
     "diagnosed": "32-bit Linux ncurses reports absent setenv/putenv during configuration; underlying link diagnostic remains pending. macOS tmux explicitly requires allocator selection and recommends jemalloc. The helper now pins upstream jemalloc 5.3.1 for Darwin, statically force-loads its zone initializer and rejects non-system dylib dependencies. Linux configure link probes and config.log artifacts added for the remaining cross-compilation issue."
+  },
+  "native_participant_popup": {
+    "status": "Implemented and locally tested; cross-platform/release validation pending.",
+    "interaction": "Local owner CLI attachments hold a private file lock for the child tmux client. Prefix then capital P opens a targeted right-side popup with existing participant selection and removal. q closes the focused popup and returns to the shell; it does not add a shell pane. Width is bounded by actual client width. Shortcut failures are quiet and do not trigger shared copy mode.",
+    "authority": "The popup checks a private live owner-attachment lease and resolves the matching tmux PID to its client TTY. Unregistered client IDs and stale unlocked leases fail. This is OS-user-scoped native control, not a sandbox against interactive guests who already have the host shell OS permissions. Browser management remains separately account-authorized.",
+    "tests": "Actual PTYs pass at 100 and 36 columns: selection, confirmation cancellation, selected removal, resize, q return and owner detach; validates no additional pane and retained workspace. Unregistered process and stale unlocked lease rejected. Existing full-screen stalled-control test also passes. Local CLI workspace/share regressions pass, including persisted shell state, invitation rotation process-loss recovery and explicit stop.",
+    "limits": "A focused popup, not a continuously visible nonmodal split. Cross-platform CI now runs native terminal and popup checks in verify-only mode as well as final packaged tests."
   }
 }
