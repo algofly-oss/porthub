@@ -17,16 +17,22 @@ use support::Case;
 #[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
 async fn enrolled_native_agents_discover_each_other_and_transfer_without_gateway_payload(
 ) -> Result<()> {
-    exercise_discovery(false).await
+    exercise_discovery(false, false).await
 }
 
 #[tokio::test]
 #[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
 async fn changed_underlay_is_used_after_failure_without_replacing_a_healthy_peer() -> Result<()> {
-    exercise_discovery(true).await
+    exercise_discovery(true, false).await
 }
 
-async fn exercise_discovery(network_change: bool) -> Result<()> {
+#[tokio::test]
+#[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn ipv6_native_agents_signal_then_transfer_with_the_entire_gateway_offline() -> Result<()> {
+    exercise_discovery(false, true).await
+}
+
+async fn exercise_discovery(network_change: bool, ipv6: bool) -> Result<()> {
     let case = Case::new(Config {
         private_transport: porthub_api::private_transport::Settings::parse(
             "[]",
@@ -50,7 +56,7 @@ async fn exercise_discovery(network_change: bool) -> Result<()> {
         }
         let group=ObjectId::new();case.app.collection("machine_groups").insert_one(doc!{"_id":group,"user_id":owner}).await?;
         case.app.collection("access_rulebooks").insert_one(doc!{"_id":ObjectId::new(),"user_id":owner,"group_id":group.to_hex(),"rules":[{"id":"http","name":"HTTP","sources":[{"kind":"machine","id":ids[0].to_hex()}],"destinations":[{"kind":"machine","id":ids[1].to_hex()}],"ports":"8000"}]}).await?;
-        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await?;let base=format!("http://{}",listener.local_addr()?);
+        let listener=tokio::net::TcpListener::bind(if ipv6 {"[::1]:0"} else {"127.0.0.1:0"}).await?;let base=format!("http://{}",listener.local_addr()?);
         let app=case.router.clone();let stop=gateway_cancel.clone();gateway=Some(tokio::spawn(async move {axum::serve(listener,app).with_graceful_shutdown(stop.cancelled_owned()).await.map_err(anyhow::Error::from)}));
         let mut sessions:Vec<Sessions>=Vec::new();let mut receivers=Vec::new();let mut interface_updates=Vec::new();
         for id in &peers {
@@ -63,7 +69,7 @@ async fn exercise_discovery(network_change: bool) -> Result<()> {
                 tasks.spawn(controller::run_watched_instance(profile,interfaces,live.clone(),output,relay_config,controller::nonce()?,cancel.child_token()));
                 interface_updates.push(updates);
             } else {
-                tasks.spawn(controller::run(profile,vec!["127.0.0.1:0".parse()?],live.clone(),output,cancel.child_token()));
+                tasks.spawn(controller::run(profile,vec![if ipv6 {"[::1]:0"} else {"127.0.0.1:0"}.parse()?],live.clone(),output,cancel.child_token()));
             }
             sessions.push(live);receivers.push(input);
         }
@@ -183,11 +189,14 @@ async fn native_gateway_fallback_authenticates_leases_and_blocks_spoofed_packet_
             request.headers_mut().insert("authorization",format!("Bearer {credential}").parse()?);
             ensure!(tokio_tungstenite::connect_async(request).await.is_err());
         }
-        let mut senders=Vec::new();let mut receivers=Vec::new();
+        let mut senders=Vec::new();let mut receivers=Vec::new();let mut relay_configs=Vec::new();
         for peer in &peers {
             let profile=Profile{server:base.clone(),peer_id:peer.clone(),workspace:owner.to_hex(),token:token.into(),account_email:None,fallback_servers:vec![],allow_insecure_http_for_tests:true};
             let (sender,input)=relay::channel();let (output,events)=mpsc::channel(16);
-            let (_relay_config, receiver) = tokio::sync::watch::channel(Some(relay::Config { direct_url: None, relay_token: None }));
+            let (relay_config, receiver) = tokio::sync::watch::channel(Some(relay::Config { direct_url: None, relay_token: None }));
+            // Closing configuration explicitly shuts down the relay owner.
+            // Retain the sender until this fixture finishes transferring.
+            relay_configs.push(relay_config);
             tasks.spawn(relay::run(profile,"relay-instance-0123456789".into(),sender.clone(),input,receiver,output,cancel.child_token()));
             senders.push(sender);receivers.push(events);
         }

@@ -20,7 +20,8 @@
   },
   "verification": {
     "mesh": "37 tests passed, including real IPv6 full-size packet transfers, IPv4-blackhole simulation, IPv4-only peer interoperability, unreachable first STUN server, IPv6 STUN, source/transaction validation, relay cancellation, certificate rejection and active stream carrier-change regressions.",
-    "agent_network": "78 agent regressions and 19 network tests passed on release 1.8.9. Native ten-platform CI pending."
+    "agent_network": "78 agent regressions and 19 network tests passed on release 1.8.9. Native ten-platform CI pending.",
+    "signaling_e2e": "Four isolated API+Mongo controller tests passed: direct IPv4 and IPv6 transfers after the entire gateway stops, underlay replacement without interrupting healthy sessions, and relay authentication/source/lease enforcement. Fixed a pre-existing fixture that dropped its relay configuration sender before transfer. Disposable test database removed."
   },
   "rollout_status": "Local verification passed; agent-only 1.8.9 release pending full native matrix. Existing API/UI/gateway 1.8.8 require no restart."
 }
