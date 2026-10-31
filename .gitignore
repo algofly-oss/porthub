@@ -12,3 +12,5 @@ volumes/
 /deploy/native/server-bin/
 
 /dist/
+
+/deploy/native/ui-bin/

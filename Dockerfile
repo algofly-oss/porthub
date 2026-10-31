@@ -2,6 +2,7 @@
 # Independent slim runtime images; one Compose file chooses prod/dev targets.
 ARG PORTHUB_SERVER_ARTIFACT_SOURCE=rust-build
 ARG PORTHUB_CORE_ARTIFACT_SOURCE=${PORTHUB_SERVER_ARTIFACT_SOURCE}
+ARG PORTHUB_UI_ARTIFACT_SOURCE=ui-build
 FROM rust:1.99.1-slim-bookworm AS rust-build
 WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev pkg-config && rm -rf /var/lib/apt/lists/*
@@ -62,6 +63,9 @@ RUN yarn build && yarn next export --outdir /out/ui && \
 
 # CI supplies the verified native server bundle to package runtime images
 # without compiling Rust again. Normal developer builds retain rust-build.
+FROM scratch AS prebuilt-ui
+COPY deploy/native/ui-bin/ui/ /out/ui/
+
 FROM scratch AS prebuilt-server
 COPY deploy/native/server-bin/porthub-api deploy/native/server-bin/porthub-runtime /usr/local/bin/
 COPY deploy/native/server-bin/porthub-api deploy/native/server-bin/porthub-runtime deploy/native/server-bin/porthub-edge deploy/native/server-bin/porthub-firewall /out/
@@ -84,6 +88,7 @@ LABEL org.opencontainers.image.revision=$PORTHUB_SOURCE_REVISION
 # from runtime-base keeps old UI assets out of the final image's layer history.
 FROM ${PORTHUB_CORE_ARTIFACT_SOURCE} AS core-artifacts
 FROM ${PORTHUB_SERVER_ARTIFACT_SOURCE} AS server-artifacts
+FROM ${PORTHUB_UI_ARTIFACT_SOURCE} AS ui-artifacts
 
 FROM runtime-base AS core-runtime
 LABEL io.porthub.api-preflight=v1
@@ -96,7 +101,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends libcurl4 libssl
     chown 10001:10001 /run/porthub-config/gateway.toml
 COPY --from=core-artifacts /usr/local/bin/porthub-api /usr/local/bin/porthub-runtime /usr/local/bin/
 COPY --from=database /usr/bin/mongod /usr/local/bin/mongod
-COPY --from=ui-build --chown=10001:10001 /out/ui /app/ui/
+COPY --from=ui-artifacts --chown=10001:10001 /out/ui /app/ui/
 COPY deploy/native/core.toml /app/core.toml
 USER 10001:10001
 ENTRYPOINT ["porthub-runtime", "supervise", "--config", "/app/core.toml"]

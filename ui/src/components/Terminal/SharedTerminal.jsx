@@ -32,7 +32,9 @@ export default function SharedTerminal() {
 
   useEffect(() => {
     let alive = true, instance, observer, resizeFrame, wheelSurface, wheelListener;
-    Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit")]).then(([{ Terminal }, { FitAddon }]) => {
+    // Use the published browser bundles: the current production minifier breaks
+    // xterm 6's ESM lifecycle helpers, although development builds work.
+    Promise.all([import("@xterm/xterm/lib/xterm.js"), import("@xterm/addon-fit/lib/addon-fit.js")]).then(([{ Terminal }, { FitAddon }]) => {
       if (!alive) return;
       instance = new Terminal({
         cursorBlink: true, disableStdin: true, scrollback: 100000, fontSize: 14,

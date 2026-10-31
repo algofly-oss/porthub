@@ -18,6 +18,46 @@ on:
 permissions:
   contents: read
 jobs:
+  ui:
+    name: Build and test production browser assets
+    runs-on: ubuntu-24.04
+    env:
+      SOURCE_REVISION: ${{ inputs.revision || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Enable pinned UI package manager
+        run: corepack enable && corepack prepare yarn@1.22.22 --activate
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .cache/ui-yarn
+            ui/.next/cache
+          key: production-ui-${{ runner.os }}-${{ hashFiles('ui/yarn.lock') }}-${{ github.sha }}
+          restore-keys: production-ui-${{ runner.os }}-${{ hashFiles('ui/yarn.lock') }}-
+      - name: Build exported UI once for all server architectures
+        working-directory: ui
+        run: |
+          yarn install --frozen-lockfile --cache-folder ../.cache/ui-yarn --network-timeout 120000 --network-concurrency 4
+          yarn build
+          yarn next export --outdir ../ui-artifacts/ui
+      - name: Exercise the exported terminal in a real browser
+        run: python3 scripts/test-terminal-production-ui.py --root ui-artifacts/ui
+      - name: Verify and compress reusable browser assets
+        run: |
+          find ui-artifacts/ui -type f \( -name '*.html' -o -name '*.js' -o -name '*.css' -o -name '*.json' -o -name '*.svg' \) -exec gzip --keep -9 {} +
+          printf '%s\n' "$SOURCE_REVISION" > ui-artifacts/source-revision
+          (cd ui-artifacts && find ui -type f -print0 | sort -z | xargs -0 sha256sum) > ui-artifacts/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: porthub-server-ui
+          path: ui-artifacts/
+          if-no-files-found: error
+          retention-days: 3
   server:
     strategy:
       fail-fast: false
@@ -75,7 +115,7 @@ jobs:
           retention-days: 3
   package:
     name: Package server runtime images
-    needs: [server]
+    needs: [server, ui]
     strategy:
       fail-fast: false
       matrix:
@@ -89,6 +129,16 @@ jobs:
         with:
           name: porthub-server-${{ matrix.arch }}
           path: deploy/native/server-bin
+      - uses: actions/download-artifact@v4
+        with:
+          name: porthub-server-ui
+          path: deploy/native/ui-bin
+      - name: Verify tested production UI artifacts
+        env:
+          EXPECTED_REVISION: ${{ inputs.revision || github.sha }}
+        run: |
+          test "$(cat deploy/native/ui-bin/source-revision)" = "$EXPECTED_REVISION"
+          (cd deploy/native/ui-bin && sha256sum --check SHA256SUMS)
       - name: Verify pinned native server artifacts
         env:
           EXPECTED_REVISION: ${{ inputs.revision || github.sha }}
@@ -106,7 +156,7 @@ jobs:
           mkdir -p server-images
           for role in core edge firewall; do
             image="porthub-ci:${role}-${SOURCE_REVISION}"
-            docker buildx build --load --target "prod-$role" --tag "$image"               --build-arg PORTHUB_SERVER_ARTIFACT_SOURCE=prebuilt-server               --build-arg PORTHUB_CORE_ARTIFACT_SOURCE=prebuilt-server               --build-arg "PORTHUB_VERSION=$version"               --build-arg "PORTHUB_SOURCE_REVISION=$SOURCE_REVISION"               --cache-from "type=gha,scope=server-${SERVER_ARCH}-${role}"               --cache-to "type=gha,scope=server-${SERVER_ARCH}-${role},mode=max" .
+            docker buildx build --load --target "prod-$role" --tag "$image"               --build-arg PORTHUB_SERVER_ARTIFACT_SOURCE=prebuilt-server               --build-arg PORTHUB_CORE_ARTIFACT_SOURCE=prebuilt-server               --build-arg PORTHUB_UI_ARTIFACT_SOURCE=prebuilt-ui               --build-arg "PORTHUB_VERSION=$version"               --build-arg "PORTHUB_SOURCE_REVISION=$SOURCE_REVISION"               --cache-from "type=gha,scope=server-${SERVER_ARCH}-${role}"               --cache-to "type=gha,scope=server-${SERVER_ARCH}-${role},mode=max" .
             test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")" = "$SOURCE_REVISION"
             case "$role" in core) binary=porthub-api; expected_user=10001:10001 ;; edge) binary=porthub-edge; expected_user=0:10001 ;; firewall) binary=porthub-firewall; expected_user=0:10001 ;; esac
             test "$(docker image inspect --format '{{.Config.User}}' "$image")" = "$expected_user"

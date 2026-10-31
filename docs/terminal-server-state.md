@@ -103,3 +103,21 @@ state survives. It also tests explicit renewal after invitation revocation.
 A filesystem-failure test verifies that an unsaved update cannot remain in memory
 and be sent on a later retry. Browser invitation rotation controls are separate
 from this native command and are not implemented yet.
+
+### Production browser packaging
+
+The server workflow builds the static UI once on x86_64, loads the exported
+terminal page in Chrome, and verifies that xterm creates its terminal and screen.
+The same hashed UI artifact is then packaged into every server architecture;
+Docker packaging does not rebuild that UI. Local Docker builds retain the normal
+UI build stage. The regression check can also be run independently:
+
+```
+python3 scripts/test-terminal-production-ui.py --root /path/to/exported/ui
+```
+
+This check must use a production export: development mode did not expose an
+xterm 6 ESM lifecycle failure in the production minifier. Terminal imports now
+select xterm's published browser bundles explicitly. This initialization check
+complements the full browser/API/SSH session tests; it does not authenticate a
+guest or prove live shell sharing on its own.
