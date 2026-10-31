@@ -121,3 +121,25 @@ xterm 6 ESM lifecycle failure in the production minifier. Terminal imports now
 select xterm's published browser bundles explicitly. This initialization check
 complements the full browser/API/SSH session tests; it does not authenticate a
 guest or prove live shell sharing on its own.
+
+### Explicit live deployment smoke check
+
+After an installed client reaches its expected version and source, an operator
+can run the scoped live check through an existing SSH host alias:
+
+```
+python3 scripts/test-terminal-live-deployment.py --host HOST_ALIAS \
+  --version VERSION --revision FULL_VERIFIED_BUILD_SHA \
+  --known-hosts /path/to/previously/verified/gateway/known_hosts
+```
+
+It requires Node, Playwright and Chrome locally. It verifies the installed CLI
+before creating anything, uses a private temporary XDG root, checks the bundled
+100000-line history/mouse/Ctrl+A/F7 configuration, and starts one bounded test
+workspace. An anonymous browser and ordinary SSH exercise shared output,
+actual retained scrollback, disconnect persistence, invitation revocation,
+recovery, owner removal and explicit exit. Invitation secrets stay out of its
+printed diagnostics. Cleanup stops only the generated workspace, waits for its
+sharing supervisor and removes only its private temporary directory; service
+units and unrelated workspaces are unchanged. A running or unconfirmed fixture
+is retained for operator review instead of deleting its control sockets.
