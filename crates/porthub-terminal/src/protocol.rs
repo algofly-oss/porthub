@@ -270,6 +270,7 @@ impl HistoryChunk {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostEvent {
+    Delivery { client: u64, packet: DeliveryPacket },
     DirectOffer { client: u64, request: u32, description: DirectDescription },
     InvitationsRotated {
         revision: u64,
@@ -335,6 +336,7 @@ pub enum HostEvent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostOutput {
+    Delivery { client: u64, packet: DeliveryPacket },
     DirectAnswer { client: u64, answer: DirectAnswer },
     DirectUnavailable { client: u64, request: u32 },
     RotateInvitations { update: InvitationUpdate },
@@ -350,6 +352,7 @@ pub enum HostOutput {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ViewerEvent {
+    Delivery { packet: DeliveryPacket },
     DirectAnswer { answer: DirectAnswer },
     DirectUnavailable { request: u32 },
     History {
@@ -388,6 +391,7 @@ pub enum ViewerEvent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ViewerInput {
+    Delivery { packet: DeliveryPacket },
     DirectOffer { request: u32, description: DirectDescription },
     Redraw,
     History {
@@ -524,5 +528,26 @@ mod direct_signal_tests {
         assert!(DirectDescription(serde_json::json!({"type":"offer","sdp":"m=audio 9 RTP/AVP 0","client":123}).to_string()).validate("offer").is_err());
         assert!(serde_json::from_value::<ViewerInput>(serde_json::json!({"type":"direct_offer","request":1,"description":description.0,"read_only":false})).is_err());
         Ok(())
+    }
+}
+
+/// A bounded relay carrier for the same binary frame used by WebRTC. Payloads
+/// remain redacted in protocol diagnostics and never supply an authorization role.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DeliveryPacket(pub String);
+impl std::fmt::Debug for DeliveryPacket {
+    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {f.write_str("DeliveryPacket([redacted])")}
+}
+impl DeliveryPacket {
+    pub fn encode(message:&crate::delivery::Message)->anyhow::Result<Self> {
+        use base64::Engine;
+        Ok(Self(base64::engine::general_purpose::STANDARD.encode(message.encode()?)))
+    }
+    pub fn decode(&self)->anyhow::Result<crate::delivery::Message> {
+        use base64::Engine;
+        ensure!(self.0.len()<=crate::delivery::MAX_WIRE.div_ceil(3)*4,"terminal delivery envelope exceeds limit");
+        let bytes=base64::engine::general_purpose::STANDARD.decode(&self.0).map_err(|_|anyhow::anyhow!("invalid terminal delivery encoding"))?;
+        crate::delivery::Message::parse(&bytes)
     }
 }

@@ -22,3 +22,5 @@ pub mod owner_view;
 
 #[cfg(feature = "direct")]
 pub mod direct;
+
+pub mod delivery;

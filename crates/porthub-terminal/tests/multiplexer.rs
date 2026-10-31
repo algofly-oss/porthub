@@ -724,3 +724,19 @@ fn private_owner_sidebar_preserves_shared_shell_and_closes_with_its_attachment()
     }
     Ok(())
 }
+
+#[tokio::test]
+#[ignore="requires bundled terminal runtime"]
+async fn unavailable_delivery_runtime_closes_only_the_sender() -> Result<()> {
+    use porthub_terminal::{host::Attachments,protocol::*,delivery::Message};
+    let (_directory,workspace)=workspace()?;let _cleanup=Cleanup(workspace.clone());
+    workspace.start(&start())?;let mut router=Attachments::new(workspace.clone(),2)?;
+    for client in [7,8] {router.apply(HostEvent::Attach {client,read_only:true,cols:100,rows:30,term:"xterm-256color".into()})?;}
+    let packet=DeliveryPacket::encode(&Message::Ack {epoch:"a".repeat(32),sequence:0})?;
+    router.apply(HostEvent::Delivery {client:7,packet})?;
+    assert_eq!(router.participants(),1);assert!(workspace.is_alive());
+    tokio::time::timeout(Duration::from_secs(5),async {
+        loop {if matches!(router.next().await,Some(HostOutput::Closed {client:7})){break;}}
+    }).await?;
+    assert_eq!(router.participants(),1);assert!(workspace.is_alive());Ok(())
+}

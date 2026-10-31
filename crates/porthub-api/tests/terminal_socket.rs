@@ -140,6 +140,16 @@ async fn actual_websocket_recovery_survives_invite_expiry_and_host_kick_revokes_
     send(&mut host,HostOutput::DirectAnswer {client:first,answer:answer.clone()}).await?;
     let received=event(&mut reader,"direct_answer").await?;
     ensure!(received["answer"]["request"]==17 && received["answer"]["input_epoch"]==answer.input_epoch);
+    let ack=DeliveryPacket::encode(&porthub_terminal::delivery::Message::Ack {epoch:answer.output_epoch.clone(),sequence:0})?;
+    send(&mut reader,ViewerInput::Delivery {packet:ack}).await?;
+    ensure!(event(&mut host,"delivery").await?["client"]==first);
+    let output=DeliveryPacket::encode(&porthub_terminal::delivery::Message::Data(porthub_terminal::delivery::Frame::new(&answer.output_epoch,1,b"sequenced-relay-output")?))?;
+    send(&mut host,HostOutput::Delivery {client:first,packet:output}).await?;
+    let delivered=event(&mut reader,"delivery").await?;
+    let packet:DeliveryPacket=serde_json::from_value(delivered["packet"].clone())?;
+    let porthub_terminal::delivery::Message::Data(frame)=packet.decode()? else {anyhow::bail!("expected relay data")};
+    ensure!(frame.payload()==b"sequenced-relay-output");
+
 
     reader.close(None).await?;
     drop(reader);

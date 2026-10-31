@@ -8,6 +8,7 @@ use std::{
 };
 
 pub const MAX_PAYLOAD: usize = 16 * 1024;
+pub const MAX_WIRE: usize = 25 + MAX_PAYLOAD;
 pub const MAX_BYTES: usize = 64 * 1024;
 pub const MAX_FRAMES: usize = 256;
 pub const MAX_SEQUENCE: u64 = (1u64 << 53) - 1;
@@ -333,7 +334,7 @@ mod wire_tests {
         let epoch = "a".repeat(32);
         let frame = Frame::new(&epoch, 1, &vec![0xff; MAX_PAYLOAD])?;
         let encoded = Message::Data(frame).encode()?;
-        assert!(encoded.len() < super::super::MAX_FRAME);
+        assert!(encoded.len() <= MAX_WIRE);
         let Message::Data(decoded) = Message::parse(&encoded)? else {
             panic!("data expected")
         };

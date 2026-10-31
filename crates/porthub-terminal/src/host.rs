@@ -51,6 +51,15 @@ impl Attachments {
     /// A false result ends this transport, while keeping the shared workspace.
     pub fn apply(&mut self, event: HostEvent) -> Result<bool> {
         match event {
+            HostEvent::Delivery {client,..} => {
+                // Capability stays off until the direct actor is integrated.
+                // Unexpected sequenced input must never end another attachment.
+                if self.clients.remove(&client).is_some() {
+                    self.pending_redraw.remove(&client);
+                    self.snapshots.lock().expect("snapshot cache").detach(client);
+                    self.send.try_send(HostOutput::Closed {client})?;
+                }
+            }
             HostEvent::DirectOffer {client,request,..} => {
                 if self.clients.contains_key(&client) {self.send.try_send(HostOutput::DirectUnavailable {client,request})?;}
             }

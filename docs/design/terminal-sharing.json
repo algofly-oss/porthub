@@ -400,6 +400,13 @@
       "privacy": "SDP wrapper redacts addresses and ICE credentials in derived debug output. Role and participant ID cannot be smuggled in guest offer fields.",
       "compatibility": "Direct and snapshot capabilities are separately negotiated in authenticated gateway upgrade headers. Local broker strips each unsupported HostHello flag independently; false fields are omitted for old services/gateways. Legacy or downgraded hosts return DirectUnavailable without dropping a valid guest connection.",
       "validation": "54 terminal checks pass with both direct and SSH features:43 unit,9 bundled-runtime,1 browser RTC,1 stockSSH. Two broker tests pass, including four independent capability-header combinations. API cargo check and actual MongoDB/WebSocket signaling/recovery/invitation-expiry/targeted-removal test pass. One full-suite invocation lacked NODE_PATH; corrected browser setup and complete rerun passed."
+    },
+    "relay_delivery": {
+      "status": "Shared delivery validation extracted from optional RTC engine into delivery.rs. Gateway relay message routing and direction/role/epoch checks implemented. CLI capability remains disabled; host RTC/PTY actor is still incomplete.",
+      "dependency_boundary": "Direct engine reexports the same journal module. cargo tree confirms the ordinary API and SSH-only terminal library do not include the rtc umbrella dependency. Existing mesh crypto/ICE subcrates remain separate.",
+      "role_rules": "Only negotiated attachment epochs admit delivery. Read-only guests can ACK their output epoch but cannot send data. Writers can send only their input epoch; host output and input ACKs must use the opposite expected directions. Gateway supplies recipient IDs; binary envelope contains no role or participant authority. Relayed writer activity updates existing participant activity state.",
+      "bounds_and_isolation": "Relay wrapper is base64 only on the existing JSON WebSocket carrier, with strict binary-envelope size/encoding checks and redacted debug output. Direct carrier remains compact binary. Unexpected delivery with the disabled host actor closes only its sender, preserving other PTYs and the workspace.",
+      "validation": "56 terminal checks pass:44 library,10 bundled-runtime,1 browser RTC,1 stockSSH. Real API/Mongo/WebSocket test passes negotiated output delivery and ACKs together with invitation expiry, recovery and targeted removal. Default/SSH-only library tests also pass independently of RTC."
     }
   }
 }
