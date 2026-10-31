@@ -30,6 +30,16 @@ of all three previous images using the previous Compose files. Further catchable
 termination signals are ignored during restoration. Previously running unrelated
 container IDs must still be running after activation or rollback. SIGKILL, machine
 failure and Docker daemon failure require operator recovery from those records.
+If one restoration fails, the script still attempts the remaining roles and
+reports every failed restoration/check instead of claiming rollback succeeded.
+
+Add repeatable `--probe-url https://application.example/health` arguments for
+existing application routes. Each must be reachable before upgrading, after all
+candidate roles become healthy, and after rollback. A failed candidate probe
+triggers rollback even if container health checks pass. Requests have an
+eight-second timeout and do not retain response bodies. Failures identify the
+probe by position without printing private URLs. Use URLs without credentials or
+fragments. HTTP redirects follow the deployment's normal route.
 
 This is an image/configuration rollback, not a database restore. Obtain and verify
 a PortHub database/terminal-journal backup before a production rollout and assess

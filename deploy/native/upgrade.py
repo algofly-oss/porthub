@@ -10,6 +10,8 @@ import signal
 import stat
 import subprocess
 import tempfile
+from urllib.parse import urlsplit
+from urllib.request import urlopen
 
 ROLES = ('firewall', 'core', 'edge')
 
@@ -75,7 +77,21 @@ def override(images, version):
     return result
 
 
-def activate(compose, previous_compose, ensure_others):
+def check_routes(urls):
+    for index, url in enumerate(urls, 1):
+        parsed = urlsplit(url)
+        if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+            raise ValueError('Upgrade probes require HTTP(S) URLs without credentials or fragments')
+        try:
+            with urlopen(url, timeout=8) as response:
+                if not 200 <= response.status < 400:
+                    raise RuntimeError('Unexpected probe status')
+        except Exception:
+            # URLs can contain private route identifiers; never print them.
+            raise RuntimeError('PortHub route probe failed: '+str(index)) from None
+
+
+def activate(compose, previous_compose, ensure_others, verify_routes=lambda: None):
     watched = (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)
     previous_handlers = {number: signal.getsignal(number) for number in watched}
     def interrupted(_number, _frame):
@@ -86,15 +102,30 @@ def activate(compose, previous_compose, ensure_others):
         # No dependencies: each replacement is explicitly scoped to one role.
         for role in ROLES:
             run([*compose, 'up', '-d', '--no-deps', '--no-build', '--pull', 'never', '--force-recreate', '--wait', '--wait-timeout', '180', role])
+        verify_routes()
         ensure_others()
-    except BaseException:
+    except BaseException as original:
         for number in watched:
             signal.signal(number, signal.SIG_IGN)
         # A CLI error can follow an already-applied replacement. Restore all
         # three previous immutable image IDs, even for the first failed command.
+        failures = []
         for role in ROLES:
-            run([*previous_compose, 'up', '-d', '--no-deps', '--no-build', '--pull', 'never', '--force-recreate', '--wait', '--wait-timeout', '180', role])
-        ensure_others()
+            try:
+                run([*previous_compose, 'up', '-d', '--no-deps', '--no-build', '--pull', 'never', '--force-recreate', '--wait', '--wait-timeout', '180', role])
+            except Exception:
+                failures.append(role)
+        try:
+            ensure_others()
+        except Exception:
+            failures.append('unrelated-container check')
+        try:
+            verify_routes()
+        except Exception:
+            failures.append('public-route check')
+        if failures:
+            raise RuntimeError('PortHub rollback incomplete: '+', '.join(failures)+
+                               '; recover using the retained previous image/configuration records') from original
         raise
     finally:
         for number, handler in previous_handlers.items():
@@ -123,6 +154,7 @@ def perform(args):
                              if value.startswith('PORTHUB_VERSION=')), None)
     if not previous_version:
         raise ValueError('Previous runtime version is unavailable for rollback')
+    check_routes(args.probe_url)
     print('Preflight passed: source, version, architecture, privileges, state mounts and rollback configuration')
     if not args.apply:
         return
@@ -138,7 +170,8 @@ def perform(args):
     for path in files:
         previous.extend(['-f', str(path)])
     previous.extend(['-f', str(record/'previous.json')])
-    activate([*base, '-f', str(record/'candidate.json')], previous, ensure_others)
+    activate([*base, '-f', str(record/'candidate.json')], previous, ensure_others,
+             lambda: check_routes(args.probe_url))
     print('PortHub roles healthy; previous immutable image references retained at '+str(record))
 
 
@@ -148,6 +181,7 @@ def main():
     parser.add_argument('--revision', required=True)
     parser.add_argument('--version', required=True)
     parser.add_argument('--project', default='porthub')
+    parser.add_argument('--probe-url', action='append', default=[], help='Existing application HTTP(S) URL to check before and after upgrade/rollback; repeatable')
     parser.add_argument('--apply', action='store_true')
     args = parser.parse_args()
     if not re.fullmatch(r'[a-z0-9][a-z0-9_-]*', args.project):

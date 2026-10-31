@@ -82,5 +82,32 @@ class Upgrade(unittest.TestCase):
                 upgrade.activate(['candidate'],['previous'],lambda:None)
         self.assertEqual(signal.getsignal(signal.SIGTERM),previous)
         self.assertEqual([call[-1] for call in calls],['firewall','firewall','core','edge'])
+    def test_failed_rollback_role_does_not_prevent_other_restoration_attempts(self):
+        calls=[]
+        def run(arguments):
+            calls.append(arguments)
+            if arguments[0]=='candidate' or arguments[-1]=='firewall':
+                raise RuntimeError('Docker failure')
+        checked=[]
+        with patch.object(upgrade,'run',side_effect=run):
+            with self.assertRaisesRegex(RuntimeError,'rollback incomplete: firewall'):
+                upgrade.activate(['candidate'],['previous'],lambda:checked.append(True))
+        self.assertEqual([call[-1] for call in calls],['firewall','firewall','core','edge'])
+        self.assertEqual(checked,[True])
+    def test_public_probe_failure_restores_images_and_rechecks_routes(self):
+        attempts=[]
+        def probe():
+            attempts.append(True)
+            if len(attempts)==1:raise RuntimeError('route unavailable')
+        with patch.object(upgrade,'run') as run:
+            with self.assertRaisesRegex(RuntimeError,'route unavailable'):
+                upgrade.activate(['candidate'],['previous'],lambda:None,probe)
+        self.assertEqual([call.args[0][0] for call in run.call_args_list],['candidate']*3+['previous']*3)
+        self.assertEqual(len(attempts),2)
+    def test_probe_rejects_credentials_and_hides_private_urls_in_errors(self):
+        with self.assertRaises(ValueError):upgrade.check_routes(['http://user:password@example.test'])
+        with patch.object(upgrade,'urlopen',side_effect=OSError('private URL details')):
+            with self.assertRaisesRegex(RuntimeError,'^PortHub route probe failed: 1$'):
+                upgrade.check_routes(['https://example.test/private-route'])
 
 if __name__=='__main__':unittest.main()
