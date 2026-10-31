@@ -20,8 +20,17 @@
   },
   "verification": {
     "mesh": "37 tests passed, including real IPv6 full-size packet transfers, IPv4-blackhole simulation, IPv4-only peer interoperability, unreachable first STUN server, IPv6 STUN, source/transaction validation, relay cancellation, certificate rejection and active stream carrier-change regressions.",
-    "agent_network": "78 agent regressions and 19 network tests passed on release 1.8.9. Native ten-platform CI pending.",
-    "signaling_e2e": "Four isolated API+Mongo controller tests passed: direct IPv4 and IPv6 transfers after the entire gateway stops, underlay replacement without interrupting healthy sessions, and relay authentication/source/lease enforcement. Fixed a pre-existing fixture that dropped its relay configuration sender before transfer. Disposable test database removed."
+    "agent_network": "78 agent regressions and 19 network tests passed on release 1.8.9. All ten native platform jobs and complete bundle validation passed in Actions 41190892302 (runtime source 9eb669af297e35fc8fa2a54f6723c4edf9894364).",
+    "signaling_e2e": "Four isolated API+Mongo controller tests passed: direct IPv4 and IPv6 transfers after the entire gateway stops, underlay replacement without interrupting healthy sessions, and relay authentication/source/lease enforcement. Fixed a pre-existing fixture that dropped its relay configuration sender before transfer. Disposable test database removed.",
+    "minimum_mtu": "Full-size encrypted IPv6 packet transfer passed with loopback MTU 1280 in an owned disposable Docker network namespace. No host networking configuration changed; container removed."
   },
-  "rollout_status": "Local verification passed; agent-only 1.8.9 release pending full native matrix. Existing API/UI/gateway 1.8.8 require no restart."
+  "rollout_status": "Complete: 1.8.9 published and deployed to all eight connected clients. API/UI and gateway remain healthy on 1.8.8 without restart.",
+  "deployment": {
+    "release": "https://github.com/algofly-oss/porthub/releases/tag/v1.8.9",
+    "artifacts": "All 30 binary/version/SHA256 files verified after CI download and all GitHub upload sizes/digests verified before publication. Latest-only release/tag policy applied. Duplicate tag-triggered build cancelled.",
+    "clients": "Luna, Clear, Deep, Miro, Reid, Nitin-MBP, Thor and EC2 all confirmed online on 1.8.9. Four enabled offline machines await reconnection; disabled Clearsight unchanged.",
+    "services": "Luna, Reid and EC2 agent units active with NRestarts=0. IBI, Thor, Home Presence and Autolycus all HTTP 200 after upgrade; IBI/Thor/Autolycus response hashes match baseline.",
+    "configuration": "All 27 proxy records, 33 forwarding mappings, 18 machine configurations and auxiliary access/network configuration preserved. All 11 URM2 container IDs and all pre-existing Luna and 10 EC2 application container IDs preserved. Reid Docker inventory unavailable to the SSH user; only agent status and forwarding verified there.",
+    "network_availability": "Luna, Reid and EC2 had no global IPv6 underlay address during rollout. IPv6 behavior verified in isolated tests; no production IPv6 throughput gain claimed."
+  }
 }
