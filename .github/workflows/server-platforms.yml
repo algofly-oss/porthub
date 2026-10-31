@@ -1,5 +1,13 @@
 name: Native server artifacts
 on:
+  workflow_call:
+    inputs:
+      revision:
+        type: string
+        default: ''
+      platform:
+        type: string
+        default: arm64
   workflow_dispatch:
     inputs:
       platform:
@@ -17,11 +25,13 @@ jobs:
         include: ${{ fromJSON(inputs.platform == 'all' && '[{"arch":"arm64","os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl"},{"arch":"x86_64","os":"ubuntu-24.04","target":"x86_64-unknown-linux-musl"}]' || inputs.platform == 'x86_64' && '[{"arch":"x86_64","os":"ubuntu-24.04","target":"x86_64-unknown-linux-musl"}]' || '[{"arch":"arm64","os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl"}]') }}
     runs-on: ${{ matrix.os }}
     env:
-      PORTHUB_SOURCE_REVISION: ${{ github.sha }}
+      PORTHUB_SOURCE_REVISION: ${{ inputs.revision || github.sha }}
       RUST_MIN_STACK: '33554432'
       CARGO_BUILD_JOBS: '4'
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
       - name: Install pinned native static toolchain
         run: |
           rustup toolchain install 1.99.1 --profile minimal
@@ -40,18 +50,19 @@ jobs:
           cc_key="$(echo "$target" | tr '-' '_')"
           export "CARGO_TARGET_${target_key}_LINKER=musl-gcc"
           export "CC_${cc_key}=musl-gcc"
-          cargo build --locked --release -p porthub-api -p porthub-edge -p porthub-runtime --target "$target" --timings
+          cargo build --locked --release -p porthub-api -p porthub-edge -p porthub-runtime -p porthub-firewall --target "$target" --timings
           mkdir -p server-artifacts
-          for binary in porthub-api porthub-edge porthub-runtime; do
+          for binary in porthub-api porthub-edge porthub-runtime porthub-firewall; do
             source="target/$target/release/$binary"
-            if readelf -l "$source" | grep -q INTERP; then
+            readelf -l "$source" > "$RUNNER_TEMP/$binary.elf"
+            if grep -q INTERP "$RUNNER_TEMP/$binary.elf"; then
               echo "$binary requires a dynamic loader" >&2
               exit 1
             fi
             "$source" --help >/dev/null
             cp "$source" server-artifacts/
           done
-          printf '%s\n' "$GITHUB_SHA" > server-artifacts/source-revision
+          printf '%s\n' "$PORTHUB_SOURCE_REVISION" > server-artifacts/source-revision
           (cd server-artifacts && sha256sum porthub-*) > server-artifacts/SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:

@@ -14,13 +14,14 @@
   "implemented": {
     "retention": "Protected tag/release allowlist and unprotected draft/prerelease cleanup wired into the existing publisher. Source reachability and latest-release checks retained. Eleven tests pass; live dry run against v1.8.9 proposes no deletion.",
     "cache": "Independent helper builds cached immediately after completion and before downstream Rust tests; workspace Rust crate/dependency cache retained.",
-    "version_preparation": "scripts/prepare-release.py is implemented, dry-run by default. Default-branch source can advance a previously published patch version using a bot commit that changes only Cargo.toml and the matching workspace Cargo.lock entries. Explicit numeric tags must match committed workspace versions. It rejects dirty/mismatched source and downgrades, verifies latest-source ancestry, skips superseded default-branch runs and recognizes already-published source. Eight tests pass against real isolated local Git repositories and bare remotes; no production branch was changed."
+    "version_preparation": "scripts/prepare-release.py is implemented, dry-run by default. Default-branch source can advance a previously published patch version using a bot commit that changes only Cargo.toml and the matching workspace Cargo.lock entries. Explicit numeric tags must match committed workspace versions. It rejects dirty/mismatched source and downgrades, verifies latest-source ancestry, skips superseded default-branch runs and recognizes already-published source. Eight tests pass against real isolated local Git repositories and bare remotes; no production branch was changed.",
+    "build_orchestration": "Continuous release workflow now defines main-push/numeric-tag entry points, automatic version preparation and reusable client/server builds pinned to its prepared revision. Manual verify-only mode avoids release mutations. Client aggregation collects only the ten platform directories and validates all thirty assets, avoiding collisions with server artifacts in the shared run. Server artifacts include API, edge, runtime and firewall. Actionlint 1.7.12 accepts all three workflow definitions; version tests (8), retention tests (11) and offline native preflight/collector tests (20) pass."
   },
   "remaining": [
-    "Wire the automatic main-push/tag entry point to tested version preparation and reusable build orchestration.",
+    "Validate the orchestrated workflow on GitHub and complete all platform gates before enabling it on main.",
     "Automatic server/UI packaging, authenticated scoped deployment job, health validation and rollback path.",
     "Dedicated narrowly scoped production CI deployment credentials; repository currently has no deployment secrets.",
-    "Wire final publication/retention to successful release/deployment gates; test the complete automated path before declaring it live."
+    "Add final publication and deployment gates to the orchestrator and test the full path before declaring push-to-deploy live."
   ],
   "authorization": "User explicitly requested automatic CI/CD and authorized live PortHub deployment with a brief reconnect; no permission question is needed for routine setup within that scope."
 }

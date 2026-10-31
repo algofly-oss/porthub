@@ -27,22 +27,19 @@ def wait_text(master, child, expected, timeout=5):
     return output
 
 
-def terminal_state(fd):
-    state = termios.tcgetattr(fd)
-    state[6] = [value[0] if isinstance(value, bytes) else value for value in state[6]]
-    return state
-
-
 # Retain a controlling session leader until the app exits and its mode is read.
 # Darwin invalidates slave ioctls after the controlling session ends; checking
 # before that end verifies restoration without weakening the assertion.
 TERMINAL_KEEPER = r"""
 import json, os, subprocess, sys, termios
 report = int(sys.argv[1])
+def state():
+    value = termios.tcgetattr(0)
+    value[6] = [item[0] if isinstance(item, bytes) else item for item in value[6]]
+    return value
+before = state()
 result = subprocess.run(sys.argv[2:])
-state = termios.tcgetattr(0)
-state[6] = [value[0] if isinstance(value, bytes) else value for value in state[6]]
-os.write(report, json.dumps(state).encode())
+os.write(report, json.dumps({"before":before,"after":state()}).encode())
 os.close(report)
 raise SystemExit(result.returncode)
 """
@@ -93,7 +90,6 @@ def exercise(executable, environment, job, stalled=False, sidebar=False, columns
     thread.start()
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, columns, 0, 0))
-    before = terminal_state(slave)
     def own_terminal():
         os.setsid()
         fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
@@ -159,7 +155,8 @@ def exercise(executable, environment, job, stalled=False, sidebar=False, columns
             if select.select([master], [], [], .02)[0]:
                 os.read(master, 65536)
         assert child.poll() == 0, "quit must not wait for a stalled owner socket"
-        assert json.loads(os.read(report_read, 8192)) == before, "terminal mode must be restored before the controlling session exits"
+        terminal_mode = json.loads(os.read(report_read, 8192))
+        assert terminal_mode["after"] == terminal_mode["before"], f"terminal mode must be restored before the controlling session exits: {terminal_mode!r}"
     finally:
         if child.poll() is None:
             try:

@@ -1,0 +1,91 @@
+name: Continuous release
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'crates/**'
+      - 'vendor/**'
+      - 'ui/**'
+      - 'scripts/**'
+      - 'deploy/**'
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - '.github/workflows/continuous-release.yml'
+      - '.github/workflows/agent-platforms.yml'
+      - '.github/workflows/server-platforms.yml'
+  workflow_dispatch:
+    inputs:
+      verify_only:
+        description: Validate a branch without changing versions, publishing or deploying
+        type: boolean
+        default: true
+      platform:
+        description: Client platforms for validation; production releases always use all
+        type: string
+        default: all
+permissions:
+  contents: read
+concurrency:
+  group: porthub-continuous-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  prepare:
+    name: Prepare immutable release source
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      revision: ${{ steps.release.outputs.revision || steps.validation.outputs.revision }}
+      version: ${{ steps.release.outputs.version || steps.validation.outputs.version }}
+      tag: ${{ steps.release.outputs.tag || steps.validation.outputs.tag }}
+      skip: ${{ steps.release.outputs.skip || steps.validation.outputs.skip }}
+      already_published: ${{ steps.release.outputs.already_published || steps.validation.outputs.already_published }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify automatic version preparation and retention
+        run: |
+          python3 scripts/test_prepare_release.py
+          python3 scripts/test_prune_github_releases.py
+      - name: Pin validation source without release mutations
+        id: validation
+        if: github.event_name == 'workflow_dispatch' && inputs.verify_only == true
+        run: |
+          version="$(sh scripts/release-version.sh)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "already_published=false" >> "$GITHUB_OUTPUT"
+      - name: Pin the release version and source
+        id: release
+        if: github.event_name != 'workflow_dispatch' || inputs.verify_only != true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: python3 scripts/prepare-release.py --default-branch "$DEFAULT_BRANCH" --execute
+  clients:
+    name: Validate and package clients
+    needs: [prepare]
+    if: needs.prepare.outputs.skip != 'true' && needs.prepare.outputs.already_published != 'true'
+    uses: ./.github/workflows/agent-platforms.yml
+    permissions:
+      contents: write
+    with:
+      revision: ${{ needs.prepare.outputs.revision }}
+      platform: ${{ github.event_name == 'workflow_dispatch' && inputs.verify_only == true && inputs.platform || 'all' }}
+      verify_only: ${{ github.event_name == 'workflow_dispatch' && inputs.verify_only == true }}
+      publish_release: false
+  server:
+    name: Build production server roles
+    needs: [prepare]
+    if: needs.prepare.outputs.skip != 'true' && needs.prepare.outputs.already_published != 'true'
+    uses: ./.github/workflows/server-platforms.yml
+    with:
+      revision: ${{ needs.prepare.outputs.revision }}
+      platform: arm64

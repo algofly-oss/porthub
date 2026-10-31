@@ -1,7 +1,20 @@
 name: Native agent platforms
 on:
-  push:
-    tags: ["v*"]
+  workflow_call:
+    inputs:
+      revision:
+        description: Exact prepared release commit
+        type: string
+        default: ''
+      platform:
+        type: string
+        default: all
+      verify_only:
+        type: boolean
+        default: false
+      publish_release:
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       platform:
@@ -28,6 +41,8 @@ jobs:
       has_linux: ${{ steps.select.outputs.has_linux }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
       - name: Validate publishing scope
         if: inputs.publish_release == true
         env:
@@ -49,11 +64,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
       - uses: actions/download-artifact@v4
         with:
           pattern: porthub-*
-          merge-multiple: true
-          path: release-input
+          path: release-platforms
+      - name: Collect client assets without server artifact collisions
+        run: python3 deploy/native/collect_client_bundle.py --source release-platforms --destination release-input --version "$(sh scripts/release-version.sh)"
       - name: Validate all platforms against the workspace release
         shell: bash
         run: python3 deploy/native/stage_client_bundle.py --source release-input --version "$(sh scripts/release-version.sh)"
@@ -65,8 +83,10 @@ jobs:
           retention-days: 3
   publish-release:
     name: Publish versioned GitHub release
-    if: inputs.verify_only != true && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true))
+    if: inputs.verify_only != true && inputs.publish_release == true
     needs: [release-bundle]
+    env:
+      PORTHUB_SOURCE_REVISION: ${{ inputs.revision || github.sha }}
     concurrency:
       group: porthub-release-publication
       cancel-in-progress: false
@@ -75,6 +95,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
       - uses: actions/download-artifact@v4
         with:
           name: porthub-release-bundle
@@ -91,7 +113,7 @@ jobs:
           fi
           gh release create "$tag" release-assets/porthub-* \
             --draft \
-            --target "$GITHUB_SHA" \
+            --target "$PORTHUB_SOURCE_REVISION" \
             --title "PortHub ${version}" \
             --notes "Consistent ${version} native client release for Linux, macOS, and Windows. Includes binaries, SHA256 checksums, and version metadata for every supported CPU architecture."
           # Publish only after every asset has uploaded, so API caches never
@@ -101,7 +123,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PORTHUB_RETAIN_TAGS: ${{ vars.PORTHUB_RETAIN_TAGS }}
-        run: python3 scripts/prune-github-releases.py --repository "$GITHUB_REPOSITORY" --keep "v$(sh scripts/release-version.sh)" --expected-commit "$GITHUB_SHA" --remove-previews --execute
+        run: python3 scripts/prune-github-releases.py --repository "$GITHUB_REPOSITORY" --keep "v$(sh scripts/release-version.sh)" --expected-commit "$PORTHUB_SOURCE_REVISION" --remove-previews --execute
   native:
     needs: [select-platforms]
     if: needs.select-platforms.outputs.has_native == 'true'
@@ -112,7 +134,7 @@ jobs:
         include: ${{ fromJSON(needs.select-platforms.outputs.native) }}
     runs-on: ${{ matrix.os }}
     env:
-      PORTHUB_SOURCE_REVISION: ${{ github.sha }}
+      PORTHUB_SOURCE_REVISION: ${{ inputs.revision || github.sha }}
       RUST_MIN_STACK: "33554432"
       RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static' || '' }}
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -120,6 +142,8 @@ jobs:
       CARGO_BUILD_JOBS: ${{ contains(matrix.target, 'apple') && '2' || '4' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
       - name: Read numeric release version
         shell: bash
         run: echo "PORTHUB_VERSION=$(sh scripts/release-version.sh)" >> "$GITHUB_ENV"
@@ -294,10 +318,12 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.select-platforms.outputs.linux) }}
     env:
-      PORTHUB_SOURCE_REVISION: ${{ github.sha }}
+      PORTHUB_SOURCE_REVISION: ${{ inputs.revision || github.sha }}
       RUST_MIN_STACK: "33554432"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
       - name: Read numeric release version
         shell: bash
         run: echo "PORTHUB_VERSION=$(sh scripts/release-version.sh)" >> "$GITHUB_ENV"
