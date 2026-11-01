@@ -4,6 +4,13 @@ async function type(page,command){await page.bringToFront();await page.locator('
 (async()=>{const browser=await launchBrowser();let ssh,sshReader;try{
 const origin=process.env.REVIEW_ORIGIN,write=process.env.PORTHUB_TEST_TERMINAL_WRITE,read=process.env.PORTHUB_TEST_TERMINAL_READ,session=process.env.PORTHUB_TEST_TERMINAL_SESSION;
 const owner=await browser.newContext({viewport:{width:1440,height:900}}),guest=await browser.newContext({viewport:{width:1100,height:900}});
+if(process.env.PORTHUB_TEST_TERMINAL_DIRECT)for(const context of [owner,guest])await context.addInitScript(()=>{
+ const Peer=window.RTCPeerConnection;window.__terminalDirect={opened:0,sent:0,received:0};
+ window.RTCPeerConnection=function(config){const peer=new Peer(config),create=peer.createDataChannel.bind(peer);peer.createDataChannel=(...args)=>{
+  const channel=create(...args),send=channel.send.bind(channel);channel.addEventListener('open',()=>window.__terminalDirect.opened++);channel.addEventListener('message',()=>window.__terminalDirect.received++);
+  channel.send=bytes=>{window.__terminalDirect.sent++;return send(bytes);};return channel;
+ };return peer;};
+});
 const cookie=process.env.PORTHUB_TEST_TERMINAL_COOKIE;const separator=cookie.indexOf('=');await owner.addCookies([{name:cookie.slice(0,separator),value:cookie.slice(separator+1),url:origin,httpOnly:true,sameSite:'Lax'}]);
 const host=await owner.newPage(),watcher=await guest.newPage();let hostConnections=0;host.on('websocket',socket=>{if(new URL(socket.url()).pathname==='/api/terminal/join')hostConnections++;});const errors=[];for(const page of [host,watcher])page.on('pageerror',e=>errors.push(e.message));
 await host.goto(`${origin}/terminal#${write}`);await host.getByRole('button',{name:'Connect',exact:true}).click();await host.getByRole('heading',{name:'amberotter',exact:true}).waitFor();
@@ -11,6 +18,10 @@ const historyFrames=[];watcher.on('websocket',socket=>socket.on('framesent',({pa
 await watcher.goto(`${origin}/terminal#${read}`);await watcher.getByRole('button',{name:'Connect',exact:true}).click();await watcher.getByRole('heading',{name:'amberotter',exact:true}).waitFor();
 await output(host,'porthub-test$');await output(watcher,'porthub-test$');
 await type(host,"OWNVAR=preserved; printf 'INITIAL%s\\n' 'SHARED'");await output(host,'INITIALSHARED');await output(watcher,'INITIALSHARED');
+if(process.env.PORTHUB_TEST_TERMINAL_DIRECT){
+ for(const page of [host,watcher])await page.waitForFunction(()=>window.__terminalDirect.opened>0 && window.__terminalDirect.sent>0 && window.__terminalDirect.received>0,null,{timeout:15000});
+ console.log('PASS real browser direct path: native sharing supervisor, authenticated broker, API signalling and bidirectional WebRTC bytes');
+}
 const sshArguments=['-F','/dev/null','-oStrictHostKeyChecking=no','-oUserKnownHostsFile=/dev/null','-oLogLevel=ERROR','-oBatchMode=yes','-tt','-p',process.env.PORTHUB_TEST_TERMINAL_SSH_PORT,'-l',write,'127.0.0.1'];ssh=spawn('ssh',sshArguments,{stdio:['pipe','pipe','pipe'],env:{...process.env,TERM:'xterm-256color'}});
 const readerArguments=[...sshArguments];readerArguments[readerArguments.indexOf('-l')+1]=read;
 sshReader=spawn('ssh',readerArguments,{stdio:['pipe','pipe','pipe'],env:{...process.env,TERM:'xterm-256color'}});let readerText='',readerError='';sshReader.stdout.on('data',data=>readerText=(readerText+data.toString()).slice(-262144));sshReader.stderr.on('data',data=>readerError=(readerError+data.toString()).slice(-4096));
@@ -25,17 +36,20 @@ await watcher.evaluate(async token=>{
   const endpoint=new URL('/api/terminal/join',location.origin);endpoint.protocol=location.protocol==='https:'?'wss:':'ws:';
   window.__terminalStress=[];
   window.__terminalStressAttach=(capability,resume,expected)=>new Promise((resolve,reject)=>{
-    const socket=new WebSocket(endpoint),state={socket,bytes:0,closed:false,text:'',history:null};let ready=false;
+    const socket=new WebSocket(endpoint),state={socket,bytes:0,closed:false,text:'',history:null};let ready=false,admitted=false;
     state.pressureStarted=new Promise(resolve=>state.startPressure=resolve);
     const deadline=setTimeout(()=>{socket.close();reject(new Error('stress guest attach timed out'));},5000);
+    // Admission precedes the native PTY's initial screen. Start pressure only
+    // after that screen arrives, so a late attachment cannot miss line zero.
+    const complete=()=>{if(admitted && !ready && state.bytes>0){clearTimeout(deadline);ready=true;window.__terminalStress.push(state);resolve(state);}};
     socket.onopen=()=>socket.send(JSON.stringify({...(resume?{resume_token:capability}:{token:capability}),cols:80,rows:24}));
     socket.onerror=()=>{if(!ready){clearTimeout(deadline);reject(new Error('stress guest transport failed'));}};
     socket.onclose=()=>{state.closed=true;if(!ready){clearTimeout(deadline);reject(new Error('stress guest closed before welcome'));}};
     socket.onmessage=event=>{const message=JSON.parse(event.data);
       if(message.type==='ping'){socket.send(JSON.stringify({type:'pong'}));return;}
       if(message.type==='recovery'){state.recovery=message.token;state.identity=message.participant;}
-      if(message.type==='welcome'){clearTimeout(deadline);if(!message.read_only || expected && state.identity!==expected){socket.close();reject(new Error('stress recovery changed identity or role'));return;}ready=true;window.__terminalStress.push(state);resolve(state);}
-      if(message.type==='output'){const bytes=atob(message.data);state.bytes+=bytes.length;state.text=(state.text+bytes).slice(-8192);if(state.text.includes('churn-line-0-')){state.startPressure?.();state.startPressure=null;}}
+      if(message.type==='welcome'){if(!message.read_only || expected && state.identity!==expected){clearTimeout(deadline);socket.close();reject(new Error('stress recovery changed identity or role'));return;}admitted=true;complete();}
+      if(message.type==='output'){const bytes=atob(message.data);state.bytes+=bytes.length;state.text=(state.text+bytes).slice(-8192);if(state.text.includes('churn-line-0-')){state.startPressure?.();state.startPressure=null;}complete();}
       if(message.type==='history' && message.page.done && state.history){state.history(message.page);state.history=null;}
       if(message.type==='closed'){socket.close();if(!ready){clearTimeout(deadline);reject(new Error('stress guest admission denied'));}}
     };
@@ -55,7 +69,12 @@ const churn=watcher.evaluate(async()=>{
   if(window.__stressStable.closed || window.__stressMoving.closed)throw new Error('independent read-only guest was interrupted during churn');
   return {histories,attachments:window.__terminalStress.length};
 });
-const [,stress]=await Promise.all([pressure,churn]);assert.equal(stress.histories,6);assert.equal(stress.attachments,8);
+let stress;
+try{[,stress]=await Promise.all([pressure,churn]);}catch(error){
+ const diagnostics={host:await host.evaluate(()=>({screen:document.querySelector('.xterm-rows')?.textContent,alerts:[...document.querySelectorAll('[role="alert"]')].map(node=>node.textContent),direct:window.__terminalDirect})),watcher:await watcher.evaluate(()=>({direct:window.__terminalDirect,stable:window.__stressStable&&{bytes:window.__stressStable.bytes,closed:window.__stressStable.closed,text:window.__stressStable.text}}))};
+ throw Error(error.message+'; pressure diagnostics '+JSON.stringify(diagnostics));
+}
+assert.equal(stress.histories,6);assert.equal(stress.attachments,8);
 await output(host,'CHURNDONE:preserved');await output(watcher,'CHURNDONE:preserved');
 await watcher.evaluate(()=>{if(window.__stressStable.bytes===0)throw new Error('stable guest received no output');for(const state of window.__terminalStress)state.socket.close();delete window.__terminalStressAttach;delete window.__terminalStress;delete window.__stressStable;delete window.__stressMoving;});
 await host.getByRole('button',{name:'Block new joins',exact:true}).click();await host.getByRole('button',{name:'Block invitation URLs',exact:true}).click();await host.getByText('New invitation joins blocked',{exact:true}).waitFor();

@@ -181,5 +181,19 @@ The broker rechecks an active direct generation every five seconds. If permissio
 becomes unavailable it closes that generation; the supervisor retains the shell
 and reconnects through relay-only negotiation. This protects the paired PortHub
 exit policy; it does not detect arbitrary third-party VPN or proxy software.
-Enabling direct transport still requires the host SDK configuration, compatible
-gateway negotiation and account-scoped traffic reporting before rollout.
+The native SDK can be built with the experimental `terminal-direct` Cargo
+feature. New shares advertise it only with broker metadata version 1.10.0 or
+newer. After compatible gateway negotiation, the OS-authenticated broker supplies
+the approved control-source addresses in a local-only envelope. That envelope
+is not a gateway event, and the gateway cannot inject or replace it. The SDK
+configures attachment actors before accepting guests; a build without the
+feature clears an old saved direct capability and continues through the relay.
+
+The current handoff supplies host candidates and no implicit STUN/TURN servers.
+Full browser/API/native-supervisor tests require actual bidirectional WebRTC
+traffic and pass in Chrome and WebKit alongside ordinary SSH guests, independent
+history, recovery, targeted removal and explicit teardown. The stress fixture
+waits for each guest's initial PTY screen before starting concurrent output.
+Account-scoped traffic reporting, approved NAT traversal configuration and the
+native optimized join client still need integration before enabling this in
+normal release builds. Ordinary unmodified SSH remains a gateway transport.

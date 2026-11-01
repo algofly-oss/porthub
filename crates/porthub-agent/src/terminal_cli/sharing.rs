@@ -233,7 +233,7 @@ pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
             pending_invitations: None,
             invitations_revoked: false,
             hello: HostHello {
-                direct_transport: false,
+                direct_transport: cfg!(feature="terminal-direct") && broker_has_history_snapshots(&registration.agent_version),
                 history_snapshots: broker_has_history_snapshots(&registration.agent_version),
                 id: job.id.clone(),
                 secret: random_token(32),
@@ -440,6 +440,7 @@ pub(super) async fn serve(root: &Path, id: &str) -> Result<()> {
     let workspace = workspace(&job)?;
     let mut owner = super::participant_control::Server::start(&job)?;
     let mut sharing = load(root, id)?;
+    sharing.hello.direct_transport &= cfg!(feature="terminal-direct");
     owner.state.lock().expect("owner state").invitations_revoked = sharing.invitations_revoked;
     {
         let mut state = owner.state.lock().expect("owner state");
@@ -486,6 +487,16 @@ pub(super) async fn serve(root: &Path, id: &str) -> Result<()> {
                     tokio::select! {
                         bytes=crate::terminal_transport::frame(&mut local,&mut partial)=> {
                             let Ok(bytes)=bytes else{break;};
+                            #[cfg(feature="terminal-direct")]
+                            if let Ok(value)=serde_json::from_slice::<serde_json::Value>(&bytes) {
+                                if value.get("type").and_then(serde_json::Value::as_str)==Some("terminal_direct_policy") {
+                                    let policy:crate::terminal_transport::DirectPolicy=serde_json::from_value(value)?;
+                                    attachments.configure_direct(porthub_terminal::direct::host::Config {
+                                        addresses:policy.addresses,stun_servers:policy.stun_servers,
+                                    })?;
+                                    continue;
+                                }
+                            }
                             let Ok(event)=serde_json::from_slice::<HostEvent>(&bytes) else{break;};
                             last_gateway=tokio::time::Instant::now();
                             if matches!(event,HostEvent::Stop{..}) {

@@ -3,7 +3,7 @@
 use anyhow::{ensure, Result};
 use futures_util::{SinkExt, StreamExt};
 use porthub_terminal::protocol::{HostEvent, HostHello, HostOutput};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio_tungstenite::{
@@ -19,7 +19,18 @@ struct Request {
     hello: HostHello,
 }
 
-struct GatewayFeatures { snapshots: bool, direct: bool }
+struct GatewayFeatures { snapshots: bool, direct: bool, addresses: Vec<std::net::IpAddr> }
+
+/// Local broker envelope only. This is deliberately not a gateway HostEvent:
+/// the remote gateway cannot inject an underlay policy into the OS-user host.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DirectPolicy {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub addresses: Vec<std::net::IpAddr>,
+    pub stun_servers: Vec<String>,
+}
 
 // Read only the securely paired registration. Display metadata and unrelated
 // accounts cannot grant permission to bypass an application's selected exit.
@@ -88,7 +99,7 @@ async fn open(
             let snapshots = response.headers().get("x-porthub-history-snapshots")
                 .is_some_and(|value| value == "1");
             let direct=response.headers().get("x-porthub-terminal-direct").is_some_and(|value|value=="1");
-            Ok::<_, anyhow::Error>((socket, GatewayFeatures {snapshots,direct}))
+            Ok::<_, anyhow::Error>((socket, GatewayFeatures {snapshots,direct,addresses:sources}))
         })
         .await;
         if let Ok(Ok(socket)) = result {
@@ -147,6 +158,11 @@ pub(crate) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     remote
         .send(Message::Text(serde_json::to_string(&request.hello)?.into()))
         .await?;
+    if request.hello.direct_transport {
+        let policy=DirectPolicy {kind:"terminal_direct_policy".into(),addresses:features.addresses,stun_servers:vec![]};
+        let mut bytes=serde_json::to_vec(&policy)?;bytes.push(b'\n');
+        tokio::time::timeout(Duration::from_secs(5),local.get_mut().write_all(&bytes)).await??;
+    }
     let mut partial = Vec::new();
     let mut policy_tick = tokio::time::interval(Duration::from_secs(5));
     policy_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -186,6 +202,16 @@ pub(crate) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gateway_cannot_supply_a_local_direct_policy() -> Result<()> {
+        let policy=serde_json::to_value(DirectPolicy {
+            kind:"terminal_direct_policy".into(),addresses:vec![std::net::Ipv4Addr::LOCALHOST.into()],stun_servers:vec![],
+        })?;
+        assert!(serde_json::from_value::<HostEvent>(policy.clone()).is_err());
+        assert!(serde_json::from_value::<HostOutput>(policy).is_err());
+        Ok(())
+    }
 
     #[tokio::test]
     async fn interrupted_frame_read_retains_partial_bytes_and_rejects_oversized_frames(
@@ -386,8 +412,16 @@ mod tests {
         bytes.extend_from_slice(b"\n{\"type\":\"pong\"}\n");
         local.get_mut().write_all(&bytes).await?;
         let mut partial = Vec::new();
-        let response =
+        let mut response =
             tokio::time::timeout(Duration::from_secs(5), frame(&mut local, &mut partial)).await??;
+        if negotiated_direct {
+            let policy:DirectPolicy=serde_json::from_slice(&response)?;
+            assert_eq!(policy.kind,"terminal_direct_policy");
+            assert_eq!(policy.addresses,vec![std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)]);
+            assert!(policy.stun_servers.is_empty());
+            assert!(!String::from_utf8_lossy(&response).contains("secret"));
+            response=tokio::time::timeout(Duration::from_secs(5),frame(&mut local,&mut partial)).await??;
+        }
         assert!(!String::from_utf8_lossy(&response).contains("secret"));
         assert!(matches!(
             serde_json::from_slice::<HostEvent>(&response)?,

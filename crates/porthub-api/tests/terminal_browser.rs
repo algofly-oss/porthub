@@ -189,8 +189,10 @@ async fn exercise(multiplex: bool) -> Result<()> {
     let _server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
         axum::serve(listener, router).await
     }));
+    let direct = std::env::var_os("PORTHUB_TEST_TERMINAL_DIRECT").is_some();
+    ensure!(!direct || std::env::var_os("PORTHUB_TEST_NATIVE_HOST").is_some(),"direct test requires the real native host SDK");
     let hello = HostHello {
-        direct_transport: false,
+        direct_transport: direct,
         history_snapshots: true,
         id: random_token(16),
         secret: random_token(32),
