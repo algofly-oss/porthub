@@ -1635,6 +1635,18 @@ mod cli_tests {
     use super::{print_help, requires_system_privileges, short_version_requested, Args};
     use clap::{CommandFactory, Parser};
 
+    #[cfg(all(unix,feature="terminal-direct"))]
+    #[test]
+    fn native_terminal_join_is_opt_in_and_does_not_require_system_privileges() {
+        use porthub_agent::terminal_cli::{Command,JoinTransport};
+        let parsed=Args::try_parse_from(["porthub","terminal","join","https://example.org/terminal#invitation"]).unwrap();
+        assert!(matches!(parsed.command,Some(super::Command::Terminal {command:Some(Command::Join {transport:JoinTransport::Ssh,..})})));
+        let parsed=Args::try_parse_from(["porthub","terminal","join","https://example.org/terminal#invitation","--transport","relay"]).unwrap();
+        assert!(!requires_system_privileges(&parsed));
+        assert!(matches!(parsed.command,Some(super::Command::Terminal {command:Some(Command::Join {transport:JoinTransport::Relay,..})})));
+        assert!(Args::try_parse_from(["porthub","terminal","join","url","--transport","unknown"]).is_err());
+    }
+
     fn args(arguments: &[&str]) -> Args {
         Args::try_parse_from(arguments).expect("valid CLI fixture")
     }

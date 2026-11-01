@@ -202,8 +202,9 @@ The optional native peer engine also creates guest offers and accepts bounded
 single-data-channel answers. Its in-memory two-peer test pumps real
 ICE/DTLS/SCTP packets and checks bidirectional binary delivery without binding a
 socket. Candidate validation and receive-buffer limits are shared with the host
-answerer. The CLI `terminal join` command still delegates to SSH until native
-terminal I/O, transport selection and the remaining release checks are integrated.
+answerer. CLI joins default to SSH. Experimental `terminal-direct` builds also
+accept `terminal join URL --transport relay`; native direct selection and the
+remaining release checks still need integration.
 
 The full integration check also accepts `PORTHUB_TEST_TERMINAL_DIRECT=blocked`.
 It rejects the browser's direct handshake while keeping the real SDK, broker and
@@ -253,9 +254,9 @@ and a new attachment must start a fresh model rather than replay uncertain old
 shell commands. Tests cover negotiation failure, replay, invalid acknowledgements,
 reordered output, role enforcement, bounded queues and sequence exhaustion.
 
-This is protocol state only: `terminal join` still invokes ordinary SSH. Native
-socket/TTY integration, direct-path privacy and traffic reporting, packaging and
-live rollout remain required before enabling native direct joins.
+This delivery model is not yet used by the CLI relay runner, which uses legacy
+gateway frames. Direct-path privacy and traffic reporting, native negotiation,
+packaging and live rollout remain required before enabling native direct joins.
 
 The experimental `terminal_guest` module now supplies bounded native WebSocket
 signaling. It validates HTTPS invitations, strips query/fragment material from
@@ -283,7 +284,36 @@ the separate `viewer-history` feature, avoiding an SSH server dependency in the
 native guest. Read-only F7/navigation issues history requests rather than shell
 input. PTY/WebSocket tests cover both roles, exact raw bytes, history rendering,
 resize, cancellation and terminal restoration. These tests use isolated framed
-WebSockets and a real local PTY, not a production server. The runner is not yet
-selected by the CLI; native direct negotiation, recovery-loop integration and
-release/platform/live validation remain pending. Windows guest TTY support also
+WebSockets and a real local PTY. The CLI now selects the experimental runner with
+`--transport relay`; native direct negotiation and release/platform validation
+remain pending. Windows guest TTY support also
 remains pending; the new raw descriptor implementation is Unix-only.
+
+### Experimental native CLI relay and bounded recovery
+
+Unix `terminal-direct` builds support `porthub terminal join URL --transport relay`
+without invoking an installed SSH executable. The default remains `--transport ssh`.
+The native relay runner uses the same browser endpoint and invitation roles.
+After a transport failure it closes the old socket and resumes only with the
+in-memory recovery credential, within one fixed grace deadline. Failed attempts
+back off from 250 ms to 2 s without extending that deadline. A recovery credential
+rotated before a lost Welcome is retained. Explicit rejection, local terminal
+failure and nonretryable closure stop recovery; the original invitation is never
+an automatic fallback.
+
+Unconfirmed old commands are never replayed across attachments. Keystrokes typed
+while offline are discarded, including the final queued tail at reconnection;
+the reconnect notice explains that input is paused, and Ctrl+C cancels locally.
+While connected, Ctrl+C/Ctrl+D remain raw shell input. SIGHUP/SIGTERM/SIGINT detach
+the CLI and let its terminal guard restore local state without stopping the shared
+workspace. Clipboard escape bytes still depend on the local terminal's clipboard
+permissions; relay transport does not add a system clipboard bridge.
+
+The test suite covers forced disconnection, a transient reconnect failure,
+credential-only resume, no old/offline command execution, fixed deadline expiry
+and immediate rejection. The optional `--native-guest PATH` live smoke exercises
+an experimental local CLI against a temporary workspace on the installed stable
+host, alongside browser and ordinary SSH participants. The Reid check passed
+shared shell I/O, read-only F7, SIGTERM detach and workspace persistence, with the
+service PID and restart count unchanged. This is smoke evidence for the relay
+candidate, not a published package or a deployed native direct transport.

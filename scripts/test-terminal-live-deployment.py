@@ -18,6 +18,7 @@ def main():
     parser.add_argument('--known-hosts',required=True,type=Path,help='Previously verified terminal-gateway SSH host keys')
     parser.add_argument('--binary',default='porthub')
     parser.add_argument('--registration')
+    parser.add_argument('--native-guest',type=Path,help='Optional local experimental CLI to verify native relay guests')
     args=parser.parse_args()
     if not re.fullmatch(r'[a-zA-Z0-9_@.:-]+',args.host) or args.host.startswith('-') or not re.fullmatch('[a-f0-9]{40}',args.revision):
         parser.error('Use an explicit SSH host and complete build revision')
@@ -57,6 +58,12 @@ def main():
         payload=dict(host=args.host,name=name,invitation=invitation,ownerPrefix=shlex.join(prefix),marker=secrets.token_hex(8),
                      sshArguments=ssh,sshOptions=['-F','/dev/null','-oBatchMode=yes','-oStrictHostKeyChecking=yes',
                          '-oUserKnownHostsFile='+str(known),'-oLogLevel=ERROR','-tt'])
+        if args.native_guest:
+            payload['nativeGuest']=str(args.native_guest.resolve(strict=True))
+            native=subprocess.run(['python3',str(Path(__file__).with_name('test-terminal-native-guest.py'))],
+                                  input=json.dumps(payload),text=True,capture_output=True,timeout=90)
+            if native.returncode:raise RuntimeError('Native guest live smoke failed; no service was changed')
+            print(native.stdout.strip())
         result=subprocess.run(['node',str(Path(__file__).with_name('test-terminal-live-browser.cjs'))],
                               input=json.dumps(payload),text=True,capture_output=True,timeout=180)
         output=result.stdout+result.stderr

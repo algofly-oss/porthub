@@ -29,8 +29,12 @@ pub enum Command {
     New(New),
     /// Share a new workspace or an existing local workspace with SSH/browser guests.
     Share(sharing::Share),
-    /// Join an invitation using your ordinary SSH client; no account required.
-    Join { url: String },
+    /// Join an invitation without a PortHub account.
+    Join {
+        url: String,
+        #[arg(long, value_enum, default_value_t = JoinTransport::Ssh)]
+        transport: JoinTransport,
+    },
     /// Show, replace or revoke invitation links.
     Invite {
         name: String,
@@ -103,6 +107,16 @@ impl Default for Command {
             command: Vec::new(),
         })
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum JoinTransport {
+    /// Ordinary installed SSH client.
+    #[default]
+    Ssh,
+    /// Experimental native relay; available in terminal-direct builds.
+    #[cfg(feature = "terminal-direct")]
+    Relay,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -449,7 +463,11 @@ pub async fn run(command: Command) -> Result<()> {
         Command::ParticipantView { root, id, sidebar } => participant_popup::view(&root, &id, sidebar).await?,
         Command::Named(arguments) => open_named(&root, arguments)?,
         Command::Share(args) => sharing::start(&root, args).await?,
-        Command::Join { url } => sharing::join(&url).await?,
+        Command::Join { url, transport } => match transport {
+            JoinTransport::Ssh => sharing::join(&url).await?,
+            #[cfg(feature = "terminal-direct")]
+            JoinTransport::Relay => crate::terminal_guest::client::join_relay(&url).await?,
+        },
         Command::Invite {
             name,
             json,

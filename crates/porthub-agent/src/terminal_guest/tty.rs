@@ -48,6 +48,14 @@ impl Terminal {
             displayed: AtomicBool::new(false),
         })
     }
+    /// Offline input belongs to no active attachment. Do not execute it after a
+    /// successful reconnect; ordinary detach never uses this explicit flush.
+    pub(super) fn discard_offline_input(&self) -> io::Result<()> {
+        if unsafe { libc::tcflush(self.file.get_ref().as_raw_fd(), libc::TCIFLUSH) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
     pub fn size(&self) -> Result<(u16, u16)> {
         let mut size = std::mem::MaybeUninit::<libc::winsize>::zeroed();
         if unsafe {
@@ -137,7 +145,7 @@ mod tests {
     use std::{os::fd::FromRawFd, time::Duration};
     fn pty() -> Result<(File, File)> {
         let (mut master, mut slave) = (-1, -1);
-        let size = libc::winsize {
+        let mut size = libc::winsize {
             ws_col: 100,
             ws_row: 30,
             ws_xpixel: 0,
@@ -149,8 +157,8 @@ mod tests {
                     &mut master,
                     &mut slave,
                     std::ptr::null_mut(),
-                    std::ptr::null(),
-                    &size,
+                    std::ptr::null_mut(),
+                    &mut size,
                 )
             } == 0,
             "test PTY creation failed"
@@ -406,6 +414,303 @@ mod tests {
                 tokio::try_join!(remote, viewer, local)
             })
             .await??;
+        }
+        Ok(())
+    }
+    #[tokio::test]
+    async fn native_client_resumes_without_replaying_old_commands_or_offline_keystrokes(
+    ) -> Result<()> {
+        use crate::terminal_guest::{client, Failure, Guest, Recovery};
+        use futures_util::{SinkExt, StreamExt};
+        use porthub_terminal::protocol::*;
+        use tokio_tungstenite::{
+            tungstenite::{protocol::Role, Message},
+            WebSocketStream,
+        };
+        struct Connect {
+            sockets: std::collections::VecDeque<WebSocketStream<tokio::io::DuplexStream>>,
+            attempts: usize,
+            gate: Option<tokio::sync::oneshot::Receiver<()>>,
+        }
+        #[async_trait::async_trait]
+        impl client::Connector for Connect {
+            type Stream = tokio::io::DuplexStream;
+            async fn connect(
+                &mut self,
+                recovery: &mut Option<Recovery>,
+                cols: u16,
+                rows: u16,
+            ) -> Result<(Guest<Self::Stream>, ViewerEvent)> {
+                self.attempts += 1;
+                if self.attempts > 1 {
+                    assert!(
+                        recovery.is_some(),
+                        "never fall back to the invitation on resume"
+                    );
+                }
+                if self.attempts == 2 {
+                    return Err(Failure::Disconnected("isolated transient failure").into());
+                }
+                if self.attempts == 3 {
+                    self.gate.take().unwrap().await?;
+                }
+                Guest::authenticate_resumable(
+                    self.sockets.pop_front().unwrap(),
+                    &"a".repeat(64),
+                    recovery,
+                    cols,
+                    rows,
+                )
+                .await
+            }
+        }
+        async fn send(
+            socket: &mut WebSocketStream<tokio::io::DuplexStream>,
+            event: ViewerEvent,
+        ) -> Result<()> {
+            socket
+                .send(Message::Text(serde_json::to_string(&event)?.into()))
+                .await?;
+            Ok(())
+        }
+        async fn observe(
+            master: &AsyncFd<File>,
+            screen: &mut Vec<u8>,
+            marker: &[u8],
+        ) -> Result<()> {
+            let mut bytes = [0; 8192];
+            while !screen.windows(marker.len()).any(|bytes| bytes == marker) {
+                let count = read(master, &mut bytes).await?;
+                assert!(count > 0);
+                screen.extend_from_slice(&bytes[..count]);
+            }
+            Ok(())
+        }
+        let (master, slave) = pty()?;
+        let terminal = Terminal::from_file(slave)?;
+        // SAFETY: the owned File retains a stable descriptor for this registration.
+        let master = unsafe { AsyncFd::register(master)? };
+        let mut sockets = std::collections::VecDeque::new();
+        let mut servers = Vec::new();
+        for _ in 0..2 {
+            let (a, b) = tokio::io::duplex(131072);
+            sockets.push_back(WebSocketStream::from_raw_socket(a, Role::Client, None).await);
+            servers.push(WebSocketStream::from_raw_socket(b, Role::Server, None).await);
+        }
+        let (gate, wait) = tokio::sync::oneshot::channel();
+        let mut connector = Connect {
+            sockets,
+            attempts: 0,
+            gate: Some(wait),
+        };
+        let remote = async move {
+            for (index, mut server) in servers.into_iter().enumerate() {
+                let hello = server.next().await.context("missing hello")??.into_text()?;
+                let hello: serde_json::Value = serde_json::from_str(&hello)?;
+                if index == 0 {
+                    assert_eq!(hello["token"], "a".repeat(64));
+                } else {
+                    assert_eq!(hello["resume_token"], "b".repeat(64));
+                    assert!(hello.get("token").is_none());
+                }
+                send(
+                    &mut server,
+                    ViewerEvent::Recovery {
+                        session: "a".repeat(32),
+                        token: if index == 0 {
+                            "b".repeat(64)
+                        } else {
+                            "c".repeat(64)
+                        },
+                        participant: 1,
+                        reconnect_timeout: 10,
+                    },
+                )
+                .await?;
+                send(
+                    &mut server,
+                    ViewerEvent::Welcome {
+                        direct_transport: false,
+                        history_snapshots: true,
+                        name: "recover".into(),
+                        read_only: false,
+                        expires_at: 0,
+                        participants: 1,
+                    },
+                )
+                .await?;
+                let resize = server
+                    .next()
+                    .await
+                    .context("missing resize")??
+                    .into_text()?;
+                assert!(matches!(
+                    serde_json::from_str::<ViewerInput>(&resize)?,
+                    ViewerInput::Resize { .. }
+                ));
+                send(
+                    &mut server,
+                    ViewerEvent::Output {
+                        data: encode_data(if index == 0 {
+                            b"FIRST_READY"
+                        } else {
+                            b"SECOND_READY"
+                        }),
+                    },
+                )
+                .await?;
+                let input = server.next().await.context("missing input")??.into_text()?;
+                let ViewerInput::Input { data } = serde_json::from_str::<ViewerInput>(&input)?
+                else {
+                    anyhow::bail!("unexpected guest message")
+                };
+                assert_eq!(
+                    decode_data(&data)?,
+                    if index == 0 {
+                        b"once\r".as_slice()
+                    } else {
+                        b"after\r".as_slice()
+                    },
+                    "old or offline command crossed the attachment boundary"
+                );
+                if index == 0 {
+                    server.close(None).await?;
+                } else {
+                    send(
+                        &mut server,
+                        ViewerEvent::Closed {
+                            reason: "complete".into(),
+                            retryable: false,
+                        },
+                    )
+                    .await?;
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        };
+        let local = async {
+            let mut screen = Vec::new();
+            observe(&master, &mut screen, b"FIRST_READY").await?;
+            let mut writer = master.get_ref();
+            writer.write_all(b"once\r")?;
+            observe(&master, &mut screen, b"PortHub reconnecting").await?;
+            writer.write_all(b"offline_must_not_execute\r")?;
+            gate.send(())
+                .map_err(|_| anyhow::anyhow!("reconnect gate dropped"))?;
+            observe(&master, &mut screen, b"SECOND_READY").await?;
+            writer.write_all(b"after\r")?;
+            Ok::<_, anyhow::Error>(())
+        };
+        let viewer = async {
+            let end = client::run(&mut connector, &terminal).await?;
+            assert_eq!(end.reason, "complete");
+            assert!(!end.retryable);
+            Ok::<_, anyhow::Error>(())
+        };
+        tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::try_join!(remote, local, viewer)
+        })
+        .await??;
+        assert_eq!(
+            connector.attempts, 3,
+            "transient retry should preserve its credential and deadline"
+        );
+        Ok(())
+    }
+    #[tokio::test(start_paused = true)]
+    async fn native_recovery_stops_at_its_deadline_or_immediately_on_rejection() -> Result<()> {
+        use crate::terminal_guest::{client, Failure, Guest, Recovery};
+        use futures_util::SinkExt;
+        use porthub_terminal::protocol::*;
+        use tokio_tungstenite::{
+            tungstenite::{protocol::Role, Message},
+            WebSocketStream,
+        };
+        struct Connect {
+            socket: Option<WebSocketStream<tokio::io::DuplexStream>>,
+            attempts: usize,
+            rejected: bool,
+            deadline: Option<tokio::time::Instant>,
+        }
+        #[async_trait::async_trait]
+        impl client::Connector for Connect {
+            type Stream = tokio::io::DuplexStream;
+            async fn connect(
+                &mut self,
+                recovery: &mut Option<Recovery>,
+                cols: u16,
+                rows: u16,
+            ) -> Result<(Guest<Self::Stream>, ViewerEvent)> {
+                self.attempts += 1;
+                if let Some(socket) = self.socket.take() {
+                    return Guest::authenticate_resumable(
+                        socket,
+                        &"a".repeat(64),
+                        recovery,
+                        cols,
+                        rows,
+                    )
+                    .await;
+                }
+                let credential = recovery.as_ref().context("lost recovery credential")?;
+                assert_eq!(credential.capability, "b".repeat(64));
+                match self.deadline {
+                    None => self.deadline = credential.deadline,
+                    Some(deadline) => assert_eq!(credential.deadline, Some(deadline)),
+                }
+                Err(if self.rejected {
+                    Failure::Rejected
+                } else {
+                    Failure::Disconnected("isolated unavailable gateway")
+                }
+                .into())
+            }
+        }
+        for rejected in [false, true] {
+            let (_master, slave) = pty()?;
+            let terminal = Terminal::from_file(slave)?;
+            let (a, b) = tokio::io::duplex(131072);
+            let client = WebSocketStream::from_raw_socket(a, Role::Client, None).await;
+            let mut server = WebSocketStream::from_raw_socket(b, Role::Server, None).await;
+            for event in [
+                ViewerEvent::Recovery {
+                    session: "a".repeat(32),
+                    token: "b".repeat(64),
+                    participant: 1,
+                    reconnect_timeout: 10,
+                },
+                ViewerEvent::Welcome {
+                    direct_transport: false,
+                    history_snapshots: true,
+                    name: "bounded".into(),
+                    read_only: false,
+                    expires_at: 0,
+                    participants: 1,
+                },
+            ] {
+                server
+                    .send(Message::Text(serde_json::to_string(&event)?.into()))
+                    .await?;
+            }
+            server.close(None).await?;
+            let mut connector = Connect {
+                socket: Some(client),
+                attempts: 0,
+                rejected,
+                deadline: None,
+            };
+            let result = client::run(&mut connector, &terminal).await;
+            assert!(result.is_err());
+            if rejected {
+                assert_eq!(connector.attempts, 2);
+            } else {
+                assert!(connector.attempts > 2 && connector.attempts < 20);
+                assert!(tokio::time::Instant::now() >= connector.deadline.unwrap());
+                assert!(
+                    tokio::time::Instant::now() - connector.deadline.unwrap()
+                        < Duration::from_millis(10)
+                );
+            }
         }
         Ok(())
     }

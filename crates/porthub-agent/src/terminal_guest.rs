@@ -2,6 +2,8 @@
 //! Invitation and recovery capabilities travel only in the encrypted first
 //! message, never in request URLs or diagnostic values.
 #[cfg(unix)]
+pub mod client;
+#[cfg(unix)]
 pub mod relay;
 #[cfg(unix)]
 pub mod tty;
@@ -9,8 +11,9 @@ pub mod tty;
 use anyhow::{bail, ensure, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use porthub_terminal::protocol::{dimensions, token, ViewerEvent, ViewerInput};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::time::Instant;
 use tokio_tungstenite::{
     tungstenite::{protocol::WebSocketConfig, Message},
     MaybeTlsStream, WebSocketStream,
@@ -65,10 +68,43 @@ pub struct Guest<S> {
 }
 pub type NetworkGuest = Guest<MaybeTlsStream<tokio::net::TcpStream>>;
 
+/// Redacted transport failure classification for bounded recovery. Invalid
+/// protocol messages and local terminal failures must not trigger automatic joins.
+#[derive(Debug)]
+pub enum Failure {
+    Disconnected(&'static str),
+    Rejected,
+}
+impl std::fmt::Display for Failure {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Disconnected(reason) => out.write_str(reason),
+            Self::Rejected => out.write_str("terminal invitation or recovery rejected"),
+        }
+    }
+}
+impl std::error::Error for Failure {}
+pub fn retryable(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<Failure>(),
+        Some(Failure::Disconnected(_))
+    )
+}
 impl NetworkGuest {
     pub async fn connect(
         invitation: &Invitation,
         recovery: Option<Recovery>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(Self, ViewerEvent)> {
+        let mut recovery = recovery;
+        Self::connect_resumable(invitation, &mut recovery, cols, rows).await
+    }
+    /// Failed network attempts retain the caller's credential. If the gateway
+    /// rotates it before Welcome, retain that successor even if Welcome is lost.
+    pub async fn connect_resumable(
+        invitation: &Invitation,
+        recovery: &mut Option<Recovery>,
         cols: u16,
         rows: u16,
     ) -> Result<(Self, ViewerEvent)> {
@@ -87,20 +123,59 @@ impl NetworkGuest {
             ),
         )
         .await
-        .context("terminal gateway connection timed out")?
-        .map_err(|_| anyhow::anyhow!("terminal gateway TLS/WebSocket connection failed"))?;
-        Self::authenticate(socket, &invitation.capability, recovery, cols, rows).await
+        .map_err(|_| Failure::Disconnected("terminal gateway connection timed out"))?
+        .map_err(|_| Failure::Disconnected("terminal gateway TLS/WebSocket connection failed"))?;
+        Self::authenticate_resumable(socket, &invitation.capability, recovery, cols, rows).await
     }
 }
-
 impl<S: AsyncRead + AsyncWrite + Unpin> Guest<S> {
+    #[cfg(test)]
     async fn authenticate(
-        mut socket: WebSocketStream<S>,
+        socket: WebSocketStream<S>,
         invitation: &str,
         recovery: Option<Recovery>,
         cols: u16,
         rows: u16,
     ) -> Result<(Self, ViewerEvent)> {
+        let mut recovery = recovery;
+        Self::authenticate_resumable(socket, invitation, &mut recovery, cols, rows).await
+    }
+    async fn authenticate_resumable(
+        socket: WebSocketStream<S>,
+        invitation: &str,
+        recovery: &mut Option<Recovery>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(Self, ViewerEvent)> {
+        let mut guest = Self {
+            socket,
+            read_only: true,
+            recovery: None,
+            last_received: tokio::time::Instant::now(),
+        };
+        match guest
+            .handshake(invitation, recovery.as_ref(), cols, rows)
+            .await
+        {
+            Ok(welcome) => {
+                *recovery = None;
+                Ok((guest, welcome))
+            }
+            Err(error) => {
+                if let Some(successor) = guest.take_recovery() {
+                    *recovery = Some(successor);
+                }
+                Err(error)
+            }
+        }
+    }
+    async fn handshake(
+        &mut self,
+        invitation: &str,
+        recovery: Option<&Recovery>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<ViewerEvent> {
         dimensions(cols, rows)?;
         ensure!(
             token(invitation, 64),
@@ -122,33 +197,32 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Guest<S> {
         };
         tokio::time::timeout(
             Duration::from_secs(3),
-            socket.send(Message::Text(hello.to_string().into())),
+            self.socket.send(Message::Text(hello.to_string().into())),
         )
         .await
-        .context("terminal authentication send timed out")?
-        .map_err(|_| anyhow::anyhow!("terminal authentication send failed"))?;
-        let mut guest = Self {
-            socket,
-            read_only: true,
-            recovery: None,
-            last_received: tokio::time::Instant::now(),
-        };
-        let welcome = tokio::time::timeout(Duration::from_secs(10), async {
+        .map_err(|_| Failure::Disconnected("terminal authentication send timed out"))?
+        .map_err(|_| Failure::Disconnected("terminal authentication send failed"))?;
+        tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let event = guest.read_event().await?;
+                let event = self.read_event().await?;
                 match event {
                     ViewerEvent::Welcome { read_only, .. } => {
-                        guest.read_only = read_only;
+                        self.read_only = read_only;
                         return Ok(event);
                     }
                     ViewerEvent::Recovery { .. } => {}
-                    _ => bail!("terminal invitation unavailable or invalid handshake"),
+                    ViewerEvent::Closed {
+                        retryable: false, ..
+                    } => return Err(Failure::Rejected.into()),
+                    ViewerEvent::Closed {
+                        retryable: true, ..
+                    } => return Err(Failure::Disconnected("terminal host reconnecting").into()),
+                    _ => bail!("invalid terminal handshake"),
                 }
             }
         })
         .await
-        .context("terminal host handshake timed out")??;
-        Ok((guest, welcome))
+        .map_err(|_| Failure::Disconnected("terminal host handshake timed out"))?
     }
     pub fn read_only(&self) -> bool {
         self.read_only
@@ -187,8 +261,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Guest<S> {
             self.socket.send(Message::Text(text.into())),
         )
         .await
-        .context("terminal signaling send timed out")?
-        .map_err(|_| anyhow::anyhow!("terminal signaling send failed"))
+        .map_err(|_| Failure::Disconnected("terminal signaling send timed out"))?
+        .map_err(|_| Failure::Disconnected("terminal signaling send failed").into())
     }
     pub async fn next_event(&mut self) -> Result<ViewerEvent> {
         let event = tokio::time::timeout_at(
@@ -196,7 +270,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Guest<S> {
             self.read_event(),
         )
         .await
-        .context("terminal gateway heartbeat timed out")??;
+        .map_err(|_| Failure::Disconnected("terminal gateway heartbeat timed out"))??;
         ensure!(
             !matches!(event, ViewerEvent::Welcome { .. }),
             "duplicate terminal welcome"
@@ -209,8 +283,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Guest<S> {
                 .socket
                 .next()
                 .await
-                .context("terminal gateway disconnected")?
-                .map_err(|_| anyhow::anyhow!("terminal gateway receive failed"))?;
+                .ok_or(Failure::Disconnected("terminal gateway disconnected"))?
+                .map_err(|_| Failure::Disconnected("terminal gateway receive failed"))?;
             match message {
                 Message::Text(text) => {
                     ensure!(
@@ -249,7 +323,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Guest<S> {
                     return Ok(event);
                 }
                 Message::Ping(_) | Message::Pong(_) => {}
-                Message::Close(_) => bail!("terminal gateway disconnected"),
+                Message::Close(_) => {
+                    return Err(Failure::Disconnected("terminal gateway disconnected").into())
+                }
                 _ => bail!("invalid terminal signaling frame type"),
             }
         }
@@ -503,6 +579,52 @@ mod tests {
         }
         assert!(guest.next_event().await.is_err());
         assert_eq!(start.elapsed(), Duration::from_secs(45));
+        Ok(())
+    }
+    #[tokio::test]
+    async fn recovery_rotation_survives_a_lost_welcome_and_rejection_is_not_retryable() -> Result<()>
+    {
+        let (client, mut server) = pair().await;
+        let remote = tokio::spawn(async move {
+            server.next().await.unwrap().unwrap();
+            event(&mut server, recovery()).await;
+            server.close(None).await.unwrap();
+        });
+        let mut credential = None;
+        let error = Guest::authenticate_resumable(client, &"a".repeat(64), &mut credential, 80, 24)
+            .await
+            .err()
+            .unwrap();
+        assert!(retryable(&error));
+        assert_eq!(credential.as_ref().unwrap().capability, "b".repeat(64));
+        let deadline = credential.as_ref().unwrap().deadline.unwrap();
+        remote.await?;
+        let (client, mut server) = pair().await;
+        let remote = tokio::spawn(async move {
+            let hello = server.next().await.unwrap().unwrap().into_text().unwrap();
+            let hello: serde_json::Value = serde_json::from_str(&hello).unwrap();
+            assert_eq!(hello["resume_token"], "b".repeat(64));
+            assert!(hello.get("token").is_none());
+            event(
+                &mut server,
+                ViewerEvent::Closed {
+                    reason: "revoked".into(),
+                    retryable: false,
+                },
+            )
+            .await;
+        });
+        let error = Guest::authenticate_resumable(client, &"a".repeat(64), &mut credential, 80, 24)
+            .await
+            .err()
+            .unwrap();
+        assert!(!retryable(&error));
+        assert_eq!(
+            credential.as_ref().unwrap().deadline,
+            Some(deadline),
+            "failed resume must not extend its original grace"
+        );
+        remote.await?;
         Ok(())
     }
 }
