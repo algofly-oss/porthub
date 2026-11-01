@@ -74,6 +74,7 @@ async fn deletion_preserves_owner_contract_tombstone_and_authenticated_ack() -> 
         case.app.collection("connections").insert_many([
             doc! {"_id":ObjectId::new(),"machine_id":machine,"user_id":owner,"external_port":39119,"internal_port":8080,"enabled":true},
             doc! {"_id":ObjectId::new(),"machine_id":machine,"user_id":owner,"external_port":39120,"internal_port":8081,"enabled":false},foreign_connection.clone()]).await?;
+        case.app.collection("terminal_traffic").insert_many([doc!{"_id":"owned-terminal","owner_id":owner,"machine_id":machine},doc!{"_id":"keep-terminal","owner_id":other,"machine_id":foreign}]).await?;
         let body=json!({"data_id":machine.to_hex()});
         for credential in ["",other_cookie.as_str()] {
             case.status("POST","/api/machines/delete",credential,body.clone(),StatusCode::BAD_REQUEST).await?;
@@ -92,6 +93,8 @@ async fn deletion_preserves_owner_contract_tombstone_and_authenticated_ack() -> 
             ensure!(!stored.contains_key(key));
         }
         ensure!(case.app.collection("connections").count_documents(doc! {"machine_id":machine}).await?==0);
+        ensure!(case.app.collection("terminal_traffic").count_documents(doc! {"machine_id":machine}).await?==0);
+        ensure!(case.app.collection("terminal_traffic").count_documents(doc! {"machine_id":foreign}).await?==1);
         ensure!(case.app.collection("connections").find_one(doc! {"_id":foreign_connection.get("_id")}).await?.unwrap()==foreign_connection);
         ensure!(std::fs::read_to_string(&path)?.contains("39121") && !std::fs::read_to_string(&path)?.contains("39119"));
         let list=case.status("GET","/api/machines/list",&cookie,Value::Null,StatusCode::OK).await?;

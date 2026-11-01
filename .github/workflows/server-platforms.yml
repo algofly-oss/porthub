@@ -18,6 +18,40 @@ on:
 permissions:
   contents: read
 jobs:
+  terminal-measurements:
+    name: Verify account-scoped terminal measurements
+    runs-on: ubuntu-24.04
+    services:
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017/tcp
+        options: >-
+          --health-cmd 'mongosh --quiet --eval "db.runCommand({ping:1}).ok"'
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+      - name: Install pinned test toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: terminal-measurements
+          cache-workspace-crates: true
+          cache-on-failure: true
+      - name: Verify strict reports and real standalone MongoDB rollups
+        env:
+          PORTHUB_TEST_MONGO_URI: mongodb://127.0.0.1:${{ job.services.mongo.ports['27017'] }}
+        run: |
+          cargo test --locked -p porthub-terminal traffic_report
+          cargo test --locked -p porthub-api --lib terminal_traffic -- --include-ignored
+          cargo test --locked -p porthub-api --test terminal_traffic --test machine_delete --test admin_users -- --include-ignored
   ui:
     name: Build and test production browser assets
     runs-on: ubuntu-24.04
@@ -116,7 +150,7 @@ jobs:
           retention-days: 3
   package:
     name: Package server runtime images
-    needs: [server, ui]
+    needs: [server, ui, terminal-measurements]
     strategy:
       fail-fast: false
       matrix:

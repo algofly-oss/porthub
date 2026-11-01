@@ -30,3 +30,5 @@ pub mod viewer;
 pub mod viewer_history;
 
 pub mod traffic;
+
+pub mod traffic_report;

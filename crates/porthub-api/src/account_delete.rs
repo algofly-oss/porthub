@@ -126,6 +126,9 @@ async fn resume(app: &App, user: &Document) -> ApiResult<()> {
     app.collection("connections")
         .update_many(connection_filter.clone(), doc! {"$set":{"enabled":false}})
         .await?;
+    app.collection("terminal_traffic")
+        .delete_many(doc! {"owner_id":{"$in":&owner}})
+        .await?;
     app.collection("traffic_routes")
         .update_many(
             doc! {"user_id":{"$in":&owner}},

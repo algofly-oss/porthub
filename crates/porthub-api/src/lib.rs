@@ -33,6 +33,7 @@ pub mod static_ui;
 pub mod status_monitor;
 pub mod store;
 pub mod terminal;
+pub mod terminal_traffic;
 pub mod terminal_grants;
 mod terminal_journal;
 pub mod web_activity;
@@ -48,6 +49,7 @@ use std::sync::Arc;
 
 pub struct App {
     pub terminals: porthub_terminal::hub::Hub,
+    pub terminal_traffic_initialized: tokio::sync::OnceCell<()>,
     pub terminal_lifecycle: tokio::sync::Mutex<()>,
     pub terminal_admission_fault: std::sync::atomic::AtomicBool,
     pub inventory_traffic: inventory_traffic::Cache,
@@ -98,6 +100,7 @@ impl App {
         };
         Self {
             terminals: Default::default(),
+            terminal_traffic_initialized: Default::default(),
             terminal_lifecycle: Default::default(),
             terminal_admission_fault: Default::default(),
             inventory_traffic: Default::default(),

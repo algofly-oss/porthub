@@ -64,19 +64,7 @@ impl Emitter {
         })
     }
 }
-#[derive(Default, Clone, Serialize)]
-pub(crate) struct Summary {
-    pub counters: Snapshot,
-    pub instance: String,
-    pub revision: u64,
-    pub relay_sent_payload_bytes: u64,
-    pub relay_received_payload_bytes: u64,
-    pub active_sessions: usize,
-    pub active_participants: usize,
-    pub reported_sessions: u64,
-    pub active_reporting_sessions: usize,
-    pub observed_at: Option<i64>,
-}
+pub(crate) use porthub_terminal::traffic_report::Summary;
 static PROFILES: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<Summary>>>>> = OnceLock::new();
 fn profiles() -> &'static Mutex<HashMap<PathBuf, Arc<Mutex<Summary>>>> {
     PROFILES.get_or_init(Default::default)

@@ -480,3 +480,39 @@ For broker rollback or unavailable version metadata, a new supervisor strips the
 new hello capabilities from the wire request and omits the reporting extension.
 It retains the saved session capabilities, so a later compatible broker can
 restore them without replacing the workspace. A boundary test covers this path.
+
+### Account-scoped terminal measurement storage (source only)
+
+The API now accepts strict, content-free cumulative reports at
+`POST /api/machines/client/terminal-traffic`, authenticated with the existing
+machine credentials. Account and machine ownership come from the authenticated
+machine record; callers cannot supply an owner selector. The agent and API use
+the same report schema. Counters must fit exact JSON integers, gauges are bounded,
+and service-instance revisions cannot advance with regressing cumulative totals.
+Repeated identical snapshots and older revisions do not change totals or renew
+retention. Conflicting revisions are rejected.
+
+The first snapshot of each service instance establishes a baseline: it does not
+invent a rate for traffic predating the first upload. Each subsequent accepted
+snapshot atomically updates both the baseline and its rollups in one MongoDB
+document, without requiring replica-set transactions. Server receipt time assigns
+buckets. The bounded windows are 120 five-second buckets, 1,440 minute buckets,
+168 hour buckets and 30 day buckets. Inactive instance documents expire after
+30 days. Account and machine deletion remove the corresponding measurement
+records. Delayed uploads attribute their accumulated delta to receipt time;
+these operational measurements are not billing records.
+
+`GET /api/terminal/traffic` returns at most 120 aggregated points for `10m`, `1h`,
+`24h`, `7d` or `30d`, with an optional `machine_id` filter. Aggregation and ownership
+filtering run in MongoDB, rather than downloading a fleet's raw records into the
+browser. Current machine ownership is checked again during the query: transferred
+or deleted machines are excluded, and administrator status does not expose other
+accounts. PTY payload, direct UDP observations and gateway relay payload remain
+separate scopes and must not be summed as unique application traffic. This endpoint
+covers terminal hosts, not all private-network or public-port traffic.
+
+Real standalone MongoDB tests cover authentication, replay, out-of-order reports,
+concurrent requests, conflicting counters, ownership transfer, cross-account
+queries, midnight transitions and expired buckets. The server packaging workflow
+requires these checks. The background agent uploader, capability negotiation and
+dashboard integration are still pending; this storage code has not been deployed.
