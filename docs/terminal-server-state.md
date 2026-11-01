@@ -693,3 +693,35 @@ without changing its service. The live smoke now has an optional
 `--require-modern` gate that requires frozen-history negotiation, a resolved pane
 and a stable capture while shell output continues. That gate still requires
 execution against the upgraded deployment; its addition is not proof of rollout.
+
+## Packaging gate follow-up
+
+The actual packaged x86-64 1.10 client (source 891172f, SHA256 sidecar and verbose
+build metadata checked) passed native relay I/O, read-only F7, clean detach and
+workspace persistence against the still-live 1.9.1 Reid/gateway deployment. The
+browser/stock-SSH smoke also passed, and its private workspace was cleaned up.
+No installed service changed. All five Linux and all three Windows packaging
+jobs passed; macOS completion remains a release gate.
+
+The server verification cache needed an absolute root, as already required by
+the helper builder and used by client jobs. Workflow commit 9b3dbda corrects it.
+The subsequent browser gate reached a shared shell and connected ICE peers,
+but its test required setup traffic to have traversed a channel that could open
+later. The test now waits for both channels and sends fresh shell output before
+requiring bidirectional direct frame counters. This stronger ordering passed the
+real API/bundled-host/browser flow using the packaged 1.10 Linux client.
+
+The macOS ARM64 package compiled and passed sharing checks, then timed out in
+its final Ctrl+D PTY test; process-group cleanup masked the timeout with EPERM.
+Test commit 3554a82 drains PTY output while waiting for exit with the same
+three-second deadline and falls back to terminating the owned child when group
+signaling is denied. A full-buffer regression and a deliberately stuck child
+prove that draining unblocks output while still rejecting deadline violations.
+The packaged Linux participant test passes; targeted macOS verification run
+41281592532 must still establish the Darwin result. This is a test-harness change,
+not a production fix or an assertion that macOS packaging has passed.
+
+Follow-up server verification must use the current test source rather than pin
+its checkout to the older test script at 891172f. Product Rust and browser UI
+code remain unchanged by these workflow/test follow-ups; record the exact server
+build revision separately from the immutable client bundle when deploying.

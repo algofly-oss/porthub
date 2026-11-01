@@ -23,7 +23,12 @@ if(process.env.PORTHUB_TEST_TERMINAL_DIRECT==='blocked'){
  assert(directRelay>0,'blocked direct path must carry sequenced bytes through the actual gateway');
  console.log('PASS blocked browser direct path: real SDK and gateway relay preserve shell input/output without an open data channel');
 }else if(process.env.PORTHUB_TEST_TERMINAL_DIRECT){
- for(const page of [host,watcher])await page.waitForFunction(()=>window.__terminalDirect.opened>0 && window.__terminalDirect.sent>0 && window.__terminalDirect.received>0,null,{timeout:15000});
+ // Setup output may finish over relay before either channel opens on a busy
+ // runner. Wait for both channels, then generate fresh traffic to prove their
+ // bidirectional data path rather than requiring earlier bytes to use it.
+ for(const page of [host,watcher])await page.waitForFunction(()=>window.__terminalDirect.opened>0,null,{timeout:15000});
+ await type(host,"printf 'DIRECT%s\\n' 'READY'");await output(host,'DIRECTREADY');await output(watcher,'DIRECTREADY');
+ for(const page of [host,watcher])try{await page.waitForFunction(()=>window.__terminalDirect.sent>0 && window.__terminalDirect.received>0,null,{timeout:15000});}catch(error){throw Error('Direct channel opened but fresh shared I/O did not traverse it: '+JSON.stringify(await page.evaluate(()=>window.__terminalDirect)));}
  console.log('PASS real browser direct path: native sharing supervisor, authenticated broker, API signalling and bidirectional WebRTC bytes');
 }
 const sshArguments=['-F','/dev/null','-oStrictHostKeyChecking=no','-oUserKnownHostsFile=/dev/null','-oLogLevel=ERROR','-oBatchMode=yes','-tt','-p',process.env.PORTHUB_TEST_TERMINAL_SSH_PORT,'-l',write,'127.0.0.1'];ssh=spawn('ssh',sshArguments,{stdio:['pipe','pipe','pipe'],env:{...process.env,TERM:'xterm-256color'}});
