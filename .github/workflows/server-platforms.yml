@@ -40,7 +40,7 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
       PORTHUB_SOURCE_REVISION: ${{ inputs.revision || github.sha }}
-      PORTHUB_TERMINAL_HELPER_CACHE_ROOT: .cache/terminal-helper
+      PORTHUB_TERMINAL_HELPER_CACHE_ROOT: ${{ github.workspace }}/.cache/terminal-helper
     steps:
       - uses: actions/checkout@v4
         with:
