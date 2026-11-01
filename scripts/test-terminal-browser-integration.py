@@ -13,8 +13,8 @@ from urllib.parse import urlsplit
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def run(environment):
-    command = ['cargo', 'test', '--locked', '-p', 'porthub-api', '--test',
+def run(environment, command=None):
+    command = command or ['cargo', 'test', '--locked', '-p', 'porthub-api', '--test',
                'terminal_browser',
                'ordinary_ssh_and_https_share_one_tls_port_with_real_terminal_participants',
                '--', '--include-ignored', '--nocapture']
@@ -68,6 +68,9 @@ def main():
         worker.start()
         try:
             for browser in browsers:
+                preview = dict(os.environ, REVIEW_ORIGIN=f'http://127.0.0.1:{server.server_port}', REVIEW_BROWSER=browser)
+                print(f'Verify terminal dashboard: {browser}', flush=True)
+                run(preview, ['node', str(ROOT / 'ui/tests/terminal-dashboard.cjs')])
                 for transport in transports:
                     print(f'Verify terminal sharing: {browser}, {transport}', flush=True)
                     environment = dict(os.environ,

@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "prebuild": "node tests/terminal-delivery.cjs && node tests/terminal-transport.cjs",
+    "prebuild": "node --test tests/terminal-traffic.test.mjs && node tests/terminal-delivery.cjs && node tests/terminal-transport.cjs",
     "build": "next build",
     "start": "next start",
     "lint": "next lint"

@@ -164,6 +164,17 @@ fn update_pipeline(
         "received_at":{"$literal":now},
         "expires_at":{"$literal":DateTime::from_millis(now.timestamp_millis()+30*86400*1000)},
     };
+    // Service-observed relay counters do not imply host PTY/UDP coverage.
+    // A final report can advance counters after the reporting host detached.
+    let mut measured = vec![Bson::Boolean(summary.active_reporting_sessions > 0),
+        doc! {"$gt":[summary.reported_sessions as i64,{"$ifNull":["$summary.reported_sessions",0]}]}.into()];
+    for (path, value) in old_paths.iter().zip(values).take(4) {
+        measured.push(doc! {"$gt":[value as i64,{"$ifNull":[*path,value as i64]}]}.into());
+    }
+    let host_reports = doc! {"$cond":[{"$or":measured},1,0]};
+    let unreported = summary
+        .active_sessions
+        .saturating_sub(summary.active_reporting_sessions) as i64;
     // Server receipt time assigns buckets; client clocks cannot inject history.
     for (name, seconds, count) in [
         ("recent", 5_i64, 120_i64),
@@ -180,6 +191,16 @@ fn update_pipeline(
             fresh.insert(*field, delta.clone());
             changed.insert(*field, doc! {"$add":[format!("$$row.{field}"),delta]});
         }
+        fresh.insert("host_reports", host_reports.clone());
+        fresh.insert("unreported_hosts", unreported);
+        changed.insert(
+            "host_reports",
+            doc! {"$max":[{"$ifNull":["$$row.host_reports",0]},host_reports.clone()]},
+        );
+        changed.insert(
+            "unreported_hosts",
+            doc! {"$max":[{"$ifNull":["$$row.unreported_hosts",0]},unreported]},
+        );
         replacement.insert(name, doc! {"$let":{
             "vars":{"rows":{"$filter":{"input":{"$ifNull":[source,[]]},"as":"row","cond":{"$gte":["$$row.at",at-(count-1)*seconds*1000]}}}},
             "in":{"$slice":[{"$cond":[{"$in":[at,{"$map":{"input":"$$rows","as":"row","in":"$$row.at"}}]},
@@ -232,6 +253,13 @@ async fn series(
     let mut project = doc! {"_id":0,"at":"$_id"};
     for field in FIELDS {
         group.insert(field, doc! {"$sum":format!("$rows.{field}")});
+        project.insert(field, 1);
+    }
+    for field in ["host_reports", "unreported_hosts"] {
+        group.insert(
+            field,
+            doc! {"$max":{"$ifNull":[format!("$rows.{field}"),0]}},
+        );
         project.insert(field, 1);
     }
     // Re-check current ownership in the DB. Admin status never broadens this

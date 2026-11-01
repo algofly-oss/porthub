@@ -239,3 +239,89 @@ async fn exercise(case: &Case) -> Result<()> {
     ensure!(deleted["points"].as_array().unwrap().is_empty());
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires isolated MongoDB"]
+async fn legacy_relay_samples_do_not_claim_host_measurement_coverage() -> Result<()> {
+    let case = Case::new(Config::default()).await?;
+    let result = async {
+        let (owner, cookie) = case.user("legacy-terminal@example.test", "user").await?;
+        let id = ObjectId::new();
+        case.app
+            .collection("machines")
+            .insert_one(doc! {"_id":id,"user_id":owner,"token":"fixture-only","enabled":true})
+            .await?;
+        let mut summary = Summary {
+            instance: "c".repeat(32),
+            revision: 1,
+            active_sessions: 1,
+            ..Default::default()
+        };
+        for revision in 1..=2 {
+            summary.revision = revision;
+            summary.relay_sent_payload_bytes = revision * 13;
+            case.status(
+                "POST",
+                PATH,
+                "",
+                json!({"machine_id":id.to_hex(),"token":"fixture-only","summary":summary}),
+                StatusCode::OK,
+            )
+            .await?;
+        }
+        let read = case
+            .status(
+                "GET",
+                "/api/terminal/traffic?range=1h",
+                &cookie,
+                Value::Null,
+                StatusCode::OK,
+            )
+            .await?;
+        let points = read["points"].as_array().unwrap();
+        ensure!(
+            !points.is_empty()
+                && points
+                    .iter()
+                    .all(|point| point["host_reports"] == 0 && point["unreported_hosts"] == 1)
+        );
+        ensure!(
+            points
+                .iter()
+                .map(|point| point["relay_sent"].as_u64().unwrap())
+                .sum::<u64>()
+                == 13
+        );
+        // A zero-byte modern sample supplies real coverage; it must be distinct
+        // from a legacy host whose unknown counters merely default to zero.
+        summary.revision = 3;
+        summary.reported_sessions = 1;
+        summary.active_reporting_sessions = 1;
+        case.status(
+            "POST",
+            PATH,
+            "",
+            json!({"machine_id":id.to_hex(),"token":"fixture-only","summary":summary}),
+            StatusCode::OK,
+        )
+        .await?;
+        let read = case
+            .status(
+                "GET",
+                "/api/terminal/traffic?range=1h",
+                &cookie,
+                Value::Null,
+                StatusCode::OK,
+            )
+            .await?;
+        ensure!(read["points"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|point| point["host_reports"] == 1 && point["pty_input"] == 0));
+        Ok(())
+    }
+    .await;
+    case.db.drop().await?;
+    result
+}

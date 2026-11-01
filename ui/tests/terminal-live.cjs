@@ -137,6 +137,32 @@ await type(host,"printf 'SURVIVED:%s:%s\\n' \"$OWNVAR\" \"${UNAUTHORIZED-unset}\
 await watcher.getByRole('button',{name:'Reconnect',exact:true}).click();await watcher.getByRole('alert').filter({hasText:'Recovery expired, revoked'}).waitFor();
 assert.equal(hostConnections,1,'host input must survive pressure without a hidden reconnect: '+JSON.stringify(hostEvents));
 await host.locator('.xterm-helper-textarea').focus();await host.keyboard.press('Control+d');await host.getByRole('button',{name:'Reconnect',exact:true}).waitFor();
+if(process.env.PORTHUB_TEST_NATIVE_CLI){
+  await host.bringToFront();
+  await host.goto(`${origin}/home?view=dashboard&terminal_range=10m&terminal_scope=direct`);
+  const card=host.getByRole('region',{name:'Terminal traffic',exact:true});
+  const chart=card.getByRole('group',{name:/Terminal traffic chart/});
+  await chart.waitFor();
+  assert.equal(await card.getByLabel('Terminal traffic range',{exact:true}).inputValue(),'10m');
+  assert.equal(await card.getByRole('tab',{name:'Direct UDP',exact:true}).getAttribute('aria-selected'),'true');
+  await host.evaluate(()=>fetch('/__fixture/terminal-traffic/unavailable',{method:'POST'}));
+  await host.getByRole('button',{name:'Refresh dashboard',exact:true}).click();
+  await card.getByRole('alert').filter({hasText:'Showing the last successful snapshot'}).waitFor();
+  assert(await chart.isVisible(),'reporting errors must preserve the last successful graph');
+  await host.evaluate(()=>fetch('/__fixture/terminal-traffic/available',{method:'POST'}));
+  await host.getByRole('button',{name:'Refresh dashboard',exact:true}).click();
+  await card.getByRole('alert').waitFor({state:'hidden'});
+  if(process.env.REVIEW_BROWSER!=='webkit' && process.env.PORTHUB_TEST_TERMINAL_DIRECT==='1'){
+    await card.getByRole('button',{name:'Pause terminal measurements',exact:true}).click();
+    await card.getByText('Paused',{exact:true}).waitFor();
+    await host.waitForTimeout(250);
+    const requests=()=>host.evaluate(async()=> (await fetch('/__fixture/terminal-traffic/requests',{method:'POST',cache:'no-store'})).json());
+    const before=(await requests()).requests;assert(before>0,'fixture must observe actual graph requests');
+    await host.waitForTimeout(16000);
+    assert.equal((await requests()).requests,before,'paused terminal graphs must stop HTTP polling');
+  }
+  console.log('PASS real account dashboard: reported terminal intervals, URL controls, outage recovery and preserved snapshots');
+}
 assert.deepEqual(errors,[]);console.log('PASS live browser/API/bundled tmux: anonymous browser and ordinary SSH guests, owner administration, shared shell state and SSH-disconnect persistence, safe browser and read-only SSH scrollback, concurrent recovery/history/output pressure, tab recovery despite revoked invitations, durable removal and explicit Ctrl+D teardown');
 await owner.close();await guest.close();
 }finally{ssh?.kill('SIGTERM');sshReader?.kill('SIGTERM');await browser.close()}})().catch(error=>{console.error(String(error.stack||error).replace(/[a-f0-9]{64}/g,'[capability]'));process.exitCode=1});

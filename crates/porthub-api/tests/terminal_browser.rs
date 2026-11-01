@@ -186,7 +186,31 @@ async fn exercise(multiplex: bool) -> Result<()> {
         .await?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let origin = format!("http://{}", listener.local_addr()?);
-    let router = case.router.clone();
+    // Fault injection stays in this loopback-only test router. Inject upstream
+    // of the real PWA so its network handling is exercised rather than bypassed.
+    let unavailable=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let requests=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let router=case.router.clone().layer(axum::middleware::from_fn(move |request:axum::extract::Request,next:axum::middleware::Next| {
+        let unavailable=unavailable.clone();let requests=requests.clone();
+        async move {
+            use axum::response::IntoResponse;
+            use std::sync::atomic::Ordering;
+            let path=request.uri().path();
+            if request.method()==axum::http::Method::POST {
+                match path {
+                    "/__fixture/terminal-traffic/unavailable"=>{unavailable.store(true,Ordering::Relaxed);return axum::http::StatusCode::NO_CONTENT.into_response();},
+                    "/__fixture/terminal-traffic/available"=>{unavailable.store(false,Ordering::Relaxed);return axum::http::StatusCode::NO_CONTENT.into_response();},
+                    "/__fixture/terminal-traffic/requests"=>return axum::Json(serde_json::json!({"requests":requests.load(Ordering::Relaxed)})).into_response(),
+                    _=>{},
+                }
+            }
+            if request.method()==axum::http::Method::GET && path=="/api/terminal/traffic" {
+                requests.fetch_add(1,Ordering::Relaxed);
+                if unavailable.load(Ordering::Relaxed) {return (axum::http::StatusCode::SERVICE_UNAVAILABLE,axum::Json(serde_json::json!({"detail":"fixture reporting outage"}))).into_response();}
+            }
+            next.run(request).await
+        }
+    }));
     let _server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
         axum::serve(listener, router).await
     }));
@@ -311,7 +335,7 @@ async fn exercise(multiplex: bool) -> Result<()> {
         );
     }
     if !output.status.success() {
-        eprintln!("Isolated fixture shell: {}", workspace.capture("%0", 200)?);
+        if let Ok(capture)=workspace.capture("%0",200) {eprintln!("Isolated fixture shell: {capture}");}
     }
     ensure!(
         output.status.success(),

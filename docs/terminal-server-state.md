@@ -573,3 +573,50 @@ A regression test holds a full replay window plus ACKs without draining and chec
 that the participant remains attached. Browser diagnostics now record connection
 phases without terminal contents or invitation/recovery capabilities, so an
 unexpected reconnect cannot silently pass the end-to-end test.
+
+### Terminal account dashboard (source only)
+
+The dashboard now has a separate Terminal traffic card beside the existing
+public-port monitoring sections. It defaults to gateway relay payload and offers
+separate direct UDP and attachment PTY views. These scopes overlap and are never
+added together. Directions are relative to the host. The chart shows byte volumes
+per server-receipt interval, rather than inventing instantaneous NIC speeds.
+Hover and keyboard navigation expose individual intervals. Missing reports remain
+gaps; measured zero values remain visible measurements. Details explain baseline,
+redraw, overhead and delayed-upload limits. This card does not claim to cover all
+private-network traffic or identify anonymous guests as registered machines.
+
+Machine selection uses the existing bounded remote inventory control. Supported
+windows are 10 minutes, 1 hour, 24 hours, 7 days and 30 days, with no more than 120
+points returned by the authenticated database aggregation. Scope changes reuse
+the same six counters without another request. `terminal_machine`,
+`terminal_range` and `terminal_scope` are shallow URL parameters and survive a
+reload. Data is cached only in the signed-in workspace's memory. Requests run at
+15-second intervals only while the dashboard is active and visible. Pause stops
+polling; Refresh dashboard can explicitly request a fresh snapshot. Errors retain
+and label the last successful snapshot. Filter changes cancel obsolete requests
+and never reuse another selection's graph.
+
+Rollup points now carry server-derived `host_reports` and `unreported_hosts`
+coverage markers. Service-observed legacy relay activity alone does not establish
+PTY or direct UDP coverage. Old rows without coverage markers are conservatively
+unknown in those views. Zero-byte modern reports establish real coverage, and
+mixed reporting windows carry an incomplete-measurements notice. Counter storage,
+coverage and baseline changes remain one atomic MongoDB operation.
+
+The production export passes responsive dark/light tests at 1512, 402 and 320
+pixels in Chrome and WebKit, including URL persistence, keyboard controls, empty,
+failed, malformed, legacy and measured-zero states. The real API/broker/bundled
+shell matrix now opens this dashboard with the machine owner's actual session
+cookie. A loopback-only test-router fault simulates an upstream reporting outage
+through the real PWA, verifies retained snapshots and recovery, and counts server
+requests to prove Pause stops polling. Those fault endpoints exist only in the
+integration test; they are not production routes. The UI tests run automatically
+in the existing server packaging gate, and pure data validation runs in prebuild.
+Dashboard hover state stays inside the chart instead of rerendering inventory
+controls for each pointer movement. No charting dependency was added.
+
+This completes the source integration from local host measurements to account
+storage and dashboard display. It is not a release or deployment attestation.
+Approved NAT configuration, the upcoming client feature/version selection,
+platform packaging validation and authorized live rollout remain outstanding.
