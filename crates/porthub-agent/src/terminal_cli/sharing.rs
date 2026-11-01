@@ -434,6 +434,34 @@ fn prepare_rotation(root: &Path, sharing: &mut Sharing, seconds: u32) -> Result<
     Ok(update)
 }
 
+fn broker_request(hello: &HostHello, extensions: bool) -> serde_json::Value {
+    let mut hello = hello.clone();
+    if !extensions {
+        hello.history_snapshots = false;
+        hello.direct_transport = false;
+    }
+    let mut request = serde_json::json!({"operation":"terminal_host","hello":hello});
+    if extensions {
+        request["traffic_reporting"] = true.into();
+    }
+    request
+}
+
+async fn report_traffic<S: tokio::io::AsyncWrite + Unpin>(
+    stream: &mut S,
+    emitter: &mut Option<crate::terminal_telemetry::Emitter>,
+    attachments: &Attachments,
+) -> Result<()> {
+    let Some(emitter) = emitter else {
+        return Ok(());
+    };
+    let report = emitter.report(attachments.traffic())?;
+    let mut bytes = serde_json::to_vec(&report)?;
+    bytes.push(b'\n');
+    tokio::time::timeout(Duration::from_secs(5), stream.write_all(&bytes)).await??;
+    Ok(())
+}
+
 pub(super) async fn serve(root: &Path, id: &str) -> Result<()> {
     let _guard = worker_lock(root, id)?;
     let job = select(root, id)?;
@@ -471,9 +499,9 @@ pub(super) async fn serve(root: &Path, id: &str) -> Result<()> {
         .await;
         if let Ok(Ok(stream)) = result {
             let mut local = BufReader::new(stream);
-            let mut request = serde_json::to_vec(
-                &serde_json::json!({"operation":"terminal_host","hello":sharing.hello}),
-            )?;
+            let traffic_requested=crate::service::readable::select(&layout,Some(&sharing.registration),Some(false))
+                .is_ok_and(|registration|broker_has_history_snapshots(&registration.agent_version));
+            let mut request=serde_json::to_vec(&broker_request(&sharing.hello,traffic_requested))?;
             request.push(b'\n');
             if local.get_mut().write_all(&request).await.is_ok() {
                 let mut attachments = Attachments::new(
@@ -481,23 +509,29 @@ pub(super) async fn serve(root: &Path, id: &str) -> Result<()> {
                     usize::from(sharing.hello.options.max_viewers),
                 )?;
                 let mut partial = Vec::new();
+                let mut traffic=None;
+                let mut last_traffic=tokio::time::Instant::now();
                 let mut tick = tokio::time::interval(Duration::from_secs(1));
                 let mut last_gateway = tokio::time::Instant::now();
                 loop {
                     tokio::select! {
                         bytes=crate::terminal_transport::frame(&mut local,&mut partial)=> {
                             let Ok(bytes)=bytes else{break;};
-                            #[cfg(feature="terminal-direct")]
-                            if let Ok(value)=serde_json::from_slice::<serde_json::Value>(&bytes) {
-                                if value.get("type").and_then(serde_json::Value::as_str)==Some("terminal_direct_policy") {
-                                    let policy:crate::terminal_transport::DirectPolicy=serde_json::from_value(value)?;
-                                    attachments.configure_direct(porthub_terminal::direct::host::Config {
-                                        addresses:policy.addresses,stun_servers:policy.stun_servers,
-                                    })?;
-                                    continue;
-                                }
+                            let Ok(value)=serde_json::from_slice::<serde_json::Value>(&bytes) else {break;};
+                            if value.get("type").and_then(serde_json::Value::as_str)==Some("terminal_traffic_policy") {
+                                ensure!(traffic_requested && traffic.is_none(),"unsolicited terminal traffic policy");
+                                traffic=Some(crate::terminal_telemetry::Emitter::new(serde_json::from_value(value)?)?);
+                                continue;
                             }
-                            let Ok(event)=serde_json::from_slice::<HostEvent>(&bytes) else{break;};
+                            #[cfg(feature="terminal-direct")]
+                            if value.get("type").and_then(serde_json::Value::as_str)==Some("terminal_direct_policy") {
+                                let policy:crate::terminal_transport::DirectPolicy=serde_json::from_value(value)?;
+                                attachments.configure_direct(porthub_terminal::direct::host::Config {
+                                    addresses:policy.addresses,stun_servers:policy.stun_servers,
+                                })?;
+                                continue;
+                            }
+                            let Ok(event)=serde_json::from_value::<HostEvent>(value) else{break;};
                             last_gateway=tokio::time::Instant::now();
                             if matches!(event,HostEvent::Stop{..}) {
                                 sharing.state="ended".into();save(root,&sharing,true)?;
@@ -556,12 +590,20 @@ pub(super) async fn serve(root: &Path, id: &str) -> Result<()> {
                         }
                         output=attachments.next()=> {
                             let Some(output)=output else{break;};
+                            if matches!(output,HostOutput::Closed {..}) {
+                                if report_traffic(local.get_mut(),&mut traffic,&attachments).await.is_err() {break;}
+                            }
                             let mut bytes=serde_json::to_vec(&output)?;bytes.push(b'\n');
                             if !matches!(tokio::time::timeout(Duration::from_secs(5),local.get_mut().write_all(&bytes)).await,Ok(Ok(()))){break;}
                         }
                         _=tick.tick()=> {
                             enforce_limits(&workspace,&sharing.hello.options)?;
-                            if !workspace.is_alive(){
+                            let alive=workspace.is_alive();
+                            if last_traffic.elapsed()>=Duration::from_secs(5) || !alive {
+                                if report_traffic(local.get_mut(),&mut traffic,&attachments).await.is_err() {break;}
+                                last_traffic=tokio::time::Instant::now();
+                            }
+                            if !alive {
                                 sharing.state="ended".into();save(root,&sharing,true)?;
                                 let _=tokio::time::timeout(Duration::from_secs(2),local.get_mut().write_all(b"{\"type\":\"end\"}\n")).await;
                                 return Ok(());
@@ -603,6 +645,22 @@ mod rotation_tests {
         for version in ["1.10.0", "1.11.0", "2.0.0"] {
             assert!(broker_has_history_snapshots(version), "{version}");
         }
+    }
+
+    #[test]
+    fn older_broker_requests_omit_extensions_without_modifying_the_saved_session() -> Result<()> {
+        let hello:HostHello=serde_json::from_value(serde_json::json!({
+            "id":random_token(16),"secret":random_token(32),"write_token":random_token(32),"read_token":random_token(32),
+            "history_snapshots":true,"direct_transport":true,
+            "options":{"name":"quietotter","expires_at":0,"idle_timeout":0,"reconnect_timeout":60,"history_limit":100000,"mouse":true,"read_only":false,"size_policy":"smallest"}}))?;
+        let old=broker_request(&hello,false);
+        assert_eq!(old.as_object().unwrap().len(),2);
+        assert!(old["hello"].get("history_snapshots").is_none() && old["hello"].get("direct_transport").is_none());
+        assert!(hello.history_snapshots && hello.direct_transport,"compatibility negotiation must not downgrade saved capabilities");
+        let current=broker_request(&hello,true);
+        assert_eq!(current["traffic_reporting"],true);
+        assert_eq!(current["hello"]["history_snapshots"],true);
+        Ok(())
     }
 
     #[test]

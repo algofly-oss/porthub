@@ -432,3 +432,51 @@ step must bind them to the installed agent's authenticated machine/session befor
 API persistence and account-scoped dashboard presentation. Guest reports must not
 supply authoritative machine identities or metrics. No reporting messages have
 been added to older gateway protocols, and no live service was changed here.
+
+### Authenticated local traffic reporting (API persistence pending)
+
+New sharing supervisors negotiate `traffic_reporting` only with a broker version
+that supports the local extension. After the gateway accepts the host session,
+the broker supplies a fresh local traffic epoch. Cumulative PTY/UDP reports use
+that epoch and increasing sequences; exact replays are idempotent, conflicting or
+regressing reports fail, and a report cannot choose a machine, account or profile.
+The broker binds scope from its existing OS-authorized registration connection.
+The traffic policy and reports are local envelopes, not gateway or guest events.
+A real-WebSocket regression test verifies an older gateway receives only its
+existing protocol, even while the broker consumes repeated local reports.
+
+The service aggregates counters per enrolled profile and process lifetime, with
+a random instance ID and a monotonic revision for later idempotent API uploads.
+Closed connections clear active gauges but retain cumulative observations. State
+is bounded to 128 profile stores and 1024 simultaneous streams per profile. The
+host samples approximately every 5 s and on closure/end when possible. Process
+crash or connection loss can leave a final unsampled interval; this remains an
+operational measurement, not exact billing accounting.
+
+The broker also measures forwarded terminal application payload for legacy
+supervisors, without requiring new owner-side messages. It derives participant
+gauges from authenticated gateway membership events, rather than trusting guest
+reports. Gateway payload excludes control messages and TLS/WebSocket framing;
+it includes relayed live output and history pages. PTY observations and direct
+UDP remain separate scopes. Do not sum overlapping scopes into one total.
+
+`porthub stats --json` includes a terminal measurements section, and the selected
+agent's interactive details show sessions, guests, gateway payload, PTY bytes and
+direct UDP. Missing host measurements are labelled as unreported. The 80-column,
+24-row layout keeps selection and quit controls visible. Existing mapped sharing
+supervisors continue serving; upgrading the service does not inject unknown local
+messages into them or stop their jobs. Collecting these counters adds no cloud
+request or additional terminal liveness probe.
+
+API persistence, authenticated account-level graph queries and dashboard display
+are still pending. No server/client deployment was performed for this step.
+
+The broker also requires local traffic-report negotiation before enabling the
+host's direct capability. An older sharing supervisor therefore continues on
+relay, where the service observes payload, rather than opening an unmeasured
+peer path. This changes no workspace or invitation lifecycle.
+
+For broker rollback or unavailable version metadata, a new supervisor strips the
+new hello capabilities from the wire request and omits the reporting extension.
+It retains the saved session capabilities, so a later compatible broker can
+restore them without replacing the workspace. A boundary test covers this path.
