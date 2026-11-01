@@ -711,14 +711,18 @@ async fn frozen_history_routes_stable_pages_and_rejects_detached_guest_anchors()
         })?;
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if let Some(HostOutput::History { client: 7, page }) = router.next().await {
-                    assert_eq!(page.request, request);
-                    assert!(page.done, "small page should fit one frame");
-                    page.validate()?;
-                    return Ok(page);
+                match router.next().await {
+                    Some(HostOutput::History {client:7,page}) => {
+                        assert_eq!(page.request, request);
+                        assert!(page.done, "small page should fit one frame");
+                        page.validate()?;
+                        return Ok(page);
+                    }
+                    Some(HostOutput::Closed {client:7}) | None => anyhow::bail!("history request {request} lost its attachment before the response"),
+                    _ => {},
                 }
             }
-        }).await?
+        }).await.map_err(|error| anyhow::anyhow!("history request {request} timed out with {} attached participants: {error}",router.participants()))?
     }
     let (_directory, workspace) = workspace()?;
     let _cleanup = Cleanup(workspace.clone());
@@ -893,4 +897,57 @@ async fn unavailable_delivery_runtime_closes_only_the_sender() -> Result<()> {
         loop {if matches!(router.next().await,Some(HostOutput::Closed {client:7})){break;}}
     }).await?;
     assert_eq!(router.participants(),1);assert!(workspace.is_alive());Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires bundled terminal runtime"]
+async fn detached_participant_events_cannot_close_a_replacement_with_the_same_identity() -> Result<()> {
+    use porthub_terminal::{host::Attachments, protocol::*};
+    let (_directory, workspace) = workspace()?;
+    let _cleanup = Cleanup(workspace.clone());
+    workspace.start(&start())?;
+    let mut router = Attachments::new(workspace.clone(), 2)?;
+    let attach = |client| HostEvent::Attach {
+        client, read_only: true, cols: 100, rows: 30, term: "xterm-256color".into(),
+    };
+    router.apply(attach(7))?;
+    router.apply(attach(8))?;
+    let command = workspace.command().args(["send-keys", "-c", "porthub-history-owner", "-t", "%0", "printf 'ATTACH%s\\n' 'READY'", "Enter"]).output()?;
+    anyhow::ensure!(command.status.success());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut screen = Vec::new();
+        loop {
+            match router.next().await {
+                Some(HostOutput::Output {client: 7, data}) => {
+                    screen.extend(decode_data(&data)?);
+                    if screen.windows(11).any(|bytes| bytes == b"ATTACHREADY") {break;}
+                }
+                Some(HostOutput::Closed {..}) | None => anyhow::bail!("initial fixture attachment closed"),
+                _ => {},
+            }
+        }
+        Ok::<_,anyhow::Error>(())
+    }).await??;
+    // Finish the initial redraw and leave the old reader blocked in read().
+    while let Ok(output) = tokio::time::timeout(Duration::from_millis(50), router.next()).await {
+        anyhow::ensure!(!matches!(output, Some(HostOutput::Closed {..}) | None), "initial fixture attachment closed");
+    }
+    router.apply(HostEvent::Detach {client: 7})?;
+    // Let its cancellation/EOF callback queue before admitting the replacement.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    router.apply(attach(7))?;
+    router.apply(HostEvent::Ping)?;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match router.next().await {
+                Some(HostOutput::Pong) => break,
+                Some(HostOutput::Closed {..}) | None => anyhow::bail!("detached PTY closed a replacement or independent participant"),
+                _ => {},
+            }
+        }
+        Ok::<_,anyhow::Error>(())
+    }).await??;
+    assert_eq!(router.participants(), 2, "both replacement and independent participant must remain attached");
+    assert!(workspace.is_alive());
+    Ok(())
 }

@@ -725,3 +725,56 @@ Follow-up server verification must use the current test source rather than pin
 its checkout to the older test script at 891172f. Product Rust and browser UI
 code remain unchanged by these workflow/test follow-ups; record the exact server
 build revision separately from the immutable client bundle when deploying.
+
+## Live gateway and attachment-generation fix
+
+Server run 41282736684 passed all build, UI, database, Chrome/WebKit direct and
+blocked-path flows and image packaging gates at source
+48a47c1707e5e1795e35342b48564568a3466cc6. Its image archive was transferred to urm2
+without copying a GitHub token, verified against GitHub's SHA256/size, checked for
+canonical entries, and validated against every role checksum and source/version
+marker. Only core and edge were loaded for this scoped upgrade.
+
+The read-only upgrade preflight passed. A database audit found zero active
+terminal sessions before restarting the gateway. The authorized core/edge
+upgrade succeeded with a verified cold backup and retained immutable rollback
+references at
+`/home/ubuntu/algofly/porthub-release-1.10.0-48a47c1/deploy/native/upgrade-records/48a47c1707e5e1795e35342b48564568a3466cc6-czk1dutr`.
+Both selected roles now report healthy 1.10.0/source 48a47c1. The firewall remains
+1.8.4/source 9b6c65d, and the upgrade tool confirmed all unselected running
+containers remained running. All four public application routes return HTTP 200.
+IBI and Thor match baseline body hashes. Home Sense and Autolycus serve newer
+static HTML than the original baseline; their expected titles and same-origin
+script assets were checked instead of claiming identical response bytes.
+
+The upgraded gateway passed the scoped live anonymous-browser/stock-SSH/native
+relay smoke with the unchanged 1.9.1 Reid host, including read-only F7, history,
+revocation, recovery, removal, detach persistence and explicit teardown. Its
+private test workspace was cleaned up. No installed agent was upgraded.
+
+Client recovery run 41283189259 verified eight eligible Linux/Windows artifacts
+for reuse and packaged macOS ARM64 with the corrected PTY test. Its final bundle
+was blocked by Intel macOS; retained archives were not yet assembled.
+Intel macOS exposed a history-router timeout. Investigating that path revealed a
+concrete production race: dropping an old PTY can enqueue Closed after a new
+attachment has reused the same public participant identity. The old router then
+removes the replacement. A new isolated real-shell regression reproduced that
+failure before the fix.
+
+The client SDK now stamps PTY/RTC/history work with a per-admission generation.
+Late callbacks cannot close or write into replacements or invalidate their
+history ownership. Forwarders are cancelled on detach, EOF reliably emits a
+scoped closure even if the producer's best-effort queue was full, and workers
+cannot target independent participants. Activity heartbeats retain their scope
+and remain valid. The before-fix regression fails and the fixed regression
+passes. All 90 terminal SDK tests and all four real browser/API/bundled-agent
+flows pass, including the CI-like TERM=dumb parent environment. Agent terminal
+checks also pass. History test failures now identify the request and attachment
+state instead of hiding a close behind an unexplained timeout.
+
+This is an actual production-input change, so the older client artifacts are
+no longer eligible for reuse. Fresh client packaging is required before client
+rollout/publication. The earlier uninstalled EC2 staging binary was checksum-
+checked and removed, rather than risking its accidental installation. The live
+core/edge services do not execute the client host-attachment router; their
+validated deployment does not need restarting for this client-only fix.
