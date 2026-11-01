@@ -29,6 +29,15 @@ backend received content-free PTY and relay counters, and the audit found zero
 active terminal sessions afterward. This proves the canary and gateway path;
 it does not assert that an offline registered machine has upgraded.
 
+The final rollout audit confirmed all eight online clients on 1.10.0: Clear,
+Deep, EC2, Luna, Miro, Reid, Thor and Pratap's laptop. Reid reached this version
+through the normal automatic update path and then passed the same modern live
+smoke, including native relay, browser/stock SSH and frozen history. EC2 and Reid
+both reported the exact published source with active services and zero unexpected
+restarts. The four checked application routes still returned HTTP 200 after
+client updates. Condor, Harshitha AGX, Spark and Nitin's MacBook were offline;
+their upgrades were not verified. No networking changes were made to reach them.
+
 Linux and macOS hosts use the bundled multiplexer; native Windows hosting and
 the native Windows guest TTY are not implemented. Windows participants can use
 a browser or ordinary SSH. Browser clipboard copying needs a secure context and
