@@ -1,4 +1,4 @@
-//! Authenticated native guest signaling. Experimental; the CLI still uses SSH.
+//! Authenticated native guest signaling. CLI joins default to ordinary SSH.
 //! Invitation and recovery capabilities travel only in the encrypted first
 //! message, never in request URLs or diagnostic values.
 #[cfg(unix)]

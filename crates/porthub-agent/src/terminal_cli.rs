@@ -126,10 +126,10 @@ pub enum JoinTransport {
     /// Ordinary installed SSH client.
     #[default]
     Ssh,
-    /// Experimental native relay; available in terminal-direct builds.
+    /// Native gateway relay without an external SSH client.
     #[cfg(feature = "terminal-direct")]
     Relay,
-    /// Experimental native direct when a local agent permits it, otherwise relay.
+    /// Native direct when a local agent permits it, otherwise gateway relay.
     #[cfg(feature="terminal-direct")]
     Auto,
 }

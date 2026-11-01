@@ -270,3 +270,12 @@ Linux and macOS lifecycle tests provide runtime evidence for their exercised
 platforms; compiling a Windows target does not establish installation or routing
 behavior on a Windows machine. Current transfer results remain in the single
 `docs/benchmarks/README.md` summary with their measured release versions.
+
+The 1.10 terminal-sharing release candidate enables the `terminal-direct` agent
+feature in the default build. Unix hosts include direct transport and native
+relay/auto joins without custom build flags; ordinary SSH remains the default
+join method. Local transport policy still controls whether UDP is allowed, and
+STUN servers require explicit local configuration. Windows retains its existing
+hosting/CLI limits; browser and ordinary SSH guests do not need PortHub installed.
+Minimal builds may opt out with `--no-default-features`. The feature must be
+validated by the platform packaging matrix before this candidate is published.
