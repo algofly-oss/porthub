@@ -17,7 +17,13 @@ async function main() {
     browser = await launchBrowser();
     const context = await browser.newContext({viewport:{width:1440,height:900}});
     page = await context.newPage();
-    const errors=[];page.on('pageerror',error=>errors.push(error.message));
+    const errors=[],historyFrames=[];let welcome;
+    page.on('pageerror',error=>errors.push(error.message));
+    page.on('websocket',socket=>{
+      if(new URL(socket.url()).pathname!=='/api/terminal/join')return;
+      socket.on('framereceived',({payload})=>{try{const event=JSON.parse(String(payload));if(event.type==='welcome')welcome=event;}catch{}});
+      socket.on('framesent',({payload})=>{try{const event=JSON.parse(String(payload));if(event.type==='history')historyFrames.push(event);}catch{}});
+    });
     await page.goto(input.invitation.read_only_url,{waitUntil:'networkidle',timeout:30000});
     await page.getByRole('button',{name:'Connect',exact:true}).click();
     await page.getByRole('heading',{name:input.name,exact:true}).waitFor();
@@ -45,6 +51,18 @@ async function main() {
     await waitSSH(ssh,'PAGEEND'+input.marker);await text(page,'PAGEEND'+input.marker);
     await page.getByRole('button',{name:'History',exact:true}).click();
     await page.getByLabel('Captured history text',{exact:true}).filter({hasText:'LIVEREADY'+input.marker}).waitFor();
+    if(input.requireModern){
+      assert.equal(welcome?.history_snapshots,true,'live host and gateway must negotiate frozen history');
+      assert.equal(historyFrames.at(-1)?.freeze,true,'browser must request a frozen snapshot');
+      const pane=await page.getByLabel('History pane',{exact:true}).inputValue();assert.match(pane,/^%[0-9]+$/);
+      const captured=await page.getByLabel('Captured history text',{exact:true}).innerText();
+      await page.getByRole('button',{name:'Refresh history',exact:true}).waitFor({state:'visible'});
+      assert(await page.getByLabel('Terminal history',{exact:true}).innerText().then(text=>text.includes('History stays fixed until you refresh.')));
+      ssh.stdin.write(`printf 'SNAPSHOTSTABLE%s\\n' '${input.marker}'\r`);
+      await waitSSH(ssh,'SNAPSHOTSTABLE'+input.marker);
+      assert.equal(await page.getByLabel('Captured history text',{exact:true}).innerText(),captured,'live output must preserve the captured page');
+      console.log('PASS live modern negotiation: frozen history with a resolved pane and stable capture');
+    }
     await page.getByRole('button',{name:'Return to live',exact:true}).click();
     // Losing the stock SSH attachment must preserve the shell variable.
     ssh.kill('SIGTERM');await new Promise(resolve=>ssh.once('close',resolve));

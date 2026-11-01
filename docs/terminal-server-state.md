@@ -666,3 +666,30 @@ layouts. All four real API/broker/bundled-shell browser flows (Chrome/WebKit,
 direct/blocked) passed, including owner administration, read-only guests,
 recovery, history pressure, reporting failure recovery and explicit teardown.
 These checks used isolated loopback services and did not restart live clients.
+
+## 1.10 packaging and rollout preparation
+
+Release source `891172f6e87f1cb0c416b48977dde6027a8a101e` enables
+`terminal-direct` in default agent builds and advances workspace metadata to
+1.10.0. All four server/agent roles compile with the locked dependency set, and
+42 terminal agent tests pass with the new default feature configuration.
+Client packaging run 41279957114 and server packaging run 41279957045 were
+started from that exact revision; these run IDs are not success attestations.
+
+The server measurement job exposed a workflow-only error before checkout: the
+runner split the single-quoted MongoDB Docker health command. Commit 2029f1f
+uses a double-quoted health command verified with an isolated actual MongoDB
+container. Server dispatch now accepts an explicit source revision so workflow
+fixes can validate/package the original immutable candidate. The failed gate
+must be rerun with that corrected workflow before deployment.
+
+The source checkout is staged at
+`/home/ubuntu/algofly/porthub-release-1.10.0-891172f` on urm2, with the existing
+private environment copied privately; Compose configuration validates. No live
+container or agent was upgraded during staging. IBI, Thor, Home Presence and
+Autolycus baseline routes returned HTTP 200. The existing 1.9.1 Reid agent also
+passed the scoped browser/stock-SSH live smoke with explicit teardown and cleanup,
+without changing its service. The live smoke now has an optional
+`--require-modern` gate that requires frozen-history negotiation, a resolved pane
+and a stable capture while shell output continues. That gate still requires
+execution against the upgraded deployment; its addition is not proof of rollout.

@@ -19,6 +19,7 @@ def main():
     parser.add_argument('--binary',default='porthub')
     parser.add_argument('--registration')
     parser.add_argument('--native-guest',type=Path,help='Optional local experimental CLI to verify native relay guests')
+    parser.add_argument('--require-modern',action='store_true',help='Require negotiated frozen history from a 1.10 or newer host and gateway')
     args=parser.parse_args()
     if not re.fullmatch(r'[a-zA-Z0-9_@.:-]+',args.host) or args.host.startswith('-') or not re.fullmatch('[a-f0-9]{40}',args.revision):
         parser.error('Use an explicit SSH host and complete build revision')
@@ -55,7 +56,7 @@ def main():
             sensitive.append(token)
         ssh=shlex.split(invitation['interactive_ssh'])
         if not ssh or ssh.pop(0)!='ssh':raise RuntimeError('Unexpected gateway SSH command')
-        payload=dict(host=args.host,name=name,invitation=invitation,ownerPrefix=shlex.join(prefix),marker=secrets.token_hex(8),
+        payload=dict(host=args.host,name=name,invitation=invitation,ownerPrefix=shlex.join(prefix),marker=secrets.token_hex(8),requireModern=args.require_modern,
                      sshArguments=ssh,sshOptions=['-F','/dev/null','-oBatchMode=yes','-oStrictHostKeyChecking=yes',
                          '-oUserKnownHostsFile='+str(known),'-oLogLevel=ERROR','-tt'])
         if args.native_guest:
