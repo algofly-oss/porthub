@@ -143,3 +143,25 @@ printed diagnostics. Cleanup stops only the generated workspace, waits for its
 sharing supervisor and removes only its private temporary directory; service
 units and unrelated workspaces are unchanged. A running or unconfirmed fixture
 is retained for operator review instead of deleting its control sockets.
+
+The same check accepts `--binary /absolute/path/to/verified/candidate/porthub`
+to test a CI artifact before installation. The candidate must report the exact
+expected version and source revision. It uses the existing registration broker;
+the check does not replace the installed executable or restart its service.
+Keep the candidate executable until fixture cleanup has confirmed its sharing
+supervisor exited, then remove only the candidate's private staging directory.
+
+### Upgrading older sharing supervisors
+
+The 1.9.1 client fixes a PTY writer-drop race: the previous writer could send an
+EOF byte during attachment cleanup and accidentally end the shared shell. The
+new writer closes its own descriptor without typing into the terminal. Explicit
+shell `exit`, Ctrl+D and workspace stop retain their normal meaning.
+
+An existing supervisor keeps its loaded code when the installed binary changes.
+Before upgrading a host from an affected version, check for active shared
+workspaces and account for those supervisors before restarting the broker.
+Installing a new binary alone does not upgrade an already running supervisor.
+Do not use `terminal stop` as an upgrade workaround: that explicitly destroys the
+workspace. A safe rollout with no active shared sessions avoids this transition
+hazard; any supervisor migration needs its own preservation test.
