@@ -20,6 +20,25 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
 
+def patch_terminal_spawn(source):
+    path = source / 'spawn.c'
+    text = path.read_text()
+    anchor = '\tenviron_push(child);\n'
+    patch = '''\t/* PortHub panes must not redirect an ordinary host tmux client. */
+\tif (getenv("PORTHUB_TERMINAL_ISOLATED") != NULL &&
+\t    strcmp(getenv("PORTHUB_TERMINAL_ISOLATED"), "1") == 0) {
+\t\tenviron_unset(child, "TMUX");
+\t\tenviron_unset(child, "TMUX_PANE");
+\t\tenviron_unset(child, "PORTHUB_TERMINAL_ISOLATED");
+\t\tenviron_set(child, "PORTHUB_TERMINAL_SOCKET", 0, "%s", socket_path);
+\t}
+'''
+    if patch + anchor in text:
+        return
+    if 'PORTHUB_TERMINAL_ISOLATED' in text or text.count(anchor) != 1:
+        raise RuntimeError('Pinned tmux pane environment does not match the PortHub patch')
+    path.write_text(text.replace(anchor, patch + anchor))
+
 def validate_linux_binary(binary, target):
     environment = dict(os.environ, LC_ALL='C')
     headers = subprocess.check_output(['readelf', '-h', str(binary)], text=True, env=environment)
@@ -84,6 +103,7 @@ def build(args):
             entries[0].rename(destination)
             extraction.rmdir()
         sources[item['name']] = destination
+    patch_terminal_spawn(sources['tmux'])
     def run(command, directory, extra=None):
         merged = dict(env)
         merged.update(extra or {})

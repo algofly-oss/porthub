@@ -287,9 +287,12 @@ fn attach(job: &Job, sidebar: Sidebar) -> Result<()> {
     let workspace = workspace(job)?;
     ensure!(workspace.is_alive(), "workspace has ended");
     // Recognize our own server instead of recursively attaching to ourselves.
-    if std::env::var_os("TMUX").is_some_and(|value| {
-        value.to_string_lossy().split(',').next() == workspace.socket().to_str()
-    }) {
+    if std::env::var_os("PORTHUB_TERMINAL_SOCKET")
+        .is_some_and(|value| PathBuf::from(value) == workspace.socket())
+        || std::env::var_os("TMUX").is_some_and(|value| {
+            value.to_string_lossy().split(',').next() == workspace.socket().to_str()
+        })
+    {
         println!("Already attached to {}", job.name);
         return Ok(());
     }

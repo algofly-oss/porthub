@@ -76,6 +76,8 @@ impl Workspace {
             .arg(self.directory.join("tmux.conf"))
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
+            .env_remove("PORTHUB_TERMINAL_ISOLATED")
+            .env_remove("PORTHUB_TERMINAL_SOCKET")
             .env("TERMINFO", &self.terminfo);
         command
     }
@@ -147,7 +149,7 @@ impl Workspace {
         // tmux interprets a singleton command as shell text. Use its multi-
         // argument exec form and a fixed POSIX trampoline, with user values
         // only in argv, so paths and arguments retain their literal meaning.
-        command.env("SHELL", &start.shell);
+        command.env("SHELL", &start.shell).env("PORTHUB_TERMINAL_ISOLATED", "1");
         command.args(["--", "/bin/sh", "-c", "exec \"$@\"", "porthub-terminal"]);
         if start.command.is_empty() {
             command.arg(&start.shell);

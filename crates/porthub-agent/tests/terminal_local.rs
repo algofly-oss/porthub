@@ -56,6 +56,34 @@ fn local_cli_needs_no_registration_and_preserves_independent_background_workspac
     };
     assert!(name.bytes().all(|byte| byte.is_ascii_lowercase()));
     assert_eq!(first["shared"], false);
+    let socket = String::from_utf8(
+        call(&[
+            "terminal",
+            "tmux",
+            name,
+            "--",
+            "display-message",
+            "-p",
+            "#{socket_path}",
+        ])?
+        .stdout,
+    )?;
+    let attached = Command::new(&executable)
+        .args(["terminal", "attach", name])
+        .env("XDG_DATA_HOME", directory.path())
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env("PORTHUB_TERMINAL_SOCKET", socket.trim())
+        .output()?;
+    ensure!(
+        attached.status.success(),
+        "{}",
+        String::from_utf8_lossy(&attached.stderr)
+    );
+    assert!(
+        String::from_utf8(attached.stdout)?.contains(&format!("Already attached to {name}")),
+        "own workspace must not recursively attach when ordinary TMUX variables are absent"
+    );
     let second: serde_json::Value = serde_json::from_slice(
         &call(&[
             "terminal",

@@ -51,6 +51,160 @@ impl Drop for Cleanup {
 }
 
 #[test]
+#[ignore = "requires bundled terminal runtime"]
+fn ordinary_tmux_attach_inside_workspace_reaches_existing_host_session() -> Result<()> {
+    use std::process::Command;
+    let (directory, workspace) = workspace()?;
+    let _cleanup = Cleanup(workspace.clone());
+    let command = workspace.command();
+    let executable = PathBuf::from(command.get_program());
+    let terminfo = command
+        .get_envs()
+        .find_map(|(key, value)| (key == "TERMINFO").then(|| value.unwrap().to_owned()))
+        .unwrap();
+    let host_root = directory.path().join("host");
+    create_directory(&host_root)?;
+    let host_socket = host_root
+        .join(format!("tmux-{}", unsafe { libc::geteuid() }))
+        .join("default");
+    struct HostCleanup {
+        executable: PathBuf,
+        socket: PathBuf,
+    }
+    impl Drop for HostCleanup {
+        fn drop(&mut self) {
+            let _ = Command::new(&self.executable)
+                .arg("-S")
+                .arg(&self.socket)
+                .arg("kill-server")
+                .env_remove("TMUX")
+                .output();
+        }
+    }
+    let _host = HostCleanup {
+        executable: executable.clone(),
+        socket: host_socket,
+    };
+    let started = Command::new(&executable)
+        .args([
+            "-f",
+            "/dev/null",
+            "-L",
+            "default",
+            "new-session",
+            "-d",
+            "-s",
+            "external",
+            "--",
+            "/bin/sh",
+        ])
+        .env("TMUX_TMPDIR", &host_root)
+        .env("TERMINFO", &terminfo)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("PORTHUB_TERMINAL_ISOLATED")
+        .output()?;
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let marked = Command::new(&executable)
+        .args([
+            "-L",
+            "default",
+            "send-keys",
+            "-t",
+            "external:0.0",
+            "test -n \"$TMUX\" && printf 'EXTERNAL%s\\n' 'READY'",
+            "Enter",
+        ])
+        .env("TMUX_TMPDIR", &host_root)
+        .env_remove("TMUX")
+        .output()?;
+    assert!(marked.status.success());
+    let mut options = start();
+    options
+        .environment
+        .push(("TMUX_TMPDIR".into(), host_root.to_string_lossy().into()));
+    workspace.start(&options)?;
+    let attach = format!("'{}' attach-session -t external", executable.display());
+    assert!(workspace
+        .command()
+        .args(["send-keys", "-t", "%0", &attach, "Enter"])
+        .status()?
+        .success());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let screen = workspace.capture("%0", 100)?;
+        if screen.contains("EXTERNALREADY") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "ordinary attach did not reach the host session: {screen}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires bundled terminal runtime"]
+fn initial_shell_new_windows_and_split_panes_keep_only_porthub_socket_identity() -> Result<()> {
+    let (_directory, workspace) = workspace()?;
+    let _cleanup = Cleanup(workspace.clone());
+    workspace.start(&start())?;
+    let mut panes = vec!["%0".to_owned()];
+    for args in [
+        vec!["new-window", "-d", "-P", "-F", "#{pane_id}"],
+        vec![
+            "split-window",
+            "-d",
+            "-h",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            "%0",
+        ],
+    ] {
+        let output = workspace.command().args(args).output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        panes.push(String::from_utf8(output.stdout)?.trim().to_owned());
+    }
+    let socket = workspace
+        .socket()
+        .to_string_lossy()
+        .replace('\'', "'\"'\"'");
+    let command=format!("printf 'ENV:%s:%s:%s\\n' \"${{TMUX-unset}}\" \"${{TMUX_PANE-unset}}\" \"${{PORTHUB_TERMINAL_ISOLATED-unset}}\"; test \"$PORTHUB_TERMINAL_SOCKET\" = '{socket}' && printf 'SOCKET%s\\n' 'CORRECT'");
+    for pane in panes {
+        assert!(workspace
+            .command()
+            .args(["send-keys", "-t", &pane, &command, "Enter"])
+            .status()?
+            .success());
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let screen = workspace.capture(&pane, 100)?;
+            if screen.contains("ENV:unset:unset:unset") && screen.contains("SOCKETCORRECT") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "pane identity was not isolated: {screen}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires extracted bundled runtime in PORTHUB_TEST_TERMINAL_RUNTIME"]
 fn detached_workspace_preserves_shared_shell_and_explicit_exit_ends_it() -> Result<()> {
     let (_directory, workspace) = workspace()?;

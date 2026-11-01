@@ -1641,7 +1641,7 @@ export const guideArticles = [
       "blocks": [
         {
           "type": "paragraph",
-          "text": "The default prefix is Ctrl+A; press it twice to send a literal Ctrl+A. Use the bundled tmux pane/window commands and prefix help for normal multiplexer features. `--prefix`, `--history-limit`, `--no-mouse`, `--cwd`, `--shell` and `--env` customize a new workspace. The default retained history is 100000 lines."
+          "text": "The default prefix is Ctrl+A; press it twice to send a literal Ctrl+A. Use the bundled tmux pane/window commands and prefix help for normal multiplexer features. `--prefix`, `--history-limit`, `--no-mouse`, `--cwd`, `--shell` and `--env` customize a new workspace. The default retained history is 100000 lines. You can run your regular `tmux attach` inside a new PortHub workspace. Use PortHub's prefix or `porthub terminal tmux NAME -- COMMAND` to control the PortHub workspace itself."
         },
         {
           "type": "paragraph",

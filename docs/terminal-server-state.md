@@ -207,3 +207,28 @@ admits the protocol's bounded input, acknowledgement and replay windows, with a
 separate 128 KiB payload budget. Acknowledgements do not consume that byte budget;
 an acknowledgement-only flood still has a finite message limit. Direct receive
 frames are parsed once and remain binary inside the native actor.
+
+### Attaching an existing host tmux session
+
+New workspaces use a scoped patch in the bundled multiplexer to remove its
+private `TMUX` and `TMUX_PANE` variables from pane processes. Ordinary host
+`tmux attach` therefore finds the host's normal server rather than trying to
+attach recursively to PortHub. Initial shells, new windows, split panes and
+explicit pane commands use the same spawn boundary. Shell selection, argv and
+login behavior retain tmux's normal implementation.
+
+Only a PortHub workspace server started with `PORTHUB_TERMINAL_ISOLATED=1` enables this
+behavior. That startup flag is removed from child environments. A separate
+`PORTHUB_TERMINAL_SOCKET` marker lets the CLI recognize an attachment to its own
+workspace. The private owner-sidebar server keeps normal tmux variables for its
+focus controls; ordinary servers outside this mode retain upstream behavior.
+The source patch fails closed if the pinned spawn boundary changes, and its
+build-script hash automatically invalidates the independent helper cache.
+
+Existing workspaces retain their running helper and shell environment. They are
+not restarted or modified by this change. In an older workspace, an explicit
+`env -u TMUX -u TMUX_PANE tmux attach` affects only that host-client invocation.
+Use PortHub's prefix or `porthub terminal tmux NAME -- COMMAND` to control the
+PortHub workspace. The new runtime passes the real nested-attach, pane/window,
+CLI self-attachment and full native browser/API/ordinary-SSH tests locally;
+cross-platform packaging and deployment remain separate release gates.
