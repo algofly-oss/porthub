@@ -620,3 +620,49 @@ This completes the source integration from local host measurements to account
 storage and dashboard display. It is not a release or deployment attestation.
 Approved NAT configuration, the upcoming client feature/version selection,
 platform packaging validation and authorized live rollout remain outstanding.
+
+## Explicit terminal discovery configuration (source candidate)
+
+Terminal hosts can opt into up to two credential-free UDP STUN endpoints with
+repeated `terminal share --stun-server` flags. Native guests independently opt in
+with `terminal join --transport auto --stun-server`. Browser participants have
+Connection options with the same bounded endpoint list and a relay-only choice,
+stored in their own tab's session storage. There are no built-in third-party
+endpoints, and gateway messages cannot populate these local settings. Editing
+browser options does not join a session or create a discovery peer.
+
+Host endpoints are persisted in the OS user's private sharing state and passed
+only over the authenticated local broker connection. They are not part of the
+public host hello. An already shared workspace rejects a request to change its
+endpoint list or switch an existing direct-capable share to relay-only; existing
+guests are left running. Repeating share without flags preserves existing
+settings. New shares support `--relay-only`, which conflicts with STUN flags.
+
+Discovery uses each actual bound ICE UDP socket, preserving the reflexive hint
+for that socket. Native guests bind the signaling connection's selected source
+address (and its interface on macOS) and check the local expiring permission
+before each discovery transmission. Host discovery remains inside its cancellable
+transport generation; local policy changes invalidate that generation. Existing
+privacy restrictions take precedence. Probes share bounded DNS/retry budgets and
+are excluded from terminal traffic counters. STUN improves address discovery;
+it does not guarantee direct connectivity through every NAT/firewall. Gateway
+relay remains the fallback, and ordinary SSH participants continue using relay.
+
+Native connection setup now drains waiting keystrokes instead of allowing them
+to become delayed shell commands. Ctrl-C during initial connection/discovery
+cancels only the local attachment, preserving the shared workspace.
+
+These are source changes pending packaging and rollout. Local loopback discovery
+and simulated NAT tests do not establish public-WAN reachability. The upcoming
+1.10 capability metadata, release feature selection, platform builds and scoped
+live verification remain required before claiming this version deployed.
+
+Validation for this candidate: 42 agent terminal tests, native CLI parsing, the
+minimal no-default-feature agent compile, five mesh discovery tests, the full
+85-test terminal SDK suite, and a fresh bundled-shell discovery/fallback test
+passed. The rebuilt production UI passed 12 discovery-consent/layout cases and
+22 dashboard scenarios across Chrome/WebKit and dark/light desktop/mobile
+layouts. All four real API/broker/bundled-shell browser flows (Chrome/WebKit,
+direct/blocked) passed, including owner administration, read-only guests,
+recovery, history pressure, reporting failure recovery and explicit teardown.
+These checks used isolated loopback services and did not restart live clients.

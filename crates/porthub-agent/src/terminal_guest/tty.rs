@@ -177,6 +177,20 @@ mod tests {
         Ok((master, slave))
     }
     #[tokio::test]
+    async fn native_setup_discards_waiting_keys_and_ctrl_c_cancels_locally()->Result<()> {
+        let (mut master,slave)=pty()?;
+        let terminal=Terminal::from_file(slave)?;
+        master.write_all(b"not an online command\r")?;
+        let ready=crate::terminal_guest::client::preparing(&terminal,async {tokio::time::sleep(Duration::from_millis(30)).await;7_u8}).await?;
+        assert_eq!(ready,Some(7));
+        let mut bytes=[0;128];
+        assert!(tokio::time::timeout(Duration::from_millis(20),terminal.read(&mut bytes)).await.is_err(),"waiting keys must not cross into the connected shell");
+        master.write_all(&[3])?;
+        let cancelled=tokio::time::timeout(Duration::from_secs(1),crate::terminal_guest::client::preparing(&terminal,std::future::pending::<u8>())).await??;
+        assert_eq!(cancelled,None);
+        Ok(())
+    }
+    #[tokio::test]
     async fn raw_keys_resize_output_and_detach_restore_the_original_terminal() -> Result<()> {
         let (mut master, slave) = pty()?;
         let observer = slave.try_clone()?;

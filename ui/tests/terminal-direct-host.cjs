@@ -7,9 +7,10 @@ const assert=require('node:assert/strict');const readline=require('node:readline
   const fs=require('node:fs'),path=require('node:path');
   await page.evaluate(async sources=>{
    const journal=URL.createObjectURL(new Blob([sources.journal],{type:'text/javascript'}));
-   const transport=URL.createObjectURL(new Blob([sources.transport.replace('"./terminalDelivery"',JSON.stringify(journal))],{type:'text/javascript'}));
-   try{window.delivery=await import(journal);window.transportModule=await import(transport);}finally{URL.revokeObjectURL(journal);URL.revokeObjectURL(transport);}
-  },{journal:fs.readFileSync(path.join(__dirname,'../src/lib/terminalDelivery.js'),'utf8'),transport:fs.readFileSync(path.join(__dirname,'../src/lib/terminalTransport.js'),'utf8')});
+   const consent=URL.createObjectURL(new Blob([sources.connectivity],{type:'text/javascript'}));
+   const transport=URL.createObjectURL(new Blob([sources.transport.replace('"./terminalDelivery"',JSON.stringify(journal)).replace('"./terminalConnectivity.mjs"',JSON.stringify(consent))],{type:'text/javascript'}));
+   try{window.delivery=await import(journal);window.transportModule=await import(transport);}finally{URL.revokeObjectURL(journal);URL.revokeObjectURL(transport);URL.revokeObjectURL(consent);}
+  },{journal:fs.readFileSync(path.join(__dirname,'../src/lib/terminalDelivery.js'),'utf8'),transport:fs.readFileSync(path.join(__dirname,'../src/lib/terminalTransport.js'),'utf8'),connectivity:fs.readFileSync(path.join(__dirname,'../src/lib/terminalConnectivity.mjs'),'utf8')});
   await page.exposeFunction('relayPacket',packet=>process.stdout.write(JSON.stringify({type:'relay',packet})+'\n'));
   input.on('line',line=>{const event=JSON.parse(line);if(event.type==='finish'){finish();return;}page.evaluate(async event=>{
    if(event.type==='answer')window.hostTransport.event({type:'direct_answer',answer:event.answer});

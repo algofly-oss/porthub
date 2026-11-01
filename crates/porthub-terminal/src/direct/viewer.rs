@@ -55,13 +55,17 @@ pub struct Transport {
 }
 impl Transport {
     pub fn offer(socket: UdpSocket, read_only: bool) -> Result<(Self, ViewerInput)> {
+        Self::offer_reflexive(socket,read_only,None)
+    }
+    /// A discovery hint must belong to this same approved bound UDP socket.
+    pub fn offer_reflexive(socket:UdpSocket,read_only:bool,mapped:Option<SocketAddr>)->Result<(Self,ViewerInput)> {
         let local = socket.local_addr()?;
         ensure!(
             !local.ip().is_unspecified() && !local.ip().is_multicast() && local.port() != 0,
             "native terminal requires an approved concrete UDP address"
         );
         let now = Instant::now();
-        let (peer, description) = Peer::offer(now, &[local], &[])?;
+        let (peer, description) = Peer::offer(now, &[local], &mapped.into_iter().map(|address|(address,local)).collect::<Vec<_>>())?;
         let mut viewer = Viewer::new(read_only);
         let offer = viewer.begin_offer(1, DirectDescription(description))?;
         Ok((
@@ -364,6 +368,18 @@ impl Transport {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn native_offer_keeps_reflexive_hint_on_the_original_bound_socket()->Result<()> {
+        let socket=UdpSocket::bind("127.0.0.1:0").await?;
+        let local=socket.local_addr()?;
+        let mapped:SocketAddr="203.0.113.9:45678".parse()?;
+        let (transport,offer)=Transport::offer_reflexive(socket,false,Some(mapped))?;
+        assert_eq!(transport.network.as_ref().unwrap().local,local);
+        let ViewerInput::DirectOffer {description,..}=offer else {unreachable!()};
+        assert!(description.0.contains("203.0.113.9") && description.0.contains("typ srflx"));
+        assert_eq!(transport.network.as_ref().unwrap().socket.local_addr()?,local);
+        Ok(())
+    }
     use super::*;
     use crate::delivery::Receiver;
     use std::sync::{

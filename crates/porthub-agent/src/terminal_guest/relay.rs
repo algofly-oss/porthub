@@ -33,9 +33,15 @@ pub(crate) async fn run_with_policy<S: AsyncRead + AsyncWrite + Unpin>(
     guest: &mut Guest<S>,
     terminal: &Terminal,
     welcome: &ViewerEvent,
-    mut socket: Option<tokio::net::UdpSocket>,
-    mut permission: Option<crate::terminal_policy::Permission>,
+    socket: Option<tokio::net::UdpSocket>,
+    permission: Option<crate::terminal_policy::Permission>,
 ) -> Result<End> {
+    Box::pin(run_with_reflexive_policy(guest,terminal,welcome,socket,permission,None)).await
+}
+pub(crate) async fn run_with_reflexive_policy<S:AsyncRead+AsyncWrite+Unpin>(
+    guest:&mut Guest<S>,terminal:&Terminal,welcome:&ViewerEvent,
+    mut socket:Option<tokio::net::UdpSocket>,mut permission:Option<crate::terminal_policy::Permission>,mapped:Option<std::net::SocketAddr>,
+)->Result<End> {
     if permission
         .as_ref()
         .is_some_and(|permission| !permission.allowed())
@@ -67,7 +73,7 @@ pub(crate) async fn run_with_policy<S: AsyncRead + AsyncWrite + Unpin>(
                 "gateway did not approve direct terminal transport"
             );
             let (mut transport, offer) =
-                porthub_terminal::direct::viewer::Transport::offer(socket, *read_only)?;
+                porthub_terminal::direct::viewer::Transport::offer_reflexive(socket, *read_only,mapped)?;
             if let Some(permission) = &permission {
                 transport.require_permission(permission.guard());
             }

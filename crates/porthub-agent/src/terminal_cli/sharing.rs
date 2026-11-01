@@ -11,6 +11,12 @@ use tokio::io::{AsyncWriteExt, BufReader};
 
 #[derive(Args)]
 pub struct Share {
+    /// Keep this share on the gateway; never advertise a direct peer path.
+    #[arg(long,conflicts_with="stun_servers")]
+    relay_only:bool,
+    /// Optional UDP STUN endpoint for this host; repeat up to twice. No default.
+    #[arg(long="stun-server",value_parser=crate::terminal_connectivity::server)]
+    stun_servers:Vec<String>,
     /// Existing local workspace; omit to create one.
     existing: Option<String>,
     #[command(flatten)]
@@ -48,6 +54,8 @@ struct Ready {
 #[derive(Serialize, Deserialize)]
 struct Sharing {
     #[serde(default)]
+    stun_servers:Vec<String>,
+    #[serde(default)]
     invitations: Option<InvitationUpdate>,
     #[serde(default)]
     pending_invitations: Option<InvitationUpdate>,
@@ -69,6 +77,7 @@ fn load(root: &Path, id: &str) -> Result<Sharing> {
         serde_json::from_slice(&crate::profile::read_private(&path(root, id)?)?)?;
     ensure!(sharing.hello.id == id, "terminal sharing identity mismatch");
     sharing.hello.validate(now())?;
+    crate::terminal_connectivity::checked(&sharing.stun_servers)?;
     if let Some(update) = &sharing.invitations {
         update.validate(now())?;
     }
@@ -205,6 +214,8 @@ pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
         },
     };
     options.validate(now())?;
+    let stun_servers=crate::terminal_connectivity::checked(&args.stun_servers)?;
+    ensure!(stun_servers.is_empty() || cfg!(feature="terminal-direct"),"this build does not include native terminal direct transport");
     let job = if let Some(name) = args.existing {
         select(root, &name)?
     } else {
@@ -217,6 +228,8 @@ pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
     let _registry = lock(root)?;
     if path(root, &job.id)?.exists() {
         let previous = load(root, &job.id)?;
+        ensure!(!args.relay_only || !previous.hello.direct_transport,"this workspace already permits direct transport; existing guests were not changed");
+        ensure!(stun_servers.is_empty() || previous.stun_servers==stun_servers,"this workspace is already shared with different STUN settings; existing guests were not changed");
         ensure!(
             previous.state != "ended",
             "this sharing invitation was ended; create a new workspace to share"
@@ -229,11 +242,12 @@ pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
         let mut options = options;
         options.name = job.name.clone();
         let sharing = Sharing {
+            stun_servers,
             invitations: None,
             pending_invitations: None,
             invitations_revoked: false,
             hello: HostHello {
-                direct_transport: cfg!(feature="terminal-direct") && broker_has_history_snapshots(&registration.agent_version),
+                direct_transport: !args.relay_only && cfg!(feature="terminal-direct") && broker_has_history_snapshots(&registration.agent_version),
                 history_snapshots: broker_has_history_snapshots(&registration.agent_version),
                 id: job.id.clone(),
                 secret: random_token(32),
@@ -310,7 +324,7 @@ pub(super) fn invite(root: &Path, job: &Job, json: bool) -> Result<()> {
         "read_only_url":web.then(||link(read_token)),
         "interactive_ssh":(ssh_enabled && interactive).then(||ssh(write_token)),
         "read_only_ssh":ssh_enabled.then(||ssh(read_token)),
-        "expires_at":expires_at,"access":sharing.hello.options.access});
+        "expires_at":expires_at,"access":sharing.hello.options.access,"stun_servers":sharing.stun_servers});
     if json {
         println!("{}", serde_json::to_string(&data)?);
     } else {
@@ -434,7 +448,7 @@ fn prepare_rotation(root: &Path, sharing: &mut Sharing, seconds: u32) -> Result<
     Ok(update)
 }
 
-fn broker_request(hello: &HostHello, extensions: bool) -> serde_json::Value {
+fn broker_request(hello: &HostHello, extensions: bool, stun_servers:&[String]) -> serde_json::Value {
     let mut hello = hello.clone();
     if !extensions {
         hello.history_snapshots = false;
@@ -443,6 +457,7 @@ fn broker_request(hello: &HostHello, extensions: bool) -> serde_json::Value {
     let mut request = serde_json::json!({"operation":"terminal_host","hello":hello});
     if extensions {
         request["traffic_reporting"] = true.into();
+        if !stun_servers.is_empty(){request["stun_servers"]=serde_json::json!(stun_servers);}
     }
     request
 }
@@ -501,7 +516,7 @@ pub(super) async fn serve(root: &Path, id: &str) -> Result<()> {
             let mut local = BufReader::new(stream);
             let traffic_requested=crate::service::readable::select(&layout,Some(&sharing.registration),Some(false))
                 .is_ok_and(|registration|broker_has_history_snapshots(&registration.agent_version));
-            let mut request=serde_json::to_vec(&broker_request(&sharing.hello,traffic_requested))?;
+            let mut request=serde_json::to_vec(&broker_request(&sharing.hello,traffic_requested,&sharing.stun_servers))?;
             request.push(b'\n');
             if local.get_mut().write_all(&request).await.is_ok() {
                 let mut attachments = Attachments::new(
@@ -653,11 +668,14 @@ mod rotation_tests {
             "id":random_token(16),"secret":random_token(32),"write_token":random_token(32),"read_token":random_token(32),
             "history_snapshots":true,"direct_transport":true,
             "options":{"name":"quietotter","expires_at":0,"idle_timeout":0,"reconnect_timeout":60,"history_limit":100000,"mouse":true,"read_only":false,"size_policy":"smallest"}}))?;
-        let old=broker_request(&hello,false);
+        let servers=vec!["stun:127.0.0.1:3478".into()];
+        let old=broker_request(&hello,false,&servers);
         assert_eq!(old.as_object().unwrap().len(),2);
         assert!(old["hello"].get("history_snapshots").is_none() && old["hello"].get("direct_transport").is_none());
         assert!(hello.history_snapshots && hello.direct_transport,"compatibility negotiation must not downgrade saved capabilities");
-        let current=broker_request(&hello,true);
+        let current=broker_request(&hello,true,&servers);
+        assert_eq!(current["stun_servers"],serde_json::json!(servers));
+        assert!(current["hello"].get("stun_servers").is_none());
         assert_eq!(current["traffic_reporting"],true);
         assert_eq!(current["hello"]["history_snapshots"],true);
         Ok(())

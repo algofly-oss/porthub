@@ -7,6 +7,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 pub struct DirectSession {
     pub(crate) socket: tokio::net::UdpSocket,
+    pub(crate) mapped: Option<std::net::SocketAddr>,
     pub(crate) permission: crate::terminal_policy::Permission,
 }
 #[async_trait::async_trait]
@@ -24,6 +25,7 @@ pub trait Connector: Send {
 }
 struct Gateway<'a> {
     invitation: &'a Invitation,
+    stun_servers: Vec<String>,
     registration: Option<(crate::service::Layout, String)>,
 }
 #[async_trait::async_trait]
@@ -49,15 +51,40 @@ impl Connector for Gateway<'_> {
         if !permission.allowed() {
             return None;
         }
-        Some(DirectSession { socket, permission })
+        #[cfg(target_os = "macos")]
+        porthub_mesh::underlay::bind_udp_interface(&socket, local.ip()).ok()?;
+        let guard = permission.guard();
+        let mapped = if self.stun_servers.is_empty() {
+            None
+        } else {
+            porthub_mesh::stun::mapped_with_permission(&socket, &self.stun_servers, guard.as_ref())
+                .await
+        };
+        if !permission.allowed() {
+            return None;
+        }
+        Some(DirectSession {
+            socket,
+            permission,
+            mapped,
+        })
     }
 }
 pub async fn join_relay(value: &str) -> Result<()> {
-    join(value, None).await
+    join(value, None, Vec::new()).await
 }
 pub async fn join_auto(value: &str, selector: Option<&str>, user: bool) -> Result<()> {
+    join_auto_with_stun(value, selector, user, &[]).await
+}
+pub async fn join_auto_with_stun(
+    value: &str,
+    selector: Option<&str>,
+    user: bool,
+    servers: &[String],
+) -> Result<()> {
+    let servers = crate::terminal_connectivity::checked(servers)?;
     let registration = select_registration(selector, user)?;
-    join(value, registration).await
+    join(value, registration, servers).await
 }
 fn select_registration(
     selector: Option<&str>,
@@ -105,7 +132,11 @@ fn select_from(
         None
     })
 }
-async fn join(value: &str, registration: Option<(crate::service::Layout, String)>) -> Result<()> {
+async fn join(
+    value: &str,
+    registration: Option<(crate::service::Layout, String)>,
+    stun_servers: Vec<String>,
+) -> Result<()> {
     let invitation = Invitation::parse(value)?;
     // Install termination handlers before changing the local terminal mode.
     let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
@@ -115,6 +146,7 @@ async fn join(value: &str, registration: Option<(crate::service::Layout, String)
     let mut gateway = Gateway {
         invitation: &invitation,
         registration,
+        stun_servers,
     };
     tokio::select! {
         result=run(&mut gateway,&terminal)=>{result?;},
@@ -124,9 +156,31 @@ async fn join(value: &str, registration: Option<(crate::service::Layout, String)
     }
     Ok(())
 }
+/// Setup may include TLS, a local policy handshake and bounded STUN gathering.
+/// Keys typed before it finishes must never become delayed shell commands.
+pub(super) async fn preparing<F: std::future::Future>(
+    terminal: &Terminal,
+    future: F,
+) -> Result<Option<F::Output>> {
+    tokio::pin!(future);
+    let mut discard = [0; 16384];
+    loop {
+        tokio::select! {
+            result=&mut future=>{terminal.discard_offline_input()?;return Ok(Some(result));},
+            count=terminal.read(&mut discard)=>{let count=count?;if count==0 || discard[..count].contains(&3){return Ok(None);}},
+        }
+    }
+}
 pub async fn run<C: Connector>(connector: &mut C, terminal: &Terminal) -> Result<relay::End> {
     let size = terminal.size()?;
-    let (mut guest, mut welcome) = connector.connect(&mut None, size.0, size.1).await?;
+    let Some(connected) = preparing(terminal, connector.connect(&mut None, size.0, size.1)).await?
+    else {
+        return Ok(relay::End {
+            reason: "connection cancelled locally".into(),
+            retryable: false,
+        });
+    };
+    let (mut guest, mut welcome) = connected?;
     loop {
         let direct = if matches!(
             welcome,
@@ -135,16 +189,22 @@ pub async fn run<C: Connector>(connector: &mut C, terminal: &Terminal) -> Result
                 ..
             }
         ) {
-            connector.direct(&guest).await
+            let Some(direct) = preparing(terminal, connector.direct(&guest)).await? else {
+                return Ok(relay::End {
+                    reason: "connection cancelled locally".into(),
+                    retryable: false,
+                });
+            };
+            direct
         } else {
             None
         };
-        let (socket, permission) = match direct {
-            Some(direct) => (Some(direct.socket), Some(direct.permission)),
-            None => (None, None),
+        let (socket, permission, mapped) = match direct {
+            Some(direct) => (Some(direct.socket), Some(direct.permission), direct.mapped),
+            None => (None, None, None),
         };
-        match Box::pin(relay::run_with_policy(
-            &mut guest, terminal, &welcome, socket, permission,
+        match Box::pin(relay::run_with_reflexive_policy(
+            &mut guest, terminal, &welcome, socket, permission, mapped,
         ))
         .await
         {

@@ -7,7 +7,8 @@ const { join } = require('node:path');
   const deliveryUrl = moduleUrl(readFileSync(join(__dirname, '../src/lib/terminalDelivery.js')));
   const { encodePacket, parsePacket } = await import(deliveryUrl);
   const source = readFileSync(join(__dirname, '../src/lib/terminalTransport.js'), 'utf8')
-    .replace('"./terminalDelivery"', JSON.stringify(deliveryUrl));
+    .replace('"./terminalDelivery"', JSON.stringify(deliveryUrl))
+    .replace('"./terminalConnectivity.mjs"',JSON.stringify(moduleUrl(readFileSync(join(__dirname,'../src/lib/terminalConnectivity.mjs'),'utf8'))));
   const { TerminalTransport } = await import(moduleUrl(source));
   const inputEpoch = 'a'.repeat(32), outputEpoch = 'b'.repeat(32);
   const decode = event => parsePacket(Uint8Array.from(Buffer.from(event.packet, 'base64')));
@@ -78,5 +79,10 @@ const { join } = require('node:path');
   assert.equal(interrupted.inputJournal.pendingFrames, 2);
   assert(interrupted.inputTimer, 'failed sends still need a bounded retry deadline');
   interrupted.close();
+  let configuration;
+  const configured=new TerminalTransport({send:()=>{},write:async()=>{},fail:()=>{},readOnly:false,stunServers:['stun:example.com'],createPeer:config=>{configuration=config;return peer;}});
+  await configured.start();
+  assert.deepEqual(configuration.iceServers,[{urls:'stun:example.com:3478'}]);configured.close();
+  assert.throws(()=>new TerminalTransport({stunServers:['turn:user:password@example.com']}));
   console.log('PASS browser transport: negotiation, render ACKs, replay deduplication, atomic backpressure and legacy fallback');
 })().catch(error => { console.error(error); process.exitCode = 1; });

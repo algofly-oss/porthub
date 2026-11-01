@@ -236,3 +236,9 @@ pub fn interface_name(source: IpAddr) -> std::io::Result<String> {
             )
         })
 }
+
+/// Pin an already-bound async UDP socket to its physical macOS interface.
+#[cfg(target_os = "macos")]
+pub fn bind_udp_interface(socket:&tokio::net::UdpSocket,source:IpAddr)->std::io::Result<()> {
+    bind_interface(&socket2::SockRef::from(socket),source)
+}

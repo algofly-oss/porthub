@@ -202,3 +202,42 @@ async fn ipv6_stun_uses_the_ipv6_socket_and_ignores_ipv4_servers() -> Result<()>
     fixture.await??;
     Ok(())
 }
+
+#[tokio::test]
+async fn local_permission_blocks_discovery_and_revocation_blocks_retransmission() -> Result<()> {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    let server = UdpSocket::bind("127.0.0.1:0").await?;
+    let socket = UdpSocket::bind("127.0.0.1:0").await?;
+    let servers = vec![format!("stun:{}", server.local_addr()?)];
+    let allowed = Arc::new(AtomicBool::new(false));
+    let permit = {
+        let allowed = allowed.clone();
+        move || allowed.load(Ordering::SeqCst)
+    };
+    assert_eq!(
+        porthub_mesh::stun::mapped_with_permission(&socket, &servers, &permit).await,
+        None
+    );
+    let mut bytes = [0; 2048];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), server.recv_from(&mut bytes))
+            .await
+            .is_err()
+    );
+    allowed.store(true, Ordering::SeqCst);
+    let attempt = porthub_mesh::stun::mapped_with_permission(&socket, &servers, &permit);
+    tokio::pin!(attempt);
+    tokio::select! {result=&mut attempt=>panic!("discovery ended before fixture received request: {result:?}"), packet=server.recv_from(&mut bytes)=>{packet?;}}
+    allowed.store(false, Ordering::SeqCst);
+    assert_eq!(attempt.await, None);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(350), server.recv_from(&mut bytes))
+            .await
+            .is_err(),
+        "revocation must suppress every discovery retry"
+    );
+    Ok(())
+}

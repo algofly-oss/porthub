@@ -37,7 +37,7 @@ impl Config {
             "invalid terminal interface address"
         );
         ensure!(
-            self.stun_servers.len() <= 8 && self.stun_servers.iter().all(|s| s.len() <= 256),
+            self.stun_servers.len() <= 2 && self.stun_servers.iter().all(|s| porthub_mesh::stun::normalize_server(s).is_some()),
             "invalid terminal STUN configuration"
         );
         Ok(())

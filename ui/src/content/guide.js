@@ -1649,7 +1649,7 @@ export const guideArticles = [
         },
         {
           "type": "paragraph",
-          "text": "History captures are bounded live slices. New output or resizing can shift page boundaries; a stable history snapshot is not yet provided. The browser offers smaller page sizes when a capture reaches its size bound."
+          "text": "With compatible 1.10-or-newer agent and gateway support, browser and read-only native/SSH viewers can retain a bounded frozen history snapshot. New output and resizing do not move its pages. Refresh history captures a new snapshot. Older hosts provide live slices whose page boundaries can shift."
         },
         {
           "type": "table",
@@ -1692,6 +1692,29 @@ export const guideArticles = [
       ]
     },
     {
+      "id": "connectivity",
+      "title": "Direct connectivity and explicit discovery",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Direct paths can reveal peer network addresses. Use --relay-only when first sharing a workspace to keep every guest on the gateway, or enable Use gateway relay only in the browser's Connection options for your own attachment. Native Unix joins can explicitly choose --transport relay. These choices leave the workspace running."
+        },
+        {
+          "type": "paragraph",
+          "text": "No public STUN service is selected automatically. In a direct-capable build, --stun-server explicitly approves a UDP discovery endpoint for that host or native auto join; repeat it at most twice. Browser guests can enter their own endpoints in Connection options. Settings are saved in that browser tab and apply on connection. Gateway messages never populate that local list. Discovery uses the same approved bound UDP socket as ICE, and native permission is checked before each probe."
+        },
+        {
+          "type": "code",
+          "label": "Terminal",
+          "text": "porthub terminal share datawork --detach --stun-server stun:your-server.example:3478\nporthub terminal join URL --transport auto --stun-server stun:your-server.example:3478\nporthub terminal share privatework --detach --relay-only"
+        },
+        {
+          "type": "paragraph",
+          "text": "Replace the example hostname with a UDP STUN service you choose. HTTP, TURN, embedded credentials, paths and non-UDP transport parameters are rejected. A configured endpoint is an address hint, not authentication. Failed discovery falls back to host candidates or the gateway. Endpoint-dependent NATs and blocked UDP can still require the relay. Native auto mode additionally requires a current local agent privacy grant; exit/Tor/gateway-only preferences take precedence. Existing shared workspaces keep their original host discovery configuration so changing command flags does not disrupt attached guests."
+        }
+      ]
+    },
+    {
       "id": "platforms",
       "title": "Platform and transport limits",
       "blocks": [
@@ -1701,7 +1724,7 @@ export const guideArticles = [
         },
         {
           "type": "paragraph",
-          "text": "Current browser and ordinary SSH participation uses the gateway relay. A PortHub-aware direct peer path and browser-compatible direct transport are not yet implemented for terminal sharing; no direct-routing guarantee is made by these invitations."
+          "text": "Ordinary SSH always uses the gateway. Direct-capable builds can optimize browser and native auto joins with WebRTC while retaining gateway signaling and fallback. NAT/firewall restrictions can prevent a direct path; no invitation guarantees direct routing."
         }
       ]
     }

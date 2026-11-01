@@ -1647,6 +1647,11 @@ mod cli_tests {
         let parsed=Args::try_parse_from(["porthub","terminal","join","https://example.org/terminal#invitation","--transport","auto","--registration","abcdef","--user"]).unwrap();
         assert!(!requires_system_privileges(&parsed));
         assert!(matches!(parsed.command,Some(super::Command::Terminal {command:Some(Command::Join {transport:JoinTransport::Auto,registration:Some(_),user:true,..})})));
+        let parsed=Args::try_parse_from(["porthub","terminal","join","https://example.org/terminal#invitation","--transport","auto","--stun-server","stun:example.com"]).unwrap();
+        assert!(!requires_system_privileges(&parsed));
+        assert!(matches!(parsed.command,Some(super::Command::Terminal {command:Some(Command::Join {stun_servers,..})}) if stun_servers==["stun:example.com:3478"]));
+        assert!(Args::try_parse_from(["porthub","terminal","share","--stun-server","stun:user:password@example.com"]).is_err());
+        assert!(Args::try_parse_from(["porthub","terminal","share","--relay-only","--stun-server","stun:example.com"]).is_err());
         assert!(Args::try_parse_from(["porthub","terminal","join","url","--transport","unknown"]).is_err());
     }
 

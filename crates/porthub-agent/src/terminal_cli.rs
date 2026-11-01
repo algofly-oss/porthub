@@ -42,6 +42,10 @@ pub enum Command {
         #[cfg(feature="terminal-direct")]
         #[arg(long)]
         user:bool,
+        /// Explicit UDP STUN endpoint for native auto mode; repeat up to twice.
+        #[cfg(feature="terminal-direct")]
+        #[arg(long="stun-server",value_parser=crate::terminal_connectivity::server)]
+        stun_servers:Vec<String>,
     },
     /// Show, replace or revoke invitation links.
     Invite {
@@ -477,16 +481,17 @@ pub async fn run(command: Command) -> Result<()> {
         Command::Join {url,transport,
             #[cfg(feature="terminal-direct")] registration,
             #[cfg(feature="terminal-direct")] user,
+            #[cfg(feature="terminal-direct")] stun_servers,
         } => {
             #[cfg(feature="terminal-direct")]
-            ensure!(matches!(transport,JoinTransport::Auto) || (registration.is_none() && !user),
-                "--registration and --user apply only to --transport auto");
+            ensure!(matches!(transport,JoinTransport::Auto) || (registration.is_none() && !user && stun_servers.is_empty()),
+                "--registration, --user and --stun-server apply only to --transport auto");
             match transport {
                 JoinTransport::Ssh=>sharing::join(&url).await?,
                 #[cfg(feature="terminal-direct")]
                 JoinTransport::Relay=>crate::terminal_guest::client::join_relay(&url).await?,
                 #[cfg(feature="terminal-direct")]
-                JoinTransport::Auto=>crate::terminal_guest::client::join_auto(&url,registration.as_deref(),user).await?,
+                JoinTransport::Auto=>crate::terminal_guest::client::join_auto_with_stun(&url,registration.as_deref(),user,&stun_servers).await?,
             }
         },
         Command::Invite {

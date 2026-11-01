@@ -94,10 +94,40 @@ async fn native_guest_keeps_the_real_shared_shell_across_direct_to_relay_fallbac
         cols: 100,
         rows: 30,
     })?;
+    // A loopback RFC 5389 responder reports each caller's actual bound socket.
+    // No discovery request or ICE packet in this fixture leaves loopback.
+    let stun = UdpSocket::bind("127.0.0.1:0").await?;
+    let stun_servers = vec![format!("stun:{}", stun.local_addr()?)];
+    let sources = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = sources.clone();
+    let _stun = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+        let mut bytes = [0u8; 2048];
+        loop {
+            let (size, source) = stun.recv_from(&mut bytes).await?;
+            if size < 20 || bytes[..2] != [0, 1] {
+                continue;
+            }
+            recorded.lock().unwrap().push(source);
+            let std::net::IpAddr::V4(ip) = source.ip() else {
+                continue;
+            };
+            let mut reply = [0u8; 32];
+            reply[..4].copy_from_slice(&[1, 1, 0, 12]);
+            reply[4..20].copy_from_slice(&bytes[4..20]);
+            reply[20..26].copy_from_slice(&[0, 32, 0, 8, 0, 1]);
+            reply[26..28].copy_from_slice(&(source.port() ^ 0x2112).to_be_bytes());
+            for (index, byte) in ip.octets().into_iter().enumerate() {
+                reply[28 + index] = byte ^ [0x21, 0x12, 0xa4, 0x42][index];
+            }
+            stun.send_to(&reply, source).await?;
+        }
+        #[allow(unreachable_code)]
+        Ok::<_, anyhow::Error>(())
+    }));
     let mut host = Attachments::new(workspace.clone(), 2)?;
     host.configure_direct(Config {
         addresses: vec!["127.0.0.1".parse()?],
-        stun_servers: vec![],
+        stun_servers: stun_servers.clone(),
     })?;
     host.apply(HostEvent::Ready {
         direct_transport: true,
@@ -116,10 +146,29 @@ async fn native_guest_keeps_the_real_shared_shell_across_direct_to_relay_fallbac
             term: "xterm-256color".into(),
         })?;
     }
-    let (mut native, offer) = Transport::offer(UdpSocket::bind("127.0.0.1:0").await?, false)?;
+    let socket = UdpSocket::bind("127.0.0.1:0").await?;
+    let local = socket.local_addr()?;
+    let mapped = porthub_mesh::stun::mapped(&socket, &stun_servers).await;
+    ensure!(
+        mapped == Some(local),
+        "guest discovery must reuse its eventual ICE socket"
+    );
+    let (mut native, offer) = Transport::offer_reflexive(socket, false, mapped)?;
     route(&mut host, vec![offer])?;
+    // The host gathers its own approved socket before answering; the drive
+    // loop below exercises discovery, real UDP and same-epoch relay fallback.
     let mut screen = Vec::new();
     drive(&mut host, &mut native, &mut screen, None).await?;
+    let observed = sources
+        .lock()
+        .unwrap()
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    ensure!(
+        observed.contains(&local) && observed.len() == 2,
+        "both peers must discover on their actual separate bound ICE sockets"
+    );
     let command = b"DCOUNT=$((DCOUNT+1)); printf '\\r\\nNATIVE_COUNTER_%s\\r\\n' \"$DCOUNT\"\r";
     route(&mut host, native.input(command)?)?;
     drive(

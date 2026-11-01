@@ -19,6 +19,8 @@ struct Request {
     hello: HostHello,
     #[serde(default)]
     traffic_reporting:bool,
+    #[serde(default)]
+    stun_servers:Vec<String>,
 }
 
 struct GatewayFeatures { snapshots: bool, direct: bool, reporting: bool, addresses: Vec<std::net::IpAddr> }
@@ -124,6 +126,8 @@ pub(crate) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         "invalid terminal broker operation"
     );
     request.hello.validate(porthub_terminal::protocol::now())?;
+    let stun_servers=crate::terminal_connectivity::checked(&request.stun_servers)?;
+    ensure!(stun_servers.is_empty() || request.traffic_reporting,"terminal STUN requires local capability negotiation");
     let (mut remote, features) = tokio::select! {
         _ = cancel.cancelled() => return Ok(()),
         result = tokio::time::timeout(Duration::from_secs(40), open(&control)) => match result {
@@ -142,7 +146,7 @@ pub(crate) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         .send(Message::Text(serde_json::to_string(&request.hello)?.into()))
         .await?;
     if request.hello.direct_transport {
-        let policy=DirectPolicy {kind:"terminal_direct_policy".into(),addresses:features.addresses,stun_servers:vec![]};
+        let policy=DirectPolicy {kind:"terminal_direct_policy".into(),addresses:features.addresses,stun_servers};
         let mut bytes=serde_json::to_vec(&policy)?;bytes.push(b'\n');
         tokio::time::timeout(Duration::from_secs(5),local.get_mut().write_all(&bytes)).await??;
     }
@@ -401,6 +405,7 @@ mod tests {
             assert_eq!(first.contains("history_snapshots"), snapshots);
             assert!(!first.contains("broker-only-machine-secret"));
             assert!(!first.contains("traffic_reporting"));
+            assert!(!first.contains("stun:"));
             socket
                 .send(Message::Text(
                     serde_json::to_string(&HostEvent::Ready {
@@ -474,7 +479,7 @@ mod tests {
             "options":{"name":"quietfalcon","expires_at":0,"idle_timeout":0,"reconnect_timeout":60,
                 "history_limit":100000,"mouse":true,"read_only":false,"size_policy":"smallest"}
         }});
-        if measured {request["traffic_reporting"]=true.into();}
+        if measured {request["traffic_reporting"]=true.into();if cloud {request["stun_servers"]=serde_json::json!(["stun:127.0.0.1:3478"]);}}
         let mut bytes = serde_json::to_vec(&request)?;
         // Pipeline data after the opening request to verify buffered bytes are
         // preserved when the broker hands off to the terminal transport.
@@ -488,7 +493,7 @@ mod tests {
             let policy:DirectPolicy=serde_json::from_slice(&response)?;
             assert_eq!(policy.kind,"terminal_direct_policy");
             assert_eq!(policy.addresses,vec![std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)]);
-            assert!(policy.stun_servers.is_empty());
+            assert_eq!(policy.stun_servers,["stun:127.0.0.1:3478"]);
             assert!(!String::from_utf8_lossy(&response).contains("secret"));
             response=tokio::time::timeout(Duration::from_secs(5),frame(&mut local,&mut partial)).await??;
         }

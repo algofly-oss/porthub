@@ -1,3 +1,4 @@
+import { terminalStunServers } from "./terminalConnectivity.mjs";
 import { InputJournal, OutputJournal, MAX_BYTES, MAX_PAYLOAD, parsePacket } from "./terminalDelivery";
 
 const MAX_BUFFERED = 262144;
@@ -10,8 +11,9 @@ function base64(bytes) {
 // Signalling and authorization always use the existing authenticated gateway.
 // The caller enables this only for a negotiated, policy-approved attachment.
 export class TerminalTransport {
-  constructor({ send, write, fail, readOnly, changed = () => {}, createPeer = config => new RTCPeerConnection(config) }) {
+  constructor({ send, write, fail, readOnly, changed = () => {}, createPeer = config => new RTCPeerConnection(config), stunServers = [] }) {
     Object.assign(this, { send, write, fail, readOnly, changed, createPeer });
+    this.stunServers = terminalStunServers(stunServers);
     this.closed = false;
     this.offered = false;
     this.answered = false;
@@ -49,9 +51,8 @@ export class TerminalTransport {
   async start() {
     if (this.closed || this.peer) return;
     try {
-      // Host candidates only until account-scoped ICE policy supplies additional
-      // servers. Do not consult arbitrary public STUN/TURN services implicitly.
-      const peer = this.peer = this.createPeer({ iceServers: [] });
+      // Only endpoints explicitly chosen in this local browser are contacted.
+      const peer = this.peer = this.createPeer({ iceServers: this.stunServers.map(url=>({urls:url})) });
       const channel = this.channel = peer.createDataChannel("porthub-terminal/1", { ordered: true });
       channel.binaryType = "arraybuffer";
       channel.onopen = () => {
