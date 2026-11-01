@@ -12,7 +12,11 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::{net::UdpSocket, sync::mpsc, task::JoinSet};
+use tokio::{
+    net::UdpSocket,
+    sync::{mpsc, OwnedSemaphorePermit, Semaphore},
+    task::JoinSet,
+};
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 #[derive(Clone)]
@@ -44,10 +48,14 @@ enum Command {
         request: u32,
         description: DirectDescription,
     },
-    Relay(DeliveryPacket),
+    Relay {
+        message: Message,
+        _bytes: Option<OwnedSemaphorePermit>,
+    },
 }
 pub struct Handle {
     commands: mpsc::Sender<Command>,
+    input_bytes: Arc<Semaphore>,
     cancel: CancellationToken,
 }
 impl Drop for Handle {
@@ -56,6 +64,20 @@ impl Drop for Handle {
     }
 }
 impl Handle {
+    fn channel() -> (Self, mpsc::Receiver<Command>) {
+        // One input window, output acknowledgements and a fallback replay can
+        // arrive before this actor is scheduled. Count payload bytes separately
+        // so small keystrokes do not exhaust an arbitrary 32-message limit.
+        let (commands, receive) = mpsc::channel(delivery::MAX_FRAMES * 4);
+        (
+            Self {
+                commands,
+                input_bytes: Arc::new(Semaphore::new(delivery::MAX_BYTES * 2)),
+                cancel: CancellationToken::new(),
+            },
+            receive,
+        )
+    }
     pub fn offer(&self, request: u32, description: DirectDescription) -> Result<()> {
         self.commands
             .try_send(Command::Offer {
@@ -65,8 +87,23 @@ impl Handle {
             .map_err(|_| anyhow::anyhow!("terminal transport control is backpressured"))
     }
     pub fn relay(&self, packet: DeliveryPacket) -> Result<()> {
+        let message = packet.decode()?;
+        let bytes = match &message {
+            Message::Data(frame) => Some(
+                self.input_bytes
+                    .clone()
+                    .try_acquire_many_owned(frame.payload().len() as u32)
+                    .map_err(|_| {
+                        anyhow::anyhow!("terminal input control bytes are backpressured")
+                    })?,
+            ),
+            Message::Ack { .. } => None,
+        };
         self.commands
-            .try_send(Command::Relay(packet))
+            .try_send(Command::Relay {
+                message,
+                _bytes: bytes,
+            })
             .map_err(|_| anyhow::anyhow!("terminal transport control is backpressured"))
     }
 }
@@ -264,7 +301,7 @@ async fn flush_network(network: &mut Option<Network>, delivery: &mut Option<Deli
 }
 async fn receipt(
     delivery: &mut Delivery,
-    packet: DeliveryPacket,
+    message: Message,
     direct: bool,
     network: &mut Option<Network>,
     sink: &InputSink,
@@ -272,7 +309,7 @@ async fn receipt(
     send: &mpsc::Sender<HostOutput>,
     cancel: &CancellationToken,
 ) -> Result<()> {
-    match packet.decode()? {
+    match message {
         Message::Ack { epoch, sequence } => {
             let before = delivery.send.retained_bytes();
             delivery.send.acknowledge(&epoch, sequence)?;
@@ -320,9 +357,8 @@ pub fn spawn(
     send: mpsc::Sender<HostOutput>,
     config: Config,
 ) -> Handle {
-    let (commands, receive) = mpsc::channel(32);
-    let cancel = CancellationToken::new();
-    let actor_cancel = cancel.clone();
+    let (handle, receive) = Handle::channel();
+    let actor_cancel = handle.cancel.clone();
     tokio::spawn(async move {
         let _ = run(
             client,
@@ -340,7 +376,7 @@ pub fn spawn(
         )
         .await;
     });
-    Handle { commands, cancel }
+    handle
 }
 async fn run(
     client: u64,
@@ -453,8 +489,8 @@ async fn run(
                     ensure!(pending.is_none(),"terminal negotiation is already pending");let config=config.clone();
                     pending=Some((request,AbortOnDropHandle::new(tokio::spawn(Network::prepare(config,description)))));
                 },
-                Some(Command::Relay(packet))=>{
-                    receipt(delivery.as_mut().context("terminal delivery is not negotiated")?,packet,false,&mut network,&sink,client,&send,&cancel).await?;
+                Some(Command::Relay {message,_bytes})=>{
+                    receipt(delivery.as_mut().context("terminal delivery is not negotiated")?,message,false,&mut network,&sink,client,&send,&cancel).await?;
                 },
                 None=>return Ok(()),
             },
@@ -473,8 +509,8 @@ async fn run(
                     network_events(&mut network,&mut delivery)?;
                     if network.is_some() {
                         while let Some(bytes)=network.as_mut().unwrap().peer.read()? {
-                            let message=Message::parse(&bytes)?;let packet=DeliveryPacket::encode(&message)?;
-                            receipt(delivery.as_mut().context("terminal delivery is not negotiated")?,packet,true,&mut network,&sink,client,&send,&cancel).await?;
+                            let message=Message::parse(&bytes)?;
+                            receipt(delivery.as_mut().context("terminal delivery is not negotiated")?,message,true,&mut network,&sink,client,&send,&cancel).await?;
                             if last_activity.elapsed()>Duration::from_secs(5){emit(&send,&cancel,HostOutput::Activity).await?;last_activity=Instant::now();}
                         }
                     }
@@ -482,5 +518,84 @@ async fn run(
             },
             _=tokio::time::sleep_until(deadline.into()),if timed=>{if let Some(net)=&mut network {let _=net.peer.timeout(Instant::now());}},
         }
+    }
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+    const EPOCH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    fn data(sequence: u64, bytes: usize) -> Result<DeliveryPacket> {
+        DeliveryPacket::encode(&Message::Data(delivery::Frame::new(
+            EPOCH,
+            sequence,
+            &vec![0; bytes],
+        )?))
+    }
+    fn ack() -> Result<DeliveryPacket> {
+        DeliveryPacket::encode(&Message::Ack {
+            epoch: EPOCH.into(),
+            sequence: 0,
+        })
+    }
+    #[test]
+    fn fast_keystrokes_output_acks_and_one_replay_fit_before_actor_scheduling() -> Result<()> {
+        let (handle, _receive) = Handle::channel();
+        for sequence in 1..=delivery::MAX_FRAMES as u64 {
+            handle.relay(data(sequence, 1)?)?;
+            handle.relay(ack()?)?;
+            handle.relay(data(sequence, 1)?)?;
+        }
+        assert_eq!(
+            handle.input_bytes.available_permits(),
+            delivery::MAX_BYTES * 2 - delivery::MAX_FRAMES * 2
+        );
+        Ok(())
+    }
+    #[test]
+    fn payload_bytes_are_bounded_independently_and_do_not_block_acknowledgements() -> Result<()> {
+        let (handle, mut receive) = Handle::channel();
+        for sequence in 1..=8 {
+            handle.relay(data(sequence, delivery::MAX_PAYLOAD)?)?;
+        }
+        assert_eq!(handle.input_bytes.available_permits(), 0);
+        assert!(handle.relay(data(9, 1)?).is_err());
+        handle.relay(ack()?)?;
+        let queued = receive.try_recv()?;
+        assert_eq!(
+            handle.input_bytes.available_permits(),
+            0,
+            "in-flight input keeps its reservation"
+        );
+        drop(queued);
+        assert_eq!(
+            handle.input_bytes.available_permits(),
+            delivery::MAX_PAYLOAD
+        );
+        handle.relay(data(9, 1)?)?;
+        drop(receive);
+        assert_eq!(
+            handle.input_bytes.available_permits(),
+            delivery::MAX_BYTES * 2
+        );
+        assert!(handle.relay(ack()?).is_err());
+        assert_eq!(
+            handle.input_bytes.available_permits(),
+            delivery::MAX_BYTES * 2
+        );
+        Ok(())
+    }
+    #[test]
+    fn ack_only_flood_is_still_bounded() -> Result<()> {
+        let (handle, _receive) = Handle::channel();
+        for _ in 0..delivery::MAX_FRAMES * 4 {
+            handle.relay(ack()?)?;
+        }
+        assert!(handle.relay(ack()?).is_err());
+        assert_eq!(
+            handle.input_bytes.available_permits(),
+            delivery::MAX_BYTES * 2
+        );
+        Ok(())
     }
 }

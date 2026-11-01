@@ -197,3 +197,13 @@ waits for each guest's initial PTY screen before starting concurrent output.
 Account-scoped traffic reporting, approved NAT traversal configuration and the
 native optimized join client still need integration before enabling this in
 normal release builds. Ordinary unmodified SSH remains a gateway transport.
+
+The full integration check also accepts `PORTHUB_TEST_TERMINAL_DIRECT=blocked`.
+It rejects the browser's direct handshake while keeping the real SDK, broker and
+API in the path, verifies sequenced gateway delivery, and requires the writer to
+survive pressure without a hidden reconnect. This exposed a 32-message actor
+queue that could disconnect healthy guests during fast typing. The queue now
+admits the protocol's bounded input, acknowledgement and replay windows, with a
+separate 128 KiB payload budget. Acknowledgements do not consume that byte budget;
+an acknowledgement-only flood still has a finite message limit. Direct receive
+frames are parsed once and remain binary inside the native actor.

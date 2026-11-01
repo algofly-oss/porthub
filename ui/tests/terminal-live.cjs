@@ -1,24 +1,28 @@
 const assert=require('node:assert/strict');const {launchBrowser}=require('./browser.cjs');const {spawn}=require('node:child_process');
-async function output(page,text){await page.bringToFront();try{await page.waitForFunction(text=>document.querySelector('.xterm-rows')?.textContent.includes(text),text,{timeout:15000})}catch(error){await page.screenshot({path:'/tmp/porthub-terminal-live-output-failure.png'});throw new Error('Expected '+text+'; real terminal view: '+(await page.locator('main').innerText()).slice(-5000));}}
+async function output(page,text){await page.bringToFront();try{await page.waitForFunction(text=>document.querySelector('.xterm-rows')?.textContent.includes(text),text,{timeout:15000})}catch(error){await page.screenshot({path:'/tmp/porthub-terminal-live-output-failure.png'});throw new Error('Expected '+text+'; real terminal view: '+(await page.locator('main').innerText()).slice(-5000)+'; transport '+JSON.stringify(page.__transportStats?.()));}}
 async function type(page,command){await page.bringToFront();await page.locator('.xterm-helper-textarea').focus();await page.keyboard.type(command);await page.keyboard.press('Enter');}
 (async()=>{const browser=await launchBrowser();let ssh,sshReader;try{
 const origin=process.env.REVIEW_ORIGIN,write=process.env.PORTHUB_TEST_TERMINAL_WRITE,read=process.env.PORTHUB_TEST_TERMINAL_READ,session=process.env.PORTHUB_TEST_TERMINAL_SESSION;
 const owner=await browser.newContext({viewport:{width:1440,height:900}}),guest=await browser.newContext({viewport:{width:1100,height:900}});
-if(process.env.PORTHUB_TEST_TERMINAL_DIRECT)for(const context of [owner,guest])await context.addInitScript(()=>{
+if(process.env.PORTHUB_TEST_TERMINAL_DIRECT)for(const context of [owner,guest])await context.addInitScript(blocked=>{
  const Peer=window.RTCPeerConnection;window.__terminalDirect={opened:0,sent:0,received:0};
- window.RTCPeerConnection=function(config){const peer=new Peer(config),create=peer.createDataChannel.bind(peer);peer.createDataChannel=(...args)=>{
+ window.RTCPeerConnection=function(config){const peer=new Peer(config),create=peer.createDataChannel.bind(peer);if(blocked)peer.setRemoteDescription=async()=>{throw Error('fixture blocks the direct path');};peer.createDataChannel=(...args)=>{
   const channel=create(...args),send=channel.send.bind(channel);channel.addEventListener('open',()=>window.__terminalDirect.opened++);channel.addEventListener('message',()=>window.__terminalDirect.received++);
   channel.send=bytes=>{window.__terminalDirect.sent++;return send(bytes);};return channel;
  };return peer;};
-});
+},process.env.PORTHUB_TEST_TERMINAL_DIRECT==='blocked');
 const cookie=process.env.PORTHUB_TEST_TERMINAL_COOKIE;const separator=cookie.indexOf('=');await owner.addCookies([{name:cookie.slice(0,separator),value:cookie.slice(separator+1),url:origin,httpOnly:true,sameSite:'Lax'}]);
-const host=await owner.newPage(),watcher=await guest.newPage();let hostConnections=0;host.on('websocket',socket=>{if(new URL(socket.url()).pathname==='/api/terminal/join')hostConnections++;});const errors=[];for(const page of [host,watcher])page.on('pageerror',e=>errors.push(e.message));
+const host=await owner.newPage(),watcher=await guest.newPage();let hostConnections=0,directRelay=0,relayInputs=0,relayAcks=0;host.on('websocket',socket=>{if(new URL(socket.url()).pathname==='/api/terminal/join'){hostConnections++;socket.on('framesent',({payload})=>{try{const frame=JSON.parse(payload);if(frame.type==='delivery'){directRelay++;if(Buffer.from(frame.packet,'base64')[0]===1)relayInputs++;}}catch{}});socket.on('framereceived',({payload})=>{try{const frame=JSON.parse(payload);if(frame.type==='delivery'&&Buffer.from(frame.packet,'base64')[0]===2)relayAcks++;}catch{}});}});host.__transportStats=()=>({hostConnections,relayInputs,relayAcks});const errors=[];for(const page of [host,watcher])page.on('pageerror',e=>errors.push(e.message));
 await host.goto(`${origin}/terminal#${write}`);await host.getByRole('button',{name:'Connect',exact:true}).click();await host.getByRole('heading',{name:'amberotter',exact:true}).waitFor();
 const historyFrames=[];watcher.on('websocket',socket=>socket.on('framesent',({payload})=>{try{const frame=JSON.parse(payload);if(frame.type==='history')historyFrames.push(frame)}catch{}}));
 await watcher.goto(`${origin}/terminal#${read}`);await watcher.getByRole('button',{name:'Connect',exact:true}).click();await watcher.getByRole('heading',{name:'amberotter',exact:true}).waitFor();
 await output(host,'porthub-test$');await output(watcher,'porthub-test$');
 await type(host,"OWNVAR=preserved; printf 'INITIAL%s\\n' 'SHARED'");await output(host,'INITIALSHARED');await output(watcher,'INITIALSHARED');
-if(process.env.PORTHUB_TEST_TERMINAL_DIRECT){
+if(process.env.PORTHUB_TEST_TERMINAL_DIRECT==='blocked'){
+ await host.waitForFunction(()=>window.__terminalDirect.opened===0);
+ assert(directRelay>0,'blocked direct path must carry sequenced bytes through the actual gateway');
+ console.log('PASS blocked browser direct path: real SDK and gateway relay preserve shell input/output without an open data channel');
+}else if(process.env.PORTHUB_TEST_TERMINAL_DIRECT){
  for(const page of [host,watcher])await page.waitForFunction(()=>window.__terminalDirect.opened>0 && window.__terminalDirect.sent>0 && window.__terminalDirect.received>0,null,{timeout:15000});
  console.log('PASS real browser direct path: native sharing supervisor, authenticated broker, API signalling and bidirectional WebRTC bytes');
 }
@@ -71,7 +75,7 @@ const churn=watcher.evaluate(async()=>{
 });
 let stress;
 try{[,stress]=await Promise.all([pressure,churn]);}catch(error){
- const diagnostics={host:await host.evaluate(()=>({screen:document.querySelector('.xterm-rows')?.textContent,alerts:[...document.querySelectorAll('[role="alert"]')].map(node=>node.textContent),direct:window.__terminalDirect})),watcher:await watcher.evaluate(()=>({direct:window.__terminalDirect,stable:window.__stressStable&&{bytes:window.__stressStable.bytes,closed:window.__stressStable.closed,text:window.__stressStable.text}}))};
+ const diagnostics={hostConnections,relayInputs,relayAcks,host:await host.evaluate(()=>({screen:document.querySelector('.xterm-rows')?.textContent.slice(-2500),alerts:[...document.querySelectorAll('[role="alert"]')].map(node=>node.textContent),direct:window.__terminalDirect})),watcher:await watcher.evaluate(()=>({direct:window.__terminalDirect,stable:window.__stressStable&&{bytes:window.__stressStable.bytes,closed:window.__stressStable.closed,text:window.__stressStable.text.slice(-1200)}}))};
  throw Error(error.message+'; pressure diagnostics '+JSON.stringify(diagnostics));
 }
 assert.equal(stress.histories,6);assert.equal(stress.attachments,8);
