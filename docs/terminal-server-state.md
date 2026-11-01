@@ -36,6 +36,42 @@ verify that ordinary listings hide ended sessions. Browser delivery also
 restores the direct return path when valid direct output follows a delayed relay
 replay; the regression verifies that acknowledgements resume over that channel.
 
+## Shipped 1.10.1 verification
+
+The [1.10.1 release](https://github.com/algofly-oss/porthub/releases/tag/v1.10.1)
+contains all ten client targets and thirty verified assets from source
+`a3e48eca7bd62605a29aa4a4c9ef2efc6798b812`.
+[Client run 41306015227](https://github.com/algofly-oss/porthub/actions/runs/41306015227)
+passed every platform, the complete bundle gate and publication.
+[Server run 41305960657](https://github.com/algofly-oss/porthub/actions/runs/41305960657)
+passed production UI, database, real Chrome/WebKit direct and blocked-path
+flows, and image packaging. Teardown checks explicitly request ended history
+with `--all`; a browser regression verifies direct acknowledgements recover
+after delayed relay replay.
+
+The verified core image is deployed on the gateway at this exact source and
+version. Edge remains healthy at 1.10.0/source 48a47c1 and firewall at
+1.8.4/source 9b6c65d. The scoped upgrade retained all other running containers,
+a verified cold core backup and immutable rollback references. Four public
+routes returned HTTP 200 afterward; the three unrelated application HTML
+hashes matched their pre-upgrade baseline. The public terminal JavaScript
+matched the verified core image's asset checksum.
+
+A scoped live Linux canary used the exact published executable, verified by
+its GitHub digest. Native relay, read-only F7, frozen history, browser and stock
+SSH, invitation revocation/recovery, targeted removal, detach persistence and
+explicit exit passed. Its workspace, private fixture and uninstalled staging
+package were removed. The test did not install or restart an agent service.
+
+The normal automatic update path subsequently brought all eight online clients
+to 1.10.1, with no pending update targets. The local installed CLI reports the
+exact published source. Four offline clients remain unverified, and the final
+audit found zero active terminal sessions. Existing workspaces retain their
+shell and configuration; the new tmux defaults apply to newly created ones.
+
+See the [release and rollout verification](verification/2026-11-01-terminal-onboarding-release.json)
+for checksums, gates, backup references and clipboard/attachment-count limits.
+
 ## Shipped 1.10.0 verification
 
 The [1.10.0 release](https://github.com/algofly-oss/porthub/releases/tag/v1.10.0)

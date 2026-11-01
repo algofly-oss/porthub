@@ -1,0 +1,102 @@
+{
+  "release": "1.10.1",
+  "source_revision": "a3e48eca7bd62605a29aa4a4c9ef2efc6798b812",
+  "changes": [
+    "Bare terminal command opens a guide without creating a workspace",
+    "Discoverable sharing examples, per-command flag help, and url/links aliases",
+    "Running-only ls by default; --all includes ended history",
+    "Bash preferred for new workspaces",
+    "Participant sidebar off by default, attached-client count in status bar, and explicit owner/session labels",
+    "tmux latest activity sizing and focus reporting",
+    "Mouse release copies without leaving copy mode or clearing selection; position indicator hidden",
+    "Direct browser acknowledgements recover after delayed relay replay",
+    "Continuous production release publishes the complete validated client bundle"
+  ],
+  "local_checks": {
+    "multiplexer_real_runtime_tests_passed": 14,
+    "terminal_local_cli_test_passed": true,
+    "real_mouse_selection_retains_scroll_and_populates_tmux_buffer": true,
+    "owner_participant_pty_controls_and_teardown_passed": true,
+    "packaged_cli_smoke_passed": true,
+    "production_browser_matrix": [
+      "chromium direct",
+      "chromium blocked",
+      "webkit direct",
+      "webkit blocked"
+    ]
+  },
+  "publication": {
+    "url": "https://github.com/algofly-oss/porthub/releases/tag/v1.10.1",
+    "run": "https://github.com/algofly-oss/porthub/actions/runs/41306015227",
+    "all_ten_platforms_passed": true,
+    "asset_count": 30,
+    "published_at_utc": "2026-11-01T12:43:44Z",
+    "linux_x86_64_sha256": "1eee0dc94009b7bc9ebd8af7e74ed70360afa47910155bf80120fe69681d3449"
+  },
+  "server": {
+    "run": "https://github.com/algofly-oss/porthub/actions/runs/41305960657",
+    "all_checks_passed": true,
+    "artifact_id": 13083413958,
+    "artifact_bytes": 188031634,
+    "artifact_sha256": "09dd260f9d5fc97c03185a84179f8d0fd1e0c8e7a650218423239f2be71652c4",
+    "role_checksums_and_source_markers_verified": true
+  },
+  "deployment": {
+    "host": "urm2",
+    "updated_roles": [
+      "core"
+    ],
+    "core_healthy": true,
+    "retained_roles": {
+      "edge": {
+        "version": "1.10.0",
+        "source": "48a47c1707e5e1795e35342b48564568a3466cc6"
+      },
+      "firewall": {
+        "version": "1.8.4",
+        "source": "9b6c65d"
+      }
+    },
+    "all_running_unselected_containers_retained": true,
+    "verified_backup_and_rollback_record": "/home/ubuntu/algofly/porthub-release-1.10.1-a3e48ec/deploy/native/upgrade-records/a3e48eca7bd62605a29aa4a4c9ef2efc6798b812-s1npe02g",
+    "public_route_checks_passed": 4,
+    "unrelated_application_html_hashes_unchanged": 3,
+    "served_terminal_asset_matches_verified_image": true,
+    "served_terminal_asset_sha256": "e42c7614ab15f4a12c21f06cfbd6abd102ffb74c94b21d54f9ece50fa800ccf0"
+  },
+  "live_canary": {
+    "host": "clear",
+    "binary_matches_published_linux_digest": true,
+    "installed_services_unchanged_by_smoke": true,
+    "passed": [
+      "native relay shared shell I/O",
+      "read-only F7",
+      "clean detach and workspace persistence",
+      "frozen history with resolved pane",
+      "anonymous browser and stock SSH",
+      "invitation revocation and recovery",
+      "targeted guest removal",
+      "explicit shell exit"
+    ],
+    "owned_workspace_and_fixture_removed": true,
+    "temporary_staged_package_removed": true,
+    "active_terminal_sessions_after_cleanup": 0
+  },
+  "rollout_observed_at_utc": "2026-11-01T12:50:36.175652+00:00",
+  "rollout": {
+    "catalog_versions": [
+      "1.10.1"
+    ],
+    "online_count": 8,
+    "online_at_release_count": 8,
+    "online_pending_count": 0,
+    "offline_count": 4,
+    "active_terminal_sessions": 0
+  },
+  "limits": [
+    "Existing workspaces retain their shell and tmux settings; new defaults apply to new workspaces",
+    "Clipboard verification covers the tmux buffer; operating-system clipboard delivery depends on the terminal emulator",
+    "Status counts attachments rather than unique people",
+    "Offline clients are not asserted upgraded"
+  ]
+}
