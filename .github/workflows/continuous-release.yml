@@ -61,6 +61,7 @@ jobs:
           python3 scripts/test_prepare_release.py
           python3 scripts/test_publish_release.py
           python3 scripts/test_prune_github_releases.py
+          python3 scripts/test_reuse_client_artifacts.py
       - name: Pin validation source without release mutations
         id: validation
         if: github.event_name == 'workflow_dispatch' && inputs.verify_only == true
@@ -85,6 +86,7 @@ jobs:
     uses: ./.github/workflows/agent-platforms.yml
     permissions:
       contents: write
+      actions: read
     with:
       revision: ${{ needs.prepare.outputs.revision }}
       platform: ${{ github.event_name == 'workflow_dispatch' && inputs.verify_only == true && inputs.platform || 'all' }}

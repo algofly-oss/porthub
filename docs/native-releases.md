@@ -279,3 +279,23 @@ STUN servers require explicit local configuration. Windows retains its existing
 hosting/CLI limits; browser and ordinary SSH guests do not need PortHub installed.
 Minimal builds may opt out with `--no-default-features`. The feature must be
 validated by the platform packaging matrix before this candidate is published.
+
+For a test/workflow-only recovery, `Native agent platforms` accepts
+`reuse_run_id=RUN` with `platform=all`, `verify_only=false`. Selection verifies a
+completed run in this repository, its source ancestry, and an identical
+production-input fingerprint: Cargo/toolchain/configuration, all crate/vendor
+sources, build helpers, target mappings and the complete native/cross build job
+recipes. Changed production inputs refuse reuse and require a full build.
+Only successful platform jobs with unexpired uniquely identified artifacts are
+reused. Missing or failed platforms build normally with the current tests.
+
+The final bundle job rechecks provenance, downloads each retained archive,
+verifies GitHub's SHA-256/size, rejects links and unexpected archive entries,
+then runs the existing complete thirty-file version/checksum validation across
+all ten platforms. Unselected build jobs may be skipped only after successful
+reuse selection; failed or cancelled selected builds still block publication.
+A separate `porthub-release-provenance` CI artifact records the retained platform
+source, archive identities/digests and production fingerprint. Reused platforms
+keep their original verbose build revision; rebuilt platforms report the new
+revision. Both represent the verified same production input tree and version.
+Normal release builds and latest-only release/tag retention are unchanged.

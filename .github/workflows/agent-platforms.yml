@@ -2,6 +2,10 @@ name: Native agent platforms
 on:
   workflow_call:
     inputs:
+      reuse_run_id:
+        description: Reuse successful platforms from a completed run with identical production inputs
+        type: string
+        default: ''
       promote_run_id:
         description: Promote an already successful full run instead of rebuilding clients
         type: string
@@ -21,6 +25,10 @@ on:
         default: false
   workflow_dispatch:
     inputs:
+      reuse_run_id:
+        description: Reuse successful platforms from a completed run with identical production inputs
+        type: string
+        default: ''
       promote_run_id:
         description: Optional successful full run ID to promote without rebuilding
         type: string
@@ -51,15 +59,20 @@ jobs:
   select-platforms:
     if: inputs.promote_run_id == ''
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
     outputs:
-      native: ${{ steps.select.outputs.native }}
-      linux: ${{ steps.select.outputs.linux }}
-      has_native: ${{ steps.select.outputs.has_native }}
-      has_linux: ${{ steps.select.outputs.has_linux }}
+      native: ${{ steps.reuse.outputs.native || steps.select.outputs.native }}
+      linux: ${{ steps.reuse.outputs.linux || steps.select.outputs.linux }}
+      has_native: ${{ steps.reuse.outputs.has_native || steps.select.outputs.has_native }}
+      has_linux: ${{ steps.reuse.outputs.has_linux || steps.select.outputs.has_linux }}
+      reuse_plan: ${{ steps.reuse.outputs.plan }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.revision || github.sha }}
+          fetch-depth: 0
       - name: Validate publishing scope
         if: inputs.publish_release == true
         env:
@@ -70,23 +83,57 @@ jobs:
           test "$BUILD_PLATFORM" = all
           test "$VERIFY_ONLY" != true
           test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+      - name: Verify reusable production inputs and successful platform artifacts
+        id: reuse
+        if: inputs.reuse_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ inputs.reuse_run_id }}
+          BUILD_PLATFORM: ${{ inputs.platform || 'all' }}
+          VERIFY_ONLY: ${{ inputs.verify_only }}
+        run: |
+          test "$BUILD_PLATFORM" = all
+          test "$VERIFY_ONLY" != true
+          python3 scripts/test_reuse_client_artifacts.py
+          python3 scripts/reuse-client-artifacts.py --run-id "$SOURCE_RUN"
       - id: select
+        if: inputs.reuse_run_id == ''
         env:
           PORTHUB_BUILD_PLATFORM: ${{ inputs.platform || 'all' }}
         run: python3 scripts/select-agent-platforms.py
   release-bundle:
     name: Validate complete release bundle
-    if: inputs.verify_only != true && (inputs.platform == '' || inputs.platform == 'all')
-    needs: [native, linux-32]
+    if: always() && inputs.verify_only != true && (inputs.platform == '' || inputs.platform == 'all') && needs.select-platforms.result == 'success' && (needs.native.result == 'success' || needs.native.result == 'skipped') && (needs.linux-32.result == 'success' || needs.linux-32.result == 'skipped')
+    needs: [select-platforms, native, linux-32]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.revision || github.sha }}
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
+        if: needs.native.result == 'success' || needs.linux-32.result == 'success'
         with:
           pattern: porthub-*
           path: release-platforms
+      - name: Restore successful platforms with verified source and digest
+        if: needs.select-platforms.outputs.reuse_plan != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PORTHUB_REUSE_PLAN: ${{ needs.select-platforms.outputs.reuse_plan }}
+        run: python3 scripts/reuse-client-artifacts.py --download release-platforms
+      - name: Retain platform reuse provenance
+        if: needs.select-platforms.outputs.reuse_plan != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: porthub-release-provenance
+          path: release-provenance.json
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 3
       - name: Collect client assets without server artifact collisions
         run: python3 deploy/native/collect_client_bundle.py --source release-platforms --destination release-input --version "$(sh scripts/release-version.sh)"
       - name: Validate all platforms against the workspace release
