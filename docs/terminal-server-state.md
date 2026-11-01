@@ -1,5 +1,46 @@
 # Terminal server persistence
 
+## Shipped 1.10.0 verification
+
+The [1.10.0 release](https://github.com/algofly-oss/porthub/releases/tag/v1.10.0)
+contains all ten client targets from source
+`d30143776c76c4bb46f3881c5bf1dae506bb3fdc`.
+[Client packaging run 41287115463](https://github.com/algofly-oss/porthub/actions/runs/41287115463)
+passed every platform and the complete bundle gate. The
+[publication run 41289252686](https://github.com/algofly-oss/porthub/actions/runs/41289252686)
+verified and published those existing binaries without rebuilding: ten executables,
+ten version records and ten SHA256 sidecars. Older releases and previews were
+removed; exceptions require an explicitly requested retained tag.
+
+The live core and edge run 1.10.0 server source
+`48a47c1707e5e1795e35342b48564568a3466cc6`, validated by
+[server run 41282736684](https://github.com/algofly-oss/porthub/actions/runs/41282736684).
+That run includes production UI checks, isolated MongoDB tests and real Chrome
+and WebKit flows with direct delivery and forced relay fallback. The client-only
+attachment-generation fix in d301437 does not change these server roles.
+The scoped upgrade retained the firewall and unrelated application containers.
+
+The upgraded EC2 canary passed a live test of the published Linux executable:
+native relay input/output, read-only F7, clean detach, workspace persistence,
+anonymous browser and ordinary SSH participation, frozen history with a resolved
+pane, invitation revocation and recovery, targeted removal and explicit shell
+exit. Its random workspace and private fixture directory were removed. The
+backend received content-free PTY and relay counters, and the audit found zero
+active terminal sessions afterward. This proves the canary and gateway path;
+it does not assert that an offline registered machine has upgraded.
+
+Linux and macOS hosts use the bundled multiplexer; native Windows hosting and
+the native Windows guest TTY are not implemented. Windows participants can use
+a browser or ordinary SSH. Browser clipboard copying needs a secure context and
+permission. Native/SSH selection, automatic copying and OSC52 depend on the
+outer terminal's settings. Direct transport depends on compatible peers, local
+policy and network reachability; ordinary SSH uses the gateway. See the CLI
+guide's terminal sections for commands, customization and clipboard behavior.
+
+The sections below include the implementation and verification history. Earlier
+statements about pending packaging or rollout describe those intermediate steps;
+the release and live evidence above supersede them for 1.10.0.
+
 The standard Compose edge listens for ordinary terminal SSH guests on TCP 8347
 and forwards them to `/run/porthub-api/terminal-ssh.sock` on the existing private
 API socket volume. The API provides the SSH server; the machine's system sshd
