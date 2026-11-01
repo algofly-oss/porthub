@@ -25,3 +25,6 @@ pub mod direct;
 
 pub mod delivery;
 pub mod viewer;
+
+#[cfg(feature = "viewer-history")]
+pub mod viewer_history;

@@ -15,7 +15,7 @@ netns-tests = ["porthub-network/netns-tests"]
 private-stream = ["dep:smoltcp", "porthub-network/private-stream", "porthub-mesh/streams"]
 root-dns-test = []
 handoff-service-test = []
-terminal-direct = ["porthub-terminal/direct"]
+terminal-direct = ["porthub-terminal/direct", "porthub-terminal/viewer-history"]
 
 [dependencies]
 getifaddrs = "0.6.2"

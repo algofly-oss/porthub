@@ -269,3 +269,21 @@ signaling writes and missing heartbeats have finite timeouts. Tests use real
 WebSocket framing over isolated duplex streams and an untrusted local TLS server;
 they do not yet prove a native TTY or direct connection through the live gateway.
 This module is compiled only with the experimental `terminal-direct` feature.
+
+The experimental Unix native relay runner now connects signaling to a private,
+nonblocking controlling-TTY descriptor. Raw control keys, mouse events, paste and
+clipboard escape bytes remain unchanged. Resize polling sends dimensions without
+cancelling the absolute gateway heartbeat deadline. Output writes apply bounded
+backpressure. Dropping or cancelling the attachment restores termios and makes a
+nonblocking best-effort reset of mouse capture, bracketed paste, cursor and screen
+modes; SIGKILL and an inaccessible local terminal cannot guarantee that reset.
+
+The read-only history pager is shared by ordinary SSH and the native runner under
+the separate `viewer-history` feature, avoiding an SSH server dependency in the
+native guest. Read-only F7/navigation issues history requests rather than shell
+input. PTY/WebSocket tests cover both roles, exact raw bytes, history rendering,
+resize, cancellation and terminal restoration. These tests use isolated framed
+WebSockets and a real local PTY, not a production server. The runner is not yet
+selected by the CLI; native direct negotiation, recovery-loop integration and
+release/platform/live validation remain pending. Windows guest TTY support also
+remains pending; the new raw descriptor implementation is Unix-only.

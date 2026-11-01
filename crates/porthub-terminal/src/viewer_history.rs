@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-pub(super) struct Pager {
+pub struct Pager {
     pub active: bool,
     cols: u16,
     rows: u16,

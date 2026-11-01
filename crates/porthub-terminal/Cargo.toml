@@ -6,7 +6,8 @@ publish.workspace = true
 
 [features]
 direct = ["dep:rtc", "dep:bytes", "dep:porthub-mesh", "dep:socket2"]
-ssh = ["dep:russh", "dep:rand10", "dep:unicode-width", "dep:unicode-segmentation"]
+viewer-history = ["dep:unicode-width", "dep:unicode-segmentation"]
+ssh = ["dep:russh", "dep:rand10", "viewer-history"]
 
 [dependencies]
 socket2 = { version = "0.6", features = ["all"], optional = true }

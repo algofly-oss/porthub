@@ -1,6 +1,11 @@
 //! Authenticated native guest signaling. Experimental; the CLI still uses SSH.
 //! Invitation and recovery capabilities travel only in the encrypted first
 //! message, never in request URLs or diagnostic values.
+#[cfg(unix)]
+pub mod relay;
+#[cfg(unix)]
+pub mod tty;
+
 use anyhow::{bail, ensure, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use porthub_terminal::protocol::{dimensions, token, ViewerEvent, ViewerInput};
@@ -56,6 +61,7 @@ pub struct Guest<S> {
     socket: WebSocketStream<S>,
     read_only: bool,
     recovery: Option<Recovery>,
+    last_received: tokio::time::Instant,
 }
 pub type NetworkGuest = Guest<MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -125,6 +131,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Guest<S> {
             socket,
             read_only: true,
             recovery: None,
+            last_received: tokio::time::Instant::now(),
         };
         let welcome = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -184,9 +191,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Guest<S> {
         .map_err(|_| anyhow::anyhow!("terminal signaling send failed"))
     }
     pub async fn next_event(&mut self) -> Result<ViewerEvent> {
-        let event = tokio::time::timeout(Duration::from_secs(45), self.read_event())
-            .await
-            .context("terminal gateway heartbeat timed out")??;
+        let event = tokio::time::timeout_at(
+            self.last_received + Duration::from_secs(45),
+            self.read_event(),
+        )
+        .await
+        .context("terminal gateway heartbeat timed out")??;
         ensure!(
             !matches!(event, ViewerEvent::Welcome { .. }),
             "duplicate terminal welcome"
@@ -209,6 +219,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Guest<S> {
                     );
                     let event: ViewerEvent = serde_json::from_str(&text)
                         .map_err(|_| anyhow::anyhow!("invalid terminal signaling frame"))?;
+                    self.last_received = tokio::time::Instant::now();
                     match &event {
                         ViewerEvent::Ping => {
                             self.send(&ViewerInput::Pong).await?;
@@ -474,6 +485,24 @@ mod tests {
             0,
             "invitation never reaches untrusted HTTP endpoint"
         );
+        Ok(())
+    }
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_event_reads_for_keyboard_or_resize_does_not_extend_heartbeat_deadline(
+    ) -> Result<()> {
+        let (client, mut server) = pair().await;
+        event(&mut server, welcome(false)).await;
+        let (mut guest, _) = Guest::authenticate(client, &"a".repeat(64), None, 80, 24).await?;
+        let start = tokio::time::Instant::now();
+        for _ in 0..4 {
+            assert!(
+                tokio::time::timeout(Duration::from_secs(10), guest.next_event())
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(guest.next_event().await.is_err());
+        assert_eq!(start.elapsed(), Duration::from_secs(45));
         Ok(())
     }
 }
