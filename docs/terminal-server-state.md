@@ -317,3 +317,8 @@ host, alongside browser and ordinary SSH participants. The Reid check passed
 shared shell I/O, read-only F7, SIGTERM detach and workspace persistence, with the
 service PID and restart count unchanged. This is smoke evidence for the relay
 candidate, not a published package or a deployed native direct transport.
+
+Native platform CI runs the experimental guest socket/TTY/recovery and CLI-selection
+checks on Linux x86_64 and macOS arm64, without enabling the experimental feature
+in published binaries. These tests use isolated local fixtures, not production
+accounts or live machine credentials.
