@@ -6,6 +6,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use tokio::sync::mpsc;
 
 pub struct Attachments {
+    #[cfg(feature="direct")]
+    direct: BTreeMap<u64,crate::direct::host::Handle>,
+    #[cfg(feature="direct")]
+    direct_config: Option<crate::direct::host::Config>,
+    #[cfg(feature="direct")]
+    direct_enabled: bool,
     workspace: Workspace,
     snapshots: std::sync::Arc<std::sync::Mutex<SnapshotCache>>,
     history_snapshots: bool,
@@ -31,6 +37,12 @@ impl Attachments {
         let (send, receive) = mpsc::channel(128);
         let (history_send, history_receive) = mpsc::channel(8);
         Ok(Self {
+            #[cfg(feature="direct")]
+            direct:BTreeMap::new(),
+            #[cfg(feature="direct")]
+            direct_config:None,
+            #[cfg(feature="direct")]
+            direct_enabled:false,
             workspace,
             snapshots: std::sync::Arc::new(std::sync::Mutex::new(SnapshotCache::default())),
             history_snapshots: false,
@@ -48,19 +60,38 @@ impl Attachments {
         })
     }
 
+    #[cfg(feature="direct")]
+    pub fn configure_direct(&mut self, config:crate::direct::host::Config)->Result<()> {
+        ensure!(self.clients.is_empty(),"configure terminal direct transport before attaching guests");
+        config.validate()?;self.direct_config=Some(config);Ok(())
+    }
+
     /// A false result ends this transport, while keeping the shared workspace.
     pub fn apply(&mut self, event: HostEvent) -> Result<bool> {
         match event {
-            HostEvent::Delivery {client,..} => {
-                // Capability stays off until the direct actor is integrated.
+            HostEvent::Delivery {client,packet} => {
+                #[cfg(feature="direct")]
+                if let Some(handle)=self.direct.get(&client) {if handle.relay(packet).is_ok(){return Ok(true);}}
+                #[cfg(not(feature="direct"))]
+                let _=packet;
+
+                // No configured actor (or a failed control queue): reject only
+                // this attachment; shipped CLI capability remains disabled.
                 // Unexpected sequenced input must never end another attachment.
                 if self.clients.remove(&client).is_some() {
+                    #[cfg(feature="direct")]
+                    self.direct.remove(&client);
                     self.pending_redraw.remove(&client);
                     self.snapshots.lock().expect("snapshot cache").detach(client);
                     self.send.try_send(HostOutput::Closed {client})?;
                 }
             }
-            HostEvent::DirectOffer {client,request,..} => {
+            HostEvent::DirectOffer {client,request,description} => {
+                #[cfg(feature="direct")]
+                if let Some(handle)=self.direct.get(&client) {if handle.offer(request,description).is_ok(){return Ok(true);}}
+                #[cfg(not(feature="direct"))]
+                let _=description;
+
                 if self.clients.contains_key(&client) {self.send.try_send(HostOutput::DirectUnavailable {client,request})?;}
             }
             HostEvent::Redraw { client } => {
@@ -157,6 +188,10 @@ impl Attachments {
                     self.send.try_send(HostOutput::Closed { client })?;
                     return Ok(true);
                 }
+                #[cfg(feature="direct")]
+                let (output,receive)=if self.direct_enabled && self.direct_config.is_some() {let (send,receive)=mpsc::channel(8);(send,Some(receive))}else{(self.send.clone(),None)};
+                #[cfg(not(feature="direct"))]
+                let output=self.send.clone();
                 match Client::attach(
                     &self.workspace,
                     client,
@@ -164,9 +199,15 @@ impl Attachments {
                     cols,
                     rows,
                     &term,
-                    self.send.clone(),
+                    output,
                 ) {
                     Ok(pty) => {
+                        #[cfg(feature="direct")]
+                        if let Some(receive)=receive {
+                            let handle=crate::direct::host::spawn(client,pty.input_sink(),receive,self.send.clone(),self.direct_config.clone().unwrap());
+                            self.direct.insert(client,handle);
+                        }
+
                         self.snapshots.lock().expect("snapshot cache").attach(client)?;
                         self.clients.insert(client, pty);
                     }
@@ -180,6 +221,8 @@ impl Attachments {
                     if pty.input(&data).is_err() {
                         // Disconnect only the offending or backpressured viewer.
                         self.clients.remove(&client);
+                        #[cfg(feature="direct")]
+                        self.direct.remove(&client);
                         self.snapshots.lock().expect("snapshot cache").detach(client);
                         self.send.try_send(HostOutput::Closed { client })?;
                     }
@@ -193,6 +236,8 @@ impl Attachments {
             HostEvent::Detach { client } => {
                 self.pending_redraw.remove(&client);
                 self.clients.remove(&client);
+                #[cfg(feature="direct")]
+                self.direct.remove(&client);
                 self.snapshots.lock().expect("snapshot cache").detach(client);
             }
             HostEvent::Ping => {
@@ -200,10 +245,16 @@ impl Attachments {
             }
             HostEvent::Stop { .. } | HostEvent::Reconnect { .. } => {
                 self.clients.clear();
+                #[cfg(feature="direct")]
+                self.direct.clear();
                 *self.snapshots.lock().expect("snapshot cache") = SnapshotCache::default();
                 return Ok(false);
             }
-            HostEvent::Ready { history_snapshots, .. } => self.history_snapshots = history_snapshots,
+            HostEvent::Ready { history_snapshots, direct_transport:_direct_transport, .. } => {
+                self.history_snapshots = history_snapshots;
+                #[cfg(feature="direct")]
+                {self.direct_enabled=_direct_transport;}
+            },
             HostEvent::Presence { .. }
             | HostEvent::InvitationsRevoked
             | HostEvent::InvitationsRotated { .. } => {}
@@ -265,6 +316,8 @@ impl Attachments {
         };
         if let HostOutput::Closed { client } = &output {
             self.clients.remove(client);
+            #[cfg(feature="direct")]
+            self.direct.remove(client);
             self.snapshots.lock().expect("snapshot cache").detach(*client);
         }
         Some(output)

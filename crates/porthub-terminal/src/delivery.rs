@@ -117,6 +117,9 @@ impl Sender {
     pub fn replay(&self) -> impl Iterator<Item = &Frame> {
         self.pending.iter()
     }
+    pub fn can_enqueue(&self, bytes: usize) -> bool {
+        bytes<=MAX_PAYLOAD && self.pending.len()<MAX_FRAMES && self.bytes+bytes<=MAX_BYTES
+    }
     pub fn retained_bytes(&self) -> usize {
         self.bytes
     }

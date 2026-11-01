@@ -2,6 +2,8 @@
 //! the terminal gateway; this engine never grants a role or opens a shell.
 //! Kept behind `direct` until signaling and relay handover are integrated.
 pub use crate::delivery as replay;
+#[cfg(unix)]
+pub mod host;
 
 use anyhow::{ensure, Context, Result};
 use bytes::BytesMut;
@@ -13,7 +15,7 @@ use rtc::{
         message::{RTCMessage, TaggedRTCMessage},
         sdp::{RTCSdpType, RTCSessionDescription},
         state::RTCPeerConnectionState,
-        transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate},
+        transport::{CandidateConfig, CandidateHostConfig, CandidateServerReflexiveConfig, RTCIceCandidate},
         RTCPeerConnection, RTCPeerConnectionBuilder,
     },
     sansio::Protocol,
@@ -38,6 +40,9 @@ pub struct Peer {
 impl Peer {
     /// Accept an authenticated offer using candidates gathered by the caller.
     pub fn answer(now: Instant, offer: &str, candidates: &[SocketAddr]) -> Result<(Self, String)> {
+        Self::answer_reflexive(now,offer,candidates,&[])
+    }
+    pub fn answer_reflexive(now:Instant,offer:&str,candidates:&[SocketAddr],reflexive:&[(SocketAddr,SocketAddr)]) -> Result<(Self,String)> {
         ensure!(offer.len() <= MAX_SDP, "terminal offer exceeds limit");
         ensure!(
             !candidates.is_empty() && candidates.len() <= 64,
@@ -85,6 +90,14 @@ impl Peer {
             .new_candidate_host()?;
             connection.add_local_candidate(RTCIceCandidate::from(&candidate).to_json()?)?;
         }
+        ensure!(candidates.len()+reflexive.len()<=64,"too many terminal candidates");
+        for (mapped,base) in reflexive {
+            ensure!(mapped.port()!=0 && !mapped.ip().is_unspecified() && !mapped.ip().is_multicast() && candidates.contains(base),"invalid reflexive terminal candidate");
+            let candidate=CandidateServerReflexiveConfig {base_config:CandidateConfig {
+                network:"udp".into(),address:mapped.ip().to_string(),port:mapped.port(),component:1,..Default::default()
+            },rel_addr:base.ip().to_string(),rel_port:base.port(),..Default::default()}.new_candidate_server_reflexive()?;
+            connection.add_local_candidate(RTCIceCandidate::from(&candidate).to_json()?)?;
+        }
         let answer = connection.create_answer(None)?;
         connection.set_local_description(now, answer)?;
         let answer = serde_json::to_string(
@@ -125,9 +138,10 @@ impl Peer {
         Ok(())
     }
     pub fn datagram(&mut self) -> Option<(SocketAddr, BytesMut)> {
-        self.connection
-            .poll_write()
-            .map(|packet| (packet.transport.peer_addr, packet.message))
+        self.datagram_from().map(|(_,remote,bytes)|(remote,bytes))
+    }
+    pub fn datagram_from(&mut self) -> Option<(SocketAddr,SocketAddr,BytesMut)> {
+        self.connection.poll_write().map(|packet|(packet.transport.local_addr,packet.transport.peer_addr,packet.message))
     }
     pub fn deadline(&mut self) -> Option<Instant> {
         self.connection.poll_timeout()
@@ -215,6 +229,16 @@ mod tests {
         connection.create_data_channel(LABEL, None)?;
         Ok(serde_json::to_string(&connection.create_offer(None)?)?)
     }
+    #[test]
+    fn reflexive_candidates_keep_their_bound_socket_and_appear_in_the_answer() -> Result<()> {
+        let base="127.0.0.1:12345".parse()?;let mapped="203.0.113.9:23456".parse()?;
+        let offer=offer()?;
+        let (mut peer,answer)=Peer::answer_reflexive(Instant::now(),&offer,&[base],&[(mapped,base)])?;
+        assert!(answer.contains("typ srflx") && answer.contains("203.0.113.9"));
+        assert!(Peer::answer_reflexive(Instant::now(),&offer,&[base],&[(mapped,"127.0.0.2:12345".parse()?)]).is_err());
+        peer.close()?;Ok(())
+    }
+
     #[test]
     fn direct_offer_and_candidate_limits_are_enforced_before_channel_use() -> Result<()> {
         let local = "127.0.0.1:12345".parse()?;

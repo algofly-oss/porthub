@@ -371,7 +371,7 @@
     }
   },
   "direct_transport_development": {
-    "status": "Feature-gated browser-compatible WebRTC engine implemented and tested. Not enabled in CLI/server releases, not connected to invitations, not deployed. Existing terminal traffic continues over the gateway.",
+    "status": "Feature-gated WebRTC engine, journals, scoped signaling/relay validation and opt-in host actor implemented. Actual browser/first-party CLI SDK integration, production settings, complete NAT/recovery/telemetry checks and release rollout remain unfinished. Shipped CLI still advertises direct_transport=false; no new feature is deployed.",
     "implementation": "Optional terminal direct feature pins rtc0.21.1 with ring, matching the existing mesh ICE/DTLS dependency family. Peer owns no sockets or tasks; caller drives datagrams/timeouts. One reliable ordered channel named porthub-terminal/1;32KiB frame limit,64KiB send outstanding limit and SCTP receive buffer,64KiB SDP and64 local candidate limit. Rejects media offers, wrong description type, unspecified/multicast/zero-port candidates, premature sends and extra channels. Outbound packet buffers move without another payload copy.",
     "validation": "Actual Chromium and WebKit RTCPeerConnection clients negotiate SDP with the Rust engine and exchange bidirectional data over loopback UDP. Combined SSH/direct library suite passes35 tests. Dedicated admission tests cover malformed/oversized offers and candidate/frame limits. These checks do not prove NAT traversal, terminal role enforcement or route handover.",
     "source_reference": [
@@ -379,7 +379,7 @@
       "https://crates.io/crates/rtc/0.21.1"
     ],
     "next": [
-      "Connect scoped signaling to a bounded host WebRTC actor; gate client advertisement on compatible local broker version; keep journal/relay validation reusable without pulling RTC media dependencies into the gateway",
+      "Wire production browser/CLI transport SDKs to the actor, using compatible local broker versions, account-scoped ICE settings and approved underlay/egress policy; keep advertised capability off until those paths are tested",
       "Integrate gathered host/STUN/TURN candidates and browser/PortHub-aware CLI participants; ordinary unmodified SSH continues to use the gateway",
       "Wire replay journals into actual direct/relay terminal routes, prioritize controls, preserve identity/workspace during handover and account for direct traffic in existing monitoring",
       "Prove terminal interactions, revocation/removal, blocked direct routes, reconnect and bandwidth/latency behavior with full browser/native/API tests",
@@ -407,6 +407,21 @@
       "role_rules": "Only negotiated attachment epochs admit delivery. Read-only guests can ACK their output epoch but cannot send data. Writers can send only their input epoch; host output and input ACKs must use the opposite expected directions. Gateway supplies recipient IDs; binary envelope contains no role or participant authority. Relayed writer activity updates existing participant activity state.",
       "bounds_and_isolation": "Relay wrapper is base64 only on the existing JSON WebSocket carrier, with strict binary-envelope size/encoding checks and redacted debug output. Direct carrier remains compact binary. Unexpected delivery with the disabled host actor closes only its sender, preserving other PTYs and the workspace.",
       "validation": "56 terminal checks pass:44 library,10 bundled-runtime,1 browser RTC,1 stockSSH. Real API/Mongo/WebSocket test passes negotiated output delivery and ACKs together with invitation expiry, recovery and targeted removal. Default/SSH-only library tests also pass independently of RTC."
+    },
+    "host_actor": {
+      "status": "Attachments can explicitly configure the actor before guests attach; negotiated Ready capability also must be true. No automatic production enablement yet.",
+      "runtime": "Per-guest PTY output queue created before attachment; actor retains one input/output journal across direct and gateway carriers. Bounded32-message controls,8-message PTY queue,32 UDP receive queue,up to16 bound interfaces and8 STUN servers. Gathering finishes within2s using existing PortHub STUN helper; advertised reflexive candidates retain their source socket. macOS uses the existing per-socket interface binding helper. No global routes/firewall changes.",
+      "handover": "RTC readiness prefers direct output; absent application ACK progress triggers relay replay after1s. Original sequences/epochs survive this carrier fallback, and shared shell state is retained. Re-offers retain journals while replacing the peer. Full preferred-route re-probing/ICE restart policy and client-side selection still need integration.",
+      "flow_control": "Full64KiB journal pauses only its private PTY source; control/ACK processing and other guests continue. Acknowledgement stalls close that guest after15s. Source EOF drains pending acknowledged output for up to2s. Cancelling an attachment aborts its candidate/UDP tasks; writes are tied to the original PTY read-only/cancellation state. Idle legacy guests have no polling timer; peers use native RTC deadlines and independent ACK/drain deadlines.",
+      "validation": "60 checks pass:46 library,10 bundled mux,2 direct-host,1 basic browser RTC,1 stockSSH. Real Chrome and WebKit data-channel clients type into bundled tmux, duplicate input increments a shell counter once, withholding direct output ACK triggers actual relay replay, replay does not duplicate rendered output, and forged read-only input cannot change the shell. A separate1MiB synthetic source test proves64KiB backpressure, sibling progress and ordered ACK drain. No real NAT/TURN traversal claim is made."
     }
+  },
+  "pty_disconnect_eof_fix": {
+    "commit": "7da3e11c2303cdeca305a68015342c5938529a0f",
+    "status": "Committed source fix, not deployed. Independent of the optional RTC actor; suitable for a stable client hotfix.",
+    "finding": "The cancellation test exposed a real race: portable-pty writer Drop injects newline+VEOF, which can reach the tmux attachment before its SIGHUP completes and end the shared shell.",
+    "fix": "Use an owned F_DUPFD_CLOEXEC descriptor writer that closes without injecting bytes. Cloned input sinks retain role/cancellation; cancellation wakes the writer so a surviving clone cannot keep its blocking task waiting.",
+    "evidence": "Dedicated live shell unit test drops/replaces its writer while child stays running and verifies its variable persists. Full terminal suite, real CLI participant/hangup/terminal-restoration/explicit Ctrl+D test and final Chrome/WebKit host actor scenarios pass.",
+    "next": "Prepare a stable release of this isolated detach fix without enabling unfinished direct transport, then continue complete terminal goal."
   }
 }
