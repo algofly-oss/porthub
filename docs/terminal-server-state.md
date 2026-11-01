@@ -239,3 +239,20 @@ Use PortHub's prefix or `porthub terminal tmux NAME -- COMMAND` to control the
 PortHub workspace. The new runtime passes the real nested-attach, pane/window,
 CLI self-attachment and full native browser/API/ordinary-SSH tests locally;
 cross-platform packaging and deployment remain separate release gates.
+
+### Native viewer delivery state (not yet connected to CLI)
+
+The carrier-independent viewer model buffers input during its first negotiation,
+then retains bounded, sequenced input until application acknowledgement. A
+carrier change replays only unacknowledged frames with their existing epochs.
+Whole-paste preflight checks byte, frame and sequence limits before retaining
+any part of a paste. Read-only roles cannot enqueue input in any phase.
+Output advances its acknowledgement only after the caller commits terminal
+acceptance; duplicate output is not rendered twice. Reoffers preserve epochs,
+and a new attachment must start a fresh model rather than replay uncertain old
+shell commands. Tests cover negotiation failure, replay, invalid acknowledgements,
+reordered output, role enforcement, bounded queues and sequence exhaustion.
+
+This is protocol state only: `terminal join` still invokes ordinary SSH. Native
+socket/TTY integration, direct-path privacy and traffic reporting, packaging and
+live rollout remain required before enabling native direct joins.

@@ -24,3 +24,4 @@ pub mod owner_view;
 pub mod direct;
 
 pub mod delivery;
+pub mod viewer;

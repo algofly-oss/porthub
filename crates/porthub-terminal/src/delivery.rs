@@ -120,6 +120,14 @@ impl Sender {
     pub fn can_enqueue(&self, bytes: usize) -> bool {
         bytes<=MAX_PAYLOAD && self.pending.len()<MAX_FRAMES && self.bytes+bytes<=MAX_BYTES
     }
+    /// Preflight a whole input batch before enqueuing its first frame. Callers
+    /// must still split it into nonempty MAX_PAYLOAD-sized pieces.
+    pub fn can_enqueue_batch(&self, bytes: usize, frames: usize) -> bool {
+        bytes > 0 && frames > 0
+            && self.bytes.checked_add(bytes).is_some_and(|total|total<=MAX_BYTES)
+            && self.pending.len().checked_add(frames).is_some_and(|total|total<=MAX_FRAMES)
+            && self.last.checked_add(frames as u64).is_some_and(|last|last<=MAX_SEQUENCE)
+    }
     pub fn retained_bytes(&self) -> usize {
         self.bytes
     }
@@ -194,6 +202,21 @@ impl Receiver {
 mod tests {
     use super::*;
     const EPOCH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    #[test]
+    fn batch_preflight_rejects_sequence_exhaustion_before_retaining_partial_input() -> Result<()> {
+        let mut sender = Sender::new(EPOCH)?;
+        sender.last = MAX_SEQUENCE - 1;
+        assert!(!sender.can_enqueue_batch(2, 2));
+        assert_eq!(sender.retained_bytes(), 0);
+        assert_eq!(sender.replay().count(), 0);
+        assert!(sender.can_enqueue_batch(1, 1));
+        assert_eq!(sender.enqueue(b"x")?.sequence(), MAX_SEQUENCE);
+        assert!(!sender.can_enqueue_batch(1, 1));
+        assert!(sender.enqueue(b"y").is_err());
+        assert_eq!(sender.retained_bytes(), 1);
+        assert_eq!(sender.replay().count(), 1);
+        Ok(())
+    }
     #[test]
     fn relay_replay_and_delayed_direct_frames_apply_keystrokes_once_in_order() -> Result<()> {
         let mut sender = Sender::new(EPOCH)?;
