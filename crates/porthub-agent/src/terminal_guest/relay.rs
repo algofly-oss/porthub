@@ -17,9 +17,20 @@ pub async fn run<S: AsyncRead + AsyncWrite + Unpin>(
     terminal: &Terminal,
     welcome: &ViewerEvent,
 ) -> Result<End> {
+    Box::pin(run_with_udp(guest, terminal, welcome, None)).await
+}
+/// The caller must approve the concrete UDP socket using its exit/privacy
+/// policy. Normal CLI relay joins never discover or open that socket implicitly.
+pub async fn run_with_udp<S: AsyncRead + AsyncWrite + Unpin>(
+    guest: &mut Guest<S>,
+    terminal: &Terminal,
+    welcome: &ViewerEvent,
+    socket: Option<tokio::net::UdpSocket>,
+) -> Result<End> {
     let ViewerEvent::Welcome {
         history_snapshots,
         read_only,
+        direct_transport,
         ..
     } = welcome
     else {
@@ -33,18 +44,40 @@ pub async fn run<S: AsyncRead + AsyncWrite + Unpin>(
             rows: size.1,
         })
         .await?;
+    let mut direct = match socket {
+        Some(socket) => {
+            anyhow::ensure!(
+                *direct_transport,
+                "gateway did not approve direct terminal transport"
+            );
+            let (transport, offer) =
+                porthub_terminal::direct::viewer::Transport::offer(socket, *read_only)?;
+            guest.send(&offer).await?;
+            Some(transport)
+        }
+        None => None,
+    };
     let mut pager = Pager::new(size.0, size.1);
     pager.capabilities(*history_snapshots);
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut input = [0; 16384];
     loop {
+        let limit = if *read_only {
+            input.len()
+        } else {
+            direct
+                .as_ref()
+                .map_or(input.len(), |transport| transport.input_capacity())
+        };
         tokio::select! {
-            count=terminal.read(&mut input)=>{
+            count=terminal.read(&mut input[..limit]),if limit>0=>{
                 let count=count.context("native terminal input failed")?;
                 if count==0 {return Ok(End {reason:"local terminal closed".into(),retryable:false});}
                 if *read_only {
                     if pager.feed(&input[..count]) {guest.send(&ViewerInput::Redraw).await?;}
+                } else if let Some(transport)=&mut direct {
+                    send(guest,transport.input(&input[..count])?).await?;
                 } else {
                     guest.send(&ViewerInput::Input {data:encode_data(&input[..count])}).await?;
                 }
@@ -60,20 +93,60 @@ pub async fn run<S: AsyncRead + AsyncWrite + Unpin>(
                     if let Some(request)=pager.request() {guest.send(&request).await?;}
                 }
             },
+            routed=async {match &mut direct {Some(transport)=>transport.network().await,None=>std::future::pending().await}}=>{
+                let routed=routed.map_err(|error| {
+                    if error.downcast_ref::<porthub_terminal::direct::viewer::Stalled>().is_some() {
+                        anyhow::Error::from(super::Failure::Disconnected("native terminal delivery stalled"))
+                    } else {error}
+                })?;
+                send(guest,routed).await?;
+            },
             event=guest.next_event()=>match event? {
                 ViewerEvent::Output {data}=>{
-                    let bytes=decode_data(&data)?;
+                    let bytes=match &direct {Some(transport)=>transport.legacy_output(&data)?,None=>decode_data(&data)?};
                     if !*read_only || !pager.active {write(terminal,&bytes).await?;}
                 },
                 ViewerEvent::History {page} if *read_only=>{
                     if let Some(bytes)=pager.page(page)? {write(terminal,&bytes).await?;}
                 },
                 ViewerEvent::Closed {reason,retryable}=>return Ok(End {reason,retryable}),
+                ViewerEvent::DirectAnswer {answer}=>{
+                    let transport=direct.as_mut().context("unexpected native terminal answer")?;
+                    send(guest,transport.answer(&answer)?).await?;
+                },
+                ViewerEvent::DirectUnavailable {request}=>{
+                    let transport=direct.as_mut().context("unexpected native terminal negotiation reply")?;
+                    send(guest,transport.unavailable(request)?).await?;
+                },
+                ViewerEvent::Delivery {packet}=>{
+                    direct.as_mut().context("unexpected sequenced terminal frame")?.receipt(packet.decode()?)?;
+                },
                 ViewerEvent::Presence {..}|ViewerEvent::Recovery {..}=>{},
                 _=>bail!("unexpected terminal event on legacy relay attachment"),
             }
         }
+        if let Some(transport) = &mut direct {
+            while let Some(frame) = transport.next_output() {
+                let sequence = frame.sequence();
+                if !*read_only || !pager.active {
+                    write(terminal, frame.payload()).await?;
+                }
+                // A frozen history view deliberately discards live-screen
+                // updates. Its snapshot is independent; redraw on returning.
+                transport.commit_output(sequence)?;
+            }
+            send(guest, transport.acknowledge_output()?).await?;
+        }
     }
+}
+async fn send<S: AsyncRead + AsyncWrite + Unpin>(
+    guest: &mut Guest<S>,
+    inputs: Vec<ViewerInput>,
+) -> Result<()> {
+    for input in inputs {
+        guest.send(&input).await?;
+    }
+    Ok(())
 }
 async fn write(terminal: &Terminal, bytes: &[u8]) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(10), terminal.write_all(bytes))

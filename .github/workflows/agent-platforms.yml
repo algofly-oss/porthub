@@ -235,10 +235,12 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: cargo test --locked -p porthub-terminal --features ssh --target ${{ matrix.target }} -- --include-ignored
-      - name: Test experimental native guest signaling, TTY and recovery
+      - name: Test experimental native terminal transports and recovery
         if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin'
         shell: bash
         run: |
+          python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-terminal --features direct,viewer-history --lib direct::viewer --target ${{ matrix.target }}
+          python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-terminal --features direct,viewer-history --test native_direct --target ${{ matrix.target }} -- --include-ignored
           python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --features terminal-direct --lib terminal_guest --target ${{ matrix.target }}
           python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --features terminal-direct --bin porthub cli_tests::native_terminal_join_is_opt_in_and_does_not_require_system_privileges --target ${{ matrix.target }}
       - name: Verify local terminals and native participant controls

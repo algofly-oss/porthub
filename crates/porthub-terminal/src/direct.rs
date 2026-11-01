@@ -2,6 +2,7 @@
 //! the terminal gateway; this engine never grants a role or opens a shell.
 //! Kept behind `direct` while native joins and release gates are completed.
 pub use crate::delivery as replay;
+pub mod viewer;
 #[cfg(unix)]
 pub mod host;
 
@@ -198,6 +199,18 @@ impl Peer {
             }
         }
         Ok(None)
+    }
+    pub fn can_send(&mut self, bytes: usize) -> Result<bool> {
+        ensure!(
+            bytes > 0 && bytes <= MAX_FRAME,
+            "invalid terminal frame size"
+        );
+        let id = self.channel.context("terminal channel is not ready")?;
+        let channel = self
+            .connection
+            .data_channel(id)
+            .context("terminal channel unavailable")?;
+        Ok(channel.outstanding_bytes() + bytes <= MAX_OUTSTANDING)
     }
     pub fn send(&mut self, now: Instant, bytes: &[u8]) -> Result<()> {
         ensure!(

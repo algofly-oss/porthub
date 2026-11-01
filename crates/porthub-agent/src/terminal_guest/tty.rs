@@ -714,4 +714,233 @@ mod tests {
         }
         Ok(())
     }
+    #[tokio::test]
+    async fn native_direct_tty_switches_to_relay_without_repeating_shell_input() -> Result<()> {
+        use crate::terminal_guest::{relay, Guest};
+        use futures_util::{SinkExt, StreamExt};
+        use porthub_terminal::{
+            delivery::{Frame, Message as Packet, Receiver},
+            direct::{Event, Peer},
+            protocol::*,
+        };
+        use tokio_tungstenite::{
+            tungstenite::{protocol::Role, Message},
+            WebSocketStream,
+        };
+        async fn signal(
+            socket: &mut WebSocketStream<tokio::io::DuplexStream>,
+            event: ViewerEvent,
+        ) -> Result<()> {
+            socket
+                .send(Message::Text(serde_json::to_string(&event)?.into()))
+                .await?;
+            Ok(())
+        }
+        let (master, slave) = pty()?;
+        let terminal = Terminal::from_file(slave)?;
+        // SAFETY: the owned File retains a stable descriptor for this registration.
+        let master = unsafe { AsyncFd::register(master)? };
+        let (a, b) = tokio::io::duplex(131072);
+        let client = WebSocketStream::from_raw_socket(a, Role::Client, None).await;
+        let mut server = WebSocketStream::from_raw_socket(b, Role::Server, None).await;
+        let client_udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+        let (seen, screen_seen) = tokio::sync::oneshot::channel();
+        let remote = Box::pin(async move {
+            server.next().await.context("missing hello")??;
+            signal(
+                &mut server,
+                ViewerEvent::Welcome {
+                    name: "direct".into(),
+                    read_only: false,
+                    expires_at: 0,
+                    participants: 1,
+                    direct_transport: true,
+                    history_snapshots: true,
+                },
+            )
+            .await?;
+            let resize = server
+                .next()
+                .await
+                .context("missing resize")??
+                .into_text()?;
+            assert!(matches!(
+                serde_json::from_str::<ViewerInput>(&resize)?,
+                ViewerInput::Resize { .. }
+            ));
+            let offer = server
+                .next()
+                .await
+                .context("missing direct offer")??
+                .into_text()?;
+            let ViewerInput::DirectOffer {
+                request,
+                description,
+            } = serde_json::from_str::<ViewerInput>(&offer)?
+            else {
+                anyhow::bail!("direct offer required")
+            };
+            let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+            let local = socket.local_addr()?;
+            let (peer, description) =
+                Peer::answer(std::time::Instant::now(), &description.0, &[local])?;
+            let mut peer = Box::new(peer);
+            signal(
+                &mut server,
+                ViewerEvent::DirectAnswer {
+                    answer: DirectAnswer {
+                        request,
+                        description: DirectDescription(description),
+                        input_epoch: "a".repeat(32),
+                        output_epoch: "b".repeat(32),
+                    },
+                },
+            )
+            .await?;
+            let mut receiver = Receiver::new(&"a".repeat(32))?;
+            let mut applied = Vec::new();
+            let mut initial = false;
+            let mut direct_inputs = 0;
+            let mut relay_inputs = 0;
+            let mut output_acked = false;
+            let mut bytes = vec![0; 65536];
+            loop {
+                while let Some(event) = peer.event()? {
+                    if matches!(event, Event::Ready) && !initial {
+                        initial = true;
+                        peer.send(
+                            std::time::Instant::now(),
+                            &Packet::Data(Frame::new(&"b".repeat(32), 1, b"DIRECT_READY")?)
+                                .encode()?,
+                        )?;
+                    }
+                }
+                while let Some((remote, bytes)) = peer.datagram() {
+                    socket.send_to(&bytes, remote).await?;
+                }
+                let deadline = peer
+                    .deadline()
+                    .unwrap_or(std::time::Instant::now() + Duration::from_secs(60));
+                let message = tokio::select! {
+                    event=server.next()=>{
+                        let text=event.context("gateway disconnected")??.into_text()?;
+                        let ViewerInput::Delivery {packet}=serde_json::from_str::<ViewerInput>(&text)? else {anyhow::bail!("unsequenced input after negotiation")};
+                        Some((packet.decode()?,true))
+                    },
+                    packet=socket.recv_from(&mut bytes)=>{
+                        let (count,remote)=packet?;
+                        let _=peer.receive(std::time::Instant::now(),local,remote,&bytes[..count]);None
+                    },
+                    _=tokio::time::sleep_until(deadline.into())=>{peer.timeout(std::time::Instant::now())?;None},
+                };
+                let mut messages = Vec::new();
+                if let Some(message) = message {
+                    messages.push(message);
+                }
+                while let Some(bytes) = peer.read()? {
+                    messages.push((Packet::parse(&bytes)?, false));
+                }
+                for (message, via_relay) in messages {
+                    match message {
+                        Packet::Data(frame) => {
+                            if via_relay {
+                                relay_inputs += 1;
+                            } else {
+                                direct_inputs += 1;
+                            }
+                            receiver.stage(frame)?;
+                            while let Some(frame) = receiver.next() {
+                                let sequence = frame.sequence();
+                                applied.extend_from_slice(frame.payload());
+                                receiver.commit(sequence)?;
+                            }
+                            if via_relay {
+                                signal(
+                                    &mut server,
+                                    ViewerEvent::Delivery {
+                                        packet: DeliveryPacket::encode(&Packet::Ack {
+                                            epoch: "a".repeat(32),
+                                            sequence: receiver.acknowledged(),
+                                        })?,
+                                    },
+                                )
+                                .await?;
+                                signal(
+                                    &mut server,
+                                    ViewerEvent::Delivery {
+                                        packet: DeliveryPacket::encode(&Packet::Data(Frame::new(
+                                            &"b".repeat(32),
+                                            2,
+                                            b"RELAY_CONFIRMED",
+                                        )?))?,
+                                    },
+                                )
+                                .await?;
+                            }
+                            // Deliberately withhold the direct input ACK to
+                            // exercise the native runner's real fallback timer.
+                        }
+                        Packet::Ack { epoch, sequence } => {
+                            assert_eq!(epoch, "b".repeat(32));
+                            if sequence == 2 {
+                                assert!(via_relay);
+                                output_acked = true;
+                            }
+                        }
+                    }
+                }
+                if output_acked {
+                    assert!(direct_inputs >= 1 && relay_inputs >= 1);
+                    assert_eq!(applied, b"first\r", "fallback typed the command twice");
+                    screen_seen.await?;
+                    signal(
+                        &mut server,
+                        ViewerEvent::Closed {
+                            reason: "complete".into(),
+                            retryable: false,
+                        },
+                    )
+                    .await?;
+                    return Ok::<_, anyhow::Error>(());
+                }
+            }
+        });
+        let viewer = async {
+            let (mut guest, welcome) =
+                Guest::authenticate(client, &"a".repeat(64), None, 100, 30).await?;
+            let end = Box::pin(relay::run_with_udp(
+                &mut guest,
+                &terminal,
+                &welcome,
+                Some(client_udp),
+            ))
+            .await?;
+            assert_eq!(end.reason, "complete");
+            Ok::<_, anyhow::Error>(())
+        };
+        let local = async {
+            let mut screen = Vec::new();
+            let mut bytes = [0; 8192];
+            while !screen.windows(12).any(|bytes| bytes == b"DIRECT_READY") {
+                let count = read(&master, &mut bytes).await?;
+                assert!(count > 0);
+                screen.extend_from_slice(&bytes[..count]);
+            }
+            let mut writer = master.get_ref();
+            writer.write_all(b"first\r")?;
+            while !screen.windows(15).any(|bytes| bytes == b"RELAY_CONFIRMED") {
+                let count = read(&master, &mut bytes).await?;
+                assert!(count > 0);
+                screen.extend_from_slice(&bytes[..count]);
+            }
+            seen.send(())
+                .map_err(|_| anyhow::anyhow!("screen observer dropped"))?;
+            Ok::<_, anyhow::Error>(())
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::try_join!(remote, viewer, local)
+        })
+        .await??;
+        Ok(())
+    }
 }

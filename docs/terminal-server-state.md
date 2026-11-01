@@ -322,3 +322,48 @@ Native platform CI runs the experimental guest socket/TTY/recovery and CLI-selec
 checks on Linux x86_64 and macOS arm64, without enabling the experimental feature
 in published binaries. These tests use isolated local fixtures, not production
 accounts or live machine credentials.
+
+### Native direct transport controller (not enabled by CLI selection)
+
+The optional native controller now runs real ICE/DTLS/SCTP over a caller-supplied,
+concrete bound UDP socket. The caller must approve that socket against its exit
+and privacy policy before use. It opens no additional interfaces or implicit
+STUN/TURN services. Authorization, SDP and role assignment still use the gateway.
+The shared native TTY runner accepts this approved socket through `run_with_udp`;
+normal CLI `--transport relay` continues to pass no socket and uses the gateway.
+Automatic CLI policy/socket selection is not implemented by this step.
+
+The controller uses the bounded viewer delivery journals for both paths. Direct
+input ACK stalls switch to sequenced relay after 1 s without resetting epochs or
+repeating acknowledged input. Whole input batches are retained before a carrier
+attempt, and the TTY reader pauses when the byte/frame window is full. Output ACKs
+advance after terminal acceptance; a frozen read-only history view intentionally
+discards live-screen updates and redraws when returning. An unanswered offer is
+bounded to 15 s, an ICE attempt to 10 s, and input without ACK progress to 15 s.
+Failed direct paths release the UDP socket and its polling deadline. The idle
+relay does not spin. Malformed authenticated protocol data remains a fatal guest
+error, while transport stalls can use the bounded recovery path.
+
+RTC state and the reusable UDP receive buffer live on the heap so introducing
+this path does not overflow ordinary test-thread stacks. Per-controller counters
+record actual UDP bytes including negotiation, overhead and retransmission; these
+are not yet account dashboard reporting. Policy selection, approved NAT settings,
+account-scoped traffic reporting and production release gates remain necessary
+before enabling automatic direct joins.
+
+Local tests now exercise two real UDP peers, deferred output ACK, a deliberately
+lost input ACK followed by relay replay with exactly one input application, bounded
+negotiation/input waits, failed ICE cleanup, and an idle relay. A bundled-shell
+integration preserves shell variables across native direct-to-relay switching and
+keeps a second participant usable. A separate real-PTY/native-guest loop verifies
+terminal output, automatic UDP-to-WebSocket fallback and no repeated input through
+the actual TTY runner. Linux x86_64 and macOS arm64 CI include the controller and
+bundled-shell native transport checks alongside guest recovery tests. No live
+service or published package was changed for this controller work.
+
+The native controller also keeps an unsent input cursor when the SCTP sender
+window fills. Healthy transport backpressure waits for capacity rather than
+forcing relay; output ACKs may use the gateway while that sender is full. The
+real UDP test sends a full 64 KiB binary input window and verifies the direct
+path remains active, then deliberately suppresses application ACKs and verifies
+relay replay applies the later input only once.

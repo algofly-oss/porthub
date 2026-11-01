@@ -128,6 +128,12 @@ impl Sender {
             && self.pending.len().checked_add(frames).is_some_and(|total|total<=MAX_FRAMES)
             && self.last.checked_add(frames as u64).is_some_and(|last|last<=MAX_SEQUENCE)
     }
+    /// Capacity for one next input frame; do not read more terminal bytes than
+    /// this while waiting for application acknowledgements.
+    pub fn available_input_bytes(&self) -> usize {
+        if self.pending.len() >= MAX_FRAMES || self.last >= MAX_SEQUENCE { return 0; }
+        (MAX_BYTES-self.bytes).min(MAX_PAYLOAD)
+    }
     pub fn retained_bytes(&self) -> usize {
         self.bytes
     }

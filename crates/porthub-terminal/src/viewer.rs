@@ -147,6 +147,15 @@ impl Viewer {
                 .collect()
         })
     }
+    pub fn input_capacity(&self) -> usize {
+        if self.read_only {
+            return 0;
+        }
+        match &self.journals {
+            Some(journals) => journals.input.available_input_bytes(),
+            None => (delivery::MAX_BYTES - self.queued.len()).min(delivery::MAX_PAYLOAD),
+        }
+    }
     pub fn pending_input_bytes(&self) -> usize {
         self.queued.len()
             + self
@@ -318,10 +327,12 @@ mod tests {
         viewer.begin_offer(1, description("offer"))?;
         assert!(viewer.begin_offer(2, description("offer")).is_err());
         viewer.input(&vec![0; delivery::MAX_BYTES])?;
+        assert_eq!(viewer.input_capacity(), 0);
         assert!(viewer.input(b"extra").is_err());
         assert_eq!(viewer.pending_input_bytes(), delivery::MAX_BYTES);
         let legacy = viewer.unavailable(1)?;
         assert_eq!(legacy.len(), 4);
+        assert_eq!(viewer.input_capacity(), delivery::MAX_PAYLOAD);
         assert_eq!(viewer.pending_input_bytes(), 0);
         assert!(viewer.begin_offer(1, description("offer")).is_err());
         viewer.begin_offer(2, description("offer"))?;
@@ -329,9 +340,16 @@ mod tests {
         for _ in 0..delivery::MAX_FRAMES {
             viewer.input(b"x")?;
         }
+        assert_eq!(viewer.input_capacity(), 0);
         assert!(viewer.input(b"whole paste").is_err());
         assert_eq!(viewer.pending_input_bytes(), delivery::MAX_FRAMES);
+        viewer.receive(Message::Ack {
+            epoch: "a".repeat(32),
+            sequence: delivery::MAX_FRAMES as u64,
+        })?;
+        assert_eq!(viewer.input_capacity(), delivery::MAX_PAYLOAD);
         let mut reader = Viewer::new(true);
+        assert_eq!(reader.input_capacity(), 0);
         assert!(reader.input(b"no").is_err());
         reader.begin_offer(1, description("offer"))?;
         assert!(reader.input(b"still no").is_err());
