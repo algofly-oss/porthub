@@ -45,6 +45,11 @@ def main():
         if args.registration:command.extend(['--registration',args.registration])
         command.extend(['--','/bin/sh','-i'])
         invitation=json.loads(remote(command).stdout)
+        # Some hosts reset PS1 in system-wide interactive shell startup files.
+        # Set our fixture prompt after startup rather than depending on inherited
+        # environment behavior; this changes only the owned disposable shell.
+        remote([*prefix,'tmux',name,'--','send-keys','-l',"PS1='porthub-live$ '"])
+        remote([*prefix,'tmux',name,'--','send-keys','Enter'])
         for setting, expected in [('history-limit','100000'),('mouse','on'),('prefix','C-a')]:
             actual=remote([*prefix,'tmux',name,'--','show-options','-gv',setting]).stdout.strip()
             if actual!=expected:raise RuntimeError('Bundled terminal option was not applied: '+setting)
@@ -63,7 +68,10 @@ def main():
             payload['nativeGuest']=str(args.native_guest.resolve(strict=True))
             native=subprocess.run(['python3',str(Path(__file__).with_name('test-terminal-native-guest.py'))],
                                   input=json.dumps(payload),text=True,capture_output=True,timeout=90)
-            if native.returncode:raise RuntimeError('Native guest live smoke failed; no service was changed')
+            if native.returncode:
+                diagnostic=native.stdout+native.stderr
+                for token in sensitive:diagnostic=diagnostic.replace(token,'[invitation]')
+                raise RuntimeError('Native guest live smoke failed; no service was changed: '+diagnostic[-2000:])
             print(native.stdout.strip())
         result=subprocess.run(['node',str(Path(__file__).with_name('test-terminal-live-browser.cjs'))],
                               input=json.dumps(payload),text=True,capture_output=True,timeout=180)

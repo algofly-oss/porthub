@@ -55,7 +55,10 @@ def main():
                 output = (output+chunk)[-262144:]
                 if needle in output:
                     return
-            raise RuntimeError('Native guest did not render the expected terminal output')
+            diagnostic=output.decode('utf-8',errors='replace')
+            for key in ('interactive_url','read_only_url'):
+                diagnostic=diagnostic.replace(invitation[key].rsplit('#',1)[-1],'[invitation]')
+            raise RuntimeError('Native guest did not render '+repr(needle.decode('utf-8',errors='replace'))+': '+repr(diagnostic[-1000:]))
 
         def detach(pid):
             os.kill(pid, signal.SIGTERM)
