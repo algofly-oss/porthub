@@ -26,8 +26,10 @@ pub enum Command {
     #[command(external_subcommand)]
     Named(Vec<OsString>),
     /// Start a persistent local workspace; sharing is optional.
+    #[command(after_help = "Examples:\n  porthub terminal new --name work\n  porthub terminal new --name work --shell /bin/bash --detach\n  porthub terminal new --name logs --detach -- tail -f /var/log/app.log\n\nAll creation flags also work with: porthub terminal NAME [OPTIONS]\nShare later with: porthub terminal share NAME --detach")]
     New(New),
     /// Share a new workspace or an existing local workspace with SSH/browser guests.
+    #[command(after_help = "Examples:\n  porthub terminal share work --detach\n  porthub terminal share work --access web --read-only --detach\n  porthub terminal share work --link-expires 3600 --detach\n  porthub terminal share work --registration laptop --user --detach\n\nBrowser and SSH access are both enabled by default. The command prints invitation\nlinks; show them again with: porthub terminal invite work\nUse --detach to share without attaching your terminal.")]
     Share(sharing::Share),
     /// Join an invitation without a PortHub account.
     Join {
@@ -48,6 +50,7 @@ pub enum Command {
         stun_servers:Vec<String>,
     },
     /// Show, replace or revoke invitation links.
+    #[command(visible_aliases = ["url", "links"], after_help = "Show current browser URLs and SSH commands:\n  porthub terminal url NAME\n  porthub terminal invite NAME --json\n\nA local workspace has no access URL until shared:\n  porthub terminal share NAME --detach")]
     Invite {
         name: String,
         #[arg(long)]
@@ -83,14 +86,17 @@ pub enum Command {
     },
     #[command(name = "__participants-view", hide = true)]
     ParticipantView { root: PathBuf, id: String, #[arg(long)] sidebar: bool },
-    /// List this OS user's local and shared workspaces.
+    /// List this OS user's running local and shared workspaces.
     #[command(alias = "ls")]
     List {
         #[arg(long)]
         json: bool,
+        /// Include ended workspaces retained in local history.
+        #[arg(short = 'a', long)]
+        all: bool,
     },
     /// Attach or reattach, including from inside another tmux session.
-    Attach { name: String, #[arg(long, value_enum, default_value_t = Sidebar::Auto)] sidebar: Sidebar },
+    Attach { name: String, #[arg(long, value_enum, default_value_t = Sidebar::Off)] sidebar: Sidebar },
     /// Explicitly terminate a workspace and its running tasks.
     Stop { name: String },
     /// Rename a workspace without interrupting its tasks.
@@ -115,7 +121,7 @@ impl Default for Command {
             prefix: "C-a".into(),
             history_limit: 100_000,
             no_mouse: false,
-            sidebar: Sidebar::Auto,
+            sidebar: Sidebar::Off,
             command: Vec::new(),
         })
     }
@@ -135,13 +141,14 @@ pub enum JoinTransport {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
-pub enum Sidebar { #[default] Auto, On, Off }
+pub enum Sidebar { Auto, On, #[default] Off }
 
 #[derive(Args, Clone)]
 pub struct New {
-    /// Friendly lowercase random name when omitted.
+    /// Workspace name; a friendly random name is generated when omitted.
     #[arg(long)]
     name: Option<String>,
+    /// Initial working directory (defaults to the current directory).
     #[arg(long)]
     cwd: Option<PathBuf>,
     /// Shell for new workspaces (defaults to Bash when installed).
@@ -154,15 +161,19 @@ pub struct New {
     #[arg(short = 'd', long)]
     detach: bool,
     #[arg(long, requires = "detach")]
+    /// Print machine-readable workspace details (requires --detach).
     json: bool,
+    /// tmux shortcut prefix, e.g. C-a (Ctrl+A) or F12.
     #[arg(long, default_value = "C-a")]
     prefix: String,
+    /// Maximum retained scrollback lines (1000 to 200000).
     #[arg(long, default_value_t = 100000)]
     history_limit: u32,
+    /// Disable tmux mouse handling; use the terminal emulator's selection.
     #[arg(long)]
     no_mouse: bool,
-    /// Private participant sidebar; auto enables it for shared, wide terminals.
-    #[arg(long, value_enum, default_value_t = Sidebar::Auto)]
+    /// Optional participant sidebar (off by default); use Ctrl+A then Shift+P on demand.
+    #[arg(long, value_enum, default_value_t = Sidebar::Off)]
     sidebar: Sidebar,
     /// Command and arguments; omit to start an interactive shell.
     #[arg(last = true)]
@@ -546,22 +557,37 @@ pub async fn run(command: Command) -> Result<()> {
                 attach(&job, sidebar)?;
             }
         }
-        Command::List { json } => {
-            let rows:Vec<_>=jobs(&root)?.into_iter().map(|job|{
+        Command::List { json, all } => {
+            let rows:Vec<_>=jobs(&root)?.into_iter().filter_map(|job|{
                 let running=workspace(&job).is_ok_and(|workspace|workspace.is_alive());
-                serde_json::json!({"id":job.id,"name":job.name,"state":if running{"running"}else{"ended"},"shared":root.join(format!("{}.share",job.id)).exists(),"created_at":job.created_at})
+                if !running && !all { return None; }
+                Some(serde_json::json!({"id":job.id,"name":job.name,"state":if running{"running"}else{"ended"},"shared":root.join(format!("{}.share",job.id)).exists(),"created_at":job.created_at}))
             }).collect();
             if json {
                 println!("{}", serde_json::to_string(&rows)?);
             } else {
+                if rows.is_empty() {
+                    println!("{}", if all { "No saved terminal workspaces." } else { "No running terminal workspaces." });
+                } else {
+                    println!("NAME\tSTATE\tACCESS");
+                }
                 for row in rows {
                     println!(
                         "{}\t{}\t{}",
                         row["name"].as_str().unwrap(),
                         row["state"].as_str().unwrap(),
-                        row["id"].as_str().unwrap()
+                        if row["shared"] == true { "shared" } else { "local" }
                     );
+                    if row["state"] == "running" {
+                        let name = row["name"].as_str().unwrap();
+                        if row["shared"] == true {
+                            println!("  URLs:  porthub terminal url {name}");
+                        } else {
+                            println!("  Share: porthub terminal share {name} --detach");
+                        }
+                    }
                 }
+                println!("\nOpen:    porthub terminal NAME\nAttach:  porthub terminal attach NAME\nShare:   porthub terminal share NAME --detach (browser + SSH)\nWeb:     porthub terminal share NAME --access web --detach\nURLs:    porthub terminal url NAME\nHistory: porthub terminal ls --all\nHelp:    porthub terminal --help");
             }
         }
         Command::Attach { name, sidebar } => attach(&select(&root, &name)?, sidebar)?,

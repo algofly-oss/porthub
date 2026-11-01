@@ -27,6 +27,14 @@ fn local_cli_needs_no_registration_and_preserves_independent_background_workspac
         );
         Ok(output)
     };
+    let guide = String::from_utf8(call(&["terminal"])?.stdout)?;
+    assert!(guide.contains("porthub terminal share NAME --detach"));
+    assert!(guide.contains("porthub terminal url NAME"));
+    assert!(guide.contains("porthub terminal share --help"));
+    assert!(!directory.path().join("porthub/terminal").exists(), "opening the guide must not create a workspace");
+    for command in ["new", "share", "join", "invite", "url", "ls", "attach"] {
+        assert!(String::from_utf8(call(&["terminal", command, "--help"])?.stdout)?.contains("Usage:"));
+    }
     let first: serde_json::Value = serde_json::from_slice(
         &call(&[
             "terminal", "new", "--detach", "--json",
@@ -193,8 +201,12 @@ fn local_cli_needs_no_registration_and_preserves_independent_background_workspac
     assert!(attached.status.success());
     assert!(String::from_utf8(attached.stdout)?.contains("Already attached"));
     call(&["terminal", "stop", "renamedworkspace"])?;
+    let active: Vec<serde_json::Value> =
+        serde_json::from_slice(&call(&["terminal", "ls", "--json"])?.stdout)?;
+    assert!(!active.iter().any(|row| row["name"] == "renamedworkspace"));
+    assert!(active.iter().any(|row| row["name"] == "secondworkspace"));
     let rows: Vec<serde_json::Value> =
-        serde_json::from_slice(&call(&["terminal", "list", "--json"])?.stdout)?;
+        serde_json::from_slice(&call(&["terminal", "list", "--all", "--json"])?.stdout)?;
     assert_eq!(
         rows.iter()
             .find(|row| row["name"] == "renamedworkspace")

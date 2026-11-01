@@ -21,6 +21,7 @@ pub struct Share {
     existing: Option<String>,
     #[command(flatten)]
     local: New,
+    /// Installed registration to use for the sharing gateway.
     #[arg(long)]
     registration: Option<String>,
     /// Select a registration installed for this OS user.
@@ -35,12 +36,16 @@ pub struct Share {
     /// Explicit idle limit in seconds; zero disables this limit.
     #[arg(long, default_value_t = 0)]
     idle_timeout: u32,
+    /// Seconds to allow a disconnected host to recover its gateway connection.
     #[arg(long, default_value_t = 60)]
     reconnect_timeout: u32,
+    /// Maximum simultaneous invited guests (1 to 32).
     #[arg(long, default_value_t = 16)]
     max_viewers: u8,
+    /// Issue only read-only invitations; guests cannot type into the workspace.
     #[arg(long)]
     read_only: bool,
+    /// Invitation access channels: SSH, browser, or both.
     #[arg(long,default_value="both",value_parser=["ssh","web","both"])]
     access: String,
 }

@@ -281,6 +281,47 @@ fn stopping_one_workspace_does_not_affect_another() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires bundled terminal runtime"]
+async fn latest_activity_controls_size_and_status_counts_attachments() -> Result<()> {
+    use porthub_terminal::{protocol::encode_data, pty::Client};
+    let (_directory, workspace) = workspace()?;
+    let _cleanup = Cleanup(workspace.clone());
+    workspace.start(&start())?;
+    let (output, mut events) = tokio::sync::mpsc::channel(128);
+    let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+    let large = Client::attach(&workspace, 1, false, 120, 40, "xterm-256color", output.clone())?;
+    let small = Client::attach(&workspace, 2, false, 80, 24, "xterm-256color", output)?;
+    let inspect = |format: &str| -> Result<String> {
+        let output = workspace.command().args(["display-message", "-p", "-t", "=workspace:", format]).output()?;
+        assert!(output.status.success());
+        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    };
+    let wait_for = |format: &str, expected: &str| -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let actual = inspect(format)?;
+            if actual == expected { return Ok(()); }
+            assert!(Instant::now() < deadline, "{format}: expected {expected}, got {actual}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    wait_for("#{session_attached}", "2")?;
+    large.input(&encode_data(b"\x1b[I"))?;
+    wait_for("#{window_width}x#{window_height}", "120x39")?;
+    small.input(&encode_data(b" "))?;
+    wait_for("#{window_width}x#{window_height}", "80x23")?;
+    large.input(&encode_data(b" "))?;
+    wait_for("#{window_width}x#{window_height}", "120x39")?;
+    drop(small);
+    wait_for("#{session_attached}", "1")?;
+    drop(large);
+    wait_for("#{session_attached}", "0")?;
+    assert!(workspace.is_alive());
+    drain.abort();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires bundled terminal runtime"]
 async fn real_pty_participants_share_output_and_disconnect_preserves_workspace() -> Result<()> {
     use porthub_terminal::{
         protocol::{decode_data, encode_data, HostOutput},

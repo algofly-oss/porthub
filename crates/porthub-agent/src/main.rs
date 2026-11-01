@@ -227,7 +227,7 @@ enum Command {
     Stats(porthub_agent::stats::Options),
     /// Start, reattach and manage persistent terminal workspaces.
     #[cfg(unix)]
-    #[command(after_help = "Open or create a named workspace: porthub terminal NAME [--detach]\nOmit --detach to attach immediately. Local workspaces need no registration.")]
+    #[command(after_help = "Examples:\n  porthub terminal NAME                       Open or create a local workspace\n  porthub terminal ls                         List running workspaces\n  porthub terminal ls --all                   Include ended workspaces\n  porthub terminal attach NAME                Reattach without sharing\n  porthub terminal share NAME --detach        Share through browser and SSH\n  porthub terminal share NAME --access web --detach\n                                             Share through browser only\n  porthub terminal url NAME                   Show current browser URLs and SSH commands\n  porthub terminal join URL                   Join a shared terminal\n\nFlag reference (all flags, descriptions and defaults):\n  porthub terminal new --help\n  porthub terminal share --help\n  porthub terminal join --help\n  porthub terminal invite --help\n  porthub terminal ls --help\n\nLocal workspaces need no registration. Sharing uses an installed registration.\nInside a workspace:\n  Help: Ctrl+A, release both keys, then ? (Shift+/).\n  Detach: Ctrl+A, release both keys, then d. Tasks keep running.\n  Participants: Ctrl+A, release both keys, then Shift+P (owner only).\n  Scroll: mouse wheel or F7. F7 returns to the live shell.\n  Copy: drag to select; release copies and keeps your scroll position.\n        System clipboard requires support from your terminal emulator.\n\nNew workspaces use Bash when installed. The bottom bar counts active attachments.\nShared sizing follows the most recently active participant, as in tmux.\nPortHub uses its own tmux configuration; it does not load ~/.tmux.conf.")]
     Terminal {
         #[command(subcommand)]
         command: Option<porthub_agent::terminal_cli::Command>,
@@ -1225,7 +1225,15 @@ async fn main() -> Result<()> {
         Some(Command::Path { command }) => path_strategy(command),
         Some(Command::Stats(options)) => porthub_agent::stats::run(options,cancel).await,
         #[cfg(unix)]
-        Some(Command::Terminal { command }) => porthub_agent::terminal_cli::run(command.unwrap_or_default()).await,
+        Some(Command::Terminal { command }) => match command {
+            Some(command) => porthub_agent::terminal_cli::run(command).await,
+            None => {
+                Args::command().find_subcommand_mut("terminal")
+                    .expect("terminal command is registered").print_long_help()?;
+                println!();
+                Ok(())
+            }
+        },
         #[cfg(feature="local-tor")]
         Some(Command::Tor {command})=>tor_command(command),
         #[cfg(feature="local-tor")]

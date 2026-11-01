@@ -24,7 +24,9 @@ fn render(
     sidebar: bool,
 ) -> String {
     let mut lines = vec![
-        format!("Participants · {}", job.name),
+        "Participants".into(),
+        format!("Session: {}", job.name),
+        "Owner (you)".into(),
         format!(
             "{} · {} guest(s)",
             if snapshot.connected {
@@ -37,7 +39,7 @@ fn render(
         if sidebar { "↑/↓ select · k remove · F8/q shell".into() } else { "↑/↓ select · k remove · q close view".into() },
         String::new(),
     ];
-    let visible = height.saturating_sub(8).max(1);
+    let visible = height.saturating_sub(10).max(1);
     let offset = selected.saturating_sub(visible.saturating_sub(1));
     for (index, member) in snapshot
         .members

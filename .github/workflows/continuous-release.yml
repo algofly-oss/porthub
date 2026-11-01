@@ -91,7 +91,7 @@ jobs:
       revision: ${{ needs.prepare.outputs.revision }}
       platform: ${{ github.event_name == 'workflow_dispatch' && inputs.verify_only == true && inputs.platform || 'all' }}
       verify_only: ${{ github.event_name == 'workflow_dispatch' && inputs.verify_only == true }}
-      publish_release: false
+      publish_release: ${{ github.event_name != 'workflow_dispatch' || inputs.verify_only != true }}
   server:
     name: Build production server roles
     needs: [prepare]

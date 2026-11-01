@@ -110,17 +110,26 @@ impl Workspace {
             );
         }
         ensure!(!self.is_alive(), "terminal workspace already exists");
+        let prefix_label = start.prefix.strip_prefix("C-")
+            .map(|key| format!("Ctrl+{}", key.to_ascii_uppercase()))
+            .unwrap_or_else(|| start.prefix.clone());
         let config = format!(
             "set -g exit-empty on\nset -g destroy-unattached off\nset -g remain-on-exit off\n\
              set -g history-limit {}\nset -g mouse {}\nset -g default-terminal tmux-256color\n\
              set -g set-clipboard on\nset -s escape-time 10\n\
+             set -gw window-size latest\nset -g focus-events on\n\
+             set -gw copy-mode-position-format ''\n\
              unbind C-b\nset -g prefix {}\nbind {} send-prefix\n\
              bind-key -n F7 copy-mode -u\n\
              bind-key -T copy-mode F7 send-keys -X cancel\n\
              bind-key -T copy-mode-vi F7 send-keys -X cancel\n\
-             set -g status-position bottom\nset -g status-right 'PortHub | {} ? help | {} d detach'\n",
+             bind-key -T copy-mode MouseDragEnd1Pane send-keys -X copy-selection-no-clear\n\
+             bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-selection-no-clear\n\
+             set -g status-position bottom\nset -g status-left 'PortHub | #{{session_attached}} active '\n\
+             set -g status-left-length 30\nset -g status-right-length 60\n\
+             set -g status-right '{} then ? help | {} then d detach'\n",
             start.history_limit, if start.mouse { "on" } else { "off" },
-            start.prefix, start.prefix, start.prefix, start.prefix,
+            start.prefix, start.prefix, prefix_label, prefix_label,
         );
         let path = self.directory.join("tmux.conf");
         let mut file = OpenOptions::new()

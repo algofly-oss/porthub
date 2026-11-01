@@ -5,6 +5,33 @@ explicit `--shell` takes precedence. Hosts without Bash fall back to `$SHELL`,
 then `/bin/sh`. Attaching an existing workspace retains its shell and tasks.
 The live deployment fixture explicitly uses Bash with private test settings.
 
+The terminal opens without a participant sidebar by default. Its status bar
+counts attached clients (including local owner attachments); it does not count
+unique people. `Ctrl+A`, release, then `?` opens help, `d` detaches, and `Shift+P`
+opens owner-only participant controls. The panel labels the local owner as
+`Owner (you)` and labels the random workspace name as `Session`.
+
+Window sizing explicitly uses tmux's `latest` policy: the most recently active
+client supplies the dimensions. Focus reporting is enabled where the terminal
+supports it. Mouse selection copies without leaving copy mode or clearing the
+selection, so releasing a drag preserves the scroll position; F7 returns to the
+live shell. Clipboard delivery uses tmux's normal terminal clipboard support.
+The copy-mode position indicator is hidden. PortHub uses a private generated
+tmux configuration rather than sourcing the host's personal configuration.
+
+`porthub terminal ls` lists running workspaces, including detached ones;
+`--all` includes ended history. Human-readable output includes sharing examples:
+`porthub terminal share NAME --detach` prints browser and SSH invitations,
+`--access web` restricts a share to browser access, and
+`porthub terminal url NAME` (also `invite` or `links`) prints an existing share's
+links. Each running row gives its share or URL command. Bare `porthub terminal`
+opens the guide without creating a workspace. The guide explains common
+operations, shortcut sequences, copy/scroll behavior, and where to find each
+command's complete flags with `--help`.
+
+The continuous release workflow publishes its complete validated client bundle
+for production runs. Explicit verification-only dispatches never publish.
+
 ## Shipped 1.10.0 verification
 
 The [1.10.0 release](https://github.com/algofly-oss/porthub/releases/tag/v1.10.0)

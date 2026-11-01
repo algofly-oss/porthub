@@ -254,13 +254,66 @@ def exercise_hangup(executable, environment, job):
         os.write(master, b"\x04")
         wait_terminal_exit(master, child)
         assert child.returncode == 0, "explicit Ctrl+D must close the final shell cleanly"
-        rows = json.loads(call("list", "--json"))
+        assert all(row["id"] != job["id"] for row in json.loads(call("list", "--json"))), "ended workspace must be hidden by default"
+        rows = json.loads(call("list", "--all", "--json"))
         assert next(row for row in rows if row["id"] == job["id"])["state"] == "ended", "Ctrl+D must end the workspace"
     finally:
         kill_attachment(child)
         if master is not None:
             os.close(master)
         marker.unlink(missing_ok=True)
+
+
+def exercise_mouse_copy(executable, environment, job):
+    """Real mouse release must copy without returning the viewport to live output."""
+    def tmux(*arguments):
+        return subprocess.run([executable, "terminal", "tmux", job["id"], "--", *arguments],
+                              env=environment, capture_output=True, check=True, timeout=3).stdout
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+    def own_terminal():
+        os.setsid()
+        fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+    child = subprocess.Popen([executable, "terminal", "attach", job["id"]],
+                             stdin=slave, stdout=slave, stderr=slave,
+                             env=environment, preexec_fn=own_terminal)
+    os.close(slave)
+    def wait_for(predicate):
+        deadline = time.monotonic() + 5
+        while not predicate():
+            assert time.monotonic() < deadline and child.poll() is None, "mouse copy check timed out"
+            if select.select([master], [], [], .02)[0]:
+                os.read(master, 65536)
+    def state():
+        return tmux("display-message", "-p", "-t", "%0", "#{pane_in_mode}:#{scroll_position}").strip()
+    try:
+        wait_text(master, child, b"PortHub")
+        # The default attachment must leave the entire terminal to the shell.
+        assert tmux("list-panes", "-a", "-F", "#{pane_id}").splitlines() == [b"%0"]
+        os.write(master, b"i=0; while [ $i -lt 80 ]; do printf 'COPY-LINE-%03d text for selection\\n' $i; i=$((i+1)); done\r")
+        wait_text(master, child, b"COPY-LINE-079")
+        os.write(master, b"\x1b[<64;10;10M" * 4)
+        wait_for(lambda: state().startswith(b"1:"))
+        position = state()
+        # SGR mouse: press, drag, release on the same visible line.
+        os.write(master, b"\x1b[<0;2;5M\x1b[<32;15;5M\x1b[<0;15;5m")
+        wait_for(lambda: bool(subprocess.run(
+            [executable, "terminal", "tmux", job["id"], "--", "show-buffer"],
+            env=environment, capture_output=True, timeout=3).stdout))
+        assert state() == position, "releasing selection must retain copy mode and scroll position"
+        copied = tmux("show-buffer")
+        assert b"LINE-" in copied, f"mouse release must populate tmux's copy buffer: {copied!r}"
+        for table in ("copy-mode", "copy-mode-vi"):
+            binding = tmux("list-keys", "-T", table, "MouseDragEnd1Pane")
+            assert b"copy-selection-no-clear" in binding
+        os.write(master, b"\x1b[18~")  # F7 returns explicitly to the live shell.
+        wait_for(lambda: state().startswith(b"0:"))
+        os.write(master, b"\x01d")
+        wait_terminal_exit(master, child)
+        assert child.returncode == 0
+    finally:
+        kill_attachment(child)
+        os.close(master)
 
 
 def main():
@@ -280,6 +333,7 @@ def main():
             exercise(executable, environment, job, sidebar="native", columns=120)
             listed = subprocess.run([executable, "terminal", "list", "--json"], env=environment, capture_output=True, check=True)
             assert any(row["id"] == identity and row["state"] == "running" for row in json.loads(listed.stdout)), "closing the owner view must preserve its workspace"
+            exercise_mouse_copy(executable, environment, job)
             exercise_hangup(executable, environment, job)
         finally:
             subprocess.run([executable, "terminal", "stop", identity], env=environment, capture_output=True, check=True)
