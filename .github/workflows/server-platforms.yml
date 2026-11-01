@@ -10,6 +10,10 @@ on:
         default: arm64
   workflow_dispatch:
     inputs:
+      revision:
+        description: Exact source commit to package (defaults to this workflow commit)
+        type: string
+        default: ''
       platform:
         description: Server architecture to build (agents are not rebuilt)
         type: choice
@@ -28,7 +32,7 @@ jobs:
         ports:
           - 27017/tcp
         options: >-
-          --health-cmd 'mongosh --quiet --eval "db.runCommand({ping:1}).ok"'
+          --health-cmd "mongosh --quiet --eval 1"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
