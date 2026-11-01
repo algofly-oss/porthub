@@ -1,5 +1,10 @@
 # Terminal server persistence
 
+New workspaces prefer `/bin/bash`, then `/usr/bin/bash`, when executable. An
+explicit `--shell` takes precedence. Hosts without Bash fall back to `$SHELL`,
+then `/bin/sh`. Attaching an existing workspace retains its shell and tasks.
+The live deployment fixture explicitly uses Bash with private test settings.
+
 ## Shipped 1.10.0 verification
 
 The [1.10.0 release](https://github.com/algofly-oss/porthub/releases/tag/v1.10.0)

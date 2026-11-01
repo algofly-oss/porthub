@@ -16,6 +16,7 @@ fn local_cli_needs_no_registration_and_preserves_independent_background_workspac
         let output = Command::new(&executable)
             .args(args)
             .env("XDG_DATA_HOME", directory.path())
+            .env("SHELL", "/bin/sh")
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .output()?;
@@ -28,7 +29,7 @@ fn local_cli_needs_no_registration_and_preserves_independent_background_workspac
     };
     let first: serde_json::Value = serde_json::from_slice(
         &call(&[
-            "terminal", "new", "--detach", "--json", "--shell", "/bin/sh",
+            "terminal", "new", "--detach", "--json",
         ])?
         .stdout,
     )?;
@@ -54,6 +55,13 @@ fn local_cli_needs_no_registration_and_preserves_independent_background_workspac
         data: directory.path().into(),
         names: vec![name.into()],
     };
+    if std::path::Path::new("/bin/bash").is_file() {
+        assert_eq!(
+            String::from_utf8(call(&["terminal", "tmux", name, "--", "show-options", "-gv", "default-shell"])?.stdout)?.trim(),
+            "/bin/bash",
+            "new workspaces must prefer Bash even when the launching environment uses sh"
+        );
+    }
     assert!(name.bytes().all(|byte| byte.is_ascii_lowercase()));
     assert_eq!(first["shared"], false);
     let socket = String::from_utf8(
@@ -96,6 +104,11 @@ fn local_cli_needs_no_registration_and_preserves_independent_background_workspac
         .stdout,
     )?;
     cleanup.names.push("secondworkspace".into());
+    assert_eq!(
+        String::from_utf8(call(&["terminal", "tmux", "secondworkspace", "--", "show-options", "-gv", "default-shell"])?.stdout)?.trim(),
+        "/bin/sh",
+        "an explicit --shell must override the Bash default"
+    );
     assert_ne!(second["id"], first["id"]);
     let other_socket = format!(
         "/tmp/porthub-terminal-{}/{}/tmux.sock",

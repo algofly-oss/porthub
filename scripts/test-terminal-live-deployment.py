@@ -39,11 +39,11 @@ def main():
     sensitive=[]
     cleanup_error=None
     try:
-        command=[*prefix,'share','--name',name,'--detach','--json','--shell','/bin/sh',
+        command=[*prefix,'share','--name',name,'--detach','--json','--shell','/bin/bash',
                  '--env','ENV=','--env','BASH_ENV=','--env','PS1=porthub-live$ ',
                  '--link-expires','180','--session-timeout','300','--max-viewers','6']
         if args.registration:command.extend(['--registration',args.registration])
-        command.extend(['--','/bin/sh','-i'])
+        command.extend(['--','/bin/bash','--noprofile','--norc','-i'])
         invitation=json.loads(remote(command).stdout)
         # Some hosts reset PS1 in system-wide interactive shell startup files.
         # Set our fixture prompt after startup rather than depending on inherited

@@ -144,6 +144,7 @@ pub struct New {
     name: Option<String>,
     #[arg(long)]
     cwd: Option<PathBuf>,
+    /// Shell for new workspaces (defaults to Bash when installed).
     #[arg(long)]
     shell: Option<PathBuf>,
     /// Environment overrides for the workspace, e.g. --env MODE=debug.
@@ -369,6 +370,8 @@ fn create_locked(root: &Path, args: New) -> Result<Job> {
         .canonicalize()?;
     let shell = args
         .shell
+        .or_else(|| ["/bin/bash", "/usr/bin/bash"].into_iter().map(PathBuf::from)
+            .find(|path| fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.mode() & 0o111 != 0)))
         .or_else(|| std::env::var_os("SHELL").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("/bin/sh"));
     let environment = args
