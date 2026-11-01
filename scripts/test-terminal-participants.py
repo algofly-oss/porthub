@@ -30,6 +30,42 @@ def wait_text(master, child, expected, timeout=5):
 
 
 
+def wait_terminal_exit(master, child, timeout=3):
+    """Keep consuming terminal output while waiting for restoration and exit."""
+    deadline = time.monotonic() + timeout
+    output = bytearray()
+    readable = True
+    while child.poll() is None and time.monotonic() < deadline:
+        if readable and select.select([master], [], [], .02)[0]:
+            try:
+                chunk = os.read(master, 65536)
+            except OSError as error:
+                if error.errno != 5:
+                    raise
+                chunk = b""
+            readable = bool(chunk)
+            output.extend(chunk)
+            del output[:-4096]
+        elif not readable:
+            time.sleep(.02)
+    assert child.poll() is not None, f"terminal exit timed out while draining output: {bytes(output)!r}"
+
+
+def kill_attachment(child):
+    if child.poll() is not None:
+        return
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except PermissionError:
+        # The attachment can change its job-control group on Darwin. Kill our
+        # own child directly instead of masking the original test failure.
+        child.kill()
+    except ProcessLookupError:
+        if child.poll() is None:
+            child.kill()
+    child.wait(timeout=3)
+
+
 def exercise(executable, environment, job, stalled=False, sidebar=False, columns=100):
     native = sidebar == "native"
     root = Path(environment["XDG_DATA_HOME"]) / "porthub/terminal"
@@ -165,12 +201,7 @@ def exercise(executable, environment, job, stalled=False, sidebar=False, columns
         assert child.poll() == 0, f"quit must not wait for a stalled owner socket: status={child.poll()}, output={bytes(exit_output[-1500:])!r}"
         assert_terminal_restored(report_read)
     finally:
-        if child.poll() is None:
-            try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            child.wait(timeout=3)
+        kill_attachment(child)
         stop.set()
         listener.close()
         thread.join(timeout=1)
@@ -221,17 +252,12 @@ def exercise_hangup(executable, environment, job):
         os.write(master, b"printf 'PERSIST%s\\n' \"$persistvalue\"\n")
         wait_text(master, child, b"PERSISTporthublifetime")
         os.write(master, b"\x04")
-        child.wait(timeout=3)
+        wait_terminal_exit(master, child)
         assert child.returncode == 0, "explicit Ctrl+D must close the final shell cleanly"
         rows = json.loads(call("list", "--json"))
         assert next(row for row in rows if row["id"] == job["id"])["state"] == "ended", "Ctrl+D must end the workspace"
     finally:
-        if child.poll() is None:
-            try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            child.wait(timeout=3)
+        kill_attachment(child)
         if master is not None:
             os.close(master)
         marker.unlink(missing_ok=True)
