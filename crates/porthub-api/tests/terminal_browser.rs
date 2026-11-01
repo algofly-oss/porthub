@@ -39,6 +39,7 @@ async fn ordinary_ssh_and_https_share_one_tls_port_with_real_terminal_participan
 static BROWSER_FIXTURE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 async fn exercise(multiplex: bool) -> Result<()> {
     let _exclusive = BROWSER_FIXTURE.lock().await;
+    let _ = tracing_subscriber::fmt().with_env_filter("porthub_api::terminal=warn").try_init();
     let ui = std::env::var("PORTHUB_TEST_UI_ORIGIN").context("set isolated UI origin")?;
     let fixture = tempfile::Builder::new()
         .prefix("phterm-browser-")
@@ -294,7 +295,7 @@ async fn exercise(multiplex: bool) -> Result<()> {
         .env("PORTHUB_TEST_TERMINAL_WRITE", &hello.write_token)
         .env("PORTHUB_TEST_TERMINAL_READ", &hello.read_token)
         .env("PORTHUB_TEST_TERMINAL_SESSION", &hello.id)
-        .env("PORTHUB_TEST_TERMINAL_COOKIE", cookie)
+        .env("PORTHUB_TEST_TERMINAL_COOKIE", &cookie)
         .env("PORTHUB_TEST_TERMINAL_SSH_PORT", ssh_port.to_string())
         .kill_on_drop(true);
     let output = tokio::time::timeout(Duration::from_secs(120), command.output()).await??;
@@ -340,6 +341,27 @@ async fn exercise(multiplex: bool) -> Result<()> {
         Ok::<_, anyhow::Error>(())
     })
     .await??;
+    if native.is_some() {
+        tokio::time::timeout(Duration::from_secs(12),async {
+            loop {
+                let saved=case.app.collection("terminal_traffic").find_one(doc! {"machine_id":machine,"owner_id":owner,"summary.active_sessions":0}).await?;
+                if let Some(saved)=saved {
+                    let summary:porthub_terminal::traffic_report::Summary=mongodb::bson::from_document(saved.get_document("summary")?.clone())?;
+                    ensure!(summary.counters.input_bytes>0 && summary.counters.output_bytes>0,"real PTY traffic must reach account storage");
+                    ensure!(summary.relay_sent_payload_bytes>0 && summary.relay_received_payload_bytes>0,"ordinary SSH relay traffic must be accounted for");
+                    if direct && std::env::var("PORTHUB_TEST_TERMINAL_DIRECT").ok().as_deref()!=Some("blocked") {
+                        ensure!(summary.counters.direct_udp_sent_bytes>0 && summary.counters.direct_udp_received_bytes>0,"direct RTC traffic must reach account storage");
+                    }
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+            Ok::<_,anyhow::Error>(())
+        }).await??;
+        let series=case.status("GET",&format!("/api/terminal/traffic?range=10m&machine_id={machine}"),&cookie,serde_json::Value::Null,axum::http::StatusCode::OK).await?;
+        ensure!(series["points"].as_array().is_some_and(|points| !points.is_empty() && points.len()<=120));
+        println!("PASS authenticated terminal measurements: real host payload, relay/direct scopes, final closed gauges and bounded account graph");
+    }
     case.db.drop().await?;
     Ok(())
 }

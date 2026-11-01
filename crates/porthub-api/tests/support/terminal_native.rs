@@ -86,6 +86,32 @@ pub async fn start(
         CancellationToken::new(),
         &layout,
     )?;
+    // Exercise the upcoming broker contract without installing a system service
+    // or claiming that this development binary is a published 1.10 release.
+    let display = porthub_agent::service::readable::Record {
+        format_version: 1,
+        id: id.clone(),
+        machine_id: machine.into(),
+        email: String::new(),
+        gateway: origin.into(),
+        private: false,
+        enabled: true,
+        active: Some(true),
+        state: "running".into(),
+        agent_version: "1.10.0".into(),
+        ports: 0,
+        route: String::new(),
+        updated_at: now() as u64,
+        strategy: Default::default(),
+        strategy_override: false,
+        private_status: None,
+    };
+    porthub_agent::profile::write_private(
+        &state.with_file_name("status").join(format!("{id}.json")),
+        &serde_json::to_vec(&display)?,
+        false,
+    )?;
+    porthub_agent::service::readable::select(&layout, Some(&id), Some(false))?;
     let executable = PathBuf::from(
         std::env::var_os("PORTHUB_TEST_AGENT_EXECUTABLE").context("set bundled CLI path")?,
     );

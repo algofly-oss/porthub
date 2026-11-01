@@ -21,7 +21,7 @@ struct Request {
     traffic_reporting:bool,
 }
 
-struct GatewayFeatures { snapshots: bool, direct: bool, addresses: Vec<std::net::IpAddr> }
+struct GatewayFeatures { snapshots: bool, direct: bool, reporting: bool, addresses: Vec<std::net::IpAddr> }
 
 /// Local broker envelope only. This is deliberately not a gateway HostEvent:
 /// the remote gateway cannot inject an underlay policy into the OS-user host.
@@ -81,7 +81,8 @@ async fn open(
             let snapshots = response.headers().get("x-porthub-history-snapshots")
                 .is_some_and(|value| value == "1");
             let direct=response.headers().get("x-porthub-terminal-direct").is_some_and(|value|value=="1");
-            Ok::<_, anyhow::Error>((socket, GatewayFeatures {snapshots,direct,addresses:sources}))
+            let reporting=response.headers().get("x-porthub-terminal-traffic").is_some_and(|value|value=="1");
+            Ok::<_, anyhow::Error>((socket, GatewayFeatures {snapshots,direct,reporting,addresses:sources}))
         })
         .await;
         if let Ok(Ok(socket)) = result {
@@ -112,7 +113,7 @@ pub(crate) async fn frame<S: AsyncRead + Unpin>(
 
 pub(crate) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     mut local: BufReader<S>,
-    control: &crate::control::Control,
+    control: std::sync::Arc<crate::control::Control>,
     profile: &std::path::Path,
     message: serde_json::Value,
     cancel: CancellationToken,
@@ -125,7 +126,7 @@ pub(crate) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     request.hello.validate(porthub_terminal::protocol::now())?;
     let (mut remote, features) = tokio::select! {
         _ = cancel.cancelled() => return Ok(()),
-        result = tokio::time::timeout(Duration::from_secs(40), open(control)) => match result {
+        result = tokio::time::timeout(Duration::from_secs(40), open(&control)) => match result {
             Ok(Ok(remote)) => remote,
             _ => {
                 local.get_mut().write_all(b"{\"error\":\"terminal gateway unavailable\"}\n").await?;
@@ -136,7 +137,7 @@ pub(crate) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     // Older gateways reject unknown fields. Advertise only capabilities that
     // both the local host and the authenticated gateway support.
     request.hello.history_snapshots &= features.snapshots;
-    request.hello.direct_transport &= request.traffic_reporting && features.direct && direct_allowed(profile, control.profile());
+    request.hello.direct_transport &= request.traffic_reporting && features.reporting && features.direct && direct_allowed(profile, control.profile());
     remote
         .send(Message::Text(serde_json::to_string(&request.hello)?.into()))
         .await?;
@@ -188,6 +189,7 @@ pub(crate) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
                             tokio::time::timeout(Duration::from_secs(3),local.get_mut().write_all(&policy)).await??;
                         }
                         traffic=Some(lease);
+                        if features.reporting {crate::terminal_upload::start(profile,control.clone(),cancel.clone());}
                     }
                     if let Some(traffic)=&mut traffic {
                         if let HostEvent::Presence {members}=&event {traffic.participants(members.len());}
@@ -334,17 +336,21 @@ mod tests {
     }
 
     async fn broker_gateway(snapshots: bool, direct: bool, blocked: bool, revoke: bool) -> Result<()> {
-        broker_gateway_measured(snapshots,direct,blocked,revoke,direct && !blocked).await
+        broker_gateway_measured(snapshots,direct,blocked,revoke,direct && !blocked,direct).await
     }
     #[tokio::test]
     async fn local_traffic_reports_are_scoped_deduplicated_and_never_forwarded_to_an_older_gateway() -> Result<()> {
-        broker_gateway_measured(false,false,false,false,true).await
+        broker_gateway_measured(false,false,false,false,true,false).await
     }
     #[tokio::test]
     async fn legacy_host_keeps_relay_service_instead_of_enabling_unmeasured_direct_traffic() -> Result<()> {
-        broker_gateway_measured(true,true,false,false,false).await
+        broker_gateway_measured(true,true,false,false,false,true).await
     }
-    async fn broker_gateway_measured(snapshots:bool,direct:bool,blocked:bool,revoke:bool,measured:bool) -> Result<()> {
+    #[tokio::test]
+    async fn older_gateway_without_ingestion_keeps_measured_relay_and_disables_direct() -> Result<()> {
+        broker_gateway_measured(true,true,false,false,true,false).await
+    }
+    async fn broker_gateway_measured(snapshots:bool,direct:bool,blocked:bool,revoke:bool,measured:bool,cloud:bool) -> Result<()> {
 
         let fixture=tempfile::tempdir()?;
         #[cfg(unix)] {
@@ -354,7 +360,7 @@ mod tests {
         let path=fixture.path().join("public.json");
         let policy_path=crate::unified::configuration_path(&path);
         if blocked {crate::profile::write_private(&policy_path,b"unreadable policy",false)?;}
-        let negotiated_direct=direct && !blocked && measured;
+        let negotiated_direct=direct && !blocked && measured && cloud;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let profile: crate::profile::Profile = serde_json::from_value(serde_json::json!({
             "server":format!("http://{}",listener.local_addr()?),
@@ -376,6 +382,7 @@ mod tests {
                         request.headers()["x-porthub-machine-id"],
                         "0123456789abcdef01234567"
                     );
+                    if cloud {response.headers_mut().insert("x-porthub-terminal-traffic", "1".parse().unwrap());}
                     if snapshots {
                         response.headers_mut().insert("x-porthub-history-snapshots", "1".parse().unwrap());
                     }
@@ -407,6 +414,27 @@ mod tests {
                     .into(),
                 ))
                 .await?;
+            if cloud {
+                // Fail ingestion while the independent terminal WebSocket
+                // continues exchanging input/output below.
+                let (socket,_) = tokio::time::timeout(Duration::from_secs(2),listener.accept()).await??;
+                let mut reader=BufReader::new(socket);
+                let mut line=String::new();
+                reader.read_line(&mut line).await?;
+                assert_eq!(line,"POST /api/machines/client/terminal-traffic HTTP/1.1\r\n");
+                let mut length=0;
+                loop {
+                    line.clear();ensure!(reader.read_line(&mut line).await?>0 && line.len()<=8192);
+                    if line=="\r\n" {break;}
+                    if let Some(value)=line.to_ascii_lowercase().strip_prefix("content-length:") {length=value.trim().parse::<usize>()?;}
+                }
+                ensure!((1..=8192).contains(&length));
+                let mut body=vec![0;length];reader.read_exact(&mut body).await?;
+                let upload:serde_json::Value=serde_json::from_slice(&body)?;
+                assert_eq!(upload["token"],"broker-only-machine-secret");
+                reader.get_mut().write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
+                reader.get_mut().shutdown().await?;
+            }
             if measured {
                 for event in [HostEvent::Presence {members:vec![porthub_terminal::protocol::Participant {
                     id:7,read_only:false,joined_at:1,last_active_at:1}]},
@@ -421,6 +449,9 @@ mod tests {
                 serde_json::from_str::<HostOutput>(&output)?,
                 HostOutput::Pong
             ));
+            if !cloud {
+                assert!(tokio::time::timeout(Duration::from_millis(60),listener.accept()).await.is_err(),"older gateways must receive no telemetry HTTP requests");
+            }
             if revoke {
                 let closed=tokio::time::timeout(Duration::from_secs(8),socket.next()).await?;
                 ensure!(matches!(closed,None|Some(Err(_))|Some(Ok(Message::Close(_)))),"policy revocation must close the old direct transport");
@@ -430,10 +461,11 @@ mod tests {
         let (local, service) = tokio::io::duplex(65536);
         let control = std::sync::Arc::new(crate::control::Control::new(profile)?);
         let stats_path=path.clone();
+        let cancel=CancellationToken::new();
         let owner = tokio::spawn(crate::exposure_protocol::serve_connection(
             service,
             control,
-            CancellationToken::new(),
+            cancel.clone(),
             path,
         ));
         let mut local = BufReader::new(local);
@@ -488,6 +520,7 @@ mod tests {
         }
         if revoke {crate::profile::write_private(&policy_path,b"newly unavailable policy",false)?;}
         tokio::time::timeout(Duration::from_secs(8), owner).await???;
+        cancel.cancel();
         gateway.await??;
         if measured {
             let summary=crate::terminal_telemetry::snapshot(&stats_path);

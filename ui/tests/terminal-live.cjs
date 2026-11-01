@@ -12,7 +12,7 @@ if(process.env.PORTHUB_TEST_TERMINAL_DIRECT)for(const context of [owner,guest])a
  };return peer;};
 },process.env.PORTHUB_TEST_TERMINAL_DIRECT==='blocked');
 const cookie=process.env.PORTHUB_TEST_TERMINAL_COOKIE;const separator=cookie.indexOf('=');await owner.addCookies([{name:cookie.slice(0,separator),value:cookie.slice(separator+1),url:origin,httpOnly:true,sameSite:'Lax'}]);
-const host=await owner.newPage(),watcher=await guest.newPage();let hostConnections=0,directRelay=0,relayInputs=0,relayAcks=0;host.on('websocket',socket=>{if(new URL(socket.url()).pathname==='/api/terminal/join'){hostConnections++;socket.on('framesent',({payload})=>{try{const frame=JSON.parse(payload);if(frame.type==='delivery'){directRelay++;if(Buffer.from(frame.packet,'base64')[0]===1)relayInputs++;}}catch{}});socket.on('framereceived',({payload})=>{try{const frame=JSON.parse(payload);if(frame.type==='delivery'&&Buffer.from(frame.packet,'base64')[0]===2)relayAcks++;}catch{}});}});host.__transportStats=()=>({hostConnections,relayInputs,relayAcks});const errors=[];for(const page of [host,watcher])page.on('pageerror',e=>errors.push(e.message));
+const host=await owner.newPage(),watcher=await guest.newPage();let phase="join";const hostEvents=[];let hostConnections=0,directRelay=0,relayInputs=0,relayAcks=0;host.on('websocket',socket=>{if(new URL(socket.url()).pathname==='/api/terminal/join'){hostConnections++;hostEvents.push({phase,event:"open"});socket.on("close",()=>hostEvents.push({phase,event:"close"}));socket.on('framesent',({payload})=>{try{const frame=JSON.parse(payload);if(frame.type==='delivery'){directRelay++;if(Buffer.from(frame.packet,'base64')[0]===1)relayInputs++;}}catch{}});socket.on('framereceived',({payload})=>{try{const frame=JSON.parse(payload);if(frame.type==='closed')hostEvents.push({phase,event:'closed',reason:frame.reason});if(frame.type==='delivery'&&Buffer.from(frame.packet,'base64')[0]===2)relayAcks++;}catch{}});}});host.__transportStats=()=>({hostConnections,relayInputs,relayAcks});const errors=[];for(const page of [host,watcher])page.on('pageerror',e=>errors.push(e.message));
 await host.goto(`${origin}/terminal#${write}`);await host.getByRole('button',{name:'Connect',exact:true}).click();await host.getByRole('heading',{name:'amberotter',exact:true}).waitFor();
 const historyFrames=[];watcher.on('websocket',socket=>socket.on('framesent',({payload})=>{try{const frame=JSON.parse(payload);if(frame.type==='history')historyFrames.push(frame)}catch{}}));
 await watcher.goto(`${origin}/terminal#${read}`);await watcher.getByRole('button',{name:'Connect',exact:true}).click();await watcher.getByRole('heading',{name:'amberotter',exact:true}).waitFor();
@@ -61,7 +61,7 @@ await watcher.evaluate(async token=>{
   window.__stressStable=await window.__terminalStressAttach(token,false);
   window.__stressMoving=await window.__terminalStressAttach(token,false);
 },read);
-const pressure=type(host,"i=0; while [ $i -lt 100 ]; do printf 'churn-line-%s-%080d\\n' \"$i\" 0; i=$((i+1)); sleep 0.005; done; printf 'CHURN%s:%s\\n' 'DONE' \"$OWNVAR\"");
+phase="pressure";const pressure=type(host,"i=0; while [ $i -lt 100 ]; do printf 'churn-line-%s-%080d\\n' \"$i\" 0; i=$((i+1)); sleep 0.005; done; printf 'CHURN%s:%s\\n' 'DONE' \"$OWNVAR\"");
 const churn=watcher.evaluate(async()=>{
   await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('shell pressure did not begin')),5000);window.__stressStable.pressureStarted.then(()=>{clearTimeout(timer);resolve();});});
   const identity=window.__stressMoving.identity;let histories=0;
@@ -81,7 +81,7 @@ try{[,stress]=await Promise.all([pressure,churn]);}catch(error){
 assert.equal(stress.histories,6);assert.equal(stress.attachments,8);
 await output(host,'CHURNDONE:preserved');await output(watcher,'CHURNDONE:preserved');
 await watcher.evaluate(()=>{if(window.__stressStable.bytes===0)throw new Error('stable guest received no output');for(const state of window.__terminalStress)state.socket.close();delete window.__terminalStressAttach;delete window.__terminalStress;delete window.__stressStable;delete window.__stressMoving;});
-await host.getByRole('button',{name:'Block new joins',exact:true}).click();await host.getByRole('button',{name:'Block invitation URLs',exact:true}).click();await host.getByText('New invitation joins blocked',{exact:true}).waitFor();
+phase="history";await host.getByRole('button',{name:'Block new joins',exact:true}).click();await host.getByRole('button',{name:'Block invitation URLs',exact:true}).click();await host.getByText('New invitation joins blocked',{exact:true}).waitFor();
 const blocked=await guest.newPage();blocked.on('pageerror',error=>errors.push(error.message));await blocked.goto(`${origin}/terminal#${read}`);await blocked.getByRole('button',{name:'Connect',exact:true}).click();await blocked.getByRole('alert').filter({hasText:'Invitation expired, revoked'}).waitFor();await blocked.close();
 
 
@@ -122,7 +122,7 @@ await type(host,"printf 'LIVE%s:%s\\n' 'CONTINUES' \"$OWNVAR\"");await output(ho
 const identity=(await watcher.getByText(/Guest .*\(you\)/).innerText()).match(/Guest (\d+)/)[1];
 await watcher.reload();await watcher.getByRole('button',{name:'Connect',exact:true}).click();await watcher.getByRole('heading',{name:'amberotter',exact:true}).waitFor();await watcher.getByText(`Guest ${identity} (you)`,{exact:true}).waitFor();
 await output(watcher,'LIVECONTINUES:preserved');
-let nativeRemoval;
+phase="management";let nativeRemoval;
 if(process.env.PORTHUB_TEST_NATIVE_CLI){
   const driver=spawn('python3',[require('node:path').join(__dirname,'../../scripts/test-terminal-supervisor-sidebar.py'),process.env.PORTHUB_TEST_NATIVE_CLI,session,identity],{stdio:['ignore','pipe','pipe']});
   let diagnostics='';for(const stream of [driver.stdout,driver.stderr])stream.on('data',data=>diagnostics=(diagnostics+data.toString()).slice(-8192));
@@ -135,7 +135,7 @@ if(nativeRemoval){await nativeRemoval;await output(host,"SIDEBAROWNER:preserved"
 
 await type(host,"printf 'SURVIVED:%s:%s\\n' \"$OWNVAR\" \"${UNAUTHORIZED-unset}\"");await output(host,'SURVIVED:preserved:unset');
 await watcher.getByRole('button',{name:'Reconnect',exact:true}).click();await watcher.getByRole('alert').filter({hasText:'Recovery expired, revoked'}).waitFor();
-assert.equal(hostConnections,1,'host input must survive pressure without a hidden reconnect');
+assert.equal(hostConnections,1,'host input must survive pressure without a hidden reconnect: '+JSON.stringify(hostEvents));
 await host.locator('.xterm-helper-textarea').focus();await host.keyboard.press('Control+d');await host.getByRole('button',{name:'Reconnect',exact:true}).waitFor();
 assert.deepEqual(errors,[]);console.log('PASS live browser/API/bundled tmux: anonymous browser and ordinary SSH guests, owner administration, shared shell state and SSH-disconnect persistence, safe browser and read-only SSH scrollback, concurrent recovery/history/output pressure, tab recovery despite revoked invitations, durable removal and explicit Ctrl+D teardown');
 await owner.close();await guest.close();

@@ -38,6 +38,7 @@ mod exposure_protocol;
 mod terminal_transport;
 mod terminal_policy;
 mod terminal_telemetry;
+mod terminal_upload;
 #[cfg(feature = "terminal-direct")]
 pub mod terminal_guest;
 #[cfg(unix)]

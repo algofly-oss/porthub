@@ -1,6 +1,7 @@
 //! Bounded in-memory terminal routing. Persistent authorization/revocation is
 //! checked by the API before registering a host. No terminal transcript is kept.
 use crate::protocol::*;
+pub use crate::hub_queue::Receiver as ViewerEvents;
 use anyhow::{ensure, Result};
 use std::{
     collections::HashMap,
@@ -70,7 +71,7 @@ struct Viewer {
     cols: u16,
     rows: u16,
     term: String,
-    events: mpsc::Sender<ViewerEvent>,
+    events: crate::hub_queue::Sender,
 }
 pub struct HostLease {
     pub session: Arc<Shared>,
@@ -80,7 +81,7 @@ pub struct HostLease {
 pub struct Attachment {
     pub id: u64,
     pub session: Arc<Shared>,
-    pub events: mpsc::Receiver<ViewerEvent>,
+    pub events: ViewerEvents,
 }
 impl Drop for Attachment {
     fn drop(&mut self) {
@@ -498,7 +499,7 @@ impl Hub {
             .checked_add(1)
             .filter(|id| *id < (1u64 << 53))
             .ok_or_else(|| anyhow::anyhow!("terminal client identity exhausted"))?;
-        let (events, receive) = mpsc::channel(64);
+        let (events, receive) = crate::hub_queue::channel();
         state
             .host
             .as_ref()
@@ -1332,6 +1333,26 @@ mod tests {
         assert!(writer.session.input(writer.id,ViewerInput::Delivery {packet:DeliveryPacket("x".repeat(32768))}).is_err());Ok(())
     }
 
+    #[test]
+    fn viewer_accepts_full_bounded_replay_window_and_acks_without_a_hidden_detach() -> Result<()> {
+        use crate::delivery::{Message,Frame,MAX_FRAMES,MAX_BYTES};
+        let hub=Hub::default();let mut h=hello();h.direct_transport=true;
+        let mut host=hub.register("owner",&h,now())?;
+        let mut viewer=hub.attach(&h.write_token,80,24,"xterm-256color")?;
+        viewer.session.input(viewer.id,ViewerInput::DirectOffer {request:1,description:description("offer")})?;
+        host.session.output(host.generation,HostOutput::DirectAnswer {client:viewer.id,answer:answer(1)})?;
+        while host.events.try_recv().is_ok() {}while viewer.events.try_recv().is_ok() {}
+        for sequence in 1..=MAX_FRAMES {
+            let data=DeliveryPacket::encode(&Message::Data(Frame::new(&"b".repeat(32),sequence as u64,&vec![0;MAX_BYTES/MAX_FRAMES])?))?;
+            host.session.output(host.generation,HostOutput::Delivery {client:viewer.id,packet:data})?;
+            let ack=DeliveryPacket::encode(&Message::Ack {epoch:"a".repeat(32),sequence:sequence as u64})?;
+            host.session.output(host.generation,HostOutput::Delivery {client:viewer.id,packet:ack})?;
+        }
+        assert_eq!(host.session.participants(),1,"a short receiver scheduling pause must not detach a bounded sender");
+        let mut count=0;while viewer.events.try_recv().is_ok() {count+=1;}
+        assert_eq!(count,MAX_FRAMES*2);
+        Ok(())
+    }
     #[test]
     fn legacy_hosts_do_not_advertise_or_receive_direct_signaling() -> Result<()> {
         let hub=Hub::default();let h=hello();let mut host=hub.register("owner",&h,now())?;

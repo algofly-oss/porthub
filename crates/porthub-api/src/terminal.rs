@@ -158,6 +158,7 @@ async fn host(
             let _permit = permit;
             host_socket(app, machine, token, socket).await
         });
+    response.headers_mut().insert("x-porthub-terminal-traffic",axum::http::HeaderValue::from_static("1"));
     response.headers_mut().insert("x-porthub-terminal-direct",axum::http::HeaderValue::from_static("1"));
     response.headers_mut().insert(
         "x-porthub-history-snapshots",
@@ -836,7 +837,7 @@ async fn viewer_socket(app: Arc<App>, mut socket: WebSocket) {
                 Some(Ok(Message::Text(message)))=>{
                     let Ok(input)=serde_json::from_str::<ViewerInput>(&message) else {break;};
                     last_viewer_message=tokio::time::Instant::now();
-                    if viewer.session.input(viewer.id,input).is_err() {break;}
+                    if let Err(error)=viewer.session.input(viewer.id,input) {tracing::warn!(%error,"terminal viewer input rejected");break;}
                 }
                 Some(Ok(Message::Ping(_)|Message::Pong(_)))=>{},
                 _=>break,

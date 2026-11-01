@@ -514,5 +514,62 @@ covers terminal hosts, not all private-network or public-port traffic.
 Real standalone MongoDB tests cover authentication, replay, out-of-order reports,
 concurrent requests, conflicting counters, ownership transfer, cross-account
 queries, midnight transitions and expired buckets. The server packaging workflow
-requires these checks. The background agent uploader, capability negotiation and
-dashboard integration are still pending; this storage code has not been deployed.
+requires these checks. The background agent uploader and capability negotiation
+are described below. Dashboard integration and release/deployment validation
+remain pending.
+
+### Service-owned reporting and full browser CI (source only)
+
+An authenticated host WebSocket now advertises `x-porthub-terminal-traffic: 1`.
+After the gateway accepts the host, the privileged broker starts one reporter per
+registered profile, independently of that terminal socket. Machine credentials
+come only from the service's control profile. Older gateways without the header
+receive no reporting requests; direct hosting also requires this ingestion
+capability, alongside local traffic-report negotiation and the existing privacy
+checks. Existing relay-only supervisors still get service-observed relay metrics.
+
+The reporter samples at five-second intervals and uploads changed measurements
+and gauges. Empty host samples that only advance freshness/revision are coalesced
+into at most one heartbeat per thirty seconds while sessions are active.
+HTTP attempts have an eight-second deadline. Temporary failures back
+off from five to sixty seconds and retry the latest snapshot, without a payload
+queue or a terminal reconnect. Lost acknowledgements are safe because the API
+accepts idempotent revisions. Invalid/disabled/deleted credentials or conflicting
+reports stop that reporter; none of these paths stop a shell, guest or connection.
+With no active sessions, reporters send no unchanged snapshots and remain
+available for the next session until the broker service cancels them. Cancellation also interrupts a
+stuck HTTP request and releases the profile's worker slot. Final measurements can
+still be lost if the entire service crashes before upload; this is not a durable
+billing journal. Guest-side discovery probes are not included in host counters.
+
+The native integration fixture now publishes explicit test-only 1.10 broker
+metadata, so it actually exercises the upcoming history/reporting/direct contract
+rather than silently selecting the older relay contract. This does not label a
+development binary as a released 1.10 artifact. The fixture checks actual PTY,
+relay and direct UDP measurements in MongoDB, final closed-session gauges and a
+bounded authenticated graph query after explicit shell teardown.
+
+`scripts/test-terminal-browser-integration.py` serves the exported browser assets
+on its own random loopback port and runs real browser/API/broker/bundled-shell
+flows. It covers Chrome and WebKit, each with working WebRTC and deliberately
+blocked direct transport. Ordinary read-only and interactive SSH guests, anonymous
+browser guests, host controls, shared shell state, independent history, recovery,
+revocation and teardown run in each case. All four cases pass locally. Server
+packaging now depends on this matrix using source-verified exported UI artifacts,
+pinned browser tooling and an isolated MongoDB service. This source has not yet
+been released or deployed; dashboard display, approved NAT configuration and the
+remaining platform/release checks still need completion.
+
+The full browser matrix exposed an intermittent gateway egress failure during a
+native-owner redraw with WebKit on the relay path: a 64-message viewer queue filled
+with small delivery frames and detached an otherwise healthy guest. Viewer egress
+now permits the protocol's 256-frame replay window, its ACKs and 64 control messages
+(576 queued events), with a separate 1 MiB quota charged for event storage and heap
+capacities. Drain, rejection and receiver shutdown release the permits. Large
+payloads still hit the byte limit, and tiny control floods still hit the count
+limit; exceeding either budget affects only that participant. The SDK's
+`Attachment.events` uses `hub::ViewerEvents`, retaining `recv` and `try_recv`.
+A regression test holds a full replay window plus ACKs without draining and checks
+that the participant remains attached. Browser diagnostics now record connection
+phases without terminal contents or invitation/recovery capabilities, so an
+unexpected reconnect cannot silently pass the end-to-end test.

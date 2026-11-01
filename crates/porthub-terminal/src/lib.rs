@@ -1,6 +1,7 @@
 //! Shared terminal wire protocol. Shell execution belongs to the initiating OS
 //! user; the gateway brokers only session-scoped, revocable terminal channels.
 pub mod hub;
+mod hub_queue;
 pub mod names;
 #[cfg(unix)]
 pub mod multiplexer;

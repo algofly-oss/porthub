@@ -90,7 +90,7 @@ pub(crate) async fn serve_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
         return crate::terminal_policy::serve(reader,&control,&profile,message,cancel).await;
     }
     if message.get("operation").and_then(serde_json::Value::as_str) == Some("terminal_host") {
-        return crate::terminal_transport::serve(reader, &control, &profile, message, cancel).await;
+        return crate::terminal_transport::serve(reader, control, &profile, message, cancel).await;
     }
     #[cfg(feature="local-tor")]
     if matches!(message.get("operation").and_then(serde_json::Value::as_str),Some("proxy_connect"|"proxy_check")) {
