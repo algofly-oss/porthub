@@ -83,7 +83,7 @@ impl Client {
         let child = pty.slave.spawn_command(builder)?;
         drop(pty.slave);
         let mut reader = pty.master.try_clone_reader()?;
-        let mut writer = pty.master.take_writer()?;
+        let mut writer = owned_writer(pty.master.as_ref())?;
         let cancel = CancellationToken::new();
         let reading = cancel.clone();
         let handle = tokio::runtime::Handle::current();
@@ -112,9 +112,18 @@ impl Client {
         let input = Arc::new(InputBuffer::default());
         let pending = input.clone();
         let (input_wake, mut receive) = mpsc::channel::<()>(1);
+        let writing = cancel.clone();
         tokio::task::spawn_blocking(move || {
             while receive.blocking_recv().is_some() {
+                if writing.is_cancelled() {
+                    pending.clear();
+                    break;
+                }
                 loop {
+                    if writing.is_cancelled() {
+                        pending.clear();
+                        return;
+                    }
                     let bytes = pending.next();
                     if bytes.is_empty() {
                         break;
@@ -137,12 +146,14 @@ impl Client {
     }
 
     pub fn input(&self, data: &str) -> Result<()> {
-        ensure!(!self.read_only, "terminal participant is read-only");
-        let bytes = decode_data(data)?;
-        self.input.enqueue(&bytes)?;
-        match self.input_wake.try_send(()) {
-            Ok(()) | Err(mpsc::error::TrySendError::Full(())) => Ok(()),
-            Err(mpsc::error::TrySendError::Closed(())) => anyhow::bail!("terminal input is closed"),
+        self.input_sink().write(&decode_data(data)?)
+    }
+    pub fn input_sink(&self) -> InputSink {
+        InputSink {
+            input: self.input.clone(),
+            wake: self.input_wake.clone(),
+            cancel: self.cancel.clone(),
+            read_only: self.read_only,
         }
     }
 
@@ -173,6 +184,9 @@ impl Drop for Client {
     fn drop(&mut self) {
         self.cancel.cancel();
         self.input.clear();
+        // A transport may still hold an InputSink clone. Wake the writer so
+        // cancellation does not depend on every sender clone being dropped.
+        let _ = self.input_wake.try_send(());
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             // Reap the detached tmux client, not the long-lived shared server.
@@ -214,6 +228,118 @@ mod input_tests {
         input.enqueue(b"after drain")?;
         input.clear();
         assert!(input.next().is_empty());
+        Ok(())
+    }
+}
+
+/// Cloneable bounded writer; cancellation and the original attachment role are
+/// retained even when a transport actor outlives its network connection.
+#[derive(Clone)]
+pub struct InputSink {
+    input: Arc<InputBuffer>,
+    wake: mpsc::Sender<()>,
+    cancel: CancellationToken,
+    read_only: bool,
+}
+impl InputSink {
+    pub fn write(&self, bytes: &[u8]) -> Result<()> {
+        ensure!(!self.read_only, "terminal participant is read-only");
+        ensure!(!self.cancel.is_cancelled(), "terminal input is closed");
+        ensure!(bytes.len() <= MAX_DATA, "terminal input exceeds limit");
+        self.input.enqueue(bytes)?;
+        match self.wake.try_send(()) {
+            Ok(()) | Err(mpsc::error::TrySendError::Full(())) => Ok(()),
+            Err(mpsc::error::TrySendError::Closed(())) => anyhow::bail!("terminal input is closed"),
+        }
+    }
+}
+
+// portable-pty's writer injects newline+EOF on Drop. That can race a tmux
+// attachment's SIGHUP and terminate the shared shell. A plain owned descriptor
+// closes without ever typing into the terminal.
+fn owned_writer(master: &dyn MasterPty) -> Result<std::fs::File> {
+    use std::os::fd::FromRawFd;
+    let descriptor = master
+        .as_raw_fd()
+        .ok_or_else(|| anyhow::anyhow!("terminal PTY descriptor unavailable"))?;
+    // SAFETY: duplicate a live descriptor and transfer this new descriptor
+    // exactly once into File. CLOEXEC prevents leaking it to child jobs.
+    let duplicate = unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, 3) };
+    ensure!(
+        duplicate >= 0,
+        "could not duplicate terminal PTY writer: {}",
+        std::io::Error::last_os_error()
+    );
+    Ok(unsafe { std::fs::File::from_raw_fd(duplicate) })
+}
+
+#[cfg(test)]
+mod writer_lifecycle_tests {
+    use super::*;
+    struct ChildGuard(Box<dyn Child + Send + Sync>);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            if self.0.try_wait().ok().flatten().is_none() {let _ = self.0.kill();}
+            let _ = self.0.wait();
+        }
+    }
+    #[test]
+    fn dropping_an_input_writer_does_not_type_eof_or_end_the_shell() -> Result<()> {
+        let pty = native_pty_system().openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.arg("-i");
+        command.env("ENV", "");
+        command.env("BASH_ENV", "");
+        command.env("PS1", "writer-test$ ");
+        let mut child = ChildGuard(pty.slave.spawn_command(command)?);
+        drop(pty.slave);
+        let mut reader = pty.master.try_clone_reader()?;
+        let (send, receive) = std::sync::mpsc::channel();
+        let reading = std::thread::spawn(move || {
+            let mut bytes = [0; 4096];
+            while let Ok(count) = reader.read(&mut bytes) {
+                if count == 0 {
+                    break;
+                }
+                if send.send(bytes[..count].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        let wait = |marker: &str| -> Result<()> {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            let mut bytes = Vec::new();
+            while !String::from_utf8_lossy(&bytes).contains(marker) {
+                let remaining = until
+                    .checked_duration_since(std::time::Instant::now())
+                    .ok_or_else(|| anyhow::anyhow!("PTY writer fixture timed out"))?;
+                bytes.extend(receive.recv_timeout(remaining)?);
+            }
+            Ok(())
+        };
+        let mut first = owned_writer(pty.master.as_ref())?;
+        first.write_all(b"PERSISTED=alive; printf 'WRITER%s\\n' 'READY'\n")?;
+        wait("WRITERREADY")?;
+        drop(first);
+        // Leave the child running while the writer is dropped. The old writer
+        // actively injected EOF here; a terminal disconnect must not do so.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        ensure!(
+            child.0.try_wait()?.is_none(),
+            "dropping a writer terminated the shell"
+        );
+        let mut second = owned_writer(pty.master.as_ref())?;
+        second.write_all(b"printf 'STILL:%s\\n' \"$PERSISTED\"\n")?;
+        wait("STILL:alive")?;
+        drop(second);
+        drop(child);
+        drop(pty.master);
+        reading.join().unwrap();
         Ok(())
     }
 }
