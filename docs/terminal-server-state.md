@@ -198,6 +198,13 @@ Account-scoped traffic reporting, approved NAT traversal configuration and the
 native optimized join client still need integration before enabling this in
 normal release builds. Ordinary unmodified SSH remains a gateway transport.
 
+The optional native peer engine also creates guest offers and accepts bounded
+single-data-channel answers. Its in-memory two-peer test pumps real
+ICE/DTLS/SCTP packets and checks bidirectional binary delivery without binding a
+socket. Candidate validation and receive-buffer limits are shared with the host
+answerer. The CLI `terminal join` command still delegates to SSH until native
+terminal I/O, transport selection and the remaining release checks are integrated.
+
 The full integration check also accepts `PORTHUB_TEST_TERMINAL_DIRECT=blocked`.
 It rejects the browser's direct handshake while keeping the real SDK, broker and
 API in the path, verifies sequenced gateway delivery, and requires the writer to
