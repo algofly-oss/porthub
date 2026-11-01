@@ -69,5 +69,14 @@ const { join } = require('node:path');
   assert.equal(legacy.pop().type, 'input'); unavailable.close();
   const reader = new TerminalTransport({ send: () => {}, write: async () => {}, fail: () => {}, readOnly: true });
   assert.throws(() => reader.input(keys)); reader.close();
+  let broken = false;
+  const interrupted = new TerminalTransport({ send: () => { if (broken) throw Error('carrier closed'); },
+    write: async () => {}, fail: () => {}, readOnly: false, createPeer: () => peer });
+  await interrupted.start(); interrupted.event(answer); broken = true;
+  assert.throws(() => interrupted.input(new Uint8Array(32768)));
+  assert.equal(interrupted.inputJournal.retainedBytes, 32768, 'a failed carrier must retain the unsent paste suffix');
+  assert.equal(interrupted.inputJournal.pendingFrames, 2);
+  assert(interrupted.inputTimer, 'failed sends still need a bounded retry deadline');
+  interrupted.close();
   console.log('PASS browser transport: negotiation, render ACKs, replay deduplication, atomic backpressure and legacy fallback');
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -33,12 +33,18 @@ export class TerminalTransport {
     }
     if (this.answered && (this.inputJournal.retainedBytes + bytes.length > MAX_BYTES ||
       this.inputJournal.pendingFrames + frames > 256)) throw new Error("Terminal input is awaiting acknowledgement");
+    const packets = [];
     for (let offset = 0; offset < bytes.length; offset += MAX_PAYLOAD) {
       const chunk = bytes.subarray(offset, offset + MAX_PAYLOAD);
       if (!this.answered) this.send({ type: "input", data: base64(chunk) });
-      else this.transmit(this.inputJournal.enqueue(chunk));
+      else packets.push(this.inputJournal.enqueue(chunk));
     }
-    if (this.answered) this.watchInput();
+    if (this.answered) {
+      this.watchInput();
+      // Retain the whole paste before attempting either carrier. A synchronous
+      // carrier failure cannot strand its unsent suffix outside the journal.
+      for (const packet of packets) this.transmit(packet);
+    }
   }
   async start() {
     if (this.closed || this.peer) return;
@@ -136,7 +142,7 @@ export class TerminalTransport {
     } catch { this.abort("Terminal gateway unavailable; reconnect to redraw"); }
   }
   watchInput() {
-    if (this.inputTimer || !this.inputJournal.pendingFrames) return;
+    if (this.closed || this.inputTimer || !this.inputJournal.pendingFrames) return;
     this.inputSince = this.inputSince || Date.now();
     this.inputTimer = setTimeout(() => {
       this.inputTimer = null;
