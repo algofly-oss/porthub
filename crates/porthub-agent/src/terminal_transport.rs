@@ -32,29 +32,9 @@ pub(crate) struct DirectPolicy {
     pub stun_servers: Vec<String>,
 }
 
-// Read only the securely paired registration. Display metadata and unrelated
-// accounts cannot grant permission to bypass an application's selected exit.
-fn direct_allowed(path: &std::path::Path, public: &crate::profile::Profile) -> bool {
-    let checked = || -> Result<bool> {
-        let Some(module) = crate::unified::load(path, public)? else { return Ok(true); };
-        if !module.enabled { return Ok(false); }
-        #[cfg(feature = "local-tor")]
-        if crate::private_network::tor_preferences::load(&module.private_profile)?.system_wide {
-            return Ok(false);
-        }
-        let status = crate::runtime::status(&module.private_profile)?;
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
-        Ok(direct_status_allowed(&status, now))
-    };
-    checked().unwrap_or(false)
-}
-
-fn direct_status_allowed(status: &crate::runtime::Status, now: u64) -> bool {
-    status.state == "running"
-        && status.updated_at <= now
-        && now.saturating_sub(status.updated_at) <= 30
-        && status.private_status.as_ref().is_some_and(|private| private.lease_valid && private.exit.is_none())
-}
+use crate::terminal_policy::direct_allowed;
+#[cfg(test)]
+use crate::terminal_policy::direct_status_allowed;
 
 async fn open(
     control: &crate::control::Control,

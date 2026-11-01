@@ -1644,6 +1644,9 @@ mod cli_tests {
         let parsed=Args::try_parse_from(["porthub","terminal","join","https://example.org/terminal#invitation","--transport","relay"]).unwrap();
         assert!(!requires_system_privileges(&parsed));
         assert!(matches!(parsed.command,Some(super::Command::Terminal {command:Some(Command::Join {transport:JoinTransport::Relay,..})})));
+        let parsed=Args::try_parse_from(["porthub","terminal","join","https://example.org/terminal#invitation","--transport","auto","--registration","abcdef","--user"]).unwrap();
+        assert!(!requires_system_privileges(&parsed));
+        assert!(matches!(parsed.command,Some(super::Command::Terminal {command:Some(Command::Join {transport:JoinTransport::Auto,registration:Some(_),user:true,..})})));
         assert!(Args::try_parse_from(["porthub","terminal","join","url","--transport","unknown"]).is_err());
     }
 

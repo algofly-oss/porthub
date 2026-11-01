@@ -27,6 +27,22 @@ pub async fn run_with_udp<S: AsyncRead + AsyncWrite + Unpin>(
     welcome: &ViewerEvent,
     socket: Option<tokio::net::UdpSocket>,
 ) -> Result<End> {
+    Box::pin(run_with_policy(guest, terminal, welcome, socket, None)).await
+}
+pub(crate) async fn run_with_policy<S: AsyncRead + AsyncWrite + Unpin>(
+    guest: &mut Guest<S>,
+    terminal: &Terminal,
+    welcome: &ViewerEvent,
+    mut socket: Option<tokio::net::UdpSocket>,
+    mut permission: Option<crate::terminal_policy::Permission>,
+) -> Result<End> {
+    if permission
+        .as_ref()
+        .is_some_and(|permission| !permission.allowed())
+    {
+        socket = None;
+        permission = None;
+    }
     let ViewerEvent::Welcome {
         history_snapshots,
         read_only,
@@ -50,8 +66,11 @@ pub async fn run_with_udp<S: AsyncRead + AsyncWrite + Unpin>(
                 *direct_transport,
                 "gateway did not approve direct terminal transport"
             );
-            let (transport, offer) =
+            let (mut transport, offer) =
                 porthub_terminal::direct::viewer::Transport::offer(socket, *read_only)?;
+            if let Some(permission) = &permission {
+                transport.require_permission(permission.guard());
+            }
             guest.send(&offer).await?;
             Some(transport)
         }
@@ -63,6 +82,15 @@ pub async fn run_with_udp<S: AsyncRead + AsyncWrite + Unpin>(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut input = [0; 16384];
     loop {
+        if permission
+            .as_ref()
+            .is_some_and(|permission| !permission.allowed())
+        {
+            if let Some(transport) = &mut direct {
+                send(guest, transport.fallback()?).await?;
+            }
+            permission = None;
+        }
         let limit = if *read_only {
             input.len()
         } else {
@@ -71,6 +99,12 @@ pub async fn run_with_udp<S: AsyncRead + AsyncWrite + Unpin>(
                 .map_or(input.len(), |transport| transport.input_capacity())
         };
         tokio::select! {
+            changed=async {match &mut permission {Some(permission)=>permission.receiver.changed().await,None=>std::future::pending().await}}=>{
+                if changed.is_err() || permission.as_ref().is_some_and(|permission|!permission.allowed()) {
+                    if let Some(transport)=&mut direct {send(guest,transport.fallback()?).await?;}
+                    permission=None;
+                }
+            },
             count=terminal.read(&mut input[..limit]),if limit>0=>{
                 let count=count.context("native terminal input failed")?;
                 if count==0 {return Ok(End {reason:"local terminal closed".into(),retryable:false});}

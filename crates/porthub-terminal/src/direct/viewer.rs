@@ -51,6 +51,7 @@ pub struct Transport {
     output_ack_pending: bool,
     traffic: Traffic,
     direct_cursor: u64,
+    permission: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 impl Transport {
     pub fn offer(socket: UdpSocket, read_only: bool) -> Result<(Self, ViewerInput)> {
@@ -79,12 +80,24 @@ impl Transport {
                 output_ack_pending: false,
                 traffic: Traffic::default(),
                 direct_cursor: 0,
+                permission: None,
             },
             offer,
         ))
     }
+    pub fn require_permission(
+        &mut self,
+        permission: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    ) {
+        self.permission = Some(permission);
+    }
+    fn permitted(&self) -> bool {
+        self.permission
+            .as_ref()
+            .is_none_or(|permission| permission())
+    }
     pub fn direct(&self) -> bool {
-        self.network.as_ref().is_some_and(|network| network.ready)
+        self.permitted() && self.network.as_ref().is_some_and(|network| network.ready)
     }
     pub fn traffic(&self) -> Traffic {
         self.traffic
@@ -232,8 +245,18 @@ impl Transport {
             .collect()
     }
     async fn flush(&mut self) -> Result<Vec<ViewerInput>> {
+        if self.network.is_some() && !self.permitted() {
+            return self.fallback();
+        }
         if let Some(network) = &mut self.network {
             for _ in 0..256 {
+                if self
+                    .permission
+                    .as_ref()
+                    .is_some_and(|permission| !permission())
+                {
+                    return self.fallback();
+                }
                 let Some((remote, bytes)) = network.peer.datagram() else {
                     return Ok(Vec::new());
                 };
@@ -362,8 +385,18 @@ mod tests {
     #[tokio::test]
     async fn real_udp_delivers_both_directions_then_ack_stall_replays_once_over_relay() -> Result<()>
     {
+        exercise_udp(false).await
+    }
+    #[tokio::test]
+    async fn revoked_permission_stops_queued_udp_and_keeps_the_same_relay_journal() -> Result<()> {
+        exercise_udp(true).await
+    }
+    async fn exercise_udp(revoke: bool) -> Result<()> {
         let socket = UdpSocket::bind("127.0.0.1:0").await?;
         let (mut native, offer) = Transport::offer(socket, false)?;
+        let permission = Arc::new(AtomicBool::new(true));
+        let allowed = permission.clone();
+        native.require_permission(Arc::new(move || allowed.load(Ordering::SeqCst)));
         let ViewerInput::DirectOffer {
             request,
             description,
@@ -513,12 +546,24 @@ mod tests {
             assert_eq!(acknowledged.load(Ordering::SeqCst), 2);
             suppress_ack.store(true, Ordering::SeqCst);
             assert!(native.input(b"second\r")?.is_empty());
+            let before_revoke = native.traffic().udp_sent;
+            if revoke {
+                permission.store(false, Ordering::SeqCst);
+                assert!(!native.direct());
+            }
             let replay = loop {
                 let relay = native.network().await?;
                 if !relay.is_empty() {
                     break relay;
                 }
             };
+            if revoke {
+                assert_eq!(
+                    native.traffic().udp_sent,
+                    before_revoke,
+                    "queued data escaped after direct permission was revoked"
+                );
+            }
             assert!(!native.direct());
             assert_eq!(replay.len(), 1);
             suppress_ack.store(false, Ordering::SeqCst);

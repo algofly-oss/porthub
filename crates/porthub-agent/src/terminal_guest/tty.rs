@@ -716,6 +716,14 @@ mod tests {
     }
     #[tokio::test]
     async fn native_direct_tty_switches_to_relay_without_repeating_shell_input() -> Result<()> {
+        native_direct_tty_flow(false).await
+    }
+    #[tokio::test]
+    async fn native_direct_tty_revokes_private_permission_without_reconnecting_the_guest(
+    ) -> Result<()> {
+        native_direct_tty_flow(true).await
+    }
+    async fn native_direct_tty_flow(revoke: bool) -> Result<()> {
         use crate::terminal_guest::{relay, Guest};
         use futures_util::{SinkExt, StreamExt};
         use porthub_terminal::{
@@ -744,6 +752,13 @@ mod tests {
         let client = WebSocketStream::from_raw_socket(a, Role::Client, None).await;
         let mut server = WebSocketStream::from_raw_socket(b, Role::Server, None).await;
         let client_udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+        let (permission, mut policy_writer, mut policy_observer) = if revoke {
+            let (permission, writer) = crate::terminal_policy::test_permission().await?;
+            let observer = permission.receiver.clone();
+            (Some(permission), Some(writer), Some(observer))
+        } else {
+            (None, None, None)
+        };
         let (seen, screen_seen) = tokio::sync::oneshot::channel();
         let remote = Box::pin(async move {
             server.next().await.context("missing hello")??;
@@ -854,6 +869,13 @@ mod tests {
                                 applied.extend_from_slice(frame.payload());
                                 receiver.commit(sequence)?;
                             }
+                            if !via_relay && policy_writer.is_some() {
+                                // Revoke after the command reached the host.
+                                // Observe the shared permission change before
+                                // sending the relay confirmation below.
+                                drop(policy_writer.take());
+                                policy_observer.as_mut().unwrap().changed().await?;
+                            }
                             if via_relay {
                                 signal(
                                     &mut server,
@@ -908,11 +930,12 @@ mod tests {
         let viewer = async {
             let (mut guest, welcome) =
                 Guest::authenticate(client, &"a".repeat(64), None, 100, 30).await?;
-            let end = Box::pin(relay::run_with_udp(
+            let end = Box::pin(relay::run_with_policy(
                 &mut guest,
                 &terminal,
                 &welcome,
                 Some(client_udp),
+                permission,
             ))
             .await?;
             assert_eq!(end.reason, "complete");

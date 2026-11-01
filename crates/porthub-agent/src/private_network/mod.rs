@@ -57,7 +57,6 @@ mod probe;
 pub mod relay;
 pub mod strategy;
 pub(crate) mod settings_watch;
-#[cfg(feature="local-tor")]
 pub mod tor_preferences;
 #[cfg(feature = "private-stream")]
 pub mod stream_router;

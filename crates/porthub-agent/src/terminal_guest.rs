@@ -91,6 +91,18 @@ pub fn retryable(error: &anyhow::Error) -> bool {
     )
 }
 impl NetworkGuest {
+    pub(crate) fn local_address(&self) -> Result<std::net::SocketAddr> {
+        let address = match self.socket.get_ref() {
+            MaybeTlsStream::Plain(stream) => stream.local_addr(),
+            MaybeTlsStream::Rustls(stream) => stream.get_ref().0.local_addr(),
+            _ => anyhow::bail!("native terminal local route is unavailable"),
+        }?;
+        ensure!(
+            !address.ip().is_unspecified() && !address.ip().is_multicast(),
+            "native terminal local route is invalid"
+        );
+        Ok(address)
+    }
     pub async fn connect(
         invitation: &Invitation,
         recovery: Option<Recovery>,

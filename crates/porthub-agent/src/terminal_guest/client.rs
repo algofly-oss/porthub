@@ -5,8 +5,12 @@ use anyhow::{bail, Context, Result};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 
+pub struct DirectSession {
+    pub(crate) socket: tokio::net::UdpSocket,
+    pub(crate) permission: crate::terminal_policy::Permission,
+}
 #[async_trait::async_trait]
-pub trait Connector {
+pub trait Connector: Send {
     type Stream: AsyncRead + AsyncWrite + Unpin + Send;
     async fn connect(
         &mut self,
@@ -14,8 +18,14 @@ pub trait Connector {
         cols: u16,
         rows: u16,
     ) -> Result<(Guest<Self::Stream>, porthub_terminal::protocol::ViewerEvent)>;
+    async fn direct(&mut self, _guest: &Guest<Self::Stream>) -> Option<DirectSession> {
+        None
+    }
 }
-struct Gateway<'a>(&'a Invitation);
+struct Gateway<'a> {
+    invitation: &'a Invitation,
+    registration: Option<(crate::service::Layout, String)>,
+}
 #[async_trait::async_trait]
 impl Connector for Gateway<'_> {
     type Stream = tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>;
@@ -25,17 +35,87 @@ impl Connector for Gateway<'_> {
         cols: u16,
         rows: u16,
     ) -> Result<(NetworkGuest, porthub_terminal::protocol::ViewerEvent)> {
-        NetworkGuest::connect_resumable(self.0, recovery, cols, rows).await
+        NetworkGuest::connect_resumable(self.invitation, recovery, cols, rows).await
+    }
+    async fn direct(&mut self, guest: &NetworkGuest) -> Option<DirectSession> {
+        let (layout, id) = self.registration.as_ref()?;
+        let permission = crate::terminal_policy::subscribe(layout, id).await.ok()?;
+        if !permission.allowed() {
+            return None;
+        }
+        let mut local = guest.local_address().ok()?;
+        local.set_port(0);
+        let socket = tokio::net::UdpSocket::bind(local).await.ok()?;
+        if !permission.allowed() {
+            return None;
+        }
+        Some(DirectSession { socket, permission })
     }
 }
 pub async fn join_relay(value: &str) -> Result<()> {
+    join(value, None).await
+}
+pub async fn join_auto(value: &str, selector: Option<&str>, user: bool) -> Result<()> {
+    let registration = select_registration(selector, user)?;
+    join(value, registration).await
+}
+fn select_registration(
+    selector: Option<&str>,
+    user: bool,
+) -> Result<Option<(crate::service::Layout, String)>> {
+    let layouts = if user {
+        vec![crate::service::Layout::user()?]
+    } else if selector.is_some() {
+        vec![crate::service::Layout::system()?]
+    } else {
+        vec![
+            crate::service::Layout::user()?,
+            crate::service::Layout::system()?,
+        ]
+    };
+    select_from(layouts, selector)
+}
+fn select_from(
+    layouts: Vec<crate::service::Layout>,
+    selector: Option<&str>,
+) -> Result<Option<(crate::service::Layout, String)>> {
+    let mut candidates = Vec::new();
+    for layout in layouts {
+        if selector.is_some() {
+            let record = crate::service::readable::select(&layout, selector, Some(false))?;
+            return Ok(if record.enabled {
+                Some((layout, record.id))
+            } else {
+                None
+            });
+        }
+        let Ok(records) = crate::service::readable::list(&layout) else {
+            return Ok(None);
+        };
+        for record in records
+            .into_iter()
+            .filter(|record| !record.private && record.enabled)
+        {
+            candidates.push((layout.clone(), record.id));
+        }
+    }
+    Ok(if candidates.len() == 1 {
+        candidates.pop()
+    } else {
+        None
+    })
+}
+async fn join(value: &str, registration: Option<(crate::service::Layout, String)>) -> Result<()> {
     let invitation = Invitation::parse(value)?;
     // Install termination handlers before changing the local terminal mode.
     let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let terminal = Terminal::open()?;
-    let mut gateway = Gateway(&invitation);
+    let mut gateway = Gateway {
+        invitation: &invitation,
+        registration,
+    };
     tokio::select! {
         result=run(&mut gateway,&terminal)=>{result?;},
         _=hangup.recv()=>{},
@@ -48,7 +128,26 @@ pub async fn run<C: Connector>(connector: &mut C, terminal: &Terminal) -> Result
     let size = terminal.size()?;
     let (mut guest, mut welcome) = connector.connect(&mut None, size.0, size.1).await?;
     loop {
-        match relay::run(&mut guest, terminal, &welcome).await {
+        let direct = if matches!(
+            welcome,
+            porthub_terminal::protocol::ViewerEvent::Welcome {
+                direct_transport: true,
+                ..
+            }
+        ) {
+            connector.direct(&guest).await
+        } else {
+            None
+        };
+        let (socket, permission) = match direct {
+            Some(direct) => (Some(direct.socket), Some(direct.permission)),
+            None => (None, None),
+        };
+        match Box::pin(relay::run_with_policy(
+            &mut guest, terminal, &welcome, socket, permission,
+        ))
+        .await
+        {
             Ok(end) if !end.retryable => return Ok(end),
             Err(error) if !super::retryable(&error) => return Err(error),
             _ => {}
@@ -115,5 +214,78 @@ pub async fn run<C: Connector>(connector: &mut C, terminal: &Terminal) -> Result
         // select. Discard that final offline tail before enabling the new shell.
         terminal.discard_offline_input()?;
         (guest, welcome) = connected;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn automatic_registration_selection_requires_one_unambiguous_readable_public_registration(
+    ) -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let layout = crate::service::Layout {
+            user: true,
+            state: root.path().join("native"),
+            releases: root.path().join("releases"),
+            units: root.path().join("units"),
+        };
+        assert!(select_from(vec![layout.clone()], None)?.is_none());
+        let status = crate::service::readable::directory(&layout)?;
+        porthub_terminal::multiplexer::create_directory(&status)?;
+        let record = |id: &str, machine: &str| crate::service::readable::Record {
+            format_version: 1,
+            id: id.into(),
+            machine_id: machine.into(),
+            email: "fixture@example.test".into(),
+            gateway: "https://example.test".into(),
+            private: false,
+            enabled: true,
+            active: Some(true),
+            state: "running".into(),
+            agent_version: "test".into(),
+            ports: 0,
+            route: "public".into(),
+            updated_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            strategy: Default::default(),
+            strategy_override: false,
+            private_status: None,
+        };
+        let id = "a".repeat(64);
+        let other = "b".repeat(64);
+        crate::profile::write_private(
+            &status.join(format!("{id}.json")),
+            &serde_json::to_vec(&record(&id, "1"))?,
+            false,
+        )?;
+        assert_eq!(select_from(vec![layout.clone()], None)?.unwrap().1, id);
+        crate::profile::write_private(
+            &status.join(format!("{other}.json")),
+            &serde_json::to_vec(&record(&other, "2"))?,
+            false,
+        )?;
+        assert!(
+            select_from(vec![layout.clone()], None)?.is_none(),
+            "auto must not guess between accounts"
+        );
+        assert_eq!(
+            select_from(vec![layout.clone()], Some("aaaaaa"))?
+                .unwrap()
+                .1,
+            id
+        );
+        crate::profile::write_private(
+            &status.join(format!("{other}.json")),
+            b"unreadable metadata",
+            true,
+        )?;
+        assert!(
+            select_from(vec![layout], None)?.is_none(),
+            "unknown registrations cannot approve direct traffic"
+        );
+        Ok(())
     }
 }

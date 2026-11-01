@@ -34,6 +34,14 @@ pub enum Command {
         url: String,
         #[arg(long, value_enum, default_value_t = JoinTransport::Ssh)]
         transport: JoinTransport,
+        /// Local registration whose exit/privacy policy controls native auto mode.
+        #[cfg(feature="terminal-direct")]
+        #[arg(long)]
+        registration:Option<String>,
+        /// Select this OS user's registration for native auto mode.
+        #[cfg(feature="terminal-direct")]
+        #[arg(long)]
+        user:bool,
     },
     /// Show, replace or revoke invitation links.
     Invite {
@@ -117,6 +125,9 @@ pub enum JoinTransport {
     /// Experimental native relay; available in terminal-direct builds.
     #[cfg(feature = "terminal-direct")]
     Relay,
+    /// Experimental native direct when a local agent permits it, otherwise relay.
+    #[cfg(feature="terminal-direct")]
+    Auto,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -463,10 +474,20 @@ pub async fn run(command: Command) -> Result<()> {
         Command::ParticipantView { root, id, sidebar } => participant_popup::view(&root, &id, sidebar).await?,
         Command::Named(arguments) => open_named(&root, arguments)?,
         Command::Share(args) => sharing::start(&root, args).await?,
-        Command::Join { url, transport } => match transport {
-            JoinTransport::Ssh => sharing::join(&url).await?,
-            #[cfg(feature = "terminal-direct")]
-            JoinTransport::Relay => crate::terminal_guest::client::join_relay(&url).await?,
+        Command::Join {url,transport,
+            #[cfg(feature="terminal-direct")] registration,
+            #[cfg(feature="terminal-direct")] user,
+        } => {
+            #[cfg(feature="terminal-direct")]
+            ensure!(matches!(transport,JoinTransport::Auto) || (registration.is_none() && !user),
+                "--registration and --user apply only to --transport auto");
+            match transport {
+                JoinTransport::Ssh=>sharing::join(&url).await?,
+                #[cfg(feature="terminal-direct")]
+                JoinTransport::Relay=>crate::terminal_guest::client::join_relay(&url).await?,
+                #[cfg(feature="terminal-direct")]
+                JoinTransport::Auto=>crate::terminal_guest::client::join_auto(&url,registration.as_deref(),user).await?,
+            }
         },
         Command::Invite {
             name,

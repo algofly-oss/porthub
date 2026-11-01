@@ -86,6 +86,9 @@ pub(crate) async fn serve_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
     if message.get("operation").and_then(serde_json::Value::as_str) == Some("agent_stats") {
         return crate::stats::serve(reader,&control,&profile,message,cancel).await;
     }
+    if message.get("operation").and_then(serde_json::Value::as_str) == Some("terminal_guest_policy") {
+        return crate::terminal_policy::serve(reader,&control,&profile,message,cancel).await;
+    }
     if message.get("operation").and_then(serde_json::Value::as_str) == Some("terminal_host") {
         return crate::terminal_transport::serve(reader, &control, &profile, message, cancel).await;
     }

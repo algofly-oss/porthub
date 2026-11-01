@@ -241,7 +241,8 @@ jobs:
         run: |
           python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-terminal --features direct,viewer-history --lib direct::viewer --target ${{ matrix.target }}
           python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-terminal --features direct,viewer-history --test native_direct --target ${{ matrix.target }} -- --include-ignored
-          python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --features terminal-direct --lib terminal_guest --target ${{ matrix.target }}
+          python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --features terminal-direct --lib terminal_ --target ${{ matrix.target }}
+          python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --no-default-features --lib terminal_policy --target ${{ matrix.target }}
           python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --features terminal-direct --bin porthub cli_tests::native_terminal_join_is_opt_in_and_does_not_require_system_privileges --target ${{ matrix.target }}
       - name: Verify local terminals and native participant controls
         if: inputs.verify_only == true && runner.os != 'Windows'

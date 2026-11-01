@@ -203,8 +203,8 @@ single-data-channel answers. Its in-memory two-peer test pumps real
 ICE/DTLS/SCTP packets and checks bidirectional binary delivery without binding a
 socket. Candidate validation and receive-buffer limits are shared with the host
 answerer. CLI joins default to SSH. Experimental `terminal-direct` builds also
-accept `terminal join URL --transport relay`; native direct selection and the
-remaining release checks still need integration.
+accept `terminal join URL --transport relay` and policy-controlled `--transport auto`;
+the remaining account reporting and release checks still need integration.
 
 The full integration check also accepts `PORTHUB_TEST_TERMINAL_DIRECT=blocked`.
 It rejects the browser's direct handshake while keeping the real SDK, broker and
@@ -285,8 +285,8 @@ native guest. Read-only F7/navigation issues history requests rather than shell
 input. PTY/WebSocket tests cover both roles, exact raw bytes, history rendering,
 resize, cancellation and terminal restoration. These tests use isolated framed
 WebSockets and a real local PTY. The CLI now selects the experimental runner with
-`--transport relay`; native direct negotiation and release/platform validation
-remain pending. Windows guest TTY support also
+`--transport relay` or experimental `--transport auto`; account reporting and
+release/platform validation remain pending. Windows guest TTY support also
 remains pending; the new raw descriptor implementation is Unix-only.
 
 ### Experimental native CLI relay and bounded recovery
@@ -323,7 +323,7 @@ checks on Linux x86_64 and macOS arm64, without enabling the experimental featur
 in published binaries. These tests use isolated local fixtures, not production
 accounts or live machine credentials.
 
-### Native direct transport controller (not enabled by CLI selection)
+### Native direct transport controller (experimental auto selection)
 
 The optional native controller now runs real ICE/DTLS/SCTP over a caller-supplied,
 concrete bound UDP socket. The caller must approve that socket against its exit
@@ -331,7 +331,9 @@ and privacy policy before use. It opens no additional interfaces or implicit
 STUN/TURN services. Authorization, SDP and role assignment still use the gateway.
 The shared native TTY runner accepts this approved socket through `run_with_udp`;
 normal CLI `--transport relay` continues to pass no socket and uses the gateway.
-Automatic CLI policy/socket selection is not implemented by this step.
+Experimental `--transport auto` now selects a local registration, obtains its
+short-lived broker permission, and uses the existing TLS connection's local source
+address for UDP. Unknown or ambiguous local policy stays on relay.
 
 The controller uses the bounded viewer delivery journals for both paths. Direct
 input ACK stalls switch to sequenced relay after 1 s without resetting epochs or
@@ -347,7 +349,7 @@ error, while transport stalls can use the bounded recovery path.
 RTC state and the reusable UDP receive buffer live on the heap so introducing
 this path does not overflow ordinary test-thread stacks. Per-controller counters
 record actual UDP bytes including negotiation, overhead and retransmission; these
-are not yet account dashboard reporting. Policy selection, approved NAT settings,
+are not yet account dashboard reporting. Approved NAT settings,
 account-scoped traffic reporting and production release gates remain necessary
 before enabling automatic direct joins.
 
@@ -367,3 +369,39 @@ forcing relay; output ACKs may use the gateway while that sender is full. The
 real UDP test sends a full 64 KiB binary input window and verifies the direct
 path remains active, then deliberately suppresses application ACKs and verifies
 relay replay applies the later input only once.
+
+### Native auto selection and revocable local permission
+
+Experimental Unix builds accept `porthub terminal join URL --transport auto`.
+The default remains SSH. Auto uses native relay when the gateway/host does not
+advertise direct support or a trusted local permission cannot be obtained. It
+requires no PortHub login to use the invitation. Direct eligibility requires a
+local enrolled agent with a live, enabled, securely paired private identity,
+fresh status, valid lease, no selected exit, no system-wide Tor preference and
+no prefer-gateway path preference. An unpaired or unknown local policy does not
+approve direct UDP. `--registration ID` and `--user` explicitly select the local
+policy owner; without them, automatic selection requires exactly one enabled
+public registration across the system and user layouts. Display records only
+locate that agent and cannot grant permission.
+
+The credential-free `terminal_guest_policy` operation uses the broker's existing
+OS-peer authorization. Its only response fields are `allowed` and `expires_at`;
+registration tokens, account identities and private profile paths stay inside
+the service. Approval expires within 4 s and is renewed every 2 s. The client
+checks expiry against wall time and revokes on silence, disconnect, malformed
+response or denial. The settings reader remains available when the Tor engine
+is compiled out, so that build choice cannot ignore a saved system-wide setting.
+
+The native controller checks the permission before UDP transmission and before
+choosing direct delivery, including already queued SCTP data. Revocation releases
+the socket and continues with the same sequenced relay journals, without creating
+a replacement guest or shell. No cached permission approves a new attachment;
+recovery consults the local agent again. Tests cover permission expiry, live
+paired-policy revocation, cross-gateway rejection, ambiguous registrations,
+Tor-free builds honoring saved settings, queued UDP suppression, and a real PTY
+guest surviving privacy revocation without repeated shell input. Linux/macOS CI
+includes these policy tests and the no-default-features settings checks.
+
+This path is still experimental and is not enabled in ordinary published builds.
+Account-scoped traffic reporting, approved NAT configuration, cross-platform
+packaging and authorized production rollout remain release gates.
