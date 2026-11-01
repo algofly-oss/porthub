@@ -256,3 +256,16 @@ reordered output, role enforcement, bounded queues and sequence exhaustion.
 This is protocol state only: `terminal join` still invokes ordinary SSH. Native
 socket/TTY integration, direct-path privacy and traffic reporting, packaging and
 live rollout remain required before enabling native direct joins.
+
+The experimental `terminal_guest` module now supplies bounded native WebSocket
+signaling. It validates HTTPS invitations, strips query/fragment material from
+the gateway URL, verifies public TLS trust, and sends the invitation or recovery
+capability only in the first encrypted message. It handles recovery-before-Welcome
+ordering and application heartbeats, rejects duplicate welcomes and pre-Welcome
+output, and blocks read-only input on both legacy and sequenced carriers.
+Recovery credentials remain in memory; their grace deadline starts when the
+caller takes the credential after disconnection. Connection, authentication,
+signaling writes and missing heartbeats have finite timeouts. Tests use real
+WebSocket framing over isolated duplex streams and an untrusted local TLS server;
+they do not yet prove a native TTY or direct connection through the live gateway.
+This module is compiled only with the experimental `terminal-direct` feature.

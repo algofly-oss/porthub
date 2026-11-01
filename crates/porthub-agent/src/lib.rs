@@ -36,6 +36,8 @@ pub mod http_tools;
 
 mod exposure_protocol;
 mod terminal_transport;
+#[cfg(feature = "terminal-direct")]
+pub mod terminal_guest;
 #[cfg(unix)]
 pub mod terminal_runtime;
 #[cfg(unix)]
