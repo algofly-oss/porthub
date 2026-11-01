@@ -3,6 +3,7 @@ import { IconCopy, IconPlugConnected, IconPlugConnectedX, IconTerminal2, IconUse
 import { Button } from "@/components/ui/button";
 import HistoryPanel from "./HistoryPanel";
 import useTerminalManagement from "./useTerminalManagement";
+import { TerminalTransport } from "@/lib/terminalTransport";
 
 const MAX_PENDING = 1024 * 1024;
 function bytesToBase64(bytes) {
@@ -13,6 +14,7 @@ function bytesToBase64(bytes) {
 
 export default function SharedTerminal() {
   const container = useRef(null), terminal = useRef(null), connection = useRef(null);
+  const transport = useRef(null);
   const permission = useRef(true), copySelection = useRef(false);
   const recovery = useRef(null), manualDisconnect = useRef(false), retryTimer = useRef(null);
   const retryDeadline = useRef(null), retryCount = useRef(0);
@@ -75,6 +77,11 @@ export default function SharedTerminal() {
         if (bytes.length > 65536 || socket.bufferedAmount > 262144) {
           setError("Input is too large or the connection is busy. Wait, then paste a smaller section."); return;
         }
+        if (transport.current) {
+          try { transport.current.input(bytes); }
+          catch { setError("Input is awaiting acknowledgement. Wait, then paste a smaller section."); }
+          return;
+        }
         for (let offset = 0; offset < bytes.length; offset += 16384)
           socket.send(JSON.stringify({ type: "input", data: bytesToBase64(bytes.subarray(offset, offset + 16384)) }));
       });
@@ -119,6 +126,7 @@ export default function SharedTerminal() {
       try {
         if (typeof data !== "string" || data.length > 32768) throw new Error("Invalid terminal frame");
         const event = JSON.parse(data);
+        if (transport.current?.event(event)) return;
         if (event.type === "history") {
           const page=event.page, pending=history.current.pending;
           if (!pending || page?.request!==pending.request) return;
@@ -151,11 +159,23 @@ export default function SharedTerminal() {
           if(typeof event.session==="string" && /^[a-f0-9]{32}$/.test(event.session))setSessionId(event.session);
           try { sessionStorage.setItem(storageKey, JSON.stringify(recovery.current)); } catch { /* Memory recovery still works when tab storage is unavailable. */ }
         } else if (event.type === "welcome") {
-          if (typeof event.name !== "string" || typeof event.read_only !== "boolean") throw new Error("Invalid session");
+          if (welcome || typeof event.name !== "string" || typeof event.read_only !== "boolean") throw new Error("Invalid session");
           history.current.supported=event.history_snapshots===true;
           welcome = true; retryDeadline.current = null; retryCount.current = 0; clearTimeout(handshake); setSession(event); setStatus("Connected");
           permission.current = event.read_only; instance.options.disableStdin = event.read_only;
           instance.reset(); instance.focus();
+          if (event.direct_transport === true && typeof RTCPeerConnection !== "undefined") {
+            transport.current = new TerminalTransport({
+              readOnly: event.read_only,
+              send: message => {
+                if (socket.readyState !== WebSocket.OPEN || socket.bufferedAmount > 262144) throw new Error("Terminal gateway is busy");
+                socket.send(JSON.stringify(message));
+              },
+              write: bytes => new Promise(resolve => instance.write(bytes, resolve)),
+              fail: reason => { if (alive) { closedReason = reason; socket.close(); } },
+            });
+            transport.current.start();
+          }
         } else if (event.type === "output") {
           if (!welcome || typeof event.data !== "string" || event.data.length > 21848) throw new Error("Invalid terminal output");
           const decoded = atob(event.data), bytes = Uint8Array.from(decoded, char => char.charCodeAt(0));
@@ -173,6 +193,7 @@ export default function SharedTerminal() {
     };
     socket.onclose = () => {
       if (!alive) return;
+      transport.current?.close(); transport.current = null;
       clearTimeout(handshake); permission.current = true; instance.options.disableStdin = true;
       setMembers([]);
       if(history.current.snapshot)history.current.stale=true;
@@ -190,7 +211,7 @@ export default function SharedTerminal() {
       if (closedReason) setError(closedReason);
     };
     socket.onerror = () => { if (alive) setError("Could not reach the terminal host. Check the connection and try again."); };
-    return () => { alive = false; clearTimeout(handshake); clearTimeout(retryTimer.current); socket.close(); if (connection.current === socket) connection.current = null; };
+    return () => { alive = false; transport.current?.close(); transport.current = null; clearTimeout(handshake); clearTimeout(retryTimer.current); socket.close(); if (connection.current === socket) connection.current = null; };
   }, [ready, attempt]);
 
   useEffect(()=>{
