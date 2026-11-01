@@ -46,6 +46,13 @@ const { join } = require('node:path');
   assert.equal(rendered.length, 1, 'relay replay cannot render the same pending frame twice');
   release(); await Promise.resolve(); await Promise.resolve();
   assert.equal(decode(packets.pop()).sequence, 1);
+  // A delayed relay replay can cross the channel's open event. Fresh direct
+  // output must restore direct acknowledgements rather than stay on relay.
+  channel.onmessage({ data: encodePacket({ kind: 'data', epoch: outputEpoch, sequence: 2, payload: keys }).buffer });
+  release(); await Promise.resolve(); await Promise.resolve();
+  assert.equal(direct.length, 1, 'fresh direct output must restore the direct return path');
+  assert.equal(parsePacket(direct.pop()).sequence, 2);
+  transport.fallback();
   transport.input(keys);
   const command = packets.pop();
   transport.fallback();

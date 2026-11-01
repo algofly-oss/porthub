@@ -164,8 +164,12 @@ export class TerminalTransport {
       if (!this.inputJournal.pendingFrames) { clearTimeout(this.inputTimer); this.inputTimer = null; this.inputSince = null; }
       return;
     }
-    if (!direct) { this.relay = true; this.changed("relay"); }
     this.outputJournal.stage(packet);
+    // Relay replay may arrive after the channel opens. Valid direct output
+    // proves that carrier is live again, including for return ACKs/readers.
+    if (direct && this.channel?.readyState === "open") {
+      this.relay = false; this.changed("direct");
+    } else if (!direct) { this.relay = true; this.changed("relay"); }
     if (!this.rendering) this.drain();
   }
   async drain() {

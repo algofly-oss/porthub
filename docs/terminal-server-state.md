@@ -31,6 +31,10 @@ command's complete flags with `--help`.
 
 The continuous release workflow publishes its complete validated client bundle
 for production runs. Explicit verification-only dispatches never publish.
+Packaged/browser teardown checks query `--all` for ended history and separately
+verify that ordinary listings hide ended sessions. Browser delivery also
+restores the direct return path when valid direct output follows a delayed relay
+replay; the regression verifies that acknowledgements resume over that channel.
 
 ## Shipped 1.10.0 verification
 

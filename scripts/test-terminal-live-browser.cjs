@@ -89,7 +89,8 @@ async function main() {
     ssh.stdin.write(`printf 'WRITERSTILL%s\\n' '${input.marker}'\r`);await waitSSH(ssh,'WRITERSTILL'+input.marker);
     ssh.stdin.write('exit\r');
     await new Promise((resolve,reject)=>{const timeout=setTimeout(()=>reject(Error('Explicit exit did not close SSH')),10000);ssh.once('close',()=>{clearTimeout(timeout);resolve()})});
-    const sessions=JSON.parse(owner('list','--json'));
+    assert(!JSON.parse(owner('list','--json')).some(session=>session.name===input.name));
+    const sessions=JSON.parse(owner('list','--all','--json'));
     assert(sessions.some(session=>session.name===input.name&&session.state==='ended'));
     assert.deepEqual(errors,[]);
     console.log('PASS live CLI/broker/gateway: account-free browser and stock SSH, shared output/history, disconnect persistence, revoked-invite recovery, owner removal and explicit exit');

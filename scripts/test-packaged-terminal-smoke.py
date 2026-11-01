@@ -41,9 +41,10 @@ def main():
             wait_capture('PERSISTpackagedstate')
             call('terminal', 'tmux', 'crosssmoke', '--', 'send-keys', '-t', '%0', 'C-d')
             deadline = time.monotonic()+15
-            while next(row for row in json.loads(call('terminal', 'list', '--json')) if row['id']==job['id'])['state'] != 'ended':
+            while next(row for row in json.loads(call('terminal', 'list', '--all', '--json')) if row['id']==job['id'])['state'] != 'ended':
                 assert time.monotonic()<deadline, 'explicit Ctrl+D must end the final shell'
                 time.sleep(.1)
+            assert not any(row['id'] == job['id'] for row in json.loads(call('terminal', 'ls', '--json'))), 'ended sessions must be hidden by default'
         finally:
             with contextlib.suppress(Exception):
                 call('terminal', 'stop', 'crosssmoke')
