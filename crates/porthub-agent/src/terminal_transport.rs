@@ -21,6 +21,30 @@ struct Request {
 
 struct GatewayFeatures { snapshots: bool, direct: bool }
 
+// Read only the securely paired registration. Display metadata and unrelated
+// accounts cannot grant permission to bypass an application's selected exit.
+fn direct_allowed(path: &std::path::Path, public: &crate::profile::Profile) -> bool {
+    let checked = || -> Result<bool> {
+        let Some(module) = crate::unified::load(path, public)? else { return Ok(true); };
+        if !module.enabled { return Ok(false); }
+        #[cfg(feature = "local-tor")]
+        if crate::private_network::tor_preferences::load(&module.private_profile)?.system_wide {
+            return Ok(false);
+        }
+        let status = crate::runtime::status(&module.private_profile)?;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+        Ok(direct_status_allowed(&status, now))
+    };
+    checked().unwrap_or(false)
+}
+
+fn direct_status_allowed(status: &crate::runtime::Status, now: u64) -> bool {
+    status.state == "running"
+        && status.updated_at <= now
+        && now.saturating_sub(status.updated_at) <= 30
+        && status.private_status.as_ref().is_some_and(|private| private.lease_valid && private.exit.is_none())
+}
+
 async fn open(
     control: &crate::control::Control,
 ) -> Result<(WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>, GatewayFeatures)> {
@@ -96,6 +120,7 @@ pub(crate) async fn frame<S: AsyncRead + Unpin>(
 pub(crate) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     mut local: BufReader<S>,
     control: &crate::control::Control,
+    profile: &std::path::Path,
     message: serde_json::Value,
     cancel: CancellationToken,
 ) -> Result<()> {
@@ -118,14 +143,22 @@ pub(crate) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     // Older gateways reject unknown fields. Advertise only capabilities that
     // both the local host and the authenticated gateway support.
     request.hello.history_snapshots &= features.snapshots;
-    request.hello.direct_transport &= features.direct;
+    request.hello.direct_transport &= features.direct && direct_allowed(profile, control.profile());
     remote
         .send(Message::Text(serde_json::to_string(&request.hello)?.into()))
         .await?;
     let mut partial = Vec::new();
+    let mut policy_tick = tokio::time::interval(Duration::from_secs(5));
+    policy_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             _ = cancel.cancelled() => break,
+            _ = policy_tick.tick(), if request.hello.direct_transport => {
+                // Stop the transport generation if an exit/privacy policy is
+                // selected or becomes unknown. The user supervisor reconnects
+                // with relay-only negotiation and retains its existing shell.
+                if !direct_allowed(profile, control.profile()) { break; }
+            }
             bytes = frame(&mut local, &mut partial) => {
                 let bytes = match bytes { Ok(bytes) => bytes, Err(_) => break };
                 let output: HostOutput = serde_json::from_slice(&bytes)?;
@@ -181,12 +214,96 @@ mod tests {
 
     #[tokio::test]
     async fn authenticated_broker_preserves_frames_and_keeps_machine_secret_private() -> Result<()> {
-        for snapshots in [false,true] {for direct in [false,true] {broker_gateway(snapshots,direct).await?;}}
+        for snapshots in [false,true] {for direct in [false,true] {broker_gateway(snapshots,direct,false,false).await?;}}
+        broker_gateway(true,true,true,false).await?;
         Ok(())
     }
 
-    async fn broker_gateway(snapshots: bool, direct: bool) -> Result<()>
+    #[tokio::test]
+    async fn newly_unavailable_exit_policy_ends_only_the_direct_transport_generation() -> Result<()> {
+        broker_gateway(true,true,false,true).await
+    }
+
+    #[test]
+    fn direct_requires_fresh_known_policy_without_a_selected_exit() -> Result<()> {
+        let mut status: crate::runtime::Status = serde_json::from_value(serde_json::json!({
+            "pid":1,"state":"running","agent_version":"test","config_version":"", "service_count":0,
+            "route":"private","updated_at":100,"update_request_id":"",
+            "private_status":{"revision":1,"grants":0,"dns_rules":0,"lease_valid":true,"exit":null}
+        }))?;
+        assert!(direct_status_allowed(&status,100));
+        assert!(direct_status_allowed(&status,130));
+        assert!(!direct_status_allowed(&status,131));
+        assert!(!direct_status_allowed(&status,99));
+        status.private_status.as_mut().unwrap().lease_valid=false;
+        assert!(!direct_status_allowed(&status,100));
+        status.private_status.as_mut().unwrap().lease_valid=true;
+        status.state="connecting".into();
+        assert!(!direct_status_allowed(&status,100));
+        status.state="running".into();
+        for traffic_mode in [porthub_mesh::exit_policy::TrafficMode::All,porthub_mesh::exit_policy::TrafficMode::InternetOnly,porthub_mesh::exit_policy::TrafficMode::LanOnly] {
+            status.private_status.as_mut().unwrap().exit=Some(crate::runtime::ExitStatus {
+                name:"exit".into(),selection:"sticky".into(),traffic_mode,state:"pending".into(),
+                peers:0,available:0,allow_direct_fallback:true,peer_names:vec![],
+            });
+            assert!(!direct_status_allowed(&status,100));
+        }
+        status.private_status=None;
+        assert!(!direct_status_allowed(&status,100));
+        Ok(())
+    }
+
+    #[cfg(feature = "local-tor")]
+    #[test]
+    fn secure_paired_policy_blocks_system_tor_and_a_stopped_owner() -> Result<()> {
+        let fixture=tempfile::tempdir()?;
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(fixture.path(),std::fs::Permissions::from_mode(0o700))?;
+        }
+        let public:crate::profile::Profile=serde_json::from_value(serde_json::json!({
+            "server":"https://example.test","machine_id":"0123456789abcdef01234567","token":"public-secret"
+        }))?;
+        let private:crate::private_profile::Profile=serde_json::from_value(serde_json::json!({
+            "server":"https://example.test","workspace":"111111111111111111111111",
+            "peer_id":"111111111111111111111111:0123456789abcdef01234567","token":"c".repeat(64)
+        }))?;
+        let public_path=fixture.path().join("public.json");
+        let identity=crate::service::RegistrationProfile::Private(private.clone()).identity();
+        let private_path=fixture.path().join(format!("{identity}.json"));
+        crate::profile::write_private(&private_path,&serde_json::to_vec(&private)?,false)?;
+        crate::unified::save(&public_path,&public,&crate::unified::Configuration {
+            format_version:1,private_profile:private_path.clone(),enabled:true,
+        })?;
+        let lease=crate::profile::Lease::acquire(&private_path)?;
+        let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+        let status=serde_json::json!({"pid":std::process::id(),"state":"running","agent_version":"test",
+            "config_version":"","service_count":0,"route":"private","updated_at":now,"update_request_id":"",
+            "private_status":{"revision":1,"grants":0,"dns_rules":0,"lease_valid":true,"exit":null}});
+        crate::profile::write_private(&crate::profile::sibling(&private_path,".status.json"),&serde_json::to_vec(&status)?,false)?;
+        assert!(direct_allowed(&public_path,&public));
+        crate::private_network::tor_preferences::save(&private_path,crate::private_network::tor_preferences::Settings {
+            system_wide:true,..Default::default()
+        })?;
+        assert!(!direct_allowed(&public_path,&public));
+        crate::private_network::tor_preferences::save(&private_path,Default::default())?;
+        assert!(direct_allowed(&public_path,&public));
+        drop(lease);
+        assert!(!direct_allowed(&public_path,&public));
+        Ok(())
+    }
+
+    async fn broker_gateway(snapshots: bool, direct: bool, blocked: bool, revoke: bool) -> Result<()>
     {
+        let fixture=tempfile::tempdir()?;
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(fixture.path(),std::fs::Permissions::from_mode(0o700))?;
+        }
+        let path=fixture.path().join("public.json");
+        let policy_path=crate::unified::configuration_path(&path);
+        if blocked {crate::profile::write_private(&policy_path,b"unreadable policy",false)?;}
+        let negotiated_direct=direct && !blocked;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let profile: crate::profile::Profile = serde_json::from_value(serde_json::json!({
             "server":format!("http://{}",listener.local_addr()?),
@@ -221,8 +338,8 @@ mod tests {
             let first = socket.next().await.unwrap()?.into_text()?;
             let hello: HostHello = serde_json::from_str(&first)?;
             assert_eq!(hello.history_snapshots, snapshots);
-            assert_eq!(hello.direct_transport,direct);
-            assert_eq!(first.contains("direct_transport"),direct);
+            assert_eq!(hello.direct_transport,negotiated_direct);
+            assert_eq!(first.contains("direct_transport"),negotiated_direct);
             assert_eq!(first.contains("history_snapshots"), snapshots);
             assert!(!first.contains("broker-only-machine-secret"));
             socket
@@ -243,7 +360,10 @@ mod tests {
                 serde_json::from_str::<HostOutput>(&output)?,
                 HostOutput::Pong
             ));
-            socket.close(None).await?;
+            if revoke {
+                let closed=tokio::time::timeout(Duration::from_secs(8),socket.next()).await?;
+                ensure!(matches!(closed,None|Some(Err(_))|Some(Ok(Message::Close(_)))),"policy revocation must close the old direct transport");
+            } else { socket.close(None).await?; }
             Ok::<_, anyhow::Error>(())
         });
         let (local, service) = tokio::io::duplex(65536);
@@ -252,7 +372,7 @@ mod tests {
             service,
             control,
             CancellationToken::new(),
-            std::path::PathBuf::from("unused-test-profile"),
+            path,
         ));
         let mut local = BufReader::new(local);
         let request = serde_json::json!({"operation":"terminal_host","hello":{ "history_snapshots":true,"direct_transport":true,
@@ -273,7 +393,8 @@ mod tests {
             serde_json::from_slice::<HostEvent>(&response)?,
             HostEvent::Ready { .. }
         ));
-        tokio::time::timeout(Duration::from_secs(5), owner).await???;
+        if revoke {crate::profile::write_private(&policy_path,b"newly unavailable policy",false)?;}
+        tokio::time::timeout(Duration::from_secs(8), owner).await???;
         gateway.await??;
         Ok(())
     }

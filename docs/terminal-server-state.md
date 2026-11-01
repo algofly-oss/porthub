@@ -165,3 +165,21 @@ Installing a new binary alone does not upgrade an already running supervisor.
 Do not use `terminal stop` as an upgrade workaround: that explicitly destroys the
 workspace. A safe rollout with no active shared sessions avoids this transition
 hazard; any supervisor migration needs its own preservation test.
+
+### Development direct-transport policy gate
+
+The experimental browser-compatible direct protocol remains disabled by the
+shipped sharing supervisor. Its broker gate reads the securely paired private
+registration, rather than a display record or another account's configuration.
+A paired registration must have a running owner, a valid policy lease and status
+no older than 30 seconds. A selected exit or local system-wide Tor preference
+keeps terminal sharing on the gateway. Missing, malformed or disabled paired
+policy also declines direct negotiation. A registration without a paired private
+module has no such exit policy to override.
+
+The broker rechecks an active direct generation every five seconds. If permission
+becomes unavailable it closes that generation; the supervisor retains the shell
+and reconnects through relay-only negotiation. This protects the paired PortHub
+exit policy; it does not detect arbitrary third-party VPN or proxy software.
+Enabling direct transport still requires the host SDK configuration, compatible
+gateway negotiation and account-scoped traffic reporting before rollout.
