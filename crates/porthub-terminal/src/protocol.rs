@@ -114,6 +114,10 @@ impl Options {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostHello {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub direct_transport: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub history_snapshots: bool,
     pub id: String,
     pub secret: String,
     pub write_token: String,
@@ -214,6 +218,8 @@ impl InvitationUpdate {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryChunk {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<String>,
     pub request: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane: Option<String>,
@@ -243,6 +249,9 @@ pub fn history_request(pane: &str, before: u32, lines: u16) -> Result<()> {
 }
 impl HistoryChunk {
     pub fn validate(&self) -> Result<()> {
+        if let Some(snapshot) = &self.snapshot {
+            ensure!(token(snapshot, 32) && self.pane.is_some(), "invalid anchored history response");
+        }
         if let Some(pane) = &self.pane {
             ensure!(!pane.is_empty(), "invalid resolved history pane");
             history_request(pane, self.before, self.lines.max(1))?;
@@ -261,6 +270,8 @@ impl HistoryChunk {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostEvent {
+    Delivery { client: u64, packet: DeliveryPacket },
+    DirectOffer { client: u64, request: u32, description: DirectDescription },
     InvitationsRotated {
         revision: u64,
         expires_at: i64,
@@ -271,6 +282,10 @@ pub enum HostEvent {
     },
     InvitationsRevoked,
     History {
+        #[serde(default, skip_serializing_if = "is_false")]
+        freeze: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        snapshot: Option<String>,
         client: u64,
         request: u32,
         pane: String,
@@ -278,6 +293,10 @@ pub enum HostEvent {
         lines: u16,
     },
     Ready {
+        #[serde(default, skip_serializing_if = "is_false")]
+        direct_transport: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        history_snapshots: bool,
         #[serde(default)]
         invitations_revoked: bool,
         ssh_host: String,
@@ -317,6 +336,9 @@ pub enum HostEvent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostOutput {
+    Delivery { client: u64, packet: DeliveryPacket },
+    DirectAnswer { client: u64, answer: DirectAnswer },
+    DirectUnavailable { client: u64, request: u32 },
     RotateInvitations { update: InvitationUpdate },
     RevokeInvitations,
     History { client: u64, page: HistoryChunk },
@@ -330,6 +352,9 @@ pub enum HostOutput {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ViewerEvent {
+    Delivery { packet: DeliveryPacket },
+    DirectAnswer { answer: DirectAnswer },
+    DirectUnavailable { request: u32 },
     History {
         page: HistoryChunk,
     },
@@ -340,6 +365,10 @@ pub enum ViewerEvent {
         reconnect_timeout: u32,
     },
     Welcome {
+        #[serde(default, skip_serializing_if = "is_false")]
+        direct_transport: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        history_snapshots: bool,
         name: String,
         read_only: bool,
         expires_at: i64,
@@ -362,8 +391,14 @@ pub enum ViewerEvent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ViewerInput {
+    Delivery { packet: DeliveryPacket },
+    DirectOffer { request: u32, description: DirectDescription },
     Redraw,
     History {
+        #[serde(default, skip_serializing_if = "is_false")]
+        freeze: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        snapshot: Option<String>,
         request: u32,
         pane: String,
         before: u32,
@@ -404,6 +439,21 @@ pub fn encode_data(bytes: &[u8]) -> String {
 mod history_tests {
     use super::*;
     #[test]
+    fn frozen_history_requires_an_opaque_anchor_and_resolved_pane() {
+        let legacy = serde_json::json!({"request":1,"data":"","done":true,"total":0,"before":0,"lines":0,"truncated":false});
+        let mut page: HistoryChunk = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(serde_json::to_value(&page).unwrap().get("snapshot").is_none());
+        page.snapshot = Some("a".repeat(32));
+        assert!(page.validate().is_err());
+        page.pane = Some("%42".into());
+        page.validate().unwrap();
+        for invalid in ["", "%42", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "../another-session"] {
+            page.snapshot = Some(invalid.into());
+            assert!(page.validate().is_err());
+        }
+    }
+
+    #[test]
     fn resolved_pane_is_optional_for_older_hosts_and_strict_when_present() {
         let legacy = serde_json::json!({"request":1,"data":"","done":true,"total":0,"before":0,"lines":0,"truncated":false});
         let mut page: HistoryChunk = serde_json::from_value(legacy).unwrap();
@@ -421,5 +471,83 @@ mod history_tests {
         }
         page.pane = Some("%42".into());
         page.validate().unwrap();
+    }
+}
+
+fn is_false(value: &bool) -> bool { !*value }
+
+/// SDP contains ICE credentials and addresses; diagnostics must never print it.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DirectDescription(pub String);
+impl std::fmt::Debug for DirectDescription {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("DirectDescription([redacted])") }
+}
+impl DirectDescription {
+    pub fn validate(&self, kind: &str) -> anyhow::Result<()> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Description { r#type:String, sdp:String }
+        ensure!(self.0.len()<=16384,"terminal direct description exceeds limit");
+        let value:Description=serde_json::from_str(&self.0).map_err(|_|anyhow::anyhow!("invalid terminal direct description"))?;
+        ensure!(value.r#type==kind,"unexpected terminal direct description type");
+        ensure!(value.sdp.is_ascii() && !value.sdp.contains('\0'),"invalid terminal direct SDP");
+        let lines:Vec<_>=value.sdp.lines().collect();
+        ensure!(lines.len()<=256 && lines.iter().filter(|line|line.starts_with("a=candidate:")).count()<=64,"terminal direct SDP exceeds limits");
+        let media:Vec<_>=lines.iter().filter(|line|line.starts_with("m=")).collect();
+        ensure!(media.len()==1 && media[0].starts_with("m=application "),"terminal direct SDP must contain one application section");
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirectAnswer {
+    pub request: u32,
+    pub description: DirectDescription,
+    pub input_epoch: String,
+    pub output_epoch: String,
+}
+impl DirectAnswer {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        self.description.validate("answer")?;
+        ensure!(token(&self.input_epoch,32) && token(&self.output_epoch,32) && self.input_epoch!=self.output_epoch,"invalid terminal direct epochs");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod direct_signal_tests {
+    use super::*;
+    #[test]
+    fn descriptions_are_bounded_typed_and_redacted() -> anyhow::Result<()> {
+        let description=DirectDescription(serde_json::json!({"type":"offer","sdp":"v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=ice-pwd:never-log-this\r\n"}).to_string());
+        description.validate("offer")?;
+        assert!(!format!("{:?}",ViewerInput::DirectOffer {request:1,description:description.clone()}).contains("never-log-this"));
+        assert!(description.validate("answer").is_err());
+        assert!(DirectDescription("x".repeat(16385)).validate("offer").is_err());
+        assert!(DirectDescription(serde_json::json!({"type":"offer","sdp":"m=audio 9 RTP/AVP 0","client":123}).to_string()).validate("offer").is_err());
+        assert!(serde_json::from_value::<ViewerInput>(serde_json::json!({"type":"direct_offer","request":1,"description":description.0,"read_only":false})).is_err());
+        Ok(())
+    }
+}
+
+/// A bounded relay carrier for the same binary frame used by WebRTC. Payloads
+/// remain redacted in protocol diagnostics and never supply an authorization role.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DeliveryPacket(pub String);
+impl std::fmt::Debug for DeliveryPacket {
+    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {f.write_str("DeliveryPacket([redacted])")}
+}
+impl DeliveryPacket {
+    pub fn encode(message:&crate::delivery::Message)->anyhow::Result<Self> {
+        use base64::Engine;
+        Ok(Self(base64::engine::general_purpose::STANDARD.encode(message.encode()?)))
+    }
+    pub fn decode(&self)->anyhow::Result<crate::delivery::Message> {
+        use base64::Engine;
+        ensure!(self.0.len()<=crate::delivery::MAX_WIRE.div_ceil(3)*4,"terminal delivery envelope exceeds limit");
+        let bytes=base64::engine::general_purpose::STANDARD.decode(&self.0).map_err(|_|anyhow::anyhow!("invalid terminal delivery encoding"))?;
+        crate::delivery::Message::parse(&bytes)
     }
 }

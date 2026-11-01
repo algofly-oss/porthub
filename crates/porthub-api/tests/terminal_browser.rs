@@ -15,6 +15,8 @@ use tokio_tungstenite::{
     connect_async,
     tungstenite::{client::IntoClientRequest, Message},
 };
+#[path = "support/terminal_native.rs"]
+mod native;
 mod support;
 use support::Case;
 struct Cleanup(Workspace);
@@ -37,6 +39,7 @@ async fn ordinary_ssh_and_https_share_one_tls_port_with_real_terminal_participan
 static BROWSER_FIXTURE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 async fn exercise(multiplex: bool) -> Result<()> {
     let _exclusive = BROWSER_FIXTURE.lock().await;
+    let _ = tracing_subscriber::fmt().with_env_filter("porthub_api::terminal=warn").try_init();
     let ui = std::env::var("PORTHUB_TEST_UI_ORIGIN").context("set isolated UI origin")?;
     let fixture = tempfile::Builder::new()
         .prefix("phterm-browser-")
@@ -183,20 +186,39 @@ async fn exercise(multiplex: bool) -> Result<()> {
         .await?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let origin = format!("http://{}", listener.local_addr()?);
-    let router = case.router.clone();
+    // Fault injection stays in this loopback-only test router. Inject upstream
+    // of the real PWA so its network handling is exercised rather than bypassed.
+    let unavailable=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let requests=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let router=case.router.clone().layer(axum::middleware::from_fn(move |request:axum::extract::Request,next:axum::middleware::Next| {
+        let unavailable=unavailable.clone();let requests=requests.clone();
+        async move {
+            use axum::response::IntoResponse;
+            use std::sync::atomic::Ordering;
+            let path=request.uri().path();
+            if request.method()==axum::http::Method::POST {
+                match path {
+                    "/__fixture/terminal-traffic/unavailable"=>{unavailable.store(true,Ordering::Relaxed);return axum::http::StatusCode::NO_CONTENT.into_response();},
+                    "/__fixture/terminal-traffic/available"=>{unavailable.store(false,Ordering::Relaxed);return axum::http::StatusCode::NO_CONTENT.into_response();},
+                    "/__fixture/terminal-traffic/requests"=>return axum::Json(serde_json::json!({"requests":requests.load(Ordering::Relaxed)})).into_response(),
+                    _=>{},
+                }
+            }
+            if request.method()==axum::http::Method::GET && path=="/api/terminal/traffic" {
+                requests.fetch_add(1,Ordering::Relaxed);
+                if unavailable.load(Ordering::Relaxed) {return (axum::http::StatusCode::SERVICE_UNAVAILABLE,axum::Json(serde_json::json!({"detail":"fixture reporting outage"}))).into_response();}
+            }
+            next.run(request).await
+        }
+    }));
     let _server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
         axum::serve(listener, router).await
     }));
-    let mut request = format!("{}/api/terminal/host", origin.replacen("http:", "ws:", 1))
-        .into_client_request()?;
-    request
-        .headers_mut()
-        .insert("x-porthub-machine-id", machine.to_hex().parse()?);
-    request
-        .headers_mut()
-        .insert("authorization", format!("Bearer {credential}").parse()?);
-    let (mut socket, _) = connect_async(request).await?;
+    let direct = std::env::var_os("PORTHUB_TEST_TERMINAL_DIRECT").is_some();
+    ensure!(!direct || std::env::var_os("PORTHUB_TEST_NATIVE_HOST").is_some(),"direct test requires the real native host SDK");
     let hello = HostHello {
+        direct_transport: direct,
+        history_snapshots: true,
         id: random_token(16),
         secret: random_token(32),
         write_token: random_token(32),
@@ -215,49 +237,89 @@ async fn exercise(multiplex: bool) -> Result<()> {
             max_viewers: 16,
         },
     };
-    socket
-        .send(Message::Text(serde_json::to_string(&hello)?.into()))
-        .await?;
-    let mut attachments = Attachments::new(workspace.clone(), 16)?;
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let message = socket.next().await.context("host closed")??;
-            if let Message::Text(text) = message {
-                let event: HostEvent = serde_json::from_str(&text)?;
-                let ready = matches!(event, HostEvent::Ready { .. });
-                attachments.apply(event)?;
-                if ready {
-                    break;
+    let mut native = if std::env::var_os("PORTHUB_TEST_NATIVE_HOST").is_some() {
+        Some(
+            native::start(
+                fixture.path(),
+                &workspace,
+                &hello,
+                &origin,
+                &machine.to_hex(),
+                &credential,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let host = if let Some(native) = &mut native {
+        native.task.take().unwrap()
+    } else {
+        let mut request = format!("{}/api/terminal/host", origin.replacen("http:", "ws:", 1))
+            .into_client_request()?;
+        request
+            .headers_mut()
+            .insert("x-porthub-machine-id", machine.to_hex().parse()?);
+        request
+            .headers_mut()
+            .insert("authorization", format!("Bearer {credential}").parse()?);
+        let (mut socket, response) = connect_async(request).await?;
+        ensure!(
+            response
+                .headers()
+                .get("x-porthub-history-snapshots")
+                .is_some_and(|v| v == "1"),
+            "gateway must advertise snapshot support"
+        );
+        socket
+            .send(Message::Text(serde_json::to_string(&hello)?.into()))
+            .await?;
+        let mut attachments = Attachments::new(workspace.clone(), 16)?;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let message = socket.next().await.context("host closed")??;
+                if let Message::Text(text) = message {
+                    let event: HostEvent = serde_json::from_str(&text)?;
+                    let ready = matches!(event, HostEvent::Ready { .. });
+                    attachments.apply(event)?;
+                    if ready {
+                        break;
+                    }
                 }
             }
-        }
-        Ok::<_, anyhow::Error>(())
-    })
-    .await??;
-    let workspace_state = workspace.clone();
-    let host = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_millis(100));
-        loop {
-            tokio::select! {
-                message=socket.next()=>match message {
-                    Some(Ok(Message::Text(text)))=>{if !attachments.apply(serde_json::from_str(&text)?)?{break;}},
-                    Some(Ok(Message::Ping(_)|Message::Pong(_)))=>{},_=>break,
-                },
-                output=attachments.next()=>{let Some(output)=output else{break;};socket.send(Message::Text(serde_json::to_string(&output)?.into())).await?;},
-                _=tick.tick()=>{if !workspace_state.is_alive(){socket.send(Message::Text(serde_json::to_string(&HostOutput::End)?.into())).await?;break;}},
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        let workspace_state = workspace.clone();
+        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(100));
+            loop {
+                tokio::select! {
+                    message=socket.next()=>match message {
+                        Some(Ok(Message::Text(text)))=>{if !attachments.apply(serde_json::from_str(&text)?)?{break;}},
+                        Some(Ok(Message::Ping(_)|Message::Pong(_)))=>{},_=>break,
+                    },
+                    output=attachments.next()=>{let Some(output)=output else{break;};socket.send(Message::Text(serde_json::to_string(&output)?.into())).await?;},
+                    _=tick.tick()=>{if !workspace_state.is_alive(){socket.send(Message::Text(serde_json::to_string(&HostOutput::End)?.into())).await?;break;}},
+                }
             }
-        }
-        Ok::<_, anyhow::Error>(())
-    }));
+            Ok::<_, anyhow::Error>(())
+        }))
+    };
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ui/tests/terminal-live.cjs");
     let mut command = tokio::process::Command::new("node");
+    if let Some(native) = &native {
+        command
+            .env("PORTHUB_TEST_NATIVE_CLI", &native.executable)
+            .env("XDG_DATA_HOME", &native.data);
+    }
     command
         .arg(script)
         .env("REVIEW_ORIGIN", &origin)
         .env("PORTHUB_TEST_TERMINAL_WRITE", &hello.write_token)
         .env("PORTHUB_TEST_TERMINAL_READ", &hello.read_token)
         .env("PORTHUB_TEST_TERMINAL_SESSION", &hello.id)
-        .env("PORTHUB_TEST_TERMINAL_COOKIE", cookie)
+        .env("PORTHUB_TEST_TERMINAL_COOKIE", &cookie)
         .env("PORTHUB_TEST_TERMINAL_SSH_PORT", ssh_port.to_string())
         .kill_on_drop(true);
     let output = tokio::time::timeout(Duration::from_secs(120), command.output()).await??;
@@ -273,7 +335,7 @@ async fn exercise(multiplex: bool) -> Result<()> {
         );
     }
     if !output.status.success() {
-        eprintln!("Isolated fixture shell: {}", workspace.capture("%0", 200)?);
+        if let Ok(capture)=workspace.capture("%0",200) {eprintln!("Isolated fixture shell: {capture}");}
     }
     ensure!(
         output.status.success(),
@@ -303,6 +365,27 @@ async fn exercise(multiplex: bool) -> Result<()> {
         Ok::<_, anyhow::Error>(())
     })
     .await??;
+    if native.is_some() {
+        tokio::time::timeout(Duration::from_secs(12),async {
+            loop {
+                let saved=case.app.collection("terminal_traffic").find_one(doc! {"machine_id":machine,"owner_id":owner,"summary.active_sessions":0}).await?;
+                if let Some(saved)=saved {
+                    let summary:porthub_terminal::traffic_report::Summary=mongodb::bson::from_document(saved.get_document("summary")?.clone())?;
+                    ensure!(summary.counters.input_bytes>0 && summary.counters.output_bytes>0,"real PTY traffic must reach account storage");
+                    ensure!(summary.relay_sent_payload_bytes>0 && summary.relay_received_payload_bytes>0,"ordinary SSH relay traffic must be accounted for");
+                    if direct && std::env::var("PORTHUB_TEST_TERMINAL_DIRECT").ok().as_deref()!=Some("blocked") {
+                        ensure!(summary.counters.direct_udp_sent_bytes>0 && summary.counters.direct_udp_received_bytes>0,"direct RTC traffic must reach account storage");
+                    }
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+            Ok::<_,anyhow::Error>(())
+        }).await??;
+        let series=case.status("GET",&format!("/api/terminal/traffic?range=10m&machine_id={machine}"),&cookie,serde_json::Value::Null,axum::http::StatusCode::OK).await?;
+        ensure!(series["points"].as_array().is_some_and(|points| !points.is_empty() && points.len()<=120));
+        println!("PASS authenticated terminal measurements: real host payload, relay/direct scopes, final closed gauges and bounded account graph");
+    }
     case.db.drop().await?;
     Ok(())
 }

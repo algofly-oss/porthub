@@ -35,6 +35,25 @@ impl InputBuffer {
     }
 }
 
+fn write_measured(
+    writer: &mut impl Write,
+    mut bytes: &[u8],
+    traffic: &crate::traffic::Counters,
+) -> std::io::Result<()> {
+    while !bytes.is_empty() {
+        match writer.write(bytes) {
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(count) => {
+                traffic.input(count);
+                bytes = &bytes[count..];
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 pub struct Client {
     master: Box<dyn MasterPty + Send>,
     child: Option<Box<dyn Child + Send + Sync>>,
@@ -42,6 +61,7 @@ pub struct Client {
     input_wake: mpsc::Sender<()>,
     cancel: CancellationToken,
     read_only: bool,
+    traffic: crate::traffic::Counters,
 }
 
 impl Client {
@@ -54,6 +74,10 @@ impl Client {
         term: &str,
         output: mpsc::Sender<HostOutput>,
     ) -> Result<Self> {
+        Self::attach_measured(workspace,client,read_only,cols,rows,term,output,Default::default())
+    }
+    pub(crate) fn attach_measured(workspace:&Workspace,client:u64,read_only:bool,cols:u16,rows:u16,
+        term:&str,output:mpsc::Sender<HostOutput>,traffic:crate::traffic::Counters) -> Result<Self> {
         dimensions(cols, rows)?;
         ensure!(
             !term.is_empty()
@@ -87,6 +111,7 @@ impl Client {
         let cancel = CancellationToken::new();
         let reading = cancel.clone();
         let handle = tokio::runtime::Handle::current();
+        let read_traffic=traffic.clone();
         tokio::task::spawn_blocking(move || {
             let mut bytes = [0; 8192];
             while !reading.is_cancelled() {
@@ -94,6 +119,7 @@ impl Client {
                     Ok(0) | Err(_) => break,
                     Ok(size) => size,
                 };
+                read_traffic.output(size);
                 let event = HostOutput::Output {
                     client,
                     data: encode_data(&bytes[..size]),
@@ -113,6 +139,7 @@ impl Client {
         let pending = input.clone();
         let (input_wake, mut receive) = mpsc::channel::<()>(1);
         let writing = cancel.clone();
+        let write_traffic=traffic.clone();
         tokio::task::spawn_blocking(move || {
             while receive.blocking_recv().is_some() {
                 if writing.is_cancelled() {
@@ -128,7 +155,7 @@ impl Client {
                     if bytes.is_empty() {
                         break;
                     }
-                    if writer.write_all(&bytes).is_err() {
+                    if write_measured(&mut writer,&bytes,&write_traffic).is_err() {
                         pending.clear();
                         return;
                     }
@@ -142,9 +169,17 @@ impl Client {
             input_wake,
             cancel,
             read_only,
+            traffic,
         })
     }
 
+    pub fn traffic(&self) -> crate::traffic::Snapshot {
+        self.traffic.snapshot()
+    }
+    #[cfg(feature = "direct")]
+    pub(crate) fn traffic_counter(&self) -> crate::traffic::Counters {
+        self.traffic.clone()
+    }
     pub fn input(&self, data: &str) -> Result<()> {
         self.input_sink().write(&decode_data(data)?)
     }
@@ -200,6 +235,27 @@ impl Drop for Client {
 
 #[cfg(test)]
 mod input_tests {
+    #[test]
+    fn traffic_counts_only_bytes_accepted_by_a_partial_pty_write() {
+        struct Partial(usize);
+        impl std::io::Write for Partial {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if self.0 == 0 {
+                    return Err(std::io::ErrorKind::BrokenPipe.into());
+                }
+                let count = self.0.min(bytes.len());
+                self.0 -= count;
+                Ok(count)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let traffic = crate::traffic::Counters::default();
+        assert!(super::write_measured(&mut Partial(3), b"abcdefg", &traffic).is_err());
+        assert_eq!(traffic.snapshot().input_bytes, 3);
+        assert_eq!(traffic.snapshot().output_bytes, 0);
+    }
     use super::*;
     #[test]
     fn tiny_keystrokes_are_coalesced_in_order_and_overflow_does_not_partially_enqueue() -> Result<()>

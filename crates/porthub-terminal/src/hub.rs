@@ -1,6 +1,7 @@
 //! Bounded in-memory terminal routing. Persistent authorization/revocation is
 //! checked by the API before registering a host. No terminal transcript is kept.
 use crate::protocol::*;
+pub use crate::hub_queue::Receiver as ViewerEvents;
 use anyhow::{ensure, Result};
 use std::{
     collections::HashMap,
@@ -37,6 +38,8 @@ pub struct Shared {
     state: Mutex<State>,
 }
 struct State {
+    direct_transport: bool,
+    history_snapshots: bool,
     host: Option<mpsc::Sender<HostEvent>>,
     generation: u64,
     offline_at: Option<Instant>,
@@ -52,7 +55,13 @@ struct State {
 }
 struct Viewer {
     identity: u64,
+    direct_epochs: Option<(String,String)>,
+    direct_pending: Option<u32>,
+    direct_started: Option<Instant>,
+    direct_last: Option<u32>,
     history_pending: Option<u32>,
+    // Outer None is legacy; Some(None) awaits the first frozen chunk.
+    history_anchor: Option<Option<String>>,
     history_started: Option<Instant>,
     last_redraw: Option<Instant>,
     joined_at: i64,
@@ -62,7 +71,7 @@ struct Viewer {
     cols: u16,
     rows: u16,
     term: String,
-    events: mpsc::Sender<ViewerEvent>,
+    events: crate::hub_queue::Sender,
 }
 pub struct HostLease {
     pub session: Arc<Shared>,
@@ -72,7 +81,7 @@ pub struct HostLease {
 pub struct Attachment {
     pub id: u64,
     pub session: Arc<Shared>,
-    pub events: mpsc::Receiver<ViewerEvent>,
+    pub events: ViewerEvents,
 }
 impl Drop for Attachment {
     fn drop(&mut self) {
@@ -184,6 +193,8 @@ impl Hub {
                 secret_hash: digest(&hello.secret),
                 stop: CancellationToken::new(),
                 state: Mutex::new(State {
+                    direct_transport: hello.direct_transport,
+                    history_snapshots: hello.history_snapshots,
                     host: None,
                     generation: 0,
                     offline_at: None,
@@ -210,6 +221,8 @@ impl Hub {
         let (send, events) = mpsc::channel(128);
         let generation = {
             let mut state = session.state.lock().expect("terminal session mutex");
+            state.direct_transport = hello.direct_transport;
+            state.history_snapshots = hello.history_snapshots;
             state.invitations_revoked |= invitations_revoked;
             // A reconnect replaces the transport, not the shared shell/session.
             if let Some(previous) = state.host.take() {
@@ -220,9 +233,12 @@ impl Hub {
             state.generation += 1;
             state.offline_at = None;
             for (id, viewer) in &mut state.viewers {
+                viewer.direct_epochs=None;
+                if let Some(request)=viewer.direct_pending.take() {let _=viewer.events.try_send(ViewerEvent::DirectUnavailable {request});}
                 if let Some(request) = viewer.history_pending.take() {
                     let _ = viewer.events.try_send(ViewerEvent::History {
                         page: HistoryChunk {
+                            snapshot: None,
                             pane: None,
                             request,
                             data: String::new(),
@@ -483,7 +499,7 @@ impl Hub {
             .checked_add(1)
             .filter(|id| *id < (1u64 << 53))
             .ok_or_else(|| anyhow::anyhow!("terminal client identity exhausted"))?;
-        let (events, receive) = mpsc::channel(64);
+        let (events, receive) = crate::hub_queue::channel();
         state
             .host
             .as_ref()
@@ -496,6 +512,8 @@ impl Hub {
                 term: term.into(),
             })?;
         events.try_send(ViewerEvent::Welcome {
+            direct_transport: state.direct_transport,
+            history_snapshots: state.history_snapshots,
             name: session.options.name.clone(),
             read_only,
             expires_at: state.invitation_expires_at,
@@ -505,7 +523,10 @@ impl Hub {
             id,
             Viewer {
                 identity: identity.unwrap_or(id),
+                direct_epochs: None,
+                direct_pending: None, direct_started: None, direct_last: None,
                 history_pending: None,
+                history_anchor: None,
                 history_started: None,
                 last_redraw: None,
                 joined_at: now(),
@@ -691,12 +712,36 @@ impl Shared {
     pub fn input(&self, client: u64, input: ViewerInput) -> Result<()> {
         ensure!(!self.stop.is_cancelled(), "terminal session ended");
         let mut state = self.state.lock().expect("terminal session mutex");
+        let direct_transport=state.direct_transport;
+        let history_snapshots = state.history_snapshots;
         let viewer = state
             .viewers
             .get_mut(&client)
             .ok_or_else(|| anyhow::anyhow!("terminal participant detached"))?;
         let mut publish_activity = false;
         let event = match input {
+            ViewerInput::Delivery {packet} => {
+                ensure!(direct_transport,"terminal delivery is unavailable");
+                let (input_epoch,output_epoch)=viewer.direct_epochs.as_ref().ok_or_else(||anyhow::anyhow!("terminal delivery is not negotiated"))?;
+                match packet.decode()? {
+                    crate::delivery::Message::Data(frame)=>{
+                        ensure!(!viewer.read_only,"this invitation is read-only");
+                        ensure!(frame.epoch()==input_epoch,"terminal input epoch mismatch");
+                        let timestamp=now();publish_activity=timestamp.saturating_sub(viewer.activity_published_at)>=5;
+                        viewer.last_active_at=timestamp;if publish_activity {viewer.activity_published_at=timestamp;}
+                    }
+                    crate::delivery::Message::Ack {epoch,..}=>ensure!(&epoch==output_epoch,"terminal output acknowledgement epoch mismatch"),
+                }
+                HostEvent::Delivery {client,packet}
+            }
+            ViewerInput::DirectOffer {request,description} => {
+                if !direct_transport {viewer.events.try_send(ViewerEvent::DirectUnavailable {request})?;return Ok(());}
+                description.validate("offer")?;
+                ensure!(viewer.direct_last.is_none_or(|last|request>last),"terminal direct request is stale");
+                ensure!(viewer.direct_started.is_none_or(|at|at.elapsed()>=Duration::from_secs(if viewer.direct_pending.is_some(){15}else{5})),"terminal direct negotiation is busy");
+                viewer.direct_pending=Some(request);viewer.direct_last=Some(request);viewer.direct_started=Some(Instant::now());
+                HostEvent::DirectOffer {client,request,description}
+            }
             ViewerInput::Redraw => {
                 if viewer
                     .last_redraw
@@ -709,12 +754,22 @@ impl Shared {
             }
 
             ViewerInput::History {
+                freeze, snapshot,
                 request,
                 pane,
                 before,
                 lines,
             } => {
                 history_request(&pane, before, lines)?;
+                ensure!(snapshot.as_ref().is_none_or(|id| freeze && token(id, 32)), "invalid history snapshot request");
+                if snapshot.is_some() && !history_snapshots {
+                    viewer.events.try_send(ViewerEvent::History { page: HistoryChunk {
+                        snapshot: None, pane: None, request, data: String::new(), done: true,
+                        total: 0, before, lines: 0, truncated: false,
+                        error: Some("History snapshot unavailable; refresh history.".into()),
+                    } })?;
+                    return Ok(());
+                }
                 if viewer.history_started.is_some_and(|started| {
                     started.elapsed() < Duration::from_millis(500)
                         || viewer.history_pending.is_some()
@@ -722,6 +777,7 @@ impl Shared {
                 }) {
                     viewer.events.try_send(ViewerEvent::History {
                         page: HistoryChunk {
+                            snapshot: None,
                             pane: None,
                             request,
                             data: String::new(),
@@ -737,7 +793,9 @@ impl Shared {
                 }
                 viewer.history_started = Some(Instant::now());
                 viewer.history_pending = Some(request);
+                viewer.history_anchor = (freeze && history_snapshots).then(|| snapshot.clone());
                 HostEvent::History {
+                    freeze: freeze && history_snapshots, snapshot,
                     client,
                     request,
                     pane,
@@ -783,6 +841,32 @@ impl Shared {
             "stale terminal host connection"
         );
         match output {
+            HostOutput::Delivery {client,packet} => {
+                if let Some(viewer)=state.viewers.get_mut(&client) {
+                    let (input_epoch,output_epoch)=viewer.direct_epochs.as_ref().ok_or_else(||anyhow::anyhow!("terminal delivery is not negotiated"))?;
+                    match packet.decode()? {
+                        crate::delivery::Message::Data(frame)=>ensure!(frame.epoch()==output_epoch,"terminal output epoch mismatch"),
+                        crate::delivery::Message::Ack {epoch,..}=>ensure!(&epoch==input_epoch,"terminal input acknowledgement epoch mismatch"),
+                    }
+                    if viewer.events.try_send(ViewerEvent::Delivery {packet}).is_err() {
+                        state.viewers.remove(&client);
+                        if let Some(host)=&state.host {let _=host.try_send(HostEvent::Detach {client});}
+                        presence(&mut state);
+                    }
+                }
+            }
+            HostOutput::DirectAnswer {client,answer} => {
+                if state.viewers.get(&client).is_some_and(|viewer|viewer.direct_pending==Some(answer.request)) {
+                    ensure!(state.direct_transport,"terminal direct transport is unavailable");
+                    answer.validate()?;
+                    state.viewers.get_mut(&client).unwrap().direct_epochs=Some((answer.input_epoch.clone(),answer.output_epoch.clone()));
+                    let request=answer.request;
+                    direct_reply(&mut state,client,request,ViewerEvent::DirectAnswer {answer});
+                }
+            }
+            HostOutput::DirectUnavailable {client,request} => {
+                direct_reply(&mut state,client,request,ViewerEvent::DirectUnavailable {request});
+            }
             HostOutput::RevokeInvitations | HostOutput::RotateInvitations { .. } => {
                 anyhow::bail!("invitation revocation must be persisted by the gateway")
             }
@@ -790,6 +874,16 @@ impl Shared {
                 page.validate()?;
                 if let Some(viewer) = state.viewers.get_mut(&client) {
                     if viewer.history_pending == Some(page.request) {
+                        if page.error.is_none() {
+                            match &mut viewer.history_anchor {
+                                Some(anchor) => {
+                                    ensure!(page.snapshot.is_some(), "history snapshot missing");
+                                    ensure!(anchor.as_ref().is_none_or(|id| Some(id) == page.snapshot.as_ref()), "history snapshot changed");
+                                    *anchor = page.snapshot.clone();
+                                }
+                                None => ensure!(page.snapshot.is_none(), "unexpected history snapshot"),
+                            }
+                        }
                         if page.done {
                             viewer.history_pending = None;
                         }
@@ -859,6 +953,8 @@ mod tests {
     use super::*;
     fn hello() -> HostHello {
         HostHello {
+            direct_transport: false,
+            history_snapshots: false,
             id: random_token(16),
             secret: random_token(32),
             write_token: random_token(32),
@@ -1174,6 +1270,139 @@ mod tests {
         Ok(())
     }
 
+    fn description(kind: &str) -> DirectDescription {
+        DirectDescription(serde_json::json!({"type":kind,"sdp":"v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=ice-pwd:private-signal-marker\r\n"}).to_string())
+    }
+    fn answer(request:u32) -> DirectAnswer {
+        DirectAnswer {request,description:description("answer"),input_epoch:"a".repeat(32),output_epoch:"b".repeat(32)}
+    }
+    #[test]
+    fn direct_signals_stay_with_the_requesting_guest_and_preserve_read_only() -> Result<()> {
+        let hub=Hub::default();let mut h=hello();h.direct_transport=true;
+        let mut host=hub.register("owner",&h,now())?;
+        let mut reader=hub.attach(&h.read_token,80,24,"xterm-256color")?;
+        let mut other=hub.attach(&h.read_token,80,24,"xterm-256color")?;
+        assert!(matches!(reader.events.try_recv(),Ok(ViewerEvent::Welcome {direct_transport:true,..})));
+        while reader.events.try_recv().is_ok() {}while other.events.try_recv().is_ok() {}while host.events.try_recv().is_ok() {}
+        reader.session.input(reader.id,ViewerInput::DirectOffer {request:1,description:description("offer")})?;
+        assert!(matches!(host.events.try_recv(),Ok(HostEvent::DirectOffer {client,request:1,..}) if client==reader.id));
+        assert!(reader.session.input(reader.id,ViewerInput::Input {data:encode_data(b"exit\r")}).is_err());
+        assert!(reader.session.input(reader.id,ViewerInput::DirectOffer {request:2,description:description("offer")}).is_err());
+        host.session.output(host.generation,HostOutput::DirectAnswer {client:other.id,answer:answer(1)})?;
+        host.session.output(host.generation,HostOutput::DirectAnswer {client:reader.id,answer:answer(99)})?;
+        assert!(reader.events.try_recv().is_err() && other.events.try_recv().is_err());
+        assert!(host.session.output(host.generation+1,HostOutput::DirectAnswer {client:reader.id,answer:answer(1)}).is_err());
+        let mut invalid=answer(1);invalid.output_epoch=invalid.input_epoch.clone();
+        assert!(host.session.output(host.generation,HostOutput::DirectAnswer {client:reader.id,answer:invalid}).is_err());
+        host.session.output(host.generation,HostOutput::DirectAnswer {client:reader.id,answer:answer(1)})?;
+        assert!(matches!(reader.events.try_recv(),Ok(ViewerEvent::DirectAnswer {answer}) if answer.request==1));
+        assert!(other.events.try_recv().is_err());
+        assert!(reader.session.input(reader.id,ViewerInput::Input {data:encode_data(b"whoami\r")}).is_err());
+        assert!(reader.session.input(reader.id,ViewerInput::DirectOffer {request:1,description:description("offer")}).is_err());
+        reader.session.kick(reader.id)?;
+        host.session.output(host.generation,HostOutput::DirectAnswer {client:reader.id,answer:answer(1)})?;
+        assert_eq!(host.session.participants(),1);Ok(())
+    }
+    #[test]
+    fn delivery_relay_enforces_direction_epoch_and_existing_guest_role() -> Result<()> {
+        use crate::delivery::{Message,Frame};
+        let hub=Hub::default();let mut h=hello();h.direct_transport=true;
+        let mut host=hub.register("owner",&h,now())?;
+        let mut reader=hub.attach(&h.read_token,80,24,"xterm-256color")?;
+        let mut writer=hub.attach(&h.write_token,80,24,"xterm-256color")?;
+        let data=|epoch:&str|DeliveryPacket::encode(&Message::Data(Frame::new(epoch,1,b"shell bytes")?));
+        assert!(writer.session.input(writer.id,ViewerInput::Delivery {packet:data(&"a".repeat(32))?}).is_err());
+        for id in [reader.id,writer.id] {
+            reader.session.input(id,ViewerInput::DirectOffer {request:1,description:description("offer")})?;
+            let mut reply=answer(1);if id==writer.id {reply.input_epoch="c".repeat(32);reply.output_epoch="d".repeat(32);}
+            host.session.output(host.generation,HostOutput::DirectAnswer {client:id,answer:reply})?;
+        }
+        while reader.events.try_recv().is_ok() {}while writer.events.try_recv().is_ok() {}while host.events.try_recv().is_ok() {}
+        assert!(reader.session.input(reader.id,ViewerInput::Delivery {packet:data(&"a".repeat(32))?}).is_err());
+        let ack=DeliveryPacket::encode(&Message::Ack {epoch:"b".repeat(32),sequence:0})?;
+        reader.session.input(reader.id,ViewerInput::Delivery {packet:ack})?;
+        assert!(matches!(host.events.try_recv(),Ok(HostEvent::Delivery {client,..}) if client==reader.id));
+        assert!(writer.session.input(writer.id,ViewerInput::Delivery {packet:data(&"a".repeat(32))?}).is_err());
+        writer.session.input(writer.id,ViewerInput::Delivery {packet:data(&"c".repeat(32))?})?;
+        assert!(matches!(host.events.try_recv(),Ok(HostEvent::Delivery {client,..}) if client==writer.id));
+        assert!(host.session.output(host.generation,HostOutput::Delivery {client:writer.id,packet:data(&"b".repeat(32))?}).is_err());
+        host.session.output(host.generation,HostOutput::Delivery {client:writer.id,packet:data(&"d".repeat(32))?})?;
+        assert!(matches!(writer.events.try_recv(),Ok(ViewerEvent::Delivery {..})));
+        assert!(reader.events.try_recv().is_err(),"delivery payload must not cross guests");
+        assert!(writer.session.input(writer.id,ViewerInput::Delivery {packet:DeliveryPacket("!invalid!".into())}).is_err());
+        assert!(writer.session.input(writer.id,ViewerInput::Delivery {packet:DeliveryPacket("x".repeat(32768))}).is_err());Ok(())
+    }
+
+    #[test]
+    fn viewer_accepts_full_bounded_replay_window_and_acks_without_a_hidden_detach() -> Result<()> {
+        use crate::delivery::{Message,Frame,MAX_FRAMES,MAX_BYTES};
+        let hub=Hub::default();let mut h=hello();h.direct_transport=true;
+        let mut host=hub.register("owner",&h,now())?;
+        let mut viewer=hub.attach(&h.write_token,80,24,"xterm-256color")?;
+        viewer.session.input(viewer.id,ViewerInput::DirectOffer {request:1,description:description("offer")})?;
+        host.session.output(host.generation,HostOutput::DirectAnswer {client:viewer.id,answer:answer(1)})?;
+        while host.events.try_recv().is_ok() {}while viewer.events.try_recv().is_ok() {}
+        for sequence in 1..=MAX_FRAMES {
+            let data=DeliveryPacket::encode(&Message::Data(Frame::new(&"b".repeat(32),sequence as u64,&vec![0;MAX_BYTES/MAX_FRAMES])?))?;
+            host.session.output(host.generation,HostOutput::Delivery {client:viewer.id,packet:data})?;
+            let ack=DeliveryPacket::encode(&Message::Ack {epoch:"a".repeat(32),sequence:sequence as u64})?;
+            host.session.output(host.generation,HostOutput::Delivery {client:viewer.id,packet:ack})?;
+        }
+        assert_eq!(host.session.participants(),1,"a short receiver scheduling pause must not detach a bounded sender");
+        let mut count=0;while viewer.events.try_recv().is_ok() {count+=1;}
+        assert_eq!(count,MAX_FRAMES*2);
+        Ok(())
+    }
+    #[test]
+    fn legacy_hosts_do_not_advertise_or_receive_direct_signaling() -> Result<()> {
+        let hub=Hub::default();let h=hello();let mut host=hub.register("owner",&h,now())?;
+        let mut reader=hub.attach(&h.read_token,80,24,"xterm-256color")?;
+        let welcome=reader.events.try_recv()?;
+        assert!(serde_json::to_value(welcome)?.get("direct_transport").is_none());
+        assert!(serde_json::to_value(&h)?.get("direct_transport").is_none());
+        while host.events.try_recv().is_ok() {}
+        while reader.events.try_recv().is_ok() {}
+        reader.session.input(reader.id,ViewerInput::DirectOffer {request:1,description:description("offer")})?;
+        assert!(matches!(reader.events.try_recv(),Ok(ViewerEvent::DirectUnavailable {request:1})));
+        assert!(host.events.try_recv().is_err());Ok(())
+    }
+    #[test]
+    fn direct_answer_backpressure_disconnects_only_its_guest() -> Result<()> {
+        let hub=Hub::default();let mut h=hello();h.direct_transport=true;
+        let host=hub.register("owner",&h,now())?;let reader=hub.attach(&h.read_token,80,24,"xterm-256color")?;
+        let other=hub.attach(&h.read_token,80,24,"xterm-256color")?;
+        reader.session.input(reader.id,ViewerInput::DirectOffer {request:1,description:description("offer")})?;
+        {let state=reader.session.state.lock().unwrap();let viewer=state.viewers.get(&reader.id).unwrap();while viewer.events.try_send(ViewerEvent::Ping).is_ok() {}}
+        host.session.output(host.generation,HostOutput::DirectAnswer {client:reader.id,answer:answer(1)})?;
+        assert_eq!(host.session.participants(),1);
+        other.session.input(other.id,ViewerInput::Pong)?;Ok(())
+    }
+
+    #[test]
+    fn frozen_history_rejects_anchor_changes_between_chunks() -> Result<()> {
+        let hub=Hub::default();
+        let mut h=hello();h.history_snapshots=true;
+        let host=hub.register("owner",&h,now())?;
+        let mut reader=hub.attach(&h.read_token,80,24,"xterm-256color")?;
+        while reader.events.try_recv().is_ok() {}
+        reader.session.input(reader.id,ViewerInput::History {
+            freeze:true,snapshot:None,request:1,pane:"%0".into(),before:0,lines:20,
+        })?;
+        let mut page=HistoryChunk {
+            snapshot:Some("a".repeat(32)),pane:Some("%0".into()),request:1,
+            data:encode_data(b"first"),done:false,total:20,before:0,lines:20,truncated:false,error:None,
+        };
+        host.session.output(host.generation,HostOutput::History {client:reader.id,page:page.clone()})?;
+        assert!(matches!(reader.events.try_recv(),Ok(ViewerEvent::History {..})));
+        page.snapshot=Some("b".repeat(32));page.done=true;
+        assert!(host.session.output(host.generation,HostOutput::History {client:reader.id,page:page.clone()}).is_err());
+        assert!(reader.events.try_recv().is_err());
+        page.snapshot=Some("a".repeat(32));
+        host.session.output(host.generation,HostOutput::History {client:reader.id,page})?;
+        assert!(matches!(reader.events.try_recv(),Ok(ViewerEvent::History {..})));
+        Ok(())
+    }
+
     #[tokio::test]
     async fn read_only_history_is_request_scoped_bounded_and_does_not_authorize_input() -> Result<()>
     {
@@ -1187,6 +1416,7 @@ mod tests {
         reader.session.input(
             reader.id,
             ViewerInput::History {
+                freeze: false, snapshot: None,
                 request: 11,
                 pane: "%0".into(),
                 before: 0,
@@ -1210,6 +1440,7 @@ mod tests {
             )
             .is_err());
         let mut page = HistoryChunk {
+            snapshot: None,
             pane: None,
             request: 99,
             data: encode_data(b"private scrollback"),
@@ -1250,6 +1481,7 @@ mod tests {
         reader.session.input(
             reader.id,
             ViewerInput::History {
+                freeze: false, snapshot: None,
                 request: 12,
                 pane: "%0".into(),
                 before: 0,
@@ -1266,6 +1498,7 @@ mod tests {
             .input(
                 reader.id,
                 ViewerInput::History {
+                    freeze: false, snapshot: None,
                     request: 13,
                     pane: "%0;bad".into(),
                     before: 0,
@@ -1278,6 +1511,7 @@ mod tests {
             .input(
                 reader.id,
                 ViewerInput::History {
+                    freeze: false, snapshot: None,
                     request: 13,
                     pane: "".into(),
                     before: 0,
@@ -1458,5 +1692,20 @@ mod tests {
             )
             .is_err());
         Ok(())
+    }
+}
+
+fn direct_reply(state: &mut State, client: u64, request: u32, event: ViewerEvent) {
+    let mut failed=false;
+    if let Some(viewer)=state.viewers.get_mut(&client) {
+        if viewer.direct_pending==Some(request) {
+            viewer.direct_pending=None;
+            failed=viewer.events.try_send(event).is_err();
+        }
+    }
+    if failed {
+        state.viewers.remove(&client);
+        if let Some(host)=&state.host {let _=host.try_send(HostEvent::Detach {client});}
+        presence(state);
     }
 }

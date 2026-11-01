@@ -11,6 +11,12 @@ use tokio::io::{AsyncWriteExt, BufReader};
 
 #[derive(Args)]
 pub struct Share {
+    /// Keep this share on the gateway; never advertise a direct peer path.
+    #[arg(long,conflicts_with="stun_servers")]
+    relay_only:bool,
+    /// Optional UDP STUN endpoint for this host; repeat up to twice. No default.
+    #[arg(long="stun-server",value_parser=crate::terminal_connectivity::server)]
+    stun_servers:Vec<String>,
     /// Existing local workspace; omit to create one.
     existing: Option<String>,
     #[command(flatten)]
@@ -48,6 +54,8 @@ struct Ready {
 #[derive(Serialize, Deserialize)]
 struct Sharing {
     #[serde(default)]
+    stun_servers:Vec<String>,
+    #[serde(default)]
     invitations: Option<InvitationUpdate>,
     #[serde(default)]
     pending_invitations: Option<InvitationUpdate>,
@@ -69,6 +77,7 @@ fn load(root: &Path, id: &str) -> Result<Sharing> {
         serde_json::from_slice(&crate::profile::read_private(&path(root, id)?)?)?;
     ensure!(sharing.hello.id == id, "terminal sharing identity mismatch");
     sharing.hello.validate(now())?;
+    crate::terminal_connectivity::checked(&sharing.stun_servers)?;
     if let Some(update) = &sharing.invitations {
         update.validate(now())?;
     }
@@ -155,6 +164,18 @@ fn enforce_limits(workspace: &Workspace, options: &Options) -> Result<()> {
     Ok(())
 }
 
+// Credential-free broker metadata is a compatibility hint, never authority.
+// Legacy brokers reject unknown HostHello fields before opening the gateway.
+fn broker_has_history_snapshots(version: &str) -> bool {
+    let parts: Vec<_> = version.split('.').collect();
+    if parts.len() != 3 { return false; }
+    let parsed: Option<Vec<u32>> = parts.iter().map(|part| {
+        if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) { return None; }
+        part.parse().ok()
+    }).collect();
+    parsed.is_some_and(|v| (v[0], v[1], v[2]) >= (1, 10, 0))
+}
+
 pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
     let layout = if args.user {
         crate::service::Layout::user()?
@@ -163,6 +184,7 @@ pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
     };
     let registration =
         crate::service::readable::select(&layout, args.registration.as_deref(), Some(false))?;
+    let sidebar = args.local.sidebar;
     let detach = args.local.detach;
     let json = args.local.json;
     // Validate before starting any shells or publishing session capabilities.
@@ -192,6 +214,8 @@ pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
         },
     };
     options.validate(now())?;
+    let stun_servers=crate::terminal_connectivity::checked(&args.stun_servers)?;
+    ensure!(stun_servers.is_empty() || cfg!(feature="terminal-direct"),"this build does not include native terminal direct transport");
     let job = if let Some(name) = args.existing {
         select(root, &name)?
     } else {
@@ -204,6 +228,8 @@ pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
     let _registry = lock(root)?;
     if path(root, &job.id)?.exists() {
         let previous = load(root, &job.id)?;
+        ensure!(!args.relay_only || !previous.hello.direct_transport,"this workspace already permits direct transport; existing guests were not changed");
+        ensure!(stun_servers.is_empty() || previous.stun_servers==stun_servers,"this workspace is already shared with different STUN settings; existing guests were not changed");
         ensure!(
             previous.state != "ended",
             "this sharing invitation was ended; create a new workspace to share"
@@ -216,10 +242,13 @@ pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
         let mut options = options;
         options.name = job.name.clone();
         let sharing = Sharing {
+            stun_servers,
             invitations: None,
             pending_invitations: None,
             invitations_revoked: false,
             hello: HostHello {
+                direct_transport: !args.relay_only && cfg!(feature="terminal-direct") && broker_has_history_snapshots(&registration.agent_version),
+                history_snapshots: broker_has_history_snapshots(&registration.agent_version),
                 id: job.id.clone(),
                 secret: random_token(32),
                 write_token: random_token(32),
@@ -248,7 +277,7 @@ pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
     }
     invite(root, &job, json)?;
     if !detach {
-        attach(&job)?;
+        attach(&job, sidebar)?;
     }
     Ok(())
 }
@@ -295,7 +324,7 @@ pub(super) fn invite(root: &Path, job: &Job, json: bool) -> Result<()> {
         "read_only_url":web.then(||link(read_token)),
         "interactive_ssh":(ssh_enabled && interactive).then(||ssh(write_token)),
         "read_only_ssh":ssh_enabled.then(||ssh(read_token)),
-        "expires_at":expires_at,"access":sharing.hello.options.access});
+        "expires_at":expires_at,"access":sharing.hello.options.access,"stun_servers":sharing.stun_servers});
     if json {
         println!("{}", serde_json::to_string(&data)?);
     } else {
@@ -419,12 +448,42 @@ fn prepare_rotation(root: &Path, sharing: &mut Sharing, seconds: u32) -> Result<
     Ok(update)
 }
 
+fn broker_request(hello: &HostHello, extensions: bool, stun_servers:&[String]) -> serde_json::Value {
+    let mut hello = hello.clone();
+    if !extensions {
+        hello.history_snapshots = false;
+        hello.direct_transport = false;
+    }
+    let mut request = serde_json::json!({"operation":"terminal_host","hello":hello});
+    if extensions {
+        request["traffic_reporting"] = true.into();
+        if !stun_servers.is_empty(){request["stun_servers"]=serde_json::json!(stun_servers);}
+    }
+    request
+}
+
+async fn report_traffic<S: tokio::io::AsyncWrite + Unpin>(
+    stream: &mut S,
+    emitter: &mut Option<crate::terminal_telemetry::Emitter>,
+    attachments: &Attachments,
+) -> Result<()> {
+    let Some(emitter) = emitter else {
+        return Ok(());
+    };
+    let report = emitter.report(attachments.traffic())?;
+    let mut bytes = serde_json::to_vec(&report)?;
+    bytes.push(b'\n');
+    tokio::time::timeout(Duration::from_secs(5), stream.write_all(&bytes)).await??;
+    Ok(())
+}
+
 pub(super) async fn serve(root: &Path, id: &str) -> Result<()> {
     let _guard = worker_lock(root, id)?;
     let job = select(root, id)?;
     let workspace = workspace(&job)?;
     let mut owner = super::participant_control::Server::start(&job)?;
     let mut sharing = load(root, id)?;
+    sharing.hello.direct_transport &= cfg!(feature="terminal-direct");
     owner.state.lock().expect("owner state").invitations_revoked = sharing.invitations_revoked;
     {
         let mut state = owner.state.lock().expect("owner state");
@@ -455,9 +514,9 @@ pub(super) async fn serve(root: &Path, id: &str) -> Result<()> {
         .await;
         if let Ok(Ok(stream)) = result {
             let mut local = BufReader::new(stream);
-            let mut request = serde_json::to_vec(
-                &serde_json::json!({"operation":"terminal_host","hello":sharing.hello}),
-            )?;
+            let traffic_requested=crate::service::readable::select(&layout,Some(&sharing.registration),Some(false))
+                .is_ok_and(|registration|broker_has_history_snapshots(&registration.agent_version));
+            let mut request=serde_json::to_vec(&broker_request(&sharing.hello,traffic_requested,&sharing.stun_servers))?;
             request.push(b'\n');
             if local.get_mut().write_all(&request).await.is_ok() {
                 let mut attachments = Attachments::new(
@@ -465,13 +524,29 @@ pub(super) async fn serve(root: &Path, id: &str) -> Result<()> {
                     usize::from(sharing.hello.options.max_viewers),
                 )?;
                 let mut partial = Vec::new();
+                let mut traffic=None;
+                let mut last_traffic=tokio::time::Instant::now();
                 let mut tick = tokio::time::interval(Duration::from_secs(1));
                 let mut last_gateway = tokio::time::Instant::now();
                 loop {
                     tokio::select! {
                         bytes=crate::terminal_transport::frame(&mut local,&mut partial)=> {
                             let Ok(bytes)=bytes else{break;};
-                            let Ok(event)=serde_json::from_slice::<HostEvent>(&bytes) else{break;};
+                            let Ok(value)=serde_json::from_slice::<serde_json::Value>(&bytes) else {break;};
+                            if value.get("type").and_then(serde_json::Value::as_str)==Some("terminal_traffic_policy") {
+                                ensure!(traffic_requested && traffic.is_none(),"unsolicited terminal traffic policy");
+                                traffic=Some(crate::terminal_telemetry::Emitter::new(serde_json::from_value(value)?)?);
+                                continue;
+                            }
+                            #[cfg(feature="terminal-direct")]
+                            if value.get("type").and_then(serde_json::Value::as_str)==Some("terminal_direct_policy") {
+                                let policy:crate::terminal_transport::DirectPolicy=serde_json::from_value(value)?;
+                                attachments.configure_direct(porthub_terminal::direct::host::Config {
+                                    addresses:policy.addresses,stun_servers:policy.stun_servers,
+                                })?;
+                                continue;
+                            }
+                            let Ok(event)=serde_json::from_value::<HostEvent>(value) else{break;};
                             last_gateway=tokio::time::Instant::now();
                             if matches!(event,HostEvent::Stop{..}) {
                                 sharing.state="ended".into();save(root,&sharing,true)?;
@@ -492,7 +567,7 @@ pub(super) async fn serve(root: &Path, id: &str) -> Result<()> {
                                 }
                             }
                             if let HostEvent::InvitationsRevoked=&event {sharing.invitations_revoked=true;save(root,&sharing,true)?;owner.state.lock().expect("owner state").invitations_revoked=true;}
-                            if let HostEvent::Ready{ssh_host,ssh_port,public_base,invitations_revoked}=&event {
+                            if let HostEvent::Ready{ssh_host,ssh_port,public_base,invitations_revoked,..}=&event {
                                 sharing.invitations_revoked|=*invitations_revoked;
                                 sharing.ready=Some(Ready{ssh_host:ssh_host.clone(),ssh_port:*ssh_port,public_base:public_base.clone()});
                                 sharing.state="connected".into();save(root,&sharing,true)?;owner.state.lock().expect("owner state").invitations_revoked=sharing.invitations_revoked;delay=1;
@@ -530,12 +605,20 @@ pub(super) async fn serve(root: &Path, id: &str) -> Result<()> {
                         }
                         output=attachments.next()=> {
                             let Some(output)=output else{break;};
+                            if matches!(output,HostOutput::Closed {..}) {
+                                if report_traffic(local.get_mut(),&mut traffic,&attachments).await.is_err() {break;}
+                            }
                             let mut bytes=serde_json::to_vec(&output)?;bytes.push(b'\n');
                             if !matches!(tokio::time::timeout(Duration::from_secs(5),local.get_mut().write_all(&bytes)).await,Ok(Ok(()))){break;}
                         }
                         _=tick.tick()=> {
                             enforce_limits(&workspace,&sharing.hello.options)?;
-                            if !workspace.is_alive(){
+                            let alive=workspace.is_alive();
+                            if last_traffic.elapsed()>=Duration::from_secs(5) || !alive {
+                                if report_traffic(local.get_mut(),&mut traffic,&attachments).await.is_err() {break;}
+                                last_traffic=tokio::time::Instant::now();
+                            }
+                            if !alive {
                                 sharing.state="ended".into();save(root,&sharing,true)?;
                                 let _=tokio::time::timeout(Duration::from_secs(2),local.get_mut().write_all(b"{\"type\":\"end\"}\n")).await;
                                 return Ok(());
@@ -569,6 +652,35 @@ pub(super) async fn serve(root: &Path, id: &str) -> Result<()> {
 #[cfg(test)]
 mod rotation_tests {
     use super::*;
+    #[test]
+    fn snapshot_advertisement_requires_a_compatible_broker_version() {
+        for version in ["", "2fb9d6e", "1.9.0", "1.9.99", "1.10", "1.10.0.extra", "1.10.x", "1.10.0-preview"] {
+            assert!(!broker_has_history_snapshots(version), "{version}");
+        }
+        for version in ["1.10.0", "1.11.0", "2.0.0"] {
+            assert!(broker_has_history_snapshots(version), "{version}");
+        }
+    }
+
+    #[test]
+    fn older_broker_requests_omit_extensions_without_modifying_the_saved_session() -> Result<()> {
+        let hello:HostHello=serde_json::from_value(serde_json::json!({
+            "id":random_token(16),"secret":random_token(32),"write_token":random_token(32),"read_token":random_token(32),
+            "history_snapshots":true,"direct_transport":true,
+            "options":{"name":"quietotter","expires_at":0,"idle_timeout":0,"reconnect_timeout":60,"history_limit":100000,"mouse":true,"read_only":false,"size_policy":"smallest"}}))?;
+        let servers=vec!["stun:127.0.0.1:3478".into()];
+        let old=broker_request(&hello,false,&servers);
+        assert_eq!(old.as_object().unwrap().len(),2);
+        assert!(old["hello"].get("history_snapshots").is_none() && old["hello"].get("direct_transport").is_none());
+        assert!(hello.history_snapshots && hello.direct_transport,"compatibility negotiation must not downgrade saved capabilities");
+        let current=broker_request(&hello,true,&servers);
+        assert_eq!(current["stun_servers"],serde_json::json!(servers));
+        assert!(current["hello"].get("stun_servers").is_none());
+        assert_eq!(current["traffic_reporting"],true);
+        assert_eq!(current["hello"]["history_snapshots"],true);
+        Ok(())
+    }
+
     #[test]
     fn failed_save_cannot_be_retried_as_unsaved_rotation_and_saved_retry_reuses_links() -> Result<()>
     {

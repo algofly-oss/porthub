@@ -180,7 +180,6 @@ pub fn start(
     control: Arc<crate::control::Control>,
     cancel: CancellationToken,
 ) -> Result<Option<Guard>> {
-    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
     let id = crate::service::identity(control.profile());
     let layouts = [
         crate::service::Layout::system(),
@@ -195,7 +194,23 @@ pub fn start(
     let Some(layout) = layout else {
         return Ok(None);
     };
-    let path = endpoint(&layout, &id)?;
+    start_registered(profile, control, cancel, &layout).map(Some)
+}
+
+/// Start a broker for an explicitly supplied enrolled layout. This uses the
+/// same manifest checks and OS-peer authorization as automatic layout discovery.
+/// Supplying a layout does not install or start an operating-system service.
+pub fn start_registered(
+    profile: &Path,
+    control: Arc<crate::control::Control>,
+    cancel: CancellationToken,
+    layout: &crate::service::Layout,
+) -> Result<Guard> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+    let id = crate::service::identity(control.profile());
+    ensure!(crate::service::installed(layout, &id)?.is_some_and(|spec| spec.profile == profile),
+        "broker profile is not enrolled in this layout");
+    let path = endpoint(layout, &id)?;
     crate::service::directory(
         path.parent().context("missing local control directory")?,
         false,
@@ -238,11 +253,11 @@ pub fn start(
             tasks.abort_all();
         }
     });
-    Ok(Some(Guard {
+    Ok(Guard {
         cancel: token,
         task,
         path,
-    }))
+    })
 }
 pub async fn connect(
     layout: &crate::service::Layout,
@@ -318,6 +333,23 @@ mod tests {
         )
         .is_err());
     }
+    #[tokio::test]
+    async fn explicit_layout_still_requires_matching_enrollment() -> Result<()> {
+        let root=tempfile::tempdir()?;
+        let layout=crate::service::Layout {user:true,state:root.path().join("native"),releases:root.path().join("releases"),units:root.path().join("units")};
+        porthub_terminal::multiplexer::create_directory(&layout.state)?;
+        let profile:crate::profile::Profile=serde_json::from_value(serde_json::json!({"server":"https://gateway.example","machine_id":"0123456789abcdef01234567","token":"private-fixture-token"}))?;
+        let id=crate::service::identity(&profile);
+        let path=layout.state.join(format!("{id}.json"));
+        let control=Arc::new(crate::control::Control::new(profile)?);
+        assert!(start_registered(&path,control.clone(),CancellationToken::new(),&layout).is_err());
+        let spec=crate::service::Spec {user:true,identity:id.clone(),service:format!("porthub-{}",&id[..24]),profile:path.clone(),executable:layout.releases.join("a".repeat(64)).join("porthub"),unit:layout.units.join(format!("porthub-{}.{}",&id[..24],if cfg!(target_os="macos"){"plist"}else{"service"})),cli:None};
+        crate::profile::write_private(&layout.state.join(format!("{id}.service.json")),&serde_json::to_vec(&spec)?,false)?;
+        assert!(start_registered(&root.path().join("other.json"),control,CancellationToken::new(),&layout).is_err());
+        assert!(!layout.state.with_file_name("status").exists(),"rejected enrollment must not create a broker listener");
+        Ok(())
+    }
+
     #[tokio::test]
     async fn local_caller_never_receives_credentials_and_disconnect_closes_mapping() -> Result<()> {
         use axum::{routing::post, Json, Router};

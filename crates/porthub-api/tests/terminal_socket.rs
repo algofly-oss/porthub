@@ -103,6 +103,8 @@ async fn actual_websocket_recovery_survives_invite_expiry_and_host_kick_revokes_
         .insert("authorization", format!("Bearer {credential}").parse()?);
     let (mut host, _) = connect_async(request).await?;
     let hello = HostHello {
+        direct_transport: true,
+        history_snapshots: false,
         id: random_token(16),
         secret: random_token(32),
         write_token: random_token(32),
@@ -122,7 +124,7 @@ async fn actual_websocket_recovery_survives_invite_expiry_and_host_kick_revokes_
         },
     };
     send(&mut host, &hello).await?;
-    event(&mut host, "ready").await?;
+    ensure!(event(&mut host, "ready").await?["direct_transport"]==true);
     let (mut reader, recovery, identity) = join(&base, &hello.read_token, false).await?;
     let first_attach = event(&mut host, "attach").await?;
     ensure!(first_attach["read_only"] == true);
@@ -130,6 +132,25 @@ async fn actual_websocket_recovery_survives_invite_expiry_and_host_kick_revokes_
     let (mut writer, writer_recovery, _) = join(&base, &hello.write_token, false).await?;
     let writer_attach = event(&mut host, "attach").await?;
     let writer_client = writer_attach["client"].as_u64().unwrap();
+    let description=DirectDescription(serde_json::json!({"type":"offer","sdp":"v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=ice-pwd:isolated-fixture\r\n"}).to_string());
+    send(&mut reader,ViewerInput::DirectOffer {request:17,description}).await?;
+    let offer=event(&mut host,"direct_offer").await?;
+    ensure!(offer["client"]==first && offer["request"]==17,"direct offer must retain authenticated guest routing");
+    let answer=DirectAnswer {request:17,description:DirectDescription(serde_json::json!({"type":"answer","sdp":"v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=ice-pwd:isolated-answer\r\n"}).to_string()),input_epoch:random_token(16),output_epoch:random_token(16)};
+    send(&mut host,HostOutput::DirectAnswer {client:first,answer:answer.clone()}).await?;
+    let received=event(&mut reader,"direct_answer").await?;
+    ensure!(received["answer"]["request"]==17 && received["answer"]["input_epoch"]==answer.input_epoch);
+    let ack=DeliveryPacket::encode(&porthub_terminal::delivery::Message::Ack {epoch:answer.output_epoch.clone(),sequence:0})?;
+    send(&mut reader,ViewerInput::Delivery {packet:ack}).await?;
+    ensure!(event(&mut host,"delivery").await?["client"]==first);
+    let output=DeliveryPacket::encode(&porthub_terminal::delivery::Message::Data(porthub_terminal::delivery::Frame::new(&answer.output_epoch,1,b"sequenced-relay-output")?))?;
+    send(&mut host,HostOutput::Delivery {client:first,packet:output}).await?;
+    let delivered=event(&mut reader,"delivery").await?;
+    let packet:DeliveryPacket=serde_json::from_value(delivered["packet"].clone())?;
+    let porthub_terminal::delivery::Message::Data(frame)=packet.decode()? else {anyhow::bail!("expected relay data")};
+    ensure!(frame.payload()==b"sequenced-relay-output");
+
+
     reader.close(None).await?;
     drop(reader);
     while now() <= hello.options.expires_at {
@@ -166,6 +187,7 @@ async fn actual_websocket_recovery_survives_invite_expiry_and_host_kick_revokes_
     send(
         &mut resumed,
         ViewerInput::History {
+            freeze: false, snapshot: None,
             request: 77,
             pane: "%0".into(),
             before: 0,
@@ -180,6 +202,7 @@ async fn actual_websocket_recovery_survives_invite_expiry_and_host_kick_revokes_
         HostOutput::History {
             client,
             page: HistoryChunk {
+                snapshot: None,
                 pane: None,
                 request: 77,
                 data: encode_data(b"read-only-scrollback"),
@@ -349,6 +372,8 @@ async fn nonresponsive_peers_release_live_slots_but_keep_bounded_recovery() -> R
         .insert("authorization", format!("Bearer {credential}").parse()?);
     let (mut host, _) = connect_async(request).await?;
     let hello = HostHello {
+        direct_transport: false,
+        history_snapshots: false,
         id: random_token(16),
         secret: random_token(32),
         write_token: random_token(32),
@@ -452,6 +477,8 @@ async fn host_rotates_public_links_without_interrupting_attached_guests() -> Res
         .insert("authorization", format!("Bearer {credential}").parse()?);
     let (mut host, _) = connect_async(request).await?;
     let hello = HostHello {
+        direct_transport: false,
+        history_snapshots: false,
         id: random_token(16),
         secret: random_token(32),
         write_token: random_token(32),

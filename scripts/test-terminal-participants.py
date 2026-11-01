@@ -30,7 +30,49 @@ def wait_text(master, child, expected, timeout=5):
 
 
 
+def wait_terminal_exit(master, child, timeout=3):
+    """Keep consuming terminal output while waiting for restoration and exit."""
+    deadline = time.monotonic() + timeout
+    output = bytearray()
+    readable = True
+    while child.poll() is None and time.monotonic() < deadline:
+        if readable and select.select([master], [], [], .02)[0]:
+            try:
+                chunk = os.read(master, 65536)
+            except OSError as error:
+                if error.errno != 5:
+                    raise
+                chunk = b""
+            readable = bool(chunk)
+            output.extend(chunk)
+            del output[:-4096]
+        elif not readable:
+            time.sleep(.02)
+    assert child.poll() is not None, f"terminal exit timed out while draining output: {bytes(output)!r}"
+
+
+def kill_attachment(child):
+    if child.poll() is not None:
+        return
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except PermissionError:
+        # The attachment can change its job-control group on Darwin. Kill our
+        # own child directly instead of masking the original test failure.
+        child.kill()
+    except ProcessLookupError:
+        if child.poll() is None:
+            child.kill()
+    child.wait(timeout=3)
+
+
 def exercise(executable, environment, job, stalled=False, sidebar=False, columns=100):
+    native = sidebar == "native"
+    root = Path(environment["XDG_DATA_HOME"]) / "porthub/terminal"
+    shared_marker = root / f"{job['id']}.share"
+    if native:
+        shared_marker.write_text("{}")
+        shared_marker.chmod(0o600)
     path = Path(job["workspace"]) / "owner.sock"
     listener = socket.socket(socket.AF_UNIX)
     listener.bind(str(path))
@@ -80,6 +122,7 @@ def exercise(executable, environment, job, stalled=False, sidebar=False, columns
         os.setsid()
         fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
     arguments = [executable, "terminal", "attach", job["id"]] if sidebar else [executable, "terminal", "participants", job["id"], "--watch"]
+    if native: arguments += ["--sidebar", "on"]
     report_read, report_write = os.pipe()
     child = subprocess.Popen([sys.executable, "-c", TERMINAL_KEEPER, str(report_write), *arguments],
                              stdin=slave, stdout=slave, stderr=slave, env=environment,
@@ -99,7 +142,7 @@ def exercise(executable, environment, job, stalled=False, sidebar=False, columns
                 assert denied.returncode != 0, "an unlocked stale lease cannot grant controls"
             finally:
                 stale.unlink()
-            os.write(master, b"\x01P")
+            os.write(master, b"\x1b[19~" if native else b"\x01P")
         try:
             wait_text(master, child, b"Participants")
         except AssertionError:
@@ -119,40 +162,51 @@ def exercise(executable, environment, job, stalled=False, sidebar=False, columns
         else:
             wait_text(master, child, b"200 read")
             os.write(master, b"\x1b[Bk")
-            wait_text(master, child, b"Remove 200? y / n")
+            wait_text(master, child, b"Remove 200?")
             os.write(master, b"n")
             wait_text(master, child, b"Removing a guest leaves")
             assert removals == [], "cancel must not remove a guest"
             os.write(master, b"k")
-            wait_text(master, child, b"Remove 200? y / n")
+            wait_text(master, child, b"Remove 200?")
             os.write(master, b"y")
             wait_text(master, child, b"Guest removed")
             assert removals == [200], "only the selected guest must be removed"
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 18, 40, 0, 0))
-            os.write(master, b"\x1b[A")
+            if native:
+                time.sleep(.1)
+                os.write(master,b"printf 'RESIZE%s\\n' 'SHELL'\r")
+                wait_text(master,child,b"RESIZESHELL")
+                fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack("HHHH",24,120,0,0))
+                time.sleep(.1)
+                os.write(master,b"\x1b[19~")
+                wait_text(master,child,b"Participants")
+            else:
+                os.write(master,b"\x1b[A")
         started = time.monotonic()
         os.write(master, b"q")
         if sidebar:
-            wait_text(master, child, b"$", timeout=1.5)
+            if native:
+                time.sleep(.1)
+                os.write(master,b"printf 'NATIVE%s\\n' 'FOCUS'\r")
+                wait_text(master, child, b"NATIVEFOCUS", timeout=1.5)
+            else:
+                wait_text(master, child, b"$", timeout=1.5)
             assert child.poll() is None, "closing the popup must keep the owner attached"
             started = time.monotonic()
             os.write(master, b"\x01d")
+        exit_output=bytearray()
         while child.poll() is None and time.monotonic() - started < 1.5:
             if select.select([master], [], [], .02)[0]:
-                os.read(master, 65536)
-        assert child.poll() == 0, "quit must not wait for a stalled owner socket"
+                exit_output.extend(os.read(master, 65536))
+        assert child.poll() == 0, f"quit must not wait for a stalled owner socket: status={child.poll()}, output={bytes(exit_output[-1500:])!r}"
         assert_terminal_restored(report_read)
     finally:
-        if child.poll() is None:
-            try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            child.wait(timeout=3)
+        kill_attachment(child)
         stop.set()
         listener.close()
         thread.join(timeout=1)
         path.unlink(missing_ok=True)
+        if native: shared_marker.unlink(missing_ok=True)
         os.close(master)
         os.close(slave)
         os.close(report_read)
@@ -167,7 +221,7 @@ def exercise_hangup(executable, environment, job):
         def own_terminal():
             os.setsid()
             fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
-        child = subprocess.Popen([executable, "terminal", "attach", job["id"]],
+        child = subprocess.Popen([executable, "terminal", "attach", job["id"], "--sidebar", "on"],
                                  stdin=slave, stdout=slave, stderr=slave,
                                  env=environment, preexec_fn=own_terminal)
         os.close(slave)
@@ -198,17 +252,12 @@ def exercise_hangup(executable, environment, job):
         os.write(master, b"printf 'PERSIST%s\\n' \"$persistvalue\"\n")
         wait_text(master, child, b"PERSISTporthublifetime")
         os.write(master, b"\x04")
-        child.wait(timeout=3)
+        wait_terminal_exit(master, child)
         assert child.returncode == 0, "explicit Ctrl+D must close the final shell cleanly"
         rows = json.loads(call("list", "--json"))
         assert next(row for row in rows if row["id"] == job["id"])["state"] == "ended", "Ctrl+D must end the workspace"
     finally:
-        if child.poll() is None:
-            try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            child.wait(timeout=3)
+        kill_attachment(child)
         if master is not None:
             os.close(master)
         marker.unlink(missing_ok=True)
@@ -228,12 +277,13 @@ def main():
             exercise(executable, environment, job, stalled=True)
             exercise(executable, environment, job, sidebar=True)
             exercise(executable, environment, job, sidebar=True, columns=36)
+            exercise(executable, environment, job, sidebar="native", columns=120)
             listed = subprocess.run([executable, "terminal", "list", "--json"], env=environment, capture_output=True, check=True)
             assert any(row["id"] == identity and row["state"] == "running" for row in json.loads(listed.stdout)), "closing the owner view must preserve its workspace"
             exercise_hangup(executable, environment, job)
         finally:
             subprocess.run([executable, "terminal", "stop", identity], env=environment, capture_output=True, check=True)
-    print("PASS owner participants PTY: selection, cancellation, targeted removal, resize, terminal restoration, responsive stalled-socket quit, owner-targeted right popup, abrupt PTY hangup, background-task/shell-state persistence and explicit Ctrl+D teardown")
+    print("PASS owner participants PTY: selection, cancellation, targeted removal, resize, terminal restoration, responsive stalled-socket quit, owner-targeted right popup and nonmodal private sidebar, abrupt PTY hangup, background-task/shell-state persistence and explicit Ctrl+D teardown")
 
 
 if __name__ == "__main__":

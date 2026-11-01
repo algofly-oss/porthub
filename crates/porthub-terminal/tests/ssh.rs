@@ -10,11 +10,17 @@ use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn ordinary_openssh_joins_shared_terminal_and_read_only_invites_cannot_write() -> Result<()> {
+    ssh_participants(false).await?;
+    ssh_participants(true).await
+}
+async fn ssh_participants(snapshots: bool) -> Result<()> {
     let root = tempfile::tempdir()?;
     let key = porthub_terminal::ssh::host_key(&root.path().join("host_key"))?;
     let config = porthub_terminal::ssh::config(key);
     let hub = Hub::default();
     let hello = HostHello {
+        direct_transport: false,
+        history_snapshots: snapshots,
         id: random_token(16),
         secret: random_token(32),
         write_token: random_token(32),
@@ -133,9 +139,10 @@ async fn ordinary_openssh_joins_shared_terminal_and_read_only_invites_cannot_wri
                     match host.events.recv().await.unwrap() {
                         HostEvent::History {
                             client: id,
-                            request,
-                            ..
-                        } if id == client => break request,
+                            request, freeze, snapshot, ..
+                        } if id == client => {
+                            assert_eq!(freeze,snapshots);assert!(snapshot.is_none());break request;
+                        },
                         HostEvent::Input { .. } => {
                             panic!("read-only navigation became shell input")
                         }
@@ -149,7 +156,8 @@ async fn ordinary_openssh_joins_shared_terminal_and_read_only_invites_cannot_wri
                 HostOutput::History {
                     client,
                     page: HistoryChunk {
-                        pane: None,
+                        snapshot: snapshots.then(|| "a".repeat(32)),
+                        pane: snapshots.then(|| "%0".into()),
                         request,
                         data: encode_data(b"retained-view\n"),
                         done: true,
@@ -175,6 +183,16 @@ async fn ordinary_openssh_joins_shared_terminal_and_read_only_invites_cannot_wri
                 Ok::<_, anyhow::Error>(())
             })
             .await??;
+            if snapshots {
+                child.stdin.as_mut().unwrap().write_all(b"\x1b[5~").await?;
+                tokio::time::timeout(Duration::from_secs(5),async {
+                    loop {
+                        if let HostEvent::History { client:id,freeze,snapshot,.. } = host.events.recv().await.unwrap() {
+                            assert_eq!(id,client);assert!(freeze);assert_eq!(snapshot,Some("a".repeat(32)));break;
+                        }
+                    }
+                }).await?;
+            }
             child.stdin.as_mut().unwrap().write_all(b"q").await?;
             tokio::time::timeout(Duration::from_secs(5), async {
                 loop {

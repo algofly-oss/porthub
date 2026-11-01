@@ -29,8 +29,24 @@ pub enum Command {
     New(New),
     /// Share a new workspace or an existing local workspace with SSH/browser guests.
     Share(sharing::Share),
-    /// Join an invitation using your ordinary SSH client; no account required.
-    Join { url: String },
+    /// Join an invitation without a PortHub account.
+    Join {
+        url: String,
+        #[arg(long, value_enum, default_value_t = JoinTransport::Ssh)]
+        transport: JoinTransport,
+        /// Local registration whose exit/privacy policy controls native auto mode.
+        #[cfg(feature="terminal-direct")]
+        #[arg(long)]
+        registration:Option<String>,
+        /// Select this OS user's registration for native auto mode.
+        #[cfg(feature="terminal-direct")]
+        #[arg(long)]
+        user:bool,
+        /// Explicit UDP STUN endpoint for native auto mode; repeat up to twice.
+        #[cfg(feature="terminal-direct")]
+        #[arg(long="stun-server",value_parser=crate::terminal_connectivity::server)]
+        stun_servers:Vec<String>,
+    },
     /// Show, replace or revoke invitation links.
     Invite {
         name: String,
@@ -66,7 +82,7 @@ pub enum Command {
         client: u32,
     },
     #[command(name = "__participants-view", hide = true)]
-    ParticipantView { root: PathBuf, id: String },
+    ParticipantView { root: PathBuf, id: String, #[arg(long)] sidebar: bool },
     /// List this OS user's local and shared workspaces.
     #[command(alias = "ls")]
     List {
@@ -74,7 +90,7 @@ pub enum Command {
         json: bool,
     },
     /// Attach or reattach, including from inside another tmux session.
-    Attach { name: String },
+    Attach { name: String, #[arg(long, value_enum, default_value_t = Sidebar::Auto)] sidebar: Sidebar },
     /// Explicitly terminate a workspace and its running tasks.
     Stop { name: String },
     /// Rename a workspace without interrupting its tasks.
@@ -99,10 +115,27 @@ impl Default for Command {
             prefix: "C-a".into(),
             history_limit: 100_000,
             no_mouse: false,
+            sidebar: Sidebar::Auto,
             command: Vec::new(),
         })
     }
 }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum JoinTransport {
+    /// Ordinary installed SSH client.
+    #[default]
+    Ssh,
+    /// Native gateway relay without an external SSH client.
+    #[cfg(feature = "terminal-direct")]
+    Relay,
+    /// Native direct when a local agent permits it, otherwise gateway relay.
+    #[cfg(feature="terminal-direct")]
+    Auto,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum Sidebar { #[default] Auto, On, Off }
 
 #[derive(Args, Clone)]
 pub struct New {
@@ -127,6 +160,9 @@ pub struct New {
     history_limit: u32,
     #[arg(long)]
     no_mouse: bool,
+    /// Private participant sidebar; auto enables it for shared, wide terminals.
+    #[arg(long, value_enum, default_value_t = Sidebar::Auto)]
+    sidebar: Sidebar,
     /// Command and arguments; omit to start an interactive shell.
     #[arg(last = true)]
     command: Vec<OsString>,
@@ -276,17 +312,20 @@ fn name_valid(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn attach(job: &Job) -> Result<()> {
+fn attach(job: &Job, sidebar: Sidebar) -> Result<()> {
     let workspace = workspace(job)?;
     ensure!(workspace.is_alive(), "workspace has ended");
     // Recognize our own server instead of recursively attaching to ourselves.
-    if std::env::var_os("TMUX").is_some_and(|value| {
-        value.to_string_lossy().split(',').next() == workspace.socket().to_str()
-    }) {
+    if std::env::var_os("PORTHUB_TERMINAL_SOCKET")
+        .is_some_and(|value| PathBuf::from(value) == workspace.socket())
+        || std::env::var_os("TMUX").is_some_and(|value| {
+            value.to_string_lossy().split(',').next() == workspace.socket().to_str()
+        })
+    {
         println!("Already attached to {}", job.name);
         return Ok(());
     }
-    participant_popup::attach(job, &workspace)
+    participant_popup::attach(job, &workspace, sidebar)
 }
 
 fn create(root: &Path, args: New) -> Result<Job> {
@@ -388,6 +427,7 @@ fn open_named(root: &Path, arguments: Vec<OsString>) -> Result<()> {
         "use the workspace name directly, without an additional --name"
     );
     flags.name = Some(name.clone());
+    let sidebar = flags.sidebar;
     let detach = flags.detach;
     let json = flags.json;
     let guard = lock(root)?;
@@ -424,7 +464,7 @@ fn open_named(root: &Path, arguments: Vec<OsString>) -> Result<()> {
         );
     }
     if !detach {
-        attach(&job)?;
+        attach(&job, sidebar)?;
     }
     Ok(())
 }
@@ -435,10 +475,25 @@ pub async fn run(command: Command) -> Result<()> {
         Command::ParticipantPopup { root, id, client } => {
             participant_popup::show(&root, &id, client)?
         }
-        Command::ParticipantView { root, id } => participant_popup::view(&root, &id).await?,
+        Command::ParticipantView { root, id, sidebar } => participant_popup::view(&root, &id, sidebar).await?,
         Command::Named(arguments) => open_named(&root, arguments)?,
         Command::Share(args) => sharing::start(&root, args).await?,
-        Command::Join { url } => sharing::join(&url).await?,
+        Command::Join {url,transport,
+            #[cfg(feature="terminal-direct")] registration,
+            #[cfg(feature="terminal-direct")] user,
+            #[cfg(feature="terminal-direct")] stun_servers,
+        } => {
+            #[cfg(feature="terminal-direct")]
+            ensure!(matches!(transport,JoinTransport::Auto) || (registration.is_none() && !user && stun_servers.is_empty()),
+                "--registration, --user and --stun-server apply only to --transport auto");
+            match transport {
+                JoinTransport::Ssh=>sharing::join(&url).await?,
+                #[cfg(feature="terminal-direct")]
+                JoinTransport::Relay=>crate::terminal_guest::client::join_relay(&url).await?,
+                #[cfg(feature="terminal-direct")]
+                JoinTransport::Auto=>crate::terminal_guest::client::join_auto_with_stun(&url,registration.as_deref(),user,&stun_servers).await?,
+            }
+        },
         Command::Invite {
             name,
             json,
@@ -459,7 +514,7 @@ pub async fn run(command: Command) -> Result<()> {
         Command::Participants { name, json, watch } => {
             let job = select(&root, &name)?;
             if watch {
-                participant_panel::run(job).await?;
+                participant_panel::run(job, false).await?;
             } else {
                 participant_control::request(&job, None, json).await?;
             }
@@ -469,6 +524,7 @@ pub async fn run(command: Command) -> Result<()> {
         }
         Command::Serve { id } => sharing::serve(&root, &id).await?,
         Command::New(args) => {
+            let sidebar = args.sidebar;
             let detach = args.detach;
             let json = args.json;
             let job = create(&root, args)?;
@@ -484,7 +540,7 @@ pub async fn run(command: Command) -> Result<()> {
                 );
             }
             if !detach {
-                attach(&job)?;
+                attach(&job, sidebar)?;
             }
         }
         Command::List { json } => {
@@ -505,7 +561,7 @@ pub async fn run(command: Command) -> Result<()> {
                 }
             }
         }
-        Command::Attach { name } => attach(&select(&root, &name)?)?,
+        Command::Attach { name, sidebar } => attach(&select(&root, &name)?, sidebar)?,
         Command::Stop { name } => {
             let job = select(&root, &name)?;
             workspace(&job)?.stop()?;

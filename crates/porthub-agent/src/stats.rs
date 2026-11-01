@@ -102,6 +102,10 @@ fn snapshot(profile: &Path, machine: &str) -> Result<Value> {
         "state":status.as_ref().map(|status|status.state.as_str()).unwrap_or("running"),"route":status.as_ref().map(|status|status.route.as_str()).unwrap_or(""),
         "private_status":status.as_ref().and_then(|status|status.private_status.as_ref()),"process":process,"open_descriptors":descriptors,
         "traffic":{"sent_bytes":sent,"received_bytes":received,"active_channels":active,"scope":"public tunnel application payload"},
+        "terminal":{"measurements":crate::terminal_telemetry::snapshot(profile),
+            "payload_scope":"guest PTY bytes; output includes redraws; delivery not implied",
+            "udp_scope":"host RTC UDP observations; external candidate discovery excluded",
+            "relay_scope":"gateway terminal payload; control and TLS/WebSocket framing excluded"},
         "services":rows,"service_count":total_services,"services_truncated":total_services>50}),
     )
 }
@@ -280,7 +284,8 @@ fn render(
         "  {:<16} {:<11} {:>7} {:>10} {:>10} {:>10}",
         "REGISTRATION", "STATE", "CPU %", "TX /s", "RX /s", "RSS"
     ));
-    let visible = height.saturating_sub(if details { 18 } else { 9 }).max(1);
+    let terminal_details=details && rows.get(selected).is_some_and(|row|row["terminal"]["measurements"].is_object());
+    let visible = height.saturating_sub(if details {18+if terminal_details {4}else{0}} else {9}).max(1);
     for (index, row) in rows
         .iter()
         .enumerate()
@@ -343,6 +348,21 @@ fn render(
                 bytes(number(&row["traffic"], "received_bytes") as f64),
                 row["open_descriptors"]
             ));
+            if terminal_details {
+                let terminal=&row["terminal"]["measurements"];
+                let totals=&terminal["counters"];
+                lines.push(format!("Terminals {} sessions  {} guests  {} measured sessions",
+                    number(terminal,"active_sessions"),number(terminal,"active_participants"),number(terminal,"active_reporting_sessions")));
+                lines.push(format!("Gateway payload in/out {} / {}",
+                    bytes(number(terminal,"relay_received_payload_bytes") as f64),bytes(number(terminal,"relay_sent_payload_bytes") as f64)));
+                if number(terminal,"reported_sessions")>0 {
+                    lines.push(format!("PTY bytes in/out {} / {} (includes redraws)",bytes(number(totals,"input_bytes") as f64),bytes(number(totals,"output_bytes") as f64)));
+                    lines.push(format!("Direct UDP in/out {} / {}",bytes(number(totals,"direct_udp_received_bytes") as f64),bytes(number(totals,"direct_udp_sent_bytes") as f64)));
+                } else {
+                    lines.push("PTY bytes: not reported by session hosts".into());
+                    lines.push("Direct UDP: not reported by session hosts".into());
+                }
+            }
             if let Some(services) = row["services"].as_array() {
                 for service in services.iter().take(4) {
                     lines.push(format!(
@@ -529,6 +549,14 @@ mod tests {
         assert!(output.lines().all(|line| line.chars().count() <= 80));
         assert!(output.lines().count() <= 24);
         assert_eq!(clean("safe\u{1b}[31m\nname", 30), "safe[31mname");
+        let mut measured=rows;
+        measured[11]["terminal"]=json!({"measurements":{"active_sessions":2,"active_participants":4,"active_reporting_sessions":1,"reported_sessions":1,"counters":{"input_bytes":7,"output_bytes":11,"direct_udp_sent_bytes":13,"direct_udp_received_bytes":17}}});
+        let output=render(&measured,80,24,false,11,true);
+        assert!(output.contains("Terminals 2 sessions"));
+        assert!(output.contains("Gateway payload in/out"));
+        assert!(output.contains("Direct UDP in/out"));
+        assert!(output.contains("q quit"));
+        assert!(output.lines().all(|line|line.chars().count()<=80) && output.lines().count()<=24);
     }
     #[test]
     fn refresh_interval_is_bounded_and_rejects_nan_and_infinity() {
@@ -546,6 +574,11 @@ mod tests {
         let control = crate::control::Control::new(profile)?;
         let directory = tempfile::tempdir()?;
         let source = directory.path().join("missing-profile.json");
+        let mut terminal=crate::terminal_telemetry::Lease::open(&source,1)?;
+        terminal.participants(1);
+        let mut emitter=crate::terminal_telemetry::Emitter::new(terminal.policy())?;
+        terminal.record(emitter.report(porthub_terminal::traffic::Snapshot {input_bytes:7,direct_udp_sent_bytes:13,..Default::default()})?)?;
+        assert_eq!(crate::terminal_telemetry::snapshot(&source.with_file_name("other-profile.json")).counters.input_bytes,0);
         let (mut caller, stream) = tokio::io::duplex(65536);
         let request = serve(
             BufReader::new(stream),
@@ -562,6 +595,9 @@ mod tests {
             assert!(!text.contains("never-return-this-secret"));
             assert!(!text.contains("environment"));
             let value: Value = serde_json::from_slice(&bytes)?;
+            assert_eq!(value["terminal"]["measurements"]["counters"]["input_bytes"],7);
+            assert_eq!(value["terminal"]["measurements"]["counters"]["direct_udp_sent_bytes"],13);
+            assert_eq!(value["terminal"]["measurements"]["active_participants"],1);
             assert_eq!(value["schema_version"], 1);
             assert_eq!(value["process"]["pid"], std::process::id());
             assert_eq!(value["machine_id"], "0123456789abcdef01234567");

@@ -1627,7 +1627,7 @@ export const guideArticles = [
         },
         {
           "type": "paragraph",
-          "text": "In a local PortHub CLI attachment, press your prefix then Shift+P (Ctrl+A then Shift+P by default) to open the participant popup on the right. It takes focus while open; q closes it and returns to the shell. The shortcut requires an active local owner-attachment lease. You can also run participants NAME --watch in another terminal. In the native participant view, arrows select a guest, `k` requests removal, `y` confirms and `n` cancels; `q` closes the view. Removing a guest revokes that recovery credential and leaves other attachments and the shell running. A holder of a still-valid invitation can intentionally join as a new guest; block invitation URLs to prevent that."
+          "text": "Shared CLI attachments show a private participant sidebar automatically at 100 columns or wider. Use --sidebar auto|on|off with terminal NAME, new, share or attach; on requires at least 80 columns and can also show a local workspace before sharing. Keep typing in the shared shell while the sidebar stays visible. F8 switches focus; q, Escape or Ctrl+C in the sidebar returns to the shell. If the terminal shrinks below 80 columns, the shell fills the view; the sidebar returns when it widens again. The panel is separate from shared panes, so guests do not see its controls. In narrow terminals or with --sidebar off, press your prefix then Shift+P (Ctrl+A then Shift+P by default) for the owner-only popup; q closes that popup. You can also run participants NAME --watch in another terminal. Arrows select a guest, k requests removal, y confirms and n cancels. Removing a guest revokes that recovery credential and leaves other attachments and the shell running. A holder of a still-valid invitation can intentionally join as a new guest; block invitation URLs to prevent that."
         },
         {
           "type": "paragraph",
@@ -1641,7 +1641,7 @@ export const guideArticles = [
       "blocks": [
         {
           "type": "paragraph",
-          "text": "The default prefix is Ctrl+A; press it twice to send a literal Ctrl+A. Use the bundled tmux pane/window commands and prefix help for normal multiplexer features. `--prefix`, `--history-limit`, `--no-mouse`, `--cwd`, `--shell` and `--env` customize a new workspace. The default retained history is 100000 lines."
+          "text": "The default prefix is Ctrl+A; press it twice to send a literal Ctrl+A. Use the bundled tmux pane/window commands and prefix help for normal multiplexer features. `--prefix`, `--history-limit`, `--no-mouse`, `--cwd`, `--shell` and `--env` customize a new workspace. The default retained history is 100000 lines. You can run your regular `tmux attach` inside a new PortHub workspace. Use PortHub's prefix or `porthub terminal tmux NAME -- COMMAND` to control the PortHub workspace itself."
         },
         {
           "type": "paragraph",
@@ -1649,7 +1649,7 @@ export const guideArticles = [
         },
         {
           "type": "paragraph",
-          "text": "History captures are bounded live slices. New output or resizing can shift page boundaries; a stable history snapshot is not yet provided. The browser offers smaller page sizes when a capture reaches its size bound."
+          "text": "With compatible 1.10-or-newer agent and gateway support, browser and read-only native/SSH viewers can retain a bounded frozen history snapshot. New output and resizing do not move its pages. Refresh history captures a new snapshot. Older hosts provide live slices whose page boundaries can shift."
         },
         {
           "type": "table",
@@ -1692,6 +1692,29 @@ export const guideArticles = [
       ]
     },
     {
+      "id": "connectivity",
+      "title": "Direct connectivity and explicit discovery",
+      "blocks": [
+        {
+          "type": "paragraph",
+          "text": "Direct paths can reveal peer network addresses. Use --relay-only when first sharing a workspace to keep every guest on the gateway, or enable Use gateway relay only in the browser's Connection options for your own attachment. Native Unix joins can explicitly choose --transport relay. These choices leave the workspace running."
+        },
+        {
+          "type": "paragraph",
+          "text": "No public STUN service is selected automatically. In a direct-capable build, --stun-server explicitly approves a UDP discovery endpoint for that host or native auto join; repeat it at most twice. Browser guests can enter their own endpoints in Connection options. Settings are saved in that browser tab and apply on connection. Gateway messages never populate that local list. Discovery uses the same approved bound UDP socket as ICE, and native permission is checked before each probe."
+        },
+        {
+          "type": "code",
+          "label": "Terminal",
+          "text": "porthub terminal share datawork --detach --stun-server stun:your-server.example:3478\nporthub terminal join URL --transport auto --stun-server stun:your-server.example:3478\nporthub terminal share privatework --detach --relay-only"
+        },
+        {
+          "type": "paragraph",
+          "text": "Replace the example hostname with a UDP STUN service you choose. HTTP, TURN, embedded credentials, paths and non-UDP transport parameters are rejected. A configured endpoint is an address hint, not authentication. Failed discovery falls back to host candidates or the gateway. Endpoint-dependent NATs and blocked UDP can still require the relay. Native auto mode additionally requires a current local agent privacy grant; exit/Tor/gateway-only preferences take precedence. Existing shared workspaces keep their original host discovery configuration so changing command flags does not disrupt attached guests."
+        }
+      ]
+    },
+    {
       "id": "platforms",
       "title": "Platform and transport limits",
       "blocks": [
@@ -1701,7 +1724,7 @@ export const guideArticles = [
         },
         {
           "type": "paragraph",
-          "text": "Current browser and ordinary SSH participation uses the gateway relay. A PortHub-aware direct peer path and browser-compatible direct transport are not yet implemented for terminal sharing; no direct-routing guarantee is made by these invitations."
+          "text": "Ordinary SSH always uses the gateway. Direct-capable builds can optimize browser and native auto joins with WebRTC while retaining gateway signaling and fallback. NAT/firewall restrictions can prevent a direct path; no invitation guarantees direct routing."
         }
       ]
     }

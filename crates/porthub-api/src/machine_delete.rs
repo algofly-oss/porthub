@@ -160,6 +160,9 @@ pub(crate) async fn resume(app: &App, machine: &Document) -> ApiResult<()> {
     app.collection("connections")
         .delete_many(doc! {"machine_id":id})
         .await?;
+    app.collection("terminal_traffic")
+        .delete_many(doc! {"machine_id":id})
+        .await?;
     app.collection("private_dns_rules")
         .delete_many(doc! {"machine_id":id})
         .await?;

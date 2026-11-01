@@ -14,8 +14,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-mod pager;
-use pager::Pager;
+use crate::viewer_history::Pager;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 
@@ -145,6 +144,9 @@ async fn output(
             event=viewer.events.recv()=>event
         };
         match event {
+            Some(ViewerEvent::Welcome { history_snapshots, .. }) => {
+                pager.lock().expect("SSH pager").capabilities(history_snapshots);
+            }
             Some(ViewerEvent::History { page }) if read_only => {
                 let screen = pager.lock().expect("SSH pager").page(page);
                 match screen {

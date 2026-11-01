@@ -64,6 +64,21 @@ Retries can finish a draft pinned to the same source; published assets are
 immutable. Automatic version preparation skips versions reserved by another
 draft or tag, so a source fix after a failed upload advances the patch version.
 
+A completed full `Native agent platforms` dispatch can be promoted separately
+with `Promote verified client release`, selecting its numeric run ID. This
+workflow does not rebuild clients. The existing `Native agent platforms`
+dispatcher also accepts `promote_run_id` for the same operation, skipping its
+platform builds. Use it after server rollout and application
+checks: it verifies the successful ten-platform bundle gate, repository/source
+ancestry and artifact identity, downloads the exact ZIP, checks GitHub's SHA256
+and length, then validates all thirty canonical files before publication. The
+tag points to the original build commit, even when the promotion workflow has
+subsequently changed. Failed/partial/foreign/expired runs, corrupt downloads,
+archive links and mismatched platform versions cannot be promoted. Publication
+uses the workflow's temporary GitHub token; no personal credential is copied to
+a deployment machine. Existing publication and latest-only retention safeguards
+apply. This is an explicit promotion workflow, not an automatic deployment gate.
+
 During active development, GitHub retains only the latest verified versioned
 release and its version tag by default. After publication, CI removes older
 versioned releases (including binary assets) and version tags, plus unprotected
@@ -255,3 +270,32 @@ Linux and macOS lifecycle tests provide runtime evidence for their exercised
 platforms; compiling a Windows target does not establish installation or routing
 behavior on a Windows machine. Current transfer results remain in the single
 `docs/benchmarks/README.md` summary with their measured release versions.
+
+The 1.10 terminal-sharing release candidate enables the `terminal-direct` agent
+feature in the default build. Unix hosts include direct transport and native
+relay/auto joins without custom build flags; ordinary SSH remains the default
+join method. Local transport policy still controls whether UDP is allowed, and
+STUN servers require explicit local configuration. Windows retains its existing
+hosting/CLI limits; browser and ordinary SSH guests do not need PortHub installed.
+Minimal builds may opt out with `--no-default-features`. The feature must be
+validated by the platform packaging matrix before this candidate is published.
+
+For a test/workflow-only recovery, `Native agent platforms` accepts
+`reuse_run_id=RUN` with `platform=all`, `verify_only=false`. Selection verifies a
+completed run in this repository, its source ancestry, and an identical
+production-input fingerprint: Cargo/toolchain/configuration, all crate/vendor
+sources, build helpers, target mappings and the complete native/cross build job
+recipes. Changed production inputs refuse reuse and require a full build.
+Only successful platform jobs with unexpired uniquely identified artifacts are
+reused. Missing or failed platforms build normally with the current tests.
+
+The final bundle job rechecks provenance, downloads each retained archive,
+verifies GitHub's SHA-256/size, rejects links and unexpected archive entries,
+then runs the existing complete thirty-file version/checksum validation across
+all ten platforms. Unselected build jobs may be skipped only after successful
+reuse selection; failed or cancelled selected builds still block publication.
+A separate `porthub-release-provenance` CI artifact records the retained platform
+source, archive identities/digests and production fingerprint. Reused platforms
+keep their original verbose build revision; rebuilt platforms report the new
+revision. Both represent the verified same production input tree and version.
+Normal release builds and latest-only release/tag retention are unchanged.

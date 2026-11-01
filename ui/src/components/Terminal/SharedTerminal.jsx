@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { IconCopy, IconPlugConnected, IconPlugConnectedX, IconTerminal2, IconUsers, IconUserMinus } from "@tabler/icons-react";
 import { Button } from "@/components/ui/button";
 import HistoryPanel from "./HistoryPanel";
 import useTerminalManagement from "./useTerminalManagement";
+import { terminalStunServers } from "@/lib/terminalConnectivity.mjs";
+import { TerminalTransport } from "@/lib/terminalTransport";
 
 const MAX_PENDING = 1024 * 1024;
 function bytesToBase64(bytes) {
@@ -13,12 +15,13 @@ function bytesToBase64(bytes) {
 
 export default function SharedTerminal() {
   const container = useRef(null), terminal = useRef(null), connection = useRef(null);
+  const transport = useRef(null);
   const permission = useRef(true), copySelection = useRef(false);
   const recovery = useRef(null), manualDisconnect = useRef(false), retryTimer = useRef(null);
   const retryDeadline = useRef(null), retryCount = useRef(0);
   const [participant, setParticipant] = useState(null);
   const [sessionId,setSessionId]=useState(null),[confirmRemoval,setConfirmRemoval]=useState(null),[confirmInvitations,setConfirmInvitations]=useState(false);
-  const history = useRef({serial:0,pending:null,timer:null}), historyAction=useRef(null), historyVisible=useRef(false);
+  const history = useRef({serial:0,pending:null,timer:null,supported:false,snapshot:null,pane:"",stale:false}), historyAction=useRef(null), historyVisible=useRef(false);
   const [historyOpen,setHistoryOpen]=useState(false),[historyPane,setHistoryPane]=useState(""),[historyPageSize,setHistoryPageSize]=useState(200);
   historyVisible.current=historyOpen;
   const [historyText,setHistoryText]=useState(""),[historyBusy,setHistoryBusy]=useState(false),[historyError,setHistoryError]=useState("");
@@ -28,6 +31,18 @@ export default function SharedTerminal() {
   const [session, setSession] = useState(null), [members, setMembers] = useState([]);
   const [autoCopy, setAutoCopy] = useState(false);
   const [clipboardStatus, setClipboardStatus] = useState("");
+  const [stunText,setStunText]=useState("");
+  const stun=useRef([]),relayOnlyChoice=useRef(false);
+  const [relayOnly,setRelayOnly]=useState(false);
+  relayOnlyChoice.current=relayOnly;
+  useEffect(()=>{try{setRelayOnly(sessionStorage.getItem("porthub:terminal:relay-only:v1")==="true");}catch{}},[]);
+  const connectivity=useMemo(()=>{try{return {servers:terminalStunServers(stunText),error:""};}catch(error){return {servers:[],error:error.message};}},[stunText]);
+  stun.current=connectivity.servers;
+  useEffect(()=>{try{setStunText(terminalStunServers(JSON.parse(sessionStorage.getItem("porthub:terminal:stun:v1") || "[]")).join("\n"));}catch{}},[]);
+  const changeStun=value=>{
+    setStunText(value);
+    try{sessionStorage.setItem("porthub:terminal:stun:v1",JSON.stringify(terminalStunServers(value)));}catch{}
+  };
   const management=useTerminalManagement(sessionId,status==="Connected");
 
   useEffect(() => {
@@ -75,6 +90,11 @@ export default function SharedTerminal() {
         if (bytes.length > 65536 || socket.bufferedAmount > 262144) {
           setError("Input is too large or the connection is busy. Wait, then paste a smaller section."); return;
         }
+        if (transport.current) {
+          try { transport.current.input(bytes); }
+          catch { setError("Input is awaiting acknowledgement. Wait, then paste a smaller section."); }
+          return;
+        }
         for (let offset = 0; offset < bytes.length; offset += 16384)
           socket.send(JSON.stringify({ type: "input", data: bytesToBase64(bytes.subarray(offset, offset + 16384)) }));
       });
@@ -119,17 +139,27 @@ export default function SharedTerminal() {
       try {
         if (typeof data !== "string" || data.length > 32768) throw new Error("Invalid terminal frame");
         const event = JSON.parse(data);
+        if (transport.current?.event(event)) return;
         if (event.type === "history") {
           const page=event.page, pending=history.current.pending;
           if (!pending || page?.request!==pending.request) return;
           if (page.pane!=null && (typeof page.pane!=="string" || !/^%[0-9]{1,19}$/.test(page.pane))) throw new Error("Invalid history pane");
           if (typeof page.data!=="string" || page.data.length>21848 || typeof page.done!=="boolean" || !Number.isInteger(page.total) || page.total<0 || page.total>200000 || !Number.isInteger(page.before) || page.before<0 || page.before>200000 || !Number.isInteger(page.lines) || page.lines<0 || page.lines>512 || page.error!=null && (typeof page.error!=="string" || page.error.length>256)) throw new Error("Invalid history response");
+          if(page.error==null){
+            if(pending.freeze){
+              if(typeof page.snapshot!=="string" || !/^[a-f0-9]{32}$/.test(page.snapshot) || !page.pane) throw new Error("Invalid history snapshot");
+              if(pending.snapshot && pending.snapshot!==page.snapshot) throw new Error("History snapshot changed");
+              if(pending.pane && pending.pane!==page.pane) throw new Error("History pane changed");
+              pending.snapshot=page.snapshot;pending.pane=page.pane;
+            } else if(page.snapshot!=null) throw new Error("Unexpected history snapshot");
+          }
           const decoded=atob(page.data),bytes=Uint8Array.from(decoded,char=>char.charCodeAt(0));
           pending.size+=bytes.length;if(pending.size>131072) throw new Error("History capture exceeds limit");pending.chunks.push(bytes);
           if (page.done) {
             clearTimeout(history.current.timer);history.current.pending=null;
             const data=new Uint8Array(pending.size);let offset=0;for(const chunk of pending.chunks){data.set(chunk,offset);offset+=chunk.length;}
             if(page.error){setHistoryError(page.error);setHistoryBusy(false);return;}
+            history.current.snapshot=pending.snapshot;history.current.pane=page.pane || "";history.current.stale=false;
             if(page.pane)setHistoryPane(page.pane);
             setHistoryText(new TextDecoder().decode(data).replace(/[\x00-\x08\x0b-\x1f\x7f]/g,""));
             setHistoryMeta({total:page.total,before:page.before,lines:page.lines,truncated:page.truncated===true});
@@ -142,10 +172,24 @@ export default function SharedTerminal() {
           if(typeof event.session==="string" && /^[a-f0-9]{32}$/.test(event.session))setSessionId(event.session);
           try { sessionStorage.setItem(storageKey, JSON.stringify(recovery.current)); } catch { /* Memory recovery still works when tab storage is unavailable. */ }
         } else if (event.type === "welcome") {
-          if (typeof event.name !== "string" || typeof event.read_only !== "boolean") throw new Error("Invalid session");
+          if (welcome || typeof event.name !== "string" || typeof event.read_only !== "boolean") throw new Error("Invalid session");
+          history.current.supported=event.history_snapshots===true;
           welcome = true; retryDeadline.current = null; retryCount.current = 0; clearTimeout(handshake); setSession(event); setStatus("Connected");
           permission.current = event.read_only; instance.options.disableStdin = event.read_only;
           instance.reset(); instance.focus();
+          if (event.direct_transport === true && !relayOnlyChoice.current && typeof RTCPeerConnection !== "undefined") {
+            transport.current = new TerminalTransport({
+              readOnly: event.read_only,
+              stunServers: stun.current,
+              send: message => {
+                if (socket.readyState !== WebSocket.OPEN || socket.bufferedAmount > 262144) throw new Error("Terminal gateway is busy");
+                socket.send(JSON.stringify(message));
+              },
+              write: bytes => new Promise(resolve => instance.write(bytes, resolve)),
+              fail: reason => { if (alive) { closedReason = reason; socket.close(); } },
+            });
+            transport.current.start();
+          }
         } else if (event.type === "output") {
           if (!welcome || typeof event.data !== "string" || event.data.length > 21848) throw new Error("Invalid terminal output");
           const decoded = atob(event.data), bytes = Uint8Array.from(decoded, char => char.charCodeAt(0));
@@ -163,8 +207,10 @@ export default function SharedTerminal() {
     };
     socket.onclose = () => {
       if (!alive) return;
+      transport.current?.close(); transport.current = null;
       clearTimeout(handshake); permission.current = true; instance.options.disableStdin = true;
       setMembers([]);
+      if(history.current.snapshot)history.current.stale=true;
       if(history.current.pending){clearTimeout(history.current.timer);history.current.pending=null;setHistoryBusy(false);setHistoryError("Connection changed. Refresh history after reconnecting.");}
       if (!manualDisconnect.current && retryable && recovery.current) {
         if (!retryDeadline.current) retryDeadline.current = Date.now() + recovery.current.reconnect_timeout * 1000;
@@ -179,7 +225,7 @@ export default function SharedTerminal() {
       if (closedReason) setError(closedReason);
     };
     socket.onerror = () => { if (alive) setError("Could not reach the terminal host. Check the connection and try again."); };
-    return () => { alive = false; clearTimeout(handshake); clearTimeout(retryTimer.current); socket.close(); if (connection.current === socket) connection.current = null; };
+    return () => { alive = false; transport.current?.close(); transport.current = null; clearTimeout(handshake); clearTimeout(retryTimer.current); socket.close(); if (connection.current === socket) connection.current = null; };
   }, [ready, attempt]);
 
   useEffect(()=>{
@@ -192,14 +238,19 @@ export default function SharedTerminal() {
     try { await navigator.clipboard.writeText(selected); setClipboardStatus("Selection copied"); }
     catch { setClipboardStatus("Clipboard unavailable. Use your browser’s Copy command."); }
   }
-  function loadHistory(before=0) {
+  function loadHistory(before=0,refresh=false) {
     const socket=connection.current;
     if(socket?.readyState!==WebSocket.OPEN || status!=="Connected"){setHistoryError("Connect to read retained history.");return;}
     if(history.current.pending)return;
     if(historyPane && !/^%[0-9]{1,19}$/.test(historyPane)){setHistoryError("Choose a pane ID such as %0, or leave it blank for the active pane.");return;}
+    if(!refresh && history.current.snapshot && (history.current.stale || historyPane!==history.current.pane)){
+      setHistoryError("Refresh history to capture this pane or connection.");return;
+    }
+    const freeze=history.current.supported;
+    const snapshot=refresh ? null : history.current.snapshot;
     const request=(history.current.serial+1)>>>0;history.current.serial=request;
-    history.current.pending={request,chunks:[],size:0};setHistoryBusy(true);setHistoryError("");
-    socket.send(JSON.stringify({type:"history",request,pane:historyPane,before,lines:historyPageSize}));
+    history.current.pending={request,chunks:[],size:0,freeze,snapshot,pane:historyPane};setHistoryBusy(true);setHistoryError("");
+    socket.send(JSON.stringify({type:"history",request,pane:historyPane,before,lines:historyPageSize,...(freeze ? {freeze:true,...(snapshot ? {snapshot} : {})} : {})}));
     history.current.timer=setTimeout(()=>{history.current.pending=null;setHistoryBusy(false);setHistoryError("History request timed out. The live terminal is still available; try Refresh history.");},5000);
   }
   historyAction.current=()=>{setHistoryOpen(!historyOpen);if(!historyOpen)loadHistory(0);else requestAnimationFrame(()=>terminal.current?.focus());};
@@ -207,15 +258,16 @@ export default function SharedTerminal() {
   return <main className="flex h-[100dvh] min-h-0 flex-col bg-background text-foreground" aria-label="Shared terminal">
     <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
       <div className="flex min-w-0 items-center gap-3"><IconTerminal2 size={23} className="shrink-0 text-primary" /><div className="min-w-0"><h1 className="truncate text-sm font-semibold">{session?.name || "PortHub shared terminal"}</h1><p role="status" className="mt-0.5 text-xs text-muted-foreground">{status}{session ? ` · ${session.read_only ? "Read-only" : "Interactive"}` : " · Join with an invitation"}</p></div></div>
-      <div className="flex flex-wrap items-center gap-2"><Button variant="secondary" size="sm" disabled={!connected} onClick={()=>historyAction.current()}>History</Button><Button variant="secondary" size="sm" onClick={copy}><IconCopy size={15} />Copy selection</Button>{connected || connecting ? <Button variant="secondary" size="sm" onClick={()=>{manualDisconnect.current=true;clearTimeout(retryTimer.current);retryDeadline.current=null;connection.current?.close();setStatus("Disconnected");}}><IconPlugConnectedX size={15} />Disconnect</Button> : <Button size="sm" disabled={!ready} onClick={()=>{clearTimeout(retryTimer.current);retryDeadline.current=null;setAttempt(value=>value+1);}}><IconPlugConnected size={15} />{attempt ? "Reconnect" : "Connect"}</Button>}</div>
+      <div className="flex flex-wrap items-center gap-2"><Button variant="secondary" size="sm" disabled={!connected} onClick={()=>historyAction.current()}>History</Button><Button variant="secondary" size="sm" onClick={copy}><IconCopy size={15} />Copy selection</Button>{connected || connecting ? <Button variant="secondary" size="sm" onClick={()=>{manualDisconnect.current=true;clearTimeout(retryTimer.current);retryDeadline.current=null;connection.current?.close();setStatus("Disconnected");}}><IconPlugConnectedX size={15} />Disconnect</Button> : <Button size="sm" disabled={!ready || (!relayOnly && !!connectivity.error)} onClick={()=>{clearTimeout(retryTimer.current);retryDeadline.current=null;setAttempt(value=>value+1);}}><IconPlugConnected size={15} />{attempt ? "Reconnect" : "Connect"}</Button>}</div>
     </header>
     {error && <p role="alert" className="shrink-0 bg-amber-500/10 px-4 py-2 text-sm text-amber-700 dark:text-amber-300">{error}</p>}
     <div className="flex min-h-0 flex-1 flex-col md:flex-row">
-      {historyOpen && <HistoryPanel text={historyText} meta={historyMeta} pane={historyPane} setPane={setHistoryPane} pageSize={historyPageSize} setPageSize={setHistoryPageSize} busy={historyBusy} error={historyError} load={loadHistory} close={()=>{setHistoryOpen(false);requestAnimationFrame(()=>terminal.current?.focus());}} onSelection={()=>{if(autoCopy)copy();}} />}
+      {historyOpen && <HistoryPanel text={historyText} meta={historyMeta} pane={historyPane} setPane={setHistoryPane} pageSize={historyPageSize} setPageSize={setHistoryPageSize} busy={historyBusy} error={historyError} load={loadHistory} frozen={!!history.current.snapshot} close={()=>{setHistoryOpen(false);requestAnimationFrame(()=>terminal.current?.focus());}} onSelection={()=>{if(autoCopy)copy();}} />}
       <section className={`${historyOpen ? "hidden" : ""} min-h-0 min-w-0 flex-1 bg-[#101214] p-2`} aria-label="Terminal output"><div ref={container} className="h-full min-h-0 w-full overflow-hidden" /></section>
-      <aside aria-label="Session participants" className="flex max-h-[45dvh] shrink-0 flex-col overflow-hidden border-t border-border bg-surface p-4 md:max-h-none md:w-72 md:border-l md:border-t-0">
+      <aside aria-label="Session participants" className="flex max-h-[45dvh] shrink-0 flex-col overflow-y-auto border-t border-border bg-surface p-4 md:max-h-none md:w-72 md:border-l md:border-t-0">
         <h2 className="flex items-center gap-2 text-xs font-semibold"><IconUsers size={16} />Participants <span className="ml-auto tabular-nums text-muted-foreground">{members.length}</span></h2>
         <div className="mt-3 min-h-0 flex-1 overflow-auto">{members.length ? <ul className="space-y-3">{members.map(member=><li key={member.id} className="flex items-center justify-between gap-2 text-xs"><span className="min-w-0 truncate" title={`Guest ${member.id}`}>Guest {member.id}{member.id === participant ? " (you)" : ""}</span><span className="shrink-0 rounded bg-muted px-2 py-1 text-muted-foreground">{member.read_only ? "Read-only" : "Interactive"}</span>{management.allowed && <button type="button" aria-label={`Remove Guest ${member.id}`} title="Remove participant" disabled={management.busy} onClick={()=>{setConfirmInvitations(false);setConfirmRemoval(member.id);}} className="shrink-0 rounded p-1 text-muted-foreground hover:bg-rose-500/10 hover:text-rose-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"><IconUserMinus size={15} /></button>}</li>)}</ul> : <p className="text-xs leading-5 text-muted-foreground">{connected ? "Waiting for participant details…" : "Connect to see who is attached."}</p>}</div>
+        <details className="mt-3 shrink-0 text-xs"><summary className="cursor-pointer py-1 font-medium">Connection options</summary><label className="mt-2 flex items-center gap-2 text-[11px]"><input type="checkbox" checked={relayOnly} disabled={connected || connecting} onChange={event=>{setRelayOnly(event.target.checked);try{sessionStorage.setItem("porthub:terminal:relay-only:v1",String(event.target.checked));}catch{}}} />Use gateway relay only</label><label htmlFor="terminal-stun-servers" className="mt-2 block text-[11px] font-medium">Optional UDP STUN endpoints</label><textarea id="terminal-stun-servers" rows={2} maxLength={513} value={stunText} onChange={event=>changeStun(event.target.value)} readOnly={connected || connecting} aria-invalid={!!connectivity.error} aria-describedby="terminal-stun-help" placeholder="stun:your-server.example:3478" spellCheck={false} className="mt-1 w-full resize-none rounded-lg border-0 bg-control p-2 text-xs text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:opacity-60" /><p id="terminal-stun-help" className="mt-1 text-[11px] leading-5 text-muted-foreground">Up to two endpoints, separated by lines or commas. Only these servers receive discovery probes. Leave blank for host candidates and gateway fallback. Saved in this tab; applies when you connect.</p>{!relayOnly && connectivity.error && <p role="alert" className="mt-1 text-[11px] text-amber-700 dark:text-amber-300">{connectivity.error}</p>}</details>
         {management.allowed && <div className="mt-3 space-y-2"><p className="text-[11px] text-muted-foreground">Machine administrator · manage guests</p>{management.invitationsRevoked ? <p role="status" className="text-xs text-amber-600 dark:text-amber-300">New invitation joins blocked</p> : <Button size="sm" variant="secondary" disabled={management.busy} onClick={()=>{setConfirmRemoval(null);setConfirmInvitations(true);}}>Block new joins</Button>}</div>}
         {management.allowed && confirmInvitations && <div role="alertdialog" aria-label="Block new invitation joins" className="mt-3 rounded-lg bg-amber-500/10 p-3 text-xs"><p>Block new joins through the invitation URLs? Attached guests, their recovery access and the workspace will keep running.</p><div className="mt-2 flex gap-2"><Button size="sm" variant="secondary" disabled={management.busy} onClick={()=>setConfirmInvitations(false)}>Cancel</Button><Button size="sm" disabled={management.busy} onClick={async()=>{if(await management.revokeInvitations())setConfirmInvitations(false);}}>{management.busy ? "Blocking…" : "Block invitation URLs"}</Button></div></div>}
         {management.allowed && confirmRemoval!==null && <div role="alertdialog" aria-label={`Remove Guest ${confirmRemoval}`} className="mt-3 rounded-lg bg-amber-500/10 p-3 text-xs"><p>Remove Guest {confirmRemoval}? Their recovery access will be revoked.</p><div className="mt-2 flex gap-2"><Button size="sm" variant="secondary" disabled={management.busy} onClick={()=>setConfirmRemoval(null)}>Cancel</Button><Button size="sm" disabled={management.busy} onClick={async()=>{const remaining=await management.remove(confirmRemoval);if(remaining){setMembers(remaining);setConfirmRemoval(null);}}}>{management.busy ? "Removing…" : "Remove guest"}</Button></div></div>}

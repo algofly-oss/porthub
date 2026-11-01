@@ -1,0 +1,53 @@
+name: Promote verified client release
+on:
+  workflow_call:
+    inputs:
+      run_id:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Successful Native agent platforms run containing the complete ten-platform bundle
+        required: true
+        type: string
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: porthub-release-publication
+  cancel-in-progress: false
+jobs:
+  publish:
+    name: Verify and publish existing binaries without rebuilding
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check artifact provenance and publication safeguards
+        run: |
+          python3 scripts/test_stage_verified_release.py
+          python3 scripts/test_publish_release.py
+          python3 scripts/test_prune_github_releases.py
+      - name: Verify source run and stage its exact complete artifact
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ inputs.run_id }}
+        run: python3 scripts/stage-verified-release.py --repository "$GITHUB_REPOSITORY" --run-id "$SOURCE_RUN" --destination release-assets
+      - name: Publish verified assets from their original build source
+        id: publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REVISION: ${{ steps.candidate.outputs.revision }}
+          RELEASE_VERSION: ${{ steps.candidate.outputs.version }}
+        run: python3 scripts/publish-release.py --repository "$GITHUB_REPOSITORY" --assets release-assets --version "$RELEASE_VERSION" --revision "$SOURCE_REVISION" --execute
+      - name: Keep latest plus explicitly requested versions
+        if: steps.publication.outputs.status != 'superseded'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REVISION: ${{ steps.candidate.outputs.revision }}
+          RELEASE_VERSION: ${{ steps.candidate.outputs.version }}
+          PORTHUB_RETAIN_TAGS: ${{ vars.PORTHUB_RETAIN_TAGS }}
+        run: python3 scripts/prune-github-releases.py --repository "$GITHUB_REPOSITORY" --keep "v$RELEASE_VERSION" --expected-commit "$SOURCE_REVISION" --remove-previews --execute

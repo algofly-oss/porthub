@@ -114,6 +114,8 @@ async fn sharing_supervisor_reconnects_to_existing_shell_and_explicit_stop_annou
         send(
             &mut stream,
             HostEvent::Ready {
+                direct_transport: false,
+                history_snapshots: false,
                 invitations_revoked: false,
                 ssh_host: "example.test".into(),
                 ssh_port: 8347,
@@ -219,16 +221,13 @@ async fn sharing_supervisor_reconnects_to_existing_shell_and_explicit_stop_annou
         Ok::<_, anyhow::Error>(())
     })
     .await??;
-    let removal = tokio::process::Command::new(&executable)
-        .args(["terminal", "kick", "sharedtest", "2"])
-        .env("XDG_DATA_HOME", &data)
-        .output()
-        .await?;
-    ensure!(
-        removal.status.success(),
-        "{}",
-        String::from_utf8_lossy(&removal.stderr)
-    );
+    // Real native sidebar talks to the supervisor's actual private owner socket.
+    // The isolated broker below observes the removal, then acknowledges presence.
+    let mut sidebar = tokio::process::Command::new("python3")
+        .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/test-terminal-supervisor-sidebar.py"))
+        .arg(&executable).arg(&id)
+        .env("XDG_DATA_HOME",&data).env("TERM","xterm-256color")
+        .kill_on_drop(true).spawn()?;
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let mut line = String::new();
@@ -247,6 +246,13 @@ async fn sharing_supervisor_reconnects_to_existing_shell_and_explicit_stop_annou
     })
     .await??;
     send(&mut first, HostEvent::Detach { client: 2 }).await?;
+    send(&mut first,HostEvent::Presence {members:vec![Participant {
+        id:1,read_only:false,joined_at:now(),last_active_at:now(),
+    }]}).await?;
+    until(&mut first,&[1],"SIDEBAROWNER:preserved").await?;
+    let sidebar_status=tokio::time::timeout(Duration::from_secs(10),sidebar.wait()).await??;
+    ensure!(sidebar_status.success(),"native sidebar owner flow failed");
+
     send(
         &mut first,
         HostEvent::Input {
@@ -365,6 +371,8 @@ async fn sharing_supervisor_reconnects_to_existing_shell_and_explicit_stop_annou
     send(
         &mut resumed,
         HostEvent::Ready {
+                direct_transport: false,
+                history_snapshots: false,
             ssh_host: "localhost".into(),
             ssh_port: 8347,
             public_base: "https://porthub.test".into(),

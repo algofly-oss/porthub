@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     body::Body,
     http::{header, Request, StatusCode},
@@ -482,24 +482,30 @@ async fn cancellation_resumes_validated_completed_segments() -> Result<()> {
     let first_url = url.clone();
     let task = tokio::spawn(async move { download::get(options(first_url, dir), token).await });
     let control = destination.path().join("resume.bin.porthub-part.json");
-    for _ in 0..100 {
-        if tokio::fs::read(&control)
-            .await
-            .ok()
-            .and_then(|value| serde_json::from_slice::<serde_json::Value>(&value).ok())
-            .and_then(|value| {
-                value["complete"]
-                    .as_array()
-                    .map(|values| values.iter().any(|value| value == true))
-            })
-            .unwrap_or(false)
-        {
-            break;
+    // Busy Windows runners can take more than a second to persist the first
+    // piece. Cancel on the observed checkpoint, with a bounded failure path.
+    let checkpoint = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if tokio::fs::read(&control)
+                .await
+                .ok()
+                .and_then(|value| serde_json::from_slice::<serde_json::Value>(&value).ok())
+                .and_then(|value| {
+                    value["complete"]
+                        .as_array()
+                        .map(|values| values.iter().any(|value| value == true))
+                })
+                .unwrap_or(false)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    })
+    .await;
     cancel.cancel();
     assert!(task.await?.is_err());
+    checkpoint.context("download did not persist a completed segment before cancellation")?;
     let state: serde_json::Value = serde_json::from_slice(&tokio::fs::read(&control).await?)?;
     assert!(state["complete"]
         .as_array()

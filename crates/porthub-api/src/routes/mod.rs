@@ -34,6 +34,7 @@ pub fn router() -> Router<Arc<App>> {
     Router::new()
         .merge(telegram::router())
         .merge(crate::terminal::router())
+        .merge(crate::terminal_traffic::router())
         .merge(connections::router())
         .merge(exposes::router())
         .merge(exit_nodes::router())

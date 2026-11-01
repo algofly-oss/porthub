@@ -1,7 +1,7 @@
 {
   "feature": "PortHub shared terminal workspaces",
-  "goal_status": "active implementation; core/edge 1.9.0 deployed, final client packaging and complete feature verification pending",
-  "baseline": "Production API/UI/edge 1.9.0 at b7b2765; firewall remains 1.8.4; registered agents remain 1.8.9 pending client rollout. Preserve unrelated workloads and existing tmux sessions.",
+  "goal_status": "active: terminal sharing1.9.0 published and live smoke passed; remaining transport/UX/automation work retained",
+  "baseline": "Latest GitHub release/tagv1.9.0 at2fb9d6e, all30 assets verified. Production core90d883e and edgeb7b2765 are1.9.0; firewall remains1.8.4. Nine clients acknowledged1.9.0; offline machines retain older versions. Preserve unrelated workloads and existing tmux sessions.",
   "latest_user_contract": {
     "lifetime": "Closing a local terminal, losing SSH, browser disconnect or explicit detach never destroys the workspace. It persists in a user-owned supervisor and private bundled tmux server. Only explicit terminal stop, exit/Ctrl+D closing the final shell, or explicitly configured idle/session timeout ends it. Earlier end-on-owner-disconnect proposal is superseded.",
     "expiry": "Invitation expiry prevents NEW joins only. Already attached participants continue without timer-driven resets. Browser reconnection credentials must preserve the same participant role independently of invitation expiry. Standard SSH connections remain alive until they disconnect/end/revoke; do not claim impossible transparent TCP reconnect for stock SSH clients.",
@@ -278,12 +278,150 @@
     "ssh": "External stock OpenSSH completes gateway key exchange on urm2.duckdns.org TCP443; invalid capability denied. HTTPS and SSH share existing TLS ingress. This does not yet prove a full live shared session.",
     "application_probes": "IBI, Thor, Home Presence and Autolycus passed activation probes. Subsequent IBI probe transiently failed; immediate retry returned 200 with original hash. Other three matched original hashes.",
     "not_complete": [
-      "Final ten-platform client cohort and release publication",
-      "Registered client upgrade and full live browser/SSH workspace smoke",
       "Optimized direct terminal participant transport with relay fallback",
       "Nonmodal native participant sidebar",
       "Stable history snapshot anchors under output/resize/eviction",
       "Authenticated automatic production deployment gate"
+    ],
+    "core_revision": "90d883e47552044619278356257147392a1d86de",
+    "edge_revision": "b7b27650212a78f97fc401a86469b7f3c84442b7",
+    "ui_fix_server_ci": 41242715248,
+    "public_browser_check": "Live public /terminal initializes xterm at1440,402,320px; no page errors, failed requests or horizontal overflow. Mobile screenshot inspected. Clean browser profiles, normal certificate validation.",
+    "core_only_activation": "Verified cold backup plus all4 application probes passed. Edge/firewall and unrelated baseline container IDs retained."
+  },
+  "client_rollout_gate": {
+    "previous_cohort": 41239179569,
+    "previous_result": "All10 platform jobs and complete bundle passed, verified privately staged; superseded by updater correction before publication.",
+    "candidate_revision": "2fb9d6eac319942a22769c32bb3b8753abceb49e",
+    "candidate_run": 41243155660,
+    "updater_tests": "13 passed, including paired and existing unified disconnected-private cases, strict healthy/recovered/stale private readiness, mandatory public readiness, rollback and foreign-registration preservation.",
+    "ec2_observation": "Installed CLI1.8.5 repeatedly rolls back1.8.9 while private module stays connecting. systemd-resolved service/D-Bus name absent; current Linux private DNS requires it. No host resolver, route or unrelated workload changes.",
+    "correction": "Recent explicit connecting report records pre-existing private failure. Healthy public upgrade may commit while private configuration remains enabled and supervised. Healthy, unknown, stale or recovered private modules retain strict readiness.",
+    "result": "Nine enabled clients acknowledged committed1.9.0 updates; EC2 and Reid installed CLI source2fb9d6e directly verified with NRestarts0.",
+    "mac_note": "nitin-mbp acknowledged1.9.0; its last heartbeat was22:00:49UTC during22:06 inventory, so current reachability is not proven.",
+    "offline_unchanged": [
+      "condor",
+      "harshithaagx",
+      "spark"
     ]
+  },
+  "published_release": {
+    "tag": "v1.9.0",
+    "source": "2fb9d6eac319942a22769c32bb3b8753abceb49e",
+    "client_ci": 41243155660,
+    "publication_ci": 41245715427,
+    "assets": 30,
+    "retention": "Onlyv1.9.0 release and tag remain; no explicit retained-tag exceptions.",
+    "main": "Fast-forwarded to exact verified release commit2fb9d6e. Redundant main continuous build41245452506 cancelled before client/server jobs; existing binaries promoted."
+  },
+  "live_deployment_smoke": {
+    "host": "otsi-reid",
+    "cli_source": "2fb9d6eac319942a22769c32bb3b8753abceb49e",
+    "result": "passed with actual unprivileged host CLI -> registered broker -> production gateway -> anonymous browser and stockSSH",
+    "checks": [
+      "Bundled100000-line history, mouse, Ctrl+A and F7 configuration",
+      "Shared output and retained scrollback",
+      "Detached workspace and SSH disconnect persistence",
+      "Revoked invitations reject new joins but preserve active guests and browser recovery",
+      "Host CLI removal revokes the read-only participant while writer continues",
+      "Explicit exit ends final shell/session",
+      "Owned workspace stopped, supervisor exited and private XDG fixture removed; services unchanged"
+    ],
+    "test_adjustment": "Initial fixture incorrectly expected a visible-screen marker in empty scrollback; corrected to generate80 lines before capturing history. No product change was needed.",
+    "production_export_e2e": "Chromium andWebKit full API/Mongo/bundledtmux/SSH flows passed;62 and83 concurrent fresh HTTPS checks respectively."
+  },
+  "history_snapshot_development": {
+    "status": "Host/cache/protocol/browser/SSH implementation passes local unit, bundled runtime and full production-export browser/API/Mongo/SSH flows in Chromium and WebKit. New-version packaging and deployment remain pending. Production1.9.0 still uses live history slices.",
+    "capture": "Immutable in-memory bytes and line index; guarded metadata+capture in one synchronous tmux command queue; resolved workspace pane only;2-second capture deadline;64MiB maximum capture;128KiB maximum response. Visible screen is not retained scrollback.",
+    "cache": "128MiB default retained cache including line indexes;10-minute idle expiry renewed by valid paging; per-guest ownership; nonce-bound capture reservations fence transport generation, detach/re-attach and out-of-order refresh; quota failure keeps previous pages and does not evict another active reader. In-flight captures and tmux history have separate bounded costs.",
+    "tests": "43 terminal tests pass:34 unit,8 real bundled multiplexer,1 stockOpenSSH. The OpenSSH test additionally passes both legacy and snapshot-capable gateways and verifies anchored Older requests. Twelve browser cases pass: legacy/frozen x dark/light x1440/402/320, with error preservation, explicit refresh and no overflow. Broker version gate test passes;1.10.0 is the first compatible broker version.",
+    "next": [
+      "Validate release1.10.0 packaging for all supported targets and deploy scoped roles/clients after the full required feature set is ready",
+      "Complete outstanding optimized direct terminal transport with gateway fallback, nonmodal native participant sidebar and authenticated automated production deployment gate"
+    ],
+    "viewer_behavior": "Older/Newer/Latest keep the retained snapshot; Refresh history in browser or r in SSH captures anew. SSH F7 reopening also starts fresh. Browser connection/pane changes require explicit refresh. Error responses preserve the previous browser page and SSH screen. Gateway and pager reject snapshot changes between chunks. Legacy hosts keep live offset paging with an explicit UI explanation.",
+    "production_export_validation": {
+      "source": "a196ab2 plus the committed terminal_browser.rs and terminal-live.cjs regression tests",
+      "build": "Separate .next-terminal-snapshot build and /tmp/porthub-terminal-production-snapshot export; exported xterm initialization smoke passes.",
+      "chromium": "Full production-export flow passed;79 concurrent fresh HTTPS connections while ordinary SSH clients used the same TLS listener.",
+      "webkit": "Full production-export flow passed;99 concurrent fresh HTTPS connections while ordinary SSH clients used the same TLS listener.",
+      "history": "Actual gateway capability header and frozen browser requests asserted; real bundled history remained byte-for-byte identical after80 new output lines and viewport resize; Older and Latest retained the same opaque anchor; explicit Refresh returned new output without an existing anchor.",
+      "isolation": "Random fixture workspace and database; existing owned test MongoDB only; loopback static server and API; no production workload or route modified."
+    }
+  },
+  "native_sidebar_development": {
+    "status": "CLI attachment integration implemented and locally tested. --sidebar auto/on/off works for named open, new, share and attach. Not yet packaged across platforms or deployed.",
+    "architecture": "Separate private presentation server from the same verified bundled runtime, with an inner attachment on the left and owner-only controls on the right. No panel is added to the shared workspace. Unique user-owned private directory and separate socket; an existing active view or the shared socket is refused.",
+    "lifecycle": "exit-unattached on ends presentation after owner terminal loss; pane-exited closes only its private session when inner attachment exits, permitting normal detach and final-shell exit to return success. Guard cleanup targets only that private view. CLI temporary view directory is created with0700 permissions.",
+    "controls": "Ctrl+A and F7 reach the shared workspace. F8 switches focus at80+ columns. Window-resized hook uses numeric width comparison: below80 columns the shell is zoomed to the full width; widening restores the sidebar. Mouse wheel reaches shared scrollback. OSC52 framing and the expected clipboard payload reach the outer PTY; actual OS clipboard writes still require the outer terminal to accept them.",
+    "validation": "44 terminal tests pass, plus updated focused test with explicit OSC52 framing assertion. Real PTY fixture verifies two simultaneous owner views with separate panel input/transcripts, independent disconnection,120->40->120 resize, narrow typing/F8 protection, Ctrl+A splitting, F7 and mouse history, shared-shell persistence and final exit. Compiled CLI participant test additionally passes120->40->120 reflow, selected-guest cancellation/confirmed removal, focus, restoration, hangup and explicit Ctrl+D.",
+    "reference": "https://man.openbsd.org/tmux",
+    "next": [
+      "Complete optimized direct terminal transport with gateway fallback and authenticated automated production deployment gate",
+      "Validate all-platform packaging and the authorized scoped live release"
+    ],
+    "cli": "Auto chooses private sidebar for shared workspaces at100+ columns; on permits local or shared views at80+ columns; off and narrow auto attachments retain owner-leased popup. F8 changes focus; q/Escape/Ctrl+C in sidebar focuses shared shell. Separate watch mode still exits with q. Native panel uses existing private owner socket and confirmation/acknowledgement behavior.",
+    "supervisor_validation": "Actual compiled CLI sidebar now participates in terminal_share integration test, using the real sharing supervisor and its authenticated private owner socket. Fixture gateway provides presence and acknowledges only the observed Kick for selected guest2. Cancellation emits no removal; sidebar sees updated presence, preserves PORTSTATE in the shared shell, detaches cleanly and restores terminal modes. Existing supervisor restart/reconnect and invitation-rotation recovery tests run afterwards. Two Ready literals in this previously uncompiled integration fixture were updated for the capability field.",
+    "api_validation": {
+      "status": "Passed real native sidebar -> owner socket -> sharing supervisor -> OS-authenticated broker -> real API/MongoDB, with browser and ordinary SSH participants.",
+      "production_export": "Chromium passed with91 concurrent fresh HTTPS checks; WebKit passed with118. Exported terminal assets are from the previously verified snapshot build; latest guide text still requires the next release build.",
+      "assertions": "Native sidebar selects the actual random-ID browser guest, cancels then confirms removal, sees authoritative presence change, returns to OWNVAR=preserved in the same shared shell, detaches cleanly and restores terminal mode. Remaining browser keeps working; removed browser recovery is rejected; final browser Ctrl+D ends workspace and CLI supervisor.",
+      "isolation": "Explicit temporary enrolled Layout validated by the production broker, same OS-peer authorization and machine credential injection; no OS manager calls, user/system units, production profiles, routes or workloads changed. Missing/mismatched enrollment is rejected before creating a listener.",
+      "reproduce": "Set PORTHUB_TEST_NATIVE_HOST=1 and PORTHUB_TEST_AGENT_EXECUTABLE=/absolute/bundled/porthub alongside the documented UI/Mongo/runtime environment for terminal_browser. Linux-only native fixture; standard browser fixture remains available without those flags."
+    }
+  },
+  "direct_transport_development": {
+    "status": "Feature-gated WebRTC engine, journals, scoped signaling/relay validation and opt-in host actor implemented. Actual browser/first-party CLI SDK integration, production settings, complete NAT/recovery/telemetry checks and release rollout remain unfinished. Shipped CLI still advertises direct_transport=false; no new feature is deployed.",
+    "implementation": "Optional terminal direct feature pins rtc0.21.1 with ring, matching the existing mesh ICE/DTLS dependency family. Peer owns no sockets or tasks; caller drives datagrams/timeouts. One reliable ordered channel named porthub-terminal/1;32KiB frame limit,64KiB send outstanding limit and SCTP receive buffer,64KiB SDP and64 local candidate limit. Rejects media offers, wrong description type, unspecified/multicast/zero-port candidates, premature sends and extra channels. Outbound packet buffers move without another payload copy.",
+    "validation": "Actual Chromium and WebKit RTCPeerConnection clients negotiate SDP with the Rust engine and exchange bidirectional data over loopback UDP. Combined SSH/direct library suite passes35 tests. Dedicated admission tests cover malformed/oversized offers and candidate/frame limits. These checks do not prove NAT traversal, terminal role enforcement or route handover.",
+    "source_reference": [
+      "https://github.com/webrtc-rs/rtc",
+      "https://crates.io/crates/rtc/0.21.1"
+    ],
+    "next": [
+      "Wire production browser/CLI transport SDKs to the actor, using compatible local broker versions, account-scoped ICE settings and approved underlay/egress policy; keep advertised capability off until those paths are tested",
+      "Integrate gathered host/STUN/TURN candidates and browser/PortHub-aware CLI participants; ordinary unmodified SSH continues to use the gateway",
+      "Wire replay journals into actual direct/relay terminal routes, prioritize controls, preserve identity/workspace during handover and account for direct traffic in existing monitoring",
+      "Prove terminal interactions, revocation/removal, blocked direct routes, reconnect and bandwidth/latency behavior with full browser/native/API tests",
+      "Package all targets, finish authenticated CI/CD deployment gate and perform authorized scoped live rollout"
+    ],
+    "replay_journal": {
+      "status": "Implemented and tested as a transport component; not yet wired into session signaling or gateway relay messages.",
+      "bounds": "16KiB maximum payload;64KiB retained payload per sender/receiver and256-frame maximum; JS-safe sequence ceiling2^53-1. Future sequence gaps are bounded by256. Two directions/attachments must use their own authenticated epochs.",
+      "receive": "Stage out-of-order frames without acknowledging application progress; commit only the next frame after successful PTY/terminal acceptance. Duplicates on either carrier do not execute again. Conflicting queued payloads and invalid epochs/acknowledgements are rejected.",
+      "handover": "Sender retains unacknowledged frames with original sequence numbers for replay on another carrier; old acknowledged frames are freed. This preserves at-most-once application within the retained live epoch. A fresh host process/epoch must not blindly replay uncertain old input; no process-crash exactly-once claim is made.",
+      "wire": "Versioned by porthub-terminal/1 channel label. Binary header:1-byte data/ack type,16-byte epoch,8-byte big-endian sequence. Data payload follows directly, without JSON/base64 expansion. Ack is exactly25 bytes. Size, tag, sequence and payload validation precede use; no participant ID or role is accepted in this envelope.",
+      "validation": "39 combined SSH/direct unit tests pass, including reordered delivery, duplicate relay/direct replay, failed application cursor, conflicting replay, future/wrong-epoch ACK, full queues, invalid/truncated binary envelopes and sequence overflow. Actual Chromium and WebKit RTC clients send duplicated binary input and scoped ACKs; Rust receiver discards duplicate input and retains output until the browser acknowledges it. Native test releases browser shutdown only after those conditions, without sleep-based proof."
+    },
+    "signaling": {
+      "status": "Protocol and gateway routing implemented and tested; shipped CLI HostHello still advertises direct_transport=false. Host attachment handler returns DirectUnavailable until runtime integration. No direct terminal path is enabled.",
+      "authorization": "Gateway binds offers to the authenticated attachment ID and existing read-only/writer role. Answers are matched to that guest and pending monotonic request ID, validated under the current host generation, then delivered only to that guest. Distinct32-hex input/output epochs are required. Unknown, stale and kicked-guest replies do not become another guest signal.",
+      "bounds": "16KiB SDP description,256 lines,64 candidates and one application media section. SDP kind and shape checked before forwarding. Per-guest negotiation cooldown5s after completion,15s while pending; stale request IDs rejected. Pending negotiations are cancelled on host replacement. Slow guest queues detach only that guest.",
+      "privacy": "SDP wrapper redacts addresses and ICE credentials in derived debug output. Role and participant ID cannot be smuggled in guest offer fields.",
+      "compatibility": "Direct and snapshot capabilities are separately negotiated in authenticated gateway upgrade headers. Local broker strips each unsupported HostHello flag independently; false fields are omitted for old services/gateways. Legacy or downgraded hosts return DirectUnavailable without dropping a valid guest connection.",
+      "validation": "54 terminal checks pass with both direct and SSH features:43 unit,9 bundled-runtime,1 browser RTC,1 stockSSH. Two broker tests pass, including four independent capability-header combinations. API cargo check and actual MongoDB/WebSocket signaling/recovery/invitation-expiry/targeted-removal test pass. One full-suite invocation lacked NODE_PATH; corrected browser setup and complete rerun passed."
+    },
+    "relay_delivery": {
+      "status": "Shared delivery validation extracted from optional RTC engine into delivery.rs. Gateway relay message routing and direction/role/epoch checks implemented. CLI capability remains disabled; host RTC/PTY actor is still incomplete.",
+      "dependency_boundary": "Direct engine reexports the same journal module. cargo tree confirms the ordinary API and SSH-only terminal library do not include the rtc umbrella dependency. Existing mesh crypto/ICE subcrates remain separate.",
+      "role_rules": "Only negotiated attachment epochs admit delivery. Read-only guests can ACK their output epoch but cannot send data. Writers can send only their input epoch; host output and input ACKs must use the opposite expected directions. Gateway supplies recipient IDs; binary envelope contains no role or participant authority. Relayed writer activity updates existing participant activity state.",
+      "bounds_and_isolation": "Relay wrapper is base64 only on the existing JSON WebSocket carrier, with strict binary-envelope size/encoding checks and redacted debug output. Direct carrier remains compact binary. Unexpected delivery with the disabled host actor closes only its sender, preserving other PTYs and the workspace.",
+      "validation": "56 terminal checks pass:44 library,10 bundled-runtime,1 browser RTC,1 stockSSH. Real API/Mongo/WebSocket test passes negotiated output delivery and ACKs together with invitation expiry, recovery and targeted removal. Default/SSH-only library tests also pass independently of RTC."
+    },
+    "host_actor": {
+      "status": "Attachments can explicitly configure the actor before guests attach; negotiated Ready capability also must be true. No automatic production enablement yet.",
+      "runtime": "Per-guest PTY output queue created before attachment; actor retains one input/output journal across direct and gateway carriers. Bounded32-message controls,8-message PTY queue,32 UDP receive queue,up to16 bound interfaces and8 STUN servers. Gathering finishes within2s using existing PortHub STUN helper; advertised reflexive candidates retain their source socket. macOS uses the existing per-socket interface binding helper. No global routes/firewall changes.",
+      "handover": "RTC readiness prefers direct output; absent application ACK progress triggers relay replay after1s. Original sequences/epochs survive this carrier fallback, and shared shell state is retained. Re-offers retain journals while replacing the peer. Full preferred-route re-probing/ICE restart policy and client-side selection still need integration.",
+      "flow_control": "Full64KiB journal pauses only its private PTY source; control/ACK processing and other guests continue. Acknowledgement stalls close that guest after15s. Source EOF drains pending acknowledged output for up to2s. Cancelling an attachment aborts its candidate/UDP tasks; writes are tied to the original PTY read-only/cancellation state. Idle legacy guests have no polling timer; peers use native RTC deadlines and independent ACK/drain deadlines.",
+      "validation": "60 checks pass:46 library,10 bundled mux,2 direct-host,1 basic browser RTC,1 stockSSH. Real Chrome and WebKit data-channel clients type into bundled tmux, duplicate input increments a shell counter once, withholding direct output ACK triggers actual relay replay, replay does not duplicate rendered output, and forged read-only input cannot change the shell. A separate1MiB synthetic source test proves64KiB backpressure, sibling progress and ordered ACK drain. No real NAT/TURN traversal claim is made."
+    }
+  },
+  "pty_disconnect_eof_fix": {
+    "commit": "7da3e11c2303cdeca305a68015342c5938529a0f",
+    "status": "Committed source fix, not deployed. Independent of the optional RTC actor; suitable for a stable client hotfix.",
+    "finding": "The cancellation test exposed a real race: portable-pty writer Drop injects newline+VEOF, which can reach the tmux attachment before its SIGHUP completes and end the shared shell.",
+    "fix": "Use an owned F_DUPFD_CLOEXEC descriptor writer that closes without injecting bytes. Cloned input sinks retain role/cancellation; cancellation wakes the writer so a surviving clone cannot keep its blocking task waiting.",
+    "evidence": "Dedicated live shell unit test drops/replaces its writer while child stays running and verifies its variable persists. Full terminal suite, real CLI participant/hangup/terminal-restoration/explicit Ctrl+D test and final Chrome/WebKit host actor scenarios pass.",
+    "next": "Prepare a stable release of this isolated detach fix without enabling unfinished direct transport, then continue complete terminal goal."
   }
 }

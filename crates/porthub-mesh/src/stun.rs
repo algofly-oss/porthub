@@ -31,6 +31,46 @@ fn authority(raw: &str) -> Option<(String, u16)> {
     let port = url.port().unwrap_or(3478);
     (port != 0).then_some((host, port))
 }
+/// Canonical credential-free UDP STUN endpoint for explicit terminal consent.
+/// No DNS or network I/O occurs while validating this setting.
+pub fn normalize_server(raw: &str) -> Option<String> {
+    if raw.len() > 256
+        || raw.contains('/')
+        || raw.chars().any(|c| c.is_control() || c.is_whitespace())
+    {
+        return None;
+    }
+    let (host, port) = authority(raw)?;
+    let host = match host.parse::<std::net::IpAddr>() {
+        Ok(ip) if ip.is_unspecified() || ip.is_multicast() => return None,
+        Ok(std::net::IpAddr::V4(ip)) if ip.is_broadcast() => return None,
+        Ok(std::net::IpAddr::V6(ip))
+            if ip.is_unicast_link_local() || ip.to_ipv4_mapped().is_some() =>
+        {
+            return None
+        }
+        Ok(std::net::IpAddr::V6(ip)) => format!("[{ip}]"),
+        Ok(ip) => ip.to_string(),
+        Err(_) => {
+            if host.len() > 253
+                || !host.trim_end_matches('.').split('.').all(|label| {
+                    !label.is_empty()
+                        && label.len() <= 63
+                        && label
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                        && label.as_bytes()[0].is_ascii_alphanumeric()
+                        && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                })
+            {
+                return None;
+            }
+            host
+        }
+    };
+    let server = format!("stun:{host}:{port}");
+    (server.len() <= 256).then_some(server)
+}
 /// Resolve independently: one broken DNS response/address must not consume the
 /// other server's entire discovery budget. A single receive owner below matches
 /// every response to its exact source and unpredictable transaction ID.
@@ -64,7 +104,11 @@ async fn targets(servers: &[String], ipv4: bool) -> Vec<SocketAddr> {
     }
     targets
 }
-async fn query(socket: &UdpSocket, targets: Vec<SocketAddr>) -> Option<SocketAddr> {
+async fn query(
+    socket: &UdpSocket,
+    targets: Vec<SocketAddr>,
+    permitted: &(dyn Fn() -> bool + Send + Sync),
+) -> Option<SocketAddr> {
     let ipv4 = socket.local_addr().ok()?.is_ipv4();
     let requests: Vec<_> = targets
         .into_iter()
@@ -90,6 +134,7 @@ async fn query(socket: &UdpSocket, targets: Vec<SocketAddr>) -> Option<SocketAdd
                 for (target, request) in &requests {
                     // An unreachable address is not evidence that every other
                     // configured STUN address is unreachable too.
+                    if !permitted() {return None;}
                     let _ = socket.send_to(&request.raw, target).await;
                 }
                 sent += 1;
@@ -127,9 +172,20 @@ async fn query(socket: &UdpSocket, targets: Vec<SocketAddr>) -> Option<SocketAdd
 /// matching STUN endpoints. Up to two servers/four addresses each share a
 /// 1.5-second DNS+retry budget; no idle task or transfer-path probing is added.
 pub async fn mapped(socket: &UdpSocket, servers: &[String]) -> Option<SocketAddr> {
+    mapped_with_permission(socket, servers, &|| true).await
+}
+/// Re-check an expiring local permission before every discovery transmission.
+pub async fn mapped_with_permission(
+    socket: &UdpSocket,
+    servers: &[String],
+    permitted: &(dyn Fn() -> bool + Send + Sync),
+) -> Option<SocketAddr> {
+    if !permitted() {
+        return None;
+    }
     let ipv4 = socket.local_addr().ok()?.is_ipv4();
     tokio::time::timeout(Duration::from_millis(1500), async {
-        query(socket, targets(servers, ipv4).await).await
+        query(socket, targets(servers, ipv4).await, permitted).await
     })
     .await
     .ok()

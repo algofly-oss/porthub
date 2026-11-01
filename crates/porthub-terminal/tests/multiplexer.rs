@@ -51,6 +51,160 @@ impl Drop for Cleanup {
 }
 
 #[test]
+#[ignore = "requires bundled terminal runtime"]
+fn ordinary_tmux_attach_inside_workspace_reaches_existing_host_session() -> Result<()> {
+    use std::process::Command;
+    let (directory, workspace) = workspace()?;
+    let _cleanup = Cleanup(workspace.clone());
+    let command = workspace.command();
+    let executable = PathBuf::from(command.get_program());
+    let terminfo = command
+        .get_envs()
+        .find_map(|(key, value)| (key == "TERMINFO").then(|| value.unwrap().to_owned()))
+        .unwrap();
+    let host_root = directory.path().join("host");
+    create_directory(&host_root)?;
+    let host_socket = host_root
+        .join(format!("tmux-{}", unsafe { libc::geteuid() }))
+        .join("default");
+    struct HostCleanup {
+        executable: PathBuf,
+        socket: PathBuf,
+    }
+    impl Drop for HostCleanup {
+        fn drop(&mut self) {
+            let _ = Command::new(&self.executable)
+                .arg("-S")
+                .arg(&self.socket)
+                .arg("kill-server")
+                .env_remove("TMUX")
+                .output();
+        }
+    }
+    let _host = HostCleanup {
+        executable: executable.clone(),
+        socket: host_socket,
+    };
+    let started = Command::new(&executable)
+        .args([
+            "-f",
+            "/dev/null",
+            "-L",
+            "default",
+            "new-session",
+            "-d",
+            "-s",
+            "external",
+            "--",
+            "/bin/sh",
+        ])
+        .env("TMUX_TMPDIR", &host_root)
+        .env("TERMINFO", &terminfo)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("PORTHUB_TERMINAL_ISOLATED")
+        .output()?;
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let marked = Command::new(&executable)
+        .args([
+            "-L",
+            "default",
+            "send-keys",
+            "-t",
+            "external:0.0",
+            "test -n \"$TMUX\" && printf 'EXTERNAL%s\\n' 'READY'",
+            "Enter",
+        ])
+        .env("TMUX_TMPDIR", &host_root)
+        .env_remove("TMUX")
+        .output()?;
+    assert!(marked.status.success());
+    let mut options = start();
+    options
+        .environment
+        .push(("TMUX_TMPDIR".into(), host_root.to_string_lossy().into()));
+    workspace.start(&options)?;
+    let attach = format!("'{}' attach-session -t external", executable.display());
+    assert!(workspace
+        .command()
+        .args(["send-keys", "-t", "%0", &attach, "Enter"])
+        .status()?
+        .success());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let screen = workspace.capture("%0", 100)?;
+        if screen.contains("EXTERNALREADY") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "ordinary attach did not reach the host session: {screen}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires bundled terminal runtime"]
+fn initial_shell_new_windows_and_split_panes_keep_only_porthub_socket_identity() -> Result<()> {
+    let (_directory, workspace) = workspace()?;
+    let _cleanup = Cleanup(workspace.clone());
+    workspace.start(&start())?;
+    let mut panes = vec!["%0".to_owned()];
+    for args in [
+        vec!["new-window", "-d", "-P", "-F", "#{pane_id}"],
+        vec![
+            "split-window",
+            "-d",
+            "-h",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            "%0",
+        ],
+    ] {
+        let output = workspace.command().args(args).output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        panes.push(String::from_utf8(output.stdout)?.trim().to_owned());
+    }
+    let socket = workspace
+        .socket()
+        .to_string_lossy()
+        .replace('\'', "'\"'\"'");
+    let command=format!("printf 'ENV:%s:%s:%s\\n' \"${{TMUX-unset}}\" \"${{TMUX_PANE-unset}}\" \"${{PORTHUB_TERMINAL_ISOLATED-unset}}\"; test \"$PORTHUB_TERMINAL_SOCKET\" = '{socket}' && printf 'SOCKET%s\\n' 'CORRECT'");
+    for pane in panes {
+        assert!(workspace
+            .command()
+            .args(["send-keys", "-t", &pane, &command, "Enter"])
+            .status()?
+            .success());
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let screen = workspace.capture(&pane, 100)?;
+            if screen.contains("ENV:unset:unset:unset") && screen.contains("SOCKETCORRECT") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "pane identity was not isolated: {screen}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires extracted bundled runtime in PORTHUB_TEST_TERMINAL_RUNTIME"]
 fn detached_workspace_preserves_shared_shell_and_explicit_exit_ends_it() -> Result<()> {
     let (_directory, workspace) = workspace()?;
@@ -267,6 +421,7 @@ async fn read_only_history_pages_real_scrollback_without_entering_copy_mode() ->
     assert_eq!(older_count, 32);
     assert_ne!(recent, older);
     attachments.apply(HostEvent::History {
+        freeze: false, snapshot: None,
         client: 7,
         request: 19,
         pane: "%0".into(),
@@ -490,5 +645,309 @@ async fn history_stays_on_resolved_pane_during_window_switches_and_rejects_other
             .is_err(),
         "history must remain within the advertised workspace session"
     );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the verified bundled terminal runtime"]
+async fn frozen_history_survives_output_resize_eviction_and_clear() -> Result<()> {
+    use porthub_terminal::history::Snapshot;
+    let (_directory, workspace) = workspace()?;
+    let _cleanup = Cleanup(workspace.clone());
+    let mut options = start();
+    options.history_limit = 1000;
+    workspace.start(&options)?;
+    let empty = Snapshot::capture(&workspace, "").await?;
+    assert_eq!(empty.total(), 0, "visible screen is not retained history");
+    let generate = |command: &str| -> Result<()> {
+        let output = workspace.command().args(["send-keys", "-c", "porthub-history-owner", "-t", "%0", command, "Enter"]).output()?;
+        assert!(output.status.success());
+        Ok(())
+    };
+    generate("i=0; while [ $i -lt 220 ]; do printf 'seed-%04d\\n' \"$i\"; i=$((i+1)); done; printf 'SNAPSHOT%s\\n' 'SEEDDONE'")?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !workspace.capture("%0", 1500)?.contains("SNAPSHOTSEEDDONE") {
+        assert!(Instant::now() < deadline, "seed output did not finish");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let frozen = Snapshot::capture(&workspace, "").await?;
+    assert_eq!(frozen.pane(), "%0");
+    assert!(frozen.total() > 100);
+    let saved = frozen.page(0, 512)?.bytes;
+    let total = frozen.total();
+    let id = frozen.id().to_owned();
+    assert!(String::from_utf8_lossy(&saved).contains("seed-"));
+    assert!(workspace.command().args(["resize-window", "-t", "=workspace:0", "-x", "40", "-y", "12"]).status()?.success());
+    generate("i=0; while [ $i -lt 1500 ]; do printf 'later-%04d\\n' \"$i\"; i=$((i+1)); done; printf 'SNAPSHOT%s\\n' 'FLOODDONE'")?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !workspace.capture("%0", 1500)?.contains("SNAPSHOTFLOODDONE") {
+        assert!(Instant::now() < deadline, "later output did not finish");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let latest = Snapshot::capture(&workspace, "%0").await?;
+    assert!((900..=1000).contains(&latest.total()));
+    assert!(!String::from_utf8_lossy(&latest.page(0, 512)?.bytes).contains("seed-"));
+    assert_eq!(frozen.page(0, 512)?.bytes, saved);
+    assert_eq!(frozen.total(), total);
+    assert_eq!(frozen.clone().id(), id);
+    assert!(workspace.command().args(["clear-history", "-t", "%0"]).status()?.success());
+    assert_eq!(Snapshot::capture(&workspace, "%0").await?.total(), 0);
+    assert_eq!(frozen.page(0, 512)?.bytes, saved);
+    assert!(workspace.command().args(["new-session", "-d", "-s", "outside", "/bin/sh"]).status()?.success());
+    let pane = workspace.command().args(["list-panes", "-t", "outside:", "-F", "#{pane_id}"]).output()?;
+    let pane = String::from_utf8(pane.stdout)?;
+    assert!(Snapshot::capture(&workspace, pane.trim()).await.is_err(), "other sessions must remain inaccessible");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires bundled terminal runtime"]
+async fn frozen_history_routes_stable_pages_and_rejects_detached_guest_anchors() -> Result<()> {
+    use porthub_terminal::{host::Attachments, protocol::*};
+    async fn page(router: &mut Attachments, request: u32, anchor: Option<String>) -> Result<HistoryChunk> {
+        router.apply(HostEvent::History {
+            client: 7, request, pane: "%0".into(), before: 0, lines: 10,
+            freeze: true, snapshot: anchor,
+        })?;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match router.next().await {
+                    Some(HostOutput::History {client:7,page}) => {
+                        assert_eq!(page.request, request);
+                        assert!(page.done, "small page should fit one frame");
+                        page.validate()?;
+                        return Ok(page);
+                    }
+                    Some(HostOutput::Closed {client:7}) | None => anyhow::bail!("history request {request} lost its attachment before the response"),
+                    _ => {},
+                }
+            }
+        }).await.map_err(|error| anyhow::anyhow!("history request {request} timed out with {} attached participants: {error}",router.participants()))?
+    }
+    let (_directory, workspace) = workspace()?;
+    let _cleanup = Cleanup(workspace.clone());
+    workspace.start(&start())?;
+    let mut router = Attachments::new(workspace.clone(), 2)?;
+    router.apply(HostEvent::Ready {
+        direct_transport: false,
+        history_snapshots: true, invitations_revoked: false,
+        ssh_host: String::new(), ssh_port: 0, public_base: String::new(),
+    })?;
+    let attach = || HostEvent::Attach {
+        client: 7, read_only: true, cols: 100, rows: 30, term: "xterm-256color".into(),
+    };
+    router.apply(attach())?;
+    let send = |command: &str| -> Result<()> {
+        let output = workspace.command().args(["send-keys", "-c", "porthub-history-owner", "-t", "%0", command, "Enter"]).output()?;
+        anyhow::ensure!(output.status.success(), "history fixture input failed");
+        Ok(())
+    };
+    send("i=0; while [ $i -lt 100 ]; do echo seed-$i; i=$((i+1)); done")?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !workspace.capture("%0", 200)?.contains("seed-99") {
+        anyhow::ensure!(Instant::now() < deadline, "history fixture timed out");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let frozen = page(&mut router, 1, None).await?;
+    assert!(frozen.error.is_none());
+    let identity = frozen.snapshot.clone().expect("snapshot identity");
+    send("i=0; while [ $i -lt 100 ]; do echo later-$i; i=$((i+1)); done")?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !workspace.capture("%0", 200)?.contains("later-99") {
+        anyhow::ensure!(Instant::now() < deadline, "later output timed out");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let retained = page(&mut router, 2, Some(identity.clone())).await?;
+    assert!(retained.error.is_none());
+    assert_eq!(retained.data, frozen.data);
+    assert_eq!(retained.total, frozen.total);
+    assert_eq!(retained.snapshot, frozen.snapshot);
+    router.apply(HostEvent::Detach { client: 7 })?;
+    router.apply(attach())?;
+    let expired = page(&mut router, 3, Some(identity)).await?;
+    assert!(expired.error.is_some(), "reattached guests cannot reuse old cache ownership");
+    assert!(expired.data.is_empty());
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires bundled terminal runtime"]
+fn private_owner_sidebar_preserves_shared_shell_and_closes_with_its_attachment() -> Result<()> {
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use std::io::{Read, Write};
+    use porthub_terminal::owner_view::OwnerView;
+    let (directory, shared) = workspace()?;
+    let _cleanup = Cleanup(shared.clone());
+    shared.start(&start())?;
+    for round in 0..2 {
+        let path = directory.path().join(format!("view{round}"));
+        create_directory(&path)?;
+        let view = OwnerView::new(&shared,path)?;
+        let mut panel = std::process::Command::new("/bin/sh");
+        panel.args(["-c", "printf 'PRIVATE_OWNER_PANEL\\n'; while read line; do printf 'private-control:%s\\n' \"$line\"; done"]);
+        let command = view.command(&shared, &panel, 120, 30)?;
+        let pty = native_pty_system().openpty(PtySize { rows:30, cols:120, pixel_width:0, pixel_height:0 })?;
+        let mut builder = CommandBuilder::new(command.get_program());
+        builder.args(command.get_args());
+        for (key,value) in command.get_envs() {
+            if let Some(value)=value { builder.env(key,value); } else { builder.env_remove(key); }
+        }
+        builder.env("TERM","xterm-256color");
+        let mut child=pty.slave.spawn_command(builder)?;
+        drop(pty.slave);
+        let mut reader=pty.master.try_clone_reader()?;
+        let observed=std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let sink=observed.clone();
+        let drain=std::thread::spawn(move || {let mut bytes=[0;8192];while let Ok(count)=reader.read(&mut bytes) {if count==0 {break;} let mut output=sink.lock().unwrap();output.extend_from_slice(&bytes[..count]);if output.len()>262144 {let excess=output.len()-262144;output.drain(..excess);}}});
+        let mut writer=pty.master.take_writer()?;
+        let wait = |predicate: &dyn Fn() -> bool| -> Result<()> {
+            let deadline=Instant::now()+Duration::from_secs(5);
+            while !predicate() {
+                anyhow::ensure!(Instant::now()<deadline,"private view fixture timed out: {:?}",view.workspace().command().args(["display-message","-p","#{pane_id}:#{window_width}:#{window_zoomed_flag}:#{pane_width}"]).output());
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(())
+        };
+        wait(&|| view.workspace().capture("%1",20).is_ok_and(|s|s.contains("PRIVATE_OWNER_PANEL")))?;
+        assert!(!shared.capture("%0",100)?.contains("PRIVATE_OWNER_PANEL"),"private controls must not enter the shared transcript");
+        let panes=shared.command().args(["list-panes","-F","#{pane_id}"]).output()?;
+        assert_eq!(String::from_utf8_lossy(&panes.stdout).lines().count(),1,"sidebar must not add shared panes");
+        if round==0 {
+            writer.write_all(b"printf 'OWNER%s\\n' 'TYPING'\r")?;writer.flush()?;
+            wait(&|| shared.capture("%0",100).is_ok_and(|s|s.contains("OWNERTYPING")))?;
+            // The private wrapper must not consume the shared prefix or F7.
+            writer.write_all(b"\x01%")?;writer.flush()?;
+            wait(&|| shared.command().args(["list-panes","-F","#{pane_id}"]).output().is_ok_and(|o|String::from_utf8_lossy(&o.stdout).lines().count()==2))?;
+            assert!(shared.command().args(["kill-pane","-t","%1"]).output()?.status.success());
+            writer.write_all(b"i=0; while [ $i -lt 80 ]; do echo scroll-$i; i=$((i+1)); done\r")?;writer.flush()?;
+            wait(&|| shared.capture("%0",100).is_ok_and(|s|s.contains("scroll-79")))?;
+            writer.write_all(b"\x1b[18~")?;writer.flush()?;
+            wait(&|| shared.command().args(["display-message","-p","-t","%0","#{pane_in_mode}"]).output().is_ok_and(|o|String::from_utf8_lossy(&o.stdout).trim()=="1"))?;
+            writer.write_all(b"\x1b[18~")?;writer.flush()?;
+            wait(&|| shared.command().args(["display-message","-p","-t","%0","#{pane_in_mode}"]).output().is_ok_and(|o|String::from_utf8_lossy(&o.stdout).trim()=="0"))?;
+            writer.write_all(b"\x1b[<64;5;5M")?;writer.flush()?;
+            wait(&|| shared.command().args(["display-message","-p","-t","%0","#{pane_in_mode}"]).output().is_ok_and(|o|String::from_utf8_lossy(&o.stdout).trim()=="1"))?;
+            writer.write_all(b"\x1b[18~")?;writer.flush()?;
+            wait(&|| shared.command().args(["display-message","-p","-t","%0","#{pane_in_mode}"]).output().is_ok_and(|o|String::from_utf8_lossy(&o.stdout).trim()=="0"))?;
+            assert!(shared.command().args(["set-buffer","-w","porthubclipboard"]).output()?.status.success());
+            wait(&|| observed.lock().unwrap().windows(b"cG9ydGh1YmNsaXBib2FyZA==".len()).any(|bytes|bytes==b"cG9ydGh1YmNsaXBib2FyZA=="))?;
+            assert!(observed.lock().unwrap().windows(5).any(|bytes|bytes==b"\x1b]52;"),"copy request must retain OSC52 framing");
+            writer.write_all(b"\x1b[19~")?;writer.flush()?;
+            wait(&|| view.workspace().command().args(["display-message","-p","#{pane_id}"]).output().is_ok_and(|o|String::from_utf8_lossy(&o.stdout).trim()=="%1"))?;
+            writer.write_all(b"owner-only\r")?;writer.flush()?;
+            wait(&|| view.workspace().capture("%1",20).is_ok_and(|s|s.contains("private-control:owner-only")))?;
+            assert!(!shared.capture("%0",100)?.contains("owner-only"));
+            let second_path=directory.path().join("secondowner");create_directory(&second_path)?;
+            let second=OwnerView::new(&shared,second_path)?;
+            let second_command=second.command(&shared,&panel,120,30)?;
+            let second_pty=native_pty_system().openpty(PtySize {rows:30,cols:120,pixel_width:0,pixel_height:0})?;
+            let mut second_builder=CommandBuilder::new(second_command.get_program());second_builder.args(second_command.get_args());
+            for (key,value) in second_command.get_envs() {if let Some(value)=value {second_builder.env(key,value);}else{second_builder.env_remove(key);}}
+            second_builder.env("TERM","xterm-256color");
+            let mut second_child=second_pty.slave.spawn_command(second_builder)?;drop(second_pty.slave);
+            let mut second_reader=second_pty.master.try_clone_reader()?;
+            let second_drain=std::thread::spawn(move||{let mut bytes=[0;8192];while second_reader.read(&mut bytes).is_ok_and(|n|n>0){}});
+            let mut second_writer=second_pty.master.take_writer()?;
+            wait(&|| second.workspace().capture("%1",20).is_ok_and(|s|s.contains("PRIVATE_OWNER_PANEL")))?;
+            assert!(!second.workspace().capture("%1",20)?.contains("owner-only"));
+            second_writer.write_all(b"\x1b[19~")?;second_writer.flush()?;
+            wait(&|| second.workspace().command().args(["display-message","-p","#{pane_id}"]).output().is_ok_and(|o|String::from_utf8_lossy(&o.stdout).trim()=="%1"))?;
+            second_writer.write_all(b"second-only\r")?;second_writer.flush()?;
+            wait(&|| second.workspace().capture("%1",20).is_ok_and(|s|s.contains("private-control:second-only")))?;
+            assert!(!view.workspace().capture("%1",20)?.contains("second-only"));
+            assert!(!shared.capture("%0",100)?.contains("second-only"));
+            second_child.kill()?;let _=second_child.wait()?;
+            wait(&|| !second.workspace().is_alive())?;
+            assert!(view.workspace().is_alive() && shared.is_alive(),"one owner disconnect must not affect another");
+            drop(second_writer);drop(second_pty.master);drop(second);second_drain.join().unwrap();
+            pty.master.resize(PtySize { rows:18, cols:40, pixel_width:0, pixel_height:0 })?;
+            wait(&|| view.workspace().command().args(["display-message","-p","#{window_zoomed_flag}:#{pane_id}:#{pane_width}"]).output().is_ok_and(|o|String::from_utf8_lossy(&o.stdout).trim()=="1:%0:40"))?;
+            writer.write_all(b"\x1b[19~")?;writer.flush()?;
+            writer.write_all(b"printf 'NARROW%s\\n' 'OWNER'\r")?;writer.flush()?;
+            wait(&|| shared.capture("%0",100).is_ok_and(|s|s.contains("NARROWOWNER")))?;
+            pty.master.resize(PtySize { rows:30, cols:120, pixel_width:0, pixel_height:0 })?;
+            wait(&|| view.workspace().command().args(["display-message","-p","#{window_zoomed_flag}"]).output().is_ok_and(|o|String::from_utf8_lossy(&o.stdout).trim()=="0"))?;
+            child.kill()?;let _=child.wait()?;
+            wait(&|| !view.workspace().is_alive())?;
+            assert!(shared.is_alive(),"owner terminal closing must preserve the shared shell");
+        } else {
+            let result=shared.command().args(["send-keys","-t","%0","exit","Enter"]).output()?;
+            assert!(result.status.success());
+            wait(&|| !shared.is_alive())?;
+            wait(&|| !view.workspace().is_alive())?;
+            let _=child.wait()?;
+        }
+        drop(writer);drop(pty.master);drop(view);
+        drain.join().unwrap();
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore="requires bundled terminal runtime"]
+async fn unavailable_delivery_runtime_closes_only_the_sender() -> Result<()> {
+    use porthub_terminal::{host::Attachments,protocol::*,delivery::Message};
+    let (_directory,workspace)=workspace()?;let _cleanup=Cleanup(workspace.clone());
+    workspace.start(&start())?;let mut router=Attachments::new(workspace.clone(),2)?;
+    for client in [7,8] {router.apply(HostEvent::Attach {client,read_only:true,cols:100,rows:30,term:"xterm-256color".into()})?;}
+    let packet=DeliveryPacket::encode(&Message::Ack {epoch:"a".repeat(32),sequence:0})?;
+    router.apply(HostEvent::Delivery {client:7,packet})?;
+    assert_eq!(router.participants(),1);assert!(workspace.is_alive());
+    tokio::time::timeout(Duration::from_secs(5),async {
+        loop {if matches!(router.next().await,Some(HostOutput::Closed {client:7})){break;}}
+    }).await?;
+    assert_eq!(router.participants(),1);assert!(workspace.is_alive());Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires bundled terminal runtime"]
+async fn detached_participant_events_cannot_close_a_replacement_with_the_same_identity() -> Result<()> {
+    use porthub_terminal::{host::Attachments, protocol::*};
+    let (_directory, workspace) = workspace()?;
+    let _cleanup = Cleanup(workspace.clone());
+    workspace.start(&start())?;
+    let mut router = Attachments::new(workspace.clone(), 2)?;
+    let attach = |client| HostEvent::Attach {
+        client, read_only: true, cols: 100, rows: 30, term: "xterm-256color".into(),
+    };
+    router.apply(attach(7))?;
+    router.apply(attach(8))?;
+    let command = workspace.command().args(["send-keys", "-c", "porthub-history-owner", "-t", "%0", "printf 'ATTACH%s\\n' 'READY'", "Enter"]).output()?;
+    anyhow::ensure!(command.status.success());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut screen = Vec::new();
+        loop {
+            match router.next().await {
+                Some(HostOutput::Output {client: 7, data}) => {
+                    screen.extend(decode_data(&data)?);
+                    if screen.windows(11).any(|bytes| bytes == b"ATTACHREADY") {break;}
+                }
+                Some(HostOutput::Closed {..}) | None => anyhow::bail!("initial fixture attachment closed"),
+                _ => {},
+            }
+        }
+        Ok::<_,anyhow::Error>(())
+    }).await??;
+    // Finish the initial redraw and leave the old reader blocked in read().
+    while let Ok(output) = tokio::time::timeout(Duration::from_millis(50), router.next()).await {
+        anyhow::ensure!(!matches!(output, Some(HostOutput::Closed {..}) | None), "initial fixture attachment closed");
+    }
+    router.apply(HostEvent::Detach {client: 7})?;
+    // Let its cancellation/EOF callback queue before admitting the replacement.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    router.apply(attach(7))?;
+    router.apply(HostEvent::Ping)?;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match router.next().await {
+                Some(HostOutput::Pong) => break,
+                Some(HostOutput::Closed {..}) | None => anyhow::bail!("detached PTY closed a replacement or independent participant"),
+                _ => {},
+            }
+        }
+        Ok::<_,anyhow::Error>(())
+    }).await??;
+    assert_eq!(router.participants(), 2, "both replacement and independent participant must remain attached");
+    assert!(workspace.is_alive());
     Ok(())
 }
