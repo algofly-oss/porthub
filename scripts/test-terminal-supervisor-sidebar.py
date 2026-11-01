@@ -26,7 +26,8 @@ def main():
         fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
     child = subprocess.Popen([sys.executable, '-c', TERMINAL_KEEPER, str(report_write),
         executable, 'terminal', 'attach', identity, '--sidebar', 'on'],
-        stdin=slave, stdout=slave, stderr=slave, pass_fds=(report_write,), preexec_fn=terminal)
+        stdin=slave, stdout=slave, stderr=slave, env={**os.environ, "TERM":"xterm-256color"},
+        pass_fds=(report_write,), preexec_fn=terminal)
     os.close(report_write)
     pending = bytearray()
     def wait(text, timeout=8):
