@@ -28,3 +28,5 @@ pub mod viewer;
 
 #[cfg(feature = "viewer-history")]
 pub mod viewer_history;
+
+pub mod traffic;

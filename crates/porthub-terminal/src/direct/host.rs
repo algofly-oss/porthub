@@ -114,6 +114,7 @@ struct Network {
     incoming: mpsc::Receiver<(SocketAddr, SocketAddr, Vec<u8>)>,
     readers: JoinSet<()>,
     ready: bool,
+    traffic: crate::traffic::Counters,
 }
 impl Drop for Network {
     fn drop(&mut self) {
@@ -121,7 +122,7 @@ impl Drop for Network {
     }
 }
 impl Network {
-    async fn prepare(config: Config, description: DirectDescription) -> Result<(Self, String)> {
+    async fn prepare(config: Config, description: DirectDescription,traffic: crate::traffic::Counters) -> Result<(Self, String)> {
         description.validate("offer")?;
         config.validate()?;
         let mut gathering = JoinSet::new();
@@ -168,12 +169,14 @@ impl Network {
         for socket in &sockets {
             let socket = socket.clone();
             let send = send.clone();
+            let traffic = traffic.clone();
             readers.spawn(async move {
                 let Ok(local) = socket.local_addr() else {
                     return;
                 };
                 let mut buffer = [0; 2048];
                 while let Ok((count, remote)) = socket.recv_from(&mut buffer).await {
+                    traffic.received(count);
                     if send
                         .send((local, remote, buffer[..count].to_vec()))
                         .await
@@ -192,6 +195,7 @@ impl Network {
                 incoming,
                 readers,
                 ready: false,
+                traffic,
             },
             answer,
         ))
@@ -215,7 +219,8 @@ impl Network {
                     })
                 })
                 .context("terminal UDP interface unavailable")?;
-            socket.send_to(&bytes, remote).await?;
+            let count = socket.send_to(&bytes, remote).await?;
+            self.traffic.sent(count);
         }
         Ok(())
     }
@@ -357,6 +362,16 @@ pub fn spawn(
     send: mpsc::Sender<HostOutput>,
     config: Config,
 ) -> Handle {
+    spawn_measured(client, sink, output, send, config, Default::default())
+}
+pub(crate) fn spawn_measured(
+    client: u64,
+    sink: InputSink,
+    output: mpsc::Receiver<HostOutput>,
+    send: mpsc::Sender<HostOutput>,
+    config: Config,
+    traffic: crate::traffic::Counters,
+) -> Handle {
     let (handle, receive) = Handle::channel();
     let actor_cancel = handle.cancel.clone();
     tokio::spawn(async move {
@@ -368,6 +383,7 @@ pub fn spawn(
             send.clone(),
             config,
             actor_cancel,
+            traffic,
         )
         .await;
         let _ = tokio::time::timeout(
@@ -386,6 +402,7 @@ async fn run(
     send: mpsc::Sender<HostOutput>,
     config: Config,
     cancel: CancellationToken,
+    traffic: crate::traffic::Counters,
 ) -> Result<()> {
     let mut delivery: Option<Delivery> = None;
     let mut network: Option<Network> = None;
@@ -487,7 +504,7 @@ async fn run(
             command=commands.recv()=>match command {
                 Some(Command::Offer {request,description})=>{
                     ensure!(pending.is_none(),"terminal negotiation is already pending");let config=config.clone();
-                    pending=Some((request,AbortOnDropHandle::new(tokio::spawn(Network::prepare(config,description)))));
+                    pending=Some((request,AbortOnDropHandle::new(tokio::spawn(Network::prepare(config,description,traffic.clone())))));
                 },
                 Some(Command::Relay {message,_bytes})=>{
                     receipt(delivery.as_mut().context("terminal delivery is not negotiated")?,message,false,&mut network,&sink,client,&send,&cancel).await?;

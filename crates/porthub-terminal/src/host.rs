@@ -19,6 +19,7 @@ pub struct Attachments {
     send: mpsc::Sender<HostOutput>,
     receive: mpsc::Receiver<HostOutput>,
     max_viewers: usize,
+    traffic: crate::traffic::Counters,
     history_send: mpsc::Sender<HostOutput>,
     history_receive: mpsc::Receiver<HostOutput>,
     history_jobs: tokio::task::JoinSet<()>,
@@ -29,6 +30,12 @@ pub struct Attachments {
 }
 
 impl Attachments {
+    pub fn traffic(&self) -> crate::traffic::Snapshot {
+        self.traffic.snapshot()
+    }
+    pub fn participant_traffic(&self, client: u64) -> Option<crate::traffic::Snapshot> {
+        self.clients.get(&client).map(Client::traffic)
+    }
     pub fn new(workspace: Workspace, max_viewers: usize) -> Result<Self> {
         ensure!(
             (1..=MAX_VIEWERS).contains(&max_viewers),
@@ -50,6 +57,7 @@ impl Attachments {
             send,
             receive,
             max_viewers,
+            traffic:Default::default(),
             history_send,
             history_receive,
             history_jobs: tokio::task::JoinSet::new(),
@@ -192,7 +200,7 @@ impl Attachments {
                 let (output,receive)=if self.direct_enabled && self.direct_config.is_some() {let (send,receive)=mpsc::channel(8);(send,Some(receive))}else{(self.send.clone(),None)};
                 #[cfg(not(feature="direct"))]
                 let output=self.send.clone();
-                match Client::attach(
+                match Client::attach_measured(
                     &self.workspace,
                     client,
                     read_only,
@@ -200,11 +208,12 @@ impl Attachments {
                     rows,
                     &term,
                     output,
+                    self.traffic.child(),
                 ) {
                     Ok(pty) => {
                         #[cfg(feature="direct")]
                         if let Some(receive)=receive {
-                            let handle=crate::direct::host::spawn(client,pty.input_sink(),receive,self.send.clone(),self.direct_config.clone().unwrap());
+                            let handle=crate::direct::host::spawn_measured(client,pty.input_sink(),receive,self.send.clone(),self.direct_config.clone().unwrap(),pty.traffic_counter());
                             self.direct.insert(client,handle);
                         }
 

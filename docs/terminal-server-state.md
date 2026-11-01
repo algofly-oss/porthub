@@ -405,3 +405,30 @@ includes these policy tests and the no-default-features settings checks.
 This path is still experimental and is not enabled in ordinary published builds.
 Account-scoped traffic reporting, approved NAT configuration, cross-platform
 packaging and authorized production rollout remain release gates.
+
+### Host-side terminal traffic measurements (reporting pipeline pending)
+
+Each attachment now has content-free counters for bytes successfully written to
+its PTY, bytes read from its PTY, and UDP bytes observed by the host RTC transport.
+The host also keeps aggregate counters. Producers hold the aggregate reference,
+so a write completing after guest detachment still contributes without retaining
+an ever-growing list of detached guests. Updates are atomic and saturating; a
+snapshot reads independent counters rather than a transactional cross-field sum.
+No command, output text, invitation, account identifier or credential is stored.
+
+PTY output includes per-participant redraws and can include bytes that have not
+yet reached the viewer. UDP observations include RTC protocol overhead and
+retransmissions, but exclude separate external candidate-discovery probes and
+cannot recover bytes truncated from invalid oversized datagrams. These scopes
+must be shown separately; summing PTY payload with UDP would double-count data.
+They are operational measurements, not a NIC accounting or billing meter.
+
+The real bundled-shell direct/fallback integration checks exact application input
+counts, host UDP observations, an independently measured legacy participant and
+host aggregation. Unit tests check concurrent producers after detach, saturation,
+and partial PTY write failure counting only accepted bytes. These measurements
+are currently available through the host attachment API only. The next reporting
+step must bind them to the installed agent's authenticated machine/session before
+API persistence and account-scoped dashboard presentation. Guest reports must not
+supply authoritative machine identities or metrics. No reporting messages have
+been added to older gateway protocols, and no live service was changed here.

@@ -142,11 +142,35 @@ async fn native_guest_keeps_the_real_shared_shell_across_direct_to_relay_fallbac
         Some(b"NATIVE_COUNTER_2"),
     )
     .await?;
+    let first = host.participant_traffic(7).unwrap();
+    ensure!(
+        first.input_bytes == 2 * command.len() as u64,
+        "replay inflated host input measurements"
+    );
+    ensure!(
+        first.output_bytes > 0
+            && first.direct_udp_sent_bytes > 0
+            && first.direct_udp_received_bytes > 0,
+        "host missed direct transport measurements"
+    );
+    let other = b"printf '\\r\\nINDEPENDENT_%s\\r\\n' OK\r";
     host.apply(HostEvent::Input {
         client: 8,
-        data: encode_data(b"printf '\\r\\nINDEPENDENT_%s\\r\\n' OK\r"),
+        data: encode_data(other),
     })?;
     drive(&mut host, &mut native, &mut screen, Some(b"INDEPENDENT_OK")).await?;
+    ensure!(
+        host.participant_traffic(7).unwrap().input_bytes == first.input_bytes,
+        "another guest changed this participant's counters"
+    );
+    ensure!(
+        host.participant_traffic(8).unwrap().input_bytes == other.len() as u64,
+        "legacy relay input was not measured"
+    );
+    ensure!(
+        host.traffic().input_bytes == first.input_bytes + other.len() as u64,
+        "host totals lost a participant"
+    );
     ensure!(
         workspace.is_alive(),
         "transport fallback ended the shared shell"
