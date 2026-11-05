@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import tomllib
 import unittest
+from unittest.mock import patch, Mock
 
 spec = importlib.util.spec_from_file_location('prepare_release', Path(__file__).with_name('prepare-release.py'))
 release = importlib.util.module_from_spec(spec)
@@ -116,5 +117,79 @@ class Repository(unittest.TestCase):
         with self.assertRaises(ValueError):release.prepare(self.root,'refs/heads/main',broken,self.latest,execute=True)
         self.assertEqual((self.root/'Cargo.toml').read_bytes(),before)
         self.assertEqual(release.remote_head(self.root,'main'),broken)
+
+class IndependentCore(unittest.TestCase):
+    def setUp(self):
+        self.fixture = Repository(); self.fixture.setUp(); self.addCleanup(self.fixture.doCleanups)
+        self.root = self.fixture.root
+        manifest = self.root/'Cargo.toml'
+        manifest.write_text(manifest.read_text().replace('"app","stable"', '"app","stable","crates/porthub-agent"'))
+        directory = self.root/'crates/porthub-agent'; directory.mkdir(parents=True)
+        (directory/'Cargo.toml').write_text('[package]\nname="porthub-agent"\nversion = "1.8.9"\n')
+        lock = self.root/'Cargo.lock'
+        lock.write_text(lock.read_text()+'\n[[package]]\nname = "porthub-agent"\nversion = "1.8.9"\n')
+        self.fixture.run_git('add','.')
+        self.fixture.run_git('commit','-m','independent core baseline')
+        self.fixture.run_git('tag','-f','v1.8.9')
+        self.fixture.run_git('push','origin','main','--force','--tags')
+
+    def test_no_reuse_proof_advances_core_and_workspace_atomically(self):
+        head = self.fixture.change()
+        result = release.prepare(self.root,'refs/heads/main',head,self.fixture.latest,execute=True)
+        self.assertEqual(result['core_version'], '1.8.10')
+        self.assertEqual(release.core_package(self.root)[2], '1.8.10')
+        packages = {p['name']:p['version'] for p in tomllib.loads((self.root/'Cargo.lock').read_text())['package']}
+        self.assertEqual(packages['porthub-agent'], '1.8.10')
+        self.assertEqual(packages['app'], '1.8.10')
+        self.assertEqual(self.fixture.run_git('status','--porcelain'), '')
+
+    def proof(self):
+        coordinator, packager = Mock(), Mock()
+        targets = ['target'+str(i) for i in range(10)]
+        packager.TARGETS = targets
+        directories = []
+        for target in targets:
+            directory = self.root/target; directory.mkdir()
+            (directory/'index.json').write_text(json.dumps({'target':target}))
+            directories.append(directory)
+        coordinator.previous_builds.return_value = {('core','1.8.9'): ({'version':'1.8.9'}, Path('/verified/core'))}
+        coordinator.planner.plan.return_value = {'action':'reuse'}
+        return coordinator, packager, directories
+
+    def test_complete_reuse_proof_preserves_core_during_server_bump(self):
+        coordinator, packager, directories = self.proof()
+        head = self.fixture.change()
+        with patch.object(release, 'core_build_modules', return_value=(coordinator,packager)):
+            result = release.prepare(self.root,'refs/heads/main',head,self.fixture.latest,execute=True,previous_core_builds=directories)
+        self.assertEqual(result['version'], '1.8.10')
+        self.assertEqual(result['core_version'], '1.8.9')
+        self.assertEqual(release.core_package(self.root)[2], '1.8.9')
+        self.assertEqual(coordinator.planner.plan.call_count, 10)
+        self.assertEqual(self.fixture.run_git('status','--porcelain','--untracked-files=no'), '')
+
+    def test_partial_proof_and_changed_platform_never_allow_reuse(self):
+        coordinator, packager, directories = self.proof()
+        with patch.object(release, 'core_build_modules', return_value=(coordinator,packager)):
+            with self.assertRaises(ValueError): release.choose_core(self.root,'1.8.9',directories[:-1])
+            coordinator.planner.plan.side_effect = ValueError('Changed core contents require a new release version')
+            self.assertEqual(release.choose_core(self.root,'1.8.9',directories), '1.8.10')
+
+    def test_explicit_tag_cannot_reuse_published_core_without_proof(self):
+        for path, text in release.version_files(self.root, '1.9.0').items():
+            path.write_text(text)
+        self.fixture.run_git('add','.')
+        self.fixture.run_git('commit','-m','server version only')
+        head = self.fixture.run_git('rev-parse','HEAD')
+        with self.assertRaisesRegex(ValueError, 'committed, unused core version'):
+            release.prepare(self.root,'refs/tags/v1.9.0',head,self.fixture.latest,execute=True)
+        self.assertEqual(release.core_package(self.root)[2], '1.8.9')
+        self.assertEqual(self.fixture.run_git('status','--porcelain'), '')
+
+    def test_published_same_source_reports_actual_core_version(self):
+        head = self.fixture.run_git('rev-parse','HEAD')
+        result = release.prepare(self.root,'refs/heads/main',head,self.fixture.latest)
+        self.assertTrue(result['already_published'])
+        self.assertEqual(result['core_version'], '1.8.9')
+
 
 if __name__=='__main__':unittest.main()

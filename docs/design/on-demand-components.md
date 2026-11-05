@@ -666,3 +666,15 @@ receipt identity, and binary contents again. Production packaging and the Rust
 offline verifier require all four optional tool families on all ten platforms;
 `--verify-only` permits incomplete, unpublished fixtures only. The public release
 still consists of ten core binaries, ten platform tool archives, and one manifest.
+
+Core executable versioning is independent of the workspace/server release. The
+agent manifest now records its own version. During release preparation, repeated
+`--previous-core-build PLATFORM_BUILD_DIR` options supply recovered, verified
+build inputs for all ten platforms. If all core fingerprints remain unchanged,
+the core version stays fixed while the server/carrier advances. Missing proof
+forces a conservative core patch increment; incomplete or corrupt supplied proof
+fails preparation. A changed platform also forces a new core version. Manifest
+and lockfile changes are validated together and committed before builds; explicit
+tags must already contain the required core version. The production workflow
+still needs to fetch verified prior-release inputs and pass these options before
+it can benefit from core reuse automatically.

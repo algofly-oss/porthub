@@ -97,6 +97,17 @@ recipe_version=1
     def choose(self):
         return buildplan.plan(self.root, 'tool', TARGET, self.receipt)
 
+    def test_independent_core_reuses_after_server_workspace_version_bump(self):
+        path = self.root/'core/Cargo.toml'
+        path.write_text(path.read_text().replace('version.workspace=true', 'version="1.11.0"'))
+        self.deps('core')
+        receipt = self.record('core')
+        workspace = self.root/'Cargo.toml'
+        workspace.write_text(workspace.read_text().replace('version = "1.11.0"', 'version = "1.12.0"'))
+        choice = buildplan.plan(self.root, 'core', TARGET, receipt)
+        self.assertEqual(choice['action'], 'reuse')
+        self.assertEqual(choice['version'], '1.11.0')
+
     def test_agent_only_edits_and_unrelated_lock_changes_reuse_helper(self):
         self.write('core/src/main.rs', 'fn main() {println!("new core behavior");}\n')
         self.packages.append({'name': 'unrelated', 'version': '9.0.0', 'source': 'registry+https://github.com/rust-lang/crates.io-index', 'checksum': 'b' * 64})

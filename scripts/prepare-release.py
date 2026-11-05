@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Prepare an immutable release commit; dry run unless --execute is supplied.
 
-Main pushes advance the patch version only when the workspace version has already
-been published. Explicit release tags must match the committed workspace version.
+Main pushes advance a published workspace release version. The core executable
+has its own committed version; keeping it unchanged requires complete verified
+platform build receipts. Explicit tags require both versions to be ready.
 """
 import argparse
 import json
+import importlib.util
 import os
 from pathlib import Path
 import re
@@ -79,6 +81,98 @@ def version_files(root, version):
         raise ValueError('Workspace lockfile is missing release packages')
     return {manifest_path: updated, lock_path: ''.join(blocks)}
 
+def core_package(root):
+    path = root/'crates/porthub-agent/Cargo.toml'
+    if not path.is_file():
+        return None
+    package = tomllib.loads(path.read_text())['package']
+    version = package.get('version')
+    if isinstance(version, str):
+        numeric(version)
+        return path, package['name'], version
+    return None  # Legacy workspaces retain their original version policy.
+
+
+def core_version_files(root, version, updates):
+    core = core_package(root)
+    if core is None:
+        return updates
+    path, name, previous = core
+    numeric(version)
+    manifest, found = re.subn(r'(?m)^version = "'+re.escape(previous)+r'"$',
+                              'version = "'+version+'"', path.read_text(), count=1)
+    if found != 1:
+        raise ValueError('Independent core version is unavailable')
+    lock_path = root/'Cargo.lock'
+    blocks = re.split(r'(?m)(?=^\[\[package\]\]$)', updates.get(lock_path, lock_path.read_text()))
+    changed = 0
+    for index, block in enumerate(blocks):
+        if not block.startswith('[[package]]'):
+            continue
+        package = tomllib.loads(block)['package'][0]
+        if package['name'] == name and package.get('source') is None:
+            if package['version'] != previous:
+                raise ValueError('Core manifest and lockfile versions disagree')
+            blocks[index], found = re.subn(r'(?m)^version = "'+re.escape(previous)+r'"$',
+                                           'version = "'+version+'"', block, count=1)
+            changed += found
+    if changed != 1:
+        raise ValueError('Core lockfile identity is unavailable')
+    return {**updates, path: manifest, lock_path: ''.join(blocks)}
+
+
+def core_build_modules():
+    modules = []
+    for name, filename in [('core_build_coordinator', 'build-component-platform.py'), ('core_packager', 'package-components.py')]:
+        spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(filename))
+        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        modules.append(module)
+    return modules
+
+
+def choose_core(root, latest_core, previous_builds=()):
+    core = core_package(root)
+    if core is None:
+        return None
+    current = core[2]
+    if latest_core is None:
+        return current
+    numeric(latest_core)
+    if numeric(current) > numeric(latest_core):
+        return current
+    if previous_builds:
+        coordinator, packager = core_build_modules()
+        proven = set()
+        unchanged = True
+        for directory in previous_builds:
+            index_path = directory/'index.json'
+            if index_path.is_symlink() or index_path.stat().st_size > 1024 * 1024:
+                raise ValueError('Invalid previous core build index')
+            index = json.loads(index_path.read_text())
+            target = index.get('target')
+            if target not in packager.TARGETS or target in proven:
+                raise ValueError('Duplicate or unsupported previous core platform')
+            proven.add(target)
+            builds = coordinator.previous_builds(directory, target, index)
+            candidates = [(receipt, binary) for (tool, version), (receipt, binary) in builds.items()
+                          if tool == 'core' and version == latest_core]
+            if len(candidates) != 1:
+                raise ValueError('Previous core build version differs from published version')
+            try:
+                choice = coordinator.planner.plan(root, 'core', target, candidates[0][0])
+                unchanged = unchanged and choice['action'] == 'reuse'
+            except ValueError as error:
+                if str(error) != 'Changed core contents require a new release version':
+                    raise
+                unchanged = False
+        if proven != set(packager.TARGETS):
+            raise ValueError('Core reuse requires verified receipts for all ten platforms')
+        if unchanged and current == latest_core:
+            return current
+    old = max(numeric(current), numeric(latest_core))
+    return '.'.join(map(str, (old[0], old[1], old[2]+1)))
+
+
 def replace(path, text):
     with tempfile.NamedTemporaryFile(mode='w', prefix='.release-version-', dir=path.parent, delete=False) as stream:
         temporary = Path(stream.name)
@@ -97,7 +191,7 @@ def remote_head(root, branch):
         raise ValueError('Default branch source is unavailable')
     return output[0]
 
-def prepare(root, ref, trigger_sha, latest=None, branch='main', execute=False, reservations=()):
+def prepare(root, ref, trigger_sha, latest=None, branch='main', execute=False, reservations=(), previous_core_builds=()):
     if not re.fullmatch(r'[0-9a-f]{40}', trigger_sha):
         raise ValueError('A full source revision is required')
     root = Path(root).resolve()
@@ -118,6 +212,15 @@ def prepare(root, ref, trigger_sha, latest=None, branch='main', execute=False, r
         latest_commit = git(root, 'rev-parse', 'refs/tags/' + latest['tag_name'] + '^{commit}').stdout.strip()
         if git(root, 'merge-base', '--is-ancestor', latest_commit, head, check=False).returncode:
             raise ValueError('Latest release source must remain in the new release history')
+    latest_core = None
+    if latest_commit is not None and core_package(root) is not None:
+        old_core = git(root, 'show', latest_commit+':crates/porthub-agent/Cargo.toml', check=False)
+        if old_core.returncode == 0:
+            recorded = tomllib.loads(old_core.stdout)['package']['version']
+            latest_core = recorded if isinstance(recorded, str) else latest_version
+        else:
+            latest_core = latest_version
+    core_version = choose_core(root, latest_core, previous_core_builds)
     tag = ref.removeprefix('refs/tags/') if ref.startswith('refs/tags/') else None
     version = choose_version(workspace, latest_version, tag)
     # A failed upload can leave a draft pinned to earlier source. A subsequent
@@ -138,25 +241,33 @@ def prepare(root, ref, trigger_sha, latest=None, branch='main', execute=False, r
         else:
             raise ValueError('Too many reserved release versions; no source was changed')
     result = {'version': version, 'revision': head, 'tag': 'v' + version,
-              'skip': False, 'already_published': False, 'would_commit': version != workspace}
+              'skip': False, 'already_published': False, 'would_commit': version != workspace or core_version is not None and core_version != core_package(root)[2]}
+    if core_version is not None:
+        result['core_version'] = core_version
     if latest_commit == head and latest_version == workspace:
         result.update(version=workspace, tag='v'+workspace, already_published=True, would_commit=False)
+        if core_package(root) is not None:
+            result['core_version'] = core_package(root)[2]
         return result
     if tag is not None:
         if latest_version == version:
             raise ValueError('Published versions cannot be reused for different source')
+        if core_version is not None and core_version != core_package(root)[2]:
+            raise ValueError('Release tag requires a committed, unused core version')
         return result
     if remote_head(root, branch) != head:
         result['skip'] = True
         return result
-    if not execute or version == workspace:
+    if not execute or not result['would_commit']:
         return result
-    updates = version_files(root, version)  # Validate both files before changing either.
+    updates = version_files(root, version)  # Validate every file before changing any.
+    if core_version is not None:
+        updates = core_version_files(root, core_version, updates)
     for path, text in updates.items():
         replace(path, text)
     git(root, 'config', 'user.name', 'github-actions[bot]')
     git(root, 'config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com')
-    git(root, 'add', '--', 'Cargo.toml', 'Cargo.lock')
+    git(root, 'add', '--', *(str(path.relative_to(root)) for path in updates))
     git(root, 'commit', '-m', 'chore(release): ' + version + ' [skip ci]')
     prepared = git(root, 'rev-parse', 'HEAD').stdout.strip()
     pushed = git(root, 'push', 'origin', 'HEAD:refs/heads/' + branch, check=False)
@@ -192,13 +303,14 @@ def main():
     parser.add_argument('--ref', default=os.environ.get('GITHUB_REF'))
     parser.add_argument('--trigger-sha', default=os.environ.get('GITHUB_SHA'))
     parser.add_argument('--default-branch', default='main')
+    parser.add_argument('--previous-core-build', type=Path, action='append', default=[])
     parser.add_argument('--execute', action='store_true')
     args = parser.parse_args()
     if not args.ref or not args.trigger_sha or not args.repository:
         parser.error('repository, ref and trigger SHA are required')
     latest = latest_release(args.repository)
     reservations = release_reservations(args.repository)
-    result = prepare(args.root, args.ref, args.trigger_sha, latest, args.default_branch, args.execute, reservations)
+    result = prepare(args.root, args.ref, args.trigger_sha, latest, args.default_branch, args.execute, reservations, args.previous_core_build)
     print(json.dumps(result, sort_keys=True))
     if os.environ.get('GITHUB_OUTPUT'):
         with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
