@@ -148,7 +148,105 @@ def backup_core(container, destination, deadline=90):
         signal.signal(signal.SIGALRM,previous)
 
 
-def activate(compose, previous_compose, ensure_others, verify_routes=lambda: None, roles=ROLES, before_role=lambda role: None):
+
+def image_reference(reference):
+    values = run(['docker', 'image', 'ls', '--quiet', '--no-trunc', reference]).split()
+    if len(set(values)) > 1:
+        raise ValueError('Ambiguous PortHub image reference')
+    return values[0] if values else None
+
+
+def replace_private(path, payload, metadata):
+    """Replace release metadata without changing its owner or permissions."""
+    fd, temporary = tempfile.mkstemp(prefix='.porthub-release-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            os.fchown(stream.fileno(), metadata.st_uid, metadata.st_gid)
+            os.fchmod(stream.fileno(), stat.S_IMODE(metadata.st_mode))
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+class ReleaseSelection:
+    """Preflight and transaction for the ordinary Compose restart configuration."""
+    def __init__(self, root, current, images, configuration, revision, version):
+        self.path = root / '.env'
+        self.metadata = self.path.lstat()
+        if not stat.S_ISREG(self.metadata.st_mode) or self.metadata.st_mode & 0o077:
+            raise ValueError('Release .env must be a private regular file')
+        self.original = self.path.read_bytes()
+        self.images = images
+        self.aliases = {}
+        for role, image in images.items():
+            stable = 'porthub:' + role
+            if configuration['services'][role]['image'] != stable:
+                raise ValueError('Release persistence requires the standard PortHub image names')
+            immutable = stable + '-' + version
+            previous = current[role]['Image']
+            rollback = 'porthub:rollback-' + role + '-' + previous.removeprefix('sha256:')[:12]
+            for reference, expected in ((immutable, image['Id']), (rollback, previous)):
+                existing = image_reference(reference)
+                if existing is not None and existing != expected:
+                    raise ValueError('An immutable PortHub image alias already has different contents')
+                self.aliases[reference] = (existing, expected)
+            self.aliases[stable] = (image_reference(stable), image['Id'])
+        changes = {}
+        if 'core' in images:
+            changes['PORTHUB_VERSION'] = version
+        if set(images) == set(ROLES):
+            changes['PORTHUB_SOURCE_REVISION'] = revision
+        lines = self.original.decode('utf-8').splitlines(keepends=True)
+        self.updated = ''.join(line for line in lines if not any(
+            re.match(r'^\s*(?:export\s+)?' + key + r'\s*=', line) for key in changes))
+        if self.updated and not self.updated.endswith('\n'):
+            self.updated += '\n'
+        self.updated = (self.updated + ''.join(key + '=' + value + '\n' for key, value in changes.items())).encode()
+
+    def apply(self, record, verify):
+        from migrate import private_file
+        fields = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+        current = self.path.lstat()
+        if any(getattr(current, key) != getattr(self.metadata, key) for key in fields) or self.path.read_bytes() != self.original:
+            raise ValueError('Release .env changed since preflight')
+        private_file(record / 'previous-release.env', self.original)
+        changed = []
+        try:
+            for reference, (old, wanted) in self.aliases.items():
+                if old != wanted:
+                    changed.append((reference, old))
+                    run(['docker', 'image', 'tag', wanted, reference])
+            replace_private(self.path, self.updated, self.metadata)
+            verify()
+        except BaseException as original:
+            failures = []
+            try:
+                replace_private(self.path, self.original, self.metadata)
+            except Exception:
+                failures.append('release environment')
+            for reference, old in reversed(changed):
+                try:
+                    if old is None:
+                        run(['docker', 'image', 'rm', reference])
+                    else:
+                        run(['docker', 'image', 'tag', old, reference])
+                except Exception:
+                    failures.append('image alias')
+            if failures:
+                raise RuntimeError('Release selection rollback incomplete: ' + ', '.join(failures)) from original
+            raise
+
+
+def activate(compose, previous_compose, ensure_others, verify_routes=lambda: None, roles=ROLES, before_role=lambda role: None, after_roles=lambda: None):
     watched = (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)
     previous_handlers = {number: signal.getsignal(number) for number in watched}
     def interrupted(_number, _frame):
@@ -164,6 +262,7 @@ def activate(compose, previous_compose, ensure_others, verify_routes=lambda: Non
             run([*compose, 'up', '-d', '--no-deps', '--no-build', '--pull', 'never', '--force-recreate', '--wait', '--wait-timeout', '180', role])
         verify_routes()
         ensure_others()
+        after_roles()
     except BaseException as original:
         for number in watched:
             signal.signal(number, signal.SIG_IGN)
@@ -218,6 +317,7 @@ def perform(args):
                              if value.startswith('PORTHUB_VERSION=')), None)
     if 'core' in roles and not previous_version:
         raise ValueError('Previous runtime version is unavailable for rollback')
+    selection = ReleaseSelection(root, current, images, configuration, args.revision, args.version)
     check_routes(args.probe_url)
     print('Preflight passed: source, version, architecture, privileges, state mounts and rollback configuration')
     if not args.apply:
@@ -253,8 +353,18 @@ def perform(args):
         if role=='core':
             backup_core(current['core'],record/'core-backup')
             print('Verified PortHub core backup retained at '+str(record/'core-backup'),flush=True)
+    def verify_selection():
+        normal = json.loads(run([*base, 'config', '--format', 'json']))
+        for role, image in images.items():
+            if image_reference(normal['services'][role]['image']) != image['Id']:
+                raise RuntimeError('Ordinary Compose configuration selects a different release image')
+        if 'core' in images and normal['services']['core']['environment'].get('PORTHUB_VERSION') != args.version:
+            raise RuntimeError('Ordinary Compose configuration selects a different core version')
+        ensure_others()
+        check_routes(args.probe_url)
     activate([*base, '-f', str(record/'candidate.json')], previous, ensure_others,
-             lambda: check_routes(args.probe_url), roles, before_role)
+             lambda: check_routes(args.probe_url), roles, before_role,
+             lambda: selection.apply(record, verify_selection))
     print('PortHub roles healthy ('+', '.join(roles)+'); unselected roles retained; previous immutable image references at '+str(record))
 
 

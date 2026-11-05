@@ -70,5 +70,7 @@ images remain in the upgrade record.
 A rendered normal Compose configuration now selects every running 1.10.2 image.
 All non-release environment settings were compared with the running containers
 and were unchanged. Public HTTPS remained healthy without recreating containers.
-The generic upgrade tool still needs this finalization automated before the next
-rollout; this deployment has been reconciled explicitly.
+The development upgrade tool now automates this finalization with preflight
+checks and rollback of tags, environment, and running roles on failure. Its
+26 upgrade tests pass (46 native deployment tests in total). This tool change
+has not been deployed; the existing 1.10.2 deployment was reconciled explicitly.
