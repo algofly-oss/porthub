@@ -613,3 +613,14 @@ https://github.com/algofly-oss/porthub/actions/runs/42106863593 . It verifies th
 runtime extraction, independent fixtures, existing installer/connectivity gates,
 and Unix CLI/PTY integration at that source. Subsequent routing, candidate-session,
 publication and source-revocation changes require updated native validation.
+
+The shared release manifest separates the GitHub release carrier (`release`) from
+the executable core version (`core_version`, defaulting to `release` for older
+manifests). A helper-only release may reuse all ten unchanged core executables.
+The gateway reports the executable core version to OTA clients and generates
+matching `.version` sidecars, while downloads and cache pruning use the carrier
+release. It rejects core downgrades and changed executable bytes under the same
+core version. Helper versions use their own independent semantic version domain.
+Publication requires the gateway capability `independent_core_version: true`.
+Build selection and receipt reuse must preserve these identities before this
+format is published; this metadata support alone does not enable production reuse.

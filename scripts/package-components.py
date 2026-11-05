@@ -50,8 +50,6 @@ def package(entries, output, release, *, verify_only=False):
         expected = ('porthub' if tool == 'core' else 'porthub-' + tool) + ('.exe' if 'windows' in target else '')
         if receipt['binary']['name'] != expected or recipe['profile'] != 'release':
             raise ValueError('Release requires the expected optimized executable')
-        if planner.stable_version(receipt['version']) > planner.stable_version(release):
-            raise ValueError('Tool cannot have a future release version')
         key = (target, tool, receipt['version'])
         if key in identities:
             raise ValueError('Duplicate tool version and platform')
@@ -62,11 +60,15 @@ def package(entries, output, release, *, verify_only=False):
     for receipt, binary in records:
         target = receipt['target']
         if receipt['tool'] == 'core':
-            if target in cores or receipt['version'] != release:
-                raise ValueError('Each platform requires exactly one matching core version')
+            if target in cores:
+                raise ValueError('Each platform requires exactly one core version')
             cores[target] = (receipt, binary)
         else:
             groups.setdefault(target, []).append((receipt, binary))
+    core_versions = {receipt['version'] for receipt, _ in cores.values()}
+    if len(core_versions) != 1:
+        raise ValueError('Core platform builds must share one executable version')
+    core_version = next(iter(core_versions))
     if len({receipt['source_revision'] for receipt, _ in cores.values()}) != 1:
         raise ValueError('Core platform builds must share one immutable source revision')
     if not cores or set(groups) != set(cores) or (not verify_only and set(cores) != set(TARGETS)):
@@ -122,7 +124,7 @@ def package(entries, output, release, *, verify_only=False):
                     'executable': {k: item['binary'][k] for k in ('size', 'sha256')},
                     'release': release, 'archive': blob})
         manifest = {'schema_version': 2, 'repository': 'algofly-oss/porthub', 'release': release,
-                    'core_assets': core_assets, 'components': {'schema_version': 1,
+                    'core_version': core_version, 'core_assets': core_assets, 'components': {'schema_version': 1,
                     'repository': 'algofly-oss/porthub', 'release': release, 'artifacts': artifacts}}
         payload = planner.canonical(manifest) + b'\n'
         if len(payload) > 512 * 1024:

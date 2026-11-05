@@ -127,7 +127,7 @@ fn verify_compact(root: &Path, version: &str) -> anyhow::Result<Vec<Release>> {
         }
         let (_, os, arch) = TARGETS.iter().find(|(target, _, _)| *target == core.target).unwrap();
         releases.push(Release { target: core.target.clone(), os: (*os).into(), arch: (*arch).into(),
-            asset: core.asset.clone(), version: version.into(), size: core.executable.size,
+            asset: core.asset.clone(), version: manifest.core_version().to_string(), size: core.executable.size,
             sha256: core.executable.sha256.clone() });
     }
     let mut actual = BTreeSet::new();

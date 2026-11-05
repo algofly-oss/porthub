@@ -92,7 +92,8 @@ def verify_gateway(base):
         capability = json.loads(payload)
         if (2 not in capability.get('release_manifest_schemas', [])
                 or 1 not in capability.get('component_protocols', [])
-                or capability.get('core_sidecars') is not True):
+                or capability.get('core_sidecars') is not True
+                or capability.get('independent_core_version') is not True):
             raise ValueError('Gateway does not support compact client releases')
     except Exception:
         raise ValueError('Gateway compact-release capability could not be verified') from None

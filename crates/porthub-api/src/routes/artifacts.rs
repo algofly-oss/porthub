@@ -45,7 +45,7 @@ pub fn router() -> Router<Arc<App>> {
 
 async fn component_capabilities() -> Json<serde_json::Value> {
     Json(json!({"release_manifest_schemas":[1,2],"component_protocols":[1],
-        "core_sidecars":true,"server_version":env!("CARGO_PKG_VERSION")}))
+        "core_sidecars":true,"independent_core_version":true,"server_version":env!("CARGO_PKG_VERSION")}))
 }
 
 async fn component_catalog(State(app): State<Arc<App>>) -> ApiResult<Json<porthub_components::catalog::Catalog>> {

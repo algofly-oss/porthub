@@ -27,6 +27,8 @@ struct Index {
     format_version: u32,
     repository: String,
     version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    core_version: Option<String>,
     etag: Option<String>,
     releases: BTreeMap<String, Release>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -93,11 +95,13 @@ fn asset_name(target: &str, os: &str) -> String {
     )
 }
 impl Index {
+    fn core_version(&self) -> &str { self.core_version.as_deref().unwrap_or(&self.version) }
     fn validate(&self, repository: &str) -> Result<()> {
         ensure!(
             self.format_version == 1
                 && self.repository == repository
                 && numeric_version(&self.version).is_some()
+                && numeric_version(self.core_version()).is_some()
                 && self.releases.len() == TARGETS.len(),
             "invalid release cache index"
         );
@@ -115,7 +119,7 @@ impl Index {
                     && release.os == *os
                     && release.arch == *arch
                     && release.asset == asset_name(target, os)
-                    && release.version == self.version
+                    && release.version == self.core_version()
                     && release.sha256.len() == 64
                     && release.sha256.bytes().all(|b| b.is_ascii_hexdigit())
                     && (1..=MAX_BINARY).contains(&release.size),
@@ -227,7 +231,7 @@ impl Remote {
             .unwrap_or_else(|p| p.into_inner())
             .index
             .as_ref()
-            .map(|index| index.version.clone())
+            .map(|index| index.core_version().to_owned())
     }
     /// Called by control requests; no network wait is added to their path.
     pub fn refresh_background(self: &Arc<Self>) {
@@ -418,6 +422,10 @@ impl Remote {
             manifest.as_ref().context("compact release cannot discard component metadata")?
                 .components.validate_successor(previous)?;
         }
+        let core_version = manifest.as_ref().map_or_else(|| version.clone(), |manifest| manifest.core_version().to_string());
+        if let Some(previous) = cached {
+            ensure!(numeric_version(&core_version) >= numeric_version(previous.core_version()), "core downgrade rejected");
+        }
         let mut releases = BTreeMap::new();
         for (target, os, arch) in TARGETS {
             let name = asset_name(target, os);
@@ -447,16 +455,24 @@ impl Remote {
                     os: (*os).into(),
                     arch: (*arch).into(),
                     asset: name,
-                    version: version.clone(),
+                    version: core_version.clone(),
                     sha256: digest.to_ascii_lowercase(),
                     size: asset.size,
                 },
             );
         }
+        if let Some(previous) = cached.filter(|previous| previous.core_version() == core_version) {
+            for (target, release) in &releases {
+                let old = previous.releases.get(target).context("previous core target missing")?;
+                ensure!(old.sha256 == release.sha256 && old.size == release.size,
+                    "core executable contents changed without a core version change");
+            }
+        }
         let index = Index {
             format_version: 1,
             repository: self.repository.clone(),
             version,
+            core_version: Some(core_version),
             etag,
             releases,
             components: manifest.map(|manifest| manifest.components),
@@ -543,9 +559,11 @@ impl Remote {
             .context("unsupported release target")?
             .lock()
             .await;
-        let release = self.release(target).await?;
+        let index = self.latest(false).await?;
+        let release = index.releases.get(target).context("unsupported release target")?.clone();
+        let carrier = index.version;
         self.initialize().await?;
-        let directory = self.root.join(&release.version);
+        let directory = self.root.join(&carrier);
         if !directory.try_exists()? {
             tokio::fs::create_dir(&directory).await?;
         }
@@ -568,7 +586,7 @@ impl Remote {
         let _permit = self.downloads.acquire().await?;
         let url = format!(
             "{}/v{}/{}",
-            self.download_base, release.version, release.asset
+            self.download_base, carrier, release.asset
         );
         let mut response = self.http.get(url).send().await?;
         ensure!(
@@ -619,9 +637,8 @@ impl Remote {
         // cache directory. Only numeric, owned cache release directories qualify.
         let _quiet = self.downloads.acquire_many(2).await?;
         let _index = self.refresh.lock().await;
-        let Some(keep) = self.version() else {
-            return Ok(());
-        };
+        let keep = self.state.read().unwrap_or_else(|p| p.into_inner()).index.as_ref().map(|index|index.version.clone());
+        let Some(keep) = keep else { return Ok(()); };
         let mut entries = tokio::fs::read_dir(&self.root).await?;
         while let Some(entry) = entries.next_entry().await? {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -677,6 +694,7 @@ mod tests {
 
     struct Fixture {
         version: RwLock<String>,
+        core_version: RwLock<Option<String>>,
         metadata: AtomicUsize,
         binaries: AtomicUsize,
         offline: AtomicBool,
@@ -698,10 +716,13 @@ mod tests {
         archive.into_inner().unwrap().finish().unwrap()
     }
     fn compact_manifest(version: &str) -> Vec<u8> {
+        compact_manifest_with_core(version, None)
+    }
+    fn compact_manifest_with_core(version: &str, core: Option<&str>) -> Vec<u8> {
         use porthub_components::{catalog::{Artifact, Blob, Catalog, Component, REPOSITORY}, manifest::{CoreAsset, ReleaseManifest}};
         let core_assets = TARGETS.iter().map(|(target, os, _)| {
             let name = asset_name(target, os);
-            let body = payload(version, &name);
+            let body = payload(core.unwrap_or(version), &name);
             CoreAsset { target: (*target).into(), asset: name,
                 executable: Blob { size: body.len() as u64, sha256: format!("{:x}", Sha256::digest(body)) } }
         }).collect();
@@ -714,7 +735,7 @@ mod tests {
         let mut stats = components.artifacts[0].clone();
         stats.component = Component::Stats;
         components.artifacts.push(stats);
-        serde_json::to_vec(&ReleaseManifest { schema_version: 2, repository: REPOSITORY.into(), release: version.parse().unwrap(), core_assets, components }).unwrap()
+        serde_json::to_vec(&ReleaseManifest { schema_version: 2, repository: REPOSITORY.into(), release: version.parse().unwrap(), core_version: core.map(|v| v.parse().unwrap()), core_assets, components }).unwrap()
     }
     async fn metadata(AxumState(state): AxumState<Arc<Fixture>>, headers: HeaderMap) -> Response {
         state.metadata.fetch_add(1, Ordering::SeqCst);
@@ -722,6 +743,7 @@ mod tests {
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
         let version = state.version.read().unwrap().clone();
+        let core_version = state.core_version.read().unwrap().clone();
         let etag = format!("\"{version}\"");
         if headers
             .get("if-none-match")
@@ -733,14 +755,14 @@ mod tests {
         let mut assets = Vec::new();
         for (target, os, _) in TARGETS {
             let name = asset_name(target, os);
-            let body = payload(&version, &name);
+            let body = payload(core_version.as_deref().unwrap_or(&version), &name);
             for suffix in if state.compact.load(Ordering::SeqCst) { &[""][..] } else { &["", ".version", ".sha256"][..] } {
                 assets.push(serde_json::json!({"name":format!("{name}{suffix}"),"size":body.len(),"digest":format!("sha256:{:x}",Sha256::digest(&body)),"state":"uploaded",
                     "browser_download_url":"http://untrusted.invalid/ignored"}));
             }
         }
         if state.compact.load(Ordering::SeqCst) {
-            let body = compact_manifest(&version);
+            let body = compact_manifest_with_core(&version, core_version.as_deref());
             assets.push(serde_json::json!({"name":porthub_components::catalog::CATALOG_ASSET,
                 "size":body.len(),"digest":format!("sha256:{:x}",Sha256::digest(body)),"state":"uploaded"}));
         }
@@ -757,10 +779,11 @@ mod tests {
         if state.offline.load(Ordering::SeqCst) {
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
+        let core_version = state.core_version.read().unwrap().clone();
         let mut body = if name == porthub_components::catalog::CATALOG_ASSET {
-            compact_manifest(version.trim_start_matches('v'))
+            compact_manifest_with_core(version.trim_start_matches('v'), core_version.as_deref())
         } else if name.starts_with("porthub-tools-") { tool_archive()
-        } else { payload(version.trim_start_matches('v'), &name) };
+        } else { payload(core_version.as_deref().unwrap_or(version.trim_start_matches('v')), &name) };
         if state.corrupt.load(Ordering::SeqCst) {
             body[0] ^= 1;
         }
@@ -775,6 +798,7 @@ mod tests {
         let root = tempfile::tempdir()?;
         let state = Arc::new(Fixture {
             version: RwLock::new("1.7.0".into()),
+            core_version: RwLock::new(None),
             metadata: AtomicUsize::new(0),
             binaries: AtomicUsize::new(0),
             offline: AtomicBool::new(false),
@@ -886,6 +910,34 @@ mod tests {
         task.abort();
         Ok(())
     }
+    #[tokio::test]
+    async fn helper_only_release_keeps_core_identity_and_uses_new_carrier() -> Result<()> {
+        let (_root, state, remote, task) = fixture().await?;
+        state.compact.store(true, Ordering::SeqCst);
+        remote.ensure("x86_64", false).await?;
+        *state.version.write().unwrap() = "1.8.0".into();
+        *state.core_version.write().unwrap() = Some("1.7.0".into());
+        expire(&remote);
+        remote.refresh_latest().await?;
+        assert_eq!(remote.version().as_deref(), Some("1.7.0"));
+        let index = remote.state.read().unwrap().index.clone().unwrap();
+        assert_eq!(index.version, "1.8.0");
+        index.validate(porthub_components::catalog::REPOSITORY)?;
+        remote.ensure("x86_64", false).await?;
+        assert_eq!(std::fs::read(remote.root.join("1.8.0/porthub-x86_64"))?, payload("1.7.0", "porthub-x86_64"));
+        assert_eq!(std::fs::read_to_string(remote.root.join("1.8.0/porthub-x86_64.version"))?, "1.7.0\n");
+        *state.version.write().unwrap() = "1.9.0".into();
+        *state.core_version.write().unwrap() = Some("1.6.0".into());
+        assert!(remote.fetch_index(Some(&index)).await.is_err());
+        *state.core_version.write().unwrap() = Some("1.7.0".into());
+        let mut changed = index.clone();
+        changed.etag = None;
+        changed.releases.get_mut("x86_64").unwrap().sha256 = "0".repeat(64);
+        assert!(remote.fetch_index(Some(&changed)).await.is_err());
+        task.abort();
+        Ok(())
+    }
+
     #[tokio::test]
     async fn corrupt_compact_manifest_cannot_replace_a_verified_legacy_index() -> Result<()> {
         let (_root, state, remote, task) = fixture().await?;

@@ -160,6 +160,8 @@ class CompactPublication(unittest.TestCase):
             response.read.return_value = b'{"release_manifest_schemas":[1],"component_protocols":[1],"core_sidecars":true}'
             with self.assertRaises(ValueError): publisher.verify_gateway('https://gateway.test')
             response.read.return_value = b'{"release_manifest_schemas":[1,2],"component_protocols":[1],"core_sidecars":true}'
+            with self.assertRaises(ValueError): publisher.verify_gateway('https://gateway.test')
+            response.read.return_value = b'{"release_manifest_schemas":[1,2],"component_protocols":[1],"core_sidecars":true,"independent_core_version":true}'
             publisher.verify_gateway('https://gateway.test/prefix')
             request = opener.open.call_args.args[0]
             self.assertEqual(request.full_url, 'https://gateway.test/prefix/api/downloads/components/capabilities')

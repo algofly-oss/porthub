@@ -30,10 +30,16 @@ pub struct ReleaseManifest {
     pub schema_version: u32,
     pub repository: String,
     pub release: Version,
+    /// Core executable version can stay fixed across helper-only releases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core_version: Option<Version>,
     pub core_assets: Vec<CoreAsset>,
     pub components: Catalog,
 }
 impl ReleaseManifest {
+    pub fn core_version(&self) -> &Version {
+        self.core_version.as_ref().unwrap_or(&self.release)
+    }
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         ensure!(
             bytes.len() <= MAX_CATALOG,
@@ -50,6 +56,10 @@ impl ReleaseManifest {
                 && self.release.pre.is_empty()
                 && self.release.build.is_empty(),
             "unsupported release manifest"
+        );
+        ensure!(
+            self.core_version().pre.is_empty() && self.core_version().build.is_empty(),
+            "core version must be stable"
         );
         self.components.validate()?;
         ensure!(

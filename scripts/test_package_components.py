@@ -75,6 +75,26 @@ class Packaging(unittest.TestCase):
         entries = self.complete()
         with self.assertRaises(ValueError): packager.package(entries + [entries[0]], self.root/'duplicate', '1.11.0')
 
+    def test_helper_only_release_preserves_core_version(self):
+        entries = self.complete()
+        manifest = packager.package(entries, self.root/'out', '1.12.0')
+        self.assertEqual(manifest['release'], '1.12.0')
+        self.assertEqual(manifest['core_version'], '1.11.0')
+        self.assertEqual(manifest['components']['release'], '1.12.0')
+
+    def test_helper_version_is_independent_of_release_version(self):
+        target = next(iter(packager.TARGETS))
+        manifest = packager.package([self.entry(target, 'core'), self.entry(target, 'sync', '3.0.0')],
+                                   self.root/'out', '1.12.0', verify_only=True)
+        self.assertEqual(manifest['components']['artifacts'][0]['version'], '3.0.0')
+
+    def test_mixed_core_versions_are_rejected(self):
+        entries = self.complete()
+        entries[0] = self.entry(next(iter(packager.TARGETS)), 'core', '1.12.0')
+        with self.assertRaises(ValueError):
+            packager.package(entries, self.root/'out', '1.12.0')
+        self.assertFalse((self.root/'out').exists())
+
     def test_existing_output_is_preserved(self):
         output = self.root/'out'; output.mkdir(); (output/'keep').write_text('existing')
         with self.assertRaises(ValueError): packager.package(self.complete(), output, '1.11.0')
