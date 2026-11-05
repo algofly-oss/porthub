@@ -323,6 +323,29 @@ fn extract(
     }
     result.context("requested executable is missing from component archive")
 }
+// macOS exposes standard /var, /tmp and /etc aliases as root-owned
+// symlinks. Normalize only those OS aliases, never arbitrary cache symlinks.
+#[cfg(target_os = "macos")]
+fn normalize_system_alias(root: PathBuf) -> Result<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    for alias in ["/var", "/tmp", "/etc"] {
+        let base = Path::new(alias);
+        if let Ok(relative) = root.strip_prefix(base) {
+            let metadata = std::fs::symlink_metadata(base)?;
+            if !metadata.file_type().is_symlink() {
+                return Ok(root);
+            }
+            let target = std::fs::canonicalize(base)?;
+            ensure!(
+                metadata.uid() == 0
+                    && target == Path::new("/private").join(base.file_name().unwrap()),
+                "untrusted macOS system directory alias"
+            );
+            return Ok(target.join(relative));
+        }
+    }
+    Ok(root)
+}
 impl Manager {
     pub fn new(root: PathBuf, settings: Settings, transport: Arc<dyn Transport>) -> Result<Self> {
         settings.validate()?;
@@ -333,6 +356,8 @@ impl Manager {
                     .any(|c| matches!(c, std::path::Component::ParentDir)),
             "component cache requires an absolute normalized path"
         );
+        #[cfg(target_os = "macos")]
+        let root = normalize_system_alias(root)?;
         directory(&root)?;
         Ok(Self {
             root,
@@ -396,6 +421,18 @@ impl Manager {
                 Ok(()) => {
                     let catalog = Catalog::parse(&std::fs::read(temporary.path())?)?;
                     if let Some(previous) = &cached {
+                        for artifact in &catalog.artifacts {
+                            if let Some(old) = previous.artifacts.iter().find(|old| {
+                                old.component == artifact.component
+                                    && old.version == artifact.version
+                                    && old.target == artifact.target
+                            }) {
+                                ensure!(
+                                    artifact.same_tool(old),
+                                    "published component version changed"
+                                );
+                            }
+                        }
                         ensure!(
                             catalog.release >= previous.release,
                             "component catalog downgrade rejected"
@@ -441,20 +478,11 @@ impl Manager {
         let artifact = self.selected(catalog, component)?.clone();
         let _lock = lock(&self.root, &format!("{component}.lock"), cancel).await?;
         // Content-addressed paths keep active workers and previous versions intact.
-        let destination = self.root.join(format!(
-            "{}-{}-{}{}",
-            component,
-            artifact.version,
-            artifact.executable.sha256,
-            if artifact.target.contains("windows") {
-                ".exe"
-            } else {
-                ""
-            }
-        ));
+        let destination = self.binary_path(&artifact);
         let check_path = destination.clone();
         let blob = artifact.executable.clone();
         if tokio::task::spawn_blocking(move || verified(&check_path, &blob)).await?? {
+            self.record(&artifact)?;
             return Ok(destination);
         }
         if self.settings.sources != Sources::GithubOnly {
@@ -470,6 +498,7 @@ impl Manager {
                             "gateway component checksum mismatch"
                         );
                         publish(temporary, &destination, true)?;
+                        self.record(&artifact)?;
                         return Ok(destination);
                     }
                     Err(error) if error.is::<AccessDenied>() => return Err(error),
@@ -503,12 +532,134 @@ impl Manager {
             .filter(|a| a.release == artifact.release && a.target == artifact.target)
             .map(|a| PathBuf::from(a.member()))
             .collect();
+        let extraction = artifact.clone();
         let file = tokio::task::spawn_blocking(move || {
-            extract(archive.path(), &root, &artifact, &allowed)
+            extract(archive.path(), &root, &extraction, &allowed)
         })
         .await??;
         publish(file, &destination, true)?;
+        self.record(&artifact)?;
         Ok(destination)
+    }
+    fn binary_path(&self, artifact: &Artifact) -> PathBuf {
+        self.root.join(format!(
+            "{}-{}-{}{}",
+            artifact.component,
+            artifact.version,
+            artifact.executable.sha256,
+            if artifact.target.contains("windows") {
+                ".exe"
+            } else {
+                ""
+            }
+        ))
+    }
+    fn record(&self, artifact: &Artifact) -> Result<()> {
+        let path = self.root.join(format!(
+            "installed-{}-{}-{}.json",
+            artifact.component, artifact.version, artifact.target
+        ));
+        if path.try_exists()? {
+            let metadata = regular(&path)?;
+            ensure!(
+                metadata.len() <= 16384,
+                "installed component receipt exceeds limit"
+            );
+            let previous: Artifact = serde_json::from_slice(&std::fs::read(&path)?)?;
+            ensure!(
+                previous.same_tool(artifact),
+                "installed component version changed"
+            );
+            return Ok(());
+        }
+        let mut file = tempfile::NamedTempFile::new_in(&self.root)?;
+        file.write_all(&serde_json::to_vec(artifact)?)?;
+        publish(file, &path, false)
+    }
+    /// Verified local versions are independent of the gateway's inventory.
+    /// Receipts retain older tool metadata when the latest catalog advances.
+    pub async fn installed(&self, component: Component) -> Result<Vec<(Artifact, PathBuf)>> {
+        ensure!(
+            !self.settings.disabled.contains(&component),
+            "component disabled by administrator policy"
+        );
+        let manager = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut installed = Vec::new();
+            let prefix = format!("installed-{component}-");
+            let mut count = 0;
+            for entry in std::fs::read_dir(&manager.root)? {
+                let path = entry?.path();
+                count += 1;
+                ensure!(
+                    count <= 4096,
+                    "component cache needs cleanup; too many entries"
+                );
+                if !path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s.starts_with(&prefix) && s.ends_with(".json"))
+                {
+                    continue;
+                }
+                ensure!(
+                    regular(&path)?.len() <= 16384,
+                    "installed component receipt exceeds limit"
+                );
+                let artifact: Artifact = serde_json::from_slice(&std::fs::read(&path)?)?;
+                artifact.validate()?;
+                if artifact.component != component
+                    || artifact.target != manager.settings.target
+                    || !artifact.core.matches(&manager.settings.core)
+                    || !artifact.protocols.contains(&crate::catalog::PROTOCOL)
+                    || manager
+                        .settings
+                        .pins
+                        .get(&component)
+                        .is_some_and(|pin| pin != &artifact.version)
+                {
+                    continue;
+                }
+                let binary = manager.binary_path(&artifact);
+                if verified(&binary, &artifact.executable)? {
+                    installed.push((artifact, binary));
+                }
+            }
+            installed.sort_by(|a, b| b.0.version.cmp(&a.0.version));
+            Ok(installed)
+        })
+        .await?
+    }
+    /// Interactive commands use the current local catalog immediately. The
+    /// maintenance worker refreshes it separately; first use fetches if absent.
+    pub async fn resolve(
+        &self,
+        component: Component,
+        cancel: &CancellationToken,
+    ) -> Result<(Artifact, PathBuf)> {
+        let catalog = match self.cached_catalog()? {
+            Some(catalog) => catalog,
+            None => self.refresh(cancel).await?,
+        };
+        let latest = self.selected(&catalog, component)?.clone();
+        match self.ensure(&catalog, component, cancel).await {
+            Ok(path) => Ok((latest, path)),
+            Err(error) => {
+                if error.is::<AccessDenied>() || cancel.is_cancelled() {
+                    return Err(error);
+                }
+                if let Some((artifact, path)) = self
+                    .installed(component)
+                    .await?
+                    .into_iter()
+                    .find(|(a, _)| a.version <= latest.version)
+                {
+                    tracing::warn!(component = %component, version = %artifact.version, "using verified compatible local component; update unavailable");
+                    return Ok((artifact, path));
+                }
+                Err(error)
+            }
+        }
     }
     /// Downloads are serialized here; commands coalesce through the same locks.
     pub async fn prefetch(&self, cancel: &CancellationToken) -> Result<()> {

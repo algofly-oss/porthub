@@ -445,3 +445,72 @@ fn caches_cannot_follow_symlinks_or_use_writable_ancestors() {
     std::fs::set_permissions(&actual, std::fs::Permissions::from_mode(0o777)).unwrap();
     assert!(Manager::new(actual.join("cache"), settings(), mock).is_err());
 }
+
+#[tokio::test]
+async fn failed_update_keeps_a_verified_compatible_local_version_usable() {
+    let root = private_temp();
+    let mock = Arc::new(Mock::default());
+    let manager = manager(root.path(), mock.clone());
+    let (mut catalog, _, executable) = fixture();
+    let cancel = CancellationToken::new();
+    let catalog_url = "https://gateway.test/prefix/api/downloads/components/catalog".to_string();
+    add(
+        &mock,
+        catalog_url.clone(),
+        serde_json::to_vec(&catalog).unwrap(),
+    );
+    add(
+        &mock,
+        format!(
+            "https://gateway.test/prefix/{}",
+            catalog.artifacts[0].gateway_path()
+        ),
+        executable,
+    );
+    manager.refresh(&cancel).await.unwrap();
+    let (old, path) = manager.resolve(Component::Sync, &cancel).await.unwrap();
+    mock.payloads.lock().unwrap().clear();
+    catalog.release = "1.12.0".parse().unwrap();
+    let mut next = catalog.artifacts[0].clone();
+    next.version = "1.1.0".parse().unwrap();
+    next.release = catalog.release.clone();
+    next.executable = blob(b"new tool that cannot currently download");
+    // Simulate a catalog that no longer contains the previously installed tool.
+    catalog.artifacts = vec![next];
+    add(&mock, catalog_url, serde_json::to_vec(&catalog).unwrap());
+    manager.refresh(&cancel).await.unwrap();
+    let (fallback, selected) = manager.resolve(Component::Sync, &cancel).await.unwrap();
+    assert_eq!(fallback.version, old.version);
+    assert_eq!(selected, path);
+    // Explicit pins still restrict fallback; core compatibility is rechecked too.
+    let mut config = settings();
+    config
+        .pins
+        .insert(Component::Sync, "1.1.0".parse().unwrap());
+    let pinned = Manager::new(root.path().join("components"), config, mock.clone()).unwrap();
+    assert!(pinned.resolve(Component::Sync, &cancel).await.is_err());
+    std::fs::write(&path, b"corrupt old executable").unwrap();
+    assert!(manager.resolve(Component::Sync, &cancel).await.is_err());
+}
+
+#[tokio::test]
+async fn newer_catalog_cannot_reuse_a_tool_version_for_different_bytes() {
+    let root = private_temp();
+    let mock = Arc::new(Mock::default());
+    let manager = manager(root.path(), mock.clone());
+    let (mut catalog, _, _) = fixture();
+    let cancel = CancellationToken::new();
+    let url = "https://gateway.test/prefix/api/downloads/components/catalog".to_string();
+    add(&mock, url.clone(), serde_json::to_vec(&catalog).unwrap());
+    manager.refresh(&cancel).await.unwrap();
+    catalog.release = "1.12.0".parse().unwrap();
+    catalog.artifacts[0].release = catalog.release.clone();
+    catalog.artifacts[0].executable = blob(b"different bytes under an old version");
+    add(&mock, url, serde_json::to_vec(&catalog).unwrap());
+    assert!(manager
+        .refresh(&cancel)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("component version changed"));
+}

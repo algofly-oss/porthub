@@ -73,7 +73,7 @@ impl std::str::FromStr for Component {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Blob {
     pub size: u64,
@@ -114,6 +114,18 @@ pub struct Artifact {
     pub archive: Blob,
 }
 impl Artifact {
+    /// Repacking a tool in a later coherent release must not change the
+    /// executable, its build provenance, or its compatibility under one version.
+    pub fn same_tool(&self, other: &Self) -> bool {
+        self.component == other.component
+            && self.version == other.version
+            && self.target == other.target
+            && self.core == other.core
+            && self.protocols == other.protocols
+            && self.source_revision == other.source_revision
+            && self.build_inputs == other.build_inputs
+            && self.executable == other.executable
+    }
     pub fn archive_name(&self) -> String {
         format!("porthub-tools-{}.tar.gz", self.target)
     }

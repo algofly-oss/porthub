@@ -13,9 +13,9 @@ use windows_sys::Win32::{
             ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
             GetNamedSecurityInfoW, SetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
         },
-        EqualSid, GetSecurityDescriptorDacl, GetTokenInformation, TokenUser,
+        EqualSid, GetSecurityDescriptorDacl, GetTokenInformation, TokenOwner, TokenUser,
         DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-        TOKEN_QUERY, TOKEN_USER,
+        TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
     },
     System::Threading::{GetCurrentProcess, OpenProcessToken},
 };
@@ -46,8 +46,28 @@ pub fn secure_directory(path: &Path) -> Result<()> {
             length,
             &mut length,
         );
+        if ok == 0 {
+            CloseHandle(token);
+            anyhow::bail!("cannot read component cache account");
+        }
+        let mut owner_length = 0;
+        GetTokenInformation(token, TokenOwner, ptr::null_mut(), 0, &mut owner_length);
+        if owner_length == 0 || owner_length > 65536 {
+            CloseHandle(token);
+            anyhow::bail!("invalid component default owner");
+        }
+        let mut owner_storage =
+            vec![0usize; (owner_length as usize).div_ceil(std::mem::size_of::<usize>())];
+        let owner_ok = GetTokenInformation(
+            token,
+            TokenOwner,
+            owner_storage.as_mut_ptr().cast(),
+            owner_length,
+            &mut owner_length,
+        );
         CloseHandle(token);
-        ensure!(ok != 0, "cannot read component cache account");
+        ensure!(owner_ok != 0, "cannot read component default owner");
+        let default_owner = &*owner_storage.as_ptr().cast::<TOKEN_OWNER>();
         let user = &*storage.as_ptr().cast::<TOKEN_USER>();
         let mut owner = ptr::null_mut();
         let mut security = ptr::null_mut();
@@ -64,7 +84,10 @@ pub fn secure_directory(path: &Path) -> Result<()> {
         if status != 0 {
             anyhow::bail!("cannot inspect component cache owner");
         }
-        let owned = !owner.is_null() && EqualSid(owner, user.User.Sid) != 0;
+        // Elevated Windows processes commonly create files owned by their
+        // token's default owner (Administrators), rather than TokenUser.
+        let owned = !owner.is_null()
+            && (EqualSid(owner, user.User.Sid) != 0 || EqualSid(owner, default_owner.Owner) != 0);
         LocalFree(security);
         ensure!(owned, "component cache must be owned by this account");
         let mut sid = ptr::null_mut();
