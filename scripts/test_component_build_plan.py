@@ -204,6 +204,15 @@ recipe_version=1
             with self.assertRaisesRegex(ValueError, 'symlink'):
                 buildplan.relative(self.root, 'link')
 
+    @unittest.skipIf(os.name == 'nt', 'Windows short temp aliases are exercised by every fixture')
+    def test_alias_above_checkout_is_allowed_but_source_symlinks_are_not(self):
+        alias = self.root.parent / (self.root.name + '-parent-alias')
+        alias.symlink_to(self.root.parent, target_is_directory=True)
+        self.addCleanup(alias.unlink)
+        checkout = alias / self.root.name
+        self.assertEqual(buildplan.relative(checkout, checkout / 'support/src/lib.rs'), 'support/src/lib.rs')
+        self.assertEqual(buildplan.plan(checkout, 'tool', TARGET, self.receipt)['action'], 'reuse')
+
     def test_changed_core_requires_an_unconsumed_version(self):
         self.deps('core')
         previous = self.record('core')

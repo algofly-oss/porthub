@@ -41,21 +41,25 @@ def file_digest(path):
 
 
 def relative(root, path):
+    root = Path(root).resolve()
     path = Path(path)
     if not path.is_absolute():
         path = root / path
-    # Hashing through a source symlink would hide a changed link destination or
-    # pull private files from outside the checkout into public build receipts.
-    for parent in [path, *path.parents]:
-        if parent == root:
-            break
-        if parent.is_symlink():
-            raise ValueError('Build inputs must not contain symlinks')
     resolved = path.resolve()
     try:
         value = resolved.relative_to(root).as_posix()
     except ValueError:
         raise ValueError('Build input escapes the repository') from None
+    # Stop at the resolved repository boundary. macOS /var aliases and Windows
+    # 8.3 temp-directory names above that boundary are valid; source symlinks
+    # inside it are still rejected, even when they point back into the checkout.
+    for parent in [path, *path.parents]:
+        if parent == root:
+            break
+        if parent.is_symlink():
+            raise ValueError('Build inputs must not contain symlinks')
+        if parent.resolve() == root:
+            break
     if not value or any(part in PRIVATE_NAMES or part == '.git' for part in Path(value).parts):
         raise ValueError('Private configuration cannot be a published build input')
     return value
@@ -149,6 +153,7 @@ def dependency_state(packages, node):
 
 
 def cargo_graph(root, recipe, target, text=None):
+    root = Path(root).resolve()
     if text is None:
         command = ['cargo', 'tree', '--locked', '-p', recipe['package'], '--target', target,
                    '--edges', 'normal,build', '--prefix', 'depth', '--format', '{p}|{f}']
@@ -319,6 +324,7 @@ def validate_receipt(receipt):
 
 
 def record(root, tool, target, binary, dep_info, revision, version=None, tree=None):
+    root = Path(root).resolve()
     recipe = read_recipes(root)[tool]
     nodes = cargo_graph(root, recipe, target, tree)
     paths = set()
@@ -361,6 +367,7 @@ def record(root, tool, target, binary, dep_info, revision, version=None, tree=No
 
 
 def plan(root, tool, target, previous=None):
+    root = Path(root).resolve()
     recipe = read_recipes(root)[tool]
     version = current_version(root, recipe)
     reason = 'No previous compatible build receipt'
