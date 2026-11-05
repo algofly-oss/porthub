@@ -2,7 +2,7 @@ const assert=require('node:assert/strict');
 const {launchBrowser}=require('./browser.cjs');
 (async()=>{
  const {makeDemoData,handleDemoRequest}=await import('../src/shared/demo/data.mjs');
- const {bootstrapCommand}=await import('../src/shared/utils/bootstrap-command.mjs');
+ const {bootstrapCommand,windowsShells}=await import('../src/shared/utils/bootstrap-command.mjs');
  const bootstrap='https://hub.example/install/test-ticket';
  const browser=await launchBrowser();
  try {for(const width of [1440,402]) {
@@ -28,7 +28,15 @@ const {launchBrowser}=require('./browser.cjs');
   await dialog.getByText(bootstrapCommand(bootstrap,'windows'),{exact:true}).waitFor();
   await dialog.getByRole('button',{name:'Copy bootstrap command',exact:true}).click();
   assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),bootstrapCommand(bootstrap,'windows'));
-  assert(await dialog.getByText(/Paste into PowerShell or Command Prompt/).isVisible());
+  for(const shell of windowsShells) {
+   await dialog.getByRole('combobox',{name:'Windows shell',exact:true}).selectOption(shell.id);
+   await dialog.getByText(bootstrapCommand(bootstrap,'windows',shell.id),{exact:true}).waitFor();
+   await dialog.getByRole('button',{name:'Copy bootstrap command',exact:true}).click();
+   assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),bootstrapCommand(bootstrap,'windows',shell.id));
+  }
+  assert.equal(await dialog.getByRole('link',{name:'Download .bat',exact:true}).getAttribute('href'),`${bootstrap}/windows.bat`);
+  assert.equal(await dialog.getByRole('link',{name:'Download .ps1',exact:true}).getAttribute('href'),`${bootstrap}/windows.ps1`);
+  assert(await dialog.getByText(/Paste into the selected shell/).isVisible());
   await dialog.screenshot({path:`/tmp/porthub-windows-install-${width}.png`});
   await operatingSystem.getByRole('button',{name:'Linux',exact:true}).click();
   await dialog.getByText(bootstrapCommand(bootstrap,'linux'),{exact:true}).waitFor();

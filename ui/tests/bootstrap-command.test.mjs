@@ -22,3 +22,19 @@ test("Linux and WSL retain the bash installer with literal URL quoting", () => {
 test("invalid bootstrap URLs never become executable commands", () => {
   for (const url of ["", "not a URL", "file:///tmp/code", "https://user:secret@hub.example/install/ticket", "https://hub.example/install/ticket#fragment"]) assert.equal(bootstrapCommand(url, "windows"), "");
 });
+test("PowerShell 5.1 and 7 get native commands without a nested shell", () => {
+  for (const shell of ["powershell", "pwsh"]) {
+    const command = bootstrapCommand("https://hub.example/install/ticket", "windows", shell);
+    assert(command.startsWith("[Net.ServicePointManager]::SecurityProtocol"));
+    assert(command.includes("Invoke-RestMethod -Uri 'https://hub.example/install/ticket/windows.ps1'"));
+    assert(!command.includes("powershell.exe"));
+  }
+});
+test("download options use the same installer capability and reject invalid URLs", async () => {
+  const { windowsInstallerDownloads } = await import("../src/shared/utils/bootstrap-command.mjs");
+  assert.deepEqual(windowsInstallerDownloads("https://hub.example/install/ticket/"), [
+    { label: "Download .bat", url: "https://hub.example/install/ticket/windows.bat" },
+    { label: "Download .ps1", url: "https://hub.example/install/ticket/windows.ps1" },
+  ]);
+  assert.deepEqual(windowsInstallerDownloads("file:///tmp/file"), []);
+});

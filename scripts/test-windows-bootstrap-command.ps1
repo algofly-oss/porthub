@@ -3,7 +3,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $marker = Join-Path $env:TEMP ('porthub-installer-command-' + [Guid]::NewGuid().ToString('N'))
 $env:PORTHUB_INSTALL_SMOKE_MARKER = $marker
 try {
-    foreach ($shell in @('cmd.exe', 'powershell.exe', 'pwsh.exe')) {
+    foreach ($shell in @('cmd.exe', 'powershell.exe', 'pwsh.exe', 'batch')) {
         foreach ($fixture in @(0, 1)) {
             $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
             $listener.Start()
@@ -12,18 +12,26 @@ try {
                 $port = $listener.LocalEndpoint.Port
                 $commands = & node (Join-Path $root 'ui/tests/bootstrap-command-fixtures.mjs') "http://127.0.0.1:$port" | ConvertFrom-Json
                 if ($LASTEXITCODE -ne 0) { throw 'Could not generate UI installer commands.' }
-                $line = $commands[$fixture]
+                $line = if ($shell -eq 'batch') { $commands.'powershell.exe'[$fixture] } else { $commands.$shell[$fixture] }
                 $info = [Diagnostics.ProcessStartInfo]::new()
-                $info.FileName = $shell
+                $info.FileName = if ($shell -eq 'batch') { 'cmd.exe' } else { $shell }
                 $info.UseShellExecute = $false
-                if ($shell -eq 'cmd.exe') {
+                if ($shell -eq 'batch') {
+                    $batchFile = Join-Path $env:TEMP ('porthub installer ' + [Guid]::NewGuid().ToString('N') + '.bat')
+                    $template = [IO.File]::ReadAllText((Join-Path $root 'crates/porthub-api/assets/client/install.bat'))
+                    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($line))
+                    [IO.File]::WriteAllText($batchFile, $template.Replace('{{PAYLOAD}}', $encoded), [Text.Encoding]::ASCII)
+                    $info.Arguments = '/d /s /c ""' + $batchFile + '""'
+                } elseif ($shell -eq 'cmd.exe') {
                     # This is the exact copied line following cmd.exe /c, with
                     # no PowerShell-specific interpretation by the test runner.
                     $info.Arguments = '/d /s /c ' + $line
                 } else {
                     $info.ArgumentList.Add('-NoProfile')
-                    $info.ArgumentList.Add('-Command')
-                    $info.ArgumentList.Add($line)
+                    # Encode only the harness transport so .NET argument quoting cannot
+                    # alter the clipboard text before the selected shell parses it.
+                    $info.ArgumentList.Add('-EncodedCommand')
+                    $info.ArgumentList.Add([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($line)))
                 }
                 $process = [Diagnostics.Process]::Start($info)
                 $accept = $listener.AcceptTcpClientAsync()
@@ -56,6 +64,7 @@ try {
             } finally {
                 $listener.Stop()
                 if ($process -and -not $process.HasExited) { $process.Kill($true) }
+                if ($shell -eq 'batch' -and $batchFile) { Remove-Item $batchFile -ErrorAction SilentlyContinue }
             }
         }
     }
