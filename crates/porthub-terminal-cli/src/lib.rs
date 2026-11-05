@@ -8,6 +8,8 @@ use std::path::Path;
 use tokio_util::sync::CancellationToken;
 #[cfg(unix)]
 pub mod workspace;
+#[cfg(unix)]
+pub mod owner;
 pub const VERSION: &str = match option_env!("PORTHUB_COMPONENT_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),

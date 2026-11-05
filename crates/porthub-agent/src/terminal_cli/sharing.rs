@@ -282,7 +282,7 @@ pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
     }
     invite(root, &job, json)?;
     if !detach {
-        attach(&job, sidebar)?;
+        attach(&job, sidebar).await?;
     }
     Ok(())
 }

@@ -57,7 +57,7 @@ pub fn create(root: &Path, args: CreateOptions, reuse: bool) -> Result<Job> {
         },
     )
 }
-fn read_private(path: &Path) -> Result<Vec<u8>> {
+pub(crate) fn read_private(path: &Path) -> Result<Vec<u8>> {
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -89,7 +89,7 @@ fn write_private(path: &Path, bytes: &[u8], _replace: bool) -> Result<()> {
     fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
-fn private(path: &Path) -> Result<()> {
+pub(crate) fn private(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     ensure!(
         metadata.is_dir()
@@ -154,7 +154,7 @@ fn jobs(root: &Path) -> Result<Vec<Job>> {
     Ok(jobs)
 }
 
-fn workspace(job: &Job) -> Result<Workspace> {
+pub(crate) fn workspace(job: &Job) -> Result<Workspace> {
     let metadata = fs::symlink_metadata(&job.executable)?;
     ensure!(
         metadata.is_file()
@@ -251,4 +251,17 @@ fn create_locked(
         return Err(error);
     }
     Ok(job)
+}
+
+pub(crate) fn select(root: &Path, name: &str) -> Result<Job> {
+    private(root)?;
+    let mut matches: Vec<_> = jobs(root)?
+        .into_iter()
+        .filter(|job| job.name == name || job.id == name)
+        .collect();
+    ensure!(
+        matches.len() == 1,
+        "workspace not found or ambiguous; use a name or full ID from terminal list"
+    );
+    Ok(matches.remove(0))
 }

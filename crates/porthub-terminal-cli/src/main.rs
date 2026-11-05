@@ -17,6 +17,22 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
+    #[cfg(unix)]
+    /// Attach to a saved local workspace; Ctrl+A then D detaches.
+    Attach {
+        #[arg(long)]
+        directory: PathBuf,
+        #[arg(long)]
+        name: String,
+        #[arg(long,value_enum,default_value_t=porthub_terminal_cli::owner::Sidebar::Off)]
+        sidebar: porthub_terminal_cli::owner::Sidebar,
+    },
+    #[cfg(unix)]
+    #[command(hide = true)]
+    Terminal {
+        #[command(subcommand)]
+        command: OwnerCommand,
+    },
     /// Create a persistent local workspace without a core agent or gateway.
     New {
         #[arg(long)]
@@ -58,6 +74,23 @@ enum Command {
     #[command(name = "__porthub-stdio", hide = true)]
     Stdio,
 }
+#[cfg(unix)]
+#[derive(Subcommand)]
+enum OwnerCommand {
+    #[command(name = "__participants-popup", hide = true)]
+    Popup {
+        root: PathBuf,
+        id: String,
+        client: u32,
+    },
+    #[command(name = "__participants-view", hide = true)]
+    View {
+        root: PathBuf,
+        id: String,
+        #[arg(long)]
+        sidebar: bool,
+    },
+}
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -73,6 +106,21 @@ async fn main() -> Result<()> {
         version: porthub_terminal_cli::VERSION.parse()?,
     };
     match args.command {
+        #[cfg(unix)]
+        Command::Attach {
+            directory,
+            name,
+            sidebar,
+        } => porthub_terminal_cli::owner::attach(&directory, &name, sidebar)?,
+        #[cfg(unix)]
+        Command::Terminal { command } => match command {
+            OwnerCommand::Popup { root, id, client } => {
+                porthub_terminal_cli::owner::popup(&root, &id, client)?
+            }
+            OwnerCommand::View { root, id, sidebar } => {
+                porthub_terminal_cli::owner::view(&root, &id, sidebar).await?
+            }
+        },
         Command::New {
             directory,
             name,

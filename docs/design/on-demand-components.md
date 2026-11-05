@@ -1,18 +1,19 @@
 # Independently usable PortHub components
 
-Status: implementation in progress; not shipped. The current published agent
-still bundles these features. The `porthub-components` crate implements catalog
-validation, compatibility selection, verified downloads/cache, gateway/GitHub
-fallback, installed-version receipts, IPC framing, and background maintenance.
-`porthub-sync` provides independently usable directory watching and an HTTP
-receiver, so neither end needs core or a PortHub gateway. Core sync/watch
-commands now use its persistent worker; core transfer builds exclude watch code.
-Background maintenance begins after the first authenticated configuration is
-applied. Core also exposes local `components list`, `fetch`, and `update` commands.
-Tor, terminal and live stats extraction, gateway delivery, release packaging,
-and installed rollout verification remain incomplete.
-No modules have been published or deployed. This document does not change the
-published updater or release format.
+Status: implementation in progress; the modular agent is not released. Production
+serves agent 1.10.1. The gateway/UI reader for compact components is deployed at
+1.11.0, but optional component assets and the new agent have not been published.
+
+The component SDK implements compatibility selection, verified gateway/GitHub
+downloads, private/shared caches, versioned RPC and CLI pipe transports,
+activation receipts, and background maintenance. Core delegates sync/watch,
+live stats, Tor, terminal runtime provisioning, workspace creation, and owner
+attachment UI. The terminal helper supports independent `new`, `attach`, `tmux`
+and `runtime` commands. Terminal sharing supervision and native guest/direct
+transport still need extraction. Live Tor generation handover, final platform
+checks, compact publication, and installed rollout verification remain pending.
+Background maintenance begins after authenticated configuration; core also
+exposes `components list`, `fetch`, and `update`.
 
 ## Ownership and package boundaries
 
@@ -910,3 +911,22 @@ and six concurrent reopen calls retain the original identity. Native and package
 Unix platform jobs now run this check. Sharing supervision, attachment UI and
 native guest/direct transport are still in core and must finish moving before
 the terminal extraction is complete.
+
+
+Owner attachment, participant popup and sidebar implementations now reside in
+the terminal helper; their previous core source files have been removed. Core
+resolves the verified helper and launches its foreground `attach` or hidden owner
+view command with inherited terminal handles. Workspace directory, identity and
+sidebar selection are the only arguments; no invitations, machine credentials
+or gateway configuration are transferred. Helper-owned shortcuts invoke the
+same content-addressed helper executable, preserving old attached workspaces
+when a newer helper is downloaded. The sharing-control server remains in core
+until the sharing supervisor itself is extracted.
+
+The rebuilt core and exact seeded helper passed the complete owner PTY suite:
+selection/cancel, targeted guest removal, resize, terminal restoration, quit
+while the private control socket stalls, owner-only popup, nonmodal sidebar,
+mouse copy, abrupt hangup, persistent shell/background state and explicit Ctrl+D
+teardown. All three standalone bundled-runtime process tests also pass. Sharing
+supervision, native guest/direct transport and remaining local workspace commands
+still require extraction before terminal code can be excluded from core.

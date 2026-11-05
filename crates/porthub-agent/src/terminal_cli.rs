@@ -1,8 +1,6 @@
 //! Local workspaces use the same private bundled multiplexer as shared ones.
 //! Local mode needs no registration or network. Sharing uses the local broker.
 mod participant_control;
-mod participant_panel;
-mod participant_popup;
 mod sharing;
 use anyhow::{ensure, Context, Result};
 use clap::{Args, Subcommand};
@@ -332,20 +330,46 @@ fn name_valid(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn attach(job: &Job, sidebar: Sidebar) -> Result<()> {
-    let workspace = workspace(job)?;
-    ensure!(workspace.is_alive(), "workspace has ended");
-    // Recognize our own server instead of recursively attaching to ourselves.
-    if std::env::var_os("PORTHUB_TERMINAL_SOCKET")
-        .is_some_and(|value| PathBuf::from(value) == workspace.socket())
-        || std::env::var_os("TMUX").is_some_and(|value| {
-            value.to_string_lossy().split(',').next() == workspace.socket().to_str()
-        })
-    {
-        println!("Already attached to {}", job.name);
-        return Ok(());
+async fn owner_frontend(arguments: Vec<OsString>) -> Result<()> {
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let (_, executable) = crate::components::manager(None)?
+        .resolve(porthub_components::catalog::Component::Terminal, &cancel)
+        .await?;
+    let mut child = porthub_components::foreground(&executable, &arguments, &cancel).await?;
+    ensure!(
+        child.wait().await?.success(),
+        "terminal frontend exited unsuccessfully; the workspace may still be running"
+    );
+    Ok(())
+}
+async fn attach(job: &Job, sidebar: Sidebar) -> Result<()> {
+    owner_frontend(vec![
+        "attach".into(),
+        "--directory".into(),
+        root()?.into_os_string(),
+        "--name".into(),
+        job.id.clone().into(),
+        "--sidebar".into(),
+        match sidebar {
+            Sidebar::On => "on",
+            Sidebar::Auto => "auto",
+            Sidebar::Off => "off",
+        }
+        .into(),
+    ])
+    .await
+}
+async fn owner_view(root: &Path, id: &str, sidebar: bool) -> Result<()> {
+    let mut arguments = vec![
+        "terminal".into(),
+        "__participants-view".into(),
+        root.as_os_str().into(),
+        id.into(),
+    ];
+    if sidebar {
+        arguments.push("--sidebar".into());
     }
-    participant_popup::attach(job, &workspace, sidebar)
+    owner_frontend(arguments).await
 }
 
 async fn create(root: &Path, args: New) -> Result<Job> {
@@ -444,7 +468,7 @@ async fn open_named(root: &Path, arguments: Vec<OsString>) -> Result<()> {
         );
     }
     if !detach {
-        attach(&job, sidebar)?;
+        attach(&job, sidebar).await?;
     }
     Ok(())
 }
@@ -453,11 +477,16 @@ pub async fn run(command: Command) -> Result<()> {
     let root = root()?;
     match command {
         Command::ParticipantPopup { root, id, client } => {
-            participant_popup::show(&root, &id, client)?
+            owner_frontend(vec![
+                "terminal".into(),
+                "__participants-popup".into(),
+                root.into_os_string(),
+                id.into(),
+                client.to_string().into(),
+            ])
+            .await?
         }
-        Command::ParticipantView { root, id, sidebar } => {
-            participant_popup::view(&root, &id, sidebar).await?
-        }
+        Command::ParticipantView { root, id, sidebar } => owner_view(&root, &id, sidebar).await?,
         Command::Named(arguments) => open_named(&root, arguments).await?,
         Command::Share(args) => sharing::start(&root, args).await?,
         Command::Join {
@@ -512,7 +541,7 @@ pub async fn run(command: Command) -> Result<()> {
         Command::Participants { name, json, watch } => {
             let job = select(&root, &name)?;
             if watch {
-                participant_panel::run(job, false).await?;
+                owner_view(&root, &job.id, false).await?;
             } else {
                 participant_control::request(&job, None, json).await?;
             }
@@ -538,7 +567,7 @@ pub async fn run(command: Command) -> Result<()> {
                 );
             }
             if !detach {
-                attach(&job, sidebar)?;
+                attach(&job, sidebar).await?;
             }
         }
         Command::List { json, all } => {
@@ -585,7 +614,7 @@ pub async fn run(command: Command) -> Result<()> {
                 println!("\nOpen:    porthub terminal NAME\nAttach:  porthub terminal attach NAME\nShare:   porthub terminal share NAME --detach (browser + SSH)\nWeb:     porthub terminal share NAME --access web --detach\nURLs:    porthub terminal url NAME\nHistory: porthub terminal ls --all\nHelp:    porthub terminal --help");
             }
         }
-        Command::Attach { name, sidebar } => attach(&select(&root, &name)?, sidebar)?,
+        Command::Attach { name, sidebar } => attach(&select(&root, &name)?, sidebar).await?,
         Command::Stop { name } => {
             let job = select(&root, &name)?;
             workspace(&job)?.stop()?;

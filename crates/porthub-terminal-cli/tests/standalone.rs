@@ -7,7 +7,8 @@ fn independent_cli_exposes_local_tmux_without_core_or_gateway() {
     let help = command().arg("--help").output().unwrap();
     assert!(help.status.success());
     let text = String::from_utf8_lossy(&help.stdout);
-    assert!(text.contains("tmux") && text.contains("runtime"));
+    assert!(text.contains("tmux") && text.contains("runtime") && text.contains("new"));
+    #[cfg(unix)] assert!(text.contains("attach"));
     assert!(command()
         .arg("--version")
         .output()
