@@ -8,6 +8,7 @@ mod process;
 pub mod protocol;
 pub mod rpc;
 pub mod shared;
+mod stdio;
 pub mod store;
 pub mod transport;
 #[cfg(windows)]

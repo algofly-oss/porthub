@@ -57,6 +57,8 @@ enum Command {
         #[arg(long)]
         endpoint: String,
     },
+    #[command(name = "__porthub-stdio", hide = true)]
+    Stdio,
     // The shared library starts detached jobs with this stable internal entry.
     #[command(hide = true)]
     Sync {
@@ -104,6 +106,20 @@ async fn main() -> Result<()> {
                     bind,
                     accept_uploads: true,
                 },
+                cancel,
+            )
+            .await
+        }
+        Command::Stdio => {
+            porthub_components::rpc::serve_stdio(
+                porthub_components::ipc::Hello {
+                    component: porthub_components::catalog::Component::Sync,
+                    protocol: porthub_components::catalog::PROTOCOL,
+                    version: option_env!("PORTHUB_COMPONENT_VERSION")
+                        .unwrap_or(env!("CARGO_PKG_VERSION"))
+                        .parse()?,
+                },
+                std::sync::Arc::new(porthub_sync::Worker),
                 cancel,
             )
             .await

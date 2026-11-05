@@ -160,7 +160,13 @@ pub async fn worker(
     }
     let state_directory = state_directory()?;
     crate::service::directory(&state_directory, true)?;
+    let mode = match std::env::var("PORTHUB_COMPONENT_TRANSPORT").as_deref() {
+        Ok("auto") | Err(std::env::VarError::NotPresent) => porthub_components::worker::Mode::Auto,
+        Ok("rpc") => porthub_components::worker::Mode::Rpc,
+        Ok("cli") => porthub_components::worker::Mode::Cli,
+        _ => anyhow::bail!("PORTHUB_COMPONENT_TRANSPORT must be auto, rpc, or cli"),
+    };
     manager
-        .worker(component, &ContextOptions { state_directory }, cancel)
+        .connect(component, &ContextOptions { state_directory }, mode, cancel)
         .await
 }

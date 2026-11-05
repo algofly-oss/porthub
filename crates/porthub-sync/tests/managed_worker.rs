@@ -8,7 +8,7 @@ use porthub_components::{
     rpc::{Client, SystemOperation, SystemValue},
     store::{Manager, Settings, Sources},
     transport::Transport,
-    worker::ContextOptions,
+    worker::{ContextOptions, Mode},
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -80,6 +80,17 @@ async fn wait_file(path: &Path, expected: &[u8]) {
 #[tokio::test]
 async fn verified_module_download_coalesces_worker_start_and_watch_follows_ipc_lifetime(
 ) -> Result<()> {
+    exercise(Mode::Rpc, false).await
+}
+#[tokio::test]
+async fn verified_cli_fallback_preserves_watch_lifetime() -> Result<()> {
+    exercise(Mode::Cli, false).await
+}
+#[tokio::test]
+async fn unavailable_worker_automatically_uses_verified_cli() -> Result<()> {
+    exercise(Mode::Auto, true).await
+}
+async fn exercise(mode: Mode, blocked: bool) -> Result<()> {
     let root = tempfile::tempdir()?;
     #[cfg(unix)]
     {
@@ -142,9 +153,23 @@ async fn verified_module_download_coalesces_worker_start_and_watch_follows_ipc_l
     };
     let cancel = CancellationToken::new();
     manager.refresh(&cancel).await?;
+    if blocked {
+        let retry_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs()
+            + 300;
+        // A previous failed worker startup is a real transport-unavailable case.
+        // Core must still resolve/verify the tool and obey policy before fallback.
+        std::fs::write(
+            manager.cache_root().join("sync.worker-attempts.json"),
+            serde_json::to_vec(
+                &serde_json::json!({"count": 1, "last_start": retry_at - 300, "retry_at": retry_at}),
+            )?,
+        )?;
+    }
     let (first, second) = tokio::join!(
-        manager.worker(Component::Sync, &context, &cancel),
-        manager.worker(Component::Sync, &context, &cancel)
+        manager.connect(Component::Sync, &context, mode, &cancel),
+        manager.connect(Component::Sync, &context, mode, &cancel)
     );
     let mut first = first?;
     let mut second = second?;
@@ -167,7 +192,11 @@ async fn verified_module_download_coalesces_worker_start_and_watch_follows_ipc_l
     else {
         panic!("expected worker PID")
     };
-    assert_eq!(one, two);
+    if matches!(mode, Mode::Rpc) {
+        assert_eq!(one, two);
+    } else {
+        assert_ne!(one, two);
+    }
     assert_ne!(one, std::process::id());
     assert_eq!(fixture.binaries.load(Ordering::SeqCst), 1);
     let source = root.path().join("source");

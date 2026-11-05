@@ -1,6 +1,11 @@
 //! Process startup is separate from requests. A verified executable serves many
 //! typed calls; mutation failures are never replayed automatically.
-use crate::{catalog::Component, local::Endpoint, rpc::Client, store::Manager};
+use crate::{
+    catalog::{Artifact, Component},
+    local::Endpoint,
+    rpc::Client,
+    store::Manager,
+};
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -27,7 +32,70 @@ fn now() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+/// Administrator-selected transport. Auto only falls back during startup,
+/// before a tool request is sent; it never replays a failed operation.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum Mode {
+    #[default]
+    Auto,
+    Rpc,
+    Cli,
+}
 impl Manager {
+    pub async fn connect(
+        &self,
+        component: Component,
+        context: &ContextOptions,
+        mode: Mode,
+        cancel: &CancellationToken,
+    ) -> Result<Client> {
+        ensure!(
+            context.state_directory.is_absolute(),
+            "component state requires an absolute directory"
+        );
+        // Policy, compatibility, catalog authorization and verification failures
+        // propagate directly. They must never trigger a different download path.
+        let (artifact, executable) = self.resolve(component, cancel).await?;
+        if !matches!(mode, Mode::Cli) {
+            match self
+                .worker_resolved(component, context, cancel, &artifact, &executable)
+                .await
+            {
+                Ok(client) => return Ok(client),
+                Err(error) if matches!(mode, Mode::Rpc) || cancel.is_cancelled() => {
+                    return Err(error)
+                }
+                Err(_) => tracing::debug!(
+                    "local component worker unavailable; invoking verified CLI over private pipes"
+                ),
+            }
+        }
+        ensure!(!cancel.is_cancelled(), "component invocation cancelled");
+        use std::process::Stdio;
+        let mut process = tokio::process::Command::new(executable)
+            .arg("__porthub-stdio")
+            .env("PORTHUB_STATE_DIR", &context.state_directory)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .context("cannot invoke verified component CLI")?;
+        let reader = process
+            .stdout
+            .take()
+            .context("component stdout unavailable")?;
+        let writer = process
+            .stdin
+            .take()
+            .context("component stdin unavailable")?;
+        let stream = Box::new(crate::stdio::Child {
+            pipes: crate::stdio::Pair::new(reader, writer),
+            process,
+        });
+        tokio::select! { biased; _ = cancel.cancelled() => anyhow::bail!("component invocation cancelled"), result = Client::from_stream(stream, &artifact) => result }
+    }
+
     pub async fn worker(
         &self,
         component: Component,
@@ -39,13 +107,24 @@ impl Manager {
             "component state requires an absolute directory"
         );
         let (artifact, executable) = self.resolve(component, cancel).await?;
+        self.worker_resolved(component, context, cancel, &artifact, &executable)
+            .await
+    }
+    async fn worker_resolved(
+        &self,
+        component: Component,
+        context: &ContextOptions,
+        cancel: &CancellationToken,
+        artifact: &Artifact,
+        executable: &Path,
+    ) -> Result<Client> {
         let context_digest = format!(
             "{:x}",
             Sha256::digest(context.state_directory.as_os_str().as_encoded_bytes())
         );
         let identity = self.cache_root().join(context_digest);
-        let endpoint = Endpoint::for_artifact(&identity, &artifact)?;
-        if let Ok(client) = Client::connect(&endpoint, &artifact).await {
+        let endpoint = Endpoint::for_artifact(&identity, artifact)?;
+        if let Ok(client) = Client::connect(&endpoint, artifact).await {
             return Ok(client);
         }
         let _lock = crate::store::lock(
@@ -55,7 +134,7 @@ impl Manager {
         )
         .await?;
         // A concurrent CLI/service may have started it while this caller waited.
-        if let Ok(client) = Client::connect(&endpoint, &artifact).await {
+        if let Ok(client) = Client::connect(&endpoint, artifact).await {
             return Ok(client);
         }
         let attempt_path = self
@@ -77,7 +156,7 @@ impl Manager {
         write_attempts(&attempt_path, &attempts)?;
         let mut child = Starting {
             child: Some(crate::process::spawn(
-                &executable,
+                executable,
                 endpoint.address(),
                 &context.state_directory,
             )?),
@@ -85,7 +164,7 @@ impl Manager {
         let ready = tokio::time::timeout(Duration::from_secs(10), async {
             let mut delay = Duration::from_millis(25);
             loop {
-                if let Ok(client) = Client::connect(&endpoint, &artifact).await { return Ok(client); }
+                if let Ok(client) = Client::connect(&endpoint, artifact).await { return Ok(client); }
                 ensure!(!child.exited()?, "component worker exited during startup");
                 tokio::select! { biased; _ = cancel.cancelled() => anyhow::bail!("component worker start cancelled"), _ = tokio::time::sleep(delay) => {} }
                 delay = (delay * 2).min(Duration::from_millis(500));

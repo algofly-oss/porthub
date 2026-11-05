@@ -129,8 +129,11 @@ use protected handoff files or standard input; never put machine credentials in
 process arguments or logs. Do not replay a mutating operation after an ambiguous
 RPC result; fall back before sending it, or reconcile its outcome first. A
 module policy/authentication rejection remains a rejection. Native tests must
-exercise forced CLI mode and automatic transport failure/recovery. This fallback
-adapter is required before release and is not yet wired into all core commands.
+exercise forced CLI mode and automatic transport failure/recovery. Sync now supports `PORTHUB_COMPONENT_TRANSPORT=auto|rpc|cli` (default auto).
+Its CLI fallback invokes `__porthub-stdio` directly and carries the same typed
+contract through inherited pipes, including foreground streams. Automatic
+fallback is limited to pre-dispatch worker startup failures. Remaining extracted
+tools must support this contract before release.
 
 Core retains machine credentials, server authorization, routing policy, and the
 authenticated exposure broker. Give helpers narrowly scoped session capabilities

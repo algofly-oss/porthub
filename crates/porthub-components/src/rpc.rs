@@ -86,7 +86,10 @@ pub struct Client {
 }
 impl Client {
     pub async fn connect(endpoint: &Endpoint, artifact: &Artifact) -> Result<Self> {
-        let mut stream = tokio::time::timeout(Duration::from_secs(5), endpoint.connect()).await??;
+        let stream = tokio::time::timeout(Duration::from_secs(5), endpoint.connect()).await??;
+        Self::from_stream(stream, artifact).await
+    }
+    pub(crate) async fn from_stream(mut stream: Stream, artifact: &Artifact) -> Result<Self> {
         let hello: Hello = ipc::read(&mut stream, Duration::from_secs(5)).await?;
         hello.validate(artifact.component, &artifact.version)?;
         ipc::write(&mut stream, &hello, Duration::from_secs(5)).await?;
@@ -311,4 +314,20 @@ pub async fn serve<H: Handler>(
     }
     clients.shutdown().await;
     Ok(())
+}
+
+/// A CLI fallback uses the same versioned contract over private inherited pipes.
+/// No endpoint, operation, URL or credential is placed in the process arguments.
+pub async fn serve_stdio<H: Handler>(
+    hello: Hello,
+    handler: Arc<H>,
+    cancel: CancellationToken,
+) -> Result<()> {
+    let stream = Box::new(crate::stdio::Pair::new(
+        tokio::io::stdin(),
+        tokio::io::stdout(),
+    ));
+    let child = cancel.child_token();
+    let _cleanup = child.clone().drop_guard();
+    connection(stream, handler, hello, child.clone(), child).await
 }
