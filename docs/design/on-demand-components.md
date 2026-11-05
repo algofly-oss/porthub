@@ -561,3 +561,14 @@ passed the real core workspace lifecycle (including reattach with an unavailable
 component source), the sharing supervisor/sidebar integration, and the delegated
 stats PTY suite (restoration, pause/resume, resize, sorting, JSON, and prompt quit
 with a stalled source). Native CI and production canary checks remain required.
+
+
+Release staging now accepts both the existing 30-file bundle and the compact
+21-file bundle. It still requires a successful original ten-platform CI run and
+complete release gate, verifies the outer GitHub artifact size/digest, rejects
+unexpected/duplicate/traversal/link entries, and applies per-file plus aggregate
+expansion limits. Compact staging requires the explicit trusted Rust artifact
+verifier before creating the destination. Extracted bytes are verified using the
+publisher's immutable snapshot checks. Promotion workflows still need to supply
+the verifier and gateway arguments when compact production assembly is enabled;
+this does not yet switch publication format.

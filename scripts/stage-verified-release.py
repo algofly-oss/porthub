@@ -16,6 +16,10 @@ import zipfile
 spec = importlib.util.spec_from_file_location('publisher', Path(__file__).with_name('publish-release.py'))
 publisher = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(publisher)
+package_spec = importlib.util.spec_from_file_location('component_packager', Path(__file__).with_name('package-components.py'))
+component_packager = importlib.util.module_from_spec(package_spec)
+package_spec.loader.exec_module(component_packager)
+
 
 
 def validate(run, jobs, artifacts, repository):
@@ -45,20 +49,31 @@ def validate(run, jobs, artifacts, repository):
     return revision, artifact
 
 
-def extract(archive, artifact, destination, version):
+def extract(archive, artifact, destination, version, artifact_verifier=None):
     with archive.open('rb') as source:
         digest = hashlib.file_digest(source, 'sha256').hexdigest()
     if archive.stat().st_size != artifact['size_in_bytes'] or 'sha256:' + digest != artifact['digest']:
         raise ValueError('Downloaded artifact does not match GitHub size and digest')
     if destination.exists() or destination.is_symlink():
         raise ValueError('Use a new staging directory')
-    expected = {asset + suffix for asset in publisher.ASSETS for suffix in ('', '.version', '.sha256')}
+    legacy = {asset + suffix for asset in publisher.ASSETS for suffix in ('', '.version', '.sha256')}
+    compact = set(publisher.ASSETS) | {'porthub-components.json'} | {
+        'porthub-tools-' + canonical + '.tar.gz' for _, canonical in component_packager.TARGETS.values()}
     with zipfile.ZipFile(archive) as bundle:
         entries = bundle.infolist()
-        if len(entries) != 30 or {entry.filename for entry in entries} != expected:
-            raise ValueError('Artifact must contain exactly thirty canonical client files')
+        is_compact = any(entry.filename == 'porthub-components.json' for entry in entries)
+        expected = compact if is_compact else legacy
+        if len(entries) != len(expected) or {entry.filename for entry in entries} != expected:
+            raise ValueError('Artifact must contain one exact complete legacy or compact release')
+        if is_compact and artifact_verifier is None:
+            raise ValueError('Compact staging requires an explicit Rust artifact verifier')
+        if sum(entry.file_size for entry in entries) > 2 * 1024 * 1024 * 1024:
+            raise ValueError('Release artifact exceeds total expansion limit')
         for entry in entries:
-            limit = 512 if entry.filename.endswith(('.version', '.sha256')) else 128 * 1024 * 1024
+            if entry.filename == 'porthub-components.json': limit = 512 * 1024
+            elif is_compact and entry.filename.endswith('.tar.gz'): limit = 512 * 1024 * 1024
+            elif is_compact: limit = 256 * 1024 * 1024
+            else: limit = 512 if entry.filename.endswith(('.version', '.sha256')) else 128 * 1024 * 1024
             if (not 0 < entry.file_size <= limit
                     or stat.S_IFMT(entry.external_attr >> 16) not in (0, stat.S_IFREG)):
                 raise ValueError('Unsafe or oversized release artifact entry')
@@ -69,7 +84,7 @@ def extract(archive, artifact, destination, version):
                 while chunk := source.read(65536):
                     target.write(chunk)
             path.chmod(0o600)
-        return publisher.assets(destination, version)
+        return publisher.assets(destination, version, artifact_verifier)
 
 
 def api(repository, suffix):
@@ -98,6 +113,7 @@ def main():
     parser.add_argument('--repository', default=os.environ.get('GITHUB_REPOSITORY'))
     parser.add_argument('--run-id', required=True)
     parser.add_argument('--destination', required=True, type=Path)
+    parser.add_argument('--artifact-verifier', type=Path, help='Absolute trusted porthub-api executable required for compact staging')
     args = parser.parse_args()
     if not args.repository or not re.fullmatch(r'[\w.-]+/[\w.-]+', args.repository) or not re.fullmatch(r'[1-9][0-9]*', args.run_id):
         parser.error('An explicit repository and numeric CI run ID are required')
@@ -122,7 +138,7 @@ def main():
                                     stdout=target, stderr=subprocess.PIPE, timeout=600)
         if result.returncode:
             raise RuntimeError('Verified artifact download failed')
-        expected = extract(archive, artifact, destination, version)
+        expected = extract(archive, artifact, destination, version, args.artifact_verifier)
     payload = dict(run=int(args.run_id), revision=revision, version=version, artifact=artifact['id'],
                    artifact_digest=artifact['digest'], assets=expected)
     with proof.open('x') as stream:
