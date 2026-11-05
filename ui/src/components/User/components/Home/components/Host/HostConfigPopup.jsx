@@ -66,7 +66,7 @@ import TrafficMonitorPanel, {
 import UptimeHistoryPanel from "./UptimeHistoryPanel";
 import { useDemo } from "@/shared/demo/DemoProvider";
 import { formatClientVersion } from "@/shared/utils/client-version.mjs";
-import { bootstrapCommand } from "@/shared/utils/bootstrap-command.mjs";
+import { bootstrapCommand, windowsShells, windowsInstallerDownloads } from "@/shared/utils/bootstrap-command.mjs";
 
 const getInputClassName = () => "w-full rounded-lg !border !border-transparent !bg-control px-3 py-2 text-sm !text-foreground !outline-none !shadow-none placeholder:!text-muted-foreground";
 const getLabelClassName = () => "mb-2 block text-sm font-medium text-foreground";
@@ -2067,8 +2067,9 @@ export default function HostConfigPopup({
     </div>
   );
 
+  const [windowsShell, setWindowsShell] = useState("cmd");
   const installCommand = bootstrapUrl
-    ? bootstrapCommand(bootstrapUrl, setupOs)
+    ? bootstrapCommand(bootstrapUrl, setupOs, windowsShell)
     : setupOs === "windows" ? "" : machineCommand;
 
   return (
@@ -2671,7 +2672,16 @@ export default function HostConfigPopup({
                                 <p className="mb-1.5 text-xs font-medium text-muted-foreground">Operating system</p>
                                 <StatusTabs label="Install operating system" value={setupOs} onChange={setSetupOs} options={[{value:"linux",label:"Linux"},{value:"macos",label:"macOS"},{value:"windows",label:"Windows"}]} />
                               </div>
-                              {setupOs === "windows" && <p className="text-xs text-muted-foreground">Paste into PowerShell or Command Prompt, including Windows Terminal tabs. Approve the Windows administrator prompt if requested. For WSL, select Linux.</p>}
+                              {setupOs === "windows" && <div className="space-y-2">
+                                <label className="block text-xs font-medium">Windows shell
+                                  <select aria-label="Windows shell" value={windowsShell} onChange={event => setWindowsShell(event.target.value)} className="mt-1 block w-full rounded-md border border-border bg-control px-2 py-2 text-sm">
+                                    {windowsShells.map(shell => <option key={shell.id} value={shell.id}>{shell.label}</option>)}
+                                  </select>
+                                </label>
+                                <p className="text-xs text-muted-foreground">Paste into the selected shell, including Windows Terminal tabs. Approve the Windows administrator prompt if requested. For WSL, select Linux.</p>
+                                <div className="flex flex-wrap gap-3 text-xs">{windowsInstallerDownloads(bootstrapUrl).map(item => <a key={item.label} href={item.url} download className="text-primary underline">{item.label}</a>)}</div>
+                                <p className="text-xs text-muted-foreground">Or download and run the .bat file. To use the .ps1 file, run it from PowerShell under your administrator’s script policy.</p>
+                              </div>}
                             </div>
                             <div
                               className={`relative rounded-lg ${

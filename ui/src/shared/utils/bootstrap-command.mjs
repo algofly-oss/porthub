@@ -13,7 +13,7 @@ function windowsUri(value) {
   flush();
   return parts.length === 1 && parts[0].startsWith("'") ? parts[0] : `('' + ${parts.join(" + ")})`;
 }
-export function bootstrapCommand(value, os) {
+export function bootstrapCommand(value, os, shell = "cmd") {
   if (!value) return "";
   const url = String(value).replace(/\/$/, "");
   try {
@@ -22,5 +22,19 @@ export function bootstrapCommand(value, os) {
   } catch { return ""; }
   if (os !== "windows") return `curl -fsSL '${url.replaceAll("'", "'\\''")}' | bash`;
   const script = `[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; Invoke-RestMethod -Uri ${windowsUri(`${url}/windows.ps1`)} -ErrorAction Stop | Invoke-Expression`;
-  return `powershell.exe -NoProfile -Command "${script}"`;
+  return shell === "cmd" ? `powershell.exe -NoProfile -Command "${script}"` : script;
+}
+
+export const windowsShells = [
+  { id: "cmd", label: "Command Prompt" },
+  { id: "powershell", label: "PowerShell 5.1" },
+  { id: "pwsh", label: "PowerShell 7" },
+];
+export function windowsInstallerDownloads(value) {
+  if (!bootstrapCommand(value, "windows")) return [];
+  const base = String(value).replace(/\/$/, "");
+  return [
+    { label: "Download .bat", url: `${base}/windows.bat` },
+    { label: "Download .ps1", url: `${base}/windows.ps1` },
+  ];
 }

@@ -17,6 +17,7 @@ pub fn router() -> Router<Arc<App>> {
     Router::new()
         .route("/install/{ticket}", get(enroll))
         .route("/install/{ticket}/windows.ps1", get(windows_installer))
+        .route("/install/{ticket}/windows.bat", get(windows_batch_installer))
         .route("/install/{ticket}/agent/{target}", get(asset))
         .route(
             "/api/machines/{first}/{second}/install.sh",
@@ -269,6 +270,27 @@ async fn windows_installer(
     let mut response_headers = headers();
     response_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
     Ok((response_headers, script).into_response())
+}
+
+async fn windows_batch_installer(
+    State(app): State<Arc<App>>, Path(ticket): Path<String>, request: Request,
+) -> ApiResult<Response> {
+    use base64::Engine;
+    let enrollment = enrollment_ticket::resolve(&app, &ticket).await?;
+    app.artifacts.refresh_latest().await?;
+    let values = enrollment.values(&app, request.headers())?;
+    let base = values["server"].as_str().or_else(|| values["profile"]["server"].as_str())
+        .ok_or_else(|| ApiError::bad_request("Missing installer gateway"))?;
+    let link = enrollment_ticket::link(base, &ticket)?;
+    let script = format!("$ErrorActionPreference = 'Stop'; [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; Invoke-RestMethod -Uri '{}windows.ps1' -ErrorAction Stop | Invoke-Expression", format!("{}/", link.replace('\'', "''")));
+    // A fixed encoded PowerShell payload avoids cmd percent/delayed expansion
+    // of gateway paths. The .ps1 keeps the architecture, UAC and cleanup logic.
+    let encoded = base64::engine::general_purpose::STANDARD.encode(script.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>());
+    let batch = include_str!("../../assets/client/install.bat").replace("{{PAYLOAD}}", &encoded);
+    let mut response_headers = headers();
+    response_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+    response_headers.insert(header::CONTENT_DISPOSITION, HeaderValue::from_static("attachment; filename=porthub-install.bat"));
+    Ok((response_headers, batch).into_response())
 }
 
 async fn asset(
