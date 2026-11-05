@@ -706,3 +706,13 @@ capability check, using repository variable `PORTHUB_RELEASE_GATEWAY` or
 version support before release writes and again before draft promotion. These
 workflow guards do not enable compact production builds by themselves; the
 platform build and release-bundle producer integration is still pending.
+
+The agent workflow's complete-bundle job now runs
+`assemble-client-release.py` on the downloaded platform artifacts, builds the
+trusted Rust verifier, and uploads only the verified assembled release. Assembly
+requires ten indexed platforms for modular releases, rejects mixed legacy/indexed
+inputs, and publishes its output directory atomically after verification. Legacy
+collection remains available only for releases before 1.11.0. A ten-platform
+assembly fixture passes the actual Rust verifier with exactly 21 output assets.
+Native and cross-compilation jobs still need to emit the coordinator indexes;
+the bundle gate deliberately rejects their old legacy-only modular outputs.

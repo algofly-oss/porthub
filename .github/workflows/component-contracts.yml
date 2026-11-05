@@ -17,6 +17,8 @@ on:
       - 'scripts/test_prepare_release.py'
       - 'scripts/fetch-component-release.py'
       - 'scripts/test_fetch_component_release.py'
+      - 'scripts/assemble-client-release.py'
+      - 'scripts/test_assemble_client_release.py'
       - 'scripts/publish-release.py'
       - 'crates/porthub-sync/**'
       - 'crates/porthub-tor/**'
@@ -45,6 +47,8 @@ on:
       - 'scripts/test_prepare_release.py'
       - 'scripts/fetch-component-release.py'
       - 'scripts/test_fetch_component_release.py'
+      - 'scripts/assemble-client-release.py'
+      - 'scripts/test_assemble_client_release.py'
       - 'scripts/publish-release.py'
       - 'crates/porthub-sync/**'
       - 'crates/porthub-tor/**'
@@ -104,6 +108,7 @@ jobs:
           python scripts/test_build_component_platform.py
           python scripts/test_prepare_release.py
           python scripts/test_fetch_component_release.py
+          python scripts/test_assemble_client_release.py
       - name: Install pinned Rust toolchain
         if: steps.native_changes.outputs.rust == 'true'
         run: rustup toolchain install 1.99.1 --profile minimal
