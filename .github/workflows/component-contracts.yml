@@ -7,6 +7,8 @@ on:
       - 'deploy/components.toml'
       - 'scripts/component-build-plan.py'
       - 'scripts/test_component_build_plan.py'
+      - 'scripts/package-components.py'
+      - 'scripts/test_package_components.py'
       - 'crates/porthub-sync/**'
       - 'crates/porthub-tor/**'
       - 'crates/porthub-egress/**'
@@ -21,6 +23,8 @@ on:
       - 'deploy/components.toml'
       - 'scripts/component-build-plan.py'
       - 'scripts/test_component_build_plan.py'
+      - 'scripts/package-components.py'
+      - 'scripts/test_package_components.py'
       - 'crates/porthub-sync/**'
       - 'crates/porthub-tor/**'
       - 'crates/porthub-egress/**'
@@ -69,7 +73,9 @@ jobs:
         with:
           python-version: '3.13'
       - name: Verify dependency-aware component build selection
-        run: python scripts/test_component_build_plan.py
+        run: |
+          python scripts/test_component_build_plan.py
+          python scripts/test_package_components.py
       - name: Install pinned Rust toolchain
         if: steps.native_changes.outputs.rust == 'true'
         run: rustup toolchain install 1.99.1 --profile minimal

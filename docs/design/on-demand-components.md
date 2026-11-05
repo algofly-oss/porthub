@@ -344,3 +344,26 @@ extraction and the requested executable's hash check succeed. Multiple tools
 from the same platform archive therefore share one upstream download; a missing
 or damaged executable can be restored from the cached archive even when GitHub
 is unavailable. Damaged archives are replaced only by verified downloads.
+
+
+### Compact packaging implementation
+
+`scripts/package-components.py` takes repeated `--input RECEIPT BINARY` pairs,
+a coherent `--release`, and a new `--output` directory. Each receipt and executable
+are verified using the build planner before packaging. The default requires all
+ten core targets from one source revision and a tool archive for each. Linux
+inputs must use the musl build triples; catalog names retain the established GNU
+platform identifiers. `--verify-only` permits unpublished platform-subset fixtures.
+
+Archives use fixed gzip/tar metadata, regular files, stable member ordering,
+versioned tool paths, and protocol size limits. Packaged bytes are checked again
+before atomic publication of the directory. Older compatible helper receipts can
+be included alongside new ones: their executable hashes, original source revisions,
+build fingerprints, compatibility requirements, and protocol lists stay intact,
+while the new archive is carried by the current coherent release. Thus release
+retention need not remove the only download location of an older compatible tool.
+
+The ten-platform fixture produces exactly 21 files. This packager is not yet
+wired into production build selection/publication; legacy release verification
+and the publication workflow must be adapted before switching formats. Real
+platform executable/ABI checks remain required in addition to packaging tests.
