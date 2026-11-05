@@ -279,7 +279,7 @@ export default function Home({ onStatsChange, active = true }) {
 
   const inventory = useInventoryPage("machines", {
     q: query, page, page_size: Number(pageSize), sort,
-    status: statusFilter === "all" ? "enabled" : statusFilter, group: groupFilter,
+    status: statusFilter, group: groupFilter,
   }, { enabled: active });
   const detailInventory = useInventoryPage("machines", { ids: selectedHostId || "", page_size: 1 }, {
     enabled: active && !!selectedHostId && !inventory.rows.some(row => row._id === selectedHostId),
@@ -403,7 +403,7 @@ export default function Home({ onStatsChange, active = true }) {
     const statusChanged = ({ machine } = {}) => {
       if (!machine?._id) return;
       // An off-page machine can enter the current presence-filtered result.
-      if (["online", "offline"].includes(statusFilter)) refreshInventory();
+      if (["online", "offline", "disabled"].includes(statusFilter)) refreshInventory();
       if (visibleIds.split(",").includes(machine._id)) refreshPresence();
     };
     socket.on("connect", reconnect);
@@ -1046,7 +1046,7 @@ export default function Home({ onStatsChange, active = true }) {
                 <>
                   <InventoryToolbar label="Machine tools"
                     search={<SearchField label="Search machines" value={query} onChange={setQuery} placeholder="Search machines…" />}
-                    status={<StatusTabs label="Machine status" value={statusFilter} onChange={setStatusFilter} options={[{value:"all",label:"All"},{value:"online",label:"Online"},{value:"offline",label:"Offline"}]} />}
+                    status={<StatusTabs label="Machine status" value={statusFilter} onChange={setStatusFilter} options={[{value:"all",label:"All"},{value:"online",label:"Online"},{value:"offline",label:"Offline"},{value:"disabled",label:"Disabled"}]} />}
                     filtered={groupFilter !== ALL_GROUPS_FILTER || sort !== "name"}
                     filters={[
                       {label:"Group",control:<InventorySelect kind="groups" label="Filter machine group" value={groupFilter} onChange={setGroupFilter} extraOptions={[{value:ALL_GROUPS_FILTER,label:"All groups"}]} />},

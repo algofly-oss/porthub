@@ -83,6 +83,13 @@ mod tor_route_tests {
         assert!(!engine.valid_lease());
     }
     #[test]
+    fn expired_policy_fails_closed_with_an_actionable_clock_diagnostic() {
+        let mut engine=Engine::default();engine.apply(snapshot()).unwrap();
+        let mut expired=snapshot();expired.expires_at=Utc::now()-chrono::Duration::seconds(20);
+        let error=engine.apply(expired).unwrap_err().to_string();
+        assert!(error.contains("check host clock synchronization"));assert!(!engine.valid_lease());
+    }
+    #[test]
     fn retired_address_rules_do_not_replace_answers_or_discard_valid_blocks() {
         let mut raw=serde_json::to_value(snapshot()).unwrap();
         raw["dns_rules"]=serde_json::json!([
@@ -286,7 +293,7 @@ impl Engine {
             let remaining = snapshot
                 .expires_at
                 .signed_duration_since(Utc::now())
-                .to_std()?;
+                .to_std().map_err(|_| anyhow::anyhow!("private policy lease expired; check host clock synchronization and gateway connectivity"))?;
             ensure!(
                 !remaining.is_zero()
                     && remaining <= Duration::from_secs(60)

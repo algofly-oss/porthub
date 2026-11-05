@@ -274,6 +274,13 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     let mut dns_upstream:Option<Arc<super::dns_upstream::Upstream>>=None;
     let mut policy = Engine::default();
     let mut private_status = crate::runtime::PrivateStatus::default();
+    #[cfg(target_os="linux")]
+    let (dns_target,dns_health) = {
+        let (target,input)=watch::channel(None);
+        let (result,health)=watch::channel(None);
+        tasks.spawn(crate::private_dns_setup::monitor(input,result,work.clone()));
+        (target,health)
+    };
     let mut exit_route = None;
     let mut exit_traffic_mode = porthub_mesh::exit_policy::TrafficMode::default();
     let mut exit_lan_peers: Vec<(String, Vec<porthub_mesh::lan_routes::Network>)> = Vec::new();
@@ -441,6 +448,11 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     #[cfg(not(all(target_os = "linux", feature = "netns-tests")))]
                     let isolated = false;
                     if !isolated { dns_registration=Some(dns::register(tun.index,own.ip,port,&suffixes).await?); }
+                    #[cfg(target_os="linux")]
+                    {dns_target.send_if_modified(|previous| {
+                        let next=Some((own.hostname.clone(),own.ip));
+                        if *previous==next {false} else {*previous=next;true}
+                    });}
                     registered_suffixes=suffixes;
                     registered_rules=snapshot.dns_rules.clone();
                 }
@@ -724,6 +736,12 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     circuit_groups:settings.circuit_groups.or(tor_route_groups).unwrap_or(4),
                 });
             }
+            #[cfg(target_os="linux")]
+            {
+                private_status.dns_integration=Some(crate::private_prerequisites::dns_status().into());
+                private_status.dns_verified=Some(dns_health.borrow().unwrap_or(false));
+            }
+            private_status.relay_ready = Some(relay_sender.is_ready());
             private_status.lease_valid = policy.valid_lease();
             if let Some(exit) = &mut private_status.exit {
                 exit.available = exit_available;

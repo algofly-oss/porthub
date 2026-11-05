@@ -4,12 +4,18 @@ pub mod adopt;
 mod autoupdate;
 pub mod bootstrap;
 pub mod control;
+pub mod outbound;
+pub mod connectivity_diagnostics;
 pub mod expose;
 pub mod legacy;
 pub mod logs;
 mod os_info;
 pub mod private_network;
 pub mod private_profile;
+#[cfg(target_os="linux")]
+mod private_prerequisites;
+#[cfg(target_os="linux")]
+mod private_dns_setup;
 pub mod profile;
 mod routes;
 pub mod runtime;

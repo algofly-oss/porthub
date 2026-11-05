@@ -278,6 +278,14 @@ jobs:
       - name: Test transfers, management and tunnel adapters
         shell: bash
         run: python scripts/run-with-timeout.py 240 cargo test --locked -p porthub-agent -p porthub-transfer -p porthub-tunnel -p porthub-identity -p porthub-mesh -p porthub-network -p porthub-io --target ${{ matrix.target }}
+      - name: Gate Linux private-network prerequisite preparation and unified activation
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --lib private_prerequisites --target ${{ matrix.target }}
+          python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --lib private_dns_setup --target ${{ matrix.target }}
+          python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --test service private_dependency_failure --target ${{ matrix.target }}
+          python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-network --lib expired_policy_fails_closed_with_an_actionable_clock_diagnostic --target ${{ matrix.target }}
       - name: Test packaged terminal runtime and ordinary SSH participation
         if: runner.os != 'Windows'
         shell: bash

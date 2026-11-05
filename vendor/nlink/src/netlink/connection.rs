@@ -2579,6 +2579,24 @@ impl Connection<Route> {
         self.parse_response(&response)
     }
 
+    /// Read-only, source-aware FIB lookup, including administrator policy rules.
+    pub async fn lookup_route_from(&self, dest: std::net::IpAddr, source: std::net::IpAddr) -> Result<RouteMessage> {
+        use crate::netlink::types::route::{RtMsg, RtaAttr};
+        let (family, len, dst, src) = match (dest, source) {
+            (std::net::IpAddr::V4(d), std::net::IpAddr::V4(s)) => (libc::AF_INET, 32, d.octets().to_vec(), s.octets().to_vec()),
+            (std::net::IpAddr::V6(d), std::net::IpAddr::V6(s)) => (libc::AF_INET6, 128, d.octets().to_vec(), s.octets().to_vec()),
+            _ => return Err(crate::netlink::error::Error::invalid_message("source and destination address families differ")),
+        };
+        let mut message = RtMsg::new().with_family(family as u8).with_dst_len(len);
+        message.rtm_src_len = len;
+        let mut builder = MessageBuilder::new(NlMsgType::RTM_GETROUTE, NLM_F_REQUEST);
+        builder.append(&message);
+        builder.append_attr(RtaAttr::Dst as u16, &dst);
+        builder.append_attr(RtaAttr::Src as u16, &src);
+        let response = self.send_request(builder).await?;
+        self.parse_response(&response)
+    }
+
     /// The route the kernel would use for `destination`: a FIB lookup,
     /// [`lookup_route`](Self::lookup_route) for one family.
     ///

@@ -275,11 +275,16 @@ pub(crate) async fn supervise<F, Fut>(
                     retry = Duration::from_secs(5);
                     break;
                 },
-                _ = &mut worker.task => {
+                result = &mut worker.task => {
                     // Panics and unexpected clean exits receive the same
                     // backoff; neither escapes into the public runtime.
                     worker.stop.cancel();
-                    tracing::warn!("private module stopped; retry scheduled");
+                    let reason = match result {
+                        Ok(Err(error)) => private_failure_reason(&error),
+                        Ok(Ok(())) => "private worker exited unexpectedly",
+                        Err(_) => "private worker terminated unexpectedly",
+                    };
+                    tracing::warn!(reason, "private module stopped; retry scheduled");
                     if began.elapsed() >= Duration::from_secs(60) { retry = Duration::from_secs(5); }
                     tokio::select! {
                         _ = cancel.cancelled() => return,
@@ -452,4 +457,14 @@ mod tests {
             .unwrap()
             .unwrap();
     }
+}
+
+pub(crate) fn private_failure_reason(error: &anyhow::Error) -> &'static str {
+    let text = format!("{error:#}").to_ascii_lowercase();
+    if text.contains("lease expired") { "private policy expired; check clock synchronization and gateway connectivity" }
+    else if text.contains("resolve1") || text.contains("systemd-resolved") { "private DNS unavailable; check systemd-resolved installation and service state" }
+    else if text.contains("dns setup") || text.contains("nsswitch") || text.contains("authselect") { "private DNS setup failed; check privileged enrollment and administrator DNS configuration restrictions" }
+    else if text.contains("tun device") { "private TUN unavailable; check device access and network privileges" }
+    else if text.contains("rejected this enrollment") { "private enrollment rejected; check registration and administrator access policy" }
+    else { "private startup failed; run porthub diagnose with the registration profile" }
 }

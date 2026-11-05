@@ -220,6 +220,8 @@ pub async fn run_bound(
     cancel: CancellationToken,
 ) -> Result<()> {
     let mut retry = Duration::from_secs(1);
+    let settings = crate::outbound::Settings::from_env()?;
+    let mut selection = crate::outbound::Selection::default();
     loop {
         while config.borrow_and_update().is_none() {
             tokio::select! {_=cancel.cancelled()=>return Ok(()),changed=config.changed()=>if changed.is_err(){return Ok(())}}
@@ -263,25 +265,33 @@ pub async fn run_bound(
                 .cloned()
                 .map(|base| (base, profile.token.clone())),
         );
-        let local: Vec<_> = interfaces.borrow().iter().map(|address| address.ip()).collect();
+        let mut local: Vec<_> = interfaces.borrow().iter().map(|address| address.ip()).collect();
         let mut primary = None;
         for (base, token) in candidates {
-            if let Some(connection) = connect_lane(
-                &base,
-                &token,
-                &profile.peer_id,
-                &instance,
-                0,
-                RELAY_LANES as u8,
-                &local,
-                &cancel,
-            )
-            .await?
-            {
-                let lane_count = connection.lane_count;
-                primary = Some((base, token, connection, lane_count));
-                break;
+            let url = url::Url::parse(&base)?;
+            let host = url.host_str().ok_or_else(|| anyhow::anyhow!("relay hostname missing"))?;
+            let destinations: Vec<_> = match tokio::time::timeout(Duration::from_secs(2),tokio::net::lookup_host((host.trim_matches(['[',']']),url.port_or_known_default().unwrap_or(443)))).await {
+                Ok(Ok(addresses)) => addresses.take(16).collect(),
+                _ => continue,
+            };
+            let paths = match tokio::time::timeout(Duration::from_secs(2),crate::outbound::discover(&settings,&destinations)).await {
+                Ok(Ok(paths)) => selection.order(&paths,Instant::now()),
+                _ => continue,
+            };
+            // Loopback is reserved for explicitly enabled local test profiles.
+            let unbound = settings.system || (profile.allow_insecure_http_for_tests && destinations.iter().all(|a| a.ip().is_loopback()));
+            let paths: Vec<Option<crate::outbound::Candidate>> = if unbound { vec![None] } else { paths.into_iter().map(Some).collect() };
+            for path in paths {
+                local = path.as_ref().map(|p|vec![p.source]).unwrap_or_default();
+                if let Some(connection) = connect_lane(&base,&token,&profile.peer_id,&instance,0,RELAY_LANES as u8,&local,&cancel).await? {
+                    if let Some(path) = path { selection.success(path); }
+                    let lane_count = connection.lane_count;
+                    primary = Some((base.clone(),token.clone(),connection,lane_count));
+                    break;
+                }
+                if let Some(path) = &path { selection.failure(path,Instant::now()); }
             }
+            if primary.is_some() { break; }
         }
         if let Some((base, token, first, lane_count)) = primary {
             let mut connections = vec![first];

@@ -59,7 +59,7 @@ fn requires_system_privileges(args: &Args) -> bool {
         },
         Command::Start(args) | Command::Stop(args) | Command::Restart(args) => !args.user,
         Command::Remove(args) => !args.user,
-        Command::Status { .. } => false,
+        Command::Status { .. } | Command::Diagnose { .. } => false,
         Command::Service { user, action } => {
             !user && !matches!(action, ServiceCommand::Status { .. })
         }
@@ -171,6 +171,12 @@ struct HttpPublicOptions {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Test DNS, TCP, verified TLS, and authenticated control without changing host networking.
+    Diagnose {
+        /// Registration profile to diagnose (uses its existing enrolled identity).
+        #[arg(long)]
+        profile: PathBuf,
+    },
     /// Hidden Windows SCM entrypoint used by a managed PortHub service.
     #[cfg(windows)]
     #[command(name = "__windows-service", hide = true)]
@@ -1529,6 +1535,10 @@ async fn main() -> Result<()> {
                 anyhow::bail!("private packet device is not yet available for this platform");
             }
             porthub_agent::runtime::run_with_logs(profile, cancel, Default::default(), logs).await
+        }
+        Some(Command::Diagnose { profile }) => {
+            println!("{}",serde_json::to_string_pretty(&porthub_agent::connectivity_diagnostics::diagnose(&profile).await?)?);
+            Ok(())
         }
         Some(Command::Status {
             profile,

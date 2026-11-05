@@ -160,6 +160,7 @@ pub struct State {
 }
 #[async_trait]
 pub trait Manager: Send + Sync {
+    async fn prepare_private(&self) -> Result<()> { Ok(()) }
     async fn state(&self, spec: &Spec) -> Result<State>;
     async fn reload(&self) -> Result<()>;
     async fn enable(&self, spec: &Spec) -> Result<()>;
@@ -188,6 +189,7 @@ impl Readiness for RuntimeReady {
                     status.state == "running"
                         && status.agent_version == crate::VERSION
                         && executable_matches
+                        && status.private_status.as_ref().is_none_or(|private|status.route!="private" || private.dns_verified!=Some(false))
                 }) {
                     return Ok(());
                 }
@@ -844,11 +846,17 @@ async fn install_locked_mode(
         !layout.user || !matches!(profile, RegistrationProfile::Private(_)),
         "private network services require system network privileges"
     );
+    if matches!(&profile, RegistrationProfile::Private(_)) { manager.prepare_private().await?; }
     let id = profile.identity();
     directory(&layout.state, true)?;
     directory(&layout.releases, false)?;
     directory(&layout.units, false)?;
     let previous = installed(layout, &id)?;
+    if let (RegistrationProfile::Public(public),Some(previous))=(&profile,&previous) {
+        if crate::unified::load(&previous.profile,public)?.is_some_and(|module|module.enabled) {
+            manager.prepare_private().await?;
+        }
+    }
     #[cfg(windows)]
     anyhow::ensure!(
         !matches!(&profile, RegistrationProfile::Private(_)),
