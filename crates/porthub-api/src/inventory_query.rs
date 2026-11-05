@@ -159,9 +159,9 @@ impl Params {
                 "At most 100 known traffic rows are supported",
             ));
         }
-        if self.seconds == 0 || self.seconds > 300 {
+        if self.seconds == 0 || self.seconds > 3600 {
             return Err(ApiError::bad_request(
-                "Traffic window must be 1–300 seconds",
+                "Traffic window must be 1–3600 seconds",
             ));
         }
         if self.tag.chars().count()>40 || self.machine_group.len()>24 {return Err(ApiError::bad_request("Invalid proxy tag or machine group"));}
@@ -1265,6 +1265,16 @@ async fn machine_traffic(
 #[cfg(test)]
 mod conditional_tests {
     use super::*;
+    #[test]
+    fn dashboard_traffic_windows_accept_one_hour_and_remain_bounded() {
+        for seconds in [1, 300, 900, 3600] {
+            assert!(Params { seconds, ..Default::default() }.validate().is_ok());
+        }
+        for seconds in [0, 3601, u64::MAX] {
+            assert!(Params { seconds, ..Default::default() }.validate().is_err());
+        }
+    }
+
     #[test]
     fn compressed_proxy_validators_use_weak_comparison() {
         let body = json!({"data": {"total": 18}});

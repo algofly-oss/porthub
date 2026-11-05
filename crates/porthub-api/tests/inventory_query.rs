@@ -128,6 +128,10 @@ async fn traffic_pages_rank_the_full_match_and_delta_only_visible_rows() -> Resu
         ensure!(page["data"][0]["connection"]["_id"]==ids[2].to_hex(),"Ranks beyond the first page before selecting rows");
         ensure!(page["aggregate"][0]["in_bytes"]==600.,"Aggregate covers all owned matching ports, not only the page: {page}");
         ensure!(page["data"][0]["traffic"][0].get("incoming_ips").is_none(),"Collapsed rows must not download source IP lists");
+        for seconds in [900, 3600] {
+            let longer=case.status("GET",&format!("/api/inventory/traffic?sort=traffic&page_size=5&seconds={seconds}"),&cookie,json!(null),StatusCode::OK).await?;
+            ensure!(longer["pagination"]["total"]==3 && longer["aggregate"][0]["in_bytes"]==600.,"Dashboard range {seconds} must be accepted: {longer}");
+        }
         let expanded=case.status("GET",&format!("/api/inventory/traffic?sort=traffic&page_size=1&seconds=60&expanded={}",ids[2]),&cookie,json!(null),StatusCode::OK).await?;
         ensure!(expanded["data"][0]["traffic"][0]["incoming_ips"][0]=="192.0.2.10");
         let delta=case.status("GET",&format!("/api/inventory/traffic?sort=traffic&page_size=1&seconds=60&since={}&known={}",now-1,ids[2]),&cookie,json!(null),StatusCode::OK).await?;

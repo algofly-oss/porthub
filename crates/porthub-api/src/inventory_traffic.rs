@@ -113,7 +113,7 @@ pub fn aggregate(samples: impl IntoIterator<Item = Sample>) -> Vec<Sample> {
     buckets
         .into_values()
         .rev()
-        .take(300)
+        .take(3600)
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
@@ -195,7 +195,7 @@ pub fn normalize(samples: &[Value]) -> Vec<Value> {
     buckets
         .into_values()
         .rev()
-        .take(300)
+        .take(3600)
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
@@ -372,8 +372,8 @@ async fn load(
     let mut by_port = HashMap::<i64, Vec<Sample>>::new();
     if let Some(client) = app.firewall.as_ref() {
         // The IPC client deliberately caps a response at 16 MiB. A whole fleet's
-        // five-minute history can exceed that; each read stays bounded instead.
-        for chunk in ports.chunks(64) {
+        // one-hour history can exceed that; each read stays bounded instead.
+        for chunk in ports.chunks(4) {
             let histories = client
                 .request(
                     reqwest::Method::POST,
@@ -620,6 +620,21 @@ pub async fn series_delta(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hour_history_is_preserved_and_limited_after_direction_merging() {
+        let raw: Vec<_> = (10000..13601).flat_map(|timestamp| [
+            json!({"timestamp":timestamp,"in_bytes":2,"interval_seconds":1}),
+            json!({"timestamp":timestamp,"out_bytes":3,"interval_seconds":1}),
+        ]).collect();
+        let numeric = numeric(&raw);
+        let expanded = normalize(&raw);
+        assert_eq!(numeric.len(), 3600);
+        assert_eq!(numeric[0].timestamp, 10001);
+        assert_eq!(numeric_volume(&numeric, "traffic", 3600., 13600.), 18000.);
+        assert_eq!(expanded.len(), 3600);
+        assert_eq!(volume(&expanded, "traffic", 3600., 13600.), 18000.);
+    }
+
     #[test]
     fn merges_directions_without_adding_overlapping_coverage() {
         let rows = normalize(&[
