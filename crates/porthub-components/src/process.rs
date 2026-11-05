@@ -188,3 +188,87 @@ impl Child {
         Ok(())
     }
 }
+
+/// Concurrent process creation may briefly inherit another thread's writable
+/// temporary-file descriptor before exec closes CLOEXEC handles. Linux can then
+/// reject exec with ETXTBSY even though publication has closed its own writer.
+/// Retry only errors proving that process creation did not succeed.
+pub(crate) async fn retry_spawn<T>(
+    cancel: &tokio_util::sync::CancellationToken,
+    mut launch: impl FnMut() -> Result<T>,
+) -> Result<T> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut delay = std::time::Duration::from_millis(10);
+    loop {
+        anyhow::ensure!(!cancel.is_cancelled(), "component startup cancelled");
+        match launch() {
+            Ok(child) => return Ok(child),
+            Err(error) => {
+                let retry = error.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                    #[cfg(unix)]
+                    {
+                        io.raw_os_error() == Some(libc::ETXTBSY)
+                    }
+                    #[cfg(windows)]
+                    {
+                        io.raw_os_error() == Some(32)
+                    } // ERROR_SHARING_VIOLATION
+                });
+                if !retry || tokio::time::Instant::now() + delay >= deadline {
+                    return Err(error);
+                }
+                tokio::select! {biased; _=cancel.cancelled()=>anyhow::bail!("component startup cancelled"),_=tokio::time::sleep(delay)=>{}}
+                delay = (delay * 2).min(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use tokio_util::sync::CancellationToken;
+    #[tokio::test]
+    async fn permission_rejections_and_cancellation_do_not_repeat_startup() {
+        let mut calls = 0;
+        let result: Result<()> = retry_spawn(&CancellationToken::new(), || {
+            calls += 1;
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into())
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(calls, 1);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let _: Result<()> = retry_spawn(&cancel, || {
+            calls += 1;
+            Ok(())
+        })
+        .await;
+        assert_eq!(calls, 1);
+    }
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn actual_exec_recovers_after_a_writable_descriptor_is_closed() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir()?;
+        let executable = root.path().join("fixture");
+        std::fs::copy("/bin/true", &executable)?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+        let writer = std::fs::OpenOptions::new().write(true).open(&executable)?;
+        let task = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+            drop(writer);
+        });
+        let mut attempts = 0;
+        let mut child = retry_spawn(&CancellationToken::new(), || {
+            attempts += 1;
+            Ok(std::process::Command::new(&executable).spawn()?)
+        })
+        .await?;
+        assert!(child.wait()?.success());
+        assert!(attempts > 1);
+        task.await?;
+        Ok(())
+    }
+}

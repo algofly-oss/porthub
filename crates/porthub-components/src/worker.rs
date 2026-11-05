@@ -72,15 +72,18 @@ impl Manager {
         }
         ensure!(!cancel.is_cancelled(), "component invocation cancelled");
         use std::process::Stdio;
-        let mut process = tokio::process::Command::new(executable)
-            .arg("__porthub-stdio")
-            .env("PORTHUB_STATE_DIR", &context.state_directory)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .context("cannot invoke verified component CLI")?;
+        let mut process = crate::process::retry_spawn(cancel, || {
+            tokio::process::Command::new(&executable)
+                .arg("__porthub-stdio")
+                .env("PORTHUB_STATE_DIR", &context.state_directory)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .context("cannot invoke verified component CLI")
+        })
+        .await?;
         let reader = process
             .stdout
             .take()
@@ -155,11 +158,12 @@ impl Manager {
         attempts.retry_at = now().saturating_add(delay);
         write_attempts(&attempt_path, &attempts)?;
         let mut child = Starting {
-            child: Some(crate::process::spawn(
-                executable,
-                endpoint.address(),
-                &context.state_directory,
-            )?),
+            child: Some(
+                crate::process::retry_spawn(cancel, || {
+                    crate::process::spawn(executable, endpoint.address(), &context.state_directory)
+                })
+                .await?,
+            ),
         };
         let ready = tokio::time::timeout(Duration::from_secs(10), async {
             let mut delay = Duration::from_millis(25);
