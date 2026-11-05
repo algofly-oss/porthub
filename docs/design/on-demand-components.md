@@ -822,3 +822,25 @@ Gateway core 1.11.0 is consumed by deployed source
 1.11.1; the unreleased core agent remains independently versioned 1.11.0. This
 avoids reusing an immutable server image version while client implementation
 continues. Production's raw agent endpoint still serves 1.10.1 until publication.
+
+Managed Tor now checks for a newer compatible worker every 60 seconds after a
+session exists. It stages the candidate separately, supplies current permitted
+sources, and bootstraps it before atomically selecting it for new operations.
+A routing-policy change interrupts candidate preparation. Failed preparation
+retains the active generation and best-effort revokes the candidate's sources.
+All current, preparing, and stream-leased retiring generations receive source
+heartbeats; routing changes cancel the previous heartbeat batch. Each returned
+stream retains its generation until drop. Maintenance keeps only weak references
+to retired generations, so it stops renewing their authorization after their last
+operation/stream closes. The worker's existing 30-second source authorization
+expiry remains the fallback when the core or its cleanup connection disappears.
+At most 16 generations may be maintained concurrently; further updates wait for
+old streams to close. Cleanup uses an existing-worker-only connection and cannot
+start another helper merely to revoke it.
+
+Four core adapter tests pass, including duplex stream I/O after generation
+promotion, release of the retired generation after stream drop, rejected-candidate
+isolation, generation bounds, and empty/closed routing authority. These tests
+verify adapter lifetime behavior; an actual managed Tor worker upgrade with live
+network traffic is still required before release. Persistent Tor CLI fallback
+and full terminal implementation extraction remain outstanding.

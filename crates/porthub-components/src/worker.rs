@@ -75,6 +75,17 @@ impl Session {
         }
         Ok(Some(candidate))
     }
+    /// Connect only to the already-running pinned worker. Maintenance cleanup
+    /// must never start a new process merely to revoke a retired profile.
+    pub async fn connect_existing(&self) -> Result<Client> {
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(self.context.state_directory.as_os_str().as_encoded_bytes())
+        );
+        let identity = self.manager.cache_root().join(digest);
+        let endpoint = Endpoint::for_artifact(&identity, &self.artifact)?;
+        Client::connect(&endpoint, &self.artifact).await
+    }
     pub async fn connect(&self, cancel: &CancellationToken) -> Result<Client> {
         let client = self
             .manager
