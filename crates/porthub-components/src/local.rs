@@ -57,6 +57,11 @@ impl Endpoint {
             )))
         }
     }
+    /// Stable identity for startup locks and retry state. Includes the account,
+    /// verified artifact, cache, and invocation context encoded in this endpoint.
+    pub fn startup_key(&self) -> String {
+        format!("{:x}", Sha256::digest(self.0.as_bytes()))
+    }
     pub fn address(&self) -> &str {
         &self.0
     }

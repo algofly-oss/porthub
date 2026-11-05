@@ -153,6 +153,10 @@ async fn exercise(mode: Mode, blocked: bool) -> Result<()> {
     };
     let cancel = CancellationToken::new();
     manager.refresh(&cancel).await?;
+    let identity = manager
+        .cache_root()
+        .join(hash(context.state_directory.as_os_str().as_encoded_bytes()));
+    let endpoint = Endpoint::for_artifact(&identity, &artifact)?;
     if blocked {
         let retry_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -161,7 +165,10 @@ async fn exercise(mode: Mode, blocked: bool) -> Result<()> {
         // A previous failed worker startup is a real transport-unavailable case.
         // Core must still resolve/verify the tool and obey policy before fallback.
         std::fs::write(
-            manager.cache_root().join("sync.worker-attempts.json"),
+            manager.cache_root().join(format!(
+                "sync.{}.worker-attempts.json",
+                endpoint.startup_key()
+            )),
             serde_json::to_vec(
                 &serde_json::json!({"count": 1, "last_start": retry_at - 300, "retry_at": retry_at}),
             )?,

@@ -103,6 +103,13 @@ Start and validate a replacement worker before switching new work to it. Existin
 sessions retain their worker until they drain where possible. If a protocol
 cannot hand off safely, defer its update until idle or reconnect with explicit
 session recovery. A failed replacement leaves the working version active.
+Worker startup locks and retry state are scoped to the endpoint identity, which
+includes the account, cache, state context, tool version, and executable hash. A
+failed candidate cannot impose its backoff on an older binary or another state
+context. Repacking an unchanged tool preserves its identity. Activation-verified
+last-known-good selection remains to be implemented; download verification alone
+does not prove a tool can start.
+
 Component crashes have bounded restart backoff; they cannot restart the whole
 agent or silently weaken networking, authorization, or Tor privacy policy.
 

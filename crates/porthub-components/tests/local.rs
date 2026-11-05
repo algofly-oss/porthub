@@ -90,3 +90,49 @@ async fn stale_socket_recovery_never_removes_regular_files_or_live_listeners() {
     drop(listener);
     assert!(!std::path::Path::new(endpoint.address()).exists());
 }
+
+#[test]
+fn startup_backoff_is_scoped_to_artifact_and_context() {
+    let root = tempfile::tempdir().unwrap();
+    let original = artifact();
+    let endpoint = Endpoint::for_artifact(&root.path().join("context-a"), &original).unwrap();
+    let key = endpoint.startup_key();
+    assert_eq!(key.len(), 64);
+    assert_eq!(
+        key,
+        Endpoint::parse(Component::Sync, endpoint.address())
+            .unwrap()
+            .startup_key()
+    );
+    let mut newer = original.clone();
+    newer.version = "0.1.1".parse().unwrap();
+    assert_ne!(
+        key,
+        Endpoint::for_artifact(&root.path().join("context-a"), &newer)
+            .unwrap()
+            .startup_key()
+    );
+    let mut changed = original.clone();
+    changed.executable.sha256 = "e".repeat(64);
+    assert_ne!(
+        key,
+        Endpoint::for_artifact(&root.path().join("context-a"), &changed)
+            .unwrap()
+            .startup_key()
+    );
+    assert_ne!(
+        key,
+        Endpoint::for_artifact(&root.path().join("context-b"), &original)
+            .unwrap()
+            .startup_key()
+    );
+    let mut repacked = original.clone();
+    repacked.release = "1.12.0".parse().unwrap();
+    repacked.archive.sha256 = "f".repeat(64);
+    assert_eq!(
+        key,
+        Endpoint::for_artifact(&root.path().join("context-a"), &repacked)
+            .unwrap()
+            .startup_key()
+    );
+}

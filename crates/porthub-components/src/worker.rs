@@ -130,9 +130,10 @@ impl Manager {
         if let Ok(client) = Client::connect(&endpoint, artifact).await {
             return Ok(client);
         }
+        let startup_key = endpoint.startup_key();
         let _lock = crate::store::lock(
             self.cache_root(),
-            &format!("{component}.worker.lock"),
+            &format!("{component}.{startup_key}.worker.lock"),
             cancel,
         )
         .await?;
@@ -142,7 +143,7 @@ impl Manager {
         }
         let attempt_path = self
             .cache_root()
-            .join(format!("{component}.worker-attempts.json"));
+            .join(format!("{component}.{startup_key}.worker-attempts.json"));
         let mut attempts = read_attempts(&attempt_path)?;
         ensure!(
             now() >= attempts.retry_at,
