@@ -49,9 +49,7 @@ async fn main() -> Result<()> {
     let hello = Hello {
         component: Component::Tor,
         protocol: PROTOCOL,
-        version: option_env!("PORTHUB_COMPONENT_VERSION")
-            .unwrap_or(env!("CARGO_PKG_VERSION"))
-            .parse()?,
+        version: porthub_tor::VERSION.parse()?,
     };
     match args.command {
         Command::Worker { endpoint } => {

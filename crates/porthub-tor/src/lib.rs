@@ -27,6 +27,35 @@ fn now() -> u64 {
 }
 use tokio::sync::{watch, Mutex};
 use tokio_util::sync::CancellationToken;
+pub const VERSION: &str = match option_env!("PORTHUB_COMPONENT_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
+fn storage_directory(options: &Options, version: &str) -> Result<PathBuf, Failure> {
+    // Version comes from the immutable executable, never from an RPC caller.
+    if version.len() > 64
+        || version.is_empty()
+        || !version
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+    {
+        return Err(failure(
+            ErrorCode::Internal,
+            "Invalid Tor worker version identity",
+        ));
+    }
+    Ok(options.directory.join(format!(
+        "worker-{version}-g{}-c{}-{}",
+        options.groups,
+        options.max_connections,
+        if options.sources.is_some() {
+            "restricted"
+        } else {
+            "system"
+        }
+    )))
+}
 type Key = (PathBuf, usize, usize, bool);
 struct Pool {
     tor: Arc<TorPool>,
@@ -75,7 +104,8 @@ impl Worker {
                 "Tor worker profile capacity reached; unused profiles expire after five minutes",
             ));
         }
-        let mut tor = TorPool::new(&options.directory, options.groups, options.max_connections)
+        let storage = storage_directory(&options, VERSION)?;
+        let mut tor = TorPool::new(&storage, options.groups, options.max_connections)
             .map_err(|_| failure(ErrorCode::InvalidRequest, "Cannot configure Tor storage"))?;
         let sources = if let Some(sources) = options.sources {
             let (sender, receiver) = watch::channel(sources);
@@ -205,6 +235,25 @@ mod tests {
             max_connections: 64,
             sources,
         }
+    }
+    #[test]
+    fn concurrent_versions_and_profiles_have_independent_storage_but_source_updates_reuse_it() {
+        let root = tempfile::tempdir().unwrap();
+        let mut profile = options(root.path(), Some(vec!["192.0.2.10".parse().unwrap()]));
+        let original = storage_directory(&profile, "0.1.0").unwrap();
+        assert!(original.starts_with(root.path()));
+        assert_ne!(original, storage_directory(&profile, "0.1.1").unwrap());
+        profile.sources = Some(vec![]);
+        assert_eq!(original, storage_directory(&profile, "0.1.0").unwrap());
+        profile.groups = 8;
+        assert_ne!(original, storage_directory(&profile, "0.1.0").unwrap());
+        profile.groups = 4;
+        profile.max_connections = 128;
+        assert_ne!(original, storage_directory(&profile, "0.1.0").unwrap());
+        profile.max_connections = 64;
+        profile.sources = None;
+        assert_ne!(original, storage_directory(&profile, "0.1.0").unwrap());
+        assert!(storage_directory(&profile, "../../other").is_err());
     }
     #[tokio::test]
     async fn configured_sources_update_same_pool_and_empty_sources_never_enable_os_routing() {

@@ -457,6 +457,16 @@ share one such session. This prevents readiness from an older pool being applied
 to a newly downloaded, unbootstrapped worker. The sync process fixture verifies
 stable worker identity across a catalog update and session recovery after a failed
 candidate. Automatic Tor candidate bootstrap-and-switch, retained-stream source
-updates during that transition, version-specific state directories, and supervised
-persistent CLI fallback are still required. Prefetch updates files in the
+updates during that transition and supervised persistent CLI fallback are still
+required. Version-specific worker state directories are implemented below. Prefetch updates files in the
 background; this change does not yet hot-activate a new Tor worker version.
+
+Tor RPC workers place Arti state/cache under a directory specific to the immutable
+tool version, circuit group count, connection limit, and restricted/system routing
+mode. Different versions or pool configurations can therefore prepare alongside
+an older pool without selecting its Arti lock directory. Updating the allowed
+source addresses, including revoking all addresses, retains the same pool and
+storage identity. Standalone `proxy --directory` behavior remains explicit to that
+standalone command. Unit checks cover namespace separation, unchanged source
+update identity, source revocation, leased pool retention, and invalid requests;
+live simultaneous Arti bootstrap and version handover remain rollout gates.
