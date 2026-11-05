@@ -255,3 +255,29 @@ fallback remains required before final release. Ordinary sync supports CLI
 fallback already. Live Tor-network bootstrap/stream verification and component
 publication are also still required; current Tor tests run without Tor-network
 access and cover source policy, profile lifetime and the real standalone frontend.
+
+### Dependency-aware build receipts
+
+`deploy/components.toml` declares separate Cargo invocations for core, sync and
+Tor. `scripts/component-build-plan.py` records each target's actual Cargo dependency
+tree and merged dependency file after its build. Receipts include compiled local
+sources, effective inherited manifests, selected lockfile identities/edges,
+relevant patch overrides, profile/compiler inputs and an immutable binary digest.
+The selection phase re-hashes those recorded inputs without running Cargo or
+fetching registry manifests. Unrelated agent edits, unrelated locked packages,
+workspace membership and fixed helpers' unrelated core-version bumps do not
+invalidate a helper. Changed helper inputs advance its independent patch version;
+changed core inputs require a fresh core release version. Ambiguous versions of
+an active dependency name are conservatively fingerprinted.
+
+A reuse decision is a candidate, not authorization to publish arbitrary cached
+bytes. `verify-reuse` must verify the previous binary against the receipt after
+its official archive/provenance has been verified. `record` requires a clean
+checkout of the stated immutable source, a current merged dependency file, and
+the selected binary/profile. Generated outputs under `target` are excluded;
+their source/build-script inputs and explicitly declared external build recipes
+must be included. Native compiler/linker flags must be consistent between the
+selection and build phases. The build planner is tested on native platforms;
+release workflow selection, archive repacking and publication integration remain
+required before the agent release. Terminal/stats recipes will be added with their
+extracted packages.

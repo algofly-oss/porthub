@@ -1,0 +1,223 @@
+import copy
+import importlib.util
+import json
+import os
+from pathlib import Path
+import tempfile
+import subprocess
+import unittest
+
+spec = importlib.util.spec_from_file_location('buildplan', Path(__file__).with_name('component-build-plan.py'))
+buildplan = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(buildplan)
+TARGET = 'x86_64-unknown-linux-gnu'
+
+
+class BuildPlanTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='porthub build inputs ')
+        self.root = Path(self.temp.name)
+        self.addCleanup(self.temp.cleanup)
+        self.write('Cargo.toml', '''[workspace]
+members = ["core", "tool", "support"]
+[workspace.package]
+version = "1.11.0"
+edition = "2021"
+publish = false
+[workspace.dependencies]
+dep-a = "1"
+''')
+        self.write('rust-toolchain.toml', '[toolchain]\nchannel="1.99.1"\nprofile="minimal"\ncomponents=["clippy"]\n')
+        self.write('deploy/components.toml', '''schema_version=1
+[tools.core]
+package="core"
+manifest="core/Cargo.toml"
+binary="core"
+default_features=true
+features=[]
+extra_inputs=[]
+profile="release"
+recipe_version=1
+[tools.tool]
+package="tool"
+manifest="tool/Cargo.toml"
+binary="tool"
+default_features=true
+features=[]
+extra_inputs=[]
+profile="release"
+recipe_version=1
+''')
+        self.write('core/Cargo.toml', '[package]\nname="core"\nversion.workspace=true\nedition.workspace=true\n[dependencies]\nsupport={path="../support"}\n')
+        self.write('tool/Cargo.toml', '[package]\nname="tool"\nversion="0.1.0"\nedition.workspace=true\npublish.workspace=true\n[dependencies]\nsupport={path="../support"}\n')
+        self.write('support/Cargo.toml', '[package]\nname="support"\nversion="0.1.0"\nedition.workspace=true\n[dependencies]\ndep-a.workspace=true\n')
+        self.write('core/src/main.rs', 'fn main() {}\n')
+        self.write('tool/src/main.rs', 'fn main() {}\n')
+        self.write('support/src/lib.rs', 'pub fn value()->u8 {1}\n')
+        self.packages = [
+            {'name': 'core', 'version': '1.11.0', 'dependencies': ['support']},
+            {'name': 'tool', 'version': '0.1.0', 'dependencies': ['support']},
+            {'name': 'support', 'version': '0.1.0', 'dependencies': ['dep-a']},
+            {'name': 'dep-a', 'version': '1.0.0', 'source': 'registry+https://github.com/rust-lang/crates.io-index', 'checksum': 'a' * 64},
+        ]
+        self.lock()
+        self.binary = self.root / 'target/tool'
+        self.write('target/tool', 'independent executable fixture')
+        self.dep = self.root / 'target/tool.d'
+        self.deps('tool')
+        self.receipt = self.record('tool')
+
+    def write(self, name, text):
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    def lock(self):
+        rows = ['version = 4\n']
+        for package in self.packages:
+            rows.append('[[package]]\n' + '\n'.join(key + ' = ' + json.dumps(value) for key, value in package.items()))
+        self.write('Cargo.lock', '\n'.join(rows))
+
+    def deps(self, tool):
+        escape = lambda path: str(path).replace('\\', '\\\\').replace(' ', '\\ ')
+        paths = [self.root / tool / 'src/main.rs', self.root / 'support/src/lib.rs']
+        self.dep.write_text(escape(self.binary) + ': ' + ' '.join(map(escape, paths)) + '\n')
+        # No assumptions about Windows timestamp granularity in this fixture.
+        stamp = self.binary.stat().st_mtime_ns + 1_000_000_000
+        os.utime(self.dep, ns=(stamp, stamp))
+
+    def record(self, tool):
+        version = '1.11.0' if tool == 'core' else '0.1.0'
+        tree = (f'0{tool} v{version} ({self.root / tool})|\n'
+                f'1support v0.1.0 ({self.root / "support"})|\n'
+                '2dep-a v1.0.0|default,std\n')
+        return buildplan.record(self.root, tool, TARGET, self.binary, self.dep, 'a' * 40, tree=tree)
+
+    def choose(self):
+        return buildplan.plan(self.root, 'tool', TARGET, self.receipt)
+
+    def test_agent_only_edits_and_unrelated_lock_changes_reuse_helper(self):
+        self.write('core/src/main.rs', 'fn main() {println!("new core behavior");}\n')
+        self.packages.append({'name': 'unrelated', 'version': '9.0.0', 'source': 'registry+https://github.com/rust-lang/crates.io-index', 'checksum': 'b' * 64})
+        self.lock()
+        choice = self.choose()
+        self.assertEqual(choice['action'], 'reuse')
+        self.assertTrue(choice['requires_artifact_verification'])
+        buildplan.verify_reuse(self.receipt, self.binary)
+
+    def test_transitive_source_change_advances_only_helper_version(self):
+        self.write('support/src/lib.rs', 'pub fn value()->u8 {2}\n')
+        choice = self.choose()
+        self.assertEqual(choice['action'], 'build')
+        self.assertEqual(choice['version'], '0.1.1')
+
+    def test_source_checksum_and_selected_edge_changes_force_rebuild(self):
+        self.packages[-1]['checksum'] = 'c' * 64
+        self.lock()
+        self.assertEqual(self.choose()['action'], 'build')
+        self.packages[-1]['checksum'] = 'a' * 64
+        self.packages.append({**self.packages[-1], 'version': '1.0.1'})
+        self.packages[2]['dependencies'] = ['dep-a 1.0.1']
+        self.lock()
+        self.assertEqual(self.choose()['action'], 'build', 'Old version still in the lock must not hide a new selected dependency')
+
+    def test_workspace_version_bump_rebuilds_core_without_rebuilding_fixed_helpers(self):
+        self.deps('core')
+        core = self.record('core')
+        self.write('Cargo.toml', (self.root / 'Cargo.toml').read_text().replace('1.11.0', '1.11.1'))
+        self.packages[0]['version'] = '1.11.1'
+        self.lock()
+        self.assertEqual(self.choose()['action'], 'reuse')
+        choice = buildplan.plan(self.root, 'core', TARGET, core)
+        self.assertEqual((choice['action'], choice['version']), ('build', '1.11.1'))
+
+    def test_new_recipe_entry_does_not_rebuild_other_tools(self):
+        self.write('deploy/components.toml', (self.root / 'deploy/components.toml').read_text() + '\n[tools.stats]\npackage="stats"\n')
+        self.assertEqual(self.choose()['action'], 'reuse')
+
+    def test_feature_toolchain_and_target_changes_invalidate_reuse(self):
+        recipe = self.root / 'deploy/components.toml'
+        original = recipe.read_text()
+        self.write('deploy/components.toml', original.replace('[tools.tool]\n', '[tools.tool]\n').replace('profile="release"', 'profile="agent-dev"'))
+        self.assertEqual(self.choose()['action'], 'build')
+        self.write('deploy/components.toml', original)
+        self.write('rust-toolchain.toml', '[toolchain]\nchannel="1.99.2"\n')
+        self.assertEqual(self.choose()['action'], 'build')
+        choice = buildplan.plan(self.root, 'tool', 'aarch64-pc-windows-msvc', self.receipt)
+        self.assertEqual(choice['action'], 'build')
+
+    def test_directory_inputs_detect_added_files_and_deleted_inputs_force_build(self):
+        recipe = self.root / 'deploy/components.toml'
+        self.write('templates/first', 'one')
+        self.write('deploy/components.toml', recipe.read_text().replace('extra_inputs=[]', 'extra_inputs=["templates"]'))
+        self.receipt = self.record('tool')
+        self.write('templates/second', 'two')
+        self.assertEqual(self.choose()['action'], 'build')
+        (self.root / 'support/src/lib.rs').unlink()
+        self.assertEqual(self.choose()['action'], 'build')
+
+    def test_release_profile_and_relevant_compiler_flags_are_inputs(self):
+        self.write('Cargo.toml', (self.root / 'Cargo.toml').read_text() + '\n[profile.release]\nlto="thin"\n')
+        self.receipt = self.record('tool')
+        self.write('Cargo.toml', (self.root / 'Cargo.toml').read_text() + '\n[profile.release.package.core]\nopt-level=1\n')
+        self.assertEqual(self.choose()['action'], 'reuse', 'A core-only profile override must not rebuild helpers')
+        self.write('Cargo.toml', (self.root / 'Cargo.toml').read_text().replace('lto="thin"', 'lto=false'))
+        self.assertEqual(self.choose()['action'], 'build')
+        original = os.environ.get('RUSTFLAGS')
+        try:
+            self.receipt = self.record('tool')
+            os.environ['RUSTFLAGS'] = '-C target-cpu=generic'
+            self.assertEqual(self.choose()['action'], 'build')
+        finally:
+            if original is None: os.environ.pop('RUSTFLAGS', None)
+            else: os.environ['RUSTFLAGS'] = original
+
+    def test_immutable_source_check_rejects_wrong_revision_and_dirty_checkout(self):
+        def git(*args):
+            return subprocess.run(['git', *args], cwd=self.root, capture_output=True, text=True, check=True).stdout.strip()
+        git('init', '--quiet')
+        git('add', '.')
+        git('-c', 'user.name=Build Fixture', '-c', 'user.email=build-fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'Fixture')
+        revision = git('rev-parse', 'HEAD')
+        buildplan.require_clean_source(self.root, revision)
+        with self.assertRaisesRegex(ValueError, 'immutable revision'):
+            buildplan.require_clean_source(self.root, 'b' * 40)
+        self.write('tool/src/main.rs', 'fn main() {println!("uncommitted");}')
+        with self.assertRaisesRegex(ValueError, 'uncommitted'):
+            buildplan.require_clean_source(self.root, revision)
+
+    def test_reuse_rejects_corrupt_binary_and_receipt(self):
+        self.binary.write_bytes(b'changed')
+        with self.assertRaisesRegex(ValueError, 'binary'):
+            buildplan.verify_reuse(self.receipt, self.binary)
+        altered = copy.deepcopy(self.receipt)
+        altered['source_revision'] = 'b' * 40
+        with self.assertRaisesRegex(ValueError, 'integrity'):
+            buildplan.validate_receipt(altered)
+
+    def test_stale_dep_info_and_private_or_escaping_paths_are_rejected(self):
+        os.utime(self.dep, ns=(1, 1))
+        with self.assertRaisesRegex(ValueError, 'predates'):
+            self.record('tool')
+        for path in ['../outside', '.env', '.cargo/credentials.toml']:
+            with self.assertRaises(ValueError):
+                buildplan.relative(self.root, path)
+        if os.name != 'nt':
+            (self.root / 'link').symlink_to(self.root / 'support/src/lib.rs')
+            with self.assertRaisesRegex(ValueError, 'symlink'):
+                buildplan.relative(self.root, 'link')
+
+    def test_changed_core_requires_an_unconsumed_version(self):
+        self.deps('core')
+        previous = self.record('core')
+        self.write('core/src/main.rs', 'fn main() {println!("different contents");}')
+        with self.assertRaisesRegex(ValueError, 'new release version'):
+            buildplan.plan(self.root, 'core', TARGET, previous)
+
+    def test_depfile_parser_handles_spaces_continuations_and_windows_drives(self):
+        text = 'C\\:/work\\ space/tool.exe: C\\:/work\\ space/src/main.rs \\\n C\\:/work\\ space/src/other.rs\n\nC\\:/work\\ space/src/main.rs:\n'
+        self.assertEqual(buildplan.dep_paths(text), ['C:/work space/src/main.rs', 'C:/work space/src/other.rs'])
+
+
+if __name__ == '__main__':
+    unittest.main()

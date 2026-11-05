@@ -4,6 +4,9 @@ on:
     branches: [main, codex/on-demand-components]
     paths:
       - 'crates/porthub-components/**'
+      - 'deploy/components.toml'
+      - 'scripts/component-build-plan.py'
+      - 'scripts/test_component_build_plan.py'
       - 'crates/porthub-sync/**'
       - 'crates/porthub-tor/**'
       - 'crates/porthub-egress/**'
@@ -15,6 +18,9 @@ on:
   pull_request:
     paths:
       - 'crates/porthub-components/**'
+      - 'deploy/components.toml'
+      - 'scripts/component-build-plan.py'
+      - 'scripts/test_component_build_plan.py'
       - 'crates/porthub-sync/**'
       - 'crates/porthub-tor/**'
       - 'crates/porthub-egress/**'
@@ -43,6 +49,11 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: '0'
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Verify dependency-aware component build selection
+        run: python scripts/test_component_build_plan.py
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.99.1 --profile minimal
       - uses: Swatinem/rust-cache@v2
