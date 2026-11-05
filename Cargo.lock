@@ -5214,6 +5214,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "porthub-terminal-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap 4.6.7",
+ "directories",
+ "porthub-components",
+ "porthub-terminal",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "porthub-tor"
 version = "0.1.0"
 dependencies = [

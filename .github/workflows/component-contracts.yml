@@ -13,6 +13,7 @@ on:
       - 'crates/porthub-tor/**'
       - 'crates/porthub-stats/**'
       - 'crates/porthub-console/**'
+      - 'crates/porthub-terminal-cli/**'
       - 'crates/porthub-egress/**'
       - 'crates/porthub-transfer/**'
       - 'Cargo.lock'
@@ -31,6 +32,7 @@ on:
       - 'crates/porthub-tor/**'
       - 'crates/porthub-stats/**'
       - 'crates/porthub-console/**'
+      - 'crates/porthub-terminal-cli/**'
       - 'crates/porthub-egress/**'
       - 'crates/porthub-transfer/**'
       - 'Cargo.lock'
@@ -67,7 +69,7 @@ jobs:
           changed=true
           if [[ "$before_revision" =~ ^[a-f0-9]{40}$ ]] && [[ "$before_revision" != 0000000000000000000000000000000000000000 ]]; then
             if git cat-file -e "$before_revision^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "$before_revision" >/dev/null 2>&1; then
-              if git diff --quiet "$before_revision" HEAD -- Cargo.toml Cargo.lock rust-toolchain.toml .cargo vendor crates/porthub-components crates/porthub-sync crates/porthub-tor crates/porthub-stats crates/porthub-console crates/porthub-transfer crates/porthub-egress .github/workflows/component-contracts.yml; then
+              if git diff --quiet "$before_revision" HEAD -- Cargo.toml Cargo.lock rust-toolchain.toml .cargo vendor crates/porthub-components crates/porthub-sync crates/porthub-tor crates/porthub-stats crates/porthub-console crates/porthub-terminal-cli crates/porthub-transfer crates/porthub-egress .github/workflows/component-contracts.yml; then
                 changed=false
               fi
             fi
@@ -96,6 +98,9 @@ jobs:
       - name: Verify standalone stats dashboard and shared console
         if: steps.native_changes.outputs.rust == 'true'
         run: cargo test --locked -p porthub-stats -p porthub-console
+      - name: Verify independent terminal runtime interface
+        if: steps.native_changes.outputs.rust == 'true'
+        run: cargo test --locked -p porthub-terminal-cli
       - name: Verify transfers compile and run without watch synchronization
         if: steps.native_changes.outputs.rust == 'true'
         run: cargo test --locked -p porthub-transfer --no-default-features

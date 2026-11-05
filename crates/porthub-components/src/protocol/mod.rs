@@ -3,3 +3,4 @@ pub mod sync;
 pub mod tor;
 
 pub mod stats;
+pub mod terminal;

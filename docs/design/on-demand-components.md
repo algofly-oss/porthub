@@ -517,3 +517,33 @@ standalone provider, private managed snapshot streaming beyond one frame, and th
 core broker's exclusion of credentials. Live installed CLI/TTY checks remain
 required before rollout. A file-input fallback exists for standalone use; automatic
 managed handoff fallback when local IPC is unavailable remains unimplemented.
+
+### Independent terminal runtime component
+
+`porthub-terminal-cli` builds the `porthub-terminal` executable independently of
+core. It owns a terminal bundle build script, the verified runtime installer,
+versioned `Install` IPC operation, persistent worker, and private stdio frontend.
+It has no agent or gateway dependency. Linux/macOS release builds require the
+existing checksum-pinned C runtime bundle; Windows hosting remains unsupported
+and uses WSL. Development builds can expose help/contracts without embedding it.
+
+Standalone use forwards normal tmux commands to the bundled runtime, for example:
+
+```sh
+porthub-terminal tmux -- new-session -s work
+porthub-terminal tmux -- list-sessions
+porthub-terminal tmux -- attach-session -t work
+```
+
+`--directory` selects a private runtime cache. The tool sets its bundled terminfo
+and invokes the executable directly; projects can use it without PortHub core or
+a gateway. A real bundled Linux test creates/lists an isolated workspace using
+its own socket and removes only that test server. Debug native contract runs
+without a bundle test help and invalid-directory handling; bundled workspace
+coverage requires the release/native build environment.
+
+Core still embeds its existing terminal bundle and hosts its existing workspace
+and sharing implementation. Delegating runtime installation to this component,
+removing core's C-bundle build dependency, and moving the remaining terminal
+implementation behind the scoped broker are pending. Adding this component has
+not yet reduced the core terminal footprint or deployed new client behavior.
