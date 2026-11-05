@@ -82,4 +82,13 @@ class Packaging(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    unittest.main()
+    import sys
+    if len(sys.argv) == 3 and sys.argv[1] == '--fixture-output':
+        case = Packaging()
+        case.setUp()
+        try:
+            packager.package(case.complete(), Path(sys.argv[2]), '1.11.0')
+        finally:
+            case.doCleanups()
+    else:
+        unittest.main()

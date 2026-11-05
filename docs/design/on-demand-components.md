@@ -367,3 +367,15 @@ The ten-platform fixture produces exactly 21 files. This packager is not yet
 wired into production build selection/publication; legacy release verification
 and the publication workflow must be adapted before switching formats. Real
 platform executable/ABI checks remain required in addition to packaging tests.
+
+
+The existing offline `porthub-api --check-artifacts DIRECTORY VERSION` verifier
+now accepts either the legacy 30-file release or the compact 21-file release.
+For compact releases it validates the shared Rust manifest contracts, every core
+hash, all declared tool archives and extracted executable hashes, safe members,
+and the exact asset set. Retained helpers must be repacked into this release's
+archives. The check needs no database, gateway, credentials, or tool execution.
+A Rust integration test consumes the Python packager's full ten-platform fixture
+and rejects wrong versions, damaged core/archive bytes, and unexpected files.
+This validates distribution integrity; native executable/ABI checks remain
+separate release gates. Packaging sets explicit permissions independent of umask.

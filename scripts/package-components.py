@@ -81,6 +81,7 @@ def package(entries, output, release, *, verify_only=False):
             receipt, binary = cores[target]
             asset = 'porthub-' + legacy + ('.exe' if 'windows' in target else '')
             shutil.copyfile(binary, stage / asset)
+            (stage / asset).chmod(0o755)
             # Verify the copied bytes as well, catching input changes during packaging.
             planner.verify_reuse(receipt, stage / asset)
             core_assets.append({'target': legacy, 'asset': asset,
@@ -97,6 +98,7 @@ def package(entries, output, release, *, verify_only=False):
                         header.size = item['binary']['size']; header.mode = 0o755
                         with path.open('rb') as stream:
                             tar.addfile(header, stream)
+            archive.chmod(0o644)
             expected = {item['tool'] + '/' + item['version'] + '/' + item['binary']['name']: item['binary'] for item, _ in groups[target]}
             with tarfile.open(archive) as packed:
                 for member in packed:
@@ -126,6 +128,7 @@ def package(entries, output, release, *, verify_only=False):
         if len(payload) > 512 * 1024:
             raise ValueError('Release manifest exceeds gateway limit')
         (stage / 'porthub-components.json').write_bytes(payload)
+        (stage / 'porthub-components.json').chmod(0o644)
         os.rename(stage, output)
     return manifest
 
