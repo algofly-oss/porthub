@@ -106,9 +106,13 @@ session recovery. A failed replacement leaves the working version active.
 Worker startup locks and retry state are scoped to the endpoint identity, which
 includes the account, cache, state context, tool version, and executable hash. A
 failed candidate cannot impose its backoff on an older binary or another state
-context. Repacking an unchanged tool preserves its identity. Activation-verified
-last-known-good selection remains to be implemented; download verification alone
-does not prove a tool can start.
+context. Repacking an unchanged tool preserves its identity. After a successful version handshake, the core records a private activation
+receipt for that identity. If a later candidate fails before receiving a tool
+request, it can try up to four previously activated older compatible versions.
+Each executable is verified again, and administrator pins and disabled-component
+policy still apply. A download receipt alone never qualifies a version for this
+startup recovery. This does not yet provide transactional staging of Tor pool
+bootstrap or pin existing consumers to a worker version; those remain required.
 
 Component crashes have bounded restart backoff; they cannot restart the whole
 agent or silently weaken networking, authorization, or Tor privacy policy.

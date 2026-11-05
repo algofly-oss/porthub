@@ -80,17 +80,21 @@ async fn wait_file(path: &Path, expected: &[u8]) {
 #[tokio::test]
 async fn verified_module_download_coalesces_worker_start_and_watch_follows_ipc_lifetime(
 ) -> Result<()> {
-    exercise(Mode::Rpc, false).await
+    exercise(Mode::Rpc, false, false).await
 }
 #[tokio::test]
 async fn verified_cli_fallback_preserves_watch_lifetime() -> Result<()> {
-    exercise(Mode::Cli, false).await
+    exercise(Mode::Cli, false, false).await
 }
 #[tokio::test]
 async fn unavailable_worker_automatically_uses_verified_cli() -> Result<()> {
-    exercise(Mode::Auto, true).await
+    exercise(Mode::Auto, true, false).await
 }
-async fn exercise(mode: Mode, blocked: bool) -> Result<()> {
+#[tokio::test]
+async fn failed_candidate_recovers_only_in_previously_activated_context() -> Result<()> {
+    exercise(Mode::Rpc, false, true).await
+}
+async fn exercise(mode: Mode, blocked: bool, failed_update: bool) -> Result<()> {
     let root = tempfile::tempdir()?;
     #[cfg(unix)]
     {
@@ -206,6 +210,62 @@ async fn exercise(mode: Mode, blocked: bool) -> Result<()> {
     }
     assert_ne!(one, std::process::id());
     assert_eq!(fixture.binaries.load(Ordering::SeqCst), 1);
+    if failed_update {
+        let mut candidate = artifact.clone();
+        candidate.version = "0.1.1".parse()?;
+        let mut update = catalog.clone();
+        update.release = "1.12.0".parse()?;
+        candidate.release = update.release.clone();
+        update.artifacts.push(candidate.clone());
+        // Same verified fixture bytes deliberately announce 0.1.0, so the
+        // candidate passes integrity checks but fails its version handshake.
+        std::fs::write(
+            manager
+                .cache_root()
+                .join(porthub_components::catalog::CATALOG_ASSET),
+            serde_json::to_vec(&update)?,
+        )?;
+        let mut recovered = manager
+            .connect(Component::Sync, &context, Mode::Cli, &cancel)
+            .await?;
+        assert!(matches!(
+            recovered
+                .call::<_, SystemValue>(SystemOperation::Ping, Duration::from_secs(2))
+                .await?,
+            SystemValue::Pong { .. }
+        ));
+        let other = ContextOptions {
+            state_directory: root.path().join("other-state"),
+        };
+        assert!(
+            manager
+                .connect(Component::Sync, &other, Mode::Cli, &cancel)
+                .await
+                .is_err(),
+            "downloaded binaries must not qualify as activated in another context"
+        );
+        let pinned = Manager::new(
+            manager.cache_root().to_path_buf(),
+            Settings {
+                gateway: Some("https://fixture.test".parse()?),
+                sources: Sources::GatewayOnly,
+                core: "1.10.1".parse()?,
+                target: target.into(),
+                disabled: BTreeSet::new(),
+                pins: BTreeMap::from([(Component::Sync, candidate.version.clone())]),
+            },
+            fixture.clone(),
+        )?;
+        assert!(
+            pinned
+                .connect(Component::Sync, &context, Mode::Cli, &cancel)
+                .await
+                .is_err(),
+            "an explicit version pin must prevent recovery to a different version"
+        );
+        drop(recovered);
+    }
+
     let source = root.path().join("source");
     let destination = root.path().join("receiver");
     std::fs::create_dir(&source)?;

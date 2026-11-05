@@ -81,7 +81,7 @@ pub struct Manager {
     shared: Option<crate::shared::Cache>,
 }
 
-fn regular(path: &Path) -> Result<std::fs::Metadata> {
+pub(crate) fn regular(path: &Path) -> Result<std::fs::Metadata> {
     let metadata = std::fs::symlink_metadata(path)?;
     ensure!(
         metadata.is_file() && !metadata.file_type().is_symlink(),

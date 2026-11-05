@@ -56,6 +56,94 @@ impl Manager {
         // Policy, compatibility, catalog authorization and verification failures
         // propagate directly. They must never trigger a different download path.
         let (artifact, executable) = self.resolve(component, cancel).await?;
+        let result = self
+            .connect_resolved(component, context, mode, cancel, &artifact, &executable)
+            .await;
+        match result {
+            Ok(client) => {
+                self.record_activation(context, &artifact)?;
+                Ok(client)
+            }
+            Err(error) => {
+                if cancel.is_cancelled() {
+                    return Err(error);
+                }
+                // Only tools that completed a handshake in this context qualify.
+                // installed() rechecks hashes, compatibility, disabled policy and pins.
+                let mut tried = 0;
+                for (previous, path) in self
+                    .installed(component)
+                    .await?
+                    .into_iter()
+                    .filter(|(candidate, _)| candidate.version < artifact.version)
+                {
+                    if !self.was_activated(context, &previous)? {
+                        continue;
+                    }
+                    if tried >= 4 {
+                        break;
+                    }
+                    tried += 1;
+                    if let Ok(client) = self
+                        .connect_resolved(component, context, mode, cancel, &previous, &path)
+                        .await
+                    {
+                        tracing::warn!(component = %component, version = %previous.version,
+                            "using previously activated compatible component after candidate startup failure");
+                        return Ok(client);
+                    }
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn activation_path(&self, context: &ContextOptions, artifact: &Artifact) -> Result<PathBuf> {
+        let identity = self.cache_root().join(format!(
+            "{:x}",
+            Sha256::digest(context.state_directory.as_os_str().as_encoded_bytes())
+        ));
+        let key = Endpoint::for_artifact(&identity, artifact)?.startup_key();
+        Ok(self
+            .cache_root()
+            .join(format!("activated-{}-{key}.json", artifact.component)))
+    }
+    fn was_activated(&self, context: &ContextOptions, artifact: &Artifact) -> Result<bool> {
+        let path = self.activation_path(context, artifact)?;
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => {
+                ensure!(
+                    crate::store::regular(&path)?.len() <= 16384,
+                    "invalid component activation receipt"
+                );
+                let previous: Artifact = serde_json::from_slice(&std::fs::read(path)?)?;
+                Ok(previous.same_tool(artifact))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+    fn record_activation(&self, context: &ContextOptions, artifact: &Artifact) -> Result<()> {
+        use std::io::Write;
+        let path = self.activation_path(context, artifact)?;
+        let mut receipt = tempfile::NamedTempFile::new_in(self.cache_root())?;
+        receipt.write_all(&serde_json::to_vec(artifact)?)?;
+        receipt.as_file().sync_all()?;
+        receipt.persist(path).map_err(|error| error.error)?;
+        Ok(())
+    }
+    async fn connect_resolved(
+        &self,
+        component: Component,
+        context: &ContextOptions,
+        mode: Mode,
+        cancel: &CancellationToken,
+        artifact: &Artifact,
+        executable: &Path,
+    ) -> Result<Client> {
         if !matches!(mode, Mode::Cli) {
             match self
                 .worker_resolved(component, context, cancel, &artifact, &executable)
@@ -96,7 +184,7 @@ impl Manager {
             pipes: crate::stdio::Pair::new(reader, writer),
             process,
         });
-        tokio::select! { biased; _ = cancel.cancelled() => anyhow::bail!("component invocation cancelled"), result = Client::from_stream(stream, &artifact) => result }
+        tokio::select! { biased; _ = cancel.cancelled() => anyhow::bail!("component invocation cancelled"), result = Client::from_stream(stream, artifact) => result }
     }
 
     pub async fn worker(
@@ -109,9 +197,7 @@ impl Manager {
             context.state_directory.is_absolute(),
             "component state requires an absolute directory"
         );
-        let (artifact, executable) = self.resolve(component, cancel).await?;
-        self.worker_resolved(component, context, cancel, &artifact, &executable)
-            .await
+        self.connect(component, context, Mode::Rpc, cancel).await
     }
     async fn worker_resolved(
         &self,
