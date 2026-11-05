@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+porthub-components = { path = "../porthub-components" }
 porthub-terminal = { path = "../porthub-terminal", features = ["ssh"] }
 unicode-normalization = "0.1"
 turn = "=0.17.2"

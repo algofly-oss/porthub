@@ -302,3 +302,25 @@ native Rust inputs, while conservatively testing all Rust inputs when the prior
 revision cannot be inspected. This conditional workflow change is awaiting its
 native run. Stable server image/environment promotion must also be automated in
 the upgrade tool before the next gateway rollout.
+
+### Shared compact manifest reader
+
+The shared `porthub-components.json` document can now use schema 2, containing
+`repository`, `release`, exactly ten `core_assets` (`target`, `asset`,
+`executable: {size, sha256}`), and a nested schema-1 `components` catalog. Core
+asset names are fixed for their platforms; the nested catalog must have the same
+repository and release. The existing schema-1 tool-only document remains readable
+by the component manager.
+
+The gateway's release reader accepts both existing GitHub releases with version
+and checksum sidecars and compact releases whose core metadata is in that shared
+document. It verifies the document against GitHub's asset digest and size, then
+checks every core asset against GitHub metadata. A malformed compact document
+cannot fall back to ignoring the document. Previously accepted component metadata
+cannot be discarded or changed incompatibly by a later release. The persistent
+index retains validated tool metadata for subsequent delivery work.
+
+The reader still generates the existing local core sidecars, preserving the
+current OTA and bootstrap download contracts. Component delivery routes, tool
+archive caching, compact publication, and deployment of this reader remain
+pending; the current production release continues using the original format.

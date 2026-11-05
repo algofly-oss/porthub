@@ -29,6 +29,8 @@ struct Index {
     version: String,
     etag: Option<String>,
     releases: BTreeMap<String, Release>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    components: Option<porthub_components::catalog::Catalog>,
 }
 struct State {
     index: Option<Index>,
@@ -98,6 +100,10 @@ impl Index {
                 && self.releases.len() == TARGETS.len(),
             "invalid release cache index"
         );
+        if let Some(components) = &self.components {
+            components.validate()?;
+            ensure!(components.release.to_string() == self.version, "cached component release differs");
+        }
         for (target, os, arch) in TARGETS {
             let release = self
                 .releases
@@ -384,11 +390,37 @@ impl Remote {
                 "duplicate release asset"
             );
         }
+        let manifest = if let Some(asset) = assets.get(porthub_components::catalog::CATALOG_ASSET) {
+            ensure!(asset.state == "uploaded" && asset.size > 0
+                && asset.size <= porthub_components::catalog::MAX_CATALOG as u64,
+                "invalid compact release manifest asset");
+            let digest = asset.digest.as_deref().and_then(|value| value.strip_prefix("sha256:"))
+                .context("compact release manifest digest missing")?;
+            let url = format!("{}/v{}/{}", self.download_base, version, porthub_components::catalog::CATALOG_ASSET);
+            let mut response = self.http.get(url).timeout(Duration::from_secs(20)).send().await?;
+            ensure!(response.status().is_success(), "compact release manifest unavailable");
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await? {
+                ensure!(bytes.len() as u64 + chunk.len() as u64 <= asset.size,
+                    "compact release manifest exceeds declared size");
+                bytes.extend_from_slice(&chunk);
+            }
+            ensure!(bytes.len() as u64 == asset.size && format!("{:x}", Sha256::digest(&bytes)) == digest,
+                "compact release manifest checksum mismatch");
+            let manifest = porthub_components::manifest::ReleaseManifest::parse(&bytes)?;
+            ensure!(manifest.release.to_string() == version && manifest.repository == self.repository,
+                "compact release identity mismatch");
+            Some(manifest)
+        } else { None };
+        if let Some(previous) = cached.and_then(|index| index.components.as_ref()) {
+            manifest.as_ref().context("compact release cannot discard component metadata")?
+                .components.validate_successor(previous)?;
+        }
         let mut releases = BTreeMap::new();
         for (target, os, arch) in TARGETS {
             let name = asset_name(target, os);
             let asset = assets.get(&name).context("release platform missing")?;
-            for suffix in ["", ".version", ".sha256"] {
+            for suffix in if manifest.is_some() { &[""][..] } else { &["", ".version", ".sha256"][..] } {
                 let asset = assets
                     .get(&format!("{name}{suffix}"))
                     .context("release sidecar missing")?;
@@ -399,6 +431,13 @@ impl Remote {
                 .as_deref()
                 .and_then(|value| value.strip_prefix("sha256:"))
                 .context("release digest missing")?;
+            if let Some(manifest) = &manifest {
+                let declared = manifest.core_assets.iter().find(|asset| asset.target == *target)
+                    .context("compact release target missing")?;
+                ensure!(declared.asset == name && declared.executable.size == asset.size
+                    && declared.executable.sha256 == digest.to_ascii_lowercase(),
+                    "compact release core asset differs from GitHub metadata");
+            }
             releases.insert(
                 (*target).to_owned(),
                 Release {
@@ -418,6 +457,7 @@ impl Remote {
             version,
             etag,
             releases,
+            components: manifest.map(|manifest| manifest.components),
         };
         index.validate(&self.repository)?;
         let path = self.root.join("latest.json");
@@ -582,9 +622,26 @@ mod tests {
         offline: AtomicBool,
         corrupt: AtomicBool,
         incomplete: AtomicBool,
+        compact: AtomicBool,
     }
     fn payload(version: &str, name: &str) -> Vec<u8> {
         format!("native release {version}: {name}").into_bytes()
+    }
+    fn compact_manifest(version: &str) -> Vec<u8> {
+        use porthub_components::{catalog::{Artifact, Blob, Catalog, Component, REPOSITORY}, manifest::{CoreAsset, ReleaseManifest}};
+        let core_assets = TARGETS.iter().map(|(target, os, _)| {
+            let name = asset_name(target, os);
+            let body = payload(version, &name);
+            CoreAsset { target: (*target).into(), asset: name,
+                executable: Blob { size: body.len() as u64, sha256: format!("{:x}", Sha256::digest(body)) } }
+        }).collect();
+        let components = Catalog { schema_version: 1, repository: REPOSITORY.into(), release: version.parse().unwrap(),
+            artifacts: vec![Artifact { component: Component::Sync, version: "0.1.0".parse().unwrap(),
+                target: porthub_components::catalog::TARGETS[0].into(), core: ">=1.0.0".parse().unwrap(), protocols: vec![1],
+                source_revision: "a".repeat(40), build_inputs: "b".repeat(64),
+                executable: Blob { size: 1, sha256: "c".repeat(64) }, release: version.parse().unwrap(),
+                archive: Blob { size: 1, sha256: "d".repeat(64) } }] };
+        serde_json::to_vec(&ReleaseManifest { schema_version: 2, repository: REPOSITORY.into(), release: version.parse().unwrap(), core_assets, components }).unwrap()
     }
     async fn metadata(AxumState(state): AxumState<Arc<Fixture>>, headers: HeaderMap) -> Response {
         state.metadata.fetch_add(1, Ordering::SeqCst);
@@ -604,10 +661,15 @@ mod tests {
         for (target, os, _) in TARGETS {
             let name = asset_name(target, os);
             let body = payload(&version, &name);
-            for suffix in ["", ".version", ".sha256"] {
+            for suffix in if state.compact.load(Ordering::SeqCst) { &[""][..] } else { &["", ".version", ".sha256"][..] } {
                 assets.push(serde_json::json!({"name":format!("{name}{suffix}"),"size":body.len(),"digest":format!("sha256:{:x}",Sha256::digest(&body)),"state":"uploaded",
                     "browser_download_url":"http://untrusted.invalid/ignored"}));
             }
+        }
+        if state.compact.load(Ordering::SeqCst) {
+            let body = compact_manifest(&version);
+            assets.push(serde_json::json!({"name":porthub_components::catalog::CATALOG_ASSET,
+                "size":body.len(),"digest":format!("sha256:{:x}",Sha256::digest(body)),"state":"uploaded"}));
         }
         if state.incomplete.load(Ordering::SeqCst) {
             assets.pop();
@@ -622,7 +684,9 @@ mod tests {
         if state.offline.load(Ordering::SeqCst) {
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
-        let mut body = payload(version.trim_start_matches('v'), &name);
+        let mut body = if name == porthub_components::catalog::CATALOG_ASSET {
+            compact_manifest(version.trim_start_matches('v'))
+        } else { payload(version.trim_start_matches('v'), &name) };
         if state.corrupt.load(Ordering::SeqCst) {
             body[0] ^= 1;
         }
@@ -642,6 +706,7 @@ mod tests {
             offline: AtomicBool::new(false),
             corrupt: AtomicBool::new(false),
             incomplete: AtomicBool::new(false),
+            compact: AtomicBool::new(false),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let base = format!("http://{}", listener.local_addr()?);
@@ -654,12 +719,60 @@ mod tests {
         });
         let remote = Remote::new(
             root.path().join("cache"),
-            "owner/project".into(),
+            porthub_components::catalog::REPOSITORY.into(),
             format!("{base}/latest"),
             format!("{base}/download"),
             true,
         )?;
         Ok((root, state, remote, task))
+    }
+    #[test]
+    fn shared_manifest_rejects_incomplete_duplicate_or_conflicting_core_metadata() -> Result<()> {
+        use porthub_components::{catalog::Catalog, manifest::ReleaseManifest};
+        let bytes = compact_manifest("1.11.0");
+        let manifest = ReleaseManifest::parse(&bytes)?;
+        assert_eq!(Catalog::parse(&bytes)?.release, manifest.release);
+        let mut incomplete = manifest.clone(); incomplete.core_assets.pop();
+        assert!(incomplete.validate().is_err());
+        let mut duplicate = manifest.clone(); duplicate.core_assets[1] = duplicate.core_assets[0].clone();
+        assert!(duplicate.validate().is_err());
+        let mut traversal = manifest.clone(); traversal.core_assets[0].asset = "../porthub".into();
+        assert!(traversal.validate().is_err());
+        let mut conflict = manifest.clone(); conflict.components.release = "1.10.0".parse()?;
+        assert!(conflict.validate().is_err());
+        let mut bad_digest = manifest.clone(); bad_digest.core_assets[0].executable.sha256 = "z".repeat(64);
+        assert!(bad_digest.validate().is_err());
+        Ok(())
+    }
+    #[tokio::test]
+    async fn compact_release_needs_no_sidecars_and_persists_validated_components() -> Result<()> {
+        let (_root, state, remote, task) = fixture().await?;
+        state.compact.store(true, Ordering::SeqCst);
+        let release = remote.release("x86_64").await?;
+        assert_eq!(release.version, "1.7.0");
+        let index = remote.state.read().unwrap().index.clone().unwrap();
+        assert!(index.components.is_some());
+        let persisted: Index = serde_json::from_slice(&tokio::fs::read(remote.root.join("latest.json")).await?)?;
+        persisted.validate(porthub_components::catalog::REPOSITORY)?;
+        assert!(persisted.components.is_some());
+        let _asset = remote.ensure("x86_64", false).await?;
+        task.abort();
+        Ok(())
+    }
+    #[tokio::test]
+    async fn corrupt_compact_manifest_cannot_replace_a_verified_legacy_index() -> Result<()> {
+        let (_root, state, remote, task) = fixture().await?;
+        remote.release("x86_64").await?;
+        let previous = remote.state.read().unwrap().index.clone().unwrap();
+        state.compact.store(true, Ordering::SeqCst);
+        *state.version.write().unwrap() = "1.8.0".into();
+        state.corrupt.store(true, Ordering::SeqCst);
+        assert!(remote.fetch_index(Some(&previous)).await.is_err());
+        assert_eq!(remote.state.read().unwrap().index.as_ref().unwrap().version, "1.7.0");
+        let persisted: Index = serde_json::from_slice(&tokio::fs::read(remote.root.join("latest.json")).await?)?;
+        assert_eq!(persisted.version, "1.7.0");
+        task.abort();
+        Ok(())
     }
     fn expire(remote: &Remote) {
         let mut state = remote.state.write().unwrap();

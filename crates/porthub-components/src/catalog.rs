@@ -206,7 +206,11 @@ impl Catalog {
             bytes.len() <= MAX_CATALOG,
             "component catalog exceeds size limit"
         );
-        let catalog: Self = serde_json::from_slice(bytes).context("invalid component catalog")?;
+        let value: serde_json::Value = serde_json::from_slice(bytes).context("invalid component catalog")?;
+        if value.get("schema_version").and_then(serde_json::Value::as_u64) == Some(2) {
+            return Ok(crate::manifest::ReleaseManifest::parse(bytes)?.components);
+        }
+        let catalog: Self = serde_json::from_value(value).context("invalid component catalog")?;
         catalog.validate()?;
         Ok(catalog)
     }

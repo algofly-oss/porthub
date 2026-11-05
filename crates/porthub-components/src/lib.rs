@@ -4,6 +4,7 @@ pub mod catalog;
 pub mod ipc;
 pub mod local;
 pub mod maintenance;
+pub mod manifest;
 mod process;
 pub mod protocol;
 pub mod rpc;

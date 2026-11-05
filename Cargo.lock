@@ -4898,6 +4898,7 @@ dependencies = [
  "mongodb",
  "percent-encoding",
  "porthub-agent",
+ "porthub-components",
  "porthub-edge",
  "porthub-egress",
  "porthub-identity",
