@@ -50,18 +50,22 @@ def relative(root, path):
         value = resolved.relative_to(root).as_posix()
     except ValueError:
         raise ValueError('Build input escapes the repository') from None
+    if not value or any(part in PRIVATE_NAMES or part == '.git' for part in Path(value).parts):
+        raise ValueError('Private configuration cannot be a published build input')
     # Stop at the resolved repository boundary. macOS /var aliases and Windows
     # 8.3 temp-directory names above that boundary are valid; source symlinks
     # inside it are still rejected, even when they point back into the checkout.
     for parent in [path, *path.parents]:
         if parent == root:
             break
-        if parent.is_symlink():
-            raise ValueError('Build inputs must not contain symlinks')
+        try:
+            reparse = getattr(parent.lstat(), 'st_file_attributes', 0) & 0x400
+        except FileNotFoundError:
+            reparse = False
+        if parent.is_symlink() or reparse:
+            raise ValueError('Build inputs must not contain symlinks or reparse points')
         if parent.resolve() == root:
             break
-    if not value or any(part in PRIVATE_NAMES or part == '.git' for part in Path(value).parts):
-        raise ValueError('Private configuration cannot be a published build input')
     return value
 
 
@@ -91,6 +95,8 @@ def manifest(root, name):
                     table[section][key] = inherited
                 elif isinstance(value, dict) and 'path' in value:
                     value['path'] = relative(root, (root / name).parent / value['path'])
+    if data.get('lints', {}).get('workspace') is True:
+        data['lints'] = copy.deepcopy(workspace.get('lints', {}))
     dependencies(data)
     for target in data.get('target', {}).values():
         dependencies(target)
@@ -169,7 +175,7 @@ def cargo_graph(root, recipe, target, text=None):
     for line in text.splitlines():
         if line.strip() in ('[build-dependencies]',):
             continue
-        match = re.fullmatch(r'\d+([A-Za-z0-9_-]+) v([0-9A-Za-z.+-]+)(.*?)\|(.*)', line)
+        match = re.fullmatch(r'\d+([A-Za-z0-9_-]+) v([0-9A-Za-z.+-]+)(.*)\|([^|]*)', line)
         if not match:
             raise ValueError('Unrecognized Cargo dependency row')
         name, version, location, features = match.groups()
@@ -285,6 +291,7 @@ def build_state(root, recipe, target, paths, nodes):
     return {'recipe': recipe, 'target': target, 'toolchain': toolchain(root),
             'profile': profile_state(root, recipe['profile'], nodes),
             'environment': compiler_environment(target, recipe['profile']),
+            'resolver': tomllib.loads((root / 'Cargo.toml').read_text()).get('workspace', {}).get('resolver'),
             'patches': patch_state(root, nodes),
             'inputs': [input_state(root, path, kind) for path, kind in sorted(paths)],
             'dependencies': [dependency_state(packages, node) for node in nodes]}

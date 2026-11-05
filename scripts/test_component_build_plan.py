@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import subprocess
 import unittest
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location('buildplan', Path(__file__).with_name('component-build-plan.py'))
 buildplan = importlib.util.module_from_spec(spec)
@@ -105,6 +106,10 @@ recipe_version=1
         self.assertTrue(choice['requires_artifact_verification'])
         buildplan.verify_reuse(self.receipt, self.binary)
 
+    def test_selection_reuses_without_running_cargo_or_fetching_registry_manifests(self):
+        with mock.patch.object(buildplan.subprocess, 'run', side_effect=AssertionError('Selection must stay offline')):
+            self.assertEqual(self.choose()['action'], 'reuse')
+
     def test_transitive_source_change_advances_only_helper_version(self):
         self.write('support/src/lib.rs', 'pub fn value()->u8 {2}\n')
         choice = self.choose()
@@ -185,6 +190,31 @@ recipe_version=1
         self.write('tool/src/main.rs', 'fn main() {println!("uncommitted");}')
         with self.assertRaisesRegex(ValueError, 'uncommitted'):
             buildplan.require_clean_source(self.root, revision)
+
+    def test_workspace_resolver_and_inherited_lints_are_relevant_inputs(self):
+        original = (self.root / 'Cargo.toml').read_text()
+        self.write('Cargo.toml', original.replace('[workspace]\n', '[workspace]\nresolver="2"\n'))
+        self.receipt = self.record('tool')
+        self.write('Cargo.toml', (self.root / 'Cargo.toml').read_text().replace('resolver="2"', 'resolver="1"'))
+        self.assertEqual(self.choose()['action'], 'build')
+        self.write('tool/Cargo.toml', (self.root / 'tool/Cargo.toml').read_text() + '\n[lints]\nworkspace=true\n')
+        self.write('Cargo.toml', original + '\n[workspace.lints.rust]\nunsafe_code="warn"\n')
+        self.receipt = self.record('tool')
+        self.write('Cargo.toml', (self.root / 'Cargo.toml').read_text().replace('unsafe_code="warn"', 'unsafe_code="deny"'))
+        self.assertEqual(self.choose()['action'], 'build')
+
+    def test_manifest_used_as_rust_input_is_hashed_as_bytes_as_well_as_effective_configuration(self):
+        self.dep.write_text(self.dep.read_text().rstrip() + ' ' + str(self.root / 'tool/Cargo.toml').replace(' ', '\\ ') + '\n')
+        self.receipt = self.record('tool')
+        self.write('tool/Cargo.toml', (self.root / 'tool/Cargo.toml').read_text() + '\n[dev-dependencies]\nunused="4"\n')
+        self.assertEqual(self.choose()['action'], 'build', 'An include_str of Cargo.toml consumes raw manifest bytes too')
+
+    @unittest.skipUnless(os.name == 'nt', 'NTFS junction check requires native Windows')
+    def test_windows_source_junctions_are_rejected(self):
+        junction = self.root / 'junction'
+        subprocess.run(['cmd', '/d', '/c', 'mklink', '/J', str(junction), str(self.root / 'support')], capture_output=True, check=True)
+        with self.assertRaisesRegex(ValueError, 'reparse'):
+            buildplan.relative(self.root, junction / 'src/lib.rs')
 
     def test_reuse_rejects_corrupt_binary_and_receipt(self):
         self.binary.write_bytes(b'changed')
