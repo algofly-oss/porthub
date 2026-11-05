@@ -697,3 +697,12 @@ by different source, even when their carrier tags differ. Exact-source draft
 retries may retain their version. Reuse of a published core version is permitted
 only with the complete unchanged-input proof described above. Unreadable or
 ambiguous reserved source fails before changing manifests.
+
+Normal client publication and verified-run promotion now build the trusted
+`porthub-api` artifact verifier from the checked-out source and pass its absolute
+path to compact staging/publication. Both publication paths require the gateway
+capability check, using repository variable `PORTHUB_RELEASE_GATEWAY` or
+`https://porthub.algofly.in` by default. This verifies TLS and independent core
+version support before release writes and again before draft promotion. These
+workflow guards do not enable compact production builds by themselves; the
+platform build and release-bundle producer integration is still pending.

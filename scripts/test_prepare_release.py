@@ -12,6 +12,22 @@ release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
 
 class Versions(unittest.TestCase):
+    def test_atomic_replace_closes_writer_before_rename(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary)/'version.txt'; path.write_text('old')
+            original_create, original_replace = release.tempfile.NamedTemporaryFile, Path.replace
+            streams = []
+            def create(*args, **kwargs):
+                stream = original_create(*args, **kwargs); streams.append(stream)
+                return stream
+            def rename(source, destination):
+                self.assertTrue(streams[-1].closed)
+                return original_replace(source, destination)
+            with patch.object(release.tempfile, 'NamedTemporaryFile', side_effect=create), patch.object(Path, 'replace', rename):
+                release.replace(path, 'new')
+            self.assertEqual(path.read_text(), 'new')
+            self.assertEqual(list(Path(temporary).iterdir()), [path])
+
     def test_main_uses_explicit_bump_or_advances_latest_patch(self):
         self.assertEqual(release.choose_version('1.9.0','1.8.9'),'1.9.0')
         self.assertEqual(release.choose_version('1.8.9','1.8.9'),'1.8.10')

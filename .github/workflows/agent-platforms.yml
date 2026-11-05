@@ -169,11 +169,22 @@ jobs:
           path: release-assets
       - name: Verify publication and retry invariants
         run: python3 scripts/test_publish_release.py
+      - name: Install trusted verifier toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: compact-publication-verifier
+      - name: Build trusted compact artifact verifier
+        env:
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: cargo build --locked -p porthub-api --bin porthub-api
       - name: Publish all platform assets
         id: publication
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/publish-release.py --repository "$GITHUB_REPOSITORY" --assets release-assets --version "$(sh scripts/release-version.sh)" --revision "$PORTHUB_SOURCE_REVISION" --execute
+          PORTHUB_COMPACT_GATEWAY: ${{ vars.PORTHUB_RELEASE_GATEWAY || 'https://porthub.algofly.in' }}
+        run: python3 scripts/publish-release.py --repository "$GITHUB_REPOSITORY" --assets release-assets --version "$(sh scripts/release-version.sh)" --revision "$PORTHUB_SOURCE_REVISION" --artifact-verifier "$GITHUB_WORKSPACE/target/debug/porthub-api" --compact-gateway "$PORTHUB_COMPACT_GATEWAY" --execute
       - name: Retain latest release plus explicitly protected tags
         if: steps.publication.outputs.status != 'superseded'
         env:

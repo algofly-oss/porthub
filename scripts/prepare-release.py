@@ -211,15 +211,19 @@ def reserve_core_version(root, version, latest_core, head, reservations):
 
 
 def replace(path, text):
-    with tempfile.NamedTemporaryFile(mode='w', prefix='.release-version-', dir=path.parent, delete=False) as stream:
-        temporary = Path(stream.name)
-        try:
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', prefix='.release-version-', dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
             temporary.chmod(path.stat().st_mode & 0o777)
-            temporary.replace(path)
-        finally:
+        # Windows forbids replacing or deleting this temporary file until its
+        # writer has closed. POSIX accepts it, hiding this ordering bug locally.
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
             temporary.unlink(missing_ok=True)
 
 def remote_head(root, branch):
