@@ -9,7 +9,8 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
+from urllib.request import Request, build_opener, HTTPRedirectHandler
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT/'deploy/native'))
@@ -26,9 +27,34 @@ def numeric(value):
     return tuple(map(int, value.split('.')))
 
 
-def assets(directory, version):
+def assets(directory, version, artifact_verifier=None):
     if directory.is_symlink() or not directory.is_dir():
         raise ValueError('Release assets must be a real directory')
+    if (directory/'porthub-components.json').exists():
+        if artifact_verifier is None:
+            raise ValueError('Compact publication requires an explicit Rust artifact verifier')
+        verifier = Path(artifact_verifier)
+        if not verifier.is_absolute() or verifier.is_symlink() or not verifier.is_file():
+            raise ValueError('Artifact verifier must be an absolute regular executable path')
+        def snapshot():
+            files = list(directory.iterdir())
+            if len(files) != 21 or any(path.is_symlink() or not path.is_file() for path in files):
+                raise ValueError('Compact publication requires exactly 21 regular assets')
+            result = {}
+            for path in files:
+                with path.open('rb') as stream:
+                    digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+                result[path.name] = {'size':path.stat().st_size, 'digest':'sha256:'+digest}
+            return result
+        before = snapshot()
+        checked = subprocess.run([str(verifier), '--check-artifacts', str(directory.resolve()), version],
+                                 capture_output=True, text=True, timeout=240)
+        if checked.returncode:
+            raise ValueError('Rust artifact verifier rejected compact release')
+        result = json.loads(checked.stdout)
+        if result.get('version') != version or len(result.get('releases', [])) != 10 or snapshot() != before:
+            raise ValueError('Compact release changed during verification or reported a different version')
+        return before
     expected = {name+suffix for name in ASSETS for suffix in ('','.version','.sha256')}
     if {path.name for path in directory.iterdir()} != expected:
         raise ValueError('Publication requires exactly thirty client assets')
@@ -41,6 +67,33 @@ def assets(directory, version):
             raise ValueError('Release metadata must be canonical before upload')
         result[name] = {'size':len(payload), 'digest':'sha256:'+hashlib.sha256(payload).hexdigest()}
     return result
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def verify_gateway(base):
+    parsed = urlsplit(base or '')
+    if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError('Compact publication requires a verified HTTPS gateway URL')
+    url = base.rstrip('/') + '/api/downloads/components/capabilities'
+    try:
+        # No redirects, credentials, certificate bypasses, or proxy bypasses.
+        with build_opener(NoRedirect()).open(Request(url, headers={'User-Agent':'PortHub release verifier'}), timeout=10) as response:
+            if response.status != 200:
+                raise ValueError('Gateway capability check failed')
+            payload = response.read(4097)
+        if len(payload) > 4096:
+            raise ValueError('Gateway capability response exceeds limit')
+        capability = json.loads(payload)
+        if (2 not in capability.get('release_manifest_schemas', [])
+                or 1 not in capability.get('component_protocols', [])
+                or capability.get('core_sidecars') is not True):
+            raise ValueError('Gateway does not support compact client releases')
+    except Exception:
+        raise ValueError('Gateway compact-release capability could not be verified') from None
 
 
 def verify_uploaded(release, expected):
@@ -90,10 +143,12 @@ def superseded(latest, version):
     return numeric(latest['tag_name'][1:]) > numeric(version)
 
 
-def publish(github,directory,version,revision,execute=False):
+def publish(github,directory,version,revision,execute=False,artifact_verifier=None,compact_gateway=None):
     numeric(version)
     if not re.fullmatch(r'[a-f0-9]{40}',revision):raise ValueError('A full verified source revision is required')
-    expected=assets(directory,version)
+    expected=assets(directory,version,artifact_verifier)
+    compact=(directory/'porthub-components.json').exists()
+    if compact:verify_gateway(compact_gateway)
     tag='v'+version
     if superseded(github.latest(),version):return {'tag':tag,'status':'superseded'}
     existing=github.release(tag)
@@ -124,6 +179,7 @@ def publish(github,directory,version,revision,execute=False):
     verify_uploaded(draft,expected)
     # A concurrent publisher must not let this older run replace newer latest.
     if superseded(github.latest(),version):return {'tag':tag,'status':'superseded'}
+    if compact:verify_gateway(compact_gateway)
     github.promote(tag)
     published=github.release(tag)
     if published is None or published.get('draft') or published.get('prerelease') or github.tag_commit(tag) != revision:
@@ -139,9 +195,11 @@ def main():
     parser.add_argument('--assets',type=Path,required=True)
     parser.add_argument('--version',required=True)
     parser.add_argument('--revision',required=True)
+    parser.add_argument('--artifact-verifier',type=Path,help='Absolute porthub-api executable for compact artifact validation')
+    parser.add_argument('--compact-gateway',help='HTTPS gateway that must support compact releases before publication')
     parser.add_argument('--execute',action='store_true')
     args=parser.parse_args()
-    result=publish(GitHub(args.repository),args.assets,args.version,args.revision,args.execute)
+    result=publish(GitHub(args.repository),args.assets,args.version,args.revision,args.execute,args.artifact_verifier,args.compact_gateway)
     print(json.dumps(result,sort_keys=True))
     if os.environ.get('GITHUB_OUTPUT'):
         with open(os.environ['GITHUB_OUTPUT'],'a') as output:

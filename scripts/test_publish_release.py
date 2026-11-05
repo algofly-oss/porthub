@@ -4,7 +4,7 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 import subprocess
 
 spec=importlib.util.spec_from_file_location('publisher',Path(__file__).with_name('publish-release.py'))
@@ -110,5 +110,54 @@ class DraftLookup(unittest.TestCase):
         with patch.object(publisher.subprocess,'run',return_value=result):
             with self.assertRaises(RuntimeError) as caught:github.command('create','v1.9.0')
         self.assertIn('HTTP403',str(caught.exception));self.assertNotIn('secret=hidden',str(caught.exception))
+
+class CompactPublication(unittest.TestCase):
+    def setUp(self):
+        self.temporary = self.enterContext(tempfile.TemporaryDirectory())
+        self.root = Path(self.temporary)
+        self.directory = self.root/'assets'; self.directory.mkdir()
+        (self.directory/'porthub-components.json').write_text('{}')
+        for index in range(20): (self.directory/str(index)).write_bytes(b'fixture')
+        self.verifier = self.root/'verifier'; self.verifier.write_text('fixture')
+        self.success = subprocess.CompletedProcess([], 0, '{"version":"1.11.0","releases":['+','.join(['{}']*10)+']}', '')
+    def test_compact_requires_explicit_verifier_and_rejects_verification_failure(self):
+        with self.assertRaises(ValueError): publisher.assets(self.directory, '1.11.0')
+        with patch.object(publisher.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, '', '')):
+            with self.assertRaises(ValueError): publisher.assets(self.directory, '1.11.0', self.verifier)
+    def test_verified_compact_release_uploads_exactly_twenty_one_assets(self):
+        with patch.object(publisher.subprocess, 'run', return_value=self.success):
+            expected = publisher.assets(self.directory, '1.11.0', self.verifier)
+            github = GitHub(expected)
+            with patch.object(publisher, 'verify_gateway') as gate:
+                result = publisher.publish(github, self.directory, '1.11.0', 'a'*40, True, self.verifier, 'https://gateway.test')
+            self.assertEqual(result['status'], 'published')
+            self.assertEqual(github.writes, [('create',21),('promote','v1.11.0')])
+            self.assertEqual(gate.call_count, 2)
+    def test_failed_gateway_check_cannot_create_release(self):
+        with patch.object(publisher.subprocess, 'run', return_value=self.success):
+            github = GitHub(publisher.assets(self.directory, '1.11.0', self.verifier))
+            with patch.object(publisher, 'verify_gateway', side_effect=ValueError('not deployed')):
+                with self.assertRaises(ValueError): publisher.publish(github, self.directory, '1.11.0', 'a'*40, True, self.verifier)
+            self.assertEqual(github.writes, [])
+    def test_input_changed_by_verifier_is_rejected(self):
+        def changed(*args, **kwargs):
+            (self.directory/'0').write_bytes(b'changed'); return self.success
+        with patch.object(publisher.subprocess, 'run', side_effect=changed):
+            with self.assertRaises(ValueError): publisher.assets(self.directory, '1.11.0', self.verifier)
+    def test_gateway_requires_https_and_all_compatibility_capabilities(self):
+        with patch.object(publisher, 'build_opener') as builder:
+            for url in [None, 'http://gateway.test', 'https://user:pass@gateway.test', 'https://gateway.test/?token=secret']:
+                with self.assertRaises(ValueError): publisher.verify_gateway(url)
+            builder.assert_not_called()
+        response = MagicMock(); response.status = 200
+        response.__enter__.return_value = response
+        opener = MagicMock(); opener.open.return_value = response
+        with patch.object(publisher, 'build_opener', return_value=opener):
+            response.read.return_value = b'{"release_manifest_schemas":[1],"component_protocols":[1],"core_sidecars":true}'
+            with self.assertRaises(ValueError): publisher.verify_gateway('https://gateway.test')
+            response.read.return_value = b'{"release_manifest_schemas":[1,2],"component_protocols":[1],"core_sidecars":true}'
+            publisher.verify_gateway('https://gateway.test/prefix')
+            request = opener.open.call_args.args[0]
+            self.assertEqual(request.full_url, 'https://gateway.test/prefix/api/downloads/components/capabilities')
 
 if __name__=='__main__':unittest.main()

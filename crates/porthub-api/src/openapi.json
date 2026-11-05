@@ -5017,6 +5017,28 @@
           }
         }
       }
+    },
+    "/api/downloads/components/capabilities": {
+      "get": {
+        "operationId": "get_component_capabilities",
+        "summary": "Get gateway release-format capabilities",
+        "tags": [
+          "Downloads"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Supported manifest schemas, component protocols, and legacy core sidecar compatibility",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {

@@ -379,3 +379,23 @@ A Rust integration test consumes the Python packager's full ten-platform fixture
 and rejects wrong versions, damaged core/archive bytes, and unexpected files.
 This validates distribution integrity; native executable/ABI checks remain
 separate release gates. Packaging sets explicit permissions independent of umask.
+
+
+### Compact publication guard
+
+The publisher accepts compact packages only with an explicit absolute
+`--artifact-verifier /path/to/porthub-api` and
+`--compact-gateway https://gateway.example`. It invokes the Rust offline verifier
+and hashes all 21 files before and after verification. Missing verification,
+changed inputs, or failed checks abort before GitHub mutations.
+
+The gateway exposes `GET /api/downloads/components/capabilities` independently
+of whichever client release is currently latest. The publisher requires schema 2,
+component protocol 1, and core-sidecar compatibility over verified HTTPS, with a
+bounded response, no redirects, and no credentials or TLS/proxy bypasses. It
+checks again immediately before promoting the uploaded draft. This permits the
+new gateway reader to be deployed while the old client release is still current,
+and prevents switching formats before that deployment. The existing legacy
+publication path remains available. The build workflow still needs to supply
+these arguments and assemble the verified compact inputs; no compact release has
+been published by this change.

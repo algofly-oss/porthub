@@ -16,6 +16,7 @@ use std::{collections::HashMap, sync::Arc};
 
 pub fn router() -> Router<Arc<App>> {
     Router::new()
+        .route("/api/downloads/components/capabilities", get(component_capabilities))
         .route("/api/downloads/components/catalog", get(component_catalog))
         .route("/api/downloads/components/{component}/{version}/{target}/{digest}", get(component_download))
         .route("/api/downloads/porthub", get(public_list))
@@ -40,6 +41,11 @@ pub fn router() -> Router<Arc<App>> {
             "/api/machines/{first}/{second}/client.sh",
             get(legacy_upgrade),
         )
+}
+
+async fn component_capabilities() -> Json<serde_json::Value> {
+    Json(json!({"release_manifest_schemas":[1,2],"component_protocols":[1],
+        "core_sidecars":true,"server_version":env!("CARGO_PKG_VERSION")}))
 }
 
 async fn component_catalog(State(app): State<Arc<App>>) -> ApiResult<Json<porthub_components::catalog::Catalog>> {
