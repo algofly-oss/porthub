@@ -399,3 +399,13 @@ and prevents switching formats before that deployment. The existing legacy
 publication path remains available. The build workflow still needs to supply
 these arguments and assemble the verified compact inputs; no compact release has
 been published by this change.
+
+Standalone private-network enrollments start optional-tool maintenance after the
+first authenticated policy has been applied and the network device is ready.
+Embedded private networking shares its parent registration's maintenance worker.
+Neither path awaits downloads during forwarding startup. The standalone worker
+uses the private enrollment's gateway and lifetime cancellation token; shutdown
+cancels and drops it with the private runtime. Failure to initialize optional
+maintenance leaves private forwarding running and emits a credential-free warning.
+This hook has compile and maintenance-lifetime regression coverage; a live
+private-only installed-agent prefetch check remains part of rollout verification.
