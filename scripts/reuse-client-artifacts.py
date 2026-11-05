@@ -6,7 +6,7 @@ import hashlib
 import importlib.util
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import stat
@@ -125,6 +125,9 @@ def extract(archive, item, destination):
         raise ValueError('Reusable artifact collides with a newly built platform')
     with zipfile.ZipFile(archive) as zipped:
         entries = zipped.infolist()
+        if any(entry.filename == 'index.json' for entry in entries):
+            extract_indexed(zipped, entries, item['platform'], target)
+            return
         if len(entries) != 3 or {entry.filename for entry in entries} != expected:
             raise ValueError('Reusable artifact must contain exactly three canonical files')
         for entry in entries:
@@ -138,6 +141,58 @@ def extract(archive, item, destination):
         except BaseException:
             shutil.rmtree(target)
             raise
+
+
+def extract_indexed(zipped, entries, platform, target):
+    # Accept only the exact receipt/binary closure, never ZIP directory entries,
+    # links, duplicate names or paths which the OS could interpret differently.
+    if not 1 <= len(entries) <= 257:
+        raise ValueError('Invalid indexed artifact member count')
+    names = set()
+    total = 0
+    for entry in entries:
+        path = PurePosixPath(entry.filename)
+        if (entry.filename in names or path.is_absolute() or '..' in path.parts
+                or str(path) != entry.filename or '\\' in entry.filename or ':' in entry.filename
+                or entry.is_dir() or stat.S_IFMT(entry.external_attr >> 16) not in (0, stat.S_IFREG)):
+            raise ValueError('Unsafe indexed artifact member')
+        limit = 1024 * 1024 if entry.filename == 'index.json' else 128 * 1024 * 1024
+        total += entry.file_size
+        if not 0 < entry.file_size <= limit or total > 1024 * 1024 * 1024:
+            raise ValueError('Oversized indexed artifact')
+        names.add(entry.filename)
+    index = json.loads(zipped.read('index.json'))
+    native, cross = matrices()
+    expected_target = next(row['target'] for row in native + cross if row['artifact'] == platform)
+    expected_target = expected_target.replace('linux-gnu', 'linux-musl')
+    if index.get('target') != expected_target:
+        raise ValueError('Indexed artifact platform differs from selected job')
+    rows = index.get('builds')
+    if not isinstance(rows, list) or not 1 <= len(rows) <= 128:
+        raise ValueError('Invalid indexed build list')
+    expected = {'index.json'}
+    for row in rows:
+        for key in ('receipt', 'binary'):
+            value = row.get(key)
+            if not isinstance(value, str) or value in expected:
+                raise ValueError('Duplicate or invalid indexed artifact path')
+            expected.add(value)
+    if names != expected:
+        raise ValueError('Indexed artifact contains missing or unreferenced files')
+    spec = importlib.util.spec_from_file_location('reused_platform', ROOT/'scripts/build-component-platform.py')
+    coordinator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(coordinator)
+    with tempfile.TemporaryDirectory(prefix='.porthub-reuse-', dir=target.parent) as temporary:
+        staged = Path(temporary)/'platform'
+        staged.mkdir()
+        for entry in entries:
+            output = staged/entry.filename
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(zipped.read(entry))
+        verified = coordinator.previous_builds(staged, expected_target, index)
+        if {tool for tool, _ in verified} != {'core', 'stats', 'sync', 'terminal', 'tor'}:
+            raise ValueError('Indexed platform must contain core and every optional tool')
+        staged.rename(target)
 
 
 def main():

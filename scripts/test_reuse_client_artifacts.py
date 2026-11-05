@@ -114,5 +114,29 @@ class Reuse(unittest.TestCase):
             self.assertEqual((destination/'porthub-x86_64/porthub-x86_64').read_bytes(),b'binary')
             with self.assertRaises(ValueError):reuse.extract(archive,item,destination)
 
+    def test_indexed_artifact_verifies_receipts_and_rejects_corruption_atomically(self):
+        spec = importlib.util.spec_from_file_location('indexed_fixture', Path(__file__).with_name('test_assemble_client_release.py'))
+        fixture = importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture)
+        case = fixture.Assembly(); case.setUp(); self.addCleanup(case.doCleanups)
+        source = case.source/'porthub-x86_64'
+        destination = case.root/'reused'; destination.mkdir()
+        archive = case.root/'indexed.zip'
+        def package(extra=False):
+            with zipfile.ZipFile(archive, 'w') as zipped:
+                for path in source.rglob('*'):
+                    if path.is_file(): zipped.write(path, path.relative_to(source).as_posix())
+                if extra: zipped.writestr('../escape', b'bad')
+            return dict(platform='x86_64',size=archive.stat().st_size,
+                        digest='sha256:'+hashlib.sha256(archive.read_bytes()).hexdigest())
+        with self.assertRaises(ValueError): reuse.extract(archive, package(True), destination)
+        self.assertFalse((destination/'porthub-x86_64').exists())
+        reuse.extract(archive, package(), destination)
+        self.assertEqual((destination/'porthub-x86_64/index.json').read_bytes(), (source/'index.json').read_bytes())
+        import shutil
+        shutil.rmtree(destination/'porthub-x86_64')
+        (source/'sync/0.1.0/porthub-sync').write_bytes(b'corrupt')
+        with self.assertRaises(ValueError): reuse.extract(archive, package(), destination)
+        self.assertEqual(list(destination.iterdir()), [])
+
 
 if __name__ == '__main__': unittest.main()
