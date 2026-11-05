@@ -6,8 +6,8 @@
     "healthz": "ok",
     "roles": {
       "core": {
-        "version": "1.10.2",
-        "source_revision": "5c6fa7b49994ca2cf673636dca5a4f84e7437637",
+        "version": "1.11.0",
+        "source_revision": "63e4afce3efb5cfe8fec28db1035b5bc944f73a8",
         "health": "healthy"
       },
       "edge": {
@@ -20,7 +20,34 @@
         "source_revision": "5c6fa7b49994ca2cf673636dca5a4f84e7437637",
         "health": "healthy"
       }
-    }
+    },
+    "gateway_capabilities": {
+      "release_manifest_schemas": [
+        1,
+        2
+      ],
+      "component_protocols": [
+        1
+      ],
+      "core_sidecars": true,
+      "independent_core_version": true,
+      "publisher_https_verification": "passed"
+    },
+    "upgrade_record": "/home/ubuntu/algofly/porthub-release-1.11.0-63e4afc/deploy/native/upgrade-records/63e4afce3efb5cfe8fec28db1035b5bc944f73a8-s0h5p972",
+    "canaries": {
+      "public_ssh_with_existing_trusted_key": "passed",
+      "ec2_private_dns": "10.203.0.230",
+      "agents_reported_after_core_restart": 13
+    },
+    "image_artifact": {
+      "run_id": 42121012171,
+      "artifact_id": 13458683277,
+      "size": 188356274,
+      "sha256": "8ccab44369e18c8f49e0f070be4fa7e18ffeb764e9bf6dae6fc1334bcce6513b",
+      "payload_checksums": "passed"
+    },
+    "served_agent_release": "1.10.1",
+    "served_agent_header_check": "HTTPS HEAD /api/downloads/porthub/x86_64 returned x-porthub-agent-release: 1.10.1"
   },
   "inventory": {
     "source": "read-only authenticated MongoDB aggregation",
@@ -55,7 +82,20 @@
     "server_run_id": 42121012171,
     "agent_publication_enabled": false,
     "validation_complete": false,
-    "deployed": false
+    "server_validation_complete": true,
+    "core_gateway_deployed": true,
+    "agent_deployed": false,
+    "latest_linux_revalidation_run_id": 42124227519,
+    "agent_release_published": false,
+    "latest_linux_revalidation_source": "f46041819e93fda6dd317f76e21a729cd601cb86",
+    "latest_linux_revalidation_conclusion": "success",
+    "latest_linux_revalidation_platforms": [
+      "x86_64",
+      "arm64",
+      "x86",
+      "armhf",
+      "armv7"
+    ]
   },
   "known_prior_failure": {
     "run_id": 42118673393,
@@ -65,8 +105,10 @@
     "fixed_in": "019c2c9f410cb48d12481c507437efa917d3abb9"
   },
   "limitations": [
-    "Candidate native, cross-platform, and server gates remain incomplete.",
-    "No modular agent release has been published or rolled out.",
-    "Offline and disabled clients have not been updated or enabled."
-  ]
+    "Agent validation is incomplete; the modular agent has not been published or rolled out.",
+    "The core gateway/UI was updated; edge and firewall intentionally retain 1.10.2.",
+    "Offline and disabled clients have not been updated or enabled.",
+    "Production signed-in browser state was not impersonated; disabled-machine behavior passed isolated browser/Mongo tests."
+  ],
+  "updated_at_utc": "2026-11-05T23:32:06.405203+00:00"
 }

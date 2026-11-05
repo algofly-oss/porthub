@@ -16,6 +16,8 @@ struct Args {
     input: Option<PathBuf>,
     #[arg(long, hide=true, conflicts_with_all=["input", "pid"])]
     managed_endpoint: Option<String>,
+    #[arg(long, hide=true, conflicts_with_all=["managed_endpoint", "input", "pid"])]
+    managed_input: Option<PathBuf>,
     #[arg(long)]
     once: bool,
     #[arg(long)]
@@ -81,40 +83,92 @@ impl Source for ManagedSource {
         Ok(result)
     }
 }
-struct FileSource(PathBuf);
+struct FileSource {
+    path: PathBuf,
+    managed: bool,
+    sequence: std::sync::atomic::AtomicU64,
+}
+impl FileSource {
+    fn new(path: PathBuf, managed: bool) -> Self {
+        Self {
+            path,
+            managed,
+            sequence: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
 #[async_trait::async_trait]
 impl Source for FileSource {
     async fn collect(&self) -> Result<Vec<Value>> {
-        let path = self.0.clone();
-        tokio::task::spawn_blocking(move || {
-            const LIMIT: usize = 128 * 32768 + 1024;
-            let mut bytes = Vec::new();
-            std::fs::File::open(path)?
-                .take(LIMIT as u64 + 1)
-                .read_to_end(&mut bytes)?;
-            ensure!(bytes.len() <= LIMIT, "snapshot input exceeds limit");
-            let value: Value = serde_json::from_slice(&bytes)?;
-            let rows = value["agents"]
-                .as_array()
-                .context("snapshot requires an agents array")?;
-            ensure!(rows.len() <= 128, "snapshot has too many rows");
-            let mut seen = BTreeSet::new();
-            for row in rows {
-                let id = row["registration"]
-                    .as_str()
-                    .context("snapshot row requires registration identity")?;
+        let path = self.path.clone();
+        let managed = self.managed;
+        let previous = self.sequence.load(std::sync::atomic::Ordering::Relaxed);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(40);
+        loop {
+            let path = path.clone();
+            let value = tokio::task::spawn_blocking(move || {
+                let row_limit = if managed {
+                    porthub_components::protocol::stats::MAX_ROW
+                } else {
+                    32768
+                };
+                let limit = 128 * row_limit + 1024;
+                let mut bytes = Vec::new();
+                std::fs::File::open(path)?
+                    .take(limit as u64 + 1)
+                    .read_to_end(&mut bytes)?;
+                ensure!(bytes.len() <= limit, "snapshot input exceeds limit");
+                let value: Value = serde_json::from_slice(&bytes)?;
+                if managed && value["pending"] == true {
+                    return Ok(None);
+                }
                 ensure!(
-                    !id.is_empty() && id.len() <= 256 && seen.insert(id),
-                    "invalid or duplicate snapshot identity"
+                    !managed || value["unavailable"] != true,
+                    "Cannot collect scoped agent statistics"
                 );
-                ensure!(
-                    serde_json::to_vec(row)?.len() <= 32768,
-                    "snapshot row exceeds limit"
-                );
+                let sequence = if managed {
+                    value["sequence"]
+                        .as_u64()
+                        .filter(|sequence| *sequence > 0)
+                        .context("invalid scoped snapshot sequence")?
+                } else {
+                    0
+                };
+                if managed && sequence == previous {
+                    return Ok(None);
+                }
+                let rows = value["agents"]
+                    .as_array()
+                    .context("snapshot requires an agents array")?;
+                ensure!(rows.len() <= 128, "snapshot has too many rows");
+                let mut seen = BTreeSet::new();
+                for row in rows {
+                    let id = row["registration"]
+                        .as_str()
+                        .context("snapshot row requires registration identity")?;
+                    ensure!(
+                        !id.is_empty() && id.len() <= 256 && seen.insert(id),
+                        "invalid or duplicate snapshot identity"
+                    );
+                    ensure!(
+                        serde_json::to_vec(row)?.len() <= row_limit,
+                        "snapshot row exceeds limit"
+                    );
+                }
+                Ok::<_, anyhow::Error>(Some((rows.clone(), sequence)))
+            })
+            .await??;
+            if let Some((rows, sequence)) = value {
+                self.sequence
+                    .store(sequence, std::sync::atomic::Ordering::Relaxed);
+                return Ok(rows);
             }
-            Ok(rows.clone())
-        })
-        .await?
+            ensure!(
+                tokio::time::Instant::now() < deadline,
+                "Scoped statistics snapshot did not become available"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
     }
 }
 struct LocalSource {
@@ -143,12 +197,14 @@ impl Source for LocalSource {
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let manage_terminal = args.managed_endpoint.is_none();
+    let manage_terminal = args.managed_endpoint.is_none() && args.managed_input.is_none();
     let source: Arc<dyn Source> = if let Some(endpoint) = args.managed_endpoint {
         Arc::new(ManagedSource(endpoint))
+    } else if let Some(path) = args.managed_input {
+        Arc::new(FileSource::new(path, true))
     } else {
         match args.input {
-            Some(path) => Arc::new(FileSource(path)),
+            Some(path) => Arc::new(FileSource::new(path, false)),
             None => Arc::new(LocalSource {
                 system: Arc::new(std::sync::Mutex::new(sysinfo::System::new())),
                 pid: args.pid,

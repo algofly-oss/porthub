@@ -274,38 +274,121 @@ impl porthub_components::rpc::Handler for DashboardSource {
     }
 }
 
+fn snapshot_bytes(rows: Vec<Value>, sequence: u64) -> Result<Vec<u8>> {
+    use porthub_components::protocol::stats::MAX_ROW;
+    ensure!(
+        rows.len() <= 128 && sequence > 0,
+        "invalid scoped statistics snapshot"
+    );
+    ensure!(
+        rows.iter()
+            .all(|row| serde_json::to_vec(row).is_ok_and(|bytes| bytes.len() <= MAX_ROW)),
+        "statistics row limit exceeded"
+    );
+    let bytes = serde_json::to_vec(&json!({"agents":rows,"sequence":sequence}))?;
+    ensure!(
+        bytes.len() <= 128 * MAX_ROW + 1024,
+        "statistics snapshot limit exceeded"
+    );
+    Ok(bytes)
+}
+
 pub async fn run(options: Options, cancel: CancellationToken) -> Result<()> {
     use porthub_components::{
         catalog::{Component, PROTOCOL},
         ipc::Hello,
         local::Endpoint,
     };
+    ensure!(
+        options.interval.is_finite() && (0.2..=60.0).contains(&options.interval),
+        "interval must be between 0.2 and 60 seconds"
+    );
     let manager = crate::components::manager(None)?;
     if manager.installed(Component::Stats).await?.is_empty() {
         eprintln!("Preparing stats: downloading a verified compatible dashboard if needed...");
     }
     let (artifact, executable) = manager.resolve(Component::Stats, &cancel).await?;
-    let invocation = tempfile::tempdir()?;
-    let endpoint = Endpoint::for_artifact(invocation.path(), &artifact)?;
+    let mut temporary = tempfile::Builder::new();
+    temporary.prefix("porthub-stats-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    let invocation = temporary.tempdir()?;
+    porthub_components::store::secure_private_directory(invocation.path())?;
     let work = cancel.child_token();
     let _stop = work.clone().drop_guard();
-    let hello = Hello {
-        component: Component::Stats,
-        protocol: PROTOCOL,
-        version: artifact.version.clone(),
+    let mode = match std::env::var("PORTHUB_COMPONENT_TRANSPORT").as_deref() {
+        Ok("auto") | Err(std::env::VarError::NotPresent) => porthub_components::worker::Mode::Auto,
+        Ok("rpc") => porthub_components::worker::Mode::Rpc,
+        Ok("cli") => porthub_components::worker::Mode::Cli,
+        _ => anyhow::bail!("PORTHUB_COMPONENT_TRANSPORT must be auto, rpc, or cli"),
     };
-    let serving = endpoint.clone();
+    let bound = if matches!(mode, porthub_components::worker::Mode::Cli) {
+        None
+    } else {
+        let setup = async {
+            let endpoint = Endpoint::for_artifact(invocation.path(), &artifact)?;
+            let listener = porthub_components::local::Listener::bind(endpoint.clone()).await?;
+            Ok::<_, anyhow::Error>((endpoint, listener))
+        }
+        .await;
+        match setup {
+            Ok(bound) => Some(bound),
+            Err(error) if matches!(mode, porthub_components::worker::Mode::Rpc) => {
+                return Err(error)
+            }
+            Err(_) => {
+                tracing::debug!(
+                    "Dashboard RPC unavailable before startup; using private snapshots"
+                );
+                None
+            }
+        }
+    };
+    let mut arguments: Vec<std::ffi::OsString> =
+        vec!["--interval".into(), options.interval.to_string().into()];
     let lifetime = work.clone();
-    let handler = std::sync::Arc::new(DashboardSource(options.clone()));
-    let _server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-        porthub_components::rpc::serve(serving, hello, handler, lifetime).await
-    }));
-    let mut arguments: Vec<std::ffi::OsString> = vec![
-        "--managed-endpoint".into(),
-        endpoint.address().into(),
-        "--interval".into(),
-        options.interval.to_string().into(),
-    ];
+    let _server = if let Some((endpoint, listener)) = bound {
+        arguments.extend(["--managed-endpoint".into(), endpoint.address().into()]);
+        let hello = Hello {
+            component: Component::Stats,
+            protocol: PROTOCOL,
+            version: artifact.version.clone(),
+        };
+        let handler = std::sync::Arc::new(DashboardSource(options.clone()));
+        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            porthub_components::rpc::serve_bound(listener, hello, handler, lifetime).await
+        }))
+    } else {
+        let path = invocation.path().join("snapshot.json");
+        crate::profile::write_private(&path, br#"{"pending":true}"#, false)?;
+        arguments.extend(["--managed-input".into(), path.as_os_str().into()]);
+        let source_options = options.clone();
+        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs_f64(source_options.interval));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut sequence = 0u64;
+            loop {
+                tokio::select! {biased; _=lifetime.cancelled()=>break,_=tick.tick()=>{}}
+                let rows = tokio::select! {biased; _=lifetime.cancelled()=>break,result=collect(&source_options)=>result};
+                sequence = sequence.saturating_add(1);
+                let bytes = rows
+                    .and_then(|rows| snapshot_bytes(rows, sequence))
+                    .unwrap_or_else(|_| br#"{"unavailable":true}"#.to_vec());
+                let destination = path.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::profile::write_private(&destination, &bytes, true)
+                })
+                .await??;
+                if source_options.once {
+                    break;
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        }))
+    };
     if options.once {
         arguments.push("--once".into());
     }
@@ -335,6 +418,22 @@ pub async fn run(options: Options, cancel: CancellationToken) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_snapshot_handoff_preserves_large_batches_and_enforces_rpc_row_bounds() {
+        let rows=(0..3).map(|index|json!({"registration":format!("fixture{index}"),"detail":"x".repeat(40000)})).collect();
+        let bytes = snapshot_bytes(rows, 1).unwrap();
+        assert!(bytes.len() > 65536);
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["sequence"], 1);
+        assert_eq!(value["agents"].as_array().unwrap().len(), 3);
+        assert!(snapshot_bytes(
+            vec![json!({"registration":"fixture","detail":"x".repeat(50000)})],
+            2
+        )
+        .is_err());
+        assert!(snapshot_bytes(vec![json!({"registration":"fixture"}); 129], 2).is_err());
+    }
 
     #[test]
     fn refresh_interval_is_bounded_and_rejects_nan_and_infinity() {

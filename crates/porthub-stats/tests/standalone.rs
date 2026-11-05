@@ -161,3 +161,95 @@ async fn managed_frontend_receives_more_than_one_frame_without_core_credentials(
     assert_eq!(value["agents"].as_array().unwrap().len(), 3);
     assert_eq!(value["agents"][0]["detail"].as_str().unwrap().len(), 24000);
 }
+
+fn replace_snapshot(path: &std::path::Path, value: &Value) {
+    use std::io::Write;
+    let mut temporary = tempfile::NamedTempFile::new_in(path.parent().unwrap()).unwrap();
+    temporary
+        .write_all(&serde_json::to_vec(value).unwrap())
+        .unwrap();
+    temporary.persist(path).unwrap();
+}
+#[tokio::test]
+async fn managed_file_frontend_waits_for_capture_and_accepts_rpc_sized_rows() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("snapshot.json");
+    replace_snapshot(&path, &serde_json::json!({"pending":true}));
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_porthub-stats"))
+        .args(["--once", "--json", "--managed-input"])
+        .arg(&path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(child.try_wait().unwrap().is_none());
+    let rows = (0..3).map(|id| serde_json::json!({"registration":format!("fixture{id}"),"detail":"x".repeat(40000)})).collect::<Vec<_>>();
+    replace_snapshot(&path, &serde_json::json!({"sequence":1,"agents":rows}));
+    let output = tokio::time::timeout(std::time::Duration::from_secs(10), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(data["agents"].as_array().unwrap().len(), 3);
+    assert!(output.stdout.len() > 65536);
+    assert!(
+        !command()
+            .args(["--once", "--input"])
+            .arg(&path)
+            .output()
+            .unwrap()
+            .status
+            .success(),
+        "standalone file input retains its smaller row bound"
+    );
+}
+#[tokio::test]
+async fn managed_file_stream_does_not_emit_duplicate_captures() {
+    use tokio::io::AsyncBufReadExt;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("snapshot.json");
+    let snapshot = |sequence, sent| serde_json::json!({"sequence":sequence,"agents":[{"registration":"fixture","process":{"pid":7,"start_time":1},"traffic":{"sent_bytes":sent}}]});
+    replace_snapshot(&path, &snapshot(1, 100));
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_porthub-stats"))
+        .args(["--json", "--interval", "0.2", "--managed-input"])
+        .arg(&path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(10), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&first).unwrap()["agents"][0]["traffic"]["sent_bytes"],
+        100
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(350), lines.next_line())
+            .await
+            .is_err()
+    );
+    replace_snapshot(&path, &snapshot(2, 300));
+    let second = tokio::time::timeout(std::time::Duration::from_secs(10), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&second).unwrap()["agents"][0]["traffic"]["sent_bytes"],
+        300
+    );
+    child.kill().await.unwrap();
+    child.wait().await.unwrap();
+}

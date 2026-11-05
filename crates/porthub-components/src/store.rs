@@ -105,6 +105,17 @@ pub(crate) fn regular(path: &Path) -> Result<std::fs::Metadata> {
     }
     Ok(metadata)
 }
+/// Secure an invocation-owned data directory with the same native ownership and
+/// protected ACL rules as the component cache. Arbitrary symlinks are rejected.
+pub fn secure_private_directory(path: &Path) -> Result<()> {
+    ensure!(path.is_absolute() && !path.components().any(|part| matches!(part,std::path::Component::ParentDir)), "private directory requires an absolute path without parent traversal");
+    #[cfg(target_os = "macos")]
+    let normalized = normalize_system_alias(path.to_path_buf())?;
+    #[cfg(target_os = "macos")]
+    let path = normalized.as_path();
+    directory(path)
+}
+
 pub(crate) fn directory(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {

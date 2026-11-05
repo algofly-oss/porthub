@@ -802,3 +802,23 @@ instead of after installation. Tests reject catalog-alias substitutions and
 malformed/oversized manifests; the independent CLI still creates and lists an
 isolated real tmux workspace. Cargo receipt capture now includes local build-script
 depfiles too, ensuring changes in imported build support modules invalidate reuse.
+
+The managed stats frontend now honors `PORTHUB_COMPONENT_TRANSPORT=auto|rpc|cli`.
+Core binds its reverse broker before launching the helper. Auto uses a private
+snapshot file if binding fails before admission; rpc fails without switching;
+cli uses the file handoff directly. Collection stays in core with the same
+registration scope. Only bounded snapshot data and a private temporary path cross
+the handoff, never enrollment credentials. The invocation directory is explicitly
+private on Unix and protected with the native Windows DACL. Snapshot writes are
+atomic, limited to 128 rows with the RPC row bound, and owned by the invocation.
+The frontend waits for the first capture asynchronously and consumes each sequence
+once, avoiding false zero-rate samples when a capture has not advanced. Core owns
+terminal restoration in both modes. Standalone `--input` retains its existing
+smaller bound and works independently. Live PTY checks pass in rpc and cli modes;
+a process-local bind-denial test proves auto fallback without changing host policy.
+
+Gateway core 1.11.0 is consumed by deployed source
+`63e4afce3efb5cfe8fec28db1035b5bc944f73a8`. The next server/carrier version is
+1.11.1; the unreleased core agent remains independently versioned 1.11.0. This
+avoids reusing an immutable server image version while client implementation
+continues. Production's raw agent endpoint still serves 1.10.1 until publication.

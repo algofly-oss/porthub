@@ -308,8 +308,19 @@ pub async fn serve<H: Handler>(
     handler: Arc<H>,
     cancel: CancellationToken,
 ) -> Result<()> {
+    let listener = Listener::bind(endpoint).await?;
+    serve_bound(listener, hello, handler, cancel).await
+}
+
+/// Serve a listener bound before frontend admission, allowing callers to choose
+/// a safe fallback if local IPC is unavailable before any request is dispatched.
+pub async fn serve_bound<H: Handler>(
+    mut listener: Listener,
+    hello: Hello,
+    handler: Arc<H>,
+    cancel: CancellationToken,
+) -> Result<()> {
     let cancel = cancel.child_token();
-    let mut listener = Listener::bind(endpoint).await?;
     let mut clients = tokio::task::JoinSet::new();
     let capacity = handler.connection_limit().clamp(1, 512);
     let mut tick = tokio::time::interval(IDLE);

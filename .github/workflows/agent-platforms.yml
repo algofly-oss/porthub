@@ -381,7 +381,12 @@ jobs:
         run: |
           cargo test --locked -p porthub-agent --test terminal_local --test terminal_share --target ${{ matrix.target }} -- --include-ignored
           python3 scripts/test-stats-terminal.py "$PORTHUB_TEST_AGENT_EXECUTABLE"
+          PORTHUB_COMPONENT_TRANSPORT=cli python3 scripts/test-stats-terminal.py "$PORTHUB_TEST_AGENT_EXECUTABLE"
           python3 scripts/test-terminal-participants.py "$PORTHUB_TEST_AGENT_EXECUTABLE"
+      - name: Verify dashboard CLI fallback under process-local bind denial
+        if: runner.os == 'Linux'
+        shell: bash
+        run: python3 scripts/test-stats-cli-fallback.py "$GITHUB_WORKSPACE/target/${{ matrix.target }}/debug/porthub"
       - name: Build independently packaged native core and optional tools
         if: inputs.verify_only != true && runner.os != 'Linux'
         shell: bash
@@ -445,6 +450,7 @@ jobs:
         run: |
           cargo test --locked -p porthub-agent --test terminal_local --test terminal_share --target ${{ matrix.target }} -- --include-ignored
           python3 scripts/test-stats-terminal.py "$PORTHUB_TEST_AGENT_EXECUTABLE"
+          PORTHUB_COMPONENT_TRANSPORT=cli python3 scripts/test-stats-terminal.py "$PORTHUB_TEST_AGENT_EXECUTABLE"
           python3 scripts/test-terminal-participants.py "$PORTHUB_TEST_AGENT_EXECUTABLE"
       - name: Test native macOS service lifecycle
         if: runner.os == 'macOS'
