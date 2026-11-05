@@ -64,6 +64,7 @@ pub struct Remote {
     initialized: OnceCell<()>,
     targets: BTreeMap<&'static str, Mutex<()>>,
     downloads: Semaphore,
+    component_download: Mutex<()>,
     background: AtomicBool,
 }
 
@@ -216,6 +217,7 @@ impl Remote {
                 .map(|(target, _, _)| (*target, Mutex::new(())))
                 .collect(),
             downloads: Semaphore::new(2),
+            component_download: Mutex::new(()),
             background: AtomicBool::new(false),
         }))
     }
@@ -465,6 +467,55 @@ impl Remote {
         tokio::task::spawn_blocking(move || atomic(&path, &bytes)).await??;
         Ok(index)
     }
+    pub async fn components(&self) -> Result<porthub_components::catalog::Catalog> {
+        self.latest(false).await?.components.context("component release metadata unavailable")
+    }
+    pub async fn component(&self, component: &str, version: &str, target: &str, digest: &str)
+        -> Result<(porthub_components::catalog::Artifact, tokio::fs::File)>
+    {
+        let catalog = self.components().await?;
+        let artifact = catalog.artifacts.iter().find(|entry| entry.component.to_string() == component
+            && entry.version.to_string() == version && entry.target == target && entry.executable.sha256 == digest)
+            .context("component is not in the verified release catalog")?.clone();
+        let _lock = self.component_download.lock().await;
+        let directory = self.root.join("components");
+        if !regular(&directory, true)? { tokio::fs::create_dir(&directory).await?; }
+        let destination = directory.join(format!("{}-{}-{}", artifact.component, artifact.version, artifact.executable.sha256));
+        let candidate = destination.clone();
+        let blob = artifact.executable.clone();
+        let valid = tokio::task::spawn_blocking(move || porthub_components::store::verified(&candidate, &blob)).await??;
+        if !valid {
+            let _permit = self.downloads.acquire().await?;
+            let archive = tempfile::NamedTempFile::new_in(&directory)?;
+            let url = format!("{}/v{}/{}", self.download_base, artifact.release, artifact.archive_name());
+            let mut response = self.http.get(url).timeout(Duration::from_secs(300)).send().await?;
+            ensure!(response.status().is_success(), "component archive unavailable");
+            let mut file = tokio::fs::File::from_std(archive.reopen()?);
+            let mut size = 0u64;
+            while let Some(chunk) = response.chunk().await? {
+                size = size.checked_add(chunk.len() as u64).context("component archive size overflow")?;
+                ensure!(size <= artifact.archive.size, "component archive exceeds size limit");
+                file.write_all(&chunk).await?;
+            }
+            file.flush().await?; file.sync_all().await?; drop(file);
+            let metadata = artifact.clone();
+            let output = destination.clone();
+            tokio::task::spawn_blocking(move || {
+                let extracted = porthub_components::store::extract_verified(archive.path(), &directory, &metadata, &catalog)?;
+                extracted.as_file().sync_all()?;
+                extracted.persist(output)?;
+                std::fs::File::open(directory)?.sync_all()?;
+                Ok::<_, anyhow::Error>(())
+            }).await??;
+        }
+        let mut options = tokio::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        let file = options.open(destination).await?;
+        ensure!(file.metadata().await?.is_file(), "invalid component cache entry");
+        Ok((artifact, file))
+    }
     pub async fn release(&self, target: &'static str) -> Result<Release> {
         self.latest(false)
             .await?
@@ -627,6 +678,15 @@ mod tests {
     fn payload(version: &str, name: &str) -> Vec<u8> {
         format!("native release {version}: {name}").into_bytes()
     }
+    const TOOL_BYTES: &[u8] = b"standalone tool fixture";
+    fn tool_archive() -> Vec<u8> {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(TOOL_BYTES.len() as u64); header.set_mode(0o755); header.set_cksum();
+        archive.append_data(&mut header, "sync/0.1.0/porthub-sync", TOOL_BYTES).unwrap();
+        archive.into_inner().unwrap().finish().unwrap()
+    }
     fn compact_manifest(version: &str) -> Vec<u8> {
         use porthub_components::{catalog::{Artifact, Blob, Catalog, Component, REPOSITORY}, manifest::{CoreAsset, ReleaseManifest}};
         let core_assets = TARGETS.iter().map(|(target, os, _)| {
@@ -639,8 +699,8 @@ mod tests {
             artifacts: vec![Artifact { component: Component::Sync, version: "0.1.0".parse().unwrap(),
                 target: porthub_components::catalog::TARGETS[0].into(), core: ">=1.0.0".parse().unwrap(), protocols: vec![1],
                 source_revision: "a".repeat(40), build_inputs: "b".repeat(64),
-                executable: Blob { size: 1, sha256: "c".repeat(64) }, release: version.parse().unwrap(),
-                archive: Blob { size: 1, sha256: "d".repeat(64) } }] };
+                executable: Blob { size: TOOL_BYTES.len() as u64, sha256: format!("{:x}", Sha256::digest(TOOL_BYTES)) }, release: version.parse().unwrap(),
+                archive: Blob { size: tool_archive().len() as u64, sha256: format!("{:x}", Sha256::digest(tool_archive())) } }] };
         serde_json::to_vec(&ReleaseManifest { schema_version: 2, repository: REPOSITORY.into(), release: version.parse().unwrap(), core_assets, components }).unwrap()
     }
     async fn metadata(AxumState(state): AxumState<Arc<Fixture>>, headers: HeaderMap) -> Response {
@@ -686,6 +746,7 @@ mod tests {
         }
         let mut body = if name == porthub_components::catalog::CATALOG_ASSET {
             compact_manifest(version.trim_start_matches('v'))
+        } else if name.starts_with("porthub-tools-") { tool_archive()
         } else { payload(version.trim_start_matches('v'), &name) };
         if state.corrupt.load(Ordering::SeqCst) {
             body[0] ^= 1;
@@ -725,6 +786,44 @@ mod tests {
             true,
         )?;
         Ok((root, state, remote, task))
+    }
+    #[tokio::test]
+    async fn component_downloads_are_verified_coalesced_and_repaired() -> Result<()> {
+        use tokio::io::AsyncReadExt;
+        let (_root, state, remote, task) = fixture().await?;
+        state.compact.store(true, Ordering::SeqCst);
+        let catalog = remote.components().await?;
+        let tool = catalog.artifacts[0].clone();
+        let version = tool.version.to_string();
+        let (one, two) = tokio::join!(
+            remote.component("sync", &version, &tool.target, &tool.executable.sha256),
+            remote.component("sync", &version, &tool.target, &tool.executable.sha256));
+        for result in [one, two] {
+            let (_, mut file) = result?;
+            let mut bytes = Vec::new(); file.read_to_end(&mut bytes).await?;
+            assert_eq!(bytes, TOOL_BYTES);
+        }
+        assert_eq!(state.binaries.load(Ordering::SeqCst), 2, "one manifest and one archive");
+        assert!(remote.component("sync", "9.0.0", &tool.target, &tool.executable.sha256).await.is_err());
+        assert!(remote.component("../sync", &version, &tool.target, &tool.executable.sha256).await.is_err());
+        assert_eq!(state.binaries.load(Ordering::SeqCst), 2);
+        let path = remote.root.join("components").join(format!("sync-{}-{}", tool.version, tool.executable.sha256));
+        tokio::fs::write(&path, b"corrupt").await?;
+        remote.component("sync", &version, &tool.target, &tool.executable.sha256).await?;
+        assert_eq!(tokio::fs::read(path).await?, TOOL_BYTES);
+        assert_eq!(state.binaries.load(Ordering::SeqCst), 3);
+        task.abort(); Ok(())
+    }
+    #[tokio::test]
+    async fn corrupt_component_archives_are_never_published() -> Result<()> {
+        let (_root, state, remote, task) = fixture().await?;
+        state.compact.store(true, Ordering::SeqCst);
+        let tool = remote.components().await?.artifacts[0].clone();
+        state.corrupt.store(true, Ordering::SeqCst);
+        assert!(remote.component("sync", &tool.version.to_string(), &tool.target, &tool.executable.sha256).await.is_err());
+        let mut files = tokio::fs::read_dir(remote.root.join("components")).await?;
+        assert!(files.next_entry().await?.is_none());
+        task.abort(); Ok(())
     }
     #[test]
     fn shared_manifest_rejects_incomplete_duplicate_or_conflicting_core_metadata() -> Result<()> {

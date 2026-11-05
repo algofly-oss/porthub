@@ -215,6 +215,15 @@ impl Catalog {
     pub fn refresh_background(&self) {
         if let Some(remote) = &self.remote { remote.refresh_background(); }
     }
+    pub async fn components(&self) -> ApiResult<porthub_components::catalog::Catalog> {
+        self.remote.as_ref().ok_or_else(unavailable)?.components().await.map_err(|_| unavailable())
+    }
+    pub async fn component(&self, component: &str, version: &str, target: &str, digest: &str)
+        -> ApiResult<(porthub_components::catalog::Artifact, File)>
+    {
+        self.remote.as_ref().ok_or_else(unavailable)?.component(component, version, target, digest)
+            .await.map_err(|_| unavailable())
+    }
     pub async fn refresh_latest(&self) -> ApiResult<()> {
         if let Some(remote) = &self.remote { remote.refresh_latest().await.map_err(|_| unavailable())?; }
         Ok(())

@@ -4932,6 +4932,91 @@
         },
         "description": "Fresh edge health and counters for the authenticated owner’s proxy bindings. Returns available=false when no fresh snapshot exists."
       }
+    },
+    "/api/downloads/components/catalog": {
+      "get": {
+        "operationId": "get_component_catalog",
+        "summary": "Get verified optional tool catalog",
+        "tags": [
+          "Downloads"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Compatible component catalog with immutable hashes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Verified component metadata unavailable"
+          }
+        }
+      }
+    },
+    "/api/downloads/components/{component}/{version}/{target}/{digest}": {
+      "get": {
+        "operationId": "get_component_binary",
+        "summary": "Download a catalog-authorized optional tool",
+        "tags": [
+          "Downloads"
+        ],
+        "security": [],
+        "parameters": [
+          {
+            "name": "component",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "target",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "digest",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Verified executable; immutable SHA-256 ETag",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Requested verified component unavailable"
+          }
+        }
+      }
     }
   },
   "components": {

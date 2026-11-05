@@ -212,7 +212,7 @@ pub(crate) async fn lock(root: &Path, name: &str, cancel: &CancellationToken) ->
         }
     }).await?
 }
-fn verified(path: &Path, blob: &crate::catalog::Blob) -> Result<bool> {
+pub fn verified(path: &Path, blob: &crate::catalog::Blob) -> Result<bool> {
     let metadata = match regular(path) {
         Ok(metadata) => metadata,
         Err(error)
@@ -269,6 +269,21 @@ fn publish(mut file: tempfile::NamedTempFile, destination: &Path, executable: bo
     .sync_all()?;
     Ok(())
 }
+/// Verify a catalog-authorized archive and extract exactly the requested tool.
+/// The caller owns the private output directory and publishes the returned file.
+pub fn extract_verified(archive: &Path, root: &Path, artifact: &Artifact, catalog: &Catalog)
+    -> Result<tempfile::NamedTempFile>
+{
+    catalog.validate()?;
+    ensure!(catalog.artifacts.iter().any(|entry| entry.same_tool(artifact)
+        && entry.release == artifact.release && entry.archive == artifact.archive),
+        "component is not authorized by catalog");
+    ensure!(verified(archive, &artifact.archive)?, "component archive checksum mismatch");
+    let allowed = catalog.artifacts.iter().filter(|entry| entry.target == artifact.target
+        && entry.release == artifact.release).map(|entry| PathBuf::from(entry.member())).collect();
+    extract(archive, root, artifact, &allowed)
+}
+
 fn extract(
     archive: &Path,
     root: &Path,

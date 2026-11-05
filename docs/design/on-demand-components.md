@@ -321,6 +321,19 @@ cannot be discarded or changed incompatibly by a later release. The persistent
 index retains validated tool metadata for subsequent delivery work.
 
 The reader still generates the existing local core sidecars, preserving the
-current OTA and bootstrap download contracts. Component delivery routes, tool
-archive caching, compact publication, and deployment of this reader remain
-pending; the current production release continues using the original format.
+current OTA and bootstrap download contracts. Component delivery routes now serve the verified tool-only catalog and
+individual executables. Tool archive caching, compact publication, and deployment
+of this reader remain pending; the current production release continues using the original format.
+
+
+The gateway exposes public `GET /api/downloads/components/catalog` and
+`GET /api/downloads/components/{component}/{version}/{target}/{sha256}` routes,
+matching the core manager's URL contract. The latter accepts only exact entries
+from the verified catalog. It fetches the declared GitHub platform archive,
+verifies its size/hash, rejects unlisted or unsafe archive members, and verifies
+the selected executable before atomic publication. Concurrent requests share
+one extraction. Cached binaries are checked again before serving and repaired
+when damaged; transfers retain their open descriptor. Responses provide an
+immutable hash ETag and exact length. These are public software artifacts and
+carry no enrollment credentials. Existing legacy-only releases report component
+metadata unavailable, allowing the manager's configured fallback behavior.
