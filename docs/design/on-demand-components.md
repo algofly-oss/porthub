@@ -120,6 +120,18 @@ not parsed human CLI output. Invoking a standalone CLI directly remains valid;
 it starts its own local backend when core is absent. Shared libraries provide
 code reuse, while process isolation gives independently replaceable tools.
 
+CLI invocation is an allowed fallback when a module's IPC/RPC transport is
+unavailable. It is internal to core: normal user commands do not change. Core
+must use the same verified compatible executable, invoke it directly without a
+shell, and use versioned machine-readable output or inherit the terminal for
+interactive frontends. It must not parse human status text. Sensitive arguments
+use protected handoff files or standard input; never put machine credentials in
+process arguments or logs. Do not replay a mutating operation after an ambiguous
+RPC result; fall back before sending it, or reconcile its outcome first. A
+module policy/authentication rejection remains a rejection. Native tests must
+exercise forced CLI mode and automatic transport failure/recovery. This fallback
+adapter is required before release and is not yet wired into all core commands.
+
 Core retains machine credentials, server authorization, routing policy, and the
 authenticated exposure broker. Give helpers narrowly scoped session capabilities
 rather than machine tokens. Endpoint paths and credentials must not be logged.
@@ -211,3 +223,12 @@ exit after five minutes. Foreground sync watches follow connection lifetime;
 detached jobs survive caller exit and remain manageable through the same core
 commands. Native core watch tests first build `porthub-sync` beside the core
 binary, or use `PORTHUB_TEST_SYNC_EXECUTABLE` to locate that fixture explicitly.
+
+Before rollout, native Windows must also pass a complete isolated SCM install,
+service start/stop, CLI publication and PATH check against a mock enrollment
+server. Shell command smoke tests and credential-file ACL checks alone do not
+prove that complete installation works. Current fixes remove the protected
+Windows profile-save stub, open the PATH registry key with write access, register
+PATH for private installations too, and refresh the invoking PowerShell session.
+Native CLI startup and detached worker pipe-lifetime checks gate the Windows
+main-stack reserve and handle-inheritance fixes.

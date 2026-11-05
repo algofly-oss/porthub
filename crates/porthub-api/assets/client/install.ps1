@@ -1,4 +1,13 @@
 $ErrorActionPreference = 'Stop'
+function Update-PortHubSessionPath {
+    $porthubMachinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    foreach ($porthubEntry in ($porthubMachinePath -split ';')) {
+        $porthubEntry = [Environment]::ExpandEnvironmentVariables($porthubEntry).TrimEnd('\')
+        if ($porthubEntry.EndsWith('\PortHub\bin', [StringComparison]::OrdinalIgnoreCase) -and (Test-Path (Join-Path $porthubEntry 'porthub.exe')) -and (($env:Path -split ';') -notcontains $porthubEntry)) {
+            $env:Path = $porthubEntry + ';' + $env:Path
+        }
+    }
+}
 $porthubUrl = {{URL}}
 $porthubIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $porthubPrincipal = [Security.Principal.WindowsPrincipal]::new($porthubIdentity)
@@ -15,7 +24,8 @@ if (-not $porthubPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
         throw 'Administrator permission was not granted. Approve the Windows prompt or run the command in an Administrator terminal.'
     }
     if ($porthubElevated.ExitCode -ne 0) { throw 'PortHub installation did not complete in the administrator window.' }
-    Write-Host 'PortHub installation completed. Open a new terminal to use porthub.'
+    Update-PortHubSessionPath
+    Write-Host 'PortHub installation completed. Open a new terminal window for Command Prompt; PowerShell can use porthub now.'
     return
 }
 $porthubArchitecture = $env:PROCESSOR_ARCHITEW6432
@@ -38,3 +48,6 @@ try {
 } finally {
     Remove-Item $porthubDirectory -Recurse -Force -ErrorAction SilentlyContinue
 }
+
+Update-PortHubSessionPath
+Write-Host 'PortHub installation completed. Open a new terminal window for Command Prompt; PowerShell can use porthub now.'

@@ -130,10 +130,16 @@ async fn persistent_rpc_stream_upgrade_and_interrupted_request_recovery() -> Res
     assert_eq!(&bytes, b"persistent stream");
     // Existing streams remain usable while other requests/connections operate.
     let mut interrupted = client(&endpoint, &artifact).await;
-    assert!(interrupted
-        .call::<_, Value>(Operation::Wait, Duration::from_millis(30))
-        .await
-        .is_err());
+    {
+        // Cancel a live request deterministically. A server deadline response is
+        // a complete frame and may legitimately leave the connection reusable.
+        let call = interrupted.call::<_, Value>(Operation::Wait, Duration::from_secs(1));
+        tokio::pin!(call);
+        tokio::select! { biased;
+            result = &mut call => panic!("pending operation unexpectedly completed: {}", result.is_ok()),
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {},
+        }
+    }
     assert!(interrupted
         .call::<_, Value>(
             Operation::Echo("must reconnect".into()),

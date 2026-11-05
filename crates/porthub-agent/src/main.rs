@@ -1221,6 +1221,7 @@ async fn main() -> Result<()> {
                     Some(&cli),
                 )
                 .await?;
+                porthub_agent::bootstrap::register_cli_path(cli.parent().context("CLI bin directory missing")?, false)?;
                 println!("PortHub private networking activated; CLI installed");
             } else {
                 println!("PortHub private credentials saved; private networking service is not activated");

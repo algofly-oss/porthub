@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
-    process::Stdio,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio_util::sync::CancellationToken;
@@ -76,35 +75,18 @@ impl Manager {
         let delay = 1u64 << attempts.count;
         attempts.retry_at = now().saturating_add(delay);
         write_attempts(&attempt_path, &attempts)?;
-        let mut command = tokio::process::Command::new(executable);
-        command
-            .args(["__porthub-worker", "--endpoint", endpoint.address()])
-            .env("PORTHUB_STATE_DIR", &context.state_directory)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(false);
-        #[cfg(unix)]
-        unsafe {
-            command.pre_exec(|| {
-                rustix::process::setsid().map_err(std::io::Error::from)?;
-                Ok(())
-            });
-        }
-        #[cfg(windows)]
-        command.creation_flags(0x0000_0008 | 0x0000_0200); // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
         let mut child = Starting {
-            child: Some(
-                command
-                    .spawn()
-                    .context("cannot start verified component worker")?,
-            ),
+            child: Some(crate::process::spawn(
+                &executable,
+                endpoint.address(),
+                &context.state_directory,
+            )?),
         };
         let ready = tokio::time::timeout(Duration::from_secs(10), async {
             let mut delay = Duration::from_millis(25);
             loop {
                 if let Ok(client) = Client::connect(&endpoint, &artifact).await { return Ok(client); }
-                ensure!(child.try_wait()?.is_none(), "component worker exited during startup");
+                ensure!(!child.exited()?, "component worker exited during startup");
                 tokio::select! { biased; _ = cancel.cancelled() => anyhow::bail!("component worker start cancelled"), _ = tokio::time::sleep(delay) => {} }
                 delay = (delay * 2).min(Duration::from_millis(500));
             }
@@ -133,10 +115,10 @@ impl Manager {
     }
 }
 struct Starting {
-    child: Option<tokio::process::Child>,
+    child: Option<crate::process::Child>,
 }
 impl std::ops::Deref for Starting {
-    type Target = tokio::process::Child;
+    type Target = crate::process::Child;
     fn deref(&self) -> &Self::Target {
         self.child.as_ref().expect("startup guard owns a child")
     }

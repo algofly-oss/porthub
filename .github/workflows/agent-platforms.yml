@@ -73,6 +73,8 @@ jobs:
         with:
           ref: ${{ inputs.revision || github.sha }}
           fetch-depth: 0
+      - name: Verify pinned source download recovery
+        run: python3 scripts/test_build_terminal_download.py
       - name: Validate publishing scope
         if: inputs.publish_release == true
         env:
@@ -279,6 +281,12 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: python scripts/run-with-timeout.py 10 "target/${{ matrix.target }}/debug/porthub.exe" --version
+      - name: Verify protected Windows enrollment and PATH registration
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --lib windows_path_tests --target ${{ matrix.target }}
+          python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --test windows_bootstrap --target ${{ matrix.target }} -- --include-ignored
       - name: Verify Windows watch jobs with a bounded runtime
         if: runner.os == 'Windows'
         shell: bash
