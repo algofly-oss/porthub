@@ -1,4 +1,5 @@
 import importlib.util
+import builtins
 import json
 import io
 import tarfile
@@ -72,6 +73,18 @@ class Recovery(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'provenance'):
             self.run_recovery(output)
         self.assertFalse(output.exists())
+
+    def test_artifact_validation_import_does_not_require_posix_locking(self):
+        original = builtins.__import__
+        def portable_import(name, *args, **kwargs):
+            if name == 'fcntl':
+                raise AssertionError('Artifact validation must work without fcntl')
+            return original(name, *args, **kwargs)
+        with patch('builtins.__import__', side_effect=portable_import):
+            spec = importlib.util.spec_from_file_location('portable_migration_check', Path(__file__).resolve().parents[1]/'deploy/native/migrate.py')
+            migration = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(migration)
+        self.assertEqual(len(migration.ASSETS), 10)
 
     def test_verifier_failure_publishes_nothing(self):
         output = self.root/'recovered'
