@@ -725,3 +725,13 @@ from those exact packaged helpers, with shared-cache reuse disabled; packaged
 core startup is checked explicitly too. Linux production job conversion and
 prior-build input delivery to native jobs remain pending, so full publication
 continues to be blocked until every platform emits the required indexes.
+
+Native Linux x64 and ARM64 production jobs now emit coordinator indexes too.
+They build all five Rust executables for musl, provision the terminal bundle with
+that exact shipping target, and maintain a separate shipping-runtime cache.
+`verify-static-components.py` verifies indexed binary checksums, requires a musl
+target, and rejects ELF interpreter or shared-library dependencies for every
+packaged version. Exact packaged helper fixtures and core startup checks then
+run on the native host. Local verifier tests compile static/dynamic ELF examples
+and reject invalid payloads. Three 32-bit Linux production jobs still need their
+musl toolchain conversion before complete release publication can proceed.
