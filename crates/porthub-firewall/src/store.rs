@@ -111,7 +111,7 @@ CREATE TABLE IF NOT EXISTS porthub_schema(key TEXT PRIMARY KEY,value TEXT NOT NU
                 for ip in &s.incoming_ips {tx.execute("INSERT OR REPLACE INTO recent_ip_hits(port,ip,last_seen) VALUES(?,?,?)",params![port,ip,s.timestamp])?;}
                 tx.execute("DELETE FROM recent_ip_hits WHERE port=? AND ip NOT IN (SELECT ip FROM recent_ip_hits WHERE port=? ORDER BY last_seen DESC,ip LIMIT 10)",params![port,port])?;
             }
-            tx.execute("DELETE FROM traffic_buffer WHERE ts<?",[now-300])?;
+            tx.execute("DELETE FROM traffic_buffer WHERE ts<?",[now-3600])?;
             tx.execute("DELETE FROM active_ports WHERE last_seen<?",[now-300])?;
             tx.commit()
         }).await?;
@@ -124,7 +124,7 @@ CREATE TABLE IF NOT EXISTS porthub_schema(key TEXT PRIMARY KEY,value TEXT NOT NU
             Some(serde_json::to_string(&ports)?)
         };
         let rows=self.db.call(move|db|->tokio_rusqlite::rusqlite::Result<Vec<StoredSample>> {
-            let mut query="SELECT port,ts,interval_seconds,in_bytes,out_bytes,drop_bytes,incoming_ips,outgoing_ips,blocked_ips FROM traffic_buffer WHERE ts>=strftime('%s','now')-300".to_owned();
+            let mut query="SELECT port,ts,interval_seconds,in_bytes,out_bytes,drop_bytes,incoming_ips,outgoing_ips,blocked_ips FROM traffic_buffer WHERE ts>=strftime('%s','now')-3600".to_owned();
             let mut parameters=Vec::new();
             if let Some(filter)=filter {query.push_str(" AND port IN (SELECT value FROM json_each(?))");parameters.push(filter);}
             query.push_str(" ORDER BY port,ts");
