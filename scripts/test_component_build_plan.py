@@ -175,6 +175,20 @@ recipe_version=1
             builder.build(SimpleNamespace(target=TARGET,cc='cross-gcc',ar='cross-ar',jobs=1))
         self.assertEqual(Path(stdout.getvalue().strip()),bundle)
 
+    def test_build_script_modules_are_inputs_even_when_absent_from_binary_depfile(self):
+        self.write('tool/build.rs','mod build_support; fn main() {}\n')
+        self.write('tool/build_support.rs','pub fn target_check() {}\n')
+        script_dep=self.root/'target/build-script.d'
+        escape=lambda path:str(path).replace('\\','\\\\').replace(' ','\\ ')
+        script_dep.write_text('build-script: '+escape(self.root/'tool/build.rs')+' '+escape(self.root/'tool/build_support.rs')+'\n')
+        tree=(f'0tool v0.1.0 ({self.root/"tool"})|\n'
+              f'1support v0.1.0 ({self.root/"support"})|\n2dep-a v1.0.0|default,std\n')
+        receipt=buildplan.record(self.root,'tool',TARGET,self.binary,self.dep,'a'*40,tree=tree,script_dep_infos=[script_dep])
+        self.assertIn('tool/build_support.rs',[row[0] for row in receipt['build']['inputs']])
+        self.assertEqual(buildplan.plan(self.root,'tool',TARGET,receipt)['action'],'reuse')
+        self.write('tool/build_support.rs','pub fn changed_target_check() {}\n')
+        self.assertEqual(buildplan.plan(self.root,'tool',TARGET,receipt)['action'],'build')
+
     def test_independent_core_reuses_after_server_workspace_version_bump(self):
         path = self.root/'core/Cargo.toml'
         path.write_text(path.read_text().replace('version.workspace=true', 'version="1.11.0"'))

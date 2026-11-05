@@ -399,14 +399,17 @@ def validate_receipt(receipt):
     return receipt
 
 
-def record(root, tool, target, binary, dep_info, revision, version=None, tree=None):
+def record(root, tool, target, binary, dep_info, revision, version=None, tree=None, script_dep_infos=()):
     root = Path(root).resolve()
     recipe = read_recipes(root)[tool]
     nodes = cargo_graph(root, recipe, target, tree)
     generated = derived_inputs(root, recipe, target)
     generated_bundle = Path(os.environ['PORTHUB_TERMINAL_BUNDLE']).resolve() if generated else None
     paths = set()
-    for value in dep_paths(dep_info.read_text()):
+    dependency_paths = []
+    for information in [dep_info, *script_dep_infos]:
+        dependency_paths.extend(dep_paths(information.read_text()))
+    for value in dependency_paths:
         path = Path(value)
         if not path.is_absolute():
             path = root / path
@@ -513,17 +516,27 @@ def build_and_record(root, tool, target, revision, version=None, binary_output=N
     result = subprocess.run(command, cwd=root, env=environment, capture_output=True, text=True)
     sys.stderr.write(result.stderr)
     outputs = set()
+    script_dep_infos = set()
     for line in result.stdout.splitlines():
         message = json.loads(line)
         if message.get('reason') == 'compiler-artifact' and message.get('target', {}).get('name') == recipe['binary'] and message.get('executable'):
             outputs.add(message['executable'])
+        if message.get('reason') == 'compiler-artifact' and message.get('target', {}).get('kind') == ['custom-build']:
+            source = Path(message['target']['src_path']).resolve()
+            if source.is_relative_to(root):
+                dependencies = {path for filename in message.get('filenames', [])
+                    for path in Path(filename).parent.glob('build_script_build-*.d')}
+                if len(dependencies) != 1:
+                    raise ValueError('Local build-script dependency information is unavailable')
+                script_dep_infos.update(dependencies)
         if message.get('reason') == 'compiler-message':
             sys.stderr.write(message.get('message', {}).get('rendered') or '')
     if result.returncode or len(outputs) != 1:
         raise ValueError('The selected component build did not produce exactly one executable')
     require_clean_source(root, revision)
     binary = Path(outputs.pop())
-    receipt = record(root, tool, target, binary, binary.with_suffix('.d'), revision, version)
+    receipt = record(root, tool, target, binary, binary.with_suffix('.d'), revision, version,
+                     script_dep_infos=sorted(script_dep_infos))
     if receipt['build'].get('derived_inputs', {}) != generated_before:
         raise ValueError('Generated terminal bundle changed during compilation')
     # CI provenance must not attest arbitrary untracked inputs merely because

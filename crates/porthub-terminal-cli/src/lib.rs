@@ -35,8 +35,10 @@ pub fn install(directory: &Path) -> Result<Value> {
                 Err(error) => return Err(error.into()),
             }
         }
-        let target = env!("PORTHUB_RUST_TARGET").replace("linux-musl", "linux-gnu");
-        let runtime = porthub_terminal::runtime::install(BUNDLE, directory, &target)?;
+        // Catalog target aliases are unrelated to the embedded runtime's exact
+        // build target. A musl bundle carries its musl target in its manifest.
+        let runtime =
+            porthub_terminal::runtime::install(BUNDLE, directory, env!("PORTHUB_RUST_TARGET"))?;
         Ok(Value::Runtime {
             executable: runtime.executable,
             terminfo: runtime.terminfo,

@@ -1,3 +1,4 @@
+mod build_support;
 fn main() {
     println!("cargo:rerun-if-env-changed=TARGET");
     let target = std::env::var("TARGET").expect("Cargo supplies the compilation target");
@@ -14,6 +15,9 @@ fn main() {
             assert!(
                 !bytes.is_empty() && bytes.len() <= 8 * 1024 * 1024,
                 "invalid terminal runtime bundle size"
+            );
+            build_support::validate_target(&bytes, &target).expect(
+                "terminal bundle must match the exact Rust target; catalog aliases do not apply",
             );
             std::fs::write(output, bytes).expect("embed terminal runtime");
             return;

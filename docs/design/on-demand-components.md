@@ -793,3 +793,12 @@ Standalone profiles with OS routing (`sources: None`) are unaffected. The
 supervisor does not keep a discarded profile alive. Paused-clock tests exercise
 expiry, renewal, and denial of post-expiry operations; standalone CLI/pipe checks
 still pass. Generation handover and persistent CLI fallback remain unfinished.
+
+Embedded terminal runtime manifests now use the exact Rust build target. Linux
+musl-to-GNU aliases remain a catalog naming convention and are not applied to
+private runtime manifests. The terminal build script checks the bounded archive's
+manifest target before embedding it, so an ABI label mismatch fails during build
+instead of after installation. Tests reject catalog-alias substitutions and
+malformed/oversized manifests; the independent CLI still creates and lists an
+isolated real tmux workspace. Cargo receipt capture now includes local build-script
+depfiles too, ensuring changes in imported build support modules invalidate reuse.
