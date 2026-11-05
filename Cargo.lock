@@ -5245,9 +5245,11 @@ dependencies = [
  "porthub-components",
  "porthub-egress",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tokio-util",
+ "url",
 ]
 
 [[package]]

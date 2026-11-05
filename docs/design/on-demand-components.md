@@ -865,3 +865,27 @@ close. They use empty authorized sources and require no network, enrollment,
 core executable, or gateway. The core session manager still needs to select and
 supervise this carrier for persistent automatic/forced CLI fallback; the new
 helper entry point alone does not complete that requirement.
+
+Core-managed Tor sessions now select the persistent pipe carrier. With
+`PORTHUB_COMPONENT_TRANSPORT=auto`, local RPC is attempted first; startup failure
+can select the verified multiplexed CLI before any Tor operation is dispatched.
+`rpc` forbids this fallback, while `cli` selects pipes directly. The selected
+transport stays fixed for that session; candidate generations inherit the
+administrator's selection policy. Session clones coalesce pipe startup and share
+one child. Existing streams retain that child through their carrier leases.
+A channel admission failure on a healthy carrier never replaces its process or
+splits its live pool. A terminated carrier may reconnect before a new operation,
+with in-memory retry delays and private, locked startup-failure records persisting
+across new session objects. Delays are bounded at 300 seconds. Each new spawn
+rechecks the verified executable hash. Cleanup only opens an existing carrier or
+local worker and never launches a replacement for revocation.
+
+All six real Tor standalone/process tests pass on native Linux, including 16
+concurrent managed connections sharing one PID, safe reconnection after explicit
+worker shutdown, automatic fallback after fixture-injected worker startup
+failure, forced-RPC refusal to fall back, and failed-start backoff surviving
+fresh sessions. The full component SDK test suite and the core compile check
+also pass. These process tests use empty authorized sources and do not establish
+Tor circuits. Live managed network traffic, generation handover with active Tor
+streams, and platform validation remain required; full terminal extraction is
+also still pending.

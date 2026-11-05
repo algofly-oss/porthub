@@ -120,6 +120,9 @@ impl Drop for Carrier {
     }
 }
 impl Carrier {
+    pub fn is_closed(&self) -> bool {
+        self.driver.is_finished()
+    }
     /// The transport is owned by the connection driver. For a subprocess pipe,
     /// its kill-on-drop guard therefore survives as long as any channel does.
     pub async fn connect<T>(transport: T) -> Result<Arc<Self>>

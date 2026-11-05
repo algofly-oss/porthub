@@ -49,6 +49,15 @@ pub struct Session {
     artifact: Artifact,
     executable: PathBuf,
     context: ContextOptions,
+    policy: Mode,
+    mode: Mode,
+    pipe: std::sync::Arc<tokio::sync::Mutex<PipeState>>,
+}
+struct PipeState {
+    carrier: Option<std::sync::Arc<crate::multiplex::Carrier>>,
+    attempts: u8,
+    last_start: tokio::time::Instant,
+    retry_at: tokio::time::Instant,
 }
 impl Session {
     pub fn artifact(&self) -> &Artifact {
@@ -67,7 +76,7 @@ impl Session {
         }
         let candidate = self
             .manager
-            .session(self.artifact.component, &self.context, cancel)
+            .session_with_mode(self.artifact.component, &self.context, self.policy, cancel)
             .await?;
         // Startup recovery may deliberately return the previously activated tool.
         if candidate.artifact.version <= self.artifact.version {
@@ -78,6 +87,16 @@ impl Session {
     /// Connect only to the already-running pinned worker. Maintenance cleanup
     /// must never start a new process merely to revoke a retired profile.
     pub async fn connect_existing(&self) -> Result<Client> {
+        if matches!(self.mode, Mode::Cli) {
+            let carrier = self
+                .pipe
+                .lock()
+                .await
+                .carrier
+                .clone()
+                .context("component pipe is not running")?;
+            return Client::from_stream(carrier.open().await?, &self.artifact).await;
+        }
         let digest = format!(
             "{:x}",
             Sha256::digest(self.context.state_directory.as_os_str().as_encoded_bytes())
@@ -87,18 +106,120 @@ impl Session {
         Client::connect(&endpoint, &self.artifact).await
     }
     pub async fn connect(&self, cancel: &CancellationToken) -> Result<Client> {
-        let client = self
-            .manager
-            .worker_resolved(
-                self.artifact.component,
-                &self.context,
-                cancel,
-                &self.artifact,
-                &self.executable,
-            )
-            .await?;
+        let client = if matches!(self.mode, Mode::Cli) {
+            self.pipe_client(cancel).await?
+        } else {
+            self.manager
+                .worker_resolved(
+                    self.artifact.component,
+                    &self.context,
+                    cancel,
+                    &self.artifact,
+                    &self.executable,
+                )
+                .await?
+        };
         self.manager
             .record_activation(&self.context, &self.artifact)?;
+        Ok(client)
+    }
+    async fn pipe_client(&self, cancel: &CancellationToken) -> Result<Client> {
+        // Session clones coalesce startup and share one private worker. A failed
+        // dispatched operation is never handled here and is never replayed.
+        let mut state = tokio::select! {biased; _=cancel.cancelled()=>anyhow::bail!("component invocation cancelled"), state=self.pipe.lock()=>state};
+        if let Some(carrier) = &state.carrier {
+            let connection =
+                async { Client::from_stream(carrier.open().await?, &self.artifact).await };
+            match tokio::select! {biased; _=cancel.cancelled()=>anyhow::bail!("component invocation cancelled"), result=connection=>result}
+            {
+                Ok(client) => return Ok(client),
+                Err(error) if !carrier.is_closed() => return Err(error),
+                Err(_) => state.carrier = None,
+            }
+        }
+        let instant = tokio::time::Instant::now();
+        ensure!(
+            instant >= state.retry_at,
+            "component pipe is backing off after an unsuccessful start; retry shortly"
+        );
+        state.attempts = if instant.duration_since(state.last_start) >= Duration::from_secs(60) {
+            1
+        } else {
+            state.attempts.saturating_add(1).min(9)
+        };
+        state.last_start = instant;
+        state.retry_at = instant + Duration::from_secs((1u64 << state.attempts).min(300));
+        let mut identity = Sha256::new();
+        identity.update(
+            format!(
+                "{}:{}:{}:",
+                self.artifact.component, self.artifact.version, self.artifact.executable.sha256
+            )
+            .as_bytes(),
+        );
+        identity.update(self.context.state_directory.as_os_str().as_encoded_bytes());
+        let identity = format!("{:x}", identity.finalize());
+        let root = self.manager.cache_root();
+        let _startup_lock = tokio::time::timeout(
+            Duration::from_secs(10),
+            crate::store::lock(root, &format!("pipe-{identity}.lock"), cancel),
+        )
+        .await??;
+        let attempts_path = root.join(format!("pipe-{identity}.attempts.json"));
+        let mut attempts = read_attempts(&attempts_path)?;
+        ensure!(
+            now() >= attempts.retry_at,
+            "component pipe startup is backing off; retry shortly"
+        );
+        attempts.count = if now().saturating_sub(attempts.last_start) >= 60 {
+            1
+        } else {
+            attempts.count.saturating_add(1).min(9)
+        };
+        attempts.last_start = now();
+        attempts.retry_at = attempts
+            .last_start
+            .saturating_add((1u64 << attempts.count).min(300));
+        write_attempts(&attempts_path, &attempts)?;
+        let path = self.executable.clone();
+        let blob = self.artifact.executable.clone();
+        ensure!(
+            tokio::task::spawn_blocking(move || crate::store::verified(&path, &blob)).await??,
+            "component executable changed before pipe startup"
+        );
+        use std::process::Stdio;
+        let mut process = crate::process::retry_spawn(cancel, || {
+            tokio::process::Command::new(&self.executable)
+                .arg("__porthub-multiplex")
+                .env("PORTHUB_STATE_DIR", &self.context.state_directory)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .context("cannot invoke verified persistent component CLI")
+        })
+        .await?;
+        let reader = process
+            .stdout
+            .take()
+            .context("component stdout unavailable")?;
+        let writer = process
+            .stdin
+            .take()
+            .context("component stdin unavailable")?;
+        let transport = crate::stdio::Child {
+            pipes: crate::stdio::Pair::new(reader, writer),
+            process,
+        };
+        let startup = async {
+            let carrier = crate::multiplex::Carrier::connect(transport).await?;
+            let client = Client::from_stream(carrier.open().await?, &self.artifact).await?;
+            Ok::<_, anyhow::Error>((carrier, client))
+        };
+        let (carrier, client) = tokio::select! {biased; _=cancel.cancelled()=>anyhow::bail!("component invocation cancelled"), result=startup=>result?};
+        write_attempts(&attempts_path, &Attempts::default())?;
+        state.carrier = Some(carrier);
         Ok(client)
     }
 }
@@ -109,58 +230,99 @@ impl Manager {
         context: &ContextOptions,
         cancel: &CancellationToken,
     ) -> Result<Session> {
+        self.session_with_mode(component, context, Mode::Rpc, cancel)
+            .await
+    }
+    /// Persistent CLI mode requires the helper's multiplexed pipe frontend.
+    /// Only Tor currently supplies that contract; ordinary tools retain their
+    /// existing RPC/one-shot fallback entry points.
+    pub async fn session_with_mode(
+        &self,
+        component: Component,
+        context: &ContextOptions,
+        policy: Mode,
+        cancel: &CancellationToken,
+    ) -> Result<Session> {
         ensure!(
             context.state_directory.is_absolute(),
             "component state requires an absolute directory"
         );
-        let (mut artifact, mut executable) = self.resolve(component, cancel).await?;
-        if let Err(error) = self
-            .worker_resolved(component, context, cancel, &artifact, &executable)
-            .await
-        {
-            if cancel.is_cancelled() {
-                return Err(error);
-            }
-            let mut recovered = None;
-            let mut tried = 0;
-            for (previous, path) in self
-                .installed(component)
-                .await?
-                .into_iter()
-                .filter(|(candidate, _)| candidate.version < artifact.version)
-            {
-                if !self.was_activated(context, &previous)? {
-                    continue;
-                }
-                if tried >= 4 {
-                    break;
-                }
-                tried += 1;
-                if self
-                    .worker_resolved(component, context, cancel, &previous, &path)
+        ensure!(
+            matches!(policy, Mode::Rpc) || component == Component::Tor,
+            "component does not support persistent CLI transport"
+        );
+        let (artifact, executable) = self.resolve(component, cancel).await?;
+        let start = |artifact: Artifact, executable: PathBuf| async move {
+            let now = tokio::time::Instant::now();
+            let mut session = Session {
+                manager: self.clone(),
+                artifact,
+                executable,
+                context: context.clone(),
+                policy,
+                mode: Mode::Rpc,
+                pipe: std::sync::Arc::new(tokio::sync::Mutex::new(PipeState {
+                    carrier: None,
+                    attempts: 0,
+                    last_start: now,
+                    retry_at: now,
+                })),
+            };
+            if !matches!(policy, Mode::Cli) {
+                match self
+                    .worker_resolved(
+                        component,
+                        context,
+                        cancel,
+                        &session.artifact,
+                        &session.executable,
+                    )
                     .await
-                    .is_ok()
                 {
-                    recovered = Some((previous, path));
-                    break;
+                    Ok(_) => {
+                        self.record_activation(context, &session.artifact)?;
+                        return Ok(session);
+                    }
+                    Err(error) if matches!(policy, Mode::Rpc) || cancel.is_cancelled() => {
+                        return Err(error)
+                    }
+                    Err(_) => {}
                 }
+            }
+            session.mode = Mode::Cli;
+            session.connect(cancel).await?;
+            Ok::<Session, anyhow::Error>(session)
+        };
+        match start(artifact.clone(), executable).await {
+            Ok(session) => Ok(session),
+            Err(error) => {
                 if cancel.is_cancelled() {
                     return Err(error);
                 }
+                let mut tried = 0;
+                for (previous, path) in self
+                    .installed(component)
+                    .await?
+                    .into_iter()
+                    .filter(|(candidate, _)| candidate.version < artifact.version)
+                {
+                    if !self.was_activated(context, &previous)? {
+                        continue;
+                    }
+                    if tried >= 4 {
+                        break;
+                    }
+                    tried += 1;
+                    if let Ok(session) = start(previous, path).await {
+                        return Ok(session);
+                    }
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+                }
+                Err(error)
             }
-            let Some((previous, path)) = recovered else {
-                return Err(error);
-            };
-            artifact = previous;
-            executable = path;
         }
-        self.record_activation(context, &artifact)?;
-        Ok(Session {
-            manager: self.clone(),
-            artifact,
-            executable,
-            context: context.clone(),
-        })
     }
     pub async fn connect(
         &self,
