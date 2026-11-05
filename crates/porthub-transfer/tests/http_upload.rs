@@ -97,6 +97,7 @@ async fn nested_destination_syncs_empty_directories_and_same_second_edits() -> R
     Ok(())
 }
 
+#[cfg(feature = "sync")]
 #[tokio::test]
 async fn watch_syncs_changes_recovers_offline_and_stops_without_deleting_remote_files() -> Result<()>
 {

@@ -5134,6 +5134,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "porthub-sync"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap 4.6.7",
+ "porthub-transfer",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "porthub-terminal"
 version = "0.1.0"
 dependencies = [

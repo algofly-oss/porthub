@@ -4,6 +4,8 @@ on:
     branches: [main, codex/on-demand-components]
     paths:
       - 'crates/porthub-components/**'
+      - 'crates/porthub-sync/**'
+      - 'crates/porthub-transfer/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
       - 'rust-toolchain.toml'
@@ -11,6 +13,8 @@ on:
   pull_request:
     paths:
       - 'crates/porthub-components/**'
+      - 'crates/porthub-sync/**'
+      - 'crates/porthub-transfer/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
       - 'rust-toolchain.toml'
@@ -28,6 +32,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-15, windows-latest, windows-11-arm]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     env:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -40,4 +45,6 @@ jobs:
         with:
           key: components-${{ runner.arch }}
       - name: Test compatibility, download verification and IPC limits
-        run: cargo test --locked -p porthub-components
+        run: cargo test --locked -p porthub-components -p porthub-sync
+      - name: Verify transfers compile and run without watch synchronization
+        run: cargo test --locked -p porthub-transfer --no-default-features

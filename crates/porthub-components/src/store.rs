@@ -68,6 +68,11 @@ impl Settings {
             .transpose()
     }
 }
+pub struct Refresh {
+    pub catalog: Catalog,
+    pub fresh: bool,
+}
+
 #[derive(Clone)]
 pub struct Manager {
     root: PathBuf,
@@ -197,7 +202,8 @@ async fn lock(root: &Path, name: &str, cancel: &CancellationToken) -> Result<Fil
         loop {
             match file.try_lock_exclusive() {
                 Ok(()) => return Ok(file),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {},
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {},
                 Err(error) => return Err(error.into()),
             }
             tokio::select! { _ = cancel.cancelled() => anyhow::bail!("component operation cancelled"),
@@ -396,6 +402,9 @@ impl Manager {
         result = self.transport.fetch(url, file, max) => result }
     }
     pub async fn refresh(&self, cancel: &CancellationToken) -> Result<Catalog> {
+        Ok(self.refresh_state(cancel).await?.catalog)
+    }
+    pub async fn refresh_state(&self, cancel: &CancellationToken) -> Result<Refresh> {
         let _lock = lock(&self.root, "catalog.lock", cancel).await?;
         let cached = self.cached_catalog()?;
         let mut sources = Vec::new();
@@ -445,14 +454,22 @@ impl Manager {
                         }
                     }
                     publish(temporary, &self.root.join(CATALOG_ASSET), false)?;
-                    return Ok(catalog);
+                    return Ok(Refresh {
+                        catalog,
+                        fresh: true,
+                    });
                 }
                 Err(error) if error.is::<AccessDenied>() => return Err(error),
                 Err(_) if cancel.is_cancelled() => anyhow::bail!("component operation cancelled"),
                 Err(_) => {}
             }
         }
-        cached.context("component catalog unavailable from allowed download sources")
+        cached
+            .map(|catalog| Refresh {
+                catalog,
+                fresh: false,
+            })
+            .context("component catalog unavailable from allowed download sources")
     }
     pub fn selected<'a>(&self, catalog: &'a Catalog, component: Component) -> Result<&'a Artifact> {
         ensure!(

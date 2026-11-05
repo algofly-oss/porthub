@@ -1,8 +1,12 @@
 # Independently usable PortHub components
 
-Status: agreed requirements and implementation design; not shipped. The current
-agent still bundles these features. This document does not change the published
-installer, updater, or release format.
+Status: implementation in progress; not shipped. The current published agent
+still bundles these features. The `porthub-components` crate implements catalog
+validation, compatibility selection, verified downloads/cache, gateway/GitHub
+fallback, installed-version receipts, IPC framing, and background maintenance.
+`porthub-sync` provides independently usable directory watching. These pieces
+are not yet connected to core startup/commands or published as release modules.
+This document does not change the published updater or release format.
 
 ## Ownership and package boundaries
 
