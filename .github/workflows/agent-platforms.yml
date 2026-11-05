@@ -467,12 +467,17 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .cache/terminal-helper
-          key: terminal-v1-linux32-${{ matrix.target }}-${{ hashFiles('vendor/terminal/sources.json', 'scripts/build-terminal-helper.py') }}
+          key: terminal-v2-linux32-${{ matrix.target }}-${{ inputs.verify_only == true && 'gnu' || 'musl' }}-${{ hashFiles('vendor/terminal/sources.json', 'scripts/build-terminal-helper.py') }}
       - name: Build or reuse cross-compiled terminal runtime
         shell: bash
         run: |
-          terminal_bundle="$(python3 scripts/build-terminal-helper.py --target '${{ matrix.target }}' --cc '${{ matrix.compiler }}' --ar '${{ matrix.ar }}')"
+          terminal_target='${{ matrix.target }}'
+          if [ '${{ inputs.verify_only }}' != 'true' ]; then
+            terminal_target="$(echo "$terminal_target" | sed 's/-gnu/-musl/')"
+          fi
+          terminal_bundle="$(python3 scripts/build-terminal-helper.py --target "$terminal_target" --cc '${{ matrix.compiler }}' --ar '${{ matrix.ar }}')"
           echo "PORTHUB_TERMINAL_BUNDLE=$terminal_bundle" >> "$GITHUB_ENV"
+          echo "PORTHUB_SHIPPING_TARGET=$terminal_target" >> "$GITHUB_ENV"
       - name: Cache completed cross-compiled terminal runtime before Rust checks
         if: steps.terminal_helper_cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -509,37 +514,37 @@ jobs:
           export "CC_${cc_target_key}=${{ matrix.compiler }}"
           export "AR_${cc_target_key}=${{ matrix.ar }}"
           cargo check --locked -p porthub-agent --all-targets --target ${{ matrix.target }}
-      - name: Build agent for 32-bit Linux
+      - name: Build indexed static components for 32-bit Linux
         if: inputs.verify_only != true
         shell: bash
+        env:
+          CARGO_INCREMENTAL: "0"
         run: |
-          target_key=$(echo '${{ matrix.target }}' | tr '[:lower:]-' '[:upper:]_')
-          export "CARGO_TARGET_${target_key}_LINKER=${{ matrix.compiler }}"
-          cc_target_key=$(echo '${{ matrix.target }}' | tr '-' '_')
-          export "CC_${cc_target_key}=${{ matrix.compiler }}"
-          export "AR_${cc_target_key}=${{ matrix.ar }}"
-          cargo build --locked --release -p porthub-agent --target ${{ matrix.target }}
-          mkdir -p dist
-          cp target/${{ matrix.target }}/release/porthub dist/porthub-${{ matrix.artifact }}
-          printf '%s\n' "$PORTHUB_VERSION" > dist/porthub-${{ matrix.artifact }}.version
-          cd dist && sha256sum porthub-${{ matrix.artifact }} > porthub-${{ matrix.artifact }}.sha256
-      - name: Install native 32-bit x86 runtime libraries
-        if: inputs.verify_only != true && matrix.artifact == 'x86'
-        run: sudo apt-get install -y --no-install-recommends libc6-i386 lib32gcc-s1
+          rustup target add --toolchain 1.99.1 "$PORTHUB_SHIPPING_TARGET"
+          shipping_cc="$(dirname "$PORTHUB_TERMINAL_BUNDLE")/musl-runtime/bin/musl-gcc"
+          test -x "$shipping_cc"
+          target_key="$(echo "$PORTHUB_SHIPPING_TARGET" | tr '[:lower:]-' '[:upper:]_')"
+          compiler_key="$(echo "$PORTHUB_SHIPPING_TARGET" | tr '-' '_')"
+          export "CARGO_TARGET_${target_key}_LINKER=$shipping_cc"
+          export "CC_${compiler_key}=$shipping_cc"
+          export "AR_${compiler_key}=${{ matrix.ar }}"
+          python3 scripts/build-component-platform.py --target "$PORTHUB_SHIPPING_TARGET" --source-revision "$PORTHUB_SOURCE_REVISION" --output component-builds
+          python3 scripts/verify-static-components.py --builds component-builds
       - name: Enable ARM user-mode execution on the isolated CI runner
         if: inputs.verify_only != true && matrix.artifact != 'x86'
         uses: docker/setup-qemu-action@v4
         with:
           platforms: arm
-      - name: Exercise packaged 32-bit CLI and embedded terminal runtime
+      - name: Prepare checks against packaged cross-compiled components
         if: inputs.verify_only != true
-        env:
-          QEMU_LD_PREFIX: ${{ matrix.artifact != 'x86' && '/usr/arm-linux-gnueabihf' || '' }}
+        run: python3 scripts/prepare-packaged-component-checks.py --builds component-builds --core-output 'dist/porthub-${{ matrix.artifact }}' --cache "$RUNNER_TEMP/porthub-packaged-components-${{ matrix.target }}"
+      - name: Exercise packaged 32-bit CLI and optional terminal runtime
+        if: inputs.verify_only != true
         run: python3 scripts/test-packaged-terminal-smoke.py "dist/porthub-${{ matrix.artifact }}"
       - uses: actions/upload-artifact@v4
         if: inputs.verify_only != true
         with:
           name: porthub-${{ matrix.artifact }}
-          path: dist/
+          path: component-builds/
           if-no-files-found: error
           retention-days: 3

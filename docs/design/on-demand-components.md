@@ -735,3 +735,18 @@ packaged version. Exact packaged helper fixtures and core startup checks then
 run on the native host. Local verifier tests compile static/dynamic ELF examples
 and reject invalid payloads. Three 32-bit Linux production jobs still need their
 musl toolchain conversion before complete release publication can proceed.
+
+The three 32-bit Linux production jobs now build shipping-target musl terminal
+runtimes and use their pinned private musl compiler wrappers for separate Cargo
+component builds. Indexed executables must pass static ELF verification. ARM
+smoke checks run through the disposable runner's binfmt/QEMU setup; all packaged
+helpers seed the private check cache before exercising core terminal commands.
+The production artifact upload is the indexed component directory for every
+platform. Actual cross-platform build/run verification remains required.
+
+Generated terminal bundles are recorded as bounded, SHA-256-identified derived
+inputs alongside the tracked C builder and pinned source list. Only the exact
+configured bundle is excluded from Cargo's source depfile list; other untracked
+inputs remain subject to the existing rejection. Changed bundle bytes invalidate
+helper reuse, and changes during compilation fail receipt creation. This avoids
+mistaking `.cache/terminal-helper/.../bundle.tar.gz` for a tracked source file.

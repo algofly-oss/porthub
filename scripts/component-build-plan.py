@@ -286,15 +286,33 @@ def require_clean_source(root, revision):
         raise ValueError('Release build source contains uncommitted changes')
 
 
+def derived_inputs(root, recipe, target):
+    if recipe['package'] != 'porthub-terminal-cli' or 'windows' in target:
+        return {}
+    if not {'scripts/build-terminal-helper.py', 'vendor/terminal/sources.json'}.issubset(recipe['extra_inputs']):
+        raise ValueError('Terminal bundle requires tracked producer and source pins')
+    configured = os.environ.get('PORTHUB_TERMINAL_BUNDLE')
+    if not configured:
+        raise ValueError('Terminal build requires its generated bundle')
+    bundle = Path(configured)
+    if bundle.is_symlink() or not bundle.is_file() or not 0 < bundle.stat().st_size <= 8*1024*1024:
+        raise ValueError('Invalid generated terminal bundle')
+    return {'terminal_bundle': {'size': bundle.stat().st_size, 'sha256': file_digest(bundle)}}
+
+
 def build_state(root, recipe, target, paths, nodes):
     packages = lock_packages(root)
-    return {'recipe': recipe, 'target': target, 'toolchain': toolchain(root),
+    state = {'recipe': recipe, 'target': target, 'toolchain': toolchain(root),
             'profile': profile_state(root, recipe['profile'], nodes),
             'environment': compiler_environment(target, recipe['profile']),
             'resolver': tomllib.loads((root / 'Cargo.toml').read_text()).get('workspace', {}).get('resolver'),
             'patches': patch_state(root, nodes),
             'inputs': [input_state(root, path, kind) for path, kind in sorted(paths)],
             'dependencies': [dependency_state(packages, node) for node in nodes]}
+    generated = derived_inputs(root, recipe, target)
+    if generated:
+        state['derived_inputs'] = generated
+    return state
 
 
 def read_recipes(root):
@@ -334,11 +352,15 @@ def record(root, tool, target, binary, dep_info, revision, version=None, tree=No
     root = Path(root).resolve()
     recipe = read_recipes(root)[tool]
     nodes = cargo_graph(root, recipe, target, tree)
+    generated = derived_inputs(root, recipe, target)
+    generated_bundle = Path(os.environ['PORTHUB_TERMINAL_BUNDLE']).resolve() if generated else None
     paths = set()
     for value in dep_paths(dep_info.read_text()):
         path = Path(value)
         if not path.is_absolute():
             path = root / path
+        if generated_bundle is not None and path.resolve() == generated_bundle:
+            continue  # Exact derived artifact is hashed separately, never trusted as source.
         try:
             name = path.resolve().relative_to(root).as_posix()
         except ValueError:
@@ -421,6 +443,7 @@ def build_and_record(root, tool, target, revision, version=None, binary_output=N
     current = stable_version(current_version(root, recipe))
     if tool == 'core' and requested != current or tool != 'core' and requested < current:
         raise ValueError('Build version does not match the selected package version policy')
+    generated_before = derived_inputs(root, recipe, target)
     command = ['cargo', '+' + toolchain(root)['channel'], 'build', '--locked',
                '-p', recipe['package'], '--bin', recipe['binary'], '--target', target,
                '--profile', recipe['profile'], '--message-format=json-render-diagnostics']
@@ -447,6 +470,8 @@ def build_and_record(root, tool, target, revision, version=None, binary_output=N
     require_clean_source(root, revision)
     binary = Path(outputs.pop())
     receipt = record(root, tool, target, binary, binary.with_suffix('.d'), revision, version)
+    if receipt['build'].get('derived_inputs', {}) != generated_before:
+        raise ValueError('Generated terminal bundle changed during compilation')
     # CI provenance must not attest arbitrary untracked inputs merely because
     # their paths were named by a generated dependency file.
     for name, kind, _ in receipt['build']['inputs']:

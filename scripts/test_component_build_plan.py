@@ -97,6 +97,33 @@ recipe_version=1
     def choose(self):
         return buildplan.plan(self.root, 'tool', TARGET, self.receipt)
 
+    def test_terminal_bundle_is_a_hashed_derived_input_not_untracked_source(self):
+        recipes=self.root/'deploy/components.toml'
+        text=recipes.read_text().replace('package="tool"','package="porthub-terminal-cli"')
+        head,tool=text.split('[tools.tool]',1)
+        tool=tool.replace('extra_inputs=[]','extra_inputs=["scripts/build-terminal-helper.py","vendor/terminal/sources.json"]')
+        recipes.write_text(head+'[tools.tool]'+tool)
+        manifest=self.root/'tool/Cargo.toml'
+        manifest.write_text(manifest.read_text().replace('name="tool"','name="porthub-terminal-cli"'))
+        self.packages[1]['name']='porthub-terminal-cli';self.lock()
+        self.write('scripts/build-terminal-helper.py','pinned producer')
+        self.write('vendor/terminal/sources.json','pinned source identities')
+        self.write('.cache/runtime/bundle.tar.gz','derived bundle bytes')
+        bundle=self.root/'.cache/runtime/bundle.tar.gz'
+        self.deps('tool')
+        escaped=str(bundle).replace('\\','\\\\').replace(' ','\\ ')
+        text=self.dep.read_text().rstrip('\n')+' '+escaped+'\n'
+        self.dep.write_text(text)
+        tree=(f'0porthub-terminal-cli v0.1.0 ({self.root/"tool"})|\n'
+              f'1support v0.1.0 ({self.root/"support"})|\n2dep-a v1.0.0|default,std\n')
+        with mock.patch.dict(os.environ,{'PORTHUB_TERMINAL_BUNDLE':str(bundle)}):
+            receipt=buildplan.record(self.root,'tool',TARGET,self.binary,self.dep,'a'*40,tree=tree)
+            self.assertNotIn('.cache/runtime/bundle.tar.gz',[row[0] for row in receipt['build']['inputs']])
+            self.assertEqual(receipt['build']['derived_inputs']['terminal_bundle']['sha256'],buildplan.file_digest(bundle))
+            self.assertEqual(buildplan.plan(self.root,'tool',TARGET,receipt)['action'],'reuse')
+            bundle.write_bytes(b'changed derived bundle')
+            self.assertEqual(buildplan.plan(self.root,'tool',TARGET,receipt)['version'],'0.1.1')
+
     def test_independent_core_reuses_after_server_workspace_version_bump(self):
         path = self.root/'core/Cargo.toml'
         path.write_text(path.read_text().replace('version.workspace=true', 'version="1.11.0"'))
