@@ -368,10 +368,12 @@ jobs:
           cargo test --locked -p porthub-agent --test terminal_local --test terminal_share --target ${{ matrix.target }} -- --include-ignored
           python3 scripts/test-stats-terminal.py "$PORTHUB_TEST_AGENT_EXECUTABLE"
           python3 scripts/test-terminal-participants.py "$PORTHUB_TEST_AGENT_EXECUTABLE"
-      - name: Build self-contained agent
+      - name: Build independently packaged native core and optional tools
         if: inputs.verify_only != true && runner.os != 'Linux'
         shell: bash
-        run: cargo build --locked --release -p porthub-agent --target ${{ matrix.target }}
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: python scripts/build-component-platform.py --target '${{ matrix.target }}' --source-revision "$PORTHUB_SOURCE_REVISION" --output component-builds
       - name: Build static Linux agent bundle
         if: inputs.verify_only != true && runner.os == 'Linux'
         shell: bash
@@ -379,19 +381,14 @@ jobs:
           # Keep Cargo artifacts in the restored host cache instead of a fresh
           # Docker cache mount that disappears with each hosted runner.
           sh scripts/build-agent-linux.sh "$(echo '${{ matrix.target }}' | sed 's/-gnu$/-musl/')" '${{ matrix.artifact }}'
-      - name: Prepare versioned artifact metadata
+      - name: Prepare checks against exact packaged native components
         if: inputs.verify_only != true && runner.os != 'Linux'
         shell: bash
-        run: |
-          python - <<'PY'
-          import hashlib, os, pathlib, shutil
-          source = pathlib.Path('target/${{ matrix.target }}/release/porthub${{ matrix.extension }}')
-          output = pathlib.Path('dist/porthub-${{ matrix.artifact }}${{ matrix.extension }}')
-          output.parent.mkdir(exist_ok=True)
-          shutil.copy2(source, output)
-          output.with_name(output.name+'.version').write_text(os.environ['PORTHUB_VERSION']+'\n')
-          output.with_name(output.name+'.sha256').write_text(hashlib.sha256(output.read_bytes()).hexdigest()+'  '+output.name+'\n')
-          PY
+        run: python scripts/prepare-packaged-component-checks.py --builds component-builds --core-output 'dist/porthub-${{ matrix.artifact }}${{ matrix.extension }}' --cache "$RUNNER_TEMP/porthub-packaged-components-${{ matrix.target }}"
+      - name: Verify packaged native core startup
+        if: inputs.verify_only != true && runner.os != 'Linux'
+        shell: bash
+        run: python scripts/run-with-timeout.py 10 'dist/porthub-${{ matrix.artifact }}${{ matrix.extension }}' --version
       - name: Test packaged HTTP server lifecycle
         if: inputs.verify_only != true
         shell: bash
@@ -417,7 +414,7 @@ jobs:
         if: inputs.verify_only != true
         with:
           name: porthub-${{ matrix.artifact }}
-          path: dist/
+          path: ${{ runner.os == 'Linux' && 'dist/' || 'component-builds/' }}
           if-no-files-found: error
           retention-days: 3
   linux-32:

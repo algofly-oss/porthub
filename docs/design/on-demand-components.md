@@ -716,3 +716,12 @@ collection remains available only for releases before 1.11.0. A ten-platform
 assembly fixture passes the actual Rust verifier with exactly 21 output assets.
 Native and cross-compilation jobs still need to emit the coordinator indexes;
 the bundle gate deliberately rejects their old legacy-only modular outputs.
+
+Native macOS and Windows production builds now invoke the component coordinator
+for core and all four optional tools, in separate optimized Cargo invocations.
+They upload the indexed binaries and original receipts rather than legacy flat
+core files. Packaged lifecycle checks use a fresh private fixture cache seeded
+from those exact packaged helpers, with shared-cache reuse disabled; packaged
+core startup is checked explicitly too. Linux production job conversion and
+prior-build input delivery to native jobs remain pending, so full publication
+continues to be blocked until every platform emits the required indexes.
