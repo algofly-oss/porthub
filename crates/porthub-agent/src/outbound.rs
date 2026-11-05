@@ -53,6 +53,22 @@ pub struct Candidate {
     pub gateway: Option<IpAddr>,
     pub metric: Option<u32>,
 }
+/// A failed address family must not discard usable routes from another one.
+#[cfg(any(not(target_os = "linux"), test))]
+fn preferred_sources(
+    destinations: &[SocketAddr],
+    mut probe: impl FnMut(SocketAddr) -> std::io::Result<IpAddr>,
+) -> HashMap<SocketAddr, IpAddr> {
+    destinations.iter().filter_map(|destination| {
+        probe(*destination).ok().map(|source| (*destination, source))
+    }).collect()
+}
+#[cfg(any(not(target_os = "linux"), test))]
+fn kernel_source(destination: SocketAddr) -> std::io::Result<IpAddr> {
+    let socket = std::net::UdpSocket::bind(if destination.is_ipv4() {"0.0.0.0:0"} else {"[::]:0"})?;
+    socket.connect(destination)?; // Kernel route lookup only; no datagram is sent.
+    Ok(socket.local_addr()?.ip())
+}
 /// Linux uses source-aware FIB queries, not a physical-interface preference.
 /// Alternatives must use the same kernel-selected egress as the unbound socket;
 /// this deliberately refuses to escape a VPN or source-policy routing rule.
@@ -81,6 +97,11 @@ pub async fn discover(settings: &Settings, destinations: &[SocketAddr]) -> Resul
         targets.extend(a);
         targets.extend(b);
     }
+    #[cfg(not(target_os = "linux"))]
+    let preferred = if settings.source.is_none() && settings.interface.is_none() {
+        let destinations: Vec<_> = targets.iter().map(|address| **address).collect();
+        preferred_sources(&destinations, kernel_source)
+    } else { HashMap::new() };
     for destination in targets {
         #[cfg(target_os = "linux")]
         let route = match netlink.lookup_route(destination.ip()).await {
@@ -140,16 +161,7 @@ pub async fn discover(settings: &Settings, destinations: &[SocketAddr]) -> Resul
             // can still pin an explicitly selected local address administratively.
             #[cfg(not(target_os = "linux"))]
             if settings.source.is_none() && settings.interface.is_none() {
-                let bind = if destination.is_ipv4() {
-                    "0.0.0.0:0"
-                } else {
-                    "[::]:0"
-                };
-                let socket = std::net::UdpSocket::bind(bind)?;
-                socket.connect(destination)?;
-                if socket.local_addr()?.ip() != source {
-                    continue;
-                }
+                if preferred.get(destination) != Some(&source) { continue; }
             }
             result.push(Candidate {
                 source,
@@ -250,6 +262,27 @@ impl Selection {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unavailable_ipv6_route_does_not_discard_a_working_ipv4_source() {
+        let v6: std::net::SocketAddr = "[2001:db8::1]:443".parse().unwrap();
+        let v4: std::net::SocketAddr = "192.0.2.1:443".parse().unwrap();
+        let source: std::net::IpAddr = "192.0.2.10".parse().unwrap();
+        let routes = super::preferred_sources(&[v6,v4], |destination| {
+            if destination.is_ipv6() { Err(std::io::Error::from(std::io::ErrorKind::NetworkUnreachable)) }
+            else { Ok(source) }
+        });
+        assert_eq!(routes.get(&v4), Some(&source));
+        assert!(!routes.contains_key(&v6));
+    }
+    #[test]
+    fn source_discovery_uses_kernel_routing_without_sending_a_probe_packet() {
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver.set_read_timeout(Some(std::time::Duration::from_millis(30))).unwrap();
+        let destination = receiver.local_addr().unwrap();
+        assert_eq!(super::kernel_source(destination).unwrap(), destination.ip());
+        assert!(matches!(receiver.recv(&mut [0u8;1]).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut));
+    }
     use super::*;
     fn path(source: &str, destination: &str) -> Candidate {
         Candidate {
