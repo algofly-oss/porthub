@@ -130,6 +130,16 @@ class Reuse(unittest.TestCase):
                         digest='sha256:'+hashlib.sha256(archive.read_bytes()).hexdigest())
         with self.assertRaises(ValueError): reuse.extract(archive, package(True), destination)
         self.assertFalse((destination/'porthub-x86_64').exists())
+        import json
+        index_path = source/'index.json'
+        original_index = index_path.read_bytes()
+        index = json.loads(original_index)
+        index['target'] = 'aarch64-unknown-linux-musl'
+        index_path.write_text(json.dumps(index))
+        with self.assertRaisesRegex(ValueError, 'platform'):
+            reuse.extract(archive, package(), destination)
+        self.assertEqual(list(destination.iterdir()), [])
+        index_path.write_bytes(original_index)
         reuse.extract(archive, package(), destination)
         self.assertEqual((destination/'porthub-x86_64/index.json').read_bytes(), (source/'index.json').read_bytes())
         import shutil
