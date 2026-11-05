@@ -1,5 +1,6 @@
 //! Local optional-tool management. Core version/OTA reports never include tool
 //! maintenance state, and forwarding never awaits optional downloads.
+mod network;
 use anyhow::{ensure, Context, Result};
 use porthub_components::{
     catalog::Component,
@@ -98,7 +99,7 @@ pub fn manager(enrolled_gateway: Option<&str>) -> Result<Manager> {
             disabled,
             pins,
         },
-        Arc::new(Http::new()?),
+        Arc::new(Http::new()?.with_routing(Arc::new(network::Routes::new()?))),
     )?;
     let shared = match std::env::var_os("PORTHUB_COMPONENT_SHARED_CACHE") {
         Some(value) if value == "off" => return Ok(manager),

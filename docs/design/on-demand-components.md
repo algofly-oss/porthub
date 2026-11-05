@@ -419,6 +419,28 @@ the actual socket host/port: the proxy when intercepted, or the origin when
 Direct IPv6 authorities are normalized for socket resolution. A redirect must
 invoke this decision again because the new host can have different proxy rules.
 Tests cover credential-bearing proxies, bypass rules, IPv6, and GitHub-to-asset
-redirect authorities. The component HTTP transport still needs to call this
-selector and bind/retry policy-approved sources per request/redirect; this
-prerequisite alone does not fix module downloads on a multi-address host.
+redirect authorities. The component HTTP transport now calls this selector through the core-owned
+routing adapter described below. Live multi-address and VPN behavior still need
+installed-agent verification.
+
+
+Component download routing is supplied by the core through the lightweight
+`Routing` interface. It resolves the actual proxy/origin socket authority, performs
+bounded DNS and policy-aware route discovery, and binds the client to a permitted
+source (and its interface on macOS). IPv4/IPv6 candidates use the existing sticky
+selection and failure cooldown logic. Each new request rechecks system proxy
+configuration and routes, without changing host routes, firewall rules, or DNS.
+Explicit system mode delegates sockets to the operating system; explicit source
+and interface preferences remain enforced. Ordinary local gateways can use
+loopback in automatic mode.
+
+The HTTP transport retries at most eight source attempts before response headers.
+It reports failed connections and interrupted bodies to the selector. Access
+denials stop immediately. GitHub redirects are followed explicitly, at most four
+times and only to the existing official HTTPS host allowlist; each hop obtains a
+fresh route. Gateway redirects remain refused. TLS verification and configured
+system proxies remain enabled. The adapter sends no enrollment credentials.
+The full component suite and agent compile check cover this integration, including
+a real local HTTP test with a failing bound source, successful alternative,
+access denial, and denied routing policy. Live multi-interface/VPN/TLS recovery
+checks remain rollout gates.

@@ -1,6 +1,6 @@
 //! Socket-local path selection. Discovery never modifies host networking.
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
@@ -45,7 +45,7 @@ impl Settings {
         })
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Candidate {
     pub source: IpAddr,
     pub interface: String,
