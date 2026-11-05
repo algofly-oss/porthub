@@ -23,7 +23,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: component-contracts-${{ github.ref }}
+  group: component-contracts-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 jobs:
   contracts:

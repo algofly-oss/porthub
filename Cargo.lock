@@ -4845,6 +4845,7 @@ dependencies = [
  "libc",
  "nlink",
  "notify 8.2.1",
+ "porthub-components",
  "porthub-edge",
  "porthub-egress",
  "porthub-identity",
@@ -5138,13 +5139,17 @@ name = "porthub-sync"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "clap 4.6.7",
+ "porthub-components",
  "porthub-transfer",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tokio-util",
+ "url",
 ]
 
 [[package]]

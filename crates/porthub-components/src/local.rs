@@ -36,7 +36,7 @@ impl Endpoint {
                 rustix::process::geteuid().as_raw()
             ));
             crate::store::directory(&root)?;
-            let path = root.join(format!("{}-{digest}.sock", artifact.component));
+            let path = root.join(format!("{}-{}.sock", artifact.component, &digest[..48]));
             ensure!(
                 path.as_os_str().len() < 104,
                 "component worker socket path exceeds platform limit"
@@ -88,7 +88,10 @@ impl Endpoint {
                 .and_then(|s| s.strip_suffix(".sock"))
                 .context("invalid worker socket name")?;
             ensure!(
-                crate::catalog::digest(digest),
+                digest.len() == 48
+                    && digest
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
                 "invalid worker socket identity"
             );
         }

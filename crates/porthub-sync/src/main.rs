@@ -7,9 +7,9 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Parser)]
 #[command(
-    version,
+    version = option_env!("PORTHUB_COMPONENT_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
     about = "Watch and synchronize directories directly to an HTTP receiver",
-    after_help = "Examples:\n  porthub-sync watch ./data http://receiver:8001/\n  porthub-sync watch ./data http://receiver:8001/ --detach\n  porthub-sync list\n  porthub-sync status JOB\n  porthub-sync stop JOB\n\nReceivers can be started with porthub http.receive; core and gateway are not required on this machine."
+    after_help = "Examples:\n  porthub-sync watch ./data http://receiver:8001/\n  porthub-sync watch ./data http://receiver:8001/ --detach\n  porthub-sync list\n  porthub-sync status JOB\n  porthub-sync stop JOB\n\nStart a receiver with porthub-sync receive ./backup --bind 0.0.0.0. Neither machine needs core, enrollment, or a PortHub gateway."
 )]
 struct Args {
     #[command(subcommand)]
@@ -17,6 +17,14 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Receive synchronization directly, without core or a PortHub gateway.
+    Receive {
+        directory: PathBuf,
+        #[arg(short = 'p', long, default_value_t = 8001)]
+        port: u16,
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: std::net::IpAddr,
+    },
     /// Synchronize a directory now, then watch for changes; retain remote-only files.
     Watch {
         path: PathBuf,
@@ -44,6 +52,11 @@ enum Command {
     },
     /// Stop a job without removing files from its receiver.
     Stop { id: String },
+    #[command(name = "__porthub-worker", hide = true)]
+    Worker {
+        #[arg(long)]
+        endpoint: String,
+    },
     // The shared library starts detached jobs with this stable internal entry.
     #[command(hide = true)]
     Sync {
@@ -78,6 +91,46 @@ async fn main() -> Result<()> {
         shutdown.cancel();
     });
     match args.command {
+        Command::Receive {
+            directory,
+            port,
+            bind,
+        } => {
+            tokio::fs::create_dir_all(&directory).await?;
+            porthub_transfer::server::serve(
+                porthub_transfer::server::Options {
+                    root: directory,
+                    port,
+                    bind,
+                    accept_uploads: true,
+                },
+                cancel,
+            )
+            .await
+        }
+        Command::Worker { endpoint } => {
+            use porthub_components::{
+                catalog::{Component, PROTOCOL},
+                ipc::Hello,
+                local::Endpoint,
+                rpc,
+            };
+            let endpoint = Endpoint::parse(Component::Sync, &endpoint)?;
+            let hello = Hello {
+                component: Component::Sync,
+                protocol: PROTOCOL,
+                version: option_env!("PORTHUB_COMPONENT_VERSION")
+                    .unwrap_or(env!("CARGO_PKG_VERSION"))
+                    .parse()?,
+            };
+            rpc::serve(
+                endpoint,
+                hello,
+                std::sync::Arc::new(porthub_sync::Worker),
+                cancel,
+            )
+            .await
+        }
         Command::Watch {
             path,
             url,

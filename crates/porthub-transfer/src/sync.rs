@@ -245,9 +245,13 @@ pub async fn detach(mut options: Options) -> Result<String> {
 pub async fn worker(id: String, cancel: CancellationToken) -> Result<()> {
     let record = read_record(&id)?;
     ensure!(record.control.is_none(), "sync job is already running");
-    run_registered(id, record, cancel).await
+    run_registered(id, record, cancel, None).await
 }
-pub async fn watch(mut options: Options, cancel: CancellationToken) -> Result<()> {
+pub async fn watch(options: Options, cancel: CancellationToken) -> Result<()> {
+    watch_ready(options, cancel, None).await
+}
+/// Exposes the established job identity over typed IPC without scraping output.
+pub async fn watch_ready(mut options: Options, cancel: CancellationToken, ready: Option<tokio::sync::oneshot::Sender<String>>) -> Result<()> {
     options.validate()?;
     run_registered(
         random()[..16].to_owned(),
@@ -257,10 +261,11 @@ pub async fn watch(mut options: Options, cancel: CancellationToken) -> Result<()
             control: None,
         },
         cancel,
+        ready,
     )
     .await
 }
-async fn run_registered(id: String, mut record: Record, cancel: CancellationToken) -> Result<()> {
+async fn run_registered(id: String, mut record: Record, cancel: CancellationToken, ready: Option<tokio::sync::oneshot::Sender<String>>) -> Result<()> {
     record.options.validate()?;
     let (events, mut receiver) = tokio::sync::mpsc::channel::<()>(1);
     let dirty = Arc::new(Mutex::new(Dirty {
@@ -327,6 +332,7 @@ async fn run_registered(id: String, mut record: Record, cancel: CancellationToke
             .with_graceful_shutdown(server_cancel.cancelled_owned())
             .await;
     });
+    if let Some(ready) = ready { let _ = ready.send(id.clone()); }
     eprintln!(
         "Watching {} (job {id}); Ctrl-C or porthub sync stop {id} to stop",
         record.options.path.display()

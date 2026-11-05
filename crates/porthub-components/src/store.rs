@@ -186,7 +186,7 @@ pub(crate) fn directory(path: &Path) -> Result<()> {
     crate::windows_security::secure_directory(path)?;
     Ok(())
 }
-async fn lock(root: &Path, name: &str, cancel: &CancellationToken) -> Result<File> {
+pub(crate) async fn lock(root: &Path, name: &str, cancel: &CancellationToken) -> Result<File> {
     directory(root)?;
     let path = root.join(name);
     let mut options = OpenOptions::new();
@@ -353,6 +353,9 @@ fn normalize_system_alias(root: PathBuf) -> Result<PathBuf> {
     Ok(root)
 }
 impl Manager {
+    pub fn cache_root(&self) -> &Path {
+        &self.root
+    }
     pub fn new(root: PathBuf, settings: Settings, transport: Arc<dyn Transport>) -> Result<Self> {
         settings.validate()?;
         ensure!(

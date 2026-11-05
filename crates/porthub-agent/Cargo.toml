@@ -24,7 +24,8 @@ clap.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
 porthub-tunnel.workspace = true
-porthub-transfer = { path = "../porthub-transfer" }
+porthub-transfer = { path = "../porthub-transfer", default-features = false, features = ["notifications"] }
+porthub-components = { path = "../porthub-components" }
 porthub-terminal = { path = "../porthub-terminal" }
 porthub-egress = { path = "../porthub-egress", optional = true }
 porthub-mesh = { path = "../porthub-mesh" }

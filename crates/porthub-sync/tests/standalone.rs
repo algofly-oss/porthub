@@ -51,9 +51,29 @@ async fn standalone_watch_runs_without_core_or_gateway_and_keeps_working_after_l
     std::fs::write(source.join("file"), b"initial")?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
-    let app = porthub_transfer::server::router(destination.clone())
-        .merge(porthub_transfer::upload::routes(destination.clone())?);
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    drop(listener);
+    let mut receiver = Command::new(env!("CARGO_BIN_EXE_porthub-sync"))
+        .kill_on_drop(true)
+        .env("PORTHUB_STATE_DIR", &state)
+        .args([
+            "receive",
+            destination.to_str().unwrap(),
+            "--port",
+            &address.port().to_string(),
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if tokio::net::TcpStream::connect(address).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await?;
     let url = format!("http://{address}/");
     run(
         &state,
@@ -93,6 +113,7 @@ async fn standalone_watch_runs_without_core_or_gateway_and_keeps_working_after_l
     })
     .await?;
     drop(job);
-    server.abort();
+    receiver.kill().await?;
+    let _ = receiver.wait().await;
     Ok(())
 }

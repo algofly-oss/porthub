@@ -3,6 +3,8 @@ pub mod adopt;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod autoupdate;
 pub mod bootstrap;
+pub mod components;
+pub mod sync_cli;
 pub mod control;
 pub mod outbound;
 pub mod connectivity_diagnostics;

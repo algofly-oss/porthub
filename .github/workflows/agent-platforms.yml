@@ -264,6 +264,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/test-windows-bootstrap-command.ps1
+      - name: Build independent sync fixture for core command checks
+        shell: bash
+        run: |
+          cargo build --locked -p porthub-sync --target ${{ matrix.target }}
+          echo "PORTHUB_TEST_SYNC_EXECUTABLE=$GITHUB_WORKSPACE/target/${{ matrix.target }}/debug/porthub-sync${{ matrix.extension }}" >> "$GITHUB_ENV"
       - name: Compile focused Windows watch checks
         if: runner.os == 'Windows'
         shell: bash

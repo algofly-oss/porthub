@@ -2,8 +2,9 @@
 use anyhow::{Context, Result};
 
 pub(super) struct Child {
+    armed: bool,
     #[cfg(unix)]
-    inner: std::process::Child,
+    inner: Option<std::process::Child>,
     #[cfg(windows)]
     handle: std::os::windows::io::OwnedHandle,
 }
@@ -27,7 +28,8 @@ pub(super) fn spawn(id: &str) -> Result<Child> {
             });
         }
         Ok(Child {
-            inner: command.spawn().context("cannot start detached sync job")?,
+            armed: true,
+            inner: Some(command.spawn().context("cannot start detached sync job")?),
         })
     }
     #[cfg(windows)]
@@ -77,6 +79,7 @@ pub(super) fn spawn(id: &str) -> Result<Child> {
             CloseHandle(information.hThread);
         }
         Ok(Child {
+            armed: true,
             handle: unsafe {
                 std::os::windows::io::OwnedHandle::from_raw_handle(information.hProcess)
             },
@@ -88,7 +91,12 @@ impl Child {
     pub(super) fn try_wait(&mut self) -> Result<Option<String>> {
         #[cfg(unix)]
         {
-            Ok(self.inner.try_wait()?.map(|exit| exit.to_string()))
+            Ok(self
+                .inner
+                .as_mut()
+                .context("sync child unavailable")?
+                .try_wait()?
+                .map(|exit| exit.to_string()))
         }
         #[cfg(windows)]
         {
@@ -111,10 +119,13 @@ impl Child {
         }
     }
     pub(super) fn terminate(&mut self) {
+        self.armed = false;
         #[cfg(unix)]
         {
-            let _ = self.inner.kill();
-            let _ = self.inner.wait();
+            if let Some(child) = &mut self.inner {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
         }
         #[cfg(windows)]
         {
@@ -126,13 +137,23 @@ impl Child {
             }
         }
     }
-    pub(super) fn release(self) {
+    pub(super) fn release(mut self) {
+        self.armed = false;
         #[cfg(unix)]
-        std::thread::spawn(move || {
-            let mut child = self.inner;
-            let _ = child.wait();
-        });
+        if let Some(mut child) = self.inner.take() {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
         // Windows automatically reaps exited processes; OwnedHandle closes our
         // reference when self is dropped without stopping the worker.
+    }
+}
+
+impl Drop for Child {
+    fn drop(&mut self) {
+        if self.armed {
+            self.terminate();
+        }
     }
 }

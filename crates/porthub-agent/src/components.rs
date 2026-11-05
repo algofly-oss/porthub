@@ -1,0 +1,128 @@
+//! Local optional-tool management. Core version/OTA reports never include tool
+//! maintenance state, and forwarding never awaits optional downloads.
+use anyhow::{ensure, Context, Result};
+use porthub_components::{
+    catalog::Component,
+    maintenance::{Guard, Options as MaintenanceOptions},
+    store::{Manager, Settings, Sources},
+    transport::Http,
+    worker::ContextOptions,
+};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    sync::Arc,
+};
+use tokio_util::sync::CancellationToken;
+
+pub fn state_directory() -> Result<PathBuf> {
+    Ok(match std::env::var_os("PORTHUB_STATE_DIR") {
+        Some(path) => PathBuf::from(path),
+        None => directories::BaseDirs::new()
+            .context("cannot find component state directory")?
+            .data_local_dir()
+            .join("porthub"),
+    })
+}
+fn gateway() -> Option<String> {
+    let layouts = [
+        crate::service::Layout::user(),
+        crate::service::Layout::system(),
+    ];
+    for layout in layouts.into_iter().flatten() {
+        if let Ok(records) = crate::service::readable::list(&layout) {
+            if let Some(record) = records
+                .into_iter()
+                .find(|record| record.enabled && !record.gateway.is_empty())
+            {
+                return Some(record.gateway);
+            }
+        }
+    }
+    None
+}
+pub fn manager(enrolled_gateway: Option<&str>) -> Result<Manager> {
+    let root = match std::env::var_os("PORTHUB_COMPONENT_CACHE") {
+        Some(path) => PathBuf::from(path),
+        None => directories::BaseDirs::new()
+            .context("cannot find component cache directory")?
+            .cache_dir()
+            .join("porthub")
+            .join("components"),
+    };
+    ensure!(
+        root.is_absolute(),
+        "PORTHUB_COMPONENT_CACHE must be an absolute path"
+    );
+    let parent = root.parent().context("component cache requires a parent")?;
+    crate::service::directory(parent, true)?;
+    let sources = match std::env::var("PORTHUB_COMPONENT_SOURCE").as_deref() {
+        Ok("auto") | Err(std::env::VarError::NotPresent) => Sources::GatewayThenGithub,
+        Ok("gateway") => Sources::GatewayOnly,
+        Ok("github") => Sources::GithubOnly,
+        _ => anyhow::bail!("PORTHUB_COMPONENT_SOURCE must be auto, gateway, or github"),
+    };
+    let mut disabled = BTreeSet::new();
+    if let Ok(value) = std::env::var("PORTHUB_COMPONENT_DISABLED") {
+        for component in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            disabled.insert(component.parse::<Component>()?);
+        }
+    }
+    let mut pins = BTreeMap::new();
+    if let Ok(value) = std::env::var("PORTHUB_COMPONENT_PINS") {
+        for entry in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let (component, version) = entry
+                .split_once('=')
+                .context("component pins require name=major.minor.patch")?;
+            ensure!(
+                pins.insert(component.parse::<Component>()?, version.parse()?)
+                    .is_none(),
+                "duplicate component pin"
+            );
+        }
+    }
+    let selected = std::env::var("PORTHUB_COMPONENT_GATEWAY")
+        .ok()
+        .or_else(|| enrolled_gateway.map(str::to_owned))
+        .or_else(gateway);
+    let gateway = selected
+        .map(|value| crate::profile::base(&value, false).and_then(|value| Ok(value.parse()?)))
+        .transpose()?;
+    Manager::new(
+        root,
+        Settings {
+            gateway,
+            sources,
+            core: crate::VERSION.parse()?,
+            target: env!("PORTHUB_RUST_TARGET").replace("-musl", "-gnu"),
+            disabled,
+            pins,
+        },
+        Arc::new(Http::new()?),
+    )
+}
+pub fn background(gateway: &str, cancel: &CancellationToken) -> Result<Guard> {
+    let options = MaintenanceOptions {
+        prefetch: match std::env::var("PORTHUB_COMPONENT_PREFETCH").as_deref() {
+            Ok("false" | "0") => false,
+            Ok("true" | "1") | Err(std::env::VarError::NotPresent) => true,
+            _ => anyhow::bail!("PORTHUB_COMPONENT_PREFETCH must be true or false"),
+        },
+        ..Default::default()
+    };
+    Ok(Guard::start(manager(Some(gateway))?, options, cancel))
+}
+pub async fn worker(
+    component: Component,
+    cancel: &CancellationToken,
+) -> Result<porthub_components::rpc::Client> {
+    let manager = manager(None)?;
+    if manager.installed(component).await?.is_empty() {
+        eprintln!("Preparing {component}: downloading a verified compatible tool if needed...");
+    }
+    let state_directory = state_directory()?;
+    crate::service::directory(&state_directory, true)?;
+    manager
+        .worker(component, &ContextOptions { state_directory }, cancel)
+        .await
+}

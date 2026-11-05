@@ -4,8 +4,10 @@ pub mod catalog;
 pub mod ipc;
 pub mod local;
 pub mod maintenance;
+pub mod protocol;
 pub mod rpc;
 pub mod store;
 pub mod transport;
 #[cfg(windows)]
 mod windows_security;
+pub mod worker;

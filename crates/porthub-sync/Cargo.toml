@@ -6,6 +6,8 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-trait = "0.1"
+porthub-components = { path = "../porthub-components" }
 clap.workspace = true
 tokio.workspace = true
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -15,3 +17,6 @@ porthub-transfer = { path = "../porthub-transfer", default-features = false, fea
 [dev-dependencies]
 axum.workspace = true
 tempfile = "3"
+async-trait = "0.1"
+sha2 = "0.10"
+url = "2"

@@ -45,6 +45,25 @@ pub enum Outcome<T> {
     Error { failure: Failure },
 }
 
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(tag = "system", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SystemOperation {
+    Ping,
+    Shutdown,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "system", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SystemValue {
+    Pong { pid: u32 },
+    Stopping,
+}
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Incoming<T> {
+    System(SystemOperation),
+    Tool(T),
+}
+
 pub enum Reply<T> {
     Message(T),
     Stream { value: T, remote: Stream },
@@ -71,11 +90,19 @@ impl Client {
         let hello: Hello = ipc::read(&mut stream, Duration::from_secs(5)).await?;
         hello.validate(artifact.component, &artifact.version)?;
         ipc::write(&mut stream, &hello, Duration::from_secs(5)).await?;
-        Ok(Self {
+        let mut client = Self {
             stream,
             next: 0,
             poisoned: false,
-        })
+        };
+        let ready: SystemValue = client
+            .call(SystemOperation::Ping, Duration::from_secs(5))
+            .await?;
+        ensure!(
+            matches!(ready, SystemValue::Pong { pid } if pid > 0),
+            "invalid component readiness response"
+        );
+        Ok(client)
     }
     async fn exchange<T: Serialize, R: DeserializeOwned>(
         &mut self,
@@ -146,13 +173,14 @@ async fn connection<H: Handler>(
     handler: Arc<H>,
     hello: Hello,
     cancel: CancellationToken,
+    worker_cancel: CancellationToken,
 ) -> Result<()> {
     ipc::write(&mut stream, &hello, Duration::from_secs(5)).await?;
     let peer: Hello = ipc::read(&mut stream, Duration::from_secs(5)).await?;
     peer.validate(hello.component, &hello.version)?;
     let mut previous = 0;
     loop {
-        let request: Request<H::Operation> = tokio::select! { biased;
+        let request: Request<Incoming<H::Operation>> = tokio::select! { biased;
             _ = cancel.cancelled() => return Ok(()),
             result = ipc::read(&mut stream, IDLE) => result?,
         };
@@ -162,11 +190,39 @@ async fn connection<H: Handler>(
             "invalid component request ID or deadline"
         );
         previous = request.id;
+        let operation = match request.operation {
+            Incoming::System(operation) => {
+                let value = match operation {
+                    SystemOperation::Ping => SystemValue::Pong {
+                        pid: std::process::id(),
+                    },
+                    SystemOperation::Shutdown => SystemValue::Stopping,
+                };
+                ipc::write(
+                    &mut stream,
+                    &Response {
+                        id: request.id,
+                        result: Outcome::Ok {
+                            value,
+                            stream: false,
+                        },
+                    },
+                    Duration::from_secs(5),
+                )
+                .await?;
+                if matches!(operation, SystemOperation::Shutdown) {
+                    worker_cancel.cancel();
+                    return Ok(());
+                }
+                continue;
+            }
+            Incoming::Tool(operation) => operation,
+        };
         let operation_cancel = cancel.child_token();
         let _operation_guard = operation_cancel.clone().drop_guard();
         let result = tokio::select! { biased;
             _ = cancel.cancelled() => { operation_cancel.cancel(); return Ok(()); },
-            result = tokio::time::timeout(Duration::from_millis(remaining), handler.handle(request.operation, operation_cancel.clone())) => result,
+            result = tokio::time::timeout(Duration::from_millis(remaining), handler.handle(operation, operation_cancel.clone())) => result,
         };
         let reply = match result {
             Ok(Ok(reply)) => reply,
@@ -226,6 +282,7 @@ pub async fn serve<H: Handler>(
     handler: Arc<H>,
     cancel: CancellationToken,
 ) -> Result<()> {
+    let cancel = cancel.child_token();
     let mut listener = Listener::bind(endpoint).await?;
     let mut clients = tokio::task::JoinSet::new();
     let mut tick = tokio::time::interval(IDLE);
@@ -244,8 +301,8 @@ pub async fn serve<H: Handler>(
                 match result {
                     Ok(stream) => {
                         idle = 0;
-                        let handler = handler.clone(); let hello = hello.clone(); let child = cancel.child_token();
-                        clients.spawn(async move { let _ = connection(stream, handler, hello, child).await; });
+                        let handler = handler.clone(); let hello = hello.clone(); let child = cancel.child_token(); let worker_cancel = cancel.clone();
+                        clients.spawn(async move { let _ = connection(stream, handler, hello, child, worker_cancel).await; });
                     }
                     Err(_) => { tokio::select! { _ = cancel.cancelled() => break, _ = tokio::time::sleep(Duration::from_millis(100)) => {} } }
                 }

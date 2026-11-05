@@ -4,9 +4,15 @@ Status: implementation in progress; not shipped. The current published agent
 still bundles these features. The `porthub-components` crate implements catalog
 validation, compatibility selection, verified downloads/cache, gateway/GitHub
 fallback, installed-version receipts, IPC framing, and background maintenance.
-`porthub-sync` provides independently usable directory watching. These pieces
-are not yet connected to core startup/commands or published as release modules.
-This document does not change the published updater or release format.
+`porthub-sync` provides independently usable directory watching and an HTTP
+receiver, so neither end needs core or a PortHub gateway. Core sync/watch
+commands now use its persistent worker; core transfer builds exclude watch code.
+Background maintenance begins after the first authenticated configuration is
+applied. Core also exposes local `components list`, `fetch`, and `update` commands.
+Tor, terminal and live stats extraction, gateway delivery, release packaging,
+shared system/user caches, and installed rollout verification remain incomplete.
+No modules have been published or deployed. This document does not change the
+published updater or release format.
 
 ## Ownership and package boundaries
 
@@ -163,3 +169,33 @@ rules still apply. Verification-only builds never publish releases.
 Record native Windows, Linux, macOS, and supported architecture results before
 release. Windows named-pipe ACLs and executable replacement require native
 coverage; Unix-only tests cannot establish their correctness.
+
+## Configuration implemented so far
+
+`PORTHUB_COMPONENT_SOURCE=auto|gateway|github` selects the permitted download
+sources; `auto` prefers the gateway. `PORTHUB_COMPONENT_GATEWAY` explicitly sets
+an HTTPS gateway; otherwise core uses its enrolled gateway for background work
+and discovers an installed gateway for interactive commands. Tool downloads do
+not contain enrollment credentials.
+
+`PORTHUB_COMPONENT_DISABLED` is a comma-separated list of prohibited tool names.
+`PORTHUB_COMPONENT_PINS` accepts comma-separated `name=major.minor.patch` pins;
+pins still require compatible core/platform/IPC metadata. Set
+`PORTHUB_COMPONENT_PREFETCH=false` to update already installed tools without
+prefetching unused ones. The default is true.
+
+`PORTHUB_COMPONENT_CACHE` can override the private absolute cache path. Executable
+caches must not be writable through another account or an untrusted ancestor.
+`PORTHUB_STATE_DIR` retains the existing per-user transfer/job state convention.
+System-service prefetch still needs a verified read-only shared cache so tools
+are immediately reusable by unprivileged interactive users; this is required
+before deployment. Module HTTP clients also still need integration with core's
+outbound routing/source-selection policy before rollout.
+
+Worker startup uses a verified executable and the private endpoint argument
+only; requests and credentials travel over typed IPC. A readiness ping precedes
+use. Concurrent starts share a lock, failed starts back off, and idle workers
+exit after five minutes. Foreground sync watches follow connection lifetime;
+detached jobs survive caller exit and remain manageable through the same core
+commands. Native core watch tests first build `porthub-sync` beside the core
+binary, or use `PORTHUB_TEST_SYNC_EXECUTABLE` to locate that fixture explicitly.
