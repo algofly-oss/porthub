@@ -52,6 +52,8 @@ jobs:
           key: terminal-measurements
           cache-workspace-crates: true
           cache-on-failure: true
+      - name: Verify pinned source download recovery
+        run: python3 scripts/test_build_terminal_download.py
       - name: Verify strict reports and real standalone MongoDB rollups
         env:
           PORTHUB_TEST_MONGO_URI: mongodb://127.0.0.1:${{ job.services.mongo.ports['27017'] }}
