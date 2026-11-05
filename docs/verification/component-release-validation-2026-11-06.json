@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "recorded_at_utc": "2026-11-05T22:26:51.453624+00:00",
+  "production": {
+    "gateway": "https://porthub.algofly.in",
+    "healthz": "ok",
+    "roles": {
+      "core": {
+        "version": "1.10.2",
+        "source_revision": "5c6fa7b49994ca2cf673636dca5a4f84e7437637",
+        "health": "healthy"
+      },
+      "edge": {
+        "version": "1.10.2",
+        "source_revision": "5c6fa7b49994ca2cf673636dca5a4f84e7437637",
+        "health": "healthy"
+      },
+      "firewall": {
+        "version": "1.10.2",
+        "source_revision": "5c6fa7b49994ca2cf673636dca5a4f84e7437637",
+        "health": "healthy"
+      }
+    }
+  },
+  "inventory": {
+    "source": "read-only authenticated MongoDB aggregation",
+    "online_cutoff_seconds": 300,
+    "exclude_deletion_pending": true,
+    "groups": [
+      {
+        "state": "online",
+        "client_version": "1.10.1",
+        "count": 13
+      },
+      {
+        "state": "offline",
+        "client_version": "1.10.1",
+        "count": 2
+      },
+      {
+        "state": "disabled",
+        "client_version": "1.10.1",
+        "count": 1
+      },
+      {
+        "state": "disabled",
+        "client_version": "7663e74a38d2",
+        "count": 1
+      }
+    ]
+  },
+  "candidate": {
+    "source_revision": "63e4afce3efb5cfe8fec28db1035b5bc944f73a8",
+    "agent_run_id": 42121002256,
+    "server_run_id": 42121012171,
+    "agent_publication_enabled": false,
+    "validation_complete": false,
+    "deployed": false
+  },
+  "known_prior_failure": {
+    "run_id": 42118673393,
+    "job_id": 127565110225,
+    "stage": "Build indexed static Linux core and optional tools",
+    "reason": "Generated terminal bundle treated as an untracked source input",
+    "fixed_in": "019c2c9f410cb48d12481c507437efa917d3abb9"
+  },
+  "limitations": [
+    "Candidate native, cross-platform, and server gates remain incomplete.",
+    "No modular agent release has been published or rolled out.",
+    "Offline and disabled clients have not been updated or enabled."
+  ]
+}
