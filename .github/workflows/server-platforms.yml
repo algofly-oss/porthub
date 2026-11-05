@@ -58,7 +58,9 @@ jobs:
         run: |
           cargo test --locked -p porthub-terminal --lib
           cargo test --locked -p porthub-api --lib terminal_traffic -- --include-ignored
-          cargo test --locked -p porthub-api --test terminal_traffic --test machine_delete --test admin_users -- --include-ignored
+          cargo test --locked -p porthub-api --lib inventory_ -- --include-ignored
+          cargo test --locked -p porthub-api --test terminal_traffic --test machine_delete --test admin_users --test firewall_history --test inventory_query -- --include-ignored
+          cargo test --locked -p porthub-firewall --test store
       - uses: actions/setup-node@v4
         with:
           node-version: '22'

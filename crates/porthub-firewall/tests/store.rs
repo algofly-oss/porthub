@@ -92,6 +92,9 @@ async fn one_hour_history_survives_restart_and_expires_older_samples() -> Result
     let reopened = Store::open(&path).await?;
     let history = reopened.snapshot(vec![8080]).await?;
     assert_eq!(history[&8080].iter().map(|sample| sample.timestamp).collect::<Vec<_>>(), vec![now - 3590, now - 900, now]);
+    let delta = reopened.snapshot_since(vec![8080], now - 20).await?;
+    assert_eq!(delta[&8080].len(), 1);
+    assert_eq!(delta[&8080][0].timestamp, now);
     // Active port detection stays five minutes; history retention does not
     // make old activity appear live.
     assert_eq!(reopened.active().await?.len(), 1);
