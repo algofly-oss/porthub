@@ -492,9 +492,28 @@ memory use. Snapshot files use `{"agents":[...]}`, with unique bounded registrat
 identities, at most 128 rows and 32 KiB per row. They can be refreshed atomically
 by another project. The frontend has no authority to query enrolled agents.
 
-The core's authenticated stats broker and basic status remain in core. Delegating
-`porthub stats` to this frontend, supplying broker snapshots over typed private
-IPC, and removing the current duplicated dashboard implementation from the core
-are still pending. This commit does not yet reduce the core dashboard footprint.
-The new helper is in the component build recipe and native contract test matrix;
-it has not been released or deployed.
+The core's authenticated stats broker and basic status remain in core.
+`porthub stats` now delegates to this frontend through typed private IPC; the
+duplicated renderer, rate baseline, and interactive loop have been removed from
+core. The helper is in the component build recipe and native contract test
+matrix; it has not been released or deployed.
+
+
+The managed dashboard runs as a verified foreground executable with inherited
+terminal handles. Core creates an invocation-specific, account-protected local
+endpoint and serves only `Collect` for the command's selected registrations.
+The helper validates the component/protocol/version handshake, receives a bounded
+row count, and reads individually framed rows (at most 48 KiB each, 128 rows).
+Aggregate snapshots can exceed the 64 KiB frame limit without truncation. No
+machine tokens, profile contents, or arbitrary broker operations are supplied to
+the helper. Core retains the existing authenticated whitelist collector.
+
+Core owns terminal-mode restoration while the helper controls rendering and input.
+It cancels the invocation broker and owns the child lifetime, including failed
+startup and cancellation. The scoped broker stays available during long pauses;
+general idle workers still self-exit normally. Independent invocation retains its
+own terminal guard and local process/file providers. Integration tests cover the
+standalone provider, private managed snapshot streaming beyond one frame, and the
+core broker's exclusion of credentials. Live installed CLI/TTY checks remain
+required before rollout. A file-input fallback exists for standalone use; automatic
+managed handoff fallback when local IPC is unavailable remains unimplemented.

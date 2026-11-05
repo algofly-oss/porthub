@@ -5159,6 +5159,7 @@ dependencies = [
  "async-trait",
  "clap 4.6.7",
  "crossterm",
+ "porthub-components",
  "porthub-console",
  "serde_json",
  "sysinfo",

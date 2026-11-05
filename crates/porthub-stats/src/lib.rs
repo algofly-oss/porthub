@@ -11,6 +11,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 #[derive(Clone)]
 pub struct Options {
+    pub manage_terminal: bool,
     pub once: bool,
     pub json: bool,
     pub interval: f64,
@@ -254,7 +255,7 @@ pub async fn run(
         && !options.once
         && std::io::stdin().is_terminal()
         && std::io::stdout().is_terminal();
-    let _screen = if interactive {
+    let _screen = if interactive && options.manage_terminal {
         Some(Screen::enter()?)
     } else {
         None

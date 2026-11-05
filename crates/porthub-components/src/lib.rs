@@ -15,3 +15,14 @@ pub mod transport;
 #[cfg(windows)]
 mod windows_security;
 pub mod worker;
+
+/// Launch an explicitly selected verified foreground frontend without a shell.
+/// Terminal handles are inherited; machine credentials must not be arguments.
+pub async fn foreground(executable: &std::path::Path, arguments: &[std::ffi::OsString],
+    cancel: &tokio_util::sync::CancellationToken) -> anyhow::Result<tokio::process::Child>
+{
+    process::retry_spawn(cancel, || tokio::process::Command::new(executable).args(arguments)
+        .stdin(std::process::Stdio::inherit()).stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit()).kill_on_drop(true).spawn()
+        .map_err(anyhow::Error::from)).await
+}

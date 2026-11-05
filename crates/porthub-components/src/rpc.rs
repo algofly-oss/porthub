@@ -72,7 +72,13 @@ pub enum Reply<T> {
 pub trait Handler: Send + Sync + 'static {
     type Operation: DeserializeOwned + Send;
     type Value: Serialize + Send + Sync;
-    fn connection_limit(&self) -> usize { 32 }
+    fn connection_limit(&self) -> usize {
+        32
+    }
+    /// A scoped frontend broker may remain paused until its owner cancels it.
+    fn exit_when_idle(&self) -> bool {
+        true
+    }
     async fn handle(
         &self,
         operation: Self::Operation,
@@ -90,9 +96,25 @@ impl Client {
         let stream = tokio::time::timeout(Duration::from_secs(5), endpoint.connect()).await??;
         Self::from_stream(stream, artifact).await
     }
-    pub(crate) async fn from_stream(mut stream: Stream, artifact: &Artifact) -> Result<Self> {
+    pub async fn connect_expected(endpoint: &Endpoint, expected: &Hello) -> Result<Self> {
+        expected.validate(expected.component, &expected.version)?;
+        let stream = tokio::time::timeout(Duration::from_secs(5), endpoint.connect()).await??;
+        Self::from_expected_stream(stream, expected).await
+    }
+    pub(crate) async fn from_stream(stream: Stream, artifact: &Artifact) -> Result<Self> {
+        Self::from_expected_stream(
+            stream,
+            &Hello {
+                component: artifact.component,
+                protocol: crate::catalog::PROTOCOL,
+                version: artifact.version.clone(),
+            },
+        )
+        .await
+    }
+    async fn from_expected_stream(mut stream: Stream, expected: &Hello) -> Result<Self> {
         let hello: Hello = ipc::read(&mut stream, Duration::from_secs(5)).await?;
-        hello.validate(artifact.component, &artifact.version)?;
+        hello.validate(expected.component, &expected.version)?;
         ipc::write(&mut stream, &hello, Duration::from_secs(5)).await?;
         let mut client = Self {
             stream,
@@ -298,7 +320,7 @@ pub async fn serve<H: Handler>(
             _ = cancel.cancelled() => break,
             _ = tick.tick() => {
                 if clients.is_empty() { idle += 1; } else { idle = 0; }
-                if idle >= 5 { break; }
+                if idle >= 5 && handler.exit_when_idle() { break; }
             },
             _ = clients.join_next(), if !clients.is_empty() => {},
             result = listener.accept(), if clients.len() < capacity => {
