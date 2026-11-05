@@ -32,6 +32,13 @@ pub enum Component {
     Transfer,
 }
 impl Component {
+    pub const ALL: [Self; 5] = [
+        Self::Tor,
+        Self::Terminal,
+        Self::Sync,
+        Self::Stats,
+        Self::Transfer,
+    ];
     pub const OPTIONAL: [Self; 4] = [Self::Tor, Self::Terminal, Self::Sync, Self::Stats];
     pub fn name(self) -> &'static str {
         match self {

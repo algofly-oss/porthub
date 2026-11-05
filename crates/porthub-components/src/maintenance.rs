@@ -66,20 +66,22 @@ impl Guard {
                     Ok(refreshed) => {
                         let catalog = refreshed.catalog;
                         status.send_modify(|s| s.catalog_unavailable = !refreshed.fresh);
-                        for component in Component::OPTIONAL {
+                        for component in Component::ALL {
                             if worker_cancel.is_cancelled() {
                                 break;
                             }
                             if manager.selected(&catalog, component).is_err() {
                                 continue;
                             }
-                            if !options.prefetch
-                                && manager
-                                    .installed(component)
-                                    .await
-                                    .map_or(true, |installed| installed.is_empty())
-                            {
-                                continue;
+                            if !options.prefetch || !Component::OPTIONAL.contains(&component) {
+                                match manager.has_installation(component).await {
+                                    Ok(true) => {}
+                                    Ok(false) => continue,
+                                    Err(_) => {
+                                        status.send_modify(|s| s.unavailable.push(component));
+                                        continue;
+                                    }
+                                }
                             }
                             if manager
                                 .ensure(&catalog, component, &worker_cancel)

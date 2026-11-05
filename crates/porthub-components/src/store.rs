@@ -593,6 +593,40 @@ impl Manager {
         file.write_all(&serde_json::to_vec(artifact)?)?;
         publish(file, &path, false)
     }
+    /// Receipts retain installation intent even when the old binary is missing
+    /// or no longer compatible after a core upgrade.
+    pub async fn has_installation(&self, component: Component) -> Result<bool> {
+        let root = self.root.clone();
+        let target = self.settings.target.clone();
+        tokio::task::spawn_blocking(move || {
+            let prefix = format!("installed-{component}-");
+            for (count, entry) in std::fs::read_dir(root)?.enumerate() {
+                ensure!(
+                    count < 4096,
+                    "component cache needs cleanup; too many entries"
+                );
+                let path = entry?.path();
+                if !path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s.starts_with(&prefix) && s.ends_with(".json"))
+                {
+                    continue;
+                }
+                ensure!(
+                    regular(&path)?.len() <= 16384,
+                    "installed component receipt exceeds limit"
+                );
+                let artifact: Artifact = serde_json::from_slice(&std::fs::read(&path)?)?;
+                artifact.validate()?;
+                if artifact.component == component && artifact.target == target {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        })
+        .await?
+    }
     /// Verified local versions are independent of the gateway's inventory.
     /// Receipts retain older tool metadata when the latest catalog advances.
     pub async fn installed(&self, component: Component) -> Result<Vec<(Artifact, PathBuf)>> {
