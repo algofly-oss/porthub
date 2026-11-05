@@ -2,7 +2,9 @@
 //! not depend on the agent or on any optional tool implementation.
 pub mod catalog;
 pub mod ipc;
+pub mod local;
 pub mod maintenance;
+pub mod rpc;
 pub mod store;
 pub mod transport;
 #[cfg(windows)]

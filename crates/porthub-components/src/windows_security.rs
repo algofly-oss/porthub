@@ -137,3 +137,102 @@ pub fn secure_directory(path: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+/// Read TokenUser for the actual pipe peer, rather than trusting a pipe name or
+/// a broad Administrators DACL. Handles are released on every error path.
+pub fn process_account(pid: u32) -> Result<String> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        ensure!(!process.is_null(), "cannot inspect component peer process");
+        let process = OwnedHandle::from_raw_handle(process);
+        let mut token = ptr::null_mut();
+        ensure!(
+            OpenProcessToken(process.as_raw_handle(), TOKEN_QUERY, &mut token) != 0,
+            "cannot inspect component peer account"
+        );
+        let token = OwnedHandle::from_raw_handle(token);
+        let mut length = 0;
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenUser,
+            ptr::null_mut(),
+            0,
+            &mut length,
+        );
+        ensure!(
+            length > 0 && length <= 65536,
+            "invalid component peer account token"
+        );
+        let mut storage = vec![0usize; (length as usize).div_ceil(std::mem::size_of::<usize>())];
+        ensure!(
+            GetTokenInformation(
+                token.as_raw_handle(),
+                TokenUser,
+                storage.as_mut_ptr().cast(),
+                length,
+                &mut length
+            ) != 0,
+            "cannot read component peer account"
+        );
+        let user = &*storage.as_ptr().cast::<TOKEN_USER>();
+        let mut sid = ptr::null_mut();
+        ensure!(
+            ConvertSidToStringSidW(user.User.Sid, &mut sid) != 0,
+            "cannot format component peer account"
+        );
+        let mut length = 0;
+        while *sid.add(length) != 0 {
+            length += 1;
+        }
+        let value = String::from_utf16_lossy(std::slice::from_raw_parts(sid, length));
+        LocalFree(sid.cast());
+        Ok(value)
+    }
+}
+pub fn same_account(pid: u32) -> Result<()> {
+    ensure!(
+        process_account(pid)? == process_account(std::process::id())?,
+        "component IPC peer belongs to another account"
+    );
+    Ok(())
+}
+pub fn pipe(
+    address: &str,
+    first: bool,
+) -> Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    let account = process_account(std::process::id())?;
+    let sddl: Vec<_> = format!("D:P(A;;GA;;;{account})")
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    unsafe {
+        let mut descriptor = ptr::null_mut();
+        ensure!(
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                ptr::null_mut()
+            ) != 0,
+            "cannot build component pipe access policy"
+        );
+        let mut attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor,
+            bInheritHandle: 0,
+        };
+        let result = tokio::net::windows::named_pipe::ServerOptions::new()
+            .first_pipe_instance(first)
+            .reject_remote_clients(true)
+            .max_instances(64)
+            .create_with_security_attributes_raw(
+                address,
+                (&mut attributes as *mut SECURITY_ATTRIBUTES).cast(),
+            );
+        LocalFree(descriptor);
+        Ok(result?)
+    }
+}

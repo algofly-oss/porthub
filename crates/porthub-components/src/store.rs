@@ -104,7 +104,7 @@ fn regular(path: &Path) -> Result<std::fs::Metadata> {
     }
     Ok(metadata)
 }
-fn directory(path: &Path) -> Result<()> {
+pub(crate) fn directory(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
