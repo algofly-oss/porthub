@@ -634,3 +634,15 @@ extraction permits only this exact metadata name alongside catalog-authorized
 executables and discards the metadata without writing it to the cache. Future CI
 reuse must validate receipt checksums, current inputs, and binary hashes again;
 an archived receipt alone does not authorize reuse.
+
+`scripts/recover-component-builds.py --input RELEASE_DIR --output NEW_DIR
+--target RUST_TARGET --release CARRIER --artifact-verifier /absolute/porthub-api`
+recovers platform build inputs from a locally staged full compact release. It
+first invokes the trusted Rust verifier through the publisher's immutable-file
+checks. It then validates receipt checksums, platform, optimized executable names,
+core version, helper provenance, and executable hashes against the shared manifest.
+Recovered files appear atomically with an `index.json`; errors leave no output.
+The index paths are relative to the recovery directory and may be passed to the
+build planner and packager. Recovery verifies the previous build, not that its
+inputs match current source: `component-build-plan.py plan` must still make that
+decision. Legacy releases without archived receipts require fresh builds.
