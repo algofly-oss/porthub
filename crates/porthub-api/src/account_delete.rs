@@ -126,6 +126,9 @@ async fn resume(app: &App, user: &Document) -> ApiResult<()> {
     app.collection("connections")
         .update_many(connection_filter.clone(), doc! {"$set":{"enabled":false}})
         .await?;
+    app.collection(crate::firewall_history::COLLECTION)
+        .delete_many(doc! {"owner_id":{"$in":&owner}})
+        .await?;
     app.collection("terminal_traffic")
         .delete_many(doc! {"owner_id":{"$in":&owner}})
         .await?;

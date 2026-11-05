@@ -7,6 +7,7 @@ embed the resulting static runtime, terminfo and license notices.
 import argparse
 import gzip
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -16,9 +17,64 @@ import subprocess
 import sys
 import tarfile
 import time
+import tempfile
+import urllib.error
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
+
+MAX_SOURCE_BYTES = 64 * 1024 * 1024
+
+def download_source(item, archive):
+    """Retry transient transport failures; publish only checksum-pinned bytes."""
+    if archive.is_file():
+        if archive.stat().st_size <= MAX_SOURCE_BYTES and hashlib.sha256(archive.read_bytes()).hexdigest() == item['sha256']:
+            return
+        archive.unlink()  # A corrupt cache must not poison all later builds.
+    deadline = time.monotonic() + 180
+    for attempt in range(3):
+        temporary = None
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('pinned source download deadline exceeded')
+            request = urllib.request.Request(item['url'], headers={'User-Agent': 'PortHub terminal builder', 'Cache-Control': 'no-cache'})
+            print('Downloading pinned ' + item['name'] + ' (attempt ' + str(attempt + 1) + '/3)', file=sys.stderr, flush=True)
+            with urllib.request.urlopen(request, timeout=min(60, remaining)) as response:
+                if not response.geturl().startswith('https://'):
+                    raise RuntimeError('Pinned source redirected away from HTTPS: ' + item['name'])
+                with tempfile.NamedTemporaryFile(prefix='.source-', dir=archive.parent, delete=False) as output:
+                    temporary = Path(output.name)
+                    size = 0
+                    digest = hashlib.sha256()
+                    while True:
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError('pinned source download deadline exceeded')
+                        chunk = response.read(64 * 1024)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        if size > MAX_SOURCE_BYTES:
+                            raise RuntimeError('Pinned source exceeds size limit: ' + item['name'])
+                        digest.update(chunk)
+                        output.write(chunk)
+                    output.flush()
+                    os.fsync(output.fileno())
+            if digest.hexdigest() != item['sha256']:
+                raise RuntimeError('Source checksum mismatch: ' + item['name'])
+            temporary.replace(archive)
+            return
+        except urllib.error.HTTPError as error:
+            if error.code not in (408, 429, 500, 502, 503, 504):
+                raise RuntimeError('Pinned source request rejected (HTTP ' + str(error.code) + '): ' + item['name']) from None
+        except (OSError, urllib.error.URLError, http.client.IncompleteRead):
+            pass
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        if attempt < 2 and time.monotonic() + 2 ** (attempt + 1) < deadline:
+            time.sleep(2 ** (attempt + 1))
+    raise RuntimeError('Could not download pinned source after bounded retries: ' + item['name']) from None
 
 def patch_terminal_spawn(source):
     path = source / 'spawn.c'
@@ -84,13 +140,7 @@ def build(args):
         if item.get('platforms') and not any(platform in args.target for platform in item['platforms']):
             continue
         archive = cache / (item['name'] + ('.tar.bz2' if item['url'].endswith('.tar.bz2') else '.tar.gz'))
-        if not archive.is_file():
-            # Sources use canonical HTTPS release locations; subsequent builds
-            # verify the committed SHA256 before touching the build tree.
-            with urllib.request.urlopen(item['url'], timeout=60) as response:
-                archive.write_bytes(response.read())
-        if hashlib.sha256(archive.read_bytes()).hexdigest() != item['sha256']:
-            raise RuntimeError('Source checksum mismatch: ' + item['name'])
+        download_source(item, archive)
         destination = cache / item['name']
         if not destination.exists():
             extraction = cache / ('unpack-' + item['name'])

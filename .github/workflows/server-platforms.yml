@@ -52,13 +52,17 @@ jobs:
           key: terminal-measurements
           cache-workspace-crates: true
           cache-on-failure: true
+      - name: Verify pinned source download recovery
+        run: python3 scripts/test_build_terminal_download.py
       - name: Verify strict reports and real standalone MongoDB rollups
         env:
           PORTHUB_TEST_MONGO_URI: mongodb://127.0.0.1:${{ job.services.mongo.ports['27017'] }}
         run: |
           cargo test --locked -p porthub-terminal --lib
           cargo test --locked -p porthub-api --lib terminal_traffic -- --include-ignored
-          cargo test --locked -p porthub-api --test terminal_traffic --test machine_delete --test admin_users -- --include-ignored
+          cargo test --locked -p porthub-api --lib inventory_ -- --include-ignored
+          cargo test --locked -p porthub-api --test terminal_traffic --test machine_delete --test admin_users --test firewall_history --test inventory_query -- --include-ignored
+          cargo test --locked -p porthub-firewall --test store
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
