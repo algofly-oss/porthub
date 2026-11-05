@@ -470,3 +470,31 @@ storage identity. Standalone `proxy --directory` behavior remains explicit to th
 standalone command. Unit checks cover namespace separation, unchanged source
 update identity, source revocation, leased pool retention, and invalid requests;
 live simultaneous Arti bootstrap and version handover remain rollout gates.
+
+### Independent stats dashboard frontend
+
+`porthub-stats` is a fixed-version helper crate with no dependency on the agent,
+server, or gateway. It contains the interactive renderer, rate baseline logic,
+pause/sort/selection controls, and bounded asynchronous collection interface.
+`porthub-console` provides shared terminal restoration and cancellable input;
+the core currently reuses that small library for its remaining terminal flows.
+
+Standalone examples:
+
+```sh
+porthub-stats --pid 1234
+porthub-stats --once --json
+porthub-stats --input snapshot.json
+```
+
+Without an input file the tool samples local processes, bounded to 128 rows by
+memory use. Snapshot files use `{"agents":[...]}`, with unique bounded registration
+identities, at most 128 rows and 32 KiB per row. They can be refreshed atomically
+by another project. The frontend has no authority to query enrolled agents.
+
+The core's authenticated stats broker and basic status remain in core. Delegating
+`porthub stats` to this frontend, supplying broker snapshots over typed private
+IPC, and removing the current duplicated dashboard implementation from the core
+are still pending. This commit does not yet reduce the core dashboard footprint.
+The new helper is in the component build recipe and native contract test matrix;
+it has not been released or deployed.

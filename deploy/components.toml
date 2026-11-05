@@ -35,3 +35,15 @@ profile = "release"
 recipe_version = 1
 core = ">=1.11.0, <2.0.0"
 protocols = [1]
+
+[tools.stats]
+package = "porthub-stats"
+manifest = "crates/porthub-stats/Cargo.toml"
+binary = "porthub-stats"
+default_features = true
+features = []
+extra_inputs = []
+profile = "release"
+recipe_version = 1
+core = ">=1.11.0, <2.0.0"
+protocols = [1]

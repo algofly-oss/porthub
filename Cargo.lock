@@ -4849,6 +4849,7 @@ dependencies = [
  "nlink",
  "notify 8.2.1",
  "porthub-components",
+ "porthub-console",
  "porthub-edge",
  "porthub-egress",
  "porthub-identity",
@@ -4961,6 +4962,16 @@ dependencies = [
  "tracing",
  "url",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "porthub-console"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossterm",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -5138,6 +5149,22 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "porthub-stats"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap 4.6.7",
+ "crossterm",
+ "porthub-console",
+ "serde_json",
+ "sysinfo",
+ "tempfile",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
