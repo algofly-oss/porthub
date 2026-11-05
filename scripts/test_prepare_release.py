@@ -185,6 +185,37 @@ class IndependentCore(unittest.TestCase):
         self.assertEqual(release.core_package(self.root)[2], '1.8.9')
         self.assertEqual(self.fixture.run_git('status','--porcelain'), '')
 
+    def reserve_draft_core(self):
+        for path, text in release.core_version_files(self.root, '1.8.10', {}).items():
+            path.write_text(text)
+        self.fixture.run_git('add','.')
+        self.fixture.run_git('commit','-m','draft core source')
+        revision = self.fixture.run_git('rev-parse','HEAD')
+        return {'tag_name':'v1.9.9', 'draft':True, 'prerelease':False, 'target_commitish':revision}
+
+    def test_different_carrier_does_not_reuse_core_version_from_old_draft(self):
+        draft = self.reserve_draft_core()
+        head = self.fixture.change()
+        result = release.prepare(self.root,'refs/heads/main',head,self.fixture.latest,reservations=[draft])
+        self.assertEqual(result['version'], '1.8.10')
+        self.assertEqual(result['core_version'], '1.8.11')
+
+    def test_exact_source_draft_preserves_core_version(self):
+        draft = self.reserve_draft_core()
+        head = self.fixture.run_git('rev-parse','HEAD')
+        self.fixture.run_git('push','origin','main')
+        result = release.prepare(self.root,'refs/heads/main',head,self.fixture.latest,reservations=[draft])
+        self.assertEqual(result['core_version'], '1.8.10')
+
+    def test_unknown_reserved_source_fails_without_mutating_versions(self):
+        head = self.fixture.change()
+        before = (self.root/'Cargo.lock').read_bytes()
+        draft = {'tag_name':'v1.9.9', 'draft':True, 'target_commitish':'unfixed-branch'}
+        with self.assertRaisesRegex(ValueError, 'immutable'):
+            release.prepare(self.root,'refs/heads/main',head,self.fixture.latest,execute=True,reservations=[draft])
+        self.assertEqual((self.root/'Cargo.lock').read_bytes(), before)
+        self.assertEqual(self.fixture.run_git('status','--porcelain'), '')
+
     def test_published_same_source_reports_actual_core_version(self):
         head = self.fixture.run_git('rev-parse','HEAD')
         result = release.prepare(self.root,'refs/heads/main',head,self.fixture.latest)

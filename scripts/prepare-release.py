@@ -173,6 +173,43 @@ def choose_core(root, latest_core, previous_builds=()):
     return '.'.join(map(str, (old[0], old[1], old[2]+1)))
 
 
+def reserve_core_version(root, version, latest_core, head, reservations):
+    # Reuse of the published core is already proven against all platform inputs.
+    if version is None or version == latest_core:
+        return version
+    reserved = set()
+    for item in reservations:
+        tag = item.get('tag_name', '')
+        if item.get('prerelease') or not re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', tag):
+            continue
+        local = git(root, 'rev-parse', '--verify', 'refs/tags/'+tag+'^{commit}', check=False)
+        declared = item.get('target_commitish', '')
+        revision = local.stdout.strip() if local.returncode == 0 else declared
+        if not re.fullmatch(r'[a-f0-9]{40}', revision):
+            raise ValueError('Reserved core release source must be immutable')
+        if local.returncode == 0 and re.fullmatch(r'[a-f0-9]{40}', declared) and declared != revision:
+            raise ValueError('Reserved release tag and source disagree')
+        if revision == head:
+            continue  # Exact-source draft retries may keep their version.
+        manifest = git(root, 'show', revision+':crates/porthub-agent/Cargo.toml', check=False)
+        if manifest.returncode:
+            # A stable release with unreadable provenance must not silently
+            # authorize reuse of a possibly occupied core version.
+            raise ValueError('Reserved core release provenance is unavailable')
+        recorded = tomllib.loads(manifest.stdout)['package']['version']
+        if isinstance(recorded, dict) and recorded.get('workspace') is True:
+            workspace = git(root, 'show', revision+':Cargo.toml')
+            recorded = tomllib.loads(workspace.stdout)['workspace']['package']['version']
+        numeric(recorded)
+        reserved.add(recorded)
+    for _ in range(1000):
+        if version not in reserved:
+            return version
+        major, minor, patch = numeric(version)
+        version = f'{major}.{minor}.{patch+1}'
+    raise ValueError('Too many reserved core versions; no source was changed')
+
+
 def replace(path, text):
     with tempfile.NamedTemporaryFile(mode='w', prefix='.release-version-', dir=path.parent, delete=False) as stream:
         temporary = Path(stream.name)
@@ -221,6 +258,7 @@ def prepare(root, ref, trigger_sha, latest=None, branch='main', execute=False, r
         else:
             latest_core = latest_version
     core_version = choose_core(root, latest_core, previous_core_builds)
+    core_version = reserve_core_version(root, core_version, latest_core, head, reservations)
     tag = ref.removeprefix('refs/tags/') if ref.startswith('refs/tags/') else None
     version = choose_version(workspace, latest_version, tag)
     # A failed upload can leave a draft pinned to earlier source. A subsequent

@@ -678,3 +678,22 @@ and lockfile changes are validated together and committed before builds; explici
 tags must already contain the required core version. The production workflow
 still needs to fetch verified prior-release inputs and pass these options before
 it can benefit from core reuse automatically.
+
+Continuous release preparation now inspects the published release format. For a
+compact release, it builds a trusted Rust verifier from the checked-out source,
+then runs `fetch-component-release.py` to stage exactly 21 expected assets from
+the official immutable GitHub URLs. Downloads honor system proxies and verified
+TLS, restrict redirect hosts, and enforce per-file size, SHA-256, and deadline
+bounds. The complete staged release must pass Rust verification before it becomes
+visible. `--recover-output` atomically recovers all ten platform build indexes;
+release preparation consumes those indexes as core reuse proof automatically.
+A complete legacy release authorizes no reuse and causes fresh builds; malformed
+compact metadata or failed verification stops preparation. The build/publish jobs
+still require their separate compact coordinator integration.
+
+Core version reservations also survive failed drafts: release preparation reads
+the immutable source of stable release reservations and skips core versions used
+by different source, even when their carrier tags differ. Exact-source draft
+retries may retain their version. Reuse of a published core version is permitted
+only with the complete unchanged-input proof described above. Unreadable or
+ambiguous reserved source fails before changing manifests.
