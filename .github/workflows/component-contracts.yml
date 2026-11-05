@@ -5,6 +5,7 @@ on:
     paths:
       - 'crates/porthub-components/**'
       - 'deploy/components.toml'
+      - 'deploy/component-platforms.toml'
       - 'scripts/component-build-plan.py'
       - 'scripts/test_component_build_plan.py'
       - 'scripts/package-components.py'
@@ -39,6 +40,7 @@ on:
     paths:
       - 'crates/porthub-components/**'
       - 'deploy/components.toml'
+      - 'deploy/component-platforms.toml'
       - 'scripts/component-build-plan.py'
       - 'scripts/test_component_build_plan.py'
       - 'scripts/package-components.py'

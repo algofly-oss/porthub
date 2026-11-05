@@ -20,7 +20,11 @@ stage = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(stage)
 INPUTS = ['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo', 'crates', 'vendor',
           'scripts/build-agent-linux.sh', 'scripts/build-terminal-helper.py',
-          'scripts/release-version.sh', 'scripts/select-agent-platforms.py']
+          'scripts/release-version.sh', 'scripts/select-agent-platforms.py',
+          'deploy/components.toml', 'deploy/component-platforms.toml',
+          'scripts/component-build-plan.py', 'scripts/build-component-platform.py',
+          'scripts/prepare-packaged-component-checks.py', 'scripts/seed-component-fixture.py',
+          'scripts/verify-static-components.py']
 
 
 def git(*arguments):

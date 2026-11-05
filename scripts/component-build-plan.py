@@ -267,7 +267,7 @@ def profile_state(root, name, nodes):
 
 
 def compiler_environment(target, profile):
-    names = {'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'CC', 'CXX', 'AR', 'CFLAGS', 'CXXFLAGS', 'ARFLAGS', 'CARGO_INCREMENTAL'}
+    names = {'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'CC', 'CXX', 'AR', 'CFLAGS', 'CXXFLAGS', 'ARFLAGS', 'CARGO_INCREMENTAL', 'RUSTC', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER'}
     target_key = target.replace('-', '_')
     for prefix in ['CC', 'CXX', 'AR', 'CFLAGS', 'CXXFLAGS', 'ARFLAGS']:
         names.add(prefix + '_' + target_key)
@@ -276,6 +276,57 @@ def compiler_environment(target, profile):
     profile_key = 'CARGO_PROFILE_' + profile.upper().replace('-', '_') + '_'
     names.update(name for name in os.environ if name.startswith(profile_key))
     return {name: os.environ[name] for name in sorted(names) if name in os.environ}
+
+
+def normalize_environment(root, environment):
+    cache = Path(os.environ.get('PORTHUB_TERMINAL_HELPER_CACHE_ROOT', root/'target/terminal-helper')).resolve()
+    prefix = str(cache).replace('\\','/').rstrip('/')+'/'
+    normalized = {}
+    for name, value in environment.items():
+        if not value:
+            continue
+        portable = value.replace('\\','/')
+        if portable.startswith(prefix):
+            value = '{terminal-cache}/'+portable[len(prefix):]
+        normalized[name] = value
+    return normalized
+
+
+def shipping_environment(root, target):
+    path = root/'deploy/component-platforms.toml'
+    if not path.is_file():
+        return None
+    data = tomllib.loads(path.read_text())
+    if data.get('schema_version') != 1 or set(data.get('defaults',{})) != {'CARGO_INCREMENTAL'}:
+        raise ValueError('Unsupported shipping compiler environment recipe')
+    config = data['targets'].get(target)
+    if config is None:
+        return None
+    if set(config)-{'compiler','ar','terminal_compiler','source_cc','rustflags'}:
+        raise ValueError('Unknown shipping compiler environment setting')
+    if 'terminal_compiler' in config and type(config['terminal_compiler']) is not bool:
+        raise ValueError('Shipping terminal compiler selection must be boolean')
+    environment = dict(data['defaults'])
+    if any(not isinstance(value,str) for value in environment.values()):
+        raise ValueError('Shipping environment values must be strings')
+    key = target.replace('-','_')
+    compiler = config.get('compiler')
+    if config.get('terminal_compiler'):
+        if compiler is not None or not isinstance(config.get('source_cc'),str):
+            raise ValueError('Invalid shipping terminal compiler recipe')
+        identity = hashlib.sha256((root/'vendor/terminal/sources.json').read_bytes()
+            +(root/'scripts/build-terminal-helper.py').read_bytes()+target.encode()+config['source_cc'].encode()).hexdigest()[:20]
+        compiler = '{terminal-cache}/'+target+'/'+identity+'/musl-runtime/bin/musl-gcc'
+    if compiler is not None:
+        environment['CC_'+key] = compiler
+        environment['CARGO_TARGET_'+key.upper()+'_LINKER'] = compiler
+    if config.get('ar'):
+        environment['AR_'+key] = config['ar']
+    if config.get('rustflags'):
+        environment['RUSTFLAGS'] = config['rustflags']
+    if any(not isinstance(value,str) or not value for value in environment.values()):
+        raise ValueError('Invalid shipping environment value')
+    return environment
 
 
 def require_clean_source(root, revision):
@@ -300,11 +351,11 @@ def derived_inputs(root, recipe, target):
     return {'terminal_bundle': {'size': bundle.stat().st_size, 'sha256': file_digest(bundle)}}
 
 
-def build_state(root, recipe, target, paths, nodes):
+def build_state(root, recipe, target, paths, nodes, environment=None):
     packages = lock_packages(root)
     state = {'recipe': recipe, 'target': target, 'toolchain': toolchain(root),
             'profile': profile_state(root, recipe['profile'], nodes),
-            'environment': compiler_environment(target, recipe['profile']),
+            'environment': normalize_environment(root, compiler_environment(target, recipe['profile'])) if environment is None else environment,
             'resolver': tomllib.loads((root / 'Cargo.toml').read_text()).get('workspace', {}).get('resolver'),
             'patches': patch_state(root, nodes),
             'inputs': [input_state(root, path, kind) for path, kind in sorted(paths)],
@@ -395,7 +446,7 @@ def record(root, tool, target, binary, dep_info, revision, version=None, tree=No
     return validate_receipt(receipt)
 
 
-def plan(root, tool, target, previous=None):
+def plan(root, tool, target, previous=None, environment=None):
     root = Path(root).resolve()
     recipe = read_recipes(root)[tool]
     version = current_version(root, recipe)
@@ -407,7 +458,7 @@ def plan(root, tool, target, previous=None):
                      for node in previous['build']['dependencies']]
             paths = [(row[0], row[1]) for row in previous['build']['inputs']]
             try:
-                current = build_state(root, recipe, target, paths, nodes)
+                current = build_state(root, recipe, target, paths, nodes, environment)
                 if digest(current) == previous['fingerprint']:
                     return {'tool': tool, 'target': target, 'action': 'reuse',
                             'version': previous['version'], 'fingerprint': previous['fingerprint'],
@@ -443,6 +494,9 @@ def build_and_record(root, tool, target, revision, version=None, binary_output=N
     current = stable_version(current_version(root, recipe))
     if tool == 'core' and requested != current or tool != 'core' and requested < current:
         raise ValueError('Build version does not match the selected package version policy')
+    expected_environment = shipping_environment(root, target)
+    if expected_environment is not None and normalize_environment(root, compiler_environment(target, recipe['profile'])) != expected_environment:
+        raise ValueError('Shipping compiler environment differs from deploy/component-platforms.toml')
     generated_before = derived_inputs(root, recipe, target)
     command = ['cargo', '+' + toolchain(root)['channel'], 'build', '--locked',
                '-p', recipe['package'], '--bin', recipe['binary'], '--target', target,
@@ -503,6 +557,7 @@ def main():
     select = sub.add_parser('plan')
     select.add_argument('--tool', required=True); select.add_argument('--target', required=True)
     select.add_argument('--previous', type=Path)
+    select.add_argument('--shipping-environment', action='store_true', help='Plan from the declared target environment without compiling')
     verify = sub.add_parser('verify-reuse')
     verify.add_argument('--receipt', type=Path, required=True); verify.add_argument('--binary', type=Path, required=True)
     args = parser.parse_args(); root = args.root.resolve()
@@ -511,7 +566,8 @@ def main():
         args.output.write_bytes(canonical(receipt) + b'\n')
         print(json.dumps({'tool': args.tool, 'fingerprint': receipt['fingerprint'], 'inputs': len(receipt['build']['inputs'])}))
     elif args.command == 'plan':
-        print(json.dumps(plan(root, args.tool, args.target, read_receipt(args.previous) if args.previous else None)))
+        print(json.dumps(plan(root, args.tool, args.target, read_receipt(args.previous) if args.previous else None,
+                              shipping_environment(root,args.target) if args.shipping_environment else None)))
     else:
         verify_reuse(read_receipt(args.receipt), args.binary)
         print('Previous component binary matches its verified build receipt')

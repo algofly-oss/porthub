@@ -60,7 +60,8 @@ class Reuse(unittest.TestCase):
         current = (reuse.ROOT/'.github/workflows/agent-platforms.yml').read_text()
         orchestration = current.replace('  select-platforms:', '  different-selection:')
         self.assertEqual(reuse.recipe(current), reuse.recipe(orchestration))
-        changed = current.replace('cargo build --locked --release','cargo build --locked --release --no-default-features')
+        self.assertIn('--output component-builds',current)
+        changed = current.replace('--output component-builds','--output component-builds --tool core')
         self.assertNotEqual(reuse.recipe(changed),reuse.recipe(current))
         self.assertNotEqual(reuse.recipe('env:\n  RUSTFLAGS: custom\n'+current),reuse.recipe(current))
 
@@ -81,6 +82,13 @@ class Reuse(unittest.TestCase):
                 self.assertEqual(original,reuse.fingerprint(second))
                 runtime.write_text('pub fn changed() {}\n');third=commit()
                 self.assertNotEqual(original,reuse.fingerprint(third))
+                (root/'deploy').mkdir()
+                (root/'deploy/component-platforms.toml').write_text('shipping flags changed\n')
+                fourth=commit()
+                self.assertNotEqual(reuse.fingerprint(third),reuse.fingerprint(fourth))
+                (root/'scripts/build-component-platform.py').write_text('component recipe changed\n')
+                fifth=commit()
+                self.assertNotEqual(reuse.fingerprint(fourth),reuse.fingerprint(fifth))
 
     def test_matrix_catalog_is_read_without_executing_selector(self):
         native, cross = reuse.matrices()

@@ -1,0 +1,32 @@
+schema_version = 1
+
+# Shipping compiler inputs are shared by release preparation and actual builds.
+# Empty environment variables are treated as unset. Unknown extra flags fail a
+# shipping build instead of publishing changed bytes under an unchanged version.
+[defaults]
+CARGO_INCREMENTAL = "0"
+
+[targets.x86_64-unknown-linux-musl]
+compiler = "musl-gcc"
+[targets.aarch64-unknown-linux-musl]
+compiler = "musl-gcc"
+[targets.i686-unknown-linux-musl]
+terminal_compiler = true
+source_cc = "i686-linux-gnu-gcc"
+ar = "i686-linux-gnu-ar"
+[targets.arm-unknown-linux-musleabihf]
+terminal_compiler = true
+source_cc = "arm-linux-gnueabihf-gcc"
+ar = "arm-linux-gnueabihf-ar"
+[targets.armv7-unknown-linux-musleabihf]
+terminal_compiler = true
+source_cc = "arm-linux-gnueabihf-gcc"
+ar = "arm-linux-gnueabihf-ar"
+[targets.x86_64-apple-darwin]
+[targets.aarch64-apple-darwin]
+[targets.x86_64-pc-windows-msvc]
+rustflags = "-C target-feature=+crt-static"
+[targets.i686-pc-windows-msvc]
+rustflags = "-C target-feature=+crt-static"
+[targets.aarch64-pc-windows-msvc]
+rustflags = "-C target-feature=+crt-static"

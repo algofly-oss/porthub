@@ -765,7 +765,18 @@ versions to coexist. Merely including all component names cannot authorize a
 release whose core cannot use them. Fixture checks reject incompatible core
 requirements and unsupported helper protocols before publication.
 
-Core reuse preparation remains conservative when its host compiler environment
-differs from a target builder's recorded environment. A declarative target build
-environment is still needed to prove unchanged cross-platform core inputs without
-forcing avoidable core rebuilds; a mismatch never authorizes unsafe reuse.
+`deploy/component-platforms.toml` declares shipping compiler settings for all ten
+targets. Release preparation compares prior core receipts using those target
+settings, rather than its Linux host environment. Actual shipping builds require
+their compiler environment to match the declaration before invoking Cargo.
+Unexpected flags or compiler wrappers fail without logging their values. Changes
+to a target's declared settings invalidate that target's build proof. Terminal
+compiler cache paths use a portable placeholder; their target/source identity
+still matches the actual pinned C builder cache key. Empty flag variables are
+normalized as unset. Local targets outside this shipping catalog retain normal
+recorded-environment planning. Real multi-platform build verification of this
+recipe remains required before publication.
+
+Whole-platform CI reuse fingerprints now include the component recipes and
+coordinator/check scripts, preventing reuse across changed packaging/compiler
+policies. Component-level reuse still uses each tool's actual compiled inputs.

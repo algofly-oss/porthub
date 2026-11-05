@@ -159,7 +159,8 @@ def choose_core(root, latest_core, previous_builds=()):
             if len(candidates) != 1:
                 raise ValueError('Previous core build version differs from published version')
             try:
-                choice = coordinator.planner.plan(root, 'core', target, candidates[0][0])
+                choice = coordinator.planner.plan(root, 'core', target, candidates[0][0],
+                    environment=coordinator.planner.shipping_environment(root,target))
                 unchanged = unchanged and choice['action'] == 'reuse'
             except ValueError as error:
                 if str(error) != 'Changed core contents require a new release version':

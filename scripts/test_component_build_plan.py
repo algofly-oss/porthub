@@ -1,4 +1,7 @@
 import copy
+import contextlib
+import io
+from types import SimpleNamespace
 import importlib.util
 import json
 import os
@@ -123,6 +126,54 @@ recipe_version=1
             self.assertEqual(buildplan.plan(self.root,'tool',TARGET,receipt)['action'],'reuse')
             bundle.write_bytes(b'changed derived bundle')
             self.assertEqual(buildplan.plan(self.root,'tool',TARGET,receipt)['version'],'0.1.1')
+
+    def shipping_recipe(self, flags='-C target-feature=+crt-static'):
+        self.write('deploy/component-platforms.toml', 'schema_version=1\n[defaults]\nCARGO_INCREMENTAL="0"\n[targets."'+TARGET+'"]\nrustflags='+json.dumps(flags)+'\n')
+
+    def test_declared_target_environment_proves_reuse_from_another_host(self):
+        self.shipping_recipe()
+        with mock.patch.dict(os.environ,{'RUSTFLAGS':'-C target-feature=+crt-static','CARGO_INCREMENTAL':'0'}):
+            receipt=self.record('tool')
+        with mock.patch.dict(os.environ,{'RUSTFLAGS':'','CARGO_INCREMENTAL':''}):
+            self.assertEqual(buildplan.plan(self.root,'tool',TARGET,receipt)['action'],'build')
+            environment=buildplan.shipping_environment(self.root,TARGET)
+            self.assertEqual(buildplan.plan(self.root,'tool',TARGET,receipt,environment=environment)['action'],'reuse')
+            self.shipping_recipe('-C opt-level=2')
+            changed=buildplan.shipping_environment(self.root,TARGET)
+            self.assertEqual(buildplan.plan(self.root,'tool',TARGET,receipt,environment=changed)['action'],'build')
+
+    def test_unexpected_shipping_flags_fail_before_compilation(self):
+        self.shipping_recipe()
+        with mock.patch.dict(os.environ,{'RUSTFLAGS':'-C opt-level=1','CARGO_INCREMENTAL':'0'}), mock.patch.object(buildplan,'require_clean_source'), mock.patch.object(buildplan.subprocess,'run',side_effect=AssertionError('Must reject before Cargo')):
+            with self.assertRaisesRegex(ValueError,'Shipping compiler environment differs'):
+                buildplan.build_and_record(self.root,'tool',TARGET,'a'*40)
+
+    def test_terminal_compiler_cache_location_is_portable(self):
+        cache=self.root/'private compiler cache'
+        key='CC_'+TARGET.replace('-','_')
+        with mock.patch.dict(os.environ,{'PORTHUB_TERMINAL_HELPER_CACHE_ROOT':str(cache)}):
+            normalized=buildplan.normalize_environment(self.root,{key:str(cache/'target/id/musl-runtime/bin/musl-gcc'),'RUSTFLAGS':''})
+        self.assertEqual(normalized,{key:'{terminal-cache}/target/id/musl-runtime/bin/musl-gcc'})
+
+    def test_declared_cross_compiler_points_at_actual_terminal_builder_cache(self):
+        repository=Path(__file__).resolve().parents[1]
+        producer=repository/'scripts/build-terminal-helper.py'
+        (self.root/'scripts').mkdir(exist_ok=True)
+        (self.root/'scripts/build-terminal-helper.py').write_bytes(producer.read_bytes())
+        (self.root/'vendor/terminal').mkdir(parents=True,exist_ok=True)
+        (self.root/'vendor/terminal/sources.json').write_bytes((repository/'vendor/terminal/sources.json').read_bytes())
+        self.write('deploy/component-platforms.toml','schema_version=1\n[defaults]\nCARGO_INCREMENTAL="0"\n[targets."'+TARGET+'"]\nterminal_compiler=true\nsource_cc="cross-gcc"\nar="cross-ar"\n')
+        environment=buildplan.shipping_environment(self.root,TARGET)
+        compiler=environment['CC_'+TARGET.replace('-','_')]
+        identity=compiler.split('/')[2]
+        cache=self.root/'compiler-cache'
+        bundle=cache/TARGET/identity/'bundle.tar.gz'
+        bundle.parent.mkdir(parents=True);bundle.write_bytes(b'cached fixture')
+        spec=importlib.util.spec_from_file_location('terminal_producer',producer)
+        builder=importlib.util.module_from_spec(spec);spec.loader.exec_module(builder)
+        with mock.patch.object(builder,'ROOT',self.root), mock.patch.dict(os.environ,{'PORTHUB_TERMINAL_HELPER_CACHE_ROOT':str(cache)}), mock.patch.object(builder,'download_source',side_effect=AssertionError('Expected exact cache hit')), contextlib.redirect_stdout(io.StringIO()) as stdout:
+            builder.build(SimpleNamespace(target=TARGET,cc='cross-gcc',ar='cross-ar',jobs=1))
+        self.assertEqual(Path(stdout.getvalue().strip()),bundle)
 
     def test_independent_core_reuses_after_server_workspace_version_bump(self):
         path = self.root/'core/Cargo.toml'
