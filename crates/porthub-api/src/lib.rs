@@ -12,6 +12,7 @@ pub mod domain;
 pub mod enrollment_ticket;
 pub mod error;
 pub mod firewall;
+pub mod firewall_history;
 pub mod gateway_apply;
 pub mod gateway_origin;
 pub mod generated;

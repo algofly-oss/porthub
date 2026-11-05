@@ -118,6 +118,9 @@ CREATE TABLE IF NOT EXISTS porthub_schema(key TEXT PRIMARY KEY,value TEXT NOT NU
         Ok(())
     }
     pub async fn snapshot(&self, ports: Vec<u16>) -> Result<BTreeMap<u16, Vec<Sample>>> {
+        self.snapshot_since(ports, 0).await
+    }
+    pub async fn snapshot_since(&self, ports: Vec<u16>, since: i64) -> Result<BTreeMap<u16, Vec<Sample>>> {
         let filter = if ports.is_empty() {
             None
         } else {
@@ -125,7 +128,8 @@ CREATE TABLE IF NOT EXISTS porthub_schema(key TEXT PRIMARY KEY,value TEXT NOT NU
         };
         let rows=self.db.call(move|db|->tokio_rusqlite::rusqlite::Result<Vec<StoredSample>> {
             let mut query="SELECT port,ts,interval_seconds,in_bytes,out_bytes,drop_bytes,incoming_ips,outgoing_ips,blocked_ips FROM traffic_buffer WHERE ts>=strftime('%s','now')-3600".to_owned();
-            let mut parameters=Vec::new();
+            let mut parameters=vec![since.to_string()];
+            query.push_str(" AND ts>=CAST(? AS INTEGER)");
             if let Some(filter)=filter {query.push_str(" AND port IN (SELECT value FROM json_each(?))");parameters.push(filter);}
             query.push_str(" ORDER BY port,ts");
             db.prepare(&query)?.query_map(tokio_rusqlite::rusqlite::params_from_iter(parameters),|r|Ok((r.get(0)?,Sample{timestamp:r.get(1)?,interval_seconds:r.get(2)?,in_bytes:r.get(3)?,out_bytes:r.get(4)?,drop_bytes:r.get(5)?,incoming_ips:vec![],outgoing_ips:vec![],blocked_ips:vec![]},r.get(6)?,r.get(7)?,r.get(8)?)))?.collect()

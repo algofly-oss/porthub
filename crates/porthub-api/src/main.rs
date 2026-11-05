@@ -130,6 +130,7 @@ async fn main() -> Result<()> {
             activity_stop.subscribe(),
         ))
     });
+    let firewall_history = app.firewall.as_ref().map(|_| tokio::spawn(porthub_api::firewall_history::run(app.clone(), activity_stop.subscribe())));
     let connection_refresh = tokio::spawn(porthub_api::connection_refresh::run(
         app.clone(),
         activity_stop.subscribe(),
@@ -190,6 +191,7 @@ async fn main() -> Result<()> {
     if let Some(firewall) = firewall {
         firewall.await?;
     }
+    if let Some(history) = firewall_history { history.await?; }
     connection_refresh.await?;
     machine_delete.await?;
     status_monitor.await?;

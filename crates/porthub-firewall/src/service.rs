@@ -217,9 +217,11 @@ async fn list(State(service): State<Arc<Service>>) -> Json<Value> {
 struct Snapshot {
     #[serde(default)]
     ports: Vec<u16>,
+    #[serde(default)]
+    since: i64,
 }
 async fn snapshot(State(service): State<Arc<Service>>, Json(body): Json<Snapshot>) -> Response {
-    match service.store.snapshot(body.ports).await {
+    match service.store.snapshot_since(body.ports, body.since).await {
         Ok(data) => {
             Json(json!({"msg":"Traffic snapshot fetched successfully","data":data})).into_response()
         }
