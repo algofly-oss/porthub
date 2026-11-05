@@ -13,7 +13,7 @@ use std::{
     pin::Pin,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex as StdMutex,
     },
     task::{Context, Poll},
     time::{SystemTime, UNIX_EPOCH},
@@ -61,6 +61,53 @@ struct Pool {
     tor: Arc<TorPool>,
     sources: Option<watch::Sender<Vec<std::net::IpAddr>>>,
     last_used: AtomicU64,
+    authorized_at: StdMutex<tokio::time::Instant>,
+}
+const AUTHORIZATION_LEASE: std::time::Duration = std::time::Duration::from_secs(30);
+impl Pool {
+    fn authorize(&self, sources: Vec<std::net::IpAddr>) {
+        let mut authorized = self.authorized_at.lock().unwrap_or_else(|p| p.into_inner());
+        *authorized = tokio::time::Instant::now();
+        if sources.is_empty() {
+            self.tor.dormant();
+        }
+        if let Some(sender) = &self.sources {
+            sender.send_replace(sources);
+        }
+    }
+    fn expire_authorization(&self) {
+        let authorized = self.authorized_at.lock().unwrap_or_else(|p| p.into_inner());
+        if authorized.elapsed() >= AUTHORIZATION_LEASE {
+            self.tor.dormant();
+            if let Some(sender) = &self.sources {
+                sender.send_if_modified(|sources| {
+                    if sources.is_empty() {
+                        false
+                    } else {
+                        sources.clear();
+                        true
+                    }
+                });
+            }
+        }
+    }
+    fn supervise_authorization(pool: &Arc<Self>) {
+        if pool.sources.is_none() {
+            return;
+        }
+        let weak = Arc::downgrade(pool);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                let Some(pool) = weak.upgrade() else {
+                    break;
+                };
+                pool.expire_authorization();
+            }
+        });
+    }
 }
 #[derive(Default)]
 pub struct Worker {
@@ -93,8 +140,8 @@ impl Worker {
         });
         if let Some(pool) = pools.get(&key) {
             pool.last_used.store(now(), Ordering::Relaxed);
-            if let (Some(sender), Some(sources)) = (&pool.sources, options.sources) {
-                sender.send_replace(sources);
+            if let Some(sources) = options.sources {
+                pool.authorize(sources);
             }
             return Ok(pool.clone());
         }
@@ -119,7 +166,9 @@ impl Worker {
             tor,
             sources,
             last_used: AtomicU64::new(now()),
+            authorized_at: StdMutex::new(tokio::time::Instant::now()),
         });
+        Pool::supervise_authorization(&pool);
         pools.insert(key, pool.clone());
         Ok(pool)
     }
@@ -279,6 +328,70 @@ mod tests {
             "configuration must not bootstrap or create network traffic"
         );
     }
+    #[tokio::test(start_paused = true)]
+    async fn lost_core_heartbeats_revoke_sources_without_bootstrapping() {
+        let root = tempfile::tempdir().unwrap();
+        let worker = Worker::default();
+        let allowed = vec!["192.0.2.10".parse().unwrap()];
+        let pool = worker
+            .pool(options(root.path(), Some(allowed.clone())))
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(*pool.sources.as_ref().unwrap().borrow(), allowed);
+        tokio::time::advance(AUTHORIZATION_LEASE + std::time::Duration::from_secs(3)).await;
+        tokio::task::yield_now().await;
+        assert!(pool.sources.as_ref().unwrap().borrow().is_empty());
+        assert!(!pool.tor.ready());
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            pool.tor
+                .connect(Destination::new("example.invalid".into(), 443).unwrap())
+        )
+        .await
+        .unwrap()
+        .is_err());
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            pool.tor.resolve("example.invalid")
+        )
+        .await
+        .unwrap()
+        .is_err());
+        let renewed = worker
+            .pool(options(root.path(), Some(allowed.clone())))
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&pool, &renewed));
+        assert_eq!(*pool.sources.as_ref().unwrap().borrow(), allowed);
+        assert!(
+            !pool.tor.ready(),
+            "renewal must not silently bootstrap network access"
+        );
+    }
+    #[tokio::test(start_paused = true)]
+    async fn active_core_heartbeats_extend_the_source_lease() {
+        let root = tempfile::tempdir().unwrap();
+        let worker = Worker::default();
+        let allowed = vec!["192.0.2.11".parse().unwrap()];
+        let pool = worker
+            .pool(options(root.path(), Some(allowed.clone())))
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(20)).await;
+        worker
+            .pool(options(root.path(), Some(allowed.clone())))
+            .await
+            .unwrap();
+        tokio::time::advance(std::time::Duration::from_secs(20)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(*pool.sources.as_ref().unwrap().borrow(), allowed);
+        tokio::time::advance(std::time::Duration::from_secs(13)).await;
+        tokio::task::yield_now().await;
+        assert!(pool.sources.as_ref().unwrap().borrow().is_empty());
+    }
+
     #[tokio::test]
     async fn idle_profiles_are_reclaimed_but_leased_profiles_survive_updates() {
         let root = tempfile::tempdir().unwrap();

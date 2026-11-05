@@ -16,4 +16,5 @@ tokio.workspace = true
 tokio-util = { version = "0.7", features = ["rt"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"

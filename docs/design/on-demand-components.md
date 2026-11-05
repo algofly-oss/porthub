@@ -780,3 +780,16 @@ recipe remains required before publication.
 Whole-platform CI reuse fingerprints now include the component recipes and
 coordinator/check scripts, preventing reuse across changed packaging/compiler
 policies. Component-level reuse still uses each tool's actual compiled inputs.
+
+Managed Tor worker profiles now require continuing source authorization. Any
+validated managed operation renews a monotonic 30-second lease; core already sends
+`Ready` heartbeats every two seconds. A weak supervisor checks the lease every two
+seconds. If control traffic stops, it clears the permitted sources and requests
+soft dormancy, without terminating existing stream objects. Expired profiles
+reject subsequent connection and DNS work through the existing underlay guard.
+Explicit empty source updates request dormancy immediately. A later authorized
+operation may renew sources but cannot bootstrap Tor merely by reconfiguring it.
+Standalone profiles with OS routing (`sources: None`) are unaffected. The
+supervisor does not keep a discarded profile alive. Paused-clock tests exercise
+expiry, renewal, and denial of post-expiry operations; standalone CLI/pipe checks
+still pass. Generation handover and persistent CLI fallback remain unfinished.
