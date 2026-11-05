@@ -315,3 +315,12 @@ Conflicting immutable tags or an administrator edit to `.env` abort the operatio
 Finalization verifies ordinary Compose rendering selects the new images and core
 version; failure restores the previous tags and environment before restoring the
 attempted running roles. Keep the record and old deployment directory for recovery.
+
+
+The migration preflight caller grants `actions: read` to its reusable release
+workflow, matching the nested client artifact-reuse job. Missing this permission
+causes GitHub to reject the entire workflow before even the migration tests run.
+The isolated Docker upgrade test uses image aliases under its unique Compose
+project name, verifies the private environment backup and persisted Compose image
+selection, and removes only its own containers and image aliases. The production
+project retains its existing `porthub:{role}` image names.

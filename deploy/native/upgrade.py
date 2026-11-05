@@ -179,7 +179,7 @@ def replace_private(path, payload, metadata):
 
 class ReleaseSelection:
     """Preflight and transaction for the ordinary Compose restart configuration."""
-    def __init__(self, root, current, images, configuration, revision, version):
+    def __init__(self, root, current, images, configuration, revision, version, namespace="porthub"):
         self.path = root / '.env'
         self.metadata = self.path.lstat()
         if not stat.S_ISREG(self.metadata.st_mode) or self.metadata.st_mode & 0o077:
@@ -188,12 +188,12 @@ class ReleaseSelection:
         self.images = images
         self.aliases = {}
         for role, image in images.items():
-            stable = 'porthub:' + role
+            stable = namespace + ':' + role
             if configuration['services'][role]['image'] != stable:
                 raise ValueError('Release persistence requires the standard PortHub image names')
             immutable = stable + '-' + version
             previous = current[role]['Image']
-            rollback = 'porthub:rollback-' + role + '-' + previous.removeprefix('sha256:')[:12]
+            rollback = namespace + ':rollback-' + role + '-' + previous.removeprefix('sha256:')[:12]
             for reference, expected in ((immutable, image['Id']), (rollback, previous)):
                 existing = image_reference(reference)
                 if existing is not None and existing != expected:
@@ -317,7 +317,7 @@ def perform(args):
                              if value.startswith('PORTHUB_VERSION=')), None)
     if 'core' in roles and not previous_version:
         raise ValueError('Previous runtime version is unavailable for rollback')
-    selection = ReleaseSelection(root, current, images, configuration, args.revision, args.version)
+    selection = ReleaseSelection(root, current, images, configuration, args.revision, args.version, args.project)
     check_routes(args.probe_url)
     print('Preflight passed: source, version, architecture, privileges, state mounts and rollback configuration')
     if not args.apply:

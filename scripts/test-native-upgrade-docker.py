@@ -33,6 +33,8 @@ def main():
             for kind in revisions:
                 directory = root/kind
                 directory.mkdir()
+                (directory/'.env').write_text('SECRET=fixture-only\nPORTHUB_VERSION=1.9.0\nPORTHUB_SOURCE_REVISION='+revisions['old']+'\n')
+                (directory/'.env').chmod(0o600)
                 for role in ROLES:
                     tag = 'porthub-ci:'+role+'-'+revisions[kind]
                     tags.append(tag)
@@ -51,18 +53,22 @@ def main():
                     if role=='core':
                         (state/'mongo').mkdir(exist_ok=True)
                         (state/'mongo/WiredTiger.fixture').write_text('owned fixture database state')
-                    service = {'image':'porthub-ci:'+role+'-'+revisions[kind],
+                    service = {'image':project+':'+role,
                                'container_name':project+'-'+role, 'read_only':True, 'stop_grace_period':'1s',
                                'cap_drop':['ALL'], 'cap_add':{'core':[],'edge':['NET_BIND_SERVICE'],'firewall':['NET_ADMIN']}[role],
-                               'environment':{'PORTHUB_VERSION':'1.9.0'},
+                               'environment':{'PORTHUB_VERSION':'${PORTHUB_VERSION}'},
                                'volumes':[{'type':'bind','source':str(state),'target':'/data' if role=='core' else '/state'}],
                                'healthcheck':{'test':['CMD','/bin/true'],'interval':'1s','timeout':'1s','retries':2}}
                     if role != 'core':service['network_mode']='host'
                     services[role]=service
                 (directory/'docker-compose.yml').write_text(json.dumps({'services':services}))
+            for role in ROLES:
+                run('docker','image','tag','porthub-ci:'+role+'-'+revisions['old'],project+':'+role)
+                tags.extend([project+':'+role, project+':'+role+'-1.9.0'])
             base = ['docker','compose','--project-name',project,'--project-directory',str(root/'old'),'-f',str(root/'old/docker-compose.yml')]
             run(*base,'up','-d','--wait','--wait-timeout','15')
             original = {role:inspect(project+'-'+role)['Image'] for role in ROLES}
+            tags.extend(project+':rollback-'+role+'-'+image.removeprefix('sha256:')[:12] for role,image in original.items())
             unrelated = set(run('docker','ps','-q','--no-trunc').stdout.split()) - {inspect(project+'-'+role)['Id'] for role in ROLES}
             def upgrade(kind, apply=False):
                 arguments = [sys.executable,str(ROOT/'deploy/native/upgrade.py'),'--root',str(root/kind),'--revision',revisions[kind],'--version','1.9.0','--project',project]
@@ -86,6 +92,14 @@ def main():
                 assert current['Image'] == expected, 'successful upgrade must run the pinned candidate: '+role
                 assert current['State']['Health']['Status'] == 'healthy'
             assert inspect(project+'-firewall')['Id']==before['firewall'], 'unselected firewall must never be recreated'
+            assert (root/'good/.env').read_text().startswith('SECRET=fixture-only\n')
+            assert (root/'good/.env').stat().st_mode & 0o777 == 0o600
+            rendered=json.loads(run('docker','compose','--project-name',project,'--project-directory',str(root/'good'),'-f',str(root/'good/docker-compose.yml'),'config','--format','json').stdout)
+            for role in ('core','edge'):
+                selected=json.loads(run('docker','image','inspect',rendered['services'][role]['image']).stdout)[0]['Id']
+                assert selected==inspect(project+'-'+role)['Image'], 'ordinary Compose must select the upgraded image'
+            assert len(list((root/'good').glob('deploy/native/upgrade-records/*/previous-release.env')))==1
+
             snapshots=list(root.glob('*/deploy/native/upgrade-records/*/core-backup/verified.json'))
             assert len(snapshots)==2, 'both core replacement attempts require a verified backup'
             for manifest in snapshots:
