@@ -49,19 +49,40 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: '0'
     steps:
       - uses: actions/checkout@v4
+      - name: Check whether native Rust inputs changed
+        id: native_changes
+        shell: bash
+        env:
+          PORTHUB_PREVIOUS_REVISION: ${{ github.event.before || '' }}
+        run: |
+          before_revision="$PORTHUB_PREVIOUS_REVISION"
+          changed=true
+          if [[ "$before_revision" =~ ^[a-f0-9]{40}$ ]] && [[ "$before_revision" != 0000000000000000000000000000000000000000 ]]; then
+            if git cat-file -e "$before_revision^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "$before_revision" >/dev/null 2>&1; then
+              if git diff --quiet "$before_revision" HEAD -- Cargo.toml Cargo.lock rust-toolchain.toml .cargo vendor crates/porthub-components crates/porthub-sync crates/porthub-tor crates/porthub-transfer crates/porthub-egress .github/workflows/component-contracts.yml; then
+                changed=false
+              fi
+            fi
+          fi
+          echo "rust=$changed" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
       - name: Verify dependency-aware component build selection
         run: python scripts/test_component_build_plan.py
       - name: Install pinned Rust toolchain
+        if: steps.native_changes.outputs.rust == 'true'
         run: rustup toolchain install 1.99.1 --profile minimal
       - uses: Swatinem/rust-cache@v2
+        if: steps.native_changes.outputs.rust == 'true'
         with:
           key: components-${{ runner.arch }}
       - name: Test compatibility, download verification and IPC limits
+        if: steps.native_changes.outputs.rust == 'true'
         run: cargo test --locked -p porthub-components -p porthub-sync
       - name: Verify independent Tor worker and source-policy lifecycle
+        if: steps.native_changes.outputs.rust == 'true'
         run: cargo test --locked -p porthub-tor
       - name: Verify transfers compile and run without watch synchronization
+        if: steps.native_changes.outputs.rust == 'true'
         run: cargo test --locked -p porthub-transfer --no-default-features

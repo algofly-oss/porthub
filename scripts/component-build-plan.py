@@ -161,7 +161,7 @@ def dependency_state(packages, node):
 def cargo_graph(root, recipe, target, text=None):
     root = Path(root).resolve()
     if text is None:
-        command = ['cargo', 'tree', '--locked', '-p', recipe['package'], '--target', target,
+        command = ['cargo', '+' + toolchain(root)['channel'], 'tree', '--locked', '-p', recipe['package'], '--target', target,
                    '--edges', 'normal,build', '--prefix', 'depth', '--format', '{p}|{f}']
         if not recipe['default_features']:
             command.append('--no-default-features')

@@ -56,3 +56,19 @@ passed Linux/macOS/Windows x64/Windows ARM64 at
 but the modular agent is not yet released or deployed. Terminal/stats extraction,
 gateway component delivery, compact publication/build selection, supervised Tor
 CLI fallback and the remaining release/install gates are still required.
+
+## Compose recreation persistence
+
+A follow-up check found that stable Docker tags still referenced older images and
+the new directory's copied environment retained 1.10.1 release metadata. The
+running 1.10.2 containers were healthy and unaffected. Stable and immutable 1.10.2
+tags now point to the verified running images, and only `PORTHUB_VERSION` and
+`PORTHUB_SOURCE_REVISION` were corrected in the staged environment. Its permissions
+and ownership were preserved; a private prior environment copy and tagged rollback
+images remain in the upgrade record.
+
+A rendered normal Compose configuration now selects every running 1.10.2 image.
+All non-release environment settings were compared with the running containers
+and were unchanged. Public HTTPS remained healthy without recreating containers.
+The generic upgrade tool still needs this finalization automated before the next
+rollout; this deployment has been reconciled explicitly.

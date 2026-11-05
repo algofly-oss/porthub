@@ -282,3 +282,12 @@ selection and build phases. The build planner is tested on native platforms;
 release workflow selection, archive repacking and publication integration remain
 required before the agent release. Terminal/stats recipes will be added with their
 extracted packages.
+
+The build-selection tests now pass on Linux, macOS, Windows x64 and Windows ARM64.
+A real optimized sync build produced a receipt with 38 local inputs and 176 active
+dependencies; the next plan selected reuse and verified the executable digest
+without Cargo. The contract workflow now distinguishes script-only changes from
+native Rust inputs, while conservatively testing all Rust inputs when the prior
+revision cannot be inspected. This conditional workflow change is awaiting its
+native run. Stable server image/environment promotion must also be automated in
+the upgrade tool before the next gateway rollout.
