@@ -3056,9 +3056,11 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "socket2 0.6.5",
+ "system-configuration",
  "tokio",
  "tower-service",
  "tracing",
+ "windows-registry",
 ]
 
 [[package]]
@@ -4842,6 +4844,7 @@ dependencies = [
  "hickory-proto",
  "hickory-resolver",
  "hostname",
+ "hyper-util",
  "libc",
  "nlink",
  "notify 8.2.1",

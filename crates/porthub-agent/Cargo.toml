@@ -18,6 +18,7 @@ handoff-service-test = []
 terminal-direct = ["porthub-terminal/direct", "porthub-terminal/viewer-history"]
 
 [dependencies]
+hyper-util = { version = "0.1", features = ["client-proxy-system"] }
 getifaddrs = "0.6.2"
 anyhow.workspace = true
 clap.workspace = true

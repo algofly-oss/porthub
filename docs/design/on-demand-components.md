@@ -409,3 +409,16 @@ cancels and drops it with the private runtime. Failure to initialize optional
 maintenance leaves private forwarding running and emits a credential-free warning.
 This hook has compile and maintenance-lifetime regression coverage; a live
 private-only installed-agent prefetch check remains part of rollout verification.
+
+### Proxy-aware outbound selection prerequisite
+
+The agent now provides `outbound::http_connection_target` using the same
+hyper-util proxy matcher as reqwest, with system-proxy support enabled. It returns
+the actual socket host/port: the proxy when intercepted, or the origin when
+`NO_PROXY` applies. Proxy credentials are never part of the returned authority.
+Direct IPv6 authorities are normalized for socket resolution. A redirect must
+invoke this decision again because the new host can have different proxy rules.
+Tests cover credential-bearing proxies, bypass rules, IPv6, and GitHub-to-asset
+redirect authorities. The component HTTP transport still needs to call this
+selector and bind/retry policy-approved sources per request/redirect; this
+prerequisite alone does not fix module downloads on a multi-address host.

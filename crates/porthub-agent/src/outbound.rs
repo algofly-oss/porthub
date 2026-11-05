@@ -439,3 +439,58 @@ mod bounded_family_tests {
         assert_eq!(selector.order(&paths, Instant::now())[0], ipv6);
     }
 }
+
+
+/// Resolve the socket authority before selecting a source address. A proxy's
+/// routing policy can differ from the origin's; never select against the latter
+/// and then silently send the socket to the former. The matcher must represent
+/// the same proxy configuration as the HTTP client. No credentials are returned.
+pub fn http_connection_target(
+    url: &url::Url,
+    proxy: &hyper_util::client::proxy::matcher::Matcher,
+) -> Result<(String, u16)> {
+    anyhow::ensure!(matches!(url.scheme(), "http" | "https"), "unsupported outbound HTTP scheme");
+    let uri = url.as_str().parse().context("invalid outbound HTTP authority")?;
+    if let Some(intercept) = proxy.intercept(&uri) {
+        let endpoint = intercept.uri();
+        let host = endpoint.host().context("proxy has no socket authority")?;
+        let port = endpoint.port_u16().or_else(|| match endpoint.scheme_str() {
+            Some("http") => Some(80), Some("https") => Some(443), _ => None,
+        }).context("unsupported proxy socket authority")?;
+        return Ok((host.trim_matches(['[', ']']).to_owned(), port));
+    }
+    Ok((url.host_str().context("HTTP URL has no socket authority")?.trim_matches(['[', ']']).to_owned(),
+        url.port_or_known_default().context("HTTP URL has no socket port")?))
+}
+
+#[cfg(test)]
+mod http_target_tests {
+    use super::*;
+    use hyper_util::client::proxy::matcher::Matcher;
+    #[test]
+    fn proxy_socket_authority_is_selected_without_returning_credentials() -> Result<()> {
+        let rules = Matcher::builder().https("http://user:password@proxy.example:8080").build();
+        assert_eq!(http_connection_target(&"https://gateway.example/path".parse()?, &rules)?,
+            ("proxy.example".into(), 8080));
+        Ok(())
+    }
+    #[test]
+    fn no_proxy_and_direct_ipv6_keep_origin_authority() -> Result<()> {
+        let rules = Matcher::builder().https("http://proxy.example:8080").no("gateway.example").build();
+        assert_eq!(http_connection_target(&"https://gateway.example:8443/path".parse()?, &rules)?,
+            ("gateway.example".into(), 8443));
+        let direct = Matcher::builder().build();
+        assert_eq!(http_connection_target(&"https://[2001:db8::1]/path".parse()?, &direct)?,
+            ("2001:db8::1".into(), 443));
+        Ok(())
+    }
+    #[test]
+    fn redirect_hosts_require_a_fresh_proxy_decision() -> Result<()> {
+        let rules = Matcher::builder().https("https://proxy.example").no("github.com").build();
+        assert_eq!(http_connection_target(&"https://github.com/release".parse()?, &rules)?,
+            ("github.com".into(), 443));
+        assert_eq!(http_connection_target(&"https://release-assets.githubusercontent.com/file".parse()?, &rules)?,
+            ("proxy.example".into(), 443));
+        Ok(())
+    }
+}
