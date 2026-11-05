@@ -95,3 +95,62 @@ fn bundled_runtime_creates_lists_and_kills_an_isolated_workspace() {
     assert!(listed.status.success());
     assert!(String::from_utf8_lossy(&listed.stdout).contains("fixture"));
 }
+
+#[cfg(unix)]
+#[test]
+fn independent_workspace_creation_preserves_caller_environment_and_reuses_registry_directory() {
+    if option_env!("PORTHUB_TERMINAL_BUNDLE").is_none() {
+        return;
+    }
+    use porthub_components::protocol::terminal::Job;
+    use porthub_terminal::multiplexer::Workspace;
+    let root = tempfile::tempdir().unwrap();
+    let registry = root.path().join("workspaces");
+    struct Stop(Job);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            if let Ok(workspace) = Workspace::open(
+                self.0.executable.clone(),
+                self.0.terminfo.clone(),
+                self.0.workspace.clone(),
+            ) {
+                let _ = workspace.stop();
+            }
+        }
+    }
+    let mut running = vec![];
+    for index in 0..2 {
+        let output = root.path().join(format!("caller-{index}.txt"));
+        let value = format!("independent-{index}");
+        let result = command()
+            .current_dir(root.path())
+            .env("PORTHUB_WORKSPACE_FIXTURE", &value)
+            .args(["new", "--directory"])
+            .arg(&registry)
+            .arg("--name")
+            .arg(format!("work-{index}"))
+            .args([
+                "--",
+                "/bin/sh",
+                "-c",
+                "printf '%s' \"$PORTHUB_WORKSPACE_FIXTURE\" > \"$1\"; sleep 30",
+                "fixture",
+            ])
+            .arg(&output)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let job: Job = serde_json::from_slice(&result.stdout).unwrap();
+        assert!(registry.join(format!("{}.json", job.id)).is_file());
+        running.push(Stop(job));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !output.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(std::fs::read_to_string(output).unwrap(), value);
+    }
+}

@@ -6,6 +6,8 @@ use porthub_components::{
 };
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
+#[cfg(unix)]
+pub mod workspace;
 pub const VERSION: &str = match option_env!("PORTHUB_COMPONENT_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
@@ -63,10 +65,17 @@ impl Handler for Worker {
         operation: Operation,
         _cancel: CancellationToken,
     ) -> Result<Reply<Value>, Failure> {
-        let Operation::Install { directory } = operation;
-        tokio::task::spawn_blocking(move || install(&directory)).await
-            .map_err(|_| Failure {code:ErrorCode::Internal,detail:"Terminal runtime provisioning task stopped".into()})?
-            .map(Reply::Message).map_err(|_| Failure {code:ErrorCode::Unavailable,
-                detail:"Terminal runtime unavailable; check platform support, runtime bundle and private directory ownership".into()})
+        tokio::task::spawn_blocking(move || match operation {
+            Operation::Install {directory}=>install(&directory),
+            Operation::Create {directory,options,reuse}=>{
+                #[cfg(unix)] {workspace::create(&directory,options,reuse).map(|job|Value::Workspace {job})}
+                #[cfg(not(unix))] {let _=(directory,options,reuse);anyhow::bail!("terminal hosting requires Unix; use WSL on Windows")}
+            }
+        }).await.map_err(|_|Failure {code:ErrorCode::Internal,detail:"Terminal operation stopped".into()})?
+        .map(Reply::Message).map_err(|error| {
+            let message=error.to_string();
+            let safe=["workspace name already exists","invalid terminal history limit","terminal working directory does not exist","terminal shell must be an absolute executable path","prefix must be C-a through C-z or F1 through F12","invalid terminal environment variable","name must contain 1–64 letters, numbers, spaces, dots, underscores or hyphens"];
+            Failure {code:ErrorCode::Unavailable,detail:if safe.contains(&message.as_str()) {message} else {"Terminal operation unavailable; check workspace name, shell, runtime and private directory ownership".into()}}
+        })
     }
 }

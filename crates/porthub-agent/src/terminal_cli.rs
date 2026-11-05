@@ -8,8 +8,8 @@ use anyhow::{ensure, Context, Result};
 use clap::{Args, Subcommand};
 use fs2::FileExt;
 use porthub_terminal::{
-    multiplexer::{create_directory, Start, Workspace},
-    protocol::{random_token, token},
+    multiplexer::{create_directory, Workspace},
+    protocol::token,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -26,10 +26,14 @@ pub enum Command {
     #[command(external_subcommand)]
     Named(Vec<OsString>),
     /// Start a persistent local workspace; sharing is optional.
-    #[command(after_help = "Examples:\n  porthub terminal new --name work\n  porthub terminal new --name work --shell /bin/bash --detach\n  porthub terminal new --name logs --detach -- tail -f /var/log/app.log\n\nAll creation flags also work with: porthub terminal NAME [OPTIONS]\nShare later with: porthub terminal share NAME --detach")]
+    #[command(
+        after_help = "Examples:\n  porthub terminal new --name work\n  porthub terminal new --name work --shell /bin/bash --detach\n  porthub terminal new --name logs --detach -- tail -f /var/log/app.log\n\nAll creation flags also work with: porthub terminal NAME [OPTIONS]\nShare later with: porthub terminal share NAME --detach"
+    )]
     New(New),
     /// Share a new workspace or an existing local workspace with SSH/browser guests.
-    #[command(after_help = "Examples:\n  porthub terminal share work --detach\n  porthub terminal share work --access web --read-only --detach\n  porthub terminal share work --link-expires 3600 --detach\n  porthub terminal share work --registration laptop --user --detach\n\nBrowser and SSH access are both enabled by default. The command prints invitation\nlinks; show them again with: porthub terminal invite work\nUse --detach to share without attaching your terminal.")]
+    #[command(
+        after_help = "Examples:\n  porthub terminal share work --detach\n  porthub terminal share work --access web --read-only --detach\n  porthub terminal share work --link-expires 3600 --detach\n  porthub terminal share work --registration laptop --user --detach\n\nBrowser and SSH access are both enabled by default. The command prints invitation\nlinks; show them again with: porthub terminal invite work\nUse --detach to share without attaching your terminal."
+    )]
     Share(sharing::Share),
     /// Join an invitation without a PortHub account.
     Join {
@@ -37,17 +41,17 @@ pub enum Command {
         #[arg(long, value_enum, default_value_t = JoinTransport::Ssh)]
         transport: JoinTransport,
         /// Local registration whose exit/privacy policy controls native auto mode.
-        #[cfg(feature="terminal-direct")]
+        #[cfg(feature = "terminal-direct")]
         #[arg(long)]
-        registration:Option<String>,
+        registration: Option<String>,
         /// Select this OS user's registration for native auto mode.
-        #[cfg(feature="terminal-direct")]
+        #[cfg(feature = "terminal-direct")]
         #[arg(long)]
-        user:bool,
+        user: bool,
         /// Explicit UDP STUN endpoint for native auto mode; repeat up to twice.
-        #[cfg(feature="terminal-direct")]
+        #[cfg(feature = "terminal-direct")]
         #[arg(long="stun-server",value_parser=crate::terminal_connectivity::server)]
-        stun_servers:Vec<String>,
+        stun_servers: Vec<String>,
     },
     /// Show, replace or revoke invitation links.
     #[command(visible_aliases = ["url", "links"], after_help = "Show current browser URLs and SSH commands:\n  porthub terminal url NAME\n  porthub terminal invite NAME --json\n\nA local workspace has no access URL until shared:\n  porthub terminal share NAME --detach")]
@@ -85,7 +89,12 @@ pub enum Command {
         client: u32,
     },
     #[command(name = "__participants-view", hide = true)]
-    ParticipantView { root: PathBuf, id: String, #[arg(long)] sidebar: bool },
+    ParticipantView {
+        root: PathBuf,
+        id: String,
+        #[arg(long)]
+        sidebar: bool,
+    },
     /// List this OS user's running local and shared workspaces.
     #[command(alias = "ls")]
     List {
@@ -96,7 +105,11 @@ pub enum Command {
         all: bool,
     },
     /// Attach or reattach, including from inside another tmux session.
-    Attach { name: String, #[arg(long, value_enum, default_value_t = Sidebar::Off)] sidebar: Sidebar },
+    Attach {
+        name: String,
+        #[arg(long, value_enum, default_value_t = Sidebar::Off)]
+        sidebar: Sidebar,
+    },
     /// Explicitly terminate a workspace and its running tasks.
     Stop { name: String },
     /// Rename a workspace without interrupting its tasks.
@@ -136,12 +149,17 @@ pub enum JoinTransport {
     #[cfg(feature = "terminal-direct")]
     Relay,
     /// Native direct when a local agent permits it, otherwise gateway relay.
-    #[cfg(feature="terminal-direct")]
+    #[cfg(feature = "terminal-direct")]
     Auto,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
-pub enum Sidebar { Auto, On, #[default] Off }
+pub enum Sidebar {
+    Auto,
+    On,
+    #[default]
+    Off,
+}
 
 #[derive(Args, Clone)]
 pub struct New {
@@ -180,17 +198,7 @@ pub struct New {
     command: Vec<OsString>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Job {
-    id: String,
-    name: String,
-    executable: PathBuf,
-    executable_sha256: String,
-    terminfo: PathBuf,
-    workspace: PathBuf,
-    created_at: i64,
-}
+use porthub_components::protocol::terminal::Job;
 
 fn private(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
@@ -341,76 +349,59 @@ fn attach(job: &Job, sidebar: Sidebar) -> Result<()> {
 }
 
 async fn create(root: &Path, args: New) -> Result<Job> {
-    let runtime = crate::terminal_runtime::install(&root.join("runtimes")).await?;
-    let _guard = lock(root)?;
-    create_locked(root, args, runtime)
+    create_or_open(root, args, false).await
 }
-
-fn create_locked(root: &Path, args: New, runtime: porthub_terminal::runtime::Runtime) -> Result<Job> {
-    let existing = jobs(root)?;
-    let name = match args.name {
-        Some(name) => name,
-        None => {
-            porthub_terminal::names::generate(|name| existing.iter().any(|job| job.name == name))?
-        }
+async fn create_or_open(root: &Path, args: New, reuse: bool) -> Result<Job> {
+    use porthub_components::{
+        catalog::Component,
+        protocol::terminal::{CreateOptions, Operation, Value},
     };
-    name_valid(&name)?;
-    ensure!(
-        !existing.iter().any(|job| job.name == name),
-        "workspace name already exists"
-    );
-    let id = random_token(16);
-    let path = socket_root()?.join(&id);
-    create_directory(&path)?;
-    let job = Job {
-        id: id.clone(),
-        name,
-        executable_sha256: format!("{:x}", Sha256::digest(fs::read(&runtime.executable)?)),
-        executable: runtime.executable,
-        terminfo: runtime.terminfo,
-        workspace: path,
-        created_at: porthub_terminal::protocol::now(),
-    };
-    let cwd = args
-        .cwd
-        .unwrap_or(std::env::current_dir()?)
-        .canonicalize()?;
     let shell = args
         .shell
-        .or_else(|| ["/bin/bash", "/usr/bin/bash"].into_iter().map(PathBuf::from)
-            .find(|path| fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.mode() & 0o111 != 0)))
+        .or_else(|| {
+            ["/bin/bash", "/usr/bin/bash"]
+                .into_iter()
+                .map(PathBuf::from)
+                .find(|path| {
+                    fs::metadata(path)
+                        .is_ok_and(|metadata| metadata.is_file() && metadata.mode() & 0o111 != 0)
+                })
+        })
         .or_else(|| std::env::var_os("SHELL").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("/bin/sh"));
-    let environment = args
-        .environment
-        .iter()
-        .map(|entry| {
-            entry
-                .split_once('=')
-                .map(|(k, v)| (k.to_owned(), v.to_owned()))
-                .context("environment overrides must use KEY=VALUE")
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let ws = workspace(&job)?;
-    ws.start(&Start {
-        cwd,
+    let options = CreateOptions {
+        name: args.name,
+        cwd: args
+            .cwd
+            .unwrap_or(std::env::current_dir()?)
+            .canonicalize()?,
         shell,
-        command: args.command,
-        environment,
+        environment: args.environment,
+        inherited_environment: std::env::vars_os().collect(),
         history_limit: args.history_limit,
-        mouse: !args.no_mouse,
+        no_mouse: args.no_mouse,
         prefix: args.prefix,
-        cols: 100,
-        rows: 30,
-    })?;
-    if let Err(error) = crate::profile::write_private(
-        &root.join(format!("{id}.json")),
-        &serde_json::to_vec(&job)?,
-        false,
-    ) {
-        let _ = ws.stop();
-        return Err(error);
-    }
+        command: args.command,
+    };
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let mut worker = crate::components::worker(Component::Terminal, &cancel).await?;
+    let value = worker
+        .call(
+            Operation::Create {
+                directory: root.into(),
+                options,
+                reuse,
+            },
+            std::time::Duration::from_secs(30),
+        )
+        .await?;
+    let Value::Workspace { job } = value else {
+        anyhow::bail!("terminal helper returned an invalid workspace")
+    };
+    ensure!(
+        token(&job.id, 32) && job.workspace == socket_root()?.join(&job.id),
+        "terminal helper returned an unrelated workspace"
+    );
     Ok(job)
 }
 
@@ -440,35 +431,7 @@ async fn open_named(root: &Path, arguments: Vec<OsString>) -> Result<()> {
     let sidebar = flags.sidebar;
     let detach = flags.detach;
     let json = flags.json;
-    let mut runtime = None;
-    let job = loop {
-        let guard = lock(root)?;
-        let existing = jobs(root)?.into_iter().find(|job| job.name == name);
-        match existing {
-            Some(job) if workspace(&job)?.is_alive() => break job,
-            ended => {
-                if runtime.is_none() {
-                    drop(guard);
-                    runtime = Some(crate::terminal_runtime::install(&root.join("runtimes")).await?);
-                    continue;
-                }
-            if let Some(job) = ended {
-                // Preserve the ended identity for investigation while allowing
-                // the familiar name to create a fresh workspace and new caps.
-                let archive = root.join("archive");
-                if !archive.exists() {
-                    create_directory(&archive)?;
-                }
-                private(&archive)?;
-                fs::rename(
-                    root.join(format!("{}.json", job.id)),
-                    archive.join(format!("{}.json", job.id)),
-                )?;
-            }
-                break create_locked(root, flags, runtime.take().context("terminal runtime unavailable")?)?;
-            }
-        }
-    };
+    let job = create_or_open(root, flags, true).await?;
     if json {
         println!(
             "{}",
@@ -492,25 +455,43 @@ pub async fn run(command: Command) -> Result<()> {
         Command::ParticipantPopup { root, id, client } => {
             participant_popup::show(&root, &id, client)?
         }
-        Command::ParticipantView { root, id, sidebar } => participant_popup::view(&root, &id, sidebar).await?,
+        Command::ParticipantView { root, id, sidebar } => {
+            participant_popup::view(&root, &id, sidebar).await?
+        }
         Command::Named(arguments) => open_named(&root, arguments).await?,
         Command::Share(args) => sharing::start(&root, args).await?,
-        Command::Join {url,transport,
-            #[cfg(feature="terminal-direct")] registration,
-            #[cfg(feature="terminal-direct")] user,
-            #[cfg(feature="terminal-direct")] stun_servers,
+        Command::Join {
+            url,
+            transport,
+            #[cfg(feature = "terminal-direct")]
+            registration,
+            #[cfg(feature = "terminal-direct")]
+            user,
+            #[cfg(feature = "terminal-direct")]
+            stun_servers,
         } => {
-            #[cfg(feature="terminal-direct")]
-            ensure!(matches!(transport,JoinTransport::Auto) || (registration.is_none() && !user && stun_servers.is_empty()),
-                "--registration, --user and --stun-server apply only to --transport auto");
+            #[cfg(feature = "terminal-direct")]
+            ensure!(
+                matches!(transport, JoinTransport::Auto)
+                    || (registration.is_none() && !user && stun_servers.is_empty()),
+                "--registration, --user and --stun-server apply only to --transport auto"
+            );
             match transport {
-                JoinTransport::Ssh=>sharing::join(&url).await?,
-                #[cfg(feature="terminal-direct")]
-                JoinTransport::Relay=>crate::terminal_guest::client::join_relay(&url).await?,
-                #[cfg(feature="terminal-direct")]
-                JoinTransport::Auto=>crate::terminal_guest::client::join_auto_with_stun(&url,registration.as_deref(),user,&stun_servers).await?,
+                JoinTransport::Ssh => sharing::join(&url).await?,
+                #[cfg(feature = "terminal-direct")]
+                JoinTransport::Relay => crate::terminal_guest::client::join_relay(&url).await?,
+                #[cfg(feature = "terminal-direct")]
+                JoinTransport::Auto => {
+                    crate::terminal_guest::client::join_auto_with_stun(
+                        &url,
+                        registration.as_deref(),
+                        user,
+                        &stun_servers,
+                    )
+                    .await?
+                }
             }
-        },
+        }
         Command::Invite {
             name,
             json,
@@ -570,7 +551,14 @@ pub async fn run(command: Command) -> Result<()> {
                 println!("{}", serde_json::to_string(&rows)?);
             } else {
                 if rows.is_empty() {
-                    println!("{}", if all { "No saved terminal workspaces." } else { "No running terminal workspaces." });
+                    println!(
+                        "{}",
+                        if all {
+                            "No saved terminal workspaces."
+                        } else {
+                            "No running terminal workspaces."
+                        }
+                    );
                 } else {
                     println!("NAME\tSTATE\tACCESS");
                 }
@@ -579,7 +567,11 @@ pub async fn run(command: Command) -> Result<()> {
                         "{}\t{}\t{}",
                         row["name"].as_str().unwrap(),
                         row["state"].as_str().unwrap(),
-                        if row["shared"] == true { "shared" } else { "local" }
+                        if row["shared"] == true {
+                            "shared"
+                        } else {
+                            "local"
+                        }
                     );
                     if row["state"] == "running" {
                         let name = row["name"].as_str().unwrap();

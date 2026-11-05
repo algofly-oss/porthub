@@ -4,14 +4,49 @@ use std::path::PathBuf;
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
-    Install { directory: PathBuf },
+    Install {
+        directory: PathBuf,
+    },
+    Create {
+        directory: PathBuf,
+        options: CreateOptions,
+        reuse: bool,
+    },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Value {
+    Workspace {
+        job: Job,
+    },
     Runtime {
         executable: PathBuf,
         terminfo: PathBuf,
         version: String,
     },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Job {
+    pub id: String,
+    pub name: String,
+    pub executable: PathBuf,
+    pub executable_sha256: String,
+    pub terminfo: PathBuf,
+    pub workspace: PathBuf,
+    pub created_at: i64,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateOptions {
+    pub name: Option<String>,
+    pub cwd: PathBuf,
+    pub shell: PathBuf,
+    pub environment: Vec<String>,
+    pub inherited_environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    pub history_limit: u32,
+    pub no_mouse: bool,
+    pub prefix: String,
+    pub command: Vec<std::ffi::OsString>,
 }

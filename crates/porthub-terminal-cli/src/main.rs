@@ -17,6 +17,27 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Create a persistent local workspace without a core agent or gateway.
+    New {
+        #[arg(long)]
+        directory: PathBuf,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        #[arg(long)]
+        shell: Option<PathBuf>,
+        #[arg(long = "env")]
+        environment: Vec<String>,
+        #[arg(long, default_value = "C-a")]
+        prefix: String,
+        #[arg(long, default_value_t = 100000)]
+        history_limit: u32,
+        #[arg(long)]
+        no_mouse: bool,
+        #[arg(last = true)]
+        command: Vec<OsString>,
+    },
     /// Install and verify the bundled runtime in a private directory.
     Runtime {
         #[arg(long)]
@@ -52,6 +73,71 @@ async fn main() -> Result<()> {
         version: porthub_terminal_cli::VERSION.parse()?,
     };
     match args.command {
+        Command::New {
+            directory,
+            name,
+            cwd,
+            shell,
+            environment,
+            prefix,
+            history_limit,
+            no_mouse,
+            command,
+        } => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let directory = if directory.is_absolute() {
+                    directory
+                } else {
+                    std::env::current_dir()?.join(directory)
+                };
+                if !directory.exists() {
+                    porthub_terminal::multiplexer::create_directory(&directory)?;
+                }
+                let shell = shell
+                    .or_else(|| {
+                        ["/bin/bash", "/usr/bin/bash"]
+                            .into_iter()
+                            .map(PathBuf::from)
+                            .find(|path| {
+                                std::fs::metadata(path).is_ok_and(|metadata| {
+                                    metadata.is_file() && metadata.mode() & 0o111 != 0
+                                })
+                            })
+                    })
+                    .or_else(|| std::env::var_os("SHELL").map(PathBuf::from))
+                    .unwrap_or_else(|| PathBuf::from("/bin/sh"));
+                let options = porthub_components::protocol::terminal::CreateOptions {
+                    name,
+                    cwd: cwd.unwrap_or(std::env::current_dir()?).canonicalize()?,
+                    shell,
+                    environment,
+                    prefix,
+                    history_limit,
+                    no_mouse,
+                    command,
+                    inherited_environment: std::env::vars_os().collect(),
+                };
+                let job = porthub_terminal_cli::workspace::create(&directory, options, false)?;
+                println!("{}", serde_json::to_string(&job)?);
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (
+                    directory,
+                    name,
+                    cwd,
+                    shell,
+                    environment,
+                    prefix,
+                    history_limit,
+                    no_mouse,
+                    command,
+                );
+                anyhow::bail!("terminal hosting requires Unix; use WSL on Windows")
+            }
+        }
         Command::Worker { endpoint } => {
             rpc::serve(
                 Endpoint::parse(Component::Terminal, &endpoint)?,
@@ -69,7 +155,10 @@ async fn main() -> Result<()> {
                 executable,
                 terminfo,
                 version,
-            } = porthub_terminal_cli::install(&directory)?;
+            } = porthub_terminal_cli::install(&directory)?
+            else {
+                anyhow::bail!("invalid runtime response")
+            };
             println!(
                 "Runtime {version}\nExecutable: {}\nTerminfo: {}",
                 executable.display(),
@@ -90,7 +179,10 @@ async fn main() -> Result<()> {
                 executable,
                 terminfo,
                 ..
-            } = porthub_terminal_cli::install(&directory)?;
+            } = porthub_terminal_cli::install(&directory)?
+            else {
+                anyhow::bail!("invalid runtime response")
+            };
             let mut child = tokio::process::Command::new(executable)
                 .args(arguments)
                 .env("TERMINFO", terminfo)

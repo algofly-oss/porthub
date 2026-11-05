@@ -83,6 +83,20 @@ impl Workspace {
     }
 
     pub fn start(&self, start: &Start) -> Result<()> {
+        self.start_internal(start, None)
+    }
+    pub fn start_with_environment(
+        &self,
+        start: &Start,
+        environment: &[(std::ffi::OsString, std::ffi::OsString)],
+    ) -> Result<()> {
+        self.start_internal(start, Some(environment))
+    }
+    fn start_internal(
+        &self,
+        start: &Start,
+        environment: Option<&[(std::ffi::OsString, std::ffi::OsString)]>,
+    ) -> Result<()> {
         crate::protocol::dimensions(start.cols, start.rows)?;
         ensure!(
             (1000..=200_000).contains(&start.history_limit),
@@ -110,7 +124,9 @@ impl Workspace {
             );
         }
         ensure!(!self.is_alive(), "terminal workspace already exists");
-        let prefix_label = start.prefix.strip_prefix("C-")
+        let prefix_label = start
+            .prefix
+            .strip_prefix("C-")
             .map(|key| format!("Ctrl+{}", key.to_ascii_uppercase()))
             .unwrap_or_else(|| start.prefix.clone());
         let config = format!(
@@ -141,6 +157,17 @@ impl Workspace {
         file.write_all(config.as_bytes())?;
         file.sync_all()?;
         let mut command = self.command();
+        if let Some(environment) = environment {
+            command
+                .env_clear()
+                .envs(environment.iter().map(|(key, value)| (key, value)))
+                .env_remove("TMUX")
+                .env_remove("TMUX_PANE")
+                .env_remove("PORTHUB_TERMINAL_ISOLATED")
+                .env_remove("PORTHUB_TERMINAL_SOCKET")
+                .env("TERMINFO", &self.terminfo);
+        }
+
         command
             .arg("new-session")
             .arg("-d")
@@ -158,7 +185,9 @@ impl Workspace {
         // tmux interprets a singleton command as shell text. Use its multi-
         // argument exec form and a fixed POSIX trampoline, with user values
         // only in argv, so paths and arguments retain their literal meaning.
-        command.env("SHELL", &start.shell).env("PORTHUB_TERMINAL_ISOLATED", "1");
+        command
+            .env("SHELL", &start.shell)
+            .env("PORTHUB_TERMINAL_ISOLATED", "1");
         command.args(["--", "/bin/sh", "-c", "exec \"$@\"", "porthub-terminal"]);
         if start.command.is_empty() {
             command.arg(&start.shell);

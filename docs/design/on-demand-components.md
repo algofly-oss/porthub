@@ -889,3 +889,24 @@ also pass. These process tests use empty authorized sources and do not establish
 Tor circuits. Live managed network traffic, generation handover with active Tor
 streams, and platform validation remain required; full terminal extraction is
 also still pending.
+
+Local workspace creation and its registry write have moved into the terminal
+component. Core sends a typed `Create` request with explicit cwd, shell, command,
+overrides and the invoking process's native environment. The helper starts tmux
+with that environment after removing inherited tmux attachment markers; an
+already-running helper cannot substitute its earlier caller's environment. The
+registry lock covers selecting/reopening a name, archiving ended identities and
+creating the replacement. Active workspaces keep their recorded verified runtime
+paths. Core still owns command parsing and presentation during this extraction.
+
+The independent helper also exposes `porthub-terminal new --directory PATH`,
+with name/cwd/shell/env/prefix/history/mouse options and literal command argv.
+It creates persistent workspaces and prints their registry record without core,
+enrollment or a gateway. Three bundled-runtime standalone process tests pass,
+including multiple workspace creation in one directory with different caller
+environments. The new `test-terminal-workspace-helper.py` passes against the
+rebuilt core and seeded helper: both cwd/environment snapshots survive reuse,
+and six concurrent reopen calls retain the original identity. Native and packaged
+Unix platform jobs now run this check. Sharing supervision, attachment UI and
+native guest/direct transport are still in core and must finish moving before
+the terminal extraction is complete.
