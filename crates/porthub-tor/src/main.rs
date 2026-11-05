@@ -36,6 +36,8 @@ enum Command {
     },
     #[command(name = "__porthub-stdio", hide = true)]
     Stdio,
+    #[command(name = "__porthub-multiplex", hide = true)]
+    Multiplex,
 }
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
@@ -55,6 +57,14 @@ async fn main() -> Result<()> {
         Command::Worker { endpoint } => {
             rpc::serve(
                 Endpoint::parse(Component::Tor, &endpoint)?,
+                hello,
+                Arc::new(porthub_tor::Worker::default()),
+                cancel,
+            )
+            .await
+        }
+        Command::Multiplex => {
+            porthub_components::multiplex::serve_stdio(
                 hello,
                 Arc::new(porthub_tor::Worker::default()),
                 cancel,

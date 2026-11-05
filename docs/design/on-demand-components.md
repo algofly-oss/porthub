@@ -844,3 +844,24 @@ isolation, generation bounds, and empty/closed routing authority. These tests
 verify adapter lifetime behavior; an actual managed Tor worker upgrade with live
 network traffic is still required before release. Persistent Tor CLI fallback
 and full terminal implementation extraction remain outstanding.
+
+A persistent CLI carrier is now implemented in the component SDK and exposed by
+Tor's hidden `__porthub-multiplex` entry point. It runs the existing typed RPC
+handshake and explicit stream upgrades on independent HTTP/2 channels over one
+inherited stdin/stdout pair. It opens no socket or network listener and carries
+no machine credentials in argv. Each channel has a 64 KiB receive window, with
+bounded aggregate connection capacity so a backpressured stream cannot consume
+the control channel's flow capacity. There are at most 128 concurrent channels;
+headers and send buffers are bounded. Upgraded streams retain the carrier driver
+until they close. Carrier failure fails outstanding operations; the transport
+never retries a dispatched request.
+
+Four SDK transport tests pass, covering shared handler state, a 2 MiB stream,
+control access while another stream is unread, interrupted-request isolation,
+and retention after the original carrier owner drops. Both real Tor standalone
+process tests pass, including two channels reporting the same helper PID,
+configure/ready through different channels, and process exit when inherited pipes
+close. They use empty authorized sources and require no network, enrollment,
+core executable, or gateway. The core session manager still needs to select and
+supervise this carrier for persistent automatic/forced CLI fallback; the new
+helper entry point alone does not complete that requirement.

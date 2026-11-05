@@ -112,6 +112,13 @@ impl Client {
         )
         .await
     }
+    /// Authenticate the versioned protocol on an already-owned transport.
+    /// Callers must establish transport ownership and verify helper bytes before
+    /// invoking it; this handshake does not perform artifact authorization.
+    pub async fn from_transport(stream: Stream, expected: &Hello) -> Result<Self> {
+        expected.validate(expected.component, &expected.version)?;
+        Self::from_expected_stream(stream, expected).await
+    }
     async fn from_expected_stream(mut stream: Stream, expected: &Hello) -> Result<Self> {
         let hello: Hello = ipc::read(&mut stream, Duration::from_secs(5)).await?;
         hello.validate(expected.component, &expected.version)?;
@@ -194,7 +201,7 @@ impl Client {
         Ok((value, self.stream))
     }
 }
-async fn connection<H: Handler>(
+pub(crate) async fn connection<H: Handler>(
     mut stream: Stream,
     handler: Arc<H>,
     hello: Hello,
