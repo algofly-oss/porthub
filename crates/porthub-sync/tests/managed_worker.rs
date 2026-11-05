@@ -1,4 +1,4 @@
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use porthub_components::{
     catalog::{Artifact, Blob, Catalog, Component, TARGETS},
@@ -25,6 +25,7 @@ use url::Url;
 struct Fixture {
     catalog: Vec<u8>,
     executable: Vec<u8>,
+    newer: Option<Vec<u8>>,
     binaries: AtomicUsize,
 }
 #[async_trait]
@@ -34,7 +35,11 @@ impl Transport for Fixture {
             &self.catalog
         } else {
             self.binaries.fetch_add(1, Ordering::SeqCst);
-            &self.executable
+            if url.path().contains("/sync/0.1.1/") {
+                self.newer.as_ref().unwrap_or(&self.executable)
+            } else {
+                &self.executable
+            }
         };
         ensure!(bytes.len() as u64 <= max, "fixture artifact exceeds limit");
         tokio::fs::write(output, bytes).await?;
@@ -80,21 +85,33 @@ async fn wait_file(path: &Path, expected: &[u8]) {
 #[tokio::test]
 async fn verified_module_download_coalesces_worker_start_and_watch_follows_ipc_lifetime(
 ) -> Result<()> {
-    exercise(Mode::Rpc, false, false).await
+    exercise(Mode::Rpc, false, false, None).await
 }
 #[tokio::test]
 async fn verified_cli_fallback_preserves_watch_lifetime() -> Result<()> {
-    exercise(Mode::Cli, false, false).await
+    exercise(Mode::Cli, false, false, None).await
 }
 #[tokio::test]
 async fn unavailable_worker_automatically_uses_verified_cli() -> Result<()> {
-    exercise(Mode::Auto, true, false).await
+    exercise(Mode::Auto, true, false, None).await
 }
 #[tokio::test]
 async fn failed_candidate_recovers_only_in_previously_activated_context() -> Result<()> {
-    exercise(Mode::Rpc, false, true).await
+    exercise(Mode::Rpc, false, true, None).await
 }
-async fn exercise(mode: Mode, blocked: bool, failed_update: bool) -> Result<()> {
+#[tokio::test]
+#[ignore = "requires a separately built 0.1.1 sync executable"]
+async fn healthy_candidate_stages_without_interrupting_an_active_old_stream() -> Result<()> {
+    let path = std::env::var_os("PORTHUB_TEST_UPDATED_SYNC_EXECUTABLE")
+        .context("updated sync fixture missing")?;
+    exercise(Mode::Rpc, false, false, Some(std::fs::read(path)?)).await
+}
+async fn exercise(
+    mode: Mode,
+    blocked: bool,
+    failed_update: bool,
+    newer: Option<Vec<u8>>,
+) -> Result<()> {
     let root = tempfile::tempdir()?;
     #[cfg(unix)]
     {
@@ -138,6 +155,7 @@ async fn exercise(mode: Mode, blocked: bool, failed_update: bool) -> Result<()> 
     let fixture = Arc::new(Fixture {
         catalog: serde_json::to_vec(&catalog)?,
         executable,
+        newer: newer.clone(),
         binaries: AtomicUsize::new(0),
     });
     let manager = Manager::new(
@@ -212,6 +230,10 @@ async fn exercise(mode: Mode, blocked: bool, failed_update: bool) -> Result<()> 
     assert_eq!(fixture.binaries.load(Ordering::SeqCst), 1);
     if failed_update {
         let pinned = manager.session(Component::Sync, &context, &cancel).await?;
+        assert!(
+            pinned.newer(&cancel).await?.is_none(),
+            "unchanged catalog must not create a candidate worker"
+        );
         let mut candidate = artifact.clone();
         candidate.version = "0.1.1".parse()?;
         let mut update = catalog.clone();
@@ -242,6 +264,11 @@ async fn exercise(mode: Mode, blocked: bool, failed_update: bool) -> Result<()> 
         )?;
         let recovered_session = manager.session(Component::Sync, &context, &cancel).await?;
         assert_eq!(recovered_session.artifact().version, artifact.version);
+        assert!(
+            pinned.newer(&cancel).await?.is_none(),
+            "failed candidate must leave the activated session pinned"
+        );
+
         assert_eq!(pinned.artifact().version, artifact.version);
         let mut pinned_client = pinned.connect(&cancel).await?;
         assert!(
@@ -320,6 +347,49 @@ async fn exercise(mode: Mode, blocked: bool, failed_update: bool) -> Result<()> 
     };
     let _: Progress = ipc::read(&mut stream, Duration::from_secs(5)).await?;
     wait_file(&destination.join("file"), b"first").await;
+    let mut _candidate_cleanup = None;
+    if let Some(bytes) = newer {
+        let pinned = manager.session(Component::Sync, &context, &cancel).await?;
+        assert!(pinned.newer(&cancel).await?.is_none());
+        let mut candidate = artifact.clone();
+        candidate.version = "0.1.1".parse()?;
+        candidate.executable = Blob {
+            size: bytes.len() as u64,
+            sha256: hash(&bytes),
+        };
+        let mut update = catalog.clone();
+        update.release = "1.12.0".parse()?;
+        candidate.release = update.release.clone();
+        update.artifacts.push(candidate.clone());
+        std::fs::write(
+            manager
+                .cache_root()
+                .join(porthub_components::catalog::CATALOG_ASSET),
+            serde_json::to_vec(&update)?,
+        )?;
+        let staged = pinned
+            .newer(&cancel)
+            .await?
+            .context("healthy candidate not staged")?;
+        assert_eq!(staged.artifact().version, candidate.version);
+        _candidate_cleanup = Some(Cleanup {
+            endpoint: Endpoint::for_artifact(&identity, &candidate)?,
+            artifact: candidate,
+        });
+        let mut next = staged.connect(&cancel).await?;
+        assert!(
+            matches!(next.call::<_,SystemValue>(SystemOperation::Ping,Duration::from_secs(2)).await?,
+            SystemValue::Pong {pid} if pid != one)
+        );
+        let mut old = pinned.connect(&cancel).await?;
+        assert!(
+            matches!(old.call::<_,SystemValue>(SystemOperation::Ping,Duration::from_secs(2)).await?,
+            SystemValue::Pong {pid} if pid == one)
+        );
+        assert_eq!(fixture.binaries.load(Ordering::SeqCst), 2);
+        // The original foreground watch stream stays open across candidate startup.
+    }
+
     std::fs::write(source.join("file"), b"second")?;
     wait_file(&destination.join("file"), b"second").await;
     drop(stream);

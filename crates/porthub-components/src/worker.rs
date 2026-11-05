@@ -54,6 +54,27 @@ impl Session {
     pub fn artifact(&self) -> &Artifact {
         &self.artifact
     }
+    /// Prepare a newer compatible worker without changing this consumer's
+    /// active session. Application-specific bootstrap must succeed before swap.
+    pub async fn newer(&self, cancel: &CancellationToken) -> Result<Option<Self>> {
+        let catalog = self
+            .manager
+            .cached_catalog()?
+            .context("component catalog unavailable")?;
+        let selected = self.manager.selected(&catalog, self.artifact.component)?;
+        if selected.version <= self.artifact.version {
+            return Ok(None);
+        }
+        let candidate = self
+            .manager
+            .session(self.artifact.component, &self.context, cancel)
+            .await?;
+        // Startup recovery may deliberately return the previously activated tool.
+        if candidate.artifact.version <= self.artifact.version {
+            return Ok(None);
+        }
+        Ok(Some(candidate))
+    }
     pub async fn connect(&self, cancel: &CancellationToken) -> Result<Client> {
         let client = self
             .manager

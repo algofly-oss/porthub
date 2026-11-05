@@ -572,3 +572,21 @@ verifier before creating the destination. Extracted bytes are verified using the
 publisher's immutable snapshot checks. Promotion workflows still need to supply
 the verifier and gateway arguments when compact production assembly is enabled;
 this does not yet switch publication format.
+
+
+Pinned sessions expose `newer()` to prepare a compatible candidate without changing
+the active consumer. Unchanged catalogs do not start a candidate; unsuccessful
+startup recovery cannot accidentally replace the active session with an older
+artifact. A process-level test builds actual 0.1.0 and 0.1.1 sync helpers, keeps a
+foreground watch stream active, prepares the newer worker, verifies distinct
+worker identities, and confirms the old stream continues transferring changes.
+Native component checks run this test on their supported runner platforms.
+Application-specific Tor bootstrap, source-update leases, and atomic handover
+still need to use this API before automatic runtime activation is complete.
+
+Publication rejects legacy-only bundles for version 1.11.0 and later, the first
+modular core release. This prevents the old assembly workflow from publishing a
+core that requires helpers while omitting its catalog and archives. The compact
+assembly workflow must be finished and the compatible gateway deployed before
+these releases can pass publication. Earlier complete legacy releases remain
+supported for verification and recovery.

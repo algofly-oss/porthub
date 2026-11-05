@@ -89,9 +89,19 @@ jobs:
         if: steps.native_changes.outputs.rust == 'true'
         with:
           key: components-${{ runner.arch }}
+      - name: Build a newer independent sync candidate for activation checks
+        if: steps.native_changes.outputs.rust == 'true'
+        shell: bash
+        run: |
+          PORTHUB_COMPONENT_VERSION=0.1.1 cargo build --locked -p porthub-sync
+          extension=""
+          if [ "$RUNNER_OS" = "Windows" ]; then extension=".exe"; fi
+          candidate="$RUNNER_TEMP/porthub-sync-candidate$extension"
+          cp "target/debug/porthub-sync$extension" "$candidate"
+          echo "PORTHUB_TEST_UPDATED_SYNC_EXECUTABLE=$candidate" >> "$GITHUB_ENV"
       - name: Test compatibility, download verification and IPC limits
         if: steps.native_changes.outputs.rust == 'true'
-        run: cargo test --locked -p porthub-components -p porthub-sync
+        run: cargo test --locked -p porthub-components -p porthub-sync -- --include-ignored
       - name: Verify independent Tor worker and source-policy lifecycle
         if: steps.native_changes.outputs.rust == 'true'
         run: cargo test --locked -p porthub-tor

@@ -55,6 +55,8 @@ def assets(directory, version, artifact_verifier=None):
         if result.get('version') != version or len(result.get('releases', [])) != 10 or snapshot() != before:
             raise ValueError('Compact release changed during verification or reported a different version')
         return before
+    if numeric(version) >= (1, 11, 0):
+        raise ValueError('Modular core releases require the compact component catalog and tool archives')
     expected = {name+suffix for name in ASSETS for suffix in ('','.version','.sha256')}
     if {path.name for path in directory.iterdir()} != expected:
         raise ValueError('Publication requires exactly thirty client assets')

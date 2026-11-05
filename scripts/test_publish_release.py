@@ -43,6 +43,10 @@ class Publication(unittest.TestCase):
         self.expected=publisher.assets(self.directory,'1.9.0');self.github=GitHub(self.expected);self.sha='a'*40
     def publish(self,execute=True):return publisher.publish(self.github,self.directory,'1.9.0',self.sha,execute)
     def draft(self):self.github.create('v1.9.0',self.sha,[]);self.github.writes.clear()
+    def test_modular_core_cannot_publish_a_legacy_bundle_without_helpers(self):
+        with self.assertRaisesRegex(ValueError, 'Modular core releases require'):
+            publisher.publish(self.github,self.directory,'1.11.0',self.sha,True)
+        self.assertEqual(self.github.writes,[])
     def test_complete_draft_is_verified_before_promotion(self):
         self.assertEqual(self.publish()['status'],'published')
         self.assertEqual(self.github.writes,[('create',30),('promote','v1.9.0')])
