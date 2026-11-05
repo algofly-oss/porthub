@@ -49,7 +49,12 @@ class Packaging(unittest.TestCase):
             self.assertEqual(path.read_bytes(), (two/path.name).read_bytes())
             if path.name.endswith('.tar.gz'):
                 with tarfile.open(path) as archive:
-                    self.assertEqual(len(archive.getmembers()), 2)
+                    self.assertEqual(len(archive.getmembers()), 3)
+                    receipts = json.load(archive.extractfile('.porthub-build-receipts.json'))
+                    self.assertEqual([r['tool'] for r in receipts['receipts']], ['core', 'sync', 'tor'])
+                    for receipt in receipts['receipts']:
+                        stored = dict(receipt); checksum = stored.pop('receipt_sha256')
+                        self.assertEqual(packager.planner.digest(stored), checksum)
                     self.assertTrue(all(member.isfile() and member.uid == member.gid == member.mtime == 0 for member in archive))
 
     def test_older_helper_versions_are_repacked_with_original_provenance(self):

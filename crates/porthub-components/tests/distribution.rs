@@ -726,3 +726,34 @@ fn a_shared_writer_never_adopts_an_existing_unmarked_private_directory() {
         );
     }
 }
+
+#[test]
+fn build_receipts_are_bounded_metadata_and_never_extracted() -> Result<()> {
+    let root = private_temp();
+    let executable = b"verified tool";
+    let mut tool = artifact(Component::Sync, "1.0.0", executable);
+    let oversized = vec![b'x'; 8 * 1024 * 1024 + 1];
+    for (name, bytes, accepted) in [
+        (".porthub-build-receipts.json", b"{\"schema_version\":1}".as_slice(), true),
+        ("other-receipts.json", b"{}".as_slice(), false),
+        (".porthub-build-receipts.json", oversized.as_slice(), false),
+        (".porthub-build-receipts.json", b"".as_slice(), false),
+    ] {
+        let packed = archive(&[(&tool.member(), executable), (name, bytes)]);
+        tool.archive = blob(&packed);
+        let catalog = Catalog { schema_version: 1, repository: REPOSITORY.into(),
+            release: tool.release.clone(), artifacts: vec![tool.clone()] };
+        let input = root.path().join("input.tar.gz");
+        std::fs::write(&input, packed)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&input, std::fs::Permissions::from_mode(0o600))?;
+        }
+        let output = porthub_components::store::extract_verified(&input, root.path(), &tool, &catalog);
+        assert_eq!(output.is_ok(), accepted, "{output:?}");
+        if let Ok(output) = output { assert_eq!(std::fs::read(output.path())?, executable); }
+        assert!(!root.path().join(name).exists());
+    }
+    Ok(())
+}

@@ -624,3 +624,13 @@ core version. Helper versions use their own independent semantic version domain.
 Publication requires the gateway capability `independent_core_version: true`.
 Build selection and receipt reuse must preserve these identities before this
 format is published; this metadata support alone does not enable production reuse.
+
+Each platform archive retains `.porthub-build-receipts.json`, a deterministic
+schema-1 envelope containing the original core receipt and each packaged helper
+receipt. This preserves input hashes and executable provenance beyond CI artifact
+retention without adding release-page assets. The envelope is limited to 8 MiB;
+it counts toward the 128-member and 1-GiB expanded archive limits. Runtime
+extraction permits only this exact metadata name alongside catalog-authorized
+executables and discards the metadata without writing it to the cache. Future CI
+reuse must validate receipt checksums, current inputs, and binary hashes again;
+an archived receipt alone does not authorize reuse.

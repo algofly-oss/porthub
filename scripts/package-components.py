@@ -4,6 +4,7 @@ import argparse
 import gzip
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -88,11 +89,17 @@ def package(entries, output, release, *, verify_only=False):
             planner.verify_reuse(receipt, stage / asset)
             core_assets.append({'target': legacy, 'asset': asset,
                                 'executable': {k: receipt['binary'][k] for k in ('size', 'sha256')}})
-            if len(groups[target]) > 128 or sum(item['binary']['size'] for item, _ in groups[target]) > 1024 * 1024 * 1024:
+            if len(groups[target]) > 127 or sum(item['binary']['size'] for item, _ in groups[target]) > 1024 * 1024 * 1024:
                 raise ValueError('Platform tool archive exceeds extraction limits')
             archive = stage / ('porthub-tools-' + canonical + '.tar.gz')
+            receipt_bytes = json.dumps({'schema_version': 1, 'receipts': [item for item, _ in [(receipt, binary)] + sorted(groups[target], key=lambda row: (row[0]['tool'], row[0]['version']))]}, sort_keys=True, separators=(',', ':')).encode()
+            if len(receipt_bytes) > 8 * 1024 * 1024:
+                raise ValueError('Platform build receipts exceed size limit')
             with archive.open('wb') as raw, gzip.GzipFile(filename='', mode='wb', fileobj=raw, mtime=0) as compressed:
                 with tarfile.open(fileobj=compressed, mode='w', format=tarfile.USTAR_FORMAT) as tar:
+                    header = tarfile.TarInfo('.porthub-build-receipts.json')
+                    header.size = len(receipt_bytes); header.mode = 0o644
+                    tar.addfile(header, io.BytesIO(receipt_bytes))
                     for item, path in sorted(groups[target], key=lambda row: (row[0]['tool'], row[0]['version'])):
                         planner.verify_reuse(item, path)
                         member = item['tool'] + '/' + item['version'] + '/' + item['binary']['name']
@@ -102,6 +109,7 @@ def package(entries, output, release, *, verify_only=False):
                             tar.addfile(header, stream)
             archive.chmod(0o644)
             expected = {item['tool'] + '/' + item['version'] + '/' + item['binary']['name']: item['binary'] for item, _ in groups[target]}
+            expected['.porthub-build-receipts.json'] = {'size': len(receipt_bytes), 'sha256': hashlib.sha256(receipt_bytes).hexdigest()}
             with tarfile.open(archive) as packed:
                 for member in packed:
                     digest = hashlib.sha256()

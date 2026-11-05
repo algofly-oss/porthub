@@ -304,7 +304,7 @@ fn extract(
             "unsafe component archive path"
         );
         ensure!(
-            allowed.contains(&path),
+            allowed.contains(&path) || path == Path::new(".porthub-build-receipts.json"),
             "unexpected executable in component archive"
         );
         ensure!(
@@ -323,7 +323,13 @@ fn extract(
             expanded <= 1024 * 1024 * 1024 && size <= crate::catalog::MAX_EXECUTABLE,
             "component archive expands beyond limit"
         );
-        if path == Path::new(&artifact.member()) {
+        if path == Path::new(".porthub-build-receipts.json") {
+            // Authenticated archive metadata is retained for future CI reuse only.
+            // Never write it into the executable cache or use it as a path.
+            ensure!(size > 0 && size <= 8 * 1024 * 1024, "build receipts exceed size limit");
+            let copied = std::io::copy(&mut entry, &mut std::io::sink())?;
+            ensure!(copied == size, "build receipts are truncated");
+        } else if path == Path::new(&artifact.member()) {
             ensure!(
                 size == artifact.executable.size,
                 "component archive executable size mismatch"
