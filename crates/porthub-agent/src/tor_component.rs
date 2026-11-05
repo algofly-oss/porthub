@@ -1,6 +1,6 @@
 //! Lightweight Tor adapter. No Arti implementation or bootstrap dependency is
 //! linked into core; routing policy and physical-interface selection stay here.
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use porthub_components::{
     catalog::Component,
@@ -67,6 +67,15 @@ impl TorPool {
             loop {
                 tokio::select! {biased; _=stop.cancelled()=>break, _=tick.tick()=>{}, changed=sources.changed()=>{if changed.is_err(){break;}}}
                 options.sources = Some(sources.borrow_and_update().clone());
+                if client.is_none()
+                    && options
+                        .sources
+                        .as_ref()
+                        .is_some_and(|sources| sources.is_empty())
+                {
+                    ready.store(false, Ordering::Release);
+                    continue;
+                }
                 if client.is_none() {
                     client = tokio::select! {biased; _=stop.cancelled()=>break,result=worker(&session,&stop)=>result.ok()};
                 }
@@ -86,16 +95,30 @@ impl TorPool {
                     }
                 }
             }
+            ready.store(false, Ordering::Release);
+            if let Some(mut connection) = client {
+                options.sources = Some(vec![]);
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    connection
+                        .call::<_, Value>(Operation::Ready { options }, Duration::from_secs(2)),
+                )
+                .await;
+            }
         });
         self
     }
     fn options(&self) -> Result<Options> {
+        let sources = self
+            .sources
+            .as_ref()
+            .context("managed Tor requires an explicit physical-interface source watcher")?;
         ensure!(
-            self.sources.is_some(),
-            "managed Tor requires an explicit physical-interface source watcher"
+            sources.has_changed().is_ok() && !sources.borrow().is_empty(),
+            "managed Tor has no permitted physical-interface sources"
         );
         let mut options = self.options.clone();
-        options.sources = self.sources.as_ref().map(|source| source.borrow().clone());
+        options.sources = Some(sources.borrow().clone());
         Ok(options)
     }
     pub async fn bootstrap(&self) -> Result<()> {
@@ -105,12 +128,16 @@ impl TorPool {
         let Value::Ready { ready } = response else {
             anyhow::bail!("unexpected Tor bootstrap response")
         };
+        self.options()?;
         self.ready.store(ready, Ordering::Release);
         ensure!(ready, "Tor is not ready for traffic");
         Ok(())
     }
     pub fn ready(&self) -> bool {
         self.ready.load(Ordering::Acquire)
+            && self.sources.as_ref().is_some_and(|sources| {
+                sources.has_changed().is_ok() && !sources.borrow().is_empty()
+            })
     }
 }
 impl Drop for TorPool {
@@ -137,6 +164,7 @@ impl Connector for TorPool {
             matches!(response, Value::Connected),
             "unexpected Tor connection response"
         );
+        self.options()?;
         Ok(Box::new(stream))
     }
 }
@@ -162,6 +190,7 @@ impl Resolver for TorPool {
             addresses.len() <= 256,
             "Tor resolution exceeded address limit"
         );
+        self.options()?;
         Ok(addresses)
     }
 }
@@ -169,6 +198,24 @@ impl Resolver for TorPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn empty_or_closed_authority_immediately_invalidates_managed_readiness() {
+        let root = tempfile::tempdir().unwrap();
+        let mut pool = TorPool::new(root.path(), 4, 64).unwrap();
+        let (sender, receiver) = watch::channel(vec!["192.0.2.10".parse().unwrap()]);
+        pool.sources = Some(receiver);
+        pool.ready.store(true, Ordering::Release);
+        assert!(pool.ready());
+        assert!(pool.options().is_ok());
+        sender.send_replace(vec![]);
+        assert!(!pool.ready());
+        assert!(pool.options().is_err());
+        sender.send_replace(vec!["192.0.2.10".parse().unwrap()]);
+        assert!(pool.options().is_ok());
+        drop(sender);
+        assert!(!pool.ready());
+        assert!(pool.options().is_err());
+    }
     #[tokio::test]
     async fn managed_tor_requires_sources_before_fetch_or_network_access() {
         let root = tempfile::tempdir().unwrap();

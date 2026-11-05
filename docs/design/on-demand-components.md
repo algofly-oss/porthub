@@ -590,3 +590,26 @@ core that requires helpers while omitting its catalog and archives. The compact
 assembly workflow must be finished and the compatible gateway deployed before
 these releases can pass publication. Earlier complete legacy releases remain
 supported for verification and recovery.
+
+Tor readiness, bootstrap, new connections and resolution now require a live,
+nonempty allowed-source authority even when Arti already has cached clients or
+circuits. In-flight operations observe source revocation and cancel; a closed
+source authority fails closed. Revocation puts cached clients into soft dormancy
+and prevents a warm client from bypassing the source check through circuit reuse.
+The managed core adapter checks its authority before provisioning/requests and
+again before exposing asynchronous results. On monitor exit it makes a bounded,
+best-effort revocation request through an existing connection and never starts a
+new worker for cleanup.
+
+Local offline checks passed for operation cancellation, closed/empty authority,
+no unauthorized bootstrap/state writes, and worker profile/source lifecycle. The
+opt-in live library test also passed: real Tor bootstrap, verified HTTPS to the
+Tor Project identifying a Tor exit, then immediate rejection of new connections
+and DNS after revoking the warm client's sources. This does not prove module
+hot-handover or managed fallback; those remain pending.
+
+The full ten-platform native agent run at source `cacab4d` passed:
+https://github.com/algofly-oss/porthub/actions/runs/42106863593 . It verifies the
+runtime extraction, independent fixtures, existing installer/connectivity gates,
+and Unix CLI/PTY integration at that source. Subsequent routing, candidate-session,
+publication and source-revocation changes require updated native validation.
