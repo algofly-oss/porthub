@@ -413,7 +413,7 @@ def read_receipt(path):
     return validate_receipt(json.loads(path.read_text()))
 
 
-def build_and_record(root, tool, target, revision, version=None):
+def build_and_record(root, tool, target, revision, version=None, binary_output=None):
     require_clean_source(root, revision)
     recipe = read_recipes(root)[tool]
     version = version or current_version(root, recipe)
@@ -453,6 +453,14 @@ def build_and_record(root, tool, target, revision, version=None):
         tracked = subprocess.run(['git', 'ls-files', '--error-unmatch', '--', name], cwd=root, capture_output=True)
         if tracked.returncode:
             raise ValueError('A compiled input is not part of the immutable checkout')
+    if binary_output is not None:
+        import shutil
+        binary_output = Path(binary_output)
+        if binary_output.exists() or binary_output.is_symlink():
+            raise ValueError('Build binary output must be a new file')
+        shutil.copyfile(binary, binary_output)
+        binary_output.chmod(0o755)
+        verify_reuse(receipt, binary_output)
     return receipt
 
 
@@ -466,6 +474,7 @@ def main():
     for name in ['output']:
         capture.add_argument('--' + name, type=Path, required=True)
     capture.add_argument('--version')
+    capture.add_argument('--binary-output', type=Path)
     select = sub.add_parser('plan')
     select.add_argument('--tool', required=True); select.add_argument('--target', required=True)
     select.add_argument('--previous', type=Path)
@@ -473,7 +482,7 @@ def main():
     verify.add_argument('--receipt', type=Path, required=True); verify.add_argument('--binary', type=Path, required=True)
     args = parser.parse_args(); root = args.root.resolve()
     if args.command == 'build':
-        receipt = build_and_record(root, args.tool, args.target, args.source_revision, args.version)
+        receipt = build_and_record(root, args.tool, args.target, args.source_revision, args.version, args.binary_output)
         args.output.write_bytes(canonical(receipt) + b'\n')
         print(json.dumps({'tool': args.tool, 'fingerprint': receipt['fingerprint'], 'inputs': len(receipt['build']['inputs'])}))
     elif args.command == 'plan':

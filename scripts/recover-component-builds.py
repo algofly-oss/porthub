@@ -103,8 +103,8 @@ def recover(directory, output, target, release, verifier):
                 receipt_path.write_text(json.dumps(receipt, sort_keys=True, separators=(',', ':')) + '\n')
                 receipt_path.chmod(0o644)
                 index.append({'tool': tool, 'version': version,
-                              'receipt': str(receipt_path.relative_to(stage)),
-                              'binary': str(binary.relative_to(stage))})
+                              'receipt': receipt_path.relative_to(stage).as_posix(),
+                              'binary': binary.relative_to(stage).as_posix()})
             if sum(tool == 'core' for tool, _ in seen) != 1 or set(expected_tools) != seen - {('core', manifest.get('core_version', manifest['release']))}:
                 raise ValueError('Build receipt identities are incomplete')
             # Input files can change while being read. Verify again before

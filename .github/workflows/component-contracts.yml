@@ -11,6 +11,8 @@ on:
       - 'scripts/test_package_components.py'
       - 'scripts/recover-component-builds.py'
       - 'scripts/test_recover_component_builds.py'
+      - 'scripts/build-component-platform.py'
+      - 'scripts/test_build_component_platform.py'
       - 'scripts/publish-release.py'
       - 'crates/porthub-sync/**'
       - 'crates/porthub-tor/**'
@@ -33,6 +35,8 @@ on:
       - 'scripts/test_package_components.py'
       - 'scripts/recover-component-builds.py'
       - 'scripts/test_recover_component_builds.py'
+      - 'scripts/build-component-platform.py'
+      - 'scripts/test_build_component_platform.py'
       - 'scripts/publish-release.py'
       - 'crates/porthub-sync/**'
       - 'crates/porthub-tor/**'
@@ -89,6 +93,7 @@ jobs:
           python scripts/test_component_build_plan.py
           python scripts/test_package_components.py
           python scripts/test_recover_component_builds.py
+          python scripts/test_build_component_platform.py
       - name: Install pinned Rust toolchain
         if: steps.native_changes.outputs.rust == 'true'
         run: rustup toolchain install 1.99.1 --profile minimal

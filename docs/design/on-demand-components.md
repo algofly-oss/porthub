@@ -646,3 +646,15 @@ The index paths are relative to the recovery directory and may be passed to the
 build planner and packager. Recovery verifies the previous build, not that its
 inputs match current source: `component-build-plan.py plan` must still make that
 decision. Legacy releases without archived receipts require fresh builds.
+
+`scripts/build-component-platform.py --target TARGET --source-revision SHA
+--previous RECOVERED_DIR` reports a plan for all configured tools without compiling.
+Adding `--output NEW_DIR` executes that plan, one Cargo invocation per changed
+tool, and atomically publishes verified binaries, receipts, and a relative-path
+index. `--tool TOOL` may be repeated to select a subset. Reused binaries are
+checked before selection and after copying. Changed core inputs still require a
+new committed core package version; helper versions advance independently.
+Older verified helper versions are retained for compatible consumers and startup
+fallback. The coordinator does not itself download releases or mutate versions.
+Production workflow integration and independent core version preparation remain
+required before release publication.
