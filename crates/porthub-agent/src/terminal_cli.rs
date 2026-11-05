@@ -340,12 +340,13 @@ fn attach(job: &Job, sidebar: Sidebar) -> Result<()> {
     participant_popup::attach(job, &workspace, sidebar)
 }
 
-fn create(root: &Path, args: New) -> Result<Job> {
+async fn create(root: &Path, args: New) -> Result<Job> {
+    let runtime = crate::terminal_runtime::install(&root.join("runtimes")).await?;
     let _guard = lock(root)?;
-    create_locked(root, args)
+    create_locked(root, args, runtime)
 }
 
-fn create_locked(root: &Path, args: New) -> Result<Job> {
+fn create_locked(root: &Path, args: New, runtime: porthub_terminal::runtime::Runtime) -> Result<Job> {
     let existing = jobs(root)?;
     let name = match args.name {
         Some(name) => name,
@@ -358,11 +359,6 @@ fn create_locked(root: &Path, args: New) -> Result<Job> {
         !existing.iter().any(|job| job.name == name),
         "workspace name already exists"
     );
-    let runtime_dir = root.join("runtimes");
-    if !runtime_dir.exists() {
-        create_directory(&runtime_dir)?;
-    }
-    let runtime = crate::terminal_runtime::install(&runtime_dir)?;
     let id = random_token(16);
     let path = socket_root()?.join(&id);
     create_directory(&path)?;
@@ -418,7 +414,7 @@ fn create_locked(root: &Path, args: New) -> Result<Job> {
     Ok(job)
 }
 
-fn open_named(root: &Path, arguments: Vec<OsString>) -> Result<()> {
+async fn open_named(root: &Path, arguments: Vec<OsString>) -> Result<()> {
     use clap::Parser;
     #[derive(Parser)]
     struct Flags {
@@ -444,11 +440,18 @@ fn open_named(root: &Path, arguments: Vec<OsString>) -> Result<()> {
     let sidebar = flags.sidebar;
     let detach = flags.detach;
     let json = flags.json;
-    let guard = lock(root)?;
-    let existing = jobs(root)?.into_iter().find(|job| job.name == name);
-    let job = match existing {
-        Some(job) if workspace(&job)?.is_alive() => job,
-        ended => {
+    let mut runtime = None;
+    let job = loop {
+        let guard = lock(root)?;
+        let existing = jobs(root)?.into_iter().find(|job| job.name == name);
+        match existing {
+            Some(job) if workspace(&job)?.is_alive() => break job,
+            ended => {
+                if runtime.is_none() {
+                    drop(guard);
+                    runtime = Some(crate::terminal_runtime::install(&root.join("runtimes")).await?);
+                    continue;
+                }
             if let Some(job) = ended {
                 // Preserve the ended identity for investigation while allowing
                 // the familiar name to create a fresh workspace and new caps.
@@ -462,10 +465,10 @@ fn open_named(root: &Path, arguments: Vec<OsString>) -> Result<()> {
                     archive.join(format!("{}.json", job.id)),
                 )?;
             }
-            create_locked(root, flags)?
+                break create_locked(root, flags, runtime.take().context("terminal runtime unavailable")?)?;
+            }
         }
     };
-    drop(guard);
     if json {
         println!(
             "{}",
@@ -490,7 +493,7 @@ pub async fn run(command: Command) -> Result<()> {
             participant_popup::show(&root, &id, client)?
         }
         Command::ParticipantView { root, id, sidebar } => participant_popup::view(&root, &id, sidebar).await?,
-        Command::Named(arguments) => open_named(&root, arguments)?,
+        Command::Named(arguments) => open_named(&root, arguments).await?,
         Command::Share(args) => sharing::start(&root, args).await?,
         Command::Join {url,transport,
             #[cfg(feature="terminal-direct")] registration,
@@ -541,7 +544,7 @@ pub async fn run(command: Command) -> Result<()> {
             let sidebar = args.sidebar;
             let detach = args.detach;
             let json = args.json;
-            let job = create(&root, args)?;
+            let job = create(&root, args).await?;
             if json {
                 println!(
                     "{}",

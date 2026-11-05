@@ -8,7 +8,7 @@ manifest = "crates/porthub-agent/Cargo.toml"
 binary = "porthub"
 default_features = true
 features = []
-extra_inputs = ["scripts/build-terminal-helper.py", "vendor/terminal/sources.json"]
+extra_inputs = []
 profile = "release"
 recipe_version = 1
 

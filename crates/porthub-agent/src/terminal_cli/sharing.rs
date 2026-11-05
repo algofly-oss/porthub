@@ -224,7 +224,7 @@ pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
     let job = if let Some(name) = args.existing {
         select(root, &name)?
     } else {
-        create(root, args.local)?
+        create(root, args.local).await?
     };
     ensure!(
         workspace(&job)?.is_alive(),

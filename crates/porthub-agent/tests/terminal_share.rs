@@ -9,7 +9,7 @@ use std::{
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires an agent binary with bundled terminal runtime"]
+#[ignore = "requires a verified terminal component fixture"]
 async fn sharing_supervisor_reconnects_to_existing_shell_and_explicit_stop_announces_end(
 ) -> Result<()> {
     let executable = std::env::var_os("PORTHUB_TEST_AGENT_EXECUTABLE")

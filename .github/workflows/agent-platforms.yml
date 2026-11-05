@@ -271,6 +271,16 @@ jobs:
         run: |
           cargo build --locked -p porthub-sync --target ${{ matrix.target }}
           echo "PORTHUB_TEST_SYNC_EXECUTABLE=$GITHUB_WORKSPACE/target/${{ matrix.target }}/debug/porthub-sync${{ matrix.extension }}" >> "$GITHUB_ENV"
+      - name: Build independent dashboard and terminal fixtures
+        shell: bash
+        run: |
+          cargo build --locked -p porthub-stats --target ${{ matrix.target }}
+          cargo build --locked -p porthub-terminal-cli --target ${{ matrix.target }}
+          component_cache="$RUNNER_TEMP/porthub-native-components-${{ matrix.target }}"
+          python scripts/seed-component-fixture.py --cache "$component_cache" --target '${{ matrix.target }}' --core "$(sh scripts/release-version.sh)" --revision "$(git rev-parse HEAD)" --input stats "$GITHUB_WORKSPACE/target/${{ matrix.target }}/debug/porthub-stats${{ matrix.extension }}" --input terminal "$GITHUB_WORKSPACE/target/${{ matrix.target }}/debug/porthub-terminal${{ matrix.extension }}" --input sync "$PORTHUB_TEST_SYNC_EXECUTABLE"
+          echo "PORTHUB_COMPONENT_CACHE=$component_cache" >> "$GITHUB_ENV"
+          echo "PORTHUB_COMPONENT_SHARED_CACHE=off" >> "$GITHUB_ENV"
+          echo "PORTHUB_COMPONENT_SOURCE=github" >> "$GITHUB_ENV"
       - name: Compile focused Windows watch checks
         if: runner.os == 'Windows'
         shell: bash

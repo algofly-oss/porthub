@@ -542,8 +542,22 @@ its own socket and removes only that test server. Debug native contract runs
 without a bundle test help and invalid-directory handling; bundled workspace
 coverage requires the release/native build environment.
 
-Core still embeds its existing terminal bundle and hosts its existing workspace
-and sharing implementation. Delegating runtime installation to this component,
-removing core's C-bundle build dependency, and moving the remaining terminal
-implementation behind the scoped broker are pending. Adding this component has
-not yet reduced the core terminal footprint or deployed new client behavior.
+Core now delegates runtime installation to this component through typed IPC,
+with the verified CLI transport available as startup fallback. The embedded bundle
+and its build-script requirement have been removed from core, and core's build
+recipe no longer includes the C helper build inputs. Workspace preparation happens
+outside the workspace lock and is rechecked under the lock before creation.
+Opening a live workspace uses its existing recorded runtime without initializing
+or fetching a component. The remaining workspace/sharing implementation is still
+linked into core and must move behind the scoped broker before full extraction.
+These changes have not been released or deployed.
+
+
+Native agent checks build terminal and stats fixtures in separate Cargo invocations
+and seed an isolated cache with their exact executable hashes. The fixture catalog
+is test-only and cannot be used as publication provenance. Normal users do not
+need to seed caches or invoke helpers. Local Linux verification with this setup
+passed the real core workspace lifecycle (including reattach with an unavailable
+component source), the sharing supervisor/sidebar integration, and the delegated
+stats PTY suite (restoration, pause/resume, resize, sorting, JSON, and prompt quit
+with a stalled source). Native CI and production canary checks remain required.
