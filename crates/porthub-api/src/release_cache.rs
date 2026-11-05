@@ -486,22 +486,31 @@ impl Remote {
         let valid = tokio::task::spawn_blocking(move || porthub_components::store::verified(&candidate, &blob)).await??;
         if !valid {
             let _permit = self.downloads.acquire().await?;
-            let archive = tempfile::NamedTempFile::new_in(&directory)?;
-            let url = format!("{}/v{}/{}", self.download_base, artifact.release, artifact.archive_name());
-            let mut response = self.http.get(url).timeout(Duration::from_secs(300)).send().await?;
-            ensure!(response.status().is_success(), "component archive unavailable");
-            let mut file = tokio::fs::File::from_std(archive.reopen()?);
-            let mut size = 0u64;
-            while let Some(chunk) = response.chunk().await? {
-                size = size.checked_add(chunk.len() as u64).context("component archive size overflow")?;
-                ensure!(size <= artifact.archive.size, "component archive exceeds size limit");
-                file.write_all(&chunk).await?;
-            }
-            file.flush().await?; file.sync_all().await?; drop(file);
+            let archive_path = directory.join(format!("archive-{}.tar.gz", artifact.archive.sha256));
+            let check = archive_path.clone();
+            let archive_blob = artifact.archive.clone();
+            let cached = tokio::task::spawn_blocking(move || porthub_components::store::verified(&check, &archive_blob)).await??;
+            let temporary = if cached { None } else {
+                let archive = tempfile::NamedTempFile::new_in(&directory)?;
+                let url = format!("{}/v{}/{}", self.download_base, artifact.release, artifact.archive_name());
+                let mut response = self.http.get(url).timeout(Duration::from_secs(300)).send().await?;
+                ensure!(response.status().is_success(), "component archive unavailable");
+                let mut file = tokio::fs::File::from_std(archive.reopen()?);
+                let mut size = 0u64;
+                while let Some(chunk) = response.chunk().await? {
+                    size = size.checked_add(chunk.len() as u64).context("component archive size overflow")?;
+                    ensure!(size <= artifact.archive.size, "component archive exceeds size limit");
+                    file.write_all(&chunk).await?;
+                }
+                file.flush().await?; file.sync_all().await?; drop(file);
+                Some(archive)
+            };
             let metadata = artifact.clone();
             let output = destination.clone();
             tokio::task::spawn_blocking(move || {
-                let extracted = porthub_components::store::extract_verified(archive.path(), &directory, &metadata, &catalog)?;
+                let source = temporary.as_ref().map_or(archive_path.as_path(), |file| file.path());
+                let extracted = porthub_components::store::extract_verified(source, &directory, &metadata, &catalog)?;
+                if let Some(archive) = temporary { archive.persist(&archive_path)?; }
                 extracted.as_file().sync_all()?;
                 extracted.persist(output)?;
                 std::fs::File::open(directory)?.sync_all()?;
@@ -685,6 +694,7 @@ mod tests {
         let mut header = tar::Header::new_gnu();
         header.set_size(TOOL_BYTES.len() as u64); header.set_mode(0o755); header.set_cksum();
         archive.append_data(&mut header, "sync/0.1.0/porthub-sync", TOOL_BYTES).unwrap();
+        archive.append_data(&mut header, "stats/0.1.0/porthub-stats", TOOL_BYTES).unwrap();
         archive.into_inner().unwrap().finish().unwrap()
     }
     fn compact_manifest(version: &str) -> Vec<u8> {
@@ -695,12 +705,15 @@ mod tests {
             CoreAsset { target: (*target).into(), asset: name,
                 executable: Blob { size: body.len() as u64, sha256: format!("{:x}", Sha256::digest(body)) } }
         }).collect();
-        let components = Catalog { schema_version: 1, repository: REPOSITORY.into(), release: version.parse().unwrap(),
+        let mut components = Catalog { schema_version: 1, repository: REPOSITORY.into(), release: version.parse().unwrap(),
             artifacts: vec![Artifact { component: Component::Sync, version: "0.1.0".parse().unwrap(),
                 target: porthub_components::catalog::TARGETS[0].into(), core: ">=1.0.0".parse().unwrap(), protocols: vec![1],
                 source_revision: "a".repeat(40), build_inputs: "b".repeat(64),
                 executable: Blob { size: TOOL_BYTES.len() as u64, sha256: format!("{:x}", Sha256::digest(TOOL_BYTES)) }, release: version.parse().unwrap(),
                 archive: Blob { size: tool_archive().len() as u64, sha256: format!("{:x}", Sha256::digest(tool_archive())) } }] };
+        let mut stats = components.artifacts[0].clone();
+        stats.component = Component::Stats;
+        components.artifacts.push(stats);
         serde_json::to_vec(&ReleaseManifest { schema_version: 2, repository: REPOSITORY.into(), release: version.parse().unwrap(), core_assets, components }).unwrap()
     }
     async fn metadata(AxumState(state): AxumState<Arc<Fixture>>, headers: HeaderMap) -> Response {
@@ -811,7 +824,22 @@ mod tests {
         tokio::fs::write(&path, b"corrupt").await?;
         remote.component("sync", &version, &tool.target, &tool.executable.sha256).await?;
         assert_eq!(tokio::fs::read(path).await?, TOOL_BYTES);
-        assert_eq!(state.binaries.load(Ordering::SeqCst), 3);
+        assert_eq!(state.binaries.load(Ordering::SeqCst), 2, "repair reuses the verified archive");
+        state.offline.store(true, Ordering::SeqCst);
+        let stats = &catalog.artifacts[1];
+        let (_, mut stats_file) = remote.component("stats", &stats.version.to_string(), &stats.target, &stats.executable.sha256).await?;
+        let mut bytes = Vec::new(); stats_file.read_to_end(&mut bytes).await?;
+        assert_eq!(bytes, TOOL_BYTES);
+        assert_eq!(state.binaries.load(Ordering::SeqCst), 2, "a second tool shares the archive while upstream is offline");
+        state.offline.store(false, Ordering::SeqCst);
+        let archive_path = remote.root.join("components").join(format!("archive-{}.tar.gz", tool.archive.sha256));
+        tokio::fs::write(archive_path, b"damaged archive").await?;
+        let path = remote.root.join("components").join(format!("sync-{}-{}", tool.version, tool.executable.sha256));
+        tokio::fs::remove_file(&path).await?;
+        remote.component("sync", &version, &tool.target, &tool.executable.sha256).await?;
+        assert_eq!(tokio::fs::read(path).await?, TOOL_BYTES);
+        assert_eq!(state.binaries.load(Ordering::SeqCst), 3, "a damaged cached archive is fetched and verified again");
+
         task.abort(); Ok(())
     }
     #[tokio::test]

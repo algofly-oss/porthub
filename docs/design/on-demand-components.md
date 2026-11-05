@@ -322,8 +322,7 @@ index retains validated tool metadata for subsequent delivery work.
 
 The reader still generates the existing local core sidecars, preserving the
 current OTA and bootstrap download contracts. Component delivery routes now serve the verified tool-only catalog and
-individual executables. Tool archive caching, compact publication, and deployment
-of this reader remain pending; the current production release continues using the original format.
+individual executables. Compact publication and deployment of this reader remain pending; the current production release continues using the original format.
 
 
 The gateway exposes public `GET /api/downloads/components/catalog` and
@@ -337,3 +336,11 @@ when damaged; transfers retain their open descriptor. Responses provide an
 immutable hash ETag and exact length. These are public software artifacts and
 carry no enrollment credentials. Existing legacy-only releases report component
 metadata unavailable, allowing the manager's configured fallback behavior.
+
+
+Gateway platform archives are cached by SHA-256 alongside extracted tools. Each
+reuse rechecks the archive size/hash. The archive is published only after safe
+extraction and the requested executable's hash check succeed. Multiple tools
+from the same platform archive therefore share one upstream download; a missing
+or damaged executable can be restored from the cached archive even when GitHub
+is unavailable. Damaged archives are replaced only by verified downloads.
