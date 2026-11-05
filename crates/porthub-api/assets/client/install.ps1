@@ -3,7 +3,20 @@ $porthubUrl = {{URL}}
 $porthubIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $porthubPrincipal = [Security.Principal.WindowsPrincipal]::new($porthubIdentity)
 if (-not $porthubPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw 'Open an Administrator PowerShell window and run this command again.'
+    Write-Host 'PortHub needs administrator permission to install its service. Approve the Windows prompt to continue.'
+    $porthubScriptUrl = $porthubUrl.TrimEnd('/') + '/windows.ps1'
+    $porthubQuotedUrl = "'" + $porthubScriptUrl.Replace("'", "''") + "'"
+    $porthubElevation = '$ErrorActionPreference = ''Stop''; [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; Invoke-RestMethod -Uri ' + $porthubQuotedUrl + ' -ErrorAction Stop | Invoke-Expression'
+    $porthubEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($porthubElevation))
+    $porthubPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    try {
+        $porthubElevated = Start-Process -FilePath $porthubPowerShell -ArgumentList @('-NoProfile', '-EncodedCommand', $porthubEncoded) -Verb RunAs -Wait -PassThru
+    } catch {
+        throw 'Administrator permission was not granted. Approve the Windows prompt or run the command in an Administrator terminal.'
+    }
+    if ($porthubElevated.ExitCode -ne 0) { throw 'PortHub installation did not complete in the administrator window.' }
+    Write-Host 'PortHub installation completed. Open a new terminal to use porthub.'
+    return
 }
 $porthubArchitecture = $env:PROCESSOR_ARCHITEW6432
 if (-not $porthubArchitecture) { $porthubArchitecture = $env:PROCESSOR_ARCHITECTURE }

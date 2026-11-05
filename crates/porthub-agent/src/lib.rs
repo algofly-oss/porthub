@@ -16,6 +16,8 @@ pub mod private_profile;
 mod private_prerequisites;
 #[cfg(target_os="linux")]
 mod private_dns_setup;
+#[cfg(target_os="linux")]
+mod private_resolver_file;
 pub mod profile;
 mod routes;
 pub mod runtime;

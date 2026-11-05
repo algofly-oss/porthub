@@ -66,20 +66,13 @@ import TrafficMonitorPanel, {
 import UptimeHistoryPanel from "./UptimeHistoryPanel";
 import { useDemo } from "@/shared/demo/DemoProvider";
 import { formatClientVersion } from "@/shared/utils/client-version.mjs";
+import { bootstrapCommand } from "@/shared/utils/bootstrap-command.mjs";
 
 const getInputClassName = () => "w-full rounded-lg !border !border-transparent !bg-control px-3 py-2 text-sm !text-foreground !outline-none !shadow-none placeholder:!text-muted-foreground";
 const getLabelClassName = () => "mb-2 block text-sm font-medium text-foreground";
 const errorClassName = "mt-1 text-xs text-red-600 dark:text-red-400";
 const getDetailInputClassName = getInputClassName;
 
-const quoteShell = value => `'${String(value).replaceAll("'", "'\\''")}'`;
-const quotePowerShell = value => `'${String(value).replaceAll("'", "''")}'`;
-function setupCommand(url, os) {
-  if (!url) return "";
-  return os === "windows"
-    ? `irm ${quotePowerShell(`${url}/windows.ps1`)} | iex`
-    : `curl -fsSL ${quoteShell(url)} | bash`;
-}
 
 const getInfoBadgeClassName = () => "!bg-control !text-muted-foreground";
 
@@ -2075,8 +2068,8 @@ export default function HostConfigPopup({
   );
 
   const installCommand = bootstrapUrl
-    ? setupCommand(bootstrapUrl, setupOs)
-    : machineCommand;
+    ? bootstrapCommand(bootstrapUrl, setupOs)
+    : setupOs === "windows" ? "" : machineCommand;
 
   return (
     <>
@@ -2678,7 +2671,7 @@ export default function HostConfigPopup({
                                 <p className="mb-1.5 text-xs font-medium text-muted-foreground">Operating system</p>
                                 <StatusTabs label="Install operating system" value={setupOs} onChange={setSetupOs} options={[{value:"linux",label:"Linux"},{value:"macos",label:"macOS"},{value:"windows",label:"Windows"}]} />
                               </div>
-                              {setupOs === "windows" && <p className="text-xs text-muted-foreground">Run this command in an Administrator PowerShell window.</p>}
+                              {setupOs === "windows" && <p className="text-xs text-muted-foreground">Paste into PowerShell or Command Prompt, including Windows Terminal tabs. Approve the Windows administrator prompt if requested. For WSL, select Linux.</p>}
                             </div>
                             <div
                               className={`relative rounded-lg ${

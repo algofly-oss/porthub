@@ -289,8 +289,10 @@ pub async fn connect(
 pub(crate) async fn connect_stream(layout: &crate::service::Layout, registration: &str) -> Result<UnixStream> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let path = endpoint(layout, registration)?;
-    let meta = std::fs::symlink_metadata(&path)
-        .context("registration agent is unavailable; start or update it first")?;
+    let meta=std::fs::symlink_metadata(&path).with_context(|| {
+        if crate::os_info::is_wsl() {"The PortHub agent is not available inside this WSL distribution. Start its Linux registration; an agent installed only on Windows cannot expose this Linux server through the local broker."}
+        else {"registration agent is unavailable; start or update it first"}
+    })?;
     let expected = if layout.user {
         rustix::process::geteuid().as_raw()
     } else {
@@ -300,7 +302,7 @@ pub(crate) async fn connect_stream(layout: &crate::service::Layout, registration
         meta.file_type().is_socket() && meta.uid() == expected,
         "local registration endpoint is not trusted"
     );
-    let stream = UnixStream::connect(path).await?;
+    let stream=tokio::time::timeout(Duration::from_secs(3),UnixStream::connect(path)).await.context("local registration agent did not respond; check porthub status")??;
     ensure!(
         stream.peer_cred()?.uid() == expected,
         "local registration agent identity mismatch"

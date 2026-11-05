@@ -94,3 +94,15 @@ mod tests {
         assert!(parse("PRETTY_NAME=\"unterminated").name.is_empty());
     }
 }
+
+/// Diagnostic hint only; never used to authorize access or change routes.
+pub(crate) fn is_wsl() -> bool {
+    #[cfg(target_os="linux")]
+    {
+        std::env::var_os("WSL_DISTRO_NAME").is_some()
+            || std::env::var_os("WSL_INTEROP").is_some()
+            || std::fs::read_to_string("/proc/sys/kernel/osrelease").is_ok_and(|release|release.to_ascii_lowercase().contains("microsoft"))
+    }
+    #[cfg(not(target_os="linux"))]
+    {false}
+}

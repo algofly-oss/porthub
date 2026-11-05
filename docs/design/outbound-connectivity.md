@@ -111,8 +111,12 @@ On authselect-managed hosts it clones the selected profile with the same enabled
 features, links its existing PAM templates, changes the hosts lookup order to use
 `resolve` before `dns`, takes an authselect backup and verifies PAM contents are
 unchanged. On unmanaged hosts it backs up and atomically updates only the hosts
-entry in `/etc/nsswitch.conf`. Existing DNS servers and `/etc/resolv.conf` remain
-unchanged. Real `getent -s resolve` resolution is checked; failure rolls back the
+entry in `/etc/nsswitch.conf`. Before package preparation, the installer snapshots the existing resolver file
+or symlink. Known package hooks that replace it with a systemd stub are restored,
+including ownership, permissions and SELinux label. NetworkManager-managed
+symlinks retain live DHCP updates; unrelated administrator changes are not
+overwritten. Debian/Ubuntu NSS integration also prepares `libnss-resolve` when
+needed. Existing stub-based setups are verified through their DNS backend. Real `getent -s resolve` resolution is checked; failure rolls back the
 hostname lookup change. Invalid administrator-managed profiles are never forced.
 A background monitor then verifies the enrolled private hostname using normal
 `getent` lookups. This runs outside packet forwarding, and private-service
@@ -169,3 +173,25 @@ Run it only in an owned disposable container namespace via
 `scripts/verify-private-tun.py`. It creates two source addresses and two default
 gateways, verifies lowest-metric selection, applies a source-specific prohibition,
 and removes an address. No host namespace or writable host mount is used.
+
+## Windows installer and WSL exposure
+
+The Windows command explicitly launches `powershell.exe`, so it works from
+Command Prompt, Windows PowerShell, and PowerShell tabs in Windows Terminal.
+The served installer requests UAC elevation when needed and preserves certificate
+verification and execution policy. Shell-specific URL expansion is prevented.
+Hosted Windows checks execute the copied UI command in cmd.exe, Windows
+PowerShell 5.1 and PowerShell 7; desktop/mobile browser checks verify the copied
+value matches the displayed command.
+
+WSL uses its Linux registration and local Unix broker. A Windows registration or
+another distribution is not implicitly a local Linux registration. Exposure
+preflight now explains missing WSL registration and stopped-agent conditions,
+including detached starts. Local broker connection establishment is bounded.
+The original incident machine was unavailable, so no claim is made that its
+specific failure was reproduced.
+
+`porthub get` reports human-readable transferred/total bytes, speed, remaining
+bytes and ETA. Terminal output updates in place; redirected output is throttled
+and has no terminal control characters. Resumed data does not inflate throughput,
+and unknown file lengths never display a fabricated percentage or ETA.

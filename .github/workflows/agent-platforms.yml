@@ -260,6 +260,10 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: test -s "$PORTHUB_TERMINAL_BUNDLE"
+      - name: Verify copied Windows installer in Command Prompt and both PowerShell versions
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/test-windows-bootstrap-command.ps1
       - name: Compile focused Windows watch checks
         if: runner.os == 'Windows'
         shell: bash
@@ -284,8 +288,17 @@ jobs:
         run: |
           python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --lib private_prerequisites --target ${{ matrix.target }}
           python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --lib private_dns_setup --target ${{ matrix.target }}
+          python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --lib private_resolver_file --target ${{ matrix.target }}
           python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --test service private_dependency_failure --target ${{ matrix.target }}
           python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-network --lib expired_policy_fails_closed_with_an_actionable_clock_diagnostic --target ${{ matrix.target }}
+      - name: Verify real privileged enrollment preparation on the disposable Linux runner
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          cargo test --locked -p porthub-agent --lib --no-run --message-format=json --target ${{ matrix.target }} > /tmp/porthub-native-preparation-tests.jsonl
+          test_executable="$(python3 -c 'import json; rows=[json.loads(line) for line in open("/tmp/porthub-native-preparation-tests.jsonl")]; print(next(row["executable"] for row in reversed(rows) if row.get("reason")=="compiler-artifact" and row.get("executable") and row["target"]["name"]=="porthub_agent"))')"
+          sudo -n env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted "$test_executable" --ignored --exact private_prerequisites::native_ci_tests::privileged_enrollment_preparation_is_idempotent_and_preserves_system_dns
       - name: Test packaged terminal runtime and ordinary SSH participation
         if: runner.os != 'Windows'
         shell: bash

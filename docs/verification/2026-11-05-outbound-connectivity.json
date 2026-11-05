@@ -1,6 +1,6 @@
 {
   "branch": "codex/outbound-connectivity",
-  "publication": "local working tree; not released or deployed",
+  "publication": "Draft PR #31; not released or deployed",
   "scope": [
     "All and Disabled machine inventory filters",
     "Policy-aware outbound source selection and cooldowns",
@@ -14,8 +14,8 @@
   ],
   "checks": {
     "agent_library": {
-      "passed": 123,
-      "ignored": 2
+      "passed": 128,
+      "ignored": 3
     },
     "pinned_origin": {
       "passed": 2
@@ -68,12 +68,37 @@
     "expired_policy_clock_diagnostic": {
       "passed": 1
     },
-    "workflow_yaml": "parsed successfully"
+    "workflow_yaml": "parsed successfully",
+    "bootstrap_api": {
+      "passed": 5,
+      "database": "task-owned disposable MongoDB"
+    },
+    "transfer_full_suite": {
+      "passed": 24
+    },
+    "bootstrap_command_unit_tests": {
+      "passed": 4
+    },
+    "windows_installer_browser_widths": [
+      1440,
+      402
+    ],
+    "inventory_pages_browser_widths": [
+      1440,
+      402
+    ],
+    "cross_platform_baseline": {
+      "revision": "0ccf84d51f028975aa1d33a3fe6bfa26180277fb",
+      "run": "https://github.com/algofly-oss/porthub/actions/runs/42024368365",
+      "platforms_passed": 10,
+      "published": false
+    }
   },
   "additional_check_limitations": [
-    "The existing inventory-pages.cjs browser suite was also attempted and failed at its unrelated proxy-binding editor assertion (0 list items versus 12 expected); the new standalone disabled-machines.cjs regression passed.",
-    "Cross-platform builds and live macOS/Windows source failover have not been validated here.",
-    "The pinned Rust toolchain encountered an incremental compiler failure; successful subsequent validation used CARGO_INCREMENTAL=0."
+    "The pinned Rust toolchain encountered an incremental compiler failure; successful subsequent validation used CARGO_INCREMENTAL=0.",
+    "The broader inventory browser failure was a premature assertion during a tab transition; awaiting the first binding resolved it and both viewport checks pass.",
+    "The original WSL incident machine was unavailable; only the inspected exposure paths and new diagnostics were tested.",
+    "The follow-up Windows shell smoke checks and privileged Linux preparation check require their next hosted CI run."
   ],
   "behavioral_boundaries": [
     "Automatic alternatives remain within the kernel-selected egress unless an explicit administrator preference or a validated PortHub-owned exit management bypass applies.",

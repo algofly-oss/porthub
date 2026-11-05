@@ -92,6 +92,7 @@ async fn unchanged_bootstrap_previews_reuse_code_and_different_cached_previews_r
         let response=case.router.clone().oneshot(Request::builder().uri(format!("/install/{ticket}/windows.ps1")).body(Body::empty())?).await?;
         ensure!(response.status()==StatusCode::OK && response.headers()["cache-control"]=="no-store");
         let powershell=String::from_utf8(to_bytes(response.into_body(),65536).await?.to_vec())?;
+        ensure!(powershell.contains("-Verb RunAs") && powershell.contains("-EncodedCommand") && !powershell.contains("ExecutionPolicy"));
         ensure!(powershell.contains("RuntimeInformation]::OSArchitecture") && powershell.contains("PROCESSOR_ARCHITEW6432"));
         ensure!(["windows_x86_64","windows_x86","windows_arm64"].iter().all(|target| powershell.contains(target)));
         ensure!(powershell.contains("& $porthubFile setup --ticket $porthubUrl") && !powershell.contains(TOKEN) && !powershell.contains("{{"));

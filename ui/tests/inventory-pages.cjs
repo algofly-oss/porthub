@@ -46,6 +46,7 @@ const {launchBrowser}=require("./browser.cjs");
   const row=page.locator('[aria-label="Edit proxy many.preview.invalid"]:visible');await row.waitFor();
   assert((await row.textContent()).includes("12 bindings"));await row.click();dialog=page.getByRole("dialog");
   await dialog.getByRole("button",{name:"Bindings",exact:true}).click();
+  await dialog.getByRole("list",{name:"Proxy bindings",exact:true}).getByRole("listitem").first().waitFor();
   assert.equal(await dialog.getByRole("list",{name:"Proxy bindings",exact:true}).getByRole("listitem").count(),12,"Editing loads every binding, including those omitted from the list preview");
   await dialog.getByLabel("Binding 1 label",{exact:true}).fill("Updated first route");
   await dialog.getByRole("button",{name:"Save Proxy",exact:true}).click();await dialog.waitFor({state:"hidden"});

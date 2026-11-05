@@ -100,9 +100,15 @@ fn pam_snapshot() -> Result<Vec<(PathBuf, Vec<u8>)>> {
     Ok(result)
 }
 async fn verify() -> Result<()> {
+    let resolv = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
+    let backend = if crate::private_prerequisites::resolver_stub(&resolv) {
+        "dns"
+    } else {
+        "resolve"
+    };
     let answer = command(
         "/usr/bin/getent",
-        &args(&["-s", "resolve", "ahostsv4", "localhost"]),
+        &args(&["-s", backend, "ahostsv4", "localhost"]),
     )
     .await
     .context("system hostname resolution through systemd-resolved failed")?;
