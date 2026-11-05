@@ -10,11 +10,16 @@ commands now use its persistent worker; core transfer builds exclude watch code.
 Background maintenance begins after the first authenticated configuration is
 applied. Core also exposes local `components list`, `fetch`, and `update` commands.
 Tor, terminal and live stats extraction, gateway delivery, release packaging,
-shared system/user caches, and installed rollout verification remain incomplete.
+and installed rollout verification remain incomplete.
 No modules have been published or deployed. This document does not change the
 published updater or release format.
 
 ## Ownership and package boundaries
+
+Normal users interact exclusively with the existing `porthub` commands. Core
+uses worker IPC and manages downloads/updates automatically; users never need
+to invoke a component executable to use a PortHub feature. Standalone CLI
+arguments exist for deliberate reuse of one tool on another system.
 
 The `porthub` executable remains the user interface and contains enrollment,
 public and private networking, OTA, component management, basic status, logs,
@@ -187,10 +192,17 @@ prefetching unused ones. The default is true.
 `PORTHUB_COMPONENT_CACHE` can override the private absolute cache path. Executable
 caches must not be writable through another account or an untrusted ancestor.
 `PORTHUB_STATE_DIR` retains the existing per-user transfer/job state convention.
-System-service prefetch still needs a verified read-only shared cache so tools
-are immediately reusable by unprivileged interactive users; this is required
-before deployment. Module HTTP clients also still need integration with core's
-outbound routing/source-selection policy before rollout.
+The system service mirrors verified software into `/var/cache/porthub-components`
+on Linux, `/Library/Caches/PortHubComponents` on macOS, or
+`%ProgramData%/PortHubComponents` on Windows. Core automatically reuses those
+bytes in a user's private execution cache without another network request.
+Catalogs are remembered privately, so subsequent shared-cache cleanup does not
+break offline use. Profiles, credentials and worker state are never mirrored.
+`PORTHUB_COMPONENT_SHARED_CACHE=off` disables this reuse; an absolute path selects
+an administrator-managed shared cache location. Existing unmarked directories
+are not adopted, and shared files must not grant mutation to other accounts.
+Module HTTP clients still need integration with core's outbound routing/source
+selection policy before rollout.
 
 Worker startup uses a verified executable and the private endpoint argument
 only; requests and credentials travel over typed IPC. A readiness ping precedes

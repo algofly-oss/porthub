@@ -88,7 +88,7 @@ pub fn manager(enrolled_gateway: Option<&str>) -> Result<Manager> {
     let gateway = selected
         .map(|value| crate::profile::base(&value, false).and_then(|value| Ok(value.parse()?)))
         .transpose()?;
-    Manager::new(
+    let manager = Manager::new(
         root,
         Settings {
             gateway,
@@ -99,7 +99,45 @@ pub fn manager(enrolled_gateway: Option<&str>) -> Result<Manager> {
             pins,
         },
         Arc::new(Http::new()?),
-    )
+    )?;
+    let shared = match std::env::var_os("PORTHUB_COMPONENT_SHARED_CACHE") {
+        Some(value) if value == "off" => return Ok(manager),
+        Some(value) => PathBuf::from(value),
+        None => system_cache_directory()?,
+    };
+    ensure!(
+        shared.is_absolute(),
+        "PORTHUB_COMPONENT_SHARED_CACHE must be off or an absolute path"
+    );
+    match manager.clone().with_shared_cache(
+        shared,
+        enrolled_gateway.is_some() && porthub_components::shared::system_writer(),
+    ) {
+        Ok(manager) => Ok(manager),
+        Err(_) => {
+            tracing::warn!(
+                "shared optional-tool cache unavailable; using this account's private cache"
+            );
+            Ok(manager)
+        }
+    }
+}
+fn system_cache_directory() -> Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        Ok("/var/cache/porthub-components".into())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Ok("/Library/Caches/PortHubComponents".into())
+    }
+    #[cfg(windows)]
+    {
+        Ok(PathBuf::from(
+            std::env::var_os("ProgramData").context("Windows ProgramData directory unavailable")?,
+        )
+        .join("PortHubComponents"))
+    }
 }
 pub fn background(gateway: &str, cancel: &CancellationToken) -> Result<Guard> {
     let options = MaintenanceOptions {

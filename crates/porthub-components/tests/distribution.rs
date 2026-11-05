@@ -514,3 +514,215 @@ async fn newer_catalog_cannot_reuse_a_tool_version_for_different_bytes() {
         .to_string()
         .contains("component version changed"));
 }
+
+#[tokio::test]
+async fn service_prefetch_is_reused_by_a_cold_user_without_network_or_shared_write_access() {
+    let root = private_temp();
+    let source = Arc::new(Mock::default());
+    let (catalog, _, executable) = fixture();
+    let cancel = CancellationToken::new();
+    add(
+        &source,
+        "https://gateway.test/prefix/api/downloads/components/catalog".into(),
+        serde_json::to_vec(&catalog).unwrap(),
+    );
+    add(
+        &source,
+        format!(
+            "https://gateway.test/prefix/{}",
+            catalog.artifacts[0].gateway_path()
+        ),
+        executable.clone(),
+    );
+    let shared = root.path().join("shared-software");
+    let system = Manager::new(root.path().join("service-private"), settings(), source)
+        .unwrap()
+        .with_shared_cache(shared.clone(), true)
+        .unwrap();
+    system.refresh(&cancel).await.unwrap();
+    let service_binary = system
+        .ensure(&catalog, Component::Sync, &cancel)
+        .await
+        .unwrap();
+    let offline = Arc::new(Mock::default());
+    let user = Manager::new(
+        root.path().join("user-private"),
+        settings(),
+        offline.clone(),
+    )
+    .unwrap()
+    .with_shared_cache(shared.clone(), false)
+    .unwrap();
+    let (_, user_binary) = user.resolve(Component::Sync, &cancel).await.unwrap();
+    assert!(user_binary.starts_with(user.cache_root()));
+    assert_ne!(service_binary, user_binary);
+    assert_eq!(std::fs::read(&user_binary).unwrap(), executable);
+    assert!(offline.calls.lock().unwrap().is_empty());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&shared).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(
+            std::fs::metadata(shared.join(CATALOG_ASSET))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
+        assert_eq!(
+            std::fs::metadata(&user_binary)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+    // Public cache cleanup cannot break a user's already installed tool/catalog.
+    std::fs::remove_dir_all(&shared).unwrap();
+    assert_eq!(
+        user.resolve(Component::Sync, &cancel).await.unwrap().1,
+        user_binary
+    );
+    assert!(offline.calls.lock().unwrap().is_empty());
+    assert!(
+        porthub_components::shared::Cache::reader(root.path().join("read-only"))
+            .unwrap()
+            .publish_catalog(&catalog)
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn newer_shared_tools_are_adopted_without_removing_older_local_executables() {
+    let root = private_temp();
+    let source = Arc::new(Mock::default());
+    let cancel = CancellationToken::new();
+    let (mut catalog, _, executable) = fixture();
+    let url = "https://gateway.test/prefix/api/downloads/components/catalog".to_string();
+    add(&source, url.clone(), serde_json::to_vec(&catalog).unwrap());
+    add(
+        &source,
+        format!(
+            "https://gateway.test/prefix/{}",
+            catalog.artifacts[0].gateway_path()
+        ),
+        executable.clone(),
+    );
+    let shared = root.path().join("shared");
+    let system = Manager::new(root.path().join("service"), settings(), source.clone())
+        .unwrap()
+        .with_shared_cache(shared.clone(), true)
+        .unwrap();
+    system.refresh(&cancel).await.unwrap();
+    system
+        .ensure(&catalog, Component::Sync, &cancel)
+        .await
+        .unwrap();
+    let offline = Arc::new(Mock::default());
+    let user = Manager::new(root.path().join("user"), settings(), offline.clone())
+        .unwrap()
+        .with_shared_cache(shared, false)
+        .unwrap();
+    let (_, old) = user.resolve(Component::Sync, &cancel).await.unwrap();
+    catalog.release = "1.12.0".parse().unwrap();
+    catalog.artifacts[0].release = catalog.release.clone();
+    catalog.artifacts[0].version = "1.1.0".parse().unwrap();
+    catalog.artifacts[0].executable = blob(b"new independent tool");
+    add(&source, url, serde_json::to_vec(&catalog).unwrap());
+    add(
+        &source,
+        format!(
+            "https://gateway.test/prefix/{}",
+            catalog.artifacts[0].gateway_path()
+        ),
+        b"new independent tool".to_vec(),
+    );
+    system.refresh(&cancel).await.unwrap();
+    system
+        .ensure(&catalog, Component::Sync, &cancel)
+        .await
+        .unwrap();
+    let (new, path) = user.resolve(Component::Sync, &cancel).await.unwrap();
+    assert_eq!(new.version, Version::parse("1.1.0").unwrap());
+    assert_ne!(path, old);
+    assert_eq!(std::fs::read(old).unwrap(), executable);
+    assert_eq!(std::fs::read(path).unwrap(), b"new independent tool");
+    assert!(offline.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn corrupt_shared_bytes_fall_back_to_verified_private_downloads() {
+    let root = private_temp();
+    let source = Arc::new(Mock::default());
+    let cancel = CancellationToken::new();
+    let (catalog, _, executable) = fixture();
+    add(
+        &source,
+        "https://gateway.test/prefix/api/downloads/components/catalog".into(),
+        serde_json::to_vec(&catalog).unwrap(),
+    );
+    add(
+        &source,
+        format!(
+            "https://gateway.test/prefix/{}",
+            catalog.artifacts[0].gateway_path()
+        ),
+        executable.clone(),
+    );
+    let shared = root.path().join("shared");
+    let system = Manager::new(root.path().join("service"), settings(), source.clone())
+        .unwrap()
+        .with_shared_cache(shared.clone(), true)
+        .unwrap();
+    system.refresh(&cancel).await.unwrap();
+    let service_binary = system
+        .ensure(&catalog, Component::Sync, &cancel)
+        .await
+        .unwrap();
+    let public = shared.join(service_binary.file_name().unwrap());
+    std::fs::write(&public, b"corrupt").unwrap();
+    let downloads = Arc::new(Mock::default());
+    add(
+        &downloads,
+        format!(
+            "https://gateway.test/prefix/{}",
+            catalog.artifacts[0].gateway_path()
+        ),
+        executable.clone(),
+    );
+    let user = Manager::new(root.path().join("user"), settings(), downloads.clone())
+        .unwrap()
+        .with_shared_cache(shared, false)
+        .unwrap();
+    let (_, binary) = user.resolve(Component::Sync, &cancel).await.unwrap();
+    assert_eq!(std::fs::read(binary).unwrap(), executable);
+    assert_eq!(downloads.calls.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_shared_writer_never_adopts_an_existing_unmarked_private_directory() {
+    let root = private_temp();
+    let private = root.path().join("credentials");
+    std::fs::create_dir(&private).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::write(private.join("secret"), b"private").unwrap();
+    assert!(porthub_components::shared::Cache::writer(private.clone()).is_err());
+    assert_eq!(std::fs::read(private.join("secret")).unwrap(), b"private");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(private).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+}

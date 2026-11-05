@@ -239,6 +239,31 @@ impl Catalog {
         }
         Ok(())
     }
+    pub fn validate_successor(&self, previous: &Self) -> Result<()> {
+        ensure!(
+            self.release >= previous.release,
+            "component catalog downgrade rejected"
+        );
+        if self.release == previous.release {
+            ensure!(
+                serde_json::to_vec(self)? == serde_json::to_vec(previous)?,
+                "published component catalog changed"
+            );
+        }
+        for artifact in &self.artifacts {
+            if let Some(old) = previous.artifacts.iter().find(|old| {
+                old.component == artifact.component
+                    && old.version == artifact.version
+                    && old.target == artifact.target
+            }) {
+                ensure!(
+                    artifact.same_tool(old),
+                    "published component version changed"
+                );
+            }
+        }
+        Ok(())
+    }
     pub fn select(
         &self,
         component: Component,

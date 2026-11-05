@@ -212,7 +212,10 @@ async fn verified_module_download_coalesces_worker_start_and_watch_follows_ipc_l
                         offset: 0,
                         limit: 32,
                     },
-                    Duration::from_secs(2),
+                    // The worker's local HTTP status probe is bounded at two
+                    // seconds; leave room to return its result after a Windows
+                    // loopback connect times out during watch shutdown.
+                    Duration::from_secs(4),
                 )
                 .await
                 .unwrap();

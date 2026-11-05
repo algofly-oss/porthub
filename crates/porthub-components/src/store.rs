@@ -78,6 +78,7 @@ pub struct Manager {
     root: PathBuf,
     settings: Settings,
     transport: Arc<dyn Transport>,
+    shared: Option<crate::shared::Cache>,
 }
 
 fn regular(path: &Path) -> Result<std::fs::Metadata> {
@@ -332,7 +333,7 @@ fn extract(
 // macOS exposes standard /var, /tmp and /etc aliases as root-owned
 // symlinks. Normalize only those OS aliases, never arbitrary cache symlinks.
 #[cfg(target_os = "macos")]
-fn normalize_system_alias(root: PathBuf) -> Result<PathBuf> {
+pub(crate) fn normalize_system_alias(root: PathBuf) -> Result<PathBuf> {
     use std::os::unix::fs::MetadataExt;
     for alias in ["/var", "/tmp", "/etc"] {
         let base = Path::new(alias);
@@ -372,9 +373,30 @@ impl Manager {
             root,
             settings,
             transport,
+            shared: None,
         })
     }
+    pub fn with_shared_cache(mut self, root: PathBuf, publish: bool) -> Result<Self> {
+        self.shared = Some(if publish {
+            crate::shared::Cache::writer(root)?
+        } else {
+            crate::shared::Cache::reader(root)?
+        });
+        Ok(self)
+    }
     pub fn cached_catalog(&self) -> Result<Option<Catalog>> {
+        let private = self.private_catalog()?;
+        let shared = self
+            .shared
+            .as_ref()
+            .and_then(|cache| cache.catalog().ok().flatten());
+        Ok(match (private, shared) {
+            (Some(private), Some(shared)) if shared.release > private.release => Some(shared),
+            (Some(private), _) => Some(private),
+            (None, shared) => shared,
+        })
+    }
+    fn private_catalog(&self) -> Result<Option<Catalog>> {
         let path = self.root.join(CATALOG_ASSET);
         match regular(&path) {
             Ok(metadata) => {
@@ -433,30 +455,10 @@ impl Manager {
                 Ok(()) => {
                     let catalog = Catalog::parse(&std::fs::read(temporary.path())?)?;
                     if let Some(previous) = &cached {
-                        for artifact in &catalog.artifacts {
-                            if let Some(old) = previous.artifacts.iter().find(|old| {
-                                old.component == artifact.component
-                                    && old.version == artifact.version
-                                    && old.target == artifact.target
-                            }) {
-                                ensure!(
-                                    artifact.same_tool(old),
-                                    "published component version changed"
-                                );
-                            }
-                        }
-                        ensure!(
-                            catalog.release >= previous.release,
-                            "component catalog downgrade rejected"
-                        );
-                        if catalog.release == previous.release {
-                            ensure!(
-                                serde_json::to_vec(&catalog)? == serde_json::to_vec(previous)?,
-                                "published component catalog changed"
-                            );
-                        }
+                        catalog.validate_successor(previous)?;
                     }
                     publish(temporary, &self.root.join(CATALOG_ASSET), false)?;
+                    self.mirror_catalog(&catalog).await;
                     return Ok(Refresh {
                         catalog,
                         fresh: true,
@@ -503,7 +505,25 @@ impl Manager {
         let blob = artifact.executable.clone();
         if tokio::task::spawn_blocking(move || verified(&check_path, &blob)).await?? {
             self.record(&artifact)?;
+            self.mirror_artifact(&artifact, &destination).await;
             return Ok(destination);
+        }
+        if let Some(shared) = self.shared.clone() {
+            let mut temporary = tempfile::NamedTempFile::new_in(&self.root)?;
+            let copy = artifact.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                if shared.copy_into(&copy, temporary.as_file_mut())? {
+                    Ok(Some(temporary))
+                } else {
+                    Ok::<_, anyhow::Error>(None)
+                }
+            })
+            .await?;
+            if let Ok(Some(temporary)) = result {
+                publish(temporary, &destination, true)?;
+                self.record(&artifact)?;
+                return Ok(destination);
+            }
         }
         if self.settings.sources != Sources::GithubOnly {
             if let Some(url) = self.settings.gateway_url(&artifact.gateway_path())? {
@@ -519,6 +539,7 @@ impl Manager {
                         );
                         publish(temporary, &destination, true)?;
                         self.record(&artifact)?;
+                        self.mirror_artifact(&artifact, &destination).await;
                         return Ok(destination);
                     }
                     Err(error) if error.is::<AccessDenied>() => return Err(error),
@@ -559,7 +580,51 @@ impl Manager {
         .await??;
         publish(file, &destination, true)?;
         self.record(&artifact)?;
+        self.mirror_artifact(&artifact, &destination).await;
         Ok(destination)
+    }
+    async fn remember_catalog(&self, catalog: &Catalog, cancel: &CancellationToken) -> Result<()> {
+        let _lock = lock(&self.root, "catalog.lock", cancel).await?;
+        if let Some(previous) = self.private_catalog()? {
+            if previous.release > catalog.release {
+                return Ok(());
+            }
+            catalog.validate_successor(&previous)?;
+            if previous.release == catalog.release {
+                return Ok(());
+            }
+        }
+        let mut file = tempfile::NamedTempFile::new_in(&self.root)?;
+        file.write_all(&serde_json::to_vec(catalog)?)?;
+        publish(file, &self.root.join(CATALOG_ASSET), false)
+    }
+    async fn mirror_catalog(&self, catalog: &Catalog) {
+        if let Some(shared) = self.shared.clone().filter(|cache| cache.is_writer()) {
+            let catalog = catalog.clone();
+            if !matches!(
+                tokio::task::spawn_blocking(move || shared.publish_catalog(&catalog)).await,
+                Ok(Ok(()))
+            ) {
+                tracing::warn!(
+                    "shared component catalog unavailable; private cache remains usable"
+                );
+            }
+        }
+    }
+    async fn mirror_artifact(&self, artifact: &Artifact, binary: &Path) {
+        if let Some(shared) = self.shared.clone().filter(|cache| cache.is_writer()) {
+            let artifact = artifact.clone();
+            let binary = binary.to_owned();
+            if !matches!(
+                tokio::task::spawn_blocking(move || shared.publish_artifact(&artifact, &binary))
+                    .await,
+                Ok(Ok(()))
+            ) {
+                tracing::warn!(
+                    "shared component publication unavailable; private tool remains usable"
+                );
+            }
+        }
     }
     fn binary_path(&self, artifact: &Artifact) -> PathBuf {
         self.root.join(format!(
@@ -696,6 +761,7 @@ impl Manager {
             None => self.refresh(cancel).await?,
         };
         let latest = self.selected(&catalog, component)?.clone();
+        self.remember_catalog(&catalog, cancel).await?;
         match self.ensure(&catalog, component, cancel).await {
             Ok(path) => Ok((latest, path)),
             Err(error) => {

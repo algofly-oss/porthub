@@ -6,6 +6,7 @@ pub mod local;
 pub mod maintenance;
 pub mod protocol;
 pub mod rpc;
+pub mod shared;
 pub mod store;
 pub mod transport;
 #[cfg(windows)]

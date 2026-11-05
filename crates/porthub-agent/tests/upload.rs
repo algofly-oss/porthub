@@ -8,16 +8,29 @@ use std::{
 struct Server(Child);
 impl Drop for Server {
     fn drop(&mut self) {
-        eprintln!("transfer test: stopping server process {}", self.0.id());
+        eprintln!(
+            "transfer test: stopping server process {} (prior exit: {:?})",
+            self.0.id(),
+            self.0.try_wait()
+        );
         let _ = self.0.kill();
         let _ = self.0.wait();
+        if let Some(stderr) = self.0.stderr.take() {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            let _ = stderr.take(64 * 1024).read_to_end(&mut bytes);
+            if !bytes.is_empty() {
+                eprintln!("server stderr: {}", String::from_utf8_lossy(&bytes));
+            }
+        }
         eprintln!("transfer test: server process stopped");
     }
 }
 
 fn cli(state: &Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_porthub"));
-    cmd.env("PORTHUB_COMPONENT_CACHE", state.join("components"))
+    cmd.env("PORTHUB_COMPONENT_SHARED_CACHE", "off")
+        .env("PORTHUB_COMPONENT_CACHE", state.join("components"))
         .env("PORTHUB_COMPONENT_SOURCE", "gateway")
         .env("PORTHUB_COMPONENT_GATEWAY", "https://fixture.invalid")
         .env("PORTHUB_STATE_DIR", state)
@@ -48,7 +61,7 @@ async fn receiver_accepts_standard_http_uploads_and_porthub_parallel_push() {
         .args(["http.receive", &port.to_string()])
         .arg(root.path())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let mut server = Server(child);
@@ -220,7 +233,7 @@ async fn detached_watch_is_managed_after_launcher_exits_and_foreground_stops_cle
         .args(["http.receive", &port.to_string()])
         .arg(root.path())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let _receiver = Server(receiver);
@@ -297,7 +310,7 @@ async fn detached_watch_is_managed_after_launcher_exits_and_foreground_stops_cle
         .arg(format!("{base}foreground/"))
         .arg("-w")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let mut foreground = Server(child);

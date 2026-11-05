@@ -275,6 +275,10 @@ jobs:
         run: |
           cargo test --locked -p porthub-transfer --no-run --target ${{ matrix.target }}
           cargo test --locked -p porthub-agent --test upload --no-run --target ${{ matrix.target }}
+      - name: Verify native Windows CLI startup
+        if: runner.os == 'Windows'
+        shell: bash
+        run: python scripts/run-with-timeout.py 10 "target/${{ matrix.target }}/debug/porthub.exe" --version
       - name: Verify Windows watch jobs with a bounded runtime
         if: runner.os == 'Windows'
         shell: bash

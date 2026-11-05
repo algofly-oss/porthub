@@ -40,7 +40,9 @@ async fn local_transport_checks_ownership_and_carries_versioned_frames() {
             version,
         };
         loop {
-            let mut stream = listener.accept().await.unwrap();
+            let Ok(mut stream) = listener.accept().await else {
+                continue;
+            };
             // A duplicate Unix bind probes the live listener and closes. Worker
             // servers treat that failed handshake as an ordinary closed client.
             if ipc::write(&mut stream, &hello, Duration::from_secs(2))
