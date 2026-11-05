@@ -69,3 +69,6 @@ mod detached_windows;
 pub mod proxy_cli;
 
 mod terminal_ui;
+
+#[cfg(feature = "local-tor")]
+pub mod tor_component;

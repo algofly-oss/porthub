@@ -154,18 +154,38 @@ pub async fn worker(
     component: Component,
     cancel: &CancellationToken,
 ) -> Result<porthub_components::rpc::Client> {
+    worker_transport(component, cancel, false).await
+}
+/// Source updates must reach the same live Tor pool as its active streams.
+/// A one-shot CLI process cannot provide that guarantee yet; fail closed until
+/// the Tor-specific supervised CLI adapter is implemented and verified.
+pub async fn persistent_worker(
+    component: Component,
+    cancel: &CancellationToken,
+) -> Result<porthub_components::rpc::Client> {
+    worker_transport(component, cancel, true).await
+}
+async fn worker_transport(
+    component: Component,
+    cancel: &CancellationToken,
+    persistent: bool,
+) -> Result<porthub_components::rpc::Client> {
     let manager = manager(None)?;
     if manager.installed(component).await?.is_empty() {
         eprintln!("Preparing {component}: downloading a verified compatible tool if needed...");
     }
     let state_directory = state_directory()?;
     crate::service::directory(&state_directory, true)?;
-    let mode = match std::env::var("PORTHUB_COMPONENT_TRANSPORT").as_deref() {
+    let mut mode = match std::env::var("PORTHUB_COMPONENT_TRANSPORT").as_deref() {
         Ok("auto") | Err(std::env::VarError::NotPresent) => porthub_components::worker::Mode::Auto,
         Ok("rpc") => porthub_components::worker::Mode::Rpc,
         Ok("cli") => porthub_components::worker::Mode::Cli,
         _ => anyhow::bail!("PORTHUB_COMPONENT_TRANSPORT must be auto, rpc, or cli"),
     };
+    if persistent {
+        ensure!(!matches!(mode, porthub_components::worker::Mode::Cli), "this component requires a persistent worker to preserve live routing restrictions; CLI fallback is not available yet");
+        mode = porthub_components::worker::Mode::Rpc;
+    }
     manager
         .connect(component, &ContextOptions { state_directory }, mode, cancel)
         .await

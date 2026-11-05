@@ -27,7 +27,7 @@ porthub-tunnel.workspace = true
 porthub-transfer = { path = "../porthub-transfer", default-features = false, features = ["notifications"] }
 porthub-components = { path = "../porthub-components" }
 porthub-terminal = { path = "../porthub-terminal" }
-porthub-egress = { path = "../porthub-egress", optional = true }
+porthub-egress = { path = "../porthub-egress", optional = true, default-features = false, features = ["websocket"] }
 porthub-mesh = { path = "../porthub-mesh" }
 porthub-network = { path = "../porthub-network" }
 chrono = { version = "0.4", features = ["serde"] }

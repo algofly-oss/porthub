@@ -6,7 +6,8 @@ use super::{
 };
 use anyhow::Result;
 use bytes::Bytes;
-use porthub_egress::{tor::TorPool, Connector, Destination};
+use crate::tor_component::TorPool;
+use porthub_egress::{Connector, Destination};
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},

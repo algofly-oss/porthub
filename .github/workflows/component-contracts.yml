@@ -5,6 +5,8 @@ on:
     paths:
       - 'crates/porthub-components/**'
       - 'crates/porthub-sync/**'
+      - 'crates/porthub-tor/**'
+      - 'crates/porthub-egress/**'
       - 'crates/porthub-transfer/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
@@ -14,6 +16,8 @@ on:
     paths:
       - 'crates/porthub-components/**'
       - 'crates/porthub-sync/**'
+      - 'crates/porthub-tor/**'
+      - 'crates/porthub-egress/**'
       - 'crates/porthub-transfer/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
@@ -32,7 +36,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-15, windows-latest, windows-11-arm]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -46,5 +50,7 @@ jobs:
           key: components-${{ runner.arch }}
       - name: Test compatibility, download verification and IPC limits
         run: cargo test --locked -p porthub-components -p porthub-sync
+      - name: Verify independent Tor worker and source-policy lifecycle
+        run: cargo test --locked -p porthub-tor
       - name: Verify transfers compile and run without watch synchronization
         run: cargo test --locked -p porthub-transfer --no-default-features

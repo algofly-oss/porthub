@@ -72,6 +72,7 @@ pub enum Reply<T> {
 pub trait Handler: Send + Sync + 'static {
     type Operation: DeserializeOwned + Send;
     type Value: Serialize + Send + Sync;
+    fn connection_limit(&self) -> usize { 32 }
     async fn handle(
         &self,
         operation: Self::Operation,
@@ -288,6 +289,7 @@ pub async fn serve<H: Handler>(
     let cancel = cancel.child_token();
     let mut listener = Listener::bind(endpoint).await?;
     let mut clients = tokio::task::JoinSet::new();
+    let capacity = handler.connection_limit().clamp(1, 512);
     let mut tick = tokio::time::interval(IDLE);
     tick.tick().await;
     let mut idle = 0;
@@ -299,7 +301,7 @@ pub async fn serve<H: Handler>(
                 if idle >= 5 { break; }
             },
             _ = clients.join_next(), if !clients.is_empty() => {},
-            result = listener.accept(), if clients.len() < 32 => {
+            result = listener.accept(), if clients.len() < capacity => {
                 // Rejected peers and closed startup probes do not stop other clients.
                 match result {
                     Ok(stream) => {

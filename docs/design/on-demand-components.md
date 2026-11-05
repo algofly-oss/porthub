@@ -235,3 +235,23 @@ Windows profile-save stub, open the PATH registry key with write access, registe
 PATH for private installations too, and refresh the invoking PowerShell session.
 Native CLI startup and detached worker pipe-lifetime checks gate the Windows
 main-stack reserve and handle-inheritance fixes.
+
+### Tor extraction implementation status
+
+`porthub-tor` now owns the Arti implementation. Core's `local-tor` feature keeps
+its user commands, mesh policy and source watcher but links only lightweight
+egress contracts/websocket support. Local Tor exits and `porthub proxy --via tor`
+call the verified worker's typed bootstrap/resolve/stream contract. A configured
+empty underlay remains restricted rather than enabling OS route fallback. Stream
+leases retain their original pool; inactive profiles expire after five minutes.
+The independent `porthub-tor proxy` command starts an authenticated localhost
+HTTP/SOCKS5 proxy without core, enrollment, or a PortHub server.
+
+Managed Tor deliberately requires persistent worker transport for now. A one-shot
+CLI cannot update an already-running stream's source restrictions through its raw
+stream channel. `cli` mode therefore fails explicitly for managed Tor, and auto
+mode does not fall back to a fresh unrestricted process. The supervised Tor CLI
+fallback remains required before final release. Ordinary sync supports CLI
+fallback already. Live Tor-network bootstrap/stream verification and component
+publication are also still required; current Tor tests run without Tor-network
+access and cover source policy, profile lifetime and the real standalone frontend.
