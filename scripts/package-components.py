@@ -28,6 +28,7 @@ TARGETS = {
     'i686-pc-windows-msvc': ('windows_x86', 'i686-pc-windows-msvc'),
     'aarch64-pc-windows-msvc': ('windows_arm64', 'aarch64-pc-windows-msvc'),
 }
+REQUIRED_TOOLS = {'sync', 'tor', 'terminal', 'stats'}
 TOOLS = {'sync', 'tor', 'terminal', 'stats', 'transfer'}
 
 
@@ -74,6 +75,8 @@ def package(entries, output, release, *, verify_only=False):
         raise ValueError('Core platform builds must share one immutable source revision')
     if not cores or set(groups) != set(cores) or (not verify_only and set(cores) != set(TARGETS)):
         raise ValueError('Release requires core and tool archives for every selected platform')
+    if not verify_only and any(not REQUIRED_TOOLS.issubset({item['tool'] for item, _ in tools}) for tools in groups.values()):
+        raise ValueError('Production release requires all four optional tools on every platform')
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.porthub-package-', dir=output.parent) as temporary:
         stage = Path(temporary) / 'release'
@@ -143,14 +146,38 @@ def package(entries, output, release, *, verify_only=False):
     return manifest
 
 
+def entries_from_indexes(directories):
+    spec = importlib.util.spec_from_file_location('platform_coordinator', Path(__file__).with_name('build-component-platform.py'))
+    coordinator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(coordinator)
+    entries = []
+    targets = set()
+    for directory in directories:
+        index_path = directory/'index.json'
+        if index_path.is_symlink() or index_path.stat().st_size > 1024 * 1024:
+            raise ValueError('Invalid platform build index')
+        index = json.loads(index_path.read_text())
+        target = index.get('target')
+        if target not in TARGETS or target in targets:
+            raise ValueError('Unsupported or duplicate platform build index')
+        targets.add(target)
+        coordinator.previous_builds(directory, target, index)
+        entries.extend((directory/row['receipt'], directory/row['binary']) for row in index['builds'])
+    return entries
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--release', required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--input', nargs=2, action='append', required=True, metavar=('RECEIPT', 'BINARY'))
+    parser.add_argument('--input', nargs=2, action='append', default=[], metavar=('RECEIPT', 'BINARY'))
+    parser.add_argument('--build-index', type=Path, action='append', default=[], help='Directory with a verified platform build index; repeat for each platform')
     parser.add_argument('--verify-only', action='store_true', help='Permit a platform subset for unpublished fixture validation')
     args = parser.parse_args()
-    package([(Path(a), Path(b)) for a, b in args.input], args.output, args.release, verify_only=args.verify_only)
+    entries = [(Path(a), Path(b)) for a, b in args.input] + entries_from_indexes(args.build_index)
+    if not entries:
+        parser.error('Provide --input or --build-index')
+    package(entries, args.output, args.release, verify_only=args.verify_only)
 
 
 if __name__ == '__main__':

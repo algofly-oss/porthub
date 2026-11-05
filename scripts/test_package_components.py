@@ -35,7 +35,7 @@ class Packaging(unittest.TestCase):
         return path, binary
 
     def complete(self):
-        return [self.entry(target, tool) for target in packager.TARGETS for tool in ('core', 'sync', 'tor')]
+        return [self.entry(target, tool) for target in packager.TARGETS for tool in ('core', 'stats', 'sync', 'terminal', 'tor')]
 
     def test_full_release_has_exactly_twenty_one_assets_and_is_reproducible(self):
         entries = self.complete()
@@ -44,14 +44,14 @@ class Packaging(unittest.TestCase):
         packager.package(entries, two, '1.11.0')
         self.assertEqual(len(list(one.iterdir())), 21)
         self.assertEqual(len(manifest['core_assets']), 10)
-        self.assertEqual(len(manifest['components']['artifacts']), 20)
+        self.assertEqual(len(manifest['components']['artifacts']), 40)
         for path in one.iterdir():
             self.assertEqual(path.read_bytes(), (two/path.name).read_bytes())
             if path.name.endswith('.tar.gz'):
                 with tarfile.open(path) as archive:
-                    self.assertEqual(len(archive.getmembers()), 3)
+                    self.assertEqual(len(archive.getmembers()), 5)
                     receipts = json.load(archive.extractfile('.porthub-build-receipts.json'))
-                    self.assertEqual([r['tool'] for r in receipts['receipts']], ['core', 'sync', 'tor'])
+                    self.assertEqual([r['tool'] for r in receipts['receipts']], ['core', 'stats', 'sync', 'terminal', 'tor'])
                     for receipt in receipts['receipts']:
                         stored = dict(receipt); checksum = stored.pop('receipt_sha256')
                         self.assertEqual(packager.planner.digest(stored), checksum)
@@ -99,6 +99,29 @@ class Packaging(unittest.TestCase):
         with self.assertRaises(ValueError):
             packager.package(entries, self.root/'out', '1.12.0')
         self.assertFalse((self.root/'out').exists())
+
+    def test_production_rejects_missing_optional_tool(self):
+        entries = [pair for pair in self.complete() if packager.planner.read_receipt(pair[0])['tool'] != 'stats']
+        with self.assertRaisesRegex(ValueError, 'all four'):
+            packager.package(entries, self.root/'out', '1.12.0')
+        self.assertFalse((self.root/'out').exists())
+
+    def test_platform_build_index_feeds_compact_packaging(self):
+        target = next(iter(packager.TARGETS))
+        pairs = [self.entry(target, tool) for tool in ('core', 'stats', 'sync', 'terminal', 'tor')]
+        rows = []
+        for receipt_path, binary in pairs:
+            receipt = packager.planner.read_receipt(receipt_path)
+            rows.append({'tool': receipt['tool'], 'version': receipt['version'],
+                         'receipt': receipt_path.name, 'binary': binary.name})
+        (self.root/'index.json').write_text(json.dumps({'schema_version':1, 'target':target, 'builds':rows}))
+        entries = packager.entries_from_indexes([self.root])
+        manifest = packager.package(entries, self.root/'out', '1.12.0', verify_only=True)
+        self.assertEqual(len(manifest['components']['artifacts']), 4)
+        with self.assertRaises(ValueError): packager.entries_from_indexes([self.root, self.root])
+        rows[0]['binary'] = '../outside'
+        (self.root/'index.json').write_text(json.dumps({'schema_version':1, 'target':target, 'builds':rows}))
+        with self.assertRaises(ValueError): packager.entries_from_indexes([self.root])
 
     def test_existing_output_is_preserved(self):
         output = self.root/'out'; output.mkdir(); (output/'keep').write_text('existing')

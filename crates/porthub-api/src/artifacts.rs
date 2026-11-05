@@ -117,7 +117,12 @@ fn verify_compact(root: &Path, version: &str) -> anyhow::Result<Vec<Release>> {
         expected.insert(core.asset.clone());
         let (_, canonical) = mapping.iter().find(|(legacy, _)| *legacy == core.target).unwrap();
         let tools: Vec<_> = manifest.components.artifacts.iter().filter(|tool| tool.target == *canonical).collect();
-        anyhow::ensure!(!tools.is_empty(), "compact release platform has no tools");
+        for component in [porthub_components::catalog::Component::Tor,
+            porthub_components::catalog::Component::Terminal, porthub_components::catalog::Component::Sync,
+            porthub_components::catalog::Component::Stats] {
+            anyhow::ensure!(tools.iter().any(|tool| tool.component == component),
+                "compact release platform is missing a required optional tool");
+        }
         for tool in tools {
             anyhow::ensure!(tool.release == manifest.release, "compact release must carry retained tool versions in its own archives");
             expected.insert(tool.archive_name());
@@ -589,6 +594,15 @@ mod compact_tests {
         anyhow::ensure!(status.status.success(), "compact package fixture failed: {}", String::from_utf8_lossy(&status.stderr));
         let releases = verify_complete(&output, "1.11.0").await?;
         assert_eq!(releases.len(), 10);
+        let manifest_path = output.join("porthub-components.json");
+        let original_manifest = tokio::fs::read(&manifest_path).await?;
+        let mut manifest: serde_json::Value = serde_json::from_slice(&original_manifest)?;
+        manifest["components"]["artifacts"].as_array_mut().unwrap()
+            .retain(|artifact| artifact["component"] != "stats");
+        tokio::fs::write(&manifest_path, serde_json::to_vec(&manifest)?).await?;
+        let error = verify_complete(&output, "1.11.0").await.err().expect("missing tool must fail verification");
+        assert!(error.to_string().contains("missing a required optional tool"));
+        tokio::fs::write(&manifest_path, original_manifest).await?;
         assert!(verify_complete(&output, "1.11.1").await.is_err());
         let archive = output.join("porthub-tools-x86_64-unknown-linux-gnu.tar.gz");
         let saved = tokio::fs::read(&archive).await?;

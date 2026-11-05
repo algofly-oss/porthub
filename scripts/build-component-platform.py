@@ -13,14 +13,15 @@ planner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(planner)
 
 
-def previous_builds(directory, target):
+def previous_builds(directory, target, index=None):
     if directory is None:
         return {}
     directory = directory.resolve(strict=True)
     index_path = directory/'index.json'
     if index_path.is_symlink() or index_path.stat().st_size > 1024 * 1024:
         raise ValueError('Invalid recovered build index')
-    index = json.loads(index_path.read_text())
+    if index is None:
+        index = json.loads(index_path.read_text())
     if index.get('schema_version') != 1 or index.get('target') != target:
         raise ValueError('Recovered build index target or schema mismatch')
     builds = index.get('builds')

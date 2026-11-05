@@ -34,7 +34,7 @@ class Recovery(unittest.TestCase):
     def test_recovers_core_and_tools_with_original_receipts(self):
         output = self.root/'recovered'
         builds = self.run_recovery(output)
-        self.assertEqual([(b['tool'], b['version']) for b in builds], [('core','1.11.0'), ('sync','0.1.0'), ('tor','0.1.0')])
+        self.assertEqual([(b['tool'], b['version']) for b in builds], [('core','1.11.0'), ('stats','0.1.0'), ('sync','0.1.0'), ('terminal','0.1.0'), ('tor','0.1.0')])
         for build in builds:
             receipt = recover.planner.read_receipt(output/build['receipt'])
             recover.planner.verify_reuse(receipt, output/build['binary'])

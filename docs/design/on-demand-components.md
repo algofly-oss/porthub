@@ -658,3 +658,11 @@ Older verified helper versions are retained for compatible consumers and startup
 fallback. The coordinator does not itself download releases or mutate versions.
 Production workflow integration and independent core version preparation remain
 required before release publication.
+
+Compact assembly accepts repeated `--build-index PLATFORM_BUILD_DIR` arguments,
+so the coordinator's output can feed the packager without constructing long
+receipt/binary argument lists. Index loading verifies relative paths, target,
+receipt identity, and binary contents again. Production packaging and the Rust
+offline verifier require all four optional tool families on all ten platforms;
+`--verify-only` permits incomplete, unpublished fixtures only. The public release
+still consists of ten core binaries, ten platform tool archives, and one manifest.
