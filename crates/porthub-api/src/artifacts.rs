@@ -122,6 +122,10 @@ fn verify_compact(root: &Path, version: &str) -> anyhow::Result<Vec<Release>> {
             porthub_components::catalog::Component::Stats] {
             anyhow::ensure!(tools.iter().any(|tool| tool.component == component),
                 "compact release platform is missing a required optional tool");
+            anyhow::ensure!(tools.iter().any(|tool| tool.component == component
+                && tool.core.matches(manifest.core_version())
+                && tool.protocols.contains(&porthub_components::catalog::PROTOCOL)),
+                "compact release platform has no compatible version of a required optional tool");
         }
         for tool in tools {
             anyhow::ensure!(tool.release == manifest.release, "compact release must carry retained tool versions in its own archives");
@@ -602,6 +606,16 @@ mod compact_tests {
         tokio::fs::write(&manifest_path, serde_json::to_vec(&manifest)?).await?;
         let error = verify_complete(&output, "1.11.0").await.err().expect("missing tool must fail verification");
         assert!(error.to_string().contains("missing a required optional tool"));
+        for (field, value) in [("core", serde_json::json!(">=2.0.0")),
+            ("protocols", serde_json::json!([2]))] {
+            let mut incompatible: serde_json::Value = serde_json::from_slice(&original_manifest)?;
+            for artifact in incompatible["components"]["artifacts"].as_array_mut().unwrap() {
+                if artifact["component"] == "stats" { artifact[field] = value.clone(); }
+            }
+            tokio::fs::write(&manifest_path, serde_json::to_vec(&incompatible)?).await?;
+            let error = verify_complete(&output, "1.11.0").await.err().expect("incompatible helper must fail verification");
+            assert!(error.to_string().contains("no compatible version"));
+        }
         tokio::fs::write(&manifest_path, original_manifest).await?;
         assert!(verify_complete(&output, "1.11.1").await.is_err());
         let archive = output.join("porthub-tools-x86_64-unknown-linux-gnu.tar.gz");

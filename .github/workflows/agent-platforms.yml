@@ -2,6 +2,10 @@ name: Native agent platforms
 on:
   workflow_call:
     inputs:
+      previous_components:
+        description: Reuse verified prior component inputs staged by this workflow run
+        type: boolean
+        default: false
       reuse_run_id:
         description: Reuse successful platforms from a completed run with identical production inputs
         type: string
@@ -221,6 +225,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.revision || github.sha }}
+      - name: Restore verified prior component builds
+        if: inputs.verify_only != true && inputs.previous_components == true
+        uses: actions/download-artifact@v4
+        with:
+          name: component-reuse-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/porthub-component-reuse
+      - name: Select verified prior component input directory
+        if: inputs.verify_only != true && inputs.previous_components == true
+        shell: bash
+        run: echo "PORTHUB_PREVIOUS_COMPONENT_BUILDS=$RUNNER_TEMP/porthub-component-reuse" >> "$GITHUB_ENV"
       - name: Read numeric release version
         shell: bash
         run: echo "PORTHUB_VERSION=$(sh scripts/release-version.sh)" >> "$GITHUB_ENV"
@@ -373,7 +387,10 @@ jobs:
         shell: bash
         env:
           CARGO_INCREMENTAL: "0"
-        run: python scripts/build-component-platform.py --target '${{ matrix.target }}' --source-revision "$PORTHUB_SOURCE_REVISION" --output component-builds
+        run: |
+          previous=()
+          if [ -n "${PORTHUB_PREVIOUS_COMPONENT_BUILDS:-}" ]; then previous=(--previous "$PORTHUB_PREVIOUS_COMPONENT_BUILDS"); fi
+          python scripts/build-component-platform.py --target '${{ matrix.target }}' --source-revision "$PORTHUB_SOURCE_REVISION" --output component-builds "${previous[@]}"
       - name: Restore shipping Linux terminal runtime
         id: shipping_terminal_cache
         if: inputs.verify_only != true && runner.os == 'Linux'
@@ -396,7 +413,9 @@ jobs:
           compiler_key="$(echo "$shipping_target" | tr '-' '_')"
           export "CARGO_TARGET_${target_key}_LINKER=musl-gcc"
           export "CC_${compiler_key}=musl-gcc"
-          python3 scripts/build-component-platform.py --target "$shipping_target" --source-revision "$PORTHUB_SOURCE_REVISION" --output component-builds
+          previous=()
+          if [ -n "${PORTHUB_PREVIOUS_COMPONENT_BUILDS:-}" ]; then previous=(--previous "$PORTHUB_PREVIOUS_COMPONENT_BUILDS"); fi
+          python3 scripts/build-component-platform.py --target "$shipping_target" --source-revision "$PORTHUB_SOURCE_REVISION" --output component-builds "${previous[@]}"
           python3 scripts/verify-static-components.py --builds component-builds
       - name: Save shipping Linux terminal runtime
         if: inputs.verify_only != true && runner.os == 'Linux' && steps.shipping_terminal_cache.outputs.cache-hit != 'true'
@@ -456,6 +475,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.revision || github.sha }}
+      - name: Restore verified prior component builds
+        if: inputs.verify_only != true && inputs.previous_components == true
+        uses: actions/download-artifact@v4
+        with:
+          name: component-reuse-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/porthub-component-reuse
+      - name: Select verified prior component input directory
+        if: inputs.verify_only != true && inputs.previous_components == true
+        shell: bash
+        run: echo "PORTHUB_PREVIOUS_COMPONENT_BUILDS=$RUNNER_TEMP/porthub-component-reuse" >> "$GITHUB_ENV"
       - name: Read numeric release version
         shell: bash
         run: echo "PORTHUB_VERSION=$(sh scripts/release-version.sh)" >> "$GITHUB_ENV"
@@ -528,7 +557,9 @@ jobs:
           export "CARGO_TARGET_${target_key}_LINKER=$shipping_cc"
           export "CC_${compiler_key}=$shipping_cc"
           export "AR_${compiler_key}=${{ matrix.ar }}"
-          python3 scripts/build-component-platform.py --target "$PORTHUB_SHIPPING_TARGET" --source-revision "$PORTHUB_SOURCE_REVISION" --output component-builds
+          previous=()
+          if [ -n "${PORTHUB_PREVIOUS_COMPONENT_BUILDS:-}" ]; then previous=(--previous "$PORTHUB_PREVIOUS_COMPONENT_BUILDS"); fi
+          python3 scripts/build-component-platform.py --target "$PORTHUB_SHIPPING_TARGET" --source-revision "$PORTHUB_SOURCE_REVISION" --output component-builds "${previous[@]}"
           python3 scripts/verify-static-components.py --builds component-builds
       - name: Enable ARM user-mode execution on the isolated CI runner
         if: inputs.verify_only != true && matrix.artifact != 'x86'

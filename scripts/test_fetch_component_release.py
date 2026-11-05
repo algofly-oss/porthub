@@ -61,11 +61,12 @@ class FetchRelease(unittest.TestCase):
             (destination/'index.json').write_text('{}')
         args = ['fetch', '--output', str(output), '--artifact-verifier', '/verifier', '--recover-output', str(recovered)]
         response = SimpleNamespace(returncode=0, stdout=json.dumps(self.release), stderr='')
-        with patch.object(sys, 'argv', args), patch.object(fetch.subprocess, 'run', return_value=response), patch.object(fetch, 'stage', return_value='1.12.0') as staged, patch.object(fetch.recovery, 'recover', side_effect=recover) as restored:
+        with patch.dict(fetch.os.environ, {'GITHUB_OUTPUT':str(self.root/'outputs')}), patch.object(sys, 'argv', args), patch.object(fetch.subprocess, 'run', return_value=response), patch.object(fetch, 'stage', return_value='1.12.0') as staged, patch.object(fetch.recovery, 'recover', side_effect=recover) as restored:
             fetch.main()
             staged.assert_called_once()
             self.assertEqual(restored.call_count, 10)
         self.assertEqual(len(list(recovered.iterdir())), 10)
+        self.assertEqual((self.root/'outputs').read_text(), 'reuse_available=true\n')
 
     def test_unsafe_redirects_are_rejected(self):
         handler = fetch.ReleaseRedirects()

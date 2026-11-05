@@ -133,6 +133,9 @@ def main():
             for target in recovery.packager.TARGETS:
                 recovery.recover(args.output, root/target, target, version, args.artifact_verifier)
             root.rename(args.recover_output)
+    if os.environ.get('GITHUB_OUTPUT'):
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+            output.write('reuse_available='+str(version is not None).lower()+'\n')
     print(json.dumps({'release':version, 'reuse_available':version is not None}))
 
 

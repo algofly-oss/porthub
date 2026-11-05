@@ -750,3 +750,22 @@ configured bundle is excluded from Cargo's source depfile list; other untracked
 inputs remain subject to the existing rejection. Changed bundle bytes invalidate
 helper reuse, and changes during compilation fail receipt creation. This avoids
 mistaking `.cache/terminal-helper/.../bundle.tar.gz` for a tracked source file.
+
+Continuous release preparation retains each verified recovered platform as a
+one-day CI artifact named `component-reuse-PLATFORM` (these are not GitHub release
+assets). The reusable agent workflow restores only its platform's inputs and
+passes them to the coordinator for native and cross builds. Missing requested
+artifacts fail the workflow; corrupt binaries fail receipt verification before
+reuse. Initial legacy-to-compact builds run without previous inputs. The
+complete-bundle download pattern excludes these prior-build artifacts.
+
+Offline compact verification now also requires a core-compatible, protocol-1
+version of every required helper on every platform, allowing older retained
+versions to coexist. Merely including all component names cannot authorize a
+release whose core cannot use them. Fixture checks reject incompatible core
+requirements and unsupported helper protocols before publication.
+
+Core reuse preparation remains conservative when its host compiler environment
+differs from a target builder's recorded environment. A declarative target build
+environment is still needed to prove unchanged cross-platform core inputs without
+forcing avoidable core rebuilds; a mismatch never authorizes unsafe reuse.
