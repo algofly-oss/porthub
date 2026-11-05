@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Record actual Cargo inputs; select unchanged helper artifacts without Cargo.
 
-Record runs immediately after a separate package build, using its merged .d file
-and target-filtered Cargo tree. Plan recomputes those inputs from a prior verified
+Build invokes a separate pinned Cargo package build and records its merged .d
+file and target-filtered dependency tree. Plan recomputes those inputs from a prior verified
 receipt, so ordinary agent edits need neither helper compilation nor downloading
 all registry manifests in the selection job. Artifact reuse always verifies the
 binary separately before it can be copied into a release.
@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tomllib
 from urllib.parse import urlsplit
 
@@ -255,7 +256,7 @@ def profile_state(root, name, nodes):
 
 
 def compiler_environment(target, profile):
-    names = {'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'CC', 'CXX', 'AR', 'CFLAGS', 'CXXFLAGS', 'ARFLAGS'}
+    names = {'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'CC', 'CXX', 'AR', 'CFLAGS', 'CXXFLAGS', 'ARFLAGS', 'CARGO_INCREMENTAL'}
     target_key = target.replace('-', '_')
     for prefix in ['CC', 'CXX', 'AR', 'CFLAGS', 'CXXFLAGS', 'ARFLAGS']:
         names.add(prefix + '_' + target_key)
@@ -319,10 +320,8 @@ def validate_receipt(receipt):
 
 def record(root, tool, target, binary, dep_info, revision, version=None, tree=None):
     recipe = read_recipes(root)[tool]
-    if dep_info.stat().st_mtime_ns < binary.stat().st_mtime_ns:
-        raise ValueError('Dependency file predates the binary; run the separate Cargo build before recording')
     nodes = cargo_graph(root, recipe, target, tree)
-    paths = {}
+    paths = set()
     for value in dep_paths(dep_info.read_text()):
         path = Path(value)
         if not path.is_absolute():
@@ -333,25 +332,25 @@ def record(root, tool, target, binary, dep_info, revision, version=None, tree=No
             continue  # Registry sources are pinned by locked identities/checksums.
         if name.startswith('target/'):
             continue  # Generated outputs are covered by source/build-script inputs.
-        paths[name] = 'directory' if path.is_dir() else ('manifest' if path.name == 'Cargo.toml' else 'file')
+        paths.add((name, 'directory' if path.is_dir() else 'file'))
     for node in nodes:
         if 'manifest' not in node:
             continue
-        name = node['manifest']; paths[name] = 'manifest'
+        name = node['manifest']; paths.add((name, 'manifest'))
         package = manifest(root, name)['package']
         build = package.get('build', 'build.rs')
         if build and isinstance(build, str):
             script = (root / name).parent / build
             if script.exists():
-                paths[relative(root, script)] = 'file'
+                paths.add((relative(root, script), 'file'))
     for name in recipe['extra_inputs']:
-        paths[relative(root, name)] = 'directory' if (root / name).is_dir() else 'file'
+        paths.add((relative(root, name), 'directory' if (root / name).is_dir() else 'file'))
     for config in ['.cargo/config', '.cargo/config.toml']:
         if (root / config).exists():
-            paths[config] = 'file'
-    if not any(path.endswith('.rs') for path in paths):
+            paths.add((config, 'file'))
+    if not any(path.endswith('.rs') for path, _ in paths):
         raise ValueError('Build receipt requires actual compiled Rust source inputs')
-    build = build_state(root, recipe, target, paths.items(), nodes)
+    build = build_state(root, recipe, target, paths, nodes)
     receipt = {'schema_version': SCHEMA, 'tool': tool, 'target': target,
                'version': version or current_version(root, recipe), 'source_revision': revision,
                'binary': {'name': recipe['binary'] + ('.exe' if 'windows' in target else ''),
@@ -400,14 +399,57 @@ def read_receipt(path):
     return validate_receipt(json.loads(path.read_text()))
 
 
+def build_and_record(root, tool, target, revision, version=None):
+    require_clean_source(root, revision)
+    recipe = read_recipes(root)[tool]
+    version = version or current_version(root, recipe)
+    requested = stable_version(version)
+    current = stable_version(current_version(root, recipe))
+    if tool == 'core' and requested != current or tool != 'core' and requested < current:
+        raise ValueError('Build version does not match the selected package version policy')
+    command = ['cargo', '+' + toolchain(root)['channel'], 'build', '--locked',
+               '-p', recipe['package'], '--bin', recipe['binary'], '--target', target,
+               '--profile', recipe['profile'], '--message-format=json-render-diagnostics']
+    if not recipe['default_features']:
+        command.append('--no-default-features')
+    if recipe['features']:
+        command += ['--features', ','.join(recipe['features'])]
+    environment = os.environ.copy()
+    if tool != 'core':
+        environment['PORTHUB_COMPONENT_VERSION'] = version
+    else:
+        environment.pop('PORTHUB_COMPONENT_VERSION', None)
+    result = subprocess.run(command, cwd=root, env=environment, capture_output=True, text=True)
+    sys.stderr.write(result.stderr)
+    outputs = set()
+    for line in result.stdout.splitlines():
+        message = json.loads(line)
+        if message.get('reason') == 'compiler-artifact' and message.get('target', {}).get('name') == recipe['binary'] and message.get('executable'):
+            outputs.add(message['executable'])
+        if message.get('reason') == 'compiler-message':
+            sys.stderr.write(message.get('message', {}).get('rendered') or '')
+    if result.returncode or len(outputs) != 1:
+        raise ValueError('The selected component build did not produce exactly one executable')
+    require_clean_source(root, revision)
+    binary = Path(outputs.pop())
+    receipt = record(root, tool, target, binary, binary.with_suffix('.d'), revision, version)
+    # CI provenance must not attest arbitrary untracked inputs merely because
+    # their paths were named by a generated dependency file.
+    for name, kind, _ in receipt['build']['inputs']:
+        tracked = subprocess.run(['git', 'ls-files', '--error-unmatch', '--', name], cwd=root, capture_output=True)
+        if tracked.returncode:
+            raise ValueError('A compiled input is not part of the immutable checkout')
+    return receipt
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=Path(__file__).resolve().parents[1])
     sub = parser.add_subparsers(dest='command', required=True)
-    capture = sub.add_parser('record')
+    capture = sub.add_parser('build')
     for name in ['tool', 'target', 'source-revision']:
         capture.add_argument('--' + name, required=True)
-    for name in ['binary', 'dep-info', 'output']:
+    for name in ['output']:
         capture.add_argument('--' + name, type=Path, required=True)
     capture.add_argument('--version')
     select = sub.add_parser('plan')
@@ -416,14 +458,8 @@ def main():
     verify = sub.add_parser('verify-reuse')
     verify.add_argument('--receipt', type=Path, required=True); verify.add_argument('--binary', type=Path, required=True)
     args = parser.parse_args(); root = args.root.resolve()
-    if args.command == 'record':
-        require_clean_source(root, args.source_revision)
-        recipe = read_recipes(root)[args.tool]
-        profile = 'debug' if recipe['profile'] == 'dev' else recipe['profile']
-        expected = recipe['binary'] + ('.exe' if 'windows' in args.target else '')
-        if args.binary.name != expected or args.binary.parent.name != profile:
-            raise ValueError('Recorded artifact does not match the selected binary/profile recipe')
-        receipt = record(root, args.tool, args.target, args.binary, args.dep_info, args.source_revision, args.version)
+    if args.command == 'build':
+        receipt = build_and_record(root, args.tool, args.target, args.source_revision, args.version)
         args.output.write_bytes(canonical(receipt) + b'\n')
         print(json.dumps({'tool': args.tool, 'fingerprint': receipt['fingerprint'], 'inputs': len(receipt['build']['inputs'])}))
     elif args.command == 'plan':

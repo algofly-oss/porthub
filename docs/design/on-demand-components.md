@@ -272,9 +272,10 @@ an active dependency name are conservatively fingerprinted.
 
 A reuse decision is a candidate, not authorization to publish arbitrary cached
 bytes. `verify-reuse` must verify the previous binary against the receipt after
-its official archive/provenance has been verified. `record` requires a clean
-checkout of the stated immutable source, a current merged dependency file, and
-the selected binary/profile. Generated outputs under `target` are excluded;
+its official archive/provenance has been verified. `build` invokes the selected package/profile directly and captures Cargo's
+reported executable and merged dependency file. It requires a clean checkout of
+the stated immutable source before and after compilation, and checks that source
+inputs are tracked. Generated outputs under `target` are excluded;
 their source/build-script inputs and explicitly declared external build recipes
 must be included. Native compiler/linker flags must be consistent between the
 selection and build phases. The build planner is tested on native platforms;

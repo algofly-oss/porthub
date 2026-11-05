@@ -195,10 +195,7 @@ recipe_version=1
         with self.assertRaisesRegex(ValueError, 'integrity'):
             buildplan.validate_receipt(altered)
 
-    def test_stale_dep_info_and_private_or_escaping_paths_are_rejected(self):
-        os.utime(self.dep, ns=(1, 1))
-        with self.assertRaisesRegex(ValueError, 'predates'):
-            self.record('tool')
+    def test_private_or_escaping_source_paths_are_rejected(self):
         for path in ['../outside', '.env', '.cargo/credentials.toml']:
             with self.assertRaises(ValueError):
                 buildplan.relative(self.root, path)
