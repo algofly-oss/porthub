@@ -160,6 +160,18 @@ pub async fn worker(
 /// Source updates must reach the same live Tor pool as its active streams.
 /// A one-shot CLI process cannot provide that guarantee yet; fail closed until
 /// the Tor-specific supervised CLI adapter is implemented and verified.
+pub async fn persistent_session(
+    component: Component, cancel: &CancellationToken,
+) -> Result<porthub_components::worker::Session> {
+    match std::env::var("PORTHUB_COMPONENT_TRANSPORT").as_deref() {
+        Ok("auto" | "rpc") | Err(std::env::VarError::NotPresent) => {},
+        Ok("cli") => anyhow::bail!("this component requires a persistent worker to preserve live routing restrictions; CLI fallback is not available yet"),
+        _ => anyhow::bail!("PORTHUB_COMPONENT_TRANSPORT must be auto, rpc, or cli"),
+    }
+    let state_directory = state_directory()?;
+    crate::service::directory(&state_directory, true)?;
+    manager(None)?.session(component, &ContextOptions { state_directory }, cancel).await
+}
 pub async fn persistent_worker(
     component: Component,
     cancel: &CancellationToken,

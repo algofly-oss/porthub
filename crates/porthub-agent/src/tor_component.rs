@@ -16,13 +16,24 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::watch;
+use tokio::sync::{watch, OnceCell};
 use tokio_util::sync::CancellationToken;
 pub struct TorPool {
     options: Options,
     sources: Option<watch::Receiver<Vec<IpAddr>>>,
     ready: Arc<AtomicBool>,
+    session: Arc<OnceCell<porthub_components::worker::Session>>,
     stop: CancellationToken,
+}
+async fn worker(
+    session: &OnceCell<porthub_components::worker::Session>,
+    stop: &CancellationToken,
+) -> Result<porthub_components::rpc::Client> {
+    session
+        .get_or_try_init(|| crate::components::persistent_session(Component::Tor, stop))
+        .await?
+        .connect(stop)
+        .await
 }
 impl TorPool {
     pub fn new(directory: &Path, groups: usize, max_connections: usize) -> Result<Self> {
@@ -37,6 +48,7 @@ impl TorPool {
             options,
             sources: None,
             ready: Arc::new(AtomicBool::new(false)),
+            session: Arc::new(OnceCell::new()),
             stop: CancellationToken::new(),
         })
     }
@@ -46,6 +58,7 @@ impl TorPool {
         let mut options = self.options.clone();
         let ready = self.ready.clone();
         let stop = self.stop.clone();
+        let session = self.session.clone();
         tokio::spawn(async move {
             let mut client = None;
             let mut retry = Duration::from_secs(2);
@@ -55,7 +68,7 @@ impl TorPool {
                 tokio::select! {biased; _=stop.cancelled()=>break, _=tick.tick()=>{}, changed=sources.changed()=>{if changed.is_err(){break;}}}
                 options.sources = Some(sources.borrow_and_update().clone());
                 if client.is_none() {
-                    client = tokio::select! {biased; _=stop.cancelled()=>break,result=crate::components::persistent_worker(Component::Tor,&stop)=>result.ok()};
+                    client = tokio::select! {biased; _=stop.cancelled()=>break,result=worker(&session,&stop)=>result.ok()};
                 }
                 let Some(connection) = client.as_mut() else {
                     ready.store(false, Ordering::Release);
@@ -87,7 +100,7 @@ impl TorPool {
     }
     pub async fn bootstrap(&self) -> Result<()> {
         let options = self.options()?;
-        let mut worker = crate::components::persistent_worker(Component::Tor, &self.stop).await?;
+        let mut worker = worker(&self.session, &self.stop).await?;
         let response: Value = tokio::select! {biased; _=self.stop.cancelled()=>anyhow::bail!("Tor preparation cancelled"),result=worker.call(Operation::Bootstrap {options},Duration::from_secs(240))=>result?};
         let Value::Ready { ready } = response else {
             anyhow::bail!("unexpected Tor bootstrap response")
@@ -109,7 +122,7 @@ impl Drop for TorPool {
 impl Connector for TorPool {
     async fn connect(&self, destination: Destination) -> Result<BoxStream> {
         let options = self.options()?;
-        let worker = crate::components::persistent_worker(Component::Tor, &self.stop).await?;
+        let worker = worker(&self.session, &self.stop).await?;
         let (response, stream) = worker
             .upgrade::<_, Value>(
                 Operation::Connect {
@@ -132,7 +145,7 @@ impl Resolver for TorPool {
     async fn resolve(&self, hostname: &str) -> Result<Vec<IpAddr>> {
         ensure!(self.ready(), "Tor resolver is not ready");
         let options = self.options()?;
-        let mut worker = crate::components::persistent_worker(Component::Tor, &self.stop).await?;
+        let mut worker = worker(&self.session, &self.stop).await?;
         let response: Value = worker
             .call(
                 Operation::Resolve {

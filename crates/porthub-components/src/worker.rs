@@ -41,7 +41,95 @@ pub enum Mode {
     Rpc,
     Cli,
 }
+/// A consumer pins one verified artifact so readiness and streams cannot
+/// accidentally refer to different versions during background downloads.
+#[derive(Clone)]
+pub struct Session {
+    manager: Manager,
+    artifact: Artifact,
+    executable: PathBuf,
+    context: ContextOptions,
+}
+impl Session {
+    pub fn artifact(&self) -> &Artifact {
+        &self.artifact
+    }
+    pub async fn connect(&self, cancel: &CancellationToken) -> Result<Client> {
+        let client = self
+            .manager
+            .worker_resolved(
+                self.artifact.component,
+                &self.context,
+                cancel,
+                &self.artifact,
+                &self.executable,
+            )
+            .await?;
+        self.manager
+            .record_activation(&self.context, &self.artifact)?;
+        Ok(client)
+    }
+}
 impl Manager {
+    pub async fn session(
+        &self,
+        component: Component,
+        context: &ContextOptions,
+        cancel: &CancellationToken,
+    ) -> Result<Session> {
+        ensure!(
+            context.state_directory.is_absolute(),
+            "component state requires an absolute directory"
+        );
+        let (mut artifact, mut executable) = self.resolve(component, cancel).await?;
+        if let Err(error) = self
+            .worker_resolved(component, context, cancel, &artifact, &executable)
+            .await
+        {
+            if cancel.is_cancelled() {
+                return Err(error);
+            }
+            let mut recovered = None;
+            let mut tried = 0;
+            for (previous, path) in self
+                .installed(component)
+                .await?
+                .into_iter()
+                .filter(|(candidate, _)| candidate.version < artifact.version)
+            {
+                if !self.was_activated(context, &previous)? {
+                    continue;
+                }
+                if tried >= 4 {
+                    break;
+                }
+                tried += 1;
+                if self
+                    .worker_resolved(component, context, cancel, &previous, &path)
+                    .await
+                    .is_ok()
+                {
+                    recovered = Some((previous, path));
+                    break;
+                }
+                if cancel.is_cancelled() {
+                    return Err(error);
+                }
+            }
+            let Some((previous, path)) = recovered else {
+                return Err(error);
+            };
+            artifact = previous;
+            executable = path;
+        }
+        self.record_activation(context, &artifact)?;
+        Ok(Session {
+            manager: self.clone(),
+            artifact,
+            executable,
+            context: context.clone(),
+        })
+    }
     pub async fn connect(
         &self,
         component: Component,
@@ -234,6 +322,12 @@ impl Manager {
         ensure!(
             now() >= attempts.retry_at,
             "component worker is backing off after an unsuccessful start; retry shortly"
+        );
+        let path = executable.to_path_buf();
+        let blob = artifact.executable.clone();
+        ensure!(
+            tokio::task::spawn_blocking(move || crate::store::verified(&path, &blob)).await??,
+            "component executable changed before worker startup"
         );
         attempts.count = if now().saturating_sub(attempts.last_start) >= 60 {
             1

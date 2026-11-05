@@ -211,6 +211,7 @@ async fn exercise(mode: Mode, blocked: bool, failed_update: bool) -> Result<()> 
     assert_ne!(one, std::process::id());
     assert_eq!(fixture.binaries.load(Ordering::SeqCst), 1);
     if failed_update {
+        let pinned = manager.session(Component::Sync, &context, &cancel).await?;
         let mut candidate = artifact.clone();
         candidate.version = "0.1.1".parse()?;
         let mut update = catalog.clone();
@@ -225,6 +226,28 @@ async fn exercise(mode: Mode, blocked: bool, failed_update: bool) -> Result<()> 
                 .join(porthub_components::catalog::CATALOG_ASSET),
             serde_json::to_vec(&update)?,
         )?;
+        let candidate_endpoint = Endpoint::for_artifact(&identity, &candidate)?;
+        let retry_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs()
+            + 300;
+        std::fs::write(
+            manager.cache_root().join(format!(
+                "sync.{}.worker-attempts.json",
+                candidate_endpoint.startup_key()
+            )),
+            serde_json::to_vec(
+                &serde_json::json!({"count":1,"last_start":retry_at-300,"retry_at":retry_at}),
+            )?,
+        )?;
+        let recovered_session = manager.session(Component::Sync, &context, &cancel).await?;
+        assert_eq!(recovered_session.artifact().version, artifact.version);
+        assert_eq!(pinned.artifact().version, artifact.version);
+        let mut pinned_client = pinned.connect(&cancel).await?;
+        assert!(
+            matches!(pinned_client.call::<_, SystemValue>(SystemOperation::Ping, Duration::from_secs(2)).await?,
+            SystemValue::Pong { pid } if pid == one)
+        );
         let mut recovered = manager
             .connect(Component::Sync, &context, Mode::Cli, &cancel)
             .await?;

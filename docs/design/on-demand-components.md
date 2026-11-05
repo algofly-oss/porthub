@@ -444,3 +444,19 @@ The full component suite and agent compile check cover this integration, includi
 a real local HTTP test with a failing bound source, successful alternative,
 access denial, and denied routing policy. Live multi-interface/VPN/TLS recovery
 checks remain rollout gates.
+
+Managed worker sessions now pin an artifact for a consumer's lifetime. Creation
+completes a version handshake before the session is retained, with the same
+activation-qualified compatible fallback used for startup recovery. Reconnecting
+an existing session preserves its version even after the catalog advances. A new
+worker process rechecks executable integrity before spawning; an already connected
+verified worker does not require repeatedly hashing the executable.
+
+Tor's readiness monitor, bootstrap, resolver, source updates, and new streams now
+share one such session. This prevents readiness from an older pool being applied
+to a newly downloaded, unbootstrapped worker. The sync process fixture verifies
+stable worker identity across a catalog update and session recovery after a failed
+candidate. Automatic Tor candidate bootstrap-and-switch, retained-stream source
+updates during that transition, version-specific state directories, and supervised
+persistent CLI fallback are still required. Prefetch updates files in the
+background; this change does not yet hot-activate a new Tor worker version.
