@@ -1,0 +1,417 @@
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+use porthub_components::protocol::terminal::Value;
+use porthub_components::{
+    catalog::{Component, PROTOCOL},
+    ipc::Hello,
+    local::Endpoint,
+    rpc,
+};
+use std::{ffi::OsString, path::PathBuf, sync::Arc};
+use tokio_util::sync::CancellationToken;
+#[derive(Parser)]
+#[command(version=porthub_terminal_cli::VERSION, about="Independent bundled tmux runtime and persistent local workspaces")]
+struct Args {
+    #[command(subcommand)]
+    command: Command,
+}
+#[derive(Subcommand)]
+enum Command {
+    #[cfg(unix)]
+    List {
+        #[arg(long)]
+        directory: PathBuf,
+        #[arg(long)]
+        all: bool,
+    },
+    #[cfg(unix)]
+    Stop {
+        #[arg(long)]
+        directory: PathBuf,
+        #[arg(long)]
+        name: String,
+    },
+    #[cfg(unix)]
+    Rename {
+        #[arg(long)]
+        directory: PathBuf,
+        #[arg(long)]
+        name: String,
+        new_name: String,
+    },
+    #[cfg(unix)]
+    WorkspaceTmux {
+        #[arg(long)]
+        directory: PathBuf,
+        #[arg(long)]
+        name: String,
+        #[arg(last = true)]
+        arguments: Vec<OsString>,
+    },
+    /// Join a terminal invitation without enrollment or an installed core.
+    Join {
+        url: String,
+        #[arg(long,value_enum,default_value_t=GuestTransport::Ssh)]
+        transport: GuestTransport,
+    },
+    #[cfg(unix)]
+    #[command(name = "__porthub-join", hide = true)]
+    ManagedJoin {
+        #[arg(long)]
+        request: PathBuf,
+    },
+    #[cfg(unix)]
+    /// Attach to a saved local workspace; Ctrl+A then D detaches.
+    Attach {
+        #[arg(long)]
+        directory: PathBuf,
+        #[arg(long)]
+        name: String,
+        #[arg(long,value_enum,default_value_t=porthub_terminal_cli::owner::Sidebar::Off)]
+        sidebar: porthub_terminal_cli::owner::Sidebar,
+    },
+    #[cfg(unix)]
+    #[command(hide = true)]
+    Terminal {
+        #[command(subcommand)]
+        command: OwnerCommand,
+    },
+    /// Create a persistent local workspace without a core agent or gateway.
+    New {
+        #[arg(long)]
+        directory: PathBuf,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        #[arg(long)]
+        shell: Option<PathBuf>,
+        #[arg(long = "env")]
+        environment: Vec<String>,
+        #[arg(long, default_value = "C-a")]
+        prefix: String,
+        #[arg(long, default_value_t = 100000)]
+        history_limit: u32,
+        #[arg(long)]
+        no_mouse: bool,
+        #[arg(last = true)]
+        command: Vec<OsString>,
+    },
+    /// Install and verify the bundled runtime in a private directory.
+    Runtime {
+        #[arg(long)]
+        directory: PathBuf,
+    },
+    /// Run bundled tmux; use its new-session, attach, list-sessions and kill-session commands.
+    Tmux {
+        #[arg(long)]
+        directory: Option<PathBuf>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<OsString>,
+    },
+    #[command(name = "__porthub-worker", hide = true)]
+    Worker {
+        #[arg(long)]
+        endpoint: String,
+    },
+    #[command(name = "__porthub-stdio", hide = true)]
+    Stdio,
+}
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum GuestTransport {
+    Ssh,
+    Relay,
+    Auto,
+}
+async fn join(request: porthub_components::protocol::terminal::JoinRequest) -> Result<()> {
+    use porthub_components::protocol::terminal::JoinTransport;
+    match request.transport {
+        JoinTransport::Ssh => porthub_terminal_cli::ssh_join::join(&request.invitation).await,
+        #[cfg(all(unix, feature = "terminal-direct"))]
+        JoinTransport::Relay => {
+            porthub_terminal_cli::terminal_guest::client::join_relay(&request.invitation).await
+        }
+        #[cfg(all(unix, feature = "terminal-direct"))]
+        JoinTransport::Auto => {
+            porthub_terminal_cli::terminal_guest::client::join_auto_with_broker(
+                &request.invitation,
+                request.broker,
+                &request.stun_servers,
+            )
+            .await
+        }
+        #[cfg(not(all(unix, feature = "terminal-direct")))]
+        _ => anyhow::bail!("native terminal guest transport is unavailable; use SSH"),
+    }
+}
+#[cfg(unix)]
+#[derive(Subcommand)]
+enum OwnerCommand {
+    #[command(name = "__serve", hide = true)]
+    Serve { root: PathBuf, id: String },
+    #[command(name = "__participants-popup", hide = true)]
+    Popup {
+        root: PathBuf,
+        id: String,
+        client: u32,
+    },
+    #[command(name = "__participants-view", hide = true)]
+    View {
+        root: PathBuf,
+        id: String,
+        #[arg(long)]
+        sidebar: bool,
+    },
+}
+#[tokio::main(worker_threads = 2)]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+    let cancel = CancellationToken::new();
+    let stopped = cancel.clone();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        stopped.cancel();
+    });
+    let hello = Hello {
+        component: Component::Terminal,
+        protocol: PROTOCOL,
+        version: porthub_terminal_cli::VERSION.parse()?,
+    };
+    match args.command {
+        #[cfg(unix)]
+        Command::List { directory, all } => {
+            let mut rows = vec![];
+            let mut offset = 0;
+            loop {
+                let Value::Workspaces { rows: page, next } =
+                    porthub_terminal_cli::workspace::list(&directory, all, offset)?
+                else {
+                    anyhow::bail!("invalid terminal listing")
+                };
+                rows.extend(page);
+                let Some(next) = next else {
+                    break;
+                };
+                offset = next;
+            }
+            println!("{}", serde_json::to_string(&rows)?);
+        }
+        #[cfg(unix)]
+        Command::Stop { directory, name } => {
+            println!(
+                "Stopped {}",
+                porthub_terminal_cli::workspace::stop(&directory, &name)?
+            );
+        }
+        #[cfg(unix)]
+        Command::Rename {
+            directory,
+            name,
+            new_name,
+        } => {
+            println!(
+                "{}",
+                serde_json::to_string(&porthub_terminal_cli::workspace::rename(
+                    &directory, &name, &new_name
+                )?)?
+            );
+        }
+        #[cfg(unix)]
+        Command::WorkspaceTmux {
+            directory,
+            name,
+            arguments,
+        } => porthub_terminal_cli::workspace::tmux(&directory, &name, &arguments)?,
+        Command::Join { url, transport } => {
+            use porthub_components::protocol::terminal::{JoinRequest, JoinTransport};
+            join(JoinRequest {
+                invitation: url,
+                transport: match transport {
+                    GuestTransport::Ssh => JoinTransport::Ssh,
+                    GuestTransport::Relay => JoinTransport::Relay,
+                    GuestTransport::Auto => JoinTransport::Auto,
+                },
+                broker: None,
+                stun_servers: vec![],
+            })
+            .await?;
+        }
+        #[cfg(unix)]
+        Command::ManagedJoin { request } => {
+            let request: porthub_components::protocol::terminal::JoinRequest =
+                serde_json::from_slice(&porthub_terminal_cli::read_join_request(&request)?)?;
+            let owner_closed = async {
+                let Some(parent) = std::env::var("PORTHUB_COMPONENT_OWNER_PID").ok() else {
+                    std::future::pending::<()>().await;
+                    return;
+                };
+                let parent = parent.parse::<u32>().unwrap_or(0);
+                loop {
+                    if unsafe { libc::getppid() } as u32 != parent {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            };
+            tokio::select! {biased; _=owner_closed=>{},result=join(request)=>result?,}
+        }
+        #[cfg(unix)]
+        Command::Attach {
+            directory,
+            name,
+            sidebar,
+        } => porthub_terminal_cli::owner::attach(&directory, &name, sidebar)?,
+        #[cfg(unix)]
+        Command::Terminal { command } => match command {
+            OwnerCommand::Serve { root, id } => {
+                let parent = std::env::var("PORTHUB_COMPONENT_OWNER_PID")
+                    .ok()
+                    .map(|value| value.parse::<u32>())
+                    .transpose()?;
+                let parent_closed = async {
+                    let Some(parent) = parent else {
+                        std::future::pending::<()>().await;
+                        return;
+                    };
+                    loop {
+                        if unsafe { libc::getppid() } as u32 != parent {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                };
+                tokio::select! {biased;
+                    _=cancel.cancelled()=>{}, _=parent_closed=>{},
+                    result=porthub_terminal_cli::sharing::serve(&root,&id)=>result?,
+                }
+            }
+            OwnerCommand::Popup { root, id, client } => {
+                porthub_terminal_cli::owner::popup(&root, &id, client)?
+            }
+            OwnerCommand::View { root, id, sidebar } => {
+                porthub_terminal_cli::owner::view(&root, &id, sidebar).await?
+            }
+        },
+        Command::New {
+            directory,
+            name,
+            cwd,
+            shell,
+            environment,
+            prefix,
+            history_limit,
+            no_mouse,
+            command,
+        } => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let directory = if directory.is_absolute() {
+                    directory
+                } else {
+                    std::env::current_dir()?.join(directory)
+                };
+                if !directory.exists() {
+                    porthub_terminal::multiplexer::create_directory(&directory)?;
+                }
+                let shell = shell
+                    .or_else(|| {
+                        ["/bin/bash", "/usr/bin/bash"]
+                            .into_iter()
+                            .map(PathBuf::from)
+                            .find(|path| {
+                                std::fs::metadata(path).is_ok_and(|metadata| {
+                                    metadata.is_file() && metadata.mode() & 0o111 != 0
+                                })
+                            })
+                    })
+                    .or_else(|| std::env::var_os("SHELL").map(PathBuf::from))
+                    .unwrap_or_else(|| PathBuf::from("/bin/sh"));
+                let options = porthub_components::protocol::terminal::CreateOptions {
+                    name,
+                    cwd: cwd.unwrap_or(std::env::current_dir()?).canonicalize()?,
+                    shell,
+                    environment,
+                    prefix,
+                    history_limit,
+                    no_mouse,
+                    command,
+                    inherited_environment: std::env::vars_os().collect(),
+                };
+                let job = porthub_terminal_cli::workspace::create(&directory, options, false)?;
+                println!("{}", serde_json::to_string(&job)?);
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (
+                    directory,
+                    name,
+                    cwd,
+                    shell,
+                    environment,
+                    prefix,
+                    history_limit,
+                    no_mouse,
+                    command,
+                );
+                anyhow::bail!("terminal hosting requires Unix; use WSL on Windows")
+            }
+        }
+        Command::Worker { endpoint } => {
+            rpc::serve(
+                Endpoint::parse(Component::Terminal, &endpoint)?,
+                hello,
+                Arc::new(porthub_terminal_cli::Worker),
+                cancel,
+            )
+            .await?
+        }
+        Command::Stdio => {
+            rpc::serve_stdio(hello, Arc::new(porthub_terminal_cli::Worker), cancel).await?
+        }
+        Command::Runtime { directory } => {
+            let Value::Runtime {
+                executable,
+                terminfo,
+                version,
+            } = porthub_terminal_cli::install(&directory)?
+            else {
+                anyhow::bail!("invalid runtime response")
+            };
+            println!(
+                "Runtime {version}\nExecutable: {}\nTerminfo: {}",
+                executable.display(),
+                terminfo.display()
+            );
+        }
+        Command::Tmux {
+            directory,
+            arguments,
+        } => {
+            let directory = directory
+                .or_else(|| {
+                    directories::BaseDirs::new()
+                        .map(|base| base.data_local_dir().join("porthub-terminal/runtimes"))
+                })
+                .context("cannot find terminal storage; specify --directory")?;
+            let Value::Runtime {
+                executable,
+                terminfo,
+                ..
+            } = porthub_terminal_cli::install(&directory)?
+            else {
+                anyhow::bail!("invalid runtime response")
+            };
+            let mut child = tokio::process::Command::new(executable)
+                .args(arguments)
+                .env("TERMINFO", terminfo)
+                .kill_on_drop(true)
+                .spawn()?;
+            anyhow::ensure!(
+                child.wait().await?.success(),
+                "tmux command exited unsuccessfully"
+            );
+        }
+    }
+    Ok(())
+}

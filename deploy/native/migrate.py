@@ -7,7 +7,6 @@ the identified PortHub container, takes a cold backup, and rolls back on failure
 """
 import argparse
 import datetime
-import fcntl
 import hashlib
 import io
 import json
@@ -305,6 +304,7 @@ def main():
         return
     if os.geteuid() != 0:
         raise RuntimeError("administrator access is required for state ownership migration")
+    import fcntl  # POSIX-only deployment operation; artifact validation is portable.
     lock = os.open(root / ".migration.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")

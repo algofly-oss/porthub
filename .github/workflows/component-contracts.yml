@@ -1,0 +1,165 @@
+name: Component contracts and downloads
+on:
+  push:
+    branches: [main, codex/on-demand-components]
+    paths:
+      - 'crates/porthub-components/**'
+      - 'deploy/components.toml'
+      - 'deploy/component-platforms.toml'
+      - 'scripts/component-build-plan.py'
+      - 'scripts/test_component_build_plan.py'
+      - 'scripts/package-components.py'
+      - 'scripts/test_package_components.py'
+      - 'scripts/recover-component-builds.py'
+      - 'scripts/test_recover_component_builds.py'
+      - 'scripts/build-component-platform.py'
+      - 'scripts/test_build_component_platform.py'
+      - 'scripts/prepare-release.py'
+      - 'scripts/test_prepare_release.py'
+      - 'scripts/fetch-component-release.py'
+      - 'scripts/test_fetch_component_release.py'
+      - 'scripts/assemble-client-release.py'
+      - 'scripts/test_assemble_client_release.py'
+      - 'scripts/prepare-packaged-component-checks.py'
+      - 'scripts/test_prepare_packaged_component_checks.py'
+      - 'scripts/verify-static-components.py'
+      - 'scripts/test_verify_static_components.py'
+      - 'scripts/publish-release.py'
+      - 'crates/porthub-sync/**'
+      - 'crates/porthub-tor/**'
+      - 'crates/porthub-stats/**'
+      - 'scripts/test-stats-cli-fallback.py'
+      - 'scripts/test-terminal-workspace-helper.py'
+      - 'scripts/check-core-component-boundaries.py'
+      - 'crates/porthub-console/**'
+      - 'crates/porthub-terminal-cli/**'
+      - 'crates/porthub-egress/**'
+      - 'crates/porthub-transfer/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/component-contracts.yml'
+  pull_request:
+    paths:
+      - 'crates/porthub-components/**'
+      - 'deploy/components.toml'
+      - 'deploy/component-platforms.toml'
+      - 'scripts/component-build-plan.py'
+      - 'scripts/test_component_build_plan.py'
+      - 'scripts/package-components.py'
+      - 'scripts/test_package_components.py'
+      - 'scripts/recover-component-builds.py'
+      - 'scripts/test_recover_component_builds.py'
+      - 'scripts/build-component-platform.py'
+      - 'scripts/test_build_component_platform.py'
+      - 'scripts/prepare-release.py'
+      - 'scripts/test_prepare_release.py'
+      - 'scripts/fetch-component-release.py'
+      - 'scripts/test_fetch_component_release.py'
+      - 'scripts/assemble-client-release.py'
+      - 'scripts/test_assemble_client_release.py'
+      - 'scripts/prepare-packaged-component-checks.py'
+      - 'scripts/test_prepare_packaged_component_checks.py'
+      - 'scripts/verify-static-components.py'
+      - 'scripts/test_verify_static_components.py'
+      - 'scripts/publish-release.py'
+      - 'crates/porthub-sync/**'
+      - 'crates/porthub-tor/**'
+      - 'crates/porthub-stats/**'
+      - 'scripts/test-stats-cli-fallback.py'
+      - 'scripts/test-terminal-workspace-helper.py'
+      - 'scripts/check-core-component-boundaries.py'
+      - 'crates/porthub-console/**'
+      - 'crates/porthub-terminal-cli/**'
+      - 'crates/porthub-egress/**'
+      - 'crates/porthub-transfer/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/component-contracts.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: component-contracts-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+jobs:
+  contracts:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check whether native Rust inputs changed
+        id: native_changes
+        shell: bash
+        env:
+          PORTHUB_PREVIOUS_REVISION: ${{ github.event.before || '' }}
+        run: |
+          before_revision="$PORTHUB_PREVIOUS_REVISION"
+          changed=true
+          if [[ "$before_revision" =~ ^[a-f0-9]{40}$ ]] && [[ "$before_revision" != 0000000000000000000000000000000000000000 ]]; then
+            if git cat-file -e "$before_revision^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "$before_revision" >/dev/null 2>&1; then
+              if git diff --quiet "$before_revision" HEAD -- Cargo.toml Cargo.lock rust-toolchain.toml .cargo vendor crates/porthub-components crates/porthub-sync crates/porthub-tor crates/porthub-stats crates/porthub-console crates/porthub-terminal-cli crates/porthub-transfer crates/porthub-egress .github/workflows/component-contracts.yml; then
+                changed=false
+              fi
+            fi
+          fi
+          echo "rust=$changed" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Verify dependency-aware component build selection
+        shell: bash
+        run: |
+          python scripts/test_component_build_plan.py
+          python scripts/test_package_components.py
+          python scripts/test_recover_component_builds.py
+          python scripts/test_build_component_platform.py
+          python scripts/test_prepare_release.py
+          python scripts/test_fetch_component_release.py
+          python scripts/test_assemble_client_release.py
+          python scripts/test_prepare_packaged_component_checks.py
+          python scripts/test_verify_static_components.py
+      - name: Install pinned Rust toolchain
+        if: steps.native_changes.outputs.rust == 'true'
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        if: steps.native_changes.outputs.rust == 'true'
+        with:
+          key: components-${{ runner.arch }}
+      - name: Build a newer independent sync candidate for activation checks
+        if: steps.native_changes.outputs.rust == 'true'
+        shell: bash
+        run: |
+          PORTHUB_COMPONENT_VERSION=0.1.1 cargo build --locked -p porthub-sync
+          extension=""
+          if [ "$RUNNER_OS" = "Windows" ]; then extension=".exe"; fi
+          candidate="$RUNNER_TEMP/porthub-sync-candidate$extension"
+          cp "target/debug/porthub-sync$extension" "$candidate"
+          echo "PORTHUB_TEST_UPDATED_SYNC_EXECUTABLE=$candidate" >> "$GITHUB_ENV"
+      - name: Verify core excludes optional worker implementations
+        if: steps.native_changes.outputs.rust == 'true'
+        run: python3 scripts/check-core-component-boundaries.py
+      - name: Test compatibility, download verification and IPC limits
+        if: steps.native_changes.outputs.rust == 'true'
+        run: cargo test --locked -p porthub-components -p porthub-sync -- --include-ignored
+      - name: Verify independent Tor worker and source-policy lifecycle
+        if: steps.native_changes.outputs.rust == 'true'
+        run: cargo test --locked -p porthub-tor
+      - name: Verify standalone stats dashboard and shared console
+        if: steps.native_changes.outputs.rust == 'true'
+        run: cargo test --locked -p porthub-stats -p porthub-console
+      - name: Verify independent terminal runtime interface
+        if: steps.native_changes.outputs.rust == 'true'
+        run: cargo test --locked -p porthub-terminal-cli
+      - name: Verify transfers compile and run without watch synchronization
+        if: steps.native_changes.outputs.rust == 'true'
+        run: cargo test --locked -p porthub-transfer --no-default-features

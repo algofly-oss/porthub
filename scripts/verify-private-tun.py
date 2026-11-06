@@ -12,7 +12,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 environment = {**os.environ, "CARGO_BUILD_JOBS": "8", "CARGO_PROFILE_TEST_DEBUG": "0", "CARGO_PROFILE_DEV_DEBUG": "0"}
 tests = {
     "private_packets": ["owned_linux_tun_routes_kernel_udp_packets_and_cleans_up", "owned_exit_nat_preserves_global_forwarding_and_cleans_up", "owned_exit_consumer_routes_new_connections_and_preserves_underlay_sockets", "owned_exit_ipv6_guard_blocks_new_internet_connections_and_restores_routes"],
-    "porthub_agent": ["private_network::interfaces::tests::kernel_events_refresh_underlay_addresses_and_ignore_owned_overlay_links"],
+    "porthub_agent": ["private_network::interfaces::tests::kernel_events_refresh_underlay_addresses_and_ignore_owned_overlay_links", "outbound::namespace_tests::source_policy_interface_changes_and_gateway_metrics_are_respected"],
 }
 with tempfile.TemporaryFile(mode="w+") as output:
     build = subprocess.run([str(pathlib.Path.home()/".cargo/bin/cargo"), "test", "-p", "porthub-agent", "--features", "netns-tests", "--lib", "--test", "private_packets", "--no-run", "--message-format=json"], cwd=ROOT, env=environment, stdout=output)

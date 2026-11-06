@@ -62,7 +62,7 @@ pub(crate) struct Snapshot {
     expires_at: u64,
 }
 impl Snapshot {
-    #[cfg(any(test, all(unix, feature = "terminal-direct")))]
+    #[cfg(test)]
     fn valid(&self, now: u64) -> bool {
         self.allowed && self.expires_at > now && self.expires_at.saturating_sub(now) <= 4
     }
@@ -94,105 +94,6 @@ pub(crate) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
             },
         }
     }
-}
-
-#[cfg(all(unix, feature = "terminal-direct"))]
-pub(crate) struct Permission {
-    pub receiver: tokio::sync::watch::Receiver<Snapshot>,
-    _task: tokio_util::task::AbortOnDropHandle<()>,
-}
-#[cfg(all(unix, feature = "terminal-direct"))]
-impl Permission {
-    pub fn guard(&self) -> std::sync::Arc<dyn Fn() -> bool + Send + Sync> {
-        let receiver = self.receiver.clone();
-        std::sync::Arc::new(move || {
-            receiver.has_changed().is_ok() && now().is_ok_and(|now| receiver.borrow().valid(now))
-        })
-    }
-    pub fn allowed(&self) -> bool {
-        self.receiver.has_changed().is_ok()
-            && now().is_ok_and(|now| self.receiver.borrow().valid(now))
-    }
-}
-#[cfg(all(unix, feature = "terminal-direct"))]
-pub(crate) async fn subscribe(layout: &crate::service::Layout, id: &str) -> Result<Permission> {
-    let mut stream = tokio::time::timeout(
-        Duration::from_secs(3),
-        crate::exposure_broker::connect_stream(layout, id),
-    )
-    .await??;
-    tokio::time::timeout(
-        Duration::from_secs(3),
-        stream.write_all(b"{\"operation\":\"terminal_guest_policy\"}\n"),
-    )
-    .await??;
-    monitor(BufReader::new(stream)).await
-}
-#[cfg(all(unix, feature = "terminal-direct"))]
-async fn monitor<S: AsyncRead + Unpin + Send + 'static>(
-    mut reader: BufReader<S>,
-) -> Result<Permission> {
-    let bytes = tokio::time::timeout(
-        Duration::from_secs(3),
-        crate::exposure_protocol::line(&mut reader),
-    )
-    .await??;
-    let snapshot: Snapshot = serde_json::from_slice(&bytes)?;
-    anyhow::ensure!(
-        snapshot.valid(now()?),
-        "native terminal direct permission unavailable"
-    );
-    let (send, receiver) = tokio::sync::watch::channel(snapshot);
-    let task = tokio::spawn(async move {
-        let mut snapshot = snapshot;
-        loop {
-            let valid = async {
-                let expiry = UNIX_EPOCH
-                    .checked_add(Duration::from_secs(snapshot.expires_at))
-                    .ok_or_else(|| anyhow::anyhow!("invalid terminal policy expiry"))?;
-                let remaining = expiry.duration_since(SystemTime::now())?;
-                anyhow::ensure!(!remaining.is_zero(), "terminal policy expired");
-                let bytes =
-                    tokio::time::timeout(remaining, crate::exposure_protocol::line(&mut reader))
-                        .await??;
-                snapshot = serde_json::from_slice(&bytes)?;
-                anyhow::ensure!(snapshot.valid(now()?), "terminal policy revoked");
-                send.send(snapshot)
-                    .map_err(|_| anyhow::anyhow!("terminal policy subscriber closed"))?;
-                Ok::<_, anyhow::Error>(())
-            }
-            .await;
-            if valid.is_err() {
-                let _ = send.send(Snapshot {
-                    allowed: false,
-                    expires_at: 0,
-                });
-                return;
-            }
-        }
-    });
-    Ok(Permission {
-        receiver,
-        _task: tokio_util::task::AbortOnDropHandle::new(task),
-    })
-}
-
-#[cfg(all(test, unix, feature = "terminal-direct"))]
-pub(crate) async fn test_permission() -> Result<(Permission, tokio::io::DuplexStream)> {
-    let (mut writer, reader) = tokio::io::duplex(16384);
-    writer
-        .write_all(
-            format!(
-                "{}\n",
-                serde_json::to_string(&Snapshot {
-                    allowed: true,
-                    expires_at: now()? + 4
-                })?
-            )
-            .as_bytes(),
-        )
-        .await?;
-    Ok((monitor(BufReader::new(reader)).await?, writer))
 }
 
 #[cfg(test)]
@@ -227,38 +128,7 @@ mod tests {
         )
         .is_err());
     }
-    #[cfg(all(unix, feature = "terminal-direct"))]
-    #[tokio::test]
-    async fn policy_subscription_revokes_on_denial_disconnect_and_invalid_messages() -> Result<()> {
-        for next in [
-            None,
-            Some(serde_json::json!({"allowed":false,"expires_at":now()?+4})),
-            Some(serde_json::json!({"allowed":true,"expires_at":now()?+100})),
-        ] {
-            let (mut writer, reader) = tokio::io::duplex(16384);
-            writer
-                .write_all(
-                    format!(
-                        "{}\n",
-                        serde_json::to_string(&Snapshot {
-                            allowed: true,
-                            expires_at: now()? + 4
-                        })?
-                    )
-                    .as_bytes(),
-                )
-                .await?;
-            let mut permission = monitor(BufReader::new(reader)).await?;
-            assert!(permission.allowed());
-            if let Some(next) = next {
-                writer.write_all(format!("{next}\n").as_bytes()).await?;
-            }
-            drop(writer);
-            tokio::time::timeout(Duration::from_secs(1), permission.receiver.changed()).await??;
-            assert!(!permission.allowed());
-        }
-        Ok(())
-    }
+
     fn fixture() -> Result<(
         crate::profile::Lease,
         tempfile::TempDir,
@@ -348,29 +218,7 @@ mod tests {
         assert!(!guest_allowed(&path, &public));
         Ok(())
     }
-    #[cfg(all(unix, feature = "terminal-direct"))]
-    #[tokio::test(start_paused = true)]
-    async fn silent_broker_cannot_leave_direct_permission_enabled() -> Result<()> {
-        let (mut writer, reader) = tokio::io::duplex(16384);
-        writer
-            .write_all(
-                format!(
-                    "{}\n",
-                    serde_json::to_string(&Snapshot {
-                        allowed: true,
-                        expires_at: now()? + 4
-                    })?
-                )
-                .as_bytes(),
-            )
-            .await?;
-        let mut permission = monitor(BufReader::new(reader)).await?;
-        assert!(permission.allowed());
-        permission.receiver.changed().await?;
-        assert!(!permission.allowed());
-        drop(writer);
-        Ok(())
-    }
+
     #[cfg(all(unix, feature = "terminal-direct"))]
     #[tokio::test]
     async fn broker_stream_is_scoped_and_revokes_after_paired_policy_becomes_unknown() -> Result<()>
@@ -389,11 +237,18 @@ mod tests {
             )
             .await
         }));
-        let mut permission = monitor(BufReader::new(client)).await?;
-        assert!(permission.allowed());
+        let mut reader = BufReader::new(client);
+        let first = crate::exposure_protocol::line(&mut reader).await?;
+        let first: Snapshot = serde_json::from_slice(&first)?;
+        assert!(first.valid(now()?));
         crate::profile::write_private(&corrupt, b"unknown paired configuration", true)?;
-        tokio::time::timeout(Duration::from_secs(3), permission.receiver.changed()).await??;
-        assert!(!permission.allowed());
+        let next = tokio::time::timeout(
+            Duration::from_secs(3),
+            crate::exposure_protocol::line(&mut reader),
+        )
+        .await??;
+        let next: Snapshot = serde_json::from_slice(&next)?;
+        assert!(!next.allowed);
         task.await??;
         Ok(())
     }

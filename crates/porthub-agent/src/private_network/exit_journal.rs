@@ -42,6 +42,9 @@ impl Journal {
         file.persist(PATH)?;
         Ok(())
     }
+    pub(super) fn allows_underlay(index: u32, source: std::net::IpAddr) -> bool {
+        Self::load().ok().flatten().is_some_and(|journal| journal.index == index && journal.sources.iter().any(|(ip,_)|std::net::IpAddr::V4(*ip)==source))
+    }
     fn load() -> Result<Option<Self>> {
         let file = match OpenOptions::new()
             .read(true)

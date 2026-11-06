@@ -86,7 +86,7 @@ impl Policy {
             + snapshot
                 .expires_at
                 .signed_duration_since(chrono::Utc::now())
-                .to_std()?;
+                .to_std().map_err(|_| anyhow::anyhow!("private policy lease expired; check host clock synchronization and gateway connectivity"))?;
         for grant in &snapshot.grants {
             if grant.protocol != "tcp" && grant.protocol != "any" {
                 continue;

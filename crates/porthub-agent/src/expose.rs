@@ -365,6 +365,16 @@ fn print_session(session: &Session) {
     println!("Exposure ID: {}", &session.id[..12]);
 }
 
+pub(crate) fn select_registration(layout:&crate::service::Layout,selector:Option<&str>)->Result<crate::service::readable::Record> {
+    select_registration_in(layout,selector,crate::os_info::is_wsl())
+}
+fn select_registration_in(layout:&crate::service::Layout,selector:Option<&str>,wsl:bool)->Result<crate::service::readable::Record> {
+    crate::service::readable::select(layout,selector,Some(false)).with_context(|| {
+        if wsl {"Cannot select a WSL exposure registration. Run the Linux installer and start PortHub inside this WSL distribution; Windows and other WSL distributions have separate registrations. Check porthub ls here, and use --user for a user installation."}
+        else {"Cannot select an exposure registration. Check porthub ls and start the registration; use --user for a user installation."}
+    })
+}
+
 #[cfg(any(unix, windows))]
 pub async fn start_registered(
     user: bool,
@@ -380,8 +390,7 @@ pub async fn start_registered(
     } else {
         crate::service::Layout::system()?
     };
-    let registration =
-        crate::service::readable::select(&registration_layout, selector, Some(false))?;
+    let registration=select_registration(&registration_layout,selector)?;
     let id = uuid::Uuid::new_v4().simple().to_string();
     if !detach {
         return broker_worker(
@@ -482,4 +491,17 @@ pub fn print_ready_for_pid(pid: u32, port: u16) -> Result<bool> {
         return Ok(true);
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod exposure_selection_tests {
+    use super::*;
+    #[test]
+    fn missing_wsl_registration_explains_the_linux_windows_boundary_without_starting_a_server()->Result<()> {
+        let root=tempfile::tempdir()?;
+        let layout=crate::service::Layout {user:false,state:root.path().join("state"),releases:root.path().join("releases"),units:root.path().join("units")};
+        let error=select_registration_in(&layout,None,true).unwrap_err().to_string();
+        assert!(error.contains("inside this WSL distribution"));assert!(error.contains("Windows and other WSL distributions"));assert!(error.contains("porthub ls"));
+        assert!(!layout.state.exists());Ok(())
+    }
 }

@@ -47,12 +47,16 @@ impl Reply {
     }
 }
 pub struct Control {
+    #[cfg(test)]
+    test_paths: Option<Vec<crate::outbound::Candidate>>,
     profile: Profile,
+    outbound_settings: crate::outbound::Settings,
+    path_state: tokio::sync::Mutex<std::collections::HashMap<String,crate::outbound::Selection>>,
     private_peer_id: Option<String>,
     http: reqwest::Client,
     preferred: Mutex<Option<(String, Instant)>>,
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    underlay: tokio::sync::Mutex<Option<(std::net::IpAddr, reqwest::Client, Instant)>>,
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    underlay: tokio::sync::Mutex<Option<(crate::outbound::Candidate, reqwest::Client, Instant, String)>>,
 }
 impl Control {
     pub fn new(mut profile: Profile) -> anyhow::Result<Self> {
@@ -65,51 +69,66 @@ impl Control {
             .timeout(Duration::from_secs(40))
             .build()?;
         Ok(Self {
+            #[cfg(test)]
+            test_paths: None,
             profile,
+            outbound_settings: crate::outbound::Settings::from_env()?,
+            path_state: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             private_peer_id: None,
             http,
             preferred: Mutex::new(None),
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
             underlay: tokio::sync::Mutex::new(None),
         })
     }
-    /// Control traffic must not inherit an application exit route. Binding a
-    /// physical source selects the consumer's preserved main-table source rule.
+    /// Bind only to sources permitted by the kernel-selected egress policy.
     /// Refresh lazily: no timer or discovery work runs while control is idle.
-    async fn http_for(&self, base: &str) -> Result<reqwest::Client, Failure> {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn http_for(&self, base: &str) -> Result<(reqwest::Client, Option<crate::outbound::Candidate>), Failure> {
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         {
             let loopback = url::Url::parse(base).ok().and_then(|url| url.host_str().map(str::to_owned))
                 .is_some_and(|host| host == "localhost" || host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback()));
-            if loopback { return Ok(self.http.clone()); }
+            #[cfg(test)]
+            let loopback = loopback && self.test_paths.is_none();
+            if loopback { return Ok((self.http.clone(), None)); }
             let mut cached = self.underlay.lock().await;
-            if let Some((_, client, until)) = &*cached {
-                if Instant::now() < *until { return Ok(client.clone()); }
+            if let Some((candidate, client, until, authority)) = &*cached {
+                if authority == base && Instant::now() < *until { return Ok((client.clone(), Some(candidate.clone()))); }
             }
-            let addresses = crate::private_network::interfaces::current().await.map_err(|_| Failure::Unavailable)?;
-            let local = addresses.first().ok_or(Failure::Unavailable)?.ip();
-            if let Some((previous, client, until)) = cached.as_mut() {
-                if *previous == local {
-                    *until = Instant::now() + Duration::from_secs(30);
-                    return Ok(client.clone());
-                }
-            }
-            let builder = reqwest::Client::builder().local_address(local);
+            if self.outbound_settings.system { return Ok((self.http.clone(), None)); }
+            let url = url::Url::parse(base).map_err(|_| Failure::Unavailable)?;
+            let host = url.host_str().ok_or(Failure::Unavailable)?;
+            let port = url.port_or_known_default().ok_or(Failure::Unavailable)?;
+            let destinations: Vec<_> = tokio::time::timeout(Duration::from_secs(3), tokio::net::lookup_host((host.trim_matches(['[',']']),port))).await
+                .map_err(|_| Failure::Unavailable)?.map_err(|_| Failure::Unavailable)?.take(16).collect();
+            let candidates = tokio::time::timeout(Duration::from_secs(2), crate::outbound::discover(&self.outbound_settings,&destinations)).await
+                .map_err(|_| Failure::Unavailable)?.map_err(|_| Failure::Unavailable)?;
+            #[cfg(test)]
+            let candidates = self.test_paths.clone().unwrap_or(candidates);
+            let mut state = self.path_state.lock().await;
+            let candidate = state.entry(base.to_owned()).or_default().order(&candidates,Instant::now()).into_iter().next().ok_or(Failure::Unavailable)?;
+            let local = candidate.source;
+            let destination = candidate.destination;
+            let builder = reqwest::Client::builder().local_address(local).resolve_to_addrs(host, &[destination]);
             #[cfg(target_os = "macos")]
             let builder = builder.interface(&porthub_mesh::underlay::interface_name(local).map_err(|_| Failure::Unavailable)?);
             let client = builder.redirect(reqwest::redirect::Policy::none())
                 .pool_max_idle_per_host(2).pool_idle_timeout(Duration::from_secs(60))
                 .connect_timeout(Duration::from_secs(3)).timeout(Duration::from_secs(40))
                 .build().map_err(|_| Failure::Unavailable)?;
-            *cached = Some((local, client.clone(), Instant::now() + Duration::from_secs(30)));
-            return Ok(client);
+            *cached = Some((candidate.clone(), client.clone(), Instant::now() + Duration::from_secs(30), base.to_owned()));
+            return Ok((client, Some(candidate)));
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        { let _ = base; Ok(self.http.clone()) }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        { let _ = base; Ok((self.http.clone(), None)) }
     }
-    async fn refresh_underlay(&self) {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        if let Some((_, _, until)) = self.underlay.lock().await.as_mut() { *until = Instant::now(); }
+    async fn refresh_underlay(&self, base: &str, failed: Option<&crate::outbound::Candidate>) {
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+        {
+            if let Some((_, _, until, _)) = self.underlay.lock().await.as_mut() { *until = Instant::now(); }
+            let mut state = self.path_state.lock().await;
+            if let Some(candidate) = failed { state.entry(base.to_owned()).or_default().failure(candidate, Instant::now()); }
+        }
     }
     pub fn new_private(profile: &crate::private_profile::Profile) -> anyhow::Result<Self> {
         let mut control = Self::new(profile.control_profile())?;
@@ -125,13 +144,20 @@ impl Control {
     #[cfg(feature="local-tor")]
     pub(crate) async fn proxy_check(&self,private:&crate::private_profile::Profile,grant:&str)->Result<bool,Failure> {
         let mut failure=Failure::Unavailable;
-        for base in self.authorities() {
-            let Ok(http)=self.http_for(&base).await else {continue;};
+        'proxy_authorities: for base in self.authorities() {
+          for _ in 0..8 {
+            let Ok((http,candidate))=self.http_for(&base).await else {continue 'proxy_authorities;};
             let response=http.get(format!("{base}/api/access/proxy-check/{grant}"))
                 .header("x-porthub-peer",&private.peer_id).bearer_auth(&private.token)
                 .timeout(Duration::from_secs(5)).send().await;
-            let Ok(mut response)=response else {continue;};
-            if !response.status().is_success() {failure=Failure::Rejected(response.status().as_u16());continue;}
+            let mut response=match response {
+                Ok(response)=>response,
+                Err(_)=>{self.refresh_underlay(&base,candidate.as_ref()).await;if candidate.is_some(){continue;}continue 'proxy_authorities;}
+            };
+            if !response.status().is_success() {
+                if matches!(response.status().as_u16(),401|403) {return Err(Failure::Rejected(response.status().as_u16()));}
+                failure=Failure::Rejected(response.status().as_u16());continue 'proxy_authorities;
+            }
             let mut bytes=Vec::new();
             loop {
                 match response.chunk().await {
@@ -141,8 +167,10 @@ impl Control {
                 }
             }
             let ready=serde_json::from_slice::<Value>(&bytes).ok().and_then(|value|value.get("ready").and_then(Value::as_bool)).ok_or(Failure::InvalidResponse)?;
+            if let Some(candidate)=candidate {self.path_state.lock().await.entry(base.clone()).or_default().success(candidate);}
             self.prefer_proxy_authority(base);
             return Ok(ready);
+          }
         }
         Err(failure)
     }
@@ -152,15 +180,17 @@ impl Control {
         if let Some(ip)=host.and_then(|host|host.trim_matches(['[',']']).parse::<std::net::IpAddr>().ok()).filter(std::net::IpAddr::is_loopback) {
             return Ok(vec![ip]);
         }
-        #[cfg(any(target_os="linux",target_os="macos"))]
+        #[cfg(any(target_os="linux",target_os="macos",windows))]
         {
             // Reuse control's bounded underlay cache; no new discovery timer
             // or origin probe is added for application connections.
-            let _=self.http_for(base).await?;
-            if let Some((source,_,_))=&*self.underlay.lock().await { return Ok(vec![*source]); }
+            let authority = if base == self.profile.server { self.authorities().into_iter().next().unwrap_or_else(||base.to_owned()) } else { base.to_owned() };
+            let (_,candidate)=self.http_for(&authority).await?;
+            if let Some(candidate)=candidate { return Ok(vec![candidate.source]); }
+            if self.outbound_settings.system { return Ok(Vec::new()); }
             Err(Failure::Unavailable)
         }
-        #[cfg(not(any(target_os="linux",target_os="macos")))]
+        #[cfg(not(any(target_os="linux",target_os="macos",windows)))]
         {
             let sources=crate::private_network::interfaces::current().await.map_err(|_|Failure::Unavailable)?;
             if sources.is_empty() {return Err(Failure::Unavailable);}
@@ -188,7 +218,7 @@ impl Control {
         bases
     }
     pub(crate) async fn release_request(&self, base: &str, target: &str) -> Result<reqwest::RequestBuilder, Failure> {
-        Ok(self.http_for(base).await?
+        Ok(self.http_for(base).await?.0
             .get(format!("{base}/api/{}", self.release_path(Some(target))))
             .header("x-porthub-agent-protocol", "rust-v1")
             .timeout(Duration::from_secs(600)))
@@ -250,11 +280,15 @@ impl Control {
                     .map(|(key, value)| (key.as_str(), value.clone())),
             );
         }
-        for base in self.authorities() {
-            let http = self.http_for(&base).await?;
+        let deadline = Instant::now() + Duration::from_secs(45);
+        'authorities: for base in self.authorities() {
+          for _ in 0..8 {
+            if Instant::now() >= deadline { return Err(Failure::Unavailable); }
+            let (http, candidate) = match self.http_for(&base).await { Ok(path) => path, Err(_) => continue 'authorities };
             let mut request = http
                 .request(method.clone(), format!("{base}/api/{path}"))
-                .header("x-porthub-agent-protocol", "rust-v1");
+                .header("x-porthub-agent-protocol", "rust-v1")
+                .timeout(deadline.saturating_duration_since(Instant::now()).min(Duration::from_secs(40)));
             if let Some(accept) = accept {
                 request = request.header(reqwest::header::ACCEPT, accept);
             }
@@ -266,10 +300,19 @@ impl Control {
             }
             let mut response = match request.send().await {
                 Ok(response) => response,
-                Err(_) => { self.refresh_underlay().await; continue; },
+                Err(error) => {
+                    self.refresh_underlay(&base,candidate.as_ref()).await;
+                    // A connect failure happens before request transmission.
+                    // Never replay a possibly committed mutation on a timeout.
+                    if error.is_connect() || method == Method::GET || matches!(path,"machines/client/sync"|"access/private/sync") {
+                        if candidate.is_none() { continue 'authorities; }
+                        continue;
+                    }
+                    return Err(Failure::Unavailable);
+                },
             };
             if response.status().is_redirection() || response.status().is_server_error() {
-                continue;
+                continue 'authorities;
             }
             if !response.status().is_success() {
                 return Err(Failure::Rejected(response.status().as_u16()));
@@ -287,6 +330,10 @@ impl Control {
                     Err(_) => return Err(Failure::Unavailable),
                 }
             }
+            {
+                let mut state = self.path_state.lock().await;
+                if let Some(candidate) = candidate.clone() { state.entry(base.clone()).or_default().success(candidate); }
+            }
             *self.preferred.lock().unwrap_or_else(|p| p.into_inner()) =
                 Some((base, Instant::now() + Duration::from_secs(30)));
             return Ok(Reply {
@@ -294,6 +341,7 @@ impl Control {
                 headers,
                 bytes,
             });
+          }
         }
         Err(Failure::Unavailable)
     }
@@ -442,7 +490,7 @@ mod proxy_tests {
         let primary=tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let fallback=tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let origin=format!("http://{}",primary.local_addr()?);let available=format!("http://{}",fallback.local_addr()?);
-        let first=tokio::spawn(reply(primary,"403 Forbidden",""));
+        let first=tokio::spawn(reply(primary,"503 Service Unavailable",""));
         let second=tokio::spawn(reply(fallback,"200 OK",r#"{"ready":true}"#));
         let profile:Profile=serde_json::from_value(serde_json::json!({"server":origin,"machine_id":"0123456789abcdef01234567","token":"public-test-token","fallback_servers":[available.clone()],"allow_insecure_http_for_tests":true}))?;
         let private=crate::private_profile::Profile {server:profile.server.clone(),peer_id:"fixture-peer".into(),token:"private-test-token-01234567890123456789".into(),workspace:"fixture".into(),account_email:None,fallback_servers:vec![],allow_insecure_http_for_tests:true};
@@ -450,5 +498,82 @@ mod proxy_tests {
         assert!(control.proxy_check(&private,&"a".repeat(24)).await?);
         assert_eq!(control.authorities().first(),Some(&available));
         first.await??;second.await??;Ok(())
+    }
+}
+
+#[cfg(all(test,target_os="linux"))]
+mod outbound_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt,AsyncWriteExt};
+    fn control(address: std::net::SocketAddr) -> Control {
+        let profile: Profile=serde_json::from_value(serde_json::json!({"server":format!("http://{address}"),"machine_id":"0123456789abcdef01234567","token":"outbound-test-token","allow_insecure_http_for_tests":true})).unwrap();
+        let mut control=Control::new(profile).unwrap();
+        control.test_paths=Some(["192.0.2.253","127.0.0.2"].into_iter().map(|source|crate::outbound::Candidate {source:source.parse().unwrap(),interface:"fixture".into(),destination:address,gateway:None,metric:None}).collect());
+        control
+    }
+    #[tokio::test]
+    async fn actual_socket_failover_uses_another_source_and_reuses_it() -> anyhow::Result<()> {
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let control=control(listener.local_addr()?);
+        let server=tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket,peer)=listener.accept().await?;
+                anyhow::ensure!(peer.ip()=="127.0.0.2".parse::<std::net::IpAddr>()?);
+                let mut bytes=[0;4096]; let count=socket.read(&mut bytes).await?;
+                anyhow::ensure!(count>0);
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await?;
+            }
+            anyhow::Ok(())
+        });
+        for _ in 0..2 { control.request(Method::GET,"fixture",None,&[]).await?; }
+        server.await??;
+        assert_eq!(control.path_state.lock().await.get(&control.profile.server).unwrap().selected().unwrap().source,"127.0.0.2".parse::<std::net::IpAddr>()?);
+        Ok(())
+    }
+    #[tokio::test]
+    async fn rejection_stops_failover_and_never_promotes_the_path() -> anyhow::Result<()> {
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let mut control=control(listener.local_addr()?);
+        control.test_paths.as_mut().unwrap().remove(0);
+        let server=tokio::spawn(async move {
+            let (mut socket,_)=listener.accept().await?; let mut bytes=[0;4096]; socket.read(&mut bytes).await?;
+            socket.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
+            anyhow::ensure!(tokio::time::timeout(Duration::from_millis(100),listener.accept()).await.is_err());
+            anyhow::Ok(())
+        });
+        assert!(matches!(control.request(Method::GET,"fixture",None,&[]).await,Err(Failure::Rejected(403))));
+        assert!(control.path_state.lock().await.get(&control.profile.server).unwrap().selected().is_none());
+        server.await??; Ok(())
+    }
+}
+
+#[cfg(all(test,unix))]
+mod diagnostic_failure_tests {
+    use super::*;
+    #[tokio::test]
+    async fn verified_tls_rejects_an_untrusted_gateway_without_sending_credentials() -> anyhow::Result<()> {
+        let identity=rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
+        let tls=axum_server::tls_rustls::RustlsConfig::from_der(vec![identity.cert.der().to_vec()],identity.signing_key.serialize_der()).await?;
+        let listener=std::net::TcpListener::bind("127.0.0.1:0")?;
+        let address=listener.local_addr()?; listener.set_nonblocking(true)?;
+        let calls=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)); let captured=calls.clone();
+        let router=axum::Router::new().fallback(move || { let calls=captured.clone(); async move {calls.fetch_add(1,std::sync::atomic::Ordering::SeqCst);"unexpected"} });
+        let handle=axum_server::Handle::new();let shutdown=handle.clone();
+        let task=tokio::spawn(async move {axum_server::from_tcp_rustls(listener,tls)?.handle(handle).serve(router.into_make_service()).await});
+        let profile:Profile=serde_json::from_value(serde_json::json!({"server":format!("https://{address}"),"machine_id":"0123456789abcdef01234567","token":"must-never-arrive"}))?;
+        let control=Control::new(profile)?;
+        assert!(matches!(control.request(Method::GET,"fixture",None,&[]).await,Err(Failure::Unavailable)));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst),0);
+        shutdown.graceful_shutdown(Some(Duration::from_secs(1)));task.await??;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn unresolved_gateway_fails_with_a_bounded_redacted_error() -> anyhow::Result<()> {
+        let profile:Profile=serde_json::from_value(serde_json::json!({"server":"https://porthub-connectivity-test.invalid","machine_id":"0123456789abcdef01234567","token":"must-not-be-logged"}))?;
+        let control=Control::new(profile)?;
+        let result=tokio::time::timeout(Duration::from_secs(6),control.request(Method::GET,"fixture",None,&[])).await?;
+        assert!(matches!(result,Err(Failure::Unavailable)));
+        assert!(!Failure::Unavailable.to_string().contains("must-not-be-logged"));
+        Ok(())
     }
 }

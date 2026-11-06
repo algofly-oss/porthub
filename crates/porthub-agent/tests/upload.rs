@@ -8,16 +8,32 @@ use std::{
 struct Server(Child);
 impl Drop for Server {
     fn drop(&mut self) {
-        eprintln!("transfer test: stopping server process {}", self.0.id());
+        eprintln!(
+            "transfer test: stopping server process {} (prior exit: {:?})",
+            self.0.id(),
+            self.0.try_wait()
+        );
         let _ = self.0.kill();
         let _ = self.0.wait();
+        if let Some(stderr) = self.0.stderr.take() {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            let _ = stderr.take(64 * 1024).read_to_end(&mut bytes);
+            if !bytes.is_empty() {
+                eprintln!("server stderr: {}", String::from_utf8_lossy(&bytes));
+            }
+        }
         eprintln!("transfer test: server process stopped");
     }
 }
 
 fn cli(state: &Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_porthub"));
-    cmd.env("PORTHUB_STATE_DIR", state)
+    cmd.env("PORTHUB_COMPONENT_SHARED_CACHE", "off")
+        .env("PORTHUB_COMPONENT_CACHE", state.join("components"))
+        .env("PORTHUB_COMPONENT_SOURCE", "gateway")
+        .env("PORTHUB_COMPONENT_GATEWAY", "https://fixture.invalid")
+        .env("PORTHUB_STATE_DIR", state)
         .env("XDG_RUNTIME_DIR", state)
         .stdin(Stdio::null());
     cmd
@@ -45,7 +61,7 @@ async fn receiver_accepts_standard_http_uploads_and_porthub_parallel_push() {
         .args(["http.receive", &port.to_string()])
         .arg(root.path())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let mut server = Server(child);
@@ -205,6 +221,7 @@ async fn uploaded(path: &Path, expected: &[u8]) {
 #[tokio::test]
 async fn detached_watch_is_managed_after_launcher_exits_and_foreground_stops_cleanly() {
     let state = tempfile::tempdir().unwrap();
+    let _modules = ModuleFixture::prepare(state.path()).await;
     let root = tempfile::tempdir().unwrap();
     let source = state.path().join("data");
     std::fs::create_dir_all(source.join("empty/deep")).unwrap();
@@ -216,7 +233,7 @@ async fn detached_watch_is_managed_after_launcher_exits_and_foreground_stops_cle
         .args(["http.receive", &port.to_string()])
         .arg(root.path())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let _receiver = Server(receiver);
@@ -293,7 +310,7 @@ async fn detached_watch_is_managed_after_launcher_exits_and_foreground_stops_cle
         .arg(format!("{base}foreground/"))
         .arg("-w")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let mut foreground = Server(child);
@@ -320,5 +337,171 @@ async fn detached_watch_is_managed_after_launcher_exits_and_foreground_stops_cle
         })
         .await
         .unwrap();
+    }
+}
+
+// An installed core downloads watch support rather than linking it. Seed a
+// verified fixture with the actual independent executable; no external gateway
+// or GitHub access is involved in these native lifecycle checks.
+struct ModuleFixture {
+    endpoint: porthub_components::local::Endpoint,
+    artifact: porthub_components::catalog::Artifact,
+}
+struct ModuleSource {
+    metadata: Vec<u8>,
+    executable: std::path::PathBuf,
+}
+#[async_trait::async_trait]
+impl porthub_components::transport::Transport for ModuleSource {
+    async fn fetch(&self, url: &url::Url, output: &Path, limit: u64) -> anyhow::Result<()> {
+        if url.path().ends_with("/catalog") {
+            anyhow::ensure!(
+                self.metadata.len() as u64 <= limit,
+                "fixture catalog too large"
+            );
+            tokio::fs::write(output, &self.metadata).await?;
+        } else {
+            anyhow::ensure!(
+                std::fs::metadata(&self.executable)?.len() <= limit,
+                "fixture executable too large"
+            );
+            tokio::fs::copy(&self.executable, output).await?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(output, std::fs::Permissions::from_mode(0o600))?;
+            }
+        }
+        Ok(())
+    }
+}
+impl ModuleFixture {
+    async fn prepare(state: &Path) -> Self {
+        use porthub_components::{
+            catalog::{Artifact, Blob, Catalog, Component, REPOSITORY},
+            local::Endpoint,
+            store::{Manager, Settings, Sources},
+        };
+        use sha2::{Digest, Sha256};
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let executable = std::env::var_os("PORTHUB_TEST_SYNC_EXECUTABLE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(env!("CARGO_BIN_EXE_porthub")).with_file_name(
+                    if cfg!(windows) {
+                        "porthub-sync.exe"
+                    } else {
+                        "porthub-sync"
+                    },
+                )
+            });
+        assert!(
+            executable.is_file(),
+            "Build porthub-sync before these integration tests or set PORTHUB_TEST_SYNC_EXECUTABLE"
+        );
+        let bytes = std::fs::read(&executable).unwrap();
+        let artifact = Artifact {
+            component: Component::Sync,
+            version: option_env!("PORTHUB_COMPONENT_VERSION")
+                .unwrap_or("0.1.0")
+                .parse()
+                .unwrap(),
+            target: env!("PORTHUB_RUST_TARGET").replace("-musl", "-gnu"),
+            core: ">=1.0.0".parse().unwrap(),
+            protocols: vec![1],
+            source_revision: "a".repeat(40),
+            build_inputs: "b".repeat(64),
+            executable: Blob {
+                size: bytes.len() as u64,
+                sha256: format!("{:x}", Sha256::digest(&bytes)),
+            },
+            release: "1.11.0".parse().unwrap(),
+            archive: Blob {
+                size: 1,
+                sha256: "c".repeat(64),
+            },
+        };
+        let catalog = Catalog {
+            schema_version: 1,
+            repository: REPOSITORY.into(),
+            release: "1.11.0".parse().unwrap(),
+            artifacts: vec![artifact.clone()],
+        };
+        let source = std::sync::Arc::new(ModuleSource {
+            metadata: serde_json::to_vec(&catalog).unwrap(),
+            executable,
+        });
+        let manager = Manager::new(
+            state.join("components"),
+            Settings {
+                gateway: Some("https://fixture.invalid".parse().unwrap()),
+                sources: Sources::GatewayOnly,
+                core: porthub_agent::VERSION.parse().unwrap(),
+                target: artifact.target.clone(),
+                disabled: Default::default(),
+                pins: Default::default(),
+            },
+            source,
+        )
+        .unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        manager.refresh(&cancel).await.unwrap();
+        manager
+            .ensure(&catalog, Component::Sync, &cancel)
+            .await
+            .unwrap();
+        let context = format!("{:x}", Sha256::digest(state.as_os_str().as_encoded_bytes()));
+        Self {
+            endpoint: Endpoint::for_artifact(&manager.cache_root().join(context), &artifact)
+                .unwrap(),
+            artifact,
+        }
+    }
+}
+impl Drop for ModuleFixture {
+    fn drop(&mut self) {
+        let endpoint = self.endpoint.clone();
+        let artifact = self.artifact.clone();
+        let _ = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                use porthub_components::{
+                    protocol::sync::{Operation, Value},
+                    rpc::{Client, SystemOperation, SystemValue},
+                };
+                if let Ok(mut client) = Client::connect(&endpoint, &artifact).await {
+                    if let Ok(Value::Jobs { jobs, .. }) = client
+                        .call::<_, Value>(
+                            Operation::List {
+                                offset: 0,
+                                limit: 32,
+                            },
+                            Duration::from_secs(2),
+                        )
+                        .await
+                    {
+                        for job in jobs {
+                            let _ = client
+                                .call::<_, Value>(
+                                    Operation::Stop { id: job.id },
+                                    Duration::from_secs(2),
+                                )
+                                .await;
+                        }
+                    }
+                    let _ = client
+                        .call::<_, SystemValue>(SystemOperation::Shutdown, Duration::from_secs(2))
+                        .await;
+                }
+            });
+        })
+        .join();
     }
 }

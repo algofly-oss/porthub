@@ -30,19 +30,30 @@ jobs:
           python3 scripts/test_stage_verified_release.py
           python3 scripts/test_publish_release.py
           python3 scripts/test_prune_github_releases.py
+      - name: Install trusted verifier toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: compact-publication-verifier
+      - name: Build trusted compact artifact verifier
+        env:
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: cargo build --locked -p porthub-api --bin porthub-api
       - name: Verify source run and stage its exact complete artifact
         id: candidate
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_RUN: ${{ inputs.run_id }}
-        run: python3 scripts/stage-verified-release.py --repository "$GITHUB_REPOSITORY" --run-id "$SOURCE_RUN" --destination release-assets
+        run: python3 scripts/stage-verified-release.py --repository "$GITHUB_REPOSITORY" --run-id "$SOURCE_RUN" --destination release-assets --artifact-verifier "$GITHUB_WORKSPACE/target/debug/porthub-api"
       - name: Publish verified assets from their original build source
         id: publication
         env:
           GH_TOKEN: ${{ github.token }}
+          PORTHUB_COMPACT_GATEWAY: ${{ vars.PORTHUB_RELEASE_GATEWAY || 'https://porthub.algofly.in' }}
           SOURCE_REVISION: ${{ steps.candidate.outputs.revision }}
           RELEASE_VERSION: ${{ steps.candidate.outputs.version }}
-        run: python3 scripts/publish-release.py --repository "$GITHUB_REPOSITORY" --assets release-assets --version "$RELEASE_VERSION" --revision "$SOURCE_REVISION" --execute
+        run: python3 scripts/publish-release.py --repository "$GITHUB_REPOSITORY" --assets release-assets --version "$RELEASE_VERSION" --revision "$SOURCE_REVISION" --artifact-verifier "$GITHUB_WORKSPACE/target/debug/porthub-api" --compact-gateway "$PORTHUB_COMPACT_GATEWAY" --execute
       - name: Keep latest plus explicitly requested versions
         if: steps.publication.outputs.status != 'superseded'
         env:

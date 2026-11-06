@@ -16,6 +16,9 @@ use std::{collections::HashMap, sync::Arc};
 
 pub fn router() -> Router<Arc<App>> {
     Router::new()
+        .route("/api/downloads/components/capabilities", get(component_capabilities))
+        .route("/api/downloads/components/catalog", get(component_catalog))
+        .route("/api/downloads/components/{component}/{version}/{target}/{digest}", get(component_download))
         .route("/api/downloads/porthub", get(public_list))
         .route("/api/downloads/porthub/{target}", get(public_download))
         .route(
@@ -38,6 +41,30 @@ pub fn router() -> Router<Arc<App>> {
             "/api/machines/{first}/{second}/client.sh",
             get(legacy_upgrade),
         )
+}
+
+async fn component_capabilities() -> Json<serde_json::Value> {
+    Json(json!({"release_manifest_schemas":[1,2],"component_protocols":[1],
+        "core_sidecars":true,"independent_core_version":true,"server_version":env!("CARGO_PKG_VERSION")}))
+}
+
+async fn component_catalog(State(app): State<Arc<App>>) -> ApiResult<Json<porthub_components::catalog::Catalog>> {
+    Ok(Json(app.artifacts.components().await?))
+}
+async fn component_download(State(app): State<Arc<App>>,
+    Path((component, version, target, digest)): Path<(String, String, String, String)>) -> ApiResult<Response>
+{
+    let (artifact, file) = app.artifacts.component(&component, &version, &target, &digest).await?;
+    let mut response = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file)).into_response();
+    for (name, value) in [("content-type", "application/octet-stream".to_owned()),
+        ("content-length", artifact.executable.size.to_string()),
+        ("etag", format!("\"{}\"", artifact.executable.sha256)),
+        ("cache-control", "public, max-age=31536000, immutable".to_owned()),
+        ("x-content-type-options", "nosniff".to_owned())] {
+        response.headers_mut().insert(axum::http::HeaderName::from_static(name),
+            HeaderValue::from_str(&value).map_err(|_| ApiError::bad_request("Invalid component metadata"))?);
+    }
+    Ok(response)
 }
 
 fn public_base(configured: &str, headers: &HeaderMap) -> ApiResult<String> {

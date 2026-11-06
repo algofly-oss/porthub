@@ -1036,7 +1036,7 @@ async fn get_with_client(
         piece_size,
         complete: vec![false; pieces],
     });
-    let already: u64 = state
+    let checkpoint_bytes: u64 = state
         .complete
         .iter()
         .enumerate()
@@ -1044,12 +1044,14 @@ async fn get_with_client(
         .map(|(index, _)| piece_size.min(size - index as u64 * piece_size))
         .sum();
     state::write_private(&control, &serde_json::to_vec(&state)?)?;
+    let already=if remote.ranges && size>0 && (remote.etag.is_some() || remote.modified.is_some()) {checkpoint_bytes} else {0};
     let received = Arc::new(AtomicU64::new(already));
+    let mut progress=crate::progress::Reporter::new(options.progress,already);
     let started = Instant::now();
     if options.progress {
         eprintln!(
-            "[porthub-get] {} connections, {} bytes already complete",
-            options.connections, already
+            "[porthub-get] {} connections; {} already complete",
+            options.connections, crate::progress::bytes(already)
         );
     }
     let transfer = async {
@@ -1115,13 +1117,14 @@ async fn get_with_client(
             result=&mut transfer=>{result?;break;},
             _=cancel.cancelled()=>bail!("download interrupted; completed segments are saved for resume"),
             _=timer.tick(),if options.progress=>{
-                let done=received.load(Ordering::Relaxed);let seconds=started.elapsed().as_secs_f64().max(0.001);
-                eprintln!("[porthub-get] {:.1}/{} MiB  {:.2} MB/s",done as f64/1048576.0,remote.size.map(|size|format!("{:.1}",size as f64/1048576.0)).unwrap_or_else(||"?".into()),done.saturating_sub(already) as f64/seconds/1_000_000.0);
+                progress.update(received.load(Ordering::Relaxed),remote.size);
             },
         }
     }
     let seconds = started.elapsed().as_secs_f64();
+    progress.finish(received.load(Ordering::Relaxed),remote.size,already);
     if let Some(expected) = &options.sha256 {
+        if options.progress {eprintln!("[porthub-get] Verifying SHA-256...");}
         checksum(&part, expected).await?;
     }
     state::publish(&part, &target).await.context(
@@ -1130,11 +1133,11 @@ async fn get_with_client(
     tokio::fs::remove_file(&control).await?;
     if options.progress {
         eprintln!(
-            "[porthub-get] Saved {} ({:.2} MB/s)",
+            "[porthub-get] Saved {} ({} in {}; {}/s average)",
             target.display(),
-            received.load(Ordering::Relaxed).saturating_sub(already) as f64
-                / seconds.max(0.001)
-                / 1_000_000.0
+            crate::progress::bytes(received.load(Ordering::Relaxed)),
+            crate::progress::duration(seconds.ceil() as u64),
+            crate::progress::bytes((received.load(Ordering::Relaxed).saturating_sub(already) as f64 / seconds.max(0.001)) as u64)
         );
     }
     Ok(target)

@@ -200,7 +200,8 @@ pub(crate) async fn run_auto_install(
         let delay = if result.is_ok() {
             Duration::from_secs(6 * 60 * 60)
         } else {
-            tracing::warn!("automatic private enrollment is pending; it will be retried later");
+            let reason=result.as_ref().err().map(crate::unified::private_failure_reason).unwrap_or("private enrollment pending");
+            tracing::warn!(reason,"automatic private enrollment is pending; it will be retried later");
             Duration::from_secs(15 * 60)
         };
         tokio::select! {

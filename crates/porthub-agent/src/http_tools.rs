@@ -30,6 +30,13 @@ pub async fn run(
             "--expose requires --bind 0.0.0.0 or --bind 127.0.0.1"
         );
     }
+    if exposure.enabled {
+        #[cfg(any(unix,windows))]
+        {
+            let layout=if exposure.user {crate::service::Layout::user()?} else {crate::service::Layout::system()?};
+            crate::expose::select_registration(&layout,exposure.registration.as_deref())?;
+        }
+    }
     if detach {
         return background(options, exposure).await;
     }
@@ -38,14 +45,6 @@ pub async fn run(
     }
     #[cfg(any(unix, windows))]
     {
-        // Validate registration selection before opening a publicly requested
-        // listener; machine authorization remains enforced by the agent/API.
-        let layout = if exposure.user {
-            crate::service::Layout::user()?
-        } else {
-            crate::service::Layout::system()?
-        };
-        crate::service::readable::select(&layout, exposure.registration.as_deref(), Some(false))?;
         let work = cancel.child_token();
         let _cleanup = work.clone().drop_guard();
         let (ready, port) = tokio::sync::oneshot::channel();

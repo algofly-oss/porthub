@@ -1,6 +1,6 @@
 #![cfg(target_os = "linux")]
 mod common;
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use porthub_agent::{
     profile::Profile,
@@ -10,7 +10,7 @@ use std::{
     collections::HashMap,
     path::Path,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Mutex,
     },
 };
@@ -18,6 +18,8 @@ use std::{
 struct Fake {
     states: Mutex<HashMap<String, State>>,
     fail_start: AtomicBool,
+    prepared_private: AtomicUsize,
+    fail_prepare: AtomicBool,
     fail_reload: AtomicBool,
     calls: Mutex<Vec<(String, String)>>,
 }
@@ -43,6 +45,11 @@ impl Fake {
 }
 #[async_trait]
 impl Manager for Fake {
+    async fn prepare_private(&self) -> Result<()> {
+        self.prepared_private.fetch_add(1,Ordering::SeqCst);
+        anyhow::ensure!(!self.fail_prepare.load(Ordering::SeqCst),"fixture private dependency missing");
+        Ok(())
+    }
     async fn state(&self, spec: &Spec) -> Result<State> {
         Ok(self.state_value(spec))
     }
@@ -781,5 +788,37 @@ async fn one_registration_id_controls_its_pair_without_touching_other_tenants() 
     ensure!(remaining.iter().any(|entry| entry.spec.identity == gateway_private.identity));
     ensure!(manager.state_value(&other).active && manager.state_value(&other_gateway).active);
     ensure!(manager.state_value(&other_private).active && manager.state_value(&gateway_private).active);
+    Ok(())
+}
+
+#[tokio::test]
+async fn private_dependency_failure_is_checked_before_unified_activation_and_preserves_public_service() -> Result<()> {
+    let temp=common::private_dir()?;let layout=layout(temp.path());
+    let source=profile(temp.path(),"0123456789abcdef01234567")?;
+    let executable=temp.path().join("agent");std::fs::write(&executable,b"native agent")?;
+    let manager=Fake::default();
+    let public=service::install(&layout,&source,&executable,&manager).await?;
+    ensure!(manager.prepared_private.load(Ordering::SeqCst)==0,"public-only installation must not install private dependencies");
+    let private=porthub_agent::private_profile::Profile {
+        server:"https://porthub.example".into(),peer_id:"abcdefabcdefabcdefabcdef:0123456789abcdef01234567".into(),
+        token:"private-test-token-12345678901234567890".into(),workspace:"abcdefabcdefabcdefabcdef".into(),account_email:None,fallback_servers:vec![],allow_insecure_http_for_tests:false,
+    };
+    let private_source=temp.path().join("private.json");porthub_agent::profile::write_private(&private_source,&serde_json::to_vec(&private)?,false)?;
+    manager.fail_prepare.store(true,Ordering::SeqCst);
+    let calls=manager.calls.lock().unwrap().len();
+    ensure!(service::install(&layout,&private_source,&executable,&manager).await.err().context("expected dependency failure")?.to_string().contains("dependency missing"));
+    ensure!(manager.prepared_private.load(Ordering::SeqCst)==1);
+    ensure!(manager.calls.lock().unwrap().len()==calls && manager.state_value(&public).active,"dependency failure must preserve public tunnels");
+    ensure!(!porthub_agent::profile::sibling(&public.profile,".private-module.json").exists(),"failed preparation must not publish a private module");
+    manager.fail_prepare.store(false,Ordering::SeqCst);
+    service::install(&layout,&private_source,&executable,&manager).await?;
+    ensure!(manager.prepared_private.load(Ordering::SeqCst)==2);
+    ensure!(porthub_agent::profile::sibling(&public.profile,".private-module.json").exists(),"successful preparation must activate the unified module");
+    // A later public-agent upgrade must also prepare its existing private module.
+    manager.fail_prepare.store(true,Ordering::SeqCst);
+    let calls=manager.calls.lock().unwrap().len();
+    ensure!(service::install(&layout,&source,&executable,&manager).await.is_err());
+    ensure!(manager.prepared_private.load(Ordering::SeqCst)==3);
+    ensure!(manager.calls.lock().unwrap().len()==calls && manager.state_value(&public).active,"failed upgrade preparation must retain the running public service");
     Ok(())
 }

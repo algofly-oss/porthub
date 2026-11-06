@@ -92,9 +92,21 @@ async fn unchanged_bootstrap_previews_reuse_code_and_different_cached_previews_r
         let response=case.router.clone().oneshot(Request::builder().uri(format!("/install/{ticket}/windows.ps1")).body(Body::empty())?).await?;
         ensure!(response.status()==StatusCode::OK && response.headers()["cache-control"]=="no-store");
         let powershell=String::from_utf8(to_bytes(response.into_body(),65536).await?.to_vec())?;
+        ensure!(powershell.contains("-Verb RunAs") && powershell.contains("-EncodedCommand") && !powershell.contains("ExecutionPolicy"));
         ensure!(powershell.contains("RuntimeInformation]::OSArchitecture") && powershell.contains("PROCESSOR_ARCHITEW6432"));
         ensure!(["windows_x86_64","windows_x86","windows_arm64"].iter().all(|target| powershell.contains(target)));
         ensure!(powershell.contains("& $porthubFile setup --ticket $porthubUrl") && !powershell.contains(TOKEN) && !powershell.contains("{{"));
+        let response=case.router.clone().oneshot(Request::builder().uri(format!("/install/{ticket}/windows.bat")).body(Body::empty())?).await?;
+        ensure!(response.status()==StatusCode::OK && response.headers()["cache-control"]=="no-store");
+        ensure!(response.headers()["content-disposition"]=="attachment; filename=porthub-install.bat");
+        let batch=String::from_utf8(to_bytes(response.into_body(),65536).await?.to_vec())?;
+        ensure!(batch.starts_with("@echo off") && batch.contains("exit /b %errorlevel%") && !batch.contains("{{") && !batch.contains(TOKEN));
+        use base64::Engine;
+        let encoded=batch.lines().find_map(|line|line.strip_prefix("powershell.exe -NoProfile -EncodedCommand ")).unwrap();
+        let bytes=base64::engine::general_purpose::STANDARD.decode(encoded)?;
+        let units=bytes.chunks_exact(2).map(|pair|u16::from_le_bytes([pair[0],pair[1]])).collect::<Vec<_>>();
+        let payload=String::from_utf16(&units)?;
+        ensure!(payload.contains(&format!("/install/{ticket}/windows.ps1")) && payload.contains("Invoke-Expression") && !payload.contains(TOKEN) && !payload.contains("ExecutionPolicy"));
         let stored=case.app.collection("machines").find_one(doc! {"_id":id}).await?.unwrap();
         ensure!(!stored.contains_key("client_setup_public_base_url"),"preview must not change the saved machine configuration");
         Ok::<_,anyhow::Error>(())

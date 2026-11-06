@@ -5,6 +5,7 @@ use crate::{BoxStream, Connector, Destination, LimitedStream, Resolver};
 use anyhow::{ensure, Context, Result};
 use arti_client::{config::CfgPath, DormantMode, TorClient, TorClientConfig};
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use std::{
     path::Path,
     sync::{
@@ -73,37 +74,96 @@ impl TorPool {
         self
     }
 
+    fn underlay_allowed(&self) -> bool {
+        self.sources
+            .as_ref()
+            .is_none_or(|sources| sources.has_changed().is_ok() && !sources.borrow().is_empty())
+    }
+    fn require_underlay(&self) -> Result<()> {
+        if !self.underlay_allowed() {
+            self.dormant();
+            anyhow::bail!("Tor has no permitted underlay sources");
+        }
+        Ok(())
+    }
+    async fn while_permitted<T>(
+        &self,
+        work: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        self.require_underlay()?;
+        let revoked = async {
+            let Some(mut sources) = self.sources.clone() else {
+                return std::future::pending::<()>().await;
+            };
+            loop {
+                if sources.borrow().is_empty() {
+                    break;
+                }
+                if sources.changed().await.is_err() {
+                    break;
+                }
+            }
+        };
+        tokio::select! {biased;
+            _=revoked=>{self.dormant();anyhow::bail!("Tor underlay permission was revoked")},
+            result=work=>{self.require_underlay()?;result}
+        }
+    }
+
     /// Call in background when a policy enables Tor. No ordinary transfer
     /// should wait for discovery or bootstrap in the packet-processing loop.
     pub async fn bootstrap(&self) -> Result<()> {
-        self.clients
-            .get_or_try_init(|| async {
-                // Keep the provider deterministic when embedded beside reqwest,
-                // QUIC and other rustls consumers in the same agent process.
-                let _ = rustls::crypto::ring::default_provider().install_default();
-                let runtime = PreferredRuntime::current()?.with_tcp_provider(UnderlayTcp {
-                    sources: self.sources.clone(),
-                });
-                let client = tokio::time::timeout(
-                    BOOTSTRAP_TIMEOUT,
-                    TorClient::with_runtime(runtime)
-                        .config(self.config.clone())
-                        .create_bootstrapped(),
-                )
-                .await
-                .context("Tor bootstrap timed out")?
-                .map_err(|_| anyhow::anyhow!("Tor bootstrap unavailable"))?;
-                let mut clients = Vec::with_capacity(self.groups);
-                for _ in 0..self.groups {
-                    clients.push(client.isolated_client());
+        self.while_permitted(async {
+            let clients = self
+                .clients
+                .get_or_try_init(|| async {
+                    // Keep the provider deterministic when embedded beside reqwest,
+                    // QUIC and other rustls consumers in the same agent process.
+                    let _ = rustls::crypto::ring::default_provider().install_default();
+                    let runtime = PreferredRuntime::current()?.with_tcp_provider(UnderlayTcp {
+                        sources: self.sources.clone(),
+                    });
+                    let client = tokio::time::timeout(
+                        BOOTSTRAP_TIMEOUT,
+                        TorClient::with_runtime(runtime)
+                            .config(self.config.clone())
+                            .create_bootstrapped(),
+                    )
+                    .await
+                    .context("Tor bootstrap timed out")?
+                    .map_err(|_| anyhow::anyhow!("Tor bootstrap unavailable"))?;
+                    let mut clients = Vec::with_capacity(self.groups);
+                    for _ in 0..self.groups {
+                        clients.push(client.isolated_client());
+                    }
+                    Ok::<_, anyhow::Error>(clients)
+                })
+                .await?;
+            let client = clients.first().context("Tor client group is empty")?;
+            // Bootstrap completion and the asynchronously published status can
+            // arrive on different tasks. A cached client may also be dormant
+            // after source revocation. Only an authorized bootstrap wakes it.
+            client.set_dormant(DormantMode::Normal);
+            let mut events = client.bootstrap_events();
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    if client.bootstrap_status().ready_for_traffic() {
+                        return Ok::<_, anyhow::Error>(());
+                    }
+                    events.next().await.context("Tor readiness stream closed")?;
                 }
-                Ok::<_, anyhow::Error>(clients)
             })
-            .await?;
-        Ok(())
+            .await
+            .context("Tor readiness timed out after bootstrap")??;
+            Ok(())
+        })
+        .await
     }
 
     pub fn ready(&self) -> bool {
+        if self.require_underlay().is_err() {
+            return false;
+        }
         self.clients
             .get()
             .and_then(|clients| clients.first())
@@ -124,49 +184,111 @@ impl TorPool {
 #[async_trait]
 impl Connector for TorPool {
     async fn connect(&self, destination: Destination) -> Result<BoxStream> {
-        let permit = self
-            .permits
-            .clone()
-            .try_acquire_owned()
-            .context("Tor connection limit reached")?;
-        self.bootstrap().await?;
-        let clients = self.clients.get().expect("bootstrap initialized");
-        let client = &clients[self.cursor.fetch_add(1, Ordering::Relaxed) % clients.len()];
-        let stream = tokio::time::timeout(
-            CONNECT_TIMEOUT,
-            client.connect((destination.host.as_str(), destination.port)),
-        )
+        self.while_permitted(async {
+            let permit = self
+                .permits
+                .clone()
+                .try_acquire_owned()
+                .context("Tor connection limit reached")?;
+            self.bootstrap().await?;
+            let clients = self.clients.get().expect("bootstrap initialized");
+            let client = &clients[self.cursor.fetch_add(1, Ordering::Relaxed) % clients.len()];
+            let stream = tokio::time::timeout(
+                CONNECT_TIMEOUT,
+                client.connect((destination.host.as_str(), destination.port)),
+            )
+            .await
+            .context("Tor connection timed out")?
+            .map_err(|_| anyhow::anyhow!("Tor destination unavailable"))?;
+            Ok(Box::new(LimitedStream {
+                stream: stream.compat(),
+                _permit: permit,
+            }) as BoxStream)
+        })
         .await
-        .context("Tor connection timed out")?
-        .map_err(|_| anyhow::anyhow!("Tor destination unavailable"))?;
-        Ok(Box::new(LimitedStream {
-            stream: stream.compat(),
-            _permit: permit,
-        }))
     }
 }
 
 #[async_trait]
 impl Resolver for TorPool {
     async fn resolve(&self, hostname: &str) -> Result<Vec<std::net::IpAddr>> {
-        ensure!(self.ready(), "Tor resolver is not ready");
-        let _permit = self
-            .permits
-            .clone()
-            .try_acquire_owned()
-            .context("Tor connection limit reached")?;
-        let clients = self.clients.get().context("Tor resolver is not ready")?;
-        let client = &clients[self.cursor.fetch_add(1, Ordering::Relaxed) % clients.len()];
-        tokio::time::timeout(Duration::from_secs(8), client.resolve(hostname))
-            .await
-            .context("Tor resolution timed out")?
-            .map_err(|_| anyhow::anyhow!("Tor name resolution unavailable"))
+        self.while_permitted(async {
+            ensure!(self.ready(), "Tor resolver is not ready");
+            let _permit = self
+                .permits
+                .clone()
+                .try_acquire_owned()
+                .context("Tor connection limit reached")?;
+            let clients = self.clients.get().context("Tor resolver is not ready")?;
+            let client = &clients[self.cursor.fetch_add(1, Ordering::Relaxed) % clients.len()];
+            tokio::time::timeout(Duration::from_secs(8), client.resolve(hostname))
+                .await
+                .context("Tor resolution timed out")?
+                .map_err(|_| anyhow::anyhow!("Tor name resolution unavailable"))
+        })
+        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn revoked_sources_block_cached_work_and_cancel_inflight_operations() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let (sender, receiver) = tokio::sync::watch::channel(vec!["192.0.2.10".parse()?]);
+        let pool = Arc::new(TorPool::new(directory.path(), 4, 16)?.with_underlay(receiver));
+        assert!(pool.underlay_allowed());
+        assert_eq!(pool.while_permitted(async { Ok(7) }).await?, 7);
+        let started = Arc::new(tokio::sync::Notify::new());
+        let running = pool.clone();
+        let observed = started.clone();
+        let task = tokio::spawn(async move {
+            running
+                .while_permitted(async {
+                    observed.notify_one();
+                    std::future::pending::<Result<()>>().await
+                })
+                .await
+        });
+        started.notified().await;
+        sender.send_replace(vec![]);
+        assert!(tokio::time::timeout(Duration::from_secs(1), task)
+            .await??
+            .is_err());
+        assert!(!pool.ready());
+        let called = std::sync::atomic::AtomicBool::new(false);
+        assert!(pool
+            .while_permitted(async {
+                called.store(true, Ordering::Relaxed);
+                Ok(())
+            })
+            .await
+            .is_err());
+        assert!(
+            !called.load(Ordering::Relaxed),
+            "cached client work must not run after revocation"
+        );
+        assert!(pool.bootstrap().await.is_err());
+        assert!(pool
+            .connect(Destination::new("example.invalid".into(), 443)?)
+            .await
+            .is_err());
+        assert!(pool.resolve("example.invalid").await.is_err());
+        sender.send_replace(vec!["192.0.2.10".parse()?]);
+        assert!(pool.underlay_allowed());
+        drop(sender);
+        assert!(
+            !pool.underlay_allowed(),
+            "closed policy authority must fail closed"
+        );
+        assert_eq!(
+            std::fs::read_dir(directory.path())?.count(),
+            0,
+            "revocation checks must not bootstrap or write Tor state"
+        );
+        Ok(())
+    }
     #[test]
     fn construction_is_offline_and_limits_are_bounded() {
         let directory = tempfile::tempdir().unwrap();
@@ -188,7 +310,7 @@ mod tests {
         // UDP connect selects a source without sending any packet. This is
         // only a test fixture; production uses the agent's interface watcher.
         route.connect("1.1.1.1:53")?;
-        let (_sources, receiver) = tokio::sync::watch::channel(vec![route.local_addr()?.ip()]);
+        let (sources, receiver) = tokio::sync::watch::channel(vec![route.local_addr()?.ip()]);
         let pool = TorPool::new(directory.path(), 4, 16)?.with_underlay(receiver);
         pool.bootstrap().await?;
         assert!(pool.ready());
@@ -232,6 +354,25 @@ mod tests {
             json.get("IsTor").and_then(|value| value.as_bool()) == Some(true),
             "verification endpoint did not identify a Tor exit"
         );
+        let original = sources.send_replace(vec![]);
+        ensure!(!pool.ready(), "revoked warm client must not report ready");
+        ensure!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                pool.connect(Destination::new("example.invalid".into(), 443)?)
+            )
+            .await?
+            .is_err(),
+            "revoked warm client must not reuse a circuit for new streams"
+        );
+        ensure!(
+            tokio::time::timeout(Duration::from_secs(1), pool.resolve("example.invalid"))
+                .await?
+                .is_err(),
+            "revoked warm client must not resolve new destinations"
+        );
+        sources.send_replace(original);
+        pool.bootstrap().await?;
         pool.dormant();
         Ok(())
     }

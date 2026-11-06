@@ -248,6 +248,7 @@ impl Systemd {
 }
 #[async_trait::async_trait]
 impl Manager for Systemd {
+    async fn prepare_private(&self) -> Result<()> { crate::private_prerequisites::prepare().await }
     async fn state(&self, spec: &Spec) -> Result<State> {
         let proxy = self.proxy().await?;
         let enabled = match proxy

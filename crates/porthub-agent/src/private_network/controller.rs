@@ -68,6 +68,15 @@ async fn prepare(
     direct_origin: Option<String>,
     servers: Vec<IceServer>,
 ) -> Result<Prepared> {
+    let settings = crate::outbound::Settings::from_env()?;
+    let interfaces = if profile.allow_insecure_http_for_tests || settings.system { interfaces } else {
+        let url = url::Url::parse(&base)?;
+        let host = url.host_str().ok_or_else(|| anyhow::anyhow!("gateway hostname missing"))?;
+        let destinations: Vec<_> = tokio::time::timeout(Duration::from_secs(2),tokio::net::lookup_host((host.trim_matches(['[',']']),url.port_or_known_default().unwrap_or(443)))).await??.take(16).collect();
+        let permitted = tokio::time::timeout(Duration::from_secs(2),crate::outbound::discover(&settings,&destinations)).await??;
+        interfaces.into_iter().filter(|address|permitted.iter().any(|p|p.source==address.ip())).collect()
+    };
+    ensure!(!interfaces.is_empty(), "no policy-permitted private session source; check interface preferences and VPN routing");
     let credential = servers.iter().find(|server| {
         server
             .urls
@@ -278,16 +287,8 @@ pub async fn run_watched_identity(
         instance,
         certificate: identity,
     } = local;
-    let make_client = |local: Option<std::net::IpAddr>| reqwest::Client::builder()
-        .local_address(local)
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(2))
-        .timeout(Duration::from_secs(4))
-        .build();
-    let mut bound = interfaces.borrow().first().map(|address| address.ip());
-    let mut client = make_client(bound)?;
-    let mut bases = vec![profile.server.clone()];
-    bases.extend(profile.fallback_servers.clone());
+    let control = crate::control::Control::new_private(&profile)?;
+    let mut bases = control.authorities();
     let mut preferred = 0;
     let mut peers: HashMap<String, Live> = HashMap::new();
     let mut readers = JoinSet::new();
@@ -312,8 +313,6 @@ pub async fn run_watched_identity(
             lan_interfaces = current_interfaces;
             lan_refreshed = Some(Instant::now());
         }
-        let next_bind = interfaces.borrow().first().map(|address| address.ip());
-        if next_bind != bound { client = make_client(next_bind)?; bound = next_bind; }
         let sent = pending.len().min(16);
         let acked = acks.len().min(128);
         let paths: BTreeMap<_, _> = peers
@@ -337,42 +336,16 @@ pub async fn run_watched_identity(
             "fingerprint":identity.fingerprint(),"instance":instance,"stream_transport":if cfg!(feature="private-stream") {"quic1"} else {""},"tor_exit":cfg!(all(feature="local-tor",any(target_os="linux",target_os="macos"))),"signals":&pending[..sent],
             "acks":&acks[..acked],"paths":paths,"lan_networks":lan_networks,"lan_exit":cfg!(any(target_os="linux",target_os="macos")),"application_proxy":cfg!(feature="local-tor")});
         let mut reply = None;
-        for offset in 0..bases.len() {
-            let index = (preferred + offset) % bases.len();
-            let request = async {
-                let mut response = client
-                    .post(format!("{}/api/access/private/sync", bases[index]))
-                    .json(&body)
-                    .send()
-                    .await?;
-                let status = response.status();
-                if status == reqwest::StatusCode::FORBIDDEN
-                    || status == reqwest::StatusCode::UNAUTHORIZED
-                {
-                    anyhow::bail!("private gateway rejected this enrollment");
-                }
-                ensure!(
-                    status.is_success(),
-                    "private control temporarily unavailable"
-                );
-                let mut data = Vec::new();
-                while let Some(chunk) = response.chunk().await? {
-                    ensure!(
-                        data.len() + chunk.len() <= 4 * 1024 * 1024,
-                        "private sync exceeds size limit"
-                    );
-                    data.extend_from_slice(&chunk);
-                }
-                serde_json::from_slice::<Reply>(&data)
-                    .map_err(|_| anyhow::anyhow!("invalid private control response"))
-            };
-            let result =
-                tokio::select! {_=cancel.cancelled()=>return Ok(()),result=request=>result};
-            if let Ok(value) = result {
-                preferred = index;
-                reply = Some(value);
-                break;
+        let request = control.request(reqwest::Method::POST,"access/private/sync",Some(body),&[]);
+        let result = tokio::select! { _=cancel.cancelled()=>return Ok(()), result=request=>result };
+        match result {
+            Ok(value) => {
+                reply = serde_json::from_slice::<Reply>(&value.bytes).ok();
+                bases = control.authorities();
+                preferred = 0;
             }
+            Err(crate::control::Failure::Rejected(401 | 403)) => anyhow::bail!("private gateway rejected this enrollment"),
+            Err(_) => {}
         }
         if let Some(reply) = reply {
             let direct_relay = super::relay::Config {

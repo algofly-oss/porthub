@@ -60,7 +60,8 @@ class Reuse(unittest.TestCase):
         current = (reuse.ROOT/'.github/workflows/agent-platforms.yml').read_text()
         orchestration = current.replace('  select-platforms:', '  different-selection:')
         self.assertEqual(reuse.recipe(current), reuse.recipe(orchestration))
-        changed = current.replace('cargo build --locked --release','cargo build --locked --release --no-default-features')
+        self.assertIn('--output component-builds',current)
+        changed = current.replace('--output component-builds','--output component-builds --tool core')
         self.assertNotEqual(reuse.recipe(changed),reuse.recipe(current))
         self.assertNotEqual(reuse.recipe('env:\n  RUSTFLAGS: custom\n'+current),reuse.recipe(current))
 
@@ -81,6 +82,13 @@ class Reuse(unittest.TestCase):
                 self.assertEqual(original,reuse.fingerprint(second))
                 runtime.write_text('pub fn changed() {}\n');third=commit()
                 self.assertNotEqual(original,reuse.fingerprint(third))
+                (root/'deploy').mkdir()
+                (root/'deploy/component-platforms.toml').write_text('shipping flags changed\n')
+                fourth=commit()
+                self.assertNotEqual(reuse.fingerprint(third),reuse.fingerprint(fourth))
+                (root/'scripts/build-component-platform.py').write_text('component recipe changed\n')
+                fifth=commit()
+                self.assertNotEqual(reuse.fingerprint(fourth),reuse.fingerprint(fifth))
 
     def test_matrix_catalog_is_read_without_executing_selector(self):
         native, cross = reuse.matrices()
@@ -105,6 +113,40 @@ class Reuse(unittest.TestCase):
             item=write();reuse.extract(archive,item,destination)
             self.assertEqual((destination/'porthub-x86_64/porthub-x86_64').read_bytes(),b'binary')
             with self.assertRaises(ValueError):reuse.extract(archive,item,destination)
+
+    def test_indexed_artifact_verifies_receipts_and_rejects_corruption_atomically(self):
+        spec = importlib.util.spec_from_file_location('indexed_fixture', Path(__file__).with_name('test_assemble_client_release.py'))
+        fixture = importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture)
+        case = fixture.Assembly(); case.setUp(); self.addCleanup(case.doCleanups)
+        source = case.source/'porthub-x86_64'
+        destination = case.root/'reused'; destination.mkdir()
+        archive = case.root/'indexed.zip'
+        def package(extra=False):
+            with zipfile.ZipFile(archive, 'w') as zipped:
+                for path in source.rglob('*'):
+                    if path.is_file(): zipped.write(path, path.relative_to(source).as_posix())
+                if extra: zipped.writestr('../escape', b'bad')
+            return dict(platform='x86_64',size=archive.stat().st_size,
+                        digest='sha256:'+hashlib.sha256(archive.read_bytes()).hexdigest())
+        with self.assertRaises(ValueError): reuse.extract(archive, package(True), destination)
+        self.assertFalse((destination/'porthub-x86_64').exists())
+        import json
+        index_path = source/'index.json'
+        original_index = index_path.read_bytes()
+        index = json.loads(original_index)
+        index['target'] = 'aarch64-unknown-linux-musl'
+        index_path.write_text(json.dumps(index))
+        with self.assertRaisesRegex(ValueError, 'platform'):
+            reuse.extract(archive, package(), destination)
+        self.assertEqual(list(destination.iterdir()), [])
+        index_path.write_bytes(original_index)
+        reuse.extract(archive, package(), destination)
+        self.assertEqual((destination/'porthub-x86_64/index.json').read_bytes(), (source/'index.json').read_bytes())
+        import shutil
+        shutil.rmtree(destination/'porthub-x86_64')
+        (source/'sync/0.1.0/porthub-sync').write_bytes(b'corrupt')
+        with self.assertRaises(ValueError): reuse.extract(archive, package(), destination)
+        self.assertEqual(list(destination.iterdir()), [])
 
 
 if __name__ == '__main__': unittest.main()

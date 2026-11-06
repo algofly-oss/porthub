@@ -13,7 +13,7 @@ const emptySample = timestamp => ({ timestamp, in_bytes: 0, out_bytes: 0, drop_b
 
 // Old firewalls send one record per direction. Combine those records before
 // limiting history, and keep byte volume separate from bytes/second.
-export function normalizeTrafficSamples(samples, limit = 300) {
+export function normalizeTrafficSamples(samples, limit = 3600) {
   const buckets = new Map();
   for (const sample of Array.isArray(samples) ? samples : []) {
     const timestamp = Math.floor(Number(sample?.timestamp));

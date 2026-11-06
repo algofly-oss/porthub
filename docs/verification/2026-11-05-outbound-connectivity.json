@@ -1,0 +1,112 @@
+{
+  "branch": "codex/outbound-connectivity",
+  "publication": "Draft PR #31; not released or deployed",
+  "scope": [
+    "All and Disabled machine inventory filters",
+    "Policy-aware outbound source selection and cooldowns",
+    "Authenticated public/private control failover and relay source selection",
+    "Read-only staged connectivity diagnosis",
+    "Private relay status, actionable lease/clock errors and safe worker failure categories",
+    "Private dependency preparation during privileged Linux service setup",
+    "Automatic system hostname integration during privileged Linux enrollment/install and upgrades",
+    "Authselect/PAM preservation, NSS backups and rollback, and system getent readiness monitoring",
+    "Required Linux release gates for dependency preparation, DNS integration, upgrade preservation, and expired-lease diagnostics"
+  ],
+  "checks": {
+    "agent_library": {
+      "passed": 128,
+      "ignored": 3
+    },
+    "pinned_origin": {
+      "passed": 2
+    },
+    "private_enrollment": {
+      "passed": 3
+    },
+    "private_packets": {
+      "passed": 11
+    },
+    "private_stream_router": {
+      "passed": 1
+    },
+    "runtime": {
+      "passed": 4
+    },
+    "service": {
+      "passed": 13,
+      "ignored": 1
+    },
+    "latest_control_targeted_tests": {
+      "passed": 5
+    },
+    "isolated_namespace": {
+      "passed": 1,
+      "cases": [
+        "two source addresses",
+        "two default gateways with different metrics",
+        "source-specific prohibit rule",
+        "explicit interface restriction",
+        "address removal and restoration",
+        "interface down and recovery after host route restoration"
+      ],
+      "isolation": "Docker network=none, read-only filesystem, NET_ADMIN only, no writable host mount"
+    },
+    "disabled_machine_browser_widths": [
+      1440,
+      402
+    ],
+    "production_ui_build_and_export": "passed",
+    "diagnose_cli_help": "passed",
+    "cargo_check": "passed",
+    "git_diff_check": "passed",
+    "private_install": {
+      "passed": 1
+    },
+    "private_dns_setup_targeted": {
+      "passed": 5
+    },
+    "expired_policy_clock_diagnostic": {
+      "passed": 1
+    },
+    "workflow_yaml": "parsed successfully",
+    "bootstrap_api": {
+      "passed": 5,
+      "database": "task-owned disposable MongoDB"
+    },
+    "transfer_full_suite": {
+      "passed": 24
+    },
+    "bootstrap_command_unit_tests": {
+      "passed": 4
+    },
+    "windows_installer_browser_widths": [
+      1440,
+      402
+    ],
+    "inventory_pages_browser_widths": [
+      1440,
+      402
+    ],
+    "cross_platform_baseline": {
+      "revision": "0ccf84d51f028975aa1d33a3fe6bfa26180277fb",
+      "run": "https://github.com/algofly-oss/porthub/actions/runs/42024368365",
+      "platforms_passed": 10,
+      "published": false
+    }
+  },
+  "additional_check_limitations": [
+    "The pinned Rust toolchain encountered an incremental compiler failure; successful subsequent validation used CARGO_INCREMENTAL=0.",
+    "The broader inventory browser failure was a premature assertion during a tab transition; awaiting the first binding resolved it and both viewport checks pass.",
+    "The original WSL incident machine was unavailable; only the inspected exposure paths and new diagnostics were tested.",
+    "The follow-up Windows shell smoke checks and privileged Linux preparation check require their next hosted CI run."
+  ],
+  "behavioral_boundaries": [
+    "Automatic alternatives remain within the kernel-selected egress unless an explicit administrator preference or a validated PortHub-owned exit management bypass applies.",
+    "Gateway next-hop selection remains owned by the kernel; no automatic host route, address, DNS configuration or firewall repair.",
+    "macOS and Windows automatic mode conservatively retains the OS-selected source.",
+    "Public tunnels currently adopt the control source rather than selecting an independent source per tunnel origin.",
+    "Discovery is lazy with a 30-second cache and immediate failure invalidation.",
+    "Diagnosis distinguishes a live authenticated control check from saved public/private/relay observations.",
+    "Privileged enrollment now explicitly owns automatic DNS integration; the outbound selector and packet forwarding loops never modify DNS configuration. Check-only mode preserves administrator-managed settings."
+  ]
+}

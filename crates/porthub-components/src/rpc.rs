@@ -1,0 +1,375 @@
+//! Persistent typed worker RPC and explicit stream upgrades. Machine credentials
+//! are not part of this protocol; sharing capabilities belong to tool contracts.
+use crate::{
+    catalog::Artifact,
+    ipc::{self, Hello, Request, Response},
+    local::{Endpoint, Listener, Stream},
+};
+use anyhow::{ensure, Context, Result};
+use async_trait::async_trait;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use tokio_util::sync::CancellationToken;
+const IDLE: Duration = Duration::from_secs(60);
+const MAX_CALL: Duration = Duration::from_secs(300);
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    InvalidRequest,
+    Unavailable,
+    Denied,
+    NotFound,
+    Internal,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Failure {
+    pub code: ErrorCode,
+    pub detail: String,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Outcome<T> {
+    Ok { value: T, stream: bool },
+    Error { failure: Failure },
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(tag = "system", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SystemOperation {
+    Ping,
+    Shutdown,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "system", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SystemValue {
+    Pong { pid: u32 },
+    Stopping,
+}
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Incoming<T> {
+    System(SystemOperation),
+    Tool(T),
+}
+
+pub enum Reply<T> {
+    Message(T),
+    Stream { value: T, remote: Stream },
+}
+#[async_trait]
+pub trait Handler: Send + Sync + 'static {
+    type Operation: DeserializeOwned + Send;
+    type Value: Serialize + Send + Sync;
+    fn connection_limit(&self) -> usize {
+        32
+    }
+    /// A scoped frontend broker may remain paused until its owner cancels it.
+    fn exit_when_idle(&self) -> bool {
+        true
+    }
+    async fn handle(
+        &self,
+        operation: Self::Operation,
+        cancel: CancellationToken,
+    ) -> std::result::Result<Reply<Self::Value>, Failure>;
+}
+
+pub struct Client {
+    stream: Stream,
+    next: u64,
+    poisoned: bool,
+}
+impl Client {
+    pub async fn connect(endpoint: &Endpoint, artifact: &Artifact) -> Result<Self> {
+        let stream = tokio::time::timeout(Duration::from_secs(5), endpoint.connect()).await??;
+        Self::from_stream(stream, artifact).await
+    }
+    pub async fn connect_expected(endpoint: &Endpoint, expected: &Hello) -> Result<Self> {
+        expected.validate(expected.component, &expected.version)?;
+        let stream = tokio::time::timeout(Duration::from_secs(5), endpoint.connect()).await??;
+        Self::from_expected_stream(stream, expected).await
+    }
+    pub(crate) async fn from_stream(stream: Stream, artifact: &Artifact) -> Result<Self> {
+        Self::from_expected_stream(
+            stream,
+            &Hello {
+                component: artifact.component,
+                protocol: crate::catalog::PROTOCOL,
+                version: artifact.version.clone(),
+            },
+        )
+        .await
+    }
+    /// Authenticate the versioned protocol on an already-owned transport.
+    /// Callers must establish transport ownership and verify helper bytes before
+    /// invoking it; this handshake does not perform artifact authorization.
+    pub async fn from_transport(stream: Stream, expected: &Hello) -> Result<Self> {
+        expected.validate(expected.component, &expected.version)?;
+        Self::from_expected_stream(stream, expected).await
+    }
+    async fn from_expected_stream(mut stream: Stream, expected: &Hello) -> Result<Self> {
+        let hello: Hello = ipc::read(&mut stream, Duration::from_secs(5)).await?;
+        hello.validate(expected.component, &expected.version)?;
+        ipc::write(&mut stream, &hello, Duration::from_secs(5)).await?;
+        let mut client = Self {
+            stream,
+            next: 0,
+            poisoned: false,
+        };
+        let ready: SystemValue = client
+            .call(SystemOperation::Ping, Duration::from_secs(5))
+            .await?;
+        ensure!(
+            matches!(ready, SystemValue::Pong { pid } if pid > 0),
+            "invalid component readiness response"
+        );
+        Ok(client)
+    }
+    async fn exchange<T: Serialize, R: DeserializeOwned>(
+        &mut self,
+        operation: T,
+        timeout: Duration,
+        want_stream: bool,
+    ) -> Result<R> {
+        ensure!(
+            !self.poisoned,
+            "component connection requires reconnecting after an interrupted request"
+        );
+        ensure!(
+            !timeout.is_zero() && timeout <= MAX_CALL,
+            "invalid component request timeout"
+        );
+        self.next = self
+            .next
+            .checked_add(1)
+            .context("component request ID exhausted")?;
+        let request = Request {
+            id: self.next,
+            deadline_unix_ms: now_ms().saturating_add(timeout.as_millis() as u64),
+            operation,
+        };
+        // Dropping this future mid-frame leaves the connection unusable. Never
+        // pair a later request with the interrupted request's response.
+        self.poisoned = true;
+        let response: Response<Outcome<R>> = tokio::time::timeout(timeout, async {
+            ipc::write(&mut self.stream, &request, timeout).await?;
+            ipc::read(&mut self.stream, timeout).await
+        })
+        .await??;
+        ensure!(response.id == self.next, "component response ID mismatch");
+        match response.result {
+            Outcome::Ok { value, stream } => {
+                ensure!(stream == want_stream, "unexpected component stream upgrade");
+                self.poisoned = false;
+                Ok(value)
+            }
+            Outcome::Error { failure } => {
+                ensure!(
+                    failure.detail.len() <= 512 && !failure.detail.chars().any(char::is_control),
+                    "invalid component error"
+                );
+                self.poisoned = false;
+                anyhow::bail!("{}", failure.detail)
+            }
+        }
+    }
+    pub async fn call<T: Serialize, R: DeserializeOwned>(
+        &mut self,
+        operation: T,
+        timeout: Duration,
+    ) -> Result<R> {
+        self.exchange(operation, timeout, false).await
+    }
+    pub async fn upgrade<T: Serialize, R: DeserializeOwned>(
+        mut self,
+        operation: T,
+        timeout: Duration,
+    ) -> Result<(R, Stream)> {
+        let value = self.exchange(operation, timeout, true).await?;
+        Ok((value, self.stream))
+    }
+}
+pub(crate) async fn connection<H: Handler>(
+    mut stream: Stream,
+    handler: Arc<H>,
+    hello: Hello,
+    cancel: CancellationToken,
+    worker_cancel: CancellationToken,
+) -> Result<()> {
+    ipc::write(&mut stream, &hello, Duration::from_secs(5)).await?;
+    let peer: Hello = ipc::read(&mut stream, Duration::from_secs(5)).await?;
+    peer.validate(hello.component, &hello.version)?;
+    let mut previous = 0;
+    loop {
+        let request: Request<Incoming<H::Operation>> = tokio::select! { biased;
+            _ = cancel.cancelled() => return Ok(()),
+            result = ipc::read(&mut stream, IDLE) => result?,
+        };
+        let remaining = request.deadline_unix_ms.saturating_sub(now_ms());
+        ensure!(
+            request.id > previous && remaining > 0 && remaining <= MAX_CALL.as_millis() as u64,
+            "invalid component request ID or deadline"
+        );
+        previous = request.id;
+        let operation = match request.operation {
+            Incoming::System(operation) => {
+                let value = match operation {
+                    SystemOperation::Ping => SystemValue::Pong {
+                        pid: std::process::id(),
+                    },
+                    SystemOperation::Shutdown => SystemValue::Stopping,
+                };
+                ipc::write(
+                    &mut stream,
+                    &Response {
+                        id: request.id,
+                        result: Outcome::Ok {
+                            value,
+                            stream: false,
+                        },
+                    },
+                    Duration::from_secs(5),
+                )
+                .await?;
+                if matches!(operation, SystemOperation::Shutdown) {
+                    worker_cancel.cancel();
+                    return Ok(());
+                }
+                continue;
+            }
+            Incoming::Tool(operation) => operation,
+        };
+        let operation_cancel = cancel.child_token();
+        let _operation_guard = operation_cancel.clone().drop_guard();
+        let result = tokio::select! { biased;
+            _ = cancel.cancelled() => { operation_cancel.cancel(); return Ok(()); },
+            result = tokio::time::timeout(Duration::from_millis(remaining), handler.handle(operation, operation_cancel.clone())) => result,
+        };
+        let reply = match result {
+            Ok(Ok(reply)) => reply,
+            result => {
+                let failure = match result {
+                    Ok(Err(failure)) => failure,
+                    Err(_) => Failure {
+                        code: ErrorCode::Unavailable,
+                        detail: "Component operation timed out".into(),
+                    },
+                    _ => unreachable!(),
+                };
+                ensure!(
+                    failure.detail.len() <= 512 && !failure.detail.chars().any(char::is_control),
+                    "invalid component failure"
+                );
+                ipc::write(
+                    &mut stream,
+                    &Response::<Outcome<H::Value>> {
+                        id: request.id,
+                        result: Outcome::Error { failure },
+                    },
+                    Duration::from_secs(5),
+                )
+                .await?;
+                continue;
+            }
+        };
+        let (value, remote) = match reply {
+            Reply::Message(value) => (value, None),
+            Reply::Stream { value, remote } => (value, Some(remote)),
+        };
+        ipc::write(
+            &mut stream,
+            &Response {
+                id: request.id,
+                result: Outcome::Ok {
+                    value,
+                    stream: remote.is_some(),
+                },
+            },
+            Duration::from_secs(5),
+        )
+        .await?;
+        if let Some(mut remote) = remote {
+            // Existing streams remain with this worker across component updates.
+            tokio::select! { biased; _ = cancel.cancelled() => {}, _ = tokio::io::copy_bidirectional(&mut stream, &mut remote) => {} }
+            return Ok(());
+        }
+    }
+}
+/// One process serves many calls and streams; no per-operation subprocesses.
+/// Idle workers exit after five minutes; active stream tasks prevent idle exit.
+pub async fn serve<H: Handler>(
+    endpoint: Endpoint,
+    hello: Hello,
+    handler: Arc<H>,
+    cancel: CancellationToken,
+) -> Result<()> {
+    let listener = Listener::bind(endpoint).await?;
+    serve_bound(listener, hello, handler, cancel).await
+}
+
+/// Serve a listener bound before frontend admission, allowing callers to choose
+/// a safe fallback if local IPC is unavailable before any request is dispatched.
+pub async fn serve_bound<H: Handler>(
+    mut listener: Listener,
+    hello: Hello,
+    handler: Arc<H>,
+    cancel: CancellationToken,
+) -> Result<()> {
+    let cancel = cancel.child_token();
+    let mut clients = tokio::task::JoinSet::new();
+    let capacity = handler.connection_limit().clamp(1, 512);
+    let mut tick = tokio::time::interval(IDLE);
+    tick.tick().await;
+    let mut idle = 0;
+    loop {
+        tokio::select! { biased;
+            _ = cancel.cancelled() => break,
+            _ = tick.tick() => {
+                if clients.is_empty() { idle += 1; } else { idle = 0; }
+                if idle >= 5 && handler.exit_when_idle() { break; }
+            },
+            _ = clients.join_next(), if !clients.is_empty() => {},
+            result = listener.accept(), if clients.len() < capacity => {
+                // Rejected peers and closed startup probes do not stop other clients.
+                match result {
+                    Ok(stream) => {
+                        idle = 0;
+                        let handler = handler.clone(); let hello = hello.clone(); let child = cancel.child_token(); let worker_cancel = cancel.clone();
+                        clients.spawn(async move { let _ = connection(stream, handler, hello, child, worker_cancel).await; });
+                    }
+                    Err(_) => { tokio::select! { _ = cancel.cancelled() => break, _ = tokio::time::sleep(Duration::from_millis(100)) => {} } }
+                }
+            },
+        }
+    }
+    clients.shutdown().await;
+    Ok(())
+}
+
+/// A CLI fallback uses the same versioned contract over private inherited pipes.
+/// No endpoint, operation, URL or credential is placed in the process arguments.
+pub async fn serve_stdio<H: Handler>(
+    hello: Hello,
+    handler: Arc<H>,
+    cancel: CancellationToken,
+) -> Result<()> {
+    let stream = Box::new(crate::stdio::Pair::new(
+        tokio::io::stdin(),
+        tokio::io::stdout(),
+    ));
+    let child = cancel.child_token();
+    let _cleanup = child.clone().drop_guard();
+    connection(stream, handler, hello, child.clone(), child).await
+}

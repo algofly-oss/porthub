@@ -3,9 +3,9 @@ use super::{
     participant_control::{fetch, Snapshot},
     Job,
 };
-use crate::terminal_ui::{InputReader, Screen};
 use anyhow::{ensure, Result};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+use porthub_console::{InputReader, Screen};
 use std::{
     io::{IsTerminal, Write},
     time::{Duration, Instant},
@@ -31,12 +31,18 @@ fn render(
             "{} · {} guest(s)",
             if snapshot.connected {
                 "Connected"
-            } else if !shared { "Local" } else {
+            } else if !shared {
+                "Local"
+            } else {
                 "Reconnecting"
             },
             snapshot.members.len()
         ),
-        if sidebar { "↑/↓ select · k remove · F8/q shell".into() } else { "↑/↓ select · k remove · q close view".into() },
+        if sidebar {
+            "↑/↓ select · k remove · F8/q shell".into()
+        } else {
+            "↑/↓ select · k remove · q close view".into()
+        },
         String::new(),
     ];
     let visible = height.saturating_sub(10).max(1);
@@ -83,16 +89,27 @@ fn render(
         .join("\r\n")
 }
 fn focus_shell(job: &Job) -> Result<()> {
-    let tmux=std::env::var("TMUX")?;
-    let socket=std::path::Path::new(tmux.split(',').next().unwrap_or(""));
-    super::private(socket.parent().ok_or_else(|| anyhow::anyhow!("owner view unavailable"))?)?;
-    ensure!(socket != job.workspace.join("tmux.sock"), "private owner view required");
-    let status=std::process::Command::new(&job.executable).arg("-S").arg(socket)
-        .args(["select-pane","-t","%0"]).env_remove("TMUX").status()?;
+    let tmux = std::env::var("TMUX")?;
+    let socket = std::path::Path::new(tmux.split(',').next().unwrap_or(""));
+    super::private(
+        socket
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("owner view unavailable"))?,
+    )?;
+    ensure!(
+        socket != job.workspace.join("tmux.sock"),
+        "private owner view required"
+    );
+    let status = std::process::Command::new(&job.executable)
+        .arg("-S")
+        .arg(socket)
+        .args(["select-pane", "-t", "%0"])
+        .env_remove("TMUX")
+        .status()?;
     ensure!(status.success(), "owner view unavailable");
     Ok(())
 }
-pub(super) async fn run(job: Job, sidebar: bool) -> Result<()> {
+pub(super) async fn run(root: &std::path::Path, job: Job, sidebar: bool) -> Result<()> {
     ensure!(
         std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
         "--watch needs an interactive terminal; use --json for scripts"
@@ -108,7 +125,7 @@ pub(super) async fn run(job: Job, sidebar: bool) -> Result<()> {
     let mut pending: Option<AbortOnDropHandle<Result<Snapshot>>> = None;
     let mut removal: Option<(u64, Instant)> = None;
     loop {
-        let shared=super::root()?.join(format!("{}.share",job.id)).is_file();
+        let shared = root.join(format!("{}.share", job.id)).is_file();
         let selected_id = snapshot.members.get(selected).map(|member| member.id);
         tokio::select! {
             _=interval.tick()=>{
@@ -163,7 +180,8 @@ pub(super) async fn run(job: Job, sidebar: bool) -> Result<()> {
                 &message,
                 usize::from(width),
                 usize::from(height),
-                shared, sidebar
+                shared,
+                sidebar
             ))
         )?;
         std::io::stdout().flush()?;

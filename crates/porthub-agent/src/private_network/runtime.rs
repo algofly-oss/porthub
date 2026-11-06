@@ -205,6 +205,10 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     let profile = Profile::load(&path)?;
     let _lease = Lease::acquire(&path)?;
     let control = Arc::new(crate::control::Control::new_private(&profile)?);
+    // Embedded private networking shares the parent registration's maintenance
+    // worker. A standalone private enrollment owns its own background updates.
+    let owns_component_maintenance = logs.is_some();
+    let mut component_maintenance = None;
     let mut log_stream = logs.map(|logs| crate::logs::Guard::start(control, logs, cancel.child_token()));
     let name = format!(
         "ph{}",
@@ -274,6 +278,13 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     let mut dns_upstream:Option<Arc<super::dns_upstream::Upstream>>=None;
     let mut policy = Engine::default();
     let mut private_status = crate::runtime::PrivateStatus::default();
+    #[cfg(target_os="linux")]
+    let (dns_target,dns_health) = {
+        let (target,input)=watch::channel(None);
+        let (result,health)=watch::channel(None);
+        tasks.spawn(crate::private_dns_setup::monitor(input,result,work.clone()));
+        (target,health)
+    };
     let mut exit_route = None;
     let mut exit_traffic_mode = porthub_mesh::exit_policy::TrafficMode::default();
     let mut exit_lan_peers: Vec<(String, Vec<porthub_mesh::lan_routes::Network>)> = Vec::new();
@@ -441,6 +452,11 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     #[cfg(not(all(target_os = "linux", feature = "netns-tests")))]
                     let isolated = false;
                     if !isolated { dns_registration=Some(dns::register(tun.index,own.ip,port,&suffixes).await?); }
+                    #[cfg(target_os="linux")]
+                    {dns_target.send_if_modified(|previous| {
+                        let next=Some((own.hostname.clone(),own.ip));
+                        if *previous==next {false} else {*previous=next;true}
+                    });}
                     registered_suffixes=suffixes;
                     registered_rules=snapshot.dns_rules.clone();
                 }
@@ -449,7 +465,13 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 // Publish initial readiness immediately. Waiting for
                 // the periodic refresh can make a healthy service miss the
                 // installer's readiness deadline after a slow initial sync.
-                if first_ready { status_tick.reset_immediately(); }
+                if first_ready {
+                    status_tick.reset_immediately();
+                    if owns_component_maintenance {
+                        component_maintenance = crate::components::background(&profile.server, &work).map(Some)
+                            .unwrap_or_else(|_| { tracing::warn!("optional component maintenance unavailable; private networking remains active"); None });
+                    }
+                }
             },
             Some(Event::Packet{peer,bytes,direct,received_at})=>{
                 let now=received_at;
@@ -724,6 +746,12 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     circuit_groups:settings.circuit_groups.or(tor_route_groups).unwrap_or(4),
                 });
             }
+            #[cfg(target_os="linux")]
+            {
+                private_status.dns_integration=Some(crate::private_prerequisites::dns_status().into());
+                private_status.dns_verified=Some(dns_health.borrow().unwrap_or(false));
+            }
+            private_status.relay_ready = Some(relay_sender.is_ready());
             private_status.lease_valid = policy.valid_lease();
             if let Some(exit) = &mut private_status.exit {
                 exit.available = exit_available;
@@ -740,6 +768,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         }
     }}Ok(())}.await;
     work.cancel();
+    drop(component_maintenance);
     if tokio::time::timeout(Duration::from_secs(2), async {
         while !tasks.is_empty() {
             let _ = tasks.join_next().await;

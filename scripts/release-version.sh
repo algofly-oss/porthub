@@ -1,5 +1,6 @@
 #!/bin/sh
-# Cargo's workspace version is the release version for binaries and images.
+# Cargo's workspace version identifies the release carrier and server images.
+# The core executable has its own version in crates/porthub-agent/Cargo.toml.
 set -eu
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' "$root/Cargo.toml" | head -n 1)

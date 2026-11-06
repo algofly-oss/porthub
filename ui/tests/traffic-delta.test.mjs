@@ -24,3 +24,14 @@ test('scope changes and evicted delta bases cannot retain traffic from removed p
   assert.deepEqual(next.rows[0].traffic,[{timestamp:101,in_bytes:5}]);assert.deepEqual(next.aggregate,[{timestamp:101,in_bytes:5}]);
   assert.equal(trafficRowCursors(next.rows,true),'two:new');assert.equal(trafficRowCursors(next.rows),'two:101');
 });
+
+test('hour-long traffic pages retain historical seconds across live deltas', () => {
+  const history = Array.from({length:3600}, (_,i)=>({timestamp:10000+i,in_bytes:1,out_bytes:2}));
+  const initial = mergeTrafficPage({}, {data:[{connection:{_id:'hour'},traffic:history}],aggregate:history}, 'hour', 1);
+  assert.equal(initial.aggregate.length,3600);
+  assert.equal(initial.rows[0].traffic.length,3600);
+  const next = mergeTrafficPage(initial, {data:[{connection:{_id:'hour'},traffic:[{timestamp:13600,in_bytes:4,out_bytes:5}]}],aggregate:[{timestamp:13600,in_bytes:4,out_bytes:5}]}, 'hour', 2);
+  assert.equal(next.aggregate.length,3600);
+  assert.equal(next.aggregate[0].timestamp,10001);
+  assert.equal(next.rows[0].traffic[3599].timestamp,13600);
+});

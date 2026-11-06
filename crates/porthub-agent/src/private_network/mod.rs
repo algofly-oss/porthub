@@ -64,3 +64,8 @@ pub mod stream_router;
 pub use porthub_network::tcp_stream;
 #[cfg(feature = "local-tor")]
 mod tor_exit;
+
+#[cfg(target_os="linux")]
+pub(crate) fn owned_exit_underlay(index: u32, source: std::net::IpAddr) -> bool {
+    exit_journal::Journal::allows_underlay(index,source)
+}

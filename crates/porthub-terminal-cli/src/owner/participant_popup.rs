@@ -44,22 +44,44 @@ fn register(job: &Job, child: &Child) -> Result<Lease> {
         .context("owner attachment lease is busy")?;
     Ok(Lease { path, _file: file })
 }
-pub(super) fn attach(job: &Job, workspace: &Workspace, sidebar: Sidebar) -> Result<()> {
-    let (cols,rows) = crossterm::terminal::size().unwrap_or((80,24));
-    let shared = root()?.join(format!("{}.share",job.id)).is_file();
+pub(super) fn attach(
+    root: &Path,
+    job: &Job,
+    workspace: &Workspace,
+    sidebar: Sidebar,
+) -> Result<()> {
+    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    let shared = root.join(format!("{}.share", job.id)).is_file();
     if sidebar == Sidebar::On || sidebar == Sidebar::Auto && shared && cols >= 100 {
-        ensure!(cols >= 80, "sidebar needs at least 80 columns; use --sidebar off");
+        ensure!(
+            cols >= 80,
+            "sidebar needs at least 80 columns; use --sidebar off"
+        );
         use std::os::unix::fs::PermissionsExt;
-        let directory=tempfile::Builder::new().prefix("phview-")
-            .permissions(fs::Permissions::from_mode(0o700)).tempdir_in("/tmp")?;
-        let view=porthub_terminal::owner_view::OwnerView::new(workspace,directory.path().to_path_buf())?;
-        let mut panel=std::process::Command::new(std::env::current_exe()?);
-        panel.arg("terminal").arg("__participants-view").arg(root()?).arg(&job.id).arg("--sidebar");
-        let status=view.command(workspace,&panel,cols.clamp(80,500),rows.clamp(5,200))?.status()?;
-        ensure!(status.success(), "terminal view closed unexpectedly; workspace may still be running");
+        let directory = tempfile::Builder::new()
+            .prefix("phview-")
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir_in("/tmp")?;
+        let view = porthub_terminal::owner_view::OwnerView::new(
+            workspace,
+            directory.path().to_path_buf(),
+        )?;
+        let mut panel = std::process::Command::new(std::env::current_exe()?);
+        panel
+            .arg("terminal")
+            .arg("__participants-view")
+            .arg(root)
+            .arg(&job.id)
+            .arg("--sidebar");
+        let status = view
+            .command(workspace, &panel, cols.clamp(80, 500), rows.clamp(5, 200))?
+            .status()?;
+        ensure!(
+            status.success(),
+            "terminal view closed unexpectedly; workspace may still be running"
+        );
         return Ok(());
     }
-    let root = root()?;
     let executable = std::env::current_exe()?;
     let command = format!(
         "{} terminal __participants-popup {} {} '#{{client_pid}}' >/dev/null 2>&1 || true",
@@ -96,7 +118,7 @@ pub(super) fn show(root: &Path, id: &str, client: u32) -> Result<()> {
     private(root)?;
     ensure!(client > 0, "invalid terminal client");
     let job = select(root, id)?;
-    let file = crate::profile::read_private(&lease_path(&job, client));
+    let file = read_private(&lease_path(&job, client));
     ensure!(
         file.is_ok(),
         "participant controls require a local owner attachment"
@@ -165,5 +187,5 @@ pub(super) fn show(root: &Path, id: &str, client: u32) -> Result<()> {
 }
 pub(super) async fn view(root: &Path, id: &str, sidebar: bool) -> Result<()> {
     private(root)?;
-    super::participant_panel::run(select(root, id)?, sidebar).await
+    super::participant_panel::run(root, select(root, id)?, sidebar).await
 }
