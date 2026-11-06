@@ -75,6 +75,11 @@ def main():
                 for transport in transports:
                     print(f'Verify terminal sharing: {browser}, {transport}', flush=True)
                     environment = dict(os.environ,
+                                       # The enrolled control fixture uses loopback
+                                       # HTTP explicitly. Software stays in its
+                                       # seeded verified cache with HTTPS-only
+                                       # download authorities, as in production.
+                                       PORTHUB_COMPONENT_GATEWAY='https://components-fixture.invalid',
                                        PORTHUB_TEST_UI_ORIGIN=f'http://127.0.0.1:{server.server_port}',
                                        PORTHUB_TEST_NATIVE_HOST='1',
                                        PORTHUB_TEST_TERMINAL_DIRECT='1' if transport == 'direct' else 'blocked',
