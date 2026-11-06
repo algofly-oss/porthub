@@ -22,7 +22,14 @@ from urllib.parse import urlsplit
 
 
 def run(args, **kwargs):
-    return subprocess.run(args, check=True, timeout=90, **kwargs)
+    # Encoded PowerShell progress becomes large CLIXML records when CI redirects
+    # its output. Keep useful installer output and bound failure diagnostics.
+    result = subprocess.run(args, timeout=90, capture_output=True, **kwargs)
+    sys.stdout.write(result.stdout.decode(errors='replace')[-4000:])
+    if result.returncode:
+        sys.stderr.write(result.stderr.decode(errors='replace')[-4000:])
+    result.check_returncode()
+    return result
 
 
 def ps(script, **kwargs):
@@ -137,7 +144,7 @@ def main():
                 line = commands["powershell.exe" if shell == "batch" else shell][0]
                 env = os.environ.copy()
                 # Every install starts with the original PATH, like a fresh terminal.
-                env["Path"] = os.environ["Path"]
+                env["PATH"] = os.environ["PATH"]
                 if shell == "cmd.exe":
                     # Pass the clipboard text verbatim: Python's list2cmdline
                     # uses C argv escaping, which is not cmd.exe quote syntax.
@@ -165,7 +172,9 @@ def main():
             machine_path, _ = winreg.QueryValueEx(key, "Path")
         assert sum(p.rstrip("\\").lower() == str(cli.parent).lower() for p in machine_path.split(";")) == 1
         env = os.environ.copy()
-        env["Path"] = os.path.expandvars(machine_path) + ";" + env["Path"]
+        # os.environ is case-insensitive on Windows, but its copied dict is not;
+        # Python normalizes its keys to uppercase (PATH rather than Path).
+        env["PATH"] = os.path.expandvars(machine_path) + ";" + env["PATH"]
         run(["cmd.exe", "/d", "/c", "porthub --version"], env=env)
         run([str(cli), "stop", identity[:12]])
         ps("if ((Get-Service '" + service + "').Status -ne 'Stopped') { exit 1 }")

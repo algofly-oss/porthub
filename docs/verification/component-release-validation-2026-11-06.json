@@ -179,13 +179,20 @@
       "source_revision": "46882356ae94666f326b2711030a160eee802078",
       "x86_64": "success",
       "arm64": "success",
-      "remaining_mac_jobs": "in_progress"
+      "remaining_mac_jobs": "ARM64 failed a literal PWD path comparison; Intel still running. Compare directory identity across /var aliases; include an explicit cwd symlink. Local process/PTY suite passed after correction; native rerun required."
     },
     "packaged_windows_installation": {
       "run_id": 42142327353,
       "source_revision": "d704a26a6757a790e4b13363c719b05b66de4ca7",
-      "state": "in_progress",
-      "scope": "Exact packaged core, real PowerShell installer, CMD/PS5/PS7/batch entrypoints, SCM LocalSystem, authenticated control, PATH, service lifecycle"
+      "state": "failed_after_successful_entrypoints",
+      "scope": "Exact packaged core, real PowerShell installer, CMD/PS5/PS7/batch entrypoints, SCM LocalSystem, authenticated control, PATH, service lifecycle",
+      "entrypoints_passed": [
+        "cmd.exe",
+        "powershell.exe",
+        "pwsh.exe",
+        "batch"
+      ],
+      "failure": "Test harness copied os.environ to a case-sensitive dict, then read Path instead of PATH. Fixed; full lifecycle rerun required."
     },
     "release_preparation": {
       "local_fix_commit": "ae062e064447fab9073460ac7797b6fe5de299fe",
@@ -203,6 +210,12 @@
       "Real Windows install gate",
       "Compact publication",
       "Installed agent/helper prefetch/update and rollout verification"
-    ]
+    ],
+    "harness_corrections": {
+      "windows": "Use uppercase PATH in copied environments and bound redirected CLIXML diagnostic output",
+      "macos": "Compare actual directory identity and retain exact environment-value assertion; also pass an explicit symlink cwd",
+      "local_workspace_process_and_pty_check": "passed",
+      "product_agent_source_changed": false
+    }
   }
 }

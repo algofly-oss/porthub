@@ -69,14 +69,23 @@ def main():
         try:
             for index in range(2):
                 name=f'caller-{index}';output=root/f'caller-{index}.txt';cwd=root/f'cwd-{index}';cwd.mkdir()
-                job=json.loads(call(['terminal','new','--name',name,'--cwd',str(cwd),'--detach','--json','--','/bin/sh','-c',
+                requested_cwd=cwd
+                if index==1:
+                    requested_cwd=root/'cwd-alias'
+                    requested_cwd.symlink_to(cwd, target_is_directory=True)
+                job=json.loads(call(['terminal','new','--name',name,'--cwd',str(requested_cwd),'--detach','--json','--','/bin/sh','-c',
                     'printf "%s\\n%s" "$PORTHUB_WORKSPACE_FIXTURE" "$PWD" > "$1"; sleep 120','fixture',str(output)],
                     {'PORTHUB_WORKSPACE_FIXTURE':f'value-{index}'}))
                 created.append(name)
                 deadline=time.monotonic()+5
                 while not output.exists() and time.monotonic()<deadline:
                     time.sleep(.02)
-                assert output.read_text()==f'value-{index}\n{cwd}', 'Caller environment or cwd was lost'
+                value,actual_cwd=output.read_text().split('\n',1)
+                assert value==f'value-{index}', 'Caller environment was lost'
+                # tmux canonicalizes cwd. macOS /var and /private/var spell the
+                # same directory differently; test identity, including an
+                # explicit caller-supplied alias, rather than path spelling.
+                assert Path(actual_cwd).samefile(cwd), 'Caller working directory was lost'
                 with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
                     results=list(pool.map(lambda _:json.loads(call(['terminal',name,'--detach','--json'])),range(6)))
                 assert all(row['id']==job['id'] for row in results), 'Concurrent reopen changed workspace identity'
