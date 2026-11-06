@@ -204,5 +204,15 @@
     "Gateway-backed sharing and public exposure inherently require a gateway; local tool operations do not.",
     "Original WSL expose incident host is unavailable; its failure was audited and prerequisites covered by tests, not reproduced on that original host.",
     "Checksums are trusted through configured verified HTTPS authorities; publisher compromise is outside this release trust model."
-  ]
+  ],
+  "follow_up_audit": {
+    "machine": "SSD UAT app",
+    "reported_agent_version": "1.11.0",
+    "shared_cli_version": "1.10.1",
+    "private_dns_verified": false,
+    "finding": "Version reporting alone did not prove native OTA commitment on every host. Preserve wrapper skipped prerequisite preparation. A follow-up fix and committed-upgrade verification are required.",
+    "ec2_canary_committed_proof_remains_valid": true,
+    "recorded_at_utc": "2026-11-06T07:09:43.728145+00:00",
+    "private_status_reported_at_unix": 1793948534
+  }
 }
