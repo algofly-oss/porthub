@@ -1,0 +1,38 @@
+{
+  "recorded_at_utc": "2026-11-06T02:20:20.312222+00:00",
+  "change": "Machines status dropdown replaces All/Online/Offline/Disabled button group",
+  "desktop_width_px": 128,
+  "options": [
+    "All",
+    "Online",
+    "Offline",
+    "Disabled"
+  ],
+  "searchable": false,
+  "behavior": "Existing server-side filter state and query paths retained; All includes disabled machines",
+  "validation": {
+    "production_build": "passed",
+    "static_export": "passed",
+    "chromium_viewports": [
+      1440,
+      402
+    ],
+    "webkit_viewports": [
+      1440,
+      402
+    ],
+    "all_four_statuses_and_disabled_configuration": "passed",
+    "horizontal_overflow": "none",
+    "screenshots_inspected": [
+      "/tmp/porthub-machine-dropdown-1440.png",
+      "/tmp/porthub-machine-dropdown-open-402.png"
+    ],
+    "broader_hover_audit": "Status selection and hover checks passed before an unrelated stale LAN badge selector blocked the existing wider audit"
+  },
+  "versions": {
+    "server_carrier": "1.11.2",
+    "core_agent": "1.11.0",
+    "helpers": "0.1.0"
+  },
+  "deployment": "pending server artifact verification"
+}

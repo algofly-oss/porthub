@@ -15,14 +15,16 @@ const {launchBrowser}=require("./browser.cjs");
   await page.getByLabel("Search machines",{exact:true}).fill(disabled.name);
   const target=page.getByRole("button",{name:`Configure ${disabled.name}`,exact:true});
   await target.waitFor();
-  const statuses=page.getByRole("group",{name:"Machine status",exact:true}).filter({visible:true});
-  await statuses.getByRole("button",{name:"Disabled",exact:true}).click();
+  const statuses=page.getByLabel("Machine status",{exact:true});
+  const selectStatus=async label=>{await statuses.click();await page.getByRole("option",{name:label,exact:true}).click();};
+  if(width>=768)assert((await statuses.boundingBox()).width<=140,"Machine status dropdown must stay compact");
+  await selectStatus("Disabled");
   await target.waitFor();
   for(const status of ["Online","Offline"]) {
-   await statuses.getByRole("button",{name:status,exact:true}).click();
+   await selectStatus(status);
    await target.waitFor({state:"hidden"});
   }
-  await statuses.getByRole("button",{name:"All",exact:true}).click();
+  await selectStatus("All");
   await target.waitFor();
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),"Machine filters must fit the viewport");
   await target.click();
