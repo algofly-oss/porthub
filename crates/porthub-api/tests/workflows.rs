@@ -1790,7 +1790,7 @@ async fn native_web_activity_preserves_history_and_ingests_real_proxy_requests_o
     let mut metrics = mongodb::bson::Document::new();
     metrics.insert(id, doc! {"requests":9_i64,"last_requested_at":&tracking});
     case.app.collection("proxy_activity").insert_one(doc! {"_id":"traefik-requests-v1","revision":7_i64,"identity":"old-log","offset":500_i64,"metrics":metrics,"tracking_since":&tracking}).await?;
-    let activity = Arc::new(WebActivity::default());
+    let activity = Arc::new(WebActivity::with_visitor_key(&log)?);
     let web = Arc::new(WebRoutes::new(None).with_activity(activity.clone()));
     web.reload(serde_json::from_slice(&std::fs::read(&manifest)?)?)?;
     let server = Arc::new(tokio::sync::RwLock::new(
@@ -1800,7 +1800,7 @@ async fn native_web_activity_preserves_history_and_ingests_real_proxy_requests_o
     let edge_router = porthub_edge::router_with_web(server.clone(), None, web);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
-    let edge = tokio::spawn(async move { axum::serve(listener, edge_router).await });
+    let edge = tokio::spawn(async move { axum::serve(listener, edge_router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await });
     let client = reqwest::Client::new();
     for _ in 0..3 {
         let response = client
@@ -1878,6 +1878,8 @@ async fn native_web_activity_preserves_history_and_ingests_real_proxy_requests_o
         )
         .await?;
     ensure!(replay["coverage_warning"] == true && replay["data"][0]["requests"] == 12);
+    ensure!(replay["data"][0]["visits"] == 1 && replay["visit_window_seconds"] == 1800);
+    ensure!(replay.get("recent_visitors").is_none(),"private deduplication state must not leave Mongo");
     let state = case
         .app
         .collection("proxy_activity")

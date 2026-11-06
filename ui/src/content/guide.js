@@ -319,6 +319,14 @@ export const guideArticles = [
         ]
       },
       {
+        "id": "visits",
+        "title": "Visit counts",
+        "blocks": [
+          { "type": "paragraph", "text": "Proxy usage shows estimated visits. Refreshes, assets and API requests from the same client IP and browser belong to one visit until 30 minutes pass without activity. Monthly totals use UTC. Shared IP/browser combinations may be grouped, and bots are included." },
+          { "type": "paragraph", "text": "Hover over usage to see the raw HTTP request totals and when visit tracking began. Earlier request counts remain preserved; they cannot be converted into past visitors." }
+        ]
+      },
+      {
         "id": "balancing",
         "title": "Priority and load balancing",
         "blocks": [

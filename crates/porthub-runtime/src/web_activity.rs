@@ -1,6 +1,7 @@
 //! Request counts are aggregated in memory, then written as bounded batches.
 //! The core reads this edge-owned volume read-only. No request addresses, paths,
-//! queries, credentials or payloads enter this journal.
+//! queries, credentials or payloads enter this journal. Visitor identities are
+//! salted fingerprints; the debounce ledger lives with the counters in Mongo.
 use anyhow::{Context, Result};
 use chrono::Datelike;
 use serde::{Deserialize, Serialize};
@@ -15,9 +16,32 @@ use std::{
 use tokio::sync::{watch, Notify};
 
 pub const MAX_RECORDS: usize = 512;
+pub const VISIT_WINDOW_SECONDS: i64 = 30 * 60;
 const MAX_PENDING: usize = 16_384;
 const ROTATE_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_READ: u64 = 2 * 1024 * 1024;
+
+fn cloudflare_peer(ip: std::net::IpAddr) -> bool {
+    use std::{net::IpAddr, sync::OnceLock};
+    // Published ingress ranges checked 2026-11-06:
+    // https://www.cloudflare.com/ips-v4 and https://www.cloudflare.com/ips-v6
+    const RANGES: &str = "173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32";
+    static NETWORKS: OnceLock<Vec<(IpAddr, u32)>> = OnceLock::new();
+    NETWORKS.get_or_init(|| RANGES.split_whitespace().map(|range| {
+        let (ip, bits) = range.split_once('/').unwrap();
+        (ip.parse().unwrap(), bits.parse().unwrap())
+    }).collect()).iter().any(|(network, bits)| match (ip.to_canonical(), network) {
+        (IpAddr::V4(ip), IpAddr::V4(network)) => {
+            let mask = u32::MAX.checked_shl(32 - bits).unwrap_or(0);
+            u32::from(ip) & mask == u32::from(*network) & mask
+        }
+        (IpAddr::V6(ip), IpAddr::V6(network)) => {
+            let mask = u128::MAX.checked_shl(128 - bits).unwrap_or(0);
+            u128::from(ip) & mask == u128::from(*network) & mask
+        }
+        _ => false,
+    })
+}
 
 pub fn segments(path: &Path) -> [PathBuf; 3] {
     let suffix = |number| {
@@ -105,7 +129,7 @@ pub fn read_batch(path: &Path, checkpoint: Option<&Checkpoint>) -> Result<Option
         {
             match serde_json::from_slice::<Batch>(line) {
                 Ok(batch)
-                    if batch.version == 1
+                    if matches!(batch.version, 1 | 2)
                         && uuid::Uuid::parse_str(&batch.id).is_ok()
                         && batch.records.len() <= MAX_RECORDS
                         && batch.records.iter().all(|record| {
@@ -113,6 +137,17 @@ pub fn read_batch(path: &Path, checkpoint: Option<&Checkpoint>) -> Result<Option
                                 && record.route_id.len() <= 128
                                 && record.host.len() <= 253
                                 && record.count >= 0
+                                && match (&record.client, record.first_timestamp) {
+                                    (None, None) => true,
+                                    (Some(client), Some(first)) => batch.version == 2
+                                        && record.count > 0
+                                        && client.len() == 64
+                                        && client.bytes().all(|b| b.is_ascii_hexdigit())
+                                        && first <= record.timestamp
+                                        && record.timestamp.saturating_sub(first) < 60_000
+                                        && chrono::DateTime::from_timestamp_millis(first).is_some(),
+                                    _ => false,
+                                }
                                 && chrono::DateTime::from_timestamp_millis(record.timestamp)
                                     .is_some()
                         }) =>
@@ -165,6 +200,10 @@ pub struct Record {
     pub count: i64,
     pub timestamp: i64,
     pub host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_timestamp: Option<i64>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -176,20 +215,76 @@ pub struct Batch {
 }
 #[derive(Default)]
 struct Pending {
-    counts: BTreeMap<(String, i32), Record>,
+    counts: BTreeMap<(String, i32, Option<(String, i64)>), Record>,
     warning: bool,
 }
 #[derive(Default)]
 pub struct WebActivity {
     pending: Mutex<Pending>,
     changed: Notify,
+    visitor_key: Option<[u8; 32]>,
 }
 impl WebActivity {
+    pub fn requests_only() -> Self {
+        Self { pending: Mutex::new(Pending { warning: true, ..Pending::default() }), ..Self::default() }
+    }
+    /// The edge's persistent private salt keeps fingerprints stable on restart.
+    /// A failure can disable visitor estimates without affecting forwarding.
+    pub fn with_visitor_key(path: &Path) -> Result<Self> {
+        use std::{io::Read, os::unix::fs::{MetadataExt, OpenOptionsExt}};
+        if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+        let mut name = path.as_os_str().to_os_string(); name.push(".visitor-key");
+        let name = PathBuf::from(name);
+        let file = OpenOptions::new().write(true).create_new(true).mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(&name);
+        if let Ok(mut file) = file {
+            let mut key = [0_u8; 32];
+            key[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+            key[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+            file.write_all(&key)?; file.sync_all()?;
+            if let Some(parent) = path.parent() { File::open(parent)?.sync_all()?; }
+        } else if file.as_ref().err().is_none_or(|e| e.kind() != std::io::ErrorKind::AlreadyExists) {
+            return Err(file.err().unwrap().into());
+        }
+        let file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(name)?;
+        let metadata = file.metadata()?;
+        anyhow::ensure!(metadata.is_file() && metadata.nlink() == 1
+            && metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0,
+            "visitor fingerprint key must be a private owned regular file");
+        let mut bytes = Vec::new(); file.take(33).read_to_end(&mut bytes)?;
+        let key: [u8; 32] = bytes.try_into().map_err(|_| anyhow::anyhow!("invalid visitor fingerprint key"))?;
+        Ok(Self { visitor_key: Some(key), ..Self::default() })
+    }
+    pub fn record_request<B>(&self, route: &str, host: &str, request: &axum::http::Request<B>) {
+        use sha2::{Digest, Sha256};
+        let client = self.visitor_key.as_ref().and_then(|key| {
+            let peer = request.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()?.0.ip().to_canonical();
+            // Only a verified Cloudflare source can supply CF-Connecting-IP.
+            // Arbitrary Forwarded/X-Forwarded-For headers never identify visitors.
+            let ip = if cloudflare_peer(peer) {
+                request.headers().get("cf-connecting-ip").and_then(|h| h.to_str().ok())
+                    .and_then(|s| s.parse::<std::net::IpAddr>().ok()).map(|ip| ip.to_canonical()).unwrap_or(peer)
+            } else { peer };
+            let mut hash = Sha256::new(); hash.update(key);
+            hash.update((route.len() as u64).to_be_bytes()); hash.update(route.as_bytes());
+            hash.update(ip.to_string().as_bytes()); hash.update([0]);
+            if let Some(agent) = request.headers().get(axum::http::header::USER_AGENT) {
+                hash.update(&agent.as_bytes()[..agent.as_bytes().len().min(512)]);
+            }
+            Some(format!("{:x}", hash.finalize()))
+        });
+        self.record_at_with_client(route, host, chrono::Utc::now(), client);
+    }
     pub fn record(&self, route: &str, host: &str) {
         self.record_at(route, host, chrono::Utc::now());
     }
     fn record_at(&self, route: &str, host: &str, now: chrono::DateTime<chrono::Utc>) {
-        let key = (route.to_owned(), now.year() * 100 + now.month() as i32);
+        self.record_at_with_client(route, host, now, None);
+    }
+    fn record_at_with_client(&self, route: &str, host: &str, now: chrono::DateTime<chrono::Utc>, client: Option<String>) {
+        // Minute buckets retain inactivity gaps even if journal writes stall.
+        let key = (route.to_owned(), now.year() * 100 + now.month() as i32,
+            client.as_ref().map(|client| (client.clone(), now.timestamp_millis().div_euclid(60_000))));
         let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
         if pending.counts.len() >= MAX_PENDING && !pending.counts.contains_key(&key) {
             pending.warning = true;
@@ -202,8 +297,11 @@ impl WebActivity {
             count: 0,
             timestamp: 0,
             host: String::new(),
+            first_timestamp: client.as_ref().map(|_| now.timestamp_millis()),
+            client,
         });
         record.count = record.count.saturating_add(1);
+        if let Some(first) = &mut record.first_timestamp { *first = (*first).min(now.timestamp_millis()); }
         if now.timestamp_millis() >= record.timestamp {
             record.timestamp = now.timestamp_millis();
             if record.host != host {
@@ -227,7 +325,7 @@ impl WebActivity {
             }
         }
         Some(Batch {
-            version: 1,
+            version: 2,
             id: uuid::Uuid::new_v4().to_string(),
             coverage_warning: pending.warning,
             records,
@@ -427,8 +525,69 @@ mod tests {
                 count,
                 timestamp: 1_700_000_000_000,
                 host: "app.example.invalid".into(),
+                client: None,
+                first_timestamp: None,
             }],
         }
+    }
+    #[test]
+    fn visitor_fingerprints_are_private_route_scoped_and_stable_on_restart() {
+        use axum::{extract::ConnectInfo, http::Request};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("activity.jsonl");
+        let fingerprint = |activity: &WebActivity, route: &str, peer: &str, forwarded: &str, agent: &str| {
+            let mut request = Request::builder().header("cf-connecting-ip", forwarded)
+                .header("user-agent", agent).body(()).unwrap();
+            request.extensions_mut().insert(ConnectInfo(peer.parse::<std::net::SocketAddr>().unwrap()));
+            activity.record_request(route, "app.invalid", &request);
+            activity.take().unwrap().records[0].client.clone().unwrap()
+        };
+        let first = WebActivity::with_visitor_key(&path).unwrap();
+        let second = WebActivity::with_visitor_key(&path).unwrap();
+        let a = fingerprint(&first,"route-a","192.0.2.1:1000","203.0.113.1","PrivateBrowser");
+        assert_eq!(a,fingerprint(&second,"route-a","192.0.2.1:2000","203.0.113.2","PrivateBrowser"),"direct clients cannot spoof CF headers; ports do not identify users");
+        assert_eq!(a,fingerprint(&first,"route-a","[::ffff:192.0.2.1]:2000","203.0.113.2","PrivateBrowser"));
+        assert_ne!(a,fingerprint(&first,"route-b","192.0.2.1:1000","203.0.113.1","PrivateBrowser"));
+        assert_ne!(a,fingerprint(&first,"route-a","192.0.2.1:1000","203.0.113.1","OtherBrowser"));
+        assert_eq!(a,fingerprint(&first,"route-a","173.245.48.1:1000","192.0.2.1","PrivateBrowser"),"verified CF origins preserve client identity");
+        assert_eq!(a,fingerprint(&first,"route-a","[2606:4700::1]:1000","192.0.2.1","PrivateBrowser"));
+        assert_ne!(a,fingerprint(&first,"route-a","173.245.48.1:1000","192.0.2.2","PrivateBrowser"));
+        let mut request=Request::builder().header("user-agent","PrivateBrowser").body(()).unwrap();
+        request.extensions_mut().insert(ConnectInfo("192.0.2.1:1000".parse::<std::net::SocketAddr>().unwrap()));
+        first.record_request("route-a","app.invalid",&request);
+        let serialized=serde_json::to_string(&first.take().unwrap()).unwrap();
+        assert!(!serialized.contains("192.0.2.1") && !serialized.contains("PrivateBrowser"));
+    }
+
+    #[test]
+    fn visitor_buckets_preserve_first_and_last_activity_without_hiding_long_gaps() {
+        let activity=WebActivity::default();
+        let now=chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis().div_euclid(60_000)*60_000+1_000).unwrap();let client="a".repeat(64);
+        activity.record_at_with_client("route","app.invalid",now,Some(client.clone()));
+        activity.record_at_with_client("route","app.invalid",now+chrono::Duration::milliseconds(1),Some(client.clone()));
+        activity.record_at_with_client("route","app.invalid",now+chrono::Duration::minutes(31),Some(client));
+        let batch=activity.take().unwrap();assert_eq!(batch.version,2);assert_eq!(batch.records.len(),2);
+        assert_eq!(batch.records[0].count,2);
+        assert_eq!(batch.records[0].first_timestamp,Some(now.timestamp_millis()));
+        assert_eq!(batch.records[0].timestamp,now.timestamp_millis()+1);
+    }
+
+    #[test]
+    fn visitor_key_rejects_symlinks_and_other_account_permissions() {
+        use std::os::unix::fs::{symlink,PermissionsExt};
+        let directory=tempfile::tempdir().unwrap();let path=directory.path().join("activity.log");
+        let key=directory.path().join("activity.log.visitor-key");
+        let other=directory.path().join("other");std::fs::write(&other,[1_u8;32]).unwrap();
+        symlink(&other,&key).unwrap();assert!(WebActivity::with_visitor_key(&path).is_err());
+        std::fs::remove_file(&key).unwrap();std::fs::write(&key,[1_u8;32]).unwrap();
+        std::fs::set_permissions(&key,std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(WebActivity::with_visitor_key(&path).is_err());
+    }
+    #[test]
+    fn visitor_key_failure_keeps_requests_and_marks_incomplete_coverage() {
+        let activity=WebActivity::requests_only();activity.record("route","app.invalid");
+        let batch=activity.take().unwrap();assert!(batch.coverage_warning);
+        assert_eq!(batch.records[0].count,1);assert!(batch.records[0].client.is_none());
     }
     #[test]
     fn aggregation_is_bounded_and_keeps_months_separate() {

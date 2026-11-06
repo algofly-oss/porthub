@@ -128,10 +128,16 @@ async fn main() -> Result<()> {
             .ok()
         })
         .filter_map(|url| url.host_str().map(str::to_owned));
-    let activity = Arc::new(porthub_runtime::web_activity::WebActivity::default());
     let activity_path = std::env::var_os("PORTHUB_WEB_ACTIVITY_LOG_PATH")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
+    let activity = Arc::new(match activity_path.as_ref() {
+        Some(path) => porthub_runtime::web_activity::WebActivity::with_visitor_key(path).unwrap_or_else(|_| {
+            tracing::warn!("visitor tracking unavailable; request tracking remains enabled");
+            porthub_runtime::web_activity::WebActivity::requests_only()
+        }),
+        None => porthub_runtime::web_activity::WebActivity::default(),
+    });
     let mut web = porthub_runtime::web_routes::WebRoutes::with_gateway_hosts(gateway_hosts);
     if activity_path.is_some() {
         web = web.with_activity(activity.clone());
@@ -254,7 +260,7 @@ async fn main() -> Result<()> {
         let server = axum_server::bind(listen)
             .acceptor(IngressAcceptor)
             .handle(handle.clone());
-        serving.spawn(async move { server.serve(router.into_make_service()).await });
+        serving.spawn(async move { server.serve(router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await });
         handles.push(handle);
     }
     if !args.tls_listen.is_empty() {
@@ -274,7 +280,7 @@ async fn main() -> Result<()> {
                 .acceptor(acceptor)
                 .handle(handle.clone());
             let router = porthub_edge::listener_router(router.clone(), true);
-            serving.spawn(async move { server.serve(router.into_make_service()).await });
+            serving.spawn(async move { server.serve(router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await });
             handles.push(handle);
         }
     }
