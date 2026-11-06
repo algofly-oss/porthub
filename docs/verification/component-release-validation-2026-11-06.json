@@ -290,5 +290,25 @@
     "modular_agent_published": false,
     "agent_validation_run": 42151370700,
     "agent_validation_source": "bac829b403f12114c3e31159c280830136b5be52"
+  },
+  "executable_version_gate_follow_up": {
+    "recorded_at_utc": "2026-11-06T03:59:25.666792+00:00",
+    "stopped_run": 42151370700,
+    "source_revision": "bac829b403f12114c3e31159c280830136b5be52",
+    "server_gates": "all passed, including real Chromium/WebKit direct and relay sharing and image smoke tests",
+    "artifact_id": 13475294475,
+    "artifact_zip_sha256": "053777feed754e43aee47aca30ab0019e30a1b0de546e47704bb052a433337c6",
+    "core_binary_sha256": "044019cdfc8f491f6d5152f311d3027e7d21bfd079975cbd81af39e7cc042408",
+    "failure": "Receipt says independent core 1.11.0; verified executable reports inherited carrier 1.11.2. Detected before canary upgrade.",
+    "fix": "Override PORTHUB_VERSION in core Cargo invocation; bump core build recipe; execute packaged version and compare against verified receipt on all targets before helper seeding and lifecycle checks.",
+    "regression": "Actual downloaded CI artifact rejected by new gate; planner, packaged checks, coordinator and assembler tests passed.",
+    "native_canary_installed": false,
+    "production_agent_version": "1.10.1",
+    "remaining": [
+      "Corrected source full-platform validation",
+      "Compact publication",
+      "Native canary and online rollout",
+      "Installed helper prefetch and updates"
+    ]
   }
 }

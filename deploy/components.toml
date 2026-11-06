@@ -10,7 +10,7 @@ default_features = true
 features = []
 extra_inputs = []
 profile = "release"
-recipe_version = 1
+recipe_version = 2
 
 [tools.sync]
 package = "porthub-sync"

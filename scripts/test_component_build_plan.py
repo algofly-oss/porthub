@@ -148,6 +148,17 @@ recipe_version=1
             with self.assertRaisesRegex(ValueError,'Shipping compiler environment differs'):
                 buildplan.build_and_record(self.root,'tool',TARGET,'a'*40)
 
+    def test_core_build_overrides_inherited_carrier_version(self):
+        class CapturedBuild(Exception):
+            pass
+        def capture(command, **kwargs):
+            self.assertEqual(kwargs['env']['PORTHUB_VERSION'], '1.11.0')
+            self.assertNotIn('PORTHUB_COMPONENT_VERSION', kwargs['env'])
+            raise CapturedBuild()
+        with mock.patch.dict(os.environ, {'PORTHUB_VERSION':'1.11.2', 'PORTHUB_COMPONENT_VERSION':'9.9.9'}), mock.patch.object(buildplan,'require_clean_source'), mock.patch.object(buildplan.subprocess,'run',side_effect=capture):
+            with self.assertRaises(CapturedBuild):
+                buildplan.build_and_record(self.root,'core',TARGET,'a'*40)
+
     def test_terminal_compiler_cache_location_is_portable(self):
         cache=self.root/'private compiler cache'
         key='CC_'+TARGET.replace('-','_')
