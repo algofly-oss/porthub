@@ -50,3 +50,12 @@ pub struct CreateOptions {
     pub prefix: String,
     pub command: Vec<std::ffi::OsString>,
 }
+
+/// Credential-free local broker identity, selected by core from installed status.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Broker {
+    pub endpoint: PathBuf,
+    pub owner: u32,
+    pub traffic: bool,
+}

@@ -77,6 +77,8 @@ enum Command {
 #[cfg(unix)]
 #[derive(Subcommand)]
 enum OwnerCommand {
+    #[command(name = "__serve", hide = true)]
+    Serve { root: PathBuf, id: String },
     #[command(name = "__participants-popup", hide = true)]
     Popup {
         root: PathBuf,
@@ -114,6 +116,28 @@ async fn main() -> Result<()> {
         } => porthub_terminal_cli::owner::attach(&directory, &name, sidebar)?,
         #[cfg(unix)]
         Command::Terminal { command } => match command {
+            OwnerCommand::Serve { root, id } => {
+                let parent = std::env::var("PORTHUB_COMPONENT_OWNER_PID")
+                    .ok()
+                    .map(|value| value.parse::<u32>())
+                    .transpose()?;
+                let parent_closed = async {
+                    let Some(parent) = parent else {
+                        std::future::pending::<()>().await;
+                        return;
+                    };
+                    loop {
+                        if unsafe { libc::getppid() } as u32 != parent {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                };
+                tokio::select! {biased;
+                    _=cancel.cancelled()=>{}, _=parent_closed=>{},
+                    result=porthub_terminal_cli::sharing::serve(&root,&id)=>result?,
+                }
+            }
             OwnerCommand::Popup { root, id, client } => {
                 porthub_terminal_cli::owner::popup(&root, &id, client)?
             }

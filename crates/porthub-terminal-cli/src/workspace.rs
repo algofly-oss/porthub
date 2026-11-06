@@ -75,7 +75,7 @@ pub(crate) fn read_private(path: &Path) -> Result<Vec<u8>> {
     ensure!(bytes.len() <= 16384, "workspace registry exceeds limit");
     Ok(bytes)
 }
-fn write_private(path: &Path, bytes: &[u8], _replace: bool) -> Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8], replace: bool) -> Result<()> {
     let parent = path
         .parent()
         .context("workspace registry requires parent")?;
@@ -83,9 +83,16 @@ fn write_private(path: &Path, bytes: &[u8], _replace: bool) -> Result<()> {
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
     temporary.write_all(bytes)?;
     temporary.as_file().sync_all()?;
-    temporary
-        .persist_noclobber(path)
-        .map_err(|error| error.error)?;
+    if replace {
+        if path.try_exists()? {
+            let _ = read_private(path)?;
+        }
+        temporary.persist(path).map_err(|error| error.error)?;
+    } else {
+        temporary
+            .persist_noclobber(path)
+            .map_err(|error| error.error)?;
+    }
     fs::File::open(parent)?.sync_all()?;
     Ok(())
 }

@@ -23,6 +23,7 @@ pub async fn foreground(executable: &std::path::Path, arguments: &[std::ffi::OsS
     cancel: &tokio_util::sync::CancellationToken) -> anyhow::Result<tokio::process::Child>
 {
     process::retry_spawn(cancel, || tokio::process::Command::new(executable).args(arguments)
+        .env("PORTHUB_COMPONENT_OWNER_PID",std::process::id().to_string())
         .stdin(std::process::Stdio::inherit()).stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit()).kill_on_drop(true).spawn()
         .map_err(anyhow::Error::from)).await

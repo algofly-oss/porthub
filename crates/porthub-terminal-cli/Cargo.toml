@@ -6,6 +6,10 @@ publish.workspace = true
 [[bin]]
 name = "porthub-terminal"
 path = "src/main.rs"
+[features]
+default = ["terminal-direct"]
+terminal-direct = ["porthub-terminal/direct"]
+
 [dependencies]
 anyhow.workspace = true
 async-trait = "0.1"

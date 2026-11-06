@@ -1,5 +1,5 @@
 //! Foreground owner attachment UI; no enrollment or machine credentials.
-mod participant_control;
+pub(crate) mod participant_control;
 mod participant_panel;
 mod participant_popup;
 use crate::workspace::{private, read_private, select, workspace};
@@ -42,7 +42,7 @@ pub fn popup(root: &Path, id: &str, client: u32) -> Result<()> {
 pub async fn view(root: &Path, id: &str, sidebar: bool) -> Result<()> {
     participant_popup::view(root, id, sidebar).await
 }
-async fn frame<S: tokio::io::AsyncRead + Unpin>(
+pub(crate) async fn frame<S: tokio::io::AsyncRead + Unpin>(
     reader: &mut tokio::io::BufReader<S>,
     bytes: &mut Vec<u8>,
 ) -> Result<Vec<u8>> {

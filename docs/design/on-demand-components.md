@@ -8,9 +8,9 @@ The component SDK implements compatibility selection, verified gateway/GitHub
 downloads, private/shared caches, versioned RPC and CLI pipe transports,
 activation receipts, and background maintenance. Core delegates sync/watch,
 live stats, Tor, terminal runtime provisioning, workspace creation, and owner
-attachment UI. The terminal helper supports independent `new`, `attach`, `tmux`
-and `runtime` commands. Terminal sharing supervision and native guest/direct
-transport still need extraction. Live Tor generation handover, final platform
+attachment UI and sharing supervision. The terminal helper supports independent `new`, `attach`, `tmux`
+and `runtime` commands. Native guest/direct transport and remaining local workspace commands still need
+extraction. Live Tor generation handover, final platform
 checks, compact publication, and installed rollout verification remain pending.
 Background maintenance begins after authenticated configuration; core also
 exposes `components list`, `fetch`, and `update`.
@@ -930,3 +930,27 @@ mouse copy, abrupt hangup, persistent shell/background state and explicit Ctrl+D
 teardown. All three standalone bundled-runtime process tests also pass. Sharing
 supervision, native guest/direct transport and remaining local workspace commands
 still require extraction before terminal code can be excluded from core.
+
+
+The sharing supervisor, attachment host, owner-control server and traffic emitter
+now execute inside the terminal helper. Core keeps registration selection,
+launching, invitation display and the credential-injecting local broker. Saved
+shares include only a credential-free broker endpoint, expected OS owner and
+capability flag. The helper rejects non-sockets and mismatched peer identities.
+Old share files without that context are upgraded by the core launch wrapper;
+missing display metadata disables extension advertisement but does not prevent
+reconnecting to the authenticated broker. Gateway/machine credentials are never
+copied into helper arguments or configuration.
+
+Foreground launches identify their core parent. The asynchronous terminal sharing
+entry point stops its supervisor when that parent disappears, preserving the
+independent tmux shell. A bounded two-second lock handoff handles immediate
+restarts. This was necessary because killing the launcher otherwise orphaned the
+new helper and prevented the replacement from acquiring the supervisor lock.
+
+The real sharing process/PTY test passes against the rebuilt core and exact
+seeded helper, covering forced launcher death and recovery to the existing shell,
+sidebar/presence controls, invitation acknowledgement/rotation/revocation and
+explicit stop/end notification. Four helper unit tests and three standalone
+bundled-runtime tests also pass. Native guest transport and remaining local
+workspace operations still need extraction; this is not an agent release.

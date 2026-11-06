@@ -10,6 +10,10 @@ use tokio_util::sync::CancellationToken;
 pub mod workspace;
 #[cfg(unix)]
 pub mod owner;
+#[cfg(unix)]
+pub mod sharing;
+#[cfg(unix)]
+mod sharing_telemetry;
 pub const VERSION: &str = match option_env!("PORTHUB_COMPONENT_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
