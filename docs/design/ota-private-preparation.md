@@ -26,8 +26,13 @@ this suite on Linux.
 During the UAT investigation the app host reported a running 1.11.0 service with
 private DNS unverified, while its shared CLI still reported 1.10.1. Intermittent
 SSH resets were also observed. The skipped setup hook is a confirmed defect;
-live verification after a committed repair is still required before attributing
-every reset to upgrade retries.
+release 1.11.4/core 1.11.2 subsequently committed on all 15 online agents with
+matching native acknowledgements. On both RHEL UAT hosts the upgrade automatically
+added systemd-resolved to NSS lookup order. Resolver contents, physical addresses,
+default routes and routing rules remained unchanged. EC2 SSH sessions to both
+hosts completed a 45-second hold without resets. These checks demonstrate repair
+and recovery, but do not establish the cause of every historical reset. See the
+[final rollout record](../verification/2026-11-06-modular-agent-final-rollout.json).
 
 ## Gateway acknowledgement
 

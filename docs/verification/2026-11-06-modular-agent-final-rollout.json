@@ -1,0 +1,369 @@
+{
+  "schema_version": 1,
+  "recorded_at_utc": "2026-11-06T09:19:24.950536+00:00",
+  "release": "1.11.4",
+  "core_version": "1.11.2",
+  "source_revision": "436a016ace8f8c89ed9518bdca0e2ff07b11ec43",
+  "release_url": "https://github.com/algofly-oss/porthub/releases/tag/v1.11.4",
+  "release_id": 436272823,
+  "published_at_utc": "2026-11-06T08:44:33Z",
+  "ci": {
+    "run_id": 42182131455,
+    "conclusion": "success",
+    "jobs": [
+      {
+        "id": 127774296689,
+        "name": "Prepare immutable release source",
+        "conclusion": "success"
+      },
+      {
+        "id": 127777724355,
+        "name": "Build production server roles / Build and test production browser assets",
+        "conclusion": "success"
+      },
+      {
+        "id": 127777724424,
+        "name": "Build production server roles / server (arm64, ubuntu-24.04-arm, aarch64-unknown-linux-musl)",
+        "conclusion": "success"
+      },
+      {
+        "id": 127778203955,
+        "name": "Build production server roles / Verify terminal sharing and account measurements",
+        "conclusion": "success"
+      },
+      {
+        "id": 127781085709,
+        "name": "Build production server roles / Package server runtime images (arm64, ubuntu-24.04-arm, aarch64-unknown-linux-musl)",
+        "conclusion": "success"
+      },
+      {
+        "id": 127781463745,
+        "name": "Validate and package clients / select-platforms",
+        "conclusion": "success"
+      },
+      {
+        "id": 127781465048,
+        "name": "Validate and package clients / promote-existing",
+        "conclusion": "skipped"
+      },
+      {
+        "id": 127781554301,
+        "name": "Validate and package clients / linux-32 (armv7-unknown-linux-gnueabihf, armv7, arm-linux-gnueabihf-gcc, arm-linux-gnueabihf-ar, ...",
+        "conclusion": "success"
+      },
+      {
+        "id": 127781554371,
+        "name": "Validate and package clients / windows_arm64",
+        "conclusion": "success"
+      },
+      {
+        "id": 127781554405,
+        "name": "Validate and package clients / linux-32 (i686-unknown-linux-gnu, x86, i686-linux-gnu-gcc, i686-linux-gnu-ar, gcc-i686-linux-gnu ...",
+        "conclusion": "success"
+      },
+      {
+        "id": 127781554457,
+        "name": "Validate and package clients / linux-32 (arm-unknown-linux-gnueabihf, armhf, arm-linux-gnueabihf-gcc, arm-linux-gnueabihf-ar, gc...",
+        "conclusion": "success"
+      },
+      {
+        "id": 127781554461,
+        "name": "Validate and package clients / darwin_arm64",
+        "conclusion": "success"
+      },
+      {
+        "id": 127781554518,
+        "name": "Validate and package clients / darwin_x86_64",
+        "conclusion": "success"
+      },
+      {
+        "id": 127781554534,
+        "name": "Validate and package clients / x86_64",
+        "conclusion": "success"
+      },
+      {
+        "id": 127781554549,
+        "name": "Validate and package clients / windows_x86_64",
+        "conclusion": "success"
+      },
+      {
+        "id": 127781554579,
+        "name": "Validate and package clients / windows_x86",
+        "conclusion": "success"
+      },
+      {
+        "id": 127781554624,
+        "name": "Validate and package clients / arm64",
+        "conclusion": "success"
+      },
+      {
+        "id": 127796058723,
+        "name": "Validate and package clients / Validate complete release bundle",
+        "conclusion": "success"
+      },
+      {
+        "id": 127797955460,
+        "name": "Validate and package clients / Publish versioned GitHub release",
+        "conclusion": "success"
+      }
+    ],
+    "installer_and_native_gates": [
+      {
+        "job": "Validate and package clients / windows_arm64",
+        "step": "Verify copied Windows installer in Command Prompt and both PowerShell versions",
+        "conclusion": "success"
+      },
+      {
+        "job": "Validate and package clients / darwin_arm64",
+        "step": "Test native macOS service lifecycle",
+        "conclusion": "success"
+      },
+      {
+        "job": "Validate and package clients / darwin_x86_64",
+        "step": "Test native macOS service lifecycle",
+        "conclusion": "success"
+      },
+      {
+        "job": "Validate and package clients / x86_64",
+        "step": "Gate Linux private-network prerequisite preparation and unified activation",
+        "conclusion": "success"
+      },
+      {
+        "job": "Validate and package clients / x86_64",
+        "step": "Verify real privileged enrollment preparation on the disposable Linux runner",
+        "conclusion": "success"
+      },
+      {
+        "job": "Validate and package clients / windows_x86_64",
+        "step": "Verify copied Windows installer in Command Prompt and both PowerShell versions",
+        "conclusion": "success"
+      },
+      {
+        "job": "Validate and package clients / windows_x86",
+        "step": "Verify copied Windows installer in Command Prompt and both PowerShell versions",
+        "conclusion": "success"
+      },
+      {
+        "job": "Validate and package clients / arm64",
+        "step": "Gate Linux private-network prerequisite preparation and unified activation",
+        "conclusion": "success"
+      },
+      {
+        "job": "Validate and package clients / arm64",
+        "step": "Verify real privileged enrollment preparation on the disposable Linux runner",
+        "conclusion": "success"
+      }
+    ]
+  },
+  "published": {
+    "assets": 21,
+    "public_release_count": 1,
+    "total_release_entries": 1,
+    "temporary_reservation_absent": true,
+    "manifest_schema": 2,
+    "manifest_sha256": "d06af66720307e99ee4537dfd9233d75f0d0c5ffb0a5a95294e76f7b64b4198f",
+    "component_catalog_artifacts": 42,
+    "retained_prior_artifacts_unchanged": 40,
+    "latest_component_versions": {
+      "stats": "0.1.0",
+      "sync": "0.1.0",
+      "tor": "0.1.0",
+      "terminal_linux_windows": "0.1.0",
+      "terminal_macos": "0.1.1"
+    },
+    "mac_terminal_rebuild_reason": "Recorded compiled inputs, dependency selection, toolchain or build recipe changed; independently versioned to 0.1.1 while retaining 0.1.0."
+  },
+  "gateway": {
+    "recorded_at": "2026-11-06T08:05:14.208708+00:00",
+    "server_version": "1.11.4",
+    "desired_agent_core_version": "1.11.2",
+    "agent_published": true,
+    "source_revision": "436a016ace8f8c89ed9518bdca0e2ff07b11ec43",
+    "workflow_revision": "a7c305188608895b24ff651e9f8ae83598da0f5d",
+    "run_id": 42182131455,
+    "server_artifact": {
+      "id": 13486966696,
+      "size": 188297985,
+      "sha256": "996ab68fb564c432236e35f88b10b64a8c91713390e128d76fe92f10e8afc6e4"
+    },
+    "upgrade_record": "/home/ubuntu/algofly/porthub-release-1.11.4-436a016/deploy/native/upgrade-records/436a016ace8f8c89ed9518bdca0e2ff07b11ec43-hk_nmuqd",
+    "core_image": "sha256:48d4a5b2754257f74b912db0f2aefbd8578eef81680a0240c9ce638e51473ee8",
+    "core_container": "2a85635c8d8440280c8c131414d1f55745bac6bbdd9d3e695f8e8b0494038d72",
+    "unselected_containers_unchanged": {
+      "edge": "974ec82f420746f6e59f7f117dbd2613efe2e891162a533fcf99187c63230cda",
+      "firewall": "677eaa28a2c711b3489f68f2f8bdd0911c64ce9a2d3c59fa9a8bfcd88954bd80"
+    },
+    "all_containers_healthy": true,
+    "live_http": [
+      {
+        "check": "gateway",
+        "status": 200,
+        "gateway_unavailable": false,
+        "response": "ok"
+      },
+      {
+        "check": "capabilities",
+        "status": 200,
+        "gateway_unavailable": false,
+        "response": {
+          "release_manifest_schemas": [
+            1,
+            2
+          ],
+          "component_protocols": [
+            1
+          ],
+          "core_sidecars": true,
+          "independent_core_version": true,
+          "server_version": "1.11.4"
+        }
+      },
+      {
+        "check": "camera",
+        "status": 200,
+        "gateway_unavailable": false
+      }
+    ],
+    "native_matching_commit_ack_required": true,
+    "fleet_verification_pending": false
+  },
+  "core_executable_linux_x64": {
+    "sha256": "7362b2dea2793fcb69c4edc9c3fd3b6a4b0d0679a25a8de41f091c0b7aead618",
+    "size": 39384672
+  },
+  "fleet": {
+    "online": 15,
+    "core_version": "1.11.2",
+    "all_matching_nonempty_commit_acknowledgements": true,
+    "all_targets_cleared": true,
+    "all_committed_after_publication": true,
+    "disabled_count": 1,
+    "disabled_excluded_from_ota": true,
+    "os_counts": {
+      "linux": 14,
+      "macos": 1
+    }
+  },
+  "automatic_dns_repair": [
+    {
+      "host": "ec2",
+      "preserved": {
+        "resolv_conf": true,
+        "default_routes": true,
+        "default_routes_v6": true,
+        "rules": true,
+        "rules_v6": true,
+        "physical_addresses": true,
+        "ssh_config_sha256": true
+      },
+      "nss_before": [
+        "hosts:      files resolve [!UNAVAIL=return] dns myhostname"
+      ],
+      "nss_after": [
+        "hosts:      files resolve [!UNAVAIL=return] dns myhostname"
+      ],
+      "core_binary_matches_release": true,
+      "private_dns_and_relay_ready": true
+    },
+    {
+      "host": "uat_app",
+      "preserved": {
+        "resolv_conf": true,
+        "default_routes": true,
+        "default_routes_v6": true,
+        "rules": true,
+        "rules_v6": true,
+        "physical_addresses": true,
+        "ssh_config_sha256": true
+      },
+      "nss_before": [
+        "hosts:      files  dns myhostname"
+      ],
+      "nss_after": [
+        "hosts: files  resolve [!UNAVAIL=return] dns myhostname"
+      ],
+      "core_binary_matches_release": true,
+      "private_dns_and_relay_ready": true
+    },
+    {
+      "host": "uat_db",
+      "preserved": {
+        "resolv_conf": true,
+        "default_routes": true,
+        "default_routes_v6": true,
+        "rules": true,
+        "rules_v6": true,
+        "physical_addresses": true,
+        "ssh_config_sha256": true
+      },
+      "nss_before": [
+        "hosts:      files  dns myhostname"
+      ],
+      "nss_after": [
+        "hosts: files  resolve [!UNAVAIL=return] dns myhostname"
+      ],
+      "core_binary_matches_release": true,
+      "private_dns_and_relay_ready": true
+    }
+  ],
+  "sustained_ec2_to_uat_ssh": [
+    {
+      "alias": "uat_app",
+      "dns_hostname": "ssd-uat-app.phub",
+      "exit_code": 0,
+      "seconds": 48.14,
+      "completed": true
+    },
+    {
+      "alias": "uat_db",
+      "dns_hostname": "ssd-uat-db.phub",
+      "exit_code": 0,
+      "seconds": 47.71,
+      "completed": true
+    }
+  ],
+  "installed_core_commands": {
+    "normal_os_user_http_server_expose_detach": true,
+    "normal_os_user_get_sha256_verified": true,
+    "file_bytes": 1048576,
+    "progress_fields": [
+      "percent",
+      "completed/total size",
+      "human-readable speed",
+      "remaining size",
+      "ETA"
+    ],
+    "test_exposure_stopped_and_files_removed": true
+  },
+  "official_github_fallback": {
+    "current_installed_core": "1.11.2",
+    "gateway_deliberately_unreachable": true,
+    "fresh_private_cache": true,
+    "shared_cache_disabled": true,
+    "tool": "stats",
+    "version": "0.1.0",
+    "sha256": "5d08250ebf1ec74b4537a44a32012f5bdd97234d5abf4d94c30dcc6673132b07",
+    "standalone_version_with_no_core_on_PATH": true,
+    "isolated_cache_removed": true
+  },
+  "unchanged_standalone_and_ipc_verification": {
+    "historical_record": "2026-11-06-modular-agent-rollout.json",
+    "all_40_prior_optional_executables_and_provenance_match": true,
+    "linux_shipping_plan": {
+      "core": "build",
+      "stats": "reuse",
+      "sync": "reuse",
+      "terminal": "reuse",
+      "tor": "reuse"
+    },
+    "core_dispatch_and_component_implementation_diff_empty_since_93a45eb": true
+  },
+  "limitations": [
+    "Windows local terminal hosting requires WSL; native installation and supported standalone tools do not.",
+    "Remote sharing and public exposure require a reachable gateway; local tool commands do not.",
+    "The original WSL expose incident host was unavailable; its prerequisites were audited and tested, not reproduced on that host.",
+    "Visitor counts estimate visits using IP/browser inactivity and include bots; they are not a census of unique people.",
+    "The OTSI upstream failure was not captured live; the confirmed cooldown defect was fault-tested and deployed."
+  ],
+  "compiled_sizes": "2026-11-06-component-sizes.csv"
+}

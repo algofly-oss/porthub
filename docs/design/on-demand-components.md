@@ -1,21 +1,32 @@
 # Independently usable PortHub components
 
-Status: released and verified. Release **1.11.2** publishes independent core
-**1.11.0**, four optional tool families at **0.1.0**, and exactly **21 assets**.
-All ten native/platform jobs and complete-bundle verification passed in
-[run 42159848228](https://github.com/algofly-oss/porthub/actions/runs/42159848228).
+Status: released and verified. Release **1.11.4** publishes independent core
+**1.11.2** and exactly **21 assets**. All ten platform jobs, server gates and
+complete-bundle verification passed in
+[run 42182131455](https://github.com/algofly-oss/porthub/actions/runs/42182131455).
 The gateway serves the verified core and component catalog. Fifteen online agents
-report core 1.11.0; two disabled machines remain disabled. The EC2 canary
-committed its native upgrade and automatically prefetched all four helpers.
+have matching, nonempty native commit acknowledgements for core 1.11.2, cleared
+update targets and commit timestamps after publication. One disabled machine is
+excluded from OTA. This is a committed-installation check, beyond version reports.
+
+Stats, sync and Tor remain 0.1.0. Terminal is 0.1.1 on macOS and 0.1.0 on Linux
+and Windows. All 40 prior component artifacts retain identical executable hashes
+and source provenance; the catalog adds two macOS terminal builds after compiled
+inputs changed. Linux x64 rebuilt core and reused all four optional executables.
 
 Installed checks covered normal core commands through RPC and CLI fallback,
-terminal mode restoration, persistent/offline workspaces, independent stats,
-sync and terminal operations, exact gateway download hashes, and official GitHub
-fallback with an unreachable test gateway. Native candidate activation and live
-Tor generation handover passed; component source is unchanged from those tests.
-See [the release verification record](../verification/2026-11-06-modular-agent-rollout.json)
-for provenance, exact sizes, installed checks, installer/connectivity evidence,
-and limitations. Implementation notes below retain their historical context.
+terminal restoration and offline workspaces, independent tools, compatible update
+activation and live Tor handover. Current installed core also passed a normal-user
+HTTP expose/download check and fresh official GitHub fallback with an unreachable
+gateway. Native OTA automatically repaired private DNS integration on both UAT
+hosts; resolver contents, physical addresses, default routes and routing rules
+were preserved. EC2 SSH sessions to both hosts remained open for at least 45 seconds.
+
+See [the final verification record](../verification/2026-11-06-modular-agent-final-rollout.json)
+and [compiled sizes for every platform](../verification/2026-11-06-component-sizes.csv).
+The [first-release record](../verification/2026-11-06-modular-agent-rollout.json)
+preserves earlier checks and the OTA defect subsequently repaired. Implementation
+notes below retain their historical context.
 
 ## Ownership and package boundaries
 
@@ -1076,3 +1087,18 @@ non-administrator execution. The x86 binary retains its separate startup and
 ACL tests: an installer on an x64 OS selects x64, so substituting an x86 binary
 in that download would not represent a real installation. Native execution of
 the new lifecycle gate is still pending; syntax validation alone is insufficient.
+
+## Final publication and installed verification
+
+The current status at the top of this document supersedes outstanding-work notes
+in the historical implementation log. The completed release run 42182131455
+validated the prepared source 436a016 on every supported platform. Windows x64
+and Windows 11 ARM64 executed the copied CMD, PowerShell 5.1, PowerShell 7 and
+batch installation lifecycle gate successfully. Both Linux native runners passed
+the privileged enrollment preservation gate; both macOS runners passed native
+service lifecycle checks. The complete bundle and publication gates passed.
+
+The final rollout record distinguishes current installed checks, unchanged
+previously verified tool artifacts, and limitations. Production VPN configurations
+and the unavailable original WSL incident host were not reproduced; policy and
+failover fixtures cover those code paths without altering production host routes.
