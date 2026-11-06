@@ -266,5 +266,29 @@
       "Canary and online rollout",
       "Installed module download/prefetch/update verification"
     ]
+  },
+  "current_gateway_deployment": {
+    "observed_at_utc": "2026-11-06T02:47:07.040377+00:00",
+    "version": "1.11.2",
+    "source_revision": "67d8935b18aed8bd30a8ed369df17996eed053dd",
+    "ci_run": 42149820993,
+    "image_artifact": 13471344179,
+    "core_image": "sha256:d31d6be8e4679537371bab32907f56ba3cbe78ff1b345bb3672ca2a07c41b5c6",
+    "health": "healthy",
+    "native_upgrade_backup_verified": true,
+    "edge_and_firewall_retained": "1.10.2 / 5c6fa7b49994ca2cf673636dca5a4f84e7437637",
+    "ui_machine_status_dropdown": "Live Chromium/WebKit checks passed at 1440/402",
+    "public_and_private_ssh": "passed",
+    "private_dns": "10.203.0.230",
+    "online_agent_versions": {
+      "1.10.1": 14
+    },
+    "offline_agent_versions": {
+      "1.10.1": 1
+    },
+    "disabled_machines": 2,
+    "modular_agent_published": false,
+    "agent_validation_run": 42151370700,
+    "agent_validation_source": "bac829b403f12114c3e31159c280830136b5be52"
   }
 }

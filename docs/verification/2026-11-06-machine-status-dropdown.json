@@ -34,5 +34,36 @@
     "core_agent": "1.11.0",
     "helpers": "0.1.0"
   },
-  "deployment": "pending server artifact verification"
+  "deployment": {
+    "observed_at_utc": "2026-11-06T02:46:42.497692+00:00",
+    "gateway": "https://porthub.algofly.in",
+    "server_version": "1.11.2",
+    "source_revision": "67d8935b18aed8bd30a8ed369df17996eed053dd",
+    "ci_run": 42149820993,
+    "artifact_id": 13471344179,
+    "artifact_zip_sha256": "f830950ce72879c982e02a7b95d6ec86751eebb92e7fea386b9d955604e813f7",
+    "core_image": "sha256:d31d6be8e4679537371bab32907f56ba3cbe78ff1b345bb3672ca2a07c41b5c6",
+    "roles_updated": [
+      "core"
+    ],
+    "edge_firewall_unchanged": true,
+    "healthz": "ok",
+    "live_browser_checks": {
+      "chromium": [
+        1440,
+        402
+      ],
+      "webkit": [
+        1440,
+        402
+      ],
+      "all_four_filters_and_disabled_configuration": "passed"
+    },
+    "public_ssh": "passed through existing verified EC2 forwarding",
+    "private_dns": "ssd-uat-app.phub -> 10.203.0.230",
+    "private_ssh_banner": "SSH-2.0-OpenSSH_9.9",
+    "verified_backup": "/home/ubuntu/algofly/porthub-release-1.11.2-67d8935/deploy/native/upgrade-records/67d8935b18aed8bd30a8ed369df17996eed053dd-haq21jdm/core-backup",
+    "monitor_user_agent": "PortHub-Upgrade/1; standard TLS verification retained",
+    "agent_release": "still 1.10.1; modular agent validation continues separately"
+  }
 }
