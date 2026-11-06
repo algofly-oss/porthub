@@ -98,7 +98,19 @@
     ],
     "full_platform_run_id": 42137007532,
     "full_platform_source": "4e4991c3eefd836f1779a78e6fffafef126d18d1",
-    "full_platform_publication_enabled": false
+    "full_platform_publication_enabled": false,
+    "full_platform_known_failures": {
+      "run_id": 42137007532,
+      "jobs": [
+        127627718799,
+        127627718668,
+        127627718740
+      ],
+      "reason": "Existing running workspace attempted optional provisioning with an unavailable cache",
+      "fixed_in_worktree_source_sha256": "03a1fafb3e0150e69bfb17440841b83ffa7508874eddd88ee7027b96d3af347a",
+      "local_regression_passed": true,
+      "offline_pty_passed": true
+    }
   },
   "known_prior_failure": {
     "run_id": 42118673393,
@@ -113,7 +125,7 @@
     "Offline and disabled clients have not been updated or enabled.",
     "Production signed-in browser state was not impersonated; disabled-machine behavior passed isolated browser/Mongo tests."
   ],
-  "updated_at_utc": "2026-11-06T00:49:11.983507+00:00",
+  "updated_at_utc": "2026-11-06T01:04:27.877079+00:00",
   "managed_tor_live_validation": {
     "fixture_only": true,
     "published": false,

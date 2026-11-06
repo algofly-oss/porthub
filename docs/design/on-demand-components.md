@@ -1027,3 +1027,25 @@ verification peer closes HTTP connections, so exit identification and long-lived
 gateway connection continuity are checked separately. Full-platform run
 42137007532 validates source 4e4991c with publishing disabled; its source predates
 this readiness fix, so it cannot alone certify the final release.
+
+
+Full-platform run 42137007532 exposed the same offline-workspace regression on
+Linux x64/ARM64 and macOS ARM64: reopening a running saved name attempted to
+provision the optional helper despite having an existing verified tmux runtime.
+Core now performs a bounded read-only saved-runtime probe before provisioning.
+It requires absolute paths, a private owned workspace, an owned regular executable
+with no writable group/other bits, a single link, a 16 MiB limit matching runtime
+extraction, and the recorded checksum. The probe sets the saved TERMINFO path.
+A running name can be reused without initializing a component cache. Basic
+attachment also works through the saved external runtime when the helper catalog
+is absent; rich owner views still require the optional helper. No PTY hosting or
+runtime bundle has been restored to core.
+
+The original failing native lifecycle test passes locally. Extended process/PTY
+checks pass for cached helper operations, offline attachment, shell input,
+detach, exact terminal restoration and no cache creation with downloads
+unavailable. A separate security test confirms relative, modified and writable
+runtime files are rejected before execution. Core's production boundary check
+continues to exclude portable-pty and terminal RTC implementation packages.
+These fixes require a new platform validation run; successful older jobs do not
+certify the changed source.

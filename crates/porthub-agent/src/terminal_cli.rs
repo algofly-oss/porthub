@@ -396,6 +396,37 @@ async fn join_frontend(request: porthub_components::protocol::terminal::JoinRequ
     .await
 }
 async fn attach(job: &Job, sidebar: Sidebar) -> Result<()> {
+    if recorded_runtime_running(job).await? {
+        let socket = job.workspace.join("tmux.sock");
+        if std::env::var_os("PORTHUB_TERMINAL_SOCKET")
+            .is_some_and(|value| PathBuf::from(value) == socket)
+            || std::env::var_os("TMUX")
+                .is_some_and(|value| value.to_string_lossy().split(',').next() == socket.to_str())
+        {
+            println!("Already attached to {}", job.name);
+            return Ok(());
+        }
+        let catalog =
+            crate::components::cache_root()?.join(porthub_components::catalog::CATALOG_ASSET);
+        if matches!(sidebar, Sidebar::Off | Sidebar::Auto) && !catalog.try_exists()? {
+            eprintln!("Terminal helper is not cached; attaching to the saved local runtime.");
+            let status = tokio::process::Command::new(&job.executable)
+                .arg("-S")
+                .arg(socket)
+                .args(["attach-session", "-t", "workspace"])
+                .env("TERMINFO", &job.terminfo)
+                .env_remove("TMUX")
+                .env_remove("TMUX_PANE")
+                .kill_on_drop(true)
+                .status()
+                .await?;
+            ensure!(
+                status.success(),
+                "terminal attachment failed; the workspace may still be running"
+            );
+            return Ok(());
+        }
+    }
     owner_frontend(vec![
         "attach".into(),
         "--directory".into(),
@@ -425,10 +456,68 @@ async fn owner_view(root: &Path, id: &str, sidebar: bool) -> Result<()> {
     owner_frontend(arguments).await
 }
 
+/// Read-only compatibility probe for a workspace whose verified runtime is
+/// already recorded. Reopening it must not depend on optional downloads.
+async fn recorded_runtime_running(job: &Job) -> Result<bool> {
+    use sha2::{Digest, Sha256};
+    ensure!(
+        job.executable.is_absolute() && job.workspace.is_absolute() && job.terminfo.is_absolute(),
+        "saved terminal paths must be absolute"
+    );
+    private(&job.workspace)?;
+    let mut options = fs::OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let mut file = options.open(&job.executable)?;
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.mode() & 0o022 == 0
+            && metadata.mode() & 0o111 != 0
+            && metadata.nlink() == 1
+            && metadata.len() <= 16 * 1024 * 1024,
+        "unsafe saved terminal runtime"
+    );
+    use std::io::Read;
+    let mut bytes = vec![];
+    file.by_ref()
+        .take(16 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() <= 16 * 1024 * 1024
+            && format!("{:x}", Sha256::digest(&bytes)) == job.executable_sha256,
+        "saved terminal runtime checksum mismatch"
+    );
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        tokio::process::Command::new(&job.executable)
+            .arg("-S")
+            .arg(job.workspace.join("tmux.sock"))
+            .arg("has-session")
+            .env("TERMINFO", &job.terminfo)
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await??;
+    Ok(output.status.success())
+}
 async fn create(root: &Path, args: New) -> Result<Job> {
     create_or_open(root, args, false).await
 }
 async fn create_or_open(root: &Path, args: New, reuse: bool) -> Result<Job> {
+    if reuse {
+        if let Some(name) = args.name.as_deref() {
+            if let Ok(job) = select(root, name) {
+                if recorded_runtime_running(&job).await? {
+                    return Ok(job);
+                }
+            }
+        }
+    }
     use porthub_components::{
         catalog::Component,
         protocol::terminal::{CreateOptions, Operation, Value},
@@ -741,4 +830,42 @@ pub async fn run(command: Command) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod saved_runtime_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    #[tokio::test]
+    async fn offline_probe_rejects_relative_changed_or_writable_code_before_execution() -> Result<()>
+    {
+        let root = tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()?;
+        let marker = root.path().join("executed");
+        let executable = root.path().join("runtime");
+        fs::write(
+            &executable,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )?;
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))?;
+        let mut job = Job {
+            id: "0".repeat(32),
+            name: "fixture".into(),
+            executable: executable.clone(),
+            executable_sha256: "0".repeat(64),
+            terminfo: root.path().join("terminfo"),
+            workspace: root.path().into(),
+            created_at: 1,
+        };
+        assert!(recorded_runtime_running(&job).await.is_err());
+        assert!(!marker.exists());
+        job.executable = "runtime".into();
+        assert!(recorded_runtime_running(&job).await.is_err());
+        job.executable = executable.clone();
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o777))?;
+        assert!(recorded_runtime_running(&job).await.is_err());
+        assert!(!marker.exists());
+        Ok(())
+    }
 }

@@ -42,7 +42,7 @@ fn gateway() -> Option<String> {
     }
     None
 }
-pub fn manager(enrolled_gateway: Option<&str>) -> Result<Manager> {
+pub fn cache_root() -> Result<PathBuf> {
     let root = match std::env::var_os("PORTHUB_COMPONENT_CACHE") {
         Some(path) => PathBuf::from(path),
         None => directories::BaseDirs::new()
@@ -55,6 +55,10 @@ pub fn manager(enrolled_gateway: Option<&str>) -> Result<Manager> {
         root.is_absolute(),
         "PORTHUB_COMPONENT_CACHE must be an absolute path"
     );
+    Ok(root)
+}
+pub fn manager(enrolled_gateway: Option<&str>) -> Result<Manager> {
+    let root = cache_root()?;
     let parent = root.parent().context("component cache requires a parent")?;
     crate::service::directory(parent, true)?;
     let sources = match std::env::var("PORTHUB_COMPONENT_SOURCE").as_deref() {
