@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 
 
 def load(name, filename):
@@ -35,10 +36,18 @@ def prepare(builds, core_output, cache):
         inputs.append((tool,binary))
     if core_output.exists() or core_output.is_symlink():
         raise ValueError('Packaged core check output must be a new file')
-    fixture.seed(cache,target,core['version'],core['source_revision'],inputs)
     core_output.parent.mkdir(parents=True,exist_ok=True)
     shutil.copyfile(executable,core_output); core_output.chmod(0o755)
     coordinator.planner.verify_reuse(core,core_output)
+    try:
+        result = subprocess.run([str(core_output.resolve()), 'version'],
+                                capture_output=True, text=True, timeout=10, check=True)
+        if result.stdout.strip() != 'porthub '+core['version']:
+            raise ValueError('Packaged core executable version differs from its verified receipt')
+    except BaseException:
+        core_output.unlink()
+        raise
+    fixture.seed(cache,target,core['version'],core['source_revision'],inputs)
     return {'PORTHUB_TEST_AGENT_EXECUTABLE':str(core_output.resolve()),
             'PORTHUB_TEST_SYNC_EXECUTABLE':str(dict(inputs)['sync'].resolve()),
             'PORTHUB_COMPONENT_CACHE':str(cache.resolve()),
