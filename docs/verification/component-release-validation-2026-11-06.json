@@ -310,5 +310,28 @@
       "Native canary and online rollout",
       "Installed helper prefetch and updates"
     ]
+  },
+  "corrected_core_canary": {
+    "recorded_at_utc": "2026-11-06T04:42:45.762631+00:00",
+    "machine_id": "6ae40339473bb150c4591851",
+    "version": "porthub 1.11.0\nbuild 93a45ebdc658b76c189ae7daaa806d3fff4d18d9\ntarget x86_64-unknown-linux-musl",
+    "sha256": "10218ca4a33a0da4f3e9954bc9e7fb8c1ebcb549315246c510526bca5e6985ba",
+    "upgrade_receipt": "/etc/porthub/native/upgrade-p5yoDv",
+    "journal_state": "committed",
+    "public_ssh": true,
+    "private_dns": true,
+    "private_ssh_banner": "SSH-2.0-OpenSSH_9.9",
+    "service_active": true,
+    "preserved_config_hashes": 6,
+    "expected_service_files_updated": 2,
+    "physical_routes_preserved": true,
+    "routing_rules_preserved": true,
+    "owned_tunnel_change": "Kernel regenerated its IPv6 link-local host route",
+    "components_downloaded": false,
+    "publication_pending": true,
+    "run_id": 42159848228,
+    "source_revision": "93a45ebdc658b76c189ae7daaa806d3fff4d18d9",
+    "artifact_id": 13477209255,
+    "artifact_zip_sha256": "4cb27642a4a110e233ed57c894c286cce87925e92a8a97445b0223e10855feeb"
   }
 }
