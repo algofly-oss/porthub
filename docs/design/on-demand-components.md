@@ -10,8 +10,9 @@ activation receipts, and background maintenance. Core delegates sync/watch,
 live stats, Tor, terminal runtime provisioning, workspace creation, and owner
 attachment UI and sharing supervision. The terminal helper supports independent `new`, `attach`, `tmux`
 and `runtime` commands. Terminal execution is delegated to the helper; full-platform and installed
-rollout validation remain pending. Live Tor generation handover, final platform
-checks, compact publication, and installed rollout verification remain pending.
+rollout validation remain pending. Live managed Tor generation handover has
+passed through both RPC and CLI pipe transports; final platform checks, compact
+publication, and installed rollout verification remain pending.
 Background maintenance begins after authenticated configuration; core also
 exposes `components list`, `fetch`, and `update`.
 
@@ -323,7 +324,9 @@ index retains validated tool metadata for subsequent delivery work.
 
 The reader still generates the existing local core sidecars, preserving the
 current OTA and bootstrap download contracts. Component delivery routes now serve the verified tool-only catalog and
-individual executables. Compact publication and deployment of this reader remain pending; the current production release continues using the original format.
+individual executables. This reader is deployed in gateway 1.11.0; compact agent
+publication remains pending, so the current published agent release continues
+using the original format.
 
 
 The gateway exposes public `GET /api/downloads/components/catalog` and

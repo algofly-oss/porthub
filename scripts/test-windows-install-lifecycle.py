@@ -139,13 +139,15 @@ def main():
                 # Every install starts with the original PATH, like a fresh terminal.
                 env["Path"] = os.environ["Path"]
                 if shell == "cmd.exe":
-                    run([shell, "/d", "/s", "/c", line], env=env)
+                    # Pass the clipboard text verbatim: Python's list2cmdline
+                    # uses C argv escaping, which is not cmd.exe quote syntax.
+                    run("cmd.exe /d /s /c " + line, env=env)
                 elif shell == "batch":
                     batch = Path(temporary) / "porthub install.bat"
                     template = (repo / "crates/porthub-api/assets/client/install.bat").read_bytes()
                     payload = base64.b64encode(line.encode("utf-16le"))
                     batch.write_bytes(template.replace(b"{{PAYLOAD}}", payload))
-                    run(["cmd.exe", "/d", "/s", "/c", '"' + str(batch) + '"'], env=env)
+                    run('cmd.exe /d /s /c ""' + str(batch) + '""', env=env)
                 else:
                     # Inspect the same PowerShell session after the copied command.
                     check = "; if ((Get-Command porthub -ErrorAction Stop).Source -ne '" + str(cli) + "') { throw 'Session PATH missing' }; porthub --version; if ($LASTEXITCODE) { exit 1 }"
