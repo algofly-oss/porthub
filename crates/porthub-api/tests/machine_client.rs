@@ -327,8 +327,8 @@ async fn session_sync_and_files_preserve_updates_overrides_authentication_and_de
         .call("POST", "/api/machines/client/sync", installed.clone())
         .await?;
     ensure!(
-        headers["x-porthub-client-update-requested"] == "false"
-            && !headers.contains_key("x-porthub-client-target-version")
+        headers["x-porthub-client-update-requested"] == "true"
+            && headers["x-porthub-client-target-version"] == "native-release"
     );
     let reconciled = case
         .db
@@ -336,9 +336,14 @@ async fn session_sync_and_files_preserve_updates_overrides_authentication_and_de
         .find_one(doc! {"_id":case.id})
         .await?
         .context("reconciled machine")?;
-    ensure!(reconciled.get_str("client_update_target_version")? == "");
-    ensure!(reconciled.get_str("client_update_last_handled_request_id")? == "update-1");
-    ensure!(reconciled.get_datetime("client_updated_at").is_ok());
+    ensure!(reconciled.get_str("client_update_target_version")? == "native-release");
+    ensure!(reconciled.get_str("client_update_last_handled_request_id").unwrap_or("") != "update-1");
+    ensure!(!reconciled.contains_key("client_updated_at"), "a candidate version is not proof of a committed install");
+
+    let mut stale_ack = installed.clone();
+    stale_ack["client_update_last_handled_request_id"] = json!("other-request");
+    let (_, headers, _) = case.call("POST", "/api/machines/client/sync", stale_ack).await?;
+    ensure!(headers["x-porthub-client-update-requested"] == "true");
 
     let mut handled = installed;
     handled["client_update_last_handled_request_id"] = json!("update-1");
@@ -346,6 +351,10 @@ async fn session_sync_and_files_preserve_updates_overrides_authentication_and_de
         .call("POST", "/api/machines/client/sync", handled)
         .await?;
     ensure!(headers["x-porthub-client-update-requested"] == "false");
+    let committed = case.db.collection::<Document>("machines").find_one(doc! {"_id":case.id}).await?.context("committed machine")?;
+    ensure!(committed.get_str("client_update_target_version")? == "");
+    ensure!(committed.get_str("client_update_last_handled_request_id")? == "update-1");
+    ensure!(committed.get_datetime("client_updated_at").is_ok());
     case.db
         .collection::<Document>("machines")
         .update_one(doc! {"_id":case.id}, doc! {"$set":{"enabled":false}})

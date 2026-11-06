@@ -28,3 +28,19 @@ private DNS unverified, while its shared CLI still reported 1.10.1. Intermittent
 SSH resets were also observed. The skipped setup hook is a confirmed defect;
 live verification after a committed repair is still required before attributing
 every reset to upgrade retries.
+
+## Gateway acknowledgement
+
+Native sync must acknowledge the exact update request after the durable worker
+commits. A candidate reporting the requested version, an empty acknowledgement,
+or an acknowledgement for another request must leave the update pending and must
+not stamp it as installed. The older legacy protocol retains its version-based
+fallback. Running-version reporting remains separate from committed update state.
+
+The API unit tests cover native and legacy acknowledgement rules. The real
+HTTP/Mongo machine-client workflow checks the pending candidate, a stale
+acknowledgement, and final commit acknowledgement. Both run in the server gate.
+A local opt-in `native_update` test also passed using the verified published
+1.11.0 executable and a distinct 1.11.1 candidate: it observed the new version
+before acknowledgement, then verified the real user-unit worker's committed
+journal and shared CLI target. Its disposable unit and database were cleaned up.

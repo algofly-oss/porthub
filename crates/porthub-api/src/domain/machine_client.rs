@@ -34,8 +34,10 @@ fn should_auto_update(
     outdated && (request_id.is_empty() || request_id == handled_id || request_target != latest)
 }
 
-fn update_request_completed(version: &str, target: &str, request_id: &str, handled: &str) -> bool {
-    !request_id.is_empty() && (handled == request_id || !target.is_empty() && version == target)
+fn update_request_completed(version: &str, target: &str, request_id: &str, handled: &str, native: bool) -> bool {
+    // A native candidate reports its version before readiness and CLI
+    // publication commit. Only its matching durable acknowledgement completes OTA.
+    !request_id.is_empty() && (handled == request_id || !native && !target.is_empty() && version == target)
 }
 
 fn numeric_version(value: &str) -> Option<Vec<u64>> {
@@ -572,11 +574,11 @@ async fn sync_inner(
     if !version.is_empty() {
         let request_id = store::string(machine, "client_update_request_id").trim();
         let target = store::string(machine, "client_update_target_version").trim();
-        if update_request_completed(version, target, request_id, handled) {
+        if update_request_completed(version, target, request_id, handled, input.native_update_protocol) {
             set.insert("client_update_last_handled_request_id", request_id);
             set.insert("client_update_target_version", "");
             set.insert("client_updated_at", now);
-        } else if version == latest_client_version {
+        } else if version == latest_client_version && (request_id.is_empty() || request_id == handled) {
             set.insert("client_updated_at", now);
         }
     } else if !handled.is_empty()
@@ -749,16 +751,19 @@ mod auto_update_tests {
     }
 
     #[test]
-    fn reporting_the_requested_release_completes_its_pending_update() {
-        assert!(update_request_completed("1.3.4", "1.3.4", "request-1", ""));
+    fn native_updates_require_commit_acknowledgement_and_legacy_updates_keep_version_fallback() {
+        assert!(!update_request_completed("1.3.4", "1.3.4", "request-1", "", true));
+        assert!(!update_request_completed("1.3.4", "1.3.4", "request-1", "other-request", true));
+        assert!(update_request_completed("1.3.4", "1.3.4", "request-1", "", false));
         assert!(update_request_completed(
             "1.3.4",
             "1.3.4",
             "request-1",
-            "request-1"
+            "request-1",
+            true
         ));
-        assert!(!update_request_completed("1.3.3", "1.3.4", "request-1", ""));
-        assert!(!update_request_completed("1.3.4", "1.3.4", "", ""));
+        assert!(!update_request_completed("1.3.3", "1.3.4", "request-1", "", true));
+        assert!(!update_request_completed("1.3.4", "1.3.4", "", "", true));
     }
 
     #[test]
