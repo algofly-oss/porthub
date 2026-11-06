@@ -95,7 +95,10 @@
       "x86",
       "armhf",
       "armv7"
-    ]
+    ],
+    "full_platform_run_id": 42137007532,
+    "full_platform_source": "4e4991c3eefd836f1779a78e6fffafef126d18d1",
+    "full_platform_publication_enabled": false
   },
   "known_prior_failure": {
     "run_id": 42118673393,
@@ -110,5 +113,31 @@
     "Offline and disabled clients have not been updated or enabled.",
     "Production signed-in browser state was not impersonated; disabled-machine behavior passed isolated browser/Mongo tests."
   ],
-  "updated_at_utc": "2026-11-05T23:32:06.405203+00:00"
+  "updated_at_utc": "2026-11-06T00:49:11.983507+00:00",
+  "managed_tor_live_validation": {
+    "fixture_only": true,
+    "published": false,
+    "versions": [
+      "0.1.0",
+      "0.1.1"
+    ],
+    "cli": {
+      "passed": true,
+      "elapsed_seconds": 87.84,
+      "log": "/tmp/porthub-managed-tor-live-cli.log"
+    },
+    "rpc": {
+      "passed": true,
+      "elapsed_seconds": 86.23,
+      "log": "/tmp/porthub-managed-tor-live-rpc.log"
+    },
+    "coverage": [
+      "old HTTPS connection retained during automatic candidate activation",
+      "old and new generations independently identified as Tor exits over verified TLS",
+      "new connections and DNS denied after source revocation",
+      "cached client recovered after source restoration"
+    ],
+    "production_tor_source_sha256": "9711eff44e0fd2e32742c807f0bcdf192d73b885618436d0655e4fb488302d57",
+    "test_source_sha256": "f52c11e46e48ad8530789b0557b60cb988779d17e333b7a5ab592271169369ed"
+  }
 }

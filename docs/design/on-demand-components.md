@@ -1001,3 +1001,29 @@ second time; actual resolution still verifies bytes. Unauthorized legacy popup
 invocations fail a local lease precheck before resolving optional code, and the
 helper repeats the full owner check. Release-platform checks, live managed Tor
 upgrade verification and installed agent rollout remain outstanding.
+
+
+Managed Tor upgrades now have an explicit opt-in live network test. It builds and
+seeds two locally compiled helper versions, runs core's real periodic candidate
+selection/bootstrap/handover, holds one verified HTTPS connection to the gateway
+through activation, independently checks old/new Tor exits using the Tor Project
+API, denies new streams and DNS after source revocation, and verifies recovery
+when sources return. Both persistent CLI pipes (87.84 s) and local socket RPC
+(86.23 s) passed. Tests use isolated private state and synthetic fixture catalog
+provenance; those binaries/catalogs are not release assets. Normal CI skips this
+network test. To run it deliberately, build distinct helper versions with
+`PORTHUB_COMPONENT_VERSION`, provide their paths using
+`PORTHUB_TEST_OLD_TOR_EXECUTABLE` and `PORTHUB_TEST_NEW_TOR_EXECUTABLE`, select
+`PORTHUB_COMPONENT_TRANSPORT=cli` or `rpc`, and run the single ignored
+`tor_component::live::managed_upgrade_preserves_old_https_connection_and_revokes_new_flows`
+test with `--test-threads=1`.
+
+The first live run exposed asynchronous readiness propagation after Arti
+bootstrap. The library now explicitly wakes a cached dormant client and waits
+up to 15 seconds for its published traffic readiness within the existing source
+revocation guard. It still fails when readiness or source authorization is
+unavailable. Regular Tor worker/process tests pass as well. The original
+verification peer closes HTTP connections, so exit identification and long-lived
+gateway connection continuity are checked separately. Full-platform run
+42137007532 validates source 4e4991c with publishing disabled; its source predates
+this readiness fix, so it cannot alone certify the final release.

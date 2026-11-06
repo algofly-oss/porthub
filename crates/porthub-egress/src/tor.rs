@@ -5,6 +5,7 @@ use crate::{BoxStream, Connector, Destination, LimitedStream, Resolver};
 use anyhow::{ensure, Context, Result};
 use arti_client::{config::CfgPath, DormantMode, TorClient, TorClientConfig};
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use std::{
     path::Path,
     sync::{
@@ -113,7 +114,8 @@ impl TorPool {
     /// should wait for discovery or bootstrap in the packet-processing loop.
     pub async fn bootstrap(&self) -> Result<()> {
         self.while_permitted(async {
-            self.clients
+            let clients = self
+                .clients
                 .get_or_try_init(|| async {
                     // Keep the provider deterministic when embedded beside reqwest,
                     // QUIC and other rustls consumers in the same agent process.
@@ -137,6 +139,22 @@ impl TorPool {
                     Ok::<_, anyhow::Error>(clients)
                 })
                 .await?;
+            let client = clients.first().context("Tor client group is empty")?;
+            // Bootstrap completion and the asynchronously published status can
+            // arrive on different tasks. A cached client may also be dormant
+            // after source revocation. Only an authorized bootstrap wakes it.
+            client.set_dormant(DormantMode::Normal);
+            let mut events = client.bootstrap_events();
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    if client.bootstrap_status().ready_for_traffic() {
+                        return Ok::<_, anyhow::Error>(());
+                    }
+                    events.next().await.context("Tor readiness stream closed")?;
+                }
+            })
+            .await
+            .context("Tor readiness timed out after bootstrap")??;
             Ok(())
         })
         .await

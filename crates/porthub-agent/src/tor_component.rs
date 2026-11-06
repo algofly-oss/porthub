@@ -465,3 +465,7 @@ mod tests {
         assert!(!pool.ready());
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "tor_component_live.rs"]
+mod live;
