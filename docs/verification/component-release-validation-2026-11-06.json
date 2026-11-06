@@ -217,5 +217,54 @@
       "local_workspace_process_and_pty_check": "passed",
       "product_agent_source_changed": false
     }
+  },
+  "release_gate_follow_up": {
+    "recorded_at_utc": "2026-11-06T01:50:00.609442+00:00",
+    "stopped_run": {
+      "id": 42144571793,
+      "source_revision": "d4a40df117bf3f137ef36c3f97a1ddbbffeb4a6a",
+      "reason": "Native browser fixture used its explicitly allowed loopback HTTP control URL as the HTTPS-only component gateway. No modular client release was published."
+    },
+    "correction": "The browser harness selects an explicit HTTPS component authority with the verified seeded cache; the loopback control fixture retains its explicit HTTP test opt-in. Production TLS requirements are unchanged.",
+    "publication_gate": "Continuous-release client validation/publication now depends on successful server packaging, including the full real browser/SSH/native-helper integration gate.",
+    "local_browser_matrix": {
+      "product_source_revision": "d4a40df117bf3f137ef36c3f97a1ddbbffeb4a6a",
+      "ui_artifact_id": 13469512137,
+      "ui_artifact_zip_sha256": "33cf61fbd5bb40139dfe8827f354eb5f96455deaac0d09e40c0dccd1836a8ccf",
+      "ui_checksums_and_revision_verified": true,
+      "core_version": "1.11.0",
+      "helper_version": "0.1.0",
+      "passed": [
+        "Chromium dashboard and connectivity",
+        "Chromium direct native host/browser/SSH",
+        "Chromium blocked-direct relay fallback",
+        "WebKit dashboard and connectivity",
+        "WebKit direct native host/browser/SSH",
+        "WebKit blocked-direct relay fallback"
+      ],
+      "logs": [
+        "/tmp/porthub-modular-full-browser-matrix.log",
+        "/tmp/porthub-modular-full-browser-webkit.log"
+      ],
+      "local_webkit_libraries": "Existing isolated unpacked libraries; no host package changes"
+    },
+    "release_workflow_actionlint": "passed",
+    "canary_preparation": {
+      "machine_id": "6ae40339473bb150c4591851",
+      "baseline_host": "EC2 through existing verified public SSH forwarding",
+      "installed_version": "1.10.1",
+      "private_network_healthy": true,
+      "active_terminal_workspaces": 0,
+      "private_dns": "ssd-uat-app.phub -> 10.203.0.230",
+      "root_only_baseline": "/tmp/porthub-canary-d4a40df-baseline.json",
+      "tracked_files": 8,
+      "agent_changed": false
+    },
+    "remaining": [
+      "Final source server and ten-platform gates",
+      "Compact publication",
+      "Canary and online rollout",
+      "Installed module download/prefetch/update verification"
+    ]
   }
 }

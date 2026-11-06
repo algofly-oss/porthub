@@ -199,7 +199,9 @@ jobs:
           retention-days: 1
   clients:
     name: Validate and package clients
-    needs: [prepare]
+    # The client workflow publishes after its platform gates. Require the
+    # server's real browser/SSH/native-helper integration gate first as well.
+    needs: [prepare, server]
     if: needs.prepare.outputs.skip != 'true' && needs.prepare.outputs.already_published != 'true'
     uses: ./.github/workflows/agent-platforms.yml
     permissions:
