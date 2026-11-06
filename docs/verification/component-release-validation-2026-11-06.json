@@ -151,5 +151,58 @@
     ],
     "production_tor_source_sha256": "9711eff44e0fd2e32742c807f0bcdf192d73b885618436d0655e4fb488302d57",
     "test_source_sha256": "f52c11e46e48ad8530789b0557b60cb988779d17e333b7a5ab592271169369ed"
+  },
+  "pre_release_follow_up": {
+    "recorded_at_utc": "2026-11-06T01:26:19.035664+00:00",
+    "native_component_contracts": {
+      "run_id": 42142657119,
+      "source_revision": "d704a26a6757a790e4b13363c719b05b66de4ca7",
+      "conclusion": "success",
+      "platforms": [
+        "ubuntu-24.04",
+        "macos-15",
+        "windows-latest",
+        "windows-11-arm"
+      ],
+      "native_steps_executed": true,
+      "scope": [
+        "SDK compatibility/download verification/IPC",
+        "sync candidate activation",
+        "Tor source-policy lifecycle",
+        "stats/shared console",
+        "terminal helper",
+        "transfers without watch synchronization"
+      ]
+    },
+    "packaged_linux": {
+      "run_id": 42141321210,
+      "source_revision": "46882356ae94666f326b2711030a160eee802078",
+      "x86_64": "success",
+      "arm64": "success",
+      "remaining_mac_jobs": "in_progress"
+    },
+    "packaged_windows_installation": {
+      "run_id": 42142327353,
+      "source_revision": "d704a26a6757a790e4b13363c719b05b66de4ca7",
+      "state": "in_progress",
+      "scope": "Exact packaged core, real PowerShell installer, CMD/PS5/PS7/batch entrypoints, SCM LocalSystem, authenticated control, PATH, service lifecycle"
+    },
+    "release_preparation": {
+      "local_fix_commit": "ae062e064447fab9073460ac7797b6fe5de299fe",
+      "unit_tests_passed": 22,
+      "live_reservations_lookup": "passed with gh 2.45.0",
+      "dry_run": {
+        "carrier": "1.11.1",
+        "core": "1.11.0",
+        "skip": true,
+        "reason": "Source is not yet the remote main head"
+      }
+    },
+    "not_complete": [
+      "Final prepared-source all-platform packaging",
+      "Real Windows install gate",
+      "Compact publication",
+      "Installed agent/helper prefetch/update and rollout verification"
+    ]
   }
 }
