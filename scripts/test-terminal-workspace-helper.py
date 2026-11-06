@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from terminal_pty_fixture import TERMINAL_KEEPER, assert_terminal_restored
 
 
 def offline_attach(core,environment,identity,root,interactive=True):
@@ -21,12 +22,16 @@ def offline_attach(core,environment,identity,root,interactive=True):
     environment=dict(environment,TERM='xterm-256color',PORTHUB_COMPONENT_CACHE=str(missing),PORTHUB_COMPONENT_SHARED_CACHE='off',
         PORTHUB_COMPONENT_SOURCE='gateway',PORTHUB_COMPONENT_GATEWAY='https://127.0.0.1:9')
     master,slave=pty.openpty()
-    original=termios.tcgetattr(slave)
     fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',24,100,0,0))
     def own_terminal():
         os.setsid();fcntl.ioctl(slave,termios.TIOCSCTTY,0)
-    child=subprocess.Popen([str(core),'terminal','attach',identity],stdin=slave,stdout=slave,stderr=slave,
-        env=environment,preexec_fn=own_terminal)
+    # Keep the controlling session alive until restoration is measured. Darwin
+    # revokes slave ioctls when its session leader exits; the other terminal
+    # suites use this same guard to inspect modes before that revocation.
+    report_read,report_write=os.pipe()
+    child=subprocess.Popen([sys.executable,'-c',TERMINAL_KEEPER,str(report_write),str(core),'terminal','attach',identity],
+        stdin=slave,stdout=slave,stderr=slave,env=environment,preexec_fn=own_terminal,pass_fds=(report_write,))
+    os.close(report_write)
     data=bytearray()
     def wait_for(expected):
         deadline=time.monotonic()+5
@@ -45,12 +50,12 @@ def offline_attach(core,environment,identity,root,interactive=True):
         while child.poll() is None and time.monotonic()<deadline:
             if select.select([master],[],[],.05)[0]:os.read(master,65536)
         assert child.poll()==0, 'Offline attachment did not detach cleanly'
-        assert termios.tcgetattr(slave)==original, 'Offline attachment left terminal attributes changed'
+        assert_terminal_restored(report_read)
         assert not missing.exists(), 'Offline attachment initialized an optional component cache'
     finally:
         if child.poll() is None:
             os.killpg(child.pid,signal.SIGKILL);child.wait(timeout=3)
-        os.close(master);os.close(slave)
+        os.close(report_read);os.close(master);os.close(slave)
 
 
 def main():
