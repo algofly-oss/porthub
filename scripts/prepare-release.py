@@ -333,11 +333,23 @@ def latest_release(repository):
     return json.loads(result.stdout)
 
 def release_reservations(repository):
-    result = subprocess.run(['gh', 'api', '--paginate', '--slurp',
+    result = subprocess.run(['gh', 'api', '--paginate',
                              'repos/'+repository+'/releases?per_page=100'], capture_output=True, text=True)
     if result.returncode:
         raise RuntimeError('Release reservations lookup failed; no source was changed')
-    return [release for page in json.loads(result.stdout) for release in page]
+    # Ubuntu's packaged gh predates --slurp. Its paginated output consists of
+    # consecutive JSON arrays; decode every page so drafts on later pages still
+    # reserve their versions. This also works with current hosted-runner gh.
+    remaining = result.stdout.strip()
+    reservations = []
+    decoder = json.JSONDecoder()
+    while remaining:
+        page, end = decoder.raw_decode(remaining)
+        if not isinstance(page, list):
+            raise ValueError('Expected a GitHub release list response')
+        reservations.extend(page)
+        remaining = remaining[end:].lstrip()
+    return reservations
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

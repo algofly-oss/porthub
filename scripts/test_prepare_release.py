@@ -12,6 +12,22 @@ release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
 
 class Versions(unittest.TestCase):
+    def test_reservations_support_older_gh_and_keep_every_page(self):
+        pages = [[{'tag_name':'v1.8.9','draft':False}], [{'tag_name':'v1.9.0','draft':True}]]
+        output = '\n'.join(json.dumps(page) for page in pages)
+        with patch.object(release.subprocess, 'run', return_value=Mock(returncode=0, stdout=output)) as invoke:
+            self.assertEqual(release.release_reservations('owner/repo'), pages[0]+pages[1])
+        self.assertNotIn('--slurp', invoke.call_args.args[0])
+
+    def test_reservations_reject_failed_or_non_list_lookup(self):
+        with patch.object(release.subprocess, 'run', return_value=Mock(returncode=1)):
+            with self.assertRaisesRegex(RuntimeError, 'lookup failed'):
+                release.release_reservations('owner/repo')
+        for output in ['{}', '[]\n{"message":"failure"}', '[]\ninvalid']:
+            with patch.object(release.subprocess, 'run', return_value=Mock(returncode=0, stdout=output)):
+                with self.assertRaises(ValueError):
+                    release.release_reservations('owner/repo')
+
     def test_atomic_replace_closes_writer_before_rename(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary)/'version.txt'; path.write_text('old')
