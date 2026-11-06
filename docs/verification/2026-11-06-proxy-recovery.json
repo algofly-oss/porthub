@@ -1,0 +1,237 @@
+{
+  "schema_version": 1,
+  "release": "1.11.3",
+  "core_version": "1.11.1",
+  "source_revision": "68e1463d82452d526bf545be96dbaea9d8e50185",
+  "workflow_revision": "3a48ab24b5c872d518f2997e8bbd25f4cae3e687",
+  "run_id": 42174135856,
+  "deployment": "gateway core and edge 1.11.3 deployed and healthy; agent 1.11.1 publication cancelled",
+  "recorded_at": "2026-11-06T06:39:47.797198+00:00",
+  "prior_proxy_activity": {
+    "_id": "traefik-requests-v1",
+    "metrics": {
+      "6a7d7c46cda8513897682772": {
+        "month": "2026-11",
+        "monthly_requests": {
+          "$numberLong": "6643"
+        },
+        "requests": {
+          "$numberLong": "24764"
+        },
+        "last_requested_at": "2026-11-06T06:29:06.721000+00:00",
+        "last_host": "otsi-traffic-pilot.algofly.ai"
+      }
+    },
+    "tracking_since": "2026-10-20T15:04:58.126128+00:00",
+    "coverage_warning": true
+  },
+  "fixture": {
+    "hostname": "porthub-verify-68e1463.algofly.ai",
+    "route_id": "6aed79b50187a60af608e691",
+    "local_port": 38057,
+    "public_port": 23076,
+    "remote_root": "/tmp/porthub-proxy-verification-68-lzj5nblx",
+    "cleanup_pending": false,
+    "listener_closed": true,
+    "files_removed": true,
+    "hostname_status_after_removal": 404
+  },
+  "ec2_dns_recheck": {
+    "resolution": "10.203.0.230",
+    "repeated_dns_and_ssh_banner_checks": 10,
+    "direct_porthub_dns_A_checks": 3,
+    "direct_porthub_dns_AAAA_NODATA_checks": 3,
+    "ssh_uat_app_true_exit_code": 0,
+    "authselect_check_exit_code": 0,
+    "agent_restarts": 0,
+    "configuration_modified": false,
+    "user_reported_failure_not_reproduced": true,
+    "exact_user_command_pending": false
+  },
+  "ec2_uat_db_repair": {
+    "cause": "SSH alias HostName omitted .phub suffix",
+    "old_hostname": "ssd-uat-db",
+    "new_hostname": "ssd-uat-db.phub",
+    "address": "10.203.0.159",
+    "ssh_uat_db_true_exit_code": 0,
+    "backup": "/home/ec2-user/.ssh/config.porthub-backup-20261106T064243Z",
+    "only_alias_hostname_modified": true
+  },
+  "server_artifact": {
+    "id": 13483636057,
+    "size": 188300401,
+    "sha256": "ff4452d7285766415c3e0cffcfca6cea7c983969b6e8b5d8afd9b8d00ea46c1f",
+    "server_gates": "all four passed"
+  },
+  "first_deployment_attempt": {
+    "result": "rolled back to healthy previous containers",
+    "backup_record": "/home/ubuntu/algofly/porthub-release-1.11.3-68e1463/deploy/native/upgrade-records/68e1463d82452d526bf545be96dbaea9d8e50185-qapx7hqe",
+    "candidate_containers_became_healthy": true,
+    "failed_probe": "temporary fixture returned 404 after its registration agent closed the exposure during API restart",
+    "production_gateway_and_otsi_probes_after_rollback": 200,
+    "correction": "use stable OTSI application probe and deploy core then edge as separate transactions; recreate fixture afterward"
+  },
+  "successful_upgrade_records": {
+    "core": "68e1463d82452d526bf545be96dbaea9d8e50185-zr6qllf5",
+    "edge": "68e1463d82452d526bf545be96dbaea9d8e50185-mlh8j5_u"
+  },
+  "deployed_images": {
+    "core": "sha256:1a34fa9baacbdc716a34b9c97c8ede9694a2649cf7bcec056698051f393dc55d",
+    "edge": "sha256:520d6c93540c39e9fe78925a5d660d70eac747e7699de771a8c9ca10d30dd61f",
+    "firewall_unchanged": "sha256:6fec95e549abcc9af709bee45af1254b4e81c7a693a608dd49ea04c11f1adce0"
+  },
+  "otsi_postdeployment_checks": [
+    {
+      "status": 200,
+      "seconds": 0.164,
+      "gateway_unavailable": false
+    },
+    {
+      "status": 200,
+      "seconds": 0.094,
+      "gateway_unavailable": false
+    },
+    {
+      "status": 200,
+      "seconds": 0.106,
+      "gateway_unavailable": false
+    },
+    {
+      "status": 200,
+      "seconds": 0.098,
+      "gateway_unavailable": false
+    },
+    {
+      "status": 200,
+      "seconds": 0.098,
+      "gateway_unavailable": false
+    },
+    {
+      "status": 200,
+      "seconds": 0.1,
+      "gateway_unavailable": false
+    },
+    {
+      "status": 200,
+      "seconds": 0.109,
+      "gateway_unavailable": false
+    },
+    {
+      "status": 200,
+      "seconds": 0.094,
+      "gateway_unavailable": false
+    },
+    {
+      "status": 200,
+      "seconds": 0.194,
+      "gateway_unavailable": false
+    },
+    {
+      "status": 200,
+      "seconds": 0.109,
+      "gateway_unavailable": false
+    }
+  ],
+  "proxy_activity_after": {
+    "_id": "traefik-requests-v1",
+    "metrics": {
+      "6a7d7c46cda8513897682772": {
+        "month": "2026-11",
+        "monthly_requests": {
+          "$numberLong": "6709"
+        },
+        "requests": {
+          "$numberLong": "24830"
+        },
+        "last_requested_at": "2026-11-06T06:54:32.633000+00:00",
+        "last_host": "otsi-traffic-pilot.algofly.ai",
+        "visits": {
+          "$numberLong": "2"
+        },
+        "monthly_visits": {
+          "$numberLong": "2"
+        },
+        "last_visited_at": "2026-11-06T06:54:31.505000+00:00"
+      }
+    },
+    "tracking_since": "2026-10-20T15:04:58.126128+00:00",
+    "coverage_warning": true,
+    "visits_tracking_since": "2026-11-06T06:49:15.683000+00:00"
+  },
+  "visit_counter_live_checks": {
+    "same_browser": {
+      "route": "6aed79b50187a60af608e691",
+      "metric": {
+        "requests": {
+          "$numberLong": "7"
+        },
+        "last_requested_at": "2026-11-06T06:55:07.014000+00:00",
+        "month": "2026-11",
+        "monthly_requests": {
+          "$numberLong": "7"
+        },
+        "monthly_visits": {
+          "$numberLong": "1"
+        },
+        "last_host": "porthub-verify-68e1463.algofly.ai",
+        "visits": {
+          "$numberLong": "1"
+        },
+        "last_visited_at": "2026-11-06T06:55:06.371000+00:00"
+      },
+      "tracking_since": "2026-11-06T06:49:15.683000+00:00",
+      "coverage_warning": true
+    },
+    "different_browser_then_repeat_original": {
+      "route": "6aed79b50187a60af608e691",
+      "metric": {
+        "requests": {
+          "$numberLong": "9"
+        },
+        "last_requested_at": "2026-11-06T06:55:29.723000+00:00",
+        "month": "2026-11",
+        "monthly_requests": {
+          "$numberLong": "9"
+        },
+        "monthly_visits": {
+          "$numberLong": "2"
+        },
+        "last_host": "porthub-verify-68e1463.algofly.ai",
+        "visits": {
+          "$numberLong": "2"
+        },
+        "last_visited_at": "2026-11-06T06:55:29.623000+00:00"
+      },
+      "tracking_since": "2026-11-06T06:49:15.683000+00:00",
+      "coverage_warning": true
+    },
+    "all_responses": 200,
+    "cloudflare_cache": "DYNAMIC",
+    "visitor_key": {
+      "mode": "0600",
+      "uid": 0,
+      "gid": 10001,
+      "size": 32,
+      "links": 1
+    }
+  },
+  "ec2_postdeployment_connectivity": {
+    "uat_db_repeated_successes": 4,
+    "uat_db_10_second_session_exit_code": 0,
+    "uat_app_dns_working": true,
+    "uat_app_successful_logins": 3,
+    "uat_app_intermittent_connection_resets_observed": true,
+    "uat_app_10_second_session_exit_code": 255,
+    "uat_app_sshd_restarts": 0,
+    "uat_app_privileged_sshd_logs_unavailable_without_sudo_password": true,
+    "uat_app_investigation_pending": true
+  },
+  "agent_publication": {
+    "state": "cancelled before publication",
+    "run_id": 42174135856,
+    "reason": "confirmed OTA preserving-manager wrapper omitted private prerequisite preparation; regression tests reproduce the defect",
+    "core_1_11_1_published": false,
+    "last_published_release": "1.11.2",
+    "last_published_core": "1.11.0"
+  }
+}

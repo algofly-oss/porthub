@@ -215,6 +215,9 @@ struct Preserve<'a> {
 }
 #[async_trait::async_trait]
 impl Manager for Preserve<'_> {
+    async fn prepare_private(&self) -> Result<()> {
+        self.inner.prepare_private().await
+    }
     async fn state(&self, spec: &Spec) -> Result<State> {
         self.inner.state(spec).await
     }

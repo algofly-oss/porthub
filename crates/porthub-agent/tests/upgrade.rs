@@ -12,7 +12,7 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
@@ -21,6 +21,8 @@ use std::{
 struct Fake {
     states: Mutex<HashMap<String, State>>,
     calls: Mutex<Vec<(String, String)>>,
+    preparations: AtomicUsize,
+    fail_preparation: AtomicBool,
 }
 impl Fake {
     fn change(&self, spec: &Spec, name: &str, f: impl FnOnce(&mut State)) {
@@ -42,6 +44,11 @@ impl Fake {
 }
 #[async_trait]
 impl Manager for Fake {
+    async fn prepare_private(&self) -> Result<()> {
+        self.preparations.fetch_add(1, Ordering::SeqCst);
+        ensure!(!self.fail_preparation.load(Ordering::SeqCst), "fixture private prerequisites unavailable");
+        Ok(())
+    }
     async fn state(&self, spec: &Spec) -> Result<State> {
         Ok(self
             .states
@@ -205,6 +212,46 @@ impl Fixture {
         ensure!(std::fs::read_link(&self.cli)? == self.specs[0].executable);
         self.foreign_untouched()
     }
+}
+
+#[tokio::test]
+async fn ota_prepares_private_dependencies_for_migrated_and_existing_unified_services() -> Result<()> {
+    for unified in [false, true] {
+        let f = Fixture::new().await?;
+        let ready = Ready { calls: AtomicUsize::new(0), fail_at: 0 };
+        let executable = if unified {
+            let plan = upgrade::plan(&f.layout, &f.public, Some(&f.cli), f.manager.as_ref()).await?;
+            upgrade::apply(&f.layout, plan, &f.new, f.manager.as_ref(), &ready).await?;
+            let next = f.new.with_file_name("next-binary");
+            std::fs::write(&next, b"next native prerequisites fixture")?;
+            next
+        } else { f.new.clone() };
+        let before = f.manager.preparations.load(Ordering::SeqCst);
+        let plan = upgrade::plan(&f.layout, &f.public, Some(&f.cli), f.manager.as_ref()).await?;
+        upgrade::apply(&f.layout, plan, &executable, f.manager.as_ref(), &ready).await?;
+        ensure!(f.manager.preparations.load(Ordering::SeqCst) == before + 1,
+            "OTA must prepare private DNS dependencies through the preserving manager, unified={unified}");
+        f.foreign_untouched()?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn ota_dependency_failure_restores_services_without_publishing_or_bypassing_readiness() -> Result<()> {
+    let f = Fixture::new().await?;
+    let before = f.manager.preparations.load(Ordering::SeqCst);
+    f.manager.fail_preparation.store(true, Ordering::SeqCst);
+    let plan = upgrade::plan(&f.layout, &f.public, Some(&f.cli), f.manager.as_ref()).await?;
+    let ready = Ready { calls: AtomicUsize::new(0), fail_at: 0 };
+    let result = upgrade::apply(&f.layout, plan, &f.new, f.manager.as_ref(), &ready).await;
+    ensure!(result.is_err(), "a missing private prerequisite must fail OTA");
+    ensure!(f.manager.preparations.load(Ordering::SeqCst) == before + 1);
+    ensure!(ready.calls.load(Ordering::SeqCst) == 0);
+    f.restored().await?;
+    for spec in &f.specs[..2] { ensure!(f.manager.state(spec).await?.active); }
+    let journal: serde_json::Value = serde_json::from_slice(&std::fs::read(f.receipt()?.join("journal.json"))?)?;
+    ensure!(journal["state"] == "rolled-back");
+    Ok(())
 }
 
 #[tokio::test]
