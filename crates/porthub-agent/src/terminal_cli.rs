@@ -332,7 +332,15 @@ fn name_valid(name: &str) -> Result<()> {
 
 async fn owner_frontend(arguments: Vec<OsString>) -> Result<()> {
     let cancel = tokio_util::sync::CancellationToken::new();
-    let (_, executable) = crate::components::manager(None)?
+    let manager = crate::components::manager(None)?;
+    if manager
+        .installed(porthub_components::catalog::Component::Terminal)
+        .await?
+        .is_empty()
+    {
+        eprintln!("Preparing terminal: downloading a verified compatible tool if needed...");
+    }
+    let (_, executable) = manager
         .resolve(porthub_components::catalog::Component::Terminal, &cancel)
         .await?;
     let mut child = porthub_components::foreground(&executable, &arguments, &cancel).await?;
@@ -341,6 +349,26 @@ async fn owner_frontend(arguments: Vec<OsString>) -> Result<()> {
         "terminal frontend exited unsuccessfully; the workspace may still be running"
     );
     Ok(())
+}
+async fn join_frontend(request: porthub_components::protocol::terminal::JoinRequest) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let temporary = tempfile::Builder::new()
+        .prefix("porthub-join-")
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()?;
+    let path = temporary.path().join("request.json");
+    let bytes = serde_json::to_vec(&request)?;
+    ensure!(
+        bytes.len() <= 16384,
+        "terminal join request exceeds size limit"
+    );
+    crate::profile::write_private(&path, &bytes, false)?;
+    owner_frontend(vec![
+        "__porthub-join".into(),
+        "--request".into(),
+        path.into_os_string(),
+    ])
+    .await
 }
 async fn attach(job: &Job, sidebar: Sidebar) -> Result<()> {
     owner_frontend(vec![
@@ -505,21 +533,27 @@ pub async fn run(command: Command) -> Result<()> {
                     || (registration.is_none() && !user && stun_servers.is_empty()),
                 "--registration, --user and --stun-server apply only to --transport auto"
             );
-            match transport {
-                JoinTransport::Ssh => sharing::join(&url).await?,
+            use porthub_components::protocol::terminal::{
+                JoinRequest, JoinTransport as HelperTransport,
+            };
+            let (transport, broker, servers) = match transport {
+                JoinTransport::Ssh => (HelperTransport::Ssh, None, Vec::new()),
                 #[cfg(feature = "terminal-direct")]
-                JoinTransport::Relay => crate::terminal_guest::client::join_relay(&url).await?,
+                JoinTransport::Relay => (HelperTransport::Relay, None, Vec::new()),
                 #[cfg(feature = "terminal-direct")]
-                JoinTransport::Auto => {
-                    crate::terminal_guest::client::join_auto_with_stun(
-                        &url,
-                        registration.as_deref(),
-                        user,
-                        &stun_servers,
-                    )
-                    .await?
-                }
-            }
+                JoinTransport::Auto => (
+                    HelperTransport::Auto,
+                    crate::terminal_guest::broker(registration.as_deref(), user)?,
+                    crate::terminal_connectivity::checked(&stun_servers)?,
+                ),
+            };
+            join_frontend(JoinRequest {
+                invitation: url,
+                transport,
+                broker,
+                stun_servers: servers,
+            })
+            .await?;
         }
         Command::Invite {
             name,

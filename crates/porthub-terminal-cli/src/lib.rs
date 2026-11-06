@@ -85,3 +85,16 @@ impl Handler for Worker {
         })
     }
 }
+
+#[cfg(feature="terminal-direct")]
+pub mod terminal_guest;
+#[cfg(all(unix,feature="terminal-direct"))]
+mod terminal_policy;
+
+pub mod ssh_join;
+
+#[cfg(unix)]
+pub fn read_join_request(path:&std::path::Path)->anyhow::Result<Vec<u8>> {
+    workspace::private(path.parent().ok_or_else(||anyhow::anyhow!("invalid join request path"))?)?;
+    workspace::read_private(path)
+}

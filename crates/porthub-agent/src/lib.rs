@@ -50,7 +50,7 @@ mod terminal_policy;
 mod terminal_connectivity;
 mod terminal_telemetry;
 mod terminal_upload;
-#[cfg(feature = "terminal-direct")]
+#[cfg(all(unix,feature = "terminal-direct"))]
 pub mod terminal_guest;
 #[cfg(unix)]
 pub mod terminal_runtime;

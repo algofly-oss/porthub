@@ -8,7 +8,8 @@ fn independent_cli_exposes_local_tmux_without_core_or_gateway() {
     assert!(help.status.success());
     let text = String::from_utf8_lossy(&help.stdout);
     assert!(text.contains("tmux") && text.contains("runtime") && text.contains("new"));
-    #[cfg(unix)] assert!(text.contains("attach"));
+    #[cfg(unix)]
+    assert!(text.contains("attach"));
     assert!(command()
         .arg("--version")
         .output()
@@ -154,4 +155,35 @@ fn independent_workspace_creation_preserves_caller_environment_and_reuses_regist
         }
         assert_eq!(std::fs::read_to_string(output).unwrap(), value);
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn managed_join_rejects_invalid_or_public_requests_without_echoing_invitation() {
+    use std::{io::Write, os::unix::fs::PermissionsExt};
+    let root = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let request = root.path().join("join.json");
+    let marker = "sensitive-invitation-must-not-be-printed";
+    let mut file = tempfile::NamedTempFile::new_in(root.path()).unwrap();
+    file.write_all(serde_json::to_string(&serde_json::json!({"invitation":format!("https://example.invalid/#{marker}"),"transport":"ssh","broker":null,"stun_servers":[]})).unwrap().as_bytes()).unwrap();
+    file.persist(&request).unwrap();
+    let result = command()
+        .args(["__porthub-join", "--request"])
+        .arg(&request)
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(!String::from_utf8_lossy(&result.stderr).contains(marker));
+    assert!(!String::from_utf8_lossy(&result.stdout).contains(marker));
+    std::fs::set_permissions(&request, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let result = command()
+        .args(["__porthub-join", "--request"])
+        .arg(&request)
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(!String::from_utf8_lossy(&result.stderr).contains(marker));
 }

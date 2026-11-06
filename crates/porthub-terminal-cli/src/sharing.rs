@@ -21,7 +21,7 @@ struct DirectPolicy {
     addresses: Vec<std::net::IpAddr>,
     stun_servers: Vec<String>,
 }
-async fn connect_broker(broker: &Broker) -> Result<tokio::net::UnixStream> {
+pub(crate) async fn connect_broker(broker: &Broker) -> Result<tokio::net::UnixStream> {
     use std::os::unix::fs::FileTypeExt;
     let metadata = fs::symlink_metadata(&broker.endpoint)?;
     ensure!(

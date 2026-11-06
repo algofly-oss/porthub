@@ -30,6 +30,7 @@ on:
       - 'crates/porthub-stats/**'
       - 'scripts/test-stats-cli-fallback.py'
       - 'scripts/test-terminal-workspace-helper.py'
+      - 'scripts/check-core-component-boundaries.py'
       - 'crates/porthub-console/**'
       - 'crates/porthub-terminal-cli/**'
       - 'crates/porthub-egress/**'
@@ -67,6 +68,7 @@ on:
       - 'crates/porthub-stats/**'
       - 'scripts/test-stats-cli-fallback.py'
       - 'scripts/test-terminal-workspace-helper.py'
+      - 'scripts/check-core-component-boundaries.py'
       - 'crates/porthub-console/**'
       - 'crates/porthub-terminal-cli/**'
       - 'crates/porthub-egress/**'
@@ -142,6 +144,9 @@ jobs:
           candidate="$RUNNER_TEMP/porthub-sync-candidate$extension"
           cp "target/debug/porthub-sync$extension" "$candidate"
           echo "PORTHUB_TEST_UPDATED_SYNC_EXECUTABLE=$candidate" >> "$GITHUB_ENV"
+      - name: Verify core excludes optional worker implementations
+        if: steps.native_changes.outputs.rust == 'true'
+        run: python3 scripts/check-core-component-boundaries.py
       - name: Test compatibility, download verification and IPC limits
         if: steps.native_changes.outputs.rust == 'true'
         run: cargo test --locked -p porthub-components -p porthub-sync -- --include-ignored

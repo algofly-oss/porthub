@@ -59,3 +59,20 @@ pub struct Broker {
     pub owner: u32,
     pub traffic: bool,
 }
+
+/// Invitation is sensitive: core transfers this in a private request file, never argv.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JoinRequest {
+    pub invitation: String,
+    pub transport: JoinTransport,
+    pub broker: Option<Broker>,
+    pub stun_servers: Vec<String>,
+}
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinTransport {
+    Ssh,
+    Relay,
+    Auto,
+}

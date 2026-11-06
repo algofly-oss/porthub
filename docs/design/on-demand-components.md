@@ -9,7 +9,7 @@ downloads, private/shared caches, versioned RPC and CLI pipe transports,
 activation receipts, and background maintenance. Core delegates sync/watch,
 live stats, Tor, terminal runtime provisioning, workspace creation, and owner
 attachment UI and sharing supervision. The terminal helper supports independent `new`, `attach`, `tmux`
-and `runtime` commands. Native guest/direct transport and remaining local workspace commands still need
+and `runtime` commands. Remaining local workspace commands and registry operations still need
 extraction. Live Tor generation handover, final platform
 checks, compact publication, and installed rollout verification remain pending.
 Background maintenance begins after authenticated configuration; core also
@@ -954,3 +954,25 @@ sidebar/presence controls, invitation acknowledgement/rotation/revocation and
 explicit stop/end notification. Four helper unit tests and three standalone
 bundled-runtime tests also pass. Native guest transport and remaining local
 workspace operations still need extraction; this is not an agent release.
+
+
+Native terminal guest WebSocket/recovery/TTY/direct code and its permission
+subscriber now live in the terminal helper. Core retains unambiguous registration
+selection and the authenticated policy server. It sends the helper a private,
+owner-only request file containing the invitation and optional credential-free
+broker context; invitation data is absent from internal helper argv. The helper
+also exposes independent `join --transport ssh|relay|auto`; without an explicitly
+supplied core policy broker, auto uses relay and cannot authorize a direct path.
+Parent disappearance cancels managed asynchronous joining so its TTY guard can
+restore the terminal. Invalid/public request-file tests confirm rejection without
+echoing invitation contents.
+
+The rebuilt standalone helper passed 21 library tests covering TLS/guest framing,
+raw TTY input/resize/restoration, recovery without replay or offline keystrokes,
+direct-to-relay fallback and permission expiry/revocation, plus four standalone
+process tests. Core passed 20 terminal broker/privacy/registration tests. The new
+production dependency check rejects optional worker implementations and terminal
+RTC engine/media/datachannel packages in core; core's required private-network
+ICE/DTLS dependencies are explicitly retained. Core alone compiles without the
+terminal RTC feature linkage. Remaining local workspace operations and registry
+presentation still need extraction before the terminal boundary is complete.

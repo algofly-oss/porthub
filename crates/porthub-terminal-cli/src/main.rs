@@ -17,6 +17,18 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Join a terminal invitation without enrollment or an installed core.
+    Join {
+        url: String,
+        #[arg(long,value_enum,default_value_t=GuestTransport::Ssh)]
+        transport: GuestTransport,
+    },
+    #[cfg(unix)]
+    #[command(name = "__porthub-join", hide = true)]
+    ManagedJoin {
+        #[arg(long)]
+        request: PathBuf,
+    },
     #[cfg(unix)]
     /// Attach to a saved local workspace; Ctrl+A then D detaches.
     Attach {
@@ -74,6 +86,33 @@ enum Command {
     #[command(name = "__porthub-stdio", hide = true)]
     Stdio,
 }
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum GuestTransport {
+    Ssh,
+    Relay,
+    Auto,
+}
+async fn join(request: porthub_components::protocol::terminal::JoinRequest) -> Result<()> {
+    use porthub_components::protocol::terminal::JoinTransport;
+    match request.transport {
+        JoinTransport::Ssh => porthub_terminal_cli::ssh_join::join(&request.invitation).await,
+        #[cfg(all(unix, feature = "terminal-direct"))]
+        JoinTransport::Relay => {
+            porthub_terminal_cli::terminal_guest::client::join_relay(&request.invitation).await
+        }
+        #[cfg(all(unix, feature = "terminal-direct"))]
+        JoinTransport::Auto => {
+            porthub_terminal_cli::terminal_guest::client::join_auto_with_broker(
+                &request.invitation,
+                request.broker,
+                &request.stun_servers,
+            )
+            .await
+        }
+        #[cfg(not(all(unix, feature = "terminal-direct")))]
+        _ => anyhow::bail!("native terminal guest transport is unavailable; use SSH"),
+    }
+}
 #[cfg(unix)]
 #[derive(Subcommand)]
 enum OwnerCommand {
@@ -108,6 +147,39 @@ async fn main() -> Result<()> {
         version: porthub_terminal_cli::VERSION.parse()?,
     };
     match args.command {
+        Command::Join { url, transport } => {
+            use porthub_components::protocol::terminal::{JoinRequest, JoinTransport};
+            join(JoinRequest {
+                invitation: url,
+                transport: match transport {
+                    GuestTransport::Ssh => JoinTransport::Ssh,
+                    GuestTransport::Relay => JoinTransport::Relay,
+                    GuestTransport::Auto => JoinTransport::Auto,
+                },
+                broker: None,
+                stun_servers: vec![],
+            })
+            .await?;
+        }
+        #[cfg(unix)]
+        Command::ManagedJoin { request } => {
+            let request: porthub_components::protocol::terminal::JoinRequest =
+                serde_json::from_slice(&porthub_terminal_cli::read_join_request(&request)?)?;
+            let owner_closed = async {
+                let Some(parent) = std::env::var("PORTHUB_COMPONENT_OWNER_PID").ok() else {
+                    std::future::pending::<()>().await;
+                    return;
+                };
+                let parent = parent.parse::<u32>().unwrap_or(0);
+                loop {
+                    if unsafe { libc::getppid() } as u32 != parent {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            };
+            tokio::select! {biased; _=owner_closed=>{},result=join(request)=>result?,}
+        }
         #[cfg(unix)]
         Command::Attach {
             directory,
