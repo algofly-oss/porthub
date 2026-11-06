@@ -155,6 +155,17 @@ recipe_version=1
             normalized=buildplan.normalize_environment(self.root,{key:str(cache/'target/id/musl-runtime/bin/musl-gcc'),'RUSTFLAGS':''})
         self.assertEqual(normalized,{key:'{terminal-cache}/target/id/musl-runtime/bin/musl-gcc'})
 
+    @unittest.skipIf(os.name == 'nt', 'Directory symlink privilege is not assumed on Windows')
+    def test_terminal_compiler_cache_alias_is_portable(self):
+        cache=self.root/'private compiler cache'
+        cache.mkdir()
+        alias=self.root/'cache alias'
+        alias.symlink_to(cache, target_is_directory=True)
+        key='CC_'+TARGET.replace('-','_')
+        with mock.patch.dict(os.environ,{'PORTHUB_TERMINAL_HELPER_CACHE_ROOT':str(cache)}):
+            normalized=buildplan.normalize_environment(self.root,{key:str(alias/'target/id/musl-runtime/bin/musl-gcc')})
+        self.assertEqual(normalized,{key:'{terminal-cache}/target/id/musl-runtime/bin/musl-gcc'})
+
     def test_declared_cross_compiler_points_at_actual_terminal_builder_cache(self):
         repository=Path(__file__).resolve().parents[1]
         producer=repository/'scripts/build-terminal-helper.py'

@@ -117,6 +117,7 @@ jobs:
         with:
           python-version: '3.13'
       - name: Verify dependency-aware component build selection
+        shell: bash
         run: |
           python scripts/test_component_build_plan.py
           python scripts/test_package_components.py

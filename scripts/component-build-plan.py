@@ -288,6 +288,16 @@ def normalize_environment(root, environment):
         portable = value.replace('\\','/')
         if portable.startswith(prefix):
             value = '{terminal-cache}/'+portable[len(prefix):]
+        elif (name.split('_', 1)[0] in ('CC', 'CXX', 'AR') or name.endswith('_LINKER')) and Path(value).is_absolute():
+            # macOS /var aliases and Windows short temporary directory names
+            # can spell the same compiler cache differently. Resolve both sides
+            # before deciding whether this is a portable cache-relative path.
+            try:
+                relative = Path(value).resolve().relative_to(cache)
+            except ValueError:
+                pass
+            else:
+                value = '{terminal-cache}/'+relative.as_posix()
         normalized[name] = value
     return normalized
 
