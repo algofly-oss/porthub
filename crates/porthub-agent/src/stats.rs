@@ -1,16 +1,14 @@
 //! Local, authenticated agent telemetry. Reading statistics never opens an
 //! application socket, sends an API request or triggers a health repair.
 use anyhow::{ensure, Result};
-use crate::terminal_ui::{InputReader,Screen};
 use clap::Args;
 use porthub_tunnel::ServiceHealthHandle;
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeMap, HashMap},
-    io::{IsTerminal, Write},
+    collections::HashMap,
     path::Path,
     sync::{Mutex, OnceLock},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
@@ -214,19 +212,6 @@ async fn collect(options: &Options) -> Result<Vec<Value>> {
     Ok(rows)
 }
 
-fn number(row: &Value, key: &str) -> u64 {
-    row[key].as_u64().unwrap_or(0)
-}
-fn bytes(value: f64) -> String {
-    let mut value = value;
-    let units = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut unit = 0;
-    while value >= 1024.0 && unit + 1 < units.len() {
-        value /= 1024.0;
-        unit += 1;
-    }
-    format!("{value:.1} {}", units[unit])
-}
 fn clean(value: &str, limit: usize) -> String {
     value
         .chars()
@@ -234,330 +219,222 @@ fn clean(value: &str, limit: usize) -> String {
         .take(limit)
         .collect()
 }
-
-fn render(
-    rows: &[Value],
-    width: usize,
-    height: usize,
-    paused: bool,
-    selected: usize,
-    details: bool,
-) -> String {
-    let mut lines = vec![
-        format!("PortHub stats  {}", if paused { "PAUSED" } else { "LIVE" }),
-        "".into(),
-    ];
-    let upload: f64 = rows
-        .iter()
-        .filter_map(|row| row["rates"]["sent_per_second"].as_f64())
-        .sum();
-    let download: f64 = rows
-        .iter()
-        .filter_map(|row| row["rates"]["received_per_second"].as_f64())
-        .sum();
-    let memory: u64 = rows
-        .iter()
-        .map(|row| number(&row["process"], "rss_bytes"))
-        .sum();
-    lines.push(format!(
-        "{} agents   TX {}/s   RX {}/s   RAM {}",
-        rows.len(),
-        if rows.iter().any(|row| row["rates"].is_object()) {
-            bytes(upload)
-        } else {
-            "—".into()
-        },
-        if rows.iter().any(|row| row["rates"].is_object()) {
-            bytes(download)
-        } else {
-            "—".into()
-        },
-        if rows.iter().any(|row| row["process"].is_object()) {
-            bytes(memory as f64)
-        } else {
-            "—".into()
+struct DashboardSource(Options);
+#[async_trait::async_trait]
+impl porthub_components::rpc::Handler for DashboardSource {
+    type Operation = porthub_components::protocol::stats::Operation;
+    type Value = porthub_components::protocol::stats::Value;
+    fn connection_limit(&self) -> usize {
+        2
+    }
+    fn exit_when_idle(&self) -> bool {
+        false
+    }
+    async fn handle(
+        &self,
+        _operation: Self::Operation,
+        cancel: CancellationToken,
+    ) -> std::result::Result<
+        porthub_components::rpc::Reply<Self::Value>,
+        porthub_components::rpc::Failure,
+    > {
+        use porthub_components::{
+            ipc,
+            protocol::stats::Row,
+            rpc::{ErrorCode, Failure, Reply},
+        };
+        let rows = tokio::select! {biased; _=cancel.cancelled()=>return Err(Failure {code:ErrorCode::Unavailable,detail:"Statistics request cancelled".into()}),
+        result=collect(&self.0)=>result.map_err(|_| Failure {code:ErrorCode::Unavailable,detail:"Cannot collect scoped agent statistics".into()})?};
+        if rows.iter().any(|row| {
+            serde_json::to_vec(row).map_or(true, |bytes| {
+                bytes.len() > porthub_components::protocol::stats::MAX_ROW
+            })
+        }) {
+            return Err(Failure {
+                code: ErrorCode::Unavailable,
+                detail: "Statistics snapshot limit exceeded".into(),
+            });
         }
-    ));
-    lines.push("Public application payload; process resources belong to the agent only.".into());
-    lines.push("".into());
-    lines.push(format!(
-        "  {:<16} {:<11} {:>7} {:>10} {:>10} {:>10}",
-        "REGISTRATION", "STATE", "CPU %", "TX /s", "RX /s", "RSS"
-    ));
-    let terminal_details=details && rows.get(selected).is_some_and(|row|row["terminal"]["measurements"].is_object());
-    let visible = height.saturating_sub(if details {18+if terminal_details {4}else{0}} else {9}).max(1);
-    for (index, row) in rows
-        .iter()
-        .enumerate()
-        .skip(selected.saturating_sub(visible - 1))
-        .take(visible)
-    {
-        let id = clean(row["registration"].as_str().unwrap_or(""), 16);
-        let state = if row["unavailable"] == true {
-            "unavailable"
-        } else {
-            row["state"].as_str().unwrap_or("unknown")
-        };
-        let rate = |key: &str| {
-            row["rates"][key]
-                .as_f64()
-                .map(bytes)
-                .unwrap_or_else(|| "—".into())
-        };
-        let cpu = row["rates"]["cpu_percent"]
-            .as_f64()
-            .map(|cpu| format!("{cpu:.1}"))
-            .unwrap_or_else(|| "—".into());
-        lines.push(format!(
-            "{} {:<16} {:<11} {:>7} {:>10} {:>10} {:>10}",
-            if index == selected { ">" } else { " " },
-            id,
-            clean(state, 11),
-            cpu,
-            rate("sent_per_second"),
-            rate("received_per_second"),
-            row["process"]["rss_bytes"]
-                .as_u64()
-                .map(|rss| bytes(rss as f64))
-                .unwrap_or_else(|| "—".into())
-        ));
-    }
-    if rows.is_empty() {
-        lines.push(
-            "No registered agents. Use porthub ls, or --user for per-user registrations.".into(),
-        );
-    }
-    if details {
-        if let Some(row) = rows.get(selected) {
-            lines.push("".into());
-            lines.push(format!(
-                "Selected agent: {}",
-                clean(row["machine_id"].as_str().unwrap_or(""), 40)
-            ));
-            lines.push(format!(
-                "PID {}   Uptime {}s   Version {}   Route {}",
-                row["process"]["pid"],
-                number(&row["process"], "uptime_seconds"),
-                clean(row["agent_version"].as_str().unwrap_or(""), 24),
-                clean(row["route"].as_str().unwrap_or(""), 30)
-            ));
-            lines.push(format!(
-                "Channels {}   TX total {}   RX total {}   FDs {}",
-                number(&row["traffic"], "active_channels"),
-                bytes(number(&row["traffic"], "sent_bytes") as f64),
-                bytes(number(&row["traffic"], "received_bytes") as f64),
-                row["open_descriptors"]
-            ));
-            if terminal_details {
-                let terminal=&row["terminal"]["measurements"];
-                let totals=&terminal["counters"];
-                lines.push(format!("Terminals {} sessions  {} guests  {} measured sessions",
-                    number(terminal,"active_sessions"),number(terminal,"active_participants"),number(terminal,"active_reporting_sessions")));
-                lines.push(format!("Gateway payload in/out {} / {}",
-                    bytes(number(terminal,"relay_received_payload_bytes") as f64),bytes(number(terminal,"relay_sent_payload_bytes") as f64)));
-                if number(terminal,"reported_sessions")>0 {
-                    lines.push(format!("PTY bytes in/out {} / {} (includes redraws)",bytes(number(totals,"input_bytes") as f64),bytes(number(totals,"output_bytes") as f64)));
-                    lines.push(format!("Direct UDP in/out {} / {}",bytes(number(totals,"direct_udp_received_bytes") as f64),bytes(number(totals,"direct_udp_sent_bytes") as f64)));
-                } else {
-                    lines.push("PTY bytes: not reported by session hosts".into());
-                    lines.push("Direct UDP: not reported by session hosts".into());
+        let count = rows.len();
+        let (caller, mut output) = tokio::io::duplex(65536);
+        tokio::spawn(async move {
+            for row in rows {
+                let frame = Row { data: row };
+                let result = tokio::select! {biased; _=cancel.cancelled()=>break,
+                result=ipc::write(&mut output,&frame,Duration::from_secs(5))=>result};
+                if result.is_err() {
+                    break;
                 }
             }
-            if let Some(services) = row["services"].as_array() {
-                for service in services.iter().take(4) {
-                    lines.push(format!(
-                        "  {}  {}  {} active",
-                        clean(service["name"].as_str().unwrap_or(""), 32),
-                        service["health"]["state"].as_str().unwrap_or("unknown"),
-                        number(&service["traffic"], "active_channels")
-                    ));
-                }
-            }
-        }
+        });
+        Ok(Reply::Stream {
+            value: Self::Value::Snapshot { rows: count },
+            remote: Box::new(caller),
+        })
     }
-    lines.push("".into());
-    lines.push(
-        "q quit | Space pause | ↑/↓ select | Enter details | t traffic | c CPU | m memory | n name"
-            .into(),
-    );
-    lines
-        .into_iter()
-        .take(height)
-        .map(|line| clean(&line, width))
-        .collect::<Vec<_>>()
-        .join("\r\n")
 }
 
-fn update_rates(
-    rows: &mut [Value],
-    previous: &mut BTreeMap<String, (Instant, Value)>,
-    now: Instant,
-) {
-    for row in rows.iter_mut() {
-        let id = row["registration"].as_str().unwrap_or("").to_owned();
-        let rates=previous.get(&id).and_then(|(at,old)|{
-                            if row["unavailable"]==true || old["unavailable"]==true || row["process"]["pid"]!=old["process"]["pid"] || row["process"]["start_time"]!=old["process"]["start_time"]{return None;}
-                            let elapsed=now.duration_since(*at).as_secs_f64().max(0.001);
-                            Some(json!({"sent_per_second":number(&row["traffic"],"sent_bytes").saturating_sub(number(&old["traffic"],"sent_bytes")) as f64/elapsed,
-                                "received_per_second":number(&row["traffic"],"received_bytes").saturating_sub(number(&old["traffic"],"received_bytes")) as f64/elapsed,
-                                "cpu_percent":number(&row["process"],"cpu_millis").saturating_sub(number(&old["process"],"cpu_millis")) as f64/(elapsed*10.0)}))
-                        });
-        previous.insert(id, (now, row.clone()));
-        row["rates"] = rates.unwrap_or(Value::Null);
-    }
-    previous.retain(|id, _| {
+fn snapshot_bytes(rows: Vec<Value>, sequence: u64) -> Result<Vec<u8>> {
+    use porthub_components::protocol::stats::MAX_ROW;
+    ensure!(
+        rows.len() <= 128 && sequence > 0,
+        "invalid scoped statistics snapshot"
+    );
+    ensure!(
         rows.iter()
-            .any(|row| row["registration"].as_str() == Some(id.as_str()))
-    });
+            .all(|row| serde_json::to_vec(row).is_ok_and(|bytes| bytes.len() <= MAX_ROW)),
+        "statistics row limit exceeded"
+    );
+    let bytes = serde_json::to_vec(&json!({"agents":rows,"sequence":sequence}))?;
+    ensure!(
+        bytes.len() <= 128 * MAX_ROW + 1024,
+        "statistics snapshot limit exceeded"
+    );
+    Ok(bytes)
 }
 
 pub async fn run(options: Options, cancel: CancellationToken) -> Result<()> {
-    use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+    use porthub_components::{
+        catalog::{Component, PROTOCOL},
+        ipc::Hello,
+        local::Endpoint,
+    };
+    ensure!(
+        options.interval.is_finite() && (0.2..=60.0).contains(&options.interval),
+        "interval must be between 0.2 and 60 seconds"
+    );
+    let manager = crate::components::manager(None)?;
+    if !manager.has_installation(Component::Stats).await? {
+        eprintln!("Preparing stats: downloading a verified compatible dashboard if needed...");
+    }
+    let (artifact, executable) = manager.resolve(Component::Stats, &cancel).await?;
+    let mut temporary = tempfile::Builder::new();
+    temporary.prefix("porthub-stats-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    let invocation = temporary.tempdir()?;
+    porthub_components::store::secure_private_directory(invocation.path())?;
+    let work = cancel.child_token();
+    let _stop = work.clone().drop_guard();
+    let mode = match std::env::var("PORTHUB_COMPONENT_TRANSPORT").as_deref() {
+        Ok("auto") | Err(std::env::VarError::NotPresent) => porthub_components::worker::Mode::Auto,
+        Ok("rpc") => porthub_components::worker::Mode::Rpc,
+        Ok("cli") => porthub_components::worker::Mode::Cli,
+        _ => anyhow::bail!("PORTHUB_COMPONENT_TRANSPORT must be auto, rpc, or cli"),
+    };
+    let bound = if matches!(mode, porthub_components::worker::Mode::Cli) {
+        None
+    } else {
+        let setup = async {
+            let endpoint = Endpoint::for_artifact(invocation.path(), &artifact)?;
+            let listener = porthub_components::local::Listener::bind(endpoint.clone()).await?;
+            Ok::<_, anyhow::Error>((endpoint, listener))
+        }
+        .await;
+        match setup {
+            Ok(bound) => Some(bound),
+            Err(error) if matches!(mode, porthub_components::worker::Mode::Rpc) => {
+                return Err(error)
+            }
+            Err(_) => {
+                tracing::debug!(
+                    "Dashboard RPC unavailable before startup; using private snapshots"
+                );
+                None
+            }
+        }
+    };
+    let mut arguments: Vec<std::ffi::OsString> =
+        vec!["--interval".into(), options.interval.to_string().into()];
+    let lifetime = work.clone();
+    let _server = if let Some((endpoint, listener)) = bound {
+        arguments.extend(["--managed-endpoint".into(), endpoint.address().into()]);
+        let hello = Hello {
+            component: Component::Stats,
+            protocol: PROTOCOL,
+            version: artifact.version.clone(),
+        };
+        let handler = std::sync::Arc::new(DashboardSource(options.clone()));
+        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            porthub_components::rpc::serve_bound(listener, hello, handler, lifetime).await
+        }))
+    } else {
+        let path = invocation.path().join("snapshot.json");
+        crate::profile::write_private(&path, br#"{"pending":true}"#, false)?;
+        arguments.extend(["--managed-input".into(), path.as_os_str().into()]);
+        let source_options = options.clone();
+        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs_f64(source_options.interval));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut sequence = 0u64;
+            loop {
+                tokio::select! {biased; _=lifetime.cancelled()=>break,_=tick.tick()=>{}}
+                let rows = tokio::select! {biased; _=lifetime.cancelled()=>break,result=collect(&source_options)=>result};
+                sequence = sequence.saturating_add(1);
+                let bytes = rows
+                    .and_then(|rows| snapshot_bytes(rows, sequence))
+                    .unwrap_or_else(|_| br#"{"unavailable":true}"#.to_vec());
+                let destination = path.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::profile::write_private(&destination, &bytes, true)
+                })
+                .await??;
+                if source_options.once {
+                    break;
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        }))
+    };
+    if options.once {
+        arguments.push("--once".into());
+    }
+    if options.json {
+        arguments.push("--json".into());
+    }
+    use std::io::IsTerminal;
     let interactive = !options.json
         && !options.once
         && std::io::stdin().is_terminal()
         && std::io::stdout().is_terminal();
-    let _screen = if interactive {
-        Some(Screen::enter()?)
+    // Core owns restoration even if the frontend crashes or is force-stopped.
+    let _terminal = if interactive {
+        Some(crate::terminal_ui::Screen::enter()?)
     } else {
         None
     };
-    let (_input_reader, mut events) = if interactive {
-        let (reader, receive) = InputReader::start();
-        (Some(reader), Some(receive))
-    } else {
-        (None, None)
-    };
-    let mut previous: BTreeMap<String, (Instant, Value)> = BTreeMap::new();
-    let mut tick = tokio::time::interval(Duration::from_secs_f64(options.interval));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut rows = Vec::new();
-    let mut paused = false;
-    let mut selected = 0usize;
-    let mut details = true;
-    let mut sort = 't';
-    let mut pending: Option<tokio_util::task::AbortOnDropHandle<Result<Vec<Value>>>> = None;
-    loop {
-        let mut preserve = rows
-            .get(selected)
-            .and_then(|row: &Value| row["registration"].as_str())
-            .map(str::to_owned);
-        tokio::select! {
-            _=cancel.cancelled()=>break,
-            _=tick.tick()=>{
-                if !paused && pending.is_none() {
-                    let options=options.clone();
-                    pending=Some(tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move{collect(&options).await})));
-                }
-            }
-            result=async{match &mut pending{Some(task)=>task.await,None=>std::future::pending().await}}=>{
-                rows=result??;pending=None;
-                update_rates(&mut rows,&mut previous,Instant::now());
-                if options.json {println!("{}",json!({"agents":rows,"observed_at":porthub_terminal::protocol::now()}));}
-                else if !interactive {println!("{}",render(&rows,160,200,false,0,true).replace('\r',""));}
-                if options.once || !interactive && !options.json{break;}
-            }
-            event=async{match &mut events{Some(events)=>events.recv().await,None=>std::future::pending().await}}=>{
-                match event {
-                    Some(Ok(Event::Key(key))) if key.kind!=KeyEventKind::Release=>match key.code{
-                        KeyCode::Char('q')|KeyCode::Esc=>break,
-                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL)=>break,
-                        KeyCode::Char(' ')=>{paused=!paused;if paused{pending=None;}},
-                        KeyCode::Up=>{selected=selected.saturating_sub(1);preserve=None;},KeyCode::Down=>{selected=(selected+1).min(rows.len().saturating_sub(1));preserve=None;},
-                        KeyCode::Enter=>details=!details,
-                        KeyCode::Char(key @ ('t'|'c'|'m'|'n'))=>sort=key,
-                        _=>{},
-                    },Some(Err(error))=>return Err(error.into()),_=>{},
-                }
-            }
-        }
-        if interactive {
-            rows.sort_by(|a, b| {
-                let metric = |row: &Value| match sort {
-                    'c' => row["rates"]["cpu_percent"].as_f64().unwrap_or(0.0),
-                    'm' => number(&row["process"], "rss_bytes") as f64,
-                    _ => {
-                        row["rates"]["sent_per_second"].as_f64().unwrap_or(0.0)
-                            + row["rates"]["received_per_second"].as_f64().unwrap_or(0.0)
-                    }
-                };
-                if sort == 'n' {
-                    a["registration"].as_str().cmp(&b["registration"].as_str())
-                } else {
-                    metric(b).total_cmp(&metric(a)).then_with(||a["registration"].as_str().cmp(&b["registration"].as_str()))
-                }
-            });
-            if let Some(id) = preserve {
-                if let Some(index) = rows
-                    .iter()
-                    .position(|row| row["registration"].as_str() == Some(id.as_str()))
-                {
-                    selected = index;
-                }
-            }
-            selected = selected.min(rows.len().saturating_sub(1));
-            let (width, height) = crossterm::terminal::size()?;
-            crossterm::execute!(
-                std::io::stdout(),
-                crossterm::cursor::MoveTo(0, 0),
-                crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-                crossterm::style::Print(render(
-                    &rows,
-                    usize::from(width),
-                    usize::from(height),
-                    paused,
-                    selected,
-                    details
-                ))
-            )?;
-            std::io::stdout().flush()?;
-        }
-    }
+    let mut child = porthub_components::foreground(&executable, &arguments, &cancel).await?;
+    let status = tokio::select! {biased; _=cancel.cancelled()=>{let _=child.kill().await;return Ok(());},status=child.wait()=>status?};
+    ensure!(
+        status.success(),
+        "optional statistics dashboard exited unsuccessfully"
+    );
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn rates_warm_up_and_reset_on_agent_restart_instead_of_spiking() {
-        let first = json!({"registration":"fixture","process":{"pid":12,"start_time":10,"cpu_millis":100},"traffic":{"sent_bytes":100,"received_bytes":200}});
-        let second = json!({"registration":"fixture","process":{"pid":12,"start_time":10,"cpu_millis":600},"traffic":{"sent_bytes":1100,"received_bytes":2200}});
-        let mut previous = BTreeMap::new();
-        let at = Instant::now();
-        let mut rows = vec![first];
-        update_rates(&mut rows, &mut previous, at);
-        assert!(rows[0]["rates"].is_null());
-        let mut rows = vec![second];
-        update_rates(&mut rows, &mut previous, at + Duration::from_secs(1));
-        assert_eq!(rows[0]["rates"]["sent_per_second"], 1000.0);
-        assert_eq!(rows[0]["rates"]["received_per_second"], 2000.0);
-        assert_eq!(rows[0]["rates"]["cpu_percent"], 50.0);
-        rows[0]["process"]["start_time"] = json!(20);
-        update_rates(&mut rows, &mut previous, at + Duration::from_secs(2));
-        assert!(
-            rows[0]["rates"].is_null(),
-            "PID reuse must begin a fresh rate baseline"
-        );
+    fn private_snapshot_handoff_preserves_large_batches_and_enforces_rpc_row_bounds() {
+        let rows=(0..3).map(|index|json!({"registration":format!("fixture{index}"),"detail":"x".repeat(40000)})).collect();
+        let bytes = snapshot_bytes(rows, 1).unwrap();
+        assert!(bytes.len() > 65536);
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["sequence"], 1);
+        assert_eq!(value["agents"].as_array().unwrap().len(), 3);
+        assert!(snapshot_bytes(
+            vec![json!({"registration":"fixture","detail":"x".repeat(50000)})],
+            2
+        )
+        .is_err());
+        assert!(snapshot_bytes(vec![json!({"registration":"fixture"}); 129], 2).is_err());
     }
-    #[test]
-    fn screen_fits_normal_ssh_terminal_and_scrolls_selected_registration_into_view() {
-        let rows=(0..12).map(|index|json!({"registration":format!("agent{index:02}"),"state":"running","process":{"rss_bytes":1048576}})).collect::<Vec<_>>();
-        let output = render(&rows, 80, 24, false, 11, true);
-        assert!(output.contains("> agent11"));
-        assert!(output.contains("RSS"));
-        assert!(output.lines().all(|line| line.chars().count() <= 80));
-        assert!(output.lines().count() <= 24);
-        assert_eq!(clean("safe\u{1b}[31m\nname", 30), "safe[31mname");
-        let mut measured=rows;
-        measured[11]["terminal"]=json!({"measurements":{"active_sessions":2,"active_participants":4,"active_reporting_sessions":1,"reported_sessions":1,"counters":{"input_bytes":7,"output_bytes":11,"direct_udp_sent_bytes":13,"direct_udp_received_bytes":17}}});
-        let output=render(&measured,80,24,false,11,true);
-        assert!(output.contains("Terminals 2 sessions"));
-        assert!(output.contains("Gateway payload in/out"));
-        assert!(output.contains("Direct UDP in/out"));
-        assert!(output.contains("q quit"));
-        assert!(output.lines().all(|line|line.chars().count()<=80) && output.lines().count()<=24);
-    }
+
     #[test]
     fn refresh_interval_is_bounded_and_rejects_nan_and_infinity() {
         for invalid in ["0", "0.1", "61", "NaN", "inf", "-1"] {
@@ -574,11 +451,20 @@ mod tests {
         let control = crate::control::Control::new(profile)?;
         let directory = tempfile::tempdir()?;
         let source = directory.path().join("missing-profile.json");
-        let mut terminal=crate::terminal_telemetry::Lease::open(&source,1)?;
+        let mut terminal = crate::terminal_telemetry::Lease::open(&source, 1)?;
         terminal.participants(1);
-        let mut emitter=crate::terminal_telemetry::Emitter::new(terminal.policy())?;
-        terminal.record(emitter.report(porthub_terminal::traffic::Snapshot {input_bytes:7,direct_udp_sent_bytes:13,..Default::default()})?)?;
-        assert_eq!(crate::terminal_telemetry::snapshot(&source.with_file_name("other-profile.json")).counters.input_bytes,0);
+        let mut emitter = crate::terminal_telemetry::Emitter::new(terminal.policy())?;
+        terminal.record(emitter.report(porthub_terminal::traffic::Snapshot {
+            input_bytes: 7,
+            direct_udp_sent_bytes: 13,
+            ..Default::default()
+        })?)?;
+        assert_eq!(
+            crate::terminal_telemetry::snapshot(&source.with_file_name("other-profile.json"))
+                .counters
+                .input_bytes,
+            0
+        );
         let (mut caller, stream) = tokio::io::duplex(65536);
         let request = serve(
             BufReader::new(stream),
@@ -595,9 +481,15 @@ mod tests {
             assert!(!text.contains("never-return-this-secret"));
             assert!(!text.contains("environment"));
             let value: Value = serde_json::from_slice(&bytes)?;
-            assert_eq!(value["terminal"]["measurements"]["counters"]["input_bytes"],7);
-            assert_eq!(value["terminal"]["measurements"]["counters"]["direct_udp_sent_bytes"],13);
-            assert_eq!(value["terminal"]["measurements"]["active_participants"],1);
+            assert_eq!(
+                value["terminal"]["measurements"]["counters"]["input_bytes"],
+                7
+            );
+            assert_eq!(
+                value["terminal"]["measurements"]["counters"]["direct_udp_sent_bytes"],
+                13
+            );
+            assert_eq!(value["terminal"]["measurements"]["active_participants"], 1);
             assert_eq!(value["schema_version"], 1);
             assert_eq!(value["process"]["pid"], std::process::id());
             assert_eq!(value["machine_id"], "0123456789abcdef01234567");

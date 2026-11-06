@@ -1,6 +1,6 @@
 [package]
 name = "porthub-agent"
-version.workspace = true
+version = "1.11.0"
 edition.workspace = true
 publish.workspace = true
 
@@ -15,18 +15,21 @@ netns-tests = ["porthub-network/netns-tests"]
 private-stream = ["dep:smoltcp", "porthub-network/private-stream", "porthub-mesh/streams"]
 root-dns-test = []
 handoff-service-test = []
-terminal-direct = ["porthub-terminal/direct", "porthub-terminal/viewer-history"]
+terminal-direct = []
 
 [dependencies]
+porthub-console = { path = "../porthub-console" }
+hyper-util = { version = "0.1", features = ["client-proxy-system"] }
 getifaddrs = "0.6.2"
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
 porthub-tunnel.workspace = true
-porthub-transfer = { path = "../porthub-transfer" }
-porthub-terminal = { path = "../porthub-terminal" }
-porthub-egress = { path = "../porthub-egress", optional = true }
+porthub-transfer = { path = "../porthub-transfer", default-features = false, features = ["notifications"] }
+porthub-components = { path = "../porthub-components" }
+porthub-terminal = { path = "../porthub-terminal", default-features = false }
+porthub-egress = { path = "../porthub-egress", optional = true, default-features = false, features = ["websocket"] }
 porthub-mesh = { path = "../porthub-mesh" }
 porthub-network = { path = "../porthub-network" }
 chrono = { version = "0.4", features = ["serde"] }
@@ -59,6 +62,11 @@ smoltcp = { version = "=0.14.0", optional = true, default-features = false, feat
 rustix = { version = "1", features = ["process"] }
 
 [dev-dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+webpki-roots = "1"
+hyper = { version = "1", features = ["client", "http1"] }
+http-body-util = "0.1"
 tokio = { workspace = true, features = ["test-util"] }
 axum.workspace = true
 
@@ -85,6 +93,6 @@ route_manager = { version = "=0.2.9", features = ["async"] }
 [target."cfg(windows)".dependencies]
 windows-service = "0.8.1"
 windows-registry = "0.6.1"
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_System_Pipes", "Win32_System_Threading"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_System_Pipes", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 tun-rs = { version = "=2.8.13", default-features = false, features = ["async"] }
 route_manager = { version = "=0.2.9", features = ["async"] }

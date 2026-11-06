@@ -2,7 +2,7 @@
 //! reports cannot select a machine, account or another connection's epoch.
 use anyhow::{ensure, Result};
 use porthub_terminal::{
-    protocol::{random_token, token},
+    protocol::random_token,
     traffic::Snapshot,
 };
 use serde::{Deserialize, Serialize};
@@ -11,6 +11,8 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
 };
+#[cfg(test)]
+use porthub_terminal::protocol::token;
 const MAX_PROFILES: usize = 128;
 const MAX_SESSIONS: usize = 1024;
 #[derive(Deserialize, Serialize)]
@@ -39,10 +41,12 @@ enum ReportKind {
     #[serde(rename = "terminal_local_traffic")]
     Report,
 }
+#[cfg(test)]
 pub(crate) struct Emitter {
     epoch: String,
     sequence: u64,
 }
+#[cfg(test)]
 impl Emitter {
     pub fn new(policy: Policy) -> Result<Self> {
         ensure!(token(&policy.epoch, 32), "invalid terminal traffic epoch");

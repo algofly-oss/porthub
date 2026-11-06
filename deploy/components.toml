@@ -1,0 +1,61 @@
+schema_version = 1
+
+# Each entry describes a separate Cargo invocation. Do not build core and all
+# helpers together: Cargo feature unification would re-enable heavy dependencies.
+[tools.core]
+package = "porthub-agent"
+manifest = "crates/porthub-agent/Cargo.toml"
+binary = "porthub"
+default_features = true
+features = []
+extra_inputs = []
+profile = "release"
+recipe_version = 1
+
+[tools.sync]
+package = "porthub-sync"
+manifest = "crates/porthub-sync/Cargo.toml"
+binary = "porthub-sync"
+default_features = true
+features = []
+extra_inputs = []
+profile = "release"
+recipe_version = 1
+core = ">=1.11.0, <2.0.0"
+protocols = [1]
+
+[tools.tor]
+package = "porthub-tor"
+manifest = "crates/porthub-tor/Cargo.toml"
+binary = "porthub-tor"
+default_features = true
+features = []
+extra_inputs = []
+profile = "release"
+recipe_version = 1
+core = ">=1.11.0, <2.0.0"
+protocols = [1]
+
+[tools.stats]
+package = "porthub-stats"
+manifest = "crates/porthub-stats/Cargo.toml"
+binary = "porthub-stats"
+default_features = true
+features = []
+extra_inputs = []
+profile = "release"
+recipe_version = 1
+core = ">=1.11.0, <2.0.0"
+protocols = [1]
+
+[tools.terminal]
+package = "porthub-terminal-cli"
+manifest = "crates/porthub-terminal-cli/Cargo.toml"
+binary = "porthub-terminal"
+default_features = true
+features = []
+extra_inputs = ["scripts/build-terminal-helper.py", "vendor/terminal/sources.json"]
+profile = "release"
+recipe_version = 1
+core = ">=1.11.0, <2.0.0"
+protocols = [1]

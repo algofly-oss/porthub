@@ -6,7 +6,7 @@ use std::{
 };
 
 #[test]
-#[ignore = "requires an agent binary with bundled terminal runtime"]
+#[ignore = "requires a verified terminal component fixture"]
 fn local_cli_needs_no_registration_and_preserves_independent_background_workspaces() -> Result<()> {
     let executable = std::env::var_os("PORTHUB_TEST_AGENT_EXECUTABLE")
         .map(PathBuf::from)
@@ -141,9 +141,18 @@ fn local_cli_needs_no_registration_and_preserves_independent_background_workspac
     );
     call(&["terminal", "tmux", "secondworkspace", "--", "has-session"])?;
 
-    let reopened: serde_json::Value = serde_json::from_slice(
-        &call(&["terminal", "secondworkspace", "--detach", "--json"])?.stdout,
-    )?;
+    let unavailable = directory.path().join("unavailable-components");
+    let reused = Command::new(&executable)
+        .args(["terminal", "secondworkspace", "--detach", "--json"])
+        .env("XDG_DATA_HOME", directory.path())
+        .env("PORTHUB_COMPONENT_CACHE", &unavailable)
+        .env("PORTHUB_COMPONENT_SHARED_CACHE", "off")
+        .env("PORTHUB_COMPONENT_SOURCE", "gateway")
+        .env("PORTHUB_COMPONENT_GATEWAY", "https://127.0.0.1:9")
+        .output()?;
+    ensure!(reused.status.success(), "reattaching an existing workspace must not provision a component: {}", String::from_utf8_lossy(&reused.stderr));
+    assert!(!unavailable.exists(), "reattachment must not initialize a component cache");
+    let reopened: serde_json::Value = serde_json::from_slice(&reused.stdout)?;
     assert_eq!(
         reopened["id"], second["id"],
         "opening a running name must reuse its workspace"

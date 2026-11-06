@@ -1,18 +1,12 @@
 //! Local workspaces use the same private bundled multiplexer as shared ones.
 //! Local mode needs no registration or network. Sharing uses the local broker.
 mod participant_control;
-mod participant_panel;
-mod participant_popup;
 mod sharing;
 use anyhow::{ensure, Context, Result};
 use clap::{Args, Subcommand};
 use fs2::FileExt;
-use porthub_terminal::{
-    multiplexer::{create_directory, Start, Workspace},
-    protocol::{random_token, token},
-};
+use porthub_terminal::protocol::token;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     ffi::OsString,
     fs,
@@ -26,10 +20,14 @@ pub enum Command {
     #[command(external_subcommand)]
     Named(Vec<OsString>),
     /// Start a persistent local workspace; sharing is optional.
-    #[command(after_help = "Examples:\n  porthub terminal new --name work\n  porthub terminal new --name work --shell /bin/bash --detach\n  porthub terminal new --name logs --detach -- tail -f /var/log/app.log\n\nAll creation flags also work with: porthub terminal NAME [OPTIONS]\nShare later with: porthub terminal share NAME --detach")]
+    #[command(
+        after_help = "Examples:\n  porthub terminal new --name work\n  porthub terminal new --name work --shell /bin/bash --detach\n  porthub terminal new --name logs --detach -- tail -f /var/log/app.log\n\nAll creation flags also work with: porthub terminal NAME [OPTIONS]\nShare later with: porthub terminal share NAME --detach"
+    )]
     New(New),
     /// Share a new workspace or an existing local workspace with SSH/browser guests.
-    #[command(after_help = "Examples:\n  porthub terminal share work --detach\n  porthub terminal share work --access web --read-only --detach\n  porthub terminal share work --link-expires 3600 --detach\n  porthub terminal share work --registration laptop --user --detach\n\nBrowser and SSH access are both enabled by default. The command prints invitation\nlinks; show them again with: porthub terminal invite work\nUse --detach to share without attaching your terminal.")]
+    #[command(
+        after_help = "Examples:\n  porthub terminal share work --detach\n  porthub terminal share work --access web --read-only --detach\n  porthub terminal share work --link-expires 3600 --detach\n  porthub terminal share work --registration laptop --user --detach\n\nBrowser and SSH access are both enabled by default. The command prints invitation\nlinks; show them again with: porthub terminal invite work\nUse --detach to share without attaching your terminal."
+    )]
     Share(sharing::Share),
     /// Join an invitation without a PortHub account.
     Join {
@@ -37,17 +35,17 @@ pub enum Command {
         #[arg(long, value_enum, default_value_t = JoinTransport::Ssh)]
         transport: JoinTransport,
         /// Local registration whose exit/privacy policy controls native auto mode.
-        #[cfg(feature="terminal-direct")]
+        #[cfg(feature = "terminal-direct")]
         #[arg(long)]
-        registration:Option<String>,
+        registration: Option<String>,
         /// Select this OS user's registration for native auto mode.
-        #[cfg(feature="terminal-direct")]
+        #[cfg(feature = "terminal-direct")]
         #[arg(long)]
-        user:bool,
+        user: bool,
         /// Explicit UDP STUN endpoint for native auto mode; repeat up to twice.
-        #[cfg(feature="terminal-direct")]
+        #[cfg(feature = "terminal-direct")]
         #[arg(long="stun-server",value_parser=crate::terminal_connectivity::server)]
-        stun_servers:Vec<String>,
+        stun_servers: Vec<String>,
     },
     /// Show, replace or revoke invitation links.
     #[command(visible_aliases = ["url", "links"], after_help = "Show current browser URLs and SSH commands:\n  porthub terminal url NAME\n  porthub terminal invite NAME --json\n\nA local workspace has no access URL until shared:\n  porthub terminal share NAME --detach")]
@@ -85,7 +83,12 @@ pub enum Command {
         client: u32,
     },
     #[command(name = "__participants-view", hide = true)]
-    ParticipantView { root: PathBuf, id: String, #[arg(long)] sidebar: bool },
+    ParticipantView {
+        root: PathBuf,
+        id: String,
+        #[arg(long)]
+        sidebar: bool,
+    },
     /// List this OS user's running local and shared workspaces.
     #[command(alias = "ls")]
     List {
@@ -96,7 +99,11 @@ pub enum Command {
         all: bool,
     },
     /// Attach or reattach, including from inside another tmux session.
-    Attach { name: String, #[arg(long, value_enum, default_value_t = Sidebar::Off)] sidebar: Sidebar },
+    Attach {
+        name: String,
+        #[arg(long, value_enum, default_value_t = Sidebar::Off)]
+        sidebar: Sidebar,
+    },
     /// Explicitly terminate a workspace and its running tasks.
     Stop { name: String },
     /// Rename a workspace without interrupting its tasks.
@@ -136,12 +143,17 @@ pub enum JoinTransport {
     #[cfg(feature = "terminal-direct")]
     Relay,
     /// Native direct when a local agent permits it, otherwise gateway relay.
-    #[cfg(feature="terminal-direct")]
+    #[cfg(feature = "terminal-direct")]
     Auto,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
-pub enum Sidebar { Auto, On, #[default] Off }
+pub enum Sidebar {
+    Auto,
+    On,
+    #[default]
+    Off,
+}
 
 #[derive(Args, Clone)]
 pub struct New {
@@ -180,17 +192,7 @@ pub struct New {
     command: Vec<OsString>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Job {
-    id: String,
-    name: String,
-    executable: PathBuf,
-    executable_sha256: String,
-    terminfo: PathBuf,
-    workspace: PathBuf,
-    created_at: i64,
-}
+use porthub_components::protocol::terminal::Job;
 
 fn private(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
@@ -232,7 +234,11 @@ fn socket_root() -> Result<PathBuf> {
     let root = PathBuf::from(format!("/tmp/porthub-terminal-{}", unsafe {
         libc::geteuid()
     }));
-    match create_directory(&root) {
+    match fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .map_err(anyhow::Error::from)
+    {
         Ok(()) => {}
         Err(_) if root.exists() => {}
         Err(error) => return Err(error),
@@ -292,26 +298,6 @@ fn select(root: &Path, name: &str) -> Result<Job> {
     Ok(matching.remove(0))
 }
 
-fn workspace(job: &Job) -> Result<Workspace> {
-    let metadata = fs::symlink_metadata(&job.executable)?;
-    ensure!(
-        metadata.is_file()
-            && !metadata.file_type().is_symlink()
-            && metadata.uid() == unsafe { libc::geteuid() }
-            && metadata.mode() & 0o022 == 0,
-        "unsafe terminal runtime executable"
-    );
-    ensure!(
-        format!("{:x}", Sha256::digest(fs::read(&job.executable)?)) == job.executable_sha256,
-        "terminal runtime checksum mismatch"
-    );
-    Workspace::open(
-        job.executable.clone(),
-        job.terminfo.clone(),
-        job.workspace.clone(),
-    )
-}
-
 fn name_valid(name: &str) -> Result<()> {
     ensure!(
         !name.is_empty()
@@ -324,101 +310,268 @@ fn name_valid(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn attach(job: &Job, sidebar: Sidebar) -> Result<()> {
-    let workspace = workspace(job)?;
-    ensure!(workspace.is_alive(), "workspace has ended");
-    // Recognize our own server instead of recursively attaching to ourselves.
-    if std::env::var_os("PORTHUB_TERMINAL_SOCKET")
-        .is_some_and(|value| PathBuf::from(value) == workspace.socket())
-        || std::env::var_os("TMUX").is_some_and(|value| {
-            value.to_string_lossy().split(',').next() == workspace.socket().to_str()
-        })
-    {
-        println!("Already attached to {}", job.name);
-        return Ok(());
-    }
-    participant_popup::attach(job, &workspace, sidebar)
+async fn terminal_operation(
+    operation: porthub_components::protocol::terminal::Operation,
+) -> Result<porthub_components::protocol::terminal::Value> {
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let mut worker =
+        crate::components::worker(porthub_components::catalog::Component::Terminal, &cancel)
+            .await?;
+    worker
+        .call(operation, std::time::Duration::from_secs(30))
+        .await
 }
-
-fn create(root: &Path, args: New) -> Result<Job> {
-    let _guard = lock(root)?;
-    create_locked(root, args)
-}
-
-fn create_locked(root: &Path, args: New) -> Result<Job> {
-    let existing = jobs(root)?;
-    let name = match args.name {
-        Some(name) => name,
-        None => {
-            porthub_terminal::names::generate(|name| existing.iter().any(|job| job.name == name))?
-        }
+async fn running(root: &Path, id: &str) -> Result<bool> {
+    let value = terminal_operation(porthub_components::protocol::terminal::Operation::Running {
+        directory: root.into(),
+        name: id.into(),
+    })
+    .await?;
+    let porthub_components::protocol::terminal::Value::Running { running } = value else {
+        anyhow::bail!("invalid terminal state response")
     };
-    name_valid(&name)?;
+    Ok(running)
+}
+fn local_owner_lease(root: &Path, id: &str, client: u32) -> Result<()> {
+    private(root)?;
+    ensure!(client > 0, "invalid terminal client");
+    let job = select(root, id)?;
+    private(&job.workspace)?;
+    let path = job.workspace.join(format!("owner-client-{client}.lock"));
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .context("participant controls require a local owner attachment")?;
+    let metadata = file.metadata()?;
     ensure!(
-        !existing.iter().any(|job| job.name == name),
-        "workspace name already exists"
+        metadata.is_file()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.mode() & 0o077 == 0,
+        "unsafe owner attachment lease"
     );
-    let runtime_dir = root.join("runtimes");
-    if !runtime_dir.exists() {
-        create_directory(&runtime_dir)?;
+    match file.try_lock_exclusive() {
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+        _ => anyhow::bail!("owner attachment is no longer active"),
     }
-    let runtime = crate::terminal_runtime::install(&runtime_dir)?;
-    let id = random_token(16);
-    let path = socket_root()?.join(&id);
-    create_directory(&path)?;
-    let job = Job {
-        id: id.clone(),
-        name,
-        executable_sha256: format!("{:x}", Sha256::digest(fs::read(&runtime.executable)?)),
-        executable: runtime.executable,
-        terminfo: runtime.terminfo,
-        workspace: path,
-        created_at: porthub_terminal::protocol::now(),
+}
+async fn owner_frontend(arguments: Vec<OsString>) -> Result<()> {
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let manager = crate::components::manager(None)?;
+    if !manager
+        .has_installation(porthub_components::catalog::Component::Terminal)
+        .await?
+    {
+        eprintln!("Preparing terminal: downloading a verified compatible tool if needed...");
+    }
+    let (_, executable) = manager
+        .resolve(porthub_components::catalog::Component::Terminal, &cancel)
+        .await?;
+    let mut child = porthub_components::foreground(&executable, &arguments, &cancel).await?;
+    ensure!(
+        child.wait().await?.success(),
+        "terminal frontend exited unsuccessfully; the workspace may still be running"
+    );
+    Ok(())
+}
+async fn join_frontend(request: porthub_components::protocol::terminal::JoinRequest) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let temporary = tempfile::Builder::new()
+        .prefix("porthub-join-")
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()?;
+    let path = temporary.path().join("request.json");
+    let bytes = serde_json::to_vec(&request)?;
+    ensure!(
+        bytes.len() <= 16384,
+        "terminal join request exceeds size limit"
+    );
+    crate::profile::write_private(&path, &bytes, false)?;
+    owner_frontend(vec![
+        "__porthub-join".into(),
+        "--request".into(),
+        path.into_os_string(),
+    ])
+    .await
+}
+async fn attach(job: &Job, sidebar: Sidebar) -> Result<()> {
+    if recorded_runtime_running(job).await? {
+        let socket = job.workspace.join("tmux.sock");
+        if std::env::var_os("PORTHUB_TERMINAL_SOCKET")
+            .is_some_and(|value| PathBuf::from(value) == socket)
+            || std::env::var_os("TMUX")
+                .is_some_and(|value| value.to_string_lossy().split(',').next() == socket.to_str())
+        {
+            println!("Already attached to {}", job.name);
+            return Ok(());
+        }
+        let catalog =
+            crate::components::cache_root()?.join(porthub_components::catalog::CATALOG_ASSET);
+        if matches!(sidebar, Sidebar::Off | Sidebar::Auto) && !catalog.try_exists()? {
+            eprintln!("Terminal helper is not cached; attaching to the saved local runtime.");
+            let status = tokio::process::Command::new(&job.executable)
+                .arg("-S")
+                .arg(socket)
+                .args(["attach-session", "-t", "workspace"])
+                .env("TERMINFO", &job.terminfo)
+                .env_remove("TMUX")
+                .env_remove("TMUX_PANE")
+                .kill_on_drop(true)
+                .status()
+                .await?;
+            ensure!(
+                status.success(),
+                "terminal attachment failed; the workspace may still be running"
+            );
+            return Ok(());
+        }
+    }
+    owner_frontend(vec![
+        "attach".into(),
+        "--directory".into(),
+        root()?.into_os_string(),
+        "--name".into(),
+        job.id.clone().into(),
+        "--sidebar".into(),
+        match sidebar {
+            Sidebar::On => "on",
+            Sidebar::Auto => "auto",
+            Sidebar::Off => "off",
+        }
+        .into(),
+    ])
+    .await
+}
+async fn owner_view(root: &Path, id: &str, sidebar: bool) -> Result<()> {
+    let mut arguments = vec![
+        "terminal".into(),
+        "__participants-view".into(),
+        root.as_os_str().into(),
+        id.into(),
+    ];
+    if sidebar {
+        arguments.push("--sidebar".into());
+    }
+    owner_frontend(arguments).await
+}
+
+/// Read-only compatibility probe for a workspace whose verified runtime is
+/// already recorded. Reopening it must not depend on optional downloads.
+async fn recorded_runtime_running(job: &Job) -> Result<bool> {
+    use sha2::{Digest, Sha256};
+    ensure!(
+        job.executable.is_absolute() && job.workspace.is_absolute() && job.terminfo.is_absolute(),
+        "saved terminal paths must be absolute"
+    );
+    private(&job.workspace)?;
+    let mut options = fs::OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let mut file = options.open(&job.executable)?;
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.mode() & 0o022 == 0
+            && metadata.mode() & 0o111 != 0
+            && metadata.nlink() == 1
+            && metadata.len() <= 16 * 1024 * 1024,
+        "unsafe saved terminal runtime"
+    );
+    use std::io::Read;
+    let mut bytes = vec![];
+    file.by_ref()
+        .take(16 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() <= 16 * 1024 * 1024
+            && format!("{:x}", Sha256::digest(&bytes)) == job.executable_sha256,
+        "saved terminal runtime checksum mismatch"
+    );
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        tokio::process::Command::new(&job.executable)
+            .arg("-S")
+            .arg(job.workspace.join("tmux.sock"))
+            .arg("has-session")
+            .env("TERMINFO", &job.terminfo)
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await??;
+    Ok(output.status.success())
+}
+async fn create(root: &Path, args: New) -> Result<Job> {
+    create_or_open(root, args, false).await
+}
+async fn create_or_open(root: &Path, args: New, reuse: bool) -> Result<Job> {
+    if reuse {
+        if let Some(name) = args.name.as_deref() {
+            if let Ok(job) = select(root, name) {
+                if recorded_runtime_running(&job).await? {
+                    return Ok(job);
+                }
+            }
+        }
+    }
+    use porthub_components::{
+        catalog::Component,
+        protocol::terminal::{CreateOptions, Operation, Value},
     };
-    let cwd = args
-        .cwd
-        .unwrap_or(std::env::current_dir()?)
-        .canonicalize()?;
     let shell = args
         .shell
-        .or_else(|| ["/bin/bash", "/usr/bin/bash"].into_iter().map(PathBuf::from)
-            .find(|path| fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.mode() & 0o111 != 0)))
+        .or_else(|| {
+            ["/bin/bash", "/usr/bin/bash"]
+                .into_iter()
+                .map(PathBuf::from)
+                .find(|path| {
+                    fs::metadata(path)
+                        .is_ok_and(|metadata| metadata.is_file() && metadata.mode() & 0o111 != 0)
+                })
+        })
         .or_else(|| std::env::var_os("SHELL").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("/bin/sh"));
-    let environment = args
-        .environment
-        .iter()
-        .map(|entry| {
-            entry
-                .split_once('=')
-                .map(|(k, v)| (k.to_owned(), v.to_owned()))
-                .context("environment overrides must use KEY=VALUE")
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let ws = workspace(&job)?;
-    ws.start(&Start {
-        cwd,
+    let options = CreateOptions {
+        name: args.name,
+        cwd: args
+            .cwd
+            .unwrap_or(std::env::current_dir()?)
+            .canonicalize()?,
         shell,
-        command: args.command,
-        environment,
+        environment: args.environment,
+        inherited_environment: std::env::vars_os().collect(),
         history_limit: args.history_limit,
-        mouse: !args.no_mouse,
+        no_mouse: args.no_mouse,
         prefix: args.prefix,
-        cols: 100,
-        rows: 30,
-    })?;
-    if let Err(error) = crate::profile::write_private(
-        &root.join(format!("{id}.json")),
-        &serde_json::to_vec(&job)?,
-        false,
-    ) {
-        let _ = ws.stop();
-        return Err(error);
-    }
+        command: args.command,
+    };
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let mut worker = crate::components::worker(Component::Terminal, &cancel).await?;
+    let value = worker
+        .call(
+            Operation::Create {
+                directory: root.into(),
+                options,
+                reuse,
+            },
+            std::time::Duration::from_secs(30),
+        )
+        .await?;
+    let Value::Workspace { job } = value else {
+        anyhow::bail!("terminal helper returned an invalid workspace")
+    };
+    ensure!(
+        token(&job.id, 32) && job.workspace == socket_root()?.join(&job.id),
+        "terminal helper returned an unrelated workspace"
+    );
     Ok(job)
 }
 
-fn open_named(root: &Path, arguments: Vec<OsString>) -> Result<()> {
+async fn open_named(root: &Path, arguments: Vec<OsString>) -> Result<()> {
     use clap::Parser;
     #[derive(Parser)]
     struct Flags {
@@ -444,28 +597,7 @@ fn open_named(root: &Path, arguments: Vec<OsString>) -> Result<()> {
     let sidebar = flags.sidebar;
     let detach = flags.detach;
     let json = flags.json;
-    let guard = lock(root)?;
-    let existing = jobs(root)?.into_iter().find(|job| job.name == name);
-    let job = match existing {
-        Some(job) if workspace(&job)?.is_alive() => job,
-        ended => {
-            if let Some(job) = ended {
-                // Preserve the ended identity for investigation while allowing
-                // the familiar name to create a fresh workspace and new caps.
-                let archive = root.join("archive");
-                if !archive.exists() {
-                    create_directory(&archive)?;
-                }
-                private(&archive)?;
-                fs::rename(
-                    root.join(format!("{}.json", job.id)),
-                    archive.join(format!("{}.json", job.id)),
-                )?;
-            }
-            create_locked(root, flags)?
-        }
-    };
-    drop(guard);
+    let job = create_or_open(root, flags, true).await?;
     if json {
         println!(
             "{}",
@@ -478,7 +610,7 @@ fn open_named(root: &Path, arguments: Vec<OsString>) -> Result<()> {
         );
     }
     if !detach {
-        attach(&job, sidebar)?;
+        attach(&job, sidebar).await?;
     }
     Ok(())
 }
@@ -487,27 +619,59 @@ pub async fn run(command: Command) -> Result<()> {
     let root = root()?;
     match command {
         Command::ParticipantPopup { root, id, client } => {
-            participant_popup::show(&root, &id, client)?
+            // Reject unauthorized legacy shortcut invocations before resolving
+            // any optional code. The helper repeats the complete owner check.
+            local_owner_lease(&root, &id, client)?;
+            owner_frontend(vec![
+                "terminal".into(),
+                "__participants-popup".into(),
+                root.into_os_string(),
+                id.into(),
+                client.to_string().into(),
+            ])
+            .await?
         }
-        Command::ParticipantView { root, id, sidebar } => participant_popup::view(&root, &id, sidebar).await?,
-        Command::Named(arguments) => open_named(&root, arguments)?,
+        Command::ParticipantView { root, id, sidebar } => owner_view(&root, &id, sidebar).await?,
+        Command::Named(arguments) => open_named(&root, arguments).await?,
         Command::Share(args) => sharing::start(&root, args).await?,
-        Command::Join {url,transport,
-            #[cfg(feature="terminal-direct")] registration,
-            #[cfg(feature="terminal-direct")] user,
-            #[cfg(feature="terminal-direct")] stun_servers,
+        Command::Join {
+            url,
+            transport,
+            #[cfg(feature = "terminal-direct")]
+            registration,
+            #[cfg(feature = "terminal-direct")]
+            user,
+            #[cfg(feature = "terminal-direct")]
+            stun_servers,
         } => {
-            #[cfg(feature="terminal-direct")]
-            ensure!(matches!(transport,JoinTransport::Auto) || (registration.is_none() && !user && stun_servers.is_empty()),
-                "--registration, --user and --stun-server apply only to --transport auto");
-            match transport {
-                JoinTransport::Ssh=>sharing::join(&url).await?,
-                #[cfg(feature="terminal-direct")]
-                JoinTransport::Relay=>crate::terminal_guest::client::join_relay(&url).await?,
-                #[cfg(feature="terminal-direct")]
-                JoinTransport::Auto=>crate::terminal_guest::client::join_auto_with_stun(&url,registration.as_deref(),user,&stun_servers).await?,
-            }
-        },
+            #[cfg(feature = "terminal-direct")]
+            ensure!(
+                matches!(transport, JoinTransport::Auto)
+                    || (registration.is_none() && !user && stun_servers.is_empty()),
+                "--registration, --user and --stun-server apply only to --transport auto"
+            );
+            use porthub_components::protocol::terminal::{
+                JoinRequest, JoinTransport as HelperTransport,
+            };
+            let (transport, broker, servers) = match transport {
+                JoinTransport::Ssh => (HelperTransport::Ssh, None, Vec::new()),
+                #[cfg(feature = "terminal-direct")]
+                JoinTransport::Relay => (HelperTransport::Relay, None, Vec::new()),
+                #[cfg(feature = "terminal-direct")]
+                JoinTransport::Auto => (
+                    HelperTransport::Auto,
+                    crate::terminal_guest::broker(registration.as_deref(), user)?,
+                    crate::terminal_connectivity::checked(&stun_servers)?,
+                ),
+            };
+            join_frontend(JoinRequest {
+                invitation: url,
+                transport,
+                broker,
+                stun_servers: servers,
+            })
+            .await?;
+        }
         Command::Invite {
             name,
             json,
@@ -528,7 +692,7 @@ pub async fn run(command: Command) -> Result<()> {
         Command::Participants { name, json, watch } => {
             let job = select(&root, &name)?;
             if watch {
-                participant_panel::run(job, false).await?;
+                owner_view(&root, &job.id, false).await?;
             } else {
                 participant_control::request(&job, None, json).await?;
             }
@@ -541,7 +705,7 @@ pub async fn run(command: Command) -> Result<()> {
             let sidebar = args.sidebar;
             let detach = args.detach;
             let json = args.json;
-            let job = create(&root, args)?;
+            let job = create(&root, args).await?;
             if json {
                 println!(
                     "{}",
@@ -554,20 +718,49 @@ pub async fn run(command: Command) -> Result<()> {
                 );
             }
             if !detach {
-                attach(&job, sidebar)?;
+                attach(&job, sidebar).await?;
             }
         }
         Command::List { json, all } => {
-            let rows:Vec<_>=jobs(&root)?.into_iter().filter_map(|job|{
-                let running=workspace(&job).is_ok_and(|workspace|workspace.is_alive());
-                if !running && !all { return None; }
-                Some(serde_json::json!({"id":job.id,"name":job.name,"state":if running{"running"}else{"ended"},"shared":root.join(format!("{}.share",job.id)).exists(),"created_at":job.created_at}))
-            }).collect();
+            let mut rows = Vec::<serde_json::Value>::new();
+            let mut offset = 0;
+            loop {
+                use porthub_components::protocol::terminal::{Operation, Value};
+                let Value::Workspaces { rows: page, next } = terminal_operation(Operation::List {
+                    directory: root.clone(),
+                    all,
+                    offset,
+                })
+                .await?
+                else {
+                    anyhow::bail!("invalid terminal listing response")
+                };
+                rows.extend(
+                    page.into_iter()
+                        .map(serde_json::to_value)
+                        .collect::<std::result::Result<Vec<_>, _>>()?,
+                );
+                let Some(next) = next else {
+                    break;
+                };
+                ensure!(
+                    next > offset && next <= 65536,
+                    "invalid terminal listing cursor"
+                );
+                offset = next;
+            }
             if json {
                 println!("{}", serde_json::to_string(&rows)?);
             } else {
                 if rows.is_empty() {
-                    println!("{}", if all { "No saved terminal workspaces." } else { "No running terminal workspaces." });
+                    println!(
+                        "{}",
+                        if all {
+                            "No saved terminal workspaces."
+                        } else {
+                            "No running terminal workspaces."
+                        }
+                    );
                 } else {
                     println!("NAME\tSTATE\tACCESS");
                 }
@@ -576,7 +769,11 @@ pub async fn run(command: Command) -> Result<()> {
                         "{}\t{}\t{}",
                         row["name"].as_str().unwrap(),
                         row["state"].as_str().unwrap(),
-                        if row["shared"] == true { "shared" } else { "local" }
+                        if row["shared"] == true {
+                            "shared"
+                        } else {
+                            "local"
+                        }
                     );
                     if row["state"] == "running" {
                         let name = row["name"].as_str().unwrap();
@@ -590,39 +787,85 @@ pub async fn run(command: Command) -> Result<()> {
                 println!("\nOpen:    porthub terminal NAME\nAttach:  porthub terminal attach NAME\nShare:   porthub terminal share NAME --detach (browser + SSH)\nWeb:     porthub terminal share NAME --access web --detach\nURLs:    porthub terminal url NAME\nHistory: porthub terminal ls --all\nHelp:    porthub terminal --help");
             }
         }
-        Command::Attach { name, sidebar } => attach(&select(&root, &name)?, sidebar)?,
+        Command::Attach { name, sidebar } => attach(&select(&root, &name)?, sidebar).await?,
         Command::Stop { name } => {
-            let job = select(&root, &name)?;
-            workspace(&job)?.stop()?;
-            println!("Stopped {}", job.name);
+            use porthub_components::protocol::terminal::{Operation, Value};
+            let Value::Stopped { name } = terminal_operation(Operation::Stop {
+                directory: root,
+                name,
+            })
+            .await?
+            else {
+                anyhow::bail!("invalid terminal stop response")
+            };
+            println!("Stopped {name}");
         }
         Command::Rename { name, new_name } => {
-            name_valid(&new_name)?;
-            let _guard = lock(&root)?;
+            use porthub_components::protocol::terminal::{Operation, Value};
+            let Value::Workspace { job } = terminal_operation(Operation::Rename {
+                directory: root,
+                name,
+                new_name: new_name.clone(),
+            })
+            .await?
+            else {
+                anyhow::bail!("invalid terminal rename response")
+            };
             ensure!(
-                !jobs(&root)?.iter().any(|job| job.name == new_name),
-                "workspace name already exists"
+                job.name == new_name && token(&job.id, 32),
+                "invalid terminal renamed identity"
             );
-            let mut job = select(&root, &name)?;
-            job.name = new_name;
-            crate::profile::write_private(
-                &root.join(format!("{}.json", job.id)),
-                &serde_json::to_vec(&job)?,
-                true,
-            )?;
         }
         Command::Tmux { name, args } => {
-            ensure!(
-                args.first()
-                    .is_some_and(|arg| !arg.is_empty() && !arg.to_string_lossy().starts_with('-')),
-                "pass a tmux command without global flags; PortHub selects this workspace's socket"
-            );
-            let job = select(&root, &name)?;
-            ensure!(
-                workspace(&job)?.command().args(args).status()?.success(),
-                "tmux command failed"
-            );
+            let mut arguments = vec![
+                "workspace-tmux".into(),
+                "--directory".into(),
+                root.into_os_string(),
+                "--name".into(),
+                name.into(),
+                "--".into(),
+            ];
+            arguments.extend(args);
+            owner_frontend(arguments).await?;
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod saved_runtime_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    #[tokio::test]
+    async fn offline_probe_rejects_relative_changed_or_writable_code_before_execution() -> Result<()>
+    {
+        let root = tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()?;
+        let marker = root.path().join("executed");
+        let executable = root.path().join("runtime");
+        fs::write(
+            &executable,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )?;
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))?;
+        let mut job = Job {
+            id: "0".repeat(32),
+            name: "fixture".into(),
+            executable: executable.clone(),
+            executable_sha256: "0".repeat(64),
+            terminfo: root.path().join("terminfo"),
+            workspace: root.path().into(),
+            created_at: 1,
+        };
+        assert!(recorded_runtime_running(&job).await.is_err());
+        assert!(!marker.exists());
+        job.executable = "runtime".into();
+        assert!(recorded_runtime_running(&job).await.is_err());
+        job.executable = executable.clone();
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o777))?;
+        assert!(recorded_runtime_running(&job).await.is_err());
+        assert!(!marker.exists());
+        Ok(())
+    }
 }

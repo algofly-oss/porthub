@@ -28,8 +28,16 @@ enum SyncCommand {
     Status { id: String },
     /// Stop a directory watch job without removing transferred files.
     Stop { id: String },
-    #[command(hide = true)]
-    Run { id: String },
+}
+
+#[derive(Subcommand)]
+enum ComponentCommand {
+    /// Show local optional-tool versions (not sent to the server).
+    List,
+    /// Fetch the latest compatible version and print its standalone executable path.
+    Fetch { component: porthub_components::catalog::Component },
+    /// Refresh the catalog and update supported optional tools.
+    Update,
 }
 
 fn requires_system_privileges(args: &Args) -> bool {
@@ -231,6 +239,8 @@ enum Command {
     },
     /// Live PortHub agent traffic, health and process resource statistics.
     Stats(porthub_agent::stats::Options),
+    /// Inspect or update optional tools; normal commands prepare tools automatically.
+    Components { #[command(subcommand)] command: ComponentCommand },
     /// Start, reattach and manage persistent terminal workspaces.
     #[cfg(unix)]
     #[command(after_help = "Examples:\n  porthub terminal NAME                       Open or create a local workspace\n  porthub terminal ls                         List running workspaces\n  porthub terminal ls --all                   Include ended workspaces\n  porthub terminal attach NAME                Reattach without sharing\n  porthub terminal share NAME --detach        Share through browser and SSH\n  porthub terminal share NAME --access web --detach\n                                             Share through browser only\n  porthub terminal url NAME                   Show current browser URLs and SSH commands\n  porthub terminal join URL                   Join a shared terminal\n\nFlag reference (all flags, descriptions and defaults):\n  porthub terminal new --help\n  porthub terminal share --help\n  porthub terminal join --help\n  porthub terminal invite --help\n  porthub terminal ls --help\n\nLocal workspaces need no registration. Sharing uses an installed registration.\nInside a workspace:\n  Help: Ctrl+A, release both keys, then ? (Shift+/).\n  Detach: Ctrl+A, release both keys, then d. Tasks keep running.\n  Participants: Ctrl+A, release both keys, then Shift+P (owner only).\n  Scroll: mouse wheel or F7. F7 returns to the live shell.\n  Copy: drag to select; release copies and keeps your scroll position.\n        System clipboard requires support from your terminal emulator.\n\nNew workspaces use Bash when installed. The bottom bar counts active attachments.\nShared sizing follows the most recently active participant, as in tmux.\nPortHub uses its own tmux configuration; it does not load ~/.tmux.conf.")]
@@ -1211,6 +1221,7 @@ async fn main() -> Result<()> {
                     Some(&cli),
                 )
                 .await?;
+                porthub_agent::bootstrap::register_cli_path(cli.parent().context("CLI bin directory missing")?, false)?;
                 println!("PortHub private networking activated; CLI installed");
             } else {
                 println!("PortHub private credentials saved; private networking service is not activated");
@@ -1230,6 +1241,40 @@ async fn main() -> Result<()> {
         }
         Some(Command::Path { command }) => path_strategy(command),
         Some(Command::Stats(options)) => porthub_agent::stats::run(options,cancel).await,
+        Some(Command::Components { command }) => {
+            use porthub_components::catalog::Component;
+            let manager = porthub_agent::components::manager(None)?;
+            match command {
+                ComponentCommand::List => {
+                    for component in Component::ALL {
+                        match manager.installed(component).await {
+                            Ok(versions) if !versions.is_empty() => println!("{component:<9} {}  {}", versions[0].0.version, versions[0].1.display()),
+                            Ok(_) => println!("{component:<9} not downloaded"),
+                            Err(_) => println!("{component:<9} unavailable or disabled by policy"),
+                        }
+                    }
+                    Ok(())
+                }
+                ComponentCommand::Fetch { component } => {
+                    let catalog = manager.refresh(&cancel).await?;
+                    eprintln!("Preparing {component}...");
+                    let path = manager.ensure(&catalog, component, &cancel).await?;
+                    println!("{}", path.display()); Ok(())
+                }
+                ComponentCommand::Update => {
+                    let catalog = manager.refresh(&cancel).await?;
+                    let mut failed = Vec::new();
+                    for component in Component::ALL {
+                        if manager.selected(&catalog, component).is_err() { continue; }
+                        if !Component::OPTIONAL.contains(&component) && !manager.has_installation(component).await? { continue; }
+                        eprintln!("Preparing {component}...");
+                        if manager.ensure(&catalog, component, &cancel).await.is_err() { failed.push(component.to_string()); }
+                    }
+                    anyhow::ensure!(failed.is_empty(), "Some optional tools could not update: {}. Verified installed versions remain available.", failed.join(", "));
+                    println!("Compatible optional tools are ready"); Ok(())
+                }
+            }
+        }
         #[cfg(unix)]
         Some(Command::Terminal { command }) => match command {
             Some(command) => porthub_agent::terminal_cli::run(command).await,
@@ -1426,20 +1471,7 @@ async fn main() -> Result<()> {
             detach,
         }) => {
             if watch {
-                let options = porthub_transfer::sync::Options {
-                    path,
-                    url,
-                    connections,
-                    contents_only,
-                    force,
-                };
-                if detach {
-                    let id = porthub_transfer::sync::detach(options).await?;
-                    println!("Sync started in background: {id}\nView: porthub sync status {id}\nStop: porthub sync stop {id}");
-                    Ok(())
-                } else {
-                    porthub_transfer::sync::watch(options, cancel.clone()).await
-                }
+                porthub_agent::sync_cli::watch(porthub_components::protocol::sync::Options { path, url, connections, contents_only, force }, detach, cancel.clone()).await
             } else {
                 tokio::select! {
                     _ = cancel.cancelled() => Ok(()),
@@ -1452,7 +1484,7 @@ async fn main() -> Result<()> {
         }
         Some(Command::Sync { command }) => match command {
             SyncCommand::List => {
-                let jobs = porthub_transfer::sync::list().await?;
+                let jobs = porthub_agent::sync_cli::list(&cancel).await?;
                 if jobs.is_empty() {
                     println!("No active sync jobs");
                 } else {
@@ -1477,7 +1509,7 @@ async fn main() -> Result<()> {
                 Ok(())
             }
             SyncCommand::Status { id } => {
-                let job = porthub_transfer::sync::status(&id).await?;
+                let job = porthub_agent::sync_cli::status(id, &cancel).await?;
                 println!(
                     "Sync {}: {}\nSource: {}\nDestination: {}\nCompleted syncs: {}\n{}",
                     job.id,
@@ -1490,11 +1522,10 @@ async fn main() -> Result<()> {
                 Ok(())
             }
             SyncCommand::Stop { id } => {
-                porthub_transfer::sync::stop(&id).await?;
+                porthub_agent::sync_cli::stop(id.clone(), &cancel).await?;
                 println!("Stopped sync {id}");
                 Ok(())
             }
-            SyncCommand::Run { id } => porthub_transfer::sync::worker(id, cancel.clone()).await,
         },
         Some(Command::Tunnel { config }) => {
             porthub_tunnel::run_client_until(config, cancel.cancelled_owned()).await

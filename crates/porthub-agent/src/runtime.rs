@@ -476,6 +476,8 @@ pub async fn run_with_logs(
             ))
         });
     let mut monitor = crate::routes::Monitor::new(options.heartbeat, options.probe_timeout);
+    let mut _component_maintenance = None;
+    let mut components_started = false;
     let mut status_name = "starting";
     let mut next_heartbeat = tokio::time::Instant::now();
     let mut failure_delay = options.retry;
@@ -544,6 +546,11 @@ pub async fn run_with_logs(
                         failure_delay = options.retry;
                         status_name = "running";
                         state(&path, &session, status_name)?;
+                        if !components_started {
+                            components_started = true;
+                            _component_maintenance = crate::components::background(&profile.server, &cancel).map(Some)
+                                .unwrap_or_else(|_| { tracing::warn!("optional component maintenance unavailable; forwarding remains active"); None });
+                        }
                         #[cfg(any(target_os = "linux", target_os = "macos"))]
                         if let Some(updater) = &mut updater {
                             updater.request(session.pending_update.clone());

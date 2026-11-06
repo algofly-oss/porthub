@@ -87,6 +87,7 @@ async fn admin_deletion_cascades_owned_resources_revokes_credentials_and_preserv
         case.app.collection("private_install_tickets").insert_one(doc!{"_id":"peer-ticket","peer_id":&peer,"created_by":target}).await?;
         case.app.collection("private_signals").insert_many([doc!{"_id":"out","from":&peer,"to":&keep_peer},doc!{"_id":"in","from":&keep_peer,"to":&invited_peer},doc!{"_id":"keep","from":&keep_peer,"to":&keep_peer}]).await?;
         case.app.collection("machine_status_events").insert_one(doc!{"_id":"history","machine_id":machine}).await?;
+        case.app.collection("firewall_traffic").insert_many([doc!{"_id":"owned-firewall","owner_id":target},doc!{"_id":"keep-firewall","owner_id":other}]).await?;
         case.app.collection("terminal_traffic").insert_many([doc!{"_id":"owned-terminal","owner_id":target,"machine_id":machine},doc!{"_id":"keep-terminal","owner_id":other,"machine_id":foreign_machine}]).await?;
         let mut metrics=mongodb::bson::Document::new();metrics.insert(route.to_hex(),doc!{"requests":10});metrics.insert("keep",doc!{"requests":2});
         case.app.collection("proxy_activity").insert_one(doc!{"_id":"activity","revision":0,"metrics":metrics}).await?;
@@ -103,7 +104,7 @@ async fn admin_deletion_cascades_owned_resources_revokes_credentials_and_preserv
         for (collection,filter) in [
             ("users",doc!{"_id":target}),("machines",doc!{"_id":machine}),("connections",doc!{"machine_id":machine}),
             ("private_peers",doc!{"workspace_id":target}),("machine_groups",doc!{"user_id":target}),
-            ("traffic_routes",doc!{"user_id":target}),("terminal_traffic",doc!{"owner_id":target}),("access_rulebooks",doc!{"user_id":target}),
+            ("traffic_routes",doc!{"user_id":target}),("terminal_traffic",doc!{"owner_id":target}),("firewall_traffic",doc!{"owner_id":target}),("access_rulebooks",doc!{"user_id":target}),
             ("user_sessions",doc!{"user_id":target.to_hex()}),("private_networks",doc!{"_id":target.to_hex()}),
             ("workspace_members",doc!{"$or":[{"user_id":target},{"workspace_id":target}]}),
             ("workspace_invites",doc!{"$or":[{"created_by":target},{"workspace_id":target}]}),
@@ -111,6 +112,7 @@ async fn admin_deletion_cascades_owned_resources_revokes_credentials_and_preserv
         ] {ensure!(case.app.collection(collection).count_documents(filter).await?==0,"remaining rows in {collection}");}
         ensure!(case.app.collection("machines").count_documents(doc!{"_id":foreign_machine}).await?==1);
         ensure!(case.app.collection("terminal_traffic").count_documents(doc!{"_id":"keep-terminal"}).await?==1);
+        ensure!(case.app.collection("firewall_traffic").count_documents(doc!{"_id":"keep-firewall"}).await?==1);
         ensure!(case.app.collection("connections").count_documents(doc!{"machine_id":foreign_machine}).await?==1);
         ensure!(case.app.collection("private_peers").count_documents(doc!{"_id":&keep_peer}).await?==1);
         ensure!(case.app.collection("private_signals").count_documents(doc!{}).await?==1);

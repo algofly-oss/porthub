@@ -2,6 +2,10 @@ name: Native agent platforms
 on:
   workflow_call:
     inputs:
+      previous_components:
+        description: Reuse verified prior component inputs staged by this workflow run
+        type: boolean
+        default: false
       reuse_run_id:
         description: Reuse successful platforms from a completed run with identical production inputs
         type: string
@@ -73,6 +77,8 @@ jobs:
         with:
           ref: ${{ inputs.revision || github.sha }}
           fetch-depth: 0
+      - name: Verify pinned source download recovery
+        run: python3 scripts/test_build_terminal_download.py
       - name: Validate publishing scope
         if: inputs.publish_release == true
         env:
@@ -134,15 +140,24 @@ jobs:
           overwrite: true
           if-no-files-found: error
           retention-days: 3
-      - name: Collect client assets without server artifact collisions
-        run: python3 deploy/native/collect_client_bundle.py --source release-platforms --destination release-input --version "$(sh scripts/release-version.sh)"
-      - name: Validate all platforms against the workspace release
-        shell: bash
-        run: python3 deploy/native/stage_client_bundle.py --source release-input --version "$(sh scripts/release-version.sh)"
+      - name: Verify compact release assembly
+        run: python3 scripts/test_assemble_client_release.py
+      - name: Install complete-bundle verifier toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: compact-publication-verifier
+      - name: Build trusted complete-bundle verifier
+        env:
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: cargo build --locked -p porthub-api --bin porthub-api
+      - name: Assemble and verify all ten platform artifacts
+        run: python3 scripts/assemble-client-release.py --source release-platforms --destination release-assets --version "$(sh scripts/release-version.sh)" --artifact-verifier "$GITHUB_WORKSPACE/target/debug/porthub-api"
       - uses: actions/upload-artifact@v4
         with:
           name: porthub-release-bundle
-          path: deploy/native/client-bin/
+          path: release-assets/
           if-no-files-found: error
           retention-days: 3
   publish-release:
@@ -167,11 +182,22 @@ jobs:
           path: release-assets
       - name: Verify publication and retry invariants
         run: python3 scripts/test_publish_release.py
+      - name: Install trusted verifier toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: compact-publication-verifier
+      - name: Build trusted compact artifact verifier
+        env:
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: cargo build --locked -p porthub-api --bin porthub-api
       - name: Publish all platform assets
         id: publication
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/publish-release.py --repository "$GITHUB_REPOSITORY" --assets release-assets --version "$(sh scripts/release-version.sh)" --revision "$PORTHUB_SOURCE_REVISION" --execute
+          PORTHUB_COMPACT_GATEWAY: ${{ vars.PORTHUB_RELEASE_GATEWAY || 'https://porthub.algofly.in' }}
+        run: python3 scripts/publish-release.py --repository "$GITHUB_REPOSITORY" --assets release-assets --version "$(sh scripts/release-version.sh)" --revision "$PORTHUB_SOURCE_REVISION" --artifact-verifier "$GITHUB_WORKSPACE/target/debug/porthub-api" --compact-gateway "$PORTHUB_COMPACT_GATEWAY" --execute
       - name: Retain latest release plus explicitly protected tags
         if: steps.publication.outputs.status != 'superseded'
         env:
@@ -199,6 +225,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.revision || github.sha }}
+      - name: Restore verified prior component builds
+        if: inputs.verify_only != true && inputs.previous_components == true
+        uses: actions/download-artifact@v4
+        with:
+          name: component-reuse-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/porthub-component-reuse
+      - name: Select verified prior component input directory
+        if: inputs.verify_only != true && inputs.previous_components == true
+        shell: bash
+        run: echo "PORTHUB_PREVIOUS_COMPONENT_BUILDS=$RUNNER_TEMP/porthub-component-reuse" >> "$GITHUB_ENV"
       - name: Read numeric release version
         shell: bash
         run: echo "PORTHUB_VERSION=$(sh scripts/release-version.sh)" >> "$GITHUB_ENV"
@@ -264,12 +300,37 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/test-windows-bootstrap-command.ps1
+      - name: Build independent sync fixture for core command checks
+        shell: bash
+        run: |
+          cargo build --locked -p porthub-sync --target ${{ matrix.target }}
+          echo "PORTHUB_TEST_SYNC_EXECUTABLE=$GITHUB_WORKSPACE/target/${{ matrix.target }}/debug/porthub-sync${{ matrix.extension }}" >> "$GITHUB_ENV"
+      - name: Build independent dashboard and terminal fixtures
+        shell: bash
+        run: |
+          cargo build --locked -p porthub-stats --target ${{ matrix.target }}
+          cargo build --locked -p porthub-terminal-cli --target ${{ matrix.target }}
+          component_cache="$RUNNER_TEMP/porthub-native-components-${{ matrix.target }}"
+          python scripts/seed-component-fixture.py --cache "$component_cache" --target '${{ matrix.target }}' --core "$(sh scripts/release-version.sh)" --revision "$(git rev-parse HEAD)" --input stats "$GITHUB_WORKSPACE/target/${{ matrix.target }}/debug/porthub-stats${{ matrix.extension }}" --input terminal "$GITHUB_WORKSPACE/target/${{ matrix.target }}/debug/porthub-terminal${{ matrix.extension }}" --input sync "$PORTHUB_TEST_SYNC_EXECUTABLE"
+          echo "PORTHUB_COMPONENT_CACHE=$component_cache" >> "$GITHUB_ENV"
+          echo "PORTHUB_COMPONENT_SHARED_CACHE=off" >> "$GITHUB_ENV"
+          echo "PORTHUB_COMPONENT_SOURCE=github" >> "$GITHUB_ENV"
       - name: Compile focused Windows watch checks
         if: runner.os == 'Windows'
         shell: bash
         run: |
           cargo test --locked -p porthub-transfer --no-run --target ${{ matrix.target }}
           cargo test --locked -p porthub-agent --test upload --no-run --target ${{ matrix.target }}
+      - name: Verify native Windows CLI startup
+        if: runner.os == 'Windows'
+        shell: bash
+        run: python scripts/run-with-timeout.py 10 "target/${{ matrix.target }}/debug/porthub.exe" --version
+      - name: Verify protected Windows enrollment and PATH registration
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --lib windows_path_tests --target ${{ matrix.target }}
+          python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --test windows_bootstrap --target ${{ matrix.target }} -- --include-ignored
       - name: Verify Windows watch jobs with a bounded runtime
         if: runner.os == 'Windows'
         shell: bash
@@ -320,31 +381,68 @@ jobs:
         run: |
           cargo test --locked -p porthub-agent --test terminal_local --test terminal_share --target ${{ matrix.target }} -- --include-ignored
           python3 scripts/test-stats-terminal.py "$PORTHUB_TEST_AGENT_EXECUTABLE"
+          PORTHUB_COMPONENT_TRANSPORT=cli python3 scripts/test-stats-terminal.py "$PORTHUB_TEST_AGENT_EXECUTABLE"
           python3 scripts/test-terminal-participants.py "$PORTHUB_TEST_AGENT_EXECUTABLE"
-      - name: Build self-contained agent
+          python3 scripts/test-terminal-workspace-helper.py "$PORTHUB_TEST_AGENT_EXECUTABLE"
+      - name: Verify dashboard CLI fallback under process-local bind denial
+        if: runner.os == 'Linux'
+        shell: bash
+        run: python3 scripts/test-stats-cli-fallback.py "$GITHUB_WORKSPACE/target/${{ matrix.target }}/debug/porthub"
+      - name: Build independently packaged native core and optional tools
         if: inputs.verify_only != true && runner.os != 'Linux'
         shell: bash
-        run: cargo build --locked --release -p porthub-agent --target ${{ matrix.target }}
-      - name: Build static Linux agent bundle
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: |
+          previous=()
+          if [ -n "${PORTHUB_PREVIOUS_COMPONENT_BUILDS:-}" ]; then previous=(--previous "$PORTHUB_PREVIOUS_COMPONENT_BUILDS"); fi
+          python scripts/build-component-platform.py --target '${{ matrix.target }}' --source-revision "$PORTHUB_SOURCE_REVISION" --output component-builds "${previous[@]}"
+      - name: Restore shipping Linux terminal runtime
+        id: shipping_terminal_cache
+        if: inputs.verify_only != true && runner.os == 'Linux'
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/terminal-helper
+          key: terminal-shipping-v1-${{ matrix.target }}-${{ hashFiles('vendor/terminal/sources.json', 'scripts/build-terminal-helper.py') }}
+      - name: Build indexed static Linux core and optional tools
         if: inputs.verify_only != true && runner.os == 'Linux'
         shell: bash
+        env:
+          CARGO_INCREMENTAL: "0"
         run: |
-          # Keep Cargo artifacts in the restored host cache instead of a fresh
-          # Docker cache mount that disappears with each hosted runner.
-          sh scripts/build-agent-linux.sh "$(echo '${{ matrix.target }}' | sed 's/-gnu$/-musl/')" '${{ matrix.artifact }}'
-      - name: Prepare versioned artifact metadata
-        if: inputs.verify_only != true && runner.os != 'Linux'
+          shipping_target="$(echo '${{ matrix.target }}' | sed 's/-gnu$/-musl/')"
+          terminal_bundle="$(python3 scripts/build-terminal-helper.py --target "$shipping_target")"
+          export PORTHUB_TERMINAL_BUNDLE="$terminal_bundle"
+          echo "PORTHUB_TEST_TERMINAL_BUNDLE=$terminal_bundle" >> "$GITHUB_ENV"
+          echo "PORTHUB_TEST_TERMINAL_TARGET=$shipping_target" >> "$GITHUB_ENV"
+          target_key="$(echo "$shipping_target" | tr '[:lower:]-' '[:upper:]_')"
+          compiler_key="$(echo "$shipping_target" | tr '-' '_')"
+          export "CARGO_TARGET_${target_key}_LINKER=musl-gcc"
+          export "CC_${compiler_key}=musl-gcc"
+          previous=()
+          if [ -n "${PORTHUB_PREVIOUS_COMPONENT_BUILDS:-}" ]; then previous=(--previous "$PORTHUB_PREVIOUS_COMPONENT_BUILDS"); fi
+          python3 scripts/build-component-platform.py --target "$shipping_target" --source-revision "$PORTHUB_SOURCE_REVISION" --output component-builds "${previous[@]}"
+          python3 scripts/verify-static-components.py --builds component-builds
+      - name: Save shipping Linux terminal runtime
+        if: inputs.verify_only != true && runner.os == 'Linux' && steps.shipping_terminal_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/terminal-helper
+          key: ${{ steps.shipping_terminal_cache.outputs.cache-primary-key }}
+      - name: Prepare checks against exact packaged native components
+        if: inputs.verify_only != true
         shell: bash
-        run: |
-          python - <<'PY'
-          import hashlib, os, pathlib, shutil
-          source = pathlib.Path('target/${{ matrix.target }}/release/porthub${{ matrix.extension }}')
-          output = pathlib.Path('dist/porthub-${{ matrix.artifact }}${{ matrix.extension }}')
-          output.parent.mkdir(exist_ok=True)
-          shutil.copy2(source, output)
-          output.with_name(output.name+'.version').write_text(os.environ['PORTHUB_VERSION']+'\n')
-          output.with_name(output.name+'.sha256').write_text(hashlib.sha256(output.read_bytes()).hexdigest()+'  '+output.name+'\n')
-          PY
+        run: python scripts/prepare-packaged-component-checks.py --builds component-builds --core-output 'dist/porthub-${{ matrix.artifact }}${{ matrix.extension }}' --cache "$RUNNER_TEMP/porthub-packaged-components-${{ matrix.target }}"
+      - name: Verify packaged native core startup
+        if: inputs.verify_only != true
+        shell: bash
+        run: python scripts/run-with-timeout.py 10 'dist/porthub-${{ matrix.artifact }}${{ matrix.extension }}' --version
+      - name: Install packaged Windows core through copied commands and verify SCM lifecycle
+        # The installer selects OS architecture. The x86 executable is tested
+        # separately on x64, but is not what an x64 installer would download.
+        if: inputs.verify_only != true && runner.os == 'Windows' && matrix.artifact != 'windows_x86'
+        shell: bash
+        run: python scripts/run-with-timeout.py 600 python scripts/test-windows-install-lifecycle.py 'dist/porthub-${{ matrix.artifact }}${{ matrix.extension }}'
       - name: Test packaged HTTP server lifecycle
         if: inputs.verify_only != true
         shell: bash
@@ -359,7 +457,9 @@ jobs:
         run: |
           cargo test --locked -p porthub-agent --test terminal_local --test terminal_share --target ${{ matrix.target }} -- --include-ignored
           python3 scripts/test-stats-terminal.py "$PORTHUB_TEST_AGENT_EXECUTABLE"
+          PORTHUB_COMPONENT_TRANSPORT=cli python3 scripts/test-stats-terminal.py "$PORTHUB_TEST_AGENT_EXECUTABLE"
           python3 scripts/test-terminal-participants.py "$PORTHUB_TEST_AGENT_EXECUTABLE"
+          python3 scripts/test-terminal-workspace-helper.py "$PORTHUB_TEST_AGENT_EXECUTABLE"
       - name: Test native macOS service lifecycle
         if: runner.os == 'macOS'
         shell: bash
@@ -370,7 +470,7 @@ jobs:
         if: inputs.verify_only != true
         with:
           name: porthub-${{ matrix.artifact }}
-          path: dist/
+          path: component-builds/
           if-no-files-found: error
           retention-days: 3
   linux-32:
@@ -389,6 +489,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.revision || github.sha }}
+      - name: Restore verified prior component builds
+        if: inputs.verify_only != true && inputs.previous_components == true
+        uses: actions/download-artifact@v4
+        with:
+          name: component-reuse-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/porthub-component-reuse
+      - name: Select verified prior component input directory
+        if: inputs.verify_only != true && inputs.previous_components == true
+        shell: bash
+        run: echo "PORTHUB_PREVIOUS_COMPONENT_BUILDS=$RUNNER_TEMP/porthub-component-reuse" >> "$GITHUB_ENV"
       - name: Read numeric release version
         shell: bash
         run: echo "PORTHUB_VERSION=$(sh scripts/release-version.sh)" >> "$GITHUB_ENV"
@@ -400,12 +510,17 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .cache/terminal-helper
-          key: terminal-v1-linux32-${{ matrix.target }}-${{ hashFiles('vendor/terminal/sources.json', 'scripts/build-terminal-helper.py') }}
+          key: terminal-v2-linux32-${{ matrix.target }}-${{ inputs.verify_only == true && 'gnu' || 'musl' }}-${{ hashFiles('vendor/terminal/sources.json', 'scripts/build-terminal-helper.py') }}
       - name: Build or reuse cross-compiled terminal runtime
         shell: bash
         run: |
-          terminal_bundle="$(python3 scripts/build-terminal-helper.py --target '${{ matrix.target }}' --cc '${{ matrix.compiler }}' --ar '${{ matrix.ar }}')"
+          terminal_target='${{ matrix.target }}'
+          if [ '${{ inputs.verify_only }}' != 'true' ]; then
+            terminal_target="$(echo "$terminal_target" | sed 's/-gnu/-musl/')"
+          fi
+          terminal_bundle="$(python3 scripts/build-terminal-helper.py --target "$terminal_target" --cc '${{ matrix.compiler }}' --ar '${{ matrix.ar }}')"
           echo "PORTHUB_TERMINAL_BUNDLE=$terminal_bundle" >> "$GITHUB_ENV"
+          echo "PORTHUB_SHIPPING_TARGET=$terminal_target" >> "$GITHUB_ENV"
       - name: Cache completed cross-compiled terminal runtime before Rust checks
         if: steps.terminal_helper_cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -442,37 +557,39 @@ jobs:
           export "CC_${cc_target_key}=${{ matrix.compiler }}"
           export "AR_${cc_target_key}=${{ matrix.ar }}"
           cargo check --locked -p porthub-agent --all-targets --target ${{ matrix.target }}
-      - name: Build agent for 32-bit Linux
+      - name: Build indexed static components for 32-bit Linux
         if: inputs.verify_only != true
         shell: bash
+        env:
+          CARGO_INCREMENTAL: "0"
         run: |
-          target_key=$(echo '${{ matrix.target }}' | tr '[:lower:]-' '[:upper:]_')
-          export "CARGO_TARGET_${target_key}_LINKER=${{ matrix.compiler }}"
-          cc_target_key=$(echo '${{ matrix.target }}' | tr '-' '_')
-          export "CC_${cc_target_key}=${{ matrix.compiler }}"
-          export "AR_${cc_target_key}=${{ matrix.ar }}"
-          cargo build --locked --release -p porthub-agent --target ${{ matrix.target }}
-          mkdir -p dist
-          cp target/${{ matrix.target }}/release/porthub dist/porthub-${{ matrix.artifact }}
-          printf '%s\n' "$PORTHUB_VERSION" > dist/porthub-${{ matrix.artifact }}.version
-          cd dist && sha256sum porthub-${{ matrix.artifact }} > porthub-${{ matrix.artifact }}.sha256
-      - name: Install native 32-bit x86 runtime libraries
-        if: inputs.verify_only != true && matrix.artifact == 'x86'
-        run: sudo apt-get install -y --no-install-recommends libc6-i386 lib32gcc-s1
+          rustup target add --toolchain 1.99.1 "$PORTHUB_SHIPPING_TARGET"
+          shipping_cc="$(dirname "$PORTHUB_TERMINAL_BUNDLE")/musl-runtime/bin/musl-gcc"
+          test -x "$shipping_cc"
+          target_key="$(echo "$PORTHUB_SHIPPING_TARGET" | tr '[:lower:]-' '[:upper:]_')"
+          compiler_key="$(echo "$PORTHUB_SHIPPING_TARGET" | tr '-' '_')"
+          export "CARGO_TARGET_${target_key}_LINKER=$shipping_cc"
+          export "CC_${compiler_key}=$shipping_cc"
+          export "AR_${compiler_key}=${{ matrix.ar }}"
+          previous=()
+          if [ -n "${PORTHUB_PREVIOUS_COMPONENT_BUILDS:-}" ]; then previous=(--previous "$PORTHUB_PREVIOUS_COMPONENT_BUILDS"); fi
+          python3 scripts/build-component-platform.py --target "$PORTHUB_SHIPPING_TARGET" --source-revision "$PORTHUB_SOURCE_REVISION" --output component-builds "${previous[@]}"
+          python3 scripts/verify-static-components.py --builds component-builds
       - name: Enable ARM user-mode execution on the isolated CI runner
         if: inputs.verify_only != true && matrix.artifact != 'x86'
         uses: docker/setup-qemu-action@v4
         with:
           platforms: arm
-      - name: Exercise packaged 32-bit CLI and embedded terminal runtime
+      - name: Prepare checks against packaged cross-compiled components
         if: inputs.verify_only != true
-        env:
-          QEMU_LD_PREFIX: ${{ matrix.artifact != 'x86' && '/usr/arm-linux-gnueabihf' || '' }}
+        run: python3 scripts/prepare-packaged-component-checks.py --builds component-builds --core-output 'dist/porthub-${{ matrix.artifact }}' --cache "$RUNNER_TEMP/porthub-packaged-components-${{ matrix.target }}"
+      - name: Exercise packaged 32-bit CLI and optional terminal runtime
+        if: inputs.verify_only != true
         run: python3 scripts/test-packaged-terminal-smoke.py "dist/porthub-${{ matrix.artifact }}"
       - uses: actions/upload-artifact@v4
         if: inputs.verify_only != true
         with:
           name: porthub-${{ matrix.artifact }}
-          path: dist/
+          path: component-builds/
           if-no-files-found: error
           retention-days: 3

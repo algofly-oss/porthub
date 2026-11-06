@@ -195,3 +195,13 @@ specific failure was reproduced.
 bytes and ETA. Terminal output updates in place; redirected output is throttled
 and has no terminal control characters. Resumed data does not inflate throughput,
 and unknown file lengths never display a fabricated percentage or ETA.
+
+On macOS and Windows, automatic mode conservatively retains the kernel-selected
+source for each destination. The read-only UDP route lookup runs once per
+address, sends no datagram, and records only successful results. A missing IPv6
+route is skipped independently and cannot discard a working IPv4 candidate (or
+vice versa). Interface inventory and administrator source/interface preferences
+still constrain the candidates. Linux continues using its source-aware FIB
+queries and route priorities. Tests cover mixed-family lookup failure, no probe
+packet emission, sticky failover, and independent address backoff. Native checks
+on the target operating systems remain required before rollout.

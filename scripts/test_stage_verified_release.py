@@ -6,6 +6,8 @@ import tempfile
 import stat
 import unittest
 import warnings
+import subprocess
+from unittest.mock import patch
 import zipfile
 
 spec = importlib.util.spec_from_file_location('stage', Path(__file__).with_name('stage-verified-release.py'))
@@ -114,6 +116,49 @@ class Bundle(unittest.TestCase):
         archive,proof=self.bundle(); destination=self.root/'assets';destination.mkdir();(destination/'keep').write_text('unchanged')
         with self.assertRaises(ValueError): stage.extract(archive,proof,destination,'1.9.0')
         self.assertEqual((destination/'keep').read_text(),'unchanged')
+
+
+class CompactBundle(Bundle):
+    def setUp(self):
+        super().setUp()
+        spec = importlib.util.spec_from_file_location('packaging_fixture', Path(__file__).with_name('test_package_components.py'))
+        fixture = importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture)
+        case = fixture.Packaging(); case.setUp(); self.addCleanup(case.doCleanups)
+        output = case.root/'release'
+        stage.component_packager.package(case.complete(), output, '1.11.0')
+        self.files = {path.name:path.read_bytes() for path in output.iterdir()}
+        self.verifier = self.root/'trusted-verifier'; self.verifier.write_text('fixture')
+        self.verified = subprocess.CompletedProcess([], 0, '{"version":"1.11.0","releases":['+','.join(['{}']*10)+']}', '')
+
+    # Compact-specific checks; inherited legacy expectations use a different version.
+    def test_exact_bundle_is_verified_without_executing_foreign_binaries(self):
+        archive, proof = self.bundle()
+        with patch.object(stage.publisher.subprocess, 'run', return_value=self.verified) as verifier:
+            result = stage.extract(archive, proof, self.root/'assets', '1.11.0', self.verifier)
+        self.assertEqual(set(result), set(self.files)); self.assertEqual(len(result), 21)
+        self.assertEqual(verifier.call_args.args[0][0], str(self.verifier))
+        self.assertEqual(verifier.call_args.args[0][1], '--check-artifacts')
+        for name, payload in self.files.items(): self.assertEqual((self.root/'assets'/name).read_bytes(), payload)
+
+    def test_compact_requires_verifier_before_creating_destination(self):
+        archive, proof = self.bundle()
+        with self.assertRaises(ValueError): stage.extract(archive, proof, self.root/'assets', '1.11.0')
+        self.assertFalse((self.root/'assets').exists())
+
+    def test_corrupt_platform_hash_and_mixed_versions_are_rejected(self):
+        archive, proof = self.bundle()
+        with patch.object(stage.publisher.subprocess, 'run', return_value=subprocess.CompletedProcess([],1,'','')):
+            with self.assertRaises(ValueError): stage.extract(archive, proof, self.root/'bad', '1.11.0', self.verifier)
+
+    def test_symlinks_and_oversized_metadata_are_rejected_before_extraction(self):
+        entries = list(self.files.items())
+        link = zipfile.ZipInfo(entries[0][0]); link.create_system=3; link.external_attr=(stat.S_IFLNK|0o777)<<16
+        archive, proof = self.bundle([(link,b'target')]+entries[1:])
+        with self.assertRaises(ValueError): stage.extract(archive,proof,self.root/'linked','1.11.0',self.verifier)
+        files = dict(self.files); files['porthub-components.json'] = b'x'*(512*1024+1)
+        archive, proof = self.bundle(files.items())
+        with self.assertRaises(ValueError): stage.extract(archive,proof,self.root/'large','1.11.0',self.verifier)
+        self.assertFalse((self.root/'linked').exists()); self.assertFalse((self.root/'large').exists())
 
 
 if __name__ == '__main__':

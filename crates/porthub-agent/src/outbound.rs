@@ -1,6 +1,6 @@
 //! Socket-local path selection. Discovery never modifies host networking.
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
@@ -45,13 +45,29 @@ impl Settings {
         })
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Candidate {
     pub source: IpAddr,
     pub interface: String,
     pub destination: SocketAddr,
     pub gateway: Option<IpAddr>,
     pub metric: Option<u32>,
+}
+/// A failed address family must not discard usable routes from another one.
+#[cfg(any(not(target_os = "linux"), test))]
+fn preferred_sources(
+    destinations: &[SocketAddr],
+    mut probe: impl FnMut(SocketAddr) -> std::io::Result<IpAddr>,
+) -> HashMap<SocketAddr, IpAddr> {
+    destinations.iter().filter_map(|destination| {
+        probe(*destination).ok().map(|source| (*destination, source))
+    }).collect()
+}
+#[cfg(any(not(target_os = "linux"), test))]
+fn kernel_source(destination: SocketAddr) -> std::io::Result<IpAddr> {
+    let socket = std::net::UdpSocket::bind(if destination.is_ipv4() {"0.0.0.0:0"} else {"[::]:0"})?;
+    socket.connect(destination)?; // Kernel route lookup only; no datagram is sent.
+    Ok(socket.local_addr()?.ip())
 }
 /// Linux uses source-aware FIB queries, not a physical-interface preference.
 /// Alternatives must use the same kernel-selected egress as the unbound socket;
@@ -81,6 +97,11 @@ pub async fn discover(settings: &Settings, destinations: &[SocketAddr]) -> Resul
         targets.extend(a);
         targets.extend(b);
     }
+    #[cfg(not(target_os = "linux"))]
+    let preferred = if settings.source.is_none() && settings.interface.is_none() {
+        let destinations: Vec<_> = targets.iter().map(|address| **address).collect();
+        preferred_sources(&destinations, kernel_source)
+    } else { HashMap::new() };
     for destination in targets {
         #[cfg(target_os = "linux")]
         let route = match netlink.lookup_route(destination.ip()).await {
@@ -140,16 +161,7 @@ pub async fn discover(settings: &Settings, destinations: &[SocketAddr]) -> Resul
             // can still pin an explicitly selected local address administratively.
             #[cfg(not(target_os = "linux"))]
             if settings.source.is_none() && settings.interface.is_none() {
-                let bind = if destination.is_ipv4() {
-                    "0.0.0.0:0"
-                } else {
-                    "[::]:0"
-                };
-                let socket = std::net::UdpSocket::bind(bind)?;
-                socket.connect(destination)?;
-                if socket.local_addr()?.ip() != source {
-                    continue;
-                }
+                if preferred.get(destination) != Some(&source) { continue; }
             }
             result.push(Candidate {
                 source,
@@ -250,6 +262,27 @@ impl Selection {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unavailable_ipv6_route_does_not_discard_a_working_ipv4_source() {
+        let v6: std::net::SocketAddr = "[2001:db8::1]:443".parse().unwrap();
+        let v4: std::net::SocketAddr = "192.0.2.1:443".parse().unwrap();
+        let source: std::net::IpAddr = "192.0.2.10".parse().unwrap();
+        let routes = super::preferred_sources(&[v6,v4], |destination| {
+            if destination.is_ipv6() { Err(std::io::Error::from(std::io::ErrorKind::NetworkUnreachable)) }
+            else { Ok(source) }
+        });
+        assert_eq!(routes.get(&v4), Some(&source));
+        assert!(!routes.contains_key(&v6));
+    }
+    #[test]
+    fn source_discovery_uses_kernel_routing_without_sending_a_probe_packet() {
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver.set_read_timeout(Some(std::time::Duration::from_millis(30))).unwrap();
+        let destination = receiver.local_addr().unwrap();
+        assert_eq!(super::kernel_source(destination).unwrap(), destination.ip());
+        assert!(matches!(receiver.recv(&mut [0u8;1]).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut));
+    }
     use super::*;
     fn path(source: &str, destination: &str) -> Candidate {
         Candidate {
@@ -437,5 +470,60 @@ mod bounded_family_tests {
         assert!(ordered.contains(&ipv6));
         selector.success(ipv6.clone());
         assert_eq!(selector.order(&paths, Instant::now())[0], ipv6);
+    }
+}
+
+
+/// Resolve the socket authority before selecting a source address. A proxy's
+/// routing policy can differ from the origin's; never select against the latter
+/// and then silently send the socket to the former. The matcher must represent
+/// the same proxy configuration as the HTTP client. No credentials are returned.
+pub fn http_connection_target(
+    url: &url::Url,
+    proxy: &hyper_util::client::proxy::matcher::Matcher,
+) -> Result<(String, u16)> {
+    anyhow::ensure!(matches!(url.scheme(), "http" | "https"), "unsupported outbound HTTP scheme");
+    let uri = url.as_str().parse().context("invalid outbound HTTP authority")?;
+    if let Some(intercept) = proxy.intercept(&uri) {
+        let endpoint = intercept.uri();
+        let host = endpoint.host().context("proxy has no socket authority")?;
+        let port = endpoint.port_u16().or_else(|| match endpoint.scheme_str() {
+            Some("http") => Some(80), Some("https") => Some(443), _ => None,
+        }).context("unsupported proxy socket authority")?;
+        return Ok((host.trim_matches(['[', ']']).to_owned(), port));
+    }
+    Ok((url.host_str().context("HTTP URL has no socket authority")?.trim_matches(['[', ']']).to_owned(),
+        url.port_or_known_default().context("HTTP URL has no socket port")?))
+}
+
+#[cfg(test)]
+mod http_target_tests {
+    use super::*;
+    use hyper_util::client::proxy::matcher::Matcher;
+    #[test]
+    fn proxy_socket_authority_is_selected_without_returning_credentials() -> Result<()> {
+        let rules = Matcher::builder().https("http://user:password@proxy.example:8080").build();
+        assert_eq!(http_connection_target(&"https://gateway.example/path".parse()?, &rules)?,
+            ("proxy.example".into(), 8080));
+        Ok(())
+    }
+    #[test]
+    fn no_proxy_and_direct_ipv6_keep_origin_authority() -> Result<()> {
+        let rules = Matcher::builder().https("http://proxy.example:8080").no("gateway.example").build();
+        assert_eq!(http_connection_target(&"https://gateway.example:8443/path".parse()?, &rules)?,
+            ("gateway.example".into(), 8443));
+        let direct = Matcher::builder().build();
+        assert_eq!(http_connection_target(&"https://[2001:db8::1]/path".parse()?, &direct)?,
+            ("2001:db8::1".into(), 443));
+        Ok(())
+    }
+    #[test]
+    fn redirect_hosts_require_a_fresh_proxy_decision() -> Result<()> {
+        let rules = Matcher::builder().https("https://proxy.example").no("github.com").build();
+        assert_eq!(http_connection_target(&"https://github.com/release".parse()?, &rules)?,
+            ("github.com".into(), 443));
+        assert_eq!(http_connection_target(&"https://release-assets.githubusercontent.com/file".parse()?, &rules)?,
+            ("proxy.example".into(), 443));
+        Ok(())
     }
 }

@@ -1,11 +1,12 @@
 //! User-owned application proxy jobs. No administrative access, public port,
 //! registration credential, or additional management listener is required.
 use anyhow::{ensure, Context, Result};
+use crate::tor_component::TorPool;
 use clap::Subcommand;
 use fs2::FileExt;
 use porthub_egress::{
     proxy::{Credentials, Proxy},
-    tor::TorPool,
+
 };
 use serde::{Deserialize, Serialize};
 use std::{

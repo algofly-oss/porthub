@@ -3,6 +3,8 @@ pub mod adopt;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod autoupdate;
 pub mod bootstrap;
+pub mod components;
+pub mod sync_cli;
 pub mod control;
 pub mod outbound;
 pub mod connectivity_diagnostics;
@@ -48,10 +50,8 @@ mod terminal_policy;
 mod terminal_connectivity;
 mod terminal_telemetry;
 mod terminal_upload;
-#[cfg(feature = "terminal-direct")]
+#[cfg(all(unix,feature = "terminal-direct"))]
 pub mod terminal_guest;
-#[cfg(unix)]
-pub mod terminal_runtime;
 #[cfg(unix)]
 pub mod terminal_cli;
 #[cfg(feature="local-tor")]
@@ -67,3 +67,6 @@ mod detached_windows;
 pub mod proxy_cli;
 
 mod terminal_ui;
+
+#[cfg(feature = "local-tor")]
+pub mod tor_component;

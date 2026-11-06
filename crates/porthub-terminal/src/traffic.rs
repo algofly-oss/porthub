@@ -1,6 +1,7 @@
 //! Content-free host measurements. PTY payload and direct UDP observations are
 //! separate scopes; adding them together would double-count application data.
 use serde::{Deserialize, Serialize};
+#[cfg(any(test, feature = "hosting", feature = "direct"))]
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -17,6 +18,7 @@ pub struct Snapshot {
     /// RTC socket bytes consumed, including protocol overhead and invalid input.
     pub direct_udp_received_bytes: u64,
 }
+#[cfg(any(test, feature = "hosting", feature = "direct"))]
 #[derive(Default)]
 struct Storage {
     input: AtomicU64,
@@ -24,11 +26,13 @@ struct Storage {
     sent: AtomicU64,
     received: AtomicU64,
 }
+#[cfg(any(test, feature = "hosting", feature = "direct"))]
 #[derive(Clone, Default)]
 pub struct Counters {
     own: Arc<Storage>,
     parent: Option<Arc<Storage>>,
 }
+#[cfg(any(test, feature = "hosting", feature = "direct"))]
 impl Counters {
     /// A host owns the root; each attachment gets one child. Producers retain
     /// both arcs, so a write finishing after detach still updates host totals.

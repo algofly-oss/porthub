@@ -85,12 +85,22 @@ struct Source {
     committed: bool,
 }
 impl Source {
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     fn save(_: &Profile, _: &Path) -> Result<Self> {
         anyhow::bail!("native credential protection for this platform is not ready")
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn save(profile: &Profile, path: &Path) -> Result<Self> {
+        #[cfg(windows)]
+        {
+            anyhow::ensure!(crate::service::windows_acl::is_managed(path),
+                "Windows enrollment credentials must use the protected PortHub data directory; omit --profile");
+            crate::service::directory(
+                path.parent()
+                    .context("enrollment profile requires a parent")?,
+                true,
+            )?;
+        }
         let lease = Lease::acquire(path)?;
         let previous = match std::fs::symlink_metadata(path) {
             Ok(_) => {
@@ -194,22 +204,29 @@ pub fn register_cli_path(directory: &Path, user_install: bool) -> Result<()> {
             "per-user Windows service installation is not supported"
         );
         let path_key = windows_registry::LOCAL_MACHINE
+            .options()
+            .read()
+            .write()
             .open("SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment")
             .context("cannot open the machine environment registry key")?;
-        let current = path_key
-            .get_string("Path")
-            .context("cannot read the machine PATH registry value")?;
-        let contains =
-            env::split_paths(std::ffi::OsStr::new(&current)).any(|entry| entry == directory);
-        if !contains {
-            let mut updated = current;
-            if !updated.is_empty() && !updated.ends_with(';') {
-                updated.push(';');
-            }
-            updated.push_str(&directory.to_string_lossy());
-            path_key
-                .set_expand_string("Path", updated)
-                .context("cannot add PortHub to the machine PATH")?;
+        append_windows_path(&path_key, directory)?;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            SendMessageTimeoutW, HWND_BROADCAST, SMTO_ABORTIFHUNG, WM_SETTINGCHANGE,
+        };
+        let environment: Vec<_> = "Environment".encode_utf16().chain(Some(0)).collect();
+        let mut result = 0;
+        // Best effort: applications that refresh on the standard environment
+        // notification can discover the new CLI without a Windows sign-out.
+        unsafe {
+            SendMessageTimeoutW(
+                HWND_BROADCAST,
+                WM_SETTINGCHANGE,
+                0,
+                environment.as_ptr() as isize,
+                SMTO_ABORTIFHUNG,
+                1000,
+                &mut result,
+            );
         }
         return Ok(());
     }
@@ -245,6 +262,62 @@ pub fn register_cli_path(directory: &Path, user_install: bool) -> Result<()> {
         for profile in profiles {
             append_path_block(&profile, directory)?;
         }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn append_windows_path(key: &windows_registry::Key, directory: &Path) -> Result<()> {
+    let directory = directory
+        .to_str()
+        .context("CLI PATH directory must be Unicode")?;
+    anyhow::ensure!(
+        !directory.contains(';') && !directory.chars().any(char::is_control),
+        "CLI directory cannot contain PATH separators or control characters"
+    );
+    let current = key
+        .get_string("Path")
+        .context("cannot read the machine PATH registry value")?;
+    if !env::split_paths(std::ffi::OsStr::new(&current))
+        .any(|entry| entry.to_string_lossy().eq_ignore_ascii_case(directory))
+    {
+        let mut updated = current;
+        if !updated.is_empty() && !updated.ends_with(';') {
+            updated.push(';');
+        }
+        updated.push_str(directory);
+        key.set_expand_string("Path", updated)
+            .context("cannot add PortHub to the machine PATH")?;
+    }
+    Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod windows_path_tests {
+    use super::*;
+    #[test]
+    fn path_registration_preserves_existing_entries_and_is_case_insensitive() -> Result<()> {
+        let mut nonce = [0u8; 16];
+        getrandom::fill(&mut nonce)?;
+        let name = format!(
+            "Software\\PortHub\\InstallerFixture-{}",
+            uuid::Uuid::from_bytes(nonce)
+        );
+        struct Cleanup(String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = windows_registry::CURRENT_USER.remove_tree(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(name.clone());
+        let key = windows_registry::CURRENT_USER.create(&name)?;
+        key.set_expand_string("Path", r"%SystemRoot%\System32;C:\Existing Tools")?;
+        append_windows_path(&key, Path::new(r"C:\Program Files\PortHub\bin"))?;
+        append_windows_path(&key, Path::new(r"c:\program files\porthub\BIN"))?;
+        anyhow::ensure!(
+            key.get_string("Path")?
+                == r"%SystemRoot%\System32;C:\Existing Tools;C:\Program Files\PortHub\bin"
+        );
         Ok(())
     }
 }

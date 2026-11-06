@@ -27,8 +27,12 @@ struct Index {
     format_version: u32,
     repository: String,
     version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    core_version: Option<String>,
     etag: Option<String>,
     releases: BTreeMap<String, Release>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    components: Option<porthub_components::catalog::Catalog>,
 }
 struct State {
     index: Option<Index>,
@@ -62,6 +66,7 @@ pub struct Remote {
     initialized: OnceCell<()>,
     targets: BTreeMap<&'static str, Mutex<()>>,
     downloads: Semaphore,
+    component_download: Mutex<()>,
     background: AtomicBool,
 }
 
@@ -90,14 +95,20 @@ fn asset_name(target: &str, os: &str) -> String {
     )
 }
 impl Index {
+    fn core_version(&self) -> &str { self.core_version.as_deref().unwrap_or(&self.version) }
     fn validate(&self, repository: &str) -> Result<()> {
         ensure!(
             self.format_version == 1
                 && self.repository == repository
                 && numeric_version(&self.version).is_some()
+                && numeric_version(self.core_version()).is_some()
                 && self.releases.len() == TARGETS.len(),
             "invalid release cache index"
         );
+        if let Some(components) = &self.components {
+            components.validate()?;
+            ensure!(components.release.to_string() == self.version, "cached component release differs");
+        }
         for (target, os, arch) in TARGETS {
             let release = self
                 .releases
@@ -108,7 +119,7 @@ impl Index {
                     && release.os == *os
                     && release.arch == *arch
                     && release.asset == asset_name(target, os)
-                    && release.version == self.version
+                    && release.version == self.core_version()
                     && release.sha256.len() == 64
                     && release.sha256.bytes().all(|b| b.is_ascii_hexdigit())
                     && (1..=MAX_BINARY).contains(&release.size),
@@ -210,6 +221,7 @@ impl Remote {
                 .map(|(target, _, _)| (*target, Mutex::new(())))
                 .collect(),
             downloads: Semaphore::new(2),
+            component_download: Mutex::new(()),
             background: AtomicBool::new(false),
         }))
     }
@@ -219,7 +231,7 @@ impl Remote {
             .unwrap_or_else(|p| p.into_inner())
             .index
             .as_ref()
-            .map(|index| index.version.clone())
+            .map(|index| index.core_version().to_owned())
     }
     /// Called by control requests; no network wait is added to their path.
     pub fn refresh_background(self: &Arc<Self>) {
@@ -384,11 +396,41 @@ impl Remote {
                 "duplicate release asset"
             );
         }
+        let manifest = if let Some(asset) = assets.get(porthub_components::catalog::CATALOG_ASSET) {
+            ensure!(asset.state == "uploaded" && asset.size > 0
+                && asset.size <= porthub_components::catalog::MAX_CATALOG as u64,
+                "invalid compact release manifest asset");
+            let digest = asset.digest.as_deref().and_then(|value| value.strip_prefix("sha256:"))
+                .context("compact release manifest digest missing")?;
+            let url = format!("{}/v{}/{}", self.download_base, version, porthub_components::catalog::CATALOG_ASSET);
+            let mut response = self.http.get(url).timeout(Duration::from_secs(20)).send().await?;
+            ensure!(response.status().is_success(), "compact release manifest unavailable");
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await? {
+                ensure!(bytes.len() as u64 + chunk.len() as u64 <= asset.size,
+                    "compact release manifest exceeds declared size");
+                bytes.extend_from_slice(&chunk);
+            }
+            ensure!(bytes.len() as u64 == asset.size && format!("{:x}", Sha256::digest(&bytes)) == digest,
+                "compact release manifest checksum mismatch");
+            let manifest = porthub_components::manifest::ReleaseManifest::parse(&bytes)?;
+            ensure!(manifest.release.to_string() == version && manifest.repository == self.repository,
+                "compact release identity mismatch");
+            Some(manifest)
+        } else { None };
+        if let Some(previous) = cached.and_then(|index| index.components.as_ref()) {
+            manifest.as_ref().context("compact release cannot discard component metadata")?
+                .components.validate_successor(previous)?;
+        }
+        let core_version = manifest.as_ref().map_or_else(|| version.clone(), |manifest| manifest.core_version().to_string());
+        if let Some(previous) = cached {
+            ensure!(numeric_version(&core_version) >= numeric_version(previous.core_version()), "core downgrade rejected");
+        }
         let mut releases = BTreeMap::new();
         for (target, os, arch) in TARGETS {
             let name = asset_name(target, os);
             let asset = assets.get(&name).context("release platform missing")?;
-            for suffix in ["", ".version", ".sha256"] {
+            for suffix in if manifest.is_some() { &[""][..] } else { &["", ".version", ".sha256"][..] } {
                 let asset = assets
                     .get(&format!("{name}{suffix}"))
                     .context("release sidecar missing")?;
@@ -399,6 +441,13 @@ impl Remote {
                 .as_deref()
                 .and_then(|value| value.strip_prefix("sha256:"))
                 .context("release digest missing")?;
+            if let Some(manifest) = &manifest {
+                let declared = manifest.core_assets.iter().find(|asset| asset.target == *target)
+                    .context("compact release target missing")?;
+                ensure!(declared.asset == name && declared.executable.size == asset.size
+                    && declared.executable.sha256 == digest.to_ascii_lowercase(),
+                    "compact release core asset differs from GitHub metadata");
+            }
             releases.insert(
                 (*target).to_owned(),
                 Release {
@@ -406,24 +455,91 @@ impl Remote {
                     os: (*os).into(),
                     arch: (*arch).into(),
                     asset: name,
-                    version: version.clone(),
+                    version: core_version.clone(),
                     sha256: digest.to_ascii_lowercase(),
                     size: asset.size,
                 },
             );
         }
+        if let Some(previous) = cached.filter(|previous| previous.core_version() == core_version) {
+            for (target, release) in &releases {
+                let old = previous.releases.get(target).context("previous core target missing")?;
+                ensure!(old.sha256 == release.sha256 && old.size == release.size,
+                    "core executable contents changed without a core version change");
+            }
+        }
         let index = Index {
             format_version: 1,
             repository: self.repository.clone(),
             version,
+            core_version: Some(core_version),
             etag,
             releases,
+            components: manifest.map(|manifest| manifest.components),
         };
         index.validate(&self.repository)?;
         let path = self.root.join("latest.json");
         let bytes = serde_json::to_vec(&index)?;
         tokio::task::spawn_blocking(move || atomic(&path, &bytes)).await??;
         Ok(index)
+    }
+    pub async fn components(&self) -> Result<porthub_components::catalog::Catalog> {
+        self.latest(false).await?.components.context("component release metadata unavailable")
+    }
+    pub async fn component(&self, component: &str, version: &str, target: &str, digest: &str)
+        -> Result<(porthub_components::catalog::Artifact, tokio::fs::File)>
+    {
+        let catalog = self.components().await?;
+        let artifact = catalog.artifacts.iter().find(|entry| entry.component.to_string() == component
+            && entry.version.to_string() == version && entry.target == target && entry.executable.sha256 == digest)
+            .context("component is not in the verified release catalog")?.clone();
+        let _lock = self.component_download.lock().await;
+        let directory = self.root.join("components");
+        if !regular(&directory, true)? { tokio::fs::create_dir(&directory).await?; }
+        let destination = directory.join(format!("{}-{}-{}", artifact.component, artifact.version, artifact.executable.sha256));
+        let candidate = destination.clone();
+        let blob = artifact.executable.clone();
+        let valid = tokio::task::spawn_blocking(move || porthub_components::store::verified(&candidate, &blob)).await??;
+        if !valid {
+            let _permit = self.downloads.acquire().await?;
+            let archive_path = directory.join(format!("archive-{}.tar.gz", artifact.archive.sha256));
+            let check = archive_path.clone();
+            let archive_blob = artifact.archive.clone();
+            let cached = tokio::task::spawn_blocking(move || porthub_components::store::verified(&check, &archive_blob)).await??;
+            let temporary = if cached { None } else {
+                let archive = tempfile::NamedTempFile::new_in(&directory)?;
+                let url = format!("{}/v{}/{}", self.download_base, artifact.release, artifact.archive_name());
+                let mut response = self.http.get(url).timeout(Duration::from_secs(300)).send().await?;
+                ensure!(response.status().is_success(), "component archive unavailable");
+                let mut file = tokio::fs::File::from_std(archive.reopen()?);
+                let mut size = 0u64;
+                while let Some(chunk) = response.chunk().await? {
+                    size = size.checked_add(chunk.len() as u64).context("component archive size overflow")?;
+                    ensure!(size <= artifact.archive.size, "component archive exceeds size limit");
+                    file.write_all(&chunk).await?;
+                }
+                file.flush().await?; file.sync_all().await?; drop(file);
+                Some(archive)
+            };
+            let metadata = artifact.clone();
+            let output = destination.clone();
+            tokio::task::spawn_blocking(move || {
+                let source = temporary.as_ref().map_or(archive_path.as_path(), |file| file.path());
+                let extracted = porthub_components::store::extract_verified(source, &directory, &metadata, &catalog)?;
+                if let Some(archive) = temporary { archive.persist(&archive_path)?; }
+                extracted.as_file().sync_all()?;
+                extracted.persist(output)?;
+                std::fs::File::open(directory)?.sync_all()?;
+                Ok::<_, anyhow::Error>(())
+            }).await??;
+        }
+        let mut options = tokio::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        let file = options.open(destination).await?;
+        ensure!(file.metadata().await?.is_file(), "invalid component cache entry");
+        Ok((artifact, file))
     }
     pub async fn release(&self, target: &'static str) -> Result<Release> {
         self.latest(false)
@@ -443,9 +559,11 @@ impl Remote {
             .context("unsupported release target")?
             .lock()
             .await;
-        let release = self.release(target).await?;
+        let index = self.latest(false).await?;
+        let release = index.releases.get(target).context("unsupported release target")?.clone();
+        let carrier = index.version;
         self.initialize().await?;
-        let directory = self.root.join(&release.version);
+        let directory = self.root.join(&carrier);
         if !directory.try_exists()? {
             tokio::fs::create_dir(&directory).await?;
         }
@@ -468,7 +586,7 @@ impl Remote {
         let _permit = self.downloads.acquire().await?;
         let url = format!(
             "{}/v{}/{}",
-            self.download_base, release.version, release.asset
+            self.download_base, carrier, release.asset
         );
         let mut response = self.http.get(url).send().await?;
         ensure!(
@@ -519,9 +637,8 @@ impl Remote {
         // cache directory. Only numeric, owned cache release directories qualify.
         let _quiet = self.downloads.acquire_many(2).await?;
         let _index = self.refresh.lock().await;
-        let Some(keep) = self.version() else {
-            return Ok(());
-        };
+        let keep = self.state.read().unwrap_or_else(|p| p.into_inner()).index.as_ref().map(|index|index.version.clone());
+        let Some(keep) = keep else { return Ok(()); };
         let mut entries = tokio::fs::read_dir(&self.root).await?;
         while let Some(entry) = entries.next_entry().await? {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -577,14 +694,48 @@ mod tests {
 
     struct Fixture {
         version: RwLock<String>,
+        core_version: RwLock<Option<String>>,
         metadata: AtomicUsize,
         binaries: AtomicUsize,
         offline: AtomicBool,
         corrupt: AtomicBool,
         incomplete: AtomicBool,
+        compact: AtomicBool,
     }
     fn payload(version: &str, name: &str) -> Vec<u8> {
         format!("native release {version}: {name}").into_bytes()
+    }
+    const TOOL_BYTES: &[u8] = b"standalone tool fixture";
+    fn tool_archive() -> Vec<u8> {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(TOOL_BYTES.len() as u64); header.set_mode(0o755); header.set_cksum();
+        archive.append_data(&mut header, "sync/0.1.0/porthub-sync", TOOL_BYTES).unwrap();
+        archive.append_data(&mut header, "stats/0.1.0/porthub-stats", TOOL_BYTES).unwrap();
+        archive.into_inner().unwrap().finish().unwrap()
+    }
+    fn compact_manifest(version: &str) -> Vec<u8> {
+        compact_manifest_with_core(version, None)
+    }
+    fn compact_manifest_with_core(version: &str, core: Option<&str>) -> Vec<u8> {
+        use porthub_components::{catalog::{Artifact, Blob, Catalog, Component, REPOSITORY}, manifest::{CoreAsset, ReleaseManifest}};
+        let core_assets = TARGETS.iter().map(|(target, os, _)| {
+            let name = asset_name(target, os);
+            let body = payload(core.unwrap_or(version), &name);
+            CoreAsset { target: (*target).into(), asset: name,
+                executable: Blob { size: body.len() as u64, sha256: format!("{:x}", Sha256::digest(body)) } }
+        }).collect();
+        let mut components = Catalog { schema_version: 1, repository: REPOSITORY.into(), release: version.parse().unwrap(),
+            artifacts: vec![Artifact { component: Component::Sync, version: "0.1.0".parse().unwrap(),
+                target: porthub_components::catalog::TARGETS[0].into(), core: ">=1.0.0".parse().unwrap(), protocols: vec![1],
+                source_revision: "a".repeat(40), build_inputs: "b".repeat(64),
+                executable: Blob { size: TOOL_BYTES.len() as u64, sha256: format!("{:x}", Sha256::digest(TOOL_BYTES)) }, release: version.parse().unwrap(),
+                archive: Blob { size: tool_archive().len() as u64, sha256: format!("{:x}", Sha256::digest(tool_archive())) } }] };
+        let mut stats = components.artifacts[0].clone();
+        stats.component = Component::Stats;
+        components.artifacts.push(stats);
+        serde_json::to_vec(&ReleaseManifest { schema_version: 2, repository: REPOSITORY.into(), release: version.parse().unwrap(), core_version: core.map(|v| v.parse().unwrap()), core_assets, components }).unwrap()
     }
     async fn metadata(AxumState(state): AxumState<Arc<Fixture>>, headers: HeaderMap) -> Response {
         state.metadata.fetch_add(1, Ordering::SeqCst);
@@ -592,6 +743,7 @@ mod tests {
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
         let version = state.version.read().unwrap().clone();
+        let core_version = state.core_version.read().unwrap().clone();
         let etag = format!("\"{version}\"");
         if headers
             .get("if-none-match")
@@ -603,11 +755,16 @@ mod tests {
         let mut assets = Vec::new();
         for (target, os, _) in TARGETS {
             let name = asset_name(target, os);
-            let body = payload(&version, &name);
-            for suffix in ["", ".version", ".sha256"] {
+            let body = payload(core_version.as_deref().unwrap_or(&version), &name);
+            for suffix in if state.compact.load(Ordering::SeqCst) { &[""][..] } else { &["", ".version", ".sha256"][..] } {
                 assets.push(serde_json::json!({"name":format!("{name}{suffix}"),"size":body.len(),"digest":format!("sha256:{:x}",Sha256::digest(&body)),"state":"uploaded",
                     "browser_download_url":"http://untrusted.invalid/ignored"}));
             }
+        }
+        if state.compact.load(Ordering::SeqCst) {
+            let body = compact_manifest_with_core(&version, core_version.as_deref());
+            assets.push(serde_json::json!({"name":porthub_components::catalog::CATALOG_ASSET,
+                "size":body.len(),"digest":format!("sha256:{:x}",Sha256::digest(body)),"state":"uploaded"}));
         }
         if state.incomplete.load(Ordering::SeqCst) {
             assets.pop();
@@ -622,7 +779,11 @@ mod tests {
         if state.offline.load(Ordering::SeqCst) {
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
-        let mut body = payload(version.trim_start_matches('v'), &name);
+        let core_version = state.core_version.read().unwrap().clone();
+        let mut body = if name == porthub_components::catalog::CATALOG_ASSET {
+            compact_manifest_with_core(version.trim_start_matches('v'), core_version.as_deref())
+        } else if name.starts_with("porthub-tools-") { tool_archive()
+        } else { payload(core_version.as_deref().unwrap_or(version.trim_start_matches('v')), &name) };
         if state.corrupt.load(Ordering::SeqCst) {
             body[0] ^= 1;
         }
@@ -637,11 +798,13 @@ mod tests {
         let root = tempfile::tempdir()?;
         let state = Arc::new(Fixture {
             version: RwLock::new("1.7.0".into()),
+            core_version: RwLock::new(None),
             metadata: AtomicUsize::new(0),
             binaries: AtomicUsize::new(0),
             offline: AtomicBool::new(false),
             corrupt: AtomicBool::new(false),
             incomplete: AtomicBool::new(false),
+            compact: AtomicBool::new(false),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let base = format!("http://{}", listener.local_addr()?);
@@ -654,12 +817,141 @@ mod tests {
         });
         let remote = Remote::new(
             root.path().join("cache"),
-            "owner/project".into(),
+            porthub_components::catalog::REPOSITORY.into(),
             format!("{base}/latest"),
             format!("{base}/download"),
             true,
         )?;
         Ok((root, state, remote, task))
+    }
+    #[tokio::test]
+    async fn component_downloads_are_verified_coalesced_and_repaired() -> Result<()> {
+        use tokio::io::AsyncReadExt;
+        let (_root, state, remote, task) = fixture().await?;
+        state.compact.store(true, Ordering::SeqCst);
+        let catalog = remote.components().await?;
+        let tool = catalog.artifacts[0].clone();
+        let version = tool.version.to_string();
+        let (one, two) = tokio::join!(
+            remote.component("sync", &version, &tool.target, &tool.executable.sha256),
+            remote.component("sync", &version, &tool.target, &tool.executable.sha256));
+        for result in [one, two] {
+            let (_, mut file) = result?;
+            let mut bytes = Vec::new(); file.read_to_end(&mut bytes).await?;
+            assert_eq!(bytes, TOOL_BYTES);
+        }
+        assert_eq!(state.binaries.load(Ordering::SeqCst), 2, "one manifest and one archive");
+        assert!(remote.component("sync", "9.0.0", &tool.target, &tool.executable.sha256).await.is_err());
+        assert!(remote.component("../sync", &version, &tool.target, &tool.executable.sha256).await.is_err());
+        assert_eq!(state.binaries.load(Ordering::SeqCst), 2);
+        let path = remote.root.join("components").join(format!("sync-{}-{}", tool.version, tool.executable.sha256));
+        tokio::fs::write(&path, b"corrupt").await?;
+        remote.component("sync", &version, &tool.target, &tool.executable.sha256).await?;
+        assert_eq!(tokio::fs::read(path).await?, TOOL_BYTES);
+        assert_eq!(state.binaries.load(Ordering::SeqCst), 2, "repair reuses the verified archive");
+        state.offline.store(true, Ordering::SeqCst);
+        let stats = &catalog.artifacts[1];
+        let (_, mut stats_file) = remote.component("stats", &stats.version.to_string(), &stats.target, &stats.executable.sha256).await?;
+        let mut bytes = Vec::new(); stats_file.read_to_end(&mut bytes).await?;
+        assert_eq!(bytes, TOOL_BYTES);
+        assert_eq!(state.binaries.load(Ordering::SeqCst), 2, "a second tool shares the archive while upstream is offline");
+        state.offline.store(false, Ordering::SeqCst);
+        let archive_path = remote.root.join("components").join(format!("archive-{}.tar.gz", tool.archive.sha256));
+        tokio::fs::write(archive_path, b"damaged archive").await?;
+        let path = remote.root.join("components").join(format!("sync-{}-{}", tool.version, tool.executable.sha256));
+        tokio::fs::remove_file(&path).await?;
+        remote.component("sync", &version, &tool.target, &tool.executable.sha256).await?;
+        assert_eq!(tokio::fs::read(path).await?, TOOL_BYTES);
+        assert_eq!(state.binaries.load(Ordering::SeqCst), 3, "a damaged cached archive is fetched and verified again");
+
+        task.abort(); Ok(())
+    }
+    #[tokio::test]
+    async fn corrupt_component_archives_are_never_published() -> Result<()> {
+        let (_root, state, remote, task) = fixture().await?;
+        state.compact.store(true, Ordering::SeqCst);
+        let tool = remote.components().await?.artifacts[0].clone();
+        state.corrupt.store(true, Ordering::SeqCst);
+        assert!(remote.component("sync", &tool.version.to_string(), &tool.target, &tool.executable.sha256).await.is_err());
+        let mut files = tokio::fs::read_dir(remote.root.join("components")).await?;
+        assert!(files.next_entry().await?.is_none());
+        task.abort(); Ok(())
+    }
+    #[test]
+    fn shared_manifest_rejects_incomplete_duplicate_or_conflicting_core_metadata() -> Result<()> {
+        use porthub_components::{catalog::Catalog, manifest::ReleaseManifest};
+        let bytes = compact_manifest("1.11.0");
+        let manifest = ReleaseManifest::parse(&bytes)?;
+        assert_eq!(Catalog::parse(&bytes)?.release, manifest.release);
+        let mut incomplete = manifest.clone(); incomplete.core_assets.pop();
+        assert!(incomplete.validate().is_err());
+        let mut duplicate = manifest.clone(); duplicate.core_assets[1] = duplicate.core_assets[0].clone();
+        assert!(duplicate.validate().is_err());
+        let mut traversal = manifest.clone(); traversal.core_assets[0].asset = "../porthub".into();
+        assert!(traversal.validate().is_err());
+        let mut conflict = manifest.clone(); conflict.components.release = "1.10.0".parse()?;
+        assert!(conflict.validate().is_err());
+        let mut bad_digest = manifest.clone(); bad_digest.core_assets[0].executable.sha256 = "z".repeat(64);
+        assert!(bad_digest.validate().is_err());
+        Ok(())
+    }
+    #[tokio::test]
+    async fn compact_release_needs_no_sidecars_and_persists_validated_components() -> Result<()> {
+        let (_root, state, remote, task) = fixture().await?;
+        state.compact.store(true, Ordering::SeqCst);
+        let release = remote.release("x86_64").await?;
+        assert_eq!(release.version, "1.7.0");
+        let index = remote.state.read().unwrap().index.clone().unwrap();
+        assert!(index.components.is_some());
+        let persisted: Index = serde_json::from_slice(&tokio::fs::read(remote.root.join("latest.json")).await?)?;
+        persisted.validate(porthub_components::catalog::REPOSITORY)?;
+        assert!(persisted.components.is_some());
+        let _asset = remote.ensure("x86_64", false).await?;
+        task.abort();
+        Ok(())
+    }
+    #[tokio::test]
+    async fn helper_only_release_keeps_core_identity_and_uses_new_carrier() -> Result<()> {
+        let (_root, state, remote, task) = fixture().await?;
+        state.compact.store(true, Ordering::SeqCst);
+        remote.ensure("x86_64", false).await?;
+        *state.version.write().unwrap() = "1.8.0".into();
+        *state.core_version.write().unwrap() = Some("1.7.0".into());
+        expire(&remote);
+        remote.refresh_latest().await?;
+        assert_eq!(remote.version().as_deref(), Some("1.7.0"));
+        let index = remote.state.read().unwrap().index.clone().unwrap();
+        assert_eq!(index.version, "1.8.0");
+        index.validate(porthub_components::catalog::REPOSITORY)?;
+        remote.ensure("x86_64", false).await?;
+        assert_eq!(std::fs::read(remote.root.join("1.8.0/porthub-x86_64"))?, payload("1.7.0", "porthub-x86_64"));
+        assert_eq!(std::fs::read_to_string(remote.root.join("1.8.0/porthub-x86_64.version"))?, "1.7.0\n");
+        *state.version.write().unwrap() = "1.9.0".into();
+        *state.core_version.write().unwrap() = Some("1.6.0".into());
+        assert!(remote.fetch_index(Some(&index)).await.is_err());
+        *state.core_version.write().unwrap() = Some("1.7.0".into());
+        let mut changed = index.clone();
+        changed.etag = None;
+        changed.releases.get_mut("x86_64").unwrap().sha256 = "0".repeat(64);
+        assert!(remote.fetch_index(Some(&changed)).await.is_err());
+        task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn corrupt_compact_manifest_cannot_replace_a_verified_legacy_index() -> Result<()> {
+        let (_root, state, remote, task) = fixture().await?;
+        remote.release("x86_64").await?;
+        let previous = remote.state.read().unwrap().index.clone().unwrap();
+        state.compact.store(true, Ordering::SeqCst);
+        *state.version.write().unwrap() = "1.8.0".into();
+        state.corrupt.store(true, Ordering::SeqCst);
+        assert!(remote.fetch_index(Some(&previous)).await.is_err());
+        assert_eq!(remote.state.read().unwrap().index.as_ref().unwrap().version, "1.7.0");
+        let persisted: Index = serde_json::from_slice(&tokio::fs::read(remote.root.join("latest.json")).await?)?;
+        assert_eq!(persisted.version, "1.7.0");
+        task.abort();
+        Ok(())
     }
     fn expire(remote: &Remote) {
         let mut state = remote.state.write().unwrap();

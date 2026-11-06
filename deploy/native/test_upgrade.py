@@ -183,4 +183,81 @@ class ColdBackup(unittest.TestCase):
             with self.assertRaises(ValueError):upgrade.backup_core(self.container,self.root/'backup')
         run.assert_not_called()
 
+class ReleaseSelection(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.env = self.root / '.env'
+        self.original = b'# retained settings\nSECRET=keep-this-private\nexport PORTHUB_VERSION=1.0.0\nPORTHUB_VERSION=1.0.1\nPORTHUB_SOURCE_REVISION=old\n'
+        self.env.write_bytes(self.original)
+        self.env.chmod(0o600)
+        self.current = {role: {'Image': 'sha256:' + str(index)*64} for index,role in enumerate(upgrade.ROLES, 1)}
+        self.images = {role: {'Id': 'sha256:' + str(index)*64} for index,role in enumerate(upgrade.ROLES, 4)}
+        self.config = {'services': {role: {'image': 'porthub:'+role} for role in upgrade.ROLES}}
+        self.tags = {'porthub:'+role: value['Image'] for role,value in self.current.items()}
+        self.calls = []
+        self.lookup = patch.object(upgrade, 'image_reference', side_effect=lambda name: self.tags.get(name))
+        self.lookup.start(); self.addCleanup(self.lookup.stop)
+        self.runner = patch.object(upgrade, 'run', side_effect=self.run_command)
+        self.runner.start(); self.addCleanup(self.runner.stop)
+    def run_command(self, arguments):
+        self.calls.append(arguments)
+        if arguments[:3] == ['docker', 'image', 'tag']:
+            self.tags[arguments[4]] = arguments[3]
+        elif arguments[:3] == ['docker', 'image', 'rm']:
+            self.tags.pop(arguments[3], None)
+        else:
+            self.fail('Unexpected Docker command')
+    def selection(self, roles=upgrade.ROLES):
+        return upgrade.ReleaseSelection(self.root, {r:self.current[r] for r in roles},
+            {r:self.images[r] for r in roles}, self.config, 'a'*40, '1.11.0')
+    def test_promotion_preserves_credentials_permissions_and_previous_images(self):
+        selection = self.selection()
+        selection.apply(self.root, lambda: None)
+        updated = self.env.read_bytes()
+        self.assertIn(b'SECRET=keep-this-private\n', updated)
+        self.assertEqual(updated.count(b'PORTHUB_VERSION='), 1)
+        self.assertIn(b'PORTHUB_VERSION=1.11.0\n', updated)
+        self.assertIn(b'PORTHUB_SOURCE_REVISION='+b'a'*40+b'\n', updated)
+        self.assertEqual(self.env.stat().st_mode & 0o777, 0o600)
+        self.assertEqual((self.root/'previous-release.env').read_bytes(), self.original)
+        for role in upgrade.ROLES:
+            self.assertEqual(self.tags['porthub:'+role], self.images[role]['Id'])
+            self.assertEqual(self.tags['porthub:'+role+'-1.11.0'], self.images[role]['Id'])
+            previous = self.current[role]['Image']
+            self.assertEqual(self.tags['porthub:rollback-'+role+'-'+previous[7:19]], previous)
+    def test_failed_verification_restores_all_tags_and_environment(self):
+        original_tags = dict(self.tags)
+        def fail(): raise RuntimeError('probe failed')
+        with self.assertRaisesRegex(RuntimeError, 'probe failed'):
+            self.selection().apply(self.root, fail)
+        self.assertEqual(self.tags, original_tags)
+        self.assertEqual(self.env.read_bytes(), self.original)
+    def test_conflicting_immutable_tag_is_rejected_before_any_mutation(self):
+        self.tags['porthub:core-1.11.0'] = 'sha256:'+'f'*64
+        with self.assertRaisesRegex(ValueError, 'immutable'):
+            self.selection()
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.env.read_bytes(), self.original)
+    def test_changed_environment_is_rejected_without_overwriting_it(self):
+        selection = self.selection()
+        self.env.write_bytes(b'SECRET=changed-by-admin\n')
+        with self.assertRaisesRegex(ValueError, 'changed since preflight'):
+            selection.apply(self.root, lambda: None)
+        self.assertEqual(self.env.read_bytes(), b'SECRET=changed-by-admin\n')
+        self.assertEqual(self.calls, [])
+    def test_partial_edge_upgrade_does_not_change_core_or_whole_release_version(self):
+        self.selection(('edge',)).apply(self.root, lambda: None)
+        self.assertEqual(self.env.read_bytes(), self.original)
+        self.assertEqual(self.tags['porthub:core'], self.current['core']['Image'])
+        self.assertEqual(self.tags['porthub:edge'], self.images['edge']['Id'])
+    def test_finalization_failure_also_rolls_back_running_roles(self):
+        calls = []
+        def fail(): raise RuntimeError('finalization failed')
+        with patch.object(upgrade, 'run', side_effect=lambda args: calls.append(args)):
+            with self.assertRaisesRegex(RuntimeError, 'finalization failed'):
+                upgrade.activate(['candidate'], ['previous'], lambda: None, after_roles=fail)
+        self.assertEqual([call[0] for call in calls], ['candidate']*3+['previous']*3)
+
 if __name__=='__main__':unittest.main()

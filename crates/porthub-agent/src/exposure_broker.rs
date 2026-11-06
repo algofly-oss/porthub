@@ -339,7 +339,7 @@ mod tests {
     async fn explicit_layout_still_requires_matching_enrollment() -> Result<()> {
         let root=tempfile::tempdir()?;
         let layout=crate::service::Layout {user:true,state:root.path().join("native"),releases:root.path().join("releases"),units:root.path().join("units")};
-        porthub_terminal::multiplexer::create_directory(&layout.state)?;
+        crate::service::directory(&layout.state,true)?;
         let profile:crate::profile::Profile=serde_json::from_value(serde_json::json!({"server":"https://gateway.example","machine_id":"0123456789abcdef01234567","token":"private-fixture-token"}))?;
         let id=crate::service::identity(&profile);
         let path=layout.state.join(format!("{id}.json"));

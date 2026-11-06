@@ -77,3 +77,26 @@ async fn retiring_a_port_removes_its_history_without_affecting_other_ports() -> 
     store.purge(8000).await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn one_hour_history_survives_restart_and_expires_older_samples() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("history.db");
+    let store = Store::open(&path).await?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+    let samples = [now - 3601, now - 3590, now - 900, now].into_iter().map(|timestamp| (8080, Sample {
+        timestamp, interval_seconds: 1., in_bytes: 10, out_bytes: 20, drop_bytes: 0,
+        incoming_ips: vec![], outgoing_ips: vec![], blocked_ips: vec![],
+    })).collect();
+    store.record(samples).await?;
+    let reopened = Store::open(&path).await?;
+    let history = reopened.snapshot(vec![8080]).await?;
+    assert_eq!(history[&8080].iter().map(|sample| sample.timestamp).collect::<Vec<_>>(), vec![now - 3590, now - 900, now]);
+    let delta = reopened.snapshot_since(vec![8080], now - 20).await?;
+    assert_eq!(delta[&8080].len(), 1);
+    assert_eq!(delta[&8080][0].timestamp, now);
+    // Active port detection stays five minutes; history retention does not
+    // make old activity appear live.
+    assert_eq!(reopened.active().await?.len(), 1);
+    Ok(())
+}

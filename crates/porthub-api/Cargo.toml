@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+porthub-components = { path = "../porthub-components" }
 porthub-terminal = { path = "../porthub-terminal", features = ["ssh"] }
 unicode-normalization = "0.1"
 turn = "=0.17.2"
@@ -47,6 +48,8 @@ porthub-egress = { path = "../porthub-egress", default-features = false }
 
 
 [dev-dependencies]
+flate2 = "1"
+tar = "0.4"
 axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 rcgen = "0.14"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

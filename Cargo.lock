@@ -3056,9 +3056,11 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "socket2 0.6.5",
+ "system-configuration",
  "tokio",
  "tower-service",
  "tracing",
+ "windows-registry",
 ]
 
 [[package]]
@@ -4823,7 +4825,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-agent"
-version = "1.10.1"
+version = "1.11.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4842,9 +4844,14 @@ dependencies = [
  "hickory-proto",
  "hickory-resolver",
  "hostname",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "libc",
  "nlink",
  "notify 8.2.1",
+ "porthub-components",
+ "porthub-console",
  "porthub-edge",
  "porthub-egress",
  "porthub-identity",
@@ -4858,6 +4865,7 @@ dependencies = [
  "reqwest",
  "route_manager",
  "rustix",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -4866,6 +4874,7 @@ dependencies = [
  "system-configuration",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite 0.30.0",
  "tokio-util",
  "tracing",
@@ -4873,6 +4882,7 @@ dependencies = [
  "tun-rs",
  "url",
  "uuid",
+ "webpki-roots 1.0.10",
  "windows-registry",
  "windows-service",
  "windows-sys 0.61.2",
@@ -4881,7 +4891,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-api"
-version = "1.10.1"
+version = "1.11.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4890,6 +4900,7 @@ dependencies = [
  "base64 0.22.1",
  "bcrypt",
  "chrono",
+ "flate2",
  "futures-util",
  "hmac 0.13.0",
  "httpdate",
@@ -4897,6 +4908,7 @@ dependencies = [
  "mongodb",
  "percent-encoding",
  "porthub-agent",
+ "porthub-components",
  "porthub-edge",
  "porthub-egress",
  "porthub-identity",
@@ -4915,6 +4927,7 @@ dependencies = [
  "sha2 0.10.9",
  "socketioxide",
  "subtle",
+ "tar",
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.30.0",
@@ -4932,8 +4945,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "porthub-components"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "bytes",
+ "flate2",
+ "fs2",
+ "h2",
+ "http 1.5.0",
+ "libc",
+ "reqwest",
+ "rustix",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "porthub-console"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossterm",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "porthub-edge"
-version = "1.10.1"
+version = "1.11.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -4983,7 +5034,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-firewall"
-version = "1.10.1"
+version = "1.11.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -5072,7 +5123,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-runtime"
-version = "1.10.1"
+version = "1.11.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -5109,6 +5160,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "porthub-stats"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap 4.6.7",
+ "crossterm",
+ "porthub-components",
+ "porthub-console",
+ "serde_json",
+ "sysinfo",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "porthub-sync"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "clap 4.6.7",
+ "porthub-components",
+ "porthub-transfer",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "url",
+]
+
+[[package]]
 name = "porthub-terminal"
 version = "0.1.0"
 dependencies = [
@@ -5133,6 +5219,56 @@ dependencies = [
  "tokio-util",
  "unicode-segmentation",
  "unicode-width",
+]
+
+[[package]]
+name = "porthub-terminal-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "axum-server",
+ "clap 4.6.7",
+ "crossterm",
+ "directories",
+ "flate2",
+ "fs2",
+ "futures-util",
+ "libc",
+ "porthub-components",
+ "porthub-console",
+ "porthub-mesh",
+ "porthub-terminal",
+ "rcgen",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tokio-util",
+ "url",
+]
+
+[[package]]
+name = "porthub-tor"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap 4.6.7",
+ "directories",
+ "porthub-components",
+ "porthub-egress",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "url",
 ]
 
 [[package]]
@@ -6474,6 +6610,10 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
+dependencies = [
+ "serde",
+ "serde_core",
+]
 
 [[package]]
 name = "serde"
@@ -7337,6 +7477,7 @@ checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
 dependencies = [
  "filetime",
  "libc",
+ "xattr",
 ]
 
 [[package]]
@@ -9903,6 +10044,16 @@ dependencies = [
  "rusticata-macros",
  "thiserror 2.0.21",
  "time",
+]
+
+[[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix",
 ]
 
 [[package]]

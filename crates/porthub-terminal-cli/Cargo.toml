@@ -1,0 +1,49 @@
+[package]
+name = "porthub-terminal-cli"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+[[bin]]
+name = "porthub-terminal"
+path = "src/main.rs"
+[features]
+default = ["terminal-direct"]
+terminal-direct = ["porthub-terminal/direct", "dep:porthub-mesh"]
+
+[dependencies]
+futures-util.workspace = true
+url = "2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+porthub-mesh = { path = "../porthub-mesh", optional = true }
+anyhow.workspace = true
+async-trait = "0.1"
+clap.workspace = true
+directories = "6"
+serde = { version = "1", features = ["derive"] }
+crossterm = "0.29"
+porthub-console = { path = "../porthub-console" }
+fs2 = "0.4"
+sha2 = "0.10"
+serde_json = "1"
+tempfile = "3"
+libc = "0.2"
+porthub-components = { path = "../porthub-components" }
+porthub-terminal = { path = "../porthub-terminal", default-features = false, features = ["hosting", "viewer-history"] }
+tokio.workspace = true
+tokio-util = { version = "0.7", features = ["rt"] }
+[build-dependencies]
+flate2 = "1"
+tar = "0.4"
+serde_json = "1"
+[dev-dependencies]
+axum.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+flate2 = "1"
+tar = "0.4"
+tempfile = "3"
+serde_json = "1"
+
+[target.'cfg(unix)'.dev-dependencies]
+rcgen = "0.14"
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }

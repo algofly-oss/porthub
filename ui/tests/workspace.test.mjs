@@ -159,3 +159,12 @@ test("full 90-second history follows the latest measurement and leaves genuine o
   assert.equal(outage.filter(sample => !sample.observed).length, 3);
   assert.equal((trafficLinePath(outage, "in_rate", 100, 20, 200).match(/M /g) || []).length, 2);
 });
+
+test('one hour traffic totals and chart preserve samples older than five minutes', () => {
+  const now=20000;
+  const history=Array.from({length:3600},(_,i)=>({timestamp:now-3599+i,in_bytes:2,out_bytes:3,interval_seconds:1}));
+  assert.equal(trafficSummary(history,3600,now).volume,18000);
+  const window=buildTrafficWindow(history,3600,now);
+  assert.equal(window.samples.filter(sample=>sample.observed).length,3600);
+  assert.equal(window.samples[0].timestamp,now-3599);
+});

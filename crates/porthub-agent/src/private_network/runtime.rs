@@ -205,6 +205,10 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     let profile = Profile::load(&path)?;
     let _lease = Lease::acquire(&path)?;
     let control = Arc::new(crate::control::Control::new_private(&profile)?);
+    // Embedded private networking shares the parent registration's maintenance
+    // worker. A standalone private enrollment owns its own background updates.
+    let owns_component_maintenance = logs.is_some();
+    let mut component_maintenance = None;
     let mut log_stream = logs.map(|logs| crate::logs::Guard::start(control, logs, cancel.child_token()));
     let name = format!(
         "ph{}",
@@ -461,7 +465,13 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 // Publish initial readiness immediately. Waiting for
                 // the periodic refresh can make a healthy service miss the
                 // installer's readiness deadline after a slow initial sync.
-                if first_ready { status_tick.reset_immediately(); }
+                if first_ready {
+                    status_tick.reset_immediately();
+                    if owns_component_maintenance {
+                        component_maintenance = crate::components::background(&profile.server, &work).map(Some)
+                            .unwrap_or_else(|_| { tracing::warn!("optional component maintenance unavailable; private networking remains active"); None });
+                    }
+                }
             },
             Some(Event::Packet{peer,bytes,direct,received_at})=>{
                 let now=received_at;
@@ -758,6 +768,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         }
     }}Ok(())}.await;
     work.cancel();
+    drop(component_maintenance);
     if tokio::time::timeout(Duration::from_secs(2), async {
         while !tasks.is_empty() {
             let _ = tasks.join_next().await;

@@ -52,6 +52,7 @@ jobs:
       tag: ${{ steps.release.outputs.tag || steps.validation.outputs.tag }}
       skip: ${{ steps.release.outputs.skip || steps.validation.outputs.skip }}
       already_published: ${{ steps.release.outputs.already_published || steps.validation.outputs.already_published }}
+      previous_components: ${{ steps.previous_builds.outputs.reuse_available || 'false' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,6 +60,8 @@ jobs:
       - name: Verify automatic version preparation and retention
         run: |
           python3 scripts/test_prepare_release.py
+          python3 scripts/test_fetch_component_release.py
+          python3 scripts/test_recover_component_builds.py
           python3 scripts/test_publish_release.py
           python3 scripts/test_prune_github_releases.py
           python3 scripts/test_reuse_client_artifacts.py
@@ -72,13 +75,128 @@ jobs:
           echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "skip=false" >> "$GITHUB_OUTPUT"
           echo "already_published=false" >> "$GITHUB_OUTPUT"
+      - name: Inspect prior component release format
+        id: previous_components
+        if: github.event_name != 'workflow_dispatch' || inputs.verify_only != true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/fetch-component-release.py --inspect-only
+      - name: Install verifier toolchain for prior compact release
+        if: steps.previous_components.outputs.compact == 'true'
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        if: steps.previous_components.outputs.compact == 'true'
+        with:
+          key: release-preparation-verifier
+      - name: Build trusted artifact verifier
+        if: steps.previous_components.outputs.compact == 'true'
+        env:
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: cargo build --locked -p porthub-api --bin porthub-api
+      - name: Recover verified prior core build inputs
+        id: previous_builds
+        if: steps.previous_components.outputs.compact == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/fetch-component-release.py --output "$RUNNER_TEMP/porthub-previous-release" --artifact-verifier "$GITHUB_WORKSPACE/target/debug/porthub-api" --recover-output "$RUNNER_TEMP/porthub-previous-builds"
       - name: Pin the release version and source
         id: release
         if: github.event_name != 'workflow_dispatch' || inputs.verify_only != true
         env:
           GH_TOKEN: ${{ github.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: python3 scripts/prepare-release.py --default-branch "$DEFAULT_BRANCH" --execute
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, subprocess
+          command = ['python3', 'scripts/prepare-release.py', '--default-branch', os.environ['DEFAULT_BRANCH'], '--execute']
+          previous = pathlib.Path(os.environ['RUNNER_TEMP'])/'porthub-previous-builds'
+          if previous.is_dir():
+              for directory in sorted(previous.iterdir()):
+                  command += ['--previous-core-build', str(directory)]
+          subprocess.run(command, check=True)
+          PY
+      - name: Retain verified prior builds for x86_64
+        if: steps.previous_builds.outputs.reuse_available == 'true' && steps.release.outputs.skip != 'true' && steps.release.outputs.already_published != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: component-reuse-x86_64
+          path: ${{ runner.temp }}/porthub-previous-builds/x86_64-unknown-linux-musl/
+          if-no-files-found: error
+          retention-days: 1
+      - name: Retain verified prior builds for x86
+        if: steps.previous_builds.outputs.reuse_available == 'true' && steps.release.outputs.skip != 'true' && steps.release.outputs.already_published != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: component-reuse-x86
+          path: ${{ runner.temp }}/porthub-previous-builds/i686-unknown-linux-musl/
+          if-no-files-found: error
+          retention-days: 1
+      - name: Retain verified prior builds for arm64
+        if: steps.previous_builds.outputs.reuse_available == 'true' && steps.release.outputs.skip != 'true' && steps.release.outputs.already_published != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: component-reuse-arm64
+          path: ${{ runner.temp }}/porthub-previous-builds/aarch64-unknown-linux-musl/
+          if-no-files-found: error
+          retention-days: 1
+      - name: Retain verified prior builds for armhf
+        if: steps.previous_builds.outputs.reuse_available == 'true' && steps.release.outputs.skip != 'true' && steps.release.outputs.already_published != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: component-reuse-armhf
+          path: ${{ runner.temp }}/porthub-previous-builds/arm-unknown-linux-musleabihf/
+          if-no-files-found: error
+          retention-days: 1
+      - name: Retain verified prior builds for armv7
+        if: steps.previous_builds.outputs.reuse_available == 'true' && steps.release.outputs.skip != 'true' && steps.release.outputs.already_published != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: component-reuse-armv7
+          path: ${{ runner.temp }}/porthub-previous-builds/armv7-unknown-linux-musleabihf/
+          if-no-files-found: error
+          retention-days: 1
+      - name: Retain verified prior builds for darwin_x86_64
+        if: steps.previous_builds.outputs.reuse_available == 'true' && steps.release.outputs.skip != 'true' && steps.release.outputs.already_published != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: component-reuse-darwin_x86_64
+          path: ${{ runner.temp }}/porthub-previous-builds/x86_64-apple-darwin/
+          if-no-files-found: error
+          retention-days: 1
+      - name: Retain verified prior builds for darwin_arm64
+        if: steps.previous_builds.outputs.reuse_available == 'true' && steps.release.outputs.skip != 'true' && steps.release.outputs.already_published != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: component-reuse-darwin_arm64
+          path: ${{ runner.temp }}/porthub-previous-builds/aarch64-apple-darwin/
+          if-no-files-found: error
+          retention-days: 1
+      - name: Retain verified prior builds for windows_x86_64
+        if: steps.previous_builds.outputs.reuse_available == 'true' && steps.release.outputs.skip != 'true' && steps.release.outputs.already_published != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: component-reuse-windows_x86_64
+          path: ${{ runner.temp }}/porthub-previous-builds/x86_64-pc-windows-msvc/
+          if-no-files-found: error
+          retention-days: 1
+      - name: Retain verified prior builds for windows_x86
+        if: steps.previous_builds.outputs.reuse_available == 'true' && steps.release.outputs.skip != 'true' && steps.release.outputs.already_published != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: component-reuse-windows_x86
+          path: ${{ runner.temp }}/porthub-previous-builds/i686-pc-windows-msvc/
+          if-no-files-found: error
+          retention-days: 1
+      - name: Retain verified prior builds for windows_arm64
+        if: steps.previous_builds.outputs.reuse_available == 'true' && steps.release.outputs.skip != 'true' && steps.release.outputs.already_published != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: component-reuse-windows_arm64
+          path: ${{ runner.temp }}/porthub-previous-builds/aarch64-pc-windows-msvc/
+          if-no-files-found: error
+          retention-days: 1
   clients:
     name: Validate and package clients
     needs: [prepare]
@@ -89,6 +207,7 @@ jobs:
       actions: read
     with:
       revision: ${{ needs.prepare.outputs.revision }}
+      previous_components: ${{ needs.prepare.outputs.previous_components == 'true' }}
       platform: ${{ github.event_name == 'workflow_dispatch' && inputs.verify_only == true && inputs.platform || 'all' }}
       verify_only: ${{ github.event_name == 'workflow_dispatch' && inputs.verify_only == true }}
       publish_release: ${{ github.event_name != 'workflow_dispatch' || inputs.verify_only != true }}

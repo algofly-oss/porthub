@@ -39,6 +39,13 @@ pub const TARGETS: &[(&str, &str, &str)] = &[
 pub async fn verify_complete(root: &Path, version: &str) -> anyhow::Result<Vec<Release>> {
     use std::collections::BTreeSet;
     anyhow::ensure!(!version.is_empty(), "release version is required");
+    let manifest = root.join(porthub_components::catalog::CATALOG_ASSET);
+    if tokio::fs::symlink_metadata(&manifest).await.is_ok() {
+        let root = root.to_path_buf();
+        let version = version.to_owned();
+        return tokio::task::spawn_blocking(move || verify_compact(&root, &version)).await?;
+    }
+
     let mut expected = BTreeSet::new();
     for (target, _, _) in TARGETS {
         let asset = format!(
@@ -85,6 +92,63 @@ pub async fn verify_complete(root: &Path, version: &str) -> anyhow::Result<Vec<R
     }
     Ok(releases)
 }
+fn verify_compact(root: &Path, version: &str) -> anyhow::Result<Vec<Release>> {
+    use porthub_components::{catalog::{CATALOG_ASSET, MAX_CATALOG}, manifest::ReleaseManifest, store};
+    use std::{collections::BTreeSet, io::Read};
+    anyhow::ensure!(std::fs::symlink_metadata(root)?.is_dir(), "release directory must not be a symlink");
+    let path = root.join(CATALOG_ASSET);
+    let metadata = std::fs::symlink_metadata(&path)?;
+    anyhow::ensure!(metadata.is_file() && metadata.len() <= MAX_CATALOG as u64, "invalid release manifest file");
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?.take(MAX_CATALOG as u64 + 1).read_to_end(&mut bytes)?;
+    let manifest = ReleaseManifest::parse(&bytes)?;
+    anyhow::ensure!(manifest.release.to_string() == version, "compact release version mismatch");
+    let mapping = [
+        ("x86_64", "x86_64-unknown-linux-gnu"), ("x86", "i686-unknown-linux-gnu"),
+        ("arm64", "aarch64-unknown-linux-gnu"), ("armhf", "arm-unknown-linux-gnueabihf"),
+        ("armv7", "armv7-unknown-linux-gnueabihf"), ("darwin_x86_64", "x86_64-apple-darwin"),
+        ("darwin_arm64", "aarch64-apple-darwin"), ("windows_x86_64", "x86_64-pc-windows-msvc"),
+        ("windows_x86", "i686-pc-windows-msvc"), ("windows_arm64", "aarch64-pc-windows-msvc")];
+    let mut expected = BTreeSet::from([CATALOG_ASSET.to_owned()]);
+    let mut releases = Vec::new();
+    let temporary = tempfile::tempdir()?;
+    for core in &manifest.core_assets {
+        anyhow::ensure!(store::verified(&root.join(&core.asset), &core.executable)?, "compact core checksum mismatch");
+        expected.insert(core.asset.clone());
+        let (_, canonical) = mapping.iter().find(|(legacy, _)| *legacy == core.target).unwrap();
+        let tools: Vec<_> = manifest.components.artifacts.iter().filter(|tool| tool.target == *canonical).collect();
+        for component in [porthub_components::catalog::Component::Tor,
+            porthub_components::catalog::Component::Terminal, porthub_components::catalog::Component::Sync,
+            porthub_components::catalog::Component::Stats] {
+            anyhow::ensure!(tools.iter().any(|tool| tool.component == component),
+                "compact release platform is missing a required optional tool");
+            anyhow::ensure!(tools.iter().any(|tool| tool.component == component
+                && tool.core.matches(manifest.core_version())
+                && tool.protocols.contains(&porthub_components::catalog::PROTOCOL)),
+                "compact release platform has no compatible version of a required optional tool");
+        }
+        for tool in tools {
+            anyhow::ensure!(tool.release == manifest.release, "compact release must carry retained tool versions in its own archives");
+            expected.insert(tool.archive_name());
+            // Safe extraction validates paths, exact member names, archive size/hash,
+            // executable size/hash, and rejects links. Never executes a tool.
+            store::extract_verified(&root.join(tool.archive_name()), temporary.path(), tool, &manifest.components)?;
+        }
+        let (_, os, arch) = TARGETS.iter().find(|(target, _, _)| *target == core.target).unwrap();
+        releases.push(Release { target: core.target.clone(), os: (*os).into(), arch: (*arch).into(),
+            asset: core.asset.clone(), version: manifest.core_version().to_string(), size: core.executable.size,
+            sha256: core.executable.sha256.clone() });
+    }
+    let mut actual = BTreeSet::new();
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        anyhow::ensure!(entry.file_type()?.is_file(), "release must contain only regular files");
+        actual.insert(entry.file_name().into_string().map_err(|_| anyhow::anyhow!("invalid release filename"))?);
+    }
+    anyhow::ensure!(actual == expected && expected.len() == 21, "compact release requires exactly 21 declared assets");
+    Ok(releases)
+}
+
 pub fn normalize(target: &str, legacy: bool) -> ApiResult<&'static str> {
     let target = match target {
         "amd64" | "linux_amd64" | "linux_x86_64" => "x86_64",
@@ -214,6 +278,15 @@ impl Catalog {
     }
     pub fn refresh_background(&self) {
         if let Some(remote) = &self.remote { remote.refresh_background(); }
+    }
+    pub async fn components(&self) -> ApiResult<porthub_components::catalog::Catalog> {
+        self.remote.as_ref().ok_or_else(unavailable)?.components().await.map_err(|_| unavailable())
+    }
+    pub async fn component(&self, component: &str, version: &str, target: &str, digest: &str)
+        -> ApiResult<(porthub_components::catalog::Artifact, File)>
+    {
+        self.remote.as_ref().ok_or_else(unavailable)?.component(component, version, target, digest)
+            .await.map_err(|_| unavailable())
     }
     pub async fn refresh_latest(&self) -> ApiResult<()> {
         if let Some(remote) = &self.remote { remote.refresh_latest().await.map_err(|_| unavailable())?; }
@@ -508,5 +581,55 @@ impl Artifact {
             Body::from_stream(ReaderStream::new(self.file.take(length)))
         };
         Ok((status, output, body).into_response())
+    }
+}
+
+#[cfg(test)]
+mod compact_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn python_packager_output_passes_rust_verification_and_damage_is_rejected() -> anyhow::Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let output = temporary.path().join("release");
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/test_package_components.py");
+        let status = std::process::Command::new("python3")
+            .arg(script).arg("--fixture-output").arg(&output).output()?;
+        anyhow::ensure!(status.status.success(), "compact package fixture failed: {}", String::from_utf8_lossy(&status.stderr));
+        let releases = verify_complete(&output, "1.11.0").await?;
+        assert_eq!(releases.len(), 10);
+        let manifest_path = output.join("porthub-components.json");
+        let original_manifest = tokio::fs::read(&manifest_path).await?;
+        let mut manifest: serde_json::Value = serde_json::from_slice(&original_manifest)?;
+        manifest["components"]["artifacts"].as_array_mut().unwrap()
+            .retain(|artifact| artifact["component"] != "stats");
+        tokio::fs::write(&manifest_path, serde_json::to_vec(&manifest)?).await?;
+        let error = verify_complete(&output, "1.11.0").await.err().expect("missing tool must fail verification");
+        assert!(error.to_string().contains("missing a required optional tool"));
+        for (field, value) in [("core", serde_json::json!(">=2.0.0")),
+            ("protocols", serde_json::json!([2]))] {
+            let mut incompatible: serde_json::Value = serde_json::from_slice(&original_manifest)?;
+            for artifact in incompatible["components"]["artifacts"].as_array_mut().unwrap() {
+                if artifact["component"] == "stats" { artifact[field] = value.clone(); }
+            }
+            tokio::fs::write(&manifest_path, serde_json::to_vec(&incompatible)?).await?;
+            let error = verify_complete(&output, "1.11.0").await.err().expect("incompatible helper must fail verification");
+            assert!(error.to_string().contains("no compatible version"));
+        }
+        tokio::fs::write(&manifest_path, original_manifest).await?;
+        assert!(verify_complete(&output, "1.11.1").await.is_err());
+        let archive = output.join("porthub-tools-x86_64-unknown-linux-gnu.tar.gz");
+        let saved = tokio::fs::read(&archive).await?;
+        tokio::fs::write(&archive, b"corrupt archive").await?;
+        assert!(verify_complete(&output, "1.11.0").await.is_err());
+        tokio::fs::write(&archive, saved).await?;
+        let core = output.join("porthub-x86_64");
+        let saved = tokio::fs::read(&core).await?;
+        tokio::fs::write(&core, b"corrupt core").await?;
+        assert!(verify_complete(&output, "1.11.0").await.is_err());
+        tokio::fs::write(&core, saved).await?;
+        tokio::fs::write(output.join("unexpected-secret.env"), b"fixture").await?;
+        assert!(verify_complete(&output, "1.11.0").await.is_err());
+        Ok(())
     }
 }
