@@ -233,5 +233,15 @@
     "core_1_11_1_published": false,
     "last_published_release": "1.11.2",
     "last_published_core": "1.11.0"
+  },
+  "subsequent_resolution": {
+    "record": "2026-11-06-modular-agent-final-rollout.json",
+    "release": "1.11.4",
+    "core_version": "1.11.2",
+    "source_revision": "436a016ace8f8c89ed9518bdca0e2ff07b11ec43",
+    "online_agents_with_matching_committed_acknowledgements": 15,
+    "both_uat_hosts_automatic_dns_preparation_verified": true,
+    "ec2_to_both_uat_sustained_ssh_passed": true,
+    "historical_release_assets_superseded_by_retained_release": true
   }
 }
