@@ -17,6 +17,20 @@ use std::{
     time::Duration,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ForwardError {
+    Transport,
+    ResponseTimeout,
+}
+impl ForwardError {
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::Transport => "connection_error",
+            Self::ResponseTimeout => "response_timeout",
+        }
+    }
+}
+
 struct Upload {
     inner: Body,
     complete: Option<tokio::sync::oneshot::Sender<()>>,
@@ -198,7 +212,7 @@ impl HttpProxy {
         mut request: Request<Body>,
         response_timeout: Duration,
         lease: Option<Arc<dyn Send + Sync>>,
-    ) -> Result<Response<Body>, ()> {
+    ) -> Result<Response<Body>, ForwardError> {
         let upgrade = is_upgrade(request.headers());
         let downstream = upgrade.then(|| hyper::upgrade::on(&mut request));
         let path = request
@@ -232,7 +246,7 @@ impl HttpProxy {
                 );
                 match target.parse() {
                     Ok(uri) => uri,
-                    Err(_) => return Err(()),
+                    Err(_) => return Err(ForwardError::Transport),
                 }
             }
         };
@@ -259,7 +273,7 @@ impl HttpProxy {
         {
             if !pass_host {
                 let Ok(host) = base.authority().unwrap().as_str().parse() else {
-                    return Err(());
+                    return Err(ForwardError::Transport);
                 };
                 request.headers_mut().insert(header::HOST, host);
             }
@@ -300,11 +314,12 @@ impl HttpProxy {
         };
         let mut response = match result {
             Ok(Ok(response)) => response,
-            _ => return Err(()),
+            Ok(Err(_)) => return Err(ForwardError::Transport),
+            Err(_) => return Err(ForwardError::ResponseTimeout),
         };
         if response.status() == StatusCode::SWITCHING_PROTOCOLS {
             let Some(downstream) = downstream else {
-                return Err(());
+                return Err(ForwardError::Transport);
             };
             let upstream = hyper::upgrade::on(&mut response);
             tokio::spawn(async move {

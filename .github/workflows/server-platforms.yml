@@ -58,6 +58,7 @@ jobs:
         run: |
           cargo test --locked -p porthub-terminal --lib
           cargo test --locked -p porthub-runtime --lib web_activity::tests
+          cargo test --locked -p porthub-runtime --test upstreams
           cargo test --locked -p porthub-api --lib web_activity::tests
           cargo test --locked -p porthub-api --test workflows native_web_activity -- --include-ignored
           cargo test --locked -p porthub-api --lib release_cache::tests -- --test-threads=1
