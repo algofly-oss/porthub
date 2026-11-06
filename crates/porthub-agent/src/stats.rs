@@ -304,7 +304,7 @@ pub async fn run(options: Options, cancel: CancellationToken) -> Result<()> {
         "interval must be between 0.2 and 60 seconds"
     );
     let manager = crate::components::manager(None)?;
-    if manager.installed(Component::Stats).await?.is_empty() {
+    if !manager.has_installation(Component::Stats).await? {
         eprintln!("Preparing stats: downloading a verified compatible dashboard if needed...");
     }
     let (artifact, executable) = manager.resolve(Component::Stats, &cancel).await?;

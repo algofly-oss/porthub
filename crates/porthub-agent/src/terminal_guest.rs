@@ -78,7 +78,7 @@ mod tests {
         };
         assert!(select_from(vec![layout.clone()], None)?.is_none());
         let status = crate::service::readable::directory(&layout)?;
-        porthub_terminal::multiplexer::create_directory(&status)?;
+        crate::service::directory(&status,true)?;
         let record = |id: &str, machine: &str| crate::service::readable::Record {
             format_version: 1,
             id: id.into(),

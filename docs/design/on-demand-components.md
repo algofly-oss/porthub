@@ -9,8 +9,8 @@ downloads, private/shared caches, versioned RPC and CLI pipe transports,
 activation receipts, and background maintenance. Core delegates sync/watch,
 live stats, Tor, terminal runtime provisioning, workspace creation, and owner
 attachment UI and sharing supervision. The terminal helper supports independent `new`, `attach`, `tmux`
-and `runtime` commands. Remaining local workspace commands and registry operations still need
-extraction. Live Tor generation handover, final platform
+and `runtime` commands. Terminal execution is delegated to the helper; full-platform and installed
+rollout validation remain pending. Live Tor generation handover, final platform
 checks, compact publication, and installed rollout verification remain pending.
 Background maintenance begins after authenticated configuration; core also
 exposes `components list`, `fetch`, and `update`.
@@ -976,3 +976,28 @@ RTC engine/media/datachannel packages in core; core's required private-network
 ICE/DTLS dependencies are explicitly retained. Core alone compiles without the
 terminal RTC feature linkage. Remaining local workspace operations and registry
 presentation still need extraction before the terminal boundary is complete.
+
+
+Remaining workspace execution now runs in the helper: list/status, stop, rename
+and workspace-scoped tmux commands. Listing uses bounded 64-row pages with
+creation-time/identity ordering, validates names, and omits ended workspaces
+unless explicitly requested. Core keeps its existing command parsing, output,
+registration selection and credential-free registry/broker metadata. The helper
+exposes independent list/stop/rename/workspace-tmux commands alongside new/attach.
+The shared terminal library has an explicit hosting feature; core disables it,
+so portable PTYs, bundled runtime installation and local shell hosting are absent
+from its production dependency graph. Other consumers retain their previous
+hosting defaults. The unused core runtime wrapper was removed.
+
+The helper passed 22 library tests, including pagination over 130 registry jobs,
+rename identity, native guest recovery and privacy revocation, plus four real
+standalone process tests. The rebuilt core and exact seeded helper passed caller
+cwd/environment, six concurrent reopen calls, rename/tmux, ended-session history,
+the full owner PTY suite and the sharing reconnect/invitation/stop suite. These
+runtime suites were rerun sequentially after concurrent debug-process hashing
+caused observation deadlines and a short-lived fixture shell to expire.
+Progress-message decisions now inspect receipts rather than hashing helpers a
+second time; actual resolution still verifies bytes. Unauthorized legacy popup
+invocations fail a local lease precheck before resolving optional code, and the
+helper repeats the full owner check. Release-platform checks, live managed Tor
+upgrade verification and installed agent rollout remain outstanding.

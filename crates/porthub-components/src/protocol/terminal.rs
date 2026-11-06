@@ -4,6 +4,24 @@ use std::path::PathBuf;
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
+    List {
+        directory: PathBuf,
+        all: bool,
+        offset: usize,
+    },
+    Running {
+        directory: PathBuf,
+        name: String,
+    },
+    Stop {
+        directory: PathBuf,
+        name: String,
+    },
+    Rename {
+        directory: PathBuf,
+        name: String,
+        new_name: String,
+    },
     Install {
         directory: PathBuf,
     },
@@ -16,6 +34,16 @@ pub enum Operation {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Value {
+    Workspaces {
+        rows: Vec<WorkspaceRow>,
+        next: Option<usize>,
+    },
+    Running {
+        running: bool,
+    },
+    Stopped {
+        name: String,
+    },
     Workspace {
         job: Job,
     },
@@ -75,4 +103,20 @@ pub enum JoinTransport {
     Ssh,
     Relay,
     Auto,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceRow {
+    pub id: String,
+    pub name: String,
+    pub state: WorkspaceState,
+    pub shared: bool,
+    pub created_at: i64,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceState {
+    Running,
+    Ended,
 }

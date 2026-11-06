@@ -17,6 +17,37 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
+    #[cfg(unix)]
+    List {
+        #[arg(long)]
+        directory: PathBuf,
+        #[arg(long)]
+        all: bool,
+    },
+    #[cfg(unix)]
+    Stop {
+        #[arg(long)]
+        directory: PathBuf,
+        #[arg(long)]
+        name: String,
+    },
+    #[cfg(unix)]
+    Rename {
+        #[arg(long)]
+        directory: PathBuf,
+        #[arg(long)]
+        name: String,
+        new_name: String,
+    },
+    #[cfg(unix)]
+    WorkspaceTmux {
+        #[arg(long)]
+        directory: PathBuf,
+        #[arg(long)]
+        name: String,
+        #[arg(last = true)]
+        arguments: Vec<OsString>,
+    },
     /// Join a terminal invitation without enrollment or an installed core.
     Join {
         url: String,
@@ -147,6 +178,50 @@ async fn main() -> Result<()> {
         version: porthub_terminal_cli::VERSION.parse()?,
     };
     match args.command {
+        #[cfg(unix)]
+        Command::List { directory, all } => {
+            let mut rows = vec![];
+            let mut offset = 0;
+            loop {
+                let Value::Workspaces { rows: page, next } =
+                    porthub_terminal_cli::workspace::list(&directory, all, offset)?
+                else {
+                    anyhow::bail!("invalid terminal listing")
+                };
+                rows.extend(page);
+                let Some(next) = next else {
+                    break;
+                };
+                offset = next;
+            }
+            println!("{}", serde_json::to_string(&rows)?);
+        }
+        #[cfg(unix)]
+        Command::Stop { directory, name } => {
+            println!(
+                "Stopped {}",
+                porthub_terminal_cli::workspace::stop(&directory, &name)?
+            );
+        }
+        #[cfg(unix)]
+        Command::Rename {
+            directory,
+            name,
+            new_name,
+        } => {
+            println!(
+                "{}",
+                serde_json::to_string(&porthub_terminal_cli::workspace::rename(
+                    &directory, &name, &new_name
+                )?)?
+            );
+        }
+        #[cfg(unix)]
+        Command::WorkspaceTmux {
+            directory,
+            name,
+            arguments,
+        } => porthub_terminal_cli::workspace::tmux(&directory, &name, &arguments)?,
         Command::Join { url, transport } => {
             use porthub_components::protocol::terminal::{JoinRequest, JoinTransport};
             join(JoinRequest {

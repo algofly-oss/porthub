@@ -179,7 +179,7 @@ async fn worker_transport(
     cancel: &CancellationToken,
 ) -> Result<porthub_components::rpc::Client> {
     let manager = manager(None)?;
-    if manager.installed(component).await?.is_empty() {
+    if !manager.has_installation(component).await? {
         eprintln!("Preparing {component}: downloading a verified compatible tool if needed...");
     }
     let state_directory = state_directory()?;

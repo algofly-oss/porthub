@@ -73,6 +73,22 @@ impl Handler for Worker {
     ) -> Result<Reply<Value>, Failure> {
         tokio::task::spawn_blocking(move || match operation {
             Operation::Install {directory}=>install(&directory),
+            Operation::List {directory,all,offset}=>{
+                #[cfg(unix)] {workspace::list(&directory,all,offset)}
+                #[cfg(not(unix))] {let _=(directory,all,offset);anyhow::bail!("terminal hosting requires Unix; use WSL on Windows")}
+            },
+            Operation::Running {directory,name}=>{
+                #[cfg(unix)] {workspace::running(&directory,&name).map(|running|Value::Running {running})}
+                #[cfg(not(unix))] {let _=(directory,name);anyhow::bail!("terminal hosting requires Unix; use WSL on Windows")}
+            },
+            Operation::Stop {directory,name}=>{
+                #[cfg(unix)] {workspace::stop(&directory,&name).map(|name|Value::Stopped {name})}
+                #[cfg(not(unix))] {let _=(directory,name);anyhow::bail!("terminal hosting requires Unix; use WSL on Windows")}
+            },
+            Operation::Rename {directory,name,new_name}=>{
+                #[cfg(unix)] {workspace::rename(&directory,&name,&new_name).map(|job|Value::Workspace {job})}
+                #[cfg(not(unix))] {let _=(directory,name,new_name);anyhow::bail!("terminal hosting requires Unix; use WSL on Windows")}
+            },
             Operation::Create {directory,options,reuse}=>{
                 #[cfg(unix)] {workspace::create(&directory,options,reuse).map(|job|Value::Workspace {job})}
                 #[cfg(not(unix))] {let _=(directory,options,reuse);anyhow::bail!("terminal hosting requires Unix; use WSL on Windows")}

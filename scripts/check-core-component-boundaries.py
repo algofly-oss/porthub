@@ -5,7 +5,7 @@ import subprocess
 
 ROOT=Path(__file__).resolve().parent.parent
 FORBIDDEN={
-    'porthub-tor','arti-client','porthub-stats','porthub-sync','porthub-terminal-cli',
+    'portable-pty','porthub-tor','arti-client','porthub-stats','porthub-sync','porthub-terminal-cli',
     'rtc','rtc-media','rtc-datachannel','rtc-sctp','rtc-rtp','rtc-rtcp',
     'rtc-sdp','rtc-interceptor','rtc-srtp',
 }

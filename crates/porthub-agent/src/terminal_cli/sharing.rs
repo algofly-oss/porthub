@@ -224,7 +224,7 @@ pub(super) async fn start(root: &Path, args: Share) -> Result<()> {
         create(root, args.local).await?
     };
     ensure!(
-        workspace(&job)?.is_alive(),
+        running(root, &job.id).await?,
         "cannot share an ended workspace"
     );
     let _registry = lock(root)?;

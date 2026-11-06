@@ -154,10 +154,15 @@ fn jobs(root: &Path) -> Result<Vec<Job>> {
                     && path.file_stem().and_then(|name| name.to_str()) == Some(&job.id),
                 "invalid terminal registry identity"
             );
+            name_valid(&job.name)?;
             jobs.push(job);
         }
     }
-    jobs.sort_by_key(|job| job.created_at);
+    jobs.sort_by(|a, b| {
+        a.created_at
+            .cmp(&b.created_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
     Ok(jobs)
 }
 
@@ -271,4 +276,143 @@ pub(crate) fn select(root: &Path, name: &str) -> Result<Job> {
         "workspace not found or ambiguous; use a name or full ID from terminal list"
     );
     Ok(matches.remove(0))
+}
+
+pub fn list(
+    root: &Path,
+    all: bool,
+    offset: usize,
+) -> Result<porthub_components::protocol::terminal::Value> {
+    use porthub_components::protocol::terminal::{Value, WorkspaceRow, WorkspaceState};
+    private(root)?;
+    ensure!(offset <= 65536, "workspace listing offset exceeds limit");
+    let _guard = lock(root)?;
+    let rows: Vec<_> = jobs(root)?
+        .into_iter()
+        .filter_map(|job| {
+            let running = workspace(&job).is_ok_and(|workspace| workspace.is_alive());
+            if !running && !all {
+                return None;
+            }
+            Some(WorkspaceRow {
+                shared: root.join(format!("{}.share", job.id)).is_file(),
+                id: job.id,
+                name: job.name,
+                state: if running {
+                    WorkspaceState::Running
+                } else {
+                    WorkspaceState::Ended
+                },
+                created_at: job.created_at,
+            })
+        })
+        .collect();
+    let next = (rows.len() > offset.saturating_add(64)).then_some(offset + 64);
+    Ok(Value::Workspaces {
+        rows: rows.into_iter().skip(offset).take(64).collect(),
+        next,
+    })
+}
+pub fn running(root: &Path, name: &str) -> Result<bool> {
+    workspace(&select(root, name)?).map(|workspace| workspace.is_alive())
+}
+pub fn stop(root: &Path, name: &str) -> Result<String> {
+    let job = select(root, name)?;
+    workspace(&job)?.stop()?;
+    Ok(job.name)
+}
+pub fn rename(root: &Path, name: &str, new_name: &str) -> Result<Job> {
+    private(root)?;
+    name_valid(new_name)?;
+    let _guard = lock(root)?;
+    ensure!(
+        !jobs(root)?.iter().any(|job| job.name == new_name),
+        "workspace name already exists"
+    );
+    let mut job = select(root, name)?;
+    job.name = new_name.into();
+    write_private(
+        &root.join(format!("{}.json", job.id)),
+        &serde_json::to_vec(&job)?,
+        true,
+    )?;
+    Ok(job)
+}
+pub fn tmux(root: &Path, name: &str, args: &[std::ffi::OsString]) -> Result<()> {
+    ensure!(
+        args.first()
+            .is_some_and(|arg| !arg.is_empty() && !arg.to_string_lossy().starts_with('-')),
+        "pass a tmux command without global flags; PortHub selects this workspace's socket"
+    );
+    ensure!(
+        workspace(&select(root, name)?)?
+            .command()
+            .args(args)
+            .status()?
+            .success(),
+        "tmux command failed"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+    use porthub_components::protocol::terminal::Value;
+    #[test]
+    fn bounded_pages_keep_stable_identity_for_equal_timestamps_and_rename() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()?;
+        for index in (0..130).rev() {
+            let id = format!("{index:032x}");
+            let job = Job {
+                id: id.clone(),
+                name: format!("job-{index}"),
+                executable: root.path().join("absent"),
+                executable_sha256: "0".repeat(64),
+                terminfo: root.path().join("terminfo"),
+                workspace: root.path().join(&id),
+                created_at: 1,
+            };
+            write_private(
+                &root.path().join(format!("{id}.json")),
+                &serde_json::to_vec(&job)?,
+                false,
+            )?;
+        }
+        let mut ids = vec![];
+        let mut offset = 0;
+        loop {
+            let value = list(root.path(), true, offset)?;
+            assert!(serde_json::to_vec(&value)?.len() < 65536);
+            let Value::Workspaces { rows, next } = value else {
+                unreachable!()
+            };
+            assert!(rows.len() <= 64);
+            ids.extend(rows.into_iter().map(|row| row.id));
+            let Some(next) = next else {
+                break;
+            };
+            assert!(next > offset);
+            offset = next;
+        }
+        assert_eq!(
+            ids,
+            (0..130)
+                .map(|index| format!("{index:032x}"))
+                .collect::<Vec<_>>()
+        );
+        let Value::Workspaces { rows, next } = list(root.path(), false, 0)? else {
+            unreachable!()
+        };
+        assert!(rows.is_empty() && next.is_none());
+        let job = rename(root.path(), "job-0", "renamed")?;
+        assert_eq!(job.id, format!("{:032x}", 0));
+        assert_eq!(select(root.path(), "renamed")?.id, job.id);
+        assert!(select(root.path(), "job-0").is_err());
+        assert!(list(root.path(), true, 65537).is_err());
+        Ok(())
+    }
 }

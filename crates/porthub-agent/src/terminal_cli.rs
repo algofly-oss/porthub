@@ -5,12 +5,8 @@ mod sharing;
 use anyhow::{ensure, Context, Result};
 use clap::{Args, Subcommand};
 use fs2::FileExt;
-use porthub_terminal::{
-    multiplexer::{create_directory, Workspace},
-    protocol::token,
-};
+use porthub_terminal::protocol::token;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     ffi::OsString,
     fs,
@@ -238,7 +234,11 @@ fn socket_root() -> Result<PathBuf> {
     let root = PathBuf::from(format!("/tmp/porthub-terminal-{}", unsafe {
         libc::geteuid()
     }));
-    match create_directory(&root) {
+    match fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .map_err(anyhow::Error::from)
+    {
         Ok(()) => {}
         Err(_) if root.exists() => {}
         Err(error) => return Err(error),
@@ -298,26 +298,6 @@ fn select(root: &Path, name: &str) -> Result<Job> {
     Ok(matching.remove(0))
 }
 
-fn workspace(job: &Job) -> Result<Workspace> {
-    let metadata = fs::symlink_metadata(&job.executable)?;
-    ensure!(
-        metadata.is_file()
-            && !metadata.file_type().is_symlink()
-            && metadata.uid() == unsafe { libc::geteuid() }
-            && metadata.mode() & 0o022 == 0,
-        "unsafe terminal runtime executable"
-    );
-    ensure!(
-        format!("{:x}", Sha256::digest(fs::read(&job.executable)?)) == job.executable_sha256,
-        "terminal runtime checksum mismatch"
-    );
-    Workspace::open(
-        job.executable.clone(),
-        job.terminfo.clone(),
-        job.workspace.clone(),
-    )
-}
-
 fn name_valid(name: &str) -> Result<()> {
     ensure!(
         !name.is_empty()
@@ -330,13 +310,58 @@ fn name_valid(name: &str) -> Result<()> {
     Ok(())
 }
 
+async fn terminal_operation(
+    operation: porthub_components::protocol::terminal::Operation,
+) -> Result<porthub_components::protocol::terminal::Value> {
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let mut worker =
+        crate::components::worker(porthub_components::catalog::Component::Terminal, &cancel)
+            .await?;
+    worker
+        .call(operation, std::time::Duration::from_secs(30))
+        .await
+}
+async fn running(root: &Path, id: &str) -> Result<bool> {
+    let value = terminal_operation(porthub_components::protocol::terminal::Operation::Running {
+        directory: root.into(),
+        name: id.into(),
+    })
+    .await?;
+    let porthub_components::protocol::terminal::Value::Running { running } = value else {
+        anyhow::bail!("invalid terminal state response")
+    };
+    Ok(running)
+}
+fn local_owner_lease(root: &Path, id: &str, client: u32) -> Result<()> {
+    private(root)?;
+    ensure!(client > 0, "invalid terminal client");
+    let job = select(root, id)?;
+    private(&job.workspace)?;
+    let path = job.workspace.join(format!("owner-client-{client}.lock"));
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .context("participant controls require a local owner attachment")?;
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.mode() & 0o077 == 0,
+        "unsafe owner attachment lease"
+    );
+    match file.try_lock_exclusive() {
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+        _ => anyhow::bail!("owner attachment is no longer active"),
+    }
+}
 async fn owner_frontend(arguments: Vec<OsString>) -> Result<()> {
     let cancel = tokio_util::sync::CancellationToken::new();
     let manager = crate::components::manager(None)?;
-    if manager
-        .installed(porthub_components::catalog::Component::Terminal)
+    if !manager
+        .has_installation(porthub_components::catalog::Component::Terminal)
         .await?
-        .is_empty()
     {
         eprintln!("Preparing terminal: downloading a verified compatible tool if needed...");
     }
@@ -505,6 +530,9 @@ pub async fn run(command: Command) -> Result<()> {
     let root = root()?;
     match command {
         Command::ParticipantPopup { root, id, client } => {
+            // Reject unauthorized legacy shortcut invocations before resolving
+            // any optional code. The helper repeats the complete owner check.
+            local_owner_lease(&root, &id, client)?;
             owner_frontend(vec![
                 "terminal".into(),
                 "__participants-popup".into(),
@@ -605,11 +633,33 @@ pub async fn run(command: Command) -> Result<()> {
             }
         }
         Command::List { json, all } => {
-            let rows:Vec<_>=jobs(&root)?.into_iter().filter_map(|job|{
-                let running=workspace(&job).is_ok_and(|workspace|workspace.is_alive());
-                if !running && !all { return None; }
-                Some(serde_json::json!({"id":job.id,"name":job.name,"state":if running{"running"}else{"ended"},"shared":root.join(format!("{}.share",job.id)).exists(),"created_at":job.created_at}))
-            }).collect();
+            let mut rows = Vec::<serde_json::Value>::new();
+            let mut offset = 0;
+            loop {
+                use porthub_components::protocol::terminal::{Operation, Value};
+                let Value::Workspaces { rows: page, next } = terminal_operation(Operation::List {
+                    directory: root.clone(),
+                    all,
+                    offset,
+                })
+                .await?
+                else {
+                    anyhow::bail!("invalid terminal listing response")
+                };
+                rows.extend(
+                    page.into_iter()
+                        .map(serde_json::to_value)
+                        .collect::<std::result::Result<Vec<_>, _>>()?,
+                );
+                let Some(next) = next else {
+                    break;
+                };
+                ensure!(
+                    next > offset && next <= 65536,
+                    "invalid terminal listing cursor"
+                );
+                offset = next;
+            }
             if json {
                 println!("{}", serde_json::to_string(&rows)?);
             } else {
@@ -650,36 +700,44 @@ pub async fn run(command: Command) -> Result<()> {
         }
         Command::Attach { name, sidebar } => attach(&select(&root, &name)?, sidebar).await?,
         Command::Stop { name } => {
-            let job = select(&root, &name)?;
-            workspace(&job)?.stop()?;
-            println!("Stopped {}", job.name);
+            use porthub_components::protocol::terminal::{Operation, Value};
+            let Value::Stopped { name } = terminal_operation(Operation::Stop {
+                directory: root,
+                name,
+            })
+            .await?
+            else {
+                anyhow::bail!("invalid terminal stop response")
+            };
+            println!("Stopped {name}");
         }
         Command::Rename { name, new_name } => {
-            name_valid(&new_name)?;
-            let _guard = lock(&root)?;
+            use porthub_components::protocol::terminal::{Operation, Value};
+            let Value::Workspace { job } = terminal_operation(Operation::Rename {
+                directory: root,
+                name,
+                new_name: new_name.clone(),
+            })
+            .await?
+            else {
+                anyhow::bail!("invalid terminal rename response")
+            };
             ensure!(
-                !jobs(&root)?.iter().any(|job| job.name == new_name),
-                "workspace name already exists"
+                job.name == new_name && token(&job.id, 32),
+                "invalid terminal renamed identity"
             );
-            let mut job = select(&root, &name)?;
-            job.name = new_name;
-            crate::profile::write_private(
-                &root.join(format!("{}.json", job.id)),
-                &serde_json::to_vec(&job)?,
-                true,
-            )?;
         }
         Command::Tmux { name, args } => {
-            ensure!(
-                args.first()
-                    .is_some_and(|arg| !arg.is_empty() && !arg.to_string_lossy().starts_with('-')),
-                "pass a tmux command without global flags; PortHub selects this workspace's socket"
-            );
-            let job = select(&root, &name)?;
-            ensure!(
-                workspace(&job)?.command().args(args).status()?.success(),
-                "tmux command failed"
-            );
+            let mut arguments = vec![
+                "workspace-tmux".into(),
+                "--directory".into(),
+                root.into_os_string(),
+                "--name".into(),
+                name.into(),
+                "--".into(),
+            ];
+            arguments.extend(args);
+            owner_frontend(arguments).await?;
         }
     }
     Ok(())

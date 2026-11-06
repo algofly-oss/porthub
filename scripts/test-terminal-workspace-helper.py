@@ -37,9 +37,18 @@ def main():
                 with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
                     results=list(pool.map(lambda _:json.loads(call(['terminal',name,'--detach','--json'])),range(6)))
                 assert all(row['id']==job['id'] for row in results), 'Concurrent reopen changed workspace identity'
+                renamed=f'renamed-{index}'
+                call(['terminal','rename',name,renamed]);created[-1]=renamed
+                rows=json.loads(call(['terminal','ls','--json']))
+                assert any(row['id']==job['id'] and row['name']==renamed for row in rows), 'Rename lost workspace identity'
+                assert call(['terminal','tmux',renamed,'--','display-message','-p','#{session_name}']).strip()=='workspace'
+
         finally:
             for name in created:
                 call(['terminal','stop',name])
+        assert json.loads(call(['terminal','ls','--json']))==[], 'Ended workspaces leaked into default list'
+        archived=json.loads(call(['terminal','ls','--json','--all']))
+        assert len(archived)==2 and all(row['state']=='ended' for row in archived), 'History lost ended workspace metadata'
     print('PASS helper-owned workspaces: caller environment/cwd preserved and concurrent reopen retains identity')
 
 

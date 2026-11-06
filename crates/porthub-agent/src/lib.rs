@@ -53,8 +53,6 @@ mod terminal_upload;
 #[cfg(all(unix,feature = "terminal-direct"))]
 pub mod terminal_guest;
 #[cfg(unix)]
-pub mod terminal_runtime;
-#[cfg(unix)]
 pub mod terminal_cli;
 #[cfg(feature="local-tor")]
 mod proxy_transport;

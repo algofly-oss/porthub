@@ -155,6 +155,42 @@ fn independent_workspace_creation_preserves_caller_environment_and_reuses_regist
         }
         assert_eq!(std::fs::read_to_string(output).unwrap(), value);
     }
+    let list = command()
+        .args(["list", "--directory"])
+        .arg(&registry)
+        .output()
+        .unwrap();
+    assert!(list.status.success());
+    let rows: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 2);
+    let renamed = command()
+        .args(["rename", "--directory"])
+        .arg(&registry)
+        .args(["--name", "work-0", "renamed"])
+        .output()
+        .unwrap();
+    assert!(
+        renamed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&renamed.stderr)
+    );
+    let job: Job = serde_json::from_slice(&renamed.stdout).unwrap();
+    assert_eq!(job.id, running[0].0.id);
+    let stopped = command()
+        .args(["stop", "--directory"])
+        .arg(&registry)
+        .args(["--name", "renamed"])
+        .output()
+        .unwrap();
+    assert!(stopped.status.success());
+    let list = command()
+        .args(["list", "--directory"])
+        .arg(&registry)
+        .output()
+        .unwrap();
+    assert!(list.status.success());
+    let rows: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 1);
 }
 
 #[cfg(unix)]

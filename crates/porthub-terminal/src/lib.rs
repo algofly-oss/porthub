@@ -3,22 +3,22 @@
 pub mod hub;
 mod hub_queue;
 pub mod names;
-#[cfg(unix)]
+#[cfg(all(unix,feature="hosting"))]
 pub mod multiplexer;
-#[cfg(unix)]
+#[cfg(all(unix,feature="hosting"))]
 pub mod runtime;
-#[cfg(unix)]
+#[cfg(all(unix,feature="hosting"))]
 pub mod pty;
-#[cfg(unix)]
+#[cfg(all(unix,feature="hosting"))]
 pub mod host;
 pub mod protocol;
 #[cfg(feature = "ssh")]
 pub mod ssh;
 
-#[cfg(unix)]
+#[cfg(all(unix,feature="hosting"))]
 pub mod history;
 
-#[cfg(unix)]
+#[cfg(all(unix,feature="hosting"))]
 pub mod owner_view;
 
 #[cfg(feature = "direct")]
