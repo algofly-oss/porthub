@@ -1,8 +1,8 @@
 # Independently usable PortHub components
 
-Status: implementation in progress; the modular agent is not released. Production
+Status: final release validation; the modular agent is not released. Production
 serves agent 1.10.1. The gateway/UI reader for compact components is deployed at
-1.11.0, but optional component assets and the new agent have not been published.
+1.11.2, but optional component assets and the new agent have not been published.
 
 The component SDK implements compatibility selection, verified gateway/GitHub
 downloads, private/shared caches, versioned RPC and CLI pipe transports,
@@ -240,10 +240,11 @@ detached jobs survive caller exit and remain manageable through the same core
 commands. Native core watch tests first build `porthub-sync` beside the core
 binary, or use `PORTHUB_TEST_SYNC_EXECUTABLE` to locate that fixture explicitly.
 
-Before rollout, native Windows must also pass a complete isolated SCM install,
-service start/stop, CLI publication and PATH check against a mock enrollment
-server. Shell command smoke tests and credential-file ACL checks alone do not
-prove that complete installation works. Current fixes remove the protected
+Native Windows x64 and Windows 11 ARM64 passed complete isolated SCM installation,
+service start/stop/restart/removal, CLI publication and PATH checks against a mock
+enrollment server in run 42146514545 at source 42e59d9. All four installer
+entrypoints reached authenticated control sync. The final prepared-source jobs
+must still pass before publication. Current fixes remove the protected
 Windows profile-save stub, open the PATH registry key with write access, register
 PATH for private installations too, and refresh the invoking PowerShell session.
 Native CLI startup and detached worker pipe-lifetime checks gate the Windows
