@@ -1049,3 +1049,18 @@ runtime files are rejected before execution. Core's production boundary check
 continues to exclude portable-pty and terminal RTC implementation packages.
 These fixes require a new platform validation run; successful older jobs do not
 certify the changed source.
+
+Windows packaging now includes a real installation gate on disposable hosted
+x64 and Windows 11 ARM64 runners. It serves the actual PowerShell installer and
+exact packaged core over loopback, using the existing explicit test-only HTTP
+opt-in. Copied Command Prompt, PowerShell 5.1, PowerShell 7 and downloaded batch
+commands must install the same enrollment without duplicates. The gate checks
+an automatic LocalSystem service, authenticated control syncs reporting the
+packaged version, current PowerShell session and persistent machine PATH, and
+the published CLI's stop/start/restart/remove operations. It refuses existing
+PortHub installations, restores machine PATH and removes only its fixture
+service and newly created directories. This does not test UAC consent or
+non-administrator execution. The x86 binary retains its separate startup and
+ACL tests: an installer on an x64 OS selects x64, so substituting an x86 binary
+in that download would not represent a real installation. Native execution of
+the new lifecycle gate is still pending; syntax validation alone is insufficient.

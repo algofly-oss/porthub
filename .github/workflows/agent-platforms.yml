@@ -437,6 +437,12 @@ jobs:
         if: inputs.verify_only != true
         shell: bash
         run: python scripts/run-with-timeout.py 10 'dist/porthub-${{ matrix.artifact }}${{ matrix.extension }}' --version
+      - name: Install packaged Windows core through copied commands and verify SCM lifecycle
+        # The installer selects OS architecture. The x86 executable is tested
+        # separately on x64, but is not what an x64 installer would download.
+        if: inputs.verify_only != true && runner.os == 'Windows' && matrix.artifact != 'windows_x86'
+        shell: bash
+        run: python scripts/run-with-timeout.py 600 python scripts/test-windows-install-lifecycle.py 'dist/porthub-${{ matrix.artifact }}${{ matrix.extension }}'
       - name: Test packaged HTTP server lifecycle
         if: inputs.verify_only != true
         shell: bash
