@@ -1,20 +1,21 @@
 # Independently usable PortHub components
 
-Status: final release validation; the modular agent is not released. Production
-serves agent 1.10.1. The gateway/UI reader for compact components is deployed at
-1.11.2, but optional component assets and the new agent have not been published.
+Status: released and verified. Release **1.11.2** publishes independent core
+**1.11.0**, four optional tool families at **0.1.0**, and exactly **21 assets**.
+All ten native/platform jobs and complete-bundle verification passed in
+[run 42159848228](https://github.com/algofly-oss/porthub/actions/runs/42159848228).
+The gateway serves the verified core and component catalog. Fifteen online agents
+report core 1.11.0; two disabled machines remain disabled. The EC2 canary
+committed its native upgrade and automatically prefetched all four helpers.
 
-The component SDK implements compatibility selection, verified gateway/GitHub
-downloads, private/shared caches, versioned RPC and CLI pipe transports,
-activation receipts, and background maintenance. Core delegates sync/watch,
-live stats, Tor, terminal runtime provisioning, workspace creation, and owner
-attachment UI and sharing supervision. The terminal helper supports independent `new`, `attach`, `tmux`
-and `runtime` commands. Terminal execution is delegated to the helper; full-platform and installed
-rollout validation remain pending. Live managed Tor generation handover has
-passed through both RPC and CLI pipe transports; final platform checks, compact
-publication, and installed rollout verification remain pending.
-Background maintenance begins after authenticated configuration; core also
-exposes `components list`, `fetch`, and `update`.
+Installed checks covered normal core commands through RPC and CLI fallback,
+terminal mode restoration, persistent/offline workspaces, independent stats,
+sync and terminal operations, exact gateway download hashes, and official GitHub
+fallback with an unreachable test gateway. Native candidate activation and live
+Tor generation handover passed; component source is unchanged from those tests.
+See [the release verification record](../verification/2026-11-06-modular-agent-rollout.json)
+for provenance, exact sizes, installed checks, installer/connectivity evidence,
+and limitations. Implementation notes below retain their historical context.
 
 ## Ownership and package boundaries
 
@@ -113,8 +114,9 @@ receipt for that identity. If a later candidate fails before receiving a tool
 request, it can try up to four previously activated older compatible versions.
 Each executable is verified again, and administrator pins and disabled-component
 policy still apply. A download receipt alone never qualifies a version for this
-startup recovery. This does not yet provide transactional staging of Tor pool
-bootstrap or pin existing consumers to a worker version; those remain required.
+startup recovery. Tor candidates bootstrap and pass readiness before new work
+switches generations; active streams retain their original worker lease. Failed
+candidates leave the previous working generation in use.
 
 Component crashes have bounded restart backoff; they cannot restart the whole
 agent or silently weaken networking, authorization, or Tor privacy policy.
@@ -145,8 +147,9 @@ module policy/authentication rejection remains a rejection. Native tests must
 exercise forced CLI mode and automatic transport failure/recovery. Sync now supports `PORTHUB_COMPONENT_TRANSPORT=auto|rpc|cli` (default auto).
 Its CLI fallback invokes `__porthub-stdio` directly and carries the same typed
 contract through inherited pipes, including foreground streams. Automatic
-fallback is limited to pre-dispatch worker startup failures. Remaining extracted
-tools must support this contract before release.
+fallback is limited to pre-dispatch worker startup failures. Stats and terminal
+use protected machine-readable handoffs, and Tor uses typed multiplexed inherited
+pipes with bounded streams. Ambiguous mutating requests are never replayed.
 
 Core retains machine credentials, server authorization, routing policy, and the
 authenticated exposure broker. Give helpers narrowly scoped session capabilities
@@ -172,9 +175,10 @@ downloads. GitHub fallback downloads the platform archive directly and extracts
 only the requested tool. Standalone users can also download that archive without
 core. Avoid a separate public release for each tool or intermediate build.
 
-The current gateway release reader and publisher require `.version`/`.sha256`
-sidecars for every core platform. Deploy a reader supporting both old sidecars
-and the new catalog before switching the publisher to the compact layout.
+The deployed gateway reader supports legacy `.version`/`.sha256` sidecars and
+the compact catalog. New releases embed verified metadata in ten core binaries,
+publish ten tool archives, and share one manifest; legacy OTA endpoints remain
+available without additional public sidecar assets.
 Preserve existing bootstrap/OTA endpoints and supported old clients. Complete
 platform coverage, artifact verification, draft promotion, and immutable release
 rules still apply. Verification-only builds never publish releases.
@@ -203,7 +207,7 @@ Record native Windows, Linux, macOS, and supported architecture results before
 release. Windows named-pipe ACLs and executable replacement require native
 coverage; Unix-only tests cannot establish their correctness.
 
-## Configuration implemented so far
+## Configuration
 
 `PORTHUB_COMPONENT_SOURCE=auto|gateway|github` selects the permitted download
 sources; `auto` prefers the gateway. `PORTHUB_COMPONENT_GATEWAY` explicitly sets
@@ -229,8 +233,8 @@ break offline use. Profiles, credentials and worker state are never mirrored.
 `PORTHUB_COMPONENT_SHARED_CACHE=off` disables this reuse; an absolute path selects
 an administrator-managed shared cache location. Existing unmarked directories
 are not adopted, and shared files must not grant mutation to other accounts.
-Module HTTP clients still need integration with core's outbound routing/source
-selection policy before rollout.
+Module HTTP clients use core's policy-aware outbound source/interface selection.
+They do not modify host routes, firewall rules, addresses or DNS configuration.
 
 Worker startup uses a verified executable and the private endpoint argument
 only; requests and credentials travel over typed IPC. A readiness ping precedes
@@ -243,12 +247,16 @@ binary, or use `PORTHUB_TEST_SYNC_EXECUTABLE` to locate that fixture explicitly.
 Native Windows x64 and Windows 11 ARM64 passed complete isolated SCM installation,
 service start/stop/restart/removal, CLI publication and PATH checks against a mock
 enrollment server in run 42146514545 at source 42e59d9. All four installer
-entrypoints reached authenticated control sync. The final prepared-source jobs
-must still pass before publication. Current fixes remove the protected
+entrypoints reached authenticated control sync. The final prepared-source jobs in run 42159848228 also passed. Current fixes remove the protected
 Windows profile-save stub, open the PATH registry key with write access, register
 PATH for private installations too, and refresh the invoking PowerShell session.
 Native CLI startup and detached worker pipe-lifetime checks gate the Windows
 main-stack reserve and handle-inheritance fixes.
+
+## Historical implementation notes
+
+The following chronological notes describe intermediate states. Released behavior
+and completion evidence are recorded above.
 
 ### Tor extraction implementation status
 

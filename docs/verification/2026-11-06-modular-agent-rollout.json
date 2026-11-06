@@ -1,0 +1,208 @@
+{
+  "schema_version": 1,
+  "recorded_at_utc": "2026-11-06T05:44:10.893178+00:00",
+  "release": "1.11.2",
+  "core_version": "1.11.0",
+  "source_revision": "93a45ebdc658b76c189ae7daaa806d3fff4d18d9",
+  "release_url": "https://github.com/algofly-oss/porthub/releases/tag/v1.11.2",
+  "ci": {
+    "run_id": 42159848228,
+    "conclusion": "success",
+    "jobs": [
+      {
+        "id": 127702920036,
+        "name": "Prepare immutable release source",
+        "conclusion": "success"
+      },
+      {
+        "id": 127703021236,
+        "name": "Build production server roles / Build and test production browser assets",
+        "conclusion": "success"
+      },
+      {
+        "id": 127703021276,
+        "name": "Build production server roles / server (arm64, ubuntu-24.04-arm, aarch64-unknown-linux-musl)",
+        "conclusion": "success"
+      },
+      {
+        "id": 127703597019,
+        "name": "Build production server roles / Verify terminal sharing and account measurements",
+        "conclusion": "success"
+      },
+      {
+        "id": 127707509767,
+        "name": "Build production server roles / Package server runtime images (arm64, ubuntu-24.04-arm, aarch64-unknown-linux-musl)",
+        "conclusion": "success"
+      },
+      {
+        "id": 127707852944,
+        "name": "Validate and package clients / select-platforms",
+        "conclusion": "success"
+      },
+      {
+        "id": 127707854496,
+        "name": "Validate and package clients / promote-existing",
+        "conclusion": "skipped"
+      },
+      {
+        "id": 127707931853,
+        "name": "Validate and package clients / darwin_x86_64",
+        "conclusion": "success"
+      },
+      {
+        "id": 127707931885,
+        "name": "Validate and package clients / linux-32 (armv7-unknown-linux-gnueabihf, armv7, arm-linux-gnueabihf-gcc, arm-linux-gnueabihf-ar, ...",
+        "conclusion": "success"
+      },
+      {
+        "id": 127707931887,
+        "name": "Validate and package clients / windows_x86_64",
+        "conclusion": "success"
+      },
+      {
+        "id": 127707931929,
+        "name": "Validate and package clients / linux-32 (i686-unknown-linux-gnu, x86, i686-linux-gnu-gcc, i686-linux-gnu-ar, gcc-i686-linux-gnu ...",
+        "conclusion": "success"
+      },
+      {
+        "id": 127707931935,
+        "name": "Validate and package clients / windows_arm64",
+        "conclusion": "success"
+      },
+      {
+        "id": 127707931942,
+        "name": "Validate and package clients / arm64",
+        "conclusion": "success"
+      },
+      {
+        "id": 127707931945,
+        "name": "Validate and package clients / linux-32 (arm-unknown-linux-gnueabihf, armhf, arm-linux-gnueabihf-gcc, arm-linux-gnueabihf-ar, gc...",
+        "conclusion": "success"
+      },
+      {
+        "id": 127707931981,
+        "name": "Validate and package clients / darwin_arm64",
+        "conclusion": "success"
+      },
+      {
+        "id": 127707931991,
+        "name": "Validate and package clients / windows_x86",
+        "conclusion": "success"
+      },
+      {
+        "id": 127707932003,
+        "name": "Validate and package clients / x86_64",
+        "conclusion": "success"
+      },
+      {
+        "id": 127724466712,
+        "name": "Validate and package clients / Validate complete release bundle",
+        "conclusion": "success"
+      },
+      {
+        "id": 127726014026,
+        "name": "Validate and package clients / Publish versioned GitHub release",
+        "conclusion": "success"
+      }
+    ]
+  },
+  "published": {
+    "asset_count": 21,
+    "public_release_count": 1,
+    "manifest_schema": 2,
+    "manifest_sha256": "2836b26e5f9ca54d615337ce8a14fa4f09dda9b23d3f92b98ae5ca7ecf6d95a2",
+    "component_versions": {
+      "stats": "0.1.0",
+      "sync": "0.1.0",
+      "terminal": "0.1.0",
+      "tor": "0.1.0"
+    }
+  },
+  "gateway": {
+    "server_version": "1.11.2",
+    "manifest_core_version": "1.11.0",
+    "component_catalog_available": true,
+    "core_executable_size": 39380576,
+    "core_executable_sha256": "10218ca4a33a0da4f3e9954bc9e7fb8c1ebcb549315246c510526bca5e6985ba",
+    "raw_core_and_stats_downloads_verified": true
+  },
+  "canary": {
+    "recorded_at_utc": "2026-11-06T04:42:45.762631+00:00",
+    "machine_id": "6ae40339473bb150c4591851",
+    "version": "porthub 1.11.0\nbuild 93a45ebdc658b76c189ae7daaa806d3fff4d18d9\ntarget x86_64-unknown-linux-musl",
+    "sha256": "10218ca4a33a0da4f3e9954bc9e7fb8c1ebcb549315246c510526bca5e6985ba",
+    "upgrade_receipt": "/etc/porthub/native/upgrade-p5yoDv",
+    "journal_state": "committed",
+    "public_ssh": true,
+    "private_dns": true,
+    "private_ssh_banner": "SSH-2.0-OpenSSH_9.9",
+    "service_active": true,
+    "preserved_config_hashes": 6,
+    "expected_service_files_updated": 2,
+    "physical_routes_preserved": true,
+    "routing_rules_preserved": true,
+    "owned_tunnel_change": "Kernel regenerated its IPv6 link-local host route",
+    "components_downloaded": true,
+    "publication_pending": false
+  },
+  "rollout": {
+    "online_core_1_11_0": 15,
+    "disabled_unchanged": 2,
+    "automatic_background_prefetch": {
+      "tor": "0.1.0",
+      "terminal": "0.1.0",
+      "sync": "0.1.0",
+      "stats": "0.1.0"
+    },
+    "manual_fetch_before_observation": false
+  },
+  "installed_checks": {
+    "standalone_entrypoints": true,
+    "standalone_stats_without_core_on_PATH": true,
+    "standalone_sync_receive_watch_and_file_changes_without_core_or_gateway": true,
+    "standalone_terminal_create_execute_list_stop_without_core_or_enrollment": true,
+    "core_managed_stats_rpc_and_cli_PTY_restoration": true,
+    "core_managed_terminal_cwd_environment_reopen_and_offline_attachment": true,
+    "isolated_unreachable_gateway_official_GitHub_fallback_download": true,
+    "idempotent_components_update": true
+  },
+  "updates_and_compatibility": {
+    "native_contract_run_id": 42142657119,
+    "source_revision": "d704a26a6757a790e4b13363c719b05b66de4ca7",
+    "native_steps_executed_on": [
+      "Linux",
+      "macOS",
+      "Windows x64",
+      "Windows ARM64"
+    ],
+    "component_source_diff_to_published_release": "empty",
+    "newer_sync_activation_and_failed_candidate_recovery": "passed",
+    "live_Tor_generation_handover": [
+      "RPC passed, 86.23 seconds",
+      "CLI passed, 87.84 seconds"
+    ],
+    "no_future_production_version_fabricated": true
+  },
+  "installer_connectivity_preserved": {
+    "real_Linux_privileged_enrollment_preparation": "passed in final x86_64 job",
+    "real_Windows_CMD_PS51_PS7_batch_and_SCM_lifecycle": "passed in final Windows x64 and ARM64 jobs",
+    "real_macOS_native_service_lifecycle": "passed on both architectures",
+    "canary_enrollment_private_NSS_PAM_hashes": "six preserved; two expected service files updated",
+    "physical_routes_and_routing_rules": "preserved; only owned tunnel IPv6 link-local address regenerated",
+    "private_DNS_and_SSH": "passed",
+    "public_SSH": "passed"
+  },
+  "linux_x64_sizes_bytes": {
+    "core": 39380576,
+    "stats": 2065456,
+    "sync": 8354464,
+    "terminal": 12184128,
+    "tor": 21786672
+  },
+  "limitations": [
+    "Windows local terminal hosting requires WSL; supported standalone tools remain usable natively.",
+    "Gateway-backed sharing and public exposure inherently require a gateway; local tool operations do not.",
+    "Original WSL expose incident host is unavailable; its failure was audited and prerequisites covered by tests, not reproduced on that original host.",
+    "Checksums are trusted through configured verified HTTPS authorities; publisher compromise is outside this release trust model."
+  ]
+}
