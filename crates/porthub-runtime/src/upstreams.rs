@@ -1,6 +1,6 @@
 //! Health-aware upstream selection. Configuration is immutable; health and
 //! counters survive unchanged snapshot reloads. Request bodies remain streamed.
-use crate::proxy::{HttpProxy, ProxyPool};
+use crate::proxy::{ForwardError, HttpProxy, ProxyPool};
 use anyhow::{ensure, Result};
 use axum::{
     body::Body,
@@ -333,8 +333,22 @@ impl Upstreams {
             probe_host: hosts.first().cloned().unwrap_or_default(),
         })))
     }
+    fn passive_single(&self) -> bool {
+        !self.0.config.health.enabled
+            && self
+                .0
+                .endpoints
+                .iter()
+                .filter(|e| e.config.enabled)
+                .take(2)
+                .count()
+                == 1
+    }
     fn candidates(&self, excluded: &HashSet<String>, sticky: Option<&str>) -> Vec<Arc<Endpoint>> {
         let now = Instant::now();
+        // A passive-only route with no alternate must keep trying its sole
+        // backend. A failed camera/API request must not black out the site.
+        let passive_single = self.passive_single();
         let mut list: Vec<_> = self
             .0
             .endpoints
@@ -343,7 +357,9 @@ impl Upstreams {
                 let h = e.health.lock().unwrap_or_else(|p| p.into_inner());
                 e.config.enabled
                     && !excluded.contains(&e.config.id)
-                    && (!h.down || (!self.0.config.health.enabled && now >= h.retry_at))
+                    && (passive_single
+                        || !h.down
+                        || (!self.0.config.health.enabled && now >= h.retry_at))
             })
             .cloned()
             .collect();
@@ -401,7 +417,15 @@ impl Upstreams {
         list.swap(0, pick);
         list
     }
-    fn outcome(&self, e: &Endpoint, success: bool, status: Option<u16>, latency: u64, probe: bool) {
+    fn outcome(
+        &self,
+        e: &Endpoint,
+        success: bool,
+        status: Option<u16>,
+        latency: u64,
+        probe: bool,
+        reason: Option<&'static str>,
+    ) {
         let mut h = e.health.lock().unwrap_or_else(|p| p.into_inner());
         h.checked = true;
         h.checked_at = Some(chrono::Utc::now().timestamp_millis());
@@ -423,11 +447,11 @@ impl Upstreams {
         } else {
             h.successes = 0;
             h.failures = h.failures.saturating_add(1);
-            h.error = Some(if status.is_some() {
+            h.error = Some(reason.unwrap_or(if status.is_some() {
                 "unexpected_status"
             } else {
                 "connection_or_timeout"
-            });
+            }));
             if !probe || h.failures >= self.0.config.health.unhealthy_after {
                 h.down = true;
                 h.retry_at =
@@ -437,6 +461,16 @@ impl Upstreams {
                 e.failures.fetch_add(1, Ordering::Relaxed);
             }
         }
+    }
+    fn application_error(&self, e: &Endpoint, status: u16) {
+        let mut health = e.health.lock().unwrap_or_else(|p| p.into_inner());
+        health.checked = true;
+        health.checked_at = Some(chrono::Utc::now().timestamp_millis());
+        health.status = Some(status);
+        health.error = Some("upstream_response");
+        // Receiving an application 502/503/504 proves transport is available.
+        // Dedicated probes, rather than one application path, determine health.
+        e.failures.fetch_add(1, Ordering::Relaxed);
     }
     pub fn status(&self) -> Vec<BindingStatus> {
         self.0
@@ -452,7 +486,7 @@ impl Upstreams {
                         "unhealthy"
                     } else if !h.checked {
                         "unknown"
-                    } else if h.failures > 0 {
+                    } else if h.failures > 0 || h.error.is_some() {
                         "degraded"
                     } else {
                         "healthy"
@@ -537,6 +571,7 @@ impl Upstreams {
                     status,
                     started.elapsed().as_millis() as u64,
                     true,
+                    None,
                 );
             })
             .await;
@@ -581,7 +616,14 @@ impl Upstreams {
         let mut body = Some(body);
         let mut excluded = HashSet::new();
         // A bounded attempt budget prevents a large pool extending a request indefinitely.
-        for _ in 0..self.0.endpoints.len().min(self.0.config.max_attempts) {
+        let passive_single = self.passive_single();
+        let attempts = (if passive_single {
+            2
+        } else {
+            self.0.endpoints.len()
+        })
+        .min(self.0.config.max_attempts);
+        for attempt in 0..attempts {
             let Some(e) = self
                 .candidates(&excluded, sticky.as_deref())
                 .into_iter()
@@ -626,13 +668,27 @@ impl Upstreams {
                             | StatusCode::SERVICE_UNAVAILABLE
                             | StatusCode::GATEWAY_TIMEOUT
                     );
-                    self.outcome(
-                        &e,
-                        !failed,
-                        Some(response.status().as_u16()),
-                        started.elapsed().as_millis() as u64,
-                        false,
-                    );
+                    if failed
+                        && self
+                            .0
+                            .endpoints
+                            .iter()
+                            .filter(|endpoint| endpoint.config.enabled)
+                            .take(2)
+                            .count()
+                            == 1
+                    {
+                        self.application_error(&e, response.status().as_u16());
+                    } else {
+                        self.outcome(
+                            &e,
+                            !failed,
+                            Some(response.status().as_u16()),
+                            started.elapsed().as_millis() as u64,
+                            false,
+                            None,
+                        );
+                    }
                     if failed && replayable && !self.candidates(&excluded, None).is_empty() {
                         continue;
                     }
@@ -656,10 +712,23 @@ impl Upstreams {
                         }),
                     );
                 }
-                Err(()) => {
-                    self.outcome(&e, false, None, started.elapsed().as_millis() as u64, false);
+                Err(error) => {
+                    self.outcome(
+                        &e,
+                        false,
+                        None,
+                        started.elapsed().as_millis() as u64,
+                        false,
+                        Some(error.reason()),
+                    );
                     if !replayable {
                         break;
+                    }
+                    if passive_single && error == ForwardError::Transport && attempt + 1 < attempts
+                    {
+                        // Hyper discards the failed pooled connection. One safe
+                        // GET/HEAD retry can establish a fresh connection.
+                        excluded.remove(&e.config.id);
                     }
                 }
             }

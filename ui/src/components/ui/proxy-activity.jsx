@@ -12,12 +12,13 @@ export function compactRequests(value) {
 }
 
 export default function ProxyActivity({metric,activity,group,compact=false}) {
-  const monthly = Number(metric?.monthly_requests || 0), lifetime = Number(metric?.requests || 0);
-  const title = activity.tracking_since ? `${monthly.toLocaleString()} requests this calendar month (UTC); ${lifetime.toLocaleString()} lifetime requests observed since ${new Date(activity.tracking_since).toLocaleString()}. Monthly tracking available since ${new Date(activity.monthly_tracking_since || activity.tracking_since).toLocaleString()}. ${metric?.last_requested_at ? `Last requested ${new Date(metric.last_requested_at).toLocaleString()}. ` : ""}Includes bots and repeat requests; not unique visitors.${activity.coverage_warning ? " Some requests during a logging interruption may not be counted." : ""}` : "Request tracking is starting";
+  const monthly = Number(metric?.monthly_visits || 0), lifetime = Number(metric?.visits || 0);
+  const minutes = Math.round(Number(activity.visit_window_seconds || 1800)/60);
+  const title = `${activity.visits_tracking_since ? `${monthly.toLocaleString()} estimated visits this calendar month (UTC); ${lifetime.toLocaleString()} total visits since ${new Date(activity.visits_tracking_since).toLocaleString()}. A new visit starts after ${minutes} minutes without activity from the same client IP and browser. Shared network/browser combinations may be grouped; bots are included. ` : "Visit tracking is starting; past request totals cannot be converted into visitors. "}${Number(metric?.monthly_requests || 0).toLocaleString()} raw requests this month; ${Number(metric?.requests || 0).toLocaleString()} lifetime requests. ${metric?.last_requested_at ? `Last requested ${new Date(metric.last_requested_at).toLocaleString()}. ` : ""}${activity.coverage_warning ? " Counts may be incomplete during tracking interruptions." : ""}`;
   return <div title={title} className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
     {group && <><span>{group}</span><span aria-hidden="true">·</span></>}
-    {activity.error ? <span>Usage unavailable</span> : !activity.available ? <span>{activity.loading ? "Loading usage…" : "Tracking unavailable"}</span> : <>
-      <span className="whitespace-nowrap tabular-nums" aria-label={compact ? `${compactRequests(monthly)} this month` : undefined}>{compactRequests(monthly)}{compact ? "/mo" : " this month"}</span><span aria-hidden="true">·</span><span className="whitespace-nowrap tabular-nums">{compactRequests(lifetime)} lifetime</span>{!compact && <><span aria-hidden="true">·</span><span className="whitespace-nowrap">{metric?.last_requested_at ? activityAge(metric.last_requested_at) : "Not requested yet"}</span></>}
+    {activity.error ? <span>Usage unavailable</span> : !activity.available ? <span>{activity.loading ? "Loading usage…" : "Tracking unavailable"}</span> : !activity.visits_tracking_since ? <span>Visit tracking starting</span> : <>
+      <span className="whitespace-nowrap tabular-nums" aria-label={compact ? `${compactRequests(monthly)} visits this month` : undefined}>{compactRequests(monthly)}{compact ? "/mo" : " visits this month"}</span><span aria-hidden="true">·</span><span className="whitespace-nowrap tabular-nums">{compactRequests(lifetime)}{compact ? " visits" : " total visits"}</span>{!compact && <><span aria-hidden="true">·</span><span className="whitespace-nowrap">{metric?.last_requested_at ? activityAge(metric.last_requested_at) : "Not requested yet"}</span></>}
     </>}
   </div>;
 }

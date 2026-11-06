@@ -40,7 +40,12 @@ async fn backend(workers: &mut JoinSet<()>, name: &'static str, delay: u64) -> R
             if request.uri().path() == "/health" {
                 tokio::time::sleep(Duration::from_millis(delay)).await;
             }
+            if request.uri().path() == "/slow-response" {
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+            }
             let status = if !h.load(Ordering::SeqCst) {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else if request.uri().path() == "/camera-unavailable" {
                 StatusCode::SERVICE_UNAVAILABLE
             } else if request.uri().path() == "/application-error" {
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -236,6 +241,152 @@ async fn writes_and_application_errors_are_not_replayed() -> Result<()> {
     ensure!(response.status() == StatusCode::SERVICE_UNAVAILABLE);
     ensure!(a.writes.load(Ordering::SeqCst) == 1 && b.writes.load(Ordering::SeqCst) == 0);
     ensure!(get(&p, "/").await?.1.starts_with('B'));
+    workers.shutdown().await;
+    Ok(())
+}
+#[tokio::test]
+async fn one_camera_error_does_not_disable_other_application_paths() -> Result<()> {
+    let mut workers = JoinSet::new();
+    let a = backend(&mut workers, "A", 0).await?;
+    for active_health in [false, true] {
+        let mut config = routing();
+        config.health.enabled = active_health;
+        let p = pool(vec![binding("a", &a.url, 1, 1)], config)?;
+        let (status, body) = get(&p, "/camera-unavailable").await?;
+        ensure!(status == StatusCode::SERVICE_UNAVAILABLE && body.starts_with("A|"));
+        ensure!(
+            p.status()[0].state == "degraded"
+                && p.status()[0].last_error == Some("upstream_response")
+        );
+        ensure!(
+            get(&p, "/").await?.0 == StatusCode::OK,
+            "an application 503 must not black out unrelated paths"
+        );
+    }
+    workers.shutdown().await;
+    Ok(())
+}
+#[tokio::test]
+async fn passive_single_backend_recovers_without_waiting_for_a_cooldown() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    drop(listener);
+    let mut config = routing();
+    config.health.enabled = false;
+    config.health.cooldown_seconds = 60;
+    config.max_attempts = 1;
+    let p = pool(
+        vec![binding("a", &format!("http://{address}"), 1, 1)],
+        config,
+    )?;
+    ensure!(get(&p, "/").await?.0 == StatusCode::SERVICE_UNAVAILABLE);
+    let listener = TcpListener::bind(address).await?;
+    let server = tokio::spawn(async move {
+        axum::serve(listener, Router::new().fallback(|| async { "recovered" })).await
+    });
+    let result = get(&p, "/").await;
+    server.abort();
+    ensure!(
+        result?.1 == "recovered",
+        "the only passive backend must be tried immediately after recovery"
+    );
+    Ok(())
+}
+#[tokio::test]
+async fn single_backend_connection_retry_is_bounded_and_never_replays_writes_or_upgrades(
+) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    for (method, maximum, upgrade, expected) in [
+        ("GET", 2, false, 2),
+        ("POST", 2, false, 1),
+        ("GET", 1, false, 1),
+        ("GET", 2, true, 1),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let count = Arc::new(AtomicUsize::new(0));
+        let accepted = count.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok(Ok((mut stream, _))) =
+                    tokio::time::timeout(Duration::from_millis(400), listener.accept()).await
+                else {
+                    break;
+                };
+                let number = accepted.fetch_add(1, Ordering::SeqCst);
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                loop {
+                    let n = stream.read(&mut buffer).await.unwrap();
+                    if n == 0 {
+                        break;
+                    };
+                    request.extend_from_slice(&buffer[..n]);
+                    if request.windows(4).any(|bytes| bytes == b"\r\n\r\n") || request.len() > 8192
+                    {
+                        break;
+                    }
+                }
+                if number > 0 {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                        )
+                        .await
+                        .unwrap();
+                }
+                // First request deliberately loses its upstream connection.
+            }
+        });
+        let mut config = routing();
+        config.health.enabled = false;
+        config.max_attempts = maximum;
+        let p = pool(
+            vec![binding("a", &format!("http://{address}"), 1, 1)],
+            config,
+        )?;
+        let mut request = Request::builder().method(method).uri("/");
+        if upgrade {
+            request = request
+                .header("connection", "upgrade")
+                .header("upgrade", "websocket");
+        }
+        let response = p
+            .forward(request.body(if method == "POST" {
+                Body::from("execute once")
+            } else {
+                Body::empty()
+            })?)
+            .await;
+        let status = response.status();
+        let _ = to_bytes(response.into_body(), 4096).await?;
+        server.await?;
+        ensure!(
+            count.load(Ordering::SeqCst) == expected,
+            "{method}, max={maximum}, upgrade={upgrade}"
+        );
+        ensure!(
+            status
+                == if expected == 2 {
+                    StatusCode::OK
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+        );
+    }
+    Ok(())
+}
+#[tokio::test]
+async fn slow_response_is_not_replayed_and_does_not_black_out_other_paths() -> Result<()> {
+    let mut workers = JoinSet::new();
+    let a = backend(&mut workers, "A", 0).await?;
+    let mut config = routing();
+    config.health.enabled = false;
+    config.response_timeout_seconds = 1;
+    let p = pool(vec![binding("a", &a.url, 1, 1)], config)?;
+    ensure!(get(&p, "/slow-response").await?.0 == StatusCode::SERVICE_UNAVAILABLE);
+    ensure!(p.status()[0].requests == 1 && p.status()[0].last_error == Some("response_timeout"));
+    ensure!(get(&p, "/").await?.0 == StatusCode::OK);
     workers.shutdown().await;
     Ok(())
 }

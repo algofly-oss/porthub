@@ -35,6 +35,7 @@ on:
       - 'crates/porthub-terminal-cli/**'
       - 'crates/porthub-egress/**'
       - 'crates/porthub-transfer/**'
+      - 'crates/porthub-runtime/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
       - 'rust-toolchain.toml'
@@ -73,6 +74,7 @@ on:
       - 'crates/porthub-terminal-cli/**'
       - 'crates/porthub-egress/**'
       - 'crates/porthub-transfer/**'
+      - 'crates/porthub-runtime/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
       - 'rust-toolchain.toml'
@@ -107,7 +109,7 @@ jobs:
           changed=true
           if [[ "$before_revision" =~ ^[a-f0-9]{40}$ ]] && [[ "$before_revision" != 0000000000000000000000000000000000000000 ]]; then
             if git cat-file -e "$before_revision^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "$before_revision" >/dev/null 2>&1; then
-              if git diff --quiet "$before_revision" HEAD -- Cargo.toml Cargo.lock rust-toolchain.toml .cargo vendor crates/porthub-components crates/porthub-sync crates/porthub-tor crates/porthub-stats crates/porthub-console crates/porthub-terminal-cli crates/porthub-transfer crates/porthub-egress .github/workflows/component-contracts.yml; then
+              if git diff --quiet "$before_revision" HEAD -- Cargo.toml Cargo.lock rust-toolchain.toml .cargo vendor crates/porthub-components crates/porthub-sync crates/porthub-tor crates/porthub-stats crates/porthub-console crates/porthub-terminal-cli crates/porthub-transfer crates/porthub-runtime crates/porthub-egress .github/workflows/component-contracts.yml; then
                 changed=false
               fi
             fi

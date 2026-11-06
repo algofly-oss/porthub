@@ -17,6 +17,7 @@ use tokio::sync::watch;
 
 const STATE_ID: &str = "traefik-requests-v1";
 const RECENT_BATCHES: usize = 512;
+const MAX_RECENT_VISITORS: usize = 32_768;
 fn integer(doc: &Document, key: &str) -> i64 {
     match doc.get(key) {
         Some(Bson::Int64(n)) => *n,
@@ -66,6 +67,14 @@ fn merge(state: &Document, read: &journal::Read, valid: &HashSet<String>, now: &
         .map(str::to_owned)
         .collect();
     let mut warning = state.get_bool("coverage_warning").unwrap_or(false) || read.gap;
+    let mut visitors = state.get_document("recent_visitors").cloned().unwrap_or_default();
+    let mut watermark = integer(state, "visits_watermark");
+    let window = journal::VISIT_WINDOW_SECONDS * 1000;
+    // Retain enough history to deduplicate a late minute bucket still inside
+    // the accepted 30-minute lateness window, including its first request.
+    let retention = 2 * window + 60_000;
+    visitors = visitors.into_iter().filter(|(_, value)| value.as_i64().is_some_and(|seen| seen >= watermark.saturating_sub(retention))).collect();
+    let mut visit_events = Vec::new();
     for batch in &read.batches {
         if recent.contains(&batch.id) {
             continue;
@@ -91,6 +100,7 @@ fn merge(state: &Document, read: &journal::Read, valid: &HashSet<String>, now: &
             if record_month > store::string(metric, "month") {
                 metric.insert("month", record_month);
                 metric.insert("monthly_requests", 0_i64);
+                metric.insert("monthly_visits", 0_i64);
             }
             if record_month == store::string(metric, "month") {
                 metric.insert(
@@ -107,12 +117,43 @@ fn merge(state: &Document, read: &journal::Read, valid: &HashSet<String>, now: &
                 metric.insert("last_requested_at", timestamp);
                 metric.insert("last_host", &record.host);
             }
+            if record.client.is_some() { visit_events.push(record); }
         }
         recent.push_back(batch.id.clone());
         while recent.len() > RECENT_BATCHES {
             recent.pop_front();
         }
     }
+    // Keep the ledger, counters and journal checkpoint in the same CAS write.
+    // Replayed batches and a restarted edge/core cannot add a second visit.
+    visit_events.sort_by_key(|record| record.first_timestamp.unwrap_or(record.timestamp));
+    let mut visits_since = state.get_str("visits_tracking_since").ok().map(str::to_owned);
+    for record in visit_events {
+        let (Some(client), Some(first)) = (&record.client, record.first_timestamp) else { continue };
+        if record.timestamp < watermark.saturating_sub(window) {
+            warning = true; // Too old to prove uniqueness; never inflate the estimate.
+            continue;
+        }
+        let previous = visitors.get_i64(client).ok();
+        watermark = watermark.max(record.timestamp);
+        if previous.is_none() && visitors.len() >= MAX_RECENT_VISITORS {
+            visitors = visitors.into_iter().filter(|(_, value)| value.as_i64().is_some_and(|seen| seen >= watermark.saturating_sub(retention))).collect();
+            if visitors.len() >= MAX_RECENT_VISITORS { warning = true; continue; }
+        }
+        visitors.insert(client, previous.unwrap_or(first).max(record.timestamp));
+        visits_since.get_or_insert_with(|| stamp(first));
+        let metric = metrics.get_document_mut(&record.route_id).unwrap();
+        if previous.is_none_or(|last| first.saturating_sub(last) >= window) {
+            metric.insert("visits", integer(metric, "visits").saturating_add(1));
+            if month(&stamp(first)) == store::string(metric, "month") {
+                metric.insert("monthly_visits", integer(metric, "monthly_visits").saturating_add(1));
+            }
+            let last = chrono::DateTime::parse_from_rfc3339(store::string(metric, "last_visited_at"))
+                .ok().map(|date| date.timestamp_millis()).unwrap_or(i64::MIN);
+            if first >= last { metric.insert("last_visited_at", stamp(first)); }
+        }
+    }
+    visitors = visitors.into_iter().filter(|(_, value)| value.as_i64().is_some_and(|seen| seen >= watermark.saturating_sub(retention))).collect();
     let monthly = state
         .get_str("monthly_tracking_since")
         .ok()
@@ -126,7 +167,9 @@ fn merge(state: &Document, read: &journal::Read, valid: &HashSet<String>, now: &
         });
     doc! {"native_identity":&read.checkpoint.identity,"native_offset":read.checkpoint.offset as i64,
     "native_batches":recent.into_iter().map(Bson::String).collect::<Vec<_>>(),"metrics":metrics,
-    "updated_at":now,"monthly_tracking_since":monthly,"coverage_warning":warning}
+    "updated_at":now,"monthly_tracking_since":monthly,"coverage_warning":warning,
+    "recent_visitors":visitors,"visits_watermark":watermark,
+    "visits_tracking_since":visits_since.map(Bson::String).unwrap_or(Bson::Null)}
 }
 
 /// Returns true if the bounded read needs another immediate chunk.
@@ -269,6 +312,8 @@ pub async fn activity(State(app): State<Arc<App>>, Query(query): Query<std::coll
             };
             metric.insert("route_id", id);
             metric.insert("monthly_requests", monthly);
+            let monthly_visits = if store::string(&metric, "month") == month { integer(&metric, "monthly_visits") } else { 0 };
+            metric.insert("monthly_visits", monthly_visits);
             store::document(&metric)
         })
         .collect();
@@ -282,6 +327,8 @@ pub async fn activity(State(app): State<Arc<App>>, Query(query): Query<std::coll
         }
     }
     let mut body=json!({"tracking_since":store::field(&state,"tracking_since"),"month":month,"monthly_tracking_since":store::field(&state,"monthly_tracking_since"),"available":available,"coverage_warning":state.get_bool("coverage_warning").unwrap_or(false),"data":data});
+    body["visits_tracking_since"] = store::field(&state,"visits_tracking_since");
+    body["visit_window_seconds"] = json!(journal::VISIT_WINDOW_SECONDS);
     if !scoped && recent.is_none() {body["updated_at"]=store::field(&state,"updated_at");}
     if recent.is_some() {body["routes"]=json!(previews);}
     crate::inventory_query::conditional(&headers,body)
@@ -291,6 +338,81 @@ pub async fn activity(State(app): State<Arc<App>>, Query(query): Query<std::coll
 mod tests {
     use super::*;
     use journal::{Batch, Read, Record};
+    fn visitor_record(route: &str, client: Option<&str>, timestamp: i64, count: i64) -> Record {
+        Record { route_id:route.into(),host:"app.invalid".into(),timestamp,count,
+            client:client.map(str::to_owned),first_timestamp:client.map(|_|timestamp) }
+    }
+    fn visitor_read(records: Vec<Record>) -> Read {
+        Read { checkpoint:Checkpoint{identity:"visit-journal".into(),offset:100},
+            batches:vec![Batch{version:2,id:uuid::Uuid::new_v4().to_string(),coverage_warning:false,records}],gap:false,more:false }
+    }
+    fn apply_visitors(state: &mut Document, read: &Read) {
+        let fields=merge(state,read,&HashSet::from(["a".into(),"b".into()]),"2026-11-06T00:00:00Z");
+        state.extend(fields);
+    }
+    #[test]
+    fn visits_debounce_refreshes_inactivity_and_persists_with_replay_checkpoint() {
+        let start=1_783_000_000_000;let a="a".repeat(64);let b="b".repeat(64);let c="c".repeat(64);
+        let mut state=doc!{};
+        let first=visitor_read(vec![visitor_record("a",Some(&a),start,3),visitor_record("a",Some(&a),start+600_000,50)]);
+        apply_visitors(&mut state,&first);apply_visitors(&mut state,&first);
+        let metric=state.get_document("metrics").unwrap().get_document("a").unwrap();
+        assert_eq!(integer(metric,"requests"),53);assert_eq!(integer(metric,"visits"),1);
+        apply_visitors(&mut state,&visitor_read(vec![visitor_record("a",Some(&b),start+300_000,1),visitor_record("b",Some(&c),start+300_000,1)]));
+        apply_visitors(&mut state,&visitor_read(vec![visitor_record("a",Some(&a),start+35*60_000,1)]));
+        assert_eq!(integer(state.get_document("metrics").unwrap().get_document("a").unwrap(),"visits"),2,"35 minutes after first request is only 25 minutes after last activity");
+        // Rehydrate exactly the BSON state stored by the Mongo CAS operation.
+        state=mongodb::bson::from_slice(&mongodb::bson::to_vec(&state).unwrap()).unwrap();
+        apply_visitors(&mut state,&visitor_read(vec![visitor_record("a",Some(&a),start+65*60_000,1)]));
+        let metrics=state.get_document("metrics").unwrap();
+        assert_eq!(integer(metrics.get_document("a").unwrap(),"visits"),3);
+        assert_eq!(integer(metrics.get_document("a").unwrap(),"monthly_visits"),3);
+        assert_eq!(integer(metrics.get_document("b").unwrap(),"visits"),1);
+    }
+    #[test]
+    fn historical_requests_are_not_relabelled_as_visitors() {
+        let mut state=doc!{"metrics":{"a":{"requests":999_i64}}};
+        apply_visitors(&mut state,&visitor_read(vec![visitor_record("a",None,1_783_000_000_000,1)]));
+        assert_eq!(integer(state.get_document("metrics").unwrap().get_document("a").unwrap(),"visits"),0);
+        assert!(state.get_str("visits_tracking_since").is_err());
+        apply_visitors(&mut state,&visitor_read(vec![visitor_record("a",Some(&"a".repeat(64)),1_783_000_000_001,1)]));
+        let metric=state.get_document("metrics").unwrap().get_document("a").unwrap();
+        assert_eq!(integer(metric,"requests"),1001);assert_eq!(integer(metric,"visits"),1);
+    }
+    #[test]
+    fn active_visit_crossing_utc_month_is_not_counted_again() {
+        let start=chrono::DateTime::parse_from_rfc3339("2026-10-31T23:55:00Z").unwrap().timestamp_millis();
+        let client="a".repeat(64);let mut state=doc!{};
+        for minutes in [0,10,35] {
+            apply_visitors(&mut state,&visitor_read(vec![visitor_record("a",Some(&client),start+minutes*60_000,1)]));
+        }
+        let metric=state.get_document("metrics").unwrap().get_document("a").unwrap();
+        assert_eq!(integer(metric,"visits"),1);assert_eq!(integer(metric,"monthly_visits"),0);
+        apply_visitors(&mut state,&visitor_read(vec![visitor_record("a",Some(&client),start+75*60_000,1)]));
+        let metric=state.get_document("metrics").unwrap().get_document("a").unwrap();
+        assert_eq!(integer(metric,"visits"),2);assert_eq!(integer(metric,"monthly_visits"),1);
+    }
+    #[test]
+    fn delayed_repeat_is_not_recounted_when_another_proxy_advances_event_time() {
+        let start=1_783_000_000_000;let mut state=doc!{};
+        apply_visitors(&mut state,&visitor_read(vec![visitor_record("a",Some(&"a".repeat(64)),start,1)]));
+        apply_visitors(&mut state,&visitor_read(vec![visitor_record("b",Some(&"b".repeat(64)),start+40*60_000,1)]));
+        apply_visitors(&mut state,&visitor_read(vec![visitor_record("a",Some(&"a".repeat(64)),start+15*60_000,1)]));
+        assert_eq!(integer(state.get_document("metrics").unwrap().get_document("a").unwrap(),"visits"),1);
+    }
+    #[test]
+    fn visit_ledger_capacity_never_evicts_active_visitors_and_inflates_counts() {
+        let start=1_783_000_000_000;
+        let visitors:Document=(0..MAX_RECENT_VISITORS).map(|i|(format!("{i:064x}"),Bson::Int64(start))).collect();
+        let mut state=doc!{"recent_visitors":visitors,"visits_watermark":start};
+        apply_visitors(&mut state,&visitor_read(vec![visitor_record("a",Some(&"f".repeat(64)),start,1)]));
+        assert!(state.get_bool("coverage_warning").unwrap());
+        assert_eq!(state.get_document("recent_visitors").unwrap().len(),MAX_RECENT_VISITORS);
+        assert_eq!(integer(state.get_document("metrics").unwrap().get_document("a").unwrap(),"visits"),0);
+        apply_visitors(&mut state,&visitor_read(vec![visitor_record("a",Some(&"f".repeat(64)),start+62*60_000,1)]));
+        assert_eq!(state.get_document("recent_visitors").unwrap().len(),1);
+        assert_eq!(integer(state.get_document("metrics").unwrap().get_document("a").unwrap(),"visits"),1);
+    }
     #[test]
     fn preserves_history_deduplicates_and_handles_out_of_order_months() {
         let valid = HashSet::from(["a".to_owned(), "b".to_owned()]);
@@ -311,24 +433,28 @@ mod tests {
                     count: 3,
                     timestamp: timestamp("2026-11-02T00:00:00Z"),
                     host: "new.invalid".into(),
+                    client: None, first_timestamp: None,
                 },
                 Record {
                     route_id: "a".into(),
                     count: 2,
                     timestamp: timestamp("2026-10-30T00:00:00Z"),
                     host: "old.invalid".into(),
+                    client: None, first_timestamp: None,
                 },
                 Record {
                     route_id: "b".into(),
                     count: 7,
                     timestamp: timestamp("2026-10-20T00:00:00Z"),
                     host: "b.invalid".into(),
+                    client: None, first_timestamp: None,
                 },
                 Record {
                     route_id: "gone".into(),
                     count: 100,
                     timestamp: timestamp("2026-10-20T00:00:00Z"),
                     host: "deleted.invalid".into(),
+                    client: None, first_timestamp: None,
                 },
             ],
         };

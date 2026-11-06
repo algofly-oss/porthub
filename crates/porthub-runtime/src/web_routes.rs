@@ -189,7 +189,7 @@ impl WebRoutes {
         };
         if (secure && route.route.https) || (!secure && route.route.http) {
             if let Some(activity) = &self.activity {
-                activity.record(&route.route.id, &host);
+                activity.record_request(&route.route.id, &host, request);
             }
             Selection::Proxy(route.proxy.clone())
         } else {
