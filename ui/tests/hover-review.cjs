@@ -58,9 +58,11 @@ async function colours(locator) {
       await page.getByRole("button",{name:"Expand navigation",exact:true}).click();
       await hover(page.getByRole("button",{name:"Create machine",exact:true}),"primary button",{blue:true});
       await hover(page.getByRole("button",{name:"Groups",exact:true}),"secondary button");
-      const status=page.getByRole("group",{name:"Machine status",exact:true});
-      await hover(status.getByRole("button",{name:"All",exact:true}),"active status tab",{blue:true});
-      await hover(status.getByRole("button",{name:"Online",exact:true}),"inactive status tab");
+      const status=page.getByLabel("Machine status",{exact:true});
+      await hover(status,"machine status dropdown",{changes:false});
+      await status.click();
+      await hover(page.getByRole("option",{name:"Online",exact:true}),"machine status option");
+      await page.keyboard.press("Escape");
       await hover(navigation.getByRole("button",{name:"Proxies",exact:true}),"navigation item");
       const row=page.getByRole("table",{name:"Machines",exact:true}).locator("tbody > tr").first();
       await hover(row,"machine row");
@@ -73,6 +75,7 @@ async function colours(locator) {
       await page.keyboard.press("Escape");
       await page.getByRole("button",{name:"Configure orion-dev-02",exact:true}).click();
       const machine=page.getByRole("dialog",{name:/^Configure orion-dev-02/});
+      await machine.getByRole("button",{name:"Ports",exact:true}).click();
       const table=machine.getByRole("table",{name:"Forwarded ports",exact:true});
       assert.notDeepEqual((await colours(table)).background,(await colours(machine)).background,"Popup table is separate from the dialog in both themes");
       await hover(table.locator("tbody > tr").first(),"popup port row");

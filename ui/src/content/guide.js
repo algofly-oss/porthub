@@ -183,7 +183,7 @@ export const guideArticles = [
           },
           {
             "type": "paragraph",
-            "text": "The default All machine view omits disabled machines. Online and Offline filter by connection state."
+            "text": "Use the status dropdown to show All, Online, Offline or Disabled machines. All includes disabled machines; the Online and Offline views show enabled machines by connection state."
           }
         ]
       },

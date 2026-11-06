@@ -13,7 +13,6 @@ import { useCallback, useContext, useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { useRouter } from "next/router";
 import { Button as WorkspaceButton } from "@/components/ui/button";
-import { StatusTabs } from "@/components/ui/status-tabs";
 import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
 import utc from "dayjs/plugin/utc";
@@ -1046,7 +1045,7 @@ export default function Home({ onStatsChange, active = true }) {
                 <>
                   <InventoryToolbar label="Machine tools"
                     search={<SearchField label="Search machines" value={query} onChange={setQuery} placeholder="Search machines…" />}
-                    status={<StatusTabs label="Machine status" value={statusFilter} onChange={setStatusFilter} options={[{value:"all",label:"All"},{value:"online",label:"Online"},{value:"offline",label:"Offline"},{value:"disabled",label:"Disabled"}]} />}
+                    status={<SearchSelect label="Machine status" searchable={false} className="md:!w-32" value={statusFilter} onChange={setStatusFilter} options={[{value:"all",label:"All"},{value:"online",label:"Online"},{value:"offline",label:"Offline"},{value:"disabled",label:"Disabled"}]} />}
                     filtered={groupFilter !== ALL_GROUPS_FILTER || sort !== "name"}
                     filters={[
                       {label:"Group",control:<InventorySelect kind="groups" label="Filter machine group" value={groupFilter} onChange={setGroupFilter} extraOptions={[{value:ALL_GROUPS_FILTER,label:"All groups"}]} />},
