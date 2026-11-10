@@ -75,12 +75,20 @@ fn preference() -> Result<Option<Preference>> {
     );
     Ok(Some(saved))
 }
+fn registration_scopes(user_only: bool) -> Result<&'static [bool]> {
+    #[cfg(windows)]
+    {
+        ensure!(!user_only,"Per-user Windows services are not supported; use the system registration without --user");
+        Ok(&[false])
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(if user_only { &[true] } else { &[false, true] })
+    }
+}
 fn tenants(user_only: bool) -> Result<Vec<Tenant>> {
     let mut rows = Vec::new();
-    for user in [false, true] {
-        if user_only && !user {
-            continue;
-        }
+    for &user in registration_scopes(user_only)? {
         let layout = if user {
             crate::service::Layout::user()?
         } else {
@@ -421,6 +429,19 @@ mod tests {
             gateway: gateway.into(),
             user,
             enabled: true,
+        }
+    }
+    #[test]
+    fn image_tenants_only_inspect_supported_service_scopes() {
+        #[cfg(windows)]
+        {
+            assert_eq!(registration_scopes(false).unwrap(), &[false]);
+            assert!(registration_scopes(true).is_err());
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(registration_scopes(false).unwrap(), &[false, true]);
+            assert_eq!(registration_scopes(true).unwrap(), &[true]);
         }
     }
     #[test]
