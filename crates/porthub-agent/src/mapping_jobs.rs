@@ -441,6 +441,9 @@ pub async fn supervise(cancel: CancellationToken) -> Result<()> {
                 crate::profile::write_private(&log_path, b"", false)?;
             }
             let log = OpenOptions::new().append(true).open(log_path)?;
+            if log.metadata()?.len() > 1024 * 1024 {
+                log.set_len(0)?;
+            }
             let mut command = tokio::process::Command::new(executable()?);
             command
                 .args(["mapping-worker", &job.id])
@@ -461,9 +464,12 @@ pub async fn supervise(cancel: CancellationToken) -> Result<()> {
 }
 fn executable() -> Result<PathBuf> {
     let current = std::env::current_exe()?;
+    let invoked = std::env::args_os().next().map(PathBuf::from);
     for user in [false, true] {
         if let Ok(path) = crate::bootstrap::cli_path(user, None) {
-            if path.canonicalize().ok() == current.canonicalize().ok() {
+            if invoked.as_ref() == Some(&path) && path.is_file()
+                || path.canonicalize().ok() == current.canonicalize().ok()
+            {
                 return Ok(path);
             }
         }
