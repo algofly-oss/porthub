@@ -56,7 +56,7 @@ const base=process.env.PORTHUB_TEST_UI_URL;assert(base);
   await form.getByRole('button',{name:'Create room',exact:true}).click();await form.waitFor({state:'hidden'});
   const row=owner.getByRole('table',{name:'Public image rooms'}).getByRole('row').filter({hasText:'Quick room'});await row.waitFor();
   assert.equal(await owner.getByLabel('Latest room URL').inputValue(),`${base}/drop?room=${roomId}`);
-  async function roomAction(name){await row.getByRole('button',{name:'Room actions for Quick room'}).click();await owner.getByRole('menuitem',{name,exact:true}).click();}
+  async function roomAction(name){try {await row.getByRole('button',{name:'Room actions for Quick room'}).click({timeout:8000});await owner.getByRole('menuitem',{name,exact:true}).click();}catch(error){require('node:fs').writeFileSync('/tmp/porthub-room-production-failure.html',await owner.content());await owner.screenshot({path:'/tmp/porthub-room-production-failure.png'});console.error('Room action failed:',name,'width:',width,'rooms:',rooms.length,'url:',owner.url(),await owner.locator('body').innerText());throw error;}}
   await roomAction('Disable room');await row.getByText('Disabled',{exact:true}).waitFor();await roomAction('Enable room');await row.getByText('Enabled',{exact:true}).waitFor();
   const a=await client();await a.goto(`${base}/drop?room=${roomId}`);await a.getByRole('heading',{name:'Quick room',exact:true}).waitFor();
   await a.getByLabel('Choose images').setInputFiles({name:'alice.png',mimeType:'image/png',buffer:png});await a.getByRole('row').filter({hasText:'alice.png'}).waitFor();
@@ -67,14 +67,14 @@ const base=process.env.PORTHUB_TEST_UI_URL;assert(base);
   await b.getByLabel('Choose images').setInputFiles({name:'bob.png',mimeType:'image/png',buffer:png});await b.getByRole('button',{name:'Delete bob.png',exact:true}).waitFor();
   const bid=await b.evaluate(()=>localStorage.getItem('porthub:image-room-visitor:v1'));await b.reload();await b.getByRole('button',{name:'Delete bob.png',exact:true}).waitFor();assert.equal(await b.evaluate(()=>localStorage.getItem('porthub:image-room-visitor:v1')),bid);
   await a.getByRole('button',{name:'Refresh images',exact:true}).click();await a.getByRole('row').filter({hasText:'bob.png'}).waitFor();assert.equal(await a.getByRole('button',{name:'Delete bob.png',exact:true}).count(),0);
-  await roomAction('Inspect images');const inspection=owner.getByRole('dialog',{name:'Inspect room',exact:true});await inspection.getByRole('button',{name:'Delete bob.png',exact:true}).click();
+  await roomAction('Inspect images');const inspection=owner.getByRole('region',{name:'Room inspection',exact:true});await inspection.getByRole('button',{name:'Delete bob.png',exact:true}).click();
   const confirm=owner.getByRole('dialog',{name:'Delete image',exact:true});await confirm.getByRole('button',{name:'Delete image',exact:true}).click();await confirm.waitFor({state:'hidden'});await inspection.getByRole('row').filter({hasText:'bob.png'}).waitFor({state:'detached'});
   assert(await inspection.isVisible(),'Room inspection stays open after deleting an image');
-  await inspection.getByRole('button',{name:'Close room inspection',exact:true}).click();
+  await inspection.getByRole('button',{name:'← Back to rooms',exact:true}).click();
   await roomAction('Room settings');const settings=owner.getByRole('dialog',{name:'Room settings',exact:true});await settings.getByLabel('Image lifetime (minutes)',{exact:true}).fill('2');await settings.getByRole('button',{name:'Save settings',exact:true}).click();await settings.waitFor({state:'hidden'});
   assert.equal(rooms[0].image_ttl_seconds,120);
   if(process.env.PORTHUB_TEST_SCREENSHOT_DIR){require('node:fs').mkdirSync(process.env.PORTHUB_TEST_SCREENSHOT_DIR,{recursive:true});await a.screenshot({path:`${process.env.PORTHUB_TEST_SCREENSHOT_DIR}/room-${width}.png`});}
-  await a.getByRole('button',{name:'Delete alice.png',exact:true}).click();const ownDelete=a.getByRole('dialog',{name:'Delete image',exact:true});await ownDelete.getByRole('button',{name:'Delete image',exact:true}).click();await ownDelete.waitFor({state:'hidden'});assert.equal(images.length,0);
+  await a.getByRole('button',{name:'Delete alice.png',exact:true}).click();const ownDelete=a.getByRole('dialog',{name:'Delete image',exact:true});await ownDelete.waitFor();for(let key=0;key<5;key++){await a.keyboard.press('Tab');assert(await ownDelete.evaluate(node=>node.contains(document.activeElement)),'Keyboard focus stays in the dialog');}await ownDelete.getByRole('button',{name:'Delete image',exact:true}).click();await ownDelete.waitFor({state:'hidden'});await a.waitForFunction(()=>document.getElementById('__next').getAttribute('aria-hidden')!=='true');assert.equal(images.length,0);
 
   await roomAction('Delete room');const deletion=owner.getByRole('dialog',{name:'Delete room',exact:true});await deletion.getByRole('button',{name:'Delete room',exact:true}).click();await deletion.waitFor({state:'hidden'});await owner.getByText('Create your first public room',{exact:true}).waitFor();
   assert.equal(nativeDialogs,0);assert.deepEqual(errors,[]);for(const context of contexts)await context.close();

@@ -10,6 +10,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "aria-hidden": "1.2.3",
     "@emotion/react": "^11.10.6",
     "@mantine/carousel": "^6.0.4",
     "@mantine/core": "^6.0.4",

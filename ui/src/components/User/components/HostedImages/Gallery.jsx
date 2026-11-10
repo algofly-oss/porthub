@@ -6,7 +6,7 @@ import toast from "react-hot-toast";
 import { IconPhoto, IconUpload, IconCopy, IconTrash, IconRefresh, IconArrowUpRight, IconKeyboard } from "@tabler/icons-react";
 import { PageHeader, EmptyState } from "@/components/ui/workspace";
 import { Button } from "@/components/ui/button";
-import { Dialog } from "@/components/ui/dialog";
+import Dialog from "./ImageDialog";
 import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell } from "@/components/ui/table";
 import ResultsPagination from "@/components/ui/results-pagination";
 import { copyText } from "@/shared/utils/clipboard";

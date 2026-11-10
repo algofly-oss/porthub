@@ -3,7 +3,7 @@ import axios from "axios";
 import toast from "react-hot-toast";
 import { IconCopy, IconDotsVertical, IconPhoto, IconPlus, IconRefresh } from "@tabler/icons-react";
 import { Button } from "@/components/ui/button";
-import { Dialog } from "@/components/ui/dialog";
+import Dialog from "./ImageDialog";
 import { Input } from "@/components/ui/input";
 import { Menu } from "@/components/ui/menu";
 import { Table, TableHeader, TableHead, TableRow, TableBody, TableCell } from "@/components/ui/table";
@@ -62,6 +62,10 @@ export default function ImageRooms({ active }) {
     catch (error) { toast.error(message(error)); }
     finally { setBusy(false); }
   }
+  if (inspect) return <section aria-label="Room inspection" className="flex h-full min-h-0 flex-col">
+    <div className="mx-auto w-full max-w-[1600px] shrink-0 px-3 pt-3 sm:px-5"><Button variant="ghost" size="sm" onClick={() => { setInspect(null); load(); }}>← Back to rooms</Button></div>
+    <div className="min-h-0 flex-1"><Gallery key={inspect.id} active={active} endpoint={`${ENDPOINT}/${inspect.id}/images`} roomMode ownerView /></div>
+  </section>;
   return <div className="workspace-page">
     <PageHeader title="Public rooms" actions={<><Button variant="secondary" size="icon" aria-label="Refresh rooms" disabled={loading || busy} onClick={() => load()}><IconRefresh size={18} /></Button><Button disabled={busy} onClick={() => settings(null)}><IconPlus size={18} />New room</Button></>} />
     <p className="mb-3 shrink-0 text-xs leading-5 text-muted-foreground">Anyone with a room link can drop images without an account. Each room has its own 512 MiB; your personal images stay separate.</p>
@@ -77,7 +81,7 @@ export default function ImageRooms({ active }) {
     <Dialog opened={Boolean(edit)} onClose={() => { if (!busy) setEdit(null); }} title={edit?.id ? "Room settings" : "New public room"} size="sm">
       <form onSubmit={save} className="space-y-4"><label className="block text-sm">Name<Input autoFocus value={name} maxLength={80} onChange={event => setName(event.target.value)} placeholder="Image room" className="mt-2" /></label><label className="block text-sm">Image lifetime (minutes)<Input type="number" min="1" max="43200" step="1" required value={minutes} onChange={event => setMinutes(event.target.value)} className="mt-2" /></label><p className="text-xs leading-5 text-muted-foreground">The timer starts separately for each upload. The room stays live until you delete it. Disabling pauses new uploads. Oldest images are removed when its storage fills.</p><div className="flex justify-end gap-2"><Button type="button" variant="secondary" disabled={busy} onClick={() => setEdit(null)}>Cancel</Button><Button type="submit" disabled={busy}>{busy ? "Saving…" : edit?.id ? "Save settings" : "Create room"}</Button></div></form>
     </Dialog>
-    <Dialog opened={Boolean(inspect)} onClose={() => { setInspect(null); load(); }} title="Inspect room" size="90%" closeButtonProps={{ "aria-label": "Close room inspection" }}><div className="h-[70vh] min-h-0">{inspect && <Gallery key={inspect.id} active={active} endpoint={`${ENDPOINT}/${inspect.id}/images`} roomMode ownerView />}</div></Dialog>
+
     <Dialog opened={Boolean(deleting)} onClose={() => { if (!busy) setDeleting(null); }} title="Delete room" size="sm"><p className="text-sm text-muted-foreground">Delete {deleting?.name} and all its images? The room link and its image links will stop working.</p><div className="mt-6 flex justify-end gap-2"><Button variant="secondary" disabled={busy} onClick={() => setDeleting(null)}>Cancel</Button><Button variant="destructive" disabled={busy} onClick={remove}>{busy ? "Deleting…" : "Delete room"}</Button></div></Dialog>
   </div>;
 }
