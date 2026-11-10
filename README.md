@@ -180,6 +180,9 @@ login. macOS and Windows restart user mappings at login. An explicit `stop`
 removes the saved configuration and prevents recovery. Gateway exposures retain
 their assigned public port when reconnecting; if it is unavailable they retry
 instead of silently switching ports. A forwarded target must still be reachable.
+`PORTHUB_STATE_DIR` can place saved mappings in a separate state directory.
+Its recovery service retains that directory setting across restarts and stays
+separate from the default mapping service.
 Terminal sharing and other detached tools retain their existing behavior.
 
 ## Agent development builds

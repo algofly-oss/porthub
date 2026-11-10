@@ -39,7 +39,7 @@ async fn wait_for(mut check: impl FnMut() -> bool) -> Result<()> {
 async fn saved_forward_recovers_after_worker_loss_and_stop_prevents_resurrection() -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir()?;
-    let root = temp.path().join("porthub/mappings");
+    let root = temp.path().join("runtime/mappings");
     std::fs::create_dir_all(&root)?;
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
     let remote = TcpListener::bind("127.0.0.1:0").await?;

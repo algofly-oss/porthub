@@ -78,11 +78,40 @@ struct Status {
     pid: u32,
     message: Option<String>,
 }
+fn state_override() -> Result<Option<String>> {
+    std::env::var_os("PORTHUB_STATE_DIR")
+        .map(|value| {
+            let value = value
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("PORTHUB_STATE_DIR must be Unicode"))?;
+            ensure!(
+                Path::new(&value).is_absolute() && !value.chars().any(char::is_control),
+                "PORTHUB_STATE_DIR must be an absolute path without control characters"
+            );
+            Ok(value)
+        })
+        .transpose()
+}
+fn recovery_suffix() -> Result<String> {
+    use sha2::{Digest, Sha256};
+    Ok(state_override()?
+        .map(|value| {
+            format!(
+                "-{}",
+                &format!("{:x}", Sha256::digest(value.as_bytes()))[..12]
+            )
+        })
+        .unwrap_or_default())
+}
 fn root() -> Result<PathBuf> {
-    let path = directories::ProjectDirs::from("dev", "porthub", "porthub")
-        .context("Cannot locate user configuration")?
-        .config_dir()
-        .join("mappings");
+    let path = if let Some(configured) = state_override()? {
+        PathBuf::from(configured).join("mappings")
+    } else {
+        directories::ProjectDirs::from("dev", "porthub", "porthub")
+            .context("Cannot locate user configuration")?
+            .config_dir()
+            .join("mappings")
+    };
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -526,7 +555,8 @@ async fn install_recovery() -> Result<()> {
         crate::service::Layout::user()?
     };
     std::fs::create_dir_all(&layout.units)?;
-    let path = layout.units.join("porthub-mappings.service");
+    let unit = format!("porthub-mappings{}.service", recovery_suffix()?);
+    let path = layout.units.join(&unit);
     let exe = executable()?
         .to_str()
         .context("CLI path must be Unicode")?
@@ -537,12 +567,23 @@ async fn install_recovery() -> Result<()> {
         .replace('"', "\\\"")
         .replace('%', "%%")
         .replace('$', "$$");
+    let environment = state_override()?
+        .map(|value| {
+            format!(
+                "Environment=\"PORTHUB_STATE_DIR={}\"\n",
+                value
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+                    .replace('%', "%%")
+            )
+        })
+        .unwrap_or_default();
     let wanted = if uid == 0 {
         "multi-user.target"
     } else {
         "default.target"
     };
-    let contents=format!("# Managed by PortHub port mapping recovery\n[Unit]\nDescription=PortHub saved port mappings\nAfter=network-online.target\n[Service]\nType=simple\nExecStart=\"{escaped}\" mapping-supervisor\nRestart=always\nRestartSec=5\nUMask=0077\nTimeoutStopSec=20\n[Install]\nWantedBy={wanted}\n");
+    let contents=format!("# Managed by PortHub port mapping recovery\n[Unit]\nDescription=PortHub saved port mappings\nAfter=network-online.target\n[Service]\nType=simple\nExecStart=\"{escaped}\" mapping-supervisor\n{environment}Restart=always\nRestartSec=5\nUMask=0077\nTimeoutStopSec=20\n[Install]\nWantedBy={wanted}\n");
     if path.try_exists()? {
         ensure!(
             crate::profile::read_private(&path)?
@@ -553,40 +594,31 @@ async fn install_recovery() -> Result<()> {
     crate::profile::write_private(&path, contents.as_bytes(), true)?;
     if uid == 0 {
         command("systemctl", &["daemon-reload"]).await?;
-        command(
-            "systemctl",
-            &["enable", "--now", "porthub-mappings.service"],
-        )
-        .await
+        command("systemctl", &["enable", "--now", &unit]).await
     } else {
         command("systemctl", &["--user", "daemon-reload"]).await?;
-        command(
-            "systemctl",
-            &["--user", "enable", "--now", "porthub-mappings.service"],
-        )
-        .await
+        command("systemctl", &["--user", "enable", "--now", &unit]).await
     }
 }
 #[cfg(target_os = "macos")]
 async fn install_recovery() -> Result<()> {
     let layout = crate::service::Layout::user()?;
     std::fs::create_dir_all(&layout.units)?;
-    let path = layout.units.join("dev.porthub.mappings.plist");
+    let label = format!("dev.porthub.mappings{}", recovery_suffix()?);
+    let path = layout.units.join(format!("{label}.plist"));
     let exe = executable()?
         .to_str()
         .context("CLI path must be Unicode")?
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;");
-    let contents=format!("<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>Label</key><string>dev.porthub.mappings</string><key>ProgramArguments</key><array><string>{exe}</string><string>mapping-supervisor</string></array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>5</integer><key>Umask</key><integer>63</integer></dict></plist>");
+    let environment=state_override()?.map(|value|format!("<key>EnvironmentVariables</key><dict><key>PORTHUB_STATE_DIR</key><string>{}</string></dict>",value.replace('&',"&amp;").replace('<',"&lt;").replace('>',"&gt;"))).unwrap_or_default();
+    let contents=format!("<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>Label</key><string>{label}</string><key>ProgramArguments</key><array><string>{exe}</string><string>mapping-supervisor</string></array>{environment}<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>5</integer><key>Umask</key><integer>63</integer></dict></plist>");
     crate::profile::write_private(&path, contents.as_bytes(), true)?;
     let domain = format!("gui/{}", rustix::process::getuid().as_raw());
-    if command(
-        "launchctl",
-        &["print", &format!("{domain}/dev.porthub.mappings")],
-    )
-    .await
-    .is_ok()
+    if command("launchctl", &["print", &format!("{domain}/{label}")])
+        .await
+        .is_ok()
     {
         return Ok(());
     }
@@ -609,10 +641,20 @@ async fn install_recovery() -> Result<()> {
         .to_owned();
     let script = root.join("recover.vbs");
     // An OS startup shortcut runs the per-user supervisor without a console.
-    let contents=format!("CreateObject(\"WScript.Shell\").Run Chr(34) & \"{}\" & Chr(34) & \" mapping-supervisor\", 0, False\r\n",exe.replace('"',"\"\""));
+    let environment = state_override()?
+        .map(|value| {
+            format!(
+                "shell.Environment(\"PROCESS\")(\"PORTHUB_STATE_DIR\") = \"{}\"\r\n",
+                value.replace('"', "\"\"")
+            )
+        })
+        .unwrap_or_default();
+    let contents=format!("Set shell = CreateObject(\"WScript.Shell\")\r\n{environment}shell.Run Chr(34) & \"{}\" & Chr(34) & \" mapping-supervisor\", 0, False\r\n",exe.replace('"',"\"\""));
     let appdata = std::env::var_os("APPDATA").context("Cannot locate Windows startup folder")?;
-    let startup = PathBuf::from(appdata)
-        .join("Microsoft/Windows/Start Menu/Programs/Startup/PortHub mappings.vbs");
+    let startup = PathBuf::from(appdata).join(format!(
+        "Microsoft/Windows/Start Menu/Programs/Startup/PortHub mappings{}.vbs",
+        recovery_suffix()?
+    ));
     crate::profile::write_private(&script, contents.as_bytes(), true)?;
     crate::profile::write_private(&startup, contents.as_bytes(), true)?;
     command(
