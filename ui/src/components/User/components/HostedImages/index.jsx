@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import axios from "axios";
+import { Popover } from "@mantine/core";
 import apiRoutes from "@/shared/routes/apiRoutes";
 import toast from "react-hot-toast";
-import { IconPhoto, IconUpload, IconCopy, IconTrash, IconRefresh, IconArrowUpRight, IconKeyboard, IconChevronDown } from "@tabler/icons-react";
+import { IconPhoto, IconUpload, IconCopy, IconTrash, IconRefresh, IconArrowUpRight, IconKeyboard } from "@tabler/icons-react";
 import { PageHeader, EmptyState } from "@/components/ui/workspace";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell } from "@/components/ui/table";
+import ResultsPagination from "@/components/ui/results-pagination";
 import { copyText } from "@/shared/utils/clipboard";
 
 const ENDPOINT = apiRoutes.hostedImages;
@@ -34,6 +36,10 @@ export default function HostedImages({ active = true }) {
   const [dragging, setDragging] = useState(false);
   const [latest, setLatest] = useState(null);
   const [preview, setPreview] = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
   const busy = useRef(false);
   const mutation = useRef(0);
   const input = useRef(null);
@@ -80,6 +86,7 @@ export default function HostedImages({ active = true }) {
           const hosted = last;
           setImages(current => [hosted, ...current.filter(row => row.id !== hosted.id)]);
           setLatest(hosted);
+          setPage(1);
         } catch (error) { toast.error(errorMessage(error, `Could not upload ${file.name || "image"}. Try again.`)); }
       }
       if (last) {
@@ -101,20 +108,23 @@ export default function HostedImages({ active = true }) {
   }, [active, upload]);
 
   const remove = async (image) => {
-    // Deletion is permanent and revokes shared links; keep this confirmation
-    // separate from the immediate capture/upload/copy workflow.
-    if (!window.confirm("Delete this image? Its public link will stop working.")) return;
     mutation.current++; setDeleting(image.id);
     try {
       await axios.delete(`${ENDPOINT}/${image.id}`);
       setImages(current => current.filter(row => row.id !== image.id));
       setLatest(current => current?.id === image.id ? null : current);
       setPreview(current => current?.id === image.id ? null : current);
+      setDeleteTarget(null);
       toast.success("Image deleted. Public link disabled.");
     } catch (error) { toast.error(errorMessage(error, "Could not delete image. Try again.")); }
     finally { setDeleting(""); }
   };
   const used = images.reduce((sum, image) => sum + image.size, 0);
+  const pages = Math.max(1, Math.ceil(images.length / pageSize));
+  const currentPage = Math.min(page, pages);
+  const visibleImages = images.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  useEffect(() => { if (page > pages) setPage(pages); }, [page, pages]);
+  useEffect(() => { if (!active) { setPreview(null); setDeleteTarget(null); setHelpOpen(false); } }, [active]);
   return <div className="workspace-page" onDragEnter={event => {
     if (!Array.from(event.dataTransfer.types).includes("Files")) return;
     event.preventDefault(); dragDepth.current++; setDragging(true);
@@ -138,20 +148,31 @@ export default function HostedImages({ active = true }) {
     </div>}
     <div className="mb-2 flex shrink-0 flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground"><span>{images.length} {images.length === 1 ? "image" : "images"}<span className="mx-2 text-border">/</span>{(used / 1024 / 1024).toFixed(1)} of 512 MiB used</span><span>Anyone with a link can view it.</span></div>
     {loadError && <p role="alert" className="mb-3 text-sm text-red-500">{loadError}</p>}
-    <div className="data-scroll rounded-xl border border-border bg-surface" style={{ flex: "0 1 auto" }}>
+    <div className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-border bg-surface" style={{ flex: "0 1 auto" }}>
+    <div className="data-scroll">
     {loading && !images.length ? <p role="status" className="p-8 text-center text-sm text-muted-foreground">Loading images…</p> : !images.length && !loadError ? <EmptyState icon={IconPhoto} title="Your images will appear here" description="Take a screenshot and paste it here. Uploading starts immediately, and your public link is copied." /> : <Table aria-label="Hosted images">
       <TableHeader><TableRow><TableHead>Image</TableHead><TableHead className="hidden w-28 md:table-cell">Resolution</TableHead><TableHead className="hidden w-24 sm:table-cell">Size</TableHead><TableHead className="hidden w-32 lg:table-cell">Uploaded</TableHead><TableHead className="hidden w-40 xl:table-cell">Public link</TableHead><TableHead className="w-32 text-right sm:w-40">Actions</TableHead></TableRow></TableHeader>
-      <TableBody>{images.map(image => <TableRow key={image.id}>
+      <TableBody>{visibleImages.map(image => <TableRow key={image.id}>
         <TableCell><div className="flex min-w-0 items-center gap-3"><button type="button" onClick={() => setPreview(image)} aria-label={`Preview ${image.name}`} title="View full image" className="flex h-12 w-16 shrink-0 items-center justify-center overflow-hidden rounded-md border border-border bg-background transition-colors hover:border-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"><img src={image.path} alt="" loading="lazy" className="max-h-full max-w-full object-contain" /></button><div className="min-w-0"><button type="button" title={image.name} className="block max-w-full truncate text-left text-sm font-medium hover:text-primary" onClick={() => setPreview(image)}>{image.name}</button><p className="mt-1 truncate text-xs text-muted-foreground md:hidden">{image.width} × {image.height} · {Math.ceil(image.size / 1024)} KiB</p></div></div></TableCell>
         <TableCell className="hidden text-xs tabular-nums text-muted-foreground md:table-cell">{image.width} × {image.height}</TableCell>
         <TableCell className="hidden text-xs tabular-nums text-muted-foreground sm:table-cell">{Math.ceil(image.size / 1024)} KiB</TableCell>
         <TableCell className="hidden text-xs text-muted-foreground lg:table-cell">{new Date(`${image.created_at}Z`).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</TableCell>
         <TableCell className="hidden xl:table-cell"><a href={image.path} target="_blank" rel="noreferrer" className="inline-flex max-w-full items-center gap-1.5 font-mono text-xs text-muted-foreground hover:text-primary"><span className="truncate">{image.path.split("/").pop()}</span><IconArrowUpRight className="shrink-0" size={13} /></a></TableCell>
-        <TableCell><div className="flex items-center justify-end gap-1"><Button variant="secondary" size="sm" onClick={() => copy(image)} aria-label={`Copy link for ${image.name}`}><IconCopy size={15} /><span className="hidden sm:inline">Copy link</span></Button><Button variant="ghost" size="icon" aria-label={`Delete ${image.name}`} disabled={Boolean(deleting)} onClick={() => remove(image)}><IconTrash size={16} /></Button></div></TableCell>
+        <TableCell><div className="flex items-center justify-end gap-1"><Button variant="secondary" size="sm" onClick={() => copy(image)} aria-label={`Copy link for ${image.name}`}><IconCopy size={15} /><span className="hidden sm:inline">Copy link</span></Button><Button variant="ghost" size="icon" aria-label={`Delete ${image.name}`} disabled={Boolean(deleting)} onClick={() => setDeleteTarget(image)}><IconTrash size={16} /></Button></div></TableCell>
       </TableRow>)}</TableBody>
     </Table>}
     </div>
-    <details className="group mt-4 shrink-0 rounded-xl border border-border bg-surface text-sm"><summary className="flex cursor-pointer items-center gap-2 px-4 py-3 text-xs font-medium"><IconKeyboard size={16} />Desktop shortcut<span className="ml-auto text-xs font-normal text-muted-foreground">Off by default</span><IconChevronDown size={14} className="shrink-0 transition-transform group-open:rotate-180" /></summary><div className="max-h-[40vh] space-y-4 overflow-y-auto border-t border-border px-4 py-4 text-xs leading-6 text-muted-foreground"><p>Take a screenshot normally, then press <kbd className="rounded border border-border px-1.5 py-0.5 font-mono text-foreground">Ctrl+Shift+U</kbd> to upload the clipboard image and copy its public URL. Screenshot shortcuts stay unchanged.</p><div className="grid gap-4 md:grid-cols-2"><div><p className="mb-1 font-medium text-foreground">Enable on this desktop</p><code className="block select-all rounded-md bg-background px-3 py-2 text-foreground">porthub image shortcut enable</code><p className="mt-1">Disable: <code>porthub image shortcut disable</code></p></div><div><p className="mb-1 font-medium text-foreground">Choose where images are hosted</p><code className="block select-all rounded-md bg-background px-3 py-2 text-foreground">porthub image tenant set &lt;ID&gt;</code><p className="mt-1">Find IDs: <code>porthub image tenant list</code>. Unique 6+ character prefixes work. Algofly is preferred by default.</p></div></div><p>Requires an updated agent in your desktop session. Automatic shortcut setup supports GNOME-based Linux desktops. Browser uploads always use this portal and need no agent.</p></div></details>
+    <ResultsPagination count={images.length} noun="Images" page={currentPage} pages={pages} pageSize={pageSize} onPage={setPage} onPageSize={size => { setPageSize(size); setPage(1); }} />
+    </div>
+    <div className="mt-3 flex shrink-0 items-center gap-2 text-xs text-muted-foreground"><IconKeyboard size={15} /><span>Ctrl+Shift+U</span><Popover opened={helpOpen} onChange={setHelpOpen} width={340} position="top-start" withinPortal zIndex={350}><Popover.Target><button type="button" aria-label="Desktop shortcut setup" className="text-primary hover:underline" onClick={() => setHelpOpen(value => !value)}>Setup</button></Popover.Target><Popover.Dropdown className="!rounded-xl !border-border !bg-dialog !p-4 !text-foreground"><p className="text-sm font-medium">Desktop shortcut</p><p className="mb-3 mt-1 text-xs text-muted-foreground">Off by default. Run in your desktop terminal:</p>{[
+      ["Enable", "porthub image shortcut enable"],
+      ["Disable", "porthub image shortcut disable"],
+      ["Tenant", "porthub image tenant set <ID>"],
+    ].map(([label, command]) => <div key={label} className="mb-2 flex items-center gap-2 last:mb-0"><code className="min-w-0 flex-1 select-all text-[11px]">{command}</code><button type="button" aria-label={`Copy ${label.toLowerCase()} command`} className="rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground" onClick={() => copyText(command).then(() => toast.success("Command copied")).catch(() => toast.error("Select and copy the command"))}><IconCopy size={14} /></button></div>)}<p className="mt-3 text-[11px] text-muted-foreground">Automatic setup: GNOME Linux. Algofly is the default tenant.</p></Popover.Dropdown></Popover></div>
+    <Dialog opened={Boolean(deleteTarget)} onClose={() => { if (!deleting) setDeleteTarget(null); }} title="Delete image" size="sm" closeOnEscape={!deleting} closeOnClickOutside={!deleting} closeButtonProps={{ disabled: Boolean(deleting) }}>
+      <p className="text-sm leading-6 text-muted-foreground">Delete <span className="break-all font-medium text-foreground">{deleteTarget?.name}</span>? Its public link will stop working.</p>
+      <div className="mt-6 flex justify-end gap-2"><Button variant="secondary" onClick={() => setDeleteTarget(null)} disabled={Boolean(deleting)}>Cancel</Button><Button variant="destructive" onClick={() => deleteTarget && remove(deleteTarget)} disabled={Boolean(deleting)}>{deleting ? "Deleting…" : "Delete image"}</Button></div>
+    </Dialog>
     <Dialog opened={Boolean(preview)} onClose={() => setPreview(null)} title={preview?.name || "Image preview"} size="90%">
       {preview && <><div className="flex max-h-[70vh] min-h-[160px] items-center justify-center overflow-auto rounded-lg bg-background p-3"><img src={preview.path} alt={preview.name} className="h-auto max-h-[70vh] max-w-full object-contain" /></div><div className="mt-4 flex flex-wrap items-center justify-between gap-3"><span className="text-xs text-muted-foreground">{preview.width} × {preview.height} · {Math.ceil(preview.size / 1024)} KiB · Original resolution</span><div className="flex items-center gap-2"><Button variant="secondary" size="sm" asChild><a href={preview.path} target="_blank" rel="noreferrer"><IconArrowUpRight size={15} />Open original</a></Button><Button size="sm" onClick={() => copy(preview)}><IconCopy size={15} />Copy link</Button></div></div></>}
     </Dialog>
