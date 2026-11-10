@@ -67,6 +67,12 @@ porthub image shortcut status
 porthub image shortcut disable
 # Upload manually without enabling a global shortcut:
 porthub image
+# URL delivery preference (per desktop user; copy is the default):
+porthub image mode
+porthub image mode paste
+porthub image mode copy
+# Override delivery for just one upload:
+porthub image --mode paste
 # For an agent installed with --user:
 porthub image --user
 # Save your preferred image-upload tenant (a unique 6+ character prefix works):
@@ -83,6 +89,12 @@ CLI prefers an installed `porthub.algofly.in` registration, otherwise the sole
 available tenant. Ambiguous choices require an explicit selection. A missing or
 disabled preferred tenant never silently redirects an upload to another tenant.
 Browser uploads always use the portal currently open.
+
+Paste mode also pastes the copied URL into the focused input after uploading.
+If the active window changes during upload, PortHub leaves the URL copied and
+skips automatic paste. X11 requires `xdotool`; macOS requires desktop automation
+permission. Windows uses native keyboard input. Wayland currently supports copy
+mode only. Clipboard delivery preferences do not enable the shortcut itself.
 
 Take a screenshot with your desktop tool so it puts the image on the clipboard,
 press your shortcut, then paste the URL anywhere. The command uploads only when
@@ -108,6 +120,45 @@ delete the oldest images in that account until there is enough space. Their
 public links stop working; there is no age-based expiry. The image-count limit
 still requires manual deletion. Public responses use `Cache-Control: no-store` so a deleted
 image is unavailable on the next request; downloaded copies cannot be revoked.
+
+## TCP forwarding and persistent port mappings
+
+Forward any TCP service reachable from this machine. The target needs neither
+SSH nor a PortHub agent. Private PortHub DNS names and IPs work over existing
+permitted network routes; forwarding does not bypass those access rules.
+
+```sh
+# Listen on all IPv4 interfaces, on the same port as the target:
+porthub forward 192.168.1.20:3000
+# Bind only to localhost and use a different local port:
+porthub forward peer.phub:3000 --bind localhost --local-port 8080
+# Bind a specific local interface and recover after reboot:
+porthub forward 192.168.1.20:3000 --host 192.168.1.10 -p 8080 -d
+porthub forward ls
+porthub forward status ID
+porthub forward stop ID
+# Exposures have the same management commands:
+porthub expose 8080 --detach
+porthub expose ls
+porthub expose status ID
+porthub expose stop ID
+# Adopt already running detached exposures without interrupting them:
+porthub expose recover
+```
+
+`--bind` defaults to `0.0.0.0`; `localhost` means `127.0.0.1`. Targets also
+support `localhost` and bracketed IPv6 addresses. `-d`, `-D`, and `--detach` run
+forwards in the background. IDs may be shortened to a unique prefix; a unique
+local port also selects a mapping. Foreground forwards end when interrupted.
+
+Detached port mappings save their desired configuration for the current OS
+user and retry after worker failures or restarts. Linux uses a systemd user
+service with lingering enabled, so recovery runs at boot without waiting for
+login. macOS and Windows restart user mappings at login. An explicit `stop`
+removes the saved configuration and prevents recovery. Gateway exposures retain
+their assigned public port when reconnecting; if it is unavailable they retry
+instead of silently switching ports. A forwarded target must still be reachable.
+Terminal sharing and other detached tools retain their existing behavior.
 
 ## Agent development builds
 

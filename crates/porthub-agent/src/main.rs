@@ -89,6 +89,7 @@ fn requires_system_privileges(args: &Args) -> bool {
             (*port_override).is_some_and(is_privileged_port)
                 || target.parse::<u16>().is_ok_and(is_privileged_port)
         }
+        Command::Forward(args) => args.command.is_none() && args.target.as_deref().and_then(|s|porthub_agent::forward::destination(s).ok()).is_some_and(|(_,port)|is_privileged_port(args.local_port.unwrap_or(port))),
         Command::Expose { .. } => false,
         #[cfg(feature="local-tor")]
         Command::Proxy {command}=>matches!(command,porthub_agent::proxy_cli::Command::Start {port,..} if is_privileged_port(*port)),
@@ -181,6 +182,13 @@ struct HttpPublicOptions {
 enum Command {
     /// Upload the clipboard image and copy its public URL. Bind this to a desktop shortcut.
     Image(porthub_agent::images::Args),
+    /// Forward a reachable TCP port to this machine; no SSH or remote agent required.
+    #[command(visible_alias = "bind")]
+    Forward(porthub_agent::forward::Args),
+    #[command(hide = true)]
+    MappingSupervisor,
+    #[command(hide = true)]
+    MappingWorker { id: String },
     /// Test DNS, TCP, verified TLS, and authenticated control without changing host networking.
     Diagnose {
         /// Registration profile to diagnose (uses its existing enrolled identity).
@@ -331,7 +339,7 @@ enum Command {
         #[command(flatten)]
         public: HttpPublicOptions,
     },
-    /// Expose a local port temporarily through the PortHub gateway.
+    /// Publish a local port through the gateway; detached mappings recover after restart.
     #[command(name = "expose")]
     Expose {
         #[arg(value_name = "PORT|list|stop")]
@@ -344,7 +352,7 @@ enum Command {
         /// Create a temporary web proxy on this subdomain label.
         #[arg(long)]
         subdomain: Option<String>,
-        /// Keep the exposure running in the background.
+        /// Run in the background and recover the exposure after restart.
         #[arg(long, short = 'd')]
         detach: bool,
         /// Use a per-user registration instead of the system service.
@@ -1292,6 +1300,9 @@ async fn main() -> Result<()> {
         Some(Command::Tor {command})=>tor_command(command),
         #[cfg(feature="local-tor")]
         Some(Command::Proxy {command})=>porthub_agent::proxy_cli::run(command,cancel).await,
+        Some(Command::Forward(args)) => porthub_agent::forward::run(args,cancel).await,
+        Some(Command::MappingSupervisor) => porthub_agent::mapping_jobs::supervise(cancel).await,
+        Some(Command::MappingWorker { id }) => porthub_agent::mapping_jobs::worker(&id,cancel).await,
         Some(Command::Start(args)) => {
             tenant_action(args, porthub_agent::service::Action::Start).await
         }
@@ -1435,14 +1446,15 @@ async fn main() -> Result<()> {
             #[cfg(any(unix, windows))]
             {
                 let selected_layout = layout(user)?;
-                let jobs = porthub_agent::expose::job_layout()?;
                 let target = target.unwrap_or_default();
                 if worker {
                     return porthub_agent::expose::broker_worker(selected_layout, registration.context("missing exposure registration")?, session_id.context("missing exposure session identity")?, target.parse()?, port, subdomain, cancel).await;
                 }
                 return match target.as_str() {
-                    "list" => porthub_agent::expose::list(&jobs),
-                    "stop" => porthub_agent::expose::stop(&jobs, id.as_deref().context("usage: porthub expose stop ID")?),
+                    "list" | "ls" => porthub_agent::mapping_jobs::list(true),
+                    "status" => porthub_agent::mapping_jobs::status(true,id.as_deref()),
+                    "recover" => porthub_agent::expose::enable_existing_recovery().await,
+                    "stop" => porthub_agent::mapping_jobs::stop(true,id.as_deref()).await,
                     _ => porthub_agent::expose::start_registered(user, registration.as_deref(), target.parse().context("usage: porthub expose LOCAL_PORT [--port EXTERNAL_PORT] [--subdomain NAME] [--detach]")?, port, subdomain, detach, cancel).await,
                 };
             }
@@ -1686,6 +1698,25 @@ async fn main() -> Result<()> {
 mod cli_tests {
     use super::{print_help, requires_system_privileges, short_version_requested, Args};
     use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn forward_defaults_and_management_match_the_cli_contract() {
+        let parsed=Args::try_parse_from(["porthub","forward","remote.test:3000"]).unwrap();
+        if let Some(super::Command::Forward(args))=parsed.command {
+            assert_eq!(args.bind.to_string(),"0.0.0.0");assert!(args.local_port.is_none() && !args.detach);
+        } else {panic!("Expected forward");}
+        for flag in ["-d","-D","--detach"] {
+            let parsed=Args::try_parse_from(["porthub","forward","remote.test:3000","--host","localhost","-p","8080",flag]).unwrap();
+            assert!(!requires_system_privileges(&parsed));
+            if let Some(super::Command::Forward(args))=parsed.command {
+                assert!(args.detach);assert_eq!(args.bind.to_string(),"127.0.0.1");assert_eq!(args.local_port,Some(8080));
+            } else {panic!("Expected forward");}
+        }
+        for action in ["ls","list","status","stop"] {
+            assert!(Args::try_parse_from(["porthub","forward",action]).is_ok());
+        }
+        assert!(Args::try_parse_from(["porthub","forward"]).is_err());
+    }
 
     #[cfg(all(unix,feature="terminal-direct"))]
     #[test]

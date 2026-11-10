@@ -1,6 +1,6 @@
 [package]
 name = "porthub-agent"
-version = "1.11.3"
+version = "1.11.4"
 edition.workspace = true
 publish.workspace = true
 
@@ -96,6 +96,6 @@ route_manager = { version = "=0.2.9", features = ["async"] }
 [target."cfg(windows)".dependencies]
 windows-service = "0.8.1"
 windows-registry = "0.6.1"
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_System_Pipes", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_System_Pipes", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
 tun-rs = { version = "=2.8.13", default-features = false, features = ["async"] }
 route_manager = { version = "=0.2.9", features = ["async"] }

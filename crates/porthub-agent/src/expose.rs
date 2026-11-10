@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     time::Duration,
 };
 
@@ -298,11 +297,12 @@ pub async fn broker_worker(
     let layout = job_layout()?;
     let lock_path = exposure_dir(&layout, true)?.join(format!("{id}.lock"));
     let lock = OpenOptions::new()
-        .create_new(true)
+        .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)?;
-    lock.lock_exclusive()?;
+    lock.try_lock_exclusive().context("Exposure already has an owner")?;
     let mut session = Session {
         id: id.clone(),
         pid: std::process::id(),
@@ -404,82 +404,9 @@ pub async fn start_registered(
         )
         .await;
     }
-    let layout = job_layout()?;
-    let mut command = Command::new(std::env::current_exe()?);
-    command.args([
-        "expose",
-        &local_port.to_string(),
-        "--worker",
-        "--registration",
-        &registration.id,
-        "--session-id",
-        &id,
-    ]);
-    if user {
-        command.arg("--user");
-    }
-    if let Some(port) = external_port {
-        command.arg("--port").arg(port.to_string());
-    }
-    if let Some(domain) = subdomain {
-        command.arg("--subdomain").arg(domain);
-    }
-    let log = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(exposure_dir(&layout, true)?.join(format!("{id}.log")))?;
-    #[cfg(windows)]
-    let detached_log = log.try_clone()?;
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log.try_clone()?))
-        .stderr(Stdio::from(log));
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-    #[cfg(windows)]
-    let mut child = crate::detached_windows::spawn(&command, &detached_log)?;
-    #[cfg(not(windows))]
-    let mut child = command.spawn()?;
-    let ready = tokio::time::timeout(Duration::from_secs(50), async {
-        loop {
-            if let Ok(session) = load_session(&session_path(&layout, &id, false)?) {
-                if session.status == "running" {
-                    return Ok::<_, anyhow::Error>(session);
-                }
-                if session.status == "failed" {
-                    bail!(
-                        "{}",
-                        session.message.as_deref().unwrap_or("exposure failed")
-                    );
-                }
-            }
-            ensure!(
-                child.try_wait()?.is_none(),
-                "background exposure stopped before becoming ready"
-            );
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await;
-    match ready {
-        Ok(Ok(session)) => {
-            print_session(&session);
-            println!("Stop with: porthub expose stop {}", &id[..12]);
-            Ok(())
-        }
-        result => {
-            let _ = child.kill();
-            let _ = child.wait();
-            match result {
-                Ok(Err(error)) => Err(error),
-                Err(_) => bail!("background exposure timed out"),
-                _ => unreachable!(),
-            }
-        }
-    }
+    crate::mapping_jobs::start(crate::mapping_jobs::Spec::Exposure {
+        user, registration: registration.id, local_port, external_port, subdomain,
+    }, true, cancel).await
 }
 
 /// Used only by the detached HTTP parent to print its own child's exposure.
@@ -504,4 +431,71 @@ mod exposure_selection_tests {
         assert!(error.contains("inside this WSL distribution"));assert!(error.contains("Windows and other WSL distributions"));assert!(error.contains("porthub ls"));
         assert!(!layout.state.exists());Ok(())
     }
+}
+
+// Runtime state is separate from durable mapping intent.
+pub(crate) fn session_active(id: &str) -> Result<bool> {
+    let layout=job_layout()?;
+    let path=exposure_dir(&layout,false)?.join(format!("{id}.lock"));
+    if !path.try_exists()? {return Ok(false);}
+    let lock=OpenOptions::new().read(true).write(true).open(path)?;
+    match lock.try_lock_exclusive() {
+        Ok(())=>{FileExt::unlock(&lock)?;Ok(false)},
+        Err(e) if e.raw_os_error()==fs2::lock_contended_error().raw_os_error()=>Ok(true),
+        Err(e)=>Err(e.into()),
+    }
+}
+pub(crate) fn session_ready(id: &str) -> Result<bool> {
+    let layout=job_layout()?;
+    Ok(load_session(&session_path(&layout,id,false)?).is_ok_and(|s|s.status=="running") && session_active(id)?)
+}
+pub(crate) fn ready_port(id: &str) -> Result<Option<u16>> {
+    if !session_ready(id)? {return Ok(None);}
+    Ok(load_session(&session_path(&job_layout()?,id,false)?)?.external_port)
+}
+pub(crate) fn describe_session(id: &str) -> Result<()> {
+    if let Ok(session)=load_session(&session_path(&job_layout()?,id,false)?) {print_session(&session);}
+    Ok(())
+}
+/// Adopt already running detached workers without interrupting their sockets.
+pub async fn enable_existing_recovery() -> Result<()> {
+    for session in read_sessions(&job_layout()?)? {
+        if session.status!="running" || !session_active(&session.id)? {continue;}
+        // Only detached legacy workers are migrated; foreground sessions stay temporary.
+        let pid=sysinfo::Pid::from_u32(session.pid);
+        let mut system=sysinfo::System::new();
+        system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]),true,
+            sysinfo::ProcessRefreshKind::nothing().with_cmd(sysinfo::UpdateKind::Always));
+        if !system.process(pid).is_some_and(|p|p.cmd().iter().any(|s|s=="--worker") && p.cmd().iter().any(|s|s=="expose")) {continue;}
+        let mut found=None;
+        for user in [false,true] {
+            #[cfg(windows)] if user {continue;}
+            let layout=if user {crate::service::Layout::user()?} else {crate::service::Layout::system()?};
+            if crate::service::readable::list(&layout)?.iter().any(|r|!r.private && r.id==session.profile.to_string_lossy()) {found=Some(user);break;}
+        }
+        if let Some(user)=found {
+            crate::mapping_jobs::adopt_exposure(session.id,crate::mapping_jobs::Spec::Exposure {
+                user,registration:session.profile.to_string_lossy().into_owned(),local_port:session.local_port,
+                external_port:session.external_port,subdomain:session.subdomain,
+            })?;
+        }
+    }
+    crate::mapping_jobs::enable_recovery().await
+}
+
+pub(crate) fn list_unmanaged() -> Result<usize> {
+    let mut count=0;
+    for session in read_sessions(&job_layout()?)? {
+        if crate::mapping_jobs::is_saved(&session.id)? {continue;}
+        println!("{}  {}  recovery:false", &session.id[..12], if session_active(&session.id)? {&session.status} else {"stopped"});
+        print_session(&session);count+=1;
+    }
+    Ok(count)
+}
+pub(crate) fn legacy_status(selector: Option<&str>) -> Result<()> {
+    let rows=read_sessions(&job_layout()?)?.into_iter().filter(|s|selector.is_none_or(|id|s.id.starts_with(id)||s.local_port.to_string()==id)).collect::<Vec<_>>();
+    ensure!(rows.len()==1,"Select an exposure ID from porthub expose ls");
+    let session=&rows[0];
+    println!("Status: {}; recovery:false", if session_active(&session.id)? {&session.status} else {"stopped"});
+    print_session(session);Ok(())
 }

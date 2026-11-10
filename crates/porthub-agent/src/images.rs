@@ -15,12 +15,17 @@ pub struct Args {
     /// Override the saved image tenant for this upload; accepts a unique ID prefix.
     #[arg(long)]
     pub registration: Option<String>,
+    /// Override copy/paste delivery for this upload.
+    #[arg(long, value_enum)]
+    pub mode: Option<crate::image_delivery::Mode>,
     #[command(subcommand)]
     pub command: Option<ImageCommand>,
 }
 
 #[derive(clap::Subcommand)]
 pub enum ImageCommand {
+    /// Show or save URL delivery: copy (default) or paste into the focused input.
+    Mode { #[arg(value_enum)] mode: Option<crate::image_delivery::Mode> },
     /// Enable, disable or inspect the opt-in Ctrl+Shift+U desktop shortcut.
     Shortcut {
         #[command(subcommand)]
@@ -253,10 +258,11 @@ fn clipboard_png() -> Result<Vec<u8>> {
 pub async fn run(mut args: Args) -> Result<()> {
     if let Some(command) = args.command.take() {
         ensure!(
-            args.registration.is_none(),
-            "Use tenant set <ID> to save a preference"
+            args.registration.is_none() && args.mode.is_none(),
+            "Upload overrides cannot be combined with image configuration commands"
         );
         return match command {
+            ImageCommand::Mode { mode } => crate::image_delivery::configure(mode),
             ImageCommand::Tenant { command } => tenant_command(args.user, command),
             ImageCommand::Shortcut { action } => crate::image_shortcut::run(action, args.user),
         };
@@ -282,6 +288,8 @@ async fn upload_clipboard(args: Args) -> Result<()> {
         .open(dirs.cache_dir().join("clipboard-upload.lock"))?;
     lock.try_lock_exclusive()
         .context("An image upload is already running")?;
+    let mode = match args.mode { Some(mode) => mode, None => crate::image_delivery::preference()? };
+    let focus = if mode == crate::image_delivery::Mode::Paste { Some(crate::image_delivery::Focus::capture()?) } else { None };
     let rows = tenants(args.user)?;
     let preferred = if args.registration.is_some() || args.user {
         None
@@ -329,9 +337,14 @@ async fn upload_clipboard(args: Args) -> Result<()> {
     let url = parsed.to_string();
     tokio::task::spawn_blocking(move || {
         ensure!(clipboard_png().is_ok_and(|current| current == original),"Image uploaded. Clipboard changed during upload, so it was preserved. Copy the URL from Hosted images.");
-        copy_url(&url)
+        copy_url(&url)?;
+        if let Some(focus) = focus {
+            ensure!(arboard::Clipboard::new()?.get_text().is_ok_and(|current| current == url), "Clipboard changed before paste; paste the image URL manually.");
+            focus.paste().context("Image link copied, but direct paste could not complete")?;
+        }
+        Ok::<_, anyhow::Error>(())
     }).await??;
-    notify("Image link copied. Paste it anywhere.");
+    notify(if mode == crate::image_delivery::Mode::Paste { "Image link pasted." } else { "Image link copied. Paste it anywhere." });
     Ok(())
 }
 

@@ -74,3 +74,6 @@ pub mod tor_component;
 pub mod images;
 
 pub mod image_shortcut;
+pub mod image_delivery;
+pub mod forward;
+pub mod mapping_jobs;
