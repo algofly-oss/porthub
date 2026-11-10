@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 porthub-components = { path = "../porthub-components" }
 porthub-terminal = { path = "../porthub-terminal", features = ["ssh"] }
 unicode-normalization = "0.1"

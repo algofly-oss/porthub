@@ -6,7 +6,7 @@ const withPWA = require("next-pwa")({
   runtimeCaching: [
     {
       // Live inventory and account data must never survive in an offline cache.
-      urlPattern: ({ url }) => url.pathname.startsWith("/api/") || url.pathname.startsWith("/socket.io/"),
+      urlPattern: ({ url }) => url.pathname.startsWith("/api/") || url.pathname.startsWith("/i/") || url.pathname.startsWith("/socket.io/"),
       handler: "NetworkOnly",
       options: { plugins: [{
         handlerDidError: async () => new Response(JSON.stringify({detail:"PortHub is unreachable. Reconnect to your network and try again."}), {

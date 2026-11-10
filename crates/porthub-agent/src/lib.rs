@@ -70,3 +70,7 @@ mod terminal_ui;
 
 #[cfg(feature = "local-tor")]
 pub mod tor_component;
+
+pub mod images;
+
+pub mod image_shortcut;

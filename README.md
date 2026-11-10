@@ -45,6 +45,67 @@ Production keeps read-only roots and excludes build toolchains and source trees.
 The default images are `porthub:core`, `porthub:edge` and `porthub:firewall`,
 with the release version recorded in image labels.
 
+## Hosted images and screenshot links
+
+Open **Hosted images** in the portal. Paste a screenshot with Ctrl+V (Cmd+V on
+macOS), drag images onto the page, or choose **Add images**. Upload starts
+immediately and copies the last image's public URL. If your browser blocks
+clipboard writes, use **Copy link**. Every image has a preview and a delete
+control; deleting it disables its public URL. Anyone with the link can view the
+raw image without signing in. Links use `/i/aB3dE.png`: five case-sensitive random
+letters/digits, excluding confusing characters. A database unique index prevents
+collisions; generation retries automatically, and deleting an image frees its
+code for random reuse. Images remain until deleted and are stored in the
+existing persistent MongoDB database, independent of the uploading machine.
+
+The desktop shortcut is **disabled by default**. On GNOME-based Linux desktops,
+enable automatic Ctrl+Shift+U registration from your desktop session:
+
+```sh
+porthub image shortcut enable
+porthub image shortcut status
+porthub image shortcut disable
+# Upload manually without enabling a global shortcut:
+porthub image
+# For an agent installed with --user:
+porthub image --user
+# Save your preferred image-upload tenant (a unique 6+ character prefix works):
+porthub image tenant list
+porthub image tenant set REGISTRATION_ID
+# Clear the preference; Algofly is preferred automatically:
+porthub image tenant reset
+# Override the saved tenant for one upload:
+porthub image --registration REGISTRATION_ID
+```
+
+Tenant preferences are saved per desktop user. Without a saved preference, the
+CLI prefers an installed `porthub.algofly.in` registration, otherwise the sole
+available tenant. Ambiguous choices require an explicit selection. A missing or
+disabled preferred tenant never silently redirects an upload to another tenant.
+Browser uploads always use the portal currently open.
+
+Take a screenshot with your desktop tool so it puts the image on the clipboard,
+press your shortcut, then paste the URL anywhere. The command uploads only when
+invoked and preserves the clipboard if upload fails. It uses the running agent's
+local authenticated broker, so desktop shortcuts do not need access to machine
+credentials or elevated privileges. Update both the agent and server for this
+feature. Run the command in the logged-in graphical session; headless services
+cannot read a desktop clipboard. On Linux, install `wl-clipboard` for Wayland or
+`xclip` for X11 so the copied URL survives the CLI exiting. Clipboard access on
+Wayland also depends on compositor data-control support. Choose an unused shortcut
+if your desktop already reserves Ctrl+Shift+U. macOS users can bind the command
+through a Shortcuts/Automator action; Windows users can invoke it from their
+preferred shortcut launcher.
+
+Set `PORT_HUB_PUBLIC_BASE_URL` to the public HTTPS portal address so copied links
+use the externally reachable gateway. With no configured base URL, clients
+resolve image paths against their portal/gateway address. Hosted images accept
+PNG, JPEG, WebP, and GIF up to 8 MiB and 32 megapixels; images are decoded and
+published as PNG with metadata removed. Animated images use their first frame.
+The resulting PNG must also fit within 8 MiB. Each account can store up to 1,000
+images and 512 MiB. Public responses use `Cache-Control: no-store` so a deleted
+image is unavailable on the next request; downloaded copies cannot be revoked.
+
 ## Agent development builds
 
 The `porthub` CLI links the transfer, tunnel, mesh, egress, packet-network and
@@ -86,9 +147,9 @@ so Rust cache cleanup cannot remove them. Local helper builds keep their existin
 Start releases from the default branch so later versions can restore the same
 build caches. GitHub isolates caches written on one version tag from other tags;
 merely caching a tag-only workflow does not solve reuse across releases.
-The automatic main/tag release workflow is being integrated with deployment
-gates; it is not yet enabled on `main`. Until that integration is shipped, the
-existing explicit publication fallback is:
+Main and version-tag pushes run the continuous release workflow, which builds
+and validates the complete platform bundle before publication. The explicit
+publication fallback, when no automatic release is already running, is:
 
 ```sh
 gh workflow run agent-platforms.yml --ref main -f platform=all -F publish_release=true

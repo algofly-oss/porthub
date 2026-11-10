@@ -7,5 +7,4 @@ volumes
 **/node_modules
 **/.next
 **/.next-*
-ui/tests
 ui/test-results

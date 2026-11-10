@@ -179,6 +179,8 @@ struct HttpPublicOptions {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Upload the clipboard image and copy its public URL. Bind this to a desktop shortcut.
+    Image(porthub_agent::images::Args),
     /// Test DNS, TCP, verified TLS, and authenticated control without changing host networking.
     Diagnose {
         /// Registration profile to diagnose (uses its existing enrolled identity).
@@ -1159,6 +1161,7 @@ async fn main() -> Result<()> {
         signal_cancel.cancel();
     });
     let result = match args.command {
+        Some(Command::Image(args)) => porthub_agent::images::run(args).await,
         Some(Command::Enroll {
             server,
             ticket,

@@ -33,6 +33,7 @@ use std::sync::Arc;
 pub fn router() -> Router<Arc<App>> {
     Router::new()
         .merge(telegram::router())
+        .merge(crate::hosted_images::router())
         .merge(crate::terminal::router())
         .merge(crate::terminal_traffic::router())
         .merge(connections::router())

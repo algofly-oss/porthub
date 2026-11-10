@@ -5039,6 +5039,287 @@
           }
         }
       }
+    },
+    "/api/images": {
+      "get": {
+        "summary": "List your hosted images, newest first",
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Images with metadata, public URLs and storage limits; image bytes are excluded"
+          }
+        }
+      },
+      "post": {
+        "summary": "Host an image and return its public URL",
+        "description": "Images persist until deleted. Account limits: 1,000 images and 512 MiB. Anyone with the URL can view the image.",
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "image"
+                ],
+                "properties": {
+                  "image": {
+                    "type": "string",
+                    "format": "byte",
+                    "description": "Base64 PNG, JPEG, WebP or GIF. Input and resulting PNG must be <=8 MiB; maximum 32 megapixels. Metadata is removed and animations use their first frame."
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "request_id": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{32}$",
+                    "description": "Optional idempotency key. Reusing a completed key returns its original image."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Image metadata and direct public URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "url": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "size": {
+                      "type": "integer"
+                    },
+                    "width": {
+                      "type": "integer"
+                    },
+                    "height": {
+                      "type": "integer"
+                    },
+                    "created_at": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid image, credentials or storage quota exceeded"
+          },
+          "413": {
+            "description": "Request body exceeds 12 MiB"
+          }
+        }
+      }
+    },
+    "/api/images/{id}": {
+      "delete": {
+        "summary": "Permanently delete your image and revoke its public URL",
+        "security": [
+          {
+            "SessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "Image does not exist or belongs to another account"
+          }
+        }
+      }
+    },
+    "/api/images/public/{id}": {
+      "get": {
+        "summary": "View a raw hosted image without signing in",
+        "security": [],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "PNG image. Cache-Control: no-store ensures deletion is respected on the next request.",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Image not found or deleted"
+          }
+        }
+      }
+    },
+    "/api/machines/client/images": {
+      "post": {
+        "summary": "Host a clipboard image using an enrolled machine credential",
+        "description": "Images persist until deleted. Account limits: 1,000 images and 512 MiB. Anyone with the URL can view the image.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "image",
+                  "machine_id",
+                  "token"
+                ],
+                "properties": {
+                  "image": {
+                    "type": "string",
+                    "format": "byte",
+                    "description": "Base64 PNG, JPEG, WebP or GIF. Input and resulting PNG must be <=8 MiB; maximum 32 megapixels. Metadata is removed and animations use their first frame."
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "request_id": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{32}$",
+                    "description": "Optional idempotency key. Reusing a completed key returns its original image."
+                  },
+                  "machine_id": {
+                    "type": "string"
+                  },
+                  "token": {
+                    "type": "string",
+                    "format": "password",
+                    "maxLength": 512
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Image metadata and direct public URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "url": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "size": {
+                      "type": "integer"
+                    },
+                    "width": {
+                      "type": "integer"
+                    },
+                    "height": {
+                      "type": "integer"
+                    },
+                    "created_at": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid image, credentials or storage quota exceeded"
+          },
+          "413": {
+            "description": "Request body exceeds 12 MiB"
+          }
+        }
+      }
+    },
+    "/i/{filename}": {
+      "get": {
+        "summary": "View a raw image using its short public URL",
+        "description": "Five case-sensitive random characters excluding lookalikes, followed by .png. IDs are unique among hosted images and may be reused after deletion. This is a public sharing link, not an authentication credential.",
+        "security": [],
+        "parameters": [
+          {
+            "name": "filename",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[2-9A-HJ-NP-Za-hjkmnp-z]{5}\\.png$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "PNG image with Cache-Control: no-store",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Image not found or deleted"
+          }
+        }
+      }
     }
   },
   "components": {

@@ -1,5 +1,6 @@
 import {
   IconServer,
+  IconPhoto,
   IconWorld,
   IconActivity,
   IconSettings,
@@ -29,6 +30,7 @@ export default function UserNavBar({
     ["Access", "Rules", IconRoute],
     ["Proxy", "Proxies", IconWorld],
     ["Traffic", "Traffic", IconActivity],
+    ["Images", "Hosted images", IconPhoto],
     ["Settings", "Settings", IconSettings],
     ...(isAdmin ? [["Platform", "Platform", IconShieldLock]] : []),
   ];

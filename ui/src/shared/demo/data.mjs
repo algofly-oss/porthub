@@ -68,6 +68,10 @@ export function handleDemoRequest(state, method, rawPath, payload = {}) {
   if(path.startsWith("/inventory/access-"))return demoAccessInventory(state,path.split("access-").pop(),Object.fromEntries(url.searchParams),id);
   if(path.startsWith("/inventory/"))return demoInventory(state,path.split("/").pop(),Object.fromEntries(url.searchParams));
   const read = method === "get";
+  if (path === "/images") {
+    if (read) return { images: [] };
+    throw new Error("Image hosting requires a connected PortHub account. Exit demo to upload.");
+  }
   const body = typeof payload === "string" ? JSON.parse(payload) : payload || {};
   if (path.startsWith("/access/")) return demoAccess(state,method,path,body,id);
   if (path === "/auth/me") return state.user;

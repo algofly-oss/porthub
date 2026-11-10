@@ -96,6 +96,9 @@ pub(crate) async fn serve_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
     if matches!(message.get("operation").and_then(serde_json::Value::as_str),Some("proxy_connect"|"proxy_check")) {
         return crate::proxy_transport::serve(reader, &control, &profile, message, cancel).await;
     }
+    if message.get("operation").and_then(serde_json::Value::as_str) == Some("image_upload") {
+        return crate::images::serve(reader, &control, message).await;
+    }
     let request: Request = serde_json::from_value(message)?;
     request.validate()?;
     let created = match gateway(

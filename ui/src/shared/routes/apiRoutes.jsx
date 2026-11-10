@@ -1,6 +1,7 @@
 const API_PREFIX = process.env.API_PREFIX || "/api";
 
 let apiRoutes = {
+  hostedImages: "/images",
   // auth
   signUp: "/auth/signup",
   signIn: "/auth/signin",
