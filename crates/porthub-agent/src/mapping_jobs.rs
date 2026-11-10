@@ -383,6 +383,7 @@ pub async fn worker(id: &str, cancel: CancellationToken) -> Result<()> {
         };
         tokio::pin!(operation);
         let mut check=tokio::time::interval(Duration::from_millis(300));
+        let mut exposure_announced=false;
         loop {
             tokio::select! {
                 result=&mut operation=>return result,
@@ -390,9 +391,10 @@ pub async fn worker(id: &str, cancel: CancellationToken) -> Result<()> {
                 _=check.tick()=>{
                     if !path.try_exists()? {work.cancel();return operation.await;}
                     // Retain the originally allocated gateway port on recovery.
-                    if job.spec.exposure() {
+                    if job.spec.exposure() && !exposure_announced {
                         if let Some(port)=crate::expose::ready_port(id)? {
                             state(&root,id,"running",None)?;
+                            exposure_announced = true;
                             let assigned=path.with_extension("assigned");
                             if !assigned.try_exists()? {crate::profile::write_private(&assigned,port.to_string().as_bytes(),false)?;}
                         }
@@ -456,6 +458,23 @@ pub async fn supervise(cancel: CancellationToken) -> Result<()> {
             }
         }
         tokio::select! {_=cancel.cancelled()=>break,_=tokio::time::sleep(Duration::from_secs(3))=>{}}
+    }
+    #[cfg(unix)]
+    {
+        // Let exposure workers close their gateway leases before a restart.
+        for child in &workers {
+            if let Some(pid) = child.id() {
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGTERM);
+                }
+            }
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(18), async {
+            for child in &mut workers {
+                let _ = child.wait().await;
+            }
+        })
+        .await;
     }
     for mut child in workers {
         let _ = child.kill().await;
