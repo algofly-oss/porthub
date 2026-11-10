@@ -67,12 +67,31 @@ async fn browser_and_agent_images_are_owned_public_and_revocable() -> Result<()>
         let one = case.status("POST","/api/machines/client/images","",agent.clone(),StatusCode::OK).await?;
         let two = case.status("POST","/api/machines/client/images","",agent.clone(),StatusCode::OK).await?;
         ensure!(one["id"]==two["id"]);
-        // Quota rejection must not block retrying a completed agent upload.
+        // Completed retries do not evict images, even when storage is full.
         case.app.collection("hosted_images").insert_one(doc!{"_id":"quota-fixture","owner_id":owner,"size":512_i64*1024*1024}).await?;
-        case.status("POST","/api/images",&cookie,json!({"image":STANDARD.encode(png())}),StatusCode::BAD_REQUEST).await?;
         let retry = case.status("POST","/api/machines/client/images","",agent.clone(),StatusCode::OK).await?;
         ensure!(retry["id"]==one["id"]);
+        ensure!(case.app.collection("hosted_images").find_one(doc!{"_id":"quota-fixture"}).await?.is_some());
         case.app.collection("hosted_images").delete_one(doc!{"_id":"quota-fixture"}).await?;
+        // Storage pressure removes only enough oldest images from this account.
+        let (temporary,temp_cookie)=case.user("temporary@example.invalid","user").await?;
+        for (id,code,created) in [("oldest","AbC23",1_i64),("newer","Def45",2_i64)] {
+            let mut fixture=stored.clone();
+            fixture.insert("_id",id); fixture.insert("public_id",code);
+            fixture.insert("owner_id",temporary); fixture.insert("size",256_i64*1024*1024);
+            fixture.insert("created_at",mongodb::bson::DateTime::from_millis(created));
+            case.app.collection("hosted_images").insert_one(fixture).await?;
+        }
+        case.status("POST","/api/images",&temp_cookie,json!({"image":STANDARD.encode(b"invalid")}),StatusCode::BAD_REQUEST).await?;
+        ensure!(case.app.collection("hosted_images").count_documents(doc!{"owner_id":temporary}).await?==2);
+        let fresh=case.status("POST","/api/images",&temp_cookie,json!({"image":STANDARD.encode(png())}),StatusCode::OK).await?;
+        case.status("GET","/i/AbC23.png","",Value::Null,StatusCode::NOT_FOUND).await?;
+        ensure!(case.app.collection("hosted_images").find_one(doc!{"_id":"newer"}).await?.is_some());
+        ensure!(case.app.collection("hosted_images").find_one(doc!{"_id":fresh["id"].as_str().unwrap()}).await?.is_some());
+        ensure!(case.app.collection("hosted_images").count_documents(doc!{"owner_id":temporary}).await?==2);
+        // Other accounts' images and links survive eviction.
+        let original=case.router.clone().oneshot(Request::builder().uri(path).body(Body::empty())?).await?;
+        ensure!(original.status()==StatusCode::OK);
         let mut wrong = agent.clone(); wrong["token"] = json!("invalid");
         case.status("POST","/api/machines/client/images","",wrong,StatusCode::GONE).await?;
         case.app.collection("machines").update_one(doc!{"_id":machine_id},doc!{"$set":{"enabled":false}}).await?;

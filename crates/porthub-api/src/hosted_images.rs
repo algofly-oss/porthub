@@ -210,15 +210,27 @@ async fn upload(
         .collection(COLLECTION)
         .find(doc! {"owner_id":owner})
         .projection(doc! {"size":1})
+        .sort(doc! {"created_at":1,"_id":1})
         .limit((MAX_IMAGES + 1) as i64)
         .await?
         .try_collect()
         .await?;
     let used: i64 = rows.iter().map(|r| r.get_i64("size").unwrap_or(0)).sum();
-    if rows.len() >= MAX_IMAGES || used + bytes.len() as i64 > MAX_STORAGE {
+    if rows.len() >= MAX_IMAGES {
         return Err(ApiError::bad_request(
-            "Image storage is full (1,000 images / 512 MiB). Delete some images and try again.",
+            "Image count limit reached (1,000 images). Delete some images and try again.",
         ));
+    }
+    // Plan oldest-first eviction, but only delete after the new image is stored.
+    // Invalid uploads and failed link allocation must preserve existing images.
+    let mut retained = used + bytes.len() as i64;
+    let mut expired = Vec::new();
+    for previous in &rows {
+        if retained <= MAX_STORAGE {
+            break;
+        }
+        retained -= previous.get_i64("size").unwrap_or(0);
+        expired.push(previous.get("_id").cloned().unwrap());
     }
     let name: String = body
         .name
@@ -239,7 +251,14 @@ async fn upload(
     for _ in 0..16 {
         row.insert("public_id", short_id());
         match app.collection(COLLECTION).insert_one(&row).await {
-            Ok(_) => return Ok(Json(metadata(&app, &row))),
+            Ok(_) => {
+                if !expired.is_empty() {
+                    app.collection(COLLECTION)
+                        .delete_many(doc! {"owner_id":owner,"_id":{"$in":&expired}})
+                        .await?;
+                }
+                return Ok(Json(metadata(&app, &row)));
+            }
             Err(error) if crate::store::duplicate(&error) => {
                 if let Some(existing) = app
                     .collection(COLLECTION)

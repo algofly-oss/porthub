@@ -9,7 +9,7 @@ assert(base, "An isolated local UI URL is required");
   const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || "/usr/bin/google-chrome" });
   try {
     for (const width of [1440, 402]) {
-      const context = await browser.newContext({ viewport: { width, height: 950 } });
+      const context = await browser.newContext({ serviceWorkers: "block", viewport: { width, height: 950 } });
       const page = await context.newPage();
       const png=Buffer.from(await page.evaluate(()=>{const c=document.createElement("canvas");c.width=640;c.height=200;const x=c.getContext("2d");x.fillStyle="#0f172a";x.fillRect(0,0,640,200);x.fillStyle="#ffffff";x.font="28px sans-serif";x.fillText("PortHub image sharing",32,80);x.fillStyle="#93c5fd";x.font="18px sans-serif";x.fillText("Original image preview",32,128);return c.toDataURL("image/png").split(",")[1];}),"base64");
       await page.route("**/i/*.png",route=>route.fulfill({contentType:"image/png",body:png}));
@@ -18,6 +18,8 @@ assert(base, "An isolated local UI URL is required");
       const errors = [];
       page.on("pageerror", error => errors.push(error.message));
       await page.addInitScript(() => {
+        // Keep API mocks authoritative on HTTPS production previews too.
+        delete Object.getPrototypeOf(navigator).serviceWorker;
         window.copiedLinks = [];
         Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async text => { window.copiedLinks.push(text); } } });
       });

@@ -93,8 +93,9 @@ export default function HostedImages({ active = true }) {
         try { await copyText(last.url); toast.success(chosen.length > 1 ? "Images uploaded. Last link copied." : "Image uploaded. Link copied.", { id: "hosted-image-upload" }); }
         catch { toast.success("Image uploaded. Click Copy link to share.", { id: "hosted-image-upload" }); }
       }
+      if (last) await load(); // Reflect any oldest images evicted by storage admission.
     } finally { busy.current = false; setUploading(false); }
-  }, []);
+  }, [load]);
 
   useEffect(() => {
     if (!active) return;
@@ -146,7 +147,7 @@ export default function HostedImages({ active = true }) {
       <input aria-label="Latest public image URL" readOnly value={latest.url} onFocus={event => event.target.select()} className="min-w-0 flex-1 bg-transparent font-mono text-xs outline-none" />
       <Button variant="secondary" size="sm" onClick={() => copy(latest)}><IconCopy size={15} />Copy link</Button>
     </div>}
-    <div className="mb-2 flex shrink-0 flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground"><span>{images.length} {images.length === 1 ? "image" : "images"}<span className="mx-2 text-border">/</span>{(used / 1024 / 1024).toFixed(1)} of 512 MiB used</span><span>Anyone with a link can view it.</span></div>
+    <div className="mb-2 flex shrink-0 flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground"><span>{images.length} {images.length === 1 ? "image" : "images"}<span className="mx-2 text-border">/</span>{(used / 1024 / 1024).toFixed(1)} of 512 MiB used</span><span>Oldest images are deleted automatically when storage is full.</span></div>
     {loadError && <p role="alert" className="mb-3 text-sm text-red-500">{loadError}</p>}
     <div className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-border bg-surface" style={{ flex: "0 1 auto" }}>
     <div className="data-scroll">
