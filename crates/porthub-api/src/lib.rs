@@ -18,6 +18,7 @@ pub mod gateway_origin;
 pub mod generated;
 pub mod http;
 pub mod hosted_images;
+pub mod image_rooms;
 pub mod input;
 pub mod input_compat;
 pub mod inventory_query;
@@ -51,6 +52,7 @@ use std::sync::Arc;
 
 pub struct App {
     pub terminals: porthub_terminal::hub::Hub,
+    pub image_rooms_initialized: tokio::sync::OnceCell<()>,
     pub hosted_images_initialized: tokio::sync::OnceCell<()>,
     pub hosted_images_lock: tokio::sync::Mutex<()>,
     pub terminal_traffic_initialized: tokio::sync::OnceCell<()>,
@@ -105,6 +107,7 @@ impl App {
         Self {
             terminals: Default::default(),
             hosted_images_initialized: Default::default(),
+            image_rooms_initialized: Default::default(),
             hosted_images_lock: Default::default(),
             terminal_traffic_initialized: Default::default(),
             terminal_lifecycle: Default::default(),

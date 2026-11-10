@@ -65,6 +65,7 @@ jobs:
           cargo test --locked -p porthub-api --test workflows native_web_activity -- --include-ignored
           cargo test --locked -p porthub-api --lib hosted_images
           cargo test --locked -p porthub-api --test hosted_images -- --include-ignored
+          cargo test --locked -p porthub-api --test image_rooms -- --include-ignored
           cargo test --locked -p porthub-agent --lib image
           cargo test --locked -p porthub-agent --lib forward::tests
           cargo test --locked -p porthub-agent --bin porthub forward_defaults

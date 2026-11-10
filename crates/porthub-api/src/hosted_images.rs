@@ -30,8 +30,8 @@ const MAX_PIXELS: u64 = 32 * 1024 * 1024;
 const MAX_IMAGES: usize = 1000;
 const MAX_STORAGE: i64 = 512 * 1024 * 1024;
 // Case-sensitive; omit 0, 1, I, O, i, l and o to reduce transcription mistakes.
-const PUBLIC_ALPHABET: &[u8] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz";
-fn short_id() -> String {
+pub(crate) const PUBLIC_ALPHABET: &[u8] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz";
+pub(crate) fn short_id() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
     (0..5)
@@ -65,7 +65,7 @@ fn invalid() -> ApiError {
 
 // Decode and re-encode to discard metadata, trailing data, and animation. Never
 // trust the filename or browser MIME type. Bound both input and decoded memory.
-fn normalize(bytes: &[u8]) -> ApiResult<(Vec<u8>, u32, u32)> {
+pub(crate) fn normalize(bytes: &[u8]) -> ApiResult<(Vec<u8>, u32, u32)> {
     if bytes.is_empty() || bytes.len() > MAX_BYTES {
         return Err(invalid());
     }
@@ -128,7 +128,7 @@ fn public_path(row: &Document) -> String {
         ),
     }
 }
-fn metadata(app: &App, row: &Document) -> Value {
+pub(crate) fn metadata(app: &App, row: &Document) -> Value {
     let id = row.get_str("_id").unwrap_or_default();
     json!({"id":id,"name":row.get_str("name").unwrap_or("Image"),"size":row.get_i64("size").unwrap_or(0),
         "width":row.get_i64("width").unwrap_or(0),"height":row.get_i64("height").unwrap_or(0),
@@ -362,7 +362,7 @@ async fn public(State(app): State<Arc<App>>, Path(id): Path<String>) -> ApiResul
         .ok_or_else(missing)?;
     image_response(row)
 }
-fn image_response(row: Document) -> ApiResult<Response> {
+pub(crate) fn image_response(row: Document) -> ApiResult<Response> {
     let missing = || ApiError::new(StatusCode::NOT_FOUND, "Image not found");
     let bytes = row
         .get_binary_generic("data")

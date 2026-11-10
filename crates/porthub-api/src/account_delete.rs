@@ -132,6 +132,8 @@ async fn resume(app: &App, user: &Document) -> ApiResult<()> {
     app.collection(crate::hosted_images::COLLECTION)
         .delete_many(doc! {"owner_id":{"$in":&owner}})
         .await?;
+    app.collection(crate::image_rooms::ROOMS).delete_many(doc! {"owner_id":{"$in":&owner}}).await?;
+    app.collection(crate::image_rooms::IMAGES).delete_many(doc! {"owner_id":{"$in":&owner}}).await?;
     app.collection("terminal_traffic")
         .delete_many(doc! {"owner_id":{"$in":&owner}})
         .await?;

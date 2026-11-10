@@ -121,6 +121,28 @@ public links stop working; there is no age-based expiry. The image-count limit
 still requires manual deletion. Public responses use `Cache-Control: no-store` so a deleted
 image is unavailable on the next request; downloaded copies cannot be revoked.
 
+## Public image rooms
+
+In **Hosted images → Public rooms**, create a room and share its link. Visitors
+need no account: paste an image, drop files, or choose files to upload immediately.
+The latest raw image URL is copied automatically; every image and the latest URL
+also have a manual **Copy link** button.
+
+Rooms remain available until their owner deletes them. Configure the image
+lifetime per room (one hour by default, between one minute and 30 days). Each
+image's timer starts at upload; changing the setting affects future uploads.
+Expired links stop working immediately, and MongoDB's TTL index purges expired
+image data automatically. Each room has a separate 512 MiB / 1,000-image rolling
+quota. Uploads remove its oldest images as needed, without touching personal
+images or other rooms.
+
+Owners can inspect and delete any images, change settings, pause/re-enable
+uploads, and delete a room with all its images. Pausing does not revoke existing
+image links; those continue to expire normally. Anonymous visitors can delete
+only their own uploads. A cryptographically random browser ID is retained in
+local storage; the server stores a room-specific hash and never includes it in
+public metadata. Clearing browser storage loses anonymous deletion access.
+
 ## TCP forwarding and persistent port mappings
 
 Forward any TCP service reachable from this machine. The target needs neither
