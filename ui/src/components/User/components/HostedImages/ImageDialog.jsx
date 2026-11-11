@@ -9,7 +9,7 @@ const selector = "button:not([disabled]), a[href], input:not([disabled]):not([ty
 function focusable(node) {
   return Array.from(node.querySelectorAll(selector)).filter(element => element.getClientRects().length && getComputedStyle(element).visibility !== "hidden");
 }
-function Scope({ active, escape, children }) {
+export function ImageFocusScope({ active, escape, children }) {
   const [node, setNode] = useState(null);
   const escapeRef = useRef(escape);
   escapeRef.current = escape;
@@ -48,6 +48,6 @@ function Scope({ active, escape, children }) {
 }
 export default function ImageDialog({ opened, onClose, closeOnEscape = true, closeButtonProps = {}, children, ...props }) {
   return <Dialog {...props} opened={opened} onClose={onClose} trapFocus={false} returnFocus={false} closeOnEscape={false} closeButtonProps={{ "aria-label": "Close dialog", ...closeButtonProps }}>
-    <Scope active={opened} escape={() => { if (closeOnEscape) onClose(); }}>{children}</Scope>
+    <ImageFocusScope active={opened} escape={() => { if (closeOnEscape) onClose(); }}>{children}</ImageFocusScope>
   </Dialog>;
 }

@@ -40,6 +40,7 @@ const base=process.env.PORTHUB_TEST_UI_URL;assert(base);
       const row={id,room_id:roomId,name:input.name,width:640,height:200,size:png.length,created_at:new Date().toISOString().replace('Z',''),expires_at:new Date(Date.now()+room.image_ttl_seconds*1000).toISOString(),path:`/r/${code}.png`,url:`${base}/r/${code}.png`,visitor};images.unshift(row);const {visitor:_,...response}=row;return reply({...response,can_delete:true});
      }
      if(method==='delete'){
+      if(path===endpoint){const input=request.postDataJSON(),before=images.length;images=images.filter(i=>!((!isPublic||i.visitor===visitor)&&(input.all||input.ids.includes(i.id))));return reply({deleted_count:before-images.length});}
       const id=path.split('/').at(-1),image=images.find(i=>i.id===id);
       if(!image||(isPublic&&image.visitor!==visitor))return reply({detail:'Image not found'},404);
       images=images.filter(i=>i.id!==id);return route.fulfill({status:204});
@@ -51,6 +52,7 @@ const base=process.env.PORTHUB_TEST_UI_URL;assert(base);
    return page;
   }
   const owner=await client();png=Buffer.from(await owner.evaluate(()=>{const c=document.createElement('canvas');c.width=640;c.height=200;const x=c.getContext('2d');x.fillStyle='#0f172a';x.fillRect(0,0,640,200);x.fillStyle='#fff';x.font='28px sans-serif';x.fillText('Public image room',32,80);return c.toDataURL('image/png').split(',')[1];}),'base64');await owner.goto(`${base}/home?view=images`);await owner.getByRole('button',{name:'Public rooms',exact:true}).click();
+  for(const name of ['My images','Public rooms']) { const tab=owner.getByRole('button',{name,exact:true});await tab.click();assert.equal(await tab.evaluate(n=>n.matches(':focus-visible')),false,'Mouse tab switching does not draw a focus ring');assert.equal(await tab.getAttribute('aria-pressed'),'true'); }
   await owner.getByText('Create your first public room',{exact:true}).waitFor();await owner.getByRole('button',{name:'New room',exact:true}).click();
   const form=owner.getByRole('dialog',{name:'New public room',exact:true});await form.getByLabel('Name',{exact:true}).fill('Quick room');assert.equal(await form.getByLabel('Image lifetime (minutes)',{exact:true}).inputValue(),'60');
   await form.getByRole('button',{name:'Create room',exact:true}).click();await form.waitFor({state:'hidden'});

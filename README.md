@@ -57,6 +57,12 @@ letters/digits, excluding confusing characters. A database unique index prevents
 collisions; generation retries automatically, and deleting an image frees its
 code for random reuse. Images remain until deleted and are stored in the
 existing persistent MongoDB database, independent of the uploading machine.
+Select individual rows or all images to delete them together, with a confirmation
+dialog. Anonymous room visitors can only select and delete their own uploads.
+Click a thumbnail for a full-screen original image: scroll or pinch to zoom,
+drag to pan, double-click or use the percentage button to reset, and use arrows
+to browse. New agent uploads display the authenticated machine's name; browser
+uploads are marked separately. Older uploads have no recorded source.
 
 The desktop shortcut is **disabled by default**. On GNOME-based Linux desktops,
 enable automatic Ctrl+Shift+U registration from your desktop session:
@@ -91,6 +97,8 @@ disabled preferred tenant never silently redirects an upload to another tenant.
 Browser uploads always use the portal currently open.
 
 Paste mode also pastes the copied URL into the focused input after uploading.
+Pressing the shortcut again while that image URL remains on the clipboard pastes
+it again without uploading. Copy a new image to upload another screenshot.
 If the active window changes during upload, PortHub leaves the URL copied and
 skips automatic paste. X11 requires `xdotool`; macOS requires desktop automation
 permission. Windows uses native keyboard input. Wayland currently supports copy

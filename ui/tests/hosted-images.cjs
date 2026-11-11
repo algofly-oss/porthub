@@ -32,12 +32,16 @@ assert(base, "An isolated local UI URL is required");
         let body;
         if (path === "/api/images") {
           if (method === "get") body = { images };
-          else {
+          else if (method === "delete") {
+            const input=request.postDataJSON(), before=images.length;
+            images=images.filter(image=>!(input.all || input.ids.includes(image.id)));
+            body={deleted_count:before-images.length};
+          } else {
             if (failNext) { failNext=false; return route.fulfill({status:400,contentType:"application/json",body:JSON.stringify({detail:"Storage full test"})}); }
             const input = request.postDataJSON(); assert(input.image.length > 0);
             const id = String(++serial).padStart(32,"0");
             const code=["AbC23","Def45","Ghj67"][serial-1];
-            body = {id,name:input.name,width:640,height:200,size:png.length,created_at:"2026-11-10T10:00:00",path:`/i/${code}.png`,url:`${base}/i/${code}.png`};
+            body = {id,name:input.name,machine_name:serial === 1 ? "Luna" : null,source:serial === 1 ? "machine" : "browser",width:640,height:200,size:png.length,created_at:"2026-11-10T10:00:00",path:`/i/${code}.png`,url:`${base}/i/${code}.png`};
             images.unshift(body);
           }
         } else if (path.startsWith("/api/images/") && method === "delete") {
@@ -74,8 +78,35 @@ assert(base, "An isolated local UI URL is required");
       await preview.waitFor();
       await preview.getByRole("img",{name:"chosen.png",exact:true}).waitFor();
       await preview.getByRole("link",{name:"Open original",exact:true}).waitFor();
+      await page.waitForFunction(() => document.querySelector('[aria-label="Hosted images"]').closest('[aria-hidden="true"]'));
+      const reset = preview.getByRole("button", { name: "Reset zoom", exact: true });
+      assert.equal(await reset.innerText(), "100%");
+      await preview.getByRole("button", { name: "Zoom in", exact: true }).click();
+      assert.equal(await reset.innerText(), "125%");
+      const stage = preview.getByTestId("image-stage");
+      await stage.hover(); await page.mouse.wheel(0, -200);
+      await page.waitForFunction(() => Number(document.querySelector('[aria-label="Reset zoom"]').textContent.replace('%','')) > 125);
+      await reset.click();
+      const box = await stage.boundingBox();
+      const x = box.x + box.width/2, y = box.y + box.height/2;
+      // Real touch pointers exercise pinch and one-finger pan on both layouts.
+      const cdp = await context.newCDPSession(page);
+      await cdp.send("Input.dispatchTouchEvent", {type:"touchStart",touchPoints:[{x:x-40,y,id:1},{x:x+40,y,id:2}]});
+      await cdp.send("Input.dispatchTouchEvent", {type:"touchMove",touchPoints:[{x:x-90,y,id:1},{x:x+90,y,id:2}]});
+      await cdp.send("Input.dispatchTouchEvent", {type:"touchEnd",touchPoints:[]});
+      await page.waitForFunction(() => Number(document.querySelector('[aria-label="Reset zoom"]').textContent.replace('%','')) > 150);
+      const picture = preview.getByRole("img", {name:"chosen.png",exact:true});
+      const before = await picture.getAttribute("style");
+      await page.mouse.move(x,y); await page.mouse.down(); await page.mouse.move(x+30,y+25); await page.mouse.up();
+      assert.notEqual(await picture.getAttribute("style"),before,"Dragging pans the original image");
+      await reset.click(); assert.equal(await reset.innerText(),"100%");
+      await preview.getByRole("button",{name:"Previous image",exact:true}).click();
+      await page.getByRole("dialog",{name:"pasted.png",exact:true}).waitFor();
+      await page.keyboard.press("ArrowRight"); await preview.waitFor();
       await page.keyboard.press("Escape");
       await preview.waitFor({state:"hidden"});
+      assert.notEqual(await page.locator("#__next").getAttribute("aria-hidden"),"true");
+      await page.getByRole("row").filter({hasText:"chosen.png"}).getByText("Luna",{exact:true}).waitFor();
       await page.waitForTimeout(300);
       if(process.env.PORTHUB_TEST_SCREENSHOT_DIR) await page.screenshot({path:`${process.env.PORTHUB_TEST_SCREENSHOT_DIR}/images-${width}.png`,fullPage:true});
       const last = page.getByLabel("Latest public image URL");

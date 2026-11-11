@@ -41,7 +41,7 @@ pub(crate) fn short_id() -> String {
 
 pub fn router() -> Router<Arc<App>> {
     Router::new()
-        .route("/api/images", get(list).post(upload))
+        .route("/api/images", get(list).post(upload).delete(remove_many))
         .route("/api/images/{id}", axum::routing::delete(remove))
         .route("/api/images/public/{id}", get(public))
         .route("/i/{filename}", get(short_public))
@@ -133,6 +133,8 @@ pub(crate) fn metadata(app: &App, row: &Document) -> Value {
     json!({"id":id,"name":row.get_str("name").unwrap_or("Image"),"size":row.get_i64("size").unwrap_or(0),
         "width":row.get_i64("width").unwrap_or(0),"height":row.get_i64("height").unwrap_or(0),
         "created_at":row.get_datetime("created_at").map(|d|crate::store::datetime(d.timestamp_millis())).unwrap_or_default(),
+        "machine_name":row.get_str("machine_name").ok(),
+        "source":row.get_str("source").unwrap_or("unknown"),
         "path":public_path(row),"url":format!("{}{}",app.config.public_base_url.trim_end_matches('/'),public_path(row))})
 }
 async fn indexes(app: &App) -> ApiResult<()> {
@@ -164,9 +166,12 @@ async fn upload(
     Json(body): Json<Upload>,
 ) -> ApiResult<Json<Value>> {
     let _lifecycle = app.account_lifecycle.read().await;
+    let mut machine_name = None;
     let owner = match (&body.machine_id, &body.token) {
         (Some(id), Some(token)) if !token.is_empty() && token.len() <= 512 => {
             let machine = machine_client::authenticate(&app, id, token).await?;
+            machine_name = ["name", "hostname_override", "client_hostname", "hostname"]
+                .iter().find_map(|key| machine.get_str(key).ok().filter(|name| !name.trim().is_empty())).map(str::to_owned);
             machine
                 .get_object_id("user_id")
                 .map_err(|_| ApiError::bad_request("Machine has no account owner"))?
@@ -239,6 +244,8 @@ async fn upload(
         .take(160)
         .collect();
     let mut row = doc! {"_id":&id,"owner_id":owner,"name":if name.is_empty(){"Clipboard image"}else{&name},"size":bytes.len() as i64,"width":i64::from(width),"height":i64::from(height),"created_at":DateTime::now()};
+    row.insert("source", if body.machine_id.is_some() { "machine" } else { "browser" });
+    if let Some(name) = machine_name { row.insert("machine_name", name); }
     row.insert(
         "data",
         Bson::Binary(Binary {
@@ -304,6 +311,34 @@ fn valid_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BulkDelete {
+    #[serde(default)]
+    pub all: bool,
+    #[serde(default)]
+    pub ids: Vec<String>,
+}
+impl BulkDelete {
+    pub(crate) fn filter(self, mut scope: Document) -> ApiResult<Document> {
+        if self.all && self.ids.is_empty() { return Ok(scope); }
+        if self.all || self.ids.is_empty() || self.ids.len() > MAX_IMAGES || !self.ids.iter().all(|id|valid_id(id)) {
+            return Err(ApiError::bad_request("Choose images to delete, or explicitly select all"));
+        }
+        scope.insert("_id", doc! {"$in":self.ids});
+        Ok(scope)
+    }
+}
+async fn remove_many(
+    State(app): State<Arc<App>>, headers: HeaderMap, Json(body): Json<BulkDelete>,
+) -> ApiResult<Json<Value>> {
+    let _lifecycle = app.account_lifecycle.read().await;
+    let owner = auth::current_user(&app, &headers).await?.get_object_id("_id").map_err(|_|ApiError::unauthenticated())?;
+    let filter = body.filter(doc! {"owner_id":owner})?;
+    let _admission = app.hosted_images_lock.lock().await;
+    let result = app.collection(COLLECTION).delete_many(filter).await?;
+    Ok(Json(json!({"deleted_count":result.deleted_count})))
 }
 async fn remove(
     State(app): State<Arc<App>>,

@@ -61,12 +61,14 @@ async fn browser_and_agent_images_are_owned_public_and_revocable() -> Result<()>
         ensure!(encoded.get_ref().len() > 4 * 1024 * 1024);
         case.status("POST","/api/images",&cookie,json!({"image":STANDARD.encode(encoded.into_inner()),"name":"Large screenshot"}),StatusCode::OK).await?;
         let machine_id = ObjectId::new();
-        case.app.collection("machines").insert_one(doc!{"_id":machine_id,"user_id":owner,"token":"image-test-token"}).await?;
+        case.app.collection("machines").insert_one(doc!{"_id":machine_id,"user_id":owner,"name":"Luna","token":"image-test-token"}).await?;
         let request_id = uuid::Uuid::new_v4().simple().to_string();
         let agent = json!({"machine_id":machine_id.to_hex(),"token":"image-test-token","image":STANDARD.encode(png()),"request_id":request_id});
         let one = case.status("POST","/api/machines/client/images","",agent.clone(),StatusCode::OK).await?;
         let two = case.status("POST","/api/machines/client/images","",agent.clone(),StatusCode::OK).await?;
         ensure!(one["id"]==two["id"]);
+        ensure!(one["machine_name"]=="Luna" && one["source"]=="machine");
+        ensure!(row["source"]=="browser" && row["machine_name"].is_null());
         // Completed retries do not evict images, even when storage is full.
         case.app.collection("hosted_images").insert_one(doc!{"_id":"quota-fixture","owner_id":owner,"size":512_i64*1024*1024}).await?;
         let retry = case.status("POST","/api/machines/client/images","",agent.clone(),StatusCode::OK).await?;
@@ -114,4 +116,31 @@ async fn browser_and_agent_images_are_owned_public_and_revocable() -> Result<()>
     }.await;
     case.db.drop().await?;
     result
+}
+
+#[tokio::test]
+#[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn bulk_image_deletion_is_explicit_and_owner_scoped() -> Result<()> {
+    let case=Case::new(Config::default()).await?;
+    let result=async {
+        let (_,owner)=case.user("bulk-owner@example.invalid","user").await?;
+        let (_,other)=case.user("bulk-other@example.invalid","user").await?;
+        let payload=json!({"image":STANDARD.encode(png())});
+        let a=case.status("POST","/api/images",&owner,payload.clone(),StatusCode::OK).await?;
+        case.status("POST","/api/images",&owner,payload.clone(),StatusCode::OK).await?;
+        let b=case.status("POST","/api/images",&other,payload,StatusCode::OK).await?;
+        case.status("DELETE","/api/images","",json!({"all":true}),StatusCode::BAD_REQUEST).await?;
+        case.status("DELETE","/api/images",&owner,json!({}),StatusCode::BAD_REQUEST).await?;
+        case.status("DELETE","/api/images",&owner,json!({"all":true,"ids":[a["id"]]}),StatusCode::BAD_REQUEST).await?;
+        let selected=case.status("DELETE","/api/images",&owner,json!({"ids":[a["id"],b["id"]]}),StatusCode::OK).await?;
+        ensure!(selected["deleted_count"]==1);
+        let own=case.status("GET","/api/images",&owner,Value::Null,StatusCode::OK).await?;
+        ensure!(own["images"].as_array().unwrap().len()==1);
+        let all=case.status("DELETE","/api/images",&owner,json!({"all":true}),StatusCode::OK).await?;
+        ensure!(all["deleted_count"]==1);
+        let foreign=case.status("GET","/api/images",&other,Value::Null,StatusCode::OK).await?;
+        ensure!(foreign["images"].as_array().unwrap().len()==1 && foreign["images"][0]["id"]==b["id"]);
+        Ok::<_,anyhow::Error>(())
+    }.await;
+    case.db.drop().await?;result
 }

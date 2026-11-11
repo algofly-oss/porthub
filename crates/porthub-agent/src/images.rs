@@ -231,6 +231,60 @@ fn tenant_command(user_only: bool, command: Option<TenantCommand>) -> Result<()>
     Ok(())
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LastUpload {
+    registration: String,
+    user: bool,
+    url: String,
+}
+fn last_upload_path() -> Result<std::path::PathBuf> {
+    Ok(tenant_config()?.with_file_name("last-upload.json"))
+}
+fn remember_upload(registration: &str, user: bool, url: &str) -> Result<()> {
+    let path = last_upload_path()?;
+    let mut directory = std::fs::DirBuilder::new();
+    directory.recursive(true);
+    #[cfg(unix)] {
+        use std::os::unix::fs::DirBuilderExt;
+        directory.mode(0o700);
+    }
+    directory.create(path.parent().context("Missing image configuration directory")?)?;
+    crate::profile::write_private(&path, &serde_json::to_vec(&LastUpload {
+        registration: registration.into(), user, url: url.into(),
+    })?, true)
+}
+fn matching_upload(saved: &LastUpload, registration: &str, user: bool, clipboard: &str) -> bool {
+    saved.registration == registration && saved.user == user && saved.url == clipboard
+        && url::Url::parse(&saved.url).is_ok_and(|url| matches!(url.scheme(), "http" | "https")
+            && url.host_str().is_some() && url.username().is_empty() && url.password().is_none())
+}
+fn gateway_image_url(gateway: &str, text: &str) -> bool {
+    if text.trim() != text { return false; }
+    let (Ok(gateway), Ok(url)) = (url::Url::parse(gateway), url::Url::parse(text)) else { return false; };
+    if !matches!(url.scheme(), "http" | "https") || url.origin() != gateway.origin()
+        || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() { return false; }
+    let short = url.path().strip_prefix("/i/").or_else(||url.path().strip_prefix("/r/"));
+    if let Some(code) = short.and_then(|path|path.strip_suffix(".png")) {
+        return code.len() == 5 && code.bytes().all(|c|b"23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz".contains(&c));
+    }
+    url.path().strip_prefix("/api/images/public/").is_some_and(|id|id.len()==32 && id.bytes().all(|c|c.is_ascii_digit() || (b'a'..=b'f').contains(&c)))
+}
+fn clipboard_upload_url(registration: &Tenant) -> Result<Option<String>> {
+    let mut clipboard = arboard::Clipboard::new()?;
+    // A newly copied image always takes precedence over any text representation.
+    if clipboard.get_image().is_ok() { return Ok(None); }
+    let Ok(text) = clipboard.get_text() else { return Ok(None); };
+    // Also recognize links copied by older agents that had no last-upload record.
+    if gateway_image_url(&registration.gateway, &text) { return Ok(Some(text)); }
+    let path = last_upload_path()?;
+    if !path.try_exists()? { return Ok(None); }
+    let bytes = crate::profile::read_private(&path)?;
+    ensure!(bytes.len() <= 8192, "Invalid last image upload record");
+    let saved: LastUpload = serde_json::from_slice(&bytes)?;
+    Ok(matching_upload(&saved, &registration.id, registration.user, &text).then_some(text))
+}
+
 fn clipboard_png() -> Result<Vec<u8>> {
     let mut clipboard = arboard::Clipboard::new().context(
         "Cannot access the desktop clipboard. Run this command in your graphical session.",
@@ -286,8 +340,13 @@ async fn upload_clipboard(args: Args) -> Result<()> {
         .read(true)
         .write(true)
         .open(dirs.cache_dir().join("clipboard-upload.lock"))?;
-    lock.try_lock_exclusive()
-        .context("An image upload is already running")?;
+    if let Err(error) = lock.try_lock_exclusive() {
+        if error.kind() == std::io::ErrorKind::WouldBlock || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() {
+            // Ignore keyboard auto-repeat while the first invocation owns delivery.
+            return Ok(());
+        }
+        return Err(error.into());
+    }
     let mode = match args.mode { Some(mode) => mode, None => crate::image_delivery::preference()? };
     let focus = if mode == crate::image_delivery::Mode::Paste { Some(crate::image_delivery::Focus::capture()?) } else { None };
     let rows = tenants(args.user)?;
@@ -302,7 +361,22 @@ async fn upload_clipboard(args: Args) -> Result<()> {
     } else {
         crate::service::Layout::system()?
     };
-    let png = tokio::task::spawn_blocking(clipboard_png).await??;
+    let png = match tokio::task::spawn_blocking(clipboard_png).await? {
+        Ok(png) => png,
+        Err(error) => {
+            if let Some(url) = clipboard_upload_url(registration)? {
+                println!("{url}");
+                if let Some(focus) = focus {
+                    tokio::task::spawn_blocking(move || {
+                        ensure!(arboard::Clipboard::new()?.get_text().is_ok_and(|current| current == url), "Clipboard changed before paste; its contents were preserved");
+                        focus.paste()
+                    }).await??;
+                }
+                return Ok(());
+            }
+            return Err(error);
+        }
+    };
     let original = png.clone();
     let mut stream = crate::exposure_broker::connect_stream(&layout, &registration.id).await?;
     let request = json!({"operation":"image_upload","size":png.len(),"request_id":uuid::Uuid::new_v4().simple().to_string()});
@@ -335,9 +409,14 @@ async fn upload_clipboard(args: Args) -> Result<()> {
     // Always print the link, including when clipboard access subsequently fails.
     println!("{parsed}");
     let url = parsed.to_string();
+    let registration_id = registration.id.clone();
+    let registration_user = registration.user;
     tokio::task::spawn_blocking(move || {
         ensure!(clipboard_png().is_ok_and(|current| current == original),"Image uploaded. Clipboard changed during upload, so it was preserved. Copy the URL from Hosted images.");
         copy_url(&url)?;
+        if let Err(error) = remember_upload(&registration_id, registration_user, &url) {
+            eprintln!("Image link copied, but its repeat-paste record could not be saved: {error}");
+        }
         if let Some(focus) = focus {
             ensure!(arboard::Clipboard::new()?.get_text().is_ok_and(|current| current == url), "Clipboard changed before paste; paste the image URL manually.");
             focus.paste().context("Image link copied, but direct paste could not complete")?;
@@ -435,6 +514,23 @@ pub(crate) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn existing_gateway_image_links_are_reused_without_an_upload_record() {
+        assert!(gateway_image_url("https://porthub.example", "https://porthub.example/i/AbC23.png"));
+        assert!(gateway_image_url("https://porthub.example", "https://porthub.example/r/Def45.png"));
+        assert!(!gateway_image_url("https://porthub.example", "https://other.example/i/AbC23.png"));
+        assert!(!gateway_image_url("https://porthub.example", "https://porthub.example/some-page"));
+        assert!(!gateway_image_url("https://porthub.example", "unrelated clipboard text"));
+    }
+    #[test]
+    fn repeat_pastes_only_the_exact_last_url_for_the_selected_tenant() {
+        let saved = LastUpload { registration: "a".repeat(64), user: false, url: "https://example.invalid/i/AbC23.png".into() };
+        assert!(matching_upload(&saved, &saved.registration, false, &saved.url));
+        assert!(!matching_upload(&saved, &"b".repeat(64), false, &saved.url));
+        assert!(!matching_upload(&saved, &saved.registration, true, &saved.url));
+        assert!(!matching_upload(&saved, &saved.registration, false, "some unrelated clipboard text"));
+        assert!(!matching_upload(&saved, &saved.registration, false, "https://example.invalid/i/Other.png"));
+    }
     fn tenant(id: char, gateway: &str, user: bool) -> Tenant {
         Tenant {
             id: id.to_string().repeat(64),

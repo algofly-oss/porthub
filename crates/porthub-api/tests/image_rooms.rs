@@ -468,3 +468,41 @@ async fn rooms_are_public_independent_expiring_and_browser_deletions_are_authori
     case.db.drop().await?;
     result
 }
+
+#[tokio::test]
+#[ignore="requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn bulk_room_deletion_preserves_other_visitors_and_other_rooms()->Result<()> {
+    let case=Case::new(Default::default()).await?;
+    let result=async {
+        let (_,owner)=case.user("room-bulk-owner@example.invalid","user").await?;
+        let (_,outsider)=case.user("room-bulk-outsider@example.invalid","user").await?;
+        let a="a".repeat(64);let b="b".repeat(64);let payload=json!({"image":STANDARD.encode(png())});
+        let room=request(&case,"POST","/api/image-rooms",&owner,"",json!({}),StatusCode::OK).await?;
+        let other=request(&case,"POST","/api/image-rooms",&owner,"",json!({}),StatusCode::OK).await?;
+        let public=format!("/api/image-rooms/public/{}/images",room["id"].as_str().unwrap());
+        let elsewhere=format!("/api/image-rooms/public/{}/images",other["id"].as_str().unwrap());
+        let own=request(&case,"POST",&public,"",&a,payload.clone(),StatusCode::OK).await?;
+        request(&case,"POST",&public,"",&a,payload.clone(),StatusCode::OK).await?;
+        let foreign=request(&case,"POST",&public,"",&b,payload.clone(),StatusCode::OK).await?;
+        let distant=request(&case,"POST",&elsewhere,"",&a,payload.clone(),StatusCode::OK).await?;
+        let selected=request(&case,"DELETE",&public,"",&a,json!({"ids":[own["id"],foreign["id"],distant["id"]]}),StatusCode::OK).await?;
+        ensure!(selected["deleted_count"]==1);
+        let all=request(&case,"DELETE",&public,"",&a,json!({"all":true}),StatusCode::OK).await?;
+        ensure!(all["deleted_count"]==1);
+        let retained=request(&case,"GET",&public,"",&b,Value::Null,StatusCode::OK).await?;
+        ensure!(retained["images"].as_array().unwrap().len()==1 && retained["images"][0]["id"]==foreign["id"]);
+        let second=request(&case,"GET",&elsewhere,"",&a,Value::Null,StatusCode::OK).await?;
+        ensure!(second["images"].as_array().unwrap().len()==1);
+        let owner_path=format!("/api/image-rooms/{}/images",room["id"].as_str().unwrap());
+        request(&case,"DELETE",&owner_path,&outsider,"",json!({"all":true}),StatusCode::NOT_FOUND).await?;
+        let cleared=request(&case,"DELETE",&owner_path,&owner,"",json!({"all":true}),StatusCode::OK).await?;
+        ensure!(cleared["deleted_count"]==1);
+        let empty=request(&case,"GET",&public,"",&a,Value::Null,StatusCode::OK).await?;
+        ensure!(empty["images"].as_array().unwrap().is_empty() && empty["room"]["enabled"]==true);
+        request(&case,"POST",&public,"",&a,payload,StatusCode::OK).await?;
+        let second=request(&case,"GET",&elsewhere,"",&a,Value::Null,StatusCode::OK).await?;
+        ensure!(second["images"].as_array().unwrap().len()==1);
+        Ok::<_,anyhow::Error>(())
+    }.await;
+    case.db.drop().await?;result
+}

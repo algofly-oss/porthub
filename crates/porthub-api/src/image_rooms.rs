@@ -34,14 +34,14 @@ pub fn router() -> Router<Arc<App>> {
             "/api/image-rooms/{id}",
             axum::routing::patch(update).delete(remove_room),
         )
-        .route("/api/image-rooms/{id}/images", get(owner_images))
+        .route("/api/image-rooms/{id}/images", get(owner_images).delete(owner_remove_many))
         .route(
             "/api/image-rooms/{id}/images/{image}",
             axum::routing::delete(owner_remove_image),
         )
         .route(
             "/api/image-rooms/public/{id}/images",
-            get(public_images).post(upload),
+            get(public_images).post(upload).delete(visitor_remove_many),
         )
         .route(
             "/api/image-rooms/public/{id}/images/{image}",
@@ -474,4 +474,23 @@ async fn raw(State(app): State<Arc<App>>, Path(filename): Path<String>) -> ApiRe
         .await?
         .ok_or_else(missing)?;
     hosted_images::image_response(row)
+}
+
+async fn owner_remove_many(State(app):State<Arc<App>>,headers:HeaderMap,Path(id):Path<String>,Json(body):Json<hosted_images::BulkDelete>)->ApiResult<Json<Value>> {
+    let _lifecycle=app.account_lifecycle.read().await;
+    let owner=owner(&app,&headers).await?;
+    let filter=body.filter(doc!{"owner_id":owner,"room_id":&id})?;
+    let _admission=app.hosted_images_lock.lock().await;
+    room(&app,&id,Some(owner)).await?;
+    let result=app.collection(IMAGES).delete_many(filter).await?;
+    Ok(Json(json!({"deleted_count":result.deleted_count})))
+}
+async fn visitor_remove_many(State(app):State<Arc<App>>,headers:HeaderMap,Path(id):Path<String>,Json(body):Json<hosted_images::BulkDelete>)->ApiResult<Json<Value>> {
+    let _lifecycle=app.account_lifecycle.read().await;
+    let visitor=visitor(&headers,&id).ok_or_else(missing)?;
+    let filter=body.filter(doc!{"room_id":&id,"visitor_hash":visitor})?;
+    let _admission=app.hosted_images_lock.lock().await;
+    room(&app,&id,None).await?;
+    let result=app.collection(IMAGES).delete_many(filter).await?;
+    Ok(Json(json!({"deleted_count":result.deleted_count})))
 }

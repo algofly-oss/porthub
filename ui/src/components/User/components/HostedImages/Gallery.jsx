@@ -6,7 +6,9 @@ import toast from "react-hot-toast";
 import { IconPhoto, IconUpload, IconCopy, IconTrash, IconRefresh, IconArrowUpRight, IconKeyboard } from "@tabler/icons-react";
 import { PageHeader, EmptyState } from "@/components/ui/workspace";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import Dialog from "./ImageDialog";
+import ImageLightbox from "./ImageLightbox";
 import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell } from "@/components/ui/table";
 import ResultsPagination from "@/components/ui/results-pagination";
 import { copyText } from "@/shared/utils/clipboard";
@@ -42,6 +44,8 @@ export default function ImageGallery({ active = true, endpoint = ENDPOINT, reque
   const [latest, setLatest] = useState(null);
   const [preview, setPreview] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
+  const [selected, setSelected] = useState([]);
+  const [bulkTarget, setBulkTarget] = useState(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
@@ -81,7 +85,7 @@ export default function ImageGallery({ active = true, endpoint = ENDPOINT, reque
     if (!canUpload) { toast.error("Uploads to this room are paused"); return; }
     const chosen = Array.from(files || []);
     if (!chosen.length) return;
-    if (busy.current) { toast.error("An upload is already running"); return; }
+    if (busy.current) { toast.error("An image operation is already running"); return; }
     busy.current = true; mutation.current++; setUploading(true);
     let last = null;
     try {
@@ -130,6 +134,22 @@ export default function ImageGallery({ active = true, endpoint = ENDPOINT, reque
     } catch (error) { toast.error(errorMessage(error, "Could not delete image. Try again.")); }
     finally { setDeleting(""); }
   };
+  const removeBulk = async () => {
+    if (!bulkTarget || busy.current) return;
+    const target = bulkTarget;
+    const ids = new Set(target.all ? deletable.map(image => image.id) : target.ids);
+    busy.current = true; mutation.current++; setDeleting("bulk");
+    try {
+      const { data } = await axios.delete(endpoint, { headers: requestHeaders, data: target.all ? { all: true } : { ids: target.ids } });
+      setImages(current => current.filter(image => !ids.has(image.id)));
+      setLatest(current => ids.has(current?.id) ? null : current);
+      setPreview(current => ids.has(current?.id) ? null : current);
+      setSelected([]); setBulkTarget(null);
+      await load();
+      toast.success(`${data.deleted_count} ${data.deleted_count === 1 ? "image" : "images"} deleted. Public links disabled.`);
+    } catch (error) { toast.error(errorMessage(error, "Could not delete images. Try again.")); }
+    finally { busy.current = false; setDeleting(""); }
+  };
   useEffect(() => {
     if (!roomMode || !active) return;
     const tick = setInterval(() => setClock(Date.now()), 1000);
@@ -141,12 +161,18 @@ export default function ImageGallery({ active = true, endpoint = ENDPOINT, reque
     if (preview?.expires_at && Date.parse(preview.expires_at) <= clock) setPreview(null);
   }, [clock, latest, preview]);
   const currentImages = roomMode ? images.filter(image => Date.parse(image.expires_at) > clock) : images;
+  const canDelete = image => !roomMode || ownerView || image.can_delete;
+  const deletable = currentImages.filter(canDelete);
+  const deletionKey = deletable.map(image => image.id).join(",");
+  useEffect(() => { const ids = new Set(deletionKey.split(",")); setSelected(previous => previous.filter(id => ids.has(id))); }, [deletionKey]);
+  const allSelected = deletable.length > 0 && selected.length === deletable.length;
+  const selectAll = checked => setSelected(checked ? deletable.map(image => image.id) : []);
   const used = currentImages.reduce((sum, image) => sum + image.size, 0);
   const pages = Math.max(1, Math.ceil(currentImages.length / pageSize));
   const currentPage = Math.min(page, pages);
   const visibleImages = currentImages.slice((currentPage - 1) * pageSize, currentPage * pageSize);
   useEffect(() => { if (page > pages) setPage(pages); }, [page, pages]);
-  useEffect(() => { if (!active) { setPreview(null); setDeleteTarget(null); setHelpOpen(false); } }, [active]);
+  useEffect(() => { if (!active) { setPreview(null); setDeleteTarget(null); setBulkTarget(null); setHelpOpen(false); } }, [active]);
   return <div className="workspace-page" onDragEnter={event => {
     if (!canUpload || !Array.from(event.dataTransfer.types).includes("Files")) return;
     event.preventDefault(); dragDepth.current++; setDragging(true);
@@ -154,11 +180,11 @@ export default function ImageGallery({ active = true, endpoint = ENDPOINT, reque
     event.preventDefault(); dragDepth.current = Math.max(0, dragDepth.current - 1); if (!dragDepth.current) setDragging(false);
   }} onDrop={event => { event.preventDefault(); dragDepth.current = 0; setDragging(false); if (canUpload) upload(event.dataTransfer.files); }}>
     <PageHeader title={roomMode ? <span className="block truncate" title={room?.name || "Image room"}>{room?.name || "Image room"}</span> : "Hosted images"} actions={<>
-      <Button variant="secondary" size="icon" aria-label="Refresh images" onClick={() => load()} disabled={loading || uploading}><IconRefresh size={18} /></Button>
-      {canUpload && <Button onClick={() => input.current?.click()} disabled={uploading}><IconUpload size={18} />{uploading ? "Uploading…" : "Add images"}</Button>}
+      <Button variant="secondary" size="icon" aria-label="Refresh images" onClick={() => load()} disabled={loading || uploading || Boolean(deleting)}><IconRefresh size={18} /></Button>
+      {canUpload && <Button onClick={() => input.current?.click()} disabled={uploading || Boolean(deleting)}><IconUpload size={18} />{uploading ? "Uploading…" : "Add images"}</Button>}
     </>} />
     <input ref={input} type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple className="sr-only" aria-label="Choose images" onChange={event => { upload(event.target.files); event.target.value = ""; }} />
-    {canUpload && <button type="button" onClick={() => input.current?.click()} disabled={uploading} className={`mb-4 flex w-full shrink-0 items-center gap-4 rounded-xl border border-dashed px-4 py-4 text-left transition-colors ${dragging ? "border-primary bg-primary/10" : "border-border bg-surface hover:border-primary/60 hover:bg-accent/40"}`}>
+    {canUpload && <button type="button" onClick={() => input.current?.click()} disabled={uploading || Boolean(deleting)} className={`mb-4 flex w-full shrink-0 items-center gap-4 rounded-xl border border-dashed px-4 py-4 text-left transition-colors ${dragging ? "border-primary bg-primary/10" : "border-border bg-surface hover:border-primary/60 hover:bg-accent/40"}`}>
       <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><IconUpload size={21} stroke={1.7} /></span>
       <span className="min-w-0"><span className="block text-sm font-medium">{uploading ? "Uploading your images…" : dragging ? "Drop to upload" : "Paste a screenshot, drop images, or click to choose"}</span><span className="mt-1 block text-xs leading-5 text-muted-foreground">Your link is copied automatically. PNG, JPEG, WebP or GIF · Up to 8 MiB</span></span>
       <kbd className="ml-auto hidden shrink-0 rounded-md border border-border bg-control px-2 py-1 text-xs text-muted-foreground md:block">Ctrl / ⌘ + V</kbd>
@@ -170,13 +196,18 @@ export default function ImageGallery({ active = true, endpoint = ENDPOINT, reque
       <Button variant="secondary" size="sm" onClick={() => copy(latest)}><IconCopy size={15} />Copy link</Button>
     </div>}
     <div className="mb-2 flex shrink-0 flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground"><span>{currentImages.length} {currentImages.length === 1 ? "image" : "images"}<span className="mx-2 text-border">/</span>{(used / 1024 / 1024).toFixed(1)} of 512 MiB used</span><span>Oldest images are deleted automatically when storage is full.</span></div>
+    {deletable.length > 0 && <div className="mb-2 flex shrink-0 flex-wrap items-center justify-between gap-2 text-xs">
+      <span className="text-muted-foreground">{selected.length ? `${selected.length} selected` : "Select images to delete"}</span>
+      <div className="flex items-center gap-2"><Button variant="secondary" size="sm" disabled={!selected.length || uploading || Boolean(deleting)} onClick={() => setBulkTarget({ ids: [...selected], count: selected.length })}><IconTrash size={14} />Delete selected</Button><Button variant="ghost" size="sm" className="text-red-500" disabled={uploading || Boolean(deleting)} onClick={() => setBulkTarget({ all: true, count: deletable.length })}>{roomMode && !ownerView ? "Delete all my images" : "Delete all"}</Button></div>
+    </div>}
     {loadError && <p role="alert" className="mb-3 text-sm text-red-500">{loadError}</p>}
     <div className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-border bg-surface" style={{ flex: "0 1 auto" }}>
     <div className="data-scroll">
     {loading && !currentImages.length ? <p role="status" className="p-8 text-center text-sm text-muted-foreground">Loading images…</p> : !currentImages.length && !loadError ? <EmptyState icon={IconPhoto} title="Your images will appear here" description="Take a screenshot and paste it here. Uploading starts immediately, and your public link is copied." /> : <Table aria-label="Hosted images">
-      <TableHeader><TableRow><TableHead>Image</TableHead><TableHead className="hidden w-28 md:table-cell">Resolution</TableHead><TableHead className="hidden w-24 sm:table-cell">Size</TableHead><TableHead className="hidden w-32 lg:table-cell">Uploaded</TableHead><TableHead className="hidden w-40 xl:table-cell">Public link</TableHead><TableHead className="w-32 text-right sm:w-40">Actions</TableHead></TableRow></TableHeader>
-      <TableBody>{visibleImages.map(image => <TableRow key={image.id}>
-        <TableCell><div className="flex min-w-0 items-center gap-3"><button type="button" onClick={() => setPreview(image)} aria-label={`Preview ${image.name}`} title="View full image" className="flex h-12 w-16 shrink-0 items-center justify-center overflow-hidden rounded-md border border-border bg-background transition-colors hover:border-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"><img src={image.path} alt="" loading="lazy" className="max-h-full max-w-full object-contain" /></button><div className="min-w-0"><button type="button" title={image.name} className="block max-w-full truncate text-left text-sm font-medium hover:text-primary" onClick={() => setPreview(image)}>{image.name}</button>{roomMode && <p className="mt-1 text-xs text-muted-foreground">Expires in {Math.max(1, Math.ceil((Date.parse(image.expires_at) - clock) / 60000))} min</p>}<p className="mt-1 truncate text-xs text-muted-foreground md:hidden">{image.width} × {image.height} · {Math.ceil(image.size / 1024)} KiB</p></div></div></TableCell>
+      <TableHeader><TableRow><TableHead className="w-11 !px-3"><Checkbox aria-label={roomMode && !ownerView ? "Select all my images" : "Select all images"} checked={allSelected ? true : selected.length ? "indeterminate" : false} onCheckedChange={selectAll} disabled={!deletable.length || uploading || Boolean(deleting)} /></TableHead><TableHead>Image</TableHead><TableHead className="hidden w-28 md:table-cell">Resolution</TableHead><TableHead className="hidden w-24 sm:table-cell">Size</TableHead><TableHead className="hidden w-32 lg:table-cell">Uploaded</TableHead><TableHead className="hidden w-40 xl:table-cell">Public link</TableHead><TableHead className="w-32 text-right sm:w-40">Actions</TableHead></TableRow></TableHeader>
+      <TableBody>{visibleImages.map(image => <TableRow key={image.id} data-state={selected.includes(image.id) ? "selected" : undefined}>
+        <TableCell className="!px-3"><Checkbox aria-label={`Select ${image.name}`} checked={selected.includes(image.id)} disabled={!canDelete(image) || uploading || Boolean(deleting)} onCheckedChange={checked => setSelected(current => checked ? [...current.filter(id => id !== image.id), image.id] : current.filter(id => id !== image.id))} /></TableCell>
+        <TableCell><div className="flex min-w-0 items-center gap-3"><button type="button" onClick={() => setPreview(image)} aria-label={`Preview ${image.name}`} title="View full image" className="flex h-12 w-16 shrink-0 items-center justify-center overflow-hidden rounded-md border border-border bg-background transition-colors hover:border-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"><img src={image.path} alt="" loading="lazy" className="max-h-full max-w-full object-contain" /></button><div className="min-w-0"><button type="button" title={image.name} className="block max-w-full truncate text-left text-sm font-medium hover:text-primary" onClick={() => setPreview(image)}>{image.name}</button>{!roomMode && <p className="mt-1 truncate text-xs text-muted-foreground" title={image.machine_name || (image.source === "browser" ? "Browser upload" : "Upload source unavailable")}>{image.machine_name || (image.source === "browser" ? "Browser" : "Unknown source")}</p>}{roomMode && <p className="mt-1 text-xs text-muted-foreground">Expires in {Math.max(1, Math.ceil((Date.parse(image.expires_at) - clock) / 60000))} min</p>}<p className="mt-1 truncate text-xs text-muted-foreground md:hidden">{image.width} × {image.height} · {Math.ceil(image.size / 1024)} KiB</p></div></div></TableCell>
         <TableCell className="hidden text-xs tabular-nums text-muted-foreground md:table-cell">{image.width} × {image.height}</TableCell>
         <TableCell className="hidden text-xs tabular-nums text-muted-foreground sm:table-cell">{Math.ceil(image.size / 1024)} KiB</TableCell>
         <TableCell className="hidden text-xs text-muted-foreground lg:table-cell">{new Date(`${image.created_at}Z`).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</TableCell>
@@ -194,12 +225,14 @@ export default function ImageGallery({ active = true, endpoint = ENDPOINT, reque
       ["Paste", "porthub image mode paste"],
       ["Copy", "porthub image mode copy"],
     ].map(([label, command]) => <div key={label} className="mb-2 flex items-center gap-2 last:mb-0"><code className="min-w-0 flex-1 select-all text-[11px]">{command}</code><button type="button" aria-label={`Copy ${label.toLowerCase()} command`} className="rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground" onClick={() => copyText(command).then(() => toast.success("Command copied")).catch(() => toast.error("Select and copy the command"))}><IconCopy size={14} /></button></div>)}<p className="mt-3 text-[11px] text-muted-foreground">Copy mode is the default. Paste mode also inserts the URL into the focused input. Automatic setup: GNOME Linux. Algofly is the default tenant.</p></Popover.Dropdown></Popover></div>}
+    <Dialog opened={Boolean(bulkTarget)} onClose={() => { if (!deleting) setBulkTarget(null); }} title={bulkTarget?.all ? "Delete all images" : "Delete selected images"} size="sm" closeOnEscape={!deleting} closeOnClickOutside={!deleting} closeButtonProps={{ disabled: Boolean(deleting) }}>
+      <p className="text-sm leading-6 text-muted-foreground">{bulkTarget?.all ? roomMode && !ownerView ? "Delete all of your images in this room? Other visitors’ images will stay." : roomMode ? "Delete all images in this room? The room will stay available." : "Delete all of your hosted images?" : `Delete ${bulkTarget?.count || 0} selected images?`} Their public links will stop working. This cannot be undone.</p>
+      <div className="mt-6 flex justify-end gap-2"><Button variant="secondary" disabled={Boolean(deleting)} onClick={() => setBulkTarget(null)}>Cancel</Button><Button variant="destructive" disabled={Boolean(deleting)} onClick={removeBulk}>{deleting ? "Deleting…" : bulkTarget?.all ? "Delete all" : "Delete selected"}</Button></div>
+    </Dialog>
     <Dialog opened={Boolean(deleteTarget)} onClose={() => { if (!deleting) setDeleteTarget(null); }} title="Delete image" size="sm" closeOnEscape={!deleting} closeOnClickOutside={!deleting} closeButtonProps={{ disabled: Boolean(deleting) }}>
       <p className="text-sm leading-6 text-muted-foreground">Delete <span className="break-all font-medium text-foreground">{deleteTarget?.name}</span>? Its public link will stop working.</p>
       <div className="mt-6 flex justify-end gap-2"><Button variant="secondary" onClick={() => setDeleteTarget(null)} disabled={Boolean(deleting)}>Cancel</Button><Button variant="destructive" onClick={() => deleteTarget && remove(deleteTarget)} disabled={Boolean(deleting)}>{deleting ? "Deleting…" : "Delete image"}</Button></div>
     </Dialog>
-    <Dialog opened={Boolean(preview)} onClose={() => setPreview(null)} title={preview?.name || "Image preview"} size="90%">
-      {preview && <><div className="flex max-h-[70vh] min-h-[160px] items-center justify-center overflow-auto rounded-lg bg-background p-3"><img src={preview.path} alt={preview.name} className="h-auto max-h-[70vh] max-w-full object-contain" /></div><div className="mt-4 flex flex-wrap items-center justify-between gap-3"><span className="text-xs text-muted-foreground">{preview.width} × {preview.height} · {Math.ceil(preview.size / 1024)} KiB · Original resolution</span><div className="flex items-center gap-2"><Button variant="secondary" size="sm" asChild><a href={preview.path} target="_blank" rel="noreferrer"><IconArrowUpRight size={15} />Open original</a></Button><Button size="sm" onClick={() => copy(preview)}><IconCopy size={15} />Copy link</Button></div></div></>}
-    </Dialog>
+    {preview && <ImageLightbox image={preview} images={currentImages} onChange={setPreview} onClose={() => setPreview(null)} onCopy={copy} />}
   </div>;
 }
