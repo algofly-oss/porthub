@@ -47,8 +47,16 @@ export default function ImageGallery({ active = true, endpoint = ENDPOINT, reque
   const [selected, setSelected] = useState([]);
   const [bulkTarget, setBulkTarget] = useState(null);
   const [helpOpen, setHelpOpen] = useState(false);
+  useEffect(() => {
+    if (!helpOpen) return;
+    const closeHelp = event => { if (event.key === "Escape") setHelpOpen(false); };
+    document.addEventListener("keydown", closeHelp);
+    return () => document.removeEventListener("keydown", closeHelp);
+  }, [helpOpen]);
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(10);
+  const [pageSize, setPageSize] = useState(0);
+  const [autoPageSize, setAutoPageSize] = useState(10);
+  const tableViewport = useRef(null);
   const busy = useRef(false);
   const mutation = useRef(0);
   const input = useRef(null);
@@ -168,9 +176,31 @@ export default function ImageGallery({ active = true, endpoint = ENDPOINT, reque
   const allSelected = deletable.length > 0 && selected.length === deletable.length;
   const selectAll = checked => setSelected(checked ? deletable.map(image => image.id) : []);
   const used = currentImages.reduce((sum, image) => sum + image.size, 0);
-  const pages = Math.max(1, Math.ceil(currentImages.length / pageSize));
+  const effectivePageSize = pageSize || autoPageSize;
+  const pages = Math.max(1, Math.ceil(currentImages.length / effectivePageSize));
   const currentPage = Math.min(page, pages);
-  const visibleImages = currentImages.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const visibleImages = currentImages.slice((currentPage - 1) * effectivePageSize, currentPage * effectivePageSize);
+  useEffect(() => {
+    if (!active || pageSize || !tableViewport.current) return;
+    const viewport = tableViewport.current;
+    const header = viewport.querySelector("thead"), row = viewport.querySelector("tbody tr");
+    let frame;
+    const measure = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        if (!viewport.clientHeight) return;
+        const rowHeight = row?.getBoundingClientRect().height || 73;
+        const headerHeight = header?.getBoundingClientRect().height || 45;
+        setAutoPageSize(Math.max(1, Math.min(1000, Math.floor((viewport.clientHeight - headerHeight) / rowHeight))));
+      });
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(viewport);
+    if (header) observer.observe(header);
+    if (row) observer.observe(row);
+    measure();
+    return () => { observer.disconnect(); cancelAnimationFrame(frame); };
+  }, [active, pageSize, visibleImages[0]?.id, Boolean(currentImages.length)]);
   useEffect(() => { if (page > pages) setPage(pages); }, [page, pages]);
   useEffect(() => { if (!active) { setPreview(null); setDeleteTarget(null); setBulkTarget(null); setHelpOpen(false); } }, [active]);
   return <div className="workspace-page" onDragEnter={event => {
@@ -203,8 +233,8 @@ export default function ImageGallery({ active = true, endpoint = ENDPOINT, reque
     </div>}
     <div className="mb-2 flex shrink-0 flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground"><span>{currentImages.length} {currentImages.length === 1 ? "image" : "images"}<span className="mx-2 text-border">/</span>{(used / 1024 / 1024).toFixed(1)} of 512 MiB used</span><span>Oldest images are deleted automatically when storage is full.</span></div>
     {loadError && <p role="alert" className="mb-3 text-sm text-red-500">{loadError}</p>}
-    <div className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-border bg-surface" style={{ flex: "0 1 auto" }}>
-    <div className="data-scroll">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-surface">
+    <div ref={tableViewport} className="data-scroll">
     {loading && !currentImages.length ? <p role="status" className="p-8 text-center text-sm text-muted-foreground">Loading images…</p> : !currentImages.length && !loadError ? <EmptyState icon={IconPhoto} title="Your images will appear here" description="Take a screenshot and paste it here. Uploading starts immediately, and your public link is copied." /> : <Table aria-label="Hosted images">
       <TableHeader><TableRow><TableHead className="w-11 !px-3"><span className="sr-only">Selection</span></TableHead><TableHead>Image</TableHead><TableHead className="hidden w-28 md:table-cell">Resolution</TableHead><TableHead className="hidden w-24 sm:table-cell">Size</TableHead><TableHead className="hidden w-32 lg:table-cell">Uploaded</TableHead><TableHead className="hidden w-40 xl:table-cell">Public link</TableHead><TableHead className="w-32 text-right sm:w-40">Actions</TableHead></TableRow></TableHeader>
       <TableBody>{visibleImages.map(image => <TableRow key={image.id} data-state={selected.includes(image.id) ? "selected" : undefined}>
@@ -218,7 +248,7 @@ export default function ImageGallery({ active = true, endpoint = ENDPOINT, reque
       </TableRow>)}</TableBody>
     </Table>}
     </div>
-    <ResultsPagination count={currentImages.length} noun="Images" page={currentPage} pages={pages} pageSize={pageSize} onPage={setPage} onPageSize={size => { setPageSize(size); setPage(1); }} />
+    <ResultsPagination count={currentImages.length} noun="Images" page={currentPage} pages={pages} pageSize={pageSize} autoPageSize={autoPageSize} sizes={[0, 10, 25, 50]} onPage={setPage} onPageSize={size => { setPageSize(size); setPage(1); }} />
     </div>
     {!roomMode && <div className="mt-3 flex shrink-0 items-center gap-2 text-xs text-muted-foreground"><IconKeyboard size={15} /><span>Ctrl+Shift+U</span><Popover opened={helpOpen} onChange={setHelpOpen} width={340} position="top-start" withinPortal zIndex={350}><Popover.Target><button type="button" aria-label="Desktop shortcut setup" className="text-primary hover:underline" onClick={() => setHelpOpen(value => !value)}>Setup</button></Popover.Target><Popover.Dropdown className="!rounded-xl !border-border !bg-dialog !p-4 !text-foreground"><p className="text-sm font-medium">Desktop shortcut</p><p className="mb-3 mt-1 text-xs text-muted-foreground">Off by default. Run in your desktop terminal:</p>{[
       ["Enable", "porthub image shortcut enable"],

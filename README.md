@@ -63,6 +63,8 @@ Click a thumbnail for a full-screen original image: scroll or pinch to zoom,
 drag to pan, double-click or use the percentage button to reset, and use arrows
 to browse. New agent uploads display the authenticated machine's name; browser
 uploads are marked separately. Older uploads have no recorded source.
+Image pagination defaults to **Auto**, fitting rows to the available table height
+as the window changes. You can still choose 10, 25, or 50 images per page.
 
 The desktop shortcut is **disabled by default**. On GNOME-based Linux desktops,
 enable automatic Ctrl+Shift+U registration from your desktop session:
@@ -103,6 +105,9 @@ If the active window changes during upload, PortHub leaves the URL copied and
 skips automatic paste. X11 requires `xdotool`; macOS requires desktop automation
 permission. Windows uses native keyboard input. Wayland currently supports copy
 mode only. Clipboard delivery preferences do not enable the shortcut itself.
+On X11, PortHub uses `xprop` to recognize supported terminal applications and
+sends Ctrl+Shift+V there; ordinary applications keep Ctrl+V. Install `x11-utils`
+if `xprop` is unavailable. Paste mode inserts the URL without pressing Enter.
 
 Take a screenshot with your desktop tool so it puts the image on the clipboard,
 press your shortcut, then paste the URL anywhere. The command uploads only when

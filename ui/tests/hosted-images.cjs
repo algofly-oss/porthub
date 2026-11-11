@@ -136,6 +136,8 @@ assert(base, "An isolated local UI URL is required");
       await page.keyboard.press("Escape");
       assert.equal(nativeDialogs,0,"Deletion never opens a native browser confirmation");
       // Exercise pagination with more than one page of image metadata.
+      await page.getByLabel("Images per page",{exact:true}).click();
+      await page.getByRole("option",{name:"10 / page",exact:true}).click();
       const sample=images[0];
       images=Array.from({length:24},(_,index)=>({...sample,id:String(100+index).padStart(32,"0"),name:`page-image-${index+1}.png`}));
       await page.getByRole("button",{name:"Refresh images",exact:true}).click();

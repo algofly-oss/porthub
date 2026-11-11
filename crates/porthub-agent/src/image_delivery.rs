@@ -68,7 +68,7 @@ impl Focus {
             foreground()? == self.0,
             "Image link copied. Focus changed during upload; paste the URL manually."
         );
-        paste()
+        paste(&self.0)
     }
 }
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -99,8 +99,54 @@ fn foreground() -> Result<String> {
     Ok(id)
 }
 #[cfg(target_os = "linux")]
-fn paste() -> Result<()> {
-    output("xdotool", &["key", "--clearmodifiers", "ctrl+v"])?;
+fn terminal_class(properties: &str) -> bool {
+    properties.split('"').skip(1).step_by(2).any(|class| {
+        matches!(
+            class.to_ascii_lowercase().as_str(),
+            "gnome-terminal"
+                | "gnome-terminal-server"
+                | "org.gnome.terminal"
+                | "kgx"
+                | "org.gnome.console"
+                | "ptyxis"
+                | "org.gnome.ptyxis"
+                | "konsole"
+                | "org.kde.konsole"
+                | "xfce4-terminal"
+                | "xfce4-terminal-server"
+                | "mate-terminal"
+                | "tilix"
+                | "com.gexperts.tilix"
+                | "terminator"
+                | "alacritty"
+                | "kitty"
+                | "wezterm"
+                | "org.wezfurlong.wezterm"
+                | "ghostty"
+                | "com.mitchellh.ghostty"
+                | "st"
+                | "st-256color"
+                | "sakura"
+                | "guake"
+                | "tilda"
+                | "hyper"
+                | "warp"
+                | "dev.warp.warp"
+        )
+    })
+}
+#[cfg(target_os = "linux")]
+fn paste(window: &str) -> Result<()> {
+    // Use application identity, never the window title (which may be a web page
+    // or shell command). Editors and browsers keep their usual Ctrl+V behavior.
+    let terminal = output("xprop", &["-id", window, "WM_CLASS"])
+        .is_ok_and(|properties| terminal_class(&properties));
+    ensure!(
+        foreground()? == window,
+        "Image link copied. Focus changed before paste; paste the URL manually."
+    );
+    let key = if terminal { "ctrl+shift+v" } else { "ctrl+v" };
+    output("xdotool", &["key", "--clearmodifiers", key])?;
     Ok(())
 }
 #[cfg(target_os = "macos")]
@@ -111,7 +157,7 @@ fn foreground() -> Result<String> {
     Ok(id)
 }
 #[cfg(target_os = "macos")]
-fn paste() -> Result<()> {
+fn paste(_window: &str) -> Result<()> {
     output(
         "osascript",
         &[
@@ -149,7 +195,7 @@ fn release_modifiers() -> Result<()> {
     Ok(())
 }
 #[cfg(windows)]
-fn paste() -> Result<()> {
+fn paste(_window: &str) -> Result<()> {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
     let input = |key, flags| INPUT {
         r#type: INPUT_KEYBOARD,
@@ -198,13 +244,35 @@ fn foreground() -> Result<String> {
     anyhow::bail!("Direct paste is unsupported on this desktop")
 }
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-fn paste() -> Result<()> {
+fn paste(_window: &str) -> Result<()> {
     anyhow::bail!("Direct paste is unsupported on this desktop")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn terminal_identity_selects_the_terminal_paste_shortcut() {
+        for properties in [
+            "WM_CLASS(STRING) = \"gnome-terminal-server\", \"Gnome-terminal\"",
+            "WM_CLASS(STRING) = \"terminal\", \"org.gnome.Ptyxis\"",
+            "WM_CLASS(STRING) = \"kitty\", \"kitty\"",
+            "WM_CLASS(STRING) = \"konsole\", \"konsole\"",
+            "WM_CLASS(STRING) = \"xfce4-terminal\", \"Xfce4-terminal\"",
+            "WM_CLASS(STRING) = \"Alacritty\", \"Alacritty\"",
+        ] {
+            assert!(terminal_class(properties), "{properties}");
+        }
+        for properties in [
+            "WM_CLASS(STRING) = \"google-chrome\", \"Google-chrome\"",
+            "WM_CLASS(STRING) = \"code\", \"Code\"",
+            "WM_CLASS:  not found.",
+            "",
+        ] {
+            assert!(!terminal_class(properties), "{properties}");
+        }
+    }
     #[test]
     fn copy_is_the_default_and_preferences_are_explicit() {
         assert_eq!(Mode::default(), Mode::Copy);
