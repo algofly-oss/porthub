@@ -5075,7 +5075,7 @@
                   "image": {
                     "type": "string",
                     "format": "byte",
-                    "description": "Base64 PNG, JPEG, WebP or GIF. Input and resulting PNG must be <=8 MiB; maximum 32 megapixels. Metadata is removed and animations use their first frame."
+                    "description": "Base64 PNG, JPEG, WebP or GIF. Input and resulting PNG must be <=50 MB (50,000,000 bytes); maximum 32 megapixels. Metadata is removed and animations use their first frame."
                   },
                   "name": {
                     "type": "string"
@@ -5217,7 +5217,7 @@
                   "image": {
                     "type": "string",
                     "format": "byte",
-                    "description": "Base64 PNG, JPEG, WebP or GIF. Input and resulting PNG must be <=8 MiB; maximum 32 megapixels. Metadata is removed and animations use their first frame."
+                    "description": "Base64 PNG, JPEG, WebP or GIF. Input and resulting PNG must be <=50 MB (50,000,000 bytes); maximum 32 megapixels. Metadata is removed and animations use their first frame."
                   },
                   "name": {
                     "type": "string"
