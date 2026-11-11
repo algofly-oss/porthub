@@ -22,15 +22,23 @@ const base=process.env.PORTHUB_TEST_UI_URL;assert(base);
   await page.goto(guest?`${base}/drop?room=${roomId}`:`${base}/home?view=images`);
   await page.getByRole('row').filter({hasText:'Shot 1.png'}).waitFor();
   const size=page.getByLabel('Images per page',{exact:true});
-  await page.waitForFunction(()=>/^Auto \(\d+\)$/.test(document.querySelector('[aria-label="Images per page"]').value));
+  const waitForAuto=()=>page.waitForFunction(()=>{
+   const table=document.querySelector('table[aria-label="Hosted images"]'),viewport=table?.parentElement,row=table?.querySelector('tbody tr');
+   if(!row)return false;
+   const fitted=Math.max(1,Math.min(1000,Math.floor((viewport.clientHeight-table.querySelector('thead').getBoundingClientRect().height)/row.getBoundingClientRect().height)));
+   return document.querySelector('[aria-label="Images per page"]').value===`Auto (${fitted})`;
+  });
+  await waitForAuto();
   if(!guest&&width>=768){
    const fitted=Number((await size.inputValue()).match(/\d+/)[0]);
    await page.setViewportSize({width,height:1300});
    await page.waitForFunction(previous=>Number(document.querySelector('[aria-label="Images per page"]').value.match(/\d+/)[0])>previous,fitted);
    const filled=await page.getByRole('table',{name:'Hosted images'}).evaluate(table=>{const viewport=table.parentElement,row=table.querySelector('tbody tr');return viewport.clientHeight-table.getBoundingClientRect().height<row.getBoundingClientRect().height+2;});
    assert(filled,'Auto pagination uses the available table height');
+   const expanded=Number((await size.inputValue()).match(/\d+/)[0]);
    await page.setViewportSize({width,height:950});
-   await page.waitForFunction(previous=>Number(document.querySelector('[aria-label="Images per page"]').value.match(/\d+/)[0])===previous,fitted);
+   await waitForAuto();
+   assert(Number((await size.inputValue()).match(/\d+/)[0])<expanded,'Auto pagination adapts when the available height shrinks');
   }
   await size.click();await page.getByRole('option',{name:'10 / page',exact:true}).click();
   const allLabel=guest?'Select all my images':'Select all images';
