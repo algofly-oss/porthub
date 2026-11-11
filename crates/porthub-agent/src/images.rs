@@ -321,11 +321,7 @@ pub async fn run(mut args: Args) -> Result<()> {
             ImageCommand::Shortcut { action } => crate::image_shortcut::run(action, args.user),
         };
     }
-    let result = upload_clipboard(args).await;
-    if let Err(error) = &result {
-        notify(&format!("{error:#}"));
-    }
-    result
+    upload_clipboard(args).await
 }
 async fn upload_clipboard(args: Args) -> Result<()> {
     // Desktop integrations invoke this command once per shortcut. Lock before
@@ -423,7 +419,6 @@ async fn upload_clipboard(args: Args) -> Result<()> {
         }
         Ok::<_, anyhow::Error>(())
     }).await??;
-    notify(if mode == crate::image_delivery::Mode::Paste { "Image link pasted." } else { "Image link copied. Paste it anywhere." });
     Ok(())
 }
 
@@ -463,23 +458,6 @@ fn copy_url(url: &str) -> Result<()> {
         Ok(())
     }
 }
-fn notify(message: &str) {
-    #[cfg(target_os = "linux")]
-    {
-        let _ = std::process::Command::new("notify-send")
-            .args(["--app-name=PortHub", "PortHub images", message])
-            .spawn();
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("osascript").args(["-e","on run argv\ndisplay notification (item 1 of argv) with title \"PortHub images\"\nend run",message]).spawn();
-    }
-    #[cfg(windows)]
-    {
-        let _ = message;
-    }
-}
-
 pub(crate) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     mut reader: BufReader<S>,
     control: &crate::control::Control,

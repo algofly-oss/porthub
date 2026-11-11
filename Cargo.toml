@@ -8,7 +8,7 @@ nlink = { path = "vendor/nlink" }
 notify = { path = "vendor/notify" }
 
 [workspace.package]
-version = "1.11.17"
+version = "1.11.18"
 edition = "2021"
 publish = false
 

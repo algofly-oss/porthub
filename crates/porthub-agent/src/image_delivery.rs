@@ -62,7 +62,7 @@ impl Focus {
         Ok(Self(foreground()?))
     }
     pub fn paste(&self) -> Result<()> {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         release_modifiers()?;
         ensure!(
             foreground()? == self.0,
@@ -100,7 +100,7 @@ fn foreground() -> Result<String> {
 }
 #[cfg(target_os = "linux")]
 fn terminal_class(properties: &str) -> bool {
-    properties.split('"').skip(1).step_by(2).any(|class| {
+    properties.split('\0').any(|class| {
         matches!(
             class.to_ascii_lowercase().as_str(),
             "gnome-terminal"
@@ -137,10 +137,22 @@ fn terminal_class(properties: &str) -> bool {
 }
 #[cfg(target_os = "linux")]
 fn paste(window: &str) -> Result<()> {
+    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt};
     // Use application identity, never the window title (which may be a web page
     // or shell command). Editors and browsers keep their usual Ctrl+V behavior.
-    let terminal = output("xprop", &["-id", window, "WM_CLASS"])
-        .is_ok_and(|properties| terminal_class(&properties));
+    let (connection, _) = x11rb::connect(None).context("Cannot access the desktop for paste")?;
+    let properties = connection
+        .get_property(
+            false,
+            window.parse::<u32>()?,
+            AtomEnum::WM_CLASS,
+            AtomEnum::STRING,
+            0,
+            1024,
+        )?
+        .reply()?
+        .value;
+    let terminal = terminal_class(&String::from_utf8_lossy(&properties));
     ensure!(
         foreground()? == window,
         "Image link copied. Focus changed before paste; paste the URL manually."
@@ -148,6 +160,44 @@ fn paste(window: &str) -> Result<()> {
     let key = if terminal { "ctrl+shift+v" } else { "ctrl+v" };
     output("xdotool", &["key", "--clearmodifiers", key])?;
     Ok(())
+}
+#[cfg(target_os = "linux")]
+fn release_modifiers() -> Result<()> {
+    use x11rb::{connection::Connection, protocol::xproto::ConnectionExt};
+    let (connection, _) = x11rb::connect(None).context("Cannot check the shortcut keys")?;
+    let setup = connection.setup();
+    let count = u8::try_from(u16::from(setup.max_keycode) - u16::from(setup.min_keycode) + 1)?;
+    let mapping = connection
+        .get_keyboard_mapping(setup.min_keycode, count)?
+        .reply()?;
+    ensure!(
+        mapping.keysyms_per_keycode > 0,
+        "Cannot read the desktop keyboard mapping"
+    );
+    let watched: Vec<usize> = mapping
+        .keysyms
+        .chunks(mapping.keysyms_per_keycode as usize)
+        .enumerate()
+        .filter(|(_, symbols)| {
+            symbols
+                .iter()
+                .any(|symbol| matches!(*symbol, 0xffe1..=0xffee | 0xfe03 | 0xff7e | 0x55 | 0x75))
+        })
+        .map(|(index, _)| usize::from(setup.min_keycode) + index)
+        .collect();
+    // Fast repeat-paste can reach delivery while Ctrl+Shift+U is still held.
+    // Wait for real release instead of synthesizing conflicting modifier-ups.
+    for _ in 0..150 {
+        let keys = connection.query_keymap()?.reply()?.keys;
+        if watched
+            .iter()
+            .all(|code| keys[code / 8] & (1 << (code % 8)) == 0)
+        {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    anyhow::bail!("Release the shortcut keys, then paste the copied image link manually")
 }
 #[cfg(target_os = "macos")]
 fn foreground() -> Result<String> {
@@ -255,21 +305,16 @@ mod tests {
     #[test]
     fn terminal_identity_selects_the_terminal_paste_shortcut() {
         for properties in [
-            "WM_CLASS(STRING) = \"gnome-terminal-server\", \"Gnome-terminal\"",
-            "WM_CLASS(STRING) = \"terminal\", \"org.gnome.Ptyxis\"",
-            "WM_CLASS(STRING) = \"kitty\", \"kitty\"",
-            "WM_CLASS(STRING) = \"konsole\", \"konsole\"",
-            "WM_CLASS(STRING) = \"xfce4-terminal\", \"Xfce4-terminal\"",
-            "WM_CLASS(STRING) = \"Alacritty\", \"Alacritty\"",
+            "gnome-terminal-server\0Gnome-terminal\0",
+            "terminal\0org.gnome.Ptyxis\0",
+            "kitty\0kitty\0",
+            "konsole\0konsole\0",
+            "xfce4-terminal\0Xfce4-terminal\0",
+            "Alacritty\0Alacritty\0",
         ] {
             assert!(terminal_class(properties), "{properties}");
         }
-        for properties in [
-            "WM_CLASS(STRING) = \"google-chrome\", \"Google-chrome\"",
-            "WM_CLASS(STRING) = \"code\", \"Code\"",
-            "WM_CLASS:  not found.",
-            "",
-        ] {
+        for properties in ["google-chrome\0Google-chrome\0", "code\0Code\0", ""] {
             assert!(!terminal_class(properties), "{properties}");
         }
     }

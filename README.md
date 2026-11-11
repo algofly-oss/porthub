@@ -105,9 +105,10 @@ If the active window changes during upload, PortHub leaves the URL copied and
 skips automatic paste. X11 requires `xdotool`; macOS requires desktop automation
 permission. Windows uses native keyboard input. Wayland currently supports copy
 mode only. Clipboard delivery preferences do not enable the shortcut itself.
-On X11, PortHub uses `xprop` to recognize supported terminal applications and
-sends Ctrl+Shift+V there; ordinary applications keep Ctrl+V. Install `x11-utils`
-if `xprop` is unavailable. Paste mode inserts the URL without pressing Enter.
+On X11, PortHub recognizes supported terminal applications and sends
+Ctrl+Shift+V there; ordinary applications keep Ctrl+V. It waits for the shortcut
+keys to be released before delivery. Paste mode never presses Enter. Image
+uploads do not show native desktop notification banners.
 
 Take a screenshot with your desktop tool so it puts the image on the clipboard,
 press your shortcut, then paste the URL anywhere. The command uploads only when

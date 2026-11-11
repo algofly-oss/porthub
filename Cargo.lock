@@ -5091,7 +5091,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-agent"
-version = "1.11.8"
+version = "1.11.9"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5155,12 +5155,13 @@ dependencies = [
  "windows-registry",
  "windows-service",
  "windows-sys 0.61.2",
+ "x11rb",
  "zbus",
 ]
 
 [[package]]
 name = "porthub-api"
-version = "1.11.17"
+version = "1.11.18"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5254,7 +5255,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-edge"
-version = "1.11.17"
+version = "1.11.18"
 dependencies = [
  "anyhow",
  "axum",
@@ -5304,7 +5305,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-firewall"
-version = "1.11.17"
+version = "1.11.18"
 dependencies = [
  "anyhow",
  "axum",
@@ -5393,7 +5394,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-runtime"
-version = "1.11.17"
+version = "1.11.18"
 dependencies = [
  "anyhow",
  "axum",

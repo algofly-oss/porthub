@@ -87,20 +87,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         if: steps.previous_components.outputs.compact == 'true'
         with:
-          key: release-preparation-verifier
+          key: release-preparation-verifier-optimized
+      # Full-catalog hashing and decompression must fit the verifier's timeouts.
       - name: Build trusted artifact verifier
         if: steps.previous_components.outputs.compact == 'true'
         env:
           CARGO_INCREMENTAL: "0"
-          CARGO_PROFILE_DEV_DEBUG: "0"
-        run: cargo build --locked -p porthub-api --bin porthub-api
+          CARGO_PROFILE_RELEASE_LTO: "false"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+        run: cargo build --locked --release -p porthub-api --bin porthub-api
       - name: Recover verified prior core build inputs
         id: previous_builds
         if: steps.previous_components.outputs.compact == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          python3 scripts/fetch-component-release.py --output "$RUNNER_TEMP/porthub-previous-release" --artifact-verifier "$GITHUB_WORKSPACE/target/debug/porthub-api" --recover-output "$RUNNER_TEMP/porthub-previous-builds"
+          python3 scripts/fetch-component-release.py --output "$RUNNER_TEMP/porthub-previous-release" --artifact-verifier "$GITHUB_WORKSPACE/target/release/porthub-api" --recover-output "$RUNNER_TEMP/porthub-previous-builds"
       - name: Pin the release version and source
         id: release
         if: github.event_name != 'workflow_dispatch' || inputs.verify_only != true
