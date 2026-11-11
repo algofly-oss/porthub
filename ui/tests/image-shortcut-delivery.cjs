@@ -20,7 +20,7 @@ const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),asse
   const origin=new URL(registration.gateway).origin,url=origin+'/i/AbC23.png';
   const copy=text=>execFileSync('xclip',['-selection','clipboard','-in','-target','UTF8_STRING'],{env,input:text,stdio:['pipe','ignore','ignore']});
   const paste=()=>execFileSync(binary,['image','--mode','paste'],{env,encoding:'utf8'}).trim();
-  const start=()=>{const child=spawn(binary,['image','--mode','paste'],{env,stdio:['ignore','pipe','pipe']});let out='',err='';child.stdout.on('data',data=>out+=data);child.stderr.on('data',data=>err+=data);return new Promise(resolve=>child.on('close',code=>resolve({code,out:out.trim(),err})));};
+  const start=()=>{const child=spawn(binary,['image','--mode','paste'],{env,stdio:['ignore','pipe','pipe']});let out='',err='',ready;const started=new Promise(resolve=>ready=resolve);child.stdout.on('data',data=>{out+=data;ready();});child.stderr.on('data',data=>err+=data);const done=new Promise(resolve=>child.on('close',code=>{ready();resolve({code,out:out.trim(),err});}));done.ready=started;return done;};
   const hold=()=>execFileSync('xdotool',['keydown','Control_L','keydown','Shift_L','keydown','u'],{env});
   const release=()=>execFileSync('xdotool',['keyup','u','keyup','Shift_L','keyup','Control_L'],{env});
   const heldPaste=async()=>{hold();const result=start();await page.waitForTimeout(180);release();const done=await result;assert.equal(done.code,0,done.err);return done.out;};
@@ -52,6 +52,10 @@ while True:
   hold();const changed=start();await page.waitForTimeout(100);
   execFileSync('python3',[activeHelper,terminalId],{env});execFileSync('xdotool',['windowfocus','--sync',terminalId],{env});release();
   const result=await changed;assert.notEqual(result.code,0);assert(result.err.includes('Focus changed'));assert.equal(fs.readFileSync(capture,'utf8'),url+url,'Focus change must not paste into the new window');
-  console.log('PASS: Chrome and GNOME Terminal receive repeated pastes with a real Ctrl+Shift+U X11 keyboard grab held and then released. Focus changes block delivery, unrelated text is preserved, no upload or Enter occurs, and the real desktop clipboard is untouched.');
+  execFileSync('python3',[activeHelper,id],{env});execFileSync('xdotool',['windowfocus','--sync',id],{env});
+  hold();const clipboardChanged=start();await clipboardChanged.ready;await page.waitForTimeout(100);copy('do not paste me');release();
+  const preserved=await clipboardChanged;assert.notEqual(preserved.code,0);assert(preserved.err.includes('Clipboard changed'));
+  assert.equal(await page.locator('textarea').inputValue(),url+url+alternate+alternate,'A clipboard change during key release must not be pasted');
+  console.log('PASS: Chrome and GNOME Terminal receive repeated pastes with a real Ctrl+Shift+U X11 keyboard grab held and then released. Focus and clipboard changes block delivery, unrelated text is preserved, no upload or Enter occurs, and the real desktop clipboard is untouched.');
  }finally{if(grab)grab.kill();if(terminal)terminal.kill();if(browser)await browser.close();xvfb.kill();fs.closeSync(log);fs.rmSync(config,{recursive:true,force:true});}
 })().catch(error=>{console.error(error);process.exitCode=1});

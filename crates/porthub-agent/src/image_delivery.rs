@@ -61,12 +61,16 @@ impl Focus {
     pub fn capture() -> Result<Self> {
         Ok(Self(foreground()?))
     }
-    pub fn paste(&self) -> Result<()> {
+    pub fn paste(&self, expected: &str) -> Result<()> {
         #[cfg(any(windows, target_os = "linux"))]
         release_modifiers()?;
         ensure!(
             foreground()? == self.0,
             "Image link copied. Focus changed during upload; paste the URL manually."
+        );
+        ensure!(
+            arboard::Clipboard::new()?.get_text().is_ok_and(|value| value == expected),
+            "Clipboard changed while waiting for shortcut release; its contents were preserved"
         );
         paste(&self.0)
     }

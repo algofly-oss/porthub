@@ -280,7 +280,11 @@ impl Control {
                     .map(|(key, value)| (key.as_str(), value.clone())),
             );
         }
-        let deadline = Instant::now() + Duration::from_secs(45);
+        // Image JSON may contain a 50 MB file plus base64 overhead. Keep normal
+        // control requests short while allowing image uploads on slower links.
+        let image_upload = method == Method::POST && path == "machines/client/images";
+        let attempt = Duration::from_secs(if image_upload { 270 } else { 40 });
+        let deadline = Instant::now() + Duration::from_secs(if image_upload { 300 } else { 45 });
         'authorities: for base in self.authorities() {
           for _ in 0..8 {
             if Instant::now() >= deadline { return Err(Failure::Unavailable); }
@@ -288,7 +292,7 @@ impl Control {
             let mut request = http
                 .request(method.clone(), format!("{base}/api/{path}"))
                 .header("x-porthub-agent-protocol", "rust-v1")
-                .timeout(deadline.saturating_duration_since(Instant::now()).min(Duration::from_secs(40)));
+                .timeout(deadline.saturating_duration_since(Instant::now()).min(attempt));
             if let Some(accept) = accept {
                 request = request.header(reqwest::header::ACCEPT, accept);
             }

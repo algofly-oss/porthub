@@ -16,7 +16,7 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::TryStreamExt;
 use mongodb::{
-    bson::{doc, spec::BinarySubtype, Binary, Bson, DateTime, Document},
+    bson::{doc, DateTime, Document},
     options::IndexOptions,
     IndexModel,
 };
@@ -25,7 +25,8 @@ use serde_json::{json, Value};
 use std::{io::Cursor, sync::Arc};
 
 pub const COLLECTION: &str = "hosted_images";
-pub const MAX_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_BYTES: usize = 50_000_000;
+pub const MAX_BODY_BYTES: usize = (MAX_BYTES + 2) / 3 * 4 + 64 * 1024;
 const MAX_PIXELS: u64 = 32 * 1024 * 1024;
 const MAX_IMAGES: usize = 1000;
 const MAX_STORAGE: i64 = 512 * 1024 * 1024;
@@ -46,7 +47,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/api/images/public/{id}", get(public))
         .route("/i/{filename}", get(short_public))
         .route("/api/machines/client/images", post(upload))
-        .layer(DefaultBodyLimit::max(12 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
 }
 
 #[derive(Deserialize)]
@@ -60,7 +61,7 @@ struct Upload {
     token: Option<String>,
 }
 fn invalid() -> ApiError {
-    ApiError::bad_request("Use a valid PNG, JPEG, WebP or GIF image, up to 8 MiB and 32 megapixels")
+    ApiError::bad_request("Use a valid PNG, JPEG, WebP or GIF image, up to 50 MB and 32 megapixels")
 }
 
 // Decode and re-encode to discard metadata, trailing data, and animation. Never
@@ -213,7 +214,7 @@ async fn upload(
     }
     let rows: Vec<Document> = app
         .collection(COLLECTION)
-        .find(doc! {"owner_id":owner})
+        .find(crate::image_storage::parents(doc! {"owner_id":owner}))
         .projection(doc! {"size":1})
         .sort(doc! {"created_at":1,"_id":1})
         .limit((MAX_IMAGES + 1) as i64)
@@ -246,47 +247,13 @@ async fn upload(
     let mut row = doc! {"_id":&id,"owner_id":owner,"name":if name.is_empty(){"Clipboard image"}else{&name},"size":bytes.len() as i64,"width":i64::from(width),"height":i64::from(height),"created_at":DateTime::now()};
     row.insert("source", if body.machine_id.is_some() { "machine" } else { "browser" });
     if let Some(name) = machine_name { row.insert("machine_name", name); }
-    row.insert(
-        "data",
-        Bson::Binary(Binary {
-            subtype: BinarySubtype::Generic,
-            bytes,
-        }),
-    );
-    // The unique index is the authority even across concurrent API instances.
-    // Removing the image removes its index entry, allowing the code to be reused.
-    for _ in 0..16 {
-        row.insert("public_id", short_id());
-        match app.collection(COLLECTION).insert_one(&row).await {
-            Ok(_) => {
-                if !expired.is_empty() {
-                    app.collection(COLLECTION)
-                        .delete_many(doc! {"owner_id":owner,"_id":{"$in":&expired}})
-                        .await?;
-                }
-                return Ok(Json(metadata(&app, &row)));
-            }
-            Err(error) if crate::store::duplicate(&error) => {
-                if let Some(existing) = app
-                    .collection(COLLECTION)
-                    .find_one(doc! {"_id":&id})
-                    .projection(doc! {"data":0})
-                    .await?
-                {
-                    if existing.get_object_id("owner_id").ok() == Some(owner) {
-                        return Ok(Json(metadata(&app, &existing)));
-                    }
-                    return Err(ApiError::bad_request("Upload identity already used"));
-                }
-            }
-            Err(error) => return Err(error.into()),
-        }
+    let stored = crate::image_storage::insert(&app, COLLECTION, row, bytes).await?;
+    if stored.inserted && !expired.is_empty() {
+        crate::image_storage::remove(&app, COLLECTION, doc! {"owner_id":owner,"_id":{"$in":expired}}).await?;
     }
-    Err(ApiError::new(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Could not allocate an image link. Please retry.",
-    ))
+    Ok(Json(metadata(&app, &stored.row)))
 }
+
 async fn list(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json<Value>> {
     let user = auth::current_user(&app, &headers).await?;
     let owner = user
@@ -295,7 +262,7 @@ async fn list(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json
     indexes(&app).await?;
     let rows: Vec<Document> = app
         .collection(COLLECTION)
-        .find(doc! {"owner_id":owner})
+        .find(crate::image_storage::parents(doc! {"owner_id":owner}))
         .projection(doc! {"data":0})
         .sort(doc! {"created_at":-1,"_id":1})
         .limit(MAX_IMAGES as i64)
@@ -337,8 +304,8 @@ async fn remove_many(
     let owner = auth::current_user(&app, &headers).await?.get_object_id("_id").map_err(|_|ApiError::unauthenticated())?;
     let filter = body.filter(doc! {"owner_id":owner})?;
     let _admission = app.hosted_images_lock.lock().await;
-    let result = app.collection(COLLECTION).delete_many(filter).await?;
-    Ok(Json(json!({"deleted_count":result.deleted_count})))
+    let count = crate::image_storage::remove(&app, COLLECTION, filter).await?;
+    Ok(Json(json!({"deleted_count":count})))
 }
 async fn remove(
     State(app): State<Arc<App>>,
@@ -353,11 +320,8 @@ async fn remove(
     if !valid_id(&id) {
         return Err(ApiError::new(StatusCode::NOT_FOUND, "Image not found"));
     }
-    let result = app
-        .collection(COLLECTION)
-        .delete_one(doc! {"_id":id,"owner_id":owner})
-        .await?;
-    if result.deleted_count == 0 {
+    let _admission = app.hosted_images_lock.lock().await;
+    if crate::image_storage::remove(&app, COLLECTION, doc! {"_id":id,"owner_id":owner}).await? == 0 {
         return Err(ApiError::new(StatusCode::NOT_FOUND, "Image not found"));
     }
     Ok(StatusCode::NO_CONTENT)
@@ -381,7 +345,7 @@ async fn short_public(
             ApiError::new(StatusCode::NOT_FOUND, "Image not found")
                 .header("cache-control", "no-store")
         })?;
-    image_response(row)
+    image_response(&app, COLLECTION, row).await
 }
 async fn public(State(app): State<Arc<App>>, Path(id): Path<String>) -> ApiResult<Response> {
     let missing = || {
@@ -395,14 +359,10 @@ async fn public(State(app): State<Arc<App>>, Path(id): Path<String>) -> ApiResul
         .find_one(doc! {"_id":id})
         .await?
         .ok_or_else(missing)?;
-    image_response(row)
+    image_response(&app, COLLECTION, row).await
 }
-pub(crate) fn image_response(row: Document) -> ApiResult<Response> {
-    let missing = || ApiError::new(StatusCode::NOT_FOUND, "Image not found");
-    let bytes = row
-        .get_binary_generic("data")
-        .map_err(|_| missing())?
-        .clone();
+pub(crate) async fn image_response(app: &App, collection: &str, row: Document) -> ApiResult<Response> {
+    let bytes = crate::image_storage::read(app, collection, &row).await?;
     Ok((
         [
             ("content-type", "image/png"),

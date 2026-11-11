@@ -14,7 +14,7 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::TryStreamExt;
 use mongodb::{
-    bson::{doc, oid::ObjectId, spec::BinarySubtype, Binary, Bson, DateTime, Document},
+    bson::{doc, oid::ObjectId, DateTime, Document},
     options::IndexOptions,
     IndexModel,
 };
@@ -48,7 +48,7 @@ pub fn router() -> Router<Arc<App>> {
             axum::routing::delete(visitor_remove_image),
         )
         .route("/r/{filename}", get(raw))
-        .layer(DefaultBodyLimit::max(12 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(hosted_images::MAX_BODY_BYTES))
 }
 fn missing() -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, "Room or image not found")
@@ -220,7 +220,7 @@ async fn list(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json
     let stats: Vec<Document> = app
         .collection(IMAGES)
         .aggregate([
-            doc! {"$match":{"owner_id":owner,"expires_at":{"$gt":DateTime::now()}}},
+            doc! {"$match":crate::image_storage::parents(doc!{"owner_id":owner,"expires_at":{"$gt":DateTime::now()}})},
             doc! {"$group":{"_id":"$room_id","used":{"$sum":"$size"},"count":{"$sum":1}}},
         ])
         .await?
@@ -300,7 +300,7 @@ async fn images(
     let row = room(app, id, owner).await?;
     let rows: Vec<Document> = app
         .collection(IMAGES)
-        .find(doc! {"room_id":id,"expires_at":{"$gt":DateTime::now()}})
+        .find(crate::image_storage::parents(doc! {"room_id":id,"expires_at":{"$gt":DateTime::now()}}))
         .projection(doc! {"data":0})
         .sort(doc! {"created_at":-1,"_id":1})
         .limit(MAX_IMAGES as i64)
@@ -350,7 +350,7 @@ async fn upload(
         ));
     }
     if body.image.len() > hosted_images::MAX_BYTES.div_ceil(3) * 4 {
-        return Err(ApiError::bad_request("Image exceeds 8 MiB"));
+        return Err(ApiError::bad_request("Image exceeds 50 MB"));
     }
     let bytes = STANDARD
         .decode(&body.image)
@@ -377,7 +377,7 @@ async fn upload(
         .await?;
     let previous: Vec<Document> = app
         .collection(IMAGES)
-        .find(doc! {"room_id":&id})
+        .find(crate::image_storage::parents(doc! {"room_id":&id}))
         .projection(doc! {"size":1})
         .sort(doc! {"created_at":1,"_id":1})
         .limit((MAX_IMAGES + 1) as i64)
@@ -402,29 +402,16 @@ async fn upload(
     let ttl = room
         .get_i64("image_ttl_seconds")
         .unwrap_or(DEFAULT_TTL as i64);
-    let mut row = doc! {"_id":uuid::Uuid::new_v4().simple().to_string(),"owner_id":room.get_object_id("owner_id").map_err(|_|missing())?,
+    let row = doc! {"_id":uuid::Uuid::new_v4().simple().to_string(),"owner_id":room.get_object_id("owner_id").map_err(|_|missing())?,
     "room_id":&id,"visitor_hash":&visitor,"name":if body.name.trim().is_empty(){"Clipboard image".to_owned()}else{name(&body.name)},"size":bytes.len()as i64,"width":i64::from(width),"height":i64::from(height),
-    "created_at":now,"expires_at":DateTime::from_millis(now.timestamp_millis()+ttl*1000),"data":Bson::Binary(Binary{subtype:BinarySubtype::Generic,bytes})};
-    for _ in 0..16 {
-        row.insert("public_id", hosted_images::short_id());
-        match app.collection(IMAGES).insert_one(&row).await {
-            Ok(_) => {
-                if !expired.is_empty() {
-                    app.collection(IMAGES)
-                        .delete_many(doc! {"room_id":&id,"_id":{"$in":expired}})
-                        .await?;
-                }
-                return Ok(Json(image_metadata(&app, &row, Some(&visitor), false)));
-            }
-            Err(e) if crate::store::duplicate(&e) => {}
-            Err(e) => return Err(e.into()),
-        }
+    "created_at":now,"expires_at":DateTime::from_millis(now.timestamp_millis()+ttl*1000)};
+    let stored = crate::image_storage::insert(&app, IMAGES, row, bytes).await?;
+    if stored.inserted && !expired.is_empty() {
+        crate::image_storage::remove(&app, IMAGES, doc! {"room_id":&id,"_id":{"$in":expired}}).await?;
     }
-    Err(ApiError::new(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Could not allocate an image URL; try again",
-    ))
+    Ok(Json(image_metadata(&app, &stored.row, Some(&visitor), false)))
 }
+
 async fn owner_remove_image(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
@@ -447,15 +434,7 @@ async fn visitor_remove_image(
     delete_image(&app, doc! {"_id":image,"room_id":id,"visitor_hash":visitor}).await
 }
 async fn delete_image(app: &App, filter: Document) -> ApiResult<StatusCode> {
-    if app
-        .collection(IMAGES)
-        .delete_one(filter)
-        .await?
-        .deleted_count
-        == 0
-    {
-        return Err(missing());
-    }
+    if crate::image_storage::remove(app, IMAGES, filter).await? == 0 { return Err(missing()); }
     Ok(StatusCode::NO_CONTENT)
 }
 async fn raw(State(app): State<Arc<App>>, Path(filename): Path<String>) -> ApiResult<Response> {
@@ -473,7 +452,7 @@ async fn raw(State(app): State<Arc<App>>, Path(filename): Path<String>) -> ApiRe
         .find_one(doc! {"public_id":code,"expires_at":{"$gt":DateTime::now()}})
         .await?
         .ok_or_else(missing)?;
-    hosted_images::image_response(row)
+    hosted_images::image_response(&app, IMAGES, row).await
 }
 
 async fn owner_remove_many(State(app):State<Arc<App>>,headers:HeaderMap,Path(id):Path<String>,Json(body):Json<hosted_images::BulkDelete>)->ApiResult<Json<Value>> {
@@ -482,8 +461,8 @@ async fn owner_remove_many(State(app):State<Arc<App>>,headers:HeaderMap,Path(id)
     let filter=body.filter(doc!{"owner_id":owner,"room_id":&id})?;
     let _admission=app.hosted_images_lock.lock().await;
     room(&app,&id,Some(owner)).await?;
-    let result=app.collection(IMAGES).delete_many(filter).await?;
-    Ok(Json(json!({"deleted_count":result.deleted_count})))
+    let count=crate::image_storage::remove(&app, IMAGES, filter).await?;
+    Ok(Json(json!({"deleted_count":count})))
 }
 async fn visitor_remove_many(State(app):State<Arc<App>>,headers:HeaderMap,Path(id):Path<String>,Json(body):Json<hosted_images::BulkDelete>)->ApiResult<Json<Value>> {
     let _lifecycle=app.account_lifecycle.read().await;
@@ -491,6 +470,6 @@ async fn visitor_remove_many(State(app):State<Arc<App>>,headers:HeaderMap,Path(i
     let filter=body.filter(doc!{"room_id":&id,"visitor_hash":visitor})?;
     let _admission=app.hosted_images_lock.lock().await;
     room(&app,&id,None).await?;
-    let result=app.collection(IMAGES).delete_many(filter).await?;
-    Ok(Json(json!({"deleted_count":result.deleted_count})))
+    let count=crate::image_storage::remove(&app, IMAGES, filter).await?;
+    Ok(Json(json!({"deleted_count":count})))
 }

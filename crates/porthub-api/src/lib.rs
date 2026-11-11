@@ -19,6 +19,7 @@ pub mod generated;
 pub mod http;
 pub mod hosted_images;
 pub mod image_rooms;
+pub mod image_storage;
 pub mod input;
 pub mod input_compat;
 pub mod inventory_query;

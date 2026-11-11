@@ -151,6 +151,7 @@ async fn main() -> Result<()> {
         app.clone(),
         activity_stop.subscribe(),
     ));
+    let image_maintenance = tokio::spawn(porthub_api::image_storage::maintenance(app.clone(), activity_stop.subscribe()));
     let terminal_stop = tokio_util::sync::CancellationToken::new();
     let terminal_maintenance = tokio::spawn(porthub_api::terminal::maintenance(
         app.clone(),
@@ -192,6 +193,7 @@ async fn main() -> Result<()> {
         firewall.await?;
     }
     if let Some(history) = firewall_history { history.await?; }
+    image_maintenance.await?;
     connection_refresh.await?;
     machine_delete.await?;
     status_monitor.await?;

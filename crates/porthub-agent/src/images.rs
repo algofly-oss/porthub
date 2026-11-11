@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::{io::Cursor, time::Duration};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
-const MAX_BYTES: usize = 8 * 1024 * 1024;
+const MAX_BYTES: usize = 50_000_000;
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -305,7 +305,7 @@ fn clipboard_png() -> Result<Vec<u8>> {
     let mut png = Cursor::new(Vec::new());
     image::DynamicImage::ImageRgba8(image).write_to(&mut png, image::ImageFormat::Png)?;
     let png = png.into_inner();
-    ensure!(png.len() <= MAX_BYTES, "Clipboard image exceeds 8 MiB");
+    ensure!(png.len() <= MAX_BYTES, "Clipboard image exceeds 50 MB");
     Ok(png)
 }
 
@@ -365,7 +365,7 @@ async fn upload_clipboard(args: Args) -> Result<()> {
                 if let Some(focus) = focus {
                     tokio::task::spawn_blocking(move || {
                         ensure!(arboard::Clipboard::new()?.get_text().is_ok_and(|current| current == url), "Clipboard changed before paste; its contents were preserved");
-                        focus.paste()
+                        focus.paste(&url)
                     }).await??;
                 }
                 return Ok(());
@@ -378,7 +378,7 @@ async fn upload_clipboard(args: Args) -> Result<()> {
     let request = json!({"operation":"image_upload","size":png.len(),"request_id":uuid::Uuid::new_v4().simple().to_string()});
     let mut header = serde_json::to_vec(&request)?;
     header.push(b'\n');
-    let reply = tokio::time::timeout(Duration::from_secs(90), async {
+    let reply = tokio::time::timeout(Duration::from_secs(330), async {
         stream.write_all(&header).await?;
         stream.write_all(&png).await?;
         let mut reader = BufReader::new(stream);
@@ -415,7 +415,7 @@ async fn upload_clipboard(args: Args) -> Result<()> {
         }
         if let Some(focus) = focus {
             ensure!(arboard::Clipboard::new()?.get_text().is_ok_and(|current| current == url), "Clipboard changed before paste; paste the image URL manually.");
-            focus.paste().context("Image link copied, but direct paste could not complete")?;
+            focus.paste(&url).context("Image link copied, but direct paste could not complete")?;
         }
         Ok::<_, anyhow::Error>(())
     }).await??;

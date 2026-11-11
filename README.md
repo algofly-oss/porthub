@@ -126,9 +126,9 @@ preferred shortcut launcher.
 Set `PORT_HUB_PUBLIC_BASE_URL` to the public HTTPS portal address so copied links
 use the externally reachable gateway. With no configured base URL, clients
 resolve image paths against their portal/gateway address. Hosted images accept
-PNG, JPEG, WebP, and GIF up to 8 MiB and 32 megapixels; images are decoded and
+PNG, JPEG, WebP, and GIF up to 50 MB and 32 megapixels; images are decoded and
 published as PNG with metadata removed. Animated images use their first frame.
-The resulting PNG must also fit within 8 MiB. Each account can store up to 1,000
+The resulting PNG must also fit within 50 MB. Each account can store up to 1,000
 images and 512 MiB. Uploads that would exceed the storage limit automatically
 delete the oldest images in that account until there is enough space. Their
 public links stop working; there is no age-based expiry. The image-count limit

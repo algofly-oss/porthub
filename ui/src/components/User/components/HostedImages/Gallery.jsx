@@ -14,7 +14,7 @@ import ResultsPagination from "@/components/ui/results-pagination";
 import { copyText } from "@/shared/utils/clipboard";
 
 const ENDPOINT = apiRoutes.hostedImages;
-const MAX_BYTES = 8 * 1024 * 1024;
+const MAX_BYTES = 50_000_000;
 const TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 function readImage(file) {
   return new Promise((resolve, reject) => {
@@ -99,11 +99,11 @@ export default function ImageGallery({ active = true, endpoint = ENDPOINT, reque
     try {
       for (const file of chosen) {
         if (!TYPES.has(file.type) || file.size === 0 || file.size > MAX_BYTES) {
-          toast.error(`${file.name || "Image"}: use PNG, JPEG, WebP or GIF up to 8 MiB`); continue;
+          toast.error(`${file.name || "Image"}: use PNG, JPEG, WebP or GIF up to 50 MB`); continue;
         }
         try {
           const image = await readImage(file);
-          const { data } = await axios.post(endpoint, { image, name: file.name || "Clipboard image" }, { timeout: 90000, headers: requestHeaders });
+          const { data } = await axios.post(endpoint, { image, name: file.name || "Clipboard image" }, { timeout: 300000, headers: requestHeaders });
           last = absoluteLink(data);
           const hosted = last;
           setImages(current => [hosted, ...current.filter(row => row.id !== hosted.id)]);
@@ -222,7 +222,7 @@ export default function ImageGallery({ active = true, endpoint = ENDPOINT, reque
     <input ref={input} type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple className="sr-only" aria-label="Choose images" onChange={event => { upload(event.target.files); event.target.value = ""; }} />
     {canUpload && <button type="button" onClick={() => input.current?.click()} disabled={uploading || Boolean(deleting)} className={`mb-4 flex w-full shrink-0 items-center gap-4 rounded-xl border border-dashed px-4 py-4 text-left transition-colors ${dragging ? "border-primary bg-primary/10" : "border-border bg-surface hover:border-primary/60 hover:bg-accent/40"}`}>
       <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><IconUpload size={21} stroke={1.7} /></span>
-      <span className="min-w-0"><span className="block text-sm font-medium">{uploading ? "Uploading your images…" : dragging ? "Drop to upload" : "Paste a screenshot, drop images, or click to choose"}</span><span className="mt-1 block text-xs leading-5 text-muted-foreground">Your link is copied automatically. PNG, JPEG, WebP or GIF · Up to 8 MiB</span></span>
+      <span className="min-w-0"><span className="block text-sm font-medium">{uploading ? "Uploading your images…" : dragging ? "Drop to upload" : "Paste a screenshot, drop images, or click to choose"}</span><span className="mt-1 block text-xs leading-5 text-muted-foreground">Your link is copied automatically. PNG, JPEG, WebP or GIF · Up to 50 MB</span></span>
       <kbd className="ml-auto hidden shrink-0 rounded-md border border-border bg-control px-2 py-1 text-xs text-muted-foreground md:block">Ctrl / ⌘ + V</kbd>
     </button>}
     {roomMode && <p className="mb-3 text-xs text-muted-foreground">{room?.enabled === false ? "Uploads are paused. " : ""}Images expire {Math.round((room?.image_ttl_seconds || 3600) / 60)} minutes after upload. Anyone with a link can view them.{!ownerView && " You can delete your own uploads in this browser."}</p>}
