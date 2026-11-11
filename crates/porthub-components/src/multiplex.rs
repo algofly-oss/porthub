@@ -244,7 +244,7 @@ mod tests {
         Stream,
         Wait,
     }
-    struct Counter(AtomicUsize);
+    struct Counter(AtomicUsize, tokio::sync::Notify);
     #[async_trait::async_trait]
     impl Handler for Counter {
         type Operation = Operation;
@@ -258,7 +258,10 @@ mod tests {
                 Operation::Increment => {
                     Ok(Reply::Message(self.0.fetch_add(1, Ordering::SeqCst) + 1))
                 }
-                Operation::Wait => std::future::pending().await,
+                Operation::Wait => {
+                    self.1.notify_one();
+                    std::future::pending().await
+                }
                 Operation::Stream => {
                     let (local, remote) = tokio::io::duplex(4096);
                     tokio::spawn(async move {
@@ -306,7 +309,7 @@ mod tests {
             protocol: PROTOCOL,
             version: artifact.version,
         };
-        let handler = Arc::new(Counter(AtomicUsize::new(0)));
+        let handler = Arc::new(Counter(AtomicUsize::new(0), tokio::sync::Notify::new()));
         let cancel = CancellationToken::new();
         let server = tokio::spawn(serve(remote, hello, handler.clone(), cancel.clone()));
         (
@@ -391,10 +394,19 @@ mod tests {
     async fn interrupted_channel_is_not_replayed_and_other_channels_remain_usable() -> Result<()> {
         let (carrier, handler, cancel, server) = fixture().await;
         let mut stalled = Client::from_stream(carrier.open().await?, &artifact()).await?;
-        let result: Result<usize> = stalled
-            .call(Operation::Wait, Duration::from_millis(20))
-            .await;
-        assert!(result.is_err());
+        // Cancel only after the handler has received the request. Racing equal
+        // client/server deadlines can instead deliver a complete error response,
+        // which correctly leaves the connection reusable.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let call = stalled.call::<_, usize>(Operation::Wait, Duration::from_secs(30));
+            tokio::pin!(call);
+            tokio::select! {
+                result = &mut call => panic!("waiting request completed before interruption: {result:?}"),
+                _ = handler.1.notified() => {},
+            }
+            // Drop the still-pending call here, before either request deadline.
+        })
+        .await?;
         assert!(stalled
             .call::<_, usize>(Operation::Increment, Duration::from_secs(1))
             .await
