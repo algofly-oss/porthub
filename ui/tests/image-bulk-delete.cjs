@@ -21,27 +21,33 @@ const base=process.env.PORTHUB_TEST_UI_URL;assert(base);
   });
   await page.goto(guest?`${base}/drop?room=${roomId}`:`${base}/home?view=images`);
   await page.getByRole('row').filter({hasText:'Shot 1.png'}).waitFor();
-  const allLabel=guest?'Select all my images':'Select all images',deleteLabel=guest?'Delete all my images':'Delete all';
-  const heading=page.locator('header.page-heading').filter({has:page.getByRole('button',{name:'Refresh images',exact:true})});assert.equal(await heading.getByRole('checkbox',{name:allLabel,exact:true}).count(),1);
-  assert(await heading.evaluate(node=>node.scrollWidth<=node.clientWidth+1),'Top actions fit the available width');
-  if(width>=768){const deletion=await heading.getByRole('button',{name:deleteLabel,exact:true}).boundingBox(),refresh=await heading.getByRole('button',{name:'Refresh images',exact:true}).boundingBox();assert(deletion.x+deletion.width<=refresh.x,'Bulk actions are left of Refresh');assert(Math.abs(deletion.y+deletion.height/2-refresh.y-refresh.height/2)<2,'Bulk actions share the top action row');}
+  const allLabel=guest?'Select all my images':'Select all images';
+  const heading=page.locator('header.page-heading').filter({has:page.getByRole('button',{name:'Refresh images',exact:true})});
+  const selection=heading.getByRole('group',{name:'Image selection',exact:true});
+  assert.equal(await selection.count(),0,'Bulk actions are hidden before selection');
+  assert.equal(await heading.getByRole('button',{name:'Delete all',exact:true}).count(),0);
+  const first=page.getByRole('checkbox',{name:'Select Shot 1.png',exact:true});
+  await first.check();await selection.waitFor();await page.getByText('1 selected',{exact:true}).waitFor();
+  assert(await heading.evaluate(node=>node.scrollWidth<=node.clientWidth+1),'Contextual actions fit the available width');
+  if(width>=768){const deletion=await selection.getByRole('button',{name:'Delete selected',exact:true}).boundingBox(),refresh=await heading.getByRole('button',{name:'Refresh images',exact:true}).boundingBox();assert(deletion.x+deletion.width<=refresh.x,'Selection actions are left of Refresh');assert(Math.abs(deletion.y+deletion.height/2-refresh.y-refresh.height/2)<2,'Selection actions share the top row');}
+  await selection.getByRole('button',{name:'Clear selection',exact:true}).click();await selection.waitFor({state:'detached'});assert.equal(await first.isChecked(),false);
+  await first.check();
   if(guest){
    assert(await page.getByRole('checkbox',{name:'Select Shot 2.png',exact:true}).isDisabled());
-   await page.getByRole('checkbox',{name:allLabel,exact:true}).check();await page.getByText('1 selected',{exact:true}).waitFor();
   }else{
-   await page.getByRole('checkbox',{name:'Select Shot 1.png',exact:true}).check();await page.getByRole('button',{name:'Delete selected',exact:true}).click();
-   const selected=page.getByRole('dialog',{name:'Delete selected images',exact:true});await selected.getByRole('button',{name:'Delete selected',exact:true}).click();await selected.waitFor({state:'hidden'});await page.getByRole('row').filter({hasText:'Shot 1.png'}).waitFor({state:'detached'});
-   assert.deepEqual(bulkCalls[0],{ids:['1'.padStart(32,'0')]});assert.equal(images.length,23);
-   await page.getByRole('checkbox',{name:allLabel,exact:true}).check();await page.getByText('23 selected',{exact:true}).waitFor();
-   const pager=page.locator('footer[aria-label="Images pagination"]');if(width<768)await pager.getByRole('button',{name:'Next page',exact:true}).click();else await pager.getByRole('button',{name:'2',exact:true}).click();
-   assert(await page.getByRole('checkbox',{name:'Select Shot 12.png',exact:true}).isChecked());
+   await selection.getByRole('button',{name:'Delete selected',exact:true}).click();
+   const dialog=page.getByRole('dialog',{name:'Delete selected images',exact:true});await dialog.getByRole('button',{name:'Delete selected',exact:true}).click();await dialog.waitFor({state:'hidden'});await page.getByRole('row').filter({hasText:'Shot 1.png'}).waitFor({state:'detached'});
+   assert.deepEqual(bulkCalls[0],{ids:['1'.padStart(32,'0')]});assert.equal(images.length,23);await selection.waitFor({state:'detached'});
+   await page.getByRole('checkbox',{name:'Select Shot 2.png',exact:true}).check();
   }
-  await page.getByRole('button',{name:deleteLabel,exact:true}).click();const confirm=page.getByRole('dialog',{name:'Delete all images',exact:true});await confirm.getByRole('button',{name:'Cancel',exact:true}).click();await confirm.waitFor({state:'hidden'});assert.equal(images.length,guest?3:23);
-  await page.getByRole('button',{name:deleteLabel,exact:true}).click();await confirm.getByRole('button',{name:'Delete all',exact:true}).click();await confirm.waitFor({state:'hidden'});await page.waitForFunction(()=>document.getElementById('__next').getAttribute('aria-hidden')!=='true');
-  assert.deepEqual(bulkCalls.at(-1),{all:true});assert.equal(images.length,guest?2:0);
-  if(guest){await page.getByRole('row').filter({hasText:'Shot 2.png'}).waitFor();assert.equal(await page.getByRole('button',{name:'Delete all my images',exact:true}).count(),0);}else await page.getByText('Your images will appear here',{exact:true}).waitFor();
+  await selection.getByRole('checkbox',{name:allLabel,exact:true}).check();await page.getByText(guest?'1 selected':'23 selected',{exact:true}).waitFor();
+  if(!guest){const pager=page.locator('footer[aria-label="Images pagination"]');if(width<768)await pager.getByRole('button',{name:'Next page',exact:true}).click();else await pager.getByRole('button',{name:'2',exact:true}).click();assert(await page.getByRole('checkbox',{name:'Select Shot 12.png',exact:true}).isChecked());}
+  await selection.getByRole('button',{name:'Delete selected',exact:true}).click();const confirm=page.getByRole('dialog',{name:'Delete selected images',exact:true});await confirm.getByRole('button',{name:'Cancel',exact:true}).click();await confirm.waitFor({state:'hidden'});assert.equal(images.length,guest?3:23);
+  await selection.getByRole('button',{name:'Delete selected',exact:true}).click();await confirm.getByRole('button',{name:'Delete selected',exact:true}).click();await confirm.waitFor({state:'hidden'});await selection.waitFor({state:'detached'});
+  assert.equal(bulkCalls.at(-1).ids.length,guest?1:23);assert.equal(bulkCalls.at(-1).all,undefined);assert.equal(images.length,guest?2:0);
+  if(guest)await page.getByRole('row').filter({hasText:'Shot 2.png'}).waitFor();else await page.getByText('Your images will appear here',{exact:true}).waitFor();
   assert.equal(dialogs,0);await context.close();
  }}
- console.log('Bulk deletion: individual selection, all-page selection, selected deletion, cancel/confirm delete-all, anonymous ownership restrictions, desktop and mobile passed.');
+ console.log('Contextual selection: hidden default actions, clear selection, all-page selection, confirmed deletion, anonymous ownership restrictions, desktop and mobile passed.');
  }finally{await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1});

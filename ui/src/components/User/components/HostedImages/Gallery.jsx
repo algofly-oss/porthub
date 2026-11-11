@@ -3,7 +3,7 @@ import axios from "axios";
 import { Popover } from "@mantine/core";
 import apiRoutes from "@/shared/routes/apiRoutes";
 import toast from "react-hot-toast";
-import { IconPhoto, IconUpload, IconCopy, IconTrash, IconRefresh, IconArrowUpRight, IconKeyboard } from "@tabler/icons-react";
+import { IconPhoto, IconUpload, IconCopy, IconTrash, IconRefresh, IconArrowUpRight, IconKeyboard, IconX } from "@tabler/icons-react";
 import { PageHeader, EmptyState } from "@/components/ui/workspace";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -137,10 +137,10 @@ export default function ImageGallery({ active = true, endpoint = ENDPOINT, reque
   const removeBulk = async () => {
     if (!bulkTarget || busy.current) return;
     const target = bulkTarget;
-    const ids = new Set(target.all ? deletable.map(image => image.id) : target.ids);
+    const ids = new Set(target.ids);
     busy.current = true; mutation.current++; setDeleting("bulk");
     try {
-      const { data } = await axios.delete(endpoint, { headers: requestHeaders, data: target.all ? { all: true } : { ids: target.ids } });
+      const { data } = await axios.delete(endpoint, { headers: requestHeaders, data: { ids: target.ids } });
       setImages(current => current.filter(image => !ids.has(image.id)));
       setLatest(current => ids.has(current?.id) ? null : current);
       setPreview(current => ids.has(current?.id) ? null : current);
@@ -180,11 +180,12 @@ export default function ImageGallery({ active = true, endpoint = ENDPOINT, reque
     event.preventDefault(); dragDepth.current = Math.max(0, dragDepth.current - 1); if (!dragDepth.current) setDragging(false);
   }} onDrop={event => { event.preventDefault(); dragDepth.current = 0; setDragging(false); if (canUpload) upload(event.dataTransfer.files); }}>
     <PageHeader actionsClassName="max-w-full" title={roomMode ? <span className="block truncate" title={room?.name || "Image room"}>{room?.name || "Image room"}</span> : "Hosted images"} actions={<>
-      {deletable.length > 0 && <>
-        <label className="mr-1 flex h-10 cursor-pointer items-center gap-2 text-xs text-muted-foreground"><Checkbox aria-label={roomMode && !ownerView ? "Select all my images" : "Select all images"} checked={allSelected ? true : selected.length ? "indeterminate" : false} onCheckedChange={selectAll} disabled={uploading || Boolean(deleting)} /><span>{selected.length ? `${selected.length} selected` : "Select all"}</span></label>
-        <Button variant="secondary" disabled={!selected.length || uploading || Boolean(deleting)} onClick={() => setBulkTarget({ ids: [...selected], count: selected.length })}><IconTrash size={16} />Delete selected</Button>
-        <Button variant="ghost" className="text-red-500" disabled={uploading || Boolean(deleting)} onClick={() => setBulkTarget({ all: true, count: deletable.length })}>{roomMode && !ownerView ? "Delete all my images" : "Delete all"}</Button>
-      </>}
+      {selected.length > 0 && <div role="group" aria-label="Image selection" className="flex max-w-full flex-wrap items-center gap-2 rounded-lg bg-primary/5 px-2">
+        <span role="status" className="text-xs font-medium text-primary">{selected.length} selected</span>
+        <label className="flex h-10 cursor-pointer items-center gap-2 text-xs text-muted-foreground"><Checkbox aria-label={roomMode && !ownerView ? "Select all my images" : "Select all images"} checked={allSelected ? true : "indeterminate"} onCheckedChange={selectAll} disabled={uploading || Boolean(deleting)} /><span>Select all</span></label>
+        <Button variant="ghost" className="text-red-500" disabled={uploading || Boolean(deleting)} onClick={() => setBulkTarget({ ids: [...selected], count: selected.length })}><IconTrash size={16} />Delete selected</Button>
+        <Button variant="ghost" size="icon" aria-label="Clear selection" title="Clear selection" disabled={uploading || Boolean(deleting)} onClick={() => setSelected([])}><IconX size={16} /></Button>
+      </div>}
       <Button variant="secondary" size="icon" aria-label="Refresh images" onClick={() => load()} disabled={loading || uploading || Boolean(deleting)}><IconRefresh size={18} /></Button>
       {canUpload && <Button onClick={() => input.current?.click()} disabled={uploading || Boolean(deleting)}><IconUpload size={18} />{uploading ? "Uploading…" : "Add images"}</Button>}
     </>} />
@@ -226,9 +227,9 @@ export default function ImageGallery({ active = true, endpoint = ENDPOINT, reque
       ["Paste", "porthub image mode paste"],
       ["Copy", "porthub image mode copy"],
     ].map(([label, command]) => <div key={label} className="mb-2 flex items-center gap-2 last:mb-0"><code className="min-w-0 flex-1 select-all text-[11px]">{command}</code><button type="button" aria-label={`Copy ${label.toLowerCase()} command`} className="rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground" onClick={() => copyText(command).then(() => toast.success("Command copied")).catch(() => toast.error("Select and copy the command"))}><IconCopy size={14} /></button></div>)}<p className="mt-3 text-[11px] text-muted-foreground">Copy mode is the default. Paste mode also inserts the URL into the focused input. Automatic setup: GNOME Linux. Algofly is the default tenant.</p></Popover.Dropdown></Popover></div>}
-    <Dialog opened={Boolean(bulkTarget)} onClose={() => { if (!deleting) setBulkTarget(null); }} title={bulkTarget?.all ? "Delete all images" : "Delete selected images"} size="sm" closeOnEscape={!deleting} closeOnClickOutside={!deleting} closeButtonProps={{ disabled: Boolean(deleting) }}>
-      <p className="text-sm leading-6 text-muted-foreground">{bulkTarget?.all ? roomMode && !ownerView ? "Delete all of your images in this room? Other visitors’ images will stay." : roomMode ? "Delete all images in this room? The room will stay available." : "Delete all of your hosted images?" : `Delete ${bulkTarget?.count || 0} selected images?`} Their public links will stop working. This cannot be undone.</p>
-      <div className="mt-6 flex justify-end gap-2"><Button variant="secondary" disabled={Boolean(deleting)} onClick={() => setBulkTarget(null)}>Cancel</Button><Button variant="destructive" disabled={Boolean(deleting)} onClick={removeBulk}>{deleting ? "Deleting…" : bulkTarget?.all ? "Delete all" : "Delete selected"}</Button></div>
+    <Dialog opened={Boolean(bulkTarget)} onClose={() => { if (!deleting) setBulkTarget(null); }} title="Delete selected images" size="sm" closeOnEscape={!deleting} closeOnClickOutside={!deleting} closeButtonProps={{ disabled: Boolean(deleting) }}>
+      <p className="text-sm leading-6 text-muted-foreground">Delete {bulkTarget?.count || 0} selected images? Their public links will stop working. This cannot be undone.</p>
+      <div className="mt-6 flex justify-end gap-2"><Button variant="secondary" disabled={Boolean(deleting)} onClick={() => setBulkTarget(null)}>Cancel</Button><Button variant="destructive" disabled={Boolean(deleting)} onClick={removeBulk}>{deleting ? "Deleting…" : "Delete selected"}</Button></div>
     </Dialog>
     <Dialog opened={Boolean(deleteTarget)} onClose={() => { if (!deleting) setDeleteTarget(null); }} title="Delete image" size="sm" closeOnEscape={!deleting} closeOnClickOutside={!deleting} closeButtonProps={{ disabled: Boolean(deleting) }}>
       <p className="text-sm leading-6 text-muted-foreground">Delete <span className="break-all font-medium text-foreground">{deleteTarget?.name}</span>? Its public link will stop working.</p>
