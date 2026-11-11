@@ -22,6 +22,9 @@ const base=process.env.PORTHUB_TEST_UI_URL;assert(base);
   await page.goto(guest?`${base}/drop?room=${roomId}`:`${base}/home?view=images`);
   await page.getByRole('row').filter({hasText:'Shot 1.png'}).waitFor();
   const allLabel=guest?'Select all my images':'Select all images',deleteLabel=guest?'Delete all my images':'Delete all';
+  const heading=page.locator('header.page-heading').filter({has:page.getByRole('button',{name:'Refresh images',exact:true})});assert.equal(await heading.getByRole('checkbox',{name:allLabel,exact:true}).count(),1);
+  assert(await heading.evaluate(node=>node.scrollWidth<=node.clientWidth+1),'Top actions fit the available width');
+  if(width>=768){const deletion=await heading.getByRole('button',{name:deleteLabel,exact:true}).boundingBox(),refresh=await heading.getByRole('button',{name:'Refresh images',exact:true}).boundingBox();assert(deletion.x+deletion.width<=refresh.x,'Bulk actions are left of Refresh');assert(Math.abs(deletion.y+deletion.height/2-refresh.y-refresh.height/2)<2,'Bulk actions share the top action row');}
   if(guest){
    assert(await page.getByRole('checkbox',{name:'Select Shot 2.png',exact:true}).isDisabled());
    await page.getByRole('checkbox',{name:allLabel,exact:true}).check();await page.getByText('1 selected',{exact:true}).waitFor();

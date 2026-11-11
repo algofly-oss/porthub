@@ -1,13 +1,13 @@
 import { IconSearch, IconX } from "@tabler/icons-react";
 import { Input } from "./input";
 
-export function PageHeader({ eyebrow, title, description, actions }) {
+export function PageHeader({ eyebrow, title, description, actions, actionsClassName = "" }) {
   return (
     <header className="page-heading">
       <div className="min-w-0">
         <h1>{title}</h1>
       </div>
-      {actions && <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div>}
+      {actions && <div className={`flex shrink-0 flex-wrap items-center gap-2 ${actionsClassName}`}>{actions}</div>}
     </header>
   );
 }
