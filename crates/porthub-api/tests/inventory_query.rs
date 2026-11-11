@@ -33,6 +33,43 @@ fn query_limits_are_bounded_and_numeric_terms_are_not_fuzzy() {
 }
 #[tokio::test]
 #[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn inventory_update_badges_only_flag_older_clients() -> Result<()> {
+    for latest in ["1.11.9", ""] {
+        let case = Case::new(Config { client_version: latest.into(), ..Config::default() }).await?;
+        let result: Result<()> = async {
+            let (owner, cookie) = case.user("version-badges@example.invalid", "user").await?;
+            let versions = [("1.11.10", false), ("1.11.9", false), ("1.11.8", true),
+                ("1.12.0", false), ("2.0.0", false), ("legacy-build", true), ("", false)];
+            let mut ids = Vec::new();
+            for (version, _) in versions {
+                let id = ObjectId::new();
+                ids.push(id.to_hex());
+                case.app.collection("machines").insert_one(doc! {
+                    "_id":id, "user_id":owner, "name":format!("version-{version}"),
+                    "client_version":version, "enabled":true, "last_seen_at":DateTime::now(),
+                }).await?;
+            }
+            for path in ["/api/inventory/machines".to_owned(), format!("/api/inventory-status?ids={}", ids.join(","))] {
+                let response = case.status("GET", &path, &cookie, json!(null), StatusCode::OK).await?;
+                let rows = response["data"].as_array().unwrap();
+                ensure!(rows.len() == versions.len());
+                for ((version, outdated), id) in versions.iter().zip(&ids) {
+                    let row = rows.iter().find(|row| row["_id"].as_str() == Some(id.as_str())).unwrap();
+                    ensure!(row["client_version"] == *version);
+                    ensure!(row["client_update_available"] == (*outdated && !latest.is_empty()),
+                        "{path}: current={version}, published={latest}: {row}");
+                }
+            }
+            Ok(())
+        }.await;
+        case.db.drop().await?;
+        result?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
 async fn database_search_pages_totals_relevance_and_owner_scoping() -> Result<()> {
     let case = Case::new(Config::default()).await?;
     let result=async{

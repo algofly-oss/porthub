@@ -85,7 +85,7 @@ pub fn machine(app: &App, machine: &Document) -> Value {
         "local_ip":default_field(machine,"local_ip",default_field(machine,"ip_address",json!(""))),"public_ip":default_field(machine,"public_ip",json!("")),
         "token":default_field(machine,"token",json!("")),"is_active":matches!(status,"online"|"auth_required"),"connection_status":status,
         "auth_required":status=="auth_required","client_version":version,"latest_client_version":latest_client_version,
-        "client_update_available":!version.is_empty() && !latest_client_version.is_empty() && version!=latest_client_version,"client_update_requested":!request.is_empty() && request!=handled,
+        "client_update_available":!version.is_empty() && super::machine_client::client_update_available(version, &latest_client_version),"client_update_requested":!request.is_empty() && request!=handled,
         "client_update_request_id":request,
     });
     for key in [

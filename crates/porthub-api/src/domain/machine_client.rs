@@ -18,7 +18,12 @@ fn should_auto_update(
     request_target: &str,
     handled_id: &str,
 ) -> bool {
-    let outdated = if latest.is_empty() || version == latest {
+    client_update_available(version, latest)
+        && (request_id.is_empty() || request_id == handled_id || request_target != latest)
+}
+
+pub(super) fn client_update_available(version: &str, latest: &str) -> bool {
+    if latest.is_empty() || version == latest {
         false
     } else if version.is_empty() {
         // Older native agents used the authenticated client sync endpoint
@@ -30,8 +35,7 @@ fn should_auto_update(
             (Some(current), Some(target)) => current < target,
             _ => true,
         }
-    };
-    outdated && (request_id.is_empty() || request_id == handled_id || request_target != latest)
+    }
 }
 
 fn update_request_completed(version: &str, target: &str, request_id: &str, handled: &str, native: bool) -> bool {
