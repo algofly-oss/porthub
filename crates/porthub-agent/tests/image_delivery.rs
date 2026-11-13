@@ -24,7 +24,7 @@ fn paste_inserts_the_copied_url_and_changed_focus_prevents_injection() -> Result
     copy.stdin.take().unwrap().write_all(url.as_bytes())?;
     ensure!(copy.wait()?.success());
     let focus = porthub_agent::image_delivery::Focus::capture()?;
-    focus.paste()?;
+    focus.paste(url)?;
     ensure!(Command::new("xprop")
         .args([
             "-root",
@@ -37,7 +37,7 @@ fn paste_inserts_the_copied_url_and_changed_focus_prevents_injection() -> Result
         ])
         .status()?
         .success());
-    ensure!(focus.paste().is_err());
+    ensure!(focus.paste(url).is_err());
     ensure!(Command::new("xprop")
         .args([
             "-root",

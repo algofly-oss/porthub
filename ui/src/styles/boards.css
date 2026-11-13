@@ -1,0 +1,25 @@
+/* PortHub's existing neutral surfaces and blue controls around the native editor. */
+.porthub-board .excalidraw {
+  --color-primary: #2563eb;
+  --color-primary-darker: #1d4ed8;
+  --color-primary-darkest: #1e40af;
+  --color-primary-light: #dbeafe;
+  --border-radius-lg: 12px;
+  --border-radius-md: 8px;
+  --ui-font: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+.porthub-board .excalidraw.theme--dark {
+  --color-primary: #60a5fa;
+  --color-primary-darker: #3b82f6;
+  --color-primary-darkest: #2563eb;
+  --color-primary-light: #1e3a8a;
+}
+.porthub-board .excalidraw .App-menu_top { z-index: 2; }
+.porthub-board .excalidraw .ToolIcon:has(input:focus-visible),
+.porthub-board .excalidraw .color-picker__button:focus-visible,
+.porthub-board .excalidraw .focus-visible-none:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+.porthub-board .excalidraw .ToolIcon__keybinding { color: var(--color-on-surface); opacity: 1; }
+.porthub-board .excalidraw .welcome-screen-center__heading { opacity: 1; }

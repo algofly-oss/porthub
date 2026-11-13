@@ -14,3 +14,7 @@ volumes/
 /dist/
 
 /deploy/native/ui-bin/
+
+/ui/public/excalidraw/
+
+/ui/.taste-skill/

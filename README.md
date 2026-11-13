@@ -45,6 +45,41 @@ Production keeps read-only roots and excludes build toolchains and source trees.
 The default images are `porthub:core`, `porthub:edge` and `porthub:firewall`,
 with the release version recorded in image labels.
 
+## Collaborative boards
+
+Open **Boards** to create a self-hosted Excalidraw whiteboard. Drawings and their
+image assets save automatically in PortHub's persistent database. The editor
+uses the portal theme and serves its fonts locally; no Excalidraw subscription
+or external collaboration service is required.
+
+The owner can rename or delete a board, enable sharing, and copy separate editing
+and view-only links. Guests can open those links without an account. Changes and
+cursors appear live. Disable sharing to revoke guest access, or regenerate both
+links to replace them. Board images remain private to people with board access;
+they do not create public screenshot URLs. Each board allows up to 512 MiB of
+image assets; reaching that limit rejects new assets rather than deleting parts
+of a drawing. Deleting a board removes its assets too.
+
+## File transfers without an installed client
+
+The signed-in **Transfers** tab provides copyable sender and receiver commands.
+Both terminals use public endpoints: neither needs to log in, install PortHub,
+or run an agent. The feature is free. Keep the generated download link private
+if the file is private; anyone holding it can download.
+
+The sender runs a one-off Bash script using cURL or Wget on Linux, macOS or WSL.
+It answers download requests while the terminal remains running. PortHub relays
+small chunks in memory and never stores the file on disk or in MongoDB. Wget
+uses temporary chunks on the sender. Multiple recipients, byte ranges,
+resuming downloads, and parallel connections are supported; the tab includes
+cURL, Wget, aria2, and a four-connection Bash/cURL recipe.
+
+Ctrl+C stops sharing and invalidates the link. An absent sender expires after
+90 seconds, and a sharing session lasts at most 24 hours. A PortHub restart also
+ends active transfers; run the sender again for a new link. With multiple core
+replicas, route all transfer requests to the same core process: rendezvous state
+is deliberately memory-only.
+
 ## Hosted images and screenshot links
 
 Open **Hosted images** in the portal. Paste a screenshot with Ctrl+V (Cmd+V on

@@ -1,5 +1,7 @@
 import "@xterm/xterm/css/xterm.css";
+import "@excalidraw/excalidraw/index.css";
 import "@/styles/globals.css";
+import "@/styles/boards.css";
 import Head from "next/head";
 import { AppProps } from "next/app";
 import { useEffect, useLayoutEffect } from "react";

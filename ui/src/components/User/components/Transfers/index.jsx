@@ -1,0 +1,31 @@
+import { useEffect, useState } from "react";
+import toast from "react-hot-toast";
+import { IconCopy, IconCheck, IconArrowUp, IconArrowDown } from "@tabler/icons-react";
+import { Button } from "@/components/ui/button";
+import { copyText } from "@/shared/utils/clipboard";
+const quote=value=>`'${value.replace(/'/g,"'\\''")}'`;
+function Command({title,children}){
+ const [copied,setCopied]=useState(false);
+ useEffect(()=>setCopied(false),[children]);
+ const copy=async()=>{try{await copyText(children);setCopied(true);setTimeout(()=>setCopied(false),1600);}catch{toast.error("Select and copy the command below.");}};
+ return <div className="overflow-hidden rounded-xl border border-border"><div className="flex items-center justify-between gap-3 border-b border-border bg-muted/50 px-3 py-2"><h3 className="text-sm font-medium">{title}</h3><Button variant="ghost" size="sm" onClick={copy} aria-label={`Copy ${title.toLowerCase()} command`}>{copied?<IconCheck size={15}/>:<IconCopy size={15}/>}<span>{copied?"Copied":"Copy"}</span></Button></div><pre className="overflow-x-auto bg-control p-4 text-xs leading-6 text-foreground" tabIndex={0}><code>{children}</code></pre></div>;
+}
+export default function Transfers(){
+ const [base,setBase]=useState(""),[file,setFile]=useState("./file.zip"),[url,setUrl]=useState(""),[out,setOut]=useState("download.zip"),[tool,setTool]=useState("curl");
+ useEffect(()=>setBase(window.location.origin),[]);
+ const download=url.trim()||`${base}/api/transfers/PASTE_TRANSFER_ID`;
+ const sender=tool==="curl"?`bash <(curl -fsS ${quote(`${base}/api/transfers/sender`)}) \\\n  ${quote(file)} ${quote(base)}`:`bash <(wget -qO- ${quote(`${base}/api/transfers/sender`)}) \\\n  ${quote(file)} ${quote(base)} wget`;
+ const parallel=`# Run in Bash. Four connections download separate byte ranges.\n(\n  set -e\n  PORTHUB_URL=${quote(download)}\n  PORTHUB_OUT=${quote(out)}\n  PORTHUB_PARTS=4\n  PORTHUB_SIZE=$(curl -fsSI -- "$PORTHUB_URL" | awk 'tolower($1)=="content-length:" {gsub("\\r","",$2); print $2}')\n  case "$PORTHUB_SIZE" in ''|*[!0-9]*) printf 'Could not read file size\\n' >&2; exit 1;; esac\n  if [ "$PORTHUB_SIZE" -eq 0 ]; then : > "$PORTHUB_OUT"; exit 0; fi\n  PORTHUB_TMP=$(mktemp -d)\n  trap 'for PORTHUB_PID in $PORTHUB_PIDS; do kill "$PORTHUB_PID" 2>/dev/null || true; done; rm -rf -- "$PORTHUB_TMP"' EXIT\n  PORTHUB_PIDS=""\n  PORTHUB_CHUNK=$(( (PORTHUB_SIZE + PORTHUB_PARTS - 1) / PORTHUB_PARTS ))\n  for ((i=0; i<PORTHUB_PARTS; i++)); do\n    PORTHUB_START=$((i * PORTHUB_CHUNK))\n    [ "$PORTHUB_START" -lt "$PORTHUB_SIZE" ] || break\n    PORTHUB_END=$((PORTHUB_START + PORTHUB_CHUNK - 1))\n    [ "$PORTHUB_END" -lt "$PORTHUB_SIZE" ] || PORTHUB_END=$((PORTHUB_SIZE - 1))\n    curl -fSL --retry 3 --range "$PORTHUB_START-$PORTHUB_END" -o "$PORTHUB_TMP/$i" -- "$PORTHUB_URL" &\n    PORTHUB_PIDS="$PORTHUB_PIDS $!"\n  done\n  for PORTHUB_PID in $PORTHUB_PIDS; do wait "$PORTHUB_PID"; done\n  PORTHUB_PIDS=""\n  : > "$PORTHUB_TMP/combined"\n  for ((j=0; j<i; j++)); do cat "$PORTHUB_TMP/$j" >> "$PORTHUB_TMP/combined"; done\n  mv -- "$PORTHUB_TMP/combined" "$PORTHUB_OUT"\n)`;
+ return <div className="mx-auto flex h-full min-h-0 w-full max-w-[1600px] flex-col px-3 py-3 sm:px-5"><h1 className="shrink-0 text-lg font-semibold">Transfers</h1><p className="mb-5 mt-1 shrink-0 text-sm text-muted-foreground">Share a file from your terminal through PortHub. Files are relayed without server storage. Free to use, with no account or PortHub installation needed on either terminal.</p>
+  <div className="min-h-0 flex-1 overflow-y-auto pb-6">
+   <div className="mb-6"><div className="mb-3 flex items-center gap-2"><IconArrowUp size={18}/><h2 className="text-base font-semibold">Send a file</h2></div><div className="mb-3 flex flex-wrap items-end gap-3"><label className="min-w-0 flex-1 text-sm" htmlFor="transfer-file">File path<input id="transfer-file" value={file} onChange={event=>setFile(event.target.value)} className="mt-1 block h-11 w-full rounded-lg border border-input bg-control px-3 text-sm"/></label><div className="flex gap-1" aria-label="Sender tool">{["curl","wget"].map(value=><Button key={value} variant={tool===value?"secondary":"ghost"} aria-pressed={tool===value} onClick={()=>setTool(value)}>{value=== "curl"?"cURL":"Wget"}</Button>)}</div></div>
+    <Command title={`Send with ${tool==="curl"?"cURL":"Wget"}`}>{sender}</Command><p className="mt-2 text-xs leading-5 text-muted-foreground">Run in Bash on Linux, macOS or WSL. The command prints a download URL. Keep the sender and file unchanged until downloads finish; Ctrl+C stops sharing. Wget uses small temporary chunks on the sender only.</p>
+   </div>
+   <div><div className="mb-3 flex items-center gap-2"><IconArrowDown size={18}/><h2 className="text-base font-semibold">Download a file</h2></div><div className="mb-3 grid gap-3 sm:grid-cols-[1fr_220px]"><label className="min-w-0 text-sm" htmlFor="transfer-url">Download URL<input id="transfer-url" type="url" value={url} onChange={event=>setUrl(event.target.value)} className="mt-1 block h-11 w-full rounded-lg border border-input bg-control px-3 text-sm" placeholder="Paste the URL printed by the sender"/></label><label className="text-sm" htmlFor="transfer-output">Save as<input id="transfer-output" value={out} onChange={event=>setOut(event.target.value)} className="mt-1 block h-11 w-full rounded-lg border border-input bg-control px-3 text-sm"/></label></div>
+    <div className="grid gap-3 lg:grid-cols-2"><Command title="Download with cURL">{`curl -fL -o ${quote(out)} -- ${quote(download)}`}</Command><Command title="Download with Wget">{`wget -c -O ${quote(out)} -- ${quote(download)}`}</Command></div>
+    <p className="my-3 text-xs leading-5 text-muted-foreground">Multiple people can download at once. Parallel connections and resumable downloads work while the sender remains running.</p>
+    <details className="rounded-xl border border-border"><summary className="cursor-pointer px-4 py-3 text-sm font-medium">Parallel download commands</summary><div className="space-y-3 border-t border-border p-3"><Command title="Parallel download with aria2">{`aria2c -x 8 -s 8 --file-allocation=none -o ${quote(out)} -- ${quote(download)}`}</Command><Command title="Parallel download with cURL">{parallel}</Command></div></details>
+   </div>
+  </div>
+ </div>;
+}

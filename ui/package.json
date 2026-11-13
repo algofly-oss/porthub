@@ -3,15 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "predev": "node scripts/prepare-excalidraw.cjs",
     "dev": "next dev",
-    "prebuild": "node --test tests/bootstrap-command.test.mjs tests/terminal-traffic.test.mjs tests/terminal-connectivity.test.mjs && node tests/terminal-delivery.cjs && node tests/terminal-transport.cjs",
+    "prebuild": "node scripts/prepare-excalidraw.cjs && node --test tests/bootstrap-command.test.mjs tests/terminal-traffic.test.mjs tests/terminal-connectivity.test.mjs && node tests/terminal-delivery.cjs && node tests/terminal-transport.cjs",
     "build": "next build",
     "start": "next start",
     "lint": "next lint"
   },
   "dependencies": {
-    "aria-hidden": "1.2.3",
     "@emotion/react": "^11.10.6",
+    "@excalidraw/excalidraw": "0.18.1",
     "@mantine/carousel": "^6.0.4",
     "@mantine/core": "^6.0.4",
     "@mantine/dates": "^6.0.4",
@@ -34,6 +35,9 @@
     "@types/node": "18.15.10",
     "@types/react": "18.0.29",
     "@types/react-dom": "18.0.11",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
+    "aria-hidden": "1.2.3",
     "axios": "^1.3.4",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
@@ -53,9 +57,7 @@
     "socket.io-client": "^4.6.1",
     "tailwind-merge": "2.6.0",
     "typescript": "5.0.2",
-    "usehooks-ts": "^2.9.1",
-    "@xterm/xterm": "6.0.0",
-    "@xterm/addon-fit": "0.11.0"
+    "usehooks-ts": "^2.9.1"
   },
   "devDependencies": {
     "autoprefixer": "^10.4.14",

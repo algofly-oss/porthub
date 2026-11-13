@@ -1,6 +1,8 @@
 import {
   IconServer,
   IconPhoto,
+  IconLayoutBoard,
+  IconFileArrowRight,
   IconWorld,
   IconActivity,
   IconSettings,
@@ -22,6 +24,7 @@ export default function UserNavBar({
   setTab,
   isAdmin,
   collapsed = false,
+  demo = false,
 }) {
   const [moreOpen, setMoreOpen] = useState(false);
   const items = [
@@ -31,6 +34,8 @@ export default function UserNavBar({
     ["Proxy", "Proxies", IconWorld],
     ["Traffic", "Traffic", IconActivity],
     ["Images", "Hosted images", IconPhoto],
+    ["Boards", "Boards", IconLayoutBoard],
+    ...(!demo ? [["Transfers", "Transfers", IconFileArrowRight]] : []),
     ["Settings", "Settings", IconSettings],
     ...(isAdmin ? [["Platform", "Platform", IconShieldLock]] : []),
   ];

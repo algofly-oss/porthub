@@ -4,6 +4,7 @@ pub mod application_proxy;
 pub mod artifacts;
 pub mod auth;
 pub mod bootstrap;
+pub mod boards;
 pub mod config;
 pub mod config_signals;
 pub mod connection_refresh;
@@ -11,6 +12,7 @@ pub mod docs;
 pub mod domain;
 pub mod enrollment_ticket;
 pub mod error;
+pub mod file_relay;
 pub mod firewall;
 pub mod firewall_history;
 pub mod gateway_apply;
@@ -52,6 +54,8 @@ use serde_json::json;
 use std::sync::Arc;
 
 pub struct App {
+    pub boards: boards::Hub,
+    pub file_relay: file_relay::Hub,
     pub terminals: porthub_terminal::hub::Hub,
     pub image_rooms_initialized: tokio::sync::OnceCell<()>,
     pub hosted_images_initialized: tokio::sync::OnceCell<()>,
@@ -106,6 +110,8 @@ impl App {
             )
         };
         Self {
+            boards: Default::default(),
+            file_relay: Default::default(),
             terminals: Default::default(),
             hosted_images_initialized: Default::default(),
             image_rooms_initialized: Default::default(),

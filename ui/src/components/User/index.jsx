@@ -5,6 +5,8 @@ import UserNavBar from "./components/NavBar";
 import { VscRemoteExplorer } from "react-icons/vsc";
 import Home from "./components/Home";
 import HostedImages from "./components/HostedImages";
+import Boards from "./components/Boards";
+import Transfers from "./components/Transfers";
 import Proxy from "./components/Proxy";
 import Settings from "./components/Settings";
 import PlatformOverview from "./components/PlatformOverview";
@@ -12,6 +14,7 @@ import Traffic from "./components/Traffic";
 import Dashboard from "./components/Dashboard";
 import AccessRules from "./components/AccessRules";
 import { useRouter } from "next/router";
+import Link from "next/link";
 import axios from "axios";
 import toast from "react-hot-toast";
 import { useDispatch } from "react-redux";
@@ -70,7 +73,7 @@ export default function UserHome() {
     }
   };
   const isAdmin = user?.role === "admin";
-  const views = { images: "Images", dashboard: "Dashboard", machines: "Home", access: "Access", proxies: "Proxy", traffic: "Traffic", settings: "Settings", platform: "Platform" };
+  const views = { transfers: "Transfers", boards: "Boards", images: "Images", dashboard: "Dashboard", machines: "Home", access: "Access", proxies: "Proxy", traffic: "Traffic", settings: "Settings", platform: "Platform" };
   const tab = views[router.query.view] || "Dashboard";
   const setTab = (nextTab) => {
     const view = Object.keys(views).find(key => views[key] === nextTab) || "machines";
@@ -105,6 +108,7 @@ export default function UserHome() {
         </button>
         <UserNavBar
           collapsed={collapsed}
+          demo={demo}
           tab={tab}
           setTab={setTab}
           machineStats={machineStats}
@@ -121,6 +125,8 @@ export default function UserHome() {
         <div hidden={tab !== "Access"} aria-hidden={tab !== "Access"} className="h-full min-h-0"><AccessRules active={tab === "Access"} /></div>
         <div hidden={tab !== "Proxy"} aria-hidden={tab !== "Proxy"} className="h-full min-h-0"><Proxy active={tab === "Proxy"} /></div>
         <div hidden={tab !== "Traffic"} aria-hidden={tab !== "Traffic"} className="h-full min-h-0"><Traffic active={tab === "Traffic"} /></div>
+        {tab === "Transfers" && <div className="h-full min-h-0">{demo?<div className="p-6 text-sm text-muted-foreground"><Link href="/home?view=transfers" className="text-primary underline">Open your workspace</Link> to view transfer commands.</div>:<Transfers />}</div>}
+        <div hidden={tab !== "Boards"} aria-hidden={tab !== "Boards"} className="h-full min-h-0">{demo?<div className="p-6 text-sm text-muted-foreground"><Link href="/home?view=boards" className="text-primary underline">Open your workspace</Link> to create and share saved boards.</div>:<Boards active={tab === "Boards"} />}</div>
         <div hidden={tab !== "Images"} aria-hidden={tab !== "Images"} className="h-full min-h-0"><HostedImages active={tab === "Images"} /></div>
         <div hidden={tab !== "Settings"} aria-hidden={tab !== "Settings"} className="h-full min-h-0"><Settings active={tab === "Settings"} /></div>
         {isAdmin && <div hidden={tab !== "Platform"} aria-hidden={tab !== "Platform"} className="h-full min-h-0"><PlatformOverview active={tab === "Platform"} /></div>}

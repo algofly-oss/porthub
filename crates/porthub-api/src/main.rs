@@ -167,22 +167,25 @@ async fn main() -> Result<()> {
     });
     let realtime = app.clone();
     let router = porthub_api::router(app);
+    let shutdown = realtime.clone();
+    let shutdown = async move { porthub_runtime::shutdown_signal().await; shutdown.file_relay.close(); };
     let result = if let Some(path) = std::env::var_os("PORTHUB_API_SOCKET") {
         let (listener, _lease) = porthub_runtime::socket::bind(std::path::Path::new(&path)).await?;
         tracing::info!("native API listening on internal Unix socket");
         axum::serve(listener, router)
-            .with_graceful_shutdown(porthub_runtime::shutdown_signal())
+            .with_graceful_shutdown(shutdown)
             .await
     } else {
         let listener = tokio::net::TcpListener::bind(&tcp_address).await?;
         tracing::info!(listen = %tcp_address, "native API listening");
         axum::serve(listener, router)
-            .with_graceful_shutdown(porthub_runtime::shutdown_signal())
+            .with_graceful_shutdown(shutdown)
             .await
     };
     terminal_stop.cancel();
     terminal_maintenance.await?;
     terminal_ssh.await?;
+    realtime.file_relay.close();
     realtime.realtime.close().await;
     refresh.abort();
     let _ = activity_stop.send(true);

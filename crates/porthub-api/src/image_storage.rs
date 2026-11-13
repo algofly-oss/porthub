@@ -217,7 +217,7 @@ pub async fn remove(app: &App, collection: &str, filter: Document) -> ApiResult<
 }
 pub async fn cleanup_orphans(app: &App) -> ApiResult<()> {
     let cutoff = DateTime::from_millis(DateTime::now().timestamp_millis() - 3_600_000);
-    for collection in [crate::hosted_images::COLLECTION, crate::image_rooms::IMAGES] {
+    for collection in [crate::hosted_images::COLLECTION, crate::image_rooms::IMAGES, crate::boards::ASSETS] {
         let mut groups = app
             .collection(collection)
             .aggregate([

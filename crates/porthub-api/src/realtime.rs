@@ -109,6 +109,14 @@ impl Default for Hub {
     }
 }
 impl Hub {
+    pub(crate) fn board_emit(&self, sid: &str, event: &str, value: &Value) {
+        if let Some(socket) = self.io.of("/boards").and_then(|ns| ns.get_socket(sid.parse().ok()?)) {
+            if socket.emit(event, value).is_err() { let _ = socket.disconnect(); }
+        }
+    }
+    pub(crate) fn board_disconnect(&self, sid: &str) {
+        if let Some(socket) = self.io.of("/boards").and_then(|ns| ns.get_socket(sid.parse().ok()?)) { let _ = socket.disconnect(); }
+    }
     fn registry(&self) -> MutexGuard<'_, Registry> {
         self.registry
             .lock()
@@ -125,6 +133,7 @@ impl Hub {
     }
     pub fn install(app: &Arc<App>) -> SocketIoLayer {
         app.realtime.installed.get_or_init(|| {
+            crate::boards::install(&app.realtime.io, app);
             let connect = Arc::downgrade(app);
             let authenticate = Arc::downgrade(app);
             app.realtime.io.ns(
@@ -451,7 +460,7 @@ fn log_status(app: &App, machine: &Document, requested: bool, subscribed: Option
     }
     value
 }
-fn origin_allowed(app: &App, headers: &HeaderMap) -> bool {
+pub(crate) fn origin_allowed(app: &App, headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get("origin") else {
         return true;
     };

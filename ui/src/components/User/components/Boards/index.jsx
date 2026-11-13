@@ -1,0 +1,28 @@
+import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { useRouter } from "next/router";
+import axios from "axios";
+import toast from "react-hot-toast";
+import { IconPlus, IconRefresh, IconPencil, IconShare, IconTrash, IconLayoutBoard } from "@tabler/icons-react";
+import { Button } from "@/components/ui/button";
+import ImageDialog from "../HostedImages/ImageDialog";
+import ShareDialog, { boardError } from "./ShareDialog";
+export default function Boards({active=true}) {
+  const router=useRouter();
+  const [boards,setBoards]=useState([]),[loading,setLoading]=useState(false),[error,setError]=useState(""),[busy,setBusy]=useState(false);
+  const [editing,setEditing]=useState(null),[name,setName]=useState(""),[deleting,setDeleting]=useState(null),[sharing,setSharing]=useState(null);
+  const load=useCallback(async()=>{setLoading(true);try{const {data}=await axios.get("/api/boards");setBoards(data.boards);setError("");}catch(error){setError(boardError(error));}finally{setLoading(false);}},[]);
+  useEffect(()=>{if(active)load();},[active,load]);
+  const save=async event=>{event.preventDefault();setBusy(true);try{const created=!editing.id;const {data}=created?await axios.post("/api/boards",{name}):await axios.patch(`/api/boards/${editing.id}`,{name});setEditing(null);if(created)router.push(`/board?id=${data.id}`);else await load();}catch(error){toast.error(boardError(error));}finally{setBusy(false);}};
+  const remove=async()=>{setBusy(true);try{await axios.delete(`/api/boards/${deleting.id}`);setDeleting(null);await load();}catch(error){toast.error(boardError(error));}finally{setBusy(false);}};
+  return <div className="mx-auto flex h-full min-h-0 w-full max-w-[1600px] flex-col px-3 py-3 sm:px-5">
+    <div className="mb-4 flex shrink-0 items-center justify-between gap-3"><h1 className="text-lg font-semibold">Boards</h1><div className="flex gap-2"><Button variant="secondary" size="icon" aria-label="Refresh boards" disabled={loading} onClick={load}><IconRefresh size={17}/></Button><Button onClick={()=>{setName("Untitled board");setEditing({});}}><IconPlus size={17}/>New board</Button></div></div>
+    {error&&<p role="alert" className="mb-3 text-sm text-red-500">{error}</p>}
+    <div className="min-h-0 flex-1 overflow-auto rounded-xl border border-border">
+      {!boards.length?<div className="flex min-h-64 flex-col items-center justify-center gap-3 p-6 text-center"><IconLayoutBoard size={30} className="text-muted-foreground"/><p className="text-sm text-muted-foreground">{loading?"Loading boards…":"Create a board, then share a link to draw together."}</p></div>:<table className="w-full text-left text-sm" aria-label="Saved boards"><thead className="sticky top-0 bg-muted text-xs text-muted-foreground"><tr><th className="px-4 py-3 font-medium">Board</th><th className="hidden px-4 py-3 font-medium sm:table-cell">Updated</th><th className="px-4 py-3 text-right font-medium">Actions</th></tr></thead><tbody>{boards.map(board=><tr key={board.id} className="border-t border-border hover:bg-accent/40"><td className="max-w-0 px-4 py-3"><Link href={`/board?id=${board.id}`} className="block truncate font-medium hover:underline">{board.name}</Link><span className="mt-1 block text-xs text-muted-foreground">{board.sharing?.enabled?"Sharing enabled":"Private"}</span></td><td className="hidden whitespace-nowrap px-4 py-3 text-xs text-muted-foreground sm:table-cell">{board.updated_at?new Date(board.updated_at).toLocaleString():"Just now"}</td><td className="px-3 py-3"><div className="flex justify-end gap-1"><Button variant="ghost" size="icon" aria-label={`Share ${board.name}`} onClick={()=>setSharing(board)}><IconShare size={17}/></Button><Button variant="ghost" size="icon" aria-label={`Rename ${board.name}`} onClick={()=>{setName(board.name);setEditing(board);}}><IconPencil size={16}/></Button><Button variant="ghost" size="icon" aria-label={`Delete ${board.name}`} onClick={()=>setDeleting(board)}><IconTrash size={16}/></Button></div></td></tr>)}</tbody></table>}
+    </div>
+    <ImageDialog opened={!!editing} onClose={()=>{if(!busy)setEditing(null);}} title={editing?.id?"Rename board":"New board"}><form onSubmit={save}><label htmlFor="board-name" className="mb-2 block text-sm">Board name</label><input id="board-name" value={name} maxLength={120} required onChange={event=>setName(event.target.value)} className="mb-4 h-11 w-full rounded-lg border border-input bg-control px-3 text-sm"/><div className="flex justify-end gap-2"><Button type="button" variant="secondary" disabled={busy} onClick={()=>setEditing(null)}>Cancel</Button><Button disabled={busy||!name.trim()}>{busy?"Saving…":editing?.id?"Save name":"Create board"}</Button></div></form></ImageDialog>
+    <ImageDialog opened={!!deleting} onClose={()=>{if(!busy)setDeleting(null);}} title="Delete board"><p className="mb-4 text-sm">Delete “{deleting?.name}” and all its images? Shared links will stop working.</p><div className="flex justify-end gap-2"><Button variant="secondary" disabled={busy} onClick={()=>setDeleting(null)}>Cancel</Button><Button variant="destructive" disabled={busy} onClick={remove}>{busy?"Deleting…":"Delete board"}</Button></div></ImageDialog>
+    {sharing&&<ShareDialog board={sharing} onClose={()=>setSharing(null)} onChange={data=>setBoards(previous=>previous.map(board=>board.id===data.id?data:board))}/>}
+  </div>;
+}

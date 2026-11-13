@@ -67,6 +67,8 @@ jobs:
           cargo test --locked -p porthub-api --test hosted_images -- --include-ignored
           cargo test --locked -p porthub-api --test image_rooms -- --include-ignored
           cargo test --locked -p porthub-api --test large_images -- --include-ignored
+          cargo test --locked -p porthub-api --test boards --test file_relay -- --include-ignored
+          cargo test --locked -p porthub-api --lib file_relay::tests
           cargo test --locked -p porthub-agent --lib image
           cargo test --locked -p porthub-agent --lib forward::tests
           cargo test --locked -p porthub-agent --bin porthub forward_defaults
@@ -113,6 +115,12 @@ jobs:
           echo "PORTHUB_COMPONENT_CACHE=$component_cache" >> "$GITHUB_ENV"
           echo "PORTHUB_COMPONENT_SHARED_CACHE=off" >> "$GITHUB_ENV"
           echo "PORTHUB_COMPONENT_SOURCE=github" >> "$GITHUB_ENV"
+      - name: Verify saved boards, guest collaboration and copied transfer commands
+        env:
+          PORTHUB_TEST_MONGO_URI: mongodb://127.0.0.1:${{ job.services.mongo.ports['27017'] }}
+          NODE_PATH: ${{ runner.temp }}/terminal-browser-tools/node_modules
+          PORTHUB_TEST_BOARD_UI_ROOT: ${{ github.workspace }}/terminal-browser-assets/ui
+        run: cargo test --locked -p porthub-api --test boards_browser -- --include-ignored --nocapture
       - name: Verify real SSH, Chrome and WebKit guests over direct and fallback paths
         env:
           PORTHUB_TEST_MONGO_URI: mongodb://127.0.0.1:${{ job.services.mongo.ports['27017'] }}

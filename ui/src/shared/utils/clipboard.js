@@ -8,7 +8,8 @@ export async function copyText(value) {
   field.value = value;
   field.setAttribute("readonly", "");
   field.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0";
-  document.body.appendChild(field);
+  // Keep local-HTTP copy fallbacks inside the active modal focus scope.
+  (previous?.closest?.('[role="dialog"]') || document.body).appendChild(field);
   try { field.select(); if (!document.execCommand("copy")) throw new Error("Copy unavailable"); }
   finally { field.remove(); previous?.focus?.({preventScroll:true}); }
 }
