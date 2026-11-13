@@ -82,6 +82,7 @@ assert(base&&cookie,'Isolated server and test session are required');
   await page.getByRole('button',{name:'Close dialog'}).click();
   await page.getByRole('button',{name:'Back to boards',exact:true}).click();
   await page.getByRole('link',{name:'Sprint planning',exact:true}).waitFor();
+  const refreshSize=await page.getByRole('button',{name:'Refresh boards',exact:true}).boundingBox(),newSize=await page.getByRole('button',{name:'New board',exact:true}).boundingBox();assert(Math.abs(refreshSize.height-newSize.height)<0.5,'Icon and primary toolbar buttons share a height');
   const boardPreview=page.getByRole('link',{name:'Open preview of Sprint planning'}).locator('img');
   await boardPreview.waitFor();await page.waitForFunction(()=>{const img=document.querySelector('a[aria-label="Open preview of Sprint planning"] img');return img?.complete&&img.naturalWidth>0;});
   assert((await boardPreview.boundingBox()).width<=90,'Board previews stay small');

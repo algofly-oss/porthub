@@ -14,7 +14,7 @@ export const buttonVariants = cva(
       ghost: "text-muted-foreground hover:bg-accent hover:text-foreground",
       destructive: "bg-red-600 text-white hover:bg-red-700",
     },
-    size: { default: "h-11 px-3 md:h-10", sm: "h-10 px-3 md:h-9", icon: "h-11 w-11 md:h-9 md:w-9", lg: "h-11 px-4 md:h-10" },
+    size: { default: "h-11 px-3 md:h-10", sm: "h-10 px-3 md:h-9", icon: "h-11 w-11 md:h-10 md:w-10", lg: "h-11 px-4 md:h-10" },
   }, defaultVariants: { variant: "default", size: "default" } }
 );
 /** @typedef {React.ButtonHTMLAttributes<HTMLButtonElement> & {variant?: "default" | "outline" | "secondary" | "ghost" | "destructive", size?: "default" | "sm" | "icon" | "lg", asChild?: boolean}} ButtonProps */
