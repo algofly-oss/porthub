@@ -37,8 +37,8 @@ export default function BrowserShare({ active }) {
     const paste = event=>{if(event.clipboardData?.files?.length){event.preventDefault();void add(event.clipboardData.files);}};
     document.addEventListener('paste',paste);return()=>document.removeEventListener('paste',paste);
   },[active]);
-  return <div onDragOver={event=>{event.preventDefault();setDragging(true);}} onDragLeave={event=>{if(!event.currentTarget.contains(event.relatedTarget))setDragging(false);}} onDrop={event=>{event.preventDefault();event.stopPropagation();setDragging(false);void add(event.dataTransfer.files);}}>
-    <div className={shares.length ? '' : 'grid gap-6 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)] lg:gap-8'}>
+  return <div className="flex grow flex-col" onDragOver={event=>{event.preventDefault();setDragging(true);}} onDragLeave={event=>{if(!event.currentTarget.contains(event.relatedTarget))setDragging(false);}} onDrop={event=>{event.preventDefault();event.stopPropagation();setDragging(false);void add(event.dataTransfer.files);}}>
+    <div className={shares.length ? '' : 'grid grow gap-6 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)] lg:gap-8'}>
       <label htmlFor="browser-share-files" className={`flex cursor-pointer flex-col items-center justify-center rounded-xl border border-dashed px-5 text-center transition-colors focus-within:ring-2 focus-within:ring-primary ${shares.length?'min-h-32 py-5':'min-h-64 py-8 sm:min-h-72'} ${dragging?'border-primary bg-primary/10':'border-input bg-background/40 hover:border-primary hover:bg-primary/5'}`}>
         <span className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10 text-primary dark:text-blue-300"><IconUpload size={24}/></span>
         <span className="text-base font-medium">Drop files to share</span>

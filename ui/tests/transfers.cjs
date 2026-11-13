@@ -34,6 +34,10 @@ assert(base, 'An isolated local UI URL is required');
       assert.equal(await page.getByRole('tab',{name:'From browser',exact:true}).getAttribute('aria-selected'),'true','Browser sharing is the default');
       const assertWidth=async()=>{const shell=await page.getByLabel('Transfers content',{exact:true}).boundingBox(),bounds=await panel.boundingBox();assert(bounds.width>=Math.min(shell.width,1600)-44,'Transfers uses the available workspace width at '+width+'px');};
       if(width>=1280)await assertWidth();
+      const assertHeight=async()=>{if(width>=1024&&height>=800){const shell=await page.getByLabel('Transfers content',{exact:true}).boundingBox(),card=await panel.locator('..').boundingBox();assert(card.y+card.height>=shell.y+shell.height-72,'Transfers fills available height at '+width+'x'+height);}};
+      await assertHeight();
+      if(width>=1024&&height>=800){const card=await panel.locator('..').boundingBox(),drop=await panel.locator('label[for="browser-share-files"]').boundingBox();assert(drop.height>=card.height-112,'Browser drop area fills the panel at '+width+'x'+height);}
+
       if(width>=1280){await page.getByRole('button',{name:'Collapse navigation',exact:true}).click();await page.waitForTimeout(250);await assertWidth();await page.getByRole('button',{name:'Expand navigation',exact:true}).click();await page.waitForTimeout(250);}
       const checkPanel=async()=>{
         assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'No page overflow at '+width+'x'+height);
@@ -108,8 +112,9 @@ assert(base, 'An isolated local UI URL is required');
       await page.keyboard.press('ArrowRight');
       assert.equal(await page.getByRole('tab', { name: 'Download' }).getAttribute('aria-selected'), 'true');
       await checkPanel();
-      if(width===1512){await page.getByRole('button',{name:'Boards',exact:true}).click();await page.getByRole('heading',{name:'Boards',exact:true}).waitFor();await page.getByRole('button',{name:'Transfers',exact:true}).click();assert.equal(await page.getByRole('tab',{name:'From browser',exact:true}).getAttribute('aria-selected'),'true','Returning to Transfers starts with browser sharing');}
-      await page.getByRole('tab',{name:'PairDrop',exact:true}).click();await page.getByTitle('PairDrop file sharing',{exact:true}).waitFor();await checkPanel();
+      if(width===1512){await page.getByRole('button',{name:'Boards',exact:true}).click();await page.getByRole('heading',{name:'Boards',exact:true}).waitFor();await page.getByRole('button',{name:'Transfers',exact:true}).click();await page.locator('#transfer-browser-tab[aria-selected="true"]').waitFor();assert.equal(await page.getByRole('tab',{name:'From browser',exact:true}).getAttribute('aria-selected'),'true','Returning to Transfers starts with browser sharing');}
+      await page.getByRole('tab',{name:'PairDrop',exact:true}).click();await page.getByTitle('PairDrop file sharing',{exact:true}).waitFor();await checkPanel();await assertHeight();
+      if(width>=1024&&height>=800){const frame=await page.getByTitle('PairDrop file sharing',{exact:true}).boundingBox(),bounds=await panel.boundingBox();assert(frame.y+frame.height>=bounds.y+bounds.height-24,'PairDrop frame fills the panel height');}
       if(process.env.PORTHUB_TEST_PAIRDROP_UPSTREAM){const embedded=page.frameLocator('iframe[title="PairDrop file sharing"]');await embedded.locator('x-peers').waitFor({state:'attached'});assert(await embedded.locator('html').evaluate(root=>root.scrollWidth<=innerWidth),'Embedded PairDrop fits '+width+'x'+height);}
       await page.waitForTimeout(200);
       if(process.env.PORTHUB_TEST_SCREENSHOT_DIR)await page.screenshot({path:`${process.env.PORTHUB_TEST_SCREENSHOT_DIR}/transfers-pairdrop-${width}x${height}.png`});
