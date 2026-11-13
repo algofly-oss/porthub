@@ -9,6 +9,7 @@ async fn browser_boards_and_transfers() -> Result<()> {
     let root = std::env::var("PORTHUB_TEST_BOARD_UI_ROOT")?;
     let case = Case::new(porthub_api::config::Config {
         ui_root: root,
+        pairdrop_upstream: std::env::var("PORTHUB_TEST_PAIRDROP_UPSTREAM").unwrap_or_default(),
         ..Default::default()
     })
     .await?;
@@ -26,7 +27,12 @@ async fn browser_boards_and_transfers() -> Result<()> {
         let output = tokio::time::timeout(
             Duration::from_secs(240),
             tokio::process::Command::new("node")
-                .arg(project.join("ui/tests/boards-live.cjs"))
+                .arg(
+                    project.join("ui/tests").join(
+                        std::env::var("PORTHUB_TEST_UI_SCRIPT")
+                            .unwrap_or_else(|_| "boards-live.cjs".into()),
+                    ),
+                )
                 .env("PORTHUB_TEST_UI_URL", base)
                 .env("PORTHUB_TEST_BOARD_COOKIE", cookie)
                 .kill_on_drop(true)

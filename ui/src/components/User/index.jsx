@@ -125,7 +125,7 @@ export default function UserHome() {
         <div hidden={tab !== "Access"} aria-hidden={tab !== "Access"} className="h-full min-h-0"><AccessRules active={tab === "Access"} /></div>
         <div hidden={tab !== "Proxy"} aria-hidden={tab !== "Proxy"} className="h-full min-h-0"><Proxy active={tab === "Proxy"} /></div>
         <div hidden={tab !== "Traffic"} aria-hidden={tab !== "Traffic"} className="h-full min-h-0"><Traffic active={tab === "Traffic"} /></div>
-        {tab === "Transfers" && <div className="h-full min-h-0">{demo?<div className="p-6 text-sm text-muted-foreground"><Link href="/home?view=transfers" className="text-primary underline">Open your workspace</Link> to view transfer commands.</div>:<Transfers />}</div>}
+        <div hidden={tab !== "Transfers"} aria-hidden={tab !== "Transfers"} className="h-full min-h-0">{demo?<div className="p-6 text-sm text-muted-foreground"><Link href="/home?view=transfers" className="text-primary underline">Open your workspace</Link> to view transfer commands.</div>:<Transfers active={tab === "Transfers"} />}</div>
         <div hidden={tab !== "Boards"} aria-hidden={tab !== "Boards"} className="h-full min-h-0">{demo?<div className="p-6 text-sm text-muted-foreground"><Link href="/home?view=boards" className="text-primary underline">Open your workspace</Link> to create and share saved boards.</div>:<Boards active={tab === "Boards"} />}</div>
         <div hidden={tab !== "Images"} aria-hidden={tab !== "Images"} className="h-full min-h-0"><HostedImages active={tab === "Images"} /></div>
         <div hidden={tab !== "Settings"} aria-hidden={tab !== "Settings"} className="h-full min-h-0"><Settings active={tab === "Settings"} /></div>

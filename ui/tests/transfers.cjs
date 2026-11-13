@@ -43,7 +43,7 @@ assert(base, 'An isolated local UI URL is required');
         await fs.mkdir(process.env.PORTHUB_TEST_SCREENSHOT_DIR, { recursive: true });
         await page.screenshot({ path: `${process.env.PORTHUB_TEST_SCREENSHOT_DIR}/transfers-send-${width}.png` });
       }
-      await page.getByRole('tab', { name: 'Download a file', exact: true }).click();
+      await page.getByRole('tab', { name: 'Download', exact: true }).click();
       assert(await copy().isDisabled(), 'No placeholder download links can be copied');
       await page.getByLabel('Download URL', { exact: true }).fill('javascript:alert(1)');
       assert(await copy().isDisabled());
@@ -77,9 +77,9 @@ assert(base, 'An isolated local UI URL is required');
       assert.equal(await page.locator('pre').count(), 1, 'Parallel mode replaces the command');
       if (process.env.PORTHUB_TEST_SCREENSHOT_DIR) await page.screenshot({ path: `${process.env.PORTHUB_TEST_SCREENSHOT_DIR}/transfers-download-${width}.png` });
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'No horizontal page overflow');
-      await page.getByRole('tab', { name: 'Send a file', exact: true }).click();
+      await page.getByRole('tab', { name: 'From terminal', exact: true }).click();
       await page.keyboard.press('ArrowRight');
-      assert.equal(await page.getByRole('tab', { name: 'Download a file' }).getAttribute('aria-selected'), 'true');
+      assert.equal(await page.getByRole('tab', { name: 'Download' }).getAttribute('aria-selected'), 'true');
       assert.deepEqual(errors, []);
       await context.close();
     }

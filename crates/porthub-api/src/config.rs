@@ -11,6 +11,7 @@ pub struct Config {
     pub firewall_api_key: String,
     pub firewall_timeout: std::time::Duration,
     pub ui_upstream: String,
+    pub pairdrop_upstream: String,
     pub ui_root: String,
     pub mongo_uri: String,
     pub mongo_database: String,
@@ -52,6 +53,7 @@ impl Default for Config {
             firewall_api_key: String::new(),
             firewall_timeout: std::time::Duration::from_secs(5),
             ui_upstream: String::new(),
+            pairdrop_upstream: String::new(),
             ui_root: String::new(),
             mongo_uri: String::new(),
             mongo_database: String::new(),
@@ -128,6 +130,11 @@ impl Config {
                 .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c)),
             "invalid session cookie name"
         );
+        let pairdrop_upstream = env("PORTHUB_PAIRDROP_UPSTREAM", "http://pairdrop:3000");
+        if !pairdrop_upstream.is_empty() {
+            let url = reqwest::Url::parse(&pairdrop_upstream).context("invalid PairDrop upstream")?;
+            anyhow::ensure!(url.scheme()=="http" && url.host_str().is_some() && url.path()=="/" && url.query().is_none() && url.fragment().is_none() && url.username().is_empty() && url.password().is_none(), "PairDrop upstream must be an internal HTTP origin");
+        }
         let ui_upstream = env("PORTHUB_UI_UPSTREAM", "");
         let ui_root = env("PORTHUB_UI_ROOT", "");
         anyhow::ensure!(
@@ -304,6 +311,7 @@ impl Config {
             gateway_ip_sources,
             listen: env("PORTHUB_API_LISTEN", "127.0.0.1:47080"),
             ui_upstream,
+            pairdrop_upstream,
             ui_root,
             mongo_uri: std::env::var("MONGO_DATABASE_URI")
                 .context("MONGO_DATABASE_URI required")?,

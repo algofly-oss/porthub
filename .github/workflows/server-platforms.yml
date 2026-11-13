@@ -67,7 +67,7 @@ jobs:
           cargo test --locked -p porthub-api --test hosted_images -- --include-ignored
           cargo test --locked -p porthub-api --test image_rooms -- --include-ignored
           cargo test --locked -p porthub-api --test large_images -- --include-ignored
-          cargo test --locked -p porthub-api --test boards --test file_relay -- --include-ignored
+          cargo test --locked -p porthub-api --test boards --test file_relay --test pairdrop -- --include-ignored
           cargo test --locked -p porthub-api --lib file_relay::tests
           cargo test --locked -p porthub-agent --lib image
           cargo test --locked -p porthub-agent --lib forward::tests
@@ -115,12 +115,18 @@ jobs:
           echo "PORTHUB_COMPONENT_CACHE=$component_cache" >> "$GITHUB_ENV"
           echo "PORTHUB_COMPONENT_SHARED_CACHE=off" >> "$GITHUB_ENV"
           echo "PORTHUB_COMPONENT_SOURCE=github" >> "$GITHUB_ENV"
-      - name: Verify saved boards, guest collaboration and copied transfer commands
+      - name: Verify saved boards, browser shares and anonymous PairDrop
         env:
           PORTHUB_TEST_MONGO_URI: mongodb://127.0.0.1:${{ job.services.mongo.ports['27017'] }}
+          PORTHUB_TEST_PAIRDROP_UPSTREAM: http://127.0.0.1:4319/
           NODE_PATH: ${{ runner.temp }}/terminal-browser-tools/node_modules
           PORTHUB_TEST_BOARD_UI_ROOT: ${{ github.workspace }}/terminal-browser-assets/ui
-        run: cargo test --locked -p porthub-api --test boards_browser -- --include-ignored --nocapture
+        run: |
+          docker build -f deploy/pairdrop/Dockerfile -t porthub-pairdrop:browser-test .
+          docker run -d --rm --name porthub-pairdrop-browser-test --read-only --cap-drop ALL --security-opt no-new-privileges:true --user 10001:10001 --memory=384m --pids-limit=64 -p 127.0.0.1:4319:3000 porthub-pairdrop:browser-test
+          trap 'docker rm -f porthub-pairdrop-browser-test >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 30); do curl -fsS http://127.0.0.1:4319/config >/dev/null && break; sleep 1; done
+          cargo test --locked -p porthub-api --test boards_browser -- --include-ignored --nocapture
       - name: Verify real SSH, Chrome and WebKit guests over direct and fallback paths
         env:
           PORTHUB_TEST_MONGO_URI: mongodb://127.0.0.1:${{ job.services.mongo.ports['27017'] }}

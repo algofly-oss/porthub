@@ -82,6 +82,14 @@ assert(base&&cookie,'Isolated server and test session are required');
   await page.getByRole('button',{name:'Close dialog'}).click();
   await page.getByRole('button',{name:'Back to boards',exact:true}).click();
   await page.getByRole('link',{name:'Sprint planning',exact:true}).waitFor();
+  const boardPreview=page.getByRole('link',{name:'Open preview of Sprint planning'}).locator('img');
+  await boardPreview.waitFor();await page.waitForFunction(()=>{const img=document.querySelector('a[aria-label="Open preview of Sprint planning"] img');return img?.complete&&img.naturalWidth>0;});
+  assert((await boardPreview.boundingBox()).width<=90,'Board previews stay small');
+  const search=page.getByRole('searchbox',{name:'Search boards'});
+  await search.fill('design notes');await page.getByRole('link',{name:'Sprint planning',exact:true}).waitFor();
+  await search.fill('missing-board-term');await page.getByText('No matching boards.',{exact:true}).waitFor();
+  await search.fill('SPRINT');await page.getByRole('link',{name:'Sprint planning',exact:true}).waitFor();
+  await search.fill('');await page.waitForTimeout(350);
   await page.getByRole('button',{name:'Rename Sprint planning'}).click();await page.getByLabel('Board name',{exact:true}).fill('Design notes');await page.getByRole('button',{name:'Save name',exact:true}).click();
   await page.getByRole('link',{name:'Design notes',exact:true}).waitFor();
   await page.getByRole('button',{name:'Delete Design notes'}).click();await page.getByRole('button',{name:'Delete board',exact:true}).click();
@@ -102,7 +110,7 @@ assert(base&&cookie,'Isolated server and test session are required');
     transferProcess.stdout.on('data',chunk=>{text+=chunk;const match=text.match(/Download: (https?:\/\/[^\s]+)/);if(match){clearTimeout(timeout);resolve(match[1]);}});
     transferProcess.on('error',reject);
   });
-  await page.getByRole('tab',{name:'Download a file',exact:true}).click();
+  await page.getByRole('tab',{name:'Download',exact:true}).click();
   await page.getByLabel('Download URL',{exact:true}).fill(transferUrl);
   for(const tool of ['cURL','Wget','aria2']){
     const folder=path.join(transferFolder,tool);await fs.mkdir(folder);
@@ -139,7 +147,8 @@ assert(base&&cookie,'Isolated server and test session are required');
   const preview=await viewer.newPage();await preview.goto(base+'/home?demo=1&view=transfers');await preview.getByText('to view transfer commands.',{exact:false}).waitFor();assert((await preview.getByRole('button',{name:/Copy .* command/}).count())===0,'Public demo does not expose the signed-in transfer recipes');
   assert.deepEqual(errors,[],'No browser errors');
   assert.deepEqual(external,[],'Editor assets and fonts come only from PortHub');
-  for(const script of ['hosted-images.cjs','image-rooms.cjs','image-bulk-delete.cjs','transfers.cjs']){const result=await execute(process.execPath,[path.join(__dirname,script)],{env:process.env,timeout:90000});console.log(result.stdout);}
+  for(const script of ['hosted-images.cjs','image-rooms.cjs','image-bulk-delete.cjs','transfers.cjs','browser-share.cjs']){const result=await execute(process.execPath,[path.join(__dirname,script)],{env:process.env,timeout:90000});console.log(result.stdout);}
+  if(process.env.PORTHUB_TEST_PAIRDROP_UPSTREAM){const result=await execute(process.execPath,[path.join(__dirname,'pairdrop-browser.cjs')],{env:process.env,timeout:90000});console.log(result.stdout);}
   console.log('PASS: real saved boards, anonymous editing/view-only access, live drawing, private images, reload durability, share rotation, rename/delete and mobile transfer instructions.');
  }catch(error){console.error(error);throw error;}finally{if(transferProcess)try{process.kill(-transferProcess.pid,'SIGTERM');}catch{}if(transferFolder)await fs.rm(transferFolder,{recursive:true,force:true});await browser.close();}
 })().catch(()=>process.exit(1));

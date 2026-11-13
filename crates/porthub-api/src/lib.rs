@@ -30,6 +30,7 @@ pub mod legacy_turn;
 mod legacy_upgrade;
 pub mod machine_delete;
 mod peer_proxy;
+pub mod pairdrop;
 pub mod private_relay;
 pub mod private_transport;
 pub mod realtime;
@@ -85,6 +86,7 @@ pub struct App {
     pub gateway_origin: gateway_origin::OriginDiscovery,
     pub gateway_apply: Option<gateway_apply::Client>,
     pub ui: Option<porthub_runtime::proxy::HttpProxy>,
+    pub pairdrop: Option<porthub_runtime::proxy::HttpProxy>,
     pub static_ui: Option<static_ui::StaticUi>,
     pub gateway_config_lock: tokio::sync::Mutex<()>,
     pub traffic_route_lock: tokio::sync::Mutex<()>,
@@ -101,6 +103,7 @@ impl App {
                     .expect("validated UI upstream"),
             )
         };
+        let pairdrop = if config.pairdrop_upstream.is_empty() { None } else { Some(porthub_runtime::proxy::HttpProxy::tcp(&config.pairdrop_upstream).expect("validated PairDrop upstream")) };
         let static_ui = if config.ui_root.is_empty() {
             None
         } else {
@@ -149,6 +152,7 @@ impl App {
             gateway_config_lock: tokio::sync::Mutex::new(()),
             traffic_route_lock: tokio::sync::Mutex::new(()),
             static_ui,
+            pairdrop,
             ui,
             db,
             gateway_origin: Default::default(),

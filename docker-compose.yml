@@ -12,6 +12,26 @@ x-common: &common
     options: {max-size: 10m, max-file: "3"}
 
 services:
+  pairdrop:
+    <<: *common
+    image: porthub:pairdrop
+    container_name: ${PORTHUB_CONTAINER_PREFIX:-porthub}-pairdrop
+    build:
+      context: .
+      dockerfile: deploy/pairdrop/Dockerfile
+    user: "10001:10001"
+    mem_limit: 384m
+    pids_limit: 64
+    cpus: 1.0
+    environment:
+      WS_FALLBACK: "true"
+      DEBUG_MODE: "false"
+      RATE_LIMIT: "1"
+      DONATION_BUTTON_ACTIVE: "false"
+      TWITTER_BUTTON_ACTIVE: "false"
+      MASTODON_BUTTON_ACTIVE: "false"
+      BLUESKY_BUTTON_ACTIVE: "false"
+
   core:
     <<: *common
     image: porthub:core
@@ -23,6 +43,7 @@ services:
     env_file: [.env]
     environment:
       PORTHUB_MODE: ${PORTHUB_MODE:-prod}
+      PORTHUB_PAIRDROP_UPSTREAM: http://pairdrop:3000
       PORTHUB_VERSION: ${PORTHUB_VERSION:-1.9.0}
       PORTHUB_CLIENT_BINARY_DIR: /data/agent-releases
       PORTHUB_AGENT_RELEASE_SOURCE: ${PORTHUB_AGENT_RELEASE_SOURCE:-github}
@@ -53,6 +74,7 @@ services:
       retries: 3
     depends_on:
       firewall: {condition: service_healthy}
+      pairdrop: {condition: service_healthy}
     develop:
       watch:
         - {path: crates, action: sync+restart, target: /src/crates}

@@ -3,7 +3,7 @@ import { useRouter } from "next/router";
 import Head from "next/head";
 import axios from "axios";
 import { io } from "socket.io-client";
-import { Excalidraw, CaptureUpdateAction, reconcileElements, MainMenu, WelcomeScreen } from "@excalidraw/excalidraw";
+import { Excalidraw, exportToBlob, CaptureUpdateAction, reconcileElements, MainMenu, WelcomeScreen } from "@excalidraw/excalidraw";
 import { useMantineColorScheme } from "@mantine/core";
 import { IconArrowLeft, IconShare, IconMoon, IconSun } from "@tabler/icons-react";
 import { Button } from "@/components/ui/button";
@@ -34,6 +34,7 @@ export default function Editor({ id, share }) {
   const [meta,setMeta]=useState(null),[error,setError]=useState(""),[saveState,setSaveState]=useState("Opening board…"),[connected,setConnected]=useState(false),[sharing,setSharing]=useState(false),[api,setApi]=useState(null),[people,setPeople]=useState(1);
   const apiRef=useRef(null),metaRef=useRef(null),initial=useRef(null),server=useRef(new Map()),pending=useRef(new Map()),shown=useRef(new Map()),files=useRef({}),uploaded=useRef(new Set()),fetchingFiles=useRef(new Set());
   const alive=useRef(true),inFlight=useRef(false),timer=useRef(null),flushRef=useRef(null),bg=useRef("#ffffff"),pendingBg=useRef(null),revision=useRef(-1),socket=useRef(null),pointerAt=useRef(0);
+  const previewBusy=useRef(false),previewRevision=useRef(-1);
   const headers=useRef(share?{"x-board-share":share}:{});
   const endpoint=`/api/boards/${id}`;
   useEffect(()=>{
@@ -132,6 +133,25 @@ export default function Editor({ id, share }) {
     const poll=window.setInterval(()=>{void synchronize();},30000);
     return()=>{window.clearInterval(poll);wire.disconnect();socket.current=null;};
   },[api,id,share,ingest,loadAssets,refresh,schedule]);
+  useEffect(()=>{
+    if(!api||!meta?.editable)return;
+    const update=async()=>{
+      const current=revision.current;
+      if(!alive.current||previewBusy.current||inFlight.current||pending.current.size||pendingBg.current||fetchingFiles.current.size||previewRevision.current===current)return;
+      const elements=api.getSceneElements();
+      if(!elements.length)return;
+      if(elements.some(e=>e.type==="image"&&e.fileId&&!api.getFiles()[e.fileId]))return;
+      previewBusy.current=true;
+      try{
+        const blob=await exportToBlob({elements,files:api.getFiles(),appState:{...api.getAppState(),exportBackground:true,exportWithDarkMode:false,exportEmbedScene:false},maxWidthOrHeight:320,mimeType:"image/png"});
+        if(!alive.current||current!==revision.current||pending.current.size)return;
+        const image=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result.split(",")[1]);reader.onerror=reject;reader.readAsDataURL(blob);});
+        await axios.put(`${endpoint}/preview`,{revision:current,image},{headers:headers.current});
+        previewRevision.current=current;
+      }catch{/* A thumbnail must never interrupt saving the board. */}finally{previewBusy.current=false;}
+    };
+    const interval=setInterval(update,1600);return()=>clearInterval(interval);
+  },[api,meta?.editable,endpoint]);
   const change=(elements,state,currentFiles)=>{
     files.current=currentFiles;
     if(!metaRef.current?.editable||error)return;

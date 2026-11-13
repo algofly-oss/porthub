@@ -356,3 +356,51 @@ async fn board_ownership_guest_permissions_conflicts_and_durable_assets() -> Res
     case.db.drop().await?;
     result
 }
+
+#[tokio::test]
+#[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn board_search_and_private_previews() -> Result<()> {
+    use axum::{body::{to_bytes,Body},http::Request};
+    use tower::ServiceExt;
+    let case=Case::new(Default::default()).await?;
+    let result: Result<()> = async {
+        let (_,cookie)=case.user("search@example.invalid","user").await?;
+        let (_,foreign)=case.user("other-search@example.invalid","user").await?;
+        let created=request(&case,"POST","/api/boards",&cookie,"",json!({"name":"Sprint [2026]"}),StatusCode::OK).await?;
+        let id=created["id"].as_str().unwrap();
+        let path=format!("/api/boards/{id}");
+        request(&case,"PATCH",&format!("{path}/scene"),&cookie,"",json!({"elements":[
+            {"id":"note","type":"text","text":"Architecture <script>alert(1)</script>","originalText":"Architecture <script>alert(1)</script>","version":1,"versionNonce":1,"x":0,"y":0,"width":200,"height":30,"fontSize":20},
+            {"id":"deleted","type":"text","text":"obsolete unique","isDeleted":true,"version":1,"versionNonce":1,"x":0,"y":0,"width":20,"height":10}
+        ]}),StatusCode::OK).await?;
+        for (search, count, user) in [("sprint",1,&cookie),("%5B2026%5D",1,&cookie),("architecture",1,&cookie),("obsolete",0,&cookie),(".*",0,&cookie),("architecture",0,&foreign)] {
+            let found=request(&case,"GET",&format!("/api/boards?search={search}"),user,"",Value::Null,StatusCode::OK).await?;
+            ensure!(found["boards"].as_array().unwrap().len()==count,"search {search}");
+            ensure!(found["boards"].as_array().unwrap().iter().all(|b|b.get("elements").is_none()&&b.get("preview").is_none()));
+        }
+        let raw=|cookie:String| {
+            let router=case.router.clone(); let url=format!("{path}/preview");
+            async move { Ok::<_,anyhow::Error>(router.oneshot(Request::builder().uri(url).header("cookie",cookie).body(Body::empty())?).await?) }
+        };
+        ensure!(raw(foreign).await?.status()==StatusCode::NOT_FOUND);
+        ensure!(raw(String::new()).await?.status()==StatusCode::BAD_REQUEST);
+        let response=raw(cookie.clone()).await?;
+        ensure!(response.status()==StatusCode::OK&&response.headers()["content-type"]=="image/svg+xml");
+        let svg=String::from_utf8(to_bytes(response.into_body(),1024*1024).await?.to_vec())?;
+        ensure!(svg.contains("&lt;script&gt;")&&!svg.contains("<script>"));
+        let mut png=std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(80,50).write_to(&mut png,image::ImageFormat::Png)?;
+        let rev=request(&case,"GET",&path,&cookie,"",Value::Null,StatusCode::OK).await?["revision"].as_i64().unwrap();
+        request(&case,"PUT",&format!("{path}/preview"),&cookie,"",json!({"revision":rev-1,"image":STANDARD.encode(png.get_ref())}),StatusCode::CONFLICT).await?;
+        request(&case,"PUT",&format!("{path}/preview"),&cookie,"",json!({"revision":rev,"image":STANDARD.encode(png.get_ref())}),StatusCode::NO_CONTENT).await?;
+        let response=raw(cookie.clone()).await?;
+        ensure!(response.headers()["content-type"]=="image/png");
+        let png=to_bytes(response.into_body(),1024*1024).await?;
+        ensure!(png.starts_with(b"\x89PNG"));
+        let mut bad=png.to_vec(); bad[16..20].copy_from_slice(&9999_u32.to_be_bytes());
+        request(&case,"PUT",&format!("{path}/preview"),&cookie,"",json!({"revision":rev,"image":STANDARD.encode(bad)}),StatusCode::BAD_REQUEST).await?;
+        Ok(())
+    }.await;
+    case.db.drop().await?;
+    result
+}

@@ -51,7 +51,6 @@ struct Slot {
     key: String,
     name: String,
     size: u64,
-    created: Instant,
     last_sender: Mutex<Instant>,
     queue: mpsc::Sender<String>,
     requests: tokio::sync::Mutex<mpsc::Receiver<String>>,
@@ -62,7 +61,6 @@ struct Slot {
 impl Slot {
     fn expired(&self) -> bool {
         self.stop.is_cancelled()
-            || self.created.elapsed() > Duration::from_secs(86400)
             || self
                 .last_sender
                 .lock()
@@ -170,13 +168,26 @@ async fn create(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Re
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|n| *n <= i64::MAX as u64)
         .ok_or_else(|| ApiError::bad_request("Provide the file size in X-Transfer-Size"))?;
-    let name = headers
-        .get("x-transfer-name")
-        .and_then(|v| std::str::from_utf8(v.as_bytes()).ok())
-        .unwrap_or("download.bin")
+    let name = if let Some(encoded) = headers.get("x-transfer-name-encoded") {
+        percent_encoding::percent_decode_str(
+            encoded
+                .to_str()
+                .map_err(|_| ApiError::bad_request("Invalid filename"))?,
+        )
+        .decode_utf8()
+        .map_err(|_| ApiError::bad_request("Invalid filename"))?
+        .into_owned()
+    } else {
+        headers
+            .get("x-transfer-name")
+            .and_then(|v| std::str::from_utf8(v.as_bytes()).ok())
+            .unwrap_or("download.bin")
+            .to_owned()
+    };
+    let name = name
         .chars()
         .filter(|c| !c.is_control() && *c != '/' && *c != '\\')
-        .take(200)
+        .take(255)
         .collect::<String>();
     let mut slots = app
         .file_relay
@@ -210,7 +221,6 @@ async fn create(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Re
                 name
             },
             size,
-            created: Instant::now(),
             last_sender: Mutex::new(Instant::now()),
             queue,
             requests: tokio::sync::Mutex::new(requests),
@@ -309,7 +319,7 @@ fn file_headers(slot: &Slot, start: u64, end: u64, partial: bool) -> HeaderMap {
         .name
         .chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || "._- ".contains(c) {
+            if (c.is_ascii_graphic() || c == ' ') && c != '"' && c != '\\' {
                 c
             } else {
                 '_'

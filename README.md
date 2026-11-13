@@ -7,11 +7,13 @@ API, gateway, firewall worker and host agent are Rust; the dashboard is Next.js.
 
 ## Architecture
 
-One Compose file runs three isolated roles:
+One Compose file runs three isolated PortHub roles and a separate PairDrop service:
 
 - `porthub-core`: API, MongoDB and UI; no host networking or published ports.
 - `porthub-edge`: public listeners and streaming gateway; no database access.
 - `porthub-firewall`: network policy; only this role receives `NET_ADMIN`.
+- `porthub-pairdrop`: public browser-to-browser sharing, isolated from database
+  state and internal control sockets, without published host ports.
 
 The roles communicate through scoped Unix sockets. Rathole-compatible forwarding
 uses the existing API listeners, so it needs no extra control port. Production
@@ -47,6 +49,8 @@ with the release version recorded in image labels.
 
 ## Collaborative boards
 
+The Boards list includes small clickable previews and searches board names and written canvas text (excluding deleted elements). Preview images require the same access as the board; text inside uploaded images is not OCR-indexed.
+
 Open **Boards** to create a self-hosted Excalidraw whiteboard. Drawings and their
 image assets save automatically in PortHub's persistent database. The editor
 uses the portal theme and serves its fonts locally; no Excalidraw subscription
@@ -63,7 +67,7 @@ of a drawing. Deleting a board removes its assets too.
 ## File transfers without an installed client
 
 The signed-in **Transfers** tab provides copyable sender and receiver commands.
-Choose **Send a file** or **Download a file**, then select a tool; only its
+Choose **From terminal** or **Download**, then select a tool; only its
 command is shown. Download options include cURL, Wget and aria2. Paste the
 sender’s download link to generate a single-line receiver command. Downloads
 keep the shared filename and extension by default; **Save as** is an optional
@@ -79,11 +83,31 @@ uses temporary chunks on the sender. Multiple recipients, byte ranges,
 resuming downloads, and parallel connections are supported; the tab includes
 cURL, Wget, aria2, and a four-connection Bash/cURL recipe.
 
-Ctrl+C stops sharing and invalidates the link. An absent sender expires after
-90 seconds, and a sharing session lasts at most 24 hours. A PortHub restart also
-ends active transfers; run the sender again for a new link. With multiple core
-replicas, route all transfer requests to the same core process: rendezvous state
-is deliberately memory-only.
+For browser sharing, choose **From browser** or drop a file anywhere in the
+Transfers view. The browser generates a temporary URL and shows single-line
+cURL/Wget download commands. File bytes stay on the source device until a
+recipient requests them; the browser sends bounded slices directly into the
+relay. Multiple recipients and parallel byte-range downloads work. Links keep
+working while navigating between portal views in the same page. Stop sharing,
+closing or reloading the source page ends the link. No file or publisher key is
+persisted in browser storage.
+
+Ctrl+C stops terminal sharing and invalidates its link. An absent source expires
+after 90 seconds; active sources keep their links alive. A PortHub restart ends
+active transfers; run the sender or share the browser file again for a new link.
+With multiple core replicas, route all transfer requests to the same core
+process: rendezvous state is deliberately memory-only.
+
+The **PairDrop** option embeds a self-hosted instance and provides a copyable
+public link at `/pairdrop/`. Anyone can visit it without a PortHub account.
+Devices can discover each other locally, pair, or join public rooms using the
+native PairDrop interface. Files transfer after the recipient accepts them.
+A direct WebRTC connection is attempted first, with an automatic, room-scoped
+WebSocket relay when the initial connection fails. Neither route stores files
+on the server. The default deployment uses no external STUN/TURN service.
+
+See [PairDrop integration and source](deploy/pairdrop/README.md) for the pinned
+upstream version, license, runtime and networking details.
 
 ## Hosted images and screenshot links
 

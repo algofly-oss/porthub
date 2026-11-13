@@ -6,7 +6,7 @@ use crate::{
     image_storage, App,
 };
 use axum::{
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, StatusCode},
     routing::get,
     Json, Router,
@@ -34,6 +34,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod preview;
+
 pub const COLLECTION: &str = "boards";
 pub const ASSETS: &str = "board_assets";
 const SCENE_BYTES: usize = 8 * 1024 * 1024;
@@ -44,6 +46,7 @@ pub fn router() -> Router<Arc<App>> {
     Router::new()
         .route("/api/boards", get(list).post(create))
         .route("/api/boards/{id}", get(read).patch(update).delete(remove))
+        .route("/api/boards/{id}/preview", get(preview::read).put(preview::write))
         .route("/api/boards/{id}/scene", axum::routing::patch(patch_scene))
         .route("/api/boards/{id}/sharing", axum::routing::patch(sharing))
         .layer(DefaultBodyLimit::max(SCENE_BYTES + 64 * 1024))
@@ -111,7 +114,7 @@ fn stamp(row: &Document, key: &str) -> Value {
 }
 fn metadata(row: &Document, owner: bool, editable: bool) -> Value {
     let mut data = json!({"id":row.get_str("_id").unwrap_or(""),"name":row.get_str("name").unwrap_or("Untitled board"),
-        "owner":owner,"editable":editable,"revision":row.get_i64("revision").unwrap_or(0),
+        "preview_revision":row.get_i64("preview_revision").unwrap_or(-1),"owner":owner,"editable":editable,"revision":row.get_i64("revision").unwrap_or(0),
         "created_at":stamp(row,"created_at"),"updated_at":stamp(row,"updated_at"),"asset_bytes":row.get_i64("asset_bytes").unwrap_or(0),"max_asset_bytes":STORAGE});
     if owner {
         data["sharing"] = json!({"enabled":row.get_bool("sharing").unwrap_or(false),"edit_token":row.get_str("edit_token").unwrap_or(""),"view_token":row.get_str("view_token").unwrap_or("")});
@@ -130,6 +133,7 @@ async fn load_scene(app: &App, id: &str) -> ApiResult<Document> {
     }
     app.collection(COLLECTION)
         .find_one(doc! {"_id":id})
+        .projection(doc! {"preview":0})
         .await?
         .ok_or_else(missing)
 }
@@ -139,7 +143,7 @@ async fn load(app: &App, id: &str) -> ApiResult<Document> {
     }
     app.collection(COLLECTION)
         .find_one(doc! {"_id":id})
-        .projection(doc! {"elements":0})
+        .projection(doc! {"elements":0,"preview":0})
         .await?
         .ok_or_else(missing)
 }
@@ -214,13 +218,28 @@ async fn indexes(app: &App) -> ApiResult<()> {
         .await?;
     Ok(())
 }
-async fn list(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+#[derive(Default, Deserialize)]
+struct Search { #[serde(default)] search: String }
+async fn list(State(app): State<Arc<App>>, Query(query): Query<Search>, headers: HeaderMap) -> ApiResult<Json<Value>> {
     let _life = app.account_lifecycle.read().await;
     let user = owner(&app, &headers).await?;
+    let mut filter = doc! {"owner_id":user};
+    let needle: String = query.search.trim().chars().take(200).collect();
+    if !needle.is_empty() {
+        let literal = needle.chars().fold(String::new(), |mut out, c| {
+            if ".*+?^$()[]{}|\\".contains(c) { out.push('\\'); }
+            out.push(c); out
+        });
+        let pattern = doc! {"$regex":literal,"$options":"i"};
+        filter.insert("$or", bson::to_bson(&vec![
+            doc! {"name":pattern.clone()},
+            doc! {"elements":{"$elemMatch":{"isDeleted":{"$ne":true},"$or":[{"text":pattern.clone()},{"originalText":pattern}]}}}
+        ]).unwrap());
+    }
     let rows: Vec<Document> = app
         .collection(COLLECTION)
-        .find(doc! {"owner_id":user})
-        .projection(doc! {"elements":0})
+        .find(filter)
+        .projection(doc! {"elements":0,"preview":0})
         .sort(doc! {"updated_at":-1,"_id":1})
         .limit(101)
         .await?

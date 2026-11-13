@@ -1,0 +1,23 @@
+{
+  "name": "pairdrop",
+  "version": "1.11.2",
+  "type": "module",
+  "description": "",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "start:prod": "node server/index.js --rate-limit --auto-restart"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.18.2",
+    "express-rate-limit": "^7.1.5",
+    "ua-parser-js": "^1.0.37",
+    "unique-names-generator": "^4.3.0",
+    "ws": "^8.16.0"
+  },
+  "engines": {
+    "node": ">=15"
+  }
+}
