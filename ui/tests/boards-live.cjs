@@ -104,6 +104,7 @@ assert(base&&cookie,'Isolated server and test session are required');
   await page.getByRole('button',{name:'Delete Design notes'}).click();await page.getByRole('button',{name:'Delete board',exact:true}).click();
   await page.getByText('Create a board, then share a link to draw together.',{exact:true}).waitFor();
   await page.goto(base+'/home?view=transfers');await page.getByRole('heading',{name:'Transfers',exact:true}).waitFor();
+  await page.getByRole('tab',{name:'From terminal',exact:true}).click();
   await page.getByRole('button',{name:'Copy send with curl command'}).waitFor();
   transferFolder=await fs.mkdtemp(path.join(os.tmpdir(),'porthub-recipe-'));
   const source=Buffer.alloc(9*1024*1024+17);for(let i=0;i<source.length;i++)source[i]=(i*37)%251;

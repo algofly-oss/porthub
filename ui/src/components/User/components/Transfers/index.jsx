@@ -15,7 +15,7 @@ const tools = { curl: "cURL", wget: "Wget", aria2: "aria2" };
 
 export default function Transfers({ active = true }) {
   const [base, setBase] = useState("");
-  const [mode, setMode] = useState("send");
+  const [mode, setMode] = useState("browser");
   const [file, setFile] = useState("./file.zip");
   const [url, setUrl] = useState("");
   const [out, setOut] = useState("");
@@ -23,6 +23,7 @@ export default function Transfers({ active = true }) {
   const [downloadTool, setDownloadTool] = useState("curl");
   const [connections, setConnections] = useState("1");
   useEffect(() => setBase(window.location.origin), []);
+  useEffect(() => { if (active) setMode("browser"); }, [active]);
   const tool = mode === "send" ? sendTool : downloadTool;
   const download = url.trim();
   let validUrl = false;
@@ -43,10 +44,10 @@ export default function Transfers({ active = true }) {
   const sending = mode === "send";
   const title = sending ? `Send with ${tools[tool]}` : tool === "curl" && connections === "4" ? "Parallel download with cURL" : `Download with ${tools[tool]}`;
   const ready = sending ? !!base && !!file.trim() : validUrl && (!customName || !!filename.trim());
-  return <div className="h-full min-h-0 overflow-y-auto px-4 py-5 sm:px-6"
+  return <div className="h-full min-h-0 overflow-y-auto overscroll-contain" aria-label="Transfers content"
     onDragOver={event=>{if(event.dataTransfer.types.includes("Files"))event.preventDefault();}}
     onDrop={event=>{if(!event.dataTransfer.files.length || mode === "browser")return;event.preventDefault();setMode("browser");for(const file of Array.from(event.dataTransfer.files)){void shareFile(file).then(async url=>{if(url){try{await copyText(url);toast.success("File link copied");}catch{}}}).catch(error=>toast.error(error.message));}}}>
-    <div className="mx-auto w-full max-w-6xl">
+    <div className="workspace-page !h-auto !min-h-full !overflow-visible">
       <header className="mb-5">
         <h1 className="text-lg font-semibold tracking-tight">Transfers</h1>
         <p className="mt-1 text-sm text-muted-foreground">Share from your browser or terminal. Download anywhere.</p>

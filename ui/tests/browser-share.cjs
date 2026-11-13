@@ -41,6 +41,7 @@ async function until(predicate,message){for(let i=0;i<100;i++){if(await predicat
   // Full navigation unloads the page; this intentionally ends the source.
   await until(async()=>{const r=await context.request.head(url);return r.status()===404;},'Leaving the source page must revoke its URL');
   await page.goto(base+'/home?view=transfers');
+  await page.getByRole('tab',{name:'From terminal',exact:true}).click();
   // Drop on the terminal panel directly: no preliminary browser-tab click.
   await page.getByRole('tabpanel').evaluate(node=>{const transfer=new DataTransfer();transfer.items.add(new File(['PortHub drag and drop'],'dropped.txt',{type:'text/plain'}));node.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer}));});
   const dropped=page.getByLabel('Public URL for dropped.txt',{exact:true});await until(async()=> (await dropped.inputValue()).startsWith(base),'Drop did not switch to browser sharing');
