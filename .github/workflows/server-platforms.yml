@@ -93,7 +93,7 @@ jobs:
       - name: Install isolated browser and terminal build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bison ncurses-bin
+          sudo apt-get install -y --no-install-recommends bison ncurses-bin aria2
           npm install --prefix "$RUNNER_TEMP/terminal-browser-tools" --ignore-scripts --no-audit --no-fund playwright@1.64.1
           node "$RUNNER_TEMP/terminal-browser-tools/node_modules/playwright/cli.js" install --with-deps webkit
       - uses: actions/cache@v4

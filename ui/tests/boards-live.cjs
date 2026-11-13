@@ -101,9 +101,16 @@ assert(base&&cookie,'Isolated server and test session are required');
     transferProcess.stdout.on('data',chunk=>{text+=chunk;const match=text.match(/Download: (https?:\/\/[^\s]+)/);if(match){clearTimeout(timeout);resolve(match[1]);}});
     transferProcess.on('error',reject);
   });
+  await page.getByRole('tab',{name:'Download a file',exact:true}).click();
   await page.getByLabel('Download URL',{exact:true}).fill(transferUrl);
   await page.getByLabel('Save as',{exact:true}).fill(output);
-  await page.getByText('Parallel download commands',{exact:true}).click();
+  await page.getByRole('group',{name:'Download tool',exact:true}).getByRole('button',{name:'aria2',exact:true}).click();
+  await page.getByRole('button',{name:'Copy download with aria2 command'}).click();
+  await execute('bash',['-c',await page.evaluate(()=>window.copiedCommands.at(-1))],{timeout:30000});
+  assert.deepEqual(await fs.readFile(output),source,'Copied aria2 command downloads the exact original file');
+  await fs.rm(output);
+  await page.getByRole('group',{name:'Download tool',exact:true}).getByRole('button',{name:'cURL',exact:true}).click();
+  await page.getByLabel('Connections',{exact:true}).selectOption('4');
   await page.getByRole('button',{name:'Copy parallel download with curl command'}).click();
   const parallel=await page.evaluate(()=>window.copiedCommands.at(-1));
   await execute('bash',['-c',parallel],{timeout:30000});
@@ -117,7 +124,7 @@ assert(base&&cookie,'Isolated server and test session are required');
   const preview=await viewer.newPage();await preview.goto(base+'/home?demo=1&view=transfers');await preview.getByText('to view transfer commands.',{exact:false}).waitFor();assert((await preview.getByRole('button',{name:/Copy .* command/}).count())===0,'Public demo does not expose the signed-in transfer recipes');
   assert.deepEqual(errors,[],'No browser errors');
   assert.deepEqual(external,[],'Editor assets and fonts come only from PortHub');
-  for(const script of ['hosted-images.cjs','image-rooms.cjs','image-bulk-delete.cjs']){const result=await execute(process.execPath,[path.join(__dirname,script)],{env:process.env,timeout:90000});console.log(result.stdout);}
+  for(const script of ['hosted-images.cjs','image-rooms.cjs','image-bulk-delete.cjs','transfers.cjs']){const result=await execute(process.execPath,[path.join(__dirname,script)],{env:process.env,timeout:90000});console.log(result.stdout);}
   console.log('PASS: real saved boards, anonymous editing/view-only access, live drawing, private images, reload durability, share rotation, rename/delete and mobile transfer instructions.');
  }catch(error){console.error(error);throw error;}finally{if(transferProcess)try{process.kill(-transferProcess.pid,'SIGTERM');}catch{}if(transferFolder)await fs.rm(transferFolder,{recursive:true,force:true});await browser.close();}
 })().catch(()=>process.exit(1));

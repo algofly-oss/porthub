@@ -63,6 +63,9 @@ of a drawing. Deleting a board removes its assets too.
 ## File transfers without an installed client
 
 The signed-in **Transfers** tab provides copyable sender and receiver commands.
+Choose **Send a file** or **Download a file**, then select a tool; only its
+command is shown. Download options include cURL, Wget and aria2. Paste the
+sender’s download link to generate a ready-to-copy receiver command.
 Both terminals use public endpoints: neither needs to log in, install PortHub,
 or run an agent. The feature is free. Keep the generated download link private
 if the file is private; anyone holding it can download.
