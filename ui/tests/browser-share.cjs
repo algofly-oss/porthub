@@ -18,11 +18,13 @@ async function until(predicate,message){for(let i=0;i<100;i++){if(await predicat
   page.on('request',async request=>{if(new URL(request.url()).pathname.startsWith('/api/transfers')&&['POST','PUT'].includes(request.method())){try{const headers=await request.allHeaders();if(headers.cookie||headers.authorization)leaks.push(request.url());}catch{ /* a page-close cleanup can cancel header inspection */ }}});
   await page.goto(base+'/home?view=transfers');
   await page.getByRole('tab',{name:'From browser',exact:true}).click();
+  await page.getByRole('complementary',{name:'Browser sharing guide'}).waitFor();
   const filename="Résumé's ENV.xlsx",source=crypto.randomBytes(17*1024*1024+37),file=path.join(folder,filename);await fs.writeFile(file,source);
   await page.getByLabel('Choose files to share',{exact:true}).setInputFiles(file);
   const urlInput=page.getByLabel(`Public URL for ${filename}`,{exact:true});
   await until(async()=> (await urlInput.inputValue()).startsWith(base+'/api/transfers/'),'Browser file URL was not generated');
   const url=await urlInput.inputValue();
+  assert.equal(await page.getByRole('complementary',{name:'Browser sharing guide'}).count(),0,'Active file links replace the getting-started guide');
   await page.getByRole('button',{name:`Copy URL for ${filename}`,exact:true}).click();assert.equal(await page.evaluate(()=>window.lastCopied),url);
   const article=page.getByRole('article',{name:`Share ${filename}`,exact:true});
   const commands={};

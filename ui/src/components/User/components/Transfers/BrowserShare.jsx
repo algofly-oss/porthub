@@ -1,6 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import toast from 'react-hot-toast';
-import { IconUpload, IconCopy, IconCheck, IconX, IconRefresh } from '@tabler/icons-react';
+import { IconUpload, IconCopy, IconCheck, IconX, IconRefresh, IconLink, IconTerminal2, IconFile } from '@tabler/icons-react';
 import { Button } from '@/components/ui/button';
 import { copyText } from '@/shared/utils/clipboard';
 import { shareFile, stopShare, retryShare, subscribe, getSnapshot, getServerSnapshot } from '@/shared/transfers/browser-shares';
@@ -38,10 +38,24 @@ export default function BrowserShare({ active }) {
     document.addEventListener('paste',paste);return()=>document.removeEventListener('paste',paste);
   },[active]);
   return <div onDragOver={event=>{event.preventDefault();setDragging(true);}} onDragLeave={event=>{if(!event.currentTarget.contains(event.relatedTarget))setDragging(false);}} onDrop={event=>{event.preventDefault();event.stopPropagation();setDragging(false);void add(event.dataTransfer.files);}}>
-    <label htmlFor="browser-share-files" className={`flex min-h-[136px] cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed px-4 py-5 text-center transition-colors focus-within:ring-2 focus-within:ring-primary ${dragging?'border-primary bg-primary/10':'border-input hover:border-primary'}`}>
-      <IconUpload size={22} className="text-muted-foreground"/><span className="text-sm font-medium">Drop a file here, or choose a file</span><span className="text-xs text-muted-foreground">Files stay on this device. Keep this tab open to share.</span>
-      <input id="browser-share-files" aria-label="Choose files to share" type="file" multiple className="sr-only" onChange={event=>{void add(event.target.files);event.target.value='';}}/>
-    </label>
+    <div className={shares.length ? '' : 'grid gap-6 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)] lg:gap-8'}>
+      <label htmlFor="browser-share-files" className={`flex cursor-pointer flex-col items-center justify-center rounded-xl border border-dashed px-5 text-center transition-colors focus-within:ring-2 focus-within:ring-primary ${shares.length?'min-h-32 py-5':'min-h-64 py-8 sm:min-h-72'} ${dragging?'border-primary bg-primary/10':'border-input bg-background/40 hover:border-primary hover:bg-primary/5'}`}>
+        <span className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10 text-primary dark:text-blue-300"><IconUpload size={24}/></span>
+        <span className="text-base font-medium">Drop files to share</span>
+        <span className="mt-1.5 text-xs text-muted-foreground">Any file type · Original quality</span>
+        <span className="mt-5 inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground"><IconFile size={16}/>Choose files</span>
+        <span className="mt-3 text-xs text-muted-foreground">or paste a file from your clipboard</span>
+        <input id="browser-share-files" aria-label="Choose files to share" type="file" multiple className="sr-only" onChange={event=>{void add(event.target.files);event.target.value='';}}/>
+      </label>
+      {!shares.length&&<aside aria-label="Browser sharing guide" className="flex flex-col justify-center py-2 lg:pr-3">
+        <h2 className="text-sm font-semibold">Share a file in three steps</h2>
+        <ol className="mt-5 space-y-5">
+          {[[IconUpload,'Choose your file','Drag it here or browse your files. Nothing is stored on the server.'],[IconLink,'Copy the temporary link','Share it with anyone. No account or PortHub client needed.'],[IconTerminal2,'Download on another machine','Copy a ready-to-run cURL or Wget command, or open the link.']].map(([Icon,title,detail])=><li key={title} className="flex gap-3"><Icon size={18} className="mt-0.5 shrink-0 text-muted-foreground"/><div><h3 className="text-sm font-medium">{title}</h3><p className="mt-1 text-xs leading-relaxed text-muted-foreground">{detail}</p></div></li>)}
+        </ol>
+        <p className="mt-6 border-t border-border pt-4 text-xs leading-relaxed text-muted-foreground">Keep this tab open while people download. Closing it ends sharing.</p>
+      </aside>}
+    </div>
+    {!!shares.length&&<div className="mt-5 flex items-center justify-between border-b border-border pb-3"><h2 className="text-sm font-semibold">Shared from this browser</h2><span className="text-xs text-muted-foreground">{shares.length} {shares.length===1?'file':'files'}</span></div>}
     {shares.map(share=><Share key={share.localId} share={share}/>)}
   </div>;
 }

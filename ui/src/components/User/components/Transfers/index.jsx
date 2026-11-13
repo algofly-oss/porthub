@@ -46,10 +46,10 @@ export default function Transfers({ active = true }) {
   return <div className="h-full min-h-0 overflow-y-auto px-4 py-5 sm:px-6"
     onDragOver={event=>{if(event.dataTransfer.types.includes("Files"))event.preventDefault();}}
     onDrop={event=>{if(!event.dataTransfer.files.length || mode === "browser")return;event.preventDefault();setMode("browser");for(const file of Array.from(event.dataTransfer.files)){void shareFile(file).then(async url=>{if(url){try{await copyText(url);toast.success("File link copied");}catch{}}}).catch(error=>toast.error(error.message));}}}>
-    <div className="mx-auto w-full max-w-5xl">
+    <div className="mx-auto w-full max-w-6xl">
       <header className="mb-5">
         <h1 className="text-lg font-semibold tracking-tight">Transfers</h1>
-        <p className="mt-1 text-sm text-muted-foreground">Share files between terminals. No login or PortHub installation needed.</p>
+        <p className="mt-1 text-sm text-muted-foreground">Share from your browser or terminal. Download anywhere.</p>
       </header>
       <div className="overflow-hidden rounded-xl border border-border bg-surface">
         <div role="tablist" aria-label="Transfer direction" className="flex flex-wrap gap-x-5 border-b border-border px-5">

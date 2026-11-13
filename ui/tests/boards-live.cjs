@@ -85,6 +85,14 @@ assert(base&&cookie,'Isolated server and test session are required');
   const boardPreview=page.getByRole('link',{name:'Open preview of Sprint planning'}).locator('img');
   await boardPreview.waitFor();await page.waitForFunction(()=>{const img=document.querySelector('a[aria-label="Open preview of Sprint planning"] img');return img?.complete&&img.naturalWidth>0;});
   assert((await boardPreview.boundingBox()).width<=90,'Board previews stay small');
+  for(const dark of [false,true]){
+   const current=await page.evaluate(()=>document.documentElement.classList.contains('dark'));
+   if(current!==dark)await page.getByRole('button',{name:dark?'Switch to dark theme':'Switch to light theme',exact:true}).click();
+   const encoded=(await boardPreview.screenshot()).toString('base64');
+   const pixel=await page.evaluate(async encoded=>{const image=new Image();image.src='data:image/png;base64,'+encoded;await image.decode();const c=document.createElement('canvas');c.width=image.width;c.height=image.height;const ctx=c.getContext('2d');ctx.drawImage(image,0,0);return [...ctx.getImageData(1,1,1,1).data].slice(0,3);},encoded);
+   assert(pixel.every(value=>dark?value<64:value>220),'Preview canvas follows the selected theme: '+pixel);
+  }
+
   const search=page.getByRole('searchbox',{name:'Search boards'});
   await search.fill('design notes');await page.getByRole('link',{name:'Sprint planning',exact:true}).waitFor();
   await search.fill('missing-board-term');await page.getByText('No matching boards.',{exact:true}).waitFor();

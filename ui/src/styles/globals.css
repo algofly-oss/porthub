@@ -232,3 +232,9 @@ html:not([data-keyboard-navigation]) :is([role="checkbox"], input[type="checkbox
   outline: none !important;
   box-shadow: none !important;
 }
+
+/* Previews are stored in light colors; match Excalidraw's live dark canvas.
+   Apply at display time so saved previews follow each viewer's theme. */
+.board-preview { background-color: #fff; }
+.dark .board-preview { background-color: #121212; }
+.dark .board-preview img { filter: invert(93%) hue-rotate(180deg); }
