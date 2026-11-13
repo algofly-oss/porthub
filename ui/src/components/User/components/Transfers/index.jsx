@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import toast from "react-hot-toast";
-import { IconCopy, IconCheck, IconArrowUpRight, IconArrowDownLeft, IconTerminal2, IconChevronDown } from "@tabler/icons-react";
+import { IconCopy, IconCheck, IconArrowUpRight, IconArrowDownLeft, IconTerminal2 } from "@tabler/icons-react";
 import { Button } from "@/components/ui/button";
 import { copyText } from "@/shared/utils/clipboard";
 
@@ -22,7 +22,7 @@ function Command({ title, command, ready, language, empty }) {
         {copied ? <IconCheck size={15}/> : <IconCopy size={15}/>}{copied ? "Copied" : "Copy command"}
       </Button>
     </div>
-    <pre className="m-0 max-h-64 min-h-[112px] overflow-auto whitespace-pre-wrap break-words p-4 text-[13px] leading-6 text-foreground" tabIndex={ready ? 0 : undefined} aria-label={title}>
+    <pre className="m-0 min-h-[64px] overflow-x-auto whitespace-pre p-4 text-[13px] leading-6 text-foreground" tabIndex={ready ? 0 : undefined} aria-label={title}>
       <code className={ready ? "" : "text-muted-foreground"}>{ready ? command : empty}</code>
     </pre>
   </div>;
@@ -33,7 +33,7 @@ export default function Transfers() {
   const [mode, setMode] = useState("send");
   const [file, setFile] = useState("./file.zip");
   const [url, setUrl] = useState("");
-  const [out, setOut] = useState("download.zip");
+  const [out, setOut] = useState("");
   const [sendTool, setSendTool] = useState("curl");
   const [downloadTool, setDownloadTool] = useState("curl");
   const [connections, setConnections] = useState("1");
@@ -43,21 +43,21 @@ export default function Transfers() {
   let validUrl = false;
   try { validUrl = ["http:", "https:"].includes(new URL(download).protocol); } catch {}
   const sender = sendTool === "curl"
-    ? `bash <(curl -fsS ${quote(`${base}/api/transfers/sender`)}) \\\n  ${quote(file)} ${quote(base)}`
-    : `bash <(wget -qO- ${quote(`${base}/api/transfers/sender`)}) \\\n  ${quote(file)} ${quote(base)} wget`;
-  const parallel = `bash <(curl -fsS ${quote(`${base}/transfers/receive.sh`)}) \\\n  ${quote(download)} ${quote(out)}`;
+    ? `bash <(curl -fsS ${quote(`${base}/api/transfers/sender`)}) ${quote(file)} ${quote(base)}`
+    : `bash <(wget -qO- ${quote(`${base}/api/transfers/sender`)}) ${quote(file)} ${quote(base)} wget`;
+  const parallel = `bash <(curl -fsS ${quote(`${base}/transfers/receive.sh`)}) ${quote(download)} ${quote(out)}`;
 
   const directory = out.includes("/") ? out.slice(0, out.lastIndexOf("/")) || "/" : ".";
   const filename = out.split("/").pop();
+  const customName = !!out.trim();
   const receiver = downloadTool === "wget"
-    ? `wget -c -O ${quote(out)} -- ${quote(download)}`
+    ? `wget -c${customName ? ` -O ${quote(out)}` : " --content-disposition"} -- ${quote(download)}`
     : downloadTool === "aria2"
-      ? `aria2c -x 8 -s 8 --file-allocation=none${directory !== "." ? ` -d ${quote(directory)}` : ""} \
-  -o ${quote(filename)} -- ${quote(download)}`
-      : connections === "4" ? parallel : `curl -fL -o ${quote(out)} -- ${quote(download)}`;
+      ? `aria2c -x 8 -s 8 --file-allocation=none${customName && directory !== "." ? ` -d ${quote(directory)}` : ""}${customName ? ` -o ${quote(filename)}` : ""} -- ${quote(download)}`
+      : connections === "4" ? parallel : customName ? `curl -fL -o ${quote(out)} -- ${quote(download)}` : `curl -fLOJ -- ${quote(download)}`;
   const sending = mode === "send";
   const title = sending ? `Send with ${tools[tool]}` : tool === "curl" && connections === "4" ? "Parallel download with cURL" : `Download with ${tools[tool]}`;
-  const ready = sending ? !!base && !!file.trim() : validUrl && !!filename.trim();
+  const ready = sending ? !!base && !!file.trim() : validUrl && (!customName || !!filename.trim());
   return <div className="h-full min-h-0 overflow-y-auto px-4 py-5 sm:px-6">
     <div className="mx-auto w-full max-w-5xl">
       <header className="mb-5">
@@ -87,8 +87,8 @@ export default function Transfers() {
               <input id="transfer-url" aria-label="Download URL" type="url" value={url} spellCheck={false} onChange={event => setUrl(event.target.value)} className={inputClass} placeholder="Paste the sender’s download link" aria-invalid={!!download && !validUrl} aria-describedby={download && !validUrl ? "transfer-url-error" : undefined}/>
               {download && !validUrl && <span id="transfer-url-error" role="alert" className="mt-1 block text-xs text-red-500">Enter an http:// or https:// download link.</span>}
             </label>
-            <label className="min-w-0 text-xs font-medium text-muted-foreground" htmlFor="transfer-output">Save as
-              <input id="transfer-output" value={out} spellCheck={false} onChange={event => setOut(event.target.value)} className={inputClass}/>
+            <label className="min-w-0 text-xs font-medium text-muted-foreground" htmlFor="transfer-output">Save as <span className="font-normal">(optional)</span>
+              <input id="transfer-output" aria-label="Save as" placeholder="Original filename" value={out} spellCheck={false} onChange={event => setOut(event.target.value)} className={inputClass}/>
             </label>
           </div>}
           <Command title={title} command={sending ? sender : receiver} ready={ready} language={sending || tool === "curl" && connections === "4" ? "Bash" : tools[tool]}
@@ -104,14 +104,7 @@ export default function Transfers() {
       </div>
       <div className="mt-4 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
         <p>Free · No server storage · Multiple downloaders</p>
-        <details className="group max-w-full">
-          <summary className="flex min-h-[44px] cursor-pointer list-none items-center gap-1.5 rounded-md px-1 outline-none focus-visible:ring-2 focus-visible:ring-primary">How it works<IconChevronDown size={14} className="transition-transform group-open:rotate-180"/></summary>
-          <div className="mt-2 max-w-lg space-y-2 rounded-lg border border-border bg-surface p-4 text-xs leading-5">
-            <p>Keep the sender running and the file unchanged. Ctrl+C stops sharing and invalidates the link.</p>
-            <p>Send with Bash on Linux, macOS or WSL, using cURL or Wget. Wget creates small temporary chunks on the sender.</p>
-            <p>Download with cURL, Wget or aria2. Anyone with the link can download while the sender is online.</p>
-          </div>
-        </details>
+
       </div>
     </div>
   </div>;

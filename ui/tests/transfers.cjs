@@ -34,6 +34,7 @@ assert(base, 'An isolated local UI URL is required');
         await panel.getByRole('button', { name: tool, exact: true }).click();
         await copy().click();
         const command = await page.evaluate(() => window.copiedCommands.at(-1));
+        assert(!command.includes('\n'), 'Copied commands are single-line');
         execFileSync('bash', ['-n', '-c', command]);
         assert(command.includes(tool === 'Wget' ? 'wget -qO-' : 'curl -fsS'));
         assert(command.includes("archive'\\''s backup.zip"), 'Shell quotes survive apostrophes');
@@ -47,11 +48,23 @@ assert(base, 'An isolated local UI URL is required');
       await page.getByLabel('Download URL', { exact: true }).fill('javascript:alert(1)');
       assert(await copy().isDisabled());
       await page.getByLabel('Download URL', { exact: true }).fill(base + '/api/transfers/test-download');
+      assert.equal(await page.getByLabel('Save as', { exact: true }).inputValue(), '', 'Original filename is the default');
+      for (const tool of ['cURL', 'Wget', 'aria2']) {
+        await panel.getByRole('button', { name: tool, exact: true }).click(); await copy().click();
+        const command = await page.evaluate(() => window.copiedCommands.at(-1));
+        assert(!command.includes('\n'));
+        assert(!command.includes('download.zip'), 'No hard-coded ZIP filename');
+        if (tool === 'cURL') assert(command.startsWith('curl -fLOJ '));
+        if (tool === 'Wget') assert(command.includes('--content-disposition'));
+        if (tool === 'aria2') assert(!/\s-o\s/.test(command));
+      }
+      assert.equal(await page.getByText('How it works', {exact:true}).count(), 0);
       await page.getByLabel('Save as', { exact: true }).fill("./folder's/download.zip");
       for (const tool of ['cURL', 'Wget', 'aria2']) {
         await panel.getByRole('button', { name: tool, exact: true }).click();
         await copy().click();
         const command = await page.evaluate(() => window.copiedCommands.at(-1));
+        assert(!command.includes('\n'), 'Copied commands are single-line');
         execFileSync('bash', ['-n', '-c', command]);
         assert(command.startsWith({ cURL: 'curl ', Wget: 'wget ', aria2: 'aria2c ' }[tool]));
         assert(command.includes('/api/transfers/test-download'));
