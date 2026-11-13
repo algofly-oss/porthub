@@ -2,7 +2,7 @@ import {
   IconServer,
   IconPhoto,
   IconLayoutBoard,
-  IconFileArrowRight,
+  IconArrowsLeftRight,
   IconWorld,
   IconActivity,
   IconSettings,
@@ -35,7 +35,7 @@ export default function UserNavBar({
     ["Traffic", "Traffic", IconActivity],
     ["Images", "Hosted images", IconPhoto],
     ["Boards", "Boards", IconLayoutBoard],
-    ...(!demo ? [["Transfers", "Transfers", IconFileArrowRight]] : []),
+    ...(!demo ? [["Transfers", "Transfers", IconArrowsLeftRight]] : []),
     ["Settings", "Settings", IconSettings],
     ...(isAdmin ? [["Platform", "Platform", IconShieldLock]] : []),
   ];
