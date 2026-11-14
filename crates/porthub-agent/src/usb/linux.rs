@@ -204,6 +204,15 @@ fn restore(device: &Device) {
         format!("del {}", current.busid),
     );
     let _ = write("/sys/bus/usb/drivers_probe", current.busid.as_bytes());
+    // Preparation may fail after detaching an interface but before exporting.
+    if let Ok(entries) = std::fs::read_dir(&path) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(&format!("{}:", current.busid))
+                && !entry.path().join("driver").exists() {
+                let _ = write("/sys/bus/usb/drivers_probe", entry.file_name().as_encoded_bytes());
+            }
+        }
+    }
 }
 pub(super) struct Handoff {
     pub kernel: std::net::TcpStream,
@@ -225,6 +234,55 @@ impl Drop for Handoff {
         }
     }
 }
+// A UAS controller can retain stream state after its driver is detached. Reset
+// the selected, unmounted device before exporting its bulk-only alternate mode.
+fn prepare_storage(path: &Path, device: &Device) -> Result<()> {
+    let descriptors = std::fs::read(path.join("descriptors"))?;
+    let mut bulk_interfaces = Vec::new();
+    let mut offset = 0;
+    while offset + 2 <= descriptors.len() {
+        let len = descriptors[offset] as usize;
+        if len < 2 || offset + len > descriptors.len() { break; }
+        let d = &descriptors[offset..offset + len];
+        if len >= 9 && d[1] == 4 && d[3] == 0 && d[5] == 8 && d[7] == 0x50 {
+            bulk_interfaces.push(d[2] as u32);
+        }
+        offset += len;
+    }
+    let interfaces: Vec<_> = std::fs::read_dir(path)?.flatten().map(|entry| entry.path())
+        .filter(|p| value(p, "bInterfaceClass") == "08" && value(p, "bInterfaceProtocol") == "62")
+        .filter_map(|p| u32::from_str_radix(&value(&p, "bInterfaceNumber"), 16).ok().map(|n| (p,n)))
+        .filter(|(_,n)| bulk_interfaces.contains(n)).collect();
+    if interfaces.is_empty() { return Ok(()); }
+    let unbind = || -> Result<()> {
+        for (interface, _) in &interfaces {
+            if interface.join("driver").exists() {
+                write(interface.join("driver/unbind"), interface.file_name().unwrap().as_encoded_bytes())?;
+            }
+        }
+        Ok(())
+    };
+    let usb = std::fs::OpenOptions::new().read(true).write(true)
+        .open(format!("/dev/bus/usb/{:03}/{:03}", device.busnum, device.devnum))?;
+    unbind()?;
+    // USBDEVFS_RESET, CLAIMINTERFACE, SETINTERFACE and RELEASEINTERFACE.
+    if unsafe { libc::ioctl(usb.as_raw_fd(), 0x5514, 0) } < 0 {
+        return Err(std::io::Error::last_os_error()).context("Reset USB storage before export");
+    }
+    unbind()?;
+    for (_, number) in &interfaces {
+        if unsafe { libc::ioctl(usb.as_raw_fd(), 0x8004550fu64 as libc::c_ulong, number) } < 0 {
+            return Err(std::io::Error::last_os_error()).context("Claim USB storage interface");
+        }
+        let alternate = [*number, 0u32];
+        let result = unsafe { libc::ioctl(usb.as_raw_fd(), 0x80085504u64 as libc::c_ulong, alternate.as_ptr()) };
+        let error = std::io::Error::last_os_error();
+        unsafe { libc::ioctl(usb.as_raw_fd(), 0x80045510u64 as libc::c_ulong, number); }
+        if result < 0 { return Err(error).context("Select USB bulk storage interface"); }
+    }
+    Ok(())
+}
+
 pub(super) fn handoff(
     profile: &Path,
     device: &Device,
@@ -280,6 +338,7 @@ pub(super) fn handoff(
         )?;
         guard.device = Some(current);
         guard.journal = Some(journal);
+        prepare_storage(&path, device)?;
         write(
             "/sys/bus/usb/drivers/usbip-host/match_busid",
             format!("add {}", device.busid),
