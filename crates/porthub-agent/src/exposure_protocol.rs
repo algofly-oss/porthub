@@ -107,14 +107,15 @@ pub(crate) async fn serve_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
         }));
         let result=tokio::select! {
             _=child.cancelled()=>Ok(()),
-            result=dispatch(reader,control,child.clone(),profile,message)=>result,
+            result=dispatch(reader,control,child.clone(),cancel.clone(),profile,message)=>result,
         };
         child.cancel();drop(task);return result;
     }
-    dispatch(reader,control,cancel,profile,message).await
+    dispatch(reader,control,cancel.clone(),cancel,profile,message).await
 }
 async fn dispatch<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     reader: BufReader<S>, control: Arc<crate::control::Control>, cancel: CancellationToken,
+    service_cancel: CancellationToken,
     profile:std::path::PathBuf,message:serde_json::Value,
 )->Result<()> {
     let mut reader=reader;
@@ -129,7 +130,7 @@ async fn dispatch<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
         return crate::terminal_policy::serve(reader,&control,&profile,message,cancel).await;
     }
     if message.get("operation").and_then(serde_json::Value::as_str) == Some("terminal_host") {
-        return crate::terminal_transport::serve(reader, control, &profile, message, cancel).await;
+        return crate::terminal_transport::serve(reader, control, &profile, message, cancel, service_cancel).await;
     }
     #[cfg(feature="local-tor")]
     if matches!(message.get("operation").and_then(serde_json::Value::as_str),Some("proxy_connect"|"proxy_check")) {

@@ -119,6 +119,7 @@ pub(crate) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     profile: &std::path::Path,
     message: serde_json::Value,
     cancel: CancellationToken,
+    service_cancel: CancellationToken,
 ) -> Result<()> {
     let mut request: Request = serde_json::from_value(message)?;
     ensure!(
@@ -193,7 +194,9 @@ pub(crate) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
                             tokio::time::timeout(Duration::from_secs(3),local.get_mut().write_all(&policy)).await??;
                         }
                         traffic=Some(lease);
-                        if features.reporting {crate::terminal_upload::start(profile,control.clone(),cancel.clone());}
+                        // The final closed-session snapshot outlives this socket and
+                        // its feature-policy token. Only service shutdown stops upload.
+                        if features.reporting {crate::terminal_upload::start(profile,control.clone(),service_cancel.clone());}
                     }
                     if let Some(traffic)=&mut traffic {
                         if let HostEvent::Presence {members}=&event {traffic.participants(members.len());}
