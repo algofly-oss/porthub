@@ -6,8 +6,6 @@ import subprocess
 ROOT=Path(__file__).resolve().parent.parent
 FORBIDDEN={
     'portable-pty','porthub-tor','arti-client','porthub-stats','porthub-sync','porthub-terminal-cli',
-    'rtc','rtc-media','rtc-datachannel','rtc-sctp','rtc-rtp','rtc-rtcp',
-    'rtc-sdp','rtc-interceptor','rtc-srtp',
 }
 
 
@@ -17,9 +15,9 @@ def main():
     found=sorted(packages&FORBIDDEN)
     if found:
         raise SystemExit('Optional implementations linked into core: '+', '.join(found))
-    # ICE/DTLS primitives used by private networking are intentionally allowed;
-    # this checks terminal media/datachannel implementation, not all rtc-* names.
-    print('PASS core production graph excludes optional workers and terminal RTC engine/media/datachannels')
+    # Native keyboard and USB forwarding share the RTC data channel engine.
+    # Terminal hosting stays optional: portable-pty and terminal-cli remain forbidden.
+    print('PASS core production graph excludes optional workers and terminal hosting implementations')
 
 
 if __name__=='__main__':main()
