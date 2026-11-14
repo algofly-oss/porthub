@@ -271,13 +271,13 @@ fn prepare_storage(path: &Path, device: &Device) -> Result<()> {
     }
     unbind()?;
     for (_, number) in &interfaces {
-        if unsafe { libc::ioctl(usb.as_raw_fd(), 0x8004550fu64 as libc::c_ulong, number) } < 0 {
+        if unsafe { libc::ioctl(usb.as_raw_fd(), 0x8004550fu32 as _, number) } < 0 {
             return Err(std::io::Error::last_os_error()).context("Claim USB storage interface");
         }
         let alternate = [*number, 0u32];
-        let result = unsafe { libc::ioctl(usb.as_raw_fd(), 0x80085504u64 as libc::c_ulong, alternate.as_ptr()) };
+        let result = unsafe { libc::ioctl(usb.as_raw_fd(), 0x80085504u32 as _, alternate.as_ptr()) };
         let error = std::io::Error::last_os_error();
-        unsafe { libc::ioctl(usb.as_raw_fd(), 0x80045510u64 as libc::c_ulong, number); }
+        unsafe { libc::ioctl(usb.as_raw_fd(), 0x80045510u32 as _, number); }
         if result < 0 { return Err(error).context("Select USB bulk storage interface"); }
     }
     Ok(())
