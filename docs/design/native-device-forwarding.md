@@ -20,3 +20,14 @@ Desktop-sharing requirements:
 - Keep USB forwarding, desktop sharing, and browser VKeyboard as separate modules within the same binary.
 
 All PortHub dropdowns must use custom searchable controls, including machine, device, model, settings and topology selectors. Do not introduce native HTML select or datalist menus. Machine pickers must support typing to find registered machines quickly.
+
+## Hardware validation status
+
+Validated on 2026-11-15:
+
+- Luna → Miro, Sennheiser Profile (1377:1100): authenticated direct transport and two seconds of actual 48 kHz mono audio captured successfully. The source microphone was restored afterward.
+- Luna → Condor, same microphone: enumeration succeeded, but audio capture returned an I/O error. This remains unresolved.
+- Luna → Miro, JMicron external SSD (152d:a583): descriptors enumerate over both direct and relay transport, then storage initialization times out. Switching the source interface to alternate setting 0 did not resolve it. During forwarding the source interface has no local driver, ruling out local driver reclamation in that test.
+- Luna → Condor, same SSD: its older virtual USB controller rejected SuperSpeedPlus. Agent 1.11.17 adds an EINVAL-only retry at SuperSpeed; physical testing confirmed successful attachment and descriptor enumeration with that retry. Disk initialization still times out afterward.
+
+SSD checks used normal unmounts and bounded read-only probes, with the original mount restored after each test. No successful remote SSD throughput result exists yet. Device attachment and transport connection status must not be reported as proof that a device's application workload works. Keep the hardware forwarding work open until storage and remote audio tests pass or their supported constraints are established with evidence.
