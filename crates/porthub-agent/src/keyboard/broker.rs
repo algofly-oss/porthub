@@ -59,18 +59,11 @@ async fn open(
     }
     anyhow::bail!("Keyboard gateway unavailable")
 }
-pub(super) async fn line<S: AsyncRead + Unpin>(reader: &mut BufReader<S>) -> Result<Vec<u8>> {
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
-    let mut bytes = Vec::new();
-    let count = reader
-        .take(MAX_FRAME as u64 + 1)
-        .read_until(b'\n', &mut bytes)
-        .await?;
-    ensure!(
-        count > 0 && count <= MAX_FRAME && bytes.last() == Some(&b'\n'),
-        "Invalid keyboard frame"
-    );
-    Ok(bytes)
+pub(super) async fn line<S: AsyncRead + Unpin>(
+    reader: &mut BufReader<S>,
+    pending: &mut Vec<u8>,
+) -> Result<Vec<u8>> {
+    crate::terminal_transport::frame(reader, pending).await
 }
 pub(crate) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     mut local: BufReader<S>,
@@ -102,11 +95,12 @@ pub(crate) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         .get_mut()
         .write_all(format!("{}\n", json!({"type":"policy","direct":direct})).as_bytes())
         .await?;
+    let mut pending = Vec::new();
     loop {
         tokio::select! {
             _=cancel.cancelled()=>break,
             changed=policy.changed()=>{if changed.is_err() || !policy.borrow().enabled(crate::features::Feature::Keyboard) || !policy.borrow().enabled(crate::features::Feature::DirectConnections){break;}}
-            outgoing=line(&mut local)=>{let bytes=outgoing?;let value:Value=serde_json::from_slice(&bytes)?;ensure!(matches!(value["type"].as_str(),Some("pong"|"ack"|"direct_answer"|"direct_unavailable"|"device_status")),"Invalid desktop keyboard response");socket.send(Message::Text(value.to_string().into())).await?;}
+            outgoing=line(&mut local, &mut pending)=>{let bytes=outgoing?;let value:Value=serde_json::from_slice(&bytes)?;ensure!(matches!(value["type"].as_str(),Some("pong"|"ack"|"direct_answer"|"direct_unavailable"|"device_status")),"Invalid desktop keyboard response");socket.send(Message::Text(value.to_string().into())).await?;}
             incoming=socket.next()=>{
                 match incoming{Some(Ok(Message::Text(text)))=>{let value:Value=serde_json::from_str(&text)?;local.get_mut().write_all(format!("{value}\n").as_bytes()).await?;},Some(Ok(Message::Ping(bytes)))=>socket.send(Message::Pong(bytes)).await?,Some(Ok(Message::Pong(_)))=>{},_=>break}
             }
@@ -114,4 +108,26 @@ pub(crate) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     }
     let _ = socket.close(None).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn split_keyboard_frames_survive_interleaved_gateway_events() -> Result<()> {
+        let (mut sender, receiver) = tokio::io::duplex(256);
+        let mut reader = BufReader::new(receiver);
+        let mut pending = Vec::new();
+        sender.write_all(b"{\"type\":\"ack\"").await?;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), line(&mut reader, &mut pending))
+                .await
+                .is_err()
+        );
+        sender.write_all(b"}\n").await?;
+        let value: Value = serde_json::from_slice(&line(&mut reader, &mut pending).await?)?;
+        assert_eq!(value["type"], "ack");
+        assert!(pending.is_empty());
+        Ok(())
+    }
 }

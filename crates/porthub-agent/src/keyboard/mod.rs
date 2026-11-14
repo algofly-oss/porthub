@@ -309,6 +309,7 @@ async fn session(
     let mut stream = crate::exposure_broker::connect_stream(layout, registration).await?;
     write(&mut stream, &json!({"operation":"keyboard_host"})).await?;
     let mut local = BufReader::new(stream);
+    let mut pending = Vec::new();
     let mut active: Option<String> = None;
     let mut direct: Option<direct::Direct> = None;
     let mut allow_direct = false;
@@ -325,7 +326,7 @@ async fn session(
         };
         let message = tokio::select! {
             _=cancel.cancelled()=>break,
-            bytes=broker::line(&mut local)=>serde_json::from_slice::<Value>(&bytes?)?,
+            bytes=broker::line(&mut local, &mut pending)=>serde_json::from_slice::<Value>(&bytes?)?,
             bytes=direct_read=>match bytes{Ok(bytes)=>{
                 let input:Input=serde_json::from_slice(&bytes)?;json!({"type":"input","session":active,"input":input})
             },Err(error)=>{tracing::debug!(reason=%error,"Local VKeyboard path failed; using relay");direct=None;continue;}}
