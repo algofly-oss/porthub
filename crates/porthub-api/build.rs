@@ -3,7 +3,13 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("musl") {
         // ggml's C++ runtime follows Rust's libc archive in the native manifest.
         // Rescan static libc to resolve the C++ locale/thread runtime references.
-        println!("cargo:rustc-link-arg=-Wl,-Bstatic,-lc");
+        let gcc = if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64") {
+            // Alpine's C++ guard runtime uses GCC's outlined ARM atomic helpers.
+            ",-lgcc"
+        } else {
+            ""
+        };
+        println!("cargo:rustc-link-arg=-Wl,-Bstatic,-lc{gcc}");
     }
     if std::env::var_os("CARGO_FEATURE_SPEECH_CUDA").is_some() {
         let root = std::env::var("CUDA_PATH").unwrap_or_else(|_| "/usr/local/cuda".into());
