@@ -46,6 +46,14 @@ fn inventory() -> Vec<porthub_components::usb::Device> {
     #[cfg(not(target_os = "linux"))]
     return vec![];
 }
+fn transport_policy(policy: &features::Policy) -> [bool; 3] {
+    [
+        Feature::Usb,
+        Feature::DirectConnections,
+        Feature::PrivateNetwork,
+    ]
+    .map(|feature| policy.enabled(feature))
+}
 pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) -> Worker {
     let cancel = cancel.child_token();
     let work = cancel.clone();
@@ -53,12 +61,13 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
         #[cfg(target_os = "linux")]
         linux::recover(&path);
         let mut policy = features::subscribe(&path);
+        let mut permissions = transport_policy(&policy.borrow());
         let mut sessions: HashMap<String, Session> = HashMap::new();
         let states = Arc::new(Mutex::new(HashMap::<String, State>::new()));
         let mut tick = tokio::time::interval(Duration::from_secs(10));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            tokio::select! {_=work.cancelled()=>break,changed=policy.changed()=>{if changed.is_err(){break;}sessions.clear();},_=tick.tick()=>{}}
+            tokio::select! {_=work.cancelled()=>break,changed=policy.changed()=>{if changed.is_err(){break;}let next=transport_policy(&policy.borrow());if next!=permissions{sessions.clear();permissions=next;}},_=tick.tick()=>{}}
             let enabled = policy.borrow().enabled(Feature::Usb);
             if !enabled {
                 sessions.clear();
@@ -71,7 +80,7 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
                 .collect::<Vec<_>>();
             let p = control.profile();
             let body = json!({"machine_id":p.machine_id,"token":p.token,"enabled":enabled,"supported":cfg!(target_os="linux"),"devices":if enabled{inventory()}else{vec![]},"states":report_states});
-            let result = tokio::select! {_=work.cancelled()=>break,changed=policy.changed()=>{if changed.is_err(){break;}sessions.clear();continue;},reply=control.request(reqwest::Method::POST,"usb/client/report",Some(body),&[])=>reply};
+            let result = tokio::select! {_=work.cancelled()=>break,changed=policy.changed()=>{if changed.is_err(){break;}let next=transport_policy(&policy.borrow());if next!=permissions{sessions.clear();permissions=next;}continue;},reply=control.request(reqwest::Method::POST,"usb/client/report",Some(body),&[])=>reply};
             let plans = result
                 .ok()
                 .and_then(|r| r.json().ok())
