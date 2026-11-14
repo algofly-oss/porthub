@@ -303,21 +303,22 @@ pub(super) fn handoff(
             "/sys/devices/platform/vhci_hcd.0/attach",
             format!("{port} {} {devid} {speed}", guard.kernel.as_raw_fd()),
         );
-        if let Err(error) = attach(device.speed) {
-            // Older vhci kernels support SuperSpeed ports but reject the
-            // newer SuperSpeedPlus enum. The same device can use SuperSpeed.
-            if device.speed == 6
-                && error.downcast_ref::<std::io::Error>()
-                    .is_some_and(|error| error.raw_os_error() == Some(libc::EINVAL))
-            {
-                attach(5)?;
-            } else {
-                return Err(error);
-            }
-        }
+        attach_compatible(device.speed, attach)?;
         guard.port = Some(port);
     }
     Ok((guard, proxy))
+}
+fn attach_compatible(speed: u32, attach: impl Fn(u32) -> Result<()>) -> Result<()> {
+    if let Err(error) = attach(speed) {
+        // Older vhci kernels reject SuperSpeedPlus but support SuperSpeed.
+        if speed == 6 && error.downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.raw_os_error() == Some(libc::EINVAL)) {
+            attach(5)?;
+        } else {
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 fn free_port(status: &str, speed: u32) -> Option<u32> {
     status
@@ -337,6 +338,26 @@ fn free_port(status: &str, speed: u32) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn speed_fallback_only_retries_unsupported_superspeed_plus() {
+        use std::cell::RefCell;
+        for (speed, errno, expected) in [
+            (6, libc::EINVAL, vec![6, 5]),
+            (5, libc::EINVAL, vec![5]),
+            (6, libc::EBUSY, vec![6]),
+            (6, libc::EACCES, vec![6]),
+        ] {
+            let attempts = RefCell::new(Vec::new());
+            let result = attach_compatible(speed, |value| {
+                attempts.borrow_mut().push(value);
+                if attempts.borrow().len() == 1 {
+                    Err(std::io::Error::from_raw_os_error(errno).into())
+                } else { Ok(()) }
+            });
+            assert_eq!(*attempts.borrow(), expected);
+            assert_eq!(result.is_ok(), expected.len() == 2);
+        }
+    }
     #[test]
     fn virtual_port_matches_speed_and_is_free() {
         let status="hub port sta spd dev sockfd local_busid\nhs 0000 006 003 00010002 1 1-2\nhs 0001 004 000 00000000 0 0-0\nss 0008 004 000 00000000 0 0-0\n";
