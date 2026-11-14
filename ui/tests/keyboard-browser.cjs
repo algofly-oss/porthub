@@ -1,3 +1,4 @@
+const {chooseDropdown}=require('./search-dropdown.cjs');
 const assert=require('node:assert/strict');
 const {chromium}=require('playwright');
 const {execFile}=require('node:child_process');const {promisify}=require('node:util');const run=promisify(execFile);
@@ -12,7 +13,7 @@ const base=process.env.PORTHUB_TEST_UI_URL,cookie=process.env.PORTHUB_TEST_BOARD
   const context=await portalBrowser.newContext({viewport:{width:1440,height:1000},serviceWorkers:'block'});await context.addInitScript(()=>{delete Object.getPrototypeOf(navigator).serviceWorker;});await context.addCookies([{name:'porthub_session',value:cookie,url:base}]);
   const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));await page.goto(base+'/home?view=keyboard');
   await page.getByRole('button',{name:'VKeyboard settings',exact:true}).waitFor();
-  await page.getByRole('button',{name:'VKeyboard settings',exact:true}).click();await page.getByRole('tab',{name:'Clients',exact:true}).click();
+  await page.getByRole('button',{name:'VKeyboard settings',exact:true}).click();await page.getByRole('tab',{name:'General',exact:true}).click();await chooseDropdown(page.getByLabel('Dictation language',{exact:true}),'English');await page.getByRole('tab',{name:'Clients',exact:true}).click();
   for(let i=0;i<15;i++){await page.getByRole('button',{name:'Refresh keyboard clients'}).click();if(await page.locator('button[aria-label="Connect"]').isEnabled())break;await page.waitForTimeout(200);}
   await page.getByRole('button',{name:'Close VKeyboard settings',exact:true}).click();await page.getByRole('button',{name:'Connect',exact:true}).click();await page.getByRole('button',{name:'Disconnect',exact:true}).waitFor();
   await page.getByRole('button',{name:'Text and clipboard',exact:true}).click();await page.getByLabel('Text to send to the selected client').fill('Native PortHub input');await page.getByRole('button',{name:'Type text',exact:true}).click();await target.waitForFunction(()=>document.querySelector('textarea').value==='Native PortHub input');
@@ -36,17 +37,27 @@ const base=process.env.PORTHUB_TEST_UI_URL,cookie=process.env.PORTHUB_TEST_BOARD
   assert((await ranking.getByRole('listitem').first().textContent()).includes('Busy CPU host'));
   await ranking.getByRole('checkbox',{name:'GPU',exact:true}).check();
   assert((await ranking.getByRole('listitem').first().textContent()).includes('Isolated desktop'));
-  await ranking.getByRole('combobox',{name:'Resource sort order'}).selectOption('low');
+  await chooseDropdown(ranking.getByLabel('Resource sort order',{exact:true}),'Least utilized first');
   assert((await ranking.getByRole('listitem').first().textContent()).includes('Busy CPU host'));
   await ranking.getByRole('listitem').filter({hasText:'Isolated desktop'}).getByRole('button').click();
   const health=page.getByRole('region',{name:'Machine health and resource history'});
   await health.getByRole('img',{name:'CPU utilization history from 0 to 100 percent'}).waitFor();
-  await health.getByRole('combobox',{name:'Resource history period'}).selectOption('1');
+  await chooseDropdown(health.getByLabel('Resource history period',{exact:true}),'Last hour');
   await health.getByText('Fixture GPU',{exact:false}).first().waitFor();
   assert.equal(await health.getByRole('img').count(),4);
   await health.getByRole('img',{name:'CPU utilization history from 0 to 100 percent'}).locator('polyline').first().waitFor();
-  assert((await health.getByRole('img',{name:'CPU utilization history from 0 to 100 percent'}).locator('polyline').first().getAttribute('points')).split(' ').length>30,'CPU graph contains real historical readings');
+  await page.waitForFunction(()=>[...document.querySelectorAll('svg[aria-label="CPU utilization history from 0 to 100 percent"] polyline')].some(line=>(line.getAttribute('points')||'').split(' ').length>30));
   for(const width of [390,1440]){await page.setViewportSize({width,height:1000});await page.waitForTimeout(100);assert(!(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1)));await page.screenshot({path:`${screenshots}/resources-${width}.png`,fullPage:true});}
-  assert.deepEqual(errors,[]);console.log(JSON.stringify({native_text:true,remote_clipboard:true,arbitrary_text_paste:true,physical_keys:true,mouse:true,local_transport:true,local_disable:true,embedded_flashing:true,resource_ranking:true,combined_sort:true,resource_history_graphs:true,viewports:[320,390,768,1024,1440,1920]}));
+  await page.getByRole('button',{name:'USB',exact:true}).click();
+  const usb=page.getByRole('region',{name:'USB forwarding',exact:true});
+  await chooseDropdown(usb.getByLabel('USB device',{exact:true}),'Fixture USB microphone · 1-2');
+  await chooseDropdown(usb.getByLabel('USB destination machine',{exact:true}),'Busy CPU host');
+  const saved=page.waitForResponse(response=>new URL(response.url()).pathname==='/api/usb/forwards'&&response.request().method()==='POST',{timeout:5000});
+  await usb.getByRole('button',{name:'Save USB forward',exact:true}).click();
+  const saveResponse=await saved.catch(async error=>{throw Error(error.message+' · '+await usb.innerText()+' · '+JSON.stringify(await usb.locator('input').evaluateAll(items=>items.map(i=>({value:i.value,required:i.required,invalid:!i.validity.valid})))));});assert.equal(saveResponse.status(),200,await saveResponse.text());
+  await usb.getByText('Persistent rule',{exact:true}).waitFor();
+  await usb.getByRole('button',{name:'Remove',exact:true}).click();await usb.getByText('Persistent rule',{exact:true}).waitFor({state:'hidden'});
+  assert.equal(await page.locator('select').count(),0,'All PortHub dropdowns use searchable custom controls');
+  assert.deepEqual(errors,[]);console.log(JSON.stringify({native_text:true,remote_clipboard:true,arbitrary_text_paste:true,physical_keys:true,mouse:true,local_transport:true,local_disable:true,embedded_flashing:true,resource_ranking:true,combined_sort:true,resource_history_graphs:true,searchable_dropdowns:true,persistent_usb_configuration:true,viewports:[320,390,768,1024,1440,1920]}));
  }finally{await portalBrowser.close();await targetBrowser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

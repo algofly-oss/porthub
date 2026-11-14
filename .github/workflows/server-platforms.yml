@@ -94,7 +94,9 @@ jobs:
           cargo test --locked -p porthub-api --test large_images -- --include-ignored
           cargo test --locked -p porthub-api --test boards --test file_relay --test pairdrop -- --include-ignored
           cargo test --locked -p porthub-api --lib file_relay::tests
-          cargo test --locked -p porthub-api --test keyboard --test machine_metrics -- --include-ignored
+          cargo test --locked -p porthub-api --test keyboard --test machine_metrics --test usb -- --include-ignored
+          cargo test --locked -p porthub-agent --lib usb::
+          cargo test --locked -p porthub-components --lib usb::
           cargo test --locked -p porthub-agent --lib features::
           cargo test --locked -p porthub-components --lib keyboard
           cargo test --locked -p porthub-components --lib metrics
@@ -161,7 +163,9 @@ jobs:
           PORTHUB_TEST_MONGO_URI: mongodb://127.0.0.1:${{ job.services.mongo.ports['27017'] }}
           NODE_PATH: ${{ runner.temp }}/terminal-browser-tools/node_modules
           PORTHUB_TEST_BOARD_UI_ROOT: ${{ github.workspace }}/terminal-browser-assets/ui
-        run: cargo test --locked -p porthub-api --test keyboard_browser -- --include-ignored --nocapture
+        run: |
+          node ui/tests/keyboard-gestures.cjs
+          cargo test --locked -p porthub-api --test keyboard_browser -- --include-ignored --nocapture
       - name: Verify real SSH, Chrome and WebKit guests over direct and fallback paths
         env:
           PORTHUB_TEST_MONGO_URI: mongodb://127.0.0.1:${{ job.services.mongo.ports['27017'] }}

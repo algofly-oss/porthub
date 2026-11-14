@@ -26,10 +26,10 @@ impl Device {
             && (1..=6).contains(&self.speed)
     }
     pub fn same_device(&self, other: &Self) -> bool {
-        self.busid == other.busid
-            && self.vendor == other.vendor
+        self.vendor == other.vendor
             && self.product == other.product
             && self.serial == other.serial
+            && (!self.serial.is_empty() || self.busid == other.busid)
     }
 }
 pub fn valid_busid(value: &str) -> bool {
@@ -63,6 +63,30 @@ pub struct State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn serial_identity_survives_port_and_bus_changes() {
+        let mut a = Device {
+            busid: "1-2".into(),
+            vendor: "1377".into(),
+            product: "1100".into(),
+            serial: "same-device".into(),
+            name: "Microphone".into(),
+            busnum: 1,
+            devnum: 2,
+            speed: 2,
+            blocked: None,
+        };
+        let mut b = a.clone();
+        b.busid = "3-4".into();
+        b.busnum = 3;
+        b.devnum = 9;
+        assert!(a.same_device(&b));
+        b.serial = "other-device".into();
+        assert!(!a.same_device(&b));
+        a.serial.clear();
+        b.serial.clear();
+        assert!(!a.same_device(&b));
+    }
     #[test]
     fn busids_never_escape_sysfs() {
         for v in ["1-2", "2-1.3.4"] {

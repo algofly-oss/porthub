@@ -70,7 +70,7 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
                 .cloned()
                 .collect::<Vec<_>>();
             let p = control.profile();
-            let body = json!({"machine_id":p.machine_id,"token":p.token,"enabled":enabled,"supported":cfg!(target_os="linux"),"devices":inventory(),"states":report_states});
+            let body = json!({"machine_id":p.machine_id,"token":p.token,"enabled":enabled,"supported":cfg!(target_os="linux"),"devices":if enabled{inventory()}else{vec![]},"states":report_states});
             let result = tokio::select! {_=work.cancelled()=>break,changed=policy.changed()=>{if changed.is_err(){break;}sessions.clear();continue;},reply=control.request(reqwest::Method::POST,"usb/client/report",Some(body),&[])=>reply};
             let plans = result
                 .ok()
@@ -107,8 +107,30 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
                 let control = control.clone();
                 let states = states.clone();
                 let task = tokio::spawn(async move {
+                    let prefer_direct = states
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(&plan.id)
+                        .is_none_or(|s| s.state != "retry-relay");
                     set_state(&states, &plan.id, "connecting", None);
-                    let result = tokio::select! {_=session_cancel.cancelled()=>Ok(()),result=session(&path,control,&plan,states.clone())=>result};
+                    let result = tokio::select! {_=session_cancel.cancelled()=>Ok(()),result=session(&path,control,&plan,states.clone(),prefer_direct)=>result};
+                    let was_direct = states
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(&plan.id)
+                        .is_some_and(|s| s.state == "active-direct");
+                    if was_direct {
+                        set_state(
+                            &states,
+                            &plan.id,
+                            "retry-relay",
+                            Some(
+                                "Direct USB path interrupted; reconnecting through the gateway"
+                                    .into(),
+                            ),
+                        );
+                        return;
+                    }
                     match result {
                         Ok(()) => set_state(&states, &plan.id, "disconnected", None),
                         Err(e) => set_state(
@@ -145,7 +167,7 @@ fn set_state(states: &States, id: &str, state: &str, error: Option<String>) {
     );
 }
 #[cfg(not(target_os = "linux"))]
-async fn session(_: &Path, _: Arc<Control>, _: &Forward, _: States) -> Result<()> {
+async fn session(_: &Path, _: Arc<Control>, _: &Forward, _: States, _: bool) -> Result<()> {
     anyhow::bail!("Native USB forwarding currently requires Linux kernel USB/IP support")
 }
 #[cfg(target_os = "linux")]
@@ -227,13 +249,23 @@ async fn negotiate(
     socket: &mut Socket,
     source: bool,
     allowed: bool,
+    control: &Control,
 ) -> Result<Option<direct::Direct>> {
-    text(socket, json!({"type":"hello","direct":allowed})).await?;
+    let candidates = if allowed {
+        direct::Candidates::gather(Some(control)).await.ok()
+    } else {
+        None
+    };
+    text(
+        socket,
+        json!({"type":"hello","direct":candidates.is_some()}),
+    )
+    .await?;
     let hello = tokio::time::timeout(Duration::from_secs(8), next_text(socket)).await??;
     ensure!(hello["type"] == "hello", "Invalid USB peer greeting");
-    let both = allowed && hello["direct"] == true;
+    let both = candidates.is_some() && hello["direct"] == true;
     let mut direct = if both {
-        let candidates = direct::Candidates::gather().await?;
+        let candidates = candidates.context("Direct USB candidates unavailable")?;
         if source {
             let offer = tokio::time::timeout(Duration::from_secs(8), next_text(socket)).await??;
             ensure!(offer["type"] == "offer", "Invalid USB offer");
@@ -267,16 +299,21 @@ async fn negotiate(
             return Ok(if both { direct } else { None });
         }
         tokio::select! {
-         result=async{if let Some(ready)=connected.as_mut(){ready.await.map_err(|_|anyhow::anyhow!("Direct USB negotiation failed"))}else{std::future::pending().await}}=>{connected=None;if result.is_ok(){local_ready=true;text(socket,json!({"type":"direct_ready"})).await?;}},
+         result=async{if let Some(ready)=connected.as_mut(){ready.await.map_err(|_|anyhow::anyhow!("Direct USB negotiation failed"))}else{std::future::pending().await}}=>{connected=None;if result.is_ok(){local_ready=true;text(socket,json!({"type":"direct_ready"})).await?;}else if let Some(peer)=direct.as_mut(){if let Err(error)=peer.stopped().await{tracing::debug!(%error,"USB direct negotiation unavailable; keeping gateway fallback");}}},
          value=next_text(socket)=>{let value=value?;match value["type"].as_str(){Some("direct_ready")=>peer_ready=true,Some("path") if !source=>{return match value["route"].as_str(){Some("direct") if local_ready=>Ok(direct),Some("relay")=>Ok(None),_=>anyhow::bail!("USB path selection failed")};},_=>anyhow::bail!("Unexpected USB signaling")}},
          _=&mut deadline=>{if source{text(socket,json!({"type":"path","route":"relay"})).await?;return Ok(None);}anyhow::bail!("USB path selection timed out")}
         }
     }
 }
 #[cfg(target_os = "linux")]
-async fn session(path: &Path, control: Arc<Control>, plan: &Forward, states: States) -> Result<()> {
-    use futures_util::{SinkExt, StreamExt};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+async fn session(
+    path: &Path,
+    control: Arc<Control>,
+    plan: &Forward,
+    states: States,
+    prefer_direct: bool,
+) -> Result<()> {
+    use futures_util::StreamExt;
     use tokio_tungstenite::tungstenite::Message;
     let source = plan.source == control.profile().machine_id;
     ensure!(
@@ -298,8 +335,8 @@ async fn session(path: &Path, control: Arc<Control>, plan: &Forward, states: Sta
         matches!(ready,Message::Text(ref s) if s.as_str()=="ready"),
         "USB peer is unavailable"
     );
-    let allowed = crate::terminal_policy::direct_allowed(path, control.profile());
-    let mut direct = negotiate(&mut socket, source, allowed).await?;
+    let allowed = prefer_direct && crate::terminal_policy::direct_allowed(path, control.profile());
+    let direct = negotiate(&mut socket, source, allowed, &control).await?;
     // Exchange fresh kernel identifiers after replugging; retain the configured physical identity.
     let device = if source {
         inventory()
@@ -335,7 +372,7 @@ async fn session(path: &Path, control: Arc<Control>, plan: &Forward, states: Sta
         );
         d
     };
-    let (_handoff, mut stream) = linux::handoff(path, &device, source)?;
+    let (_handoff, stream) = linux::handoff(path, &device, source)?;
     set_state(
         &states,
         &plan.id,
@@ -346,19 +383,69 @@ async fn session(path: &Path, control: Arc<Control>, plan: &Forward, states: Sta
         },
         None,
     );
-    let mut bytes = vec![0u8; 16384];
+    bridge(stream, socket, direct, features::subscribe(path)).await
+}
+// Independent pumps preserve full-duplex progress when either carrier applies
+// backpressure. Never replay kernel USB requests after a path fails.
+#[cfg(target_os = "linux")]
+async fn bridge<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    stream: S,
+    socket: Socket,
+    mut direct: Option<direct::Direct>,
+    mut policy: tokio::sync::watch::Receiver<crate::features::Policy>,
+) -> Result<()> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let (mut sink, mut source) = socket.split();
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    let (ws_send, mut outgoing) = tokio::sync::mpsc::channel(8);
+    let upload_socket = ws_send.clone();
+    let control_socket = ws_send.clone();
+    let direct_send = direct.as_ref().map(|d| d.send.clone());
+    let local = direct.is_some();
+    let upload = async move {
+        let mut bytes = vec![0u8; 16384];
+        loop {
+            let n = reader.read(&mut bytes).await?;
+            if n == 0 {
+                return Ok::<_, anyhow::Error>(());
+            }
+            if let Some(send) = &direct_send {
+                send.send(bytes[..n].to_vec())
+                    .await
+                    .context("Direct USB transport closed")?;
+            } else {
+                upload_socket
+                    .send(Message::Binary(bytes[..n].to_vec().into()))
+                    .await
+                    .context("USB gateway closed")?;
+            }
+        }
+    };
+    let carrier = async move {
+        while let Some(message) = outgoing.recv().await {
+            sink.send(message).await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    };
+    let download = async {
+        loop {
+            tokio::select! {
+             message=source.next()=>{match message{Some(Ok(Message::Binary(b))) if !local=>writer.write_all(&b).await?,Some(Ok(Message::Ping(b)))=>{control_socket.send(Message::Pong(b)).await.context("USB gateway closed")?;},Some(Ok(Message::Pong(_)))=>{},Some(Ok(Message::Close(_)))|None=>return Ok::<_,anyhow::Error>(()),Some(Err(e))=>return Err(e.into()),_=>anyhow::bail!("Unexpected USB carrier message")}},
+             data=async{if let Some(d)=direct.as_mut(){d.incoming.recv().await}else{std::future::pending().await}}=>{writer.write_all(&data.context("Direct USB transport closed")?).await?;}
+            }
+        }
+    };
+    tokio::pin!(upload, carrier, download);
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
-    let mut policy = features::subscribe(path);
     loop {
         tokio::select! {
-         changed=policy.changed()=>{if changed.is_err()||!policy.borrow().enabled(Feature::Usb)||!policy.borrow().enabled(Feature::DirectConnections){break;}},
-         _=heartbeat.tick()=>{socket.send(Message::Ping(vec![].into())).await?;},
-         read=stream.read(&mut bytes)=>{let n=read?;if n==0{break;}if let Some(d)=&direct{d.send.send(bytes[..n].to_vec()).await.context("Direct USB transport closed")?;}else{socket.send(Message::Binary(bytes[..n].to_vec().into())).await?;}},
-         incoming=async{if let Some(d)=direct.as_mut(){d.incoming.recv().await}else{std::future::pending().await}}=>{let incoming=incoming.context("Direct USB transport closed")?;stream.write_all(&incoming).await?;},
-         incoming=socket.next()=>{match incoming{Some(Ok(Message::Binary(b))) if direct.is_none()=>stream.write_all(&b).await?,Some(Ok(Message::Ping(b)))=>socket.send(Message::Pong(b)).await?,Some(Ok(Message::Pong(_)))=>{},_=>break,}}
+         result=&mut upload=>return result,result=&mut carrier=>return result,result=&mut download=>return result,
+         _=heartbeat.tick()=>{let _=ws_send.try_send(Message::Ping(vec![].into()));},
+         changed=policy.changed()=>{if changed.is_err()||!policy.borrow().enabled(Feature::Usb)||local&&!policy.borrow().enabled(Feature::DirectConnections){return Ok(());}}
         }
     }
-    Ok(())
 }
 /// The OS-authenticated local broker keeps machine credentials inside the agent.
 pub(crate) async fn serve<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
@@ -408,4 +495,113 @@ pub(crate) async fn serve<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpi
         .request(reqwest::Method::POST, "usb/client/action", Some(body), &[])
         .await;
     Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod stream_tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_tungstenite::tungstenite::Message;
+    async fn full_duplex(local: bool) -> Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let relayed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = relayed.clone();
+        let _relay = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            let (a, _) = listener.accept().await?;
+            let mut a = tokio_tungstenite::accept_async(a).await?;
+            let (b, _) = listener.accept().await?;
+            let mut b = tokio_tungstenite::accept_async(b).await?;
+            loop {
+                tokio::select! {
+                 message=a.next()=>{match message{Some(Ok(Message::Binary(bytes)))=>{counted.fetch_add(bytes.len(),std::sync::atomic::Ordering::Relaxed);b.send(Message::Binary(bytes)).await?;},Some(Ok(Message::Ping(bytes)))=>a.send(Message::Pong(bytes)).await?,Some(Ok(Message::Pong(_)))=>{},_=>break}},
+                 message=b.next()=>{match message{Some(Ok(Message::Binary(bytes)))=>{counted.fetch_add(bytes.len(),std::sync::atomic::Ordering::Relaxed);a.send(Message::Binary(bytes)).await?;},Some(Ok(Message::Ping(bytes)))=>b.send(Message::Pong(bytes)).await?,Some(Ok(Message::Pong(_)))=>{},_=>break}}
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        }));
+        let (a, _) = tokio_tungstenite::connect_async(format!("ws://{address}")).await?;
+        let (b, _) = tokio_tungstenite::connect_async(format!("ws://{address}")).await?;
+        let (direct_a, direct_b) = if local {
+            let ca = direct::Candidates::gather(None).await?;
+            let cb = direct::Candidates::gather(None).await?;
+            let (mut ap, offer) = ca.offer()?;
+            let (bp, answer) = cb.answer(&offer)?;
+            ap.accept_answer(std::time::Instant::now(), &answer)?;
+            let mut a = ca.run(ap);
+            let mut b = cb.run(bp);
+            tokio::time::timeout(Duration::from_secs(8), async {
+                a.connected.take().unwrap().await?;
+                b.connected.take().unwrap().await?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await??;
+            (Some(a), Some(b))
+        } else {
+            (None, None)
+        };
+        let (ka, app_a) = tokio::io::duplex(1024);
+        let (kb, app_b) = tokio::io::duplex(1024);
+        let (policy, rx) = tokio::sync::watch::channel(crate::features::Policy::default());
+        let mut bridge_a = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(bridge(
+            ka,
+            a,
+            direct_a,
+            rx.clone(),
+        )));
+        let mut bridge_b =
+            tokio_util::task::AbortOnDropHandle::new(tokio::spawn(bridge(kb, b, direct_b, rx)));
+        let (mut ar, mut aw) = tokio::io::split(app_a);
+        let (mut br, mut bw) = tokio::io::split(app_b);
+        let a_bytes = vec![17; 2 * 1024 * 1024];
+        let b_bytes = vec![93; 2 * 1024 * 1024];
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let send_a = aw.write_all(&a_bytes);
+            let send_b = bw.write_all(&b_bytes);
+            let receive_a = async {
+                let mut bytes = vec![0; b_bytes.len()];
+                ar.read_exact(&mut bytes).await?;
+                ensure!(bytes == b_bytes, "B→A USB bytes changed");
+                Ok::<_, anyhow::Error>(())
+            };
+            let receive_b = async {
+                let mut bytes = vec![0; a_bytes.len()];
+                br.read_exact(&mut bytes).await?;
+                ensure!(bytes == a_bytes, "A→B USB bytes changed");
+                Ok::<_, anyhow::Error>(())
+            };
+            let (sa, sb, ra, rb) = tokio::join!(send_a, send_b, receive_a, receive_b);
+            sa?;
+            sb?;
+            ra?;
+            rb?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        if local {
+            ensure!(
+                relayed.load(std::sync::atomic::Ordering::Relaxed) == 0,
+                "Direct USB bytes must bypass the gateway"
+            );
+        }
+        let mut disabled = crate::features::Policy::default();
+        disabled.disabled.insert(Feature::Usb, true);
+        policy.send_replace(disabled);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            (&mut bridge_a).await??;
+            (&mut bridge_b).await??;
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn relay_usb_stream_remains_full_duplex_under_backpressure() -> Result<()> {
+        full_duplex(false).await
+    }
+    #[tokio::test]
+    async fn direct_usb_stream_remains_full_duplex_and_revokes_locally() -> Result<()> {
+        full_duplex(true).await
+    }
 }

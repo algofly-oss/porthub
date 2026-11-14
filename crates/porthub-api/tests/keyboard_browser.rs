@@ -35,6 +35,9 @@ async fn native_keyboard_clipboard_mouse_and_local_disable_from_embedded_portal(
         case.app.collection("machines").insert_one(doc!{"_id":busy,"user_id":owner,"name":"Busy CPU host","token":"fixture-busy","enabled":true}).await?;
         let mut busy_sample=metric_sample.clone();busy_sample["cpu"]=json!(90);busy_sample["gpus"][0]["utilization"]=json!(0);
         case.status("POST","/api/machines/client/metrics","",json!({"machine_id":busy.to_hex(),"token":"fixture-busy","sample":busy_sample}),axum::http::StatusCode::OK).await?;
+        let usb_device=json!({"busid":"1-2","vendor":"1377","product":"1100","serial":"fixture-microphone","name":"Fixture USB microphone","busnum":1,"devnum":2,"speed":2,"blocked":null});
+        case.status("POST","/api/usb/client/report","",json!({"machine_id":machine.to_hex(),"token":token,"enabled":true,"supported":true,"devices":[usb_device],"states":[]}),axum::http::StatusCode::OK).await?;
+        case.status("POST","/api/usb/client/report","",json!({"machine_id":busy.to_hex(),"token":"fixture-busy","enabled":true,"supported":true,"devices":[],"states":[]}),axum::http::StatusCode::OK).await?;
         let now=mongodb::bson::DateTime::now().timestamp_millis();
         for minute in 1..60_i64 {
             let mut sample=metric_sample.clone();sample["cpu"]=json!(20+(minute%50));

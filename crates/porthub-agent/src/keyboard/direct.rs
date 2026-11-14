@@ -26,11 +26,22 @@ impl Direct {
     pub async fn answer(offer: &str) -> Result<(Self, String)> {
         let mut ips = Vec::new();
         for interface in getifaddrs::getifaddrs()? {
+            if !interface.flags.contains(getifaddrs::InterfaceFlags::UP)
+                || ["docker", "br-", "veth", "virbr", "cni", "flannel"]
+                    .iter()
+                    .any(|prefix| interface.name.starts_with(prefix))
+            {
+                continue;
+            }
             let Some(IpAddr::V4(ip)) = interface.address.ip_addr() else {
                 continue;
             };
             // No network scanning, external discovery server, or public candidate.
-            if (ip.is_private() || ip.is_loopback()) && !ips.contains(&ip) {
+            if (ip.is_private()
+                || ip.is_loopback()
+                || ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1]))
+                && !ips.contains(&ip)
+            {
                 ips.push(ip);
             }
             if ips.len() == 8 {
@@ -54,7 +65,14 @@ impl Direct {
             let tx = tx.clone();
             readers.spawn(async move {
                 let mut bytes = vec![0; 65536];
-                while let Ok((n, remote)) = socket.recv_from(&mut bytes).await {
+                loop {
+                    let (n, remote) = match socket.recv_from(&mut bytes).await {
+                        Ok(packet) => packet,
+                        Err(_) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                            continue;
+                        }
+                    };
                     let Ok(local) = socket.local_addr() else {
                         break;
                     };
@@ -82,7 +100,11 @@ impl Direct {
                 .iter()
                 .find(|s| s.local_addr().ok() == Some(local))
             {
-                socket.send_to(&bytes, remote).await?;
+                if local.ip().is_loopback() != remote.ip().is_loopback() {
+                    continue;
+                }
+                // One unreachable ICE pair must not discard other valid LAN paths.
+                let _ = socket.send_to(&bytes, remote).await;
             }
         }
         Ok(())

@@ -53,6 +53,7 @@ async fn owned_device_reservations_authenticated_streams_and_revocation() -> Res
   let command=json!({"source":source_id,"destination":destination_id,"busid":"2-3"});
   case.status("POST","/api/usb/forwards",&other_cookie,command.clone(),StatusCode::CONFLICT).await?;
   let mut cross=command.clone();cross["destination"]=foreign_id.clone().into();case.status("POST","/api/usb/forwards",&cookie,cross,StatusCode::CONFLICT).await?;
+  let mut self_forward=command.clone();self_forward["destination"]=source_id.to_ascii_uppercase().into();case.status("POST","/api/usb/forwards",&cookie,self_forward,StatusCode::BAD_REQUEST).await?;
   let created=case.status("POST","/api/usb/forwards",&cookie,command.clone(),StatusCode::OK).await?;let id=created["forward"]["id"].as_str().unwrap();
   ensure!(created["forward"]["persistent"]==true);case.status("POST","/api/usb/forwards",&cookie,command.clone(),StatusCode::CONFLICT).await?;
   let ready=case.status("POST","/api/usb/client/report","",report.clone(),StatusCode::OK).await?;ensure!(ready["forwards"][0]["id"]==id,"database fields must not break typed forwarding contracts");

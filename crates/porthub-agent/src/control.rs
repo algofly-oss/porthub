@@ -135,6 +135,9 @@ impl Control {
         control.private_peer_id = Some(profile.peer_id.clone());
         Ok(control)
     }
+    pub(crate) fn direct_interface_allowed(&self,name:&str,source:std::net::IpAddr)->bool {
+        self.outbound_settings.interface.as_deref().is_none_or(|selected|selected==name)&&self.outbound_settings.source.is_none_or(|selected|selected==source)
+    }
     pub fn profile(&self) -> &Profile {
         &self.profile
     }

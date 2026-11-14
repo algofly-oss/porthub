@@ -1,3 +1,4 @@
+const {chooseDropdown}=require('./search-dropdown.cjs');
 const assert=require('node:assert/strict');
 const {launchBrowser}=require('./browser.cjs');
 (async()=>{
@@ -29,7 +30,7 @@ const {launchBrowser}=require('./browser.cjs');
   await dialog.getByRole('button',{name:'Copy bootstrap command',exact:true}).click();
   assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),bootstrapCommand(bootstrap,'windows'));
   for(const shell of windowsShells) {
-   await dialog.getByRole('combobox',{name:'Windows shell',exact:true}).selectOption(shell.id);
+   await chooseDropdown(dialog.getByLabel('Windows shell',{exact:true}),shell.label);
    await dialog.getByText(bootstrapCommand(bootstrap,'windows',shell.id),{exact:true}).waitFor();
    await dialog.getByRole('button',{name:'Copy bootstrap command',exact:true}).click();
    assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),bootstrapCommand(bootstrap,'windows',shell.id));

@@ -1,3 +1,4 @@
+const {chooseDropdown}=require('./search-dropdown.cjs');
 const assert=require('node:assert/strict');
 const {chromium}=require('playwright');
 const fs=require('node:fs/promises'),os=require('node:os'),path=require('node:path'),{spawn,execFile}=require('node:child_process'),{promisify}=require('node:util');
@@ -131,7 +132,7 @@ assert(base&&cookie,'Isolated server and test session are required');
     assert.deepEqual(await fs.readFile(path.join(folder,'ENV-1.03.xlsx')),source,'Original XLSX filename and bytes survive '+tool);
   }
   await page.getByRole('group',{name:'Download tool',exact:true}).getByRole('button',{name:'cURL',exact:true}).click();
-  await page.getByLabel('Connections',{exact:true}).selectOption('4');
+  await chooseDropdown(page.getByLabel('Connections',{exact:true}),'4 · Parallel (Bash)');
   await page.getByRole('button',{name:'Copy parallel download with curl command'}).click();
   const autoParallelFolder=path.join(transferFolder,'parallel-auto');await fs.mkdir(autoParallelFolder);
   await execute('bash',['-c',await page.evaluate(()=>window.copiedCommands.at(-1))],{cwd:autoParallelFolder,timeout:30000});
@@ -143,7 +144,7 @@ assert(base&&cookie,'Isolated server and test session are required');
   assert.deepEqual(await fs.readFile(output),source,'Copied aria2 command downloads the exact original file');
   await fs.rm(output);
   await page.getByRole('group',{name:'Download tool',exact:true}).getByRole('button',{name:'cURL',exact:true}).click();
-  await page.getByLabel('Connections',{exact:true}).selectOption('4');
+  await chooseDropdown(page.getByLabel('Connections',{exact:true}),'4 · Parallel (Bash)');
   await page.getByRole('button',{name:'Copy parallel download with curl command'}).click();
   const parallel=await page.evaluate(()=>window.copiedCommands.at(-1));
   await execute('bash',['-c',parallel],{timeout:30000});

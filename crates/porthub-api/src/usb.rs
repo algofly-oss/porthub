@@ -161,6 +161,9 @@ async fn make(
     persistent: bool,
     requested: Option<&str>,
 ) -> ApiResult<Value> {
+    let mut body = body;
+    body.source = oid(&body.source)?.to_hex();
+    body.destination = oid(&body.destination)?.to_hex();
     machine(app, owner, &body.source).await?;
     machine(app, owner, &body.destination).await?;
     if body.source == body.destination || !porthub_components::usb::valid_busid(&body.busid) {
@@ -208,7 +211,18 @@ async fn make(
                 .build(),
         )
         .await?;
-    let key = format!("{}:{}", body.source, body.busid);
+    let identity = if device.serial.is_empty() {
+        device.busid.clone()
+    } else {
+        use sha2::{Digest, Sha256};
+        format!(
+            "{:x}",
+            Sha256::digest(
+                format!("{}:{}:{}", device.vendor, device.product, device.serial).as_bytes()
+            )
+        )
+    };
+    let key = format!("{}:{}", body.source, identity);
     let forward = Forward {
         id: id.clone(),
         source: body.source,
@@ -315,7 +329,10 @@ struct Action {
     #[serde(default)]
     busid: String,
 }
-async fn action(State(app): State<Arc<App>>, Json(body): Json<Action>) -> ApiResult<Json<Value>> {
+async fn action(
+    State(app): State<Arc<App>>,
+    Json(mut body): Json<Action>,
+) -> ApiResult<Json<Value>> {
     let m = machine_client::authenticate(&app, &body.machine_id, &body.token).await?;
     let owner = m.get_object_id("user_id").map_err(|_| unavailable())?;
     machine(&app, owner, &body.machine_id).await?;
@@ -325,6 +342,9 @@ async fn action(State(app): State<Arc<App>>, Json(body): Json<Action>) -> ApiRes
         ));
     }
     if body.action == "create" {
+        body.source = oid(&body.source)?.to_hex();
+        body.destination = oid(&body.destination)?.to_hex();
+        body.machine_id = oid(&body.machine_id)?.to_hex();
         if body.source != body.machine_id && body.destination != body.machine_id {
             return Err(unavailable());
         }

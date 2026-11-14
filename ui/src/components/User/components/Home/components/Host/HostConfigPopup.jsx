@@ -1,3 +1,4 @@
+import SearchDropdown from '@/components/ui/search-dropdown';
 import { useRouter } from "next/router";
 import useUrlTab from "@/shared/hooks/useUrlTab";
 import ClientLogViewer from "./ClientLogViewer";
@@ -2676,9 +2677,9 @@ export default function HostConfigPopup({
                               </div>
                               {setupOs === "windows" && <div className="space-y-2">
                                 <label className="block text-xs font-medium">Windows shell
-                                  <select aria-label="Windows shell" value={windowsShell} onChange={event => setWindowsShell(event.target.value)} className="mt-1 block w-full rounded-md border border-border bg-control px-2 py-2 text-sm">
+                                  <SearchDropdown aria-label="Windows shell" value={windowsShell} onChange={event => setWindowsShell(event.target.value)} className="mt-1 block w-full rounded-md border border-border bg-control px-2 py-2 text-sm">
                                     {windowsShells.map(shell => <option key={shell.id} value={shell.id}>{shell.label}</option>)}
-                                  </select>
+                                  </SearchDropdown>
                                 </label>
                                 <p className="text-xs text-muted-foreground">Paste into the selected shell, including Windows Terminal tabs. Approve the Windows administrator prompt if requested. For WSL, select Linux.</p>
                                 <div className="flex flex-wrap gap-3 text-xs">{windowsInstallerDownloads(bootstrapUrl).map(item => <a key={item.label} href={item.url} download className="text-primary underline">{item.label}</a>)}</div>

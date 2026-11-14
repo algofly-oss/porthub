@@ -1,3 +1,4 @@
+import SearchDropdown from '@/components/ui/search-dropdown';
 import { useMemo, useState } from "react";
 import { useRouter } from "next/router";
 import { IconTerminal2, IconPlayerPause, IconPlayerPlay } from "@tabler/icons-react";
@@ -27,7 +28,7 @@ export default function TerminalTraffic({ active, refresh }) {
       <div><h2 className="flex items-center gap-2 text-base font-semibold"><IconTerminal2 size={18} className="text-muted-foreground" />Terminal traffic</h2><p className="mt-1 text-xs text-muted-foreground">Your terminal hosts · separate from public port traffic</p></div>
       <div className="flex w-full flex-wrap gap-2 sm:w-auto">
         <InventorySelect kind="machines" label="Terminal traffic machine" className="min-w-0 flex-1 basis-full sm:w-48 sm:flex-none sm:basis-auto" value={machine} onChange={value => update("terminal_machine", value)} extraOptions={ALL_MACHINES} />
-        <label className="sr-only" htmlFor="terminal-traffic-range">Terminal traffic range</label><select id="terminal-traffic-range" value={range} onChange={event => update("terminal_range", event.target.value)} className="h-11 min-w-0 flex-1 rounded-lg border-0 bg-control px-3 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary sm:h-10 sm:flex-none">{Object.keys(terminalRanges).map(value => <option key={value} value={value}>{value}</option>)}</select>
+        <label className="sr-only" htmlFor="terminal-traffic-range">Terminal traffic range</label><SearchDropdown id="terminal-traffic-range" value={range} onChange={event => update("terminal_range", event.target.value)} className="h-11 min-w-0 flex-1 rounded-lg border-0 bg-control px-3 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary sm:h-10 sm:flex-none">{Object.keys(terminalRanges).map(value => <option key={value} value={value}>{value}</option>)}</SearchDropdown>
         <Button variant="secondary" size="icon" aria-label={paused ? "Resume terminal measurements" : "Pause terminal measurements"} onClick={() => setPaused(value => !value)}>{paused ? <IconPlayerPlay size={17} /> : <IconPlayerPause size={17} />}</Button>
       </div>
     </div>

@@ -238,3 +238,12 @@ html:not([data-keyboard-navigation]) :is([role="checkbox"], input[type="checkbox
 .board-preview { background-color: #fff; }
 .dark .board-preview { background-color: #121212; }
 .dark .board-preview img { filter: invert(93%) hue-rotate(180deg); }
+
+/* Keep the keyboard within thumb reach on a phone held sideways. */
+@media (pointer: coarse) and (orientation: landscape) and (max-height: 599px) and (min-width: 768px) {
+  .workspace[data-keyboard-active="true"] .workspace-sidebar { width:64px !important; padding-left:8px !important; padding-right:8px !important; }
+  .workspace[data-keyboard-active="true"] .workspace-sidebar > button { display:none !important; }
+  .workspace[data-keyboard-active="true"] .workspace-sidebar .nav-item { justify-content:center; padding-left:0; padding-right:0; }
+  .workspace[data-keyboard-active="true"] .workspace-sidebar .nav-item span { display:none; }
+  .workspace[data-keyboard-active="true"] .workspace-body { margin-left:64px !important; }
+}

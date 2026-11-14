@@ -91,7 +91,7 @@ export default function UserHome() {
 
   return (
     <WorkspaceCacheProvider key={`${user?.username || "anonymous"}:${router.query.demo === "1"}`}>
-    <div className="workspace flex flex-col-reverse md:flex-row">
+    <div className="workspace flex flex-col-reverse md:flex-row" data-keyboard-active={tab === "VKeyboard"}>
       <a href="#workspace-content" className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-lg focus:bg-blue-600 focus:p-3 focus:text-white">Skip to content</a>
       <aside
         aria-label="Main navigation"

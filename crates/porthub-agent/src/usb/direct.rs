@@ -17,7 +17,7 @@ pub(super) struct Candidates {
     addresses: Vec<SocketAddr>,
 }
 impl Candidates {
-    pub async fn gather() -> Result<Self> {
+    pub async fn gather(control: Option<&crate::control::Control>) -> Result<Self> {
         let mut ips = Vec::new();
         for interface in getifaddrs::getifaddrs()? {
             if !interface.flags.contains(getifaddrs::InterfaceFlags::UP)
@@ -29,6 +29,12 @@ impl Candidates {
             }
 
             if let Some(IpAddr::V4(ip)) = interface.address.ip_addr() {
+                if control
+                    .is_some_and(|c| !c.direct_interface_allowed(&interface.name, IpAddr::V4(ip)))
+                {
+                    continue;
+                }
+
                 if (ip.is_private()
                     || ip.is_loopback()
                     || ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1]))
@@ -70,7 +76,14 @@ impl Candidates {
                 let packets = packets.clone();
                 readers.spawn(async move {
                     let mut bytes = vec![0; 65536];
-                    while let Ok((n, remote)) = socket.recv_from(&mut bytes).await {
+                    loop {
+                        let (n, remote) = match socket.recv_from(&mut bytes).await {
+                            Ok(packet) => packet,
+                            Err(_) => {
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                                continue;
+                            }
+                        };
                         if packets
                             .send((socket.local_addr()?, remote, bytes[..n].to_vec()))
                             .await
@@ -90,7 +103,8 @@ impl Candidates {
     while let Some(event)=peer.event()?{match event{Event::Ready=>{if let Some(ready)=ready.take(){let _=ready.send(());}},Event::Closed=>anyhow::bail!("Direct USB connection closed")}}
     while let Some(bytes)=peer.read()?{tx.send(bytes).await.context("USB consumer stopped")?;}
     if let Some(bytes)=pending.as_ref(){if ready.is_none()&&peer.can_send(bytes.len())?{peer.send(Instant::now(),bytes)?;pending=None;}}
-    while let Some((local,remote,bytes))=peer.datagram_from(){if let Some(socket)=self.sockets.iter().find(|s|s.local_addr().ok()==Some(local)){socket.send_to(&bytes,remote).await?;}}
+    while let Some((local,remote,bytes))=peer.datagram_from(){if let Some(socket)=self.sockets.iter().find(|s|s.local_addr().ok()==Some(local)){if local.ip().is_loopback()!=remote.ip().is_loopback(){continue;}
+      if let Err(error)=socket.send_to(&bytes,remote).await{tracing::trace!(%local,%remote,%error,"USB ICE candidate unavailable");}}}
     tokio::select!{
      bytes=outgoing.recv(),if pending.is_none()=>{pending=Some(bytes.context("USB sender stopped")?);},
      packet=received.recv()=>{let(local,remote,bytes)=packet.context("Direct sockets stopped")?;peer.receive(Instant::now(),local,remote,&bytes)?;},
@@ -115,6 +129,11 @@ pub(super) struct Direct {
     pub connected: Option<oneshot::Receiver<()>>,
     task: tokio::task::JoinHandle<Result<()>>,
 }
+impl Direct {
+    pub async fn stopped(&mut self) -> Result<()> {
+        (&mut self.task).await?
+    }
+}
 impl Drop for Direct {
     fn drop(&mut self) {
         self.task.abort();
@@ -126,8 +145,8 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn authenticated_direct_usb_stream_is_ordered_and_backpressured() -> Result<()> {
-        let a = Candidates::gather().await?;
-        let b = Candidates::gather().await?;
+        let a = Candidates::gather(None).await?;
+        let b = Candidates::gather(None).await?;
         let (mut ap, offer) = a.offer()?;
         let (bp, answer) = b.answer(&offer)?;
         ap.accept_answer(Instant::now(), &answer)?;

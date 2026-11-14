@@ -181,7 +181,10 @@ pub(super) fn recover(profile: &Path) {
     }
 }
 fn restore(device: &Device) {
-    let Some(current) = inventory().into_iter().find(|d| d.same_device(device)) else {
+    let Some(current) = inventory()
+        .into_iter()
+        .find(|d| d.busid == device.busid && d.same_device(device))
+    else {
         return;
     };
     let path = Path::new("/sys/bus/usb/devices").join(&current.busid);

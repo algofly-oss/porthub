@@ -1,3 +1,4 @@
+import SearchDropdown from '@/components/ui/search-dropdown';
 import { useEffect, useState } from "react";
 import { IconArrowUpRight, IconArrowDownLeft } from "@tabler/icons-react";
 import Command from "./Command";
@@ -85,7 +86,7 @@ export default function Transfers({ active = true }) {
           <div className="mt-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 text-xs text-muted-foreground">
             <p>{sending ? "Copy the command, run it in Bash, then share the printed link." : tool === "aria2" ? "Up to 8 connections. Requires aria2." : tool === "wget" ? "Resumes an interrupted download while the sender stays online." : connections === "4" ? "Up to 4 connections. Run the full script in Bash." : "Run this on the machine receiving the file."}</p>
             {!sending && tool === "curl" && <label className="flex items-center gap-2" htmlFor="transfer-connections">Connections
-              <select id="transfer-connections" aria-label="Connections" value={connections} onChange={event => setConnections(event.target.value)} className="h-11 rounded-md border border-border bg-background px-2 text-xs text-foreground"><option value="1">1 · Standard</option><option value="4">4 · Parallel (Bash)</option></select>
+              <SearchDropdown id="transfer-connections" aria-label="Connections" value={connections} onChange={event => setConnections(event.target.value)} className="h-11 rounded-md border border-border bg-background px-2 text-xs text-foreground"><option value="1">1 · Standard</option><option value="4">4 · Parallel (Bash)</option></SearchDropdown>
             </label>}
           </div>
           {sending && <p className="mt-2 text-xs text-muted-foreground">Keep the sender running and the file unchanged. Ctrl+C stops sharing.</p>}

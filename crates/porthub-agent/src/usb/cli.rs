@@ -80,6 +80,8 @@ pub async fn run(args: Args, cancel: CancellationToken) -> Result<()> {
                     "Use the registered machine ID shown in the host popup"
                 );
             }
+            let source = source.to_ascii_lowercase();
+            let destination = destination.to_ascii_lowercase();
             ensure!(source != destination, "Choose two different machines");
             crate::mapping_jobs::start(
                 crate::mapping_jobs::Spec::Usb {

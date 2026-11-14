@@ -1,3 +1,4 @@
+const {chooseDropdown}=require('./search-dropdown.cjs');
 const assert = require('node:assert/strict');
 const {launchBrowser} = require('./browser.cjs');
 (async () => {
@@ -26,7 +27,7 @@ const {launchBrowser} = require('./browser.cjs');
       await page.keyboard.press('ArrowRight');
       await page.waitForURL(/terminal_scope=pty/);
       await card.locator('#terminal-scope-pty[aria-selected="true"]').waitFor();
-      await card.getByLabel('Terminal traffic range',{exact:true}).selectOption('24h');
+      await chooseDropdown(card.getByLabel('Terminal traffic range',{exact:true}),'24h');
       await page.waitForURL(/terminal_range=24h/);
       const machine = card.getByLabel('Terminal traffic machine',{exact:true});
       await machine.click(); await machine.fill('atlas');

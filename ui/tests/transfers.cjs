@@ -1,3 +1,4 @@
+const {chooseDropdown}=require('./search-dropdown.cjs');
 const assert = require('node:assert/strict');
 const { chromium } = require('playwright');
 const { execFileSync } = require('node:child_process');
@@ -102,7 +103,7 @@ assert(base, 'An isolated local UI URL is required');
         if (tool === 'aria2') assert(command.includes("-d './folder'\\''s'"), 'aria2 receives an explicit output directory');
       }
       await panel.getByRole('button', { name: 'cURL', exact: true }).click();
-      await page.getByLabel('Connections', { exact: true }).selectOption('4');
+      await chooseDropdown(page.getByLabel('Connections', { exact: true }),'4 · Parallel (Bash)');
       await copy().click();
       execFileSync('bash', ['-n', '-c', await page.evaluate(() => window.copiedCommands.at(-1))]);
       assert.equal(await page.locator('pre').count(), 1, 'Parallel mode replaces the command');
