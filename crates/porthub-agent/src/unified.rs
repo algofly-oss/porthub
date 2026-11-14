@@ -145,7 +145,7 @@ impl Controller {
             }
         }
         let selected = configuration
-            .filter(|config| config.enabled)
+            .filter(|config| config.enabled && crate::features::enabled(public_path,crate::features::Feature::PrivateNetwork))
             .map(|config| config.private_profile);
         let (configuration, receiver) = watch::channel(selected);
         let cancel = CancellationToken::new();
@@ -158,11 +158,13 @@ impl Controller {
         let updates = configuration.clone();
         let task = tokio::spawn(async move {
             let _keepalive = changes;
+            let mut policy=crate::features::subscribe(&path);
             let mut fallback = tokio::time::interval(Duration::from_secs(60));
             fallback.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
                     _ = stop.cancelled() => break,
+                    _ = policy.changed() => {},
                     event = changed.recv() => {
                         if event == Some(true) { watcher = None; }
                         if event.is_none() { break; }
@@ -179,7 +181,7 @@ impl Controller {
                             }
                         }
                         let selected = value
-                            .filter(|value| value.enabled)
+                            .filter(|value| value.enabled && crate::features::enabled(&path,crate::features::Feature::PrivateNetwork))
                             .map(|value| value.private_profile);
                         updates.send_if_modified(|current| {
                             if *current == selected {

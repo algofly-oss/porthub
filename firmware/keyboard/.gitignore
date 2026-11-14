@@ -1,0 +1,7 @@
+build/
+dist/
+managed_components/
+sdkconfig
+sdkconfig.old
+# Written by every build (with the chip in it); the versions are pinned in main/idf_component.yml.
+dependencies.lock

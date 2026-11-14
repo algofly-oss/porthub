@@ -47,6 +47,21 @@ Production keeps read-only roots and excludes build toolchains and source trees.
 The default images are `porthub:core`, `porthub:edge` and `porthub:firewall`,
 with the release version recorded in image labels.
 
+## VKeyboard
+
+Open **VKeyboard** in the existing portal to type, use a touchpad, update a
+client's clipboard, paste arbitrary text, or dictate. Desktop input is an
+independent module of the existing Rust agent; a local `porthub keyboard disable`
+always blocks server control. `porthub features` also controls other local
+capabilities, including automatic updates. The in-tab model library downloads
+verified Handy models, selects CPU/GPU, and unloads speech models when idle.
+Browser USB flashing configures ESP32/ESP32-C3 Bluetooth keyboard/mouse boards.
+No extra runtime containers are required. See [VKeyboard](docs/vkeyboard.md).
+
+
+Machine health: live resource rankings and CPU/GPU/RAM/disk history are available
+in the dashboard and host Resources tab. See [machine metrics](docs/machine-metrics.md).
+
 ## Collaborative boards
 
 The Boards list includes small clickable previews and searches board names and written canvas text (excluding deleted elements). Preview images require the same access as the board; text inside uploaded images is not OCR-indexed.

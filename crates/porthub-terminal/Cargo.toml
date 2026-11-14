@@ -7,7 +7,8 @@ publish.workspace = true
 [features]
 default = ["hosting"]
 hosting = ["dep:portable-pty", "dep:flate2", "dep:tar", "dep:tempfile"]
-direct = ["hosting", "dep:rtc", "dep:bytes", "dep:porthub-mesh", "dep:socket2"]
+data-channel = ["dep:rtc", "dep:bytes"]
+direct = ["hosting", "data-channel", "dep:porthub-mesh", "dep:socket2"]
 viewer-history = ["dep:unicode-width", "dep:unicode-segmentation"]
 ssh = ["dep:russh", "dep:rand10", "viewer-history"]
 

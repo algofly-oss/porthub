@@ -1078,6 +1078,7 @@ async fn action_locked(layout: &Layout, source: &Path, action: Action, manager: 
                 for suffix in [
                     ".config.json",
                     ".local-access.json",
+                    ".client-features.json",
                     ".status.json",
                     ".update-attempt.json",
                     ".update-commit.json",

@@ -18,6 +18,7 @@ on:
       - 'crates/**'
       - 'vendor/**'
       - 'ui/**'
+      - 'firmware/**'
       - 'scripts/**'
       - 'deploy/**'
       - 'Dockerfile'

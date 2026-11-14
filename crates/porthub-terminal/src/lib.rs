@@ -21,7 +21,7 @@ pub mod history;
 #[cfg(all(unix,feature="hosting"))]
 pub mod owner_view;
 
-#[cfg(feature = "direct")]
+#[cfg(feature = "data-channel")]
 pub mod direct;
 
 pub mod delivery;

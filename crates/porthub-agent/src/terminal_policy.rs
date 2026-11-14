@@ -10,10 +10,10 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
 pub(crate) fn direct_allowed(path: &Path, public: &crate::profile::Profile) -> bool {
-    checked(path, public, false).unwrap_or(false)
+    crate::features::enabled(path,crate::features::Feature::DirectConnections) && checked(path, public, false).unwrap_or(false)
 }
 pub(crate) fn guest_allowed(path: &Path, public: &crate::profile::Profile) -> bool {
-    checked(path, public, true).unwrap_or(false)
+    crate::features::enabled(path,crate::features::Feature::Terminal) && checked(path, public, true).unwrap_or(false)
 }
 fn checked(path: &Path, public: &crate::profile::Profile, require_pair: bool) -> Result<bool> {
     let Some(module) = crate::unified::load(path, public)? else {

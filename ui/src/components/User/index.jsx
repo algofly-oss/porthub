@@ -7,6 +7,8 @@ import Home from "./components/Home";
 import HostedImages from "./components/HostedImages";
 import Boards from "./components/Boards";
 import Transfers from "./components/Transfers";
+import dynamic from "next/dynamic";
+const VKeyboard = dynamic(() => import("./components/VKeyboard"), { ssr: false });
 import Proxy from "./components/Proxy";
 import Settings from "./components/Settings";
 import PlatformOverview from "./components/PlatformOverview";
@@ -73,8 +75,10 @@ export default function UserHome() {
     }
   };
   const isAdmin = user?.role === "admin";
-  const views = { transfers: "Transfers", boards: "Boards", images: "Images", dashboard: "Dashboard", machines: "Home", access: "Access", proxies: "Proxy", traffic: "Traffic", settings: "Settings", platform: "Platform" };
+  const views = { keyboard: "VKeyboard", transfers: "Transfers", boards: "Boards", images: "Images", dashboard: "Dashboard", machines: "Home", access: "Access", proxies: "Proxy", traffic: "Traffic", settings: "Settings", platform: "Platform" };
   const tab = views[router.query.view] || "Dashboard";
+  const [keyboardVisited,setKeyboardVisited]=useState(false);
+  useEffect(()=>{if(tab === "VKeyboard")setKeyboardVisited(true);},[tab]);
   const setTab = (nextTab) => {
     const view = Object.keys(views).find(key => views[key] === nextTab) || "machines";
     router.push({ pathname: "/home", query: { ...(router.query.demo === "1" ? { demo: "1" } : {}), view } }, undefined, { shallow: true, scroll: false });
@@ -127,6 +131,7 @@ export default function UserHome() {
         <div hidden={tab !== "Traffic"} aria-hidden={tab !== "Traffic"} className="h-full min-h-0"><Traffic active={tab === "Traffic"} /></div>
         <div hidden={tab !== "Transfers"} aria-hidden={tab !== "Transfers"} className="h-full min-h-0">{demo?<div className="p-6 text-sm text-muted-foreground"><Link href="/home?view=transfers" className="text-primary underline">Open your workspace</Link> to view transfer commands.</div>:<Transfers active={tab === "Transfers"} />}</div>
         <div hidden={tab !== "Boards"} aria-hidden={tab !== "Boards"} className="h-full min-h-0">{demo?<div className="p-6 text-sm text-muted-foreground"><Link href="/home?view=boards" className="text-primary underline">Open your workspace</Link> to create and share saved boards.</div>:<Boards active={tab === "Boards"} />}</div>
+        <div hidden={tab !== "VKeyboard"} aria-hidden={tab !== "VKeyboard"} className="h-full min-h-0">{!demo&&(tab === "VKeyboard"||keyboardVisited)&&<VKeyboard active={tab === "VKeyboard"}/>}</div>
         <div hidden={tab !== "Images"} aria-hidden={tab !== "Images"} className="h-full min-h-0"><HostedImages active={tab === "Images"} /></div>
         <div hidden={tab !== "Settings"} aria-hidden={tab !== "Settings"} className="h-full min-h-0"><Settings active={tab === "Settings"} /></div>
         {isAdmin && <div hidden={tab !== "Platform"} aria-hidden={tab !== "Platform"} className="h-full min-h-0"><PlatformOverview active={tab === "Platform"} /></div>}

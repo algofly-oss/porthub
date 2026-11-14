@@ -237,6 +237,11 @@ impl Session {
                     .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)),
             "invalid configuration version"
         );
+        if !crate::features::enabled(path,crate::features::Feature::PublicForwarding) {
+            self.stop().await;
+            self.version=version;
+            return Ok(());
+        }
         if self.version == version && self.client.is_some() {
             return self.refresh_source().await;
         }
@@ -434,6 +439,7 @@ pub async fn run_with_logs(
     let profile = Profile::load(&path)?;
     let _lease = Lease::acquire(&path)?;
     let control = std::sync::Arc::new(Control::new(profile.clone())?);
+    let _metrics = crate::metrics::start(path.clone(), control.clone(), cancel.clone());
     #[cfg(any(unix, windows))]
     let exposure_broker = crate::exposure_broker::start(&path, control.clone(), cancel.clone())
         .unwrap_or_else(|_| { tracing::warn!("local exposure control unavailable; forwarding remains active"); None });
@@ -472,9 +478,11 @@ pub async fn run_with_logs(
                 control.clone(),
                 profile.clone(),
                 layout,
+                path.clone(),
                 private_install_cancel.clone(),
             ))
         });
+    let mut client_features=crate::features::subscribe(&path);
     let mut monitor = crate::routes::Monitor::new(options.heartbeat, options.probe_timeout);
     let mut _component_maintenance = None;
     let mut components_started = false;
@@ -485,7 +493,9 @@ pub async fn run_with_logs(
         if cancel.is_cancelled() {
             break;
         }
-        let initial = session.client.is_none() || tokio::time::Instant::now() >= next_heartbeat;
+        let initial = (session.client.is_none()
+            && crate::features::enabled(&path, crate::features::Feature::PublicForwarding))
+            || tokio::time::Instant::now() >= next_heartbeat;
         let started = tokio::time::Instant::now();
         monitor.set(session.revision, session.route_snapshot());
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -519,6 +529,15 @@ pub async fn run_with_logs(
                 if !_alive {updater=None;tracing::warn!("automatic update worker stopped");}
                 next_heartbeat=tokio::time::Instant::now();continue;
             },
+            changed=client_features.changed()=>{
+                if changed.is_err(){break;}
+                let policy=client_features.borrow_and_update().clone();
+                if !policy.enabled(crate::features::Feature::AutoUpdate){_component_maintenance=None;components_started=false;}
+                if !policy.enabled(crate::features::Feature::PublicForwarding){session.stop().await;}
+                #[cfg(any(target_os="linux",target_os="macos"))]
+                if let Some(updater)=&mut updater {if !policy.enabled(crate::features::Feature::AutoUpdate){updater.request(None);}}
+                next_heartbeat=tokio::time::Instant::now();continue;
+            },
             update=monitor.next()=>{
                 let update=update.context("background route worker stopped")?;
                 route_update(&path, &mut session, update, status_name).await?;
@@ -546,14 +565,14 @@ pub async fn run_with_logs(
                         failure_delay = options.retry;
                         status_name = "running";
                         state(&path, &session, status_name)?;
-                        if !components_started {
+                        if !components_started && crate::features::enabled(&path,crate::features::Feature::AutoUpdate) {
                             components_started = true;
                             _component_maintenance = crate::components::background(&profile.server, &cancel).map(Some)
                                 .unwrap_or_else(|_| { tracing::warn!("optional component maintenance unavailable; forwarding remains active"); None });
                         }
                         #[cfg(any(target_os = "linux", target_os = "macos"))]
                         if let Some(updater) = &mut updater {
-                            updater.request(session.pending_update.clone());
+                            updater.request(if crate::features::enabled(&path,crate::features::Feature::AutoUpdate){session.pending_update.clone()}else{None});
                         }
                     }
                     Err(_) => {

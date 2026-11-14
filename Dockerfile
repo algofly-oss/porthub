@@ -5,7 +5,7 @@ ARG PORTHUB_CORE_ARTIFACT_SOURCE=${PORTHUB_SERVER_ARTIFACT_SOURCE}
 ARG PORTHUB_UI_ARTIFACT_SOURCE=ui-build
 FROM rust:1.99.1-slim-bookworm AS rust-build
 WORKDIR /src
-RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev pkg-config && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends gcc g++ make cmake libc6-dev pkg-config && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
 COPY vendor/ vendor/
@@ -112,7 +112,7 @@ LABEL io.porthub.agent-distribution=github-cache-v1
 FROM core-runtime AS dev-core
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      gcc libc6-dev pkg-config libssl-dev libcurl4-openssl-dev && \
+      gcc g++ make cmake libc6-dev pkg-config libssl-dev libcurl4-openssl-dev && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=rust-build /src /src
 COPY --from=rust-build /usr/local/cargo /usr/local/cargo
@@ -140,7 +140,7 @@ ENTRYPOINT ["porthub-edge", "--config", "/run/porthub-config/gateway.toml"]
 FROM prod-edge AS dev-edge
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      gcc libc6-dev pkg-config libssl-dev libcurl4-openssl-dev && \
+      gcc g++ make cmake libc6-dev pkg-config libssl-dev libcurl4-openssl-dev && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=rust-build /src /src
 COPY --from=rust-build /usr/local/cargo /usr/local/cargo
@@ -164,7 +164,7 @@ ENTRYPOINT ["porthub-firewall"]
 FROM prod-firewall AS dev-firewall
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      gcc libc6-dev pkg-config libssl-dev libcurl4-openssl-dev && \
+      gcc g++ make cmake libc6-dev pkg-config libssl-dev libcurl4-openssl-dev && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=rust-build /src /src
 COPY --from=rust-build /usr/local/cargo /usr/local/cargo

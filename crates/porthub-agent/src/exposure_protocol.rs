@@ -83,6 +83,43 @@ pub(crate) async fn serve_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
     let mut reader = BufReader::new(stream);
     let bytes = tokio::time::timeout(Duration::from_secs(5), line(&mut reader)).await??;
     let message: serde_json::Value = serde_json::from_slice(&bytes)?;
+    if message.get("operation").and_then(serde_json::Value::as_str) == Some("client_features") {
+        return crate::features::serve(reader, &profile, message).await;
+    }
+    let operation=message.get("operation").and_then(serde_json::Value::as_str);
+    let feature=match operation {
+        Some("keyboard_host")=>Some(crate::features::Feature::Keyboard),
+        Some("terminal_host")=>Some(crate::features::Feature::Terminal),
+        Some("image_upload")=>Some(crate::features::Feature::Images),
+        None=>Some(crate::features::Feature::Expose),
+        _=>None,
+    };
+    if let Some(feature)=feature {
+        let mut policy=crate::features::subscribe(&profile);
+        if !policy.borrow().enabled(feature) {
+            reader.get_mut().write_all(format!("{}\n",serde_json::json!({"type":"disabled","error":format!("{} disabled locally; use porthub features enable {}",feature.name(),feature.name())})).as_bytes()).await?;
+            return Ok(());
+        }
+        let child=cancel.child_token();let changed=child.clone();
+        let task=tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            loop {if policy.changed().await.is_err() || !policy.borrow().enabled(feature){changed.cancel();break;}}
+        }));
+        let result=tokio::select! {
+            _=child.cancelled()=>Ok(()),
+            result=dispatch(reader,control,child.clone(),profile,message)=>result,
+        };
+        child.cancel();drop(task);return result;
+    }
+    dispatch(reader,control,cancel,profile,message).await
+}
+async fn dispatch<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    reader: BufReader<S>, control: Arc<crate::control::Control>, cancel: CancellationToken,
+    profile:std::path::PathBuf,message:serde_json::Value,
+)->Result<()> {
+    let mut reader=reader;
+    if message.get("operation").and_then(serde_json::Value::as_str) == Some("keyboard_host") {
+        return crate::keyboard::serve(reader,control,&profile,cancel).await;
+    }
     if message.get("operation").and_then(serde_json::Value::as_str) == Some("agent_stats") {
         return crate::stats::serve(reader,&control,&profile,message,cancel).await;
     }

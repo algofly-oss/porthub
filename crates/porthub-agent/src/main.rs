@@ -182,6 +182,10 @@ struct HttpPublicOptions {
 enum Command {
     /// Upload the clipboard image and copy its public URL. Bind this to a desktop shortcut.
     Image(porthub_agent::images::Args),
+    /// Enable, disable or inspect client-owned capabilities. Defaults remain enabled.
+    Features(porthub_agent::features::Args),
+    /// Control whether this desktop accepts keyboard, mouse and clipboard input.
+    Keyboard(porthub_agent::keyboard::Args),
     /// Forward a reachable TCP port to this machine; no SSH or remote agent required.
     #[command(visible_alias = "bind")]
     Forward(porthub_agent::forward::Args),
@@ -1169,6 +1173,8 @@ async fn main() -> Result<()> {
         signal_cancel.cancel();
     });
     let result = match args.command {
+        Some(Command::Features(args)) => porthub_agent::features::run(args).await,
+        Some(Command::Keyboard(args)) => porthub_agent::keyboard::run(args,cancel.clone()).await,
         Some(Command::Image(args)) => porthub_agent::images::run(args).await,
         Some(Command::Enroll {
             server,

@@ -1,0 +1,8 @@
+# Build-time toolchain only. Runtime container count is unchanged.
+# Alpine provides a complete musl C++ runtime for the embedded speech engine;
+# musl-gcc alone on glibc hosts cannot build/link that runtime correctly.
+FROM rust:1.99.1-alpine3.22
+RUN apk add --no-cache build-base cmake linux-headers perl
+ENV CARGO_HOME=/cargo RUSTUP_HOME=/usr/local/rustup
+RUN rustup component add rustfmt clippy
+WORKDIR /src

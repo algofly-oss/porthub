@@ -1,0 +1,6 @@
+# Optional build-time CUDA toolchain; no additional runtime service.
+FROM rust:1.99.1-slim-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends gcc g++ make cmake libc6-dev pkg-config ca-certificates && rm -rf /var/lib/apt/lists/*
+ENV CARGO_HOME=/cargo RUSTUP_HOME=/usr/local/rustup CUDACXX=/usr/local/cuda/bin/nvcc
+RUN rustup component add rustfmt clippy
+WORKDIR /src

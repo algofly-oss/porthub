@@ -1,0 +1,2 @@
+# io.c drives the built-in USB serial port itself, so the console must not.
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y

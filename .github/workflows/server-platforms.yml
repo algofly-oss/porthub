@@ -22,6 +22,28 @@ on:
 permissions:
   contents: read
 jobs:
+  keyboard-firmware:
+    name: Build reusable browser HID firmware
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            firmware/keyboard/build
+            firmware/keyboard/managed_components
+          key: keyboard-idf-5.4.2-${{ hashFiles('firmware/keyboard/main/**', 'firmware/keyboard/sdkconfig*', 'firmware/keyboard/CMakeLists.txt') }}
+          restore-keys: keyboard-idf-5.4.2-
+      - name: Build both chips without adding a runtime service
+        run: python3 scripts/build-keyboard-firmware.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: porthub-keyboard-firmware
+          path: ui/public/keyboard-firmware/
+          if-no-files-found: error
+          retention-days: 3
   terminal-measurements:
     name: Verify terminal sharing and account measurements
     needs: [ui]
@@ -46,7 +68,10 @@ jobs:
         with:
           ref: ${{ inputs.revision || github.sha }}
       - name: Install pinned test toolchain
-        run: rustup toolchain install 1.99.1 --profile minimal
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake g++
       - uses: Swatinem/rust-cache@v2
         with:
           key: terminal-measurements
@@ -69,6 +94,10 @@ jobs:
           cargo test --locked -p porthub-api --test large_images -- --include-ignored
           cargo test --locked -p porthub-api --test boards --test file_relay --test pairdrop -- --include-ignored
           cargo test --locked -p porthub-api --lib file_relay::tests
+          cargo test --locked -p porthub-api --test keyboard --test machine_metrics -- --include-ignored
+          cargo test --locked -p porthub-agent --lib features::
+          cargo test --locked -p porthub-components --lib keyboard
+          cargo test --locked -p porthub-components --lib metrics
           cargo test --locked -p porthub-agent --lib image
           cargo test --locked -p porthub-agent --lib forward::tests
           cargo test --locked -p porthub-agent --bin porthub forward_defaults
@@ -93,7 +122,7 @@ jobs:
       - name: Install isolated browser and terminal build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bison ncurses-bin aria2
+          sudo apt-get install -y --no-install-recommends bison ncurses-bin aria2 cmake g++ xvfb
           npm install --prefix "$RUNNER_TEMP/terminal-browser-tools" --ignore-scripts --no-audit --no-fund playwright@1.64.1
           node "$RUNNER_TEMP/terminal-browser-tools/node_modules/playwright/cli.js" install --with-deps webkit
       - uses: actions/cache@v4
@@ -127,12 +156,19 @@ jobs:
           trap 'docker rm -f porthub-pairdrop-browser-test >/dev/null 2>&1 || true' EXIT
           for attempt in $(seq 1 30); do curl -fsS http://127.0.0.1:4319/config >/dev/null && break; sleep 1; done
           cargo test --locked -p porthub-api --test boards_browser -- --include-ignored --nocapture
+      - name: Verify native VKeyboard input and local revocation in a browser
+        env:
+          PORTHUB_TEST_MONGO_URI: mongodb://127.0.0.1:${{ job.services.mongo.ports['27017'] }}
+          NODE_PATH: ${{ runner.temp }}/terminal-browser-tools/node_modules
+          PORTHUB_TEST_BOARD_UI_ROOT: ${{ github.workspace }}/terminal-browser-assets/ui
+        run: cargo test --locked -p porthub-api --test keyboard_browser -- --include-ignored --nocapture
       - name: Verify real SSH, Chrome and WebKit guests over direct and fallback paths
         env:
           PORTHUB_TEST_MONGO_URI: mongodb://127.0.0.1:${{ job.services.mongo.ports['27017'] }}
           NODE_PATH: ${{ runner.temp }}/terminal-browser-tools/node_modules
         run: python3 scripts/test-terminal-browser-integration.py --ui-root terminal-browser-assets/ui
   ui:
+    needs: [keyboard-firmware]
     name: Build and test production browser assets
     runs-on: ubuntu-24.04
     env:
@@ -144,6 +180,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - uses: actions/download-artifact@v4
+        with:
+          name: porthub-keyboard-firmware
+          path: ui/public/keyboard-firmware
       - name: Enable pinned UI package manager
         run: corepack enable && corepack prepare yarn@1.22.22 --activate
       - uses: actions/cache@v4
@@ -189,12 +229,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.revision || github.sha }}
-      - name: Install pinned native static toolchain
-        run: |
-          rustup toolchain install 1.99.1 --profile minimal
-          rustup target add --toolchain 1.99.1 '${{ matrix.target }}'
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends musl-tools
       - uses: Swatinem/rust-cache@v2
         with:
           key: server-${{ matrix.target }}
@@ -203,12 +237,7 @@ jobs:
       - name: Build server roles without rebuilding agents
         run: |
           target='${{ matrix.target }}'
-          target_key="$(echo "$target" | tr '[:lower:]-' '[:upper:]_')"
-          cc_key="$(echo "$target" | tr '-' '_')"
-          export "CARGO_TARGET_${target_key}_LINKER=musl-gcc"
-          export "CC_${cc_key}=musl-gcc"
-          cargo build --locked --release -p porthub-api -p porthub-edge -p porthub-runtime -p porthub-firewall --target "$target" --timings
-          cargo test --locked -p porthub-edge --target "$target"
+          sh scripts/build-server-linux.sh "$target"
           mkdir -p server-artifacts
           for binary in porthub-api porthub-edge porthub-runtime porthub-firewall; do
             source="target/$target/release/$binary"

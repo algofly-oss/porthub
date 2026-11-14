@@ -18,3 +18,6 @@ volumes/
 /ui/public/excalidraw/
 
 /ui/.taste-skill/
+
+# Generated ESP32 release assets (packaged into the UI artifact).
+ui/public/keyboard-firmware/

@@ -77,3 +77,8 @@ pub mod image_shortcut;
 pub mod image_delivery;
 pub mod forward;
 pub mod mapping_jobs;
+
+pub mod keyboard;
+pub mod features;
+
+mod metrics;

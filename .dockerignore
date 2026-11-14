@@ -8,3 +8,7 @@ volumes
 **/.next
 **/.next-*
 ui/test-results
+
+firmware/**/build
+firmware/**/managed_components
+firmware/**/dist

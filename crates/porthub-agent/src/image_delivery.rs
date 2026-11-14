@@ -103,7 +103,7 @@ fn foreground() -> Result<String> {
     Ok(id)
 }
 #[cfg(target_os = "linux")]
-fn terminal_class(properties: &str) -> bool {
+pub(crate) fn terminal_class(properties: &str) -> bool {
     properties.split('\0').any(|class| {
         matches!(
             class.to_ascii_lowercase().as_str(),

@@ -1,0 +1,8 @@
+# Optional overlay: exposes NVIDIA hardware to the existing core only.
+# Use a core image built with the speech-cuda feature and its CUDA runtime libs.
+services:
+  core:
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility

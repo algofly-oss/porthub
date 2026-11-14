@@ -2,8 +2,9 @@
 //! the terminal gateway; this engine never grants a role or opens a shell.
 //! Kept behind `direct` while native joins and release gates are completed.
 pub use crate::delivery as replay;
+#[cfg(feature = "direct")]
 pub mod viewer;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "direct"))]
 pub mod host;
 
 use anyhow::{ensure, Context, Result};
@@ -39,6 +40,7 @@ pub enum Event {
 pub struct Peer {
     connection: RTCPeerConnection,
     channel: Option<RTCDataChannelId>,
+    label: String,
 }
 impl Peer {
     /// Accept an authenticated offer using candidates gathered by the caller.
@@ -51,6 +53,11 @@ impl Peer {
         candidates: &[SocketAddr],
         reflexive: &[(SocketAddr, SocketAddr)],
     ) -> Result<(Self, String)> {
+        Self::answer_named(now, offer, candidates, reflexive, LABEL)
+    }
+    /// Shared data-channel engine; authorization and lifetime belong to the caller.
+    pub fn answer_named(now: Instant, offer: &str, candidates: &[SocketAddr], reflexive: &[(SocketAddr, SocketAddr)], label: &str) -> Result<(Self, String)> {
+        ensure!(!label.is_empty() && label.len() <= 64, "invalid channel label");
         let offer = description(offer, RTCSdpType::Offer)?;
         ensure!(
             !candidates.is_empty() && candidates.len() + reflexive.len() <= 64,
@@ -71,6 +78,7 @@ impl Peer {
             Self {
                 connection,
                 channel: None,
+                label: label.to_owned(),
             },
             answer,
         ))
@@ -101,6 +109,7 @@ impl Peer {
             Self {
                 connection,
                 channel: None,
+                label: LABEL.to_owned(),
             },
             offer,
         ))
@@ -166,7 +175,7 @@ impl Peer {
                         .data_channel(id)
                         .context("terminal channel unavailable")?;
                     ensure!(
-                        channel.label() == LABEL
+                        channel.label() == self.label
                             && channel.ordered()
                             && channel.max_retransmits().is_none()
                             && channel.max_packet_life_time().is_none(),

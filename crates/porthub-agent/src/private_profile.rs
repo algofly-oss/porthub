@@ -189,14 +189,28 @@ pub(crate) async fn run_auto_install(
     control: std::sync::Arc<crate::control::Control>,
     public: crate::profile::Profile,
     layout: crate::service::Layout,
+    public_path: PathBuf,
     cancel: CancellationToken,
 ) {
     use std::time::Duration;
+    let mut policy = crate::features::subscribe(&public_path);
     loop {
         if cancel.is_cancelled() {
             return;
         }
-        let result = auto_install_once(&control, &public, &layout, &cancel).await;
+        if !policy.borrow().enabled(crate::features::Feature::PrivateNetwork) {
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                changed = policy.changed() => if changed.is_err() { return; },
+            }
+            continue;
+        }
+        let result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return,
+            changed = policy.changed() => { if changed.is_err() { return; } continue; },
+            result = auto_install_once(&control, &public, &layout, &cancel) => result,
+        };
         let delay = if result.is_ok() {
             Duration::from_secs(6 * 60 * 60)
         } else {
@@ -206,7 +220,8 @@ pub(crate) async fn run_auto_install(
         };
         tokio::select! {
             _ = cancel.cancelled() => return,
-            _ = tokio::time::sleep(delay) => {}
+            _ = tokio::time::sleep(delay) => {},
+            changed = policy.changed() => if changed.is_err() { return; },
         }
     }
 }

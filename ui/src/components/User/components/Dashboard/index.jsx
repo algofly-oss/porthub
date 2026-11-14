@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { PageHeader, EmptyState } from "@/components/ui/workspace";
 import useProxyActivity from "@/shared/hooks/useProxyActivity";
 import TerminalTraffic from "./TerminalTraffic";
+import { MachineRanking } from "../MachineMetrics";
 import ProxyActivity from "@/components/ui/proxy-activity";
 
 // Placeholder cards shaped like the dashboard so the layout does not jump.
@@ -60,6 +61,7 @@ export default function Dashboard({ active = true }) {
     <PageHeader title="Dashboard" actions={<div className="flex items-center gap-2"><span className="hidden items-center gap-1.5 text-xs text-muted-foreground sm:flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />{traffic.error ? "Traffic unavailable" : traffic.updated ? "Live workspace" : "Connecting…"}</span><Button variant="ghost" size="icon" aria-label="Refresh dashboard" onClick={()=>load()}><IconRefresh size={17} /></Button></div>} />
     {error && <p role="alert" className="mb-3 rounded-lg bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">{error}</p>}
     {loading ? <DashboardSkeleton /> : !machineTotal && !counts?.proxies ? <EmptyState icon={IconServer} title="Your workspace starts here" description="Enroll a machine to expose its ports, or create a standalone web proxy." action={<div className="flex flex-wrap justify-center gap-2"><Button onClick={()=>navigate("machines", {create:"1"})}><IconPlus size={16} />Enroll a Machine</Button><Button variant="secondary" onClick={()=>navigate("proxies", {create:"1"})}>Create a Proxy</Button></div>} /> : <div className="space-y-4 pb-1">
+      <MachineRanking active={active} onSelect={id=>navigate("machines",{machine:id,machineTab:"resources"})} />
       <div aria-label="Workspace overview" className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <OverviewCard label="Registered machines" value={machineTotal} detail={`${online} online · ${disabled} disabled`} onClick={()=>navigate("machines")} />
         <OverviewCard label="Needs attention" value={attention} detail={attention ? "Review connectivity and authentication" : "All enabled clients connected"} onClick={()=>navigate("machines",{status:"offline"})} tone={attention ? "text-amber-600 dark:text-amber-400" : "text-emerald-600 dark:text-emerald-400"} />

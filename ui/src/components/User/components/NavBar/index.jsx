@@ -1,5 +1,6 @@
 import {
   IconServer,
+  IconKeyboard,
   IconPhoto,
   IconLayoutBoard,
   IconArrowsLeftRight,
@@ -36,6 +37,7 @@ export default function UserNavBar({
     ["Images", "Hosted images", IconPhoto],
     ["Boards", "Boards", IconLayoutBoard],
     ...(!demo ? [["Transfers", "Transfers", IconArrowsLeftRight]] : []),
+    ...(!demo ? [["VKeyboard", "VKeyboard", IconKeyboard]] : []),
     ["Settings", "Settings", IconSettings],
     ...(isAdmin ? [["Platform", "Platform", IconShieldLock]] : []),
   ];

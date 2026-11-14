@@ -437,6 +437,11 @@ async fn install_published_mode(
     match install {
         Ok(spec) => {
             source.committed = true;
+            if let Some(cli)=&spec.cli {
+                if let Err(_)=crate::keyboard::install_desktop(cli,layout.user){
+                    tracing::warn!("Desktop VKeyboard startup registration unavailable; use porthub keyboard enable from your desktop session");
+                }
+            }
             Ok(spec)
         }
         Err(error) => {

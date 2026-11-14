@@ -494,3 +494,27 @@ async fn control_redirects_cannot_send_machine_credentials_to_an_unconfigured_en
     fallback_task.abort();
     Ok(())
 }
+
+#[tokio::test]
+async fn locally_disabled_forwarding_keeps_control_heartbeat_bounded_without_starting_routes() -> Result<()> {
+    let state = Arc::new(Control {
+        snapshot: Mutex::new(Snapshot { text: "no tunnel should be started".into(), version: "disabled-local".into(), disabled: false, deleted: false, machine: MACHINE.into() }),
+        syncs: AtomicUsize::new(0), acks: AtomicUsize::new(0),
+    });
+    let router = Router::new().route("/api/machines/client/sync", post(sync)).route("/api/machines/client/changes.toml", get(changes)).with_state(state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let server = format!("http://{}", listener.local_addr()?);
+    let api = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move { axum::serve(listener, router).await }));
+    let directory = common::private_dir()?; let path = directory.path().join("machine.json");
+    let profile: Profile = serde_json::from_value(json!({"server":server,"machine_id":MACHINE,"token":TOKEN,"allow_insecure_http_for_tests":true}))?;
+    profile.save_new(&path)?;
+    porthub_agent::profile::write_private(&porthub_agent::profile::sibling(&path,".client-features.json"), &serde_json::to_vec(&json!({"disabled":{"public-forwarding":true,"auto-update":true,"metrics":true,"private-network":true}}))?, false)?;
+    let cancel = CancellationToken::new(); let stopping = cancel.clone(); let selected = path.clone();
+    let agent = tokio::spawn(async move { runtime::run(selected, stopping, Options { heartbeat: Duration::from_secs(5), ..Default::default() }).await });
+    status(&path,"running").await?;
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    ensure!(state.syncs.load(Ordering::SeqCst)==1,"a disabled forwarding module must not busy-loop synchronization");
+    ensure!(runtime::status(&path)?.service_count==0);
+    cancel.cancel(); tokio::time::timeout(Duration::from_secs(3),agent).await???;
+    drop(api); Ok(())
+}

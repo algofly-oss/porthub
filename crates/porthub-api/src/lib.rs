@@ -20,6 +20,8 @@ pub mod gateway_origin;
 pub mod generated;
 pub mod http;
 pub mod hosted_images;
+pub mod keyboard;
+pub mod machine_metrics;
 pub mod image_rooms;
 pub mod image_storage;
 pub mod input;
@@ -55,6 +57,8 @@ use serde_json::json;
 use std::sync::Arc;
 
 pub struct App {
+    pub keyboard: keyboard::Hub,
+    pub machine_metrics_initialized: tokio::sync::OnceCell<()>,
     pub boards: boards::Hub,
     pub file_relay: file_relay::Hub,
     pub terminals: porthub_terminal::hub::Hub,
@@ -113,6 +117,8 @@ impl App {
             )
         };
         Self {
+            keyboard: Default::default(),
+            machine_metrics_initialized: Default::default(),
             boards: Default::default(),
             file_relay: Default::default(),
             terminals: Default::default(),

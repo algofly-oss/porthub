@@ -28,3 +28,7 @@ pub async fn foreground(executable: &std::path::Path, arguments: &[std::ffi::OsS
         .stderr(std::process::Stdio::inherit()).kill_on_drop(true).spawn()
         .map_err(anyhow::Error::from)).await
 }
+
+pub mod keyboard;
+
+pub mod metrics;
