@@ -48,7 +48,8 @@ struct Case {
     id: ObjectId,
 }
 impl Case {
-    async fn new() -> Result<Self> {
+    async fn new() -> Result<Self> {Self::with_client_version("native-release").await}
+    async fn with_client_version(client_version:&str) -> Result<Self> {
         let client = Client::with_uri_str(std::env::var("PORTHUB_TEST_MONGO_URI")?).await?;
         let db = client.database(&format!(
             "porthub_client_test_{}",
@@ -57,7 +58,7 @@ impl Case {
         let app = Arc::new(App::new(
             Config {
                 public_base_url: "https://hub.example.invalid".into(),
-                client_version: "native-release".into(),
+                client_version: client_version.into(),
                 long_poll_timeout: Duration::from_secs(2),
                 ..Config::default()
             },
@@ -546,4 +547,22 @@ async fn owner_update_request_wakes_an_idle_agent_without_changing_its_service_d
     );
     case.db.drop().await?;
     Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn newer_prerelease_supersedes_old_update_without_faking_a_commit() -> Result<()> {
+    let case=Case::with_client_version("1.11.13").await?;
+    let result:Result<()>=async{
+        case.db.collection::<Document>("machines").update_one(doc!{"_id":case.id},doc!{"$set":{"client_version":"1.11.15","client_update_request_id":"older-target-request","client_update_target_version":"1.11.13"}}).await?;
+        let(status,headers,_)=case.call("POST","/api/machines/client/sync",json!({"machine_id":case.id.to_hex(),"token":"machine-secret","client_version":"1.11.16-dev.2"})).await?;
+        ensure!(status==StatusCode::OK);
+        let row=case.db.collection::<Document>("machines").find_one(doc!{"_id":case.id}).await?.context("machine missing")?;
+        ensure!(row.get_str("client_version")?=="1.11.16-dev.2");
+        ensure!(row.get_str("client_update_superseded_request_id")?=="older-target-request");
+        ensure!(row.get_str("client_update_last_handled_request_id").unwrap_or("")!="older-target-request");
+        ensure!(!row.contains_key("client_updated_at"),"Supersession must not claim a committed install");
+        ensure!(headers["x-porthub-client-update-requested"]=="false");
+        ensure!(row.get_str("client_update_request_id")?=="");Ok(())
+    }.await;case.db.drop().await?;result
 }

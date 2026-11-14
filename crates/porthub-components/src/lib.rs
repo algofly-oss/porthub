@@ -34,3 +34,5 @@ pub mod keyboard;
 pub mod metrics;
 
 pub mod usb;
+
+pub mod release_version;

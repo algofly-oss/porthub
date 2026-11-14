@@ -224,6 +224,10 @@ async fn run(
             terminal = Some(request);
             continue;
         }
+        if !target_allowed(crate::VERSION,&request.target_version){
+            tracing::debug!("older or unversioned automatic update target ignored");
+            terminal=Some(request);continue;
+        }
         if upgrade::failed(&native.layout, &native.source, &request).unwrap_or(false) {
             tracing::warn!("requested native update rolled back; waiting for another request");
             terminal = Some(request);
@@ -306,4 +310,10 @@ async fn run(
         }
         tokio::select! {_=stop.cancelled()=>return,result=settings.changed()=>if result.is_err(){return;},_=tokio::time::sleep(Duration::from_secs(1))=>{}}
     }
+}
+
+fn target_allowed(current:&str,target:&str)->bool{matches!(porthub_components::release_version::compare(target,current),Some(std::cmp::Ordering::Equal|std::cmp::Ordering::Greater))}
+#[cfg(test)]mod version_tests{
+ use super::*;
+ #[test]fn automatic_updates_cannot_replace_a_newer_local_build(){assert!(!target_allowed("1.11.16-dev.1","1.11.13"));assert!(target_allowed("1.11.16-dev.1","1.11.16"));assert!(!target_allowed("1.11.16","1.11.16-dev.1"));assert!(target_allowed("1.11.16","1.11.16"));assert!(!target_allowed("custom-build","1.11.16"));assert!(!target_allowed("1.11.16","unknown"));}
 }

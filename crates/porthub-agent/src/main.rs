@@ -648,6 +648,9 @@ async fn update_command(options: UpdateOptions, cancel: &CancellationToken) -> R
         );
         return Ok(());
     }
+    if porthub_components::release_version::compare(&release.version,porthub_agent::VERSION)==Some(std::cmp::Ordering::Less){
+        println!("Installed agent {} is newer than published {}; no update applied",porthub_agent::VERSION,release.version);return Ok(());
+    }
     let staged = update::stage(&control, &release, &layout.releases, cancel).await?;
     staged.verify_executable(cancel).await?;
     let record = layout.state.join(format!(

@@ -31,6 +31,7 @@ pub(super) fn client_update_available(version: &str, latest: &str) -> bool {
         // they are native clients and can consume the gateway update headers.
         true
     } else {
+        if let Some(order)=porthub_components::release_version::compare(version,latest){return order==std::cmp::Ordering::Less;}
         match (numeric_version(version), numeric_version(latest)) {
             (Some(current), Some(target)) => current < target,
             _ => true,
@@ -60,7 +61,8 @@ fn should_replace_reported_version(current: &str, incoming: &str) -> bool {
     // Keep a release version if a stale legacy/hash build reports after it.
     // A numbered release can still replace it, including an intentional
     // downgrade, so the inventory reflects an actual release transition.
-    numeric_version(current).is_none() || numeric_version(incoming).is_some()
+    let numbered=|value:&str|numeric_version(value).is_some()||porthub_components::release_version::compare(value,value).is_some();
+    !numbered(current)||numbered(incoming)
 }
 
 pub async fn authenticate(app: &App, id: &str, token: &str) -> ApiResult<Document> {
@@ -578,7 +580,9 @@ async fn sync_inner(
     if !version.is_empty() {
         let request_id = store::string(machine, "client_update_request_id").trim();
         let target = store::string(machine, "client_update_target_version").trim();
-        if update_request_completed(version, target, request_id, handled, input.native_update_protocol) {
+        if !request_id.is_empty()&&porthub_components::release_version::compare(version,target)==Some(std::cmp::Ordering::Greater){
+            set.insert("client_update_superseded_request_id",request_id);set.insert("client_update_request_id","");set.insert("client_update_target_version","");
+        } else if update_request_completed(version, target, request_id, handled, input.native_update_protocol) {
             set.insert("client_update_last_handled_request_id", request_id);
             set.insert("client_update_target_version", "");
             set.insert("client_updated_at", now);
@@ -745,6 +749,9 @@ mod auto_update_tests {
         assert!(should_auto_update("", "1.3.2", "", "", ""));
         assert!(!should_auto_update("1.3.2", "1.3.2", "", "", ""));
         assert!(!should_auto_update("1.10.0", "1.3.2", "", "", ""));
+        assert!(!should_auto_update("1.11.16-dev.1","1.11.13","","",""));
+        assert!(should_auto_update("1.11.16-dev.1","1.11.16","","",""));
+        assert!(should_replace_reported_version("1.11.15","1.11.16-dev.1"));
         assert!(!should_auto_update(
             "1.3.1", "1.3.2", "pending", "1.3.2", ""
         ));
