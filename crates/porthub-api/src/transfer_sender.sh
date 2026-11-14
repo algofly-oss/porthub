@@ -27,15 +27,20 @@ porthub_cleanup() {
 trap porthub_cleanup EXIT
 trap 'exit 130' INT TERM
 porthub_size=$(wc -c < "$porthub_file" | tr -d ' ')
+porthub_tmp=$(mktemp -d) || exit 1
 if [ "$porthub_http" = wget ]; then
-  porthub_tmp=$(mktemp -d) || exit 1
-  porthub_session=$(wget -qO- --timeout=30 --post-data='' --header="X-Transfer-Name: ${porthub_file##*/}" --header="X-Transfer-Size: $porthub_size" "$porthub_base/api/transfers") || exit 1
+  porthub_session=$(wget -qSO- --timeout=30 --post-data='' --header="X-Transfer-Name: ${porthub_file##*/}" --header="X-Transfer-Size: $porthub_size" "$porthub_base/api/transfers" 2>"$porthub_tmp/create.headers") || exit 1
 else
-  porthub_session=$(curl -fsS --max-time 30 -X POST -H "X-Transfer-Name: ${porthub_file##*/}" -H "X-Transfer-Size: $porthub_size" "$porthub_base/api/transfers") || exit 1
+  porthub_session=$(curl -fsS --dump-header "$porthub_tmp/create.headers" --max-time 30 -X POST -H "X-Transfer-Name: ${porthub_file##*/}" -H "X-Transfer-Size: $porthub_size" "$porthub_base/api/transfers") || exit 1
 fi
 read -r porthub_id porthub_key <<< "$porthub_session"
 [ -n "$porthub_id" ] && [ -n "$porthub_key" ] || exit 1
-printf 'Download: %s/api/transfers/%s\nKeep this sender running. Press Ctrl+C to stop.\n' "$porthub_base" "$porthub_id"
+porthub_download_path=$(awk 'tolower($1)=="x-transfer-path:" {sub(/^[^:]*:[[:space:]]*/, ""); sub(/\r$/, ""); path=$0} END{print path}' "$porthub_tmp/create.headers")
+case "$porthub_download_path" in
+  "/api/transfers/$porthub_id/"*) ;;
+  *) porthub_download_path="/api/transfers/$porthub_id" ;;
+esac
+printf 'Download: %s%s\nKeep this sender running. Press Ctrl+C to stop.\n' "$porthub_base" "$porthub_download_path"
 porthub_worker() {
   trap - EXIT INT TERM
   porthub_worker_id=$1

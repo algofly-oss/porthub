@@ -440,11 +440,7 @@ async fn delete_image(app: &App, filter: Document) -> ApiResult<StatusCode> {
 async fn raw(State(app): State<Arc<App>>, Path(filename): Path<String>) -> ApiResult<Response> {
     let code = filename
         .strip_suffix(".png")
-        .filter(|c| {
-            c.len() == 5
-                && c.bytes()
-                    .all(|b| hosted_images::PUBLIC_ALPHABET.contains(&b))
-        })
+        .filter(|c| hosted_images::valid_public_id(c))
         .ok_or_else(missing)?;
     // Enforce exact expiry independently of MongoDB's asynchronous TTL sweep.
     let row = app

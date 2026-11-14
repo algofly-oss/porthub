@@ -31,11 +31,24 @@ const MAX_PIXELS: u64 = 32 * 1024 * 1024;
 const MAX_IMAGES: usize = 1000;
 const MAX_STORAGE: i64 = 512 * 1024 * 1024;
 // Case-sensitive; omit 0, 1, I, O, i, l and o to reduce transcription mistakes.
-pub(crate) const PUBLIC_ALPHABET: &[u8] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz";
-pub(crate) fn short_id() -> String {
+pub(crate) const PUBLIC_ALPHABET: &[u8] =
+    b"23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz";
+pub(crate) const MIN_PUBLIC_ID: usize = 5;
+pub(crate) const MAX_PUBLIC_ID: usize = 16;
+pub(crate) const ID_ATTEMPTS: usize = (MAX_PUBLIC_ID - MIN_PUBLIC_ID + 1) * 16;
+pub(crate) fn public_id_length(attempt: usize) -> usize {
+    MIN_PUBLIC_ID
+        .saturating_add(attempt / 16)
+        .min(MAX_PUBLIC_ID)
+}
+pub(crate) fn valid_public_id(id: &str) -> bool {
+    (MIN_PUBLIC_ID..=MAX_PUBLIC_ID).contains(&id.len())
+        && id.bytes().all(|b| PUBLIC_ALPHABET.contains(&b))
+}
+pub(crate) fn short_id(attempt: usize) -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
-    (0..5)
+    (0..public_id_length(attempt))
         .map(|_| PUBLIC_ALPHABET[rng.gen_range(0..PUBLIC_ALPHABET.len())] as char)
         .collect()
 }
@@ -172,7 +185,14 @@ async fn upload(
         (Some(id), Some(token)) if !token.is_empty() && token.len() <= 512 => {
             let machine = machine_client::authenticate(&app, id, token).await?;
             machine_name = ["name", "hostname_override", "client_hostname", "hostname"]
-                .iter().find_map(|key| machine.get_str(key).ok().filter(|name| !name.trim().is_empty())).map(str::to_owned);
+                .iter()
+                .find_map(|key| {
+                    machine
+                        .get_str(key)
+                        .ok()
+                        .filter(|name| !name.trim().is_empty())
+                })
+                .map(str::to_owned);
             machine
                 .get_object_id("user_id")
                 .map_err(|_| ApiError::bad_request("Machine has no account owner"))?
@@ -245,11 +265,25 @@ async fn upload(
         .take(160)
         .collect();
     let mut row = doc! {"_id":&id,"owner_id":owner,"name":if name.is_empty(){"Clipboard image"}else{&name},"size":bytes.len() as i64,"width":i64::from(width),"height":i64::from(height),"created_at":DateTime::now()};
-    row.insert("source", if body.machine_id.is_some() { "machine" } else { "browser" });
-    if let Some(name) = machine_name { row.insert("machine_name", name); }
+    row.insert(
+        "source",
+        if body.machine_id.is_some() {
+            "machine"
+        } else {
+            "browser"
+        },
+    );
+    if let Some(name) = machine_name {
+        row.insert("machine_name", name);
+    }
     let stored = crate::image_storage::insert(&app, COLLECTION, row, bytes).await?;
     if stored.inserted && !expired.is_empty() {
-        crate::image_storage::remove(&app, COLLECTION, doc! {"owner_id":owner,"_id":{"$in":expired}}).await?;
+        crate::image_storage::remove(
+            &app,
+            COLLECTION,
+            doc! {"owner_id":owner,"_id":{"$in":expired}},
+        )
+        .await?;
     }
     Ok(Json(metadata(&app, &stored.row)))
 }
@@ -289,19 +323,32 @@ pub(crate) struct BulkDelete {
 }
 impl BulkDelete {
     pub(crate) fn filter(self, mut scope: Document) -> ApiResult<Document> {
-        if self.all && self.ids.is_empty() { return Ok(scope); }
-        if self.all || self.ids.is_empty() || self.ids.len() > MAX_IMAGES || !self.ids.iter().all(|id|valid_id(id)) {
-            return Err(ApiError::bad_request("Choose images to delete, or explicitly select all"));
+        if self.all && self.ids.is_empty() {
+            return Ok(scope);
+        }
+        if self.all
+            || self.ids.is_empty()
+            || self.ids.len() > MAX_IMAGES
+            || !self.ids.iter().all(|id| valid_id(id))
+        {
+            return Err(ApiError::bad_request(
+                "Choose images to delete, or explicitly select all",
+            ));
         }
         scope.insert("_id", doc! {"$in":self.ids});
         Ok(scope)
     }
 }
 async fn remove_many(
-    State(app): State<Arc<App>>, headers: HeaderMap, Json(body): Json<BulkDelete>,
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(body): Json<BulkDelete>,
 ) -> ApiResult<Json<Value>> {
     let _lifecycle = app.account_lifecycle.read().await;
-    let owner = auth::current_user(&app, &headers).await?.get_object_id("_id").map_err(|_|ApiError::unauthenticated())?;
+    let owner = auth::current_user(&app, &headers)
+        .await?
+        .get_object_id("_id")
+        .map_err(|_| ApiError::unauthenticated())?;
     let filter = body.filter(doc! {"owner_id":owner})?;
     let _admission = app.hosted_images_lock.lock().await;
     let count = crate::image_storage::remove(&app, COLLECTION, filter).await?;
@@ -321,7 +368,8 @@ async fn remove(
         return Err(ApiError::new(StatusCode::NOT_FOUND, "Image not found"));
     }
     let _admission = app.hosted_images_lock.lock().await;
-    if crate::image_storage::remove(&app, COLLECTION, doc! {"_id":id,"owner_id":owner}).await? == 0 {
+    if crate::image_storage::remove(&app, COLLECTION, doc! {"_id":id,"owner_id":owner}).await? == 0
+    {
         return Err(ApiError::new(StatusCode::NOT_FOUND, "Image not found"));
     }
     Ok(StatusCode::NO_CONTENT)
@@ -332,7 +380,7 @@ async fn short_public(
 ) -> ApiResult<Response> {
     let id = filename
         .strip_suffix(".png")
-        .filter(|id| id.len() == 5 && id.bytes().all(|b| PUBLIC_ALPHABET.contains(&b)))
+        .filter(|id| valid_public_id(id))
         .ok_or_else(|| {
             ApiError::new(StatusCode::NOT_FOUND, "Image not found")
                 .header("cache-control", "no-store")
@@ -361,7 +409,11 @@ async fn public(State(app): State<Arc<App>>, Path(id): Path<String>) -> ApiResul
         .ok_or_else(missing)?;
     image_response(&app, COLLECTION, row).await
 }
-pub(crate) async fn image_response(app: &App, collection: &str, row: Document) -> ApiResult<Response> {
+pub(crate) async fn image_response(
+    app: &App,
+    collection: &str,
+    row: Document,
+) -> ApiResult<Response> {
     let bytes = crate::image_storage::read(app, collection, &row).await?;
     Ok((
         [
@@ -414,5 +466,28 @@ mod tests {
         assert_eq!((w, h), (3, 2));
         assert!(!out.windows(8).any(|b| b == b"private "));
         assert!(image::load_from_memory(&out).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod public_id_tests {
+    use super::*;
+    #[test]
+    fn short_ids_expand_after_collisions_and_keep_safe_bounded_paths() {
+        for (attempt, length) in [
+            (0, 5),
+            (15, 5),
+            (16, 6),
+            (31, 6),
+            (32, 7),
+            (ID_ATTEMPTS - 1, 16),
+        ] {
+            let id = short_id(attempt);
+            assert_eq!(id.len(), length);
+            assert!(valid_public_id(&id));
+        }
+        for value in ["abc", "../abc", "AbC23/", "xxxxxxxxxxxxxxxxx"] {
+            assert!(!valid_public_id(value));
+        }
     }
 }

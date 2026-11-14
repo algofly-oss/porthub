@@ -32,3 +32,5 @@ pub async fn foreground(executable: &std::path::Path, arguments: &[std::ffi::OsS
 pub mod keyboard;
 
 pub mod metrics;
+
+pub mod usb;

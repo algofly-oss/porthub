@@ -88,6 +88,7 @@ pub(crate) async fn serve_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
     }
     let operation=message.get("operation").and_then(serde_json::Value::as_str);
     let feature=match operation {
+        Some("usb")=>Some(crate::features::Feature::Usb),
         Some("keyboard_host")=>Some(crate::features::Feature::Keyboard),
         Some("terminal_host")=>Some(crate::features::Feature::Terminal),
         Some("image_upload")=>Some(crate::features::Feature::Images),
@@ -117,6 +118,7 @@ async fn dispatch<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     profile:std::path::PathBuf,message:serde_json::Value,
 )->Result<()> {
     let mut reader=reader;
+    if message["operation"]=="usb"{return crate::usb::serve(reader,control,message,cancel).await;}
     if message.get("operation").and_then(serde_json::Value::as_str) == Some("keyboard_host") {
         return crate::keyboard::serve(reader,control,&profile,cancel).await;
     }

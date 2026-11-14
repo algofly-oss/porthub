@@ -75,7 +75,9 @@ export async function shareFile(file) {
     if (!/^[A-Za-z0-9_-]{32}$/.test(id) || !/^[A-Za-z0-9_-]{32}$/.test(key)) throw new Error('Could not start sharing. Try again.');
     actor.id = id; actor.key = key;
     if (!active(actor)) { closeRemote(actor); return; }
-    update(actor, { url: `${actor.base}/api/transfers/${id}`, status: 'sharing' });
+    const path = response.headers.get('x-transfer-path');
+    const downloadPath = path?.startsWith(`/api/transfers/${id}/`) ? path : `/api/transfers/${id}`;
+    update(actor, { url: `${actor.base}${downloadPath}`, status: 'sharing' });
     for (let i = 0; i < 4; i++) void worker(actor);
     return actor.url;
   } catch (error) {

@@ -24,6 +24,7 @@ async function until(predicate,message){for(let i=0;i<100;i++){if(await predicat
   const urlInput=page.getByLabel(`Public URL for ${filename}`,{exact:true});
   await until(async()=> (await urlInput.inputValue()).startsWith(base+'/api/transfers/'),'Browser file URL was not generated');
   const url=await urlInput.inputValue();
+  assert.equal(decodeURIComponent(new URL(url).pathname.split('/').at(-1)),filename,'Download links include the original file name and extension');
   assert.equal(await page.getByRole('complementary',{name:'Browser sharing guide'}).count(),0,'Active file links replace the getting-started guide');
   await page.getByRole('button',{name:`Copy URL for ${filename}`,exact:true}).click();assert.equal(await page.evaluate(()=>window.lastCopied),url);
   const article=page.getByRole('article',{name:`Share ${filename}`,exact:true});

@@ -393,3 +393,21 @@ python3 -m unittest discover -s deploy/native -p 'test_*.py'
 MongoDB integration checks require a dedicated disposable database. Network
 benchmarks and registered-client rollout checks are recorded separately under
 `docs/benchmarks/` and `docs/verification/`.
+
+Browser and terminal file-transfer links include the encoded original filename
+and extension after their unique ID. Existing ID-only transfer URLs remain
+supported. Screenshot URLs keep five-character IDs normally; after repeated
+collisions, allocation adds characters without changing existing image links.
+
+USB forwarding is a native optional agent module. In a machine's popup, the USB
+section lists physical devices and saves persistent rules to another owned machine.
+`porthub usb expose BUSID --to MACHINE_ID` runs a temporary foreground session;
+`--detach` uses the existing mapping supervisor for background/restart recovery.
+The destination can instead run `porthub usb attach --from MACHINE_ID --device BUSID`.
+Use `porthub usb list`, `status`, and `stop` to inspect or remove CLI jobs.
+`porthub features disable usb` locally revokes sharing and attaching; a server
+cannot override that policy. Linux USB/IP kernel modules and a privileged system
+agent are required for device handoff. Mounted disks, active network adapters and
+USB hubs are not detached. Authenticated ICE/DTLS selects a local/direct connection
+when allowed by client egress policy, with the gateway as fallback. No USB/IP daemon,
+public USB port, or additional service container is required.

@@ -120,6 +120,43 @@ impl Hub {
         Ok(slot)
     }
 }
+fn download_name(name: &str) -> String {
+    match name {
+        "" => "download.bin".into(),
+        "." | ".." | "next" => format!("file-{name}"),
+        _ => name.to_owned(),
+    }
+}
+fn download_path(id: &str, name: &str) -> String {
+    const SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+        .remove(b'.')
+        .remove(b'-')
+        .remove(b'_')
+        .remove(b'~');
+    format!(
+        "/api/transfers/{id}/{}",
+        percent_encoding::utf8_percent_encode(&download_name(name), SEGMENT)
+    )
+}
+async fn named_download(
+    State(app): State<Arc<App>>,
+    Path((id, name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    if download_name(&app.file_relay.get(&id)?.name) != name {
+        return Err(missing());
+    }
+    download(State(app), Path(id), headers).await
+}
+async fn named_head(
+    State(app): State<Arc<App>>,
+    Path((id, name)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    if download_name(&app.file_relay.get(&id)?.name) != name {
+        return Err(missing());
+    }
+    head(State(app), Path(id)).await
+}
 pub fn router() -> Router<Arc<App>> {
     Router::new()
         .route("/api/transfers", post(create))
@@ -127,6 +164,10 @@ pub fn router() -> Router<Arc<App>> {
         .route(
             "/api/transfers/{id}",
             get(download).head(head).delete(close),
+        )
+        .route(
+            "/api/transfers/{id}/{filename}",
+            get(named_download).head(named_head),
         )
         .route("/api/transfers/{id}/next", get(next))
         .route(
@@ -229,7 +270,13 @@ async fn create(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Re
             downloads: Arc::new(Semaphore::new(64)),
         }),
     );
-    Ok((StatusCode::CREATED, format!("{id} {key}\n")).into_response())
+    let path = download_path(&id, &slots[&id].name);
+    Ok((
+        StatusCode::CREATED,
+        [("x-transfer-path", path)],
+        format!("{id} {key}\n"),
+    )
+        .into_response())
 }
 async fn close(
     State(app): State<Arc<App>>,

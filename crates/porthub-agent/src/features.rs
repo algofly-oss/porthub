@@ -17,6 +17,7 @@ use tokio::{
 #[serde(rename_all = "kebab-case")]
 pub enum Feature {
     Keyboard,
+    Usb,
     Metrics,
     Images,
     Terminal,
@@ -27,8 +28,9 @@ pub enum Feature {
     DirectConnections,
 }
 impl Feature {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Keyboard,
+        Self::Usb,
         Self::Metrics,
         Self::Images,
         Self::Terminal,
@@ -41,6 +43,7 @@ impl Feature {
     pub fn name(self) -> &'static str {
         match self {
             Self::Keyboard => "keyboard",
+            Self::Usb => "usb",
             Self::Metrics => "metrics",
             Self::Images => "images",
             Self::Terminal => "terminal",

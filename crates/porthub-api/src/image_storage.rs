@@ -107,8 +107,8 @@ pub async fn insert(
         );
         None
     };
-    for _ in 0..16 {
-        row.insert("public_id", crate::hosted_images::short_id());
+    for attempt in 0..crate::hosted_images::ID_ATTEMPTS {
+        row.insert("public_id", crate::hosted_images::short_id(attempt));
         match app.collection(collection).insert_one(&row).await {
             Ok(_) => {
                 return Ok(Stored {

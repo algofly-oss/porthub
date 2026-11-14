@@ -82,3 +82,5 @@ pub mod keyboard;
 pub mod features;
 
 mod metrics;
+
+pub mod usb;

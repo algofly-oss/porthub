@@ -90,12 +90,17 @@ impl Peer {
         candidates: &[SocketAddr],
         reflexive: &[(SocketAddr, SocketAddr)],
     ) -> Result<(Self, String)> {
+        Self::offer_named(now,candidates,reflexive,LABEL)
+    }
+    /// Create one reliable channel for another authenticated PortHub module.
+    pub fn offer_named(now:Instant,candidates:&[SocketAddr],reflexive:&[(SocketAddr,SocketAddr)],label:&str)->Result<(Self,String)>{
+        ensure!(!label.is_empty()&&label.len()<=64,"invalid channel label");
         ensure!(
             !candidates.is_empty() && candidates.len() + reflexive.len() <= 64,
             "invalid terminal candidates"
         );
         let mut connection = new_connection(now)?;
-        connection.create_data_channel(LABEL, None)?;
+        connection.create_data_channel(label, None)?;
         add_candidates(&mut connection, candidates, reflexive)?;
         let offer = connection.create_offer(None)?;
         connection.set_local_description(now, offer)?;
@@ -109,7 +114,7 @@ impl Peer {
             Self {
                 connection,
                 channel: None,
-                label: LABEL.to_owned(),
+                label: label.to_owned(),
             },
             offer,
         ))

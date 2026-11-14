@@ -44,6 +44,11 @@ async fn browser_and_agent_images_are_owned_public_and_revocable() -> Result<()>
         let mut collision=stored.clone(); collision.insert("_id","collision-fixture");
         let duplicate=case.app.collection("hosted_images").insert_one(collision.clone()).await.unwrap_err();
         ensure!(porthub_api::store::duplicate(&duplicate));
+        let mut extended=stored.clone();extended.insert("_id","extended-code-fixture");extended.insert("public_id","AbC234");
+        case.app.collection("hosted_images").insert_one(extended).await?;
+        let extended_response=case.router.clone().oneshot(Request::builder().uri("/i/AbC234.png").body(Body::empty())?).await?;
+        ensure!(extended_response.status()==StatusCode::OK);
+        case.app.collection("hosted_images").delete_one(doc!{"_id":"extended-code-fixture"}).await?;
         let delete = format!("/api/images/{}",row["id"].as_str().unwrap());
         case.status("DELETE",&delete,&outsider,Value::Null,StatusCode::NOT_FOUND).await?;
         let other = case.status("GET","/api/images",&outsider,Value::Null,StatusCode::OK).await?;

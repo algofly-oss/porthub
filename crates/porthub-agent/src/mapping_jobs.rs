@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Spec {
+    Usb{user:bool,registration:String,source:String,destination:String,busid:String},
     Forward {
         target: String,
         bind: IpAddr,
@@ -32,13 +33,15 @@ impl Spec {
     }
     fn port(&self) -> u16 {
         match self {
+            Self::Usb{..}=>0,
             Self::Forward { port, .. } => *port,
             Self::Exposure { local_port, .. } => *local_port,
         }
     }
     fn validate(&self) -> Result<()> {
-        ensure!(self.port() > 0, "Invalid mapping port");
+        ensure!(self.port() > 0 || matches!(self,Self::Usb{..}), "Invalid mapping port");
         match self {
+            Self::Usb{registration,source,destination,busid,..}=>{ensure!(registration.len()==64&&registration.bytes().all(|b|b.is_ascii_hexdigit())&&source!=destination&&[source,destination].iter().all(|s|s.len()==24&&s.bytes().all(|b|b.is_ascii_hexdigit()))&&porthub_components::usb::valid_busid(busid),"Invalid USB forwarding job");},
             Self::Forward { target, .. } => {
                 crate::forward::destination(target)?;
             }
@@ -221,6 +224,7 @@ fn describe(root: &Path, job: &Job) -> Result<()> {
         "stopped"
     };
     match &job.spec {
+        Spec::Usb{source,destination,busid,..}=>println!("{}  {:<11}  USB {}/{} -> {}  recovery:{}",&job.id[..12],label,source,busid,destination,job.recover),
         Spec::Forward { target, bind, port } => println!(
             "{}  {:<11}  {} -> {}  recovery:{}",
             &job.id[..12],
@@ -269,7 +273,7 @@ pub fn list(exposure: bool) -> Result<()> {
     let root = root()?;
     let rows = jobs(&root)?
         .into_iter()
-        .filter(|j| j.spec.exposure() == exposure)
+        .filter(|j| j.spec.exposure() == exposure && (exposure || !matches!(j.spec,Spec::Usb{..})))
         .collect::<Vec<_>>();
     let legacy = if exposure {
         crate::expose::list_unmanaged()?
@@ -364,7 +368,7 @@ pub async fn start(spec: Spec, recover: bool, cancel: CancellationToken) -> Resu
     }
     println!(
         "Stop: porthub {} stop {}",
-        if job.spec.exposure() {
+        if matches!(job.spec,Spec::Usb{..}) {"usb"} else if job.spec.exposure() {
             "expose"
         } else {
             "forward"
@@ -399,6 +403,7 @@ pub async fn worker(id: &str, cancel: CancellationToken) -> Result<()> {
         }
         let operation=async {
             match operation_job.spec.clone() {
+                Spec::Usb{user,registration,source,destination,busid}=>crate::usb::cli::broker_worker(user,registration,id.into(),source,destination,busid,work.clone()).await,
                 Spec::Forward{target,bind,port}=>{
                     let listener=tokio::net::TcpListener::bind(crate::forward::address(bind,port)).await.context("Cannot bind the local port; choose a different --bind or --local-port")?;
                     state(&root,id,"running",None)?;describe(&root,&operation_job)?;
@@ -687,3 +692,8 @@ pub fn adopt_exposure(id: String, spec: Spec) -> Result<()> {
 pub async fn enable_recovery() -> Result<()> {
     install_recovery().await
 }
+
+// USB uses the same durable jobs, process locks and OS restart supervisor as TCP forwards.
+pub(crate) fn usb_ready(id:&str)->Result<()>{state(&root()?,id,"running",None)}
+pub fn usb_list(selector:Option<&str>)->Result<()>{let root=root()?;let rows:Vec<_>=jobs(&root)?.into_iter().filter(|j|matches!(j.spec,Spec::Usb{..})&&selector.is_none_or(|s|j.id.starts_with(s))).collect();if selector.is_some(){ensure!(rows.len()==1,"Choose a unique USB forwarding job ID");}if rows.is_empty(){println!("No saved USB forwards.");}for row in rows{describe(&root,&row)?;}Ok(())}
+pub async fn usb_stop(selector:Option<&str>)->Result<()>{let rows:Vec<_>=jobs(&root()?)?.into_iter().filter(|j|matches!(j.spec,Spec::Usb{..})&&selector.is_none_or(|s|j.id.starts_with(s))).collect();ensure!(rows.len()==1,"Choose a unique USB forwarding job ID");stop(false,Some(&rows[0].id)).await}

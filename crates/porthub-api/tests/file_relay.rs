@@ -60,6 +60,10 @@ async fn anonymous_senders_support_parallel_ranges_multiple_downloaders_and_stop
                 .await??
                 .unwrap();
             let url = line.strip_prefix("Download: ").unwrap().to_owned();
+            ensure!(url.ends_with("/source%20image%27s%20file.bin"), "Download URL must preserve the encoded filename and extension: {url}");
+            let legacy = url.rsplit_once('/').unwrap().0;
+            ensure!(client.head(legacy).send().await?.status()==200, "Legacy ID-only links remain supported");
+            ensure!(client.head(format!("{legacy}/wrong-name.zip")).send().await?.status()==404);
             let response = client.head(&url).send().await?;
             ensure!(response.status() == 200 && response.headers()["accept-ranges"] == "bytes");
             ensure!(

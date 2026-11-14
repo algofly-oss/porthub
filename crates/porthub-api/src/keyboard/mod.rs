@@ -63,7 +63,7 @@ fn unavailable() -> ApiError {
 fn id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
-pub(super) fn same_origin(app: &App, headers: &HeaderMap) -> ApiResult<()> {
+pub(crate) fn same_origin(app: &App, headers: &HeaderMap) -> ApiResult<()> {
     if let Some(origin) = headers.get("origin") {
         let origin = origin
             .to_str()
