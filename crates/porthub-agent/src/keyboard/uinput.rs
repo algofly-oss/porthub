@@ -45,7 +45,7 @@ impl Device {
         // SAFETY: fd is a live uinput descriptor, setup pointer is valid for the
         // synchronous ioctl; other requests take bounded integer constants.
         ensure!(
-            unsafe { libc::ioctl(self.file.as_raw_fd(), request, arg) } >= 0,
+            unsafe { libc::ioctl(self.file.as_raw_fd(), request as _, arg) } >= 0,
             "Cannot configure virtual input: {}",
             std::io::Error::last_os_error()
         );
