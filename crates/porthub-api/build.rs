@@ -1,5 +1,10 @@
 fn main() {
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("musl") {
+        // ggml's C++ runtime follows Rust's libc archive in the native manifest.
+        // Rescan static libc to resolve the C++ locale/thread runtime references.
+        println!("cargo:rustc-link-arg=-Wl,-Bstatic,-lc");
+    }
     if std::env::var_os("CARGO_FEATURE_SPEECH_CUDA").is_some() {
         let root = std::env::var("CUDA_PATH").unwrap_or_else(|_| "/usr/local/cuda".into());
         let library = if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
