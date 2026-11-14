@@ -299,14 +299,22 @@ pub(super) fn handoff(
         let status = std::fs::read_to_string("/sys/devices/platform/vhci_hcd.0/status")?;
         let port = free_port(&status, device.speed).context("No free USB/IP virtual port")?;
         let devid = ((device.busnum as u32) << 16) | device.devnum as u32;
-        write(
+        let attach = |speed| write(
             "/sys/devices/platform/vhci_hcd.0/attach",
-            format!(
-                "{port} {} {devid} {}",
-                guard.kernel.as_raw_fd(),
-                device.speed
-            ),
-        )?;
+            format!("{port} {} {devid} {speed}", guard.kernel.as_raw_fd()),
+        );
+        if let Err(error) = attach(device.speed) {
+            // Older vhci kernels support SuperSpeed ports but reject the
+            // newer SuperSpeedPlus enum. The same device can use SuperSpeed.
+            if device.speed == 6
+                && error.downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.raw_os_error() == Some(libc::EINVAL))
+            {
+                attach(5)?;
+            } else {
+                return Err(error);
+            }
+        }
         guard.port = Some(port);
     }
     Ok((guard, proxy))
