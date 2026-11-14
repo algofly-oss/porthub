@@ -112,6 +112,11 @@ fn set(profile: &Path, feature: Feature, enabled: bool) -> Result<Policy> {
     sender.send_replace(policy.clone());
     Ok(policy)
 }
+fn set_offline(profile: &Path, feature: Feature, enabled: bool) -> Result<Policy> {
+    ensure!(!crate::profile::Lease::running(profile)?,
+        "The agent is running but its local control socket is unavailable; stop it before changing offline feature policy");
+    set(profile, feature, enabled)
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
@@ -179,7 +184,7 @@ pub async fn run(args: Args) -> Result<()> {
             let spec = crate::service::installed(&layout, &registration)?
                 .context("Registration manifest unavailable")?;
             let policy = match (feature, enabled) {
-                (Some(feature), Some(on)) => set(&spec.profile, feature, on)?,
+                (Some(feature), Some(on)) => set_offline(&spec.profile, feature, on)?,
                 _ => load(&spec.profile)?,
             };
             for feature in Feature::ALL {
@@ -285,6 +290,12 @@ mod policy_tests {
         tokio::try_join!(broker, client)?;
         set(&path, Feature::Keyboard, true)?;
         assert!(load(&path)?.enabled(Feature::Keyboard));
+        let lease = crate::profile::Lease::acquire(&path)?;
+        assert!(set_offline(&path, Feature::Keyboard, false).is_err());
+        assert!(load(&path)?.enabled(Feature::Keyboard));
+        drop(lease);
+        set_offline(&path, Feature::Keyboard, false)?;
+        assert!(!load(&path)?.enabled(Feature::Keyboard));
         Ok(())
     }
 }

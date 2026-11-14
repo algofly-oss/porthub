@@ -37,7 +37,10 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
             let mut seen = std::collections::HashSet::new();
             let mut disk = Memory { used: 0, total: 0 };
             for d in disks.list() {
-                if d.total_space() == 0 || !seen.insert(d.name().to_os_string()) {
+                if matches!(d.file_system().to_str(), Some("overlay" | "aufs"))
+                    || d.total_space() == 0
+                    || !seen.insert(d.name().to_os_string())
+                {
                     continue;
                 }
                 disk.total = disk.total.saturating_add(d.total_space());
