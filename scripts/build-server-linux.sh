@@ -18,5 +18,13 @@ docker run --rm --user "$(id -u):$(id -g)" \
   --env "PORTHUB_SERVER_TARGET=$server_target" \
   porthub-server-static-toolchain sh -ec '
     cargo build --locked --release -p porthub-api -p porthub-edge -p porthub-runtime -p porthub-firewall --target "$PORTHUB_SERVER_TARGET" --timings
+    for binary in porthub-api porthub-edge porthub-runtime porthub-firewall; do
+      artifact="target/$PORTHUB_SERVER_TARGET/release/$binary"
+      if readelf -l "$artifact" | grep -q INTERP || readelf -d "$artifact" | grep -q NEEDED; then
+        echo "$binary must be fully static, including its C++ runtime" >&2
+        exit 1
+      fi
+      "$artifact" --help >/dev/null
+    done
     cargo test --locked -p porthub-edge --target "$PORTHUB_SERVER_TARGET"
   '

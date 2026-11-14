@@ -242,7 +242,7 @@ jobs:
           for binary in porthub-api porthub-edge porthub-runtime porthub-firewall; do
             source="target/$target/release/$binary"
             readelf -l "$source" > "$RUNNER_TEMP/$binary.elf"
-            if grep -q INTERP "$RUNNER_TEMP/$binary.elf"; then
+            if grep -q INTERP "$RUNNER_TEMP/$binary.elf" || readelf -d "$source" | grep -q NEEDED; then
               echo "$binary requires a dynamic loader" >&2
               exit 1
             fi
