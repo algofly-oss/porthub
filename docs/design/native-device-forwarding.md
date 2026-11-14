@@ -18,3 +18,5 @@ Desktop-sharing requirements:
 - Capture input through native OS APIs, including required desktop/Wayland consent, rather than browser events or external desktop-sharing programs.
 - Prevent routing and clipboard loops, arbitrate input ownership, release held input on transitions and disconnect, and provide a local escape shortcut.
 - Keep USB forwarding, desktop sharing, and browser VKeyboard as separate modules within the same binary.
+
+All PortHub dropdowns must use custom searchable controls, including machine, device, model, settings and topology selectors. Do not introduce native HTML select or datalist menus. Machine pickers must support typing to find registered machines quickly.
