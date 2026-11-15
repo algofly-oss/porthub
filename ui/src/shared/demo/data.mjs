@@ -97,7 +97,11 @@ export function handleDemoRequest(state, method, rawPath, payload = {}) {
   if (path.startsWith("/auth/")) return { msg: "success" };
   if (path === "/admin/overview") return { data: state.platformAccounts || [{ user: { ...state.user, id: "demo-user" }, machines: state.machines.map(m => ({ ...m, num_ports: state.connections.filter(c => c.machine_id === m._id).length, ports: state.connections.filter(c => c.machine_id === m._id) })) }] };
   if (path === "/connections/firewall/traffic/snapshot") return { data: state.connections.filter(c => !body.data_ids?.length || body.data_ids.includes(c._id)).map(traffic) };
-  if (path.includes("/recent-ip-hits/")) return { data: [{ ip: "192.0.2.25", hits: 24, last_seen: stamp() }] };
+  if (path.includes("/recent-ip-hits/")) {
+    state.recentIpHitsRequests = (state.recentIpHitsRequests || 0) + 1;
+    if (state.recentIpHitsError) throw new Error("Recent observations unavailable");
+    return { data: state.recentIpHitsByConnection?.[path.split("/").pop()] ?? state.recentIpHits ?? [{ ip: "192.0.2.25", last_seen: Math.floor(Date.now() / 1000) }] };
+  }
   if (path.includes("/status-history")) return { data: [{ status: "online", changed_at: new Date(Date.now() - 3600000).toISOString() }], current_status: "online" };
   if (path.includes("/availability")) return { available: true, message: "Available in demo" };
   if (path === "/connections/random") return { port: 30000 + state.nextId++ % 10000 };

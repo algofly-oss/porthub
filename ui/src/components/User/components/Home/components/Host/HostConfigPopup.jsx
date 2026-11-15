@@ -61,6 +61,7 @@ import uiRoutes from "@/shared/routes/uiRoutes";
 import useToast from "@/shared/hooks/useToast";
 import { SocketContext } from "@/shared/contexts/socket";
 import socketRoutes from "@/shared/routes/socketRoutes";
+import RecentSourceIPs from "./RecentSourceIPs";
 import TrafficMonitorPanel, {
   normalizeTrafficSamples,
 } from "./TrafficMonitorPanel";
@@ -538,7 +539,7 @@ export default function HostConfigPopup({
   const [showRuleAdvanced, setShowRuleAdvanced] = useState(true);
   const [allowIpDraft, setAllowIpDraft] = useState("");
   const [allowIpRecentHitsByRuleId, setAllowIpRecentHitsByRuleId] = useState({});
-  const [isLoadingAllowIpSuggestions, setIsLoadingAllowIpSuggestions] = useState(false);
+  const [recentIpStatus, setRecentIpStatus] = useState({});
   const [isAllowIpPickerOpen, setIsAllowIpPickerOpen] = useState(false);
   const [trafficSamplesByRuleId, setTrafficSamplesByRuleId] = useState({});
   const [isLoadingTrafficSamples, setIsLoadingTrafficSamples] = useState(false);
@@ -736,6 +737,7 @@ export default function HostConfigPopup({
       setShowRuleAdvanced(true);
       setAllowIpDraft("");
       setAllowIpRecentHitsByRuleId({});
+      setRecentIpStatus({});
       setTrafficSamplesByRuleId({});
       setIsAllowIpPickerOpen(false);
       initialRulesSnapshotRef.current = "";
@@ -757,6 +759,8 @@ export default function HostConfigPopup({
     initialRulesSnapshotRef.current=rulesSnapshotKey(nextRules);
 
     if (isHostSwitch) {
+      setAllowIpRecentHitsByRuleId({});
+      setRecentIpStatus({});
       setSelectedRuleId(null);
       setShowGroups(false);
       setShowMachineCredentials(false);
@@ -838,62 +842,51 @@ export default function HostConfigPopup({
   }, [selectedPortId]);
 
   useEffect(() => {
-    if (!opened || !selectedRule?.dataId || (!showRuleAdvanced && !isAllowIpPickerOpen)) {
-      return;
-    }
-
-    let isActive = true;
-
-    const loadRecentHits = async ({ showLoading = false } = {}) => {
-      if (showLoading) {
-        setIsLoadingAllowIpSuggestions(true);
-      }
-
+    if (!opened || machineSection !== "ports" || !["access", "traffic"].includes(portSection) || !selectedRule?.dataId) return;
+    let active = true;
+    let timer;
+    let request;
+    const key = selectedRule.localId;
+    const status = (value) => { if (active) setRecentIpStatus(current => ({ ...current, [key]: { ...current[key], ...value } })); };
+    const load = async () => {
+      window.clearTimeout(timer);
+      if (!active || document.hidden || request) return;
+      const controller = new AbortController();
+      request = controller;
+      status({ loading: true });
       try {
-        const response = await axios.get(
-          apiRoutes.getConnectionRecentIpHits(selectedRule.dataId, 10)
-        );
-        if (!isActive) {
-          return;
+        const response = await axios.get(apiRoutes.getConnectionRecentIpHits(selectedRule.dataId, 10), { signal: controller.signal });
+        if (!Array.isArray(response.data?.data)) throw new Error("Invalid observations");
+        if (active && !controller.signal.aborted) {
+          setAllowIpRecentHitsByRuleId(current => ({ ...current, [key]: response.data.data }));
+          status({ received: true, error: false });
         }
-
-        setAllowIpRecentHitsByRuleId((current) => ({
-          ...current,
-          [selectedRule.localId]: response.data?.data || [],
-        }));
       } catch {
-        if (!isActive) {
-          return;
-        }
-        setAllowIpRecentHitsByRuleId((current) => ({
-          ...current,
-          [selectedRule.localId]: current[selectedRule.localId] || [],
-        }));
+        if (!controller.signal.aborted) status({ error: true });
       } finally {
-        if (isActive) {
-          setIsLoadingAllowIpSuggestions(false);
+        if (request === controller) {
+          request = null;
+          status({ loading: false });
+          if (active && !document.hidden) timer = window.setTimeout(load, 5000);
         }
       }
     };
-    loadRecentHitsRef.current = loadRecentHits;
-
-    loadRecentHits({ showLoading: true });
-    const intervalId = window.setInterval(() => {
-      loadRecentHits();
-    }, 5000);
-
+    const visibility = () => {
+      window.clearTimeout(timer);
+      if (document.hidden) { request?.abort(); request = null; status({ loading: false }); }
+      else load();
+    };
+    loadRecentHitsRef.current = load;
+    document.addEventListener("visibilitychange", visibility);
+    load();
     return () => {
-      isActive = false;
-      window.clearInterval(intervalId);
+      active = false;
+      window.clearTimeout(timer);
+      request?.abort();
+      document.removeEventListener("visibilitychange", visibility);
       loadRecentHitsRef.current = null;
     };
-  }, [
-    opened,
-    selectedRule?.dataId,
-    selectedRule?.localId,
-    showRuleAdvanced,
-    isAllowIpPickerOpen,
-  ]);
+  }, [opened, machineSection, portSection, selectedRule?.dataId, selectedRule?.localId]);
 
   useEffect(() => {
     if (!opened || !selectedRule?.dataId || !showRuleAdvanced) {
@@ -2970,7 +2963,7 @@ export default function HostConfigPopup({
                       <div className="rounded-lg bg-surface p-4"><div className="flex items-center justify-between gap-4"><div><h3 className="text-sm font-medium">Scheduled Refresh</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">Reconnect this service periodically.</p></div><Switch size="sm" checked={rule.autoRefreshEnabled || false} onChange={event=>updateRule(rule.localId,"autoRefreshEnabled",event.currentTarget.checked)} aria-label={rule.autoRefreshEnabled ? "Disable service auto refresh" : "Enable service auto refresh"} /></div><div className="mt-4 flex flex-wrap items-end gap-3">{rule.autoRefreshEnabled && <PortField id={`auto-refresh-interval-${rule.localId}`} label="Refresh interval (minutes)" value={rule.autoRefreshIntervalMinutes} onChange={value=>updateRule(rule.localId,"autoRefreshIntervalMinutes",value)} error={ruleErrors.autoRefreshIntervalMinutes} inputMode="numeric" />}<WorkspaceButton type="button" variant="secondary" disabled={!rule.dataId || rule.enabled === false || ruleHasUnsavedChanges || !!refreshingRuleId} onClick={()=>handleRefreshRuleNow(rule)}><IconRefresh size={15} />{refreshingRuleId === rule.localId ? "Refreshing…" : "Refresh Now"}</WorkspaceButton></div></div>
                     </div>}
                     {portSection === "access" && <div className="space-y-4"><PublicAccessLock key={rule.localId} id={rule.dataId} initialMode={rule.publicAccess?.mode || "off"} temporary={rule.temporary} onSaved={mode => updateRule(rule.localId, "publicAccess", { mode })} /><div><h3 className="text-base font-semibold">Source IP Access</h3><p className="mt-2 text-sm leading-6 text-muted-foreground">Leave the list empty for public access. Add IP addresses to restrict who can reach this port.</p></div><div className="flex flex-wrap gap-2">{allowedIps.map(ip=><span key={ip} className="inline-flex items-center gap-2 rounded-md bg-surface px-3 py-2 text-sm">{ip}<button type="button" aria-label={`Remove ${ip}`} onClick={()=>removeAllowedIpFromRule(rule.localId,ip)} className="rounded text-muted-foreground hover:text-foreground"><IconX size={14} /></button></span>)}</div><div className="flex gap-2"><WorkspaceInput aria-label="Allowed source IP" className="bg-control" value={allowIpDraft} onChange={event=>setAllowIpDraft(event.target.value)} placeholder="e.g. 192.0.2.10" onKeyDown={event=>{if(event.key==="Enter"){event.preventDefault();addAllowedIpToRule(rule.localId,allowIpDraft);}}} /><WorkspaceButton type="button" disabled={!allowIpDraft.trim()} onClick={()=>addAllowedIpToRule(rule.localId,allowIpDraft)}>Add IP</WorkspaceButton></div><div><h4 className="mb-2 text-xs font-medium text-muted-foreground">Recent source addresses</h4><div className="flex flex-wrap gap-2">{filteredRecentIpHits.slice(0,10).map(item=><WorkspaceButton type="button" key={item.ip} size="sm" variant="secondary" onClick={()=>addAllowedIpToRule(rule.localId,item.ip)}>{item.ip}<IconPlus size={13} /></WorkspaceButton>)}{!filteredRecentIpHits.length && <p className="text-xs text-muted-foreground">No additional addresses observed.</p>}</div></div></div>}
-                    {portSection === "traffic" && <TrafficMonitorPanel isDark={isDark} samples={samplesByConnection.get(rule.dataId) || []} isLoading={allPortTraffic.loading} onOpenExternal={()=>openTrafficMonitorWindow(rule)} title={`${rule.serviceName || "Port"} Traffic`} />}
+                    {portSection === "traffic" && <div className="space-y-3"><TrafficMonitorPanel isDark={isDark} samples={samplesByConnection.get(rule.dataId) || []} isLoading={allPortTraffic.loading} onOpenExternal={()=>openTrafficMonitorWindow(rule)} title={`${rule.serviceName || "Port"} Traffic`} /><RecentSourceIPs hits={recentIpHits} status={recentIpStatus[rule.localId]} isDark={isDark} onRetry={() => loadRecentHitsRef.current?.()} /></div>}
                     {portSection === "web" && <div><p className="mb-4 text-sm text-muted-foreground">Web addresses that route to this port. Changes here also appear on the Proxies page.</p>{rule.dataId ? <Proxy key={`${host.id}-${rule.dataId}`} machineId={host.id} connectionId={rule.dataId} onEditorOpenChange={setProxyEditorOpen} compact /> : <p className="rounded-lg bg-surface p-4 text-sm">Save this port first, then connect a web address to it.</p>}</div>}
                   </div>
                 );
