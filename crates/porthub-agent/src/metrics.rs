@@ -3,6 +3,8 @@ mod disk_identity;
 mod drive_health;
 mod gpu_counter;
 mod integrated_gpu;
+#[cfg(any(target_os = "macos", test))]
+mod mac_disk_usage;
 use crate::{
     control::Control,
     features::{self, Feature},
@@ -20,7 +22,10 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
     Worker(tokio::spawn(async move {
         let mut policy = features::subscribe(&path);
         let mut system = sysinfo::System::new();
+        #[cfg(not(target_os = "macos"))]
         let mut disks = sysinfo::Disks::new();
+        #[cfg(target_os = "macos")]
+        let mac_disks = mac_disk_usage::Worker::start(path.clone(), cancel.clone());
         let mut native_cpu = NativeCpu::default();
         let mut integrated_gpu = integrated_gpu::Cache::default();
         let drive_health = drive_health::Worker::start(path.clone(), cancel.clone());
@@ -44,52 +49,62 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
                 continue;
             }
             system.refresh_memory();
-            disks.refresh(true);
-            // Exclude network/virtual mounts and count each physical filesystem once.
-            let mut seen = std::collections::HashSet::new();
-            let mut drives = Vec::new();
-            let mut disk = Memory { used: 0, total: 0 };
-            for d in disks.list() {
-                if matches!(d.file_system().to_str(), Some("overlay" | "aufs"))
-                    || d.total_space() == 0
-                    || d.total_space() > i64::MAX as u64
-                {
-                    continue;
+            #[cfg(not(target_os = "macos"))]
+            let (drives, disk) = {
+                disks.refresh(true);
+                // Exclude network/virtual mounts and count each physical filesystem once.
+                let mut seen = std::collections::HashSet::new();
+                let mut drives = Vec::new();
+                let mut disk = Memory { used: 0, total: 0 };
+                for d in disks.list() {
+                    if matches!(d.file_system().to_str(), Some("overlay" | "aufs"))
+                        || d.total_space() == 0
+                        || d.total_space() > i64::MAX as u64
+                    {
+                        continue;
+                    }
+                    if drives.len() >= 128 {
+                        continue;
+                    }
+                    #[cfg(windows)]
+                    let Some(identity) = disk_identity::collect(d) else {
+                        continue;
+                    };
+                    #[cfg(windows)]
+                    let (key, id, name) = (identity.key, identity.id, identity.name);
+                    #[cfg(not(windows))]
+                    let (key, id, name) = {
+                        let name = d.name().to_string_lossy();
+                        (
+                            d.name().to_os_string(),
+                            integrated_gpu::label(&name, 256),
+                            integrated_gpu::label(&name, 120),
+                        )
+                    };
+                    // Optional per-disk failures must never invalidate CPU/RAM/GPU
+                    // telemetry. On Windows the key is the volume GUID, not its label.
+                    if id.is_empty() || !seen.insert(key) {
+                        continue;
+                    }
+                    drives.push(Disk {
+                        id,
+                        name,
+                        used: d.total_space().saturating_sub(d.available_space()),
+                        total: d.total_space(),
+                    });
+                    disk.total = disk.total.saturating_add(d.total_space());
+                    disk.used = disk
+                        .used
+                        .saturating_add(d.total_space().saturating_sub(d.available_space()));
                 }
-                if drives.len() >= 128 {
-                    continue;
-                }
-                #[cfg(windows)]
-                let Some(identity) = disk_identity::collect(d) else {
-                    continue;
-                };
-                #[cfg(windows)]
-                let (key, id, name) = (identity.key, identity.id, identity.name);
-                #[cfg(not(windows))]
-                let (key, id, name) = {
-                    let name = d.name().to_string_lossy();
-                    (
-                        d.name().to_os_string(),
-                        integrated_gpu::label(&name, 256),
-                        integrated_gpu::label(&name, 120),
-                    )
-                };
-                // Optional per-disk failures must never invalidate CPU/RAM/GPU
-                // telemetry. On Windows the key is the volume GUID, not its label.
-                if id.is_empty() || !seen.insert(key) {
-                    continue;
-                }
-                drives.push(Disk {
-                    id,
-                    name,
-                    used: d.total_space().saturating_sub(d.available_space()),
-                    total: d.total_space(),
-                });
-                disk.total = disk.total.saturating_add(d.total_space());
-                disk.used = disk
-                    .used
-                    .saturating_add(d.total_space().saturating_sub(d.available_space()));
-            }
+                (drives, disk)
+            };
+            #[cfg(target_os = "macos")]
+            let (drives, disk) = {
+                let drives = mac_disks.sample();
+                let disk = mac_disk_usage::aggregate(&drives);
+                (drives, disk)
+            };
             let mut gpus = gpus().await;
             if gpus.is_empty() {
                 gpus = integrated_gpu.sample().await;

@@ -10,6 +10,17 @@ readings stay unavailable. No inference libraries or additional containers load.
 Windows CPU sampling also uses GetSystemTimes so a missing performance-counter
 provider cannot suppress the machine's RAM and disk reports.
 
+Windows mounted volumes use their native volume GUID rather than their label;
+blank or duplicate labels cannot discard the machine's report or another drive.
+On macOS, native physical-device identities group usage by drive. APFS container
+capacity/free space is refreshed separately once per minute and counted once,
+including independent containers on the same physical drive. Volume quotas,
+shared volumes, snapshots and disk images are never added as extra physical
+capacity. Slow discovery cannot delay CPU/RAM reports. Unmounted drives and
+unproven backing relationships remain unavailable; if physical-drive coverage is
+incomplete, the aggregate disk percentage is unavailable while verified per-drive
+series remain visible. Native mount metadata is refreshed with ordinary samples.
+
 Collection is enabled by default and remains under the client's control:
 
 ```sh

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { utilization, rankedMachines, metricSegments, diskDevices, diskReading, capacityPercent, gpuDevices, gpuReading } from '../src/lib/machineMetrics.mjs';
+import { utilization, rankedMachines, metricSegments, diskDevices, diskReading, capacityPercent, memoryText, gpuDevices, gpuReading } from '../src/lib/machineMetrics.mjs';
 const sample = (cpu, gpu = null) => ({ cpu, ram: { used: 4, total: 8 }, disk: { used: 25, total: 100 }, gpus: gpu === null ? [] : [{ utilization: gpu }] });
 test('resource percentages normalize capacity and preserve unsupported GPU', () => {
   assert.equal(utilization(sample(10), 'ram'), 50);
@@ -63,4 +63,14 @@ test('drive-health ranking prioritizes a critical drive and puts unknown coverag
  assert.deepEqual(rankedMachines(machines,['health']).map(m=>m.name),['critical','warning','healthy','unavailable']);
  assert.deepEqual(rankedMachines(machines,['health'],true).map(m=>m.name),['healthy','warning','critical','unavailable']);
  assert.equal(utilization({cpu:0,cpu_available:false},'cpu'),null);
+});
+
+test('unmounted physical drive keeps identity but shows unavailable capacity and chart gap', () => {
+ const unavailable={disks:[{id:'mac-physical:a',name:'External drive',used:0,total:0}],disk:{used:0,total:0}};
+ assert.equal(memoryText(diskReading(unavailable,'mac-physical:a')),'Unavailable');
+ assert.equal(capacityPercent(diskReading(unavailable,'mac-physical:a')),null);
+ assert.equal(utilization(unavailable,'disk'),null);
+ assert.deepEqual(metricSegments([{at:1,sample:unavailable}],s=>capacityPercent(diskReading(s,'mac-physical:a'))),[]);
+ assert.equal(memoryText({used:1024,total:2048}),'1.0 KB / 2.0 KB');
+ assert.equal(diskDevices([],unavailable)[0].name,'External drive');
 });

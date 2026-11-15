@@ -1,3 +1,4 @@
+import { formatBytes } from "../shared/utils/traffic.mjs";
 export const RESOURCES = [['cpu', 'CPU'], ['gpu', 'GPU'], ['ram', 'RAM'], ['disk', 'Disk']];
 const percent = value => Number.isFinite(value) && value >= 0 && value <= 100 ? value : null;
 export function utilization(sample, key) {
@@ -37,6 +38,7 @@ export function gpuReading(sample, id, name, allowLegacy=false) {
   const older=allowLegacy?sample?.gpus?.filter(g=>!g.id&&g.name===name):[];
   return older?.length===1?older[0]:null;
 }
+export function memoryText(memory) { return memory?.total > 0 ? `${formatBytes(memory.used)} / ${formatBytes(memory.total)}` : 'Unavailable'; }
 export function capacityPercent(memory) { return memory?.total > 0 ? percent(memory.used / memory.total * 100) : null; }
 export function gpuDevices(history, latest) {
   const samples=[latest,...history.slice().reverse().map(p=>p.sample)].filter(Boolean);
