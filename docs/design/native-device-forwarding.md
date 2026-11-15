@@ -31,3 +31,24 @@ Validated on 2026-11-15:
 - Luna → Condor, same SSD: its older virtual USB controller rejected SuperSpeedPlus. Agent 1.11.17 adds an EINVAL-only retry at SuperSpeed; physical testing confirmed successful attachment and descriptor enumeration with that retry. With source-side storage preparation, the full 16 MiB read passed in 51.4908 seconds (326 kB/s). Measured network round-trip latency was approximately 60 ms.
 
 SSD checks used normal unmounts and bounded read-only probes, with the original mount restored after each test. Both destination reads completed without writes to the SSD. Device attachment and transport connection status must not be reported as proof that a device's application workload works. Keep the hardware forwarding work open until storage and remote audio tests pass or their supported constraints are established with evidence.
+
+### Explicit Windows removable-drive preparation
+
+Windows removable media may reject disk-level offline operations. An administrator
+can instead run `porthub usb prepare BUSID` locally before forwarding it. This
+operation checks the local USB permission, confirms one directly attached USB disk
+with a stable native serial, enumerates all its volume extents, and locks every
+volume before dismounting or offlining any volume. Open files, system/page-file
+volumes, incomplete metadata, multi-LUN devices and spanned volumes block preparation.
+Close applications using the drive and retry; there is no force option.
+
+Preparation records a private identity-bound recovery journal and leaves the
+volumes offline. It does not format, repair, read or write user files; Windows
+flushes its existing filesystem cache when obtaining the volume lock. Start the
+usual USB forward afterward. After stopping forwarding and waiting for the device
+to return, run `porthub usb restore BUSID` on its source. Restoration checks the
+same physical serial, size, device instance and volume extents before bringing
+only PortHub-prepared volumes online. It remains available when local USB access
+is disabled so recovery is still possible. A failed rollback retains its journal
+and reports the restore command. Mount points and disk read-only settings are not
+changed, and no remote request automatically dismounts local storage.

@@ -1,5 +1,7 @@
 //! Windows kernel adapters. PortHub owns authorization, transport and lifecycle;
 //! the signed USB/IP host/UDE drivers provide the OS device handoff.
+#[path = "windows/storage.rs"]
+pub(crate) mod storage;
 use anyhow::{ensure, Context, Result};
 use porthub_components::usb::Device;
 use serde_json::Value;

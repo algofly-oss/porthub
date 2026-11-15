@@ -15,6 +15,10 @@ pub struct Args {
 pub enum Action {
     /// List physical USB devices on this machine without changing their drivers.
     Devices,
+    /// Safely offline local Windows USB storage volumes before forwarding (administrator).
+    Prepare { busid: String },
+    /// Restore only storage volumes explicitly prepared by this machine.
+    Restore { busid: String },
     /// Forward a selected local USB device to another registered machine.
     #[command(alias = "share")]
     Expose {
@@ -42,6 +46,8 @@ pub enum Action {
     Stop { id: Option<String> },
 }
 pub async fn run(args: Args, cancel: CancellationToken) -> Result<()> {
+    #[cfg(windows)]
+    let restoring = matches!(&args.command, Action::Restore { .. });
     match args.command {
         Action::Devices => {
             // The daemon cache refreshes in the background; a one-shot CLI must
@@ -55,6 +61,31 @@ pub async fn run(args: Args, cancel: CancellationToken) -> Result<()> {
                 println!("Native USB forwarding requires Linux USB/IP or the signed Windows USB drivers.");
             }
             Ok(())
+        }
+        Action::Prepare { busid } | Action::Restore { busid } => {
+            #[cfg(windows)]
+            {
+                let restore = restoring;
+                if !restore {
+                    let (layout, registration) = crate::keyboard::registration(
+                        args.user,
+                        args.registration.as_deref(),
+                    )?;
+                    let row = crate::service::select(&layout, Some(&registration))?;
+                    ensure!(
+                        crate::features::enabled(&row.spec.profile, crate::features::Feature::Usb),
+                        "USB is disabled by local client policy"
+                    );
+                }
+                tokio::task::spawn_blocking(move || {
+                    super::windows::storage::run(&busid, restore)
+                }).await?
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = busid;
+                anyhow::bail!("Explicit USB volume preparation is supported on Windows only");
+            }
         }
         Action::List => crate::mapping_jobs::usb_list(None),
         Action::Status { id } => crate::mapping_jobs::usb_list(id.as_deref()),

@@ -5194,7 +5194,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-agent"
-version = "1.11.27"
+version = "1.11.28"
 dependencies = [
  "anyhow",
  "arboard",
