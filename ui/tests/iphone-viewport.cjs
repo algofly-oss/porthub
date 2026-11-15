@@ -7,7 +7,7 @@ const { launchBrowser } = require('./browser.cjs');
   try {
     // iPhone 16 Pro logical viewport, including a sideways phone.
     for (const viewport of [{ width: 402, height: 874 }, { width: 874, height: 402 }]) {
-      const context = await browser.newContext({ viewport, isMobile: true, hasTouch: true, deviceScaleFactor: 3, serviceWorkers: 'block' });
+      const context = await browser.newContext({ viewport, isMobile: true, hasTouch: true, deviceScaleFactor: 3, serviceWorkers: process.env.REVIEW_SERVICE_WORKERS || 'block' });
       const page = await context.newPage();
       const state = makeDemoData();
       await context.route('**/api/**', async route => {
