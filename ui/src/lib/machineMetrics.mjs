@@ -37,8 +37,20 @@ export function gpuDevices(history, latest) {
   for (const sample of [...history.map(p=>p.sample), latest].filter(Boolean)) sample.gpus?.forEach((g,i)=>devices.set(gpuIdentity(g,i),{id:gpuIdentity(g,i),name:g.name}));
   return [...devices.values()];
 }
+export function diskIdentity(disk) {
+  const id = disk.id;
+  if (/^\/dev\/(?:nvme\d+n\d+|mmcblk\d+)p\d+$/.test(id)) return id.replace(/p\d+$/, '');
+  if (/^\/dev\/(?:sd|hd|vd|xvd)[a-z]+\d+$/.test(id)) return id.replace(/\d+$/, '');
+  return id;
+}
+export function diskReading(sample, id) {
+  const parts=sample?.disks?.filter(d=>diskIdentity(d)===id);
+  return parts?.length ? parts.reduce((sum,d)=>({used:sum.used+d.used,total:sum.total+d.total}),{used:0,total:0}) : null;
+}
 export function diskDevices(history, latest) {
   const devices = new Map();
-  for (const sample of [...history.map(p=>p.sample), latest].filter(Boolean)) sample.disks?.forEach(d=>devices.set(d.id,{id:d.id,name:d.name}));
+  for (const sample of [...history.map(p=>p.sample), latest].filter(Boolean)) sample.disks?.forEach(d=>{
+    const id=diskIdentity(d);devices.set(id,{id,name:id===d.id?d.name:id});
+  });
   return [...devices.values()];
 }

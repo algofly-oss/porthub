@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { utilization, rankedMachines, metricSegments } from '../src/lib/machineMetrics.mjs';
+import { utilization, rankedMachines, metricSegments, diskDevices, diskReading, capacityPercent } from '../src/lib/machineMetrics.mjs';
 const sample = (cpu, gpu = null) => ({ cpu, ram: { used: 4, total: 8 }, disk: { used: 25, total: 100 }, gpus: gpu === null ? [] : [{ utilization: gpu }] });
 test('resource percentages normalize capacity and preserve unsupported GPU', () => {
   assert.equal(utilization(sample(10), 'ram'), 50);
@@ -26,4 +26,13 @@ test('history gaps are never interpolated as idle usage', () => {
   assert.deepEqual(metricSegments(points, 'cpu').map(s => s.length), [2,2]);
   assert.equal(metricSegments(points, 'gpu').length, 0);
   assert.equal(metricSegments(points, 'cpu', 240000).length, 1);
+});
+
+test('drive histories combine mounted partitions by capacity and retain disconnect gaps',()=>{
+ const sample={disks:[{id:'/dev/nvme0n1p1',name:'boot',used:1,total:100},{id:'/dev/nvme0n1p2',name:'root',used:200,total:900},{id:'/dev/sda1',name:'SSD',used:20,total:100}]};
+ assert.deepEqual(diskDevices([{at:0,sample}],sample).map(d=>d.id),['/dev/nvme0n1','/dev/sda']);
+ assert.deepEqual(diskReading(sample,'/dev/nvme0n1'),{used:201,total:1000});
+ assert.equal(capacityPercent(diskReading(sample,'/dev/nvme0n1')),20.1);
+ assert.equal(diskReading({disks:[]},'/dev/sda'),null);
+ assert.deepEqual(diskDevices([],{disks:[{id:'Macintosh HD',name:'Macintosh HD',used:1,total:10}]}),[{id:'Macintosh HD',name:'Macintosh HD'}]);
 });

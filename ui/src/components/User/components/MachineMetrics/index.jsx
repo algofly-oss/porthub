@@ -1,7 +1,7 @@
 import SeriesChart from './SeriesChart';
 import SearchDropdown from '@/components/ui/search-dropdown';
 import { useEffect, useState } from 'react';
-import { RESOURCES, utilization, rankedMachines, metricSegments, gpuDevices, gpuReading, capacityPercent, diskDevices } from '@/lib/machineMetrics.mjs';
+import { RESOURCES, utilization, rankedMachines, metricSegments, gpuDevices, gpuReading, capacityPercent, diskDevices, diskReading } from '@/lib/machineMetrics.mjs';
 import { formatBytes } from '@/shared/utils/traffic.mjs';
 
 function useMetrics(url, active) {
@@ -84,7 +84,7 @@ export default function MachineMetrics({ machineId, active }) {
    {id:'temp',label:'Temperature',read:s=>readGpu(s)?.temperature??null,scale:v=>v/150*100,format:s=>readGpu(s)?.temperature==null?'Unavailable':`${readGpu(s).temperature.toFixed(1)}°C`},
    {id:'fan',label:'Fan speed',read:s=>readGpu(s)?.fan_speed??null,format:s=>percentText(readGpu(s)?.fan_speed)}];
   const drives=diskDevices(history,sample);
-  const diskSeries=drives.map(d=>({id:d.id,label:d.name,read:s=>capacityPercent(s?.disks?.find(v=>v.id===d.id)),format:s=>memoryText(s?.disks?.find(v=>v.id===d.id))}));
+  const diskSeries=drives.map(d=>({id:d.id,label:d.name,read:s=>capacityPercent(diskReading(s,d.id)),format:s=>memoryText(diskReading(s,d.id))}));
   if(history.some(p=>!p.sample.disks?.length))diskSeries.push({id:'legacy',label:'All drives (older reports)',read:s=>s?.disks?.length?null:capacityPercent(s?.disk),format:s=>s?.disks?.length?'Unavailable':memoryText(s?.disk)});
   const fresh = latest?.at && Date.now() - latest.at < 45000;
   return <section aria-label="Machine health and resource history" className="space-y-4 p-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-base font-semibold">Resources</h2><p className="mt-1 text-xs text-muted-foreground">{latest ? `${fresh ? 'Live' : 'Stale reading'} · ${time(latest.at)}` : 'Waiting for the client’s first report'}</p></div><SearchDropdown aria-label="Resource history period" className="rounded-md bg-control p-2 text-sm" value={hours} onChange={event => setHours(Number(event.target.value))}><option value={1}>Last hour</option><option value={24}>Last 24 hours</option><option value={168}>Last 7 days</option></SearchDropdown></div>
