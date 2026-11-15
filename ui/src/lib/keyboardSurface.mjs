@@ -8,8 +8,19 @@ export function mountKeyboardSurface({root,keyboard,pad,read,command,mic}) {
   const clearInterval=id=>{window.clearInterval(id);timers.delete(id)};
   const cfg=new Proxy({}, {get:(_,key)=>read()[key]});
   const isOn=Boolean,touchDevice=matchMedia('(pointer: coarse)').matches;
-  const icons={shift:'⇧',caps:'⇪',delete:'⌫',enter:'↵',left:'←',right:'→',up:'↑',down:'↓',mic:'●'};
-  const svg=name=>icons[name]||name;
+  // Explicit vectors keep special keys legible across mobile system fonts.
+  const icons={
+    shift:'<path d="M16 20h-8v-8h-4l8-8 8 8h-4z"/>',
+    caps:'<path d="M16 16h-8v-6h-4l8-7 8 7h-4zM8 21h8"/>',
+    delete:'<path d="M20 5h-12l-6 7 6 7h12a2 2 0 0 0 2-2v-10a2 2 0 0 0-2-2zM12 9l6 6M18 9l-6 6"/>',
+    enter:'<path d="M20 4v10a3 3 0 0 1-3 3h-13M9 12l-5 5 5 5"/>',
+    left:'<path d="M20 12h-16M10 6l-6 6 6 6"/>',
+    right:'<path d="M4 12h16M14 6l6 6-6 6"/>',
+    up:'<path d="M12 20v-16M6 10l6-6 6 6"/>',
+    down:'<path d="M12 4v16M6 14l6 6 6-6"/>',
+    mic:'<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/>',
+  };
+  const svg=name=>icons[name]?`<svg aria-hidden="true" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${icons[name]}</svg>`:name;
   const typeText=text=>{if(read().connected)command({type:'text',text})};
   // Repeating press/up pairs refresh the server deadman timer and work on native and HID clients.
   const sendKey=query=>{if(!read().connected)return;const p=new URLSearchParams(query),state=p.get('s');command({type:'key',key:p.get('k'),state:state==='up'?'up':'press'})};
