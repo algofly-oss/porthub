@@ -160,6 +160,16 @@ async function verifySurfaceDictation(browser){
   await health.getByText('Fixture GPU',{exact:false}).first().waitFor();
   await page.waitForFunction(()=>document.querySelector('section[aria-label="Machine health and resource history"]')?.querySelectorAll('svg[role="img"]').length===5);
   assert.equal(await health.getByRole('img').count(),5);
+  const integrated=health.getByRole('heading',{name:'GPU · Fixture GPU',exact:true}).locator('..');
+  assert((await integrated.getByRole('listitem').filter({hasText:'Dedicated VRAM'}).innerText()).includes('Unavailable'),'An integrated adapter without dedicated-memory data never invents zero VRAM');
+  assert((await integrated.getByRole('listitem').filter({hasText:'Shared GPU memory'}).innerText()).includes('256.0 MB / 8.0 GB max'),'Shared usage is measured against its maximum shareable limit');
+  assert.equal(await integrated.locator('polyline').count(),2,'Only measured utilization and shared memory generate lines; absent dedicated VRAM, temperature and fan remain gaps');
+  await chooseDropdown(health.getByLabel('GPU device',{exact:true}),'Fixture discrete GPU · fixture-discrete');
+  const discrete=health.getByRole('heading',{name:'GPU · Fixture discrete GPU',exact:true}).locator('..');
+  assert((await discrete.getByRole('listitem').filter({hasText:'Dedicated VRAM'}).innerText()).includes('953.7 MB / 3.7 GB'),'Switching adapters reads only that adapter memory, without summing shared limits');
+  assert.equal(await discrete.getByRole('listitem').filter({hasText:'Shared GPU memory'}).count(),0,'Shared memory from the integrated adapter does not leak into a discrete adapter history');
+  assert.equal(await discrete.locator('polyline').count(),1,'An adapter with unknown utilization draws only its measured dedicated-memory line');
+  await chooseDropdown(health.getByLabel('GPU device',{exact:true}),'Fixture GPU · fixture-integrated');
   const drives=health.getByRole('region',{name:'Physical drive health and history'});
   await drives.getByRole('img',{name:'Drive SMART condition history'}).waitFor();
   assert((await drives.getByLabel('Physical drive',{exact:true}).inputValue()).includes('Fixture physical SSD'));
