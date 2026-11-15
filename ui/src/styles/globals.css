@@ -239,6 +239,16 @@ html:not([data-keyboard-navigation]) :is([role="checkbox"], input[type="checkbox
 .dark .board-preview { background-color: #121212; }
 .dark .board-preview img { filter: invert(93%) hue-rotate(180deg); }
 
+/* iOS zooms focused form fields below 16px. Cover landscape phones too,
+   without disabling the user's pinch zoom or changing desktop density. */
+@media (hover: none) and (pointer: coarse) and (max-width: 1024px) {
+  :root input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="hidden"]),
+  :root textarea,
+  :root select {
+    font-size: 16px !important;
+  }
+}
+
 /* Keep the keyboard within thumb reach on a phone held sideways. */
 @media (pointer: coarse) and (orientation: landscape) and (max-height: 599px) and (min-width: 768px) {
   .workspace[data-keyboard-active="true"] .workspace-sidebar { width:64px !important; padding-left:8px !important; padding-right:8px !important; }
