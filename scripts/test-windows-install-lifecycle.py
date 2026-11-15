@@ -197,6 +197,8 @@ def main():
             next_spec = json.loads(manifest_path.read_text())
             assert next_spec["executable"] != previous_spec["executable"], "SCM update retained old image"
             assert hashlib.sha256(Path(next_spec["executable"]).read_bytes()).digest() == hashlib.sha256(replacement.read_bytes()).digest()
+            assert next_spec["cli"] == previous_spec["cli"], "SCM update lost shared CLI publication"
+            assert hashlib.sha256(cli.read_bytes()).digest() == hashlib.sha256(replacement.read_bytes()).digest(), "Published CLI retained old release"
             ps("$s = Get-CimInstance Win32_Service -Filter \"Name='" + service + "'\"; "
                "if ($s.State -ne 'Running' -or -not $s.PathName.Contains('" + next_spec["executable"] + "')) { exit 1 }")
             # Idempotent reinstallation must retain this registration and credentials.

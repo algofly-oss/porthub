@@ -13,7 +13,7 @@ use std::{
 enum Previous {
     Missing,
     Link(PathBuf),
-    IdenticalFile(tempfile::TempDir),
+    ExistingFile(tempfile::TempDir),
 }
 fn cli_name() -> &'static str {
     if cfg!(windows) {
@@ -249,11 +249,23 @@ fn state(
                 Some(hash) => hash.to_owned(),
                 None => hash_file(target)?,
             };
-            anyhow::ensure!(
-                current_hash == expected_hash,
-                "existing CLI is not the selected native binary; legacy adoption must be explicit"
-            );
-            Ok(Previous::IdenticalFile(backup))
+            if current_hash != expected_hash {
+                #[cfg(windows)]
+                {
+                    // Windows publishes a regular executable copy rather than
+                    // a symlink. Accept an earlier copy only when its bytes are
+                    // still backed by a checksum-verified immutable release.
+                    anyhow::ensure!(
+                        legacy_hash.is_none(),
+                        "existing CLI changed during adoption"
+                    );
+                    let previous = layout.releases.join(&current_hash).join(cli_name());
+                    owned_target(layout, &previous)?;
+                }
+                #[cfg(not(windows))]
+                anyhow::bail!("existing CLI is not the selected native binary; legacy adoption must be explicit");
+            }
+            Ok(Previous::ExistingFile(backup))
         }
         _ => anyhow::bail!("existing CLI is not an owned executable"),
     }
@@ -393,8 +405,7 @@ impl Publication {
         owned_target(layout, target)?;
         let previous = state(layout, &path, target, legacy_hash)?;
         #[cfg(windows)]
-        if matches!(&previous, Previous::IdenticalFile(_))
-            && hash_file(&path)? == hash_file(target)?
+        if matches!(&previous, Previous::ExistingFile(_)) && hash_file(&path)? == hash_file(target)?
         {
             // Reinstalling the exact CLI must work while that executable is
             // running. No replacement is needed, and rollback has no bytes to
@@ -435,7 +446,7 @@ impl Publication {
         match &self.previous {
             Previous::Missing => std::fs::remove_file(&self.path)?,
             Previous::Link(target) => replace_link(&self.path, target)?,
-            Previous::IdenticalFile(backup) => {
+            Previous::ExistingFile(backup) => {
                 #[cfg(unix)]
                 std::fs::rename(backup.path().join("porthub"), &self.path)?;
                 #[cfg(windows)]
@@ -479,6 +490,59 @@ mod darwin_tests {
         anyhow::ensure!(std::fs::symlink_metadata(&cli)?.permissions().mode() & 0o777 == 0o755);
         anyhow::ensure!(std::fs::read_link(&cli)? == binary);
         anyhow::ensure!(cli.canonicalize()? == binary.canonicalize()?);
+        Ok(())
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    fn release(layout: &Layout, bytes: &[u8]) -> Result<PathBuf> {
+        let hash = format!("{:x}", Sha256::digest(bytes));
+        let parent = layout.releases.join(hash);
+        std::fs::create_dir_all(&parent)?;
+        let executable = parent.join(cli_name());
+        std::fs::write(&executable, bytes)?;
+        Ok(executable)
+    }
+
+    #[test]
+    fn managed_regular_cli_updates_roll_back_and_reject_foreign_bytes() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let layout = Layout {
+            user: false,
+            state: root.path().join("native"),
+            releases: root.path().join("releases"),
+            units: root.path().join("units"),
+        };
+        for path in [&layout.state, &layout.releases, &layout.units] {
+            std::fs::create_dir_all(path)?;
+        }
+        let old = release(&layout, b"old verified executable")?;
+        let new = release(&layout, b"new verified executable")?;
+        let bin = root.path().join("bin");
+        std::fs::create_dir(&bin)?;
+        let cli = bin.join(cli_name());
+        std::fs::copy(&old, &cli)?;
+        {
+            let mut update = Publication::prepare(&layout, &cli, &new)?;
+            assert_eq!(hash_file(&cli)?, hash_file(&new)?);
+            update.restore()?;
+            assert_eq!(hash_file(&cli)?, hash_file(&old)?);
+        }
+        {
+            let mut update = Publication::prepare(&layout, &cli, &new)?;
+            update.commit();
+        }
+        assert_eq!(hash_file(&cli)?, hash_file(&new)?);
+        std::fs::write(&cli, b"foreign executable")?;
+        assert!(Publication::prepare(&layout, &cli, &new).is_err());
+        assert_eq!(std::fs::read(&cli)?, b"foreign executable");
+        std::fs::copy(&old, &cli)?;
+        std::fs::write(&old, b"corrupted immutable release")?;
+        assert!(Publication::prepare(&layout, &cli, &new).is_err());
+        assert_eq!(std::fs::read(&cli)?, b"old verified executable");
         Ok(())
     }
 }

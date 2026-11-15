@@ -320,11 +320,19 @@ struct Native {
     interfaces: Vec<u8>,
     endpoints: Mutex<HashMap<u8, (TransferType, u16)>>,
     configuration: u8,
+    captured: bool,
 }
 impl Drop for Native {
     fn drop(&mut self) {
         for interface in self.interfaces.iter().rev() {
             let _ = self.handle.release_interface(*interface);
+        }
+        if self.captured {
+            // Capture belongs to the whole device. Restore even when the first
+            // interface claim failed and libusb recorded no claimed interface.
+            if let Err(error) = self.handle.attach_kernel_driver(0) {
+                tracing::warn!(%error,"Cannot restore native macOS USB device ownership");
+            }
         }
     }
 }
@@ -503,19 +511,24 @@ pub(super) async fn source(
     let descriptor = native.device_descriptor()?;
     let config = native.active_config_descriptor()?;
     let handle = native.open().context("Cannot open selected USB device")?;
+    // libusb's Darwin automatic detach can capture the device before a failed
+    // claim, then leak that capture because no interface was marked claimed.
+    // One explicit capture paired with Native::drop restores all failure paths.
+    handle.set_auto_detach_kernel_driver(false)?;
     handle
-        .set_auto_detach_kernel_driver(true)
-        .context("Cannot enable native macOS root USB capture")?;
+        .detach_kernel_driver(0)
+        .context("Cannot capture the selected macOS USB device")?;
     let mut io = Native {
         handle,
         interfaces: Vec::new(),
         endpoints: Mutex::new(HashMap::new()),
         configuration: config.number(),
+        captured: true,
     };
     for interface in config.interfaces() {
         let number = interface.number();
         io.handle.claim_interface(number).context(
-            "Cannot capture selected USB interface; macOS may require accessory approval",
+            "Cannot open the selected USB interface; macOS denied native interface access",
         )?;
         io.interfaces.push(number);
         let alternate = interface
