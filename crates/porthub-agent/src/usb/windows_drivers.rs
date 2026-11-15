@@ -42,7 +42,7 @@ async fn direct_rule(path:&Path,control:&Control)->Result<()> {
     let name=format!("PortHub-USB-{}",control.profile().machine_id);let executable=std::env::current_exe()?;
     // Only the authenticated PortHub process is exposed to its local subnet.
     // Raw usbipd TCP3240 is deliberately not opened to the network.
-    let script="$ErrorActionPreference='Stop';$name=$env:PORTHUB_USB_RULE;$group='PortHub managed USB bulk';$old=Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue;if($old){if($old.Group -ne $group){throw 'USB firewall rule belongs to another owner'};Set-NetFirewallRule -Name $name -Enabled True -Action Allow -Direction Inbound -Profile Any -RemoteAddress LocalSubnet;Set-NetFirewallApplicationFilter -AssociatedNetFirewallRule $old -Program $env:PORTHUB_USB_EXE | Out-Null}else{New-NetFirewallRule -Name $name -DisplayName $name -Group $group -Direction Inbound -Action Allow -Profile Any -Program $env:PORTHUB_USB_EXE -Protocol TCP -RemoteAddress LocalSubnet | Out-Null}";
+    let script=include_str!("windows_usb_direct_rule.ps1");
     let output=tokio::time::timeout(Duration::from_secs(30),tokio::process::Command::new(system("WindowsPowerShell/v1.0/powershell.exe")?).args(["-NoLogo","-NoProfile","-NonInteractive","-Command",script]).env("PORTHUB_USB_RULE",name).env("PORTHUB_USB_EXE",executable).kill_on_drop(true).output()).await??;ensure!(output.status.success(),"Cannot configure the owned PortHub USB direct-path firewall rule");Ok(())
 }
 pub(super) async fn prepare(path:&Path,control:Arc<Control>)->Result<()> {
