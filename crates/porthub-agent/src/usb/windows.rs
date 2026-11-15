@@ -208,10 +208,237 @@ fn online_usb_storage() -> Option<bool> {
     }
 }
 
+#[derive(Clone, Debug)]
+struct DiskNode {
+    ancestors: Vec<String>,
+    number: Option<u32>,
+    offline: bool,
+    indirect: bool,
+}
+#[derive(Clone, Debug)]
+struct VolumeState {
+    disks: Option<Vec<u32>>,
+    offline: bool,
+    // A false FSCTL result may mean another application's lock or an error.
+    // Only true is positive mount evidence; false never grants capture.
+    mounted: bool,
+}
+fn query_metadata(file: &File, code: u32, output: &mut [u8]) -> Option<usize> {
+    let mut returned = 0;
+    let ok = unsafe {
+        DeviceIoControl(
+            file.as_raw_handle(),
+            code,
+            std::ptr::null(),
+            0,
+            if output.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                output.as_mut_ptr().cast()
+            },
+            output.len() as u32,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    (ok != 0 && returned as usize <= output.len()).then_some(returned as usize)
+}
+fn disk_metadata(path: &str) -> (Option<u32>, bool, bool) {
+    let Ok(file) = metadata_volume(path) else {
+        return (None, false, true);
+    };
+    let mut number = [0u8; 12];
+    let number = query_metadata(&file, 0x002d1080, &mut number)
+        .filter(|n| *n >= 12)
+        .filter(|_| u32::from_le_bytes(number[..4].try_into().unwrap()) == 7)
+        .map(|_| u32::from_le_bytes(number[4..8].try_into().unwrap()));
+    let mut attributes = [0u8; 16];
+    attributes[..4].copy_from_slice(&16u32.to_le_bytes());
+    let offline = query_metadata(&file, 0x000700f0, &mut attributes).is_some_and(|n| {
+        n >= 16
+            && u32::from_le_bytes(attributes[..4].try_into().unwrap()) == 16
+            && u64::from_le_bytes(attributes[8..16].try_into().unwrap()) & 1 != 0
+    });
+    let query = [0u32; 3];
+    let mut descriptor = [0u8; 1024];
+    let mut returned = 0;
+    let ok = unsafe {
+        DeviceIoControl(
+            file.as_raw_handle(),
+            0x002d1400,
+            query.as_ptr().cast(),
+            12,
+            descriptor.as_mut_ptr().cast(),
+            descriptor.len() as u32,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    let bus = (ok != 0 && returned >= 36 && returned as usize <= descriptor.len())
+        .then(|| u32::from_le_bytes(descriptor[28..32].try_into().unwrap()));
+    (number, offline, indirect_storage_bus(bus))
+}
+fn indirect_storage_bus(bus: Option<u32>) -> bool {
+    // SCSI/RAID can also represent virtual storage. With Spaces, VHDs or an
+    // unknown bus, physical extents alone cannot exclude an indirect backing
+    // file/pool relationship. Affirmative disk OFFLINE still proves safety.
+    !matches!(bus, Some(2 | 3 | 4 | 7 | 10 | 11 | 12 | 13 | 17 | 18 | 19))
+}
+#[repr(C)]
+struct DiskExtent {
+    number: u32,
+    offset: i64,
+    length: i64,
+}
+#[repr(C)]
+struct DiskExtents {
+    count: u32,
+    extents: [DiskExtent; 1],
+}
+fn extent_numbers(bytes: &[u8]) -> Option<Vec<u32>> {
+    let count = u32::from_le_bytes(bytes.get(..4)?.try_into().ok()?) as usize;
+    if !(1..=256).contains(&count) {
+        return None;
+    }
+    let start = std::mem::offset_of!(DiskExtents, extents);
+    let stride = std::mem::size_of::<DiskExtent>();
+    if bytes.len() < start.checked_add(count.checked_mul(stride)?)? {
+        return None;
+    }
+    let mut numbers = Vec::new();
+    for index in 0..count {
+        let offset = start + index * stride;
+        let number = u32::from_le_bytes(bytes[offset..offset + 4].try_into().ok()?);
+        let start = i64::from_le_bytes(bytes[offset + 8..offset + 16].try_into().ok()?);
+        let length = i64::from_le_bytes(bytes[offset + 16..offset + 24].try_into().ok()?);
+        if number == u32::MAX || start < 0 || length <= 0 {
+            return None;
+        }
+        if !numbers.contains(&number) {
+            numbers.push(number);
+        }
+    }
+    Some(numbers)
+}
+fn volume_states() -> Option<Vec<VolumeState>> {
+    unsafe {
+        let mut name = [0u16; 1024];
+        let handle = FindFirstVolumeW(name.as_mut_ptr(), name.len() as u32);
+        if handle == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        struct Volumes(windows_sys::Win32::Foundation::HANDLE);
+        impl Drop for Volumes {
+            fn drop(&mut self) {
+                unsafe {
+                    FindVolumeClose(self.0);
+                }
+            }
+        }
+        let _guard = Volumes(handle);
+        let mut rows = Vec::new();
+        for _ in 0..256 {
+            let length = name.iter().position(|c| *c == 0)?;
+            let path = String::from_utf16(&name[..length])
+                .ok()?
+                .trim_end_matches('\\')
+                .to_owned();
+            // Volume GUIDs can include optical/network filesystems that cannot
+            // be USB disk descendants. Unknown/local volume types remain gated.
+            if !matches!(GetDriveTypeW(name.as_ptr()), 4 | 5 | 6) {
+                let state = match metadata_volume(&path) {
+                    Ok(file) => {
+                        let mut extents = vec![
+                            0u8;
+                            std::mem::offset_of!(DiskExtents, extents)
+                                + 256 * std::mem::size_of::<DiskExtent>()
+                        ];
+                        let disks = query_metadata(&file, 0x00560000, &mut extents)
+                            .and_then(|n| extent_numbers(&extents[..n]));
+                        let offline = query_metadata(&file, 0x00560010, &mut []).is_some();
+                        let mounted = query_metadata(&file, 0x00090028, &mut []).is_some();
+                        VolumeState {
+                            disks,
+                            offline,
+                            mounted,
+                        }
+                    }
+                    Err(_) => VolumeState {
+                        disks: None,
+                        offline: false,
+                        mounted: false,
+                    },
+                };
+                rows.push(state);
+            }
+            name.fill(0);
+            if FindNextVolumeW(handle, name.as_mut_ptr(), name.len() as u32) == 0 {
+                return (std::io::Error::last_os_error().raw_os_error() == Some(18))
+                    .then_some(rows);
+            }
+        }
+        None
+    }
+}
+fn selected_storage_online(
+    instance: &str,
+    disks: Option<&[DiskNode]>,
+    volumes: Option<&[VolumeState]>,
+) -> Option<bool> {
+    if instance.is_empty() {
+        return None;
+    }
+    let disks = disks?;
+    let selected = disks
+        .iter()
+        .filter(|disk| {
+            disk.ancestors
+                .iter()
+                .any(|node| node.eq_ignore_ascii_case(instance))
+        })
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Some(false);
+    }
+    // Disk-level OFFLINE is affirmative OS evidence, even when its inaccessible
+    // offline volumes cannot be opened. No operation here changes disk state.
+    if selected.iter().all(|disk| disk.offline) {
+        return Some(false);
+    }
+    let numbers = selected
+        .iter()
+        .filter(|disk| !disk.offline)
+        .map(|disk| disk.number)
+        .collect::<Option<Vec<_>>>()?;
+    let mut uncertain = disks.iter().any(|disk| disk.indirect);
+    for volume in volumes? {
+        let Some(extents) = &volume.disks else {
+            uncertain = true;
+            continue;
+        };
+        if extents.is_empty() {
+            uncertain = true;
+            continue;
+        }
+        if !extents.iter().any(|number| numbers.contains(number)) {
+            continue;
+        }
+        if volume.mounted {
+            return Some(true);
+        }
+        if !volume.offline {
+            uncertain = true;
+        }
+    }
+    // A complete extent map with no matching volume also proves there is no
+    // mounted Windows filesystem on an unformatted/foreign-filesystem disk.
+    (!uncertain).then_some(false)
+}
+
 // Complete native disk ancestry proves that a vendor/composite USB device is
 // unrelated to every present disk, even when its function driver is missing.
 // Any uncertain enumeration falls back to the existing mounted-storage guard.
-fn disk_ancestry() -> Option<Vec<Vec<String>>> {
+fn disk_ancestry() -> Option<Vec<DiskNode>> {
     const DISK: GUID = GUID::from_u128(0x53f56307_b6bf_11d0_94f2_00a0c91efb8b);
     unsafe {
         let mut root = 0;
@@ -306,18 +533,33 @@ fn disk_ancestry() -> Option<Vec<Vec<String>>> {
             if !complete {
                 return None;
             }
-            rows.push(chain);
+            if required as usize > buffer.len() * 8 {
+                return None;
+            }
+            let raw = std::slice::from_raw_parts(
+                (buffer.as_ptr() as *const u8).add(4).cast::<u16>(),
+                (required as usize - 4) / 2,
+            );
+            let path_len = raw.iter().position(|v| *v == 0)?;
+            let path = String::from_utf16(&raw[..path_len]).ok()?;
+            let (number, offline, indirect) = disk_metadata(&path);
+            rows.push(DiskNode {
+                ancestors: chain,
+                number,
+                offline,
+                indirect,
+            });
         }
         None
     }
 }
-fn has_disk_descendant(instance: &str, ancestry: Option<&[Vec<String>]>) -> Option<bool> {
+fn has_disk_descendant(instance: &str, ancestry: Option<&[DiskNode]>) -> Option<bool> {
     if instance.is_empty() {
         return None;
     }
     ancestry.map(|rows| {
         rows.iter()
-            .flatten()
+            .flat_map(|disk| &disk.ancestors)
             .any(|node| node.eq_ignore_ascii_case(instance))
     })
 }
@@ -407,10 +649,11 @@ fn parse_device(
     };
     device.valid().then_some(device)
 }
-fn fresh_inventory() -> Result<Vec<Device>> {
+pub(super) fn fresh_inventory() -> Result<Vec<Device>> {
     let state = host_state()?;
-    let online = online_usb_storage();
     let ancestry = disk_ancestry();
+    let volumes = ancestry.as_ref().and_then(|_| volume_states());
+    let fallback = ancestry.is_none().then(online_usb_storage).flatten();
     Ok(state["Devices"]
         .as_array()
         .context("Invalid Windows USB inventory")?
@@ -418,7 +661,13 @@ fn fresh_inventory() -> Result<Vec<Device>> {
         .filter_map(|row| {
             parse_device(
                 row,
-                online,
+                row["InstanceId"].as_str().and_then(|instance| {
+                    if ancestry.is_some() {
+                        selected_storage_online(instance, ancestry.as_deref(), volumes.as_deref())
+                    } else {
+                        fallback
+                    }
+                }),
                 row["InstanceId"]
                     .as_str()
                     .and_then(|instance| has_disk_descendant(instance, ancestry.as_deref())),
@@ -841,7 +1090,17 @@ pub(super) async fn source(
         has_disk_descendant(&export.instance, ancestry.as_deref()),
     ) {
         ensure!(
-            tokio::task::spawn_blocking(online_usb_storage).await? == Some(false),
+            {
+                let instance = export.instance.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Some(disks) = ancestry {
+                        selected_storage_online(&instance, Some(&disks), volume_states().as_deref())
+                    } else {
+                        online_usb_storage()
+                    }
+                })
+                .await?
+            } == Some(false),
             "USB volume state changed; safely take USB storage offline before sharing"
         );
     }
@@ -938,11 +1197,16 @@ mod tests {
     fn disk_ancestry_separates_serial_devices_from_unrelated_mounted_storage() {
         let disk_usb = "USB\\VID_0781&PID_5583\\disk";
         let serial_usb = "USB\\VID_10C4&PID_EA60\\0001";
-        let ancestry = vec![vec![
-            "USBSTOR\\Disk&Ven_SanDisk\\disk".into(),
-            disk_usb.into(),
-            "USB\\ROOT_HUB30\\root".into(),
-        ]];
+        let ancestry = vec![DiskNode {
+            ancestors: vec![
+                "USBSTOR\\Disk&Ven_SanDisk\\disk".into(),
+                disk_usb.into(),
+                "USB\\ROOT_HUB30\\root".into(),
+            ],
+            number: Some(1),
+            offline: false,
+            indirect: false,
+        }];
         assert_eq!(
             has_disk_descendant(serial_usb, Some(&ancestry)),
             Some(false)
@@ -975,6 +1239,242 @@ mod tests {
             .blocked
             .is_none());
         assert!(parse_device(&row, None, None).unwrap().blocked.is_some());
+    }
+    #[test]
+    fn storage_guard_checks_only_selected_disk_volumes() {
+        let disks = [
+            DiskNode {
+                ancestors: vec!["USB\\selected".into()],
+                number: Some(1),
+                offline: false,
+                indirect: false,
+            },
+            DiskNode {
+                ancestors: vec!["USB\\other".into()],
+                number: Some(2),
+                offline: false,
+                indirect: false,
+            },
+        ];
+        let volumes = [
+            VolumeState {
+                disks: Some(vec![1]),
+                offline: true,
+                mounted: false,
+            },
+            VolumeState {
+                disks: Some(vec![2]),
+                offline: false,
+                mounted: true,
+            },
+        ];
+        assert_eq!(
+            selected_storage_online("USB\\selected", Some(&disks), Some(&volumes)),
+            Some(false)
+        );
+        assert_eq!(
+            selected_storage_online("USB\\other", Some(&disks), Some(&volumes)),
+            Some(true)
+        );
+        assert_eq!(
+            selected_storage_online("USB\\serial", Some(&disks), None),
+            Some(false)
+        );
+    }
+    #[test]
+    fn locked_or_unknown_storage_never_grants_capture() {
+        let disks = [DiskNode {
+            ancestors: vec!["USB\\selected".into()],
+            number: Some(1),
+            offline: false,
+            indirect: false,
+        }];
+        let locked = [VolumeState {
+            disks: Some(vec![1]),
+            offline: false,
+            mounted: false,
+        }];
+        assert_eq!(
+            selected_storage_online("USB\\selected", Some(&disks), Some(&locked)),
+            None
+        );
+        assert_eq!(
+            selected_storage_online("USB\\selected", Some(&disks), None),
+            None
+        );
+        assert_eq!(
+            selected_storage_online("USB\\selected", None, Some(&locked)),
+            None
+        );
+        let unmapped = [VolumeState {
+            disks: None,
+            offline: true,
+            mounted: false,
+        }];
+        assert_eq!(
+            selected_storage_online("USB\\selected", Some(&disks), Some(&unmapped)),
+            None
+        );
+        let removed = [DiskNode {
+            ancestors: vec!["USB\\selected".into()],
+            number: None,
+            offline: false,
+            indirect: false,
+        }];
+        assert_eq!(
+            selected_storage_online("USB\\selected", Some(&removed), Some(&locked)),
+            None
+        );
+        assert_eq!(
+            selected_storage_online("", Some(&disks), Some(&locked)),
+            None
+        );
+    }
+    #[test]
+    fn offline_disk_and_complete_empty_volume_map_are_positive_evidence() {
+        let offline = [DiskNode {
+            ancestors: vec!["USB\\selected".into()],
+            number: Some(1),
+            offline: true,
+            indirect: false,
+        }];
+        assert_eq!(
+            selected_storage_online("USB\\selected", Some(&offline), None),
+            Some(false)
+        );
+        let raw = [DiskNode {
+            ancestors: vec!["USB\\selected".into()],
+            number: Some(1),
+            offline: false,
+            indirect: false,
+        }];
+        assert_eq!(
+            selected_storage_online("USB\\selected", Some(&raw), Some(&[])),
+            Some(false)
+        );
+        let unknown = [VolumeState {
+            disks: None,
+            offline: false,
+            mounted: false,
+        }];
+        assert_eq!(
+            selected_storage_online("USB\\selected", Some(&raw), Some(&unknown)),
+            None
+        );
+    }
+    #[test]
+    fn spanned_and_multilun_volumes_check_every_selected_extent() {
+        let disks = [
+            DiskNode {
+                ancestors: vec!["USB\\selected".into()],
+                number: Some(1),
+                offline: true,
+                indirect: false,
+            },
+            DiskNode {
+                ancestors: vec!["USB\\selected".into()],
+                number: Some(2),
+                offline: false,
+                indirect: false,
+            },
+        ];
+        let active = [VolumeState {
+            disks: Some(vec![9, 2]),
+            offline: false,
+            mounted: true,
+        }];
+        assert_eq!(
+            selected_storage_online("USB\\selected", Some(&disks), Some(&active)),
+            Some(true)
+        );
+        let locked = [VolumeState {
+            disks: Some(vec![9, 2]),
+            offline: false,
+            mounted: false,
+        }];
+        assert_eq!(
+            selected_storage_online("USB\\selected", Some(&disks), Some(&locked)),
+            None
+        );
+        let offline = [VolumeState {
+            disks: Some(vec![9, 2]),
+            offline: true,
+            mounted: false,
+        }];
+        assert_eq!(
+            selected_storage_online("USB\\selected", Some(&disks), Some(&offline)),
+            Some(false)
+        );
+    }
+    #[test]
+    fn volume_extent_parser_requires_complete_bounded_native_records() {
+        let stride = std::mem::size_of::<DiskExtent>();
+        let start = std::mem::offset_of!(DiskExtents, extents);
+        let mut bytes = vec![0u8; start + stride * 2];
+        bytes[..4].copy_from_slice(&2u32.to_le_bytes());
+        for (index, disk) in [1u32, 2].into_iter().enumerate() {
+            let position = start + stride * index;
+            bytes[position..position + 4].copy_from_slice(&disk.to_le_bytes());
+            bytes[position + 16..position + 24].copy_from_slice(&4096i64.to_le_bytes());
+        }
+        assert_eq!(extent_numbers(&bytes), Some(vec![1, 2]));
+        assert!(extent_numbers(&bytes[..bytes.len() - 1]).is_none());
+        bytes[..4].copy_from_slice(&257u32.to_le_bytes());
+        assert!(extent_numbers(&bytes).is_none());
+        bytes[..4].copy_from_slice(&0u32.to_le_bytes());
+        assert!(extent_numbers(&bytes).is_none());
+        bytes[..4].copy_from_slice(&2u32.to_le_bytes());
+        bytes[start + 8..start + 16].copy_from_slice(&(-1i64).to_le_bytes());
+        assert!(extent_numbers(&bytes).is_none());
+    }
+    #[test]
+    fn indirect_pool_or_virtual_disks_prevent_false_safe_empty_extent_proof() {
+        let selected = DiskNode {
+            ancestors: vec!["USB\\selected".into()],
+            number: Some(1),
+            offline: false,
+            indirect: false,
+        };
+        let virtual_disk = DiskNode {
+            ancestors: vec!["ROOT\\space".into()],
+            number: Some(2),
+            offline: false,
+            indirect: true,
+        };
+        let mounted_virtual = [VolumeState {
+            disks: Some(vec![2]),
+            mounted: true,
+            offline: false,
+        }];
+        let mut disks = [selected, virtual_disk];
+        assert_eq!(
+            selected_storage_online("USB\\selected", Some(&disks), Some(&mounted_virtual)),
+            None
+        );
+        assert_eq!(
+            selected_storage_online("USB\\selected", Some(&disks), Some(&[])),
+            None
+        );
+        disks[0].offline = true;
+        assert_eq!(
+            selected_storage_online("USB\\selected", Some(&disks), None),
+            Some(false)
+        );
+        for bus in [
+            None,
+            Some(0),
+            Some(1),
+            Some(8),
+            Some(14),
+            Some(15),
+            Some(16),
+            Some(255),
+        ] {
+            assert!(indirect_storage_bus(bus));
+        }
+        for bus in [7, 11, 17] {
+            assert!(!indirect_storage_bus(Some(bus)));
+        }
     }
     #[test]
     fn release_driver_abi_is_fixed() {

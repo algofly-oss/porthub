@@ -1,4 +1,5 @@
 //! Low-frequency, process-free host sampling. Local policy gates collection and upload.
+mod disk_identity;
 mod drive_health;
 mod gpu_counter;
 mod integrated_gpu;
@@ -51,17 +52,36 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
             for d in disks.list() {
                 if matches!(d.file_system().to_str(), Some("overlay" | "aufs"))
                     || d.total_space() == 0
-                    || !seen.insert(d.name().to_os_string())
+                    || d.total_space() > i64::MAX as u64
                 {
                     continue;
                 }
                 if drives.len() >= 128 {
                     continue;
                 }
-                let name = d.name().to_string_lossy().to_string();
+                #[cfg(windows)]
+                let Some(identity) = disk_identity::collect(d) else {
+                    continue;
+                };
+                #[cfg(windows)]
+                let (key, id, name) = (identity.key, identity.id, identity.name);
+                #[cfg(not(windows))]
+                let (key, id, name) = {
+                    let name = d.name().to_string_lossy();
+                    (
+                        d.name().to_os_string(),
+                        integrated_gpu::label(&name, 256),
+                        integrated_gpu::label(&name, 120),
+                    )
+                };
+                // Optional per-disk failures must never invalidate CPU/RAM/GPU
+                // telemetry. On Windows the key is the volume GUID, not its label.
+                if id.is_empty() || !seen.insert(key) {
+                    continue;
+                }
                 drives.push(Disk {
-                    id: integrated_gpu::label(&name, 256),
-                    name: integrated_gpu::label(&name, 120),
+                    id,
+                    name,
                     used: d.total_space().saturating_sub(d.available_space()),
                     total: d.total_space(),
                 });

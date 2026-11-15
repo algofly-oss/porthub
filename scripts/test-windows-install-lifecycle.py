@@ -234,7 +234,7 @@ def main():
             replacement = Path(update) / "porthub.exe"
             replacement.write_bytes(source.read_bytes() + b"porthub-owned-update-fixture-v1")
             before = len(syncs)
-            run([str(replacement), "service", "install", "--profile", previous_spec["profile"]])
+            run([str(replacement), "service", "install", "--profile", previous_spec["profile"], "--publish-cli"])
             wait_for(lambda: len(syncs) > before, "replacement image authenticated control")
             next_spec = json.loads(manifest_path.read_text())
             assert next_spec["executable"] != previous_spec["executable"], "SCM update retained old image"
@@ -244,7 +244,7 @@ def main():
             ps("$s = Get-CimInstance Win32_Service -Filter \"Name='" + service + "'\"; "
                "if ($s.State -ne 'Running' -or -not $s.PathName.Contains('" + next_spec["executable"] + "')) { exit 1 }")
             # Idempotent reinstallation must retain this registration and credentials.
-            run([str(replacement), "service", "install", "--profile", previous_spec["profile"]])
+            run([str(replacement), "service", "install", "--profile", previous_spec["profile"], "--publish-cli"])
             assert json.loads(manifest_path.read_text())["identity"] == previous_spec["identity"]
         print("PASS verified owned SCM image replacement and idempotency", flush=True)
         run([str(cli), "remove", identity[:12]])

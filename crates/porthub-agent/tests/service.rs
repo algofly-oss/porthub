@@ -349,6 +349,11 @@ async fn cli_publication_tracks_verified_releases_rolls_back_failed_activation_a
     let first =
         service::install_published(&layout, &source, &executable, &manager, Some(&cli)).await?;
     let other = service::install(&layout, &other_source, &executable, &manager).await?;
+    // A live agent owns the enrollment lease. Publishing an update must use
+    // its native registration, without rewriting the enrolled credentials.
+    let source_bytes=std::fs::read(&source)?;
+    let _running_agent=porthub_agent::profile::Lease::acquire(&source)?;
+    ensure!(porthub_agent::profile::Lease::running(&source)?);
     ensure!(std::fs::read_link(&cli)? == first.executable);
     std::fs::write(&executable, b"release two")?;
     manager.fail_start.store(true, Ordering::SeqCst);
@@ -369,6 +374,7 @@ async fn cli_publication_tracks_verified_releases_rolls_back_failed_activation_a
     ensure!(std::fs::read_link(&cli)?==latest.executable&&std::fs::read(&cli)?==b"release two");
     let latest=service::install(&layout,&source,&executable,&manager).await?;
     ensure!(latest.cli.as_deref()==Some(cli.as_path())&&std::fs::read_link(&cli)?==latest.executable&&std::fs::read(&cli)?==b"release three");
+    ensure!(std::fs::read(&source)?==source_bytes,"CLI update rewrote live enrollment credentials");
     service::action(
         &layout,
         &source,

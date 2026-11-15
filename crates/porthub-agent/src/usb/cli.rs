@@ -44,7 +44,13 @@ pub enum Action {
 pub async fn run(args: Args, cancel: CancellationToken) -> Result<()> {
     match args.command {
         Action::Devices => {
-            println!("{}", serde_json::to_string_pretty(&super::inventory())?);
+            // The daemon cache refreshes in the background; a one-shot CLI must
+            // wait for native discovery instead of exiting with its empty cache.
+            #[cfg(windows)]
+            let devices = tokio::task::spawn_blocking(super::windows::fresh_inventory).await??;
+            #[cfg(not(windows))]
+            let devices = super::inventory();
+            println!("{}", serde_json::to_string_pretty(&devices)?);
             if !cfg!(any(target_os = "linux",target_os="macos",windows)) {
                 println!("Native USB forwarding requires Linux USB/IP or the signed Windows USB drivers.");
             }

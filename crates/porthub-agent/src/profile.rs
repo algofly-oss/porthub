@@ -136,6 +136,14 @@ fn checked(path: &Path) -> Result<File> {
     checked_import(path, false)
 }
 fn checked_import(path: &Path, root_import: bool) -> Result<File> {
+    checked_open(path, root_import, false)
+}
+/// Validate and open private lock state without reading its locked byte range.
+/// Windows mandatory locks reject ReadFile even on an empty locked file.
+pub(crate) fn open_private_lock(path: &Path) -> Result<File> {
+    checked_open(path, false, true)
+}
+fn checked_open(path: &Path, root_import: bool, writable: bool) -> Result<File> {
     #[cfg(not(unix))]
     let _ = root_import;
     let metadata = std::fs::symlink_metadata(path).context("read machine state metadata")?;
@@ -144,7 +152,12 @@ fn checked_import(path: &Path, root_import: bool) -> Result<File> {
         "machine state must be a bounded regular file"
     );
     let mut options = OpenOptions::new();
-    options.read(true);
+    options.read(true).write(writable);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x00200000); // FILE_FLAG_OPEN_REPARSE_POINT
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -167,6 +180,11 @@ fn checked_import(path: &Path, root_import: bool) -> Result<File> {
         );
     }
     anyhow::ensure!(current.is_file(), "machine state must be a regular file");
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        anyhow::ensure!(current.file_attributes() & 0x400 == 0, "machine state must not be a reparse point");
+    }
     Ok(file)
 }
 pub fn read_private(path: &Path) -> Result<Vec<u8>> {

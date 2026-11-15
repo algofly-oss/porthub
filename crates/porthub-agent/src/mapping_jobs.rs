@@ -170,8 +170,7 @@ fn active(root: &Path, job: &Job) -> Result<bool> {
     if !path.try_exists()? {
         return Ok(false);
     }
-    crate::profile::read_private(&path)?;
-    let lock = OpenOptions::new().read(true).write(true).open(path)?;
+    let lock = crate::profile::open_private_lock(&path)?;
     match lock.try_lock_exclusive() {
         Ok(()) => {
             FileExt::unlock(&lock)?;
@@ -307,9 +306,12 @@ pub async fn stop(exposure: bool, selector: Option<&str>) -> Result<()> {
         );
     }
     let job = select(&root, exposure, selector)?;
+    stop_job(&root, &job).await
+}
+async fn stop_job(root: &Path, job: &Job) -> Result<()> {
     // Remove desired state first; a concurrent supervisor cannot resurrect it.
-    std::fs::remove_file(file(&root, &job.id)?)?;
-    if exposure {
+    std::fs::remove_file(file(root, &job.id)?)?;
+    if job.spec.exposure() {
         let _ = crate::expose::stop(&crate::expose::job_layout()?, &job.id);
     }
     tokio::time::timeout(Duration::from_secs(25), async {
@@ -385,7 +387,7 @@ pub async fn worker(id: &str, cancel: CancellationToken) -> Result<()> {
     if !lock_path.try_exists()? {
         let _ = crate::profile::write_private(&lock_path, b"", false);
     }
-    let lock = OpenOptions::new().read(true).write(true).open(&lock_path)?;
+    let lock = crate::profile::open_private_lock(&lock_path)?;
     lock.try_lock_exclusive()
         .context("Mapping already has an owner")?;
     // A stop may have raced with acquiring ownership.
@@ -457,10 +459,7 @@ pub async fn supervise(cancel: CancellationToken) -> Result<()> {
     if !daemon_path.try_exists()? {
         let _ = crate::profile::write_private(&daemon_path, b"", false);
     }
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(daemon_path)?;
+    let lock = crate::profile::open_private_lock(&daemon_path)?;
     lock.try_lock_exclusive()
         .context("Mapping recovery is already running")?;
     let mut workers = Vec::new();
@@ -515,8 +514,40 @@ pub async fn supervise(cancel: CancellationToken) -> Result<()> {
     }
     Ok(())
 }
+#[cfg(windows)]
+fn pinned_windows_executable(current: &Path, releases: &Path) -> Result<Option<PathBuf>> {
+    use sha2::{Digest,Sha256};
+    use std::io::Read;
+    fn hash(path:&Path)->Result<String>{
+        let metadata=std::fs::symlink_metadata(path)?;
+        ensure!(metadata.is_file()&&metadata.len()<=256*1024*1024,"Mapping executable must be a bounded regular file");
+        let mut file=std::fs::File::open(path)?;
+        let mut hash=Sha256::new();let mut buffer=[0u8;65536];
+        loop{let n=file.read(&mut buffer)?;if n==0{break;}hash.update(&buffer[..n]);}
+        Ok(format!("{:x}",hash.finalize()))
+    }
+    let identity=hash(current)?;
+    let directory=releases.join(&identity);
+    let target=directory.join("porthub.exe");
+    if !target.try_exists()?{return Ok(None);}
+    ensure!(std::fs::symlink_metadata(&directory)?.is_dir(),"Mapping release directory must be real");
+    ensure!(hash(&target)?==identity,"Mapping immutable executable checksum mismatch");
+    Ok(Some(target))
+}
 fn executable() -> Result<PathBuf> {
     let current = std::env::current_exe()?;
+    #[cfg(windows)]
+    {
+        if let Some(pinned)=pinned_windows_executable(&current,&crate::service::Layout::system()?.releases)? {
+            return Ok(pinned);
+        }
+        let published=crate::bootstrap::cli_path(false,None)?;
+        ensure!(published.canonicalize().ok().as_ref()!=Some(&current.canonicalize()?),"The installed CLI has no verified immutable release; repair PortHub setup before starting background mappings");
+        return Ok(current);
+    }
+    #[cfg(not(windows))]
+    {
+
     let invoked = std::env::args_os().next().map(PathBuf::from);
     for user in [false, true] {
         if let Ok(path) = crate::bootstrap::cli_path(user, None) {
@@ -528,6 +559,7 @@ fn executable() -> Result<PathBuf> {
         }
     }
     Ok(current)
+    }
 }
 async fn command(program: &str, args: &[&str]) -> Result<()> {
     let output = tokio::time::timeout(
@@ -697,3 +729,79 @@ pub async fn enable_recovery() -> Result<()> {
 pub(crate) fn usb_ready(id:&str)->Result<()>{state(&root()?,id,"running",None)}
 pub fn usb_list(selector:Option<&str>)->Result<()>{let root=root()?;let rows:Vec<_>=jobs(&root)?.into_iter().filter(|j|matches!(j.spec,Spec::Usb{..})&&selector.is_none_or(|s|j.id.starts_with(s))).collect();if selector.is_some(){ensure!(rows.len()==1,"Choose a unique USB forwarding job ID");}if rows.is_empty(){println!("No saved USB forwards.");}for row in rows{describe(&root,&row)?;}Ok(())}
 pub async fn usb_stop(selector:Option<&str>)->Result<()>{let rows:Vec<_>=jobs(&root()?)?.into_iter().filter(|j|matches!(j.spec,Spec::Usb{..})&&selector.is_none_or(|s|j.id.starts_with(s))).collect();ensure!(rows.len()==1,"Choose a unique USB forwarding job ID");stop(false,Some(&rows[0].id)).await}
+
+#[cfg(test)]
+mod private_lock_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn held_job_locks_allow_active_list_and_stop_for_tcp_usb_foreground_and_recovery() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        #[cfg(unix)]
+        { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(root.path(),std::fs::Permissions::from_mode(0o700))?; }
+        for recover in [false,true] {
+            for spec in [Spec::Forward {target:"127.0.0.1:8080".into(),bind:"127.0.0.1".parse()?,port:18080},
+                Spec::Usb {user:false,registration:"a".repeat(64),source:"a".repeat(24),destination:"b".repeat(24),busid:"1-2".into()}] {
+                let job=Job{id:uuid::Uuid::new_v4().simple().to_string(),recover,spec};
+                write(root.path(),&job)?;
+                let path=file(root.path(),&job.id)?;
+                let lock_path=path.with_extension("lock");
+                crate::profile::write_private(&lock_path,b"",false)?;
+                let held=crate::profile::open_private_lock(&lock_path)?;
+                held.try_lock_exclusive()?;
+                assert!(active(root.path(),&job)?);
+                let listed=jobs(root.path())?;
+                assert_eq!(listed.len(),1);
+                describe(root.path(),&listed[0])?;
+                let worker=tokio::spawn(async move {
+                    while path.exists(){tokio::time::sleep(Duration::from_millis(10)).await;}
+                    drop(held);
+                });
+                stop_job(root.path(),&job).await?;
+                worker.await?;
+                assert!(jobs(root.path())?.is_empty());
+                assert!(!lock_path.exists());
+            }
+        }
+        let path=root.path().join("supervisor.lock");
+        crate::profile::write_private(&path,b"",false)?;
+        let held=crate::profile::open_private_lock(&path)?;
+        held.try_lock_exclusive()?;
+        let contender=crate::profile::open_private_lock(&path)?;
+        assert_eq!(contender.try_lock_exclusive().unwrap_err().raw_os_error(),fs2::lock_contended_error().raw_os_error());
+        let oversized=root.path().join("oversized.lock");
+        crate::profile::write_private(&oversized,b"",false)?;
+        std::fs::OpenOptions::new().write(true).open(&oversized)?.set_len(4*1024*1024+1)?;
+        assert!(crate::profile::open_private_lock(&oversized).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let link=root.path().join("symlink.lock");std::os::unix::fs::symlink(&path,&link)?;
+            assert!(crate::profile::open_private_lock(&link).is_err());
+            let unsafe_file=root.path().join("readable.lock");crate::profile::write_private(&unsafe_file,b"",false)?;
+            std::fs::set_permissions(&unsafe_file,std::fs::Permissions::from_mode(0o644))?;
+            assert!(crate::profile::open_private_lock(&unsafe_file).is_err());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(test,windows))]
+mod windows_executable_tests {
+    use super::*;
+    use sha2::{Digest,Sha256};
+    #[test]
+    fn background_workers_pin_only_matching_immutable_release() -> Result<()> {
+        let root=tempfile::tempdir()?;
+        let cli=root.path().join("porthub.exe");let bytes=b"fixture executable";
+        std::fs::write(&cli,bytes)?;
+        let releases=root.path().join("releases");std::fs::create_dir(&releases)?;
+        assert!(pinned_windows_executable(&cli,&releases)?.is_none());
+        let leaf=releases.join(format!("{:x}",Sha256::digest(bytes)));std::fs::create_dir(&leaf)?;
+        let target=leaf.join("porthub.exe");std::fs::write(&target,bytes)?;
+        assert_eq!(pinned_windows_executable(&cli,&releases)?,Some(target.clone()));
+        std::fs::write(&target,b"modified release")?;
+        assert!(pinned_windows_executable(&cli,&releases).is_err());
+        Ok(())
+    }
+}

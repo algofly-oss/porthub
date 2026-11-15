@@ -370,6 +370,16 @@ fn append_path_block(profile: &Path, directory: &Path) -> Result<()> {
     file.sync_all()?;
     Ok(())
 }
+/// Refresh interactive startup after a successful native CLI transaction.
+/// Existing service updates must not rewrite their live enrollment profile.
+pub fn setup_published_desktop(spec: &Spec, user: bool) {
+    if let Some(cli) = &spec.cli {
+        if crate::keyboard::install_desktop(cli,user).is_err() {
+            tracing::warn!("Desktop VKeyboard startup registration unavailable; use porthub keyboard enable from your desktop session");
+        }
+    }
+}
+
 pub async fn install_published(
     profile: Profile,
     path: Option<&Path>,
@@ -437,11 +447,7 @@ async fn install_published_mode(
     match install {
         Ok(spec) => {
             source.committed = true;
-            if let Some(cli)=&spec.cli {
-                if let Err(_)=crate::keyboard::install_desktop(cli,layout.user){
-                    tracing::warn!("Desktop VKeyboard startup registration unavailable; use porthub keyboard enable from your desktop session");
-                }
-            }
+            setup_published_desktop(&spec,layout.user);
             Ok(spec)
         }
         Err(error) => {
