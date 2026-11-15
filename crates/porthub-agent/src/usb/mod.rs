@@ -283,9 +283,9 @@ async fn negotiate(
         } else if let Ok(offer)=serde_json::from_value::<tcp::Offer>(hello["bulk_offer"].clone()) {
             tcp::connect(offer,Some(control)).await.ok()
         } else {None};
-        text(socket,json!({"type":"bulk_ready","ready":stream.is_some()})).await?;
+        text(socket,json!({"type":"direct_ready","bulk":true,"ready":stream.is_some()})).await?;
         let remote=tokio::time::timeout(Duration::from_secs(8),next_text(socket)).await??;
-        ensure!(remote["type"]=="bulk_ready","Invalid bulk USB negotiation");
+        ensure!(remote["type"]=="direct_ready" && remote["bulk"]==true,"Invalid bulk USB negotiation");
         if remote["ready"]==true {if let Some(stream)=stream {return Ok(Carrier{tcp:Some(stream),sctp:None});}}
     }
     let both = candidates.is_some() && hello["direct"] == true;
