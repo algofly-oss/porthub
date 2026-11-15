@@ -39,6 +39,31 @@ const base=process.env.PORTHUB_TEST_UI_URL,cookie=process.env.PORTHUB_TEST_BOARD
     await page.getByRole('button',{name:'Close VKeyboard settings',exact:true}).click();await page.getByRole('dialog').waitFor({state:'hidden'});
   }
   await page.setViewportSize({width:1440,height:1000});await page.getByRole('button',{name:'Switch to portrait layout',exact:true}).click();assert(await page.locator('[aria-label="Capture physical keyboard"]').evaluate(el=>getComputedStyle(el).maxWidth==='680px'));await page.getByRole('button',{name:'Switch to landscape layout',exact:true}).click();assert(await page.locator('[aria-label="Capture physical keyboard"]').evaluate(el=>getComputedStyle(el).gridTemplateColumns.split(' ').length===2));
+  // High-refresh-rate pointing must stay connected through the real relay and
+  // native worker, even when samples arrive faster than input can be applied.
+  await page.getByRole('button',{name:'Disconnect',exact:true}).click();
+  await page.addScriptTag({content:(await fs.readFile(require('node:path').join(__dirname,'../src/lib/keyboardTransport.mjs'),'utf8')).replace(/export /g,'')+'\nwindow.MotionTransport=KeyboardTransport;'});
+  const motion=await page.evaluate(async()=>{
+    const targets=await fetch('/api/keyboard/targets').then(r=>r.json());
+    const target=targets.targets.find(t=>t.name==='Isolated desktop');
+    let failure='',acknowledged=0;
+    const transport=new window.MotionTransport({target:target.id,createPeer:()=>{throw Error('Exercise relay');},failed:reason=>failure=reason});
+    transport.connect();
+    for(let i=0;i<100&&!transport.ready&&!transport.closed;i++)await new Promise(r=>setTimeout(r,20));
+    if(!transport.ready)throw Error('Stress session did not connect: '+failure);
+    const promises=[];
+    for(let i=0;i<500;i++){
+      promises.push(transport.send({type:'pointer',action:'move',dx:i%2?1:-1,dy:0}).then(()=>acknowledged++,reason=>{failure||=reason.message;}));
+      await new Promise(r=>setTimeout(r,4));
+    }
+    await Promise.all(promises);
+    const connected=!transport.closed;
+    transport.close();
+    return {connected,failure,acknowledged};
+  });
+  assert(motion.connected,`Sustained pointer session closed: ${JSON.stringify(motion)}`);
+  assert.equal(motion.failure,'');assert.equal(motion.acknowledged,500);
+  await page.getByRole('button',{name:'Connect',exact:true}).click();await page.getByRole('button',{name:'Disconnect',exact:true}).waitFor();
   const cli=process.env.PORTHUB_TEST_AGENT_EXECUTABLE;const env={...process.env,XDG_CONFIG_HOME:process.env.PORTHUB_TEST_KEYBOARD_CONFIG,XDG_DATA_HOME:process.env.PORTHUB_TEST_KEYBOARD_DATA};
   await run(cli,['keyboard','disable','--user','--registration',process.env.PORTHUB_TEST_KEYBOARD_ID],{env});await page.getByRole('button',{name:'Connect',exact:true}).waitFor();await page.getByRole('button',{name:'Text and clipboard',exact:true}).click();assert(await page.getByRole('button',{name:'Type text',exact:true}).isDisabled(),'Local disable revokes active remote input');
   await page.getByRole('tab',{name:'Flash',exact:true}).click();await page.getByRole('heading',{name:'Bluetooth keyboard board',exact:true}).waitFor();assert.equal(new URL(page.url()).pathname,'/home');

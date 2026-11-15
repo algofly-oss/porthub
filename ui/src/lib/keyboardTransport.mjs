@@ -4,7 +4,7 @@ export const KEYBOARD_CHANNEL = "porthub-keyboard/1";
 export class KeyboardTransport {
   constructor({target,changed=()=>{},failed=()=>{},createSocket=url=>new WebSocket(url),createPeer=config=>new RTCPeerConnection(config),origin=globalThis.location?.origin}) {
     Object.assign(this,{target,changed,failed,createSocket,createPeer,origin});
-    this.pending=new Map();this.closed=false;this.generation=0;
+    this.pending=new Map();this.queue=[];this.closed=false;this.generation=0;this.motionAfter=0;
   }
   connect() {
     const url=new URL(`/api/keyboard/control/${encodeURIComponent(this.target)}`,this.origin);url.protocol=url.protocol==='https:'?'wss:':'ws:';
@@ -18,24 +18,43 @@ export class KeyboardTransport {
     if(message.type==='ready') {this.ready=true;this.session=message.session;this.changed({state:'connected',route:'relay',clipboard:message.clipboard});if(message.direct)void this.discover();}
     else if(message.type==='device_status')this.changed({bluetooth:message.bluetooth});
     else if(message.type==='ping')this.socket.send(JSON.stringify({type:'pong'}));
-    else if(message.type==='ack') {const pending=this.pending.get(message.ack?.id);if(!pending)return;clearTimeout(pending.timer);this.pending.delete(message.ack.id);message.ack.ok?pending.resolve():pending.reject(new Error(message.ack.error||'Input failed'));}
+    else if(message.type==='ack') {const pending=this.pending.get(message.ack?.id);if(!pending)return;clearTimeout(pending.timer);this.pending.delete(message.ack.id);message.ack.ok?pending.resolve():pending.reject(new Error(message.ack.error||'Input failed'));this.pump();}
     else if(message.type==='direct_answer') {if(!this.peer||message.session!==this.session)return;void this.peer.setRemoteDescription(JSON.parse(message.description)).catch(()=>this.fallback());}
     else if(message.type==='direct_unavailable')this.fallback();
     else if(message.type==='closed'||message.type==='error')this.fail(message.error||'VKeyboard unavailable');
   }
   send(command) {
     if(!this.ready||this.closed)return Promise.reject(new Error('Connect to a client first'));
-    if(this.pending.size>=64)return Promise.reject(new Error('Wait for pending input to finish'));
-    const input={id:crypto.randomUUID(),command};const bytes=JSON.stringify(input);
+    const motion=command.type==='pointer'&&command.action==='move';
+    const tail=this.queue.at(-1);
+    // Only combine adjacent, unsent relative movements. A click, key or scroll
+    // remains a barrier, and already-sent identities are never modified.
+    if(motion&&tail?.motion){
+      const dx=(tail.input.command.dx||0)+(command.dx||0),dy=(tail.input.command.dy||0)+(command.dy||0);
+      if(Math.abs(dx)<=4000&&Math.abs(dy)<=4000){Object.assign(tail.input.command,{dx,dy});return tail.promise;}
+    }
+    if(this.pending.size+this.queue.length>=64)return Promise.reject(new Error('Wait for pending input to finish'));
+    const input={id:crypto.randomUUID(),command:{...command}};
     const envelope=JSON.stringify({type:'input',input});
     if(new TextEncoder().encode(envelope).length>32000)return Promise.reject(new Error('Text exceeds the input limit'));
-    return new Promise((resolve,reject)=>{
-      const pending={input,resolve,reject};pending.timer=setTimeout(()=>{
+    let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});
+    this.queue.push({input,motion,promise,resolve,reject,expires:Date.now()+10000});this.pump();return promise;
+  }
+  pump() {
+    while(!this.closed&&this.ready&&this.pending.size<4&&this.queue.length){
+      const next=this.queue[0];
+      if(next.expires<=Date.now()){this.queue.shift();next.reject(new Error('Input expired before it could be sent'));continue;}
+      // A 120/240 Hz display must not exceed the gateway's input budget. Keep
+      // a small acknowledgement window so a slow desktop cannot build a flood.
+      const delay=next.motion?this.motionAfter-Date.now():0;
+      if(delay>0){if(!this.pumpTimer)this.pumpTimer=setTimeout(()=>{this.pumpTimer=null;this.pump();},delay);return;}
+      this.queue.shift();if(next.motion)this.motionAfter=Date.now()+17;
+      const {input}=next;const pending=next;pending.timer=setTimeout(()=>{
         // A timeout never repeats a command: the client may have executed it.
-        this.pending.delete(input.id);reject(new Error('No acknowledgement. Input may have reached the client; check before retrying.'));
+        this.pending.delete(input.id);pending.reject(new Error('No acknowledgement. Input may have reached the client; check before retrying.'));this.pump();
       },10000);this.pending.set(input.id,pending);
-      try{if(this.channel?.readyState==='open'&&this.channel.bufferedAmount<65536)this.channel.send(bytes);else this.socket.send(envelope);}catch{this.pending.delete(input.id);clearTimeout(pending.timer);reject(new Error('Input was not sent'));}
-    });
+      try{if(this.channel?.readyState==='open'&&this.channel.bufferedAmount<65536)this.channel.send(JSON.stringify(input));else this.socket.send(JSON.stringify({type:'input',input}));}catch{this.pending.delete(input.id);clearTimeout(pending.timer);pending.reject(new Error('Input was not sent'));}
+    }
   }
   device(command) {if(!this.ready||this.closed)throw new Error('Connect to a board first');this.socket.send(JSON.stringify({type:'device',command}));}
   async discover() {
@@ -66,10 +85,10 @@ export class KeyboardTransport {
     // The desktop deduplicates identities across both carriers in this session.
     for(const {input} of this.pending.values()){try{this.socket.send(JSON.stringify({type:'input',input}));}catch{this.fail('Relay connection failed');break;}}
   }
-  fail(message) {if(this.closed)return;this.failed(message);this.close();}
-  close() {
+  fail(message) {if(this.closed)return;this.failed(message);this.close(new Error(message));}
+  close(reason=new Error('Input session closed')) {
     if(this.closed)return;this.closed=true;this.ready=false;this.generation++;clearTimeout(this.gather);this.finishGather?.();clearTimeout(this.localDeadline);
-    this.fallback();if(this.socket){this.socket.onclose=this.socket.onerror=this.socket.onmessage=null;this.socket.close();}
-    for(const p of this.pending.values()){clearTimeout(p.timer);p.reject(new Error('Input session closed'));}this.pending.clear();this.changed({state:'disconnected',route:null});
+    clearTimeout(this.pumpTimer);this.fallback();if(this.socket){this.socket.onclose=this.socket.onerror=this.socket.onmessage=null;this.socket.close();}
+    for(const p of this.pending.values()){clearTimeout(p.timer);p.reject(reason);}this.pending.clear();for(const p of this.queue)p.reject(reason);this.queue=[];this.changed({state:'disconnected',route:null});
   }
 }
