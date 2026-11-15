@@ -174,8 +174,8 @@ function renderVkb(){
   const SCROLL_PX=18;  // finger travel per scroll step
   // Tap and drag, as on Windows: a finger that lands within DRAG_WINDOW of a tap
   // holds the left button once it moves, until it lifts.
-  const DRAG_WINDOW=300,DRAG_START_PX=6;
-  let gesture=null,frame=0,lastTap=-1e9,dragging=false;
+  const DRAG_WINDOW=450,DRAG_START_PX=6;
+  let gesture=null,frame=0,lastTap=-1e9,dragging=false,holdTimer=0,heldRenew=0;
   const send=m=>{if(read().connected)command({type:'pointer',...m})};
   const flush=()=>{frame=0;
     const mx=Math.round(move.x),my=Math.round(move.y);
@@ -183,23 +183,28 @@ function renderVkb(){
     const sx=Math.trunc(scroll.x),sy=Math.trunc(scroll.y);if(sx||sy){send({action:'scroll',dx:sx,dy:sy});scroll.x-=sx;scroll.y-=sy}};
   const later=()=>{frame||=requestAnimationFrame(flush)};
   const now=()=>{cancelAnimationFrame(frame);flush()};  // pending motion first, then the button
-  const release=()=>{if(!dragging)return;dragging=false;now();send({action:'release',button:'left'});pad.classList.remove('dragging')};
+  const cancelHold=()=>{window.clearTimeout(holdTimer);holdTimer=0};
+  const stopRenew=()=>{if(!dragging&&!buttonsDown.size&&heldRenew){clearInterval(heldRenew);heldRenew=0}};
+  const renew=()=>{heldRenew||=setInterval(()=>{if(!read().connected){resetPad();return;}if(dragging||buttonsDown.size)send({action:'move',dx:0,dy:0});else stopRenew()},1000)};
+  const beginDrag=()=>{cancelHold();if(dragging||!gesture?.drag||fingers.size!==1||!read().connected)return;dragging=true;now();send({action:'press',button:'left'});pad.classList.add('dragging');renew();navigator.vibrate?.(12)};
+  const release=()=>{cancelHold();if(!dragging)return;dragging=false;now();send({action:'release',button:'left'});pad.classList.remove('dragging');stopRenew()};
   // A finger (or the mouse) goes down, moves, lifts: the same for touch and pointer events.
   const down=(id,x,y,t)=>{if(!read().connected)return;fingers.set(id,{x,y,t});
     if(fingers.size===1)gesture={start:t,travel:0,most:1,drag:t-lastTap<DRAG_WINDOW};else if(gesture)gesture.most=Math.max(gesture.most,fingers.size);
+    if(fingers.size===1&&gesture.drag)holdTimer=window.setTimeout(beginDrag,80);else if(fingers.size>1){cancelHold();gesture.drag=false;}
     pad.classList.add('touching')};
   const moved=(id,x,y,t)=>{const f=fingers.get(id);if(!f||!gesture)return;
     const dx=x-f.x,dy=y-f.y,dt=Math.max(1,t-f.t);Object.assign(f,{x,y,t});
     gesture.travel+=Math.abs(dx)+Math.abs(dy);
     if(gesture.drag&&!dragging&&fingers.size===1&&gesture.travel>DRAG_START_PX){
-      dragging=true;now();send({action:'press',button:'left'});pad.classList.add('dragging');navigator.vibrate?.(12)}
+      beginDrag()}
     if(fingers.size===1){  // faster swipes go further, like a laptop touchpad
       const gain=(1.3+Math.min(2.2,Math.hypot(dx,dy)/dt*1.4))*(buttonsDown.size?DRAG_SPEED:1);move.x+=dx*gain;move.y+=dy*gain}
     else{  // two fingers: scroll, the content following the fingers; each finger adds half
       const dir=isOn(cfg.reverseScroll)?-1:1;  // Settings → Reverse scrolling
       scroll.x-=dir*dx/SCROLL_PX/fingers.size;scroll.y-=dir*dy/SCROLL_PX/fingers.size}
     later()};
-  const lifted=(id,t)=>{if(!fingers.delete(id)||fingers.size)return;
+  const lifted=(id,t)=>{if(!fingers.delete(id)||fingers.size)return;cancelHold();
     pad.classList.remove('touching');
     if(dragging)release();
     else if(gesture&&gesture.travel<12&&t-gesture.start<320){  // a tap: a click (the second of a double tap too)
@@ -250,12 +255,12 @@ function renderVkb(){
   const buttonsDown=new Map();  // pointer id -> {b, name, x, y, t}
   const DRAG_SPEED=0.5;  // pointer speed while a button is held: drags are for precision
   const releaseButton=id=>{const p=buttonsDown.get(id);if(!p)return;buttonsDown.delete(id);
-    p.b.classList.remove('pressed');now();send({action:'release',button:p.name})};
+    p.b.classList.remove('pressed');now();send({action:'release',button:p.name});stopRenew()};
   pad.querySelectorAll('.tp-btn').forEach(b=>{
     b.addEventListener('pointerdown',e=>{e.preventDefault();e.stopPropagation();if(!read().connected||buttonsDown.has(e.pointerId))return;
       try{b.setPointerCapture(e.pointerId)}catch{}now();
       buttonsDown.set(e.pointerId,{b,name:b.dataset.button,x:e.clientX,y:e.clientY,t:e.timeStamp});b.classList.add('pressed');
-      send({action:'press',button:b.dataset.button});navigator.vibrate?.(8)});
+      send({action:'press',button:b.dataset.button});renew();navigator.vibrate?.(8)});
     b.addEventListener('pointermove',e=>{const p=buttonsDown.get(e.pointerId);if(!p)return;
       const dx=e.clientX-p.x,dy=e.clientY-p.y,dt=Math.max(1,e.timeStamp-p.t);Object.assign(p,{x:e.clientX,y:e.clientY,t:e.timeStamp});
       const gain=(1.3+Math.min(2.2,Math.hypot(dx,dy)/dt*1.4))*DRAG_SPEED;  // as on the touchpad, slower
@@ -263,7 +268,7 @@ function renderVkb(){
     ['pointerup','pointercancel','lostpointercapture'].forEach(n=>b.addEventListener(n,e=>releaseButton(e.pointerId)));
   });
   const releaseAll=()=>{for(const id of [...buttonsDown.keys()])releaseButton(id)};
-  resetPad=()=>{release();releaseAll();fingers.clear();gesture=null;lastTap=-1e9;setActive(false);cancelAnimationFrame(frame);frame=0;move.x=move.y=scroll.x=scroll.y=0;pad.classList.remove('touching')};  // never leave a button held
+  resetPad=()=>{cancelHold();release();releaseAll();if(heldRenew){clearInterval(heldRenew);heldRenew=0}fingers.clear();gesture=null;lastTap=-1e9;setActive(false);cancelAnimationFrame(frame);frame=0;move.x=move.y=scroll.x=scroll.y=0;pad.classList.remove('touching')};  // never leave a button held
   addEventListener('pagehide',()=>resetPad());addEventListener('blur',()=>resetPad());
   document.addEventListener('visibilitychange',()=>{if(document.hidden)resetPad()});
   pad.addEventListener('contextmenu',e=>e.preventDefault());

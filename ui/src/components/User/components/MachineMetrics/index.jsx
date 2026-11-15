@@ -1,10 +1,11 @@
 import SeriesChart from './SeriesChart';
 import SearchDropdown from '@/components/ui/search-dropdown';
+import DriveHealthPanel from './DriveHealth';
 import { useEffect, useRef, useState } from 'react';
-import { RESOURCES, utilization, rankedMachines, metricSegments, gpuDevices, gpuReading, capacityPercent, diskDevices, diskReading } from '@/lib/machineMetrics.mjs';
+import { RESOURCES, utilization, rankedMachines, metricSegments, gpuDevices, gpuReading, capacityPercent, diskDevices, diskReading, RANKING_RESOURCES, driveAssessment } from '@/lib/machineMetrics.mjs';
 import { formatBytes } from '@/shared/utils/traffic.mjs';
 
-function useMetrics(url, active) {
+function useMetrics(url, active, interval = 15000) {
   const [state, setState] = useState({ data: null, error: '', loading: true });
   useEffect(() => {
     setState({ data: null, error: '', loading: true });
@@ -21,54 +22,69 @@ function useMetrics(url, active) {
         if (!disposed) setState({ data, error: '', loading: false });
       } catch (error) {
         if (!disposed && error.name !== 'AbortError') setState(old => ({ ...old, error: error.message, loading: false }));
-      } finally { if (!disposed) timer = setTimeout(load, 15000); }
+      } finally { if (!disposed) timer = setTimeout(load, interval); }
     };
     const visibility = () => { clearTimeout(timer); if (document.hidden) request?.abort(); else load(); };
     document.addEventListener('visibilitychange', visibility); load();
     return () => { disposed = true; clearTimeout(timer); request?.abort(); document.removeEventListener('visibilitychange', visibility); };
-  }, [url, active]);
+  }, [url, active, interval]);
   return state;
 }
 const time = at => at ? new Date(at).toLocaleString() : 'No reading';
 function Usage({ value, label, memory }) {
   return <div className="min-w-0"><div className="mb-1 flex justify-between gap-2 text-xs"><span className="text-muted-foreground">{label}</span><span className="tabular-nums">{value === null ? '—' : `${value.toFixed(1)}%`}</span></div><div role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={value ?? undefined} aria-valuetext={value === null ? 'Unavailable' : `${value.toFixed(1)}% · ${value >= 90 ? 'High' : value >= 70 ? 'Elevated' : 'Low'} utilization`} className="h-1.5 overflow-hidden rounded-full bg-muted"><div className={value >= 90 ? 'h-full bg-red-500' : value >= 70 ? 'h-full bg-amber-500' : 'h-full bg-emerald-500'} style={{ width: `${value ?? 0}%` }} /></div>{memory && <p className="mt-1 text-[10px] leading-3 tabular-nums text-muted-foreground">{formatBytes(memory.used)} / {formatBytes(memory.total)}</p>}</div>;
 }
+const rankingGrid='grid grid-cols-[minmax(56px,1.2fr)_repeat(5,minmax(0,1fr))] gap-1.5 sm:gap-2';
+function RankingCell({machine,resource,label}) {
+  const health=resource==='health'?driveAssessment(machine.reading?.sample):null;
+  const value=health?health.score:utilization(machine.reading?.sample,resource);
+  const memory=machine.reading?.sample?.[resource]?.total?machine.reading.sample[resource]:null;
+  const description=health?health.detail:`${label}: ${value===null?'Unavailable':value.toFixed(1)+'%'}${memory?' · '+formatBytes(memory.used)+' / '+formatBytes(memory.total):''}`;
+  const color=health?(health.status==='critical'?'bg-red-500':health.status==='warning'?'bg-amber-500':health.status==='healthy'?'bg-emerald-500':'bg-muted-foreground/30'):(value>=90?'bg-red-500':value>=70?'bg-amber-500':'bg-emerald-500');
+  const compact=memory?formatBytes(memory.used).replace(/(\d+)\.\d+\s*/, '$1').replace(/\s+/g,''):'';
+  return <span className="min-w-0" title={description}>
+    <span className={`block h-4 truncate text-[10px] leading-4 tabular-nums ${health?.status==='critical'?'font-medium text-red-500':health?.status==='warning'?'text-amber-500':''}`}>
+      {health?<><span className="sm:hidden">{health.status==='critical'?'Crit':health.status==='warning'?'Warn':health.status==='healthy'?'Good':'—'}</span><span className="hidden sm:inline">{health.label}</span></>:value===null?'—':<><span className="sm:hidden">{Math.round(value)}%</span><span className="hidden sm:inline">{value.toFixed(1)}%</span></>}
+    </span>
+    <span role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={value??undefined} aria-valuetext={description} className="mt-1 block h-1 overflow-hidden rounded-full bg-muted">
+      <span className={`block h-full ${color}`} style={{width:`${health&&value===0?6:value??0}%`}} />
+    </span>
+    {memory&&<span className="mt-0.5 block truncate text-[9px] leading-3 tabular-nums text-muted-foreground"><span className="sm:hidden">{compact}</span><span className="hidden sm:inline">{formatBytes(memory.used)}</span></span>}
+    {health&&<span className="mt-0.5 block truncate text-[9px] leading-3 text-muted-foreground">{health.incomplete?`${health.checked}/${health.total}`:`${health.total} drive${health.total===1?'':'s'}`}</span>}
+  </span>;
+}
 export function MachineRanking({ active, onSelect }) {
   const { data, error, loading } = useMetrics('/api/machines/metrics', active);
-  const [selected, setSelected] = useState('cpu');
-  const [ascending, setAscending] = useState(false);
-  const machines = rankedMachines(data?.machines || [], [selected], ascending);
-  const viewport = useRef(null);
-  useEffect(() => {
-    const element = viewport.current;
-    if (!element) return;
-    const contents = [...element.querySelectorAll('[data-ranking-row-content]')];
-    const measure = () => {
-      const height = element.clientHeight;
-      element.parentElement.style.setProperty('--ranking-scrollbar', `${element.offsetWidth-element.clientWidth}px`);
-      const minimum = Math.max(0, ...contents.map(content => content.getBoundingClientRect().height + 1));
-      if (!height || !minimum) return;
-      const count = Math.max(1, Math.min(contents.length, Math.floor(height / minimum)));
-      element.style.setProperty('--ranking-row-height', `${height / count}px`);
+  const [selected,setSelected]=useState('cpu'),[ascending,setAscending]=useState(false);
+  const machines=rankedMachines(data?.machines||[],[selected],ascending);
+  const viewport=useRef(null);
+  useEffect(()=>{
+    const element=viewport.current;if(!element)return;
+    const contents=[...element.querySelectorAll('[data-ranking-row-content]')];
+    const measure=()=>{
+      const height=element.clientHeight;
+      element.parentElement.style.setProperty('--ranking-scrollbar',`${element.offsetWidth-element.clientWidth}px`);
+      const minimum=Math.max(0,...contents.map(content=>content.getBoundingClientRect().height+1));
+      if(!height||!minimum)return;
+      const count=Math.max(1,Math.min(contents.length,Math.floor(height/minimum)));
+      element.style.setProperty('--ranking-row-height',`${contents.length<=count?minimum:height/count}px`);
     };
-    const observer = new ResizeObserver(measure);
-    observer.observe(element);
-    contents.forEach(content => observer.observe(content));
-    measure();
-    return () => observer.disconnect();
-  }, [data, selected, ascending, loading]);
+    const observer=new ResizeObserver(measure);observer.observe(element);contents.forEach(content=>observer.observe(content));measure();
+    return ()=>observer.disconnect();
+  },[data,selected,ascending,loading]);
   return <section aria-label="Machine resource utilization" className="absolute inset-0 flex min-w-0 flex-col overflow-hidden rounded-xl bg-surface">
     <div className="px-4 pt-4"><div className="flex items-center justify-between gap-2"><h2 className="text-base font-semibold">Machine utilization</h2><span className="text-xs tabular-nums text-muted-foreground">{machines.length} live</span></div>
-      <div className="mt-2 flex flex-wrap items-center justify-between gap-2"><fieldset className="flex gap-1"><legend className="sr-only">Sort machines by resource</legend>{RESOURCES.map(([key, label]) => <label key={key} className="relative cursor-pointer"><input className="peer absolute inset-0 z-10 m-0 h-full w-full cursor-pointer opacity-0" type="radio" name="hardware-sort" checked={selected === key} onChange={() => setSelected(key)}/><span className="flex min-h-[36px] items-center rounded-lg border border-transparent px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-control peer-checked:border-primary/20 peer-checked:bg-primary/10 peer-checked:text-primary peer-focus-visible:ring-2 peer-focus-visible:ring-primary">{label}</span></label>)}</fieldset>
-      <SearchDropdown aria-label="Resource sort order" className="min-w-0 text-xs" value={ascending ? 'low' : 'high'} onChange={event => setAscending(event.target.value === 'low')}><option value="high">Most utilized first</option><option value="low">Least utilized first</option></SearchDropdown></div>
-      {error && <p role="status" className="py-2 text-xs text-amber-600">{error}</p>}
-      <p className="mb-2 text-[11px] leading-4 text-muted-foreground">Ranked by utilization · Select for history</p>
-      <div aria-hidden="true" style={{paddingRight:'var(--ranking-scrollbar, 0px)'}} className="grid grid-cols-[minmax(80px,1.4fr)_repeat(4,minmax(0,1fr))] gap-2 border-b border-border pb-2 text-[10px] font-medium text-muted-foreground"><span>Machine</span>{RESOURCES.map(([key,label])=><span key={key}>{label}</span>)}</div>
+      <div className="mt-2 flex flex-wrap items-center justify-between gap-2"><fieldset className="flex gap-0.5"><legend className="sr-only">Sort machines by resource</legend>{RANKING_RESOURCES.map(([key,label])=><label key={key} className="relative cursor-pointer"><input className="peer absolute inset-0 z-10 m-0 h-full w-full cursor-pointer opacity-0" type="radio" name="hardware-sort" checked={selected===key} onChange={()=>setSelected(key)}/><span className="flex min-h-[36px] items-center rounded-lg border border-transparent px-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-control peer-checked:border-primary/20 peer-checked:bg-primary/10 peer-checked:text-primary peer-focus-visible:ring-2 peer-focus-visible:ring-primary">{label}</span></label>)}</fieldset>
+        <SearchDropdown aria-label="Resource sort order" title={selected==='health'?(ascending?'Healthiest first':'Most at risk first'):(ascending?'Least utilized first':'Most utilized first')} className="w-[112px] min-w-0 text-xs" value={ascending?'low':'high'} onChange={e=>setAscending(e.target.value==='low')}><option value="high">{selected==='health'?'Most at risk first':'Most utilized first'}</option><option value="low">{selected==='health'?'Healthiest first':'Least utilized first'}</option></SearchDropdown>
+      </div>
+      {error&&<p role="status" className="py-2 text-xs text-amber-600">{error}</p>}
+      <p className="mb-2 text-[10px] leading-4 text-muted-foreground">{selected==='health'?'Worst drive · Unknown coverage stays visible':'Ranked by utilization'} · Select for history</p>
+      <div aria-hidden="true" style={{paddingRight:'calc(var(--ranking-scrollbar, 0px) + 8px)'}} className={`${rankingGrid} items-end border-b border-border px-2 pb-2 text-[9px] font-medium leading-3 text-muted-foreground`}><span>Machine</span>{RESOURCES.map(([key,label])=><span key={key}>{label}</span>)}<span>Disk<br/>health</span></div>
     </div>
     <div ref={viewport} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4" tabIndex={0} role="region" aria-label="Live machine rankings" style={{scrollbarGutter:'stable',scrollbarWidth:'thin',scrollSnapType:'y mandatory'}}>
-      {loading ? <p role="status" className="py-5 text-sm text-muted-foreground">Loading resource readings…</p> : !machines.length ? <p className="py-5 text-sm text-muted-foreground">No fresh readings. Enable metrics on an online client.</p> : <ol className="divide-y divide-border">{machines.map((machine, index) => <li key={machine.id} style={{height:'var(--ranking-row-height, 104px)',scrollSnapAlign:'start'}}><button type="button" onClick={() => onSelect(machine.id)} className="flex h-full w-full items-center rounded-lg text-left hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary" title={`Updated ${time(machine.reading?.at)}`}><div data-ranking-row-content className="grid w-full grid-cols-[minmax(80px,1.4fr)_repeat(4,minmax(0,1fr))] items-start gap-2 py-1.5"><span className="min-w-0 self-center truncate text-xs font-medium" title={`${index+1}. ${machine.name} · ${machine.score === null ? 'Unavailable' : machine.score.toFixed(1)+'% ranked usage'}`}>{machine.name}</span>{RESOURCES.map(([key,label])=>{const value=utilization(machine.reading?.sample,key);const memory=machine.reading?.sample?.[key]?.total ? machine.reading.sample[key] : null;return <span key={key} className="min-w-0" title={`${label}: ${value === null ? 'Unavailable' : value.toFixed(1)+'%'}${memory ? ' · '+formatBytes(memory.used)+' / '+formatBytes(memory.total) : ''}`}><span className="block text-[11px] tabular-nums">{value === null ? '—' : `${value.toFixed(1)}%`}</span><span role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={value ?? undefined} className="mt-1 block h-1 overflow-hidden rounded-full bg-muted"><span className={`block h-full ${value>=90?'bg-red-500':value>=70?'bg-amber-500':'bg-emerald-500'}`} style={{width:`${value??0}%`}} /></span>{memory && <span className="mt-1 block truncate text-[10px] leading-3 tabular-nums text-muted-foreground">{formatBytes(memory.used)}</span>}</span>;})}</div></button></li>)}</ol>}
+      {loading?<p role="status" className="py-5 text-sm text-muted-foreground">Loading resource readings…</p>:!machines.length?<p className="py-5 text-sm text-muted-foreground">No fresh readings. Enable metrics on an online client.</p>:<ol className="divide-y divide-border">{machines.map(machine=><li key={machine.id} style={{height:'var(--ranking-row-height, 46px)',scrollSnapAlign:'start'}}><button type="button" onClick={()=>onSelect(machine.id)} className="flex h-full w-full items-center rounded-lg px-2 text-left hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary" title={`${machine.name} · Updated ${time(machine.reading?.at)}`}><span data-ranking-row-content className={`${rankingGrid} w-full items-start py-1`}><span className="min-w-0 self-center truncate text-[11px] font-medium" title={machine.name}>{machine.name}</span>{RESOURCES.map(([key,label])=><RankingCell key={key} machine={machine} resource={key} label={label}/>)}<RankingCell machine={machine} resource="health" label="Disk health"/></span></button></li>)}</ol>}
     </div>
-    <p className="border-t border-border px-4 py-2 text-[11px] text-muted-foreground">Updates every 15s{machines.length > 2 ? ` · ${machines.length} machines` : ''}{data?.machines?.length >= data?.limit ? ` · Up to ${data.limit} machines` : ''}</p>
+    <p className="border-t border-border px-4 py-2 text-[10px] text-muted-foreground">Updates every 15s{machines.length>2?` · Scroll for ${machines.length} machines`:''}</p>
   </section>;
 }
 
@@ -93,6 +109,10 @@ export default function MachineMetrics({ machineId, active }) {
   const [gpuId,setGpuId]=useState('');
   const { data, error, loading } = useMetrics(`/api/machines/metrics/${encodeURIComponent(machineId || '')}?hours=${hours}`, active && !!machineId);
   const latest = data?.latest, sample = latest?.sample;
+  const [driveDays,setDriveDays]=useState(7),[driveId,setDriveId]=useState('');
+  useEffect(()=>setDriveId(''),[machineId]);
+  const selectedDrive=driveId||sample?.drive_health?.find(d=>d.present)?.id||sample?.drive_health?.[0]?.id||'';
+  const health=useMetrics(`/api/machines/metrics/${encodeURIComponent(machineId||'')}/drives?days=${driveDays}${selectedDrive?'&drive='+encodeURIComponent(selectedDrive):''}`,active&&!!machineId&&!!sample,60000);
   const history=data?.history||[];
   const devices=gpuDevices(history,sample),gpu=devices.find(d=>d.id===gpuId)||devices[0];
   const readGpu=s=>gpuReading(s,gpu?.id,gpu?.name,gpu?.allowLegacy);
@@ -111,6 +131,7 @@ export default function MachineMetrics({ machineId, active }) {
     {error && <p role="alert" className="text-sm text-amber-600">{error}</p>}
     {loading && <p role="status" className="text-sm text-muted-foreground">Loading metrics…</p>}
     <div className="grid grid-cols-2 gap-4">{RESOURCES.map(([key, label]) => <div key={key}><Usage label={label} value={utilization(sample, key)} /><p className="mt-2 text-xs text-muted-foreground">{key === 'cpu' ? sample ? `${sample.cores} logical CPUs` : '' : key === 'gpu' ? sample?.gpus?.map(gpu => `${gpu.name}${gpu.memory ? ` · ${formatBytes(gpu.memory.used)} / ${formatBytes(gpu.memory.total)} VRAM` : ''}`).join(' · ') : sample?.[key] ? `${formatBytes(sample[key].used)} / ${formatBytes(sample[key].total)}` : ''}</p></div>)}</div>
+    <DriveHealthPanel data={health.data} latest={sample?.drive_health} enabled={sample?.drive_health_enabled} testsEnabled={sample?.drive_tests_enabled} error={health.error} loading={health.loading} days={driveDays} onDays={setDriveDays} selected={selectedDrive} onDrive={setDriveId}/>
     <div className="grid gap-3 xl:grid-cols-2">{RESOURCES.filter(([key])=>key==='cpu'||key==='ram').map(([key, label]) => <HistoryChart key={key} history={data?.history || []} resource={key} label={label} intervalMs={data?.interval_ms || 60000} interval={`Last ${hours} ${hours === 1 ? 'hour' : 'hours'}`} />)}<div>{devices.length>1&&<SearchDropdown aria-label="GPU device" value={gpu?.id||''} onChange={e=>setGpuId(e.target.value)}>{devices.map(d=><option key={d.id} value={d.id}>{d.name} · {d.id}</option>)}</SearchDropdown>}<SeriesChart label={gpu?`GPU · ${gpu.name}`:'GPU'} history={history} series={gpuSeries} intervalMs={data?.interval_ms||60000}/></div><SeriesChart label="Disk usage by drive" history={history} series={diskSeries} intervalMs={data?.interval_ms||60000}/></div>
     <p className="text-xs leading-5 text-muted-foreground">Readings arrive every 15 seconds. History retains minute samples for seven days; chart gaps indicate missing reports. Disk combines mounted local filesystems. Client owners can disable reporting with <code>porthub features disable metrics</code>.</p>
   </section>;

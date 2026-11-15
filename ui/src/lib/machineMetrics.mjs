@@ -2,7 +2,8 @@ export const RESOURCES = [['cpu', 'CPU'], ['gpu', 'GPU'], ['ram', 'RAM'], ['disk
 const percent = value => Number.isFinite(value) && value >= 0 && value <= 100 ? value : null;
 export function utilization(sample, key) {
   if (!sample) return null;
-  if (key === 'cpu') return percent(sample.cpu);
+  if (key === 'cpu') return sample.cpu_available===false?null:percent(sample.cpu);
+  if (key === 'health') return driveAssessment(sample).risk;
   if (key === 'gpu') {
     const values = (sample.gpus || []).map(gpu => percent(gpu.utilization)).filter(value => value !== null);
     return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
@@ -66,3 +67,22 @@ export function diskDevices(history, latest) {
   });
   return [...devices.values()];
 }
+
+export const RANKING_RESOURCES=[...RESOURCES,['health','Health']];
+export const DRIVE_STATUS_LABELS={healthy:'Healthy',warning:'Needs attention',critical:'Critical',unavailable:'Unavailable',sleeping:'Sleeping',removed:'Removed'};
+export function driveAssessment(sample,now=Date.now()) {
+ if(sample?.drive_health_enabled===false)return {status:'unavailable',label:'Disabled',score:null,risk:null,total:0,checked:0,critical:0,warning:0,incomplete:true,detail:'Drive-health reporting disabled on this client'};
+ const drives=(sample?.drive_health||[]).filter(drive=>drive.present);
+ if(!drives.length)return {status:'unavailable',label:'Unknown',score:null,risk:null,total:0,checked:0,critical:0,warning:0,incomplete:true,detail:'No physical-drive SMART readings'};
+ const current=drive=>drive.checked_at&&drive.checked_at<=now+5*60*1000&&now-drive.checked_at<=75*60*1000;
+ const critical=drives.filter(d=>d.status==='critical').length;
+ const warning=drives.filter(d=>d.status==='warning').length;
+ const checked=drives.filter(d=>current(d)&&['healthy','warning','critical'].includes(d.status)).length;
+ const incomplete=checked<drives.length;
+ const status=critical?'critical':warning?'warning':incomplete?'unavailable':'healthy';
+ const risk=critical?100:warning?50:incomplete?null:0;
+ const label=critical?'Critical':warning?'Warning':incomplete?'Unknown':'Healthy';
+ return {status,label,score:risk===null?null:100-risk,risk,total:drives.length,checked,critical,warning,incomplete,
+  detail:`${critical?`${critical} critical · `:''}${warning?`${warning} need attention · `:''}${checked}/${drives.length} drives have current SMART readings${incomplete?' · Incomplete coverage':''}`};
+}
+export function driveTimeline(points,id) {return points.filter(point=>point.snapshot?.id===id).sort((a,b)=>a.at-b.at);}

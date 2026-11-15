@@ -184,6 +184,25 @@ def main():
         before = len(syncs)
         run([str(cli), "restart", identity[:12]])
         wait_for(lambda: len(syncs) > before, "service restart control sync")
+        # A different immutable image must replace a verified owned SCM entry.
+        # A PE overlay changes the content hash without changing executable behavior.
+        manifest_path = state / "native" / (identity + ".service.json")
+        previous_spec = json.loads(manifest_path.read_text())
+        with tempfile.TemporaryDirectory(prefix="porthub update candidate ") as update:
+            replacement = Path(update) / "porthub.exe"
+            replacement.write_bytes(source.read_bytes() + b"porthub-owned-update-fixture-v1")
+            before = len(syncs)
+            run([str(replacement), "service", "install", "--profile", previous_spec["profile"]])
+            wait_for(lambda: len(syncs) > before, "replacement image authenticated control")
+            next_spec = json.loads(manifest_path.read_text())
+            assert next_spec["executable"] != previous_spec["executable"], "SCM update retained old image"
+            assert hashlib.sha256(Path(next_spec["executable"]).read_bytes()).digest() == hashlib.sha256(replacement.read_bytes()).digest()
+            ps("$s = Get-CimInstance Win32_Service -Filter \"Name='" + service + "'\"; "
+               "if ($s.State -ne 'Running' -or -not $s.PathName.Contains('" + next_spec["executable"] + "')) { exit 1 }")
+            # Idempotent reinstallation must retain this registration and credentials.
+            run([str(replacement), "service", "install", "--profile", previous_spec["profile"]])
+            assert json.loads(manifest_path.read_text())["identity"] == previous_spec["identity"]
+        print("PASS verified owned SCM image replacement and idempotency", flush=True)
         run([str(cli), "remove", identity[:12]])
         ps("if (Get-Service '" + service + "' -ErrorAction SilentlyContinue) { exit 1 }")
         assert not errors and len(downloads) == 4

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Upgrade only an existing native PortHub Compose deployment; dry-run by default."""
 import argparse
+from contextlib import contextmanager
 import fcntl
 import json
 import os
@@ -11,6 +12,7 @@ import stat
 import shutil
 import subprocess
 import tempfile
+import time
 from urllib.parse import urlsplit
 from urllib.request import urlopen
 
@@ -103,49 +105,71 @@ def core_data(container):
     return Path(mounts[0]['Source'])
 
 
-def backup_core(container, destination, deadline=90):
-    from migrate import snapshot, file_hash, private_file
+def backup_paths(container, destination):
     source = core_data(container)
-    if not isinstance(deadline,int) or not 1<=deadline<=3600:
-        raise ValueError('Core backup requires a bounded deadline')
     if source.is_symlink() or destination.is_symlink():
         raise ValueError('Backup paths must not be symlinks')
-    source = source.resolve()
-    destination = destination.resolve()
+    source, destination = source.resolve(), destination.resolve()
     if destination==source or source in destination.parents or destination in source.parents:
         raise ValueError('Backup destination must be independent of the live state directory')
     if not (source/'mongo').is_dir():
         raise ValueError('Core MongoDB directory is unavailable for backup')
-    destination.mkdir(mode=0o700)
+    return source, destination
+
+
+@contextmanager
+def backup_deadline(seconds):
+    if not isinstance(seconds,int) or not 1<=seconds<=3600:
+        raise ValueError('Core backup requires a bounded deadline')
     previous = signal.getsignal(signal.SIGALRM)
     def expired(_number, _frame):
         raise TimeoutError('PortHub core backup exceeded its deadline')
     signal.signal(signal.SIGALRM, expired)
-    signal.alarm(deadline)
+    remaining = signal.alarm(seconds)
+    started = time.monotonic()
     try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM,previous)
+        if remaining:
+            signal.alarm(max(1,remaining-int(time.monotonic()-started)))
+
+
+def prepare_core_backup(container, destination, deadline=900):
+    from native_backup import prepare_snapshot
+    source, destination = backup_paths(container,destination)
+    with backup_deadline(deadline):
+        destination.mkdir(mode=0o700)
+        prepared = prepare_snapshot(source,destination/'data')
+        prepared['root'] = destination
+    return prepared
+
+
+def backup_core(container, destination, deadline=90, prepared=None):
+    from migrate import private_file
+    from native_backup import finish_snapshot
+    if not isinstance(deadline,int) or not 1<=deadline<=3600:
+        raise ValueError('Core backup requires a bounded deadline')
+    source, destination = backup_paths(container,destination)
+    if prepared is None:
+        prepared = prepare_core_backup(container,destination)
+    if prepared['source']!=source or prepared['destination']!=destination/'data' or prepared['root']!=destination:
+        raise ValueError('Prepared backup does not belong to this core state directory')
+    with backup_deadline(deadline):
+        started = time.monotonic()
         run(['docker','stop','--time','20',container['Id']])
-        ownership = snapshot(source,destination/'data')
-        files = {}
-        for relative,(uid,gid) in ownership.items():
-            copied = destination/'data'/relative
-            os.chown(copied,uid,gid,follow_symlinks=False)
-            if copied.is_file():
-                files[relative] = file_hash(copied).hex()
-                with copied.open('rb') as stream:os.fsync(stream.fileno())
-        for relative in reversed(list(ownership)):
-            copied=destination/'data'/relative
-            if copied.is_dir():
-                fd=os.open(copied,os.O_RDONLY|os.O_DIRECTORY)
-                try:os.fsync(fd)
-                finally:os.close(fd)
-        private_file(destination/'verified.json',json.dumps({'source':str(source),'container':container['Id'],'ownership':ownership,'sha256':files},sort_keys=True).encode())
+        receipt = finish_snapshot(prepared)
+        ownership, files = receipt['ownership'], receipt['sha256']
+        # Every file was already read back and compared to its streamed source
+        # digest. Persist those hashes instead of rereading the entire cold copy.
+        private_file(destination/'verified.json',json.dumps({'source':str(source),'container':container['Id'],'ownership':ownership,'sha256':files,
+            'online_staged_bytes':receipt['staged_bytes'],'cold_copied_bytes':receipt['cold_bytes'],'cold_seconds':time.monotonic()-started},sort_keys=True).encode())
         for directory in (destination,destination.parent):
             fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY)
             try:os.fsync(fd)
             finally:os.close(fd)
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM,previous)
+
 
 
 
@@ -349,9 +373,12 @@ def perform(args):
             command.extend(['-f', path])
         command.extend(['-f', str(record/'previous.json')])
         previous[role] = command
+    # Slow immutable artifact preparation happens while the old core is healthy,
+    # before rollback accounting begins. A staging error must not restart it.
+    prepared_backup = prepare_core_backup(current['core'],record/'core-backup') if 'core' in roles else None
     def before_role(role):
         if role=='core':
-            backup_core(current['core'],record/'core-backup')
+            backup_core(current['core'],record/'core-backup',prepared=prepared_backup)
             print('Verified PortHub core backup retained at '+str(record/'core-backup'),flush=True)
     def verify_selection():
         normal = json.loads(run([*base, 'config', '--format', 'json']))

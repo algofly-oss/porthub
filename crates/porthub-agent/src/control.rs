@@ -142,7 +142,7 @@ impl Control {
     /// aware FIB checks keep direct sockets inside the configured interface,
     /// source and VPN policy instead of racing arbitrary local addresses.
     pub(crate) async fn direct_paths(&self, destinations: &[std::net::SocketAddr]) -> anyhow::Result<Vec<crate::outbound::Candidate>> {
-        let candidates=crate::outbound::discover(&self.outbound_settings,destinations).await?;
+        let candidates=tokio::time::timeout(Duration::from_secs(2),crate::outbound::discover(&self.outbound_settings,destinations)).await??;
         let mut selection=crate::outbound::Selection::default();
         // Keep a recently successful HTTP/file source as the first candidate
         // only when native discovery also permits it for this destination.
@@ -155,6 +155,24 @@ impl Control {
             }
         }
         Ok(selection.order(&candidates,Instant::now()))
+    }
+    /// Pinned optional OS prerequisites use the same source-aware HTTP policy
+    /// as control/file transfers, without sending registration credentials.
+    #[cfg(windows)]
+    pub(crate) async fn prerequisite_download(&self, url:&str)->Result<reqwest::Response,Failure> {
+        let mut url=url::Url::parse(url).map_err(|_|Failure::Unavailable)?;
+        for _ in 0..6 {
+            let host=url.host_str().ok_or(Failure::Unavailable)?;
+            if url.scheme()!="https" || !matches!(host,"github.com"|"release-assets.githubusercontent.com"|"objects.githubusercontent.com") {return Err(Failure::Unavailable);}
+            let authority=format!("https://{host}");let(http,_)=self.http_for(&authority).await?;
+            let response=http.get(url.clone()).timeout(Duration::from_secs(120)).send().await.map_err(|_|Failure::Unavailable)?;
+            if response.status().is_redirection() {
+                let location=response.headers().get(reqwest::header::LOCATION).and_then(|h|h.to_str().ok()).ok_or(Failure::Unavailable)?;
+                url=url.join(location).map_err(|_|Failure::Unavailable)?;continue;
+            }
+            return if response.status().is_success(){Ok(response)}else{Err(Failure::Unavailable)};
+        }
+        Err(Failure::Unavailable)
     }
     pub fn profile(&self) -> &Profile {
         &self.profile

@@ -140,6 +140,7 @@ impl Listener {
                         );
                         stream.write_all(&[0xa5]).await?;
                         stream.flush().await?;
+                        tracing::debug!(local=%stream.get_ref().0.local_addr()?,remote=%stream.get_ref().0.peer_addr()?,"Authenticated USB bulk source path selected");
                         Ok::<_, anyhow::Error>(Stream::from(stream))
                     })
                     .await;

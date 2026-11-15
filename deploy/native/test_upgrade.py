@@ -150,18 +150,27 @@ class ColdBackup(unittest.TestCase):
             with self.assertRaises(ValueError):upgrade.backup_core(self.container,self.data/'backup')
         run.assert_not_called()
     def test_bad_copy_is_never_marked_verified(self):
-        import migrate
-        original=migrate.shutil.copytree
-        def corrupt(source,destination,*args,**kwargs):
-            result=original(source,destination,*args,**kwargs)
-            if Path(source)==self.data:
-                (Path(destination)/'mongo/WiredTiger.fixture').write_bytes(b'corrupted copy')
-            return result
-        with patch.object(upgrade,'run'),patch.object(migrate.shutil,'copytree',side_effect=corrupt):
+        import native_backup
+        original=native_backup.hash_file
+        def corrupt(path):
+            if path.name=='WiredTiger.fixture':path.write_bytes(b'corrupted copy')
+            return original(path)
+        with patch.object(upgrade,'run'),patch.object(native_backup,'hash_file',side_effect=corrupt):
             with self.assertRaisesRegex(RuntimeError,'integrity check failed'):
                 upgrade.backup_core(self.container,self.root/'backup')
         self.assertFalse((self.root/'backup/verified.json').exists())
         self.assertEqual(self.file.read_bytes(),b'owned database state')
+    def test_copy_changed_after_hash_readback_is_never_marked_verified(self):
+        import native_backup
+        original=native_backup.hash_file
+        def corrupt_after_readback(path):
+            digest=original(path)
+            if path.name=='WiredTiger.fixture':path.write_bytes(b'late corruption')
+            return digest
+        with patch.object(upgrade,'run'),patch.object(native_backup,'hash_file',side_effect=corrupt_after_readback):
+            with self.assertRaisesRegex(RuntimeError,'integrity check failed'):
+                upgrade.backup_core(self.container,self.root/'backup')
+        self.assertFalse((self.root/'backup/verified.json').exists())
     def test_failed_backup_restores_core_without_touching_edge(self):
         def failed(role):raise RuntimeError('backup failed after core stop')
         with patch.object(upgrade,'run') as run:
@@ -169,10 +178,10 @@ class ColdBackup(unittest.TestCase):
                 upgrade.activate(['candidate'],{'core':['old-core'],'edge':['old-edge']},lambda:None,roles=('core','edge'),before_role=failed)
         self.assertEqual([call.args[0][0] for call in run.call_args_list],['old-core'])
     def test_backup_timeout_leaves_no_verified_marker_and_restores_alarm_handler(self):
-        import migrate
+        import native_backup
         previous=signal.getsignal(signal.SIGALRM)
         def stalled(*args):signal.raise_signal(signal.SIGALRM)
-        with patch.object(upgrade,'run'),patch.object(migrate,'snapshot',side_effect=stalled):
+        with patch.object(upgrade,'run'),patch.object(native_backup,'finish_snapshot',side_effect=stalled):
             with self.assertRaises(TimeoutError):upgrade.backup_core(self.container,self.root/'backup')
         self.assertEqual(signal.getsignal(signal.SIGALRM),previous)
         self.assertFalse((self.root/'backup/verified.json').exists())
@@ -182,6 +191,80 @@ class ColdBackup(unittest.TestCase):
         with patch.object(upgrade,'run') as run:
             with self.assertRaises(ValueError):upgrade.backup_core(self.container,self.root/'backup')
         run.assert_not_called()
+
+    def component(self,content=b'immutable artifact old'):
+        path=self.data/'agent-releases/components'/('terminal-1.0-'+hashlib.sha256(content).hexdigest())
+        path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(content)
+        return path
+    def test_only_verified_immutable_components_are_staged_while_core_is_online(self):
+        import native_backup
+        component=self.component();backup=self.root/'backup';copied=backup/'data'/component.relative_to(self.data)
+        def stop(arguments):
+            self.assertEqual(arguments,['docker','stop','--time','20','owned-core'])
+            self.assertEqual(copied.read_bytes(),component.read_bytes())
+            self.assertFalse((backup/'data/mongo/WiredTiger.fixture').exists())
+            self.file.write_bytes(b'consistent state after database shutdown')
+        original=native_backup.copy_verified
+        with patch.object(upgrade,'run',side_effect=stop),patch.object(native_backup,'copy_verified',wraps=original) as copy:
+            upgrade.backup_core(self.container,backup)
+        self.assertEqual(sum(call.args[0]==component for call in copy.call_args_list),1,'immutable data is not copied again during downtime')
+        manifest=json.loads((backup/'verified.json').read_text())
+        self.assertEqual(manifest['online_staged_bytes'],component.stat().st_size)
+        self.assertEqual(manifest['cold_copied_bytes'],self.file.stat().st_size)
+        self.assertEqual((backup/'data/mongo/WiredTiger.fixture').read_bytes(),self.file.read_bytes())
+        self.assertNotEqual(copied.stat().st_ino,component.stat().st_ino,'live state is never hardlinked into a backup')
+        original_copy=(backup/'data/mongo/WiredTiger.fixture').read_bytes();self.file.write_bytes(b'new live database writes')
+        self.assertEqual((backup/'data/mongo/WiredTiger.fixture').read_bytes(),original_copy)
+    def test_blob_changed_with_same_size_and_mtime_is_recopied_from_cold_state(self):
+        component=self.component();before=component.stat();backup=self.root/'backup'
+        def stop(_arguments):
+            component.write_bytes(b'immutable artifact new')
+            os.utime(component,ns=(before.st_atime_ns,before.st_mtime_ns))
+        with patch.object(upgrade,'run',side_effect=stop):upgrade.backup_core(self.container,backup)
+        copied=backup/'data'/component.relative_to(self.data)
+        self.assertEqual(copied.read_bytes(),b'immutable artifact new')
+        manifest=json.loads((backup/'verified.json').read_text())
+        self.assertEqual(manifest['online_staged_bytes'],0)
+        self.assertEqual(manifest['sha256'][str(component.relative_to(self.data))],hashlib.sha256(copied.read_bytes()).hexdigest())
+    def test_tampered_staged_copy_is_repaired_before_verification(self):
+        component=self.component();backup=self.root/'backup';copied=backup/'data'/component.relative_to(self.data)
+        def stop(_arguments):copied.write_bytes(b'corrupted staged copy')
+        with patch.object(upgrade,'run',side_effect=stop):upgrade.backup_core(self.container,backup)
+        self.assertEqual(copied.read_bytes(),component.read_bytes())
+        self.assertTrue((backup/'verified.json').is_file())
+    def test_added_and_removed_files_match_the_cold_boundary(self):
+        component=self.component();relative=str(component.relative_to(self.data));backup=self.root/'backup'
+        def stop(_arguments):
+            component.unlink();(self.data/'mongo/new-table').write_bytes(b'new consistent table')
+        with patch.object(upgrade,'run',side_effect=stop):upgrade.backup_core(self.container,backup)
+        manifest=json.loads((backup/'verified.json').read_text())
+        self.assertNotIn(relative,manifest['sha256']);self.assertFalse((backup/'data'/relative).exists())
+        self.assertEqual((backup/'data/mongo/new-table').read_bytes(),b'new consistent table')
+    def test_online_staging_failure_never_stops_the_core(self):
+        import native_backup
+        self.component()
+        with patch.object(upgrade,'run') as run,patch.object(native_backup,'copy_verified',side_effect=OSError('staging write failed')):
+            with self.assertRaises(OSError):upgrade.backup_core(self.container,self.root/'backup')
+        run.assert_not_called();self.assertFalse((self.root/'backup/verified.json').exists())
+    def test_state_child_symlink_is_rejected_before_stopping_the_core(self):
+        (self.data/'mongo/unsafe').symlink_to(self.file)
+        with patch.object(upgrade,'run') as run:
+            with self.assertRaises(ValueError):upgrade.backup_core(self.container,self.root/'backup')
+        run.assert_not_called()
+    def test_filename_digest_mismatch_is_cold_copied_instead_of_trusted(self):
+        component=self.component();component.write_bytes(b'damaged cached artifact');backup=self.root/'backup'
+        with patch.object(upgrade,'run'):upgrade.backup_core(self.container,backup)
+        manifest=json.loads((backup/'verified.json').read_text())
+        self.assertEqual(manifest['online_staged_bytes'],0)
+        self.assertEqual((backup/'data'/component.relative_to(self.data)).read_bytes(),component.read_bytes())
+    def test_online_staging_timeout_never_stops_the_core(self):
+        import native_backup
+        self.component();previous=signal.getsignal(signal.SIGALRM)
+        def stalled(*_args):signal.raise_signal(signal.SIGALRM)
+        with patch.object(upgrade,'run') as run,patch.object(native_backup,'copy_verified',side_effect=stalled):
+            with self.assertRaises(TimeoutError):upgrade.backup_core(self.container,self.root/'backup')
+        run.assert_not_called();self.assertEqual(signal.getsignal(signal.SIGALRM),previous)
+        self.assertFalse((self.root/'backup/verified.json').exists())
 
 class ReleaseSelection(unittest.TestCase):
     def setUp(self):

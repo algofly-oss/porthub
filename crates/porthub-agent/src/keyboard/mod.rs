@@ -1,10 +1,14 @@
 //! Optional desktop module of the existing PortHub executable. Its service
 //! broker owns authentication; this module runs as the logged-in OS user.
 mod broker;
+#[cfg(target_os = "linux")]
+mod desktop;
 mod direct;
 mod input;
 #[cfg(target_os = "linux")]
 mod uinput;
+#[cfg(windows)]
+mod windows_desktop;
 use anyhow::{ensure, Context, Result};
 pub(crate) use broker::serve;
 use porthub_components::keyboard::{Ack, Command, Input};
@@ -38,20 +42,28 @@ pub enum Action {
     },
     #[command(hide = true)]
     Run,
+    #[command(hide = true)]
+    Startup,
+}
+fn registration_layouts(user: bool) -> Result<Vec<crate::service::Layout>> {
+    Ok(if user {
+        vec![crate::service::Layout::user()?]
+    } else {
+        let mut layouts = vec![crate::service::Layout::system()?];
+        // Windows has system registrations only. An unavailable optional user
+        // layout must not abort selection of its valid system registration.
+        if let Ok(layout) = crate::service::Layout::user() {
+            layouts.push(layout);
+        }
+        layouts
+    })
 }
 /// Readable registration metadata selects the credential-free broker only.
 pub(crate) fn registration(
     user: bool,
     selector: Option<&str>,
 ) -> Result<(crate::service::Layout, String)> {
-    let layouts = if user {
-        vec![crate::service::Layout::user()?]
-    } else {
-        vec![
-            crate::service::Layout::system()?,
-            crate::service::Layout::user()?,
-        ]
-    };
+    let layouts = registration_layouts(user)?;
     let mut found = Vec::new();
     for layout in layouts {
         if let Ok(rows) = crate::service::readable::list(&layout) {
@@ -90,7 +102,23 @@ pub(crate) fn registration(
 pub async fn run(args: Args, cancel: CancellationToken) -> Result<()> {
     match args.command.unwrap_or(Action::Status) {
         Action::Permissions { request } => input::permissions(request),
+        Action::Startup => {
+            #[cfg(target_os = "linux")]
+            if desktop::start() {
+                return Ok(());
+            }
+            Box::pin(run(
+                Args {
+                    command: Some(Action::Run),
+                    ..args
+                },
+                cancel,
+            ))
+            .await
+        }
         Action::Run => {
+            #[cfg(windows)]
+            windows_desktop::interactive()?;
             let (layout, id) = registration(args.user, args.registration.as_deref())?;
             let root = directories::ProjectDirs::from("dev", "porthub", "porthub")
                 .context("Cannot locate desktop state")?
@@ -114,10 +142,15 @@ pub async fn run(args: Args, cancel: CancellationToken) -> Result<()> {
                 .context("VKeyboard module is already running for this desktop registration")?;
             loop {
                 let result = session(&layout, &id, cancel.clone()).await;
-                if result
-                    .as_ref()
-                    .err()
-                    .is_some_and(|e| e.to_string().contains("disabled locally"))
+                if let Err(error) = result {
+                    tracing::debug!(reason=%error,"Desktop VKeyboard reconnecting");
+                }
+                if crate::service::readable::list(&layout)
+                    .ok()
+                    .is_some_and(|rows| {
+                        rows.iter()
+                            .any(|row| row.id == id && row.state == "uninstalled")
+                    })
                 {
                     return Ok(());
                 }
@@ -170,7 +203,70 @@ fn stable_cli(user: bool) -> Result<PathBuf> {
     }
     Ok(current)
 }
+// macOS grants Accessibility to an executable's signing identity. Retain an
+// explicitly pinned, checksum-valid managed helper across CLI updates.
+#[cfg(target_os = "macos")]
+fn pinned_desktop(user: bool) -> Option<PathBuf> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let base = directories::BaseDirs::new()?;
+    let directory = if !user && rustix::process::geteuid().is_root() {
+        PathBuf::from("/Library/LaunchAgents")
+    } else {
+        base.home_dir().join("Library/LaunchAgents")
+    };
+    let file = directory.join("in.porthub.keyboard.plist");
+    let output = std::process::Command::new("/usr/bin/plutil")
+        .args(["-extract", "ProgramArguments", "json", "-o", "-"])
+        .arg(file)
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.len() > 8192 {
+        return None;
+    }
+    let arguments: Vec<String> = serde_json::from_slice(&output.stdout).ok()?;
+    if !(arguments.len() == 3 || arguments.len() == 4 && arguments[3] == "--user")
+        || arguments[1] != "keyboard"
+        || arguments[2] != "run"
+    {
+        return None;
+    }
+    let path = PathBuf::from(&arguments[0]);
+    let directory = path.parent()?;
+    let root = directory.parent()?;
+    let allowed = [
+        crate::service::Layout::system().ok()?.releases,
+        crate::service::Layout::user().ok()?.releases,
+    ];
+    let hash = directory.file_name()?.to_str()?;
+    if path.file_name()? != "porthub"
+        || !allowed.iter().any(|candidate| candidate == root)
+        || hash.len() != 64
+        || !hash.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    let metadata = std::fs::symlink_metadata(&path).ok()?;
+    if !metadata.is_file() || metadata.len() > 256 * 1024 * 1024 {
+        return None;
+    }
+    let mut input = std::fs::File::open(&path).ok()?;
+    let mut digest = Sha256::new();
+    let mut bytes = [0; 65536];
+    loop {
+        let n = input.read(&mut bytes).ok()?;
+        if n == 0 {
+            break;
+        }
+        digest.update(&bytes[..n]);
+    }
+    (format!("{:x}", digest.finalize()) == hash).then_some(path)
+}
 fn spawn(executable: &Path, user: bool, registration: Option<&str>) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    let retained = pinned_desktop(user);
+    #[cfg(target_os = "macos")]
+    let executable = retained.as_deref().unwrap_or(executable);
     let mut command = std::process::Command::new(executable);
     command.args(["keyboard", "run"]);
     if user {
@@ -204,24 +300,7 @@ pub(crate) fn install_desktop(executable: &Path, user: bool) -> Result<()> {
     let path = executable.to_str().context("Invalid CLI path")?;
     ensure!(!path.contains(['\n', '\r', '\0']), "Invalid CLI path");
     #[cfg(target_os = "linux")]
-    {
-        let directory = if user || !rustix::process::geteuid().is_root() {
-            directories::BaseDirs::new()
-                .context("No desktop configuration directory")?
-                .config_dir()
-                .join("autostart")
-        } else {
-            PathBuf::from("/etc/xdg/autostart")
-        };
-        std::fs::create_dir_all(&directory)?;
-        let quoted = path
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('`', "\\`")
-            .replace('$', "\\$")
-            .replace('%', "%%");
-        std::fs::write(directory.join("porthub-keyboard.desktop"),format!("[Desktop Entry]\nType=Application\nName=PortHub desktop input\nExec=\"{quoted}\" keyboard run{}\nTerminal=false\nNoDisplay=true\nX-GNOME-Autostart-enabled=true\n",if user{" --user"}else{""}))?;
-    }
+    desktop::install(executable, user)?;
     #[cfg(target_os = "macos")]
     {
         let base = directories::BaseDirs::new().context("No user directory")?;
@@ -231,21 +310,18 @@ pub(crate) fn install_desktop(executable: &Path, user: bool) -> Result<()> {
             base.home_dir().join("Library/LaunchAgents")
         };
         std::fs::create_dir_all(&root)?;
-        let xml = path
+        let retained = pinned_desktop(user);
+        let retained = retained.as_deref().unwrap_or(executable);
+        let xml = retained
+            .to_str()
+            .context("Invalid desktop executable path")?
             .replace('&', "&amp;")
             .replace('<', "&lt;")
             .replace('>', "&gt;");
-        std::fs::write(root.join("in.porthub.keyboard.plist"),format!("<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>Label</key><string>in.porthub.keyboard</string><key>ProgramArguments</key><array><string>{xml}</string><string>keyboard</string><string>run</string>{}</array><key>RunAtLoad</key><true/></dict></plist>",if user{"<string>--user</string>"}else{""}))?;
+        std::fs::write(root.join("in.porthub.keyboard.plist"),format!("<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>Label</key><string>in.porthub.keyboard</string><key>ProgramArguments</key><array><string>{xml}</string><string>keyboard</string><string>run</string>{}</array><key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>ThrottleInterval</key><integer>5</integer></dict></plist>",if user{"<string>--user</string>"}else{""}))?;
     }
     #[cfg(windows)]
-    {
-        let key = windows_registry::CURRENT_USER
-            .create("Software\\Microsoft\\Windows\\CurrentVersion\\Run")?;
-        key.set_string(
-            "PortHubKeyboard",
-            format!("\"{}\" keyboard run", path.replace('"', "")),
-        )?;
-    }
+    windows_desktop::install(executable)?;
     Ok(())
 }
 async fn write<S: tokio::io::AsyncWrite + Unpin>(stream: &mut S, value: &Value) -> Result<()> {

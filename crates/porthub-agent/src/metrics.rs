@@ -1,4 +1,7 @@
 //! Low-frequency, process-free host sampling. Local policy gates collection and upload.
+mod drive_health;
+mod gpu_counter;
+mod integrated_gpu;
 use crate::{
     control::Control,
     features::{self, Feature},
@@ -17,6 +20,9 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
         let mut policy = features::subscribe(&path);
         let mut system = sysinfo::System::new();
         let mut disks = sysinfo::Disks::new();
+        let mut native_cpu = NativeCpu::default();
+        let mut integrated_gpu = integrated_gpu::Cache::default();
+        let drive_health = drive_health::Worker::start(path.clone(), cancel.clone());
         let mut primed = false;
         let mut legacy_until = None;
         let mut tick = tokio::time::interval(Duration::from_secs(15));
@@ -28,6 +34,10 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
                 continue;
             }
             system.refresh_cpu_usage();
+            let measured_cpu = native_cpu
+                .sample()
+                .or_else(|| (!system.cpus().is_empty()).then(|| system.global_cpu_usage()))
+                .filter(|v| v.is_finite());
             if !primed {
                 primed = true;
                 continue;
@@ -50,8 +60,8 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
                 }
                 let name = d.name().to_string_lossy().to_string();
                 drives.push(Disk {
-                    id: name.chars().take(256).collect(),
-                    name: name.chars().take(120).collect(),
+                    id: integrated_gpu::label(&name, 256),
+                    name: integrated_gpu::label(&name, 120),
                     used: d.total_space().saturating_sub(d.available_space()),
                     total: d.total_space(),
                 });
@@ -60,10 +70,20 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
                     .used
                     .saturating_add(d.total_space().saturating_sub(d.available_space()));
             }
-            let gpus = gpus().await;
+            let mut gpus = gpus().await;
+            if gpus.is_empty() {
+                gpus = integrated_gpu.sample().await;
+            }
+            drive_health.cpu(measured_cpu.unwrap_or(100.));
+            let drive_health_enabled = policy.borrow().enabled(Feature::DriveHealth);
             let sample = Sample {
-                cpu: system.global_cpu_usage().clamp(0., 100.),
-                cores: system.cpus().len() as u32,
+                cpu: measured_cpu.unwrap_or(0.).clamp(0., 100.),
+                cpu_available: measured_cpu.is_some(),
+                cores: system.cpus().len().max(
+                    std::thread::available_parallelism()
+                        .map(|n| n.get())
+                        .unwrap_or(1),
+                ) as u32,
                 ram: Memory {
                     used: system.used_memory(),
                     total: system.total_memory(),
@@ -71,8 +91,16 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
                 disk,
                 gpus,
                 disks: drives,
+                drive_health: if drive_health_enabled {
+                    drive_health.snapshot()
+                } else {
+                    Vec::new()
+                },
+                drive_health_enabled,
+                drive_tests_enabled: policy.borrow().enabled(Feature::DriveTests),
             };
             if !sample.valid() || !features::enabled(&path, Feature::Metrics) {
+                tracing::warn!("Host metrics unavailable: an OS reading did not satisfy the bounded metrics schema");
                 continue;
             }
             let p = control.profile();
@@ -109,6 +137,10 @@ where
 fn legacy_report(mut body: serde_json::Value) -> serde_json::Value {
     if let Some(sample) = body.get_mut("sample").and_then(|v| v.as_object_mut()) {
         sample.remove("disks");
+        sample.remove("drive_health");
+        sample.remove("cpu_available");
+        sample.remove("drive_health_enabled");
+        sample.remove("drive_tests_enabled");
         if let Some(gpus) = sample.get_mut("gpus").and_then(|v| v.as_array_mut()) {
             for gpu in gpus {
                 if let Some(gpu) = gpu.as_object_mut() {
@@ -153,8 +185,8 @@ fn parse_gpus(output: &str) -> Vec<Gpu> {
             }
             let number = |s: &str| s.parse::<f32>().ok().filter(|v| v.is_finite());
             Some(Gpu {
-                id: Some(p[0].chars().take(128).collect()),
-                name: p[1].chars().take(120).collect(),
+                id: Some(integrated_gpu::label(p[0], 128)),
+                name: integrated_gpu::label(p[1], 120),
                 utilization: number(p[2]).filter(|v| (0.0..=100.0).contains(v)),
                 memory: p[3]
                     .parse::<u64>()
@@ -243,6 +275,43 @@ mod tests {
             .is_err());
             assert_eq!(calls, 1);
             assert!(until.is_none());
+        }
+    }
+}
+
+#[derive(Default)]
+struct NativeCpu {
+    #[cfg(windows)]
+    previous: Option<(u64, u64, u64)>,
+}
+impl NativeCpu {
+    fn sample(&mut self) -> Option<f32> {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::{Foundation::FILETIME, System::Threading::GetSystemTimes};
+            let mut idle: FILETIME = unsafe { std::mem::zeroed() };
+            let mut kernel = idle;
+            let mut user = idle;
+            if unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) } == 0 {
+                return None;
+            }
+            let ticks = |v: FILETIME| ((v.dwHighDateTime as u64) << 32) | v.dwLowDateTime as u64;
+            let current = (ticks(idle), ticks(kernel), ticks(user));
+            let previous = self.previous.replace(current)?;
+            let total = current
+                .1
+                .saturating_sub(previous.1)
+                .saturating_add(current.2.saturating_sub(previous.2));
+            if total == 0 {
+                return None;
+            }
+            return Some(
+                (100. * (1. - current.0.saturating_sub(previous.0) as f64 / total as f64)) as f32,
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            None
         }
     }
 }

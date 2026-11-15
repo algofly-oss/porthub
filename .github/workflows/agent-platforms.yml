@@ -24,6 +24,10 @@ on:
       verify_only:
         type: boolean
         default: false
+      core_only:
+        description: Build a core-only debugging artifact after native checks; not a publishable release
+        type: boolean
+        default: false
       publish_release:
         type: boolean
         default: false
@@ -45,6 +49,10 @@ on:
         description: 'Run platform tests and native service checks without building release artifacts'
         default: false
         type: boolean
+      core_only:
+        description: Build a core-only debugging artifact after native checks; not a publishable release
+        type: boolean
+        default: false
       publish_release:
         description: 'Publish the complete validated bundle; retain only the latest version release/tag'
         default: false
@@ -80,7 +88,7 @@ jobs:
       - name: Verify pinned source download recovery
         run: python3 scripts/test_build_terminal_download.py
       - name: Validate publishing scope
-        if: inputs.publish_release == true
+        if: inputs.publish_release == true && inputs.core_only != true
         env:
           BUILD_PLATFORM: ${{ inputs.platform }}
           VERIFY_ONLY: ${{ inputs.verify_only }}
@@ -109,7 +117,7 @@ jobs:
         run: python3 scripts/select-agent-platforms.py
   release-bundle:
     name: Validate complete release bundle
-    if: always() && inputs.verify_only != true && (inputs.platform == '' || inputs.platform == 'all') && needs.select-platforms.result == 'success' && (needs.native.result == 'success' || needs.native.result == 'skipped') && (needs.linux-32.result == 'success' || needs.linux-32.result == 'skipped')
+    if: always() && inputs.verify_only != true && inputs.core_only != true && (inputs.platform == '' || inputs.platform == 'all') && needs.select-platforms.result == 'success' && (needs.native.result == 'success' || needs.native.result == 'skipped') && (needs.linux-32.result == 'success' || needs.linux-32.result == 'skipped')
     needs: [select-platforms, native, linux-32]
     runs-on: ubuntu-24.04
     permissions:
@@ -164,7 +172,7 @@ jobs:
           retention-days: 3
   publish-release:
     name: Publish versioned GitHub release
-    if: inputs.verify_only != true && inputs.publish_release == true
+    if: inputs.verify_only != true && inputs.publish_release == true && inputs.core_only != true
     needs: [release-bundle]
     env:
       PORTHUB_SOURCE_REVISION: ${{ inputs.revision || github.sha }}
@@ -399,7 +407,9 @@ jobs:
         run: |
           previous=()
           if [ -n "${PORTHUB_PREVIOUS_COMPONENT_BUILDS:-}" ]; then previous=(--previous "$PORTHUB_PREVIOUS_COMPONENT_BUILDS"); fi
-          python scripts/build-component-platform.py --target '${{ matrix.target }}' --source-revision "$PORTHUB_SOURCE_REVISION" --output component-builds "${previous[@]}"
+          tools=()
+          if [ '${{ inputs.core_only }}' = 'true' ]; then tools=(--tool core); fi
+          python scripts/build-component-platform.py --target '${{ matrix.target }}' --source-revision "$PORTHUB_SOURCE_REVISION" --output component-builds "${previous[@]}" "${tools[@]}"
       - name: Restore shipping Linux terminal runtime
         id: shipping_terminal_cache
         if: inputs.verify_only != true && runner.os == 'Linux'
@@ -432,8 +442,14 @@ jobs:
         with:
           path: .cache/terminal-helper
           key: ${{ steps.shipping_terminal_cache.outputs.cache-primary-key }}
+      - name: Prepare core-only debugging executable
+        if: inputs.verify_only != true && inputs.core_only == true && runner.os != 'Linux'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp component-builds/core/*/porthub${{ matrix.extension }} 'dist/porthub-${{ matrix.artifact }}${{ matrix.extension }}'
       - name: Prepare checks against exact packaged native components
-        if: inputs.verify_only != true
+        if: inputs.verify_only != true && inputs.core_only != true
         shell: bash
         run: python scripts/prepare-packaged-component-checks.py --builds component-builds --core-output 'dist/porthub-${{ matrix.artifact }}${{ matrix.extension }}' --cache "$RUNNER_TEMP/porthub-packaged-components-${{ matrix.target }}"
       - name: Verify packaged native core startup
@@ -447,13 +463,13 @@ jobs:
         shell: bash
         run: python scripts/run-with-timeout.py 600 python scripts/test-windows-install-lifecycle.py 'dist/porthub-${{ matrix.artifact }}${{ matrix.extension }}'
       - name: Test packaged HTTP server lifecycle
-        if: inputs.verify_only != true
+        if: inputs.verify_only != true && inputs.core_only != true
         shell: bash
         env:
           PORTHUB_TEST_AGENT_EXECUTABLE: ${{ github.workspace }}/dist/porthub-${{ matrix.artifact }}${{ matrix.extension }}
         run: cargo test --locked -p porthub-agent --test http_management --target ${{ matrix.target }}
       - name: Test packaged local terminal workspaces
-        if: inputs.verify_only != true && runner.os != 'Windows'
+        if: inputs.verify_only != true && inputs.core_only != true && runner.os != 'Windows'
         shell: bash
         env:
           PORTHUB_TEST_AGENT_EXECUTABLE: ${{ github.workspace }}/dist/porthub-${{ matrix.artifact }}${{ matrix.extension }}

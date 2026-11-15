@@ -1031,6 +1031,9 @@ enum ServiceCommand {
     Install {
         #[arg(long)]
         profile: PathBuf,
+        /// Publish the shared CLI and repair desktop startup during this update.
+        #[arg(long)]
+        publish_cli: bool,
     },
     Start {
         #[arg(long)]
@@ -1090,14 +1093,18 @@ async fn service_command(command: ServiceCommand, user: bool) -> Result<()> {
             }
             let manager = service::system_manager(user).await?;
             let service = match command {
-                ServiceCommand::Install { profile } => {
-                    service::install(
-                        &layout,
-                        &profile,
-                        &std::env::current_exe()?.canonicalize()?,
-                        manager.as_ref(),
-                    )
-                    .await?
+                ServiceCommand::Install { profile, publish_cli } => {
+                    let executable=std::env::current_exe()?.canonicalize()?;
+                    if publish_cli {
+                        let enrolled=porthub_agent::profile::Profile::load(&profile)
+                            .context("CLI publication during a service update requires its public enrollment profile")?;
+                        let cli=porthub_agent::bootstrap::cli_path(user,None)?;
+                        let spec=porthub_agent::bootstrap::install_published(enrolled,Some(&profile),&layout,&executable,manager.as_ref(),Some(&cli)).await?;
+                        porthub_agent::bootstrap::register_cli_path(cli.parent().context("CLI bin directory missing")?,user)?;
+                        spec
+                    } else {
+                        service::install(&layout,&profile,&executable,manager.as_ref()).await?
+                    }
                 }
                 ServiceCommand::Start { profile } => {
                     service::action(&layout, &profile, Action::Start, manager.as_ref()).await?
@@ -1711,6 +1718,19 @@ mod cli_tests {
     use super::{print_help, requires_system_privileges, short_version_requested, Args};
     use clap::{CommandFactory, Parser};
 
+    #[test]
+    fn service_install_cli_publication_is_explicit_and_keeps_privilege_scope() {
+        for publish in [false,true] {
+            let mut arguments=vec!["porthub","service","install","--profile","native.json"];
+            if publish {arguments.push("--publish-cli");}
+            let parsed=Args::try_parse_from(arguments).unwrap();
+            assert!(requires_system_privileges(&parsed));
+            assert!(matches!(parsed.command,Some(super::Command::Service{action:super::ServiceCommand::Install{publish_cli,..},..}) if publish_cli==publish));
+        }
+        let parsed=Args::try_parse_from(["porthub","service","--user","install","--profile","native.json","--publish-cli"]).unwrap();
+        assert!(!requires_system_privileges(&parsed));
+        assert!(Args::try_parse_from(["porthub","service","start","--profile","native.json","--publish-cli"]).is_err());
+    }
     #[test]
     fn forward_defaults_and_management_match_the_cli_contract() {
         let parsed=Args::try_parse_from(["porthub","forward","remote.test:3000"]).unwrap();

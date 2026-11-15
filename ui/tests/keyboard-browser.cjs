@@ -9,7 +9,7 @@ const base=process.env.PORTHUB_TEST_UI_URL,cookie=process.env.PORTHUB_TEST_BOARD
  const portalBrowser=await chromium.launch({headless:true,executablePath:'/usr/bin/google-chrome',args:['--no-sandbox','--disable-features=WebRtcHideLocalIpsWithMdns']});
  const errors=[];
  try{
-  const target=await targetBrowser.newPage();await target.setContent('<title>PortHub isolated native target</title><textarea id="target" autofocus style="width:700px;height:400px"></textarea><script>window.pointer=0;document.addEventListener("mousemove",()=>window.pointer++);document.getElementById("target").focus();</script>');await target.bringToFront();await target.locator('textarea').focus();
+  const target=await targetBrowser.newPage();await target.setContent('<title>PortHub isolated native target</title><textarea id="target" autofocus style="width:700px;height:400px"></textarea><script>window.pointer=0;window.nativeButtons=[];window.heldMoves=0;window.nativePosition=null;document.addEventListener("mousedown",e=>nativeButtons.push({type:"down",trusted:e.isTrusted}));document.addEventListener("mouseup",e=>nativeButtons.push({type:"up",trusted:e.isTrusted}));document.addEventListener("mousemove",e=>{window.pointer++;window.nativePosition={x:e.clientX,y:e.clientY};if(e.buttons&1)window.heldMoves++;});document.getElementById("target").focus();</script>');await target.bringToFront();await target.locator('textarea').focus();
   const context=await portalBrowser.newContext({viewport:{width:1440,height:1000},serviceWorkers:'block'});await context.addInitScript(()=>{delete Object.getPrototypeOf(navigator).serviceWorker;});await context.addCookies([{name:'porthub_session',value:cookie,url:base}]);
   const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));await page.goto(base+'/home?view=keyboard');
   await page.getByRole('button',{name:'VKeyboard settings',exact:true}).waitFor();
@@ -25,9 +25,28 @@ const base=process.env.PORTHUB_TEST_UI_URL,cookie=process.env.PORTHUB_TEST_BOARD
   let local=false;for(let i=0;i<50;i++){if((await status.textContent()).includes('Local connection')){local=true;break;}await page.waitForTimeout(100);}
   assert(local,'Authenticated LAN data channel connects without changing the public page URL');assert.equal(new URL(page.url()).pathname,'/home');
   await page.getByRole('button',{name:'Close VKeyboard settings',exact:true}).click();await page.getByRole('dialog').waitFor({state:'hidden'});const pad=page.getByRole('application',{name:/Touchpad:/}),box=await pad.boundingBox();const before=await target.evaluate(()=>window.pointer);await page.mouse.move(box.x+60,box.y+60);await page.mouse.down();await page.mouse.move(box.x+100,box.y+90,{steps:5});await page.mouse.up();await target.waitForFunction(before=>window.pointer>before,before);
+  // Hold the second tap without motion beyond the native deadman, then drag.
+  // Events are injected only into the isolated portal; the separate Xvfb target
+  // must observe trusted events emitted by the real Rust desktop worker.
+  const nativeBefore=await target.evaluate(()=>({events:nativeButtons.length,moves:heldMoves}));
+  const touchPad=async(type,x=box.x+60,y=box.y+60)=>page.evaluate(({type,x,y})=>{const pad=document.querySelector('[aria-label^="Touchpad:"]');const touch=new Touch({identifier:41,target:pad,clientX:x,clientY:y});pad.dispatchEvent(new TouchEvent(type,{bubbles:true,cancelable:true,changedTouches:[touch]}));},{type,x,y});
+  await touchPad('touchstart');await touchPad('touchend');await page.waitForTimeout(100);await touchPad('touchstart');
+  await target.waitForFunction(start=>nativeButtons.slice(start).filter(e=>e.type==='down').length===2,nativeBefore.events);
+  await page.waitForTimeout(6100);
+  assert.equal(await target.evaluate(start=>nativeButtons.slice(start).filter(e=>e.type==='up').length,nativeBefore.events),1,'Second-tap hold survives stationary native deadman');
+  const heldBeforeMove=await target.evaluate(()=>({moves:heldMoves,position:nativePosition}));
+  await touchPad('touchmove',box.x+70,box.y+65);
+  await target.waitForFunction(before=>heldMoves>before.moves&&nativePosition&&(nativePosition.x!==before.position?.x||nativePosition.y!==before.position?.y),heldBeforeMove);
+  await touchPad('touchend',box.x+70,box.y+65);
+  await target.waitForFunction(start=>nativeButtons.slice(start).filter(e=>e.type==='up').length===2,nativeBefore.events);
+  assert((await target.evaluate(start=>nativeButtons.slice(start),nativeBefore.events)).every(event=>event.trusted),'Mouse hold and release reached the native desktop');
   await page.getByRole('button',{name:'VKeyboard settings',exact:true}).click();await page.getByRole('tab',{name:'Models',exact:true}).click();await page.getByRole('button',{name:'Model library',exact:true}).click();await page.getByRole('button',{name:'Download',exact:true}).first().waitFor();assert((await page.getByText('Whisper Tiny Q8',{exact:false}).count())>=1);assert(await page.getByRole('button',{name:'GPU',exact:true}).isDisabled());
   await page.getByRole('button',{name:'Close VKeyboard settings',exact:true}).click();await page.getByRole('dialog').waitFor({state:'hidden'});const screenshots='/tmp/porthub-keyboard-browser';await fs.mkdir(screenshots,{recursive:true});
-  for(const width of [320,390,768,1024,1440,1920]){await page.setViewportSize({width,height:950});await page.waitForTimeout(100);const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1);assert(!overflow,`No horizontal overflow at ${width}`);await page.screenshot({path:`${screenshots}/keyboard-${width}.png`,fullPage:true});}
+  for(const width of [320,390,768,1024,1440,1920]){await page.setViewportSize({width,height:950});await page.waitForTimeout(100);const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1);assert(!overflow,`No horizontal overflow at ${width}`);
+    const tools=page.getByRole('toolbar',{name:'Keyboard controls'});for(const button of await tools.getByRole('button').all()){const bounds=await button.boundingBox();assert(Math.abs(bounds.width-44)<=1&&bounds.height>=43,`Toolbar keeps44pxcontrols at ${width}`);}
+    if(width<768){const client=await page.getByLabel('Keyboard client',{exact:true}).boundingBox(),touchpad=await pad.boundingBox(),bar=await tools.boundingBox();assert(Math.abs(client.x-touchpad.x)<=1&&Math.abs(client.x+client.width-touchpad.x-touchpad.width)<=1,'Phone picker matches touchpad edges');assert(Math.abs(bar.x-touchpad.x)<=1&&Math.abs(bar.width-touchpad.width)<=1,'Phone toolbar matches touchpad width');}
+    assert.equal(await page.getByRole('img',{name:/Keyboard (?:connected|disconnected)/}).count(),0,'Connection dot removed');
+    await page.screenshot({path:`${screenshots}/keyboard-${width}.png`,fullPage:true});}
   for(const width of [320,390]){
     await page.setViewportSize({width,height:740});
     await page.getByRole('button',{name:'VKeyboard settings',exact:true}).click();
@@ -80,6 +99,11 @@ const base=process.env.PORTHUB_TEST_UI_URL,cookie=process.env.PORTHUB_TEST_BOARD
       const visible=rows.filter(row=>row.bottom>bounds.top+1&&row.top<bounds.bottom-1);
       return {height:card.getBoundingClientRect().height,viewport:bounds.height,contents:[...viewport.querySelectorAll('[data-ranking-row-content]')].map(el=>el.getBoundingClientRect().height),visible:visible.length,complete:visible.every(row=>row.top>=bounds.top-1&&row.bottom<=bounds.bottom+1)};
     });
+    if(width===1440){
+      const web=await page.getByRole('region',{name:'Recent Web Addresses',exact:true}).boundingBox();
+      const rankingBox=await ranking.boundingBox();
+      assert(Math.abs(web.x-rankingBox.x)<=1&&Math.abs(web.width-rankingBox.width)<=1,'Upper and lower right cards share the same grid column');
+    }
     const bars=await ranking.getByRole('listitem').first().getByRole('meter').evaluateAll(items=>items.map(el=>el.getBoundingClientRect().top));
     assert(Math.max(...bars)-Math.min(...bars)<=1,'All hardware progress bars share one baseline');
     if(width===1440)assert.equal(geometry.visible,3,'Compact desktop table shows all three fixture machines');
@@ -94,13 +118,23 @@ const base=process.env.PORTHUB_TEST_UI_URL,cookie=process.env.PORTHUB_TEST_BOARD
   assert.equal(await ranking.getByRole('radio',{name:'CPU',exact:true}).isChecked(),false);
   await chooseDropdown(ranking.getByLabel('Resource sort order',{exact:true}),'Least utilized first');
   assert((await ranking.getByRole('listitem').first().textContent()).includes('Busy CPU host'));
+  assert.equal(await ranking.getByRole('listitem').first().getByRole('meter').count(),5,'CPU, GPU, RAM, disk and physical-drive health bars stay visible');
+  await ranking.getByRole('radio',{name:'Health',exact:true}).check();
+  await chooseDropdown(ranking.getByLabel('Resource sort order',{exact:true}),'Most at risk first');
+  assert((await ranking.getByRole('listitem').first().textContent()).includes('Busy CPU host'),'One critical physical drive ranks ahead of healthy hosts');
+  assert.equal(await ranking.locator('input[type=radio]:checked').count(),1);
   await ranking.getByRole('listitem').filter({hasText:'Isolated desktop'}).getByRole('button').click();
   const health=page.getByRole('region',{name:'Machine health and resource history'});
   await health.getByRole('img',{name:'CPU utilization history from 0 to 100 percent'}).waitFor();await page.waitForFunction(()=>document.querySelector('section[aria-label="Machine health and resource history"] [role="meter"][aria-label="GPU"]')?.getAttribute('aria-valuenow')==='96');assert.equal(await health.getByRole('meter',{name:'GPU',exact:true}).getAttribute('aria-valuenow'),'96');assert.equal(await health.getByRole('meter',{name:'GPU',exact:true}).locator('div').evaluate(el=>getComputedStyle(el).backgroundColor),'rgb(240, 82, 82)');
   await chooseDropdown(health.getByLabel('Resource history period',{exact:true}),'Last hour');
   await health.getByText('Fixture GPU',{exact:false}).first().waitFor();
-  await page.waitForFunction(()=>document.querySelector('section[aria-label="Machine health and resource history"]')?.querySelectorAll('svg[role="img"]').length===4);
-  assert.equal(await health.getByRole('img').count(),4);
+  await page.waitForFunction(()=>document.querySelector('section[aria-label="Machine health and resource history"]')?.querySelectorAll('svg[role="img"]').length===5);
+  assert.equal(await health.getByRole('img').count(),5);
+  const drives=health.getByRole('region',{name:'Physical drive health and history'});
+  await drives.getByRole('img',{name:'Drive SMART condition history'}).waitFor();
+  assert((await drives.getByLabel('Physical drive',{exact:true}).inputValue()).includes('Fixture physical SSD'));
+  await chooseDropdown(drives.getByLabel('Drive health history period',{exact:true}),'Last 90 days');
+  await drives.getByRole('img',{name:'Drive SMART condition history'}).waitFor();
   await health.getByRole('img',{name:'CPU utilization history from 0 to 100 percent'}).locator('polyline').first().waitFor();
   await page.waitForFunction(()=>[...document.querySelectorAll('svg[aria-label="CPU utilization history from 0 to 100 percent"] polyline')].some(line=>(line.getAttribute('points')||'').split(' ').length>30));
   for(const width of [390,1440]){await page.setViewportSize({width,height:1000});await page.waitForTimeout(100);assert(!(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1)));await page.screenshot({path:`${screenshots}/resources-${width}.png`,fullPage:true});}

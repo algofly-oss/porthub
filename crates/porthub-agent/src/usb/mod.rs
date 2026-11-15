@@ -1,11 +1,21 @@
 //! Optional USB forwarding module in the existing native agent.
 pub(crate) mod cli;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 mod direct;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 mod tcp;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os="macos")]
+mod macos;
+#[cfg(any(target_os="macos",test))]
+mod userspace;
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+mod protocol;
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+mod windows_drivers;
 use crate::{
     control::Control,
     features::{self, Feature},
@@ -45,8 +55,23 @@ impl Drop for Session {
 fn inventory() -> Vec<porthub_components::usb::Device> {
     #[cfg(target_os = "linux")]
     return linux::inventory();
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
+    return windows::inventory();
+    #[cfg(target_os="macos")]
+    return macos::inventory();
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     return vec![];
+}
+fn supported()->bool {
+    #[cfg(any(target_os="linux",target_os="macos"))] {true}
+    #[cfg(windows)] {windows::supported()}
+    #[cfg(not(any(target_os="linux",target_os="macos",windows)))] {false}
+}
+#[cfg(any(target_os="linux",target_os="macos",windows))]
+enum Handoff {
+    #[cfg(target_os="macos")] Mac(macos::Handoff),
+    #[cfg(target_os="linux")] Linux(linux::Handoff),
+    #[cfg(windows)] Windows(windows::Handoff),
 }
 fn transport_policy(policy: &features::Policy) -> [bool; 3] {
     [
@@ -62,6 +87,10 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
     let task = tokio::spawn(async move {
         #[cfg(target_os = "linux")]
         linux::recover(&path);
+        #[cfg(windows)]
+        windows::recover(&path);
+        #[cfg(windows)]
+        let preparing={let path=path.clone();let control=control.clone();tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {if let Err(error)=windows_drivers::prepare(&path,control).await{tracing::warn!(%error,"Windows USB driver preparation unavailable");}}))};
         let mut policy = features::subscribe(&path);
         let mut permissions = transport_policy(&policy.borrow());
         let mut sessions: HashMap<String, Session> = HashMap::new();
@@ -81,8 +110,9 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
                 .cloned()
                 .collect::<Vec<_>>();
             let p = control.profile();
-            let body = json!({"machine_id":p.machine_id,"token":p.token,"enabled":enabled,"supported":cfg!(target_os="linux"),"devices":if enabled{inventory()}else{vec![]},"states":report_states});
-            let result = tokio::select! {_=work.cancelled()=>break,changed=policy.changed()=>{if changed.is_err(){break;}let next=transport_policy(&policy.borrow());if next!=permissions{sessions.clear();permissions=next;}continue;},reply=control.request(reqwest::Method::POST,"usb/client/report",Some(body),&[])=>reply};
+            let mut body = json!({"machine_id":p.machine_id,"token":p.token,"enabled":enabled,"supported":supported(),"can_export":supported(),"can_import":supported()&&!cfg!(target_os="macos"),"devices":if enabled{inventory()}else{vec![]},"states":report_states});
+            let result = tokio::select! {_=work.cancelled()=>break,changed=policy.changed()=>{if changed.is_err(){break;}let next=transport_policy(&policy.borrow());if next!=permissions{sessions.clear();permissions=next;}continue;},reply=control.request(reqwest::Method::POST,"usb/client/report",Some(body.clone()),&[])=>reply};
+            let result=if matches!(result,Err(crate::control::Failure::Rejected(422))) { body.as_object_mut().unwrap().remove("can_export");body.as_object_mut().unwrap().remove("can_import");if cfg!(target_os="macos"){body["supported"]=json!(false);}control.request(reqwest::Method::POST,"usb/client/report",Some(body),&[]).await }else{result};
             let plans = result
                 .ok()
                 .and_then(|r| r.json().ok())
@@ -177,14 +207,14 @@ fn set_state(states: &States, id: &str, state: &str, error: Option<String>) {
         },
     );
 }
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 async fn session(_: &Path, _: Arc<Control>, _: &Forward, _: States, _: bool) -> Result<()> {
     anyhow::bail!("Native USB forwarding currently requires Linux kernel USB/IP support")
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 async fn open(control: &Control, plan: &Forward, side: &str) -> Result<Socket> {
     use tokio_tungstenite::tungstenite::{client::IntoClientRequest, protocol::WebSocketConfig};
     for base in control.authorities() {
@@ -232,7 +262,7 @@ async fn open(control: &Control, plan: &Forward, side: &str) -> Result<Socket> {
     }
     anyhow::bail!("USB gateway unavailable")
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 async fn text(socket: &mut Socket, value: Value) -> Result<()> {
     use futures_util::SinkExt;
     socket
@@ -242,7 +272,7 @@ async fn text(socket: &mut Socket, value: Value) -> Result<()> {
         .await?;
     Ok(())
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 async fn next_text(socket: &mut Socket) -> Result<Value> {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
@@ -257,7 +287,7 @@ async fn next_text(socket: &mut Socket) -> Result<Value> {
 }
 #[cfg(target_os="linux")]
 struct Carrier {tcp:Option<tcp::Stream>,sctp:Option<direct::Direct>}
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 async fn negotiate(
     socket: &mut Socket,
     source: bool,
@@ -330,7 +360,7 @@ async fn negotiate(
         }
     }
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 async fn session(
     path: &Path,
     control: Arc<Control>,
@@ -346,7 +376,9 @@ async fn session(
         "USB rule does not belong to this machine"
     );
     ensure!(plan.device.valid(), "Invalid USB device configuration");
-    linux::module(source).await?;
+    #[cfg(target_os="linux")] linux::module(source).await?;
+    #[cfg(windows)] windows::module(source).await?;
+    #[cfg(target_os="macos")] macos::prepare(source).await?;
     let mut socket = open(
         &control,
         plan,
@@ -363,7 +395,7 @@ async fn session(
     let allowed = prefer_direct && crate::terminal_policy::direct_allowed(path, control.profile());
     let direct = negotiate(&mut socket, source, allowed, &control).await?;
     // Exchange fresh kernel identifiers after replugging; retain the configured physical identity.
-    let device = if source {
+    let mut device = if source {
         inventory()
             .into_iter()
             .find(|d| d.same_device(&plan.device))
@@ -371,9 +403,23 @@ async fn session(
     } else {
         plan.device.clone()
     };
+    let mut prepared=None;
+    let mut wire=None;
+    if source {
+        #[cfg(target_os="linux")] {
+            wire=Some(protocol::local_device(&device)?);
+            let(guard,stream)=linux::handoff(path,&device,true)?;prepared=Some((Handoff::Linux(guard),stream));
+        }
+        #[cfg(target_os="macos")] {
+            let(guard,stream,actual,bytes)=macos::source(path,&device).await?;device=actual;wire=Some(bytes);prepared=Some((Handoff::Mac(guard),stream));
+        }
+        #[cfg(windows)] {
+            let(guard,stream,actual,bytes)=windows::source(path,&device).await?;device=actual;wire=Some(bytes);prepared=Some((Handoff::Windows(guard),stream));
+        }
+    }
     text(
         &mut socket,
-        json!({"type":"device","device":if source{Some(&device)}else{None}}),
+        json!({"type":"device","device":if source{Some(&device)}else{None},"usbip":wire}),
     )
     .await?;
     let remote = tokio::time::timeout(Duration::from_secs(8), async {
@@ -397,7 +443,14 @@ async fn session(
         );
         d
     };
-    let (_handoff, stream) = linux::handoff(path, &device, source)?;
+    let(mut handoff,stream)=if source {prepared.context("USB source handoff unavailable")?} else {
+        #[cfg(target_os="macos")] {anyhow::bail!("macOS can export USB devices only")}
+        #[cfg(target_os="linux")] {let(guard,stream)=linux::handoff(path,&device,false)?;(Handoff::Linux(guard),stream)}
+        #[cfg(windows)] {
+            let bytes=if remote["usbip"].is_null(){protocol::legacy_device(&device)?}else{serde_json::from_value::<Vec<u8>>(remote["usbip"].clone())?};
+            let(guard,stream)=windows::destination(&device,&bytes).await?;(Handoff::Windows(guard),stream)
+        }
+    };
     set_state(
         &states,
         &plan.id,
@@ -408,12 +461,16 @@ async fn session(
         },
         None,
     );
-    if let Some(bulk)=direct.tcp {
-        tracing::info!("USB selected authenticated bulk TCP path");
-        bridge_bulk(stream,socket,bulk,features::subscribe(path)).await
-    } else {bridge(stream, socket, direct.sctp, features::subscribe(path)).await}
+    let transfer=async {
+        if let Some(bulk)=direct.tcp {
+            tracing::info!("USB selected authenticated bulk TCP path");
+            bridge_bulk(stream,socket,bulk,features::subscribe(path)).await
+        } else {bridge(stream,socket,direct.sctp,features::subscribe(path)).await}
+    };
+    #[cfg(windows)] {let Handoff::Windows(guard)=&mut handoff;tokio::select!{result=transfer=>result,error=guard.failed()=>error}}
+    #[cfg(any(target_os="linux",target_os="macos"))] {let _guard=handoff;transfer.await}
 }
-#[cfg(target_os="linux")]
+#[cfg(any(target_os="linux",target_os="macos",windows))]
 async fn bridge_bulk<S:tokio::io::AsyncRead+tokio::io::AsyncWrite+Unpin>(mut kernel:S,mut socket:Socket,mut bulk:tcp::Stream,mut policy:tokio::sync::watch::Receiver<features::Policy>)->Result<()> {
     use futures_util::{SinkExt,StreamExt};
     use tokio_tungstenite::tungstenite::Message;
@@ -429,7 +486,7 @@ async fn bridge_bulk<S:tokio::io::AsyncRead+tokio::io::AsyncWrite+Unpin>(mut ker
 }
 // Independent pumps preserve full-duplex progress when either carrier applies
 // backpressure. Never replay kernel USB requests after a path fails.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 async fn bridge<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     stream: S,
     socket: Socket,

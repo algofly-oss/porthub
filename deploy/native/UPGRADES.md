@@ -49,14 +49,29 @@ eight-second timeout and do not retain response bodies. Failures identify the
 probe by position without printing private URLs. Use URLs without credentials or
 fragments. HTTP redirects follow the deployment's normal route.
 
-When core is selected, activation stops it cleanly before copying its complete
-`/data` directory, including MongoDB and terminal journals. The private
-`core-backup` snapshot retains ownership metadata and SHA-256 hashes; every copied
-file is verified and the snapshot is synced to disk before core replacement.
-A 90-second deadline bounds the backup. Run with sudo when the deployment data
-belongs to the service UID. Stage both `upgrade.py` and its `migrate.py` helper.
-A failed backup triggers restoration of the attempted core role while edge and
-firewall remain running. Keep the snapshot with the upgrade records.
+When core is selected, the script first stages independent copies of immutable
+component objects while the previous core remains online. Only files under
+`agent-releases/components` whose bytes match the SHA-256 in their filename can
+be reused. A 15-minute deadline bounds this online preparation; failure leaves
+the running core untouched. Live MongoDB files are never copied or hardlinked
+in this phase.
+
+Activation then stops core cleanly and captures its complete `/data` directory,
+including MongoDB and terminal journals. An unchanged staged object is reused
+only when source and copy identities, size, mode, ownership and nanosecond
+modification/change timestamps still match. All other files are copied from the
+stopped core. Source hashes are computed during the copy and compared with a
+readback of the copied file. Those verified hashes form the manifest without a
+third full read. Added or removed files are reconciled at this cold boundary;
+no live state is hardlinked into a backup.
+
+The private `core-backup` snapshot retains ownership metadata, SHA-256 hashes,
+online/cold byte counts and cold-phase timing. Files and directories are synced
+before core replacement. The cold phase retains its 90-second deadline. Run
+with sudo when deployment data belongs to the service UID. Stage `upgrade.py`,
+`native_backup.py` and `migrate.py` together. A cold-phase failure restores the
+attempted core role while edge and firewall remain running. Keep the snapshot
+with the upgrade records.
 
 Rollback restores images and configuration; it does not restore database files.
 Assess schema compatibility separately before upgrading. Keep public application probes and a real

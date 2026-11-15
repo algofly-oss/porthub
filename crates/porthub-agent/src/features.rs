@@ -19,6 +19,8 @@ pub enum Feature {
     Keyboard,
     Usb,
     Metrics,
+    DriveHealth,
+    DriveTests,
     Images,
     Terminal,
     Expose,
@@ -28,10 +30,12 @@ pub enum Feature {
     DirectConnections,
 }
 impl Feature {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 12] = [
         Self::Keyboard,
         Self::Usb,
         Self::Metrics,
+        Self::DriveHealth,
+        Self::DriveTests,
         Self::Images,
         Self::Terminal,
         Self::Expose,
@@ -45,6 +49,8 @@ impl Feature {
             Self::Keyboard => "keyboard",
             Self::Usb => "usb",
             Self::Metrics => "metrics",
+            Self::DriveHealth => "drive-health",
+            Self::DriveTests => "drive-tests",
             Self::Images => "images",
             Self::Terminal => "terminal",
             Self::Expose => "expose",
@@ -69,15 +75,46 @@ impl Policy {
 fn path(profile: &Path) -> PathBuf {
     crate::profile::sibling(profile, ".client-features.json")
 }
-fn load(profile: &Path) -> Result<Policy> {
-    let path = path(profile);
-    if !path.try_exists()? {
-        return Ok(Policy::default());
-    }
-    let bytes = crate::profile::read_private(&path)?;
-    ensure!(bytes.len() <= 4096, "Invalid client feature policy");
-    Ok(serde_json::from_slice(&bytes)?)
+fn drive_feature(feature: Feature) -> bool {
+    matches!(feature, Feature::DriveHealth | Feature::DriveTests)
 }
+fn drive_policy_path(profile: &Path) -> PathBuf {
+    crate::profile::sibling(profile, ".drive-health-policy.json")
+}
+fn load(profile: &Path) -> Result<Policy> {
+    let base = path(profile);
+    let mut policy = if base.try_exists()? {
+        let bytes = crate::profile::read_private(&base)?;
+        ensure!(bytes.len() <= 4096, "Invalid client feature policy");
+        serde_json::from_slice(&bytes)?
+    } else {
+        Policy::default()
+    };
+    // New controls live separately so an older, OS-approved desktop helper can
+    // still read its original capability file after the main agent upgrades.
+    let extended = drive_policy_path(profile);
+    if extended.try_exists()? {
+        let load = || -> Result<Policy> {
+            let bytes = crate::profile::read_private(&extended)?;
+            ensure!(bytes.len() <= 1024, "Invalid drive policy");
+            let value: Policy = serde_json::from_slice(&bytes)?;
+            ensure!(
+                value.disabled.keys().all(|feature| drive_feature(*feature)),
+                "Invalid drive feature"
+            );
+            Ok(value)
+        };
+        match load() {
+            Ok(value) => policy.disabled.extend(value.disabled),
+            Err(_) => {
+                policy.disabled.insert(Feature::DriveHealth, true);
+                policy.disabled.insert(Feature::DriveTests, true);
+            }
+        }
+    }
+    Ok(policy)
+}
+
 fn registry() -> &'static Mutex<HashMap<PathBuf, watch::Sender<Policy>>> {
     static POLICIES: OnceLock<Mutex<HashMap<PathBuf, watch::Sender<Policy>>>> = OnceLock::new();
     POLICIES.get_or_init(Mutex::default)
@@ -111,7 +148,16 @@ fn set(profile: &Path, feature: Feature, enabled: bool) -> Result<Policy> {
     } else {
         policy.disabled.insert(feature, true);
     }
-    crate::profile::write_private(&path(profile), &serde_json::to_vec(&policy)?, true)?;
+    let mut persisted = policy.clone();
+    persisted
+        .disabled
+        .retain(|key, _| drive_feature(*key) == drive_feature(feature));
+    let destination = if drive_feature(feature) {
+        drive_policy_path(profile)
+    } else {
+        path(profile)
+    };
+    crate::profile::write_private(&destination, &serde_json::to_vec(&persisted)?, true)?;
     sender.send_replace(policy.clone());
     Ok(policy)
 }
@@ -253,6 +299,34 @@ mod tests {
 #[cfg(test)]
 mod policy_tests {
     use super::*;
+    #[test]
+    fn drive_controls_preserve_legacy_desktop_policy_and_fail_closed_independently() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;
+        }
+        let profile = root.path().join("fixture.json");
+        set(&profile, Feature::Keyboard, false)?;
+        set(&profile, Feature::DriveHealth, false)?;
+        let base: serde_json::Value =
+            serde_json::from_slice(&crate::profile::read_private(&path(&profile))?)?;
+        ensure!(base["disabled"].get("drive-health").is_none());
+        ensure!(
+            base["disabled"]["keyboard"] == true && !load(&profile)?.enabled(Feature::DriveHealth)
+        );
+        set(&profile, Feature::Keyboard, true)?;
+        ensure!(!load(&profile)?.enabled(Feature::DriveHealth));
+        crate::profile::write_private(&drive_policy_path(&profile), b"invalid", true)?;
+        let failed = load(&profile)?;
+        ensure!(
+            failed.enabled(Feature::Keyboard)
+                && !failed.enabled(Feature::DriveHealth)
+                && !failed.enabled(Feature::DriveTests)
+        );
+        Ok(())
+    }
     #[tokio::test]
     async fn local_disable_is_durable_and_rejects_remote_input_before_any_gateway_request(
     ) -> Result<()> {

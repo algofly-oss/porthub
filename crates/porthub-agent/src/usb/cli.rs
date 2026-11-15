@@ -45,8 +45,8 @@ pub async fn run(args: Args, cancel: CancellationToken) -> Result<()> {
     match args.command {
         Action::Devices => {
             println!("{}", serde_json::to_string_pretty(&super::inventory())?);
-            if !cfg!(target_os = "linux") {
-                println!("Native USB forwarding currently requires Linux USB/IP support.");
+            if !cfg!(any(target_os = "linux",target_os="macos",windows)) {
+                println!("Native USB forwarding requires Linux USB/IP or the signed Windows USB drivers.");
             }
             Ok(())
         }
@@ -55,8 +55,8 @@ pub async fn run(args: Args, cancel: CancellationToken) -> Result<()> {
         Action::Stop { id } => crate::mapping_jobs::usb_stop(id.as_deref()).await,
         action => {
             ensure!(
-                cfg!(target_os = "linux"),
-                "Native USB forwarding currently requires Linux USB/IP support"
+                cfg!(any(target_os = "linux",target_os="macos",windows)),
+                "Native USB forwarding requires Linux USB/IP or the signed Windows USB drivers"
             );
             let (layout, registration) =
                 crate::keyboard::registration(args.user, args.registration.as_deref())?;
@@ -67,7 +67,10 @@ pub async fn run(args: Args, cancel: CancellationToken) -> Result<()> {
                     from,
                     device,
                     detach,
-                } => (from, row.machine_id, device, detach),
+                } => {
+                    ensure!(!cfg!(target_os="macos"),"macOS can export USB devices only; receiving requires an Apple-approved virtual host-controller entitlement");
+                    (from, row.machine_id, device, detach)
+                },
                 _ => unreachable!(),
             };
             ensure!(

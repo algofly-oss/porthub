@@ -17,5 +17,19 @@ const {chromium}=require('playwright');const fs=require('node:fs/promises');cons
  await page.evaluate(()=>{commands=[];touch('touchstart',[[1,50,50]],3000);touch('touchend',[[1,50,50]],3050);touch('touchstart',[[1,50,50]],3150);touch('touchmove',[[1,80,50]],3170);touch('touchend',[[1,80,50]],3250)});const drag=await page.evaluate(()=>commands);assert(drag.some(c=>c.action==='press'&&c.button==='left'));assert(drag.some(c=>c.action==='release'&&c.button==='left'));
  await page.evaluate(()=>{commands=[];touch('touchstart',[[1,50,50]],4000);touch('touchcancel',[[1,50,50]],4010)});assert(!(await page.evaluate(()=>commands)).some(c=>c.action==='click'),'cancellation never clicks');
  await page.evaluate(()=>{commands=[];pointer('.tp-btn','pointerdown',8);window.dispatchEvent(new Event('blur'))});assert((await page.evaluate(()=>commands)).some(c=>c.action==='release'&&c.button==='left'),'blur releases held mouse buttons');
+ // A stationary second tap must hold before any movement and renew the native
+ // five-second deadman. A quick second tap still produces a normal double click.
+ await page.evaluate(()=>{commands=[];touch('touchstart',[[1,50,50]],5000);touch('touchend',[[1,50,50]],5050);touch('touchstart',[[1,50,50]],5350)});
+ await page.waitForTimeout(120);
+ assert.equal((await page.evaluate(()=>commands)).filter(c=>c.action==='press').length,1,'stationary second tap presses once');
+ await page.waitForTimeout(6100);
+ const held=await page.evaluate(()=>commands);assert(!held.some(c=>c.action==='release'),'holding never releases early');assert(held.filter(c=>c.action==='move'&&c.dx===0&&c.dy===0).length>=5,'stationary hold renews native deadman');
+ await page.evaluate(()=>touch('touchend',[[1,50,50]],11700));
+ assert.equal((await page.evaluate(()=>commands)).filter(c=>c.action==='release').length,1);
+ const released=await page.evaluate(()=>commands.length);await page.waitForTimeout(1100);assert.equal(await page.evaluate(()=>commands.length),released,'renewal stops after lift');
+ await page.evaluate(()=>{commands=[];touch('touchstart',[[1,50,50]],13000);touch('touchend',[[1,50,50]],13050);touch('touchstart',[[1,50,50]],13100);touch('touchend',[[1,50,50]],13150)});
+ await page.waitForTimeout(120);assert.equal((await page.evaluate(()=>commands)).filter(c=>c.action==='click').length,2,'quick double tap stays a double click');
+ await page.evaluate(()=>{commands=[];touch('touchstart',[[1,50,50]],14000);touch('touchend',[[1,50,50]],14050);touch('touchstart',[[1,50,50]],14100);touch('touchcancel',[[1,50,50]],14120)});
+ await page.waitForTimeout(120);assert(!(await page.evaluate(()=>commands)).some(c=>c.action==='press'),'cancelled hold timer cannot press later');
  await page.evaluate(()=>surface.destroy());console.log('PASS: touch-down typing, sticky/held modifiers, Caps Lock, repeat, two-finger right-click/scroll, tap-and-drag, cancellation and held-button cleanup');
  }finally{await browser.close();}})().catch(error=>{console.error(error);process.exitCode=1});

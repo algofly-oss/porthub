@@ -29,15 +29,19 @@ async fn native_keyboard_clipboard_mouse_and_local_disable_from_embedded_portal(
     let result:Result<()>=async{
         let(owner,cookie)=case.user("keyboard-browser@example.invalid","admin").await?;let machine=ObjectId::new();let token="isolated-keyboard-native-test-token";
         case.app.collection("machines").insert_one(doc!{"_id":machine,"user_id":owner,"name":"Isolated desktop","token":token,"enabled":true}).await?;
-        let metric_sample=json!({"cpu":20,"cores":8,"ram":{"used":4_000_000_000_u64,"total":8_000_000_000_u64},"disk":{"used":50_000_000_000_u64,"total":100_000_000_000_u64},"gpus":[{"name":"Fixture GPU","utilization":96,"memory":{"used":1_000_000_000_u64,"total":4_000_000_000_u64}}]});
+        let mut metric_sample=json!({"cpu":20,"cores":8,"ram":{"used":4_000_000_000_u64,"total":8_000_000_000_u64},"disk":{"used":50_000_000_000_u64,"total":100_000_000_000_u64},"gpus":[{"name":"Fixture GPU","utilization":96,"memory":{"used":1_000_000_000_u64,"total":4_000_000_000_u64}}]});
+        let smart_at=mongodb::bson::DateTime::now().timestamp_millis();
+        metric_sample["drive_health"]=json!([{"id":"a".repeat(64),"name":"Fixture physical SSD","protocol":"nvme","capacity":1_000_000_000_000_u64,"present":true,"status":"healthy","observed_at":smart_at,"checked_at":smart_at,"temperature":42,"percentage_used":12,"available_spare":100,"spare_threshold":10,"power_on_hours":1200,"power_cycles":300,"unsafe_shutdowns":0,"media_errors":0,"reallocated_sectors":null,"pending_sectors":null,"uncorrectable_sectors":null,"short_test_supported":true,"self_test":"passed","last_test_started":null,"next_test_at":null,"reasons":[]}]);
         case.status("POST","/api/machines/client/metrics","",json!({"machine_id":machine.to_hex(),"token":token,"sample":metric_sample}),axum::http::StatusCode::OK).await?;
         let busy=ObjectId::new();
         case.app.collection("machines").insert_one(doc!{"_id":busy,"user_id":owner,"name":"Busy CPU host","token":"fixture-busy","enabled":true}).await?;
         let mut busy_sample=metric_sample.clone();busy_sample["cpu"]=json!(90);busy_sample["gpus"][0]["utilization"]=json!(0);
+        busy_sample["drive_health"][0]["status"]=json!("critical");busy_sample["drive_health"][0]["media_errors"]=json!(10);busy_sample["drive_health"][0]["reasons"]=json!(["Media or data-integrity errors recorded"]);
         case.status("POST","/api/machines/client/metrics","",json!({"machine_id":busy.to_hex(),"token":"fixture-busy","sample":busy_sample}),axum::http::StatusCode::OK).await?;
         let third=ObjectId::new();
         case.app.collection("machines").insert_one(doc!{"_id":third,"user_id":owner,"name":"Third host","token":"fixture-third","enabled":true}).await?;
         let mut third_sample=metric_sample.clone();third_sample["cpu"]=json!(60);third_sample["gpus"][0]["utilization"]=json!(50);
+        third_sample["drive_health"][0]["status"]=json!("warning");third_sample["drive_health"][0]["percentage_used"]=json!(92);third_sample["drive_health"][0]["reasons"]=json!(["SSD is nearing its rated endurance"]);
         case.status("POST","/api/machines/client/metrics","",json!({"machine_id":third.to_hex(),"token":"fixture-third","sample":third_sample}),axum::http::StatusCode::OK).await?;
         let usb_device=json!({"busid":"1-2","vendor":"1377","product":"1100","serial":"fixture-microphone","name":"Fixture USB microphone","busnum":1,"devnum":2,"speed":2,"blocked":null});
         case.status("POST","/api/usb/client/report","",json!({"machine_id":machine.to_hex(),"token":token,"enabled":true,"supported":true,"devices":[usb_device],"states":[]}),axum::http::StatusCode::OK).await?;

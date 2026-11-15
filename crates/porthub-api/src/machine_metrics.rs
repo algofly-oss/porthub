@@ -21,13 +21,15 @@ use porthub_components::metrics::Sample;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};
+const DRIVE_RETENTION: i64 = 90 * 24 * 60 * 60 * 1000;
 const RETENTION: i64 = 7 * 24 * 60 * 60 * 1000;
 pub fn router() -> Router<Arc<App>> {
     Router::new()
         .route("/api/machines/client/metrics", post(report))
         .route("/api/machines/metrics", get(fleet))
         .route("/api/machines/metrics/{id}", get(history))
-        .layer(DefaultBodyLimit::max(16384))
+        .route("/api/machines/metrics/{id}/drives", get(drive_history))
+        .layer(DefaultBodyLimit::max(131072))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -67,6 +69,21 @@ async fn report(State(app): State<Arc<App>>, Json(body): Json<Report>) -> ApiRes
                         .build(),
                 )
                 .await?;
+            app.collection("machine_drive_health_history")
+                .create_index(
+                    IndexModel::builder()
+                        .keys(doc! {"expires_at":1})
+                        .options(IndexOptions::builder().expire_after(Duration::ZERO).build())
+                        .build(),
+                )
+                .await?;
+            app.collection("machine_drive_health_history")
+                .create_index(
+                    IndexModel::builder()
+                        .keys(doc! {"machine_id":1,"drive_id":1,"at":1})
+                        .build(),
+                )
+                .await?;
             Ok::<_, ApiError>(())
         })
         .await?;
@@ -74,12 +91,44 @@ async fn report(State(app): State<Arc<App>>, Json(body): Json<Report>) -> ApiRes
     let minute = now.timestamp_millis() / 60000;
     let sample =
         bson::to_document(&body.sample).map_err(|_| ApiError::bad_request("Invalid metrics"))?;
+    let previous = app
+        .collection("machine_metrics_latest")
+        .find_one(doc! {"_id":id,"owner_id":owner})
+        .projection(doc! {"sample.drive_health.id":1,"sample.drive_health.observed_at":1})
+        .await?;
+    let previous_drives = previous
+        .as_ref()
+        .and_then(|r| r.get_document("sample").ok())
+        .and_then(|s| s.get_array("drive_health").ok());
     let current = doc! {"machine_id":id,"owner_id":owner,"at":now,"sample":sample};
+    // SMART is sampled much less often than utilization. Keep one immutable
+    // history point per drive observation/topology event, not every 15s upload.
+    for drive in &body.sample.drive_health {
+        if previous_drives.is_some_and(|rows| {
+            rows.iter().filter_map(|r| r.as_document()).any(|r| {
+                r.get_str("id") == Ok(drive.id.as_str())
+                    && r.get_i64("observed_at") == Ok(drive.observed_at)
+            })
+        }) {
+            continue;
+        }
+        let snapshot =
+            bson::to_document(drive).map_err(|_| ApiError::bad_request("Invalid drive health"))?;
+        app.collection("machine_drive_health_history").update_one(
+            doc!{"_id":format!("{}:{}:{}",id.to_hex(),drive.id,drive.observed_at)},
+            doc!{"$setOnInsert":{"machine_id":id,"owner_id":owner,"drive_id":&drive.id,"at":now,"snapshot":snapshot,
+                "expires_at":DateTime::from_millis(now.timestamp_millis()+DRIVE_RETENTION)}}).upsert(true).await?;
+    }
+    // Advance the cache marker only after durable SMART history succeeds. A
+    // partial database failure must leave identical observations retryable.
     app.collection("machine_metrics_latest")
         .update_one(doc! {"_id":id}, doc! {"$set":&current})
         .upsert(true)
         .await?;
     let mut retained = current;
+    if let Ok(sample) = retained.get_document_mut("sample") {
+        sample.remove("drive_health");
+    }
     retained.insert(
         "expires_at",
         DateTime::from_millis(now.timestamp_millis() + RETENTION),
@@ -189,8 +238,9 @@ async fn history(
                 .collect();
             if !samples.is_empty() {
                 let n = samples.len() as f64;
-                value["sample"]["cpu"] =
-                    json!(samples.iter().map(|s| f64::from(s.cpu)).sum::<f64>() / n);
+                let cpus:Vec<_>=samples.iter().filter(|s|s.cpu_available).collect();
+                value["sample"]["cpu_available"]=json!(!cpus.is_empty());
+                value["sample"]["cpu"]=if cpus.is_empty(){json!(0)}else{json!(cpus.iter().map(|s|f64::from(s.cpu)).sum::<f64>()/cpus.len() as f64)};
                 for key in ["ram", "disk"] {
                     let memories: Vec<_> = samples
                         .iter()
@@ -230,5 +280,108 @@ async fn history(
         .collect();
     Ok(Json(
         json!({"latest":latest.as_ref().map(output),"history":history,"hours":hours,"retention_days":7,"interval_ms":interval_ms}),
+    ))
+}
+
+#[derive(Deserialize)]
+struct DriveRange {
+    #[serde(default = "drive_days")]
+    days: u32,
+    drive: Option<String>,
+}
+fn drive_days() -> u32 {
+    7
+}
+async fn drive_history(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(range): Query<DriveRange>,
+) -> ApiResult<Json<Value>> {
+    let user = auth::current_user(&app, &headers).await?;
+    let owner = user
+        .get_object_id("_id")
+        .map_err(|_| ApiError::unauthenticated())?;
+    let id = ObjectId::parse_str(id).map_err(|_| ApiError::bad_request("Invalid machine"))?;
+    if app
+        .collection("machines")
+        .find_one(doc! {"_id":id,"user_id":owner,"deletion_pending":{"$ne":true}})
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::bad_request("Machine unavailable"));
+    }
+    let days = range.days.clamp(1, 90);
+    let since = DateTime::from_millis(
+        DateTime::now().timestamp_millis() - i64::from(days) * 24 * 60 * 60 * 1000,
+    );
+    // 64 drives * 48 checks/day * 90 days can be large. Return <=96 evenly
+    // spaced observations per drive, always retaining state changes and newest
+    // observations within a bounded database scan and response.
+    let mut filter = doc! {"machine_id":id,"owner_id":owner,"at":{"$gte":since}};
+    if let Some(drive) = &range.drive {
+        if drive.len() != 64 || !drive.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(ApiError::bad_request("Invalid physical drive"));
+        }
+        filter.insert("drive_id", drive);
+    }
+    let limit = if range.drive.is_some() { 8192 } else { 32768 };
+    let rows: Vec<Document> = app
+        .collection("machine_drive_health_history")
+        .find(filter)
+        .sort(doc! {"at":-1})
+        .limit(limit)
+        .await?
+        .try_collect()
+        .await?;
+    let mut groups = std::collections::BTreeMap::<String, Vec<Value>>::new();
+    for row in &rows {
+        if let (Ok(drive), Ok(at), Ok(snapshot)) = (
+            row.get_str("drive_id"),
+            row.get_datetime("at"),
+            row.get_document("snapshot"),
+        ) {
+            if let Ok(snapshot) =
+                bson::from_document::<porthub_components::metrics::DriveHealth>(snapshot.clone())
+            {
+                groups
+                    .entry(drive.into())
+                    .or_default()
+                    .push(json!({"at":at.timestamp_millis(),"snapshot":snapshot}));
+            }
+        }
+    }
+    let mut history = Vec::new();
+    for readings in groups.values_mut() {
+        readings.reverse();
+        let step = (readings.len() + 95) / 96;
+        for (index, point) in readings.iter().enumerate() {
+            let changed = index > 0
+                && (point["snapshot"]["status"] != readings[index - 1]["snapshot"]["status"]
+                    || point["snapshot"]["present"] != readings[index - 1]["snapshot"]["present"]
+                    || point["snapshot"]["self_test"]
+                        != readings[index - 1]["snapshot"]["self_test"]);
+            if index == 0 || index + 1 == readings.len() || index % step.max(1) == 0 || changed {
+                history.push(point.clone());
+            }
+        }
+    }
+    history.sort_by_key(|point| point["at"].as_i64().unwrap_or_default());
+    // State-change storms are bounded independently of regular sample buckets.
+    if history.len() > 8192 {
+        history.drain(..history.len() - 8192);
+    }
+    let latest = app
+        .collection("machine_metrics_latest")
+        .find_one(doc! {"_id":id,"owner_id":owner})
+        .await?;
+    let drives = latest
+        .as_ref()
+        .and_then(|r| r.get_document("sample").ok())
+        .and_then(|s| s.get_array("drive_health").ok())
+        .cloned()
+        .unwrap_or_default();
+    Ok(Json(
+        json!({"drives":bson::from_bson::<Value>(bson::Bson::Array(drives)).unwrap_or_else(|_|json!([])),"history":history,"days":days,"retention_days":90,"scan_interval_seconds":60,"smart_interval_minutes":30,"short_test_interval_days":7,"truncated":rows.len()>=limit as usize}),
     ))
 }

@@ -45,3 +45,22 @@ test('GPU history prefers current identities and joins only unambiguous older re
  const ambiguous=gpuDevices([{at:0,sample:older}],multiple);assert.equal(ambiguous[0].id,'gpu-a');assert.equal(ambiguous[0].allowLegacy,false);
  assert.equal(gpuReading(older,'gpu-a','GPU',false),null);
 });
+
+test('physical-drive assessment uses the worst finding and never hides incomplete SMART coverage',async()=>{
+ const {driveAssessment}=await import('../src/lib/machineMetrics.mjs');const at=Date.now();
+ const good={id:'good',present:true,status:'healthy',checked_at:at};
+ assert.equal(driveAssessment({drive_health:[good]},at).score,100);
+ const partial=driveAssessment({drive_health:[good,{id:'unknown',present:true,status:'unavailable'}]},at);
+ assert.equal(partial.risk,null);assert.equal(partial.incomplete,true);assert.equal(partial.checked,1);
+ const bad=driveAssessment({drive_health:[good,{...good,id:'failing',status:'critical'}]},at);
+ assert.equal(bad.score,0);assert.equal(bad.risk,100);assert.equal(bad.critical,1);
+ assert.equal(driveAssessment({drive_health:[{...good,present:false,status:'removed'}]},at).score,null);
+ assert.equal(driveAssessment({drive_health:[{...good,checked_at:at-76*60*1000}]},at).risk,null);
+});
+test('drive-health ranking prioritizes a critical drive and puts unknown coverage after known assessments',async()=>{
+ const at=Date.now(),snapshot=status=>({drive_health:[{present:true,status,checked_at:at}]});
+ const machines=['healthy','critical','unavailable','warning'].map((status,i)=>({id:String(i),name:status,live:true,reading:{sample:snapshot(status)}}));
+ assert.deepEqual(rankedMachines(machines,['health']).map(m=>m.name),['critical','warning','healthy','unavailable']);
+ assert.deepEqual(rankedMachines(machines,['health'],true).map(m=>m.name),['healthy','warning','critical','unavailable']);
+ assert.equal(utilization({cpu:0,cpu_available:false},'cpu'),null);
+});

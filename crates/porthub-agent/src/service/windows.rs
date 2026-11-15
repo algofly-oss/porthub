@@ -173,6 +173,26 @@ impl Manager for Windows {
         Ok(())
     }
 
+    async fn reconfigure(&self, previous: &Spec, next: &Spec) -> Result<()> {
+        ensure!(previous.identity==next.identity && previous.service==next.service
+            && previous.profile==next.profile && previous.user==next.user,
+            "Windows service updates must preserve the registered identity");
+        let start_type={
+            let Some(owned)=service(previous,ServiceAccess::CHANGE_CONFIG|ServiceAccess::STOP)? else {return Ok(());};
+            // Keep native SCM handles out of the Send future's await state.
+            // Idempotency and rollback may already have the requested image.
+            if verify_owned(next,&owned).is_ok() {return Ok(());}
+            verify_owned(previous,&owned)?;
+            owned.query_config()?.start_type
+        };
+        self.stop(previous).await?;
+        let owned=service(previous,ServiceAccess::CHANGE_CONFIG)?.context("Windows service disappeared during update")?;
+        verify_owned(previous,&owned)?;
+        owned.change_config(&service_info(next,start_type)?)?;
+        verify_owned(next,&owned)?;
+        Ok(())
+    }
+
     async fn enable(&self, spec: &Spec) -> Result<()> {
         if with_owned_service(spec, ServiceAccess::CHANGE_CONFIG, |_| Ok(()))?.is_some() {
             let service = service(spec, ServiceAccess::CHANGE_CONFIG)?

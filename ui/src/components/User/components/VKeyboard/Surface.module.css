@@ -1,6 +1,6 @@
 .surface{height:100%;min-height:0;width:100%;max-width:1100px;margin:auto;display:grid;grid-template-rows:auto minmax(0,1fr) auto;padding:8px 12px max(8px,env(safe-area-inset-bottom));gap:8px;outline:none}
 .header{display:flex;align-items:center;gap:6px;min-width:0}
-.header :global(.mantine-Select-root){min-width:0;flex:1;max-width:280px;font-size:12px}
+.clientPicker{min-width:0;flex:1;max-width:none}.toolbar{display:flex;align-items:center;gap:6px;min-width:0}.clientPicker :global(.mantine-Select-root){min-width:0;width:100%;font-size:12px}.clientPicker :global(.mantine-Select-input){height:44px!important;min-height:44px}
 .iconButton{display:grid;place-items:center;flex:none;width:44px;height:44px;border:1px solid hsl(var(--border));border-radius:8px;background:hsl(var(--surface));font-size:13px}
 .iconButton:disabled{opacity:.4}
 .layoutToggle{display:none}
@@ -48,7 +48,7 @@
 
 .landscape{grid-template-columns:minmax(0,1fr) minmax(0,1.5fr);grid-template-rows:auto minmax(0,1fr);max-width:1600px}.landscape .header{grid-column:1/-1}.landscape .stage{display:flex}.landscape .keyboard{display:flex;justify-content:center}.landscape .layoutToggle{display:none}.portrait{max-width:680px;grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr) auto}.portrait .stage{display:flex}.portrait .keyboard{display:flex}.portrait .layoutToggle{display:none}
 
-.connectionDot{width:8px;height:8px;flex:none;border-radius:50%;background:hsl(var(--muted-foreground))}.connectionDot[data-online=true]{background:#22a866}.header{flex-wrap:wrap}.header :global(.mantine-Select-root){flex:1 1 120px}
+.header{flex-wrap:wrap}.clientPicker{flex:1 1 160px}
 
 /* Keep the hand controls together on large screens. */
 .surface{max-height:900px;align-self:start}
@@ -59,15 +59,13 @@
 @media(max-width:767px){
 .surface,.portrait,.landscape{max-width:100%;max-height:100%;grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(60px,1fr) auto}
 .landscape .header{grid-column:auto}
-.header{gap:4px}.header :global(.mantine-Select-root){max-width:none;flex-basis:calc(100% - 20px)}
-.header .iconButton{flex:1}
+.header{display:grid;grid-template-columns:minmax(0,1fr);gap:4px}.clientPicker{max-width:none;width:100%}.clientPicker :global(.mantine-Select-input){font-size:16px!important}.toolbar{display:flex;justify-content:space-between;gap:4px}.toolbar .iconButton{width:44px;min-width:44px;flex:none}
 .keyboard{gap:5px}.keyboard :global(.vkb-row){gap:3px}.keyboard :global(.vk){font-size:18px;height:44px}
 .keyboard :global(.vk.fn){font-size:11px}
 .tabs{gap:2px;padding:3px}.tabs button{padding:0 5px;font-size:11px}
 }
 @media(orientation:landscape) and (max-height:599px){
 .surface,.portrait,.landscape{grid-template-rows:44px minmax(0,1fr);max-height:100%}
-.surface .header :global(.mantine-Select-root){flex-basis:120px;max-width:280px}
-.header .iconButton{flex:none}.surface .stage{display:none}.surface .keyboard{display:flex;justify-content:center}
+.surface .header{display:flex;flex-wrap:nowrap}.surface .clientPicker{flex:1 1 120px;max-width:none}.surface .toolbar{display:flex;flex:none}.toolbar .iconButton{width:44px;flex:none}.surface .stage{display:none}.surface .keyboard{display:flex;justify-content:center}
 .surface .layoutToggle{display:grid}.padView .stage{display:flex}.padView .keyboard{display:none}
 }

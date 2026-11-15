@@ -154,6 +154,16 @@ struct Create {
     destination: String,
     busid: String,
 }
+fn role_allowed(report: &Document, role: &str) -> bool {
+    report.get_bool("enabled") == Ok(true)
+        && report.get_bool("supported") == Ok(true)
+        && report.get_bool(role).unwrap_or(true)
+}
+async fn require_role(app: &App, owner: ObjectId, id: &str, role: &str) -> ApiResult<()> {
+    let row=app.collection("usb_inventory").find_one(doc!{"_id":oid(id)?,"owner":owner,"at":{"$gt":DateTime::from_millis(DateTime::now().timestamp_millis()-45000)}}).await?.ok_or_else(unavailable)?;
+    if !row.get_document("report").ok().is_some_and(|r|role_allowed(r,role)){return Err(unavailable());}
+    Ok(())
+}
 async fn make(
     app: &App,
     owner: ObjectId,
@@ -176,7 +186,8 @@ async fn make(
     }
     let r=app.collection("usb_inventory").find_one(doc!{"_id":oid(&body.source)?,"owner":owner,"at":{"$gt":DateTime::from_millis(DateTime::now().timestamp_millis()-45000)}}).await?.ok_or_else(unavailable)?;
     let report = r.get_document("report").map_err(|_| unavailable())?;
-    if report.get_bool("enabled") != Ok(true) || report.get_bool("supported") != Ok(true) {
+    require_role(app,owner,&body.destination,"can_import").await?;
+    if !role_allowed(report,"can_export") {
         return Err(unavailable());
     }
     let devices: Vec<Device> = report
@@ -284,6 +295,10 @@ struct Report {
     token: String,
     enabled: bool,
     supported: bool,
+    #[serde(default)]
+    can_export: Option<bool>,
+    #[serde(default)]
+    can_import: Option<bool>,
     devices: Vec<Device>,
     states: Vec<DeviceState>,
 }
@@ -304,9 +319,9 @@ async fn report(State(app): State<Arc<App>>, Json(body): Json<Report>) -> ApiRes
         return Err(unavailable());
     }
     let owner = m.get_object_id("user_id").map_err(|_| unavailable())?;
-    app.collection("usb_inventory").update_one(doc!{"_id":oid(&body.machine_id)?},doc!{"$set":{"owner":owner,"at":DateTime::now(),"report":{"enabled":body.enabled,"supported":body.supported,"devices":bson::to_bson(&body.devices).map_err(|_|unavailable())?,"states":bson::to_bson(&body.states).map_err(|_|unavailable())?}}}).upsert(true).await?;
+    app.collection("usb_inventory").update_one(doc!{"_id":oid(&body.machine_id)?},doc!{"$set":{"owner":owner,"at":DateTime::now(),"report":{"enabled":body.enabled,"supported":body.supported,"can_export":body.can_export.unwrap_or(body.supported),"can_import":body.can_import.unwrap_or(body.supported),"devices":bson::to_bson(&body.devices).map_err(|_|unavailable())?,"states":bson::to_bson(&body.states).map_err(|_|unavailable())?}}}).upsert(true).await?;
     let rows = if body.enabled && body.supported {
-        plans(&app, owner, Some(&body.machine_id)).await?
+        plans(&app, owner, Some(&body.machine_id)).await?.into_iter().filter(|r| { let p=decode(r.clone()).ok(); p.is_some_and(|p|if p.source==body.machine_id {body.can_export.unwrap_or(body.supported)}else{body.can_import.unwrap_or(body.supported)}) }).collect()
     } else {
         vec![]
     };
@@ -411,6 +426,8 @@ async fn authorized_stream(
     }
     machine(app, owner, &p.source).await?;
     machine(app, owner, &p.destination).await?;
+    require_role(app,owner,&p.source,"can_export").await?;
+    require_role(app,owner,&p.destination,"can_import").await?;
     Ok(p)
 }
 async fn stream(
@@ -521,4 +538,31 @@ fn signal(text: &str) -> bool {
                 Some("hello" | "offer" | "answer" | "direct_ready" | "path" | "device")
             )
         })
+}
+
+#[cfg(test)]
+mod role_tests {
+    use super::*;
+    #[test]
+    fn legacy_reports_preserve_both_roles_but_explicit_roles_are_enforced() {
+        let mut report=doc!{"enabled":true,"supported":true};
+        assert!(role_allowed(&report,"can_export"));
+        assert!(role_allowed(&report,"can_import"));
+        report.insert("can_import",false);
+        assert!(role_allowed(&report,"can_export"));
+        assert!(!role_allowed(&report,"can_import"));
+        report.insert("enabled",false);
+        assert!(!role_allowed(&report,"can_export"));
+        report.insert("enabled",true);report.insert("supported",false);
+        assert!(!role_allowed(&report,"can_export"));
+    }
+    #[test]
+    fn reports_accept_optional_role_fields() {
+        for roles in ["",",\"can_export\":true,\"can_import\":false"] {
+            let text=format!("{{\"machine_id\":\"id\",\"token\":\"token\",\"enabled\":true,\"supported\":true,\"devices\":[],\"states\":[]{roles}}}");
+            let report:Report=serde_json::from_str(&text).unwrap();
+            assert!(report.can_export.unwrap_or(report.supported));
+            assert_eq!(report.can_import,if roles.is_empty(){None}else{Some(false)});
+        }
+    }
 }

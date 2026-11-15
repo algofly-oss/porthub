@@ -363,6 +363,12 @@ async fn cli_publication_tracks_verified_releases_rolls_back_failed_activation_a
     ensure!(
         std::fs::read_link(&cli)? == latest.executable && std::fs::read(&cli)? == b"release two"
     );
+    std::fs::write(&executable,b"release three")?;
+    manager.fail_start.store(true,Ordering::SeqCst);
+    ensure!(service::install(&layout,&source,&executable,&manager).await.is_err());
+    ensure!(std::fs::read_link(&cli)?==latest.executable&&std::fs::read(&cli)?==b"release two");
+    let latest=service::install(&layout,&source,&executable,&manager).await?;
+    ensure!(latest.cli.as_deref()==Some(cli.as_path())&&std::fs::read_link(&cli)?==latest.executable&&std::fs::read(&cli)?==b"release three");
     service::action(
         &layout,
         &source,

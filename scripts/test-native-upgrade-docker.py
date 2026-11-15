@@ -53,6 +53,9 @@ def main():
                     if role=='core':
                         (state/'mongo').mkdir(exist_ok=True)
                         (state/'mongo/WiredTiger.fixture').write_text('owned fixture database state')
+                        blob=b'owned immutable artifact'*4096
+                        components=state/'agent-releases/components';components.mkdir(parents=True,exist_ok=True)
+                        (components/('fixture-'+hashlib.sha256(blob).hexdigest())).write_bytes(blob)
                     service = {'image':project+':'+role,
                                'container_name':project+'-'+role, 'read_only':True, 'stop_grace_period':'1s',
                                'cap_drop':['ALL'], 'cap_add':{'core':[],'edge':['NET_BIND_SERVICE'],'firewall':['NET_ADMIN']}[role],
@@ -106,6 +109,9 @@ def main():
                 proof=json.loads(manifest.read_text())
                 assert proof['sha256']['mongo/WiredTiger.fixture']==hashlib.sha256(b'owned fixture database state').hexdigest()
                 assert (manifest.parent/'data/mongo/WiredTiger.fixture').read_bytes()==b'owned fixture database state'
+                assert proof['online_staged_bytes']==len(blob), 'immutable objects must be staged before downtime'
+                assert proof['cold_copied_bytes']==len(b'owned fixture database state'), 'only mutable state should be copied after core stops'
+                assert 0<=proof['cold_seconds']<90
             missing = unrelated - set(run('docker','ps','-q','--no-trunc').stdout.split())
             if missing:
                 details = []

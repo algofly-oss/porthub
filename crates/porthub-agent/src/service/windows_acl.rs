@@ -35,14 +35,49 @@ pub(crate) fn is_managed(path: &Path) -> bool {
 }
 
 pub(crate) fn secure(path: &Path, directory: bool) -> Result<()> {
-    apply(path, directory, false)
+    apply(path, directory, false, false)
 }
 pub(crate) fn readable(path: &Path, directory: bool) -> Result<()> {
-    apply(path, directory, true)
+    apply(path, directory, true, false)
 }
-fn apply(path: &Path, directory: bool, readable: bool) -> Result<()> {
+/// Only public immutable executable artifacts are readable by desktop users.
+/// Credential and native service state paths can never enter this policy.
+pub(crate) fn public_release(path: &Path, directory: bool) -> Result<()> {
+    apply(path, directory, false, true)
+}
+fn release_path(path: &Path, directory: bool) -> bool {
+    let Ok(root) = managed_root().map(|root| root.join("releases")) else {
+        return false;
+    };
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return false;
+    }
+    if directory && path == root {
+        return true;
+    }
+    let release = if directory {
+        Some(path)
+    } else if path.file_name().is_some_and(|name| name == "porthub.exe") {
+        path.parent()
+    } else {
+        None
+    };
+    release.is_some_and(|release| {
+        release.parent() == Some(root.as_path())
+            && release
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.len() == 64 && name.bytes().all(|b| b.is_ascii_hexdigit()))
+    })
+}
+fn apply(path: &Path, directory: bool, readable: bool, executable: bool) -> Result<()> {
     ensure!(
-        if readable {
+        if executable {
+            release_path(path, directory)
+        } else if readable {
             path.starts_with(managed_root()?.with_file_name("PortHubStatus"))
                 && path
                     .components()
@@ -66,8 +101,10 @@ fn apply(path: &Path, directory: bool, readable: bool) -> Result<()> {
         .encode_wide()
         .chain(Some(0))
         .collect::<Vec<_>>();
-    let sddl = if readable && directory {
+    let sddl = if (readable || executable) && directory {
         "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)"
+    } else if executable {
+        "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFX;;;BU)"
     } else if readable {
         "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)"
     } else if directory {
@@ -188,5 +225,26 @@ mod status_retry_tests {
         });
         assert_eq!(result.unwrap_err().raw_os_error(), Some(87));
         assert_eq!(attempts, 1);
+    }
+}
+
+#[cfg(test)]
+mod public_release_tests {
+    use super::*;
+    #[test]
+    fn public_executable_policy_cannot_reach_credentials_or_arbitrary_files() {
+        let root = managed_root().unwrap();
+        let release = root.join("releases").join("a".repeat(64));
+        assert!(release_path(&root.join("releases"), true));
+        assert!(release_path(&release, true));
+        assert!(release_path(&release.join("porthub.exe"), false));
+        for path in [
+            root.join("native/profile.json"),
+            root.join("releases/arbitrary.exe"),
+            release.join("credentials.json"),
+            release.join("../porthub.exe"),
+        ] {
+            assert!(!release_path(&path, false));
+        }
     }
 }

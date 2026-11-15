@@ -163,6 +163,8 @@ pub trait Manager: Send + Sync {
     async fn prepare_private(&self) -> Result<()> { Ok(()) }
     async fn state(&self, spec: &Spec) -> Result<State>;
     async fn reload(&self) -> Result<()>;
+    /// Replace only a previously verified owned registration, preserving strict SCM ownership.
+    async fn reconfigure(&self, _previous: &Spec, _next: &Spec) -> Result<()> { Ok(()) }
     async fn enable(&self, spec: &Spec) -> Result<()>;
     async fn disable(&self, spec: &Spec) -> Result<()>;
     async fn start(&self, spec: &Spec) -> Result<()>;
@@ -533,6 +535,8 @@ pub(crate) fn binary(source: &Path, releases: &Path) -> Result<PathBuf> {
             hex(check.finalize()) == release.file_name().unwrap().to_string_lossy(),
             "installed release checksum does not match its identity"
         );
+        #[cfg(windows)]
+        {windows_acl::public_release(releases,true)?;windows_acl::public_release(&release,true)?;windows_acl::public_release(&path,false)?;}
         return Ok(path);
     }
     #[cfg(unix)]
@@ -547,6 +551,8 @@ pub(crate) fn binary(source: &Path, releases: &Path) -> Result<PathBuf> {
         .map_err(|error| error.error)?;
     #[cfg(unix)]
     File::open(&release)?.sync_all()?;
+    #[cfg(windows)]
+    {windows_acl::public_release(releases,true)?;windows_acl::public_release(&release,true)?;windows_acl::public_release(&path,false)?;}
     Ok(path)
 }
 
@@ -776,7 +782,15 @@ pub async fn install(
     executable: &Path,
     manager: &dyn Manager,
 ) -> Result<Spec> {
-    install_published(layout, source, executable, manager, None).await
+    directory(&layout.state,true)?;
+    directory(&layout.releases,false)?;
+    directory(&layout.units,false)?;
+    let _lock=lock(layout)?;
+    let id=RegistrationProfile::load(source)?.identity();
+    // Existing managed publication belongs to this registration. Updating its
+    // service must not leave the interactive CLI running an older release.
+    let cli=installed(layout,&id)?.and_then(|spec|spec.cli);
+    install_locked_mode(layout,source,executable,manager,cli.as_deref(),None).await
 }
 pub async fn install_published(
     layout: &Layout,
@@ -914,7 +928,7 @@ async fn install_locked_mode(
             .or_else(|| previous.as_ref().and_then(|spec| spec.cli.clone())),
     };
     owned_unit(&spec)?;
-    let old = manager.state(&spec).await?;
+    let old = manager.state(previous.as_ref().unwrap_or(&spec)).await?;
     anyhow::ensure!(
         !old.installed || previous.is_some(),
         "service registration is not owned by PortHub"
@@ -944,10 +958,11 @@ async fn install_locked_mode(
     )?;
     let mut attempted_start = false;
     let result = async {
+        attempted_start = true;
+        if let Some(previous) = &previous { manager.reconfigure(previous, &spec).await?; }
         manager.reload().await?;
         manager.enable(&spec).await?;
         manager.reset_failed(&spec).await?;
-        attempted_start = true;
         manager.start(&spec).await?;
         readable::install(layout, &spec, &profile).await?;
         Ok::<_, anyhow::Error>(())
@@ -970,6 +985,7 @@ async fn install_locked_mode(
             .transpose();
         let _ = manager.reload().await;
         if let Some(previous) = &previous {
+            let _ = manager.reconfigure(&spec, previous).await;
             if old.enabled {
                 let _ = manager.enable(previous).await;
             }
@@ -1079,6 +1095,8 @@ async fn action_locked(layout: &Layout, source: &Path, action: Action, manager: 
                     ".config.json",
                     ".local-access.json",
                     ".client-features.json",
+                    ".drive-health-policy.json",
+                    ".drive-health-schedule.json",
                     ".status.json",
                     ".update-attempt.json",
                     ".update-commit.json",
