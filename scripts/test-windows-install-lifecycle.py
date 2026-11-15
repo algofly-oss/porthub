@@ -35,6 +35,7 @@ def run(args, **kwargs):
 
 
 def ps(script, **kwargs):
+    script = "$ProgressPreference='SilentlyContinue';\n" + script
     encoded = base64.b64encode(script.encode("utf-16le")).decode()
     return run(["powershell.exe", "-NoProfile", "-EncodedCommand", encoded], **kwargs)
 
@@ -149,7 +150,12 @@ for($attempt=0;$attempt -lt 100;$attempt++){
     if($task -and $task.Actions[0].Execute -eq $expected -and $task.Actions[0].Arguments -eq 'keyboard startup' -and $task.State -eq 'Running' -and $process.Count){$process[0].ProcessId;exit 0}
     Start-Sleep -Milliseconds 250
 }
-Get-CimInstance Win32_Process -Filter "Name='porthub.exe'" | Select-Object ProcessId,ExecutablePath,SessionId | Format-List
+$task=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+if($task){
+    $info=Get-ScheduledTaskInfo -InputObject $task
+    [pscustomobject]@{Task=$name;State=$task.State.ToString();LastResult=('0x{0:X8}' -f $info.LastTaskResult);LastRun=$info.LastRunTime;Principal=$task.Principal.UserId;LogonType=$task.Principal.LogonType.ToString();RunLevel=$task.Principal.RunLevel.ToString();Execute=$task.Actions.Execute;Arguments=$task.Actions.Arguments;Expected=$expected}|ConvertTo-Json -Compress
+}
+Get-CimInstance Win32_Process -Filter "Name='porthub.exe'" | Select-Object ProcessId,ParentProcessId,ExecutablePath,SessionId | Format-List
 throw 'Persistent desktop helper did not advance to its published immutable image'
 """)
     pid = int(result.stdout.decode().strip())

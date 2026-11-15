@@ -59,6 +59,7 @@ fn script(executable: &Path) -> Result<String> {
     let path = path.replace('\'', "''");
     Ok(format!(
         r#"$ErrorActionPreference='Stop'
+$ProgressPreference='SilentlyContinue'
 $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
 $sid=$identity.User.Value
 if($sid -in @('S-1-5-18','S-1-5-19','S-1-5-20')){{exit 0}}
@@ -79,18 +80,36 @@ if($previous){{
     if($priorSid -notmatch '^S-1-'){{$priorSid=([Security.Principal.NTAccount]$priorSid).Translate([Security.Principal.SecurityIdentifier]).Value}}
     if($priorSid -ne $sid -or @($previous.Actions).Count -ne 1 -or $previous.Actions[0].Arguments -notin @('keyboard run','keyboard startup') -or -not (ManagedHelper $previous.Actions[0].Execute)){{throw 'Refusing to replace an unverified desktop task'}}
     $currentHelper=$false
+    $ownedHelpers=@()
     foreach($process in @(Get-CimInstance Win32_Process -Filter "Name='porthub.exe'")){{
-        if($process.ExecutablePath -eq $path -and $process.SessionId -ne 0 -and $process.CommandLine -match '(?i)\skeyboard\s+startup\s*$'){{
+        if($process.SessionId -ne 0 -and $process.CommandLine -match '(?i)\skeyboard\s+(?:run|startup)\s*$' -and (ManagedHelper $process.ExecutablePath)){{
             $owner=Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid
-            if($owner.ReturnValue -eq 0 -and $owner.Sid -eq $sid){{$currentHelper=$true}}
+            if($owner.ReturnValue -eq 0 -and $owner.Sid -eq $sid){{
+                $ownedHelpers+=$process
+                if($process.ExecutablePath -eq $path -and $process.CommandLine -match '(?i)\skeyboard\s+startup\s*$'){{$currentHelper=$true}}
+            }}
         }}
     }}
     # IgnoreNew preserves a running old image even after its action changes.
     # Stop only this verified SID-owned task when its image needs refreshing.
     if($previous.State -eq 'Running' -and ($previous.Actions[0].Execute -ne $path -or $previous.Actions[0].Arguments -ne 'keyboard startup' -or -not $currentHelper)){{
-        Stop-ScheduledTask -TaskName $name
-        for($attempt=0;$attempt -lt 50 -and (Get-ScheduledTask -TaskName $name).State -eq 'Running';$attempt++){{Start-Sleep -Milliseconds 100}}
-        if((Get-ScheduledTask -TaskName $name).State -eq 'Running'){{throw 'Desktop task did not stop for its verified update'}}
+        $waiting=@()
+        try{{
+            foreach($old in $ownedHelpers){{
+                $native=Get-Process -Id $old.ProcessId -ErrorAction SilentlyContinue
+                if(-not $native){{continue}}
+                if($native.Path -ne $old.ExecutablePath -or [Math]::Abs(($native.StartTime.ToUniversalTime()-$old.CreationDate.ToUniversalTime()).TotalMilliseconds) -ge 10){{throw 'Desktop process ownership changed before its update'}}
+                # Pin the native process handle before asking the scheduler to
+                # stop it. A Ready task can still have an exiting old process
+                # holding the desktop lease; PID reuse cannot satisfy this wait.
+                [void]$native.Handle
+                $waiting+=$native
+            }}
+            Stop-ScheduledTask -TaskName $name
+            for($attempt=0;$attempt -lt 50 -and (Get-ScheduledTask -TaskName $name).State -eq 'Running';$attempt++){{Start-Sleep -Milliseconds 100}}
+            if((Get-ScheduledTask -TaskName $name).State -eq 'Running'){{throw 'Desktop task did not stop for its verified update'}}
+            foreach($native in $waiting){{if(-not $native.WaitForExit(5000)){{throw 'Previous verified desktop helper has not released its process and lease'}}}}
+        }}finally{{foreach($native in $waiting){{$native.Dispose()}}}}
     }}
 }}
 $action=New-ScheduledTaskAction -Execute $path -Argument 'keyboard startup'
@@ -157,6 +176,12 @@ mod tests {
                 < text.find("Register-ScheduledTask -TaskName $name").unwrap()
         );
         assert!(!text.contains("Stop-Process"));
+        assert!(text.contains("[void]$native.Handle"));
+        assert!(text.contains("$native.WaitForExit(5000)"));
+        assert!(
+            text.find("$native.WaitForExit(5000)").unwrap()
+                < text.find("Start-ScheduledTask -TaskName $name").unwrap()
+        );
         assert!(text.contains("-Argument 'keyboard startup'"));
         assert!(text.contains("@('keyboard run','keyboard startup')"));
         assert!(!text.contains("-Password"));
