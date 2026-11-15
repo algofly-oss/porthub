@@ -5,6 +5,56 @@ use enigo::{Axis, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use porthub_components::keyboard::{Button, Command, KeyState, PointerAction};
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "macos")]
+static PERMISSION_PROMPTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn settings() -> Settings {
+    #[cfg(target_os = "macos")]
+    return Settings {
+        // A failed initialization is retried for subsequent input. Ask once
+        // per module process, not once for every pointer movement or key.
+        open_prompt_to_get_permissions: !PERMISSION_PROMPTED
+            .swap(true, std::sync::atomic::Ordering::Relaxed),
+        ..Settings::default()
+    };
+    #[cfg(not(target_os = "macos"))]
+    Settings::default()
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn accessibility_prompt_is_not_repeated_on_input_retries() {
+    assert!(settings().open_prompt_to_get_permissions);
+    assert!(!settings().open_prompt_to_get_permissions);
+    assert!(!settings().open_prompt_to_get_permissions);
+}
+
+pub(super) fn permissions(request: bool) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let executable = std::env::current_exe()?.canonicalize()?;
+        println!("Accessibility executable: {}", executable.display());
+        let result = Enigo::new(&Settings {
+            open_prompt_to_get_permissions: request,
+            ..Settings::default()
+        });
+        match result {
+            Ok(_) => println!("Accessibility: allowed for this PortHub executable"),
+            Err(error) => {
+                println!("Accessibility: unavailable ({error})");
+                anyhow::bail!("In System Settings > Privacy & Security > Accessibility, enable the executable printed above. An older PortHub entry may refer to an older release. Run `porthub keyboard permissions` again after granting access.");
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = request;
+        println!("macOS Accessibility permission checks do not apply to this platform");
+    }
+    Ok(())
+}
+
 pub struct Desktop {
     native: Option<Native>,
     clipboard: Option<arboard::Clipboard>,
@@ -36,13 +86,13 @@ impl Desktop {
             Native::Uinput(super::uinput::Device::new().context("Wayland input requires desktop-user access to /dev/uinput; see porthub keyboard help")?)
         } else {
             Native::Enigo(
-                Enigo::new(&Settings::default()).context("Cannot initialize desktop input")?,
+                Enigo::new(&settings()).context("Cannot initialize desktop input")?,
             )
         };
         #[cfg(not(target_os = "linux"))]
         let native = Native::Enigo(
-            Enigo::new(&Settings::default())
-                .context("Cannot initialize desktop input; allow Accessibility permissions")?,
+            Enigo::new(&settings())
+                .context("Cannot initialize desktop input; on macOS run `porthub keyboard permissions` to check Accessibility access for this release")?,
         );
         self.native = Some(native);
         Ok(())

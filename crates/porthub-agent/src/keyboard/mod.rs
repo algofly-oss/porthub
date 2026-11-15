@@ -30,6 +30,12 @@ pub enum Action {
     Enable,
     Disable,
     Status,
+    /// Check this executable's macOS Accessibility access without sending input.
+    Permissions {
+        /// Ask macOS to show its permission prompt when access is missing.
+        #[arg(long)]
+        request: bool,
+    },
     #[command(hide = true)]
     Run,
 }
@@ -83,6 +89,7 @@ pub(crate) fn registration(
 }
 pub async fn run(args: Args, cancel: CancellationToken) -> Result<()> {
     match args.command.unwrap_or(Action::Status) {
+        Action::Permissions { request } => input::permissions(request),
         Action::Run => {
             let (layout, id) = registration(args.user, args.registration.as_deref())?;
             let root = directories::ProjectDirs::from("dev", "porthub", "porthub")

@@ -16,11 +16,23 @@ focused window. On an already logged-in desktop, start the module with:
 porthub keyboard enable
 porthub keyboard status
 porthub keyboard disable
+# On macOS, inspect the exact executable's Accessibility permission:
+porthub keyboard permissions
+# Request the OS prompt explicitly if access is missing:
+porthub keyboard permissions --request
 # Select one account when there are several registrations:
 porthub keyboard enable --registration UNIQUE_MACHINE_OR_REGISTRATION_PREFIX
 # Per-user agent installations:
 porthub keyboard enable --user
 ```
+
+On macOS, enable the current executable in System Settings → Privacy & Security
+→ Accessibility. `permissions` prints its full resolved path and checks access
+without sending input; it does not display a prompt unless `--request` is used.
+Ad-hoc signed releases have version-specific identities, so an existing entry
+for an older PortHub binary may not authorize a newly installed release. The
+desktop module asks at most once per process and continues checking for access
+on later input after you grant it. PortHub never changes macOS permission records.
 
 Capabilities are permitted by default. A local disable is persisted beside the
 registration, survives updates, and revokes existing broker streams. The portal
