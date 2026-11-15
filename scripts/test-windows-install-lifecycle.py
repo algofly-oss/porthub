@@ -48,8 +48,8 @@ def wait_for(predicate, description):
 
 
 def assert_helper_has_no_console(pid):
-    # The short-lived probe starts without a console. Attaching and immediately
-    # detaching it never sends input or changes another process's attachment.
+    # The short-lived probe detaches its own console before inspection.
+    # Attaching and detaching it sends no input and leaves other attachments intact.
     probe = r"""
 import ctypes,sys,time
 from ctypes import wintypes
@@ -58,7 +58,10 @@ kernel.AttachConsole.argtypes=[wintypes.DWORD];kernel.AttachConsole.restype=wint
 kernel.FreeConsole.restype=wintypes.BOOL
 kernel.GetConsoleProcessList.argtypes=[ctypes.POINTER(wintypes.DWORD),wintypes.DWORD]
 buffer=(wintypes.DWORD*2)()
-assert kernel.GetConsoleProcessList(buffer,2)==0,'Probe unexpectedly inherited a console'
+# Console attachment differs across runner hosts even with CREATE_NO_WINDOW.
+# Detach only this disposable probe; the parent and helper are unaffected.
+kernel.FreeConsole()
+assert kernel.GetConsoleProcessList(buffer,2)==0,'Probe could not detach its own console'
 for attempt in range(50):
     if kernel.AttachConsole(int(sys.argv[1])):
         kernel.FreeConsole()
