@@ -9,6 +9,16 @@ use std::{
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+fn same_configuration_path(left: &Path, right: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let normalize = |path: &Path| path.to_string_lossy().trim_start_matches(r"\\?\").replace('/', r"\").to_lowercase();
+        normalize(left) == normalize(right)
+    }
+    #[cfg(not(windows))]
+    { left == right }
+}
+
 /// Pair by enrolled authority and machine identity, never email, IP, or a
 /// fallback URL shared by otherwise unrelated registrations.
 pub(crate) fn matches(
@@ -108,7 +118,7 @@ impl Controller {
             let mut watcher = porthub_transfer::notifications::watcher(
                 move |event: notify::Result<notify::Event>| match event {
                     Ok(event)
-                        if event.paths.iter().any(|path| path == &target)
+                        if event.paths.iter().any(|path| same_configuration_path(path, &target))
                             && matches!(
                                 event.kind,
                                 notify::EventKind::Create(_)
@@ -469,4 +479,13 @@ pub(crate) fn private_failure_reason(error: &anyhow::Error) -> &'static str {
     else if text.contains("tun device") { "private TUN unavailable; check device access and network privileges" }
     else if text.contains("rejected this enrollment") { "private enrollment rejected; check registration and administrator access policy" }
     else { "private startup failed; run porthub diagnose with the registration profile" }
+}
+
+#[cfg(all(test,windows))]
+#[test]
+fn windows_module_notifications_match_long_path_and_case_variants() {
+    let expected=Path::new(r"C:\ProgramData\PortHub\native\owner.json.private-module.json");
+    assert!(same_configuration_path(expected,Path::new(r"\\?\c:\programdata\PORT hub\native\owner.json.private-module.json"))==false);
+    assert!(same_configuration_path(expected,Path::new(r"\\?\c:\programdata\PORTHUB\native\owner.json.private-module.json")));
+    assert!(!same_configuration_path(expected,Path::new(r"C:\ProgramData\PortHub\native\another.json.private-module.json")));
 }

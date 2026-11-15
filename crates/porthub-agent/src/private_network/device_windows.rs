@@ -38,6 +38,12 @@ pub struct Tun {
     _driver: PathBuf,
 }
 
+fn peer_routes(own: Ipv4Addr, peers: &[Ipv4Addr]) -> HashSet<Ipv4Addr> {
+    // Windows creates the interface's own /32 when its address is assigned.
+    // It is kernel-owned: adding it again fails with ERROR_OBJECT_ALREADY_EXISTS.
+    peers.iter().copied().filter(|ip| *ip != own).collect()
+}
+
 fn conflicts_with_route(address: Ipv4Addr, route: &Route) -> bool {
     let prefix = route.prefix().min(32);
     if prefix == 0 {
@@ -144,8 +150,7 @@ impl Tun {
             peers.iter().all(Ipv4Addr::is_private),
             "invalid private route address"
         );
-        let mut wanted: HashSet<_> = peers.iter().copied().collect();
-        wanted.insert(self.own);
+        let wanted = peer_routes(self.own, peers);
         let mut current = self.routes.lock().await;
         let additions: Vec<_> = wanted.difference(&current).copied().collect();
         let mut routes = AsyncRouteManager::new().context("cannot open Windows route manager")?;
@@ -230,6 +235,13 @@ mod tests {
     use super::conflicts_with_route;
     use route_manager::Route;
     use std::net::IpAddr;
+
+    #[test]
+    fn assigned_interface_address_is_not_an_explicit_peer_route() {
+        let own = "10.254.250.254".parse().unwrap();
+        let peer = "10.254.250.253".parse().unwrap();
+        assert_eq!(super::peer_routes(own, &[own, peer, peer]), std::collections::HashSet::from([peer]));
+    }
 
     #[test]
     fn route_preflight_detects_overlaps_but_allows_default_and_other_family_routes() {

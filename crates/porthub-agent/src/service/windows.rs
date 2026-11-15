@@ -32,6 +32,18 @@ impl Windows {
         ensure!(!user, "per-user Windows services are not supported");
         Ok(Self)
     }
+
+    pub(crate) fn owns_process(spec: &Spec, pid: u32) -> Result<bool> {
+        Ok(with_owned_service(
+            spec,
+            ServiceAccess::QUERY_CONFIG | ServiceAccess::QUERY_STATUS,
+            |service| {
+                let status = service.query_status()?;
+                Ok(status.process_id == Some(pid)
+                    && matches!(status.current_state, ServiceState::Running | ServiceState::StartPending))
+            },
+        )?.unwrap_or(false))
+    }
 }
 
 fn scm(access: ServiceManagerAccess) -> Result<ServiceManager> {

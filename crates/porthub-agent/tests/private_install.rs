@@ -1,4 +1,4 @@
-#![cfg(unix)]
+#![cfg(any(unix, windows))]
 use axum::{extract::Json, http::HeaderMap, routing::post, Router};
 use porthub_agent::{control::Control, profile::Profile};
 use serde_json::Value;

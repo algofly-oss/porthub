@@ -1,6 +1,7 @@
 #![cfg(windows)]
 //! Filesystem/ACL enrollment checks use an isolated ProgramData namespace. They
-//! never install services or edit the real machine environment registry key.
+//! never install agent services or edit the real environment registry key.
+//! The privileged network probe creates and removes its own temporary adapter.
 use anyhow::{ensure, Result};
 use porthub_agent::{bootstrap, profile::Profile};
 use std::{ffi::OsString, path::Path};
@@ -114,5 +115,74 @@ fn assert_private_acl(path: &Path) -> Result<()> {
         principals.sort();
         ensure!(principals == ["S-1-5-18", "S-1-5-32-544"]);
     }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an Administrator token on native Windows"]
+async fn private_enrollment_protects_credentials_and_rejects_unmanaged_destinations_before_claiming() -> Result<()> {
+    use axum::{routing::post, Json, Router};
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    use porthub_agent::private_profile::{self, Source};
+    porthub_agent::service::require_administrator()?;
+    let root = tempfile::tempdir()?;
+    let _restore = ProgramData(std::env::var_os("ProgramData"));
+    std::env::set_var("ProgramData", root.path());
+    let native = root.path().join("PortHub/native/private");
+    porthub_agent::service::directory(&native, true)?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let server = format!("http://{}", listener.local_addr()?);
+    let claims = Arc::new(AtomicUsize::new(0));
+    let observed = claims.clone();
+    let app = Router::new().route("/api/access/private/bootstrap", post(move || {
+        let claims = observed.clone(); async move {
+            claims.fetch_add(1, Ordering::SeqCst);
+            Json(serde_json::json!({"peer_id":"0123456789abcdef01234567:abcdef0123456789abcdef01","workspace":"0123456789abcdef01234567","token":"fixture-private-credential-0123456789abcdef"}))
+        }
+    }));
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let ticket = "fixture-private-ticket-0123456789abcdef";
+    let outside = root.path().join("unprotected.json");
+    ensure!(private_profile::enroll(Source::Ticket{server:&server,ticket},Some(&outside),false,true,&cancel).await.is_err());
+    ensure!(!outside.exists() && claims.load(Ordering::SeqCst)==0);
+    let path = native.join("private.json");
+    private_profile::enroll(Source::Ticket{server:&server,ticket},Some(&path),false,true,&cancel).await?;
+    assert_private_acl(&path)?;
+    ensure!(private_profile::Profile::load(&path)?.workspace=="0123456789abcdef01234567");
+    ensure!(private_profile::enroll(Source::Ticket{server:&server,ticket},Some(&path),false,true,&cancel).await.is_err());
+    ensure!(claims.load(Ordering::SeqCst)==1);
+    task.abort();
+    Ok(())
+}
+
+#[cfg(target_arch="x86_64")]
+#[tokio::test]
+#[ignore = "requires an Administrator token and Wintun on native Windows"]
+async fn windows_tun_uses_the_kernel_address_route_and_cleans_only_its_peer_routes() -> Result<()> {
+    use porthub_agent::private_network::device::Tun;
+    use route_manager::AsyncRouteManager;
+    use std::net::{IpAddr,Ipv4Addr};
+    porthub_agent::service::require_administrator()?;
+    let root = tempfile::tempdir()?;
+    let _restore = ProgramData(std::env::var_os("ProgramData"));
+    std::env::set_var("ProgramData", root.path());
+    let own:Ipv4Addr="10.254.250.254".parse()?;
+    let peer:Ipv4Addr="10.254.250.253".parse()?;
+    let name=format!("ph{}",&uuid::Uuid::new_v4().simple().to_string()[..8]);
+    let tun=Tun::open(&name,own,&[own,peer,peer]).await?;
+    let index=tun.index;
+    let mut routes=AsyncRouteManager::new()?;
+    let matching=|r:&route_manager::Route,ip:Ipv4Addr|r.destination()==IpAddr::V4(ip)&&r.prefix()==32&&r.if_index()==Some(index);
+    let current=routes.list().await?;
+    ensure!(current.iter().filter(|r|matching(r,own)).count()==1,"Windows must retain its one automatic interface address route");
+    ensure!(current.iter().any(|r|matching(r,peer)));
+    tun.update_routes(&[own,peer]).await?;
+    tun.update_routes(&[own]).await?;
+    let current=routes.list().await?;
+    ensure!(current.iter().any(|r|matching(r,own)) && !current.iter().any(|r|matching(r,peer)));
+    tun.update_routes(&[peer]).await?;
+    drop(tun);
+    ensure!(!routes.list().await?.iter().any(|r|matching(r,peer)));
     Ok(())
 }

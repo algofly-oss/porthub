@@ -56,3 +56,20 @@ the packet implementation and its outstanding acceptance gates.
 The one-time exchange is not crash-recoverable after a lost successful response
 or a failed credential save; that case requires revoking/reissuing enrollment.
 Existing active routes are not replaced by credential staging.
+
+## Windows system registrations
+
+An installed Windows public service claims its pending private enrollment and
+activates the private module inside that same service. Automatic enrollment
+verifies the owning SCM process and executable before using machine credentials;
+foreground copies cannot enroll on behalf of an installed registration.
+
+Windows enrollment requires an Administrator token. Private destinations must
+remain inside the managed native state directory, with SYSTEM/Administrators
+ACLs applied before a ticket is consumed. Public and private credentials remain
+separate, and existing local capability disables remain authoritative.
+
+Wintun assigns the interface's own address and Windows creates its local /32
+route. PortHub adds and removes only peer routes; adding the address route again
+would fail with Windows error 5010. The native Windows bootstrap checks include
+protected private enrollment and a temporary Wintun adapter lifecycle regression.

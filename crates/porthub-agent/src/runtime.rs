@@ -469,12 +469,19 @@ pub async fn run_with_logs(
             None
         });
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    let private_install_cancel = cancel.child_token();
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    let _private_install_task = updater
+    let private_install_layout = updater
         .as_ref()
-        .and_then(crate::autoupdate::Controller::private_enrollment_layout)
-        .map(|layout| {
+        .and_then(crate::autoupdate::Controller::private_enrollment_layout);
+    #[cfg(windows)]
+    let private_install_layout = crate::private_profile::windows_service_layout(&path, &profile)
+        .unwrap_or_else(|_| {
+            tracing::warn!("automatic private enrollment requires an owned Windows service registration");
+            None
+        });
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    let private_install_cancel = cancel.child_token();
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    let _private_install_task = private_install_layout.map(|layout| {
             tokio::spawn(crate::private_profile::run_auto_install(
                 control.clone(),
                 profile.clone(),

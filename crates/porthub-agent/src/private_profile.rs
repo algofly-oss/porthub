@@ -1,14 +1,14 @@
 //! Private-network credentials retain the existing Go profile wire format.
 //! Enrollment stages identity only; packet runtime activation is separate.
 use crate::profile;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::profile::Lease;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use anyhow::Context;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 #[derive(Clone, Deserialize, Serialize)]
@@ -99,7 +99,7 @@ impl Profile {
     }
 }
 #[derive(Deserialize)]
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 struct Metadata {
     format_version: u32,
     kind: String,
@@ -113,13 +113,13 @@ struct Metadata {
     fallback_servers: Vec<String>,
 }
 #[derive(Deserialize)]
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 struct Credentials {
     peer_id: String,
     workspace: String,
     token: String,
 }
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -127,7 +127,7 @@ fn client() -> Result<reqwest::Client> {
         .timeout(Duration::from_secs(20))
         .build()?)
 }
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn response(
     mut response: reqwest::Response,
     cancel: &CancellationToken,
@@ -152,7 +152,7 @@ async fn response(
     }
     Ok((headers, bytes))
 }
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(crate) fn default_path(user: bool, server: &str, peer: &str) -> Result<PathBuf> {
     use sha2::{Digest, Sha256};
     let layout = if user {
@@ -169,7 +169,7 @@ pub(crate) fn default_path(user: bool, server: &str, peer: &str) -> Result<PathB
     )))
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[derive(Deserialize)]
 struct PendingInstall {
     format_version: u32,
@@ -184,7 +184,24 @@ struct PendingInstall {
 }
 
 /// The native registration activates private networking inside its own process.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(windows)]
+pub(crate) fn windows_service_layout(
+    source: &Path,
+    public: &crate::profile::Profile,
+) -> Result<Option<crate::service::Layout>> {
+    let layout = crate::service::Layout::system()?;
+    let id = crate::service::identity(public);
+    let Some(spec) = crate::service::installed(&layout, &id)? else { return Ok(None); };
+    anyhow::ensure!(
+        !spec.user && spec.profile == source
+            && spec.executable.canonicalize()? == std::env::current_exe()?.canonicalize()?
+            && crate::service::windows::Windows::owns_process(&spec, std::process::id())?,
+        "private automatic enrollment requires the registered Windows service process"
+    );
+    Ok(Some(layout))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub(crate) async fn run_auto_install(
     control: std::sync::Arc<crate::control::Control>,
     public: crate::profile::Profile,
@@ -226,7 +243,7 @@ pub(crate) async fn run_auto_install(
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 async fn auto_install_once(
     control: &crate::control::Control,
     public: &crate::profile::Profile,
@@ -309,7 +326,7 @@ async fn auto_install_once(
     Ok(())
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn pending_profiles(layout: &crate::service::Layout) -> Result<Vec<(PathBuf, PathBuf)>> {
     let root = layout.state.join("private");
     let metadata = match std::fs::symlink_metadata(&root) {
@@ -342,7 +359,7 @@ fn pending_profiles(layout: &crate::service::Layout) -> Result<Vec<(PathBuf, Pat
     Ok(profiles)
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 async fn activate_pending_profiles(
     layout: &crate::service::Layout,
     public: &crate::profile::Profile,
@@ -358,7 +375,7 @@ async fn activate_pending_profiles(
     Ok(())
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 async fn activate_profile(
     layout: &crate::service::Layout,
     public: &crate::profile::Profile,
@@ -396,12 +413,12 @@ pub async fn enroll(
     insecure: bool,
     cancel: &CancellationToken,
 ) -> Result<PathBuf> {
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (source, destination, user, insecure, cancel);
         anyhow::bail!("native credential protection for this platform is not ready");
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         let http = client()?;
         let mut expected = None;
@@ -469,6 +486,14 @@ pub async fn enroll(
                     .0,
             )?,
         };
+        #[cfg(windows)]
+        {
+            crate::service::require_administrator()?;
+            anyhow::ensure!(!user, "private network enrollment requires the system registration");
+            let native = crate::service::Layout::system()?.state;
+            anyhow::ensure!(destination.starts_with(&native) && crate::service::windows_acl::is_managed(&destination), "private credentials must be saved inside the managed native directory");
+            crate::service::windows_acl::secure(destination.parent().context("private profile directory missing")?, true)?;
+        }
         profile::validate_parent(&destination)?;
         anyhow::ensure!(
             std::fs::symlink_metadata(&destination)

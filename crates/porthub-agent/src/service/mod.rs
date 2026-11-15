@@ -857,11 +857,6 @@ async fn install_locked_mode(
             manager.prepare_private().await?;
         }
     }
-    #[cfg(windows)]
-    anyhow::ensure!(
-        !matches!(&profile, RegistrationProfile::Private(_)),
-        "Windows private-network service activation is not supported"
-    );
     let executable = binary(executable, &layout.releases)?;
     if let RegistrationProfile::Private(private) = &profile {
         let mut owners = Vec::new();
@@ -900,6 +895,11 @@ async fn install_locked_mode(
             return Ok(owner);
         }
     }
+    #[cfg(windows)]
+    anyhow::ensure!(
+        !matches!(&profile, RegistrationProfile::Private(_)),
+        "Windows private networking requires an existing public registration to pair with"
+    );
     let spec = Spec {
         user: layout.user,
         identity: id.clone(),
