@@ -5182,7 +5182,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-agent"
-version = "1.11.19"
+version = "1.11.20"
 dependencies = [
  "anyhow",
  "arboard",

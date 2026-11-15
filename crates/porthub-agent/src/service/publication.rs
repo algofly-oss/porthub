@@ -274,6 +274,17 @@ fn replace_link(path: &Path, target: &Path) -> Result<()> {
     let directory = private_directory(parent)?;
     let staged = directory.path().join("porthub");
     std::os::unix::fs::symlink(target, &staged)?;
+    // Darwin checks symlink read permission during canonicalization. A root
+    // installer with umask 077 must still publish a CLI readable by local users.
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let name = std::ffi::CString::new(staged.as_os_str().as_bytes())?;
+        if unsafe { libc::lchmod(name.as_ptr(), 0o755) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("cannot set CLI symlink permissions");
+        }
+    }
     std::fs::rename(staged, path)?;
     File::open(parent)?.sync_all()?;
     Ok(())
@@ -450,5 +461,24 @@ impl Drop for Publication {
         if !self.committed && self.restore().is_err() {
             tracing::error!("interactive CLI rollback failed");
         }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod darwin_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn published_cli_link_is_readable_for_desktop_setup() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let binary = root.path().join("release");
+        std::fs::write(&binary, b"fixture")?;
+        let cli = root.path().join("porthub");
+        replace_link(&cli, &binary)?;
+        anyhow::ensure!(std::fs::symlink_metadata(&cli)?.permissions().mode() & 0o777 == 0o755);
+        anyhow::ensure!(std::fs::read_link(&cli)? == binary);
+        anyhow::ensure!(cli.canonicalize()? == binary.canonicalize()?);
+        Ok(())
     }
 }

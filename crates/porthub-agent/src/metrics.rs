@@ -18,6 +18,7 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
         let mut system = sysinfo::System::new();
         let mut disks = sysinfo::Disks::new();
         let mut primed = false;
+        let mut legacy_until = None;
         let mut tick = tokio::time::interval(Duration::from_secs(15));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -77,9 +78,48 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
             let p = control.profile();
             let body =
                 serde_json::json!({"machine_id":p.machine_id,"token":p.token,"sample":sample});
-            tokio::select! {biased;_=cancel.cancelled()=>break,changed=policy.changed()=>{if changed.is_err(){break;}primed=false;},_=control.request(reqwest::Method::POST,"machines/client/metrics",Some(body),&[])=>{}}
+            tokio::select! {biased;_=cancel.cancelled()=>break,changed=policy.changed()=>{if changed.is_err(){break;}primed=false;},_=upload(body, &mut legacy_until, |body| {let control=&control; async move {control.request(reqwest::Method::POST,"machines/client/metrics",Some(body),&[]).await.map(|_| ())}})=>{}}
         }
     }))
+}
+// Older gateways reject unknown report fields. Keep basic readings flowing while
+// periodically checking whether the gateway has gained the extended schema.
+async fn upload<F, Fut>(
+    body: serde_json::Value,
+    legacy_until: &mut Option<std::time::Instant>,
+    mut send: F,
+) -> Result<(), crate::control::Failure>
+where
+    F: FnMut(serde_json::Value) -> Fut,
+    Fut: std::future::Future<Output = Result<(), crate::control::Failure>>,
+{
+    if legacy_until.is_some_and(|until| until > std::time::Instant::now()) {
+        return send(legacy_report(body)).await;
+    }
+    *legacy_until = None;
+    match send(body.clone()).await {
+        Err(crate::control::Failure::Rejected(400 | 422)) => {
+            send(legacy_report(body)).await?;
+            *legacy_until = Some(std::time::Instant::now() + Duration::from_secs(60));
+            Ok(())
+        }
+        result => result,
+    }
+}
+fn legacy_report(mut body: serde_json::Value) -> serde_json::Value {
+    if let Some(sample) = body.get_mut("sample").and_then(|v| v.as_object_mut()) {
+        sample.remove("disks");
+        if let Some(gpus) = sample.get_mut("gpus").and_then(|v| v.as_array_mut()) {
+            for gpu in gpus {
+                if let Some(gpu) = gpu.as_object_mut() {
+                    for key in ["id", "temperature", "fan_speed"] {
+                        gpu.remove(key);
+                    }
+                }
+            }
+        }
+    }
+    body
 }
 async fn gpus() -> Vec<Gpu> {
     // NVIDIA's installed driver utility is optional; never load inference libraries.
@@ -144,5 +184,65 @@ mod tests {
         assert_eq!(readings[0].memory.as_ref().unwrap().used, 1073741824);
         assert_eq!(readings[1].temperature, None);
         assert_eq!(readings[1].fan_speed, None);
+    }
+    #[tokio::test]
+    async fn older_gateways_keep_basic_metrics_and_upgrade_without_auth_retries() {
+        use crate::control::Failure;
+        let body = serde_json::json!({"machine_id":"fixture","token":"fixture-secret","sample":{"cpu":42,"cores":8,"ram":{"used":4,"total":8},"disk":{"used":20,"total":100},"disks":[],"gpus":[{"id":"gpu-a","name":"GPU","utilization":70,"temperature":60,"fan_speed":40,"memory":{"used":2,"total":8}}]}});
+        let mut until = None;
+        let mut sent = Vec::new();
+        upload(body.clone(), &mut until, |report| {
+            let rejected = report["sample"].get("disks").is_some();
+            sent.push(report);
+            std::future::ready(if rejected {
+                Err(Failure::Rejected(422))
+            } else {
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(sent.len(), 2);
+        assert!(until.is_some());
+        assert_eq!(sent[1]["token"], body["token"]);
+        for key in ["cpu", "cores", "ram", "disk"] {
+            assert_eq!(sent[1]["sample"][key], body["sample"][key]);
+        }
+        assert_eq!(
+            sent[1]["sample"]["gpus"][0]["memory"],
+            body["sample"]["gpus"][0]["memory"]
+        );
+        assert!(sent[1]["sample"]["gpus"][0].get("id").is_none());
+        sent.clear();
+        upload(body.clone(), &mut until, |r| {
+            sent.push(r);
+            std::future::ready(Ok(()))
+        })
+        .await
+        .unwrap();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0]["sample"].get("disks").is_none());
+        until = Some(std::time::Instant::now() - Duration::from_secs(1));
+        sent.clear();
+        upload(body.clone(), &mut until, |r| {
+            sent.push(r);
+            std::future::ready(Ok(()))
+        })
+        .await
+        .unwrap();
+        assert!(until.is_none());
+        assert!(sent[0]["sample"].get("disks").is_some());
+        for status in [401, 403, 503] {
+            let mut calls = 0;
+            let mut until = None;
+            assert!(upload(body.clone(), &mut until, |_| {
+                calls += 1;
+                std::future::ready(Err(Failure::Rejected(status)))
+            })
+            .await
+            .is_err());
+            assert_eq!(calls, 1);
+            assert!(until.is_none());
+        }
     }
 }
