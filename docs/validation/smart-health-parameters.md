@@ -13,7 +13,9 @@ The November 2026 investigation compared PortHub's native read-only collector wi
 | Aero / Samsung internal NVMe | Actual Windows storage-protocol query returns temperature, endurance, spare, hours/cycles, unsafe shutdowns, media errors and lifetime data units | Native query succeeds. A zero supported endurance/media-error counter is a real zero. |
 | Aero / SanDisk USB flash drive | Neither the native NVMe protocol query nor legacy ATA SMART query succeeds | Windows returns invalid-parameter (87) and not-supported (50), respectively. StorageReliabilityCounter zero placeholders do not prove supported SMART; those fields remain unavailable. |
 | WSL / Microsoft virtual disks | Virtual disks only; host physical SMART is not exposed | Host physical health must be obtained from the Windows agent, not inferred from virtual block devices. |
-| MacBook | Machine unreachable during this investigation | No new hardware claim. Existing OS-level SMART status does not provide detailed ATA/NVMe attributes. |
+| MacBook / Apple AP1024Z internal SSD | macOS diskutil supplies optional typed NVMe SMART details: temperature, endurance, spare/threshold, hours/cycles, unsafe shutdowns, media errors and lifetime data units | Machine became reachable during follow-up. Existing collector ignored the detailed dictionary; the native parser now preserves supported values without another process or utility. No external JMicron device was attached during this verification. |
+
+The Mac's optional `SMARTDeviceSpecificKeysMayVaryNotGuaranteed` dictionary is not a guaranteed OS ABI. Missing, changed or wrongly typed keys remain unknown; a verified native SMART assessment still works on older systems. Split low/high counters are combined with checked range limits, and unknown status is never turned into healthy by the presence of numbers.
 
 Raw diagnostic receipts are kept locally with restricted permissions, including the device-to-result mapping. Hardware serials and raw user data are not included in this document or uploaded in metrics; drive identities remain hashed.
 

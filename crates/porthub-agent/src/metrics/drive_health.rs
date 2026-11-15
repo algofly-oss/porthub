@@ -16,6 +16,8 @@ const MAX_DRIVES: usize = 64;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(any(target_os = "macos", test))]
+mod macos_reading;
 #[cfg(windows)]
 mod windows;
 #[cfg(target_os = "linux")]

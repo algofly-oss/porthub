@@ -1,6 +1,6 @@
 //! Apple storage drivers expose an OS SMART assessment through diskutil. The
-//! property list is decoded with native CoreFoundation; missing detailed wear,
-//! counters and self-test support remain unavailable rather than invented.
+//! property list is decoded with native CoreFoundation. Optional typed NVMe
+//! details are decoded when supplied; missing keys remain unavailable.
 use super::*;
 use core_foundation::{
     array::CFArray,
@@ -128,26 +128,19 @@ pub(super) fn inventory() -> Vec<Device> {
                 .as_u64()
                 .or_else(|| data["TotalSize"].as_u64())
                 .or_else(|| row["Size"].as_u64())?;
-            Some(Device::new(path, name, serial, "os_smart", capacity))
+            // Preserve the established hashed identity when richer OS details
+            // become available; correcting protocol must not reset history.
+            let mut device=Device::new(path, name, serial, "os_smart", capacity);
+            if super::macos_reading::has_nvme_details(&data){device.protocol="nvme".into();}
+            Some(device)
         })
         .collect()
 }
 pub(super) fn probe(device: &Device) -> Result<Reading, String> {
     let data = info(&device.path)?;
-    match data["SMARTStatus"].as_str() {
-        Some("Verified") => Ok(Reading {
-            self_test: "unsupported".into(),
-            ..Default::default()
-        }),
-        Some("Failing") | Some("Failure") => Ok(Reading {
-            critical: true,
-            self_test: "unsupported".into(),
-            reasons: vec!["The native storage driver reports SMART failure".into()],
-            ..Default::default()
-        }),
-        _ => Err("The native storage driver does not provide SMART health".into()),
-    }
+    super::macos_reading::parse(&data)
 }
+
 pub(super) fn short_test(_: &Device, _: &Reading) -> Result<(), String> {
     Err("The native Apple storage driver does not expose short self-tests".into())
 }
