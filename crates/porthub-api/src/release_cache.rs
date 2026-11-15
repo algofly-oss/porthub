@@ -331,8 +331,9 @@ impl Remote {
                 state.index = Some(index.clone());
                 Ok(index)
             }
-            Err(_) if cached.is_some() => {
+            Err(error) if cached.is_some() => {
                 tracing::warn!(
+                    reason = %error,
                     "GitHub release refresh unavailable; retaining the verified cached release"
                 );
                 Ok(cached.unwrap())
