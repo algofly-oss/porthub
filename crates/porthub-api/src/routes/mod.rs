@@ -72,4 +72,5 @@ pub fn router() -> Router<Arc<App>> {
         .merge(crate::private_relay::router())
         .merge(traffic_routes::router())
         .merge(crate::inventory_query::router())
+        .merge(crate::traffic_hover::router())
 }

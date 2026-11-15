@@ -1,0 +1,13 @@
+# Public traffic contributors
+
+`GET /api/traffic/hover?timestamp=<Unix seconds>&limit=6` requires the same owner session as inventory. `limit` is 1–10; timestamp must be within the retained hour. Responses use `Cache-Control: private, no-store`. They contain the busiest positive-rate ports for the displayed second, not merely the current inventory page. Rates are bytes/second, including blocked traffic separately.
+
+Each contributor carries `connection_id`, `machine_id`, current `machine_name` and `service_name`, `measurement` (`start_timestamp`, `end_timestamp`, `interval_seconds`), incoming/outgoing/dropped bytes per second, and optional source observations. The measurement interval is `(start, end]`; delayed samples cover the intermediate averaged chart seconds. An exact endpoint sample takes precedence. Rates belong to the entire measurement; there are no per-IP rates.
+
+`public_port_scope=recorded_measurement` means `public_port` was saved with the raw traffic sample. Older data without this snapshot returns null/unavailable rather than using a possibly changed current port. `configured_target` has `scope=current_configuration`; its sanitized host and port are current settings, never a claim about a historical resolved address. URL credentials, paths and queries are stripped.
+
+`accepted_incoming_ips` is null for legacy or invalid provenance and an empty array for measured no accepted source matches. Accepted observations require all three sampler fields: the IP list, finite window at most 300 seconds, and measured IPv4/IPv6 families. Conflicting provenance in duplicate timestamp samples degrades to unknown. Legacy `incoming_ips` remains a security-attempt list and is never substituted.
+
+`source_status=observed` means the hovered second is within the accepted observation window ending at the measurement timestamp; outside it, `outside_observation_window` returns null sources. `unavailable` covers unsupported/older data. At most 16 addresses per contributor are returned, with `source_ips_truncated` when necessary. These are packets accepted by PortHub policy, not proof of delivery to the application or acceptance by independent firewall chains. They may identify a network proxy.
+
+Current owner-scoped connection and machine metadata is checked before every short-lived cache hit. Numeric fleet samples reuse the existing traffic cache; only the selected raw measurement rows are fetched, using owner/connection/timestamp indexes. The response cache has at most 64 entries and expires after two seconds. Work uses the existing four-reader semaphore and remains tied to the request future, so cancelled requests do not leave a background collector.

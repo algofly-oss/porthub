@@ -51,7 +51,7 @@ pub async fn persist(app: &App, record: &Document, samples: &[Value]) -> Result<
         }
         let id = format!("{connection}:{timestamp}");
         let value = doc! {"owner_id":&owner,"connection_id":connection,"timestamp":timestamp,
-        "expires_at":DateTime::from_millis((timestamp + RETENTION_SECONDS)*1000),"sample":bson::to_bson(&sample)?};
+        "public_port":firewall::port(record),"expires_at":DateTime::from_millis((timestamp + RETENTION_SECONDS)*1000),"sample":bson::to_bson(&sample)?};
         // Upsert replaces overlapping measurements, rather than double-counting
         // them, and accepts corrected source-IP lists from the sampler.
         updates.push(doc! {"q":{"_id":id},"u":{"$set":value},"upsert":true});

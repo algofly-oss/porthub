@@ -29,6 +29,8 @@ pub mod input;
 pub mod input_compat;
 pub mod inventory_query;
 pub mod inventory_traffic;
+pub mod traffic_hover;
+mod traffic_observations;
 pub mod legacy_turn;
 mod legacy_upgrade;
 pub mod machine_delete;
@@ -71,6 +73,7 @@ pub struct App {
     pub terminal_lifecycle: tokio::sync::Mutex<()>,
     pub terminal_admission_fault: std::sync::atomic::AtomicBool,
     pub inventory_traffic: inventory_traffic::Cache,
+    pub traffic_hover: traffic_hover::Cache,
     pub account_lifecycle: tokio::sync::RwLock<()>,
     pub private_relay: private_relay::Hub,
     pub proxy_capacity: application_proxy::Capacity,
@@ -132,6 +135,7 @@ impl App {
             terminal_lifecycle: Default::default(),
             terminal_admission_fault: Default::default(),
             inventory_traffic: Default::default(),
+            traffic_hover: Default::default(),
             private_enrollment_initialized: Default::default(),
             private_initialized: Default::default(),
             account_lifecycle: tokio::sync::RwLock::new(()),

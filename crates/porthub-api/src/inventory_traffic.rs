@@ -20,7 +20,7 @@ pub struct Cache(
     pub tokio::sync::Mutex<Histories>,
     pub tokio::sync::Mutex<Details>,
     tokio::sync::Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
-    tokio::sync::Semaphore,
+    pub(crate) tokio::sync::Semaphore,
     tokio::sync::Mutex<SeriesCache>,
 );
 impl Default for Cache {
@@ -154,11 +154,25 @@ fn nonnegative(value: Option<&Value>) -> f64 {
 }
 pub fn normalize(samples: &[Value]) -> Vec<Value> {
     let mut buckets = BTreeMap::<i64, Value>::new();
+    let mut observations = BTreeMap::<i64, Option<crate::traffic_observations::Accepted>>::new();
     for sample in samples {
         let timestamp = nonnegative(sample.get("timestamp")).floor() as i64;
         if timestamp <= 0 {
             continue;
         }
+        let accepted = crate::traffic_observations::Accepted::parse(sample);
+        observations
+            .entry(timestamp)
+            .and_modify(|previous| match (previous.as_mut(), accepted.as_ref()) {
+                (Some(old), Some(new))
+                    if old.window == new.window && old.families == new.families =>
+                {
+                    old.ips.extend(new.ips.iter().cloned());
+                    if old.ips.len() > 8192 { *previous = None; }
+                }
+                _ => *previous = None,
+            })
+            .or_insert(accepted);
         let duration = nonnegative(sample.get("interval_seconds"));
         let duration = if duration == 0. { 1. } else { duration };
         let bucket=buckets.entry(timestamp).or_insert_with(||json!({"timestamp":timestamp,"interval_seconds":0,"in_bytes":0,"out_bytes":0,"drop_bytes":0,"in_rate":0,"out_rate":0,"drop_rate":0,"incoming_ips":[],"outgoing_ips":[],"blocked_ips":[]}));
@@ -190,6 +204,11 @@ pub fn normalize(samples: &[Value]) -> Vec<Value> {
                 .filter(|ip| !ip.is_empty())
                 .collect::<BTreeSet<_>>();
             bucket[key] = json!(ips);
+        }
+    }
+    for (timestamp, accepted) in observations {
+        if let (Some(accepted), Some(bucket)) = (accepted, buckets.get_mut(&timestamp)) {
+            accepted.attach(bucket);
         }
     }
     buckets
