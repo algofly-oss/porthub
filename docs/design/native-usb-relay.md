@@ -62,7 +62,7 @@ revocation, upstream replacement, cycle/hop rejection, restoration and compatibi
 then actual Luna → Miro → Aero microphone enumeration and a bounded capture to
 `/dev/null`/discarded memory. Windows-middle Luna → Aero → Miro enumeration and
 three-second 48 kHz mono S16 capture already passed after fixing owned Windows
-firewall rule reconciliation; that does not prove this new Linux relay.
+firewall rule reconciliation; the independent Linux-middle result is recorded below.
 
 Initial onward support is deliberately limited to imported devices whose every
 interface is positively identified as USB Audio or HID. Imported mass storage
@@ -71,3 +71,61 @@ check cannot prevent a competing mount before the parent VHCI consumer stops.
 Transactional held exclusive block-device leases, validated first with an owned
 loop-device fixture, are required before storage onward support can be enabled.
 Ordinary physical storage exports and their existing preparation remain unchanged.
+
+## Actual Linux-middle microphone validation, 2026-11-15
+
+Luna agent 1.11.30 → Miro agent 1.11.30 → Aero agent 1.11.28 passed an actual
+Windows microphone capture through the ordinary USB Audio class driver. The
+Linux agents and gateway 1.11.47 used frozen source
+`5e5c5945b8824292428c8c2bd07a48d88c263cd4`; Aero was the existing ordinary
+Windows USB receiver. This test did not use the unfinished native media adapter,
+change client policies, access drives, or publish a synthetic microphone.
+
+The selected source was Sennheiser Profile `1377:1100`, serial `0214024304`,
+Luna bus `1-5`. The upstream temporary job `7a4f8de91727` first imported it as
+Miro `5-1`, VHCI port 0, with all three `snd-usb-audio` interfaces. Miro's native
+CLI exposed its authenticated alias `0-1148601517668033298`; onward temporary job
+`33bbf3b58109` selected that alias for Aero. Miro's local VHCI port became free
+while forwarding onward, confirming that this used the native stream relay rather
+than binding the imported device to `usbip-host`. Aero enumerated the exact USB
+serial and its MEDIA/audio endpoint with healthy native device status.
+
+Both hops reported `active-direct` at both endpoints. Recorded LAN TCP sockets
+were `192.168.0.3:32843 ↔ 192.168.0.166:55951` for Luna–Miro and
+`192.168.0.166:37795 ↔ 192.168.0.169:51063` for Miro–Aero. Luna and Miro routed
+through their Ethernet `enp6s0` interfaces. Aero used its Intel AX201 Wi-Fi adapter
+(reporting a 432 Mbps link at inspection). The second hop is a Wi-Fi result, not
+an Ethernet throughput baseline.
+
+An owned, limited InteractiveToken task in Windows session 1 selected the exact
+active IMMDevice endpoint through its present PnP USB-serial ancestry. It captured
+144,000 mono frames at 48,000 Hz: 576,000 bytes, 300 packets, over 3,015 ms. Buffers
+were discarded; no audio file or playback was produced and no default endpoint
+was selected for capture. The recorded mix format was 32-bit
+WAVEFORMATEXTENSIBLE with four bytes per frame; this first diagnostic did not
+record the subformat GUID and therefore does not distinguish integer PCM from
+floating point in the persisted proof.
+
+The capture reported two data-discontinuity flags, including **one after the
+first packet**, and zero timestamp-error flags. This proves native capture and
+delivery, not flawless audio quality or measured end-to-end latency. The initial
+check recorded totals only. A future separately authorized, bounded diagnostic
+must record packet device positions, QPC timestamps, elapsed time and flags to
+locate startup gaps versus later transport/clock effects before any tuning or
+repeat-quality claim.
+
+Cleanup stopped the child first: Aero's microphone disappeared and Miro's original
+local VHCI microphone and all three sound interfaces returned. Stopping the
+parent then restored Luna's original USB driver and all three `snd-usb-audio`
+interfaces. Miro's VHCI ports were all free and its alias disappeared. All three
+clients reported no saved USB forwards. All six Windows capture/render default
+role IDs matched their values from before attachment; Luna and Miro PipeWire
+default metadata matched byte for byte. The owned Windows diagnostic task, runner
+and metadata output were removed. The shared diagnostic source remained for the
+separately coordinated synthetic-device test.
+
+Local receipts: `/tmp/porthub-relay30-aero-capture-proof.json`,
+`/tmp/porthub-relay30-actual-api-states.json`,
+`/tmp/porthub-relay30-miro-vhci-onward.txt`, and
+`/tmp/porthub-relay30-complete-restoration.json`. These contain device/transport
+metadata and counts, not microphone audio.
