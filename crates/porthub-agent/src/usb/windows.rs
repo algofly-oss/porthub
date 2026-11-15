@@ -21,9 +21,10 @@ use windows_sys::{
     core::GUID,
     Win32::{
         Devices::DeviceAndDriverInstallation::{
-            SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
-            SetupDiGetDeviceInterfaceDetailW, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, HDEVINFO,
-            SP_DEVICE_INTERFACE_DATA,
+            CM_Get_Device_IDW, CM_Get_Parent, CM_Locate_DevNodeW, SetupDiDestroyDeviceInfoList,
+            SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
+            DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, HDEVINFO, SP_DEVICE_INTERFACE_DATA,
+            SP_DEVINFO_DATA,
         },
         Foundation::INVALID_HANDLE_VALUE,
         Storage::FileSystem::{
@@ -207,6 +208,124 @@ fn online_usb_storage() -> Option<bool> {
     }
 }
 
+// Complete native disk ancestry proves that a vendor/composite USB device is
+// unrelated to every present disk, even when its function driver is missing.
+// Any uncertain enumeration falls back to the existing mounted-storage guard.
+fn disk_ancestry() -> Option<Vec<Vec<String>>> {
+    const DISK: GUID = GUID::from_u128(0x53f56307_b6bf_11d0_94f2_00a0c91efb8b);
+    unsafe {
+        let mut root = 0;
+        if CM_Locate_DevNodeW(&mut root, std::ptr::null(), 0) != 0 {
+            return None;
+        }
+        let set = SetupDiGetClassDevsW(
+            &DISK,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
+        );
+        if set as isize == -1 {
+            return None;
+        }
+        struct List(HDEVINFO);
+        impl Drop for List {
+            fn drop(&mut self) {
+                unsafe {
+                    SetupDiDestroyDeviceInfoList(self.0);
+                }
+            }
+        }
+        let list = List(set);
+        let mut rows = Vec::new();
+        for index in 0..256 {
+            let mut interface: SP_DEVICE_INTERFACE_DATA = std::mem::zeroed();
+            interface.cbSize = std::mem::size_of::<SP_DEVICE_INTERFACE_DATA>() as u32;
+            if SetupDiEnumDeviceInterfaces(list.0, std::ptr::null(), &DISK, index, &mut interface)
+                == 0
+            {
+                return (std::io::Error::last_os_error().raw_os_error() == Some(259))
+                    .then_some(rows);
+            }
+            let mut required = 0;
+            SetupDiGetDeviceInterfaceDetailW(
+                list.0,
+                &interface,
+                std::ptr::null_mut(),
+                0,
+                &mut required,
+                std::ptr::null_mut(),
+            );
+            if !(8..=32768).contains(&required) {
+                return None;
+            }
+            let mut buffer = vec![0u64; (required as usize + 7) / 8];
+            // SP_DEVICE_INTERFACE_DETAIL_DATA_W has a pointer-aligned size on
+            // x64/ARM64, and a packed six-byte header on 32-bit Windows.
+            *(buffer.as_mut_ptr() as *mut u32) = if cfg!(target_pointer_width = "64") {
+                8
+            } else {
+                6
+            };
+            let mut device: SP_DEVINFO_DATA = std::mem::zeroed();
+            device.cbSize = std::mem::size_of::<SP_DEVINFO_DATA>() as u32;
+            if SetupDiGetDeviceInterfaceDetailW(
+                list.0,
+                &interface,
+                buffer.as_mut_ptr().cast(),
+                required,
+                &mut required,
+                &mut device,
+            ) == 0
+            {
+                return None;
+            }
+            let mut node = device.DevInst;
+            let mut chain = Vec::new();
+            let mut complete = false;
+            for _ in 0..64 {
+                if node == root {
+                    complete = true;
+                    break;
+                }
+                let mut id = [0u16; 512];
+                if CM_Get_Device_IDW(node, id.as_mut_ptr(), id.len() as u32, 0) != 0 {
+                    return None;
+                }
+                let length = id.iter().position(|v| *v == 0)?;
+                let id = String::from_utf16(&id[..length]).ok()?;
+                if id.is_empty() || chain.iter().any(|previous| previous == &id) {
+                    return None;
+                }
+                chain.push(id);
+                let mut parent = 0;
+                if CM_Get_Parent(&mut parent, node, 0) != 0 || parent == node {
+                    return None;
+                }
+                node = parent;
+            }
+            if !complete {
+                return None;
+            }
+            rows.push(chain);
+        }
+        None
+    }
+}
+fn has_disk_descendant(instance: &str, ancestry: Option<&[Vec<String>]>) -> Option<bool> {
+    if instance.is_empty() {
+        return None;
+    }
+    ancestry.map(|rows| {
+        rows.iter()
+            .flatten()
+            .any(|node| node.eq_ignore_ascii_case(instance))
+    })
+}
+fn storage_guard_required(known_nonstorage: bool, disk_descendant: Option<bool>) -> bool {
+    // Positive disk ancestry always wins over a stale registry function class.
+    disk_descendant == Some(true) || (!known_nonstorage && disk_descendant != Some(false))
+}
+
 fn proven_serial(service: &str, class: &str) -> bool {
     let service = service.to_ascii_lowercase();
     // CDC class 02/0a can also describe a network adapter. Require the
@@ -238,7 +357,11 @@ fn safe_nonstorage(instance: &str) -> bool {
             id.starts_with("USB\\CLASS_03") || id.starts_with("USB\\CLASS_01")
         })
 }
-fn parse_device(row: &Value, storage_online: Option<bool>) -> Option<Device> {
+fn parse_device(
+    row: &Value,
+    storage_online: Option<bool>,
+    disk_descendant: Option<bool>,
+) -> Option<Device> {
     let busid = row["BusId"].as_str()?;
     if !porthub_components::usb::valid_busid(busid) {
         return None;
@@ -264,7 +387,9 @@ fn parse_device(row: &Value, storage_online: Option<bool>) -> Option<Device> {
         Some("Device is already attached by another USB client".into())
     } else if lower.contains("network") || lower.contains("ethernet") {
         Some("Network adapters must remain available to the host".into())
-    } else if storage_online != Some(false) && !safe_nonstorage(instance) {
+    } else if storage_online != Some(false)
+        && storage_guard_required(safe_nonstorage(instance), disk_descendant)
+    {
         Some("USB storage may be mounted or its volume state cannot be verified; safely take USB storage offline before sharing".into())
     } else {
         None
@@ -285,11 +410,20 @@ fn parse_device(row: &Value, storage_online: Option<bool>) -> Option<Device> {
 fn fresh_inventory() -> Result<Vec<Device>> {
     let state = host_state()?;
     let online = online_usb_storage();
+    let ancestry = disk_ancestry();
     Ok(state["Devices"]
         .as_array()
         .context("Invalid Windows USB inventory")?
         .iter()
-        .filter_map(|row| parse_device(row, online))
+        .filter_map(|row| {
+            parse_device(
+                row,
+                online,
+                row["InstanceId"]
+                    .as_str()
+                    .and_then(|instance| has_disk_descendant(instance, ancestry.as_deref())),
+            )
+        })
         .take(128)
         .collect())
 }
@@ -701,7 +835,11 @@ pub(super) async fn source(
         .await??;
         anyhow::bail!("Recovered previous USB binding; retry after device inventory refresh");
     }
-    if !safe_nonstorage(&export.instance) {
+    let ancestry = tokio::task::spawn_blocking(disk_ancestry).await?;
+    if storage_guard_required(
+        safe_nonstorage(&export.instance),
+        has_disk_descendant(&export.instance, ancestry.as_deref()),
+    ) {
         ensure!(
             tokio::task::spawn_blocking(online_usb_storage).await? == Some(false),
             "USB volume state changed; safely take USB storage offline before sharing"
@@ -797,6 +935,48 @@ pub(super) async fn destination(device: &Device, wire: &[u8]) -> Result<(Handoff
 mod tests {
     use super::*;
     #[test]
+    fn disk_ancestry_separates_serial_devices_from_unrelated_mounted_storage() {
+        let disk_usb = "USB\\VID_0781&PID_5583\\disk";
+        let serial_usb = "USB\\VID_10C4&PID_EA60\\0001";
+        let ancestry = vec![vec![
+            "USBSTOR\\Disk&Ven_SanDisk\\disk".into(),
+            disk_usb.into(),
+            "USB\\ROOT_HUB30\\root".into(),
+        ]];
+        assert_eq!(
+            has_disk_descendant(serial_usb, Some(&ancestry)),
+            Some(false)
+        );
+        assert!(!storage_guard_required(
+            false,
+            has_disk_descendant(serial_usb, Some(&ancestry))
+        ));
+        assert!(storage_guard_required(
+            false,
+            has_disk_descendant(disk_usb, Some(&ancestry))
+        ));
+        assert!(
+            storage_guard_required(true, Some(true)),
+            "Disk ancestry overrides registry classification"
+        );
+        assert!(
+            storage_guard_required(false, None),
+            "Incomplete native enumeration cannot grant capture"
+        );
+        assert_eq!(has_disk_descendant(serial_usb, None), None);
+        assert_eq!(has_disk_descendant("", Some(&ancestry)), None);
+        assert_eq!(
+            has_disk_descendant(&disk_usb.to_lowercase(), Some(&ancestry)),
+            Some(true)
+        );
+        let row = serde_json::json!({"BusId":"5-1","InstanceId":serial_usb,"Description":"CP2102 USB to UART Bridge Controller","ClientIPAddress":null});
+        assert!(parse_device(&row, Some(true), Some(false))
+            .unwrap()
+            .blocked
+            .is_none());
+        assert!(parse_device(&row, None, None).unwrap().blocked.is_some());
+    }
+    #[test]
     fn release_driver_abi_is_fixed() {
         assert_eq!(std::mem::size_of::<Location>(), 1100);
         assert_eq!(std::mem::size_of::<Plugin>(), 1124);
@@ -806,18 +986,30 @@ mod tests {
     #[test]
     fn inventory_hides_hubs_and_blocks_online_storage() {
         let row = serde_json::json!({"BusId":"1-14","InstanceId":"USB\\VID_04E8&PID_4001\\stable","Description":"USB Attached SCSI (UAS) Mass Storage Device","ClientIPAddress":null});
-        assert!(parse_device(&row, Some(true)).unwrap().blocked.is_some());
-        assert!(parse_device(&row, Some(false)).unwrap().blocked.is_none());
+        assert!(parse_device(&row, Some(true), None)
+            .unwrap()
+            .blocked
+            .is_some());
+        assert!(parse_device(&row, Some(false), None)
+            .unwrap()
+            .blocked
+            .is_none());
         let mut hub = row;
         hub["Description"] = "Generic USB Hub".into();
-        assert!(parse_device(&hub, Some(false)).is_none());
+        assert!(parse_device(&hub, Some(false), None).is_none());
     }
     #[test]
     fn storage_guard_does_not_trust_friendly_names_or_unknown_volume_state() {
         let row = serde_json::json!({"BusId":"1-14","InstanceId":"USB\\VID_04E8&PID_4001\\porthub-test-nonexistent","Description":"Samsung Portable SSD T7","ClientIPAddress":null});
-        assert!(parse_device(&row, Some(true)).unwrap().blocked.is_some());
-        assert!(parse_device(&row, None).unwrap().blocked.is_some());
-        assert!(parse_device(&row, Some(false)).unwrap().blocked.is_none());
+        assert!(parse_device(&row, Some(true), None)
+            .unwrap()
+            .blocked
+            .is_some());
+        assert!(parse_device(&row, None, None).unwrap().blocked.is_some());
+        assert!(parse_device(&row, Some(false), None)
+            .unwrap()
+            .blocked
+            .is_none());
     }
     #[test]
     fn serial_exception_requires_native_driver_identity() {

@@ -62,10 +62,17 @@ fn inventory() -> Vec<porthub_components::usb::Device> {
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     return vec![];
 }
-fn supported()->bool {
-    #[cfg(any(target_os="linux",target_os="macos"))] {true}
-    #[cfg(windows)] {windows::supported()}
-    #[cfg(not(any(target_os="linux",target_os="macos",windows)))] {false}
+fn capabilities()->[bool;2] {
+    #[cfg(target_os="linux")] { [true,true] }
+    #[cfg(target_os="macos")] { [true,false] }
+    #[cfg(windows)] { [windows::host_installed(),windows::receive_installed()] }
+    #[cfg(not(any(target_os="linux",target_os="macos",windows)))] { [false,false] }
+}
+fn legacy_report(body:&mut Value) {
+    // Old gateways have no directional roles. Advertising partial support
+    // there could authorize a destination that cannot receive USB devices.
+    body["supported"]=json!(body["can_export"].as_bool()==Some(true)&&body["can_import"].as_bool()==Some(true));
+    if let Some(object)=body.as_object_mut(){object.remove("can_export");object.remove("can_import");}
 }
 #[cfg(any(target_os="linux",target_os="macos",windows))]
 enum Handoff {
@@ -110,9 +117,10 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
                 .cloned()
                 .collect::<Vec<_>>();
             let p = control.profile();
-            let mut body = json!({"machine_id":p.machine_id,"token":p.token,"enabled":enabled,"supported":supported(),"can_export":supported(),"can_import":supported()&&!cfg!(target_os="macos"),"devices":if enabled{inventory()}else{vec![]},"states":report_states});
+            let [can_export,can_import]=capabilities();
+            let mut body = json!({"machine_id":p.machine_id,"token":p.token,"enabled":enabled,"supported":can_export||can_import,"can_export":can_export,"can_import":can_import,"devices":if enabled{inventory()}else{vec![]},"states":report_states});
             let result = tokio::select! {_=work.cancelled()=>break,changed=policy.changed()=>{if changed.is_err(){break;}let next=transport_policy(&policy.borrow());if next!=permissions{sessions.clear();permissions=next;}continue;},reply=control.request(reqwest::Method::POST,"usb/client/report",Some(body.clone()),&[])=>reply};
-            let result=if matches!(result,Err(crate::control::Failure::Rejected(422))) { body.as_object_mut().unwrap().remove("can_export");body.as_object_mut().unwrap().remove("can_import");if cfg!(target_os="macos"){body["supported"]=json!(false);}control.request(reqwest::Method::POST,"usb/client/report",Some(body),&[]).await }else{result};
+            let result=if matches!(result,Err(crate::control::Failure::Rejected(422))) { legacy_report(&mut body);control.request(reqwest::Method::POST,"usb/client/report",Some(body),&[]).await }else{result};
             let plans = result
                 .ok()
                 .and_then(|r| r.json().ok())
@@ -702,5 +710,20 @@ mod stream_tests {
     #[tokio::test]
     async fn direct_usb_stream_remains_full_duplex_and_revokes_locally() -> Result<()> {
         full_duplex(true).await
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+    #[test]
+    fn old_gateway_never_turns_partial_roles_into_receiver_support(){
+        for (export,import) in [(false,false),(true,false),(false,true),(true,true)] {
+            let mut body=json!({"supported":export||import,"can_export":export,"can_import":import,"enabled":true,"devices":[]});
+            legacy_report(&mut body);
+            assert_eq!(body["supported"],json!(export&&import));
+            assert!(body.get("can_export").is_none()&&body.get("can_import").is_none());
+            assert_eq!(body["enabled"],true);
+        }
     }
 }
