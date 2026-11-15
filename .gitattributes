@@ -2,3 +2,14 @@
 Cargo.toml text eol=lf
 # Preserve upstream source and license whitespace in this vendored crate.
 vendor/notify/** -whitespace
+
+# Optional helper provenance hashes raw source bytes on GNU and Windows builders.
+.gitattributes text eol=lf
+Cargo.lock text eol=lf
+rust-toolchain.toml text eol=lf
+crates/porthub-components/** text eol=lf
+crates/porthub-media-helper/** text eol=lf
+scripts/package-media-helper.py text eol=lf
+scripts/test_package_media_helper.py text eol=lf
+scripts/build-media-helper-windows.ps1 text eol=lf
+vendor/media/** text eol=lf
