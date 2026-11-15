@@ -88,3 +88,47 @@ test('shared GPU limits remain separate from dedicated memory and missing usage'
   assert.equal(sharedGpuMemoryText(gpu),'256.0 MB / 8.0 GB max');
   assert.equal(gpuMemorySummary({name:'Legacy',memory:{used:1,total:2}}),'Legacy · 1 B / 2 B dedicated');
 });
+
+test('fresh explicit empty inventory keeps historical drives without current presence or risk',async()=>{
+ const {driveInventoryView}=await import('../src/lib/machineMetrics.mjs');
+ const now=1700000000000,old={id:'old',name:'Virtual Disk',present:true,status:'critical',observed_at:now-60000,checked_at:now-60000};
+ const history=[{at:now-60000,snapshot:old}],before=JSON.stringify(history);
+ const view=driveInventoryView({history,drives:[old],latest:[],reportedAt:now,enabled:true,now});
+ assert.equal(view.authoritative,true);assert.equal(view.entries.length,1);assert.equal(view.entries[0].reportMembership,'historical');
+ assert.equal(view.assessment.total,0);assert.equal(view.assessment.critical,0);assert.equal(view.assessment.risk,null);
+ assert.equal(JSON.stringify(history),before);assert.equal(old.present,true);assert.equal(view.entries[0].observed_at,old.observed_at);
+});
+test('disabled missing and stale inventory leave presence unknown instead of inventing removal',async()=>{
+ const {driveInventoryView}=await import('../src/lib/machineMetrics.mjs');const now=1700000000000;
+ const old={id:'old',name:'Recorded SSD',present:true,status:'healthy',checked_at:now-1000};
+ for(const context of [{latest:[],reportedAt:now,enabled:false},{reportedAt:now,enabled:true},{latest:[],enabled:true},{latest:[],reportedAt:now-45001,enabled:true},{latest:[],reportedAt:now,enabled:undefined}]){
+  const view=driveInventoryView({history:[{at:now-1000,snapshot:old}],now,...context});
+  assert.equal(view.authoritative,false);assert.equal(view.entries[0].reportMembership,'unknown');assert.equal(view.entries[0].status,'healthy');
+  assert.equal(view.assessment.total,0);assert.equal(view.assessment.risk,null);assert(!view.entries.some(drive=>drive.status==='removed'));
+  const pastRemoval=driveInventoryView({history:[{at:now-1000,snapshot:{...old,present:false,status:'removed'}}],now,...context});assert.equal(pastRemoval.entries[0].reportMembership,'unknown');assert.equal(pastRemoval.entries[0].status,'removed');
+ }
+});
+test('current rejoin overrides past removal while real removed observations remain intact',async()=>{
+ const {driveInventoryView}=await import('../src/lib/machineMetrics.mjs');const now=1700000000000;
+ const removed={id:'same',name:'External SSD',present:false,status:'removed',observed_at:now-10000};
+ const history=[{at:now-10000,snapshot:removed}];
+ const absent=driveInventoryView({history,latest:[],reportedAt:now,enabled:true,now});assert.equal(absent.entries[0].reportMembership,'removed');assert.equal(absent.entries[0].observed_at,removed.observed_at);
+ const rejoined={...removed,present:true,status:'healthy',checked_at:now,observed_at:now};
+ const joined=driveInventoryView({history,latest:[rejoined],reportedAt:now,enabled:true,now});assert.equal(joined.entries[0].reportMembership,'current');assert.equal(joined.assessment.total,1);assert.equal(joined.assessment.risk,0);assert.equal(history[0].snapshot.present,false);
+});
+test('current assessment and ordering exclude historical warnings',async()=>{
+ const {driveInventoryView}=await import('../src/lib/machineMetrics.mjs');const now=1700000000000;
+ const old={id:'a',name:'A past drive',present:true,status:'critical',checked_at:now};const current={id:'z',name:'Z current drive',present:true,status:'healthy',checked_at:now};
+ const view=driveInventoryView({history:[{at:now,snapshot:old}],latest:[current],reportedAt:now,enabled:true,now});
+ assert.equal(view.entries[0].id,'z');assert.equal(view.assessment.total,1);assert.equal(view.assessment.critical,0);assert.equal(view.assessment.risk,0);
+});
+
+test('historical drive catalog survives narrowed queries and remains bounded',async()=>{
+ const {driveCatalog}=await import('../src/lib/machineMetrics.mjs');
+ const a={id:'a',name:'A',observed_at:1},b={id:'b',name:'B',observed_at:2};
+ let catalog=driveCatalog([],[{snapshot:a},{snapshot:b}]);
+ catalog=driveCatalog(catalog,[{snapshot:{...a,observed_at:3}}],[a]);
+ assert.deepEqual(new Set(catalog.map(d=>d.id)),new Set(['a','b']));
+ assert.equal(driveCatalog([],[],[{id:'new-host'}]).some(d=>d.id==='a'),false);
+ assert.equal(driveCatalog([],[],Array.from({length:600},(_,i)=>({id:String(i),observed_at:i}))).length,512);
+});

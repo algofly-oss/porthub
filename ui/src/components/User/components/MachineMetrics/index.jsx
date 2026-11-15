@@ -6,9 +6,9 @@ import { RESOURCES, utilization, rankedMachines, metricSegments, gpuDevices, gpu
 import { formatBytes } from '@/shared/utils/traffic.mjs';
 
 function useMetrics(url, active, interval = 15000) {
-  const [state, setState] = useState({ data: null, error: '', loading: true });
+  const [state, setState] = useState({ url, data: null, error: '', loading: true });
   useEffect(() => {
-    setState({ data: null, error: '', loading: true });
+    setState({ url, data: null, error: '', loading: true });
     if (!active) return;
     let disposed = false, timer, request;
     const load = async () => {
@@ -19,7 +19,7 @@ function useMetrics(url, active, interval = 15000) {
         const response = await fetch(url, { signal: request.signal, credentials: 'same-origin' });
         if (!response.ok) throw new Error('Resource metrics are temporarily unavailable.');
         const data = await response.json();
-        if (!disposed) setState({ data, error: '', loading: false });
+        if (!disposed) setState({ url, data, error: '', loading: false });
       } catch (error) {
         if (!disposed && error.name !== 'AbortError') setState(old => ({ ...old, error: error.message, loading: false }));
       } finally { if (!disposed) timer = setTimeout(load, interval); }
@@ -28,7 +28,7 @@ function useMetrics(url, active, interval = 15000) {
     document.addEventListener('visibilitychange', visibility); load();
     return () => { disposed = true; clearTimeout(timer); request?.abort(); document.removeEventListener('visibilitychange', visibility); };
   }, [url, active, interval]);
-  return state;
+  return state.url===url?state:{data:null,error:'',loading:true};
 }
 const time = at => at ? new Date(at).toLocaleString() : 'No reading';
 function Usage({ value, label, memory }) {
@@ -131,7 +131,7 @@ export default function MachineMetrics({ machineId, active }) {
     {error && <p role="alert" className="text-sm text-amber-600">{error}</p>}
     {loading && <p role="status" className="text-sm text-muted-foreground">Loading metrics…</p>}
     <div className="grid grid-cols-2 gap-4">{RESOURCES.map(([key, label]) => <div key={key}><Usage label={label} value={utilization(sample, key)} /><p className="mt-2 text-xs text-muted-foreground">{key === 'cpu' ? sample ? `${sample.cores} logical CPUs` : '' : key === 'gpu' ? sample?.gpus?.map(gpuMemorySummary).join(' · ') : sample?.[key] ? memoryText(sample[key]) : ''}</p></div>)}</div>
-    <DriveHealthPanel data={health.data} latest={sample?.drive_health} enabled={sample?.drive_health_enabled} testsEnabled={sample?.drive_tests_enabled} error={health.error} loading={health.loading} days={driveDays} onDays={setDriveDays} selected={selectedDrive} onDrive={setDriveId}/>
+    <DriveHealthPanel key={machineId} data={health.data} latest={sample?.drive_health} reportedAt={latest?.at} enabled={sample?.drive_health_enabled} testsEnabled={sample?.drive_tests_enabled} error={health.error} loading={health.loading} days={driveDays} onDays={setDriveDays} selected={selectedDrive} onDrive={setDriveId}/>
     <div className="grid gap-3 xl:grid-cols-2">{RESOURCES.filter(([key])=>key==='cpu'||key==='ram').map(([key, label]) => <HistoryChart key={key} history={data?.history || []} resource={key} label={label} intervalMs={data?.interval_ms || 60000} interval={`Last ${hours} ${hours === 1 ? 'hour' : 'hours'}`} />)}<div>{devices.length>1&&<SearchDropdown aria-label="GPU device" value={gpu?.id||''} onChange={e=>setGpuId(e.target.value)}>{devices.map(d=><option key={d.id} value={d.id}>{d.name} · {d.id}</option>)}</SearchDropdown>}<SeriesChart label={gpu?`GPU · ${gpu.name}`:'GPU'} history={history} series={gpuSeries} intervalMs={data?.interval_ms||60000}/></div><SeriesChart label="Disk usage by drive" history={history} series={diskSeries} intervalMs={data?.interval_ms||60000}/></div>
     <p className="text-xs leading-5 text-muted-foreground">Readings arrive every 15 seconds. History retains minute samples for seven days; chart gaps indicate missing reports. Disk usage includes verified local storage capacity; unmounted or unverified drives are unavailable. Client owners can disable reporting with <code>porthub features disable metrics</code>.</p>
   </section>;

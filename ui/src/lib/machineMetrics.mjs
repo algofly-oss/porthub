@@ -101,3 +101,32 @@ export function driveAssessment(sample,now=Date.now()) {
   detail:`${critical?`${critical} critical · `:''}${warning?`${warning} need attention · `:''}${checked}/${drives.length} drives have current SMART readings${incomplete?' · Incomplete coverage':''}`};
 }
 export function driveTimeline(points,id) {return points.filter(point=>point.snapshot?.id===id).sort((a,b)=>a.at-b.at);}
+
+// Historical observations retain their original presence/status. Only an explicit,
+// fresh current report can establish current inventory membership.
+export function driveInventoryView({history=[],drives=[],latest,reportedAt,enabled,now=Date.now()}={}) {
+ const hasCurrent=Array.isArray(latest);
+ const current=hasCurrent?latest:[];
+ const fresh=Number.isFinite(reportedAt)&&reportedAt<=now+5*60*1000&&now-reportedAt<45000;
+ const authoritative=hasCurrent&&enabled===true&&fresh;
+ const ids=new Set(current.map(drive=>drive.id));
+ const records=new Map();
+ for(const point of history)if(point.snapshot?.id)records.set(point.snapshot.id,point.snapshot);
+ for(const drive of [...(Array.isArray(drives)?drives:[]),...current])if(drive?.id)records.set(drive.id,drive);
+ const entries=[...records.values()].map(drive=>({
+  ...drive,
+  reportMembership:!authoritative?'unknown':drive.present===false&&drive.status==='removed'?'removed':ids.has(drive.id)?'current':'historical'
+ })).sort((a,b)=>Number(b.reportMembership==='current')-Number(a.reportMembership==='current')||a.name.localeCompare(b.name));
+ const assessment=enabled===false?driveAssessment({drive_health_enabled:false}):authoritative?driveAssessment({drive_health:current,drive_health_enabled:true},now):{
+  status:'unavailable',label:'Unknown',score:null,risk:null,total:0,checked:0,critical:0,warning:0,incomplete:true,detail:'Current drive inventory is unknown · Showing last-recorded health'
+ };
+ if(authoritative&&!current.some(drive=>drive.present))assessment.detail='No physical drives in the current report';
+ return {entries,authoritative,current,assessment};
+}
+
+// Keep a bounded host-local picker catalog while a selected-drive query narrows history.
+export function driveCatalog(previous=[],history=[],drives=[],latest=[]) {
+ const records=new Map(previous.map(drive=>[drive.id,drive]));
+ for(const drive of [...(history||[]).map(point=>point.snapshot),...(drives||[]),...(latest||[])])if(drive?.id)records.set(drive.id,drive);
+ return [...records.values()].sort((a,b)=>(b.observed_at||0)-(a.observed_at||0)||a.id.localeCompare(b.id)).slice(0,512);
+}

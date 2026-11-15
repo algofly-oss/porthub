@@ -1,8 +1,8 @@
-import {useMemo} from 'react';
+import {useRef} from 'react';
 import SearchDropdown from '@/components/ui/search-dropdown';
-import {driveTimeline,driveAssessment,metricSegments} from '@/lib/machineMetrics.mjs';
+import {driveTimeline,driveInventoryView,driveCatalog,metricSegments} from '@/lib/machineMetrics.mjs';
 import {formatBytes} from '@/shared/utils/traffic.mjs';
-const states={healthy:{label:'Healthy',color:'text-emerald-500'},warning:{label:'Needs attention',color:'text-amber-500'},critical:{label:'Critical',color:'text-red-500'},unavailable:{label:'Unavailable',color:'text-muted-foreground'},sleeping:{label:'Sleeping',color:'text-muted-foreground'},removed:{label:'Removed',color:'text-muted-foreground'}};
+const states={historical:{label:'Historical',color:'text-muted-foreground'},unknown:{label:'Current status unknown',color:'text-muted-foreground'},healthy:{label:'Healthy',color:'text-emerald-500'},warning:{label:'Needs attention',color:'text-amber-500'},critical:{label:'Critical',color:'text-red-500'},unavailable:{label:'Unavailable',color:'text-muted-foreground'},sleeping:{label:'Sleeping',color:'text-muted-foreground'},removed:{label:'Removed',color:'text-muted-foreground'}};
 const tests={not_run:'Not yet run',running:'Running',passed:'Passed',failed:'Failed',aborted:'Aborted',unsupported:'Not supported',deferred:'Deferred until idle'};
 const number=value=>value==null?'Unavailable':new Intl.NumberFormat().format(value);
 const date=value=>value?new Date(value).toLocaleString():'Not yet checked';
@@ -19,31 +19,38 @@ function ConditionHistory({history}){
   <text x="68" y="89" fill="currentColor" fontSize="8">{new Date(first).toLocaleDateString()}</text><text x="464" y="89" textAnchor="end" fill="currentColor" fontSize="8">{new Date(last).toLocaleDateString()}</text>
  </svg>:<p className="py-4 text-xs text-muted-foreground">No supported SMART readings in this period.</p>}<p className="mt-1 text-[10px] leading-4 text-muted-foreground">Unavailable and removed drives leave gaps. Condition reflects SMART findings, not a predicted failure percentage.</p></div>;
 }
-export default function DriveHealthPanel({data,latest,enabled,testsEnabled,error,loading,days,onDays,selected,onDrive}){
- const drives=useMemo(()=>{const map=new Map();for(const p of data?.history||[])if(p.snapshot?.id)map.set(p.snapshot.id,p.snapshot);for(const d of [...(data?.drives||[]),...(latest||[])])map.set(d.id,d);return [...map.values()].sort((a,b)=>Number(b.present)-Number(a.present)||a.name.localeCompare(b.name));},[data,latest]);
+export default function DriveHealthPanel({data,latest,reportedAt,enabled,testsEnabled,error,loading,days,onDays,selected,onDrive}){
+ const catalog=useRef([]);
+ catalog.current=driveCatalog(catalog.current,data?.history,data?.drives,latest);
+ const inventory=driveInventoryView({drives:catalog.current,latest,reportedAt,enabled});
+ const drives=inventory.entries;
  const drive=drives.find(d=>d.id===selected)||drives[0];
  const history=driveTimeline(data?.history||[],drive?.id);
- const assessment=driveAssessment({drive_health:latest?.length?latest:data?.drives,drive_health_enabled:enabled});
+ const assessment=inventory.assessment;
+ const membership=drive?.reportMembership;
+ const status=membership==='historical'?'historical':membership==='unknown'?'unknown':drive?.status;
  const isNvme=drive?.protocol?.includes('nvme')&&drive?.checked_at!=null;
  const missing=(value,applies=true)=>value==null?(applies?'Not reported':'Not applicable'):number(value);
- const overdue=drive?.present&&drive?.checked_at&&Date.now()-drive.checked_at>75*60*1000;
+ const overdue=membership==='current'&&drive?.present&&drive?.checked_at&&Date.now()-drive.checked_at>75*60*1000;
  return <section aria-label="Physical drive health and history" className="min-w-0 rounded-xl border border-border p-3 sm:p-4">
-  <div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="text-sm font-semibold">Drive health</h3><p className="mt-1 text-xs text-muted-foreground">{assessment.total?assessment.detail:'Waiting for physical-drive SMART reports'}</p></div><SearchDropdown aria-label="Drive health history period" className="min-w-0 text-xs" value={days} onChange={e=>onDays(Number(e.target.value))}><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option></SearchDropdown></div>
+  <div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="text-sm font-semibold">Drive health</h3><p className="mt-1 text-xs text-muted-foreground">{assessment.detail}</p></div><SearchDropdown aria-label="Drive health history period" className="min-w-0 text-xs" value={days} onChange={e=>onDays(Number(e.target.value))}><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option></SearchDropdown></div>
   {loading&&!drives.length&&<p role="status" className="py-4 text-xs text-muted-foreground">Reading drive health…</p>}
   {data?.truncated&&<p className="mt-3 text-xs text-amber-500">Showing the newest health observations. Select a physical drive to inspect its complete retained period.</p>}
   {error&&<p role="status" className="mt-3 text-xs text-amber-500">{error}</p>}
-  {!drives.length&&!loading&&<p className="mt-4 text-xs leading-5 text-muted-foreground">No drive health report is available. Update the agent and enable drive-health reporting. Unsupported native SMART access is reported explicitly.</p>}
+  {!drives.length&&!loading&&<p className="mt-4 text-xs leading-5 text-muted-foreground">{inventory.authoritative?'No physical drives are reported by this client.':'No current drive inventory is available. Previously recorded health remains available when reporting resumes.'}</p>}
   {enabled===false&&<p className="mt-3 text-xs text-muted-foreground">Drive-health reporting is disabled on this client. Previously recorded readings remain available in history.</p>}
   {testsEnabled===false&&enabled!==false&&<p className="mt-3 text-xs text-muted-foreground">Automatic short self-tests are disabled on this client. SMART monitoring continues.</p>}
   {drive&&<>
-   <div className="mt-4"><SearchDropdown aria-label="Physical drive" value={drive.id} onChange={e=>onDrive(e.target.value)}>{drives.map(d=><option key={d.id} value={d.id}>{d.name} · {formatBytes(d.capacity)}{d.present?'':' · Removed'}</option>)}</SearchDropdown></div>
-   <div className="mt-3 flex flex-wrap items-center justify-between gap-2"><Status value={enabled===false?'unavailable':drive.status}/><span className="text-[10px] text-muted-foreground">{drive.protocol==='os_smart'?'Native OS SMART assessment':drive.protocol.toUpperCase()} · {formatBytes(drive.capacity)}</span></div>
-   <p className="mt-1 text-[10px] leading-4 text-muted-foreground">Last SMART check: {date(drive.checked_at)}{overdue?' · Check overdue':''}{!drive.present?` · Removed ${date(drive.observed_at)}`:''}</p>
+   <div className="mt-4"><SearchDropdown aria-label="Physical drive" value={drive.id} onChange={e=>onDrive(e.target.value)}>{drives.map(d=><option key={d.id} value={d.id}>{d.name} · {formatBytes(d.capacity)}{d.reportMembership==='current'?'':d.reportMembership==='historical'?' · Historical':d.reportMembership==='removed'?' · Removed':' · Last recorded'}</option>)}</SearchDropdown></div>
+   <div className="mt-3 flex flex-wrap items-center justify-between gap-2"><Status value={status}/><span className="text-[10px] text-muted-foreground">{drive.protocol==='os_smart'?'Native OS SMART assessment':drive.protocol.toUpperCase()} · {formatBytes(drive.capacity)}</span></div>
+   {membership==='historical'&&<p className="mt-2 text-xs text-muted-foreground">Not in the current report. Last recorded health: {states[drive.status]?.label||'Unavailable'}.</p>}
+   {membership==='unknown'&&<p className="mt-2 text-xs text-muted-foreground">Current presence is unknown. Last recorded health: {states[drive.status]?.label||'Unavailable'}.</p>}
+   <p className="mt-1 text-[10px] leading-4 text-muted-foreground">{membership==='current'?'Last SMART check:':'Last recorded SMART check:'} {date(drive.checked_at)}{overdue?' · Check overdue':''}{membership==='removed'?` · Removed ${date(drive.observed_at)}`:''}</p>
    {drive.reasons?.length>0&&<ul className="mt-3 space-y-1 text-xs text-muted-foreground">{drive.reasons.map(reason=><li key={reason}>{reason}</li>)}</ul>}
    <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3">
     {[['Temperature',drive.temperature==null?'Unavailable':`${drive.temperature.toFixed(1)}°C`],['Rated endurance used',drive.percentage_used==null?'Not reported':`${drive.percentage_used}%`],['Available spare',drive.available_spare==null?'Not reported':`${drive.available_spare}%${drive.spare_threshold==null?'':` · threshold ${drive.spare_threshold}%`}`],['Power-on hours',number(drive.power_on_hours)],['Media / data errors',missing(drive.media_errors)],['Pending sectors',missing(drive.pending_sectors,!isNvme)],['Reallocated sectors',missing(drive.reallocated_sectors,!isNvme)],['Uncorrectable sectors',missing(drive.uncorrectable_sectors,!isNvme)],['Reported uncorrectable events',missing(drive.reported_uncorrectable_errors,!isNvme)],['Lifetime host reads',drive.lifetime_read_bytes==null?'Not reported':`≈ ${formatBytes(drive.lifetime_read_bytes)}`],['Lifetime host writes',drive.lifetime_written_bytes==null?'Not reported':`≈ ${formatBytes(drive.lifetime_written_bytes)}`],['Power cycles',missing(drive.power_cycles)],['Unsafe shutdowns',missing(drive.unsafe_shutdowns)],['Short self-test',tests[drive.self_test]||'Unavailable']].map(([label,value])=><div key={label} className="min-w-0"><dt className="text-[10px] leading-4 text-muted-foreground">{label}</dt><dd className="mt-0.5 break-words text-xs tabular-nums">{value}</dd></div>)}
    </dl>
-   {drive.short_test_supported&&testsEnabled!==false&&<p className="mt-3 text-[10px] leading-4 text-muted-foreground">Last short test started: {date(drive.last_test_started)} · Next eligible check: {date(drive.next_test_at)}. Tests wait until the drive and machine are idle.</p>}
+   {membership==='current'&&drive.short_test_supported&&testsEnabled!==false&&<p className="mt-3 text-[10px] leading-4 text-muted-foreground">Last short test started: {date(drive.last_test_started)} · Next eligible check: {date(drive.next_test_at)}. Tests wait until the drive and machine are idle.</p>}
    <ConditionHistory history={history}/>
    <ol aria-label="Drive health observations" className="mt-3 max-h-52 divide-y divide-border overflow-y-auto overscroll-contain">{history.slice(-12).reverse().map((point,index)=><li key={`${point.at}:${index}`} className="py-2"><div className="flex items-center justify-between gap-3"><time className="text-[10px] text-muted-foreground" dateTime={new Date(point.at).toISOString()}>{date(point.at)}</time><Status value={point.snapshot.status}/></div><p className="mt-1 text-[10px] leading-4 text-muted-foreground">{point.snapshot.reasons?.join(' · ')||`Short test: ${tests[point.snapshot.self_test]||'Unavailable'}`}{point.snapshot.percentage_used!=null?` · Endurance used ${point.snapshot.percentage_used}%`:''}{point.snapshot.temperature!=null?` · ${point.snapshot.temperature.toFixed(1)}°C`:''}</p></li>)}</ol>
   </>}
