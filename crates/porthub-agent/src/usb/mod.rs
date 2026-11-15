@@ -1,5 +1,6 @@
 //! Optional USB forwarding module in the existing native agent.
 pub(crate) mod cli;
+mod relay;
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 mod direct;
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
@@ -62,13 +63,25 @@ fn inventory() -> Vec<porthub_components::usb::Device> {
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     return vec![];
 }
+fn inventory_for(path: &Path) -> Vec<porthub_components::usb::Device> {
+    let mut devices = inventory();
+    #[cfg(target_os = "linux")]
+    devices.extend(relay::inventory(path));
+    #[cfg(not(target_os = "linux"))] let _ = path;
+    devices.truncate(128); devices
+}
 fn capabilities()->[bool;2] {
     #[cfg(target_os="linux")] { [true,true] }
     #[cfg(target_os="macos")] { [true,false] }
     #[cfg(windows)] { [windows::host_installed(),windows::receive_installed()] }
     #[cfg(not(any(target_os="linux",target_os="macos",windows)))] { [false,false] }
 }
+fn ordinary_report(body:&mut Value) {
+    if let Some(object)=body.as_object_mut(){object.remove("imports");}
+    if let Some(devices)=body["devices"].as_array_mut(){devices.retain(|d|!d["busid"].as_str().is_some_and(relay::is_alias));}
+}
 fn legacy_report(body:&mut Value) {
+    ordinary_report(body);
     // Old gateways have no directional roles. Advertising partial support
     // there could authorize a destination that cannot receive USB devices.
     body["supported"]=json!(body["can_export"].as_bool()==Some(true)&&body["can_import"].as_bool()==Some(true));
@@ -78,7 +91,30 @@ fn legacy_report(body:&mut Value) {
 enum Handoff {
     #[cfg(target_os="macos")] Mac(macos::Handoff),
     #[cfg(target_os="linux")] Linux(linux::Handoff),
+    #[cfg(target_os="linux")] RelaySource(relay::Lease),
+    #[cfg(target_os="linux")] RelayDestination,
     #[cfg(windows)] Windows(windows::Handoff),
+}
+/// Lifetime-owned native local controller attachment for receiver-local class
+/// devices. The returned TCP stream contains raw USB/IP URBs; Windows' private
+/// capability/import handshake is already consumed by its existing adapter.
+#[cfg(any(target_os="linux",windows))]
+pub(crate) struct VirtualReceiver { _guard:Handoff }
+#[cfg(any(target_os="linux",windows))]
+impl VirtualReceiver {
+    pub(crate) async fn failed(&mut self)->Result<()> {
+        #[cfg(windows)] {let Handoff::Windows(guard)=&mut self._guard;guard.failed().await}
+        #[cfg(not(windows))] {std::future::pending().await}
+    }
+}
+#[cfg(any(target_os="linux",windows))]
+pub(crate) async fn attach_virtual(profile:&Path,device:&porthub_components::usb::Device,wire:&[u8])->Result<(VirtualReceiver,tokio::net::TcpStream)> {
+    ensure!(features::enabled(profile,Feature::Usb),"Local USB receiving is disabled by client policy");
+    ensure!(device.busid.starts_with("65535-")&&device.busnum==65535,"Invalid receiver-local virtual USB namespace");
+    protocol::validate(wire,device)?;
+    #[cfg(target_os="linux")] {linux::module(false).await?;let(guard,stream)=linux::handoff(profile,device,false)?;return Ok((VirtualReceiver{_guard:Handoff::Linux(guard)},stream));}
+    #[cfg(windows)] {windows::module(false).await?;let(guard,stream)=windows::destination(device,wire).await?;return Ok((VirtualReceiver{_guard:Handoff::Windows(guard)},stream));}
+    #[cfg(not(any(target_os="linux",windows)))] {anyhow::bail!("Receiver-local USB devices require Linux or the signed Windows virtual controller");}
 }
 fn transport_policy(policy: &features::Policy) -> [bool; 3] {
     [
@@ -118,13 +154,22 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
                 .collect::<Vec<_>>();
             let p = control.profile();
             let [can_export,can_import]=capabilities();
-            let mut body = json!({"machine_id":p.machine_id,"token":p.token,"enabled":enabled,"supported":can_export||can_import,"can_export":can_export,"can_import":can_import,"devices":if enabled{inventory()}else{vec![]},"states":report_states});
+            let mut body = json!({"machine_id":p.machine_id,"token":p.token,"enabled":enabled,"supported":can_export||can_import,"can_export":can_export,"can_import":can_import,"devices":if enabled{inventory_for(&path)}else{vec![]},"states":report_states});
+            #[cfg(target_os="linux")] {
+                let mut imports=relay::imports(&path);
+                imports.retain(|r|body["devices"].as_array().is_some_and(|devices|devices.iter().any(|d|d["busid"]==r.busid)));
+                if let Some(devices)=body["devices"].as_array_mut(){devices.retain(|d|!d["busid"].as_str().is_some_and(relay::is_alias)||imports.iter().any(|r|d["busid"]==r.busid));}
+                body["imports"]=json!(imports);
+            }
             let result = tokio::select! {_=work.cancelled()=>break,changed=policy.changed()=>{if changed.is_err(){break;}let next=transport_policy(&policy.borrow());if next!=permissions{sessions.clear();permissions=next;}continue;},reply=control.request(reqwest::Method::POST,"usb/client/report",Some(body.clone()),&[])=>reply};
+            // Gateways with directional roles but no relay support must keep
+            // ordinary USB (including export-only Mac sources) operational.
+            let result=if matches!(result,Err(crate::control::Failure::Rejected(422))) { ordinary_report(&mut body);control.request(reqwest::Method::POST,"usb/client/report",Some(body.clone()),&[]).await }else{result};
             let result=if matches!(result,Err(crate::control::Failure::Rejected(422))) { legacy_report(&mut body);control.request(reqwest::Method::POST,"usb/client/report",Some(body),&[]).await }else{result};
-            let plans = result
-                .ok()
-                .and_then(|r| r.json().ok())
-                .and_then(|v| serde_json::from_value::<Vec<Forward>>(v["forwards"].clone()).ok());
+            let response = result.ok().and_then(|r| r.json().ok());
+            #[cfg(target_os="linux")]
+            relay::gateway(&path,response.as_ref().is_some_and(|v|v["relay_version"]==1));
+            let plans = response.and_then(|v|serde_json::from_value::<Vec<Forward>>(v["forwards"].clone()).ok());
             let Some(plans) = plans else {
                 sessions.clear();
                 continue;
@@ -162,7 +207,24 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
                         .get(&plan.id)
                         .is_none_or(|s| s.state != "retry-relay");
                     set_state(&states, &plan.id, "connecting", None);
-                    let result = tokio::select! {_=session_cancel.cancelled()=>Ok(()),result=session(&path,control,&plan,states.clone(),prefer_direct)=>result};
+                    #[cfg(target_os="linux")]
+                    let _import = if plan.destination == control.profile().machine_id {
+                        match relay::register(&path,&plan) { Ok(guard)=>Some(guard),Err(error)=>{set_state(&states,&plan.id,"error",Some(error.to_string()));return;} }
+                    } else { None };
+                    #[cfg(target_os="linux")]
+                    let reroute = _import.as_ref().map(relay::ImportGuard::subscribe);
+                    #[cfg(not(target_os="linux"))]
+                    let reroute: Option<tokio::sync::watch::Receiver<u64>> = None;
+                    let result = loop {
+                        let mut epoch=reroute.clone();if let Some(changes)=epoch.as_mut(){changes.borrow_and_update();}
+                        let result=tokio::select! {_=session_cancel.cancelled()=>break Ok(()),result=session(&path,control.clone(),&plan,states.clone(),prefer_direct,epoch)=>result};
+                        if result.as_ref().is_err_and(|error|error.is::<relay::Reconfigure>()) {
+                            set_state(&states,&plan.id,"connecting",None);
+                            tokio::select!{_=session_cancel.cancelled()=>break Ok(()),_=tokio::time::sleep(Duration::from_millis(300))=>{}}
+                            continue;
+                        }
+                        break result;
+                    };
                     let was_direct = states
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
@@ -216,7 +278,7 @@ fn set_state(states: &States, id: &str, state: &str, error: Option<String>) {
     );
 }
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-async fn session(_: &Path, _: Arc<Control>, _: &Forward, _: States, _: bool) -> Result<()> {
+async fn session(_: &Path, _: Arc<Control>, _: &Forward, _: States, _: bool, _: Option<tokio::sync::watch::Receiver<u64>>) -> Result<()> {
     anyhow::bail!("Native USB forwarding currently requires Linux kernel USB/IP support")
 }
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
@@ -294,7 +356,7 @@ async fn next_text(socket: &mut Socket) -> Result<Value> {
     }
 }
 #[cfg(any(target_os="linux",target_os="macos",windows))]
-struct Carrier {tcp:Option<tcp::Stream>,sctp:Option<direct::Direct>}
+struct Carrier {tcp:Option<tcp::Stream>,sctp:Option<direct::Direct>,restart:bool}
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 async fn negotiate(
     socket: &mut Socket,
@@ -310,11 +372,12 @@ async fn negotiate(
     let listener=if source && allowed {tcp::Listener::bind(Some(control)).await.ok()} else {None};
     text(
         socket,
-        json!({"type":"hello","direct":candidates.is_some(),"bulk_tcp":allowed,"bulk_offer":listener.as_ref().map(|l|&l.offer)}),
+        json!({"type":"hello","restart":1,"direct":candidates.is_some(),"bulk_tcp":allowed,"bulk_offer":listener.as_ref().map(|l|&l.offer)}),
     )
     .await?;
     let hello = tokio::time::timeout(Duration::from_secs(8), next_text(socket)).await??;
     ensure!(hello["type"] == "hello", "Invalid USB peer greeting");
+    let restart=hello["restart"]==1;
     if allowed && hello["bulk_tcp"]==true {
         let stream=if source {
             if let Some(listener)=listener {listener.accept().await.ok()} else {None}
@@ -324,7 +387,7 @@ async fn negotiate(
         text(socket,json!({"type":"direct_ready","bulk":true,"ready":stream.is_some()})).await?;
         let remote=tokio::time::timeout(Duration::from_secs(8),next_text(socket)).await??;
         ensure!(remote["type"]=="direct_ready" && remote["bulk"]==true,"Invalid bulk USB negotiation");
-        if remote["ready"]==true {if let Some(stream)=stream {return Ok(Carrier{tcp:Some(stream),sctp:None});}}
+        if remote["ready"]==true {if let Some(stream)=stream {return Ok(Carrier{tcp:Some(stream),sctp:None,restart});}}
     }
     let both = candidates.is_some() && hello["direct"] == true;
     let mut direct = if both {
@@ -359,12 +422,12 @@ async fn negotiate(
         if source && (!both || local_ready && peer_ready) {
             let route = if both { "direct" } else { "relay" };
             text(socket, json!({"type":"path","route":route})).await?;
-            return Ok(Carrier{tcp:None,sctp:if both { direct } else { None }});
+            return Ok(Carrier{tcp:None,sctp:if both { direct } else { None },restart});
         }
         tokio::select! {
          result=async{if let Some(ready)=connected.as_mut(){ready.await.map_err(|_|anyhow::anyhow!("Direct USB negotiation failed"))}else{std::future::pending().await}}=>{connected=None;if result.is_ok(){local_ready=true;text(socket,json!({"type":"direct_ready"})).await?;}else if let Some(peer)=direct.as_mut(){if let Err(error)=peer.stopped().await{tracing::debug!(%error,"USB direct negotiation unavailable; keeping gateway fallback");}}},
-         value=next_text(socket)=>{let value=value?;match value["type"].as_str(){Some("direct_ready")=>peer_ready=true,Some("path") if !source=>{return match value["route"].as_str(){Some("direct") if local_ready=>Ok(Carrier{tcp:None,sctp:direct}),Some("relay")=>Ok(Carrier{tcp:None,sctp:None}),_=>anyhow::bail!("USB path selection failed")};},_=>anyhow::bail!("Unexpected USB signaling")}},
-         _=&mut deadline=>{if source{text(socket,json!({"type":"path","route":"relay"})).await?;return Ok(Carrier{tcp:None,sctp:None});}anyhow::bail!("USB path selection timed out")}
+         value=next_text(socket)=>{let value=value?;match value["type"].as_str(){Some("direct_ready")=>peer_ready=true,Some("path") if !source=>{return match value["route"].as_str(){Some("direct") if local_ready=>Ok(Carrier{tcp:None,sctp:direct,restart}),Some("relay")=>Ok(Carrier{tcp:None,sctp:None,restart}),_=>anyhow::bail!("USB path selection failed")};},_=>anyhow::bail!("Unexpected USB signaling")}},
+         _=&mut deadline=>{if source{text(socket,json!({"type":"path","route":"relay"})).await?;return Ok(Carrier{tcp:None,sctp:None,restart});}anyhow::bail!("USB path selection timed out")}
         }
     }
 }
@@ -375,6 +438,7 @@ async fn session(
     plan: &Forward,
     states: States,
     prefer_direct: bool,
+    reroute: Option<tokio::sync::watch::Receiver<u64>>,
 ) -> Result<()> {
     use futures_util::StreamExt;
     use tokio_tungstenite::tungstenite::Message;
@@ -384,7 +448,20 @@ async fn session(
         "USB rule does not belong to this machine"
     );
     ensure!(plan.device.valid(), "Invalid USB device configuration");
-    #[cfg(target_os="linux")] linux::module(source).await?;
+    #[cfg(target_os="linux")]
+    let mut relayed = if source && relay::is_alias(&plan.device.busid) {
+        // A positive capability report alone is insufficient after authority
+        // failover. Authorize this exact ancestry on the selected gateway; an
+        // old gateway's404 must never permit an unvalidated imported alias.
+        let p=control.profile();
+        let reply=control.request(reqwest::Method::POST,"usb/client/relay-authorize",Some(json!({"machine_id":p.machine_id,"token":p.token,"id":plan.id})),&[]).await.map_err(|_|anyhow::anyhow!("Gateway cannot authorize this USB relay; upgrade the gateway and recreate its forwarding rule"))?;
+        let authorization=reply.json()?;
+        ensure!(authorization["relay_version"]==1&&authorization["upstream_id"]==relay::upstream(path,&plan.device.busid)?,"USB relay lineage authorization changed");
+        let mut lease=relay::claim(path,&plan.device.busid,&plan.id)?;
+        let (stream,metadata)=tokio::time::timeout(Duration::from_secs(60),lease.ready()).await??;
+        Some((lease,stream,metadata))
+    } else { None };
+    #[cfg(target_os="linux")] if relayed.is_none(){linux::module(source).await?;}
     #[cfg(windows)] windows::module(source).await?;
     #[cfg(target_os="macos")] macos::prepare(source).await?;
     let mut socket = open(
@@ -404,7 +481,7 @@ async fn session(
     let direct = negotiate(&mut socket, source, allowed, &control).await?;
     // Exchange fresh kernel identifiers after replugging; retain the configured physical identity.
     let mut device = if source {
-        inventory()
+        inventory_for(path)
             .into_iter()
             .find(|d| d.same_device(&plan.device))
             .context("USB device unplugged or changed")?
@@ -415,8 +492,8 @@ async fn session(
     let mut wire=None;
     if source {
         #[cfg(target_os="linux")] {
-            wire=Some(protocol::local_device(&device)?);
-            let(guard,stream)=linux::handoff(path,&device,true)?;prepared=Some((Handoff::Linux(guard),stream));
+            if let Some((lease,stream,metadata))=relayed.take(){device=metadata.device;wire=Some(metadata.wire);prepared=Some((Handoff::RelaySource(lease),stream));}
+            else {wire=Some(protocol::local_device(&device)?);let(guard,stream)=linux::handoff(path,&device,true)?;prepared=Some((Handoff::Linux(guard),stream));}
         }
         #[cfg(target_os="macos")] {
             let(guard,stream,actual,bytes)=macos::source(path,&device).await?;device=actual;wire=Some(bytes);prepared=Some((Handoff::Mac(guard),stream));
@@ -453,7 +530,11 @@ async fn session(
     };
     let(mut handoff,stream)=if source {prepared.context("USB source handoff unavailable")?} else {
         #[cfg(target_os="macos")] {anyhow::bail!("macOS can export USB devices only")}
-        #[cfg(target_os="linux")] {let(guard,stream)=linux::handoff(path,&device,false)?;(Handoff::Linux(guard),stream)}
+        #[cfg(target_os="linux")] {
+            let bytes=if remote["usbip"].is_null(){protocol::legacy_device(&device)?}else{serde_json::from_value::<Vec<u8>>(remote["usbip"].clone())?};
+            if let Some(stream)=relay::destination(path,plan,relay::Metadata{device:device.clone(),wire:bytes,restart:direct.restart})? {(Handoff::RelayDestination,stream)}
+            else {let(guard,stream)=linux::handoff(path,&device,false)?;relay::local(path,&plan.id,guard.virtual_port().context("USB import port missing")?)?;(Handoff::Linux(guard),stream)}
+        }
         #[cfg(windows)] {
             let bytes=if remote["usbip"].is_null(){protocol::legacy_device(&device)?}else{serde_json::from_value::<Vec<u8>>(remote["usbip"].clone())?};
             let(guard,stream)=windows::destination(&device,&bytes).await?;(Handoff::Windows(guard),stream)
@@ -472,23 +553,45 @@ async fn session(
     let transfer=async {
         if let Some(bulk)=direct.tcp {
             tracing::info!("USB selected authenticated bulk TCP path");
-            bridge_bulk(stream,socket,bulk,features::subscribe(path)).await
-        } else {bridge(stream,socket,direct.sctp,features::subscribe(path)).await}
+            bridge_bulk(stream,socket,bulk,features::subscribe(path),reroute,direct.restart).await
+        } else {bridge(stream,socket,direct.sctp,features::subscribe(path),reroute,direct.restart).await}
     };
     #[cfg(windows)] {let Handoff::Windows(guard)=&mut handoff;tokio::select!{result=transfer=>result,error=guard.failed()=>error}}
     #[cfg(any(target_os="linux",target_os="macos"))] {let _guard=handoff;transfer.await}
 }
+fn planned_ack(value:&str)->bool {serde_json::from_str::<Value>(value).is_ok_and(|v|v["type"]=="path"&&v["route"]=="restart-ack")}
+fn restart_frame(ack:bool)->tokio_tungstenite::tungstenite::Message {tokio_tungstenite::tungstenite::Message::Text(json!({"type":"path","route":if ack{"restart-ack"}else{"restart"}}).to_string().into())}
+fn planned_restart(value:&str)->bool {
+    serde_json::from_str::<Value>(value).is_ok_and(|v|v["type"]=="path"&&v["route"]=="restart")
+}
+async fn rerouted(changes:&mut Option<tokio::sync::watch::Receiver<u64>>) {
+    match changes {Some(changes)=>{let _=changes.changed().await;},None=>std::future::pending().await}
+}
 #[cfg(any(target_os="linux",target_os="macos",windows))]
-async fn bridge_bulk<S:tokio::io::AsyncRead+tokio::io::AsyncWrite+Unpin>(mut kernel:S,mut socket:Socket,mut bulk:tcp::Stream,mut policy:tokio::sync::watch::Receiver<features::Policy>)->Result<()> {
+async fn bridge_bulk<S:tokio::io::AsyncRead+tokio::io::AsyncWrite+Unpin>(mut kernel:S,mut socket:Socket,mut bulk:tcp::Stream,mut policy:tokio::sync::watch::Receiver<features::Policy>,mut reroute:Option<tokio::sync::watch::Receiver<u64>>,restart:bool)->Result<()> {
     use futures_util::{SinkExt,StreamExt};
     use tokio_tungstenite::tungstenite::Message;
+    let mut kernel=relay::RoutedStream::new(kernel,reroute.is_some());
     let transfer=tokio::io::copy_bidirectional_with_sizes(&mut kernel,&mut bulk,65536,65536);
     tokio::pin!(transfer);
     let mut heartbeat=tokio::time::interval(Duration::from_secs(15));
     loop {tokio::select! {
         result=&mut transfer=>{let (sent,received)=result?;tracing::debug!(sent,received,"USB bulk stream closed");return Ok(());},
-        frame=socket.next()=>match frame {Some(Ok(Message::Ping(bytes)))=>socket.send(Message::Pong(bytes)).await?,Some(Ok(Message::Pong(_)))=>{},Some(Ok(Message::Close(_)))|None=>return Ok(()),Some(Err(error))=>return Err(error.into()),_=>anyhow::bail!("Unexpected bulk USB control message")},
+        frame=socket.next()=>match frame {Some(Ok(Message::Ping(bytes)))=>socket.send(Message::Pong(bytes)).await?,Some(Ok(Message::Pong(_)))=>{},Some(Ok(Message::Text(value))) if planned_restart(&value)=>{socket.send(restart_frame(true)).await?;return Err(relay::Reconfigure.into());},Some(Ok(Message::Text(value))) if planned_ack(&value)=>return Err(relay::Reconfigure.into()),Some(Ok(Message::Close(_)))|None=>return Ok(()),Some(Err(error))=>return Err(error.into()),_=>anyhow::bail!("Unexpected bulk USB control message")},
         _=heartbeat.tick()=>socket.send(Message::Ping(vec![].into())).await?,
+        _=rerouted(&mut reroute),if restart=>{
+            // Keep the bulk socket alive until the authenticated peer has
+            // acknowledged rerouting. A LAN EOF must not beat WAN signaling
+            // and be misclassified as an unexpected direct-path failure.
+            tokio::time::timeout(Duration::from_secs(2),async {
+                socket.send(restart_frame(false)).await?;
+                let value=next_text(&mut socket).await?;
+                if planned_restart(&value.to_string()){socket.send(restart_frame(true)).await?;}
+                else {ensure!(planned_ack(&value.to_string()),"USB peer did not acknowledge rerouting");}
+                Ok::<(),anyhow::Error>(())
+            }).await??;
+            return Err(relay::Reconfigure.into());
+        },
         changed=policy.changed()=>if changed.is_err()||!policy.borrow().enabled(Feature::Usb)||!policy.borrow().enabled(Feature::DirectConnections){return Ok(());}
     }}
 }
@@ -500,13 +603,16 @@ async fn bridge<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     socket: Socket,
     mut direct: Option<direct::Direct>,
     mut policy: tokio::sync::watch::Receiver<crate::features::Policy>,
+    mut reroute: Option<tokio::sync::watch::Receiver<u64>>,
+    restart: bool,
 ) -> Result<()> {
     use futures_util::{SinkExt, StreamExt};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_tungstenite::tungstenite::Message;
     let (mut sink, mut source) = socket.split();
+    let stream=relay::RoutedStream::new(stream,reroute.is_some());
     let (mut reader, mut writer) = tokio::io::split(stream);
-    let (ws_send, mut outgoing) = tokio::sync::mpsc::channel(8);
+    let (ws_send, mut outgoing) = tokio::sync::mpsc::channel::<(Message,Option<tokio::sync::oneshot::Sender<()>>)>(8);
     let upload_socket = ws_send.clone();
     let control_socket = ws_send.clone();
     let direct_send = direct.as_ref().map(|d| d.send.clone());
@@ -524,22 +630,23 @@ async fn bridge<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
                     .context("Direct USB transport closed")?;
             } else {
                 upload_socket
-                    .send(Message::Binary(bytes[..n].to_vec().into()))
+                    .send((Message::Binary(bytes[..n].to_vec().into()),None))
                     .await
                     .context("USB gateway closed")?;
             }
         }
     };
     let carrier = async move {
-        while let Some(message) = outgoing.recv().await {
+        while let Some((message,ack)) = outgoing.recv().await {
             sink.send(message).await?;
+            if let Some(ack)=ack{let _=ack.send(());}
         }
         Ok::<_, anyhow::Error>(())
     };
     let download = async {
         loop {
             tokio::select! {
-             message=source.next()=>{match message{Some(Ok(Message::Binary(b))) if !local=>writer.write_all(&b).await?,Some(Ok(Message::Ping(b)))=>{control_socket.send(Message::Pong(b)).await.context("USB gateway closed")?;},Some(Ok(Message::Pong(_)))=>{},Some(Ok(Message::Close(_)))|None=>return Ok::<_,anyhow::Error>(()),Some(Err(e))=>return Err(e.into()),_=>anyhow::bail!("Unexpected USB carrier message")}},
+             message=source.next()=>{match message{Some(Ok(Message::Binary(b))) if !local=>writer.write_all(&b).await?,Some(Ok(Message::Ping(b)))=>{control_socket.send((Message::Pong(b),None)).await.context("USB gateway closed")?;},Some(Ok(Message::Pong(_)))=>{},Some(Ok(Message::Text(value))) if planned_restart(&value)=>{let(ack,sent)=tokio::sync::oneshot::channel();control_socket.send((restart_frame(true),Some(ack))).await?;sent.await?;return Err(relay::Reconfigure.into());},Some(Ok(Message::Text(value))) if planned_ack(&value)=>return Err(relay::Reconfigure.into()),Some(Ok(Message::Close(_)))|None=>return Ok::<_,anyhow::Error>(()),Some(Err(e))=>return Err(e.into()),_=>anyhow::bail!("Unexpected USB carrier message")}},
              data=async{if let Some(d)=direct.as_mut(){d.incoming.recv().await}else{std::future::pending().await}}=>{writer.write_all(&data.context("Direct USB transport closed")?).await?;}
             }
         }
@@ -549,7 +656,20 @@ async fn bridge<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     loop {
         tokio::select! {
          result=&mut upload=>return result,result=&mut carrier=>return result,result=&mut download=>return result,
-         _=heartbeat.tick()=>{let _=ws_send.try_send(Message::Ping(vec![].into()));},
+         _=heartbeat.tick()=>{let _=ws_send.try_send((Message::Ping(vec![].into()),None));},
+         _=rerouted(&mut reroute),if restart=>{
+            let (ack,ready)=tokio::sync::oneshot::channel();
+            let notify=async {
+                let send=ws_send.send((restart_frame(false),Some(ack)));
+                tokio::pin!(send);
+                tokio::select!{result=&mut send=>{result?;},result=&mut carrier=>{return result;}}
+                tokio::select!{result=ready=>{result?;},result=&mut carrier=>{return result;}}
+                // Continue polling the control carrier and receiver until the
+                // peer acknowledges, while retaining the existing data stream.
+                tokio::select!{result=&mut download=>result,result=&mut carrier=>result}
+            };
+            return tokio::time::timeout(Duration::from_secs(2),notify).await?;
+         },
          changed=policy.changed()=>{if changed.is_err()||!policy.borrow().enabled(Feature::Usb)||local&&!policy.borrow().enabled(Feature::DirectConnections){return Ok(());}}
         }
     }
@@ -558,11 +678,17 @@ async fn bridge<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
 pub(crate) async fn serve<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     mut reader: tokio::io::BufReader<S>,
     control: Arc<Control>,
+    path: &Path,
     message: Value,
     cancel: CancellationToken,
 ) -> Result<()> {
     use tokio::io::AsyncWriteExt;
     let mut body = message;
+    if body["action"] == "devices" {
+        let reply=json!({"devices":inventory_for(path)});
+        reader.get_mut().write_all(format!("{reply}\n").as_bytes()).await?;
+        return Ok(());
+    }
     let lease = body["action"] == "create";
     body.as_object_mut()
         .context("Invalid USB request")?
@@ -656,9 +782,11 @@ mod stream_tests {
             a,
             direct_a,
             rx.clone(),
+            None,
+            false,
         )));
         let mut bridge_b =
-            tokio_util::task::AbortOnDropHandle::new(tokio::spawn(bridge(kb, b, direct_b, rx)));
+            tokio_util::task::AbortOnDropHandle::new(tokio::spawn(bridge(kb, b, direct_b, rx, None, false)));
         let (mut ar, mut aw) = tokio::io::split(app_a);
         let (mut br, mut bw) = tokio::io::split(app_b);
         let a_bytes = vec![17; 2 * 1024 * 1024];
@@ -711,11 +839,71 @@ mod stream_tests {
     async fn direct_usb_stream_remains_full_duplex_and_revokes_locally() -> Result<()> {
         full_duplex(true).await
     }
+    #[tokio::test]
+    async fn planned_rerouting_ack_beats_local_eof_on_gateway_and_bulk() -> Result<()> {
+        use futures_util::{SinkExt,StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        for bulk in [false,true] {
+            let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let address=listener.local_addr()?;
+            let _gateway=tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                let (a,_)=listener.accept().await?;let mut a=tokio_tungstenite::accept_async(a).await?;
+                let (b,_)=listener.accept().await?;let mut b=tokio_tungstenite::accept_async(b).await?;
+                loop {tokio::select! {
+                    frame=a.next()=>match frame {Some(Ok(Message::Text(value)))=>{tokio::time::sleep(Duration::from_millis(60)).await;b.send(Message::Text(value)).await?;},Some(Ok(Message::Ping(v)))=>a.send(Message::Pong(v)).await?,Some(Ok(Message::Pong(_)))=>{},_=>break},
+                    frame=b.next()=>match frame {Some(Ok(Message::Text(value)))=>{tokio::time::sleep(Duration::from_millis(60)).await;a.send(Message::Text(value)).await?;},Some(Ok(Message::Ping(v)))=>b.send(Message::Pong(v)).await?,Some(Ok(Message::Pong(_)))=>{},_=>break},
+                }}Ok::<(),anyhow::Error>(())
+            }));
+            let(a,_)=tokio_tungstenite::connect_async(format!("ws://{address}")).await?;
+            let(b,_)=tokio_tungstenite::connect_async(format!("ws://{address}")).await?;
+            let(ka,app_a)=tokio::io::duplex(128);let(kb,_app_b)=tokio::io::duplex(128);
+            let(_policy,rx)=tokio::sync::watch::channel(crate::features::Policy::default());
+            let(change,changes)=tokio::sync::watch::channel(0u64);
+            let(mut first,mut second)=if bulk {
+                let listener=tcp::Listener::bind(None).await?;let offer=listener.offer.clone();
+                let(ta,tb)=tokio::join!(listener.accept(),tcp::connect(offer,None));
+                (tokio::spawn(bridge_bulk(ka,a,ta?,rx.clone(),Some(changes),true)),tokio::spawn(bridge_bulk(kb,b,tb?,rx,None,true)))
+            } else {
+                (tokio::spawn(bridge(ka,a,None,rx.clone(),Some(changes),true)),tokio::spawn(bridge(kb,b,None,rx,None,true)))
+            };
+            // The local consumer can close before the lease destructor sends
+            // its notification. A fast FIN must not outrun the slower gateway.
+            drop(app_a);tokio::task::yield_now().await;change.send_replace(1);
+            let(first,second)=tokio::time::timeout(Duration::from_secs(3),async{tokio::join!(&mut first,&mut second)}).await?;
+            ensure!(first?.is_err_and(|e|e.is::<relay::Reconfigure>()),"initiator misclassified planned rerouting");
+            ensure!(second?.is_err_and(|e|e.is::<relay::Reconfigure>()),"peer treated planned rerouting as direct-path failure");
+        }
+        Ok(())
+    }
+
 }
 
 #[cfg(test)]
 mod capability_tests {
     use super::*;
+    #[test]
+    fn gateway44_contract_preserves_ordinary_devices_and_directional_roles() {
+        // Exact report shape accepted before relay fields were introduced.
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct Gateway44Report {
+            machine_id:String, token:String, enabled:bool, supported:bool,
+            can_export:Option<bool>, can_import:Option<bool>,
+            devices:Vec<porthub_components::usb::Device>, states:Vec<State>,
+        }
+        let device=json!({"busid":"1-2","vendor":"1377","product":"1100","serial":"fixture","name":"Microphone","busnum":1,"devnum":2,"speed":3,"blocked":null});
+        let mut alias=device.clone();alias["busid"]=json!("0-123");
+        for (export,import) in [(true,true),(true,false)] {
+            let mut body=json!({"machine_id":"fixture","token":"test-token","enabled":true,"supported":true,"can_export":export,"can_import":import,"devices":[device.clone(),alias.clone()],"states":[],"imports":[{"busid":"0-123","upstream_id":"f".repeat(32)}]});
+            assert!(serde_json::from_value::<Gateway44Report>(body.clone()).is_err());
+            ordinary_report(&mut body);
+            let report:Gateway44Report=serde_json::from_value(body).expect("gateway44 rejects ordinary report");
+            assert!(report.enabled&&report.supported);
+            assert_eq!(report.can_export,Some(export));assert_eq!(report.can_import,Some(import));
+            assert_eq!(report.devices.len(),1);assert_eq!(report.devices[0].busid,"1-2");
+        }
+    }
     #[test]
     fn old_gateway_never_turns_partial_roles_into_receiver_support(){
         for (export,import) in [(false,false),(true,false),(false,true),(true,true)] {

@@ -13,7 +13,7 @@ pub struct Args {
 }
 #[derive(clap::Subcommand)]
 pub enum Action {
-    /// List physical USB devices on this machine without changing their drivers.
+    /// List local USB devices and active onward-forwarding aliases without changing drivers.
     Devices,
     /// Safely offline local Windows USB storage volumes before forwarding (administrator).
     Prepare { busid: String },
@@ -54,7 +54,9 @@ pub async fn run(args: Args, cancel: CancellationToken) -> Result<()> {
             // wait for native discovery instead of exiting with its empty cache.
             #[cfg(windows)]
             let devices = tokio::task::spawn_blocking(super::windows::fresh_inventory).await??;
-            #[cfg(not(windows))]
+            #[cfg(target_os="linux")]
+            let devices = daemon_devices(args.user,args.registration.as_deref()).await.unwrap_or_else(|_|super::inventory());
+            #[cfg(not(any(windows,target_os="linux")))]
             let devices = super::inventory();
             println!("{}", serde_json::to_string_pretty(&devices)?);
             if !cfg!(any(target_os = "linux",target_os="macos",windows)) {
@@ -137,6 +139,16 @@ pub async fn run(args: Args, cancel: CancellationToken) -> Result<()> {
             .await
         }
     }
+}
+#[cfg(target_os="linux")]
+async fn daemon_devices(user:bool,registration:Option<&str>)->Result<Vec<porthub_components::usb::Device>> {
+    let (layout,registration)=crate::keyboard::registration(user,registration)?;
+    let mut stream=crate::exposure_broker::connect_stream(&layout,&registration).await?;
+    stream.write_all(b"{\"operation\":\"usb\",\"action\":\"devices\"}\n").await?;
+    let mut reader=BufReader::new(stream);
+    let bytes=tokio::time::timeout(std::time::Duration::from_secs(5),crate::exposure_protocol::line(&mut reader)).await??;
+    let value:Value=serde_json::from_slice(&bytes)?;
+    Ok(serde_json::from_value(value["devices"].clone())?)
 }
 pub(crate) async fn broker_worker(
     user: bool,

@@ -317,8 +317,10 @@ mod tests {
             ws_a,
             tls_a?,
             rx.clone(),
+            None,
+            false,
         ));
-        let b = tokio::spawn(super::super::bridge_bulk(kernel_b, ws_b, tls_b?, rx));
+        let b = tokio::spawn(super::super::bridge_bulk(kernel_b, ws_b, tls_b?, rx, None, false));
         let (mut ar, mut aw) = tokio::io::split(app_a);
         let (mut br, mut bw) = tokio::io::split(app_b);
         let bytes_a = vec![13; 2 * 1024 * 1024];

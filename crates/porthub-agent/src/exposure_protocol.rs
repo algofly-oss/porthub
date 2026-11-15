@@ -119,7 +119,7 @@ async fn dispatch<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     profile:std::path::PathBuf,message:serde_json::Value,
 )->Result<()> {
     let mut reader=reader;
-    if message["operation"]=="usb"{return crate::usb::serve(reader,control,message,cancel).await;}
+    if message["operation"]=="usb"{return crate::usb::serve(reader,control,&profile,message,cancel).await;}
     if message.get("operation").and_then(serde_json::Value::as_str) == Some("keyboard_host") {
         return crate::keyboard::serve(reader,control,&profile,cancel).await;
     }

@@ -26,21 +26,22 @@ fn speed(v: &str) -> Option<u32> {
 pub(super) fn inventory() -> Vec<Device> {
     inventory_at(Path::new("/sys"))
 }
-fn inventory_at(sys: &Path) -> Vec<Device> {
+fn inventory_at(sys: &Path) -> Vec<Device> { inventory_scan(sys,false,None,None) }
+fn inventory_scan(sys: &Path, imported: bool, selected: Option<&str>, mounts: Option<&str>) -> Vec<Device> {
     let Ok(entries) = std::fs::read_dir(sys.join("bus/usb/devices")) else {
         return vec![];
     };
     let mut devices = Vec::new();
     for entry in entries.flatten() {
         let busid = entry.file_name().to_string_lossy().to_string();
-        if !valid_busid(&busid) {
+        if !valid_busid(&busid) || selected.is_some_and(|selected|selected!=busid) {
             continue;
         }
         let path = entry.path();
         let Ok(real) = std::fs::canonicalize(&path) else {
             continue;
         };
-        if real
+        if !imported && real
             .components()
             .any(|c| c.as_os_str().to_string_lossy().starts_with("vhci_hcd"))
         {
@@ -70,7 +71,8 @@ fn inventory_at(sys: &Path) -> Vec<Device> {
                 }
             }
         }
-        let mounts = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+        let fallback_mounts;
+        let mounts = if let Some(mounts)=mounts {mounts} else {fallback_mounts=std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();&fallback_mounts};
         if let Ok(disks) = std::fs::read_dir(sys.join("class/block")) {
             for disk in disks.flatten() {
                 if std::fs::canonicalize(disk.path()).is_ok_and(|p| p.starts_with(&real)) {
@@ -221,12 +223,53 @@ fn restore(device: &Device) {
         }
     }
 }
+fn imported_busid(status:&str,port:u32,device:&Device)->Result<String> {
+    let remote=((device.busnum as u32)<<16)|device.devnum as u32;
+    let rows:Vec<_>=status.lines().filter_map(|line|{let fields:Vec<_>=line.split_whitespace().collect();(fields.len()>=7&&fields[1].parse::<u32>().ok()==Some(port)).then_some(fields)}).collect();
+    ensure!(rows.len()==1,"Imported USB port identity is unavailable");let row=&rows[0];
+    ensure!(row[2]=="006"&&u32::from_str_radix(row[4],16).ok()==Some(remote)&&valid_busid(row[6])&&row[6]!="0-0","Imported USB device is not ready or changed identity");
+    Ok(row[6].into())
+}
+fn relay_interface_policy(path:&Path,busid:&str)->Result<()> {
+    let mut classes=Vec::new();
+    for item in std::fs::read_dir(path)? {
+        let item=item?;
+        if item.file_name().to_string_lossy().starts_with(&format!("{busid}:")) {
+            let class=std::fs::read_to_string(item.path().join("bInterfaceClass"))?;
+            classes.push(u8::from_str_radix(class.trim(),16)?);
+        }
+    }
+    ensure!(!classes.is_empty(),"Imported USB interfaces are not ready");
+    // Checking mounts alone leaves a race before the parent drops its VHCI
+    // consumer. Storage needs held exclusive block-device leases before an
+    // onward handoff can safely be offered. Keep that unsupported for now.
+    ensure!(!classes.contains(&8),"Imported storage cannot be forwarded onward until exclusive volume protection is supported");
+    ensure!(classes.iter().all(|class|matches!(class,1|3)),"Onward forwarding currently supports imported audio and HID devices only");
+    Ok(())
+}
+pub(super) fn relay_import(port:u32,expected:&Device)->Result<Device> {
+    let status=std::fs::read_to_string("/sys/devices/platform/vhci_hcd.0/status")?;
+    let busid=imported_busid(&status,port,expected)?;
+    let path=std::fs::canonicalize(Path::new("/sys/bus/usb/devices").join(&busid))?;
+    ensure!(path.components().any(|c|c.as_os_str().to_string_lossy().starts_with("vhci_hcd")),"Selected device is not the owned USB import");
+    relay_interface_policy(&path,&busid)?;
+    // Unknown topology/mount state is never permission to detach storage.
+    let mounts=std::fs::read_to_string("/proc/self/mountinfo")?;
+    std::fs::read_dir("/sys/class/block")?;std::fs::read_dir("/sys/class/net")?;
+    let actual=inventory_scan(Path::new("/sys"),true,Some(&busid),Some(&mounts)).into_iter().next().context("Imported USB device is unavailable")?;
+    ensure!(actual.vendor==expected.vendor&&actual.product==expected.product&&actual.serial==expected.serial,"Imported USB fingerprint changed");
+    ensure!(actual.blocked.is_none(),"{}",actual.blocked.as_deref().unwrap_or("Imported USB cannot be forwarded"));
+    let latest=std::fs::read_to_string("/sys/devices/platform/vhci_hcd.0/status")?;
+    ensure!(imported_busid(&latest,port,expected)?==busid,"USB import changed during ownership verification");
+    Ok(actual)
+}
 pub(super) struct Handoff {
     pub kernel: std::net::TcpStream,
     device: Option<Device>,
     journal: Option<PathBuf>,
     port: Option<u32>,
 }
+impl Handoff { pub(super) fn virtual_port(&self)->Option<u32>{self.port} }
 impl Drop for Handoff {
     fn drop(&mut self) {
         let _ = self.kernel.shutdown(std::net::Shutdown::Both);
@@ -433,6 +476,49 @@ fn free_port(status: &str, speed: u32) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn onward_policy_requires_proven_audio_or_hid_and_never_storage() -> Result<()> {
+        let dir=tempfile::tempdir()?;let path=dir.path();
+        assert!(relay_interface_policy(path,"5-1").is_err());
+        std::fs::create_dir(path.join("5-1:1.0"))?;
+        let class=path.join("5-1:1.0/bInterfaceClass");
+        for (value,supported) in [("01",true),("03",true),("08",false),("ff",false),("02",false)] {
+            std::fs::write(&class,value)?;assert_eq!(relay_interface_policy(path,"5-1").is_ok(),supported);
+        }
+        std::fs::write(&class,"01")?;std::fs::create_dir(path.join("5-1:1.1"))?;
+        std::fs::write(path.join("5-1:1.1/bInterfaceClass"),"08")?;
+        assert!(relay_interface_policy(path,"5-1").unwrap_err().to_string().contains("exclusive volume"));
+        Ok(())
+    }
+    #[test]
+    fn relay_port_identity_requires_unique_ready_exact_kernel_device() {
+        let device=Device{busid:"2-7".into(),vendor:"1377".into(),product:"1100".into(),serial:"fixture".into(),name:"Mic".into(),busnum:2,devnum:7,speed:3,blocked:None};
+        let row="hs 0001 006 003 00020007 1 5-1\n";
+        assert_eq!(imported_busid(row,1,&device).unwrap(),"5-1");
+        for invalid in [row.replace("006","005"),row.replace("00020007","00020008"),row.replace("5-1","0-0"),format!("{row}{row}"),row.replace("0001","0002")] {
+            assert!(imported_busid(&invalid,1,&device).is_err(),"Unsafe status accepted: {invalid}");
+        }
+    }
+    #[test]
+    fn targeted_virtual_inventory_retains_storage_and_network_safety_guards() -> Result<()> {
+        use std::os::unix::fs::symlink;
+        let dir=tempfile::tempdir()?;let sys=dir.path();
+        let real=sys.join("devices/platform/vhci_hcd.0/usb5/5-1");
+        for path in [sys.join("bus/usb/devices"),sys.join("class/block"),sys.join("class/net"),real.join("block/sdz")] {std::fs::create_dir_all(path)?;}
+        for (name,value) in [("speed","480"),("busnum","5"),("devnum","1"),("bDeviceClass","00"),("idVendor","1377"),("idProduct","1100"),("serial","fixture"),("product","Mic")] {std::fs::write(real.join(name),value)?;}
+        std::fs::write(real.join("block/sdz/dev"),"8:96")?;
+        symlink(&real,sys.join("bus/usb/devices/5-1"))?;
+        symlink(real.join("block/sdz"),sys.join("class/block/sdz"))?;
+        assert!(inventory_at(sys).is_empty(),"Ordinary inventory must still hide VHCI imports");
+        let blocked=inventory_scan(sys,true,Some("5-1"),Some("42 1 8:96 / /mnt/test rw - ext4 /dev/sdz rw"));
+        assert_eq!(blocked[0].blocked.as_deref(),Some("Mounted storage device"));
+        assert!(inventory_scan(sys,true,Some("5-2"),Some("")).is_empty());
+        assert!(inventory_scan(sys,true,Some("5-1"),Some(""))[0].blocked.is_none());
+        let net=sys.join("class/net/test0");std::fs::create_dir_all(&net)?;std::fs::create_dir_all(real.join("5-1:1.0"))?;
+        symlink(real.join("5-1:1.0"),net.join("device"))?;std::fs::write(net.join("operstate"),"up")?;
+        assert_eq!(inventory_scan(sys,true,Some("5-1"),Some(""))[0].blocked.as_deref(),Some("Active network interface"));
+        Ok(())
+    }
     #[test]
     fn speed_fallback_only_retries_unsupported_superspeed_plus() {
         use std::cell::RefCell;

@@ -37,9 +37,7 @@ struct PairKey {
     destination: String,
     id: String,
 }
-fn pair_key(owner:ObjectId,forward:&Forward)->PairKey {
-    PairKey {owner,source:forward.source.clone(),destination:forward.destination.clone(),id:forward.id.clone()}
-}
+fn pair_key(owner:ObjectId,forward:&Forward)->PairKey {PairKey {owner,source:forward.source.clone(),destination:forward.destination.clone(),id:forward.id.clone()}}
 #[derive(Default)]
 struct Registry {
     waiting: HashMap<
@@ -80,6 +78,7 @@ pub fn router() -> Router<Arc<App>> {
         .route("/api/usb/forwards/{id}", delete(remove))
         .route("/api/usb/client/report", post(report))
         .route("/api/usb/client/action", post(action))
+        .route("/api/usb/client/relay-authorize", post(relay_authorize))
         .route("/api/usb/stream/{id}/{side}", get(stream))
         .layer(DefaultBodyLimit::max(131072))
 }
@@ -105,6 +104,7 @@ fn decode(mut row: Document) -> Result<Forward, bson::de::Error> {
     row.remove("_id");
     row.remove("owner");
     row.remove("expires_at");
+    row.remove("relay_parent");
     bson::from_document(row)
 }
 fn public(row: Document) -> Value {
@@ -113,18 +113,96 @@ fn public(row: Document) -> Value {
         .and_then(|v| serde_json::to_value(v).ok())
         .unwrap_or(Value::Null)
 }
+fn extend_lineage(mut path: Vec<String>, source: &str, destination: &str) -> ApiResult<Vec<String>> {
+    if path.len() < 2 || path.len() >= 5 || path.last().map(String::as_str) != Some(source)
+        || path.iter().any(|id| id == destination)
+        || path.iter().enumerate().any(|(i,id)| path[..i].contains(id)) {
+        return Err(ApiError::bad_request("USB relay would create a cycle or exceed four hops"));
+    }
+    path.push(destination.into()); Ok(path)
+}
+fn lineage_key(owner:ObjectId,id:&str)->String {format!("{}:{id}",owner.to_hex())}
+async fn lineage_path(app: &App, owner: ObjectId, row: &Document) -> ApiResult<Vec<String>> {
+    let mut row = row.clone(); let mut reverse = Vec::new(); let mut seen = std::collections::HashSet::new();
+    let mut downstream:Option<Device>=None;
+    let mut policies=HashMap::<String,Document>::new();
+    for hop in 0..4 {
+        let forward = decode(row.clone()).map_err(|_| unavailable())?;
+        for (endpoint,role) in [(&forward.source,"can_export"),(&forward.destination,"can_import")] {
+            if !policies.contains_key(endpoint) {
+                machine(app,owner,endpoint).await?;
+                policies.insert(endpoint.clone(),role_report(app,owner,endpoint).await?);
+            }
+            if !role_allowed(&policies[endpoint],role) {return Err(unavailable());}
+        }
+        if downstream.as_ref().is_some_and(|device|device.vendor!=forward.device.vendor||device.product!=forward.device.product||device.serial!=forward.device.serial) {return Err(unavailable());}
+        downstream=Some(forward.device.clone());
+        if !seen.insert(forward.id.clone()) || reverse.last().is_some_and(|id| id != &forward.destination) { return Err(unavailable()); }
+        if reverse.is_empty() { reverse.push(forward.destination.clone()); }
+        reverse.push(forward.source.clone());
+        let metadata=app.collection("usb_relay_lineage").find_one(doc! {"_id":lineage_key(owner,&forward.id),"owner":owner}).await?;
+        let mut parent=metadata.as_ref().and_then(|r|r.get_str("parent").ok()).map(str::to_owned);
+        if parent.is_none() {
+            if forward.device.busid.starts_with("0-") { return Err(unavailable()); }
+            // Legacy Windows can re-export a virtual USB device through its OS
+            // driver. Re-evaluate current serial-bearing imports on every auth,
+            // including a permanent rule whose selected device was replugged.
+            let report=app.collection("usb_inventory").find_one(doc! {"_id":oid(&forward.source)?,"owner":owner}).await?;
+            let explicit=report.as_ref().and_then(|r|r.get_document("report").ok()).is_some_and(|r|r.get_array("imports").is_ok());
+            if !explicit {
+                let incoming:Vec<Document>=app.collection("usb_forwards").find(doc! {"owner":owner,"destination":&forward.source,"$and":[current()]}).limit(64).await?.try_collect().await?;
+                let matching:Vec<_>=incoming.into_iter().filter(|r|decode(r.clone()).ok().is_some_and(|p|p.device.vendor==forward.device.vendor&&p.device.product==forward.device.product&&p.device.serial==forward.device.serial)).collect();
+                if matching.len()>1||(!matching.is_empty()&&forward.device.serial.is_empty()){return Err(unavailable());}
+                parent=matching.first().and_then(|r|r.get_str("id").ok()).map(str::to_owned);
+            }
+        }
+        let Some(parent)=parent else {
+            reverse.reverse();
+            if reverse.iter().enumerate().any(|(i,id)| reverse[..i].contains(id)) { return Err(unavailable()); }
+            return Ok(reverse);
+        };
+        if hop == 3 { return Err(unavailable()); }
+        row = app.collection("usb_forwards").find_one(doc! {"owner": owner, "id": parent, "$and": [current()]}).await?.ok_or_else(unavailable)?;
+    }
+    Err(unavailable())
+}
+async fn relay_parent(app: &App, owner: ObjectId, source: &str, destination: &str, device: &Device, report: &Document) -> ApiResult<Option<String>> {
+    let imports = report.get_array("imports").ok();
+    let explicit = imports.and_then(|rows| rows.iter().filter_map(|v|v.as_document()).find(|v|v.get_str("busid")==Ok(device.busid.as_str()))).and_then(|v|v.get_str("upstream_id").ok());
+    let parent = if let Some(id) = explicit {
+        Some(app.collection("usb_forwards").find_one(doc! {"owner": owner, "id": id, "$and": [current()]}).await?.ok_or_else(unavailable)?)
+    } else if device.busid.starts_with("0-") { return Err(unavailable()); }
+    else if imports.is_some() { None }
+    else {
+        // Legacy Windows agents report imported devices as ordinary devices.
+        // Serial-bearing imports may be inferred only from one current match.
+        let rows: Vec<Document> = app.collection("usb_forwards").find(doc! {"owner": owner, "destination": source, "$and": [current()]}).limit(64).await?.try_collect().await?;
+        let matching: Vec<_> = rows.into_iter().filter(|row|decode(row.clone()).ok().is_some_and(|p| p.device.vendor==device.vendor && p.device.product==device.product && p.device.serial==device.serial)).collect();
+        if matching.len() > 1 || (!matching.is_empty() && device.serial.is_empty()) { return Err(ApiError::bad_request("Explicit imported USB lineage is required for this device")); }
+        matching.into_iter().next()
+    };
+    if let Some(row) = parent {
+        let p = decode(row.clone()).map_err(|_| unavailable())?;
+        if p.destination != source || p.device.vendor != device.vendor || p.device.product != device.product || p.device.serial != device.serial { return Err(unavailable()); }
+        extend_lineage(lineage_path(app,owner,&row).await?,source,destination)?;
+        Ok(Some(p.id))
+    } else { Ok(None) }
+}
 async fn plans(app: &App, owner: ObjectId, endpoint: Option<&str>) -> ApiResult<Vec<Document>> {
     let mut filter = doc! {"owner":owner,"$and":[current()]};
     if let Some(id) = endpoint {
         filter.insert("$or", vec![doc! {"source":id}, doc! {"destination":id}]);
     }
-    Ok(app
+    let rows = app
         .collection("usb_forwards")
         .find(filter)
         .limit(64)
         .await?
-        .try_collect()
-        .await?)
+        .try_collect::<Vec<Document>>()
+        .await?;
+    // Keep configured orphan rules visible/removable. Authentication and lease
+    // renewal fail closed when lineage is missing; no raw stream can survive it.
+    Ok(rows)
 }
 async fn inventory(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json<Value>> {
     let owner = user(&app, &headers).await?;
@@ -169,9 +247,25 @@ fn role_allowed(report: &Document, role: &str) -> bool {
         && report.get_bool("supported") == Ok(true)
         && report.get_bool(role).unwrap_or(true)
 }
+async fn role_report(app:&App,owner:ObjectId,id:&str)->ApiResult<Document> {
+    let row=app.collection("usb_inventory").find_one(doc!{"_id":oid(id)?,"owner":owner,"at":{"$gt":DateTime::from_millis(DateTime::now().timestamp_millis()-45000)}})
+        .projection(doc!{"_id":0,"report.enabled":1,"report.supported":1,"report.can_export":1,"report.can_import":1})
+        .await?.ok_or_else(unavailable)?;
+    row.get_document("report").cloned().map_err(|_|unavailable())
+}
 async fn require_role(app: &App, owner: ObjectId, id: &str, role: &str) -> ApiResult<()> {
-    let row=app.collection("usb_inventory").find_one(doc!{"_id":oid(id)?,"owner":owner,"at":{"$gt":DateTime::from_millis(DateTime::now().timestamp_millis()-45000)}}).await?.ok_or_else(unavailable)?;
-    if !row.get_document("report").ok().is_some_and(|r|role_allowed(r,role)){return Err(unavailable());}
+    if !role_allowed(&role_report(app,owner,id).await?,role){return Err(unavailable());}
+    Ok(())
+}
+async fn prune_relay_metadata(app:&App,owner:ObjectId)->ApiResult<()> {
+    let candidates:Vec<Document>=app.collection("usb_relay_lineage").find(doc! {"owner":owner,"expires_at":{"$lte":DateTime::now()}}).limit(64).await?.try_collect().await?;
+    for record in candidates {
+        let Ok(id)=record.get_str("forward_id") else {continue;};
+        let live=app.collection("usb_forwards").find_one(doc! {"owner":owner,"id":id,"$and":[current()]}).await?;
+        if let Some(live)=live {
+            if let Ok(expiry)=live.get_datetime("expires_at") {app.collection("usb_relay_lineage").update_one(doc! {"_id":lineage_key(owner,id),"owner":owner},doc! {"$set":{"expires_at":expiry}}).await?;}
+        } else {app.collection("usb_relay_lineage").delete_one(doc! {"_id":lineage_key(owner,id),"owner":owner}).await?;}
+    }
     Ok(())
 }
 async fn make(
@@ -181,6 +275,7 @@ async fn make(
     persistent: bool,
     requested: Option<&str>,
 ) -> ApiResult<Value> {
+    prune_relay_metadata(app,owner).await?;
     let mut body = body;
     body.source = oid(&body.source)?.to_hex();
     body.destination = oid(&body.destination)?.to_hex();
@@ -211,6 +306,7 @@ async fn make(
         .into_iter()
         .find(|d| d.busid == body.busid && d.blocked.is_none() && d.valid())
         .ok_or_else(unavailable)?;
+    let relay_parent = relay_parent(app, owner, &body.source, &body.destination, &device, report).await?;
     let id = if let Some(id) = requested {
         if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(ApiError::bad_request("Invalid USB session identity"));
@@ -274,6 +370,15 @@ async fn make(
             "This USB device already has a forwarding rule",
         ));
     }
+    // Keep provenance outside the strict Forward document: old gateways and
+    // receiving agents share this collection and must still decode the plan.
+    let mut metadata=doc! {"_id":lineage_key(owner,&id),"forward_id":&id,"owner":owner,"created_at":DateTime::now()};
+    if let Some(parent)=relay_parent {metadata.insert("parent",parent);}
+    if !persistent {metadata.insert("expires_at",DateTime::from_millis(DateTime::now().timestamp_millis()+45000));}
+    if let Err(error)=app.collection("usb_relay_lineage").insert_one(metadata).await {
+        let _=app.collection("usb_forwards").delete_one(doc! {"_id":&key,"id":&id,"owner":owner}).await;
+        return Err(error.into());
+    }
     Ok(json!({"forward":forward}))
 }
 async fn create(
@@ -294,10 +399,14 @@ async fn remove(
     crate::keyboard::same_origin(&app, &headers)?;
     let owner = user(&app, &headers).await?;
     app.collection("usb_forwards")
-        .delete_one(doc! {"owner":owner,"id":id})
+        .delete_one(doc! {"owner":owner,"id":&id})
         .await?;
+    app.collection("usb_relay_lineage").delete_one(doc! {"_id":lineage_key(owner,&id),"owner":owner}).await?;
     Ok(Json(json!({"ok":true})))
 }
+#[derive(Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct Import { busid: String, upstream_id: String }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Report {
@@ -311,9 +420,13 @@ struct Report {
     can_import: Option<bool>,
     devices: Vec<Device>,
     states: Vec<DeviceState>,
+    #[serde(default)]
+    imports: Option<Vec<Import>>,
 }
 async fn report(State(app): State<Arc<App>>, Json(body): Json<Report>) -> ApiResult<Json<Value>> {
-    if body.devices.len() > 128
+    if body.imports.as_ref().is_some_and(|rows| rows.len()>128 || rows.iter().any(|r| !r.busid.starts_with("0-") || !porthub_components::usb::valid_busid(&r.busid) || r.upstream_id.len()!=32 || !r.upstream_id.bytes().all(|b|b.is_ascii_hexdigit()) || !body.devices.iter().any(|d| d.busid==r.busid)) || rows.iter().enumerate().any(|(i,r)| rows[..i].iter().any(|old|old.busid==r.busid)))
+        || body.devices.iter().any(|d| d.busid.starts_with("0-") && !body.imports.as_ref().is_some_and(|imports|imports.iter().any(|r|r.busid==d.busid)))
+        || body.devices.len() > 128
         || body.devices.iter().any(|d| !d.valid())
         || body.states.len() > 64
         || body.states.iter().any(|s| {
@@ -329,14 +442,16 @@ async fn report(State(app): State<Arc<App>>, Json(body): Json<Report>) -> ApiRes
         return Err(unavailable());
     }
     let owner = m.get_object_id("user_id").map_err(|_| unavailable())?;
-    app.collection("usb_inventory").update_one(doc!{"_id":oid(&body.machine_id)?},doc!{"$set":{"owner":owner,"at":DateTime::now(),"report":{"enabled":body.enabled,"supported":body.supported,"can_export":body.can_export.unwrap_or(body.supported),"can_import":body.can_import.unwrap_or(body.supported),"devices":bson::to_bson(&body.devices).map_err(|_|unavailable())?,"states":bson::to_bson(&body.states).map_err(|_|unavailable())?}}}).upsert(true).await?;
+    let mut stored=doc! {"enabled":body.enabled,"supported":body.supported,"can_export":body.can_export.unwrap_or(body.supported),"can_import":body.can_import.unwrap_or(body.supported),"devices":bson::to_bson(&body.devices).map_err(|_|unavailable())?,"states":bson::to_bson(&body.states).map_err(|_|unavailable())?};
+    if let Some(imports)=&body.imports { stored.insert("imports",bson::to_bson(imports).map_err(|_|unavailable())?); }
+    app.collection("usb_inventory").update_one(doc! {"_id":oid(&body.machine_id)?},doc! {"$set":{"owner":owner,"at":DateTime::now(),"report":stored}}).upsert(true).await?;
     let rows = if body.enabled && body.supported {
         plans(&app, owner, Some(&body.machine_id)).await?.into_iter().filter(|r| { let p=decode(r.clone()).ok(); p.is_some_and(|p|if p.source==body.machine_id {body.can_export.unwrap_or(body.supported)}else{body.can_import.unwrap_or(body.supported)}) }).collect()
     } else {
         vec![]
     };
     Ok(Json(
-        json!({"forwards":rows.into_iter().map(public).collect::<Vec<_>>()}),
+        json!({"forwards":rows.into_iter().map(public).collect::<Vec<_>>(),"relay_version":1}),
     ))
 }
 #[derive(Deserialize)]
@@ -385,6 +500,7 @@ async fn action(
             {
                 return Err(unavailable());
             }
+            lineage_path(&app,owner,&row).await?;
             app.collection("usb_forwards").update_one(doc!{"_id":row.get("_id").unwrap().clone()},doc!{"$set":{"expires_at":DateTime::from_millis(DateTime::now().timestamp_millis()+45000)}}).await?;
             return Ok(Json(json!({"forward":public(row)})));
         }
@@ -406,11 +522,26 @@ async fn action(
     let filter = doc! {"owner":owner,"id":&body.id,"persistent":false,"$or":[{"source":&body.machine_id},{"destination":&body.machine_id}]};
     match body.action.as_str() {
         "stop" => {
-            app.collection("usb_forwards").delete_one(filter).await?;
+            let deleted=app.collection("usb_forwards").delete_one(filter).await?;
+            if deleted.deleted_count>0 {app.collection("usb_relay_lineage").delete_one(doc! {"_id":lineage_key(owner,&body.id),"owner":owner}).await?;}
         }
         _ => return Err(ApiError::bad_request("Invalid USB action")),
     };
     Ok(Json(json!({"ok":true})))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RelayAuthorization {machine_id:String,token:String,id:String}
+async fn relay_authorize(State(app):State<Arc<App>>,Json(body):Json<RelayAuthorization>)->ApiResult<Json<Value>> {
+    let machine=machine_client::authenticate(&app,&body.machine_id,&body.token).await?;
+    let owner=machine.get_object_id("user_id").map_err(|_|unavailable())?;
+    let row=app.collection("usb_forwards").find_one(doc! {"owner":owner,"id":&body.id,"source":&body.machine_id,"$and":[current()]}).await?.ok_or_else(unavailable)?;
+    let forward=decode(row.clone()).map_err(|_|unavailable())?;
+    if !forward.device.busid.starts_with("0-"){return Err(unavailable());}
+    lineage_path(&app,owner,&row).await?;
+    let metadata=app.collection("usb_relay_lineage").find_one(doc! {"_id":lineage_key(owner,&body.id),"owner":owner}).await?.ok_or_else(unavailable)?;
+    let parent=metadata.get_str("parent").map_err(|_|unavailable())?;
+    Ok(Json(json!({"relay_version":1,"upstream_id":parent})))
 }
 async fn authorized_stream(
     app: &App,
@@ -427,6 +558,7 @@ async fn authorized_stream(
         .find_one(doc! {"owner":owner,"id":id,"$and":[current()]})
         .await?
         .ok_or_else(unavailable)?;
+    lineage_path(app,owner,&row).await?;
     let p: Forward = decode(row).map_err(|_| unavailable())?;
     if (side == "source" && p.source != machine_id)
         || (side == "destination" && p.destination != machine_id)
@@ -436,8 +568,6 @@ async fn authorized_stream(
     }
     machine(app, owner, &p.source).await?;
     machine(app, owner, &p.destination).await?;
-    require_role(app,owner,&p.source,"can_export").await?;
-    require_role(app,owner,&p.destination,"can_import").await?;
     Ok((owner,p))
 }
 async fn stream(
@@ -464,9 +594,7 @@ async fn stream(
         .max_frame_size(262144)
         .on_upgrade(move |socket| pair(app, key, id, side, machine_id, token, socket)))
 }
-async fn pair_authorized(app:&App,id:&str,machine_id:&str,token:&str,side:&str,key:&PairKey)->bool {
-    authorized_stream(app,id,machine_id,token,side).await.is_ok_and(|(owner,forward)|pair_key(owner,&forward)==*key)
-}
+async fn pair_authorized(app:&App,id:&str,machine_id:&str,token:&str,side:&str,key:&PairKey)->bool {authorized_stream(app,id,machine_id,token,side).await.is_ok_and(|(owner,forward)|pair_key(owner,&forward)==*key)}
 async fn pair(
     app: Arc<App>,
     key: PairKey,
@@ -575,5 +703,16 @@ mod role_tests {
             assert!(report.can_export.unwrap_or(report.supported));
             assert_eq!(report.can_import,if roles.is_empty(){None}else{Some(false)});
         }
+    }
+}
+
+#[cfg(test)] mod relay_lineage_tests {
+    use super::*;
+    #[test] fn acyclic_paths_are_bounded_and_cannot_return_to_an_ancestor() {
+        assert_eq!(extend_lineage(vec!["a".into(),"b".into()],"b","c").ok().unwrap(),vec!["a","b","c"]);
+        assert!(extend_lineage(vec!["a".into(),"b".into()],"b","a").is_err());
+        assert!(extend_lineage(vec!["a".into(),"b".into(),"c".into(),"d".into(),"e".into()],"e","f").is_err());
+        assert!(extend_lineage(vec!["a".into(),"b".into(),"a".into()],"a","c").is_err());
+        assert!(extend_lineage(vec!["a".into(),"b".into()],"wrong","c").is_err());
     }
 }
