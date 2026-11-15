@@ -12,6 +12,8 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
+import uuid
 import subprocess
 import sys
 import tempfile
@@ -47,7 +49,7 @@ def wait_for(predicate, description):
 
 
 
-def assert_helper_has_no_console(pid):
+def assert_console_state(pid, attached=False):
     # The short-lived probe detaches its own console before inspection.
     # Attaching and detaching it sends no input and leaves other attachments intact.
     probe = r"""
@@ -62,18 +64,75 @@ buffer=(wintypes.DWORD*2)()
 # Detach only this disposable probe; the parent and helper are unaffected.
 kernel.FreeConsole()
 assert kernel.GetConsoleProcessList(buffer,2)==0,'Probe could not detach its own console'
+expected=sys.argv[2]=='attached'
 for attempt in range(50):
     if kernel.AttachConsole(int(sys.argv[1])):
         kernel.FreeConsole()
+        if expected:break
         time.sleep(.1)
         continue
     error=ctypes.get_last_error()
-    assert error==6,'Cannot verify helper console state: '+str(error)
-    break
+    assert error==6,'Cannot verify target console state: '+str(error)
+    if not expected:break
+    time.sleep(.1)
 else:
-    raise AssertionError('Automatic desktop helper retained a console')
+    raise AssertionError('Native console attachment did not match '+sys.argv[2])
 """
-    run([sys.executable, "-c", probe, str(pid)], creationflags=subprocess.CREATE_NO_WINDOW)
+    run([sys.executable, "-c", probe, str(pid), "attached" if attached else "detached"], creationflags=subprocess.CREATE_NO_WINDOW)
+
+
+def assert_helper_has_no_console(pid):
+    assert_console_state(pid)
+
+
+def verify_mapping_console_scope(executable):
+    # Isolated local state only: no recovery task, enrollment, USB, or network
+    # destination connection. A fresh console makes a missing detach observable.
+    with tempfile.TemporaryDirectory(prefix="porthub console scope ") as fixture:
+        for hidden in (True, False):
+            root = Path(fixture) / ("hidden" if hidden else "foreground")
+            mappings = root / "mappings"
+            mappings.mkdir(parents=True)
+            env = os.environ.copy()
+            env["PORTHUB_STATE_DIR"] = str(root)
+            with socket.socket() as reserved:
+                reserved.bind(("127.0.0.1", 0))
+                port = reserved.getsockname()[1]
+            if hidden:
+                identity = uuid.uuid4().hex
+                (mappings / (identity + ".json")).write_text(json.dumps({
+                    "id": identity, "recover": False,
+                    "spec": {"kind": "forward", "target": "127.0.0.1:9", "bind": "127.0.0.1", "port": port},
+                }))
+                args = [str(executable), "mapping-worker", identity]
+            else:
+                args = [str(executable), "forward", "127.0.0.1:9", "--bind", "localhost", "--local-port", str(port)]
+            process = subprocess.Popen(args, env=env, creationflags=subprocess.CREATE_NEW_CONSOLE,
+                                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                def ready():
+                    if process.poll() is not None:
+                        raise AssertionError("Isolated mapping exited before binding")
+                    for path in mappings.glob("*.status"):
+                        try:
+                            if json.loads(path.read_text())["state"] == "running":
+                                return True
+                        except (OSError, ValueError, KeyError):
+                            pass  # Atomic status publication can race a reader.
+                    return False
+                wait_for(ready, "isolated mapping listener")
+                assert_console_state(process.pid, attached=not hidden)
+            finally:
+                # Remove only this fixture's desired state and let its worker
+                # close normally; terminate only its own PID if it fails to exit.
+                for path in mappings.glob("*.json"):
+                    path.unlink()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.terminate()
+                    process.wait(timeout=10)
+    print("PASS hidden mapping worker detaches and foreground forward retains its console", flush=True)
 
 
 def wait_keyboard_image(executable):
@@ -156,6 +215,11 @@ def main():
     ps("if (Get-Service -Name 'porthub-*' -ErrorAction SilentlyContinue) { exit 1 }")
     ps("$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; "
        "if(Get-ScheduledTask -TaskName ('PortHubKeyboard-'+$sid) -ErrorAction SilentlyContinue){throw 'Existing desktop task'}")
+    firewall_fixture = str(repo / "scripts/test-windows-usb-firewall.ps1").replace("'", "''")
+    firewall_rule = str(repo / "crates/porthub-agent/src/usb/windows_usb_direct_rule.ps1").replace("'", "''")
+    firewall_executable = str(source).replace("'", "''")
+    ps("& ([ScriptBlock]::Create([IO.File]::ReadAllText('" + firewall_fixture + "'))) "
+       "-RuleScript ([IO.File]::ReadAllText('" + firewall_rule + "')) -Executable '" + firewall_executable + "'")
     registry = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
     with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, registry) as key:
         old_path, path_type = winreg.QueryValueEx(key, "Path")
@@ -260,6 +324,7 @@ def main():
                 print("PASS actual installer, SCM and authenticated control:", shell, flush=True)
         expected = subprocess.check_output([str(source), "--version"], text=True).strip()
         assert subprocess.check_output([str(cli), "--version"], text=True).strip() == expected
+        verify_mapping_console_scope(cli)
         assert all(v == expected.removeprefix("porthub ") for v in syncs), "Wrong installed version"
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, registry) as key:
             machine_path, _ = winreg.QueryValueEx(key, "Path")

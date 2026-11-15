@@ -1323,7 +1323,13 @@ async fn main() -> Result<()> {
         Some(Command::Proxy {command})=>porthub_agent::proxy_cli::run(command,cancel).await,
         Some(Command::Forward(args)) => porthub_agent::forward::run(args,cancel).await,
         Some(Command::MappingSupervisor) => porthub_agent::mapping_jobs::supervise(cancel).await,
-        Some(Command::MappingWorker { id }) => porthub_agent::mapping_jobs::worker(&id,cancel).await,
+        Some(Command::MappingWorker { id }) => {
+            // Only this hidden background command detaches. Foreground
+            // `forward` uses worker() directly and retains its user's terminal.
+            #[cfg(windows)]
+            unsafe { windows_sys::Win32::System::Console::FreeConsole(); }
+            porthub_agent::mapping_jobs::worker(&id,cancel).await
+        },
         Some(Command::Start(args)) => {
             tenant_action(args, porthub_agent::service::Action::Start).await
         }
