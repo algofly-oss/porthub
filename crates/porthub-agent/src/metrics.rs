@@ -148,7 +148,7 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
 // Older gateways reject unknown report fields. Keep basic readings flowing while
 // periodically checking whether the gateway has gained the extended schema.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ReportFormat { Modern, WithoutGpuDetails, Basic }
+enum ReportFormat { Modern, WithoutExtendedDetails, Basic }
 struct ReportCompatibility { format: ReportFormat, until: std::time::Instant }
 async fn upload<F, Fut>(
     body: serde_json::Value,
@@ -161,12 +161,12 @@ where
 {
     if legacy_until.as_ref().is_some_and(|saved| saved.until <= std::time::Instant::now()) { *legacy_until = None; }
     let initial = legacy_until.as_ref().map(|saved| saved.format).unwrap_or(ReportFormat::Modern);
-    let has_gpu_details = body["sample"]["gpus"].as_array().is_some_and(|gpus| gpus.iter().any(|gpu| ["shared_memory", "shared_memory_capacity", "integrated"].iter().any(|key| gpu.get(*key).is_some())));
+    let has_extended_details = body["sample"]["drive_health"].as_array().is_some_and(|drives| drives.iter().any(|drive| ["reported_uncorrectable_errors", "lifetime_read_bytes", "lifetime_written_bytes"].iter().any(|key| drive.get(*key).is_some()))) || body["sample"]["gpus"].as_array().is_some_and(|gpus| gpus.iter().any(|gpu| ["shared_memory", "shared_memory_capacity", "integrated"].iter().any(|key| gpu.get(*key).is_some())));
     let mut format = initial;
     loop {
         let report = match format {
             ReportFormat::Modern => body.clone(),
-            ReportFormat::WithoutGpuDetails => gpu_legacy_report(body.clone()),
+            ReportFormat::WithoutExtendedDetails => extended_legacy_report(body.clone()),
             ReportFormat::Basic => legacy_report(body.clone()),
         };
         match send(report).await {
@@ -178,13 +178,18 @@ where
                 return Ok(());
             }
             Err(crate::control::Failure::Rejected(400 | 422)) if format != ReportFormat::Basic => {
-                format = if format == ReportFormat::Modern && has_gpu_details { ReportFormat::WithoutGpuDetails } else { ReportFormat::Basic };
+                format = if format == ReportFormat::Modern && has_extended_details { ReportFormat::WithoutExtendedDetails } else { ReportFormat::Basic };
             }
             Err(error) => return Err(error),
         }
     }
 }
-fn gpu_legacy_report(mut body: serde_json::Value) -> serde_json::Value {
+fn extended_legacy_report(mut body: serde_json::Value) -> serde_json::Value {
+    if let Some(drives) = body["sample"]["drive_health"].as_array_mut() {
+        for drive in drives.iter_mut().filter_map(|d| d.as_object_mut()) {
+            for key in ["reported_uncorrectable_errors", "lifetime_read_bytes", "lifetime_written_bytes"] { drive.remove(key); }
+        }
+    }
     if let Some(gpus) = body.get_mut("sample").and_then(|s| s.get_mut("gpus")).and_then(|g| g.as_array_mut()) {
         for gpu in gpus {
             if let Some(gpu) = gpu.as_object_mut() {
@@ -195,7 +200,7 @@ fn gpu_legacy_report(mut body: serde_json::Value) -> serde_json::Value {
     body
 }
 fn legacy_report(body: serde_json::Value) -> serde_json::Value {
-    let mut body = gpu_legacy_report(body);
+    let mut body = extended_legacy_report(body);
     if let Some(sample) = body.get_mut("sample").and_then(|v| v.as_object_mut()) {
         sample.remove("disks");
         sample.remove("drive_health");
@@ -280,6 +285,18 @@ mod tests {
         assert_eq!(readings[0].memory.as_ref().unwrap().used, 1073741824);
         assert_eq!(readings[1].temperature, None);
         assert_eq!(readings[1].fan_speed, None);
+    }
+    #[tokio::test]
+    async fn drive_detail_fallback_keeps_supported_health_on_old_gateways() {
+        let body=serde_json::json!({"sample":{"drive_health":[{"id":"drive","status":"warning","reported_uncorrectable_errors":2,"lifetime_read_bytes":512000}]}});
+        let mut sent=Vec::new();let mut until=None;
+        upload(body,&mut until,|report|{
+            let unsupported=report["sample"]["drive_health"][0].get("reported_uncorrectable_errors").is_some();sent.push(report);
+            std::future::ready(if unsupported{Err(crate::control::Failure::Rejected(422))}else{Ok(())})
+        }).await.unwrap();
+        assert_eq!(sent.len(),2);
+        assert_eq!(sent[1]["sample"]["drive_health"][0]["status"],"warning");
+        assert!(sent[1]["sample"]["drive_health"][0].get("lifetime_read_bytes").is_none());
     }
     #[tokio::test]
     async fn gpu_detail_fallback_preserves_drive_history_and_handles_gateway_changes() {

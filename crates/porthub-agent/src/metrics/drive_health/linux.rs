@@ -1,3 +1,5 @@
+#[path = "asmedia.rs"]
+mod asmedia;
 use super::*;
 use std::{
     fs::{File, OpenOptions},
@@ -8,6 +10,22 @@ fn value(path: &Path, name: &str) -> String {
         .unwrap_or_default()
         .trim()
         .to_owned()
+}
+// Hyper-V/WSL VMBus disks expose virtual block storage, not a physical drive's
+// native SMART controller. Classify by the kernel bus/driver, never model text.
+fn virtual_disk_bus(path: &Path) -> bool {
+    let Ok(path) = std::fs::canonicalize(path) else {
+        return true;
+    };
+    path.ancestors().any(|p| {
+        [("subsystem", "vmbus"), ("driver", "hv_storvsc")]
+            .iter()
+            .any(|(link, name)| {
+                std::fs::read_link(p.join(link))
+                    .ok()
+                    .is_some_and(|target| target.file_name().is_some_and(|n| n == *name))
+            })
+    })
 }
 pub(super) fn inventory() -> Vec<Device> {
     let Ok(entries) = std::fs::read_dir("/sys/class/block") else {
@@ -23,6 +41,7 @@ pub(super) fn inventory() -> Vec<Device> {
                 || name.starts_with("nvme")
                 || name.starts_with("mmcblk"))
             || !path.join("device").exists()
+            || virtual_disk_bus(&path)
         {
             continue;
         }
@@ -53,6 +72,10 @@ pub(super) fn inventory() -> Vec<Device> {
             if nvme { "nvme" } else { "ata" },
             capacity,
         );
+        // Keep legacy physical identity stable; only the reported protocol changes.
+        if !nvme && asmedia::supported(&device.path) {
+            device.protocol = "nvme_usb".into();
+        }
         let stat = value(&path, "stat")
             .split_whitespace()
             .filter_map(|n| n.parse::<u64>().ok())
@@ -229,6 +252,9 @@ fn ata_command(
     Ok(registers.unwrap_or_default())
 }
 pub(super) fn probe(device: &Device) -> Result<Reading, String> {
+    if device.protocol == "nvme_usb" {
+        return asmedia::probe(device);
+    }
     if device.protocol == "nvme" {
         let mut bytes = [0; 512];
         nvme_command(device, 2, (127 << 16) | 2, &mut bytes)?;
@@ -282,6 +308,9 @@ pub(super) fn probe(device: &Device) -> Result<Reading, String> {
     )
 }
 pub(super) fn short_test(device: &Device, reading: &Reading) -> Result<(), String> {
+    if device.protocol == "nvme_usb" {
+        return Err("USB NVMe short self-tests are not supported".into());
+    }
     if !reading.short_test_supported {
         return Err("Short self-test unsupported".into());
     }
@@ -289,5 +318,46 @@ pub(super) fn short_test(device: &Device, reading: &Reading) -> Result<(), Strin
         nvme_command(device, 0x14, 1, &mut [])
     } else {
         ata_command(device, 0xb0, 0xd4, 1, &mut []).map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod virtual_bus_tests {
+    use super::*;
+    #[test]
+    fn excludes_kernel_vmbus_ancestry_without_model_heuristics() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!(
+            "porthub-vmbus-fixture-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        struct Clean(PathBuf);
+        impl Drop for Clean {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _clean = Clean(root.clone());
+        let block = root.join("controller/host0/target0/block/sda");
+        std::fs::create_dir_all(&block).unwrap();
+        assert!(!virtual_disk_bus(&block));
+        symlink("/sys/bus/vmbus", root.join("controller/subsystem")).unwrap();
+        assert!(virtual_disk_bus(&block));
+        std::fs::remove_file(root.join("controller/subsystem")).unwrap();
+        symlink(
+            "/sys/bus/vmbus/drivers/hv_storvsc",
+            root.join("controller/driver"),
+        )
+        .unwrap();
+        assert!(virtual_disk_bus(&block));
+        std::fs::remove_file(root.join("controller/driver")).unwrap();
+        symlink("/sys/bus/usb", root.join("controller/subsystem")).unwrap();
+        assert!(!virtual_disk_bus(&block));
+        assert!(virtual_disk_bus(&root.join("missing")));
     }
 }

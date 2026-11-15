@@ -69,6 +69,13 @@ pub struct DriveHealth {
     pub reallocated_sectors: Option<u64>,
     pub pending_sectors: Option<u64>,
     pub uncorrectable_sectors: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_uncorrectable_errors: Option<u64>,
+    /// NVMe rounded-up thousands of 512-byte units; approximate lifetime host bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifetime_read_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifetime_written_bytes: Option<u64>,
     pub short_test_supported: bool,
     pub self_test: String,
     pub last_test_started: Option<i64>,
@@ -103,6 +110,9 @@ impl DriveHealth {
                 self.reallocated_sectors,
                 self.pending_sectors,
                 self.uncorrectable_sectors,
+                self.reported_uncorrectable_errors,
+                self.lifetime_read_bytes,
+                self.lifetime_written_bytes,
             ]
             .into_iter()
             .flatten()

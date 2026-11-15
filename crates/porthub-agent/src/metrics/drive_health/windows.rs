@@ -13,7 +13,7 @@ fn open(path: &Path, write: bool) -> Result<File, String> {
         .write(write)
         .share_mode(3)
         .open(path)
-        .map_err(|_| "Native storage access is unavailable".into())
+        .map_err(|error| format!("Native storage access unavailable ({error}); administrator access may be required"))
 }
 fn io(file: &File, code: u32, input: &[u8], output: &mut [u8]) -> Result<usize, String> {
     let mut returned = 0u32;
@@ -30,7 +30,7 @@ fn io(file: &File, code: u32, input: &[u8], output: &mut [u8]) -> Result<usize, 
         )
     };
     if ok == 0 {
-        return Err("Native SMART request is unsupported or unavailable".into());
+        return Err(format!("Native SMART request unsupported or unavailable ({})", std::io::Error::last_os_error()));
     }
     Ok(returned as usize)
 }

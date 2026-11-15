@@ -109,6 +109,9 @@ impl Device {
             reallocated_sectors: None,
             pending_sectors: None,
             uncorrectable_sectors: None,
+            reported_uncorrectable_errors: None,
+            lifetime_read_bytes: None,
+            lifetime_written_bytes: None,
             short_test_supported: false,
             self_test: "unsupported".into(),
             last_test_started: None,
@@ -130,6 +133,9 @@ struct Reading {
     reallocated_sectors: Option<u64>,
     pending_sectors: Option<u64>,
     uncorrectable_sectors: Option<u64>,
+    reported_uncorrectable_errors: Option<u64>,
+    lifetime_read_bytes: Option<u64>,
+    lifetime_written_bytes: Option<u64>,
     short_test_supported: bool,
     self_test: String,
     reasons: Vec<String>,
@@ -150,6 +156,9 @@ impl Reading {
         out.reallocated_sectors = self.reallocated_sectors;
         out.pending_sectors = self.pending_sectors;
         out.uncorrectable_sectors = self.uncorrectable_sectors;
+        out.reported_uncorrectable_errors = self.reported_uncorrectable_errors;
+        out.lifetime_read_bytes = self.lifetime_read_bytes;
+        out.lifetime_written_bytes = self.lifetime_written_bytes;
         out.short_test_supported = self.short_test_supported;
         out.self_test = if self.self_test.is_empty() {
             "not_run".into()
@@ -455,6 +464,15 @@ fn counter(data: &[u8]) -> u64 {
         u64::from_le_bytes(bytes).min(i64::MAX as u64)
     }
 }
+fn nvme_bytes(data: &[u8]) -> Option<u64> {
+    let units = u128::from_le_bytes(data.try_into().ok()?);
+    let bytes = units.checked_mul(512_000)?;
+    (units > 0 && bytes <= i64::MAX as u128).then_some(bytes as u64)
+}
+fn valid_ata_sector(data: &[u8]) -> bool {
+    data.len() == 512 && data.iter().any(|b| *b != 0)
+        && data.iter().fold(0u8, |sum, b| sum.wrapping_add(*b)) == 0
+}
 fn nvme(data: &[u8]) -> Result<Reading, String> {
     if data.len() < 512 || data.iter().all(|b| *b == 0) {
         return Err("Incomplete NVMe health log".into());
@@ -471,6 +489,8 @@ fn nvme(data: &[u8]) -> Result<Reading, String> {
         power_cycles: Some(counter(&data[112..128])),
         unsafe_shutdowns: Some(counter(&data[144..160])),
         media_errors: Some(counter(&data[160..176])),
+        lifetime_read_bytes: nvme_bytes(&data[32..48]),
+        lifetime_written_bytes: nvme_bytes(&data[48..64]),
         ..Default::default()
     };
     if data[0] & 0xfd != 0 {
@@ -492,7 +512,7 @@ fn nvme(data: &[u8]) -> Result<Reading, String> {
             .reasons
             .push("SSD is nearing its rated endurance".into());
     }
-    if data[3] < data[4] {
+    if reading.available_spare.zip(reading.spare_threshold).is_some_and(|(spare, threshold)| spare < threshold) {
         reading.critical = true;
         reading
             .reasons
@@ -511,6 +531,9 @@ fn ata(data: &[u8], thresholds: Option<&[u8]>, log: Option<&[u8]>) -> Result<Rea
         || data.iter().fold(0u8, |sum, b| sum.wrapping_add(*b)) != 0
     {
         return Err("Incomplete or corrupt ATA SMART data".into());
+    }
+    if !data[2..362].chunks_exact(12).any(|a| a[0] != 0 && a[3] > 0) {
+        return Err("ATA bridge returned no usable SMART attributes".into());
     }
     let mut out = Reading {
         short_test_supported: data[367] & 0x10 != 0,
@@ -537,12 +560,13 @@ fn ata(data: &[u8], thresholds: Option<&[u8]>, log: Option<&[u8]>) -> Result<Rea
                     out.temperature = Some(temp);
                 }
             }
+            187 => out.reported_uncorrectable_errors = Some(raw),
             197 => out.pending_sectors = Some(raw),
             198 => out.uncorrectable_sectors = Some(raw),
             _ => {}
         }
         if let Some(limit) = thresholds
-            .filter(|t| t.len() == 512)
+            .filter(|t| valid_ata_sector(t))
             .and_then(|t| t[2..362].chunks_exact(12).find(|a| a[0] == id))
             .map(|t| t[1])
             .filter(|n| *n > 0)
@@ -555,6 +579,7 @@ fn ata(data: &[u8], thresholds: Option<&[u8]>, log: Option<&[u8]>) -> Result<Rea
         }
     }
     for (value, label) in [
+        (out.reported_uncorrectable_errors, "Historical uncorrectable command errors recorded; inspect changes over time"),
         (out.reallocated_sectors, "Reallocated sectors recorded"),
         (out.pending_sectors, "Pending sectors need attention"),
         (out.uncorrectable_sectors, "Uncorrectable sectors recorded"),
@@ -566,7 +591,7 @@ fn ata(data: &[u8], thresholds: Option<&[u8]>, log: Option<&[u8]>) -> Result<Rea
     if out.temperature.is_some_and(|v| v >= 60.) {
         out.reasons.push("Drive temperature is elevated".into());
     }
-    if let Some(log) = log.filter(|b| b.len() == 512 && out.self_test != "running") {
+    if let Some(log) = log.filter(|b| valid_ata_sector(b) && out.self_test != "running") {
         let index = log[508] as usize;
         if (1..=21).contains(&index) {
             let status = log[2 + (index - 1) * 24 + 1] >> 4;
@@ -637,6 +662,8 @@ mod tests {
         let mut log = [0; 512];
         log[508] = 1;
         log[3] = 0x70;
+        checksum(&mut limits);
+        checksum(&mut log);
         let failed = ata(&data, Some(&limits), Some(&log))
             .unwrap()
             .apply(&device("ata-a"), 1);
@@ -644,6 +671,43 @@ mod tests {
         assert_eq!(failed.self_test, "failed");
         data[20] = 1;
         assert!(ata(&data, None, None).is_err());
+    }
+    #[test]
+    fn historical_reported_errors_are_warning_not_failed_sectors() {
+        let mut data = [0; 512]; data[0] = 1; data[2] = 187; data[5] = 98; data[7] = 2; checksum(&mut data);
+        let reading = ata(&data, None, None).unwrap().apply(&device("ata"), 1);
+        assert_eq!(reading.reported_uncorrectable_errors, Some(2));
+        assert_eq!(reading.uncorrectable_sectors, None);
+        assert_eq!(reading.status, DriveStatus::Warning);
+        let mut corrupt = [0; 512]; corrupt[2] = 187; corrupt[3] = 99;
+        assert!(!ata(&data, Some(&corrupt), Some(&corrupt)).unwrap().critical);
+        checksum(&mut corrupt);
+        assert!(ata(&data, Some(&corrupt), None).unwrap().critical);
+    }
+    #[test]
+    fn empty_attribute_pages_and_corrupt_optional_blocks_are_not_health_evidence() {
+        let mut data = [0; 512]; data[0] = 1; checksum(&mut data);
+        assert!(ata(&data, None, None).is_err());
+        data[2] = 9; data[5] = 100; data[7] = 1; checksum(&mut data);
+        let mut log = [0; 512]; log[508] = 1; log[3] = 0x70;
+        assert_eq!(ata(&data, None, Some(&log)).unwrap().self_test, "not_run");
+    }
+    #[test]
+    fn invalid_nvme_spare_values_do_not_invent_a_threshold_failure() {
+        let mut data = [0; 512]; data[1..3].copy_from_slice(&300u16.to_le_bytes());
+        data[3] = 100; data[4] = 255;
+        let reading = nvme(&data).unwrap();
+        assert_eq!(reading.spare_threshold, None);
+        assert!(!reading.critical);
+        data[3] = 255; data[4] = 10;
+        assert_eq!(nvme(&data).unwrap().available_spare, None);
+    }
+    #[test]
+    fn lifetime_nvme_bytes_are_approximate_bounded_and_zero_is_not_reported() {
+        assert_eq!(nvme_bytes(&0u128.to_le_bytes()), None);
+        assert_eq!(nvme_bytes(&43767976u128.to_le_bytes()), Some(22409203712000));
+        assert_eq!(nvme_bytes(&u128::MAX.to_le_bytes()), None);
+        assert_eq!(nvme_bytes(&(i64::MAX as u128).to_le_bytes()), None);
     }
     #[test]
     fn hotplug_keeps_hardware_identity_and_marks_removed_drive_unknown() {
@@ -702,6 +766,23 @@ mod tests {
                 }
                 Err(reason) => println!("{} unavailable: {reason}", drive.path.display()),
             }
+        }
+    }
+}
+
+#[cfg(all(test,any(target_os="linux",target_os="macos",windows)))]
+mod readonly_hardware_diagnostics {
+    use super::*;
+    #[test]
+    #[ignore="Explicit read-only hardware health diagnostic; never starts self-tests"]
+    fn physical_drive_health_without_self_tests() {
+        assert_eq!(std::env::var("PORTHUB_SMART_READONLY_PROBE").as_deref(),Ok("1"),"Explicit read-only probe opt-in required");
+        for device in platform::inventory() {
+            let at=now();
+            let snapshot=if device.in_use {let mut value=device.empty(at);value.reasons.push("Device currently forwarded; source SMART skipped".into());value}
+            else if device.asleep {let mut value=device.empty(at);value.status=DriveStatus::Sleeping;value.reasons.push("Drive sleeping; read-only probe did not wake it".into());value}
+            else {match platform::probe(&device){Ok(reading)=>reading.apply(&device,at),Err(error)=>{let mut value=device.empty(at);value.reasons.push(error);value}}};
+            println!("{}",serde_json::json!({"device":device.path,"health":snapshot}));
         }
     }
 }

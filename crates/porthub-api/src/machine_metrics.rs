@@ -89,7 +89,7 @@ async fn report(State(app): State<Arc<App>>, Json(body): Json<Report>) -> ApiRes
         .await?;
     let now = DateTime::now();
     let minute = now.timestamp_millis() / 60000;
-    let (sample, gpu_memory_details) = storage_sample(&body.sample)
+    let (sample, gpu_memory_details, drive_details) = storage_sample(&body.sample)
         .map_err(|_| ApiError::bad_request("Invalid metrics"))?;
     let previous = app
         .collection("machine_metrics_latest")
@@ -100,7 +100,7 @@ async fn report(State(app): State<Arc<App>>, Json(body): Json<Report>) -> ApiRes
         .as_ref()
         .and_then(|r| r.get_document("sample").ok())
         .and_then(|s| s.get_array("drive_health").ok());
-    let current = doc! {"machine_id":id,"owner_id":owner,"at":now,"sample":sample,"gpu_memory_details":gpu_memory_details};
+    let current = doc! {"machine_id":id,"owner_id":owner,"at":now,"sample":sample,"gpu_memory_details":gpu_memory_details,"drive_details":drive_details};
     // SMART is sampled much less often than utilization. Keep one immutable
     // history point per drive observation/topology event, not every 15s upload.
     for drive in &body.sample.drive_health {
@@ -112,11 +112,11 @@ async fn report(State(app): State<Arc<App>>, Json(body): Json<Report>) -> ApiRes
         }) {
             continue;
         }
-        let snapshot =
-            bson::to_document(drive).map_err(|_| ApiError::bad_request("Invalid drive health"))?;
+        let mut snapshot = bson::to_document(drive).map_err(|_| ApiError::bad_request("Invalid drive health"))?;
+        let details = strip_drive_details(&mut snapshot);
         app.collection("machine_drive_health_history").update_one(
             doc!{"_id":format!("{}:{}:{}",id.to_hex(),drive.id,drive.observed_at)},
-            doc!{"$setOnInsert":{"machine_id":id,"owner_id":owner,"drive_id":&drive.id,"at":now,"snapshot":snapshot,
+            doc!{"$setOnInsert":{"machine_id":id,"owner_id":owner,"drive_id":&drive.id,"at":now,"snapshot":snapshot,"details":details,
                 "expires_at":DateTime::from_millis(now.timestamp_millis()+DRIVE_RETENTION)}}).upsert(true).await?;
     }
     // Advance the cache marker only after durable SMART history succeeds. A
@@ -126,6 +126,7 @@ async fn report(State(app): State<Arc<App>>, Json(body): Json<Report>) -> ApiRes
         .upsert(true)
         .await?;
     let mut retained = current;
+    retained.remove("drive_details");
     if let Ok(sample) = retained.get_document_mut("sample") {
         sample.remove("drive_health");
     }
@@ -143,8 +144,8 @@ async fn report(State(app): State<Arc<App>>, Json(body): Json<Report>) -> ApiRes
     Ok(Json(json!({"ok":true})))
 }
 // Keep the strict legacy Sample in storage readable by rolling/rollback
-// gateways. New GPU details live beside it in the same atomic document.
-fn storage_sample(sample: &Sample) -> Result<(Document, Vec<Document>), bson::ser::Error> {
+// gateways. New GPU and drive details live beside it in the same atomic document.
+fn storage_sample(sample: &Sample) -> Result<(Document, Vec<Document>, Vec<Document>), bson::ser::Error> {
     let mut document = bson::to_document(sample)?;
     let mut details = Vec::new();
     if let Ok(gpus) = document.get_array_mut("gpus") {
@@ -162,7 +163,35 @@ fn storage_sample(sample: &Sample) -> Result<(Document, Vec<Document>), bson::se
             }
         }
     }
-    Ok((document, details))
+    let mut drives = Vec::new();
+    if let Ok(readings) = document.get_array_mut("drive_health") {
+        for drive in readings.iter_mut().filter_map(|v| v.as_document_mut()) {
+            let mut extra = strip_drive_details(drive);
+            if !extra.is_empty() {
+                extra.insert("id", drive.get_str("id").unwrap_or_default());
+                extra.insert("observed_at", drive.get("observed_at").cloned().unwrap_or(bson::Bson::Null));
+                drives.push(extra);
+            }
+        }
+    }
+    Ok((document, details, drives))
+}
+const DRIVE_DETAIL_KEYS: [&str; 3] = ["reported_uncorrectable_errors", "lifetime_read_bytes", "lifetime_written_bytes"];
+fn strip_drive_details(drive: &mut Document) -> Document {
+    let mut extra = Document::new();
+    for key in DRIVE_DETAIL_KEYS {
+        if let Some(value) = drive.remove(key) { extra.insert(key, value); }
+    }
+    extra
+}
+fn drive_from_storage(snapshot: &Document, details: Option<&Document>) -> Option<porthub_components::metrics::DriveHealth> {
+    let original: porthub_components::metrics::DriveHealth = bson::from_document(snapshot.clone()).ok()?;
+    let mut merged = snapshot.clone();
+    if let Some(details) = details {
+        for key in DRIVE_DETAIL_KEYS { if let Some(value) = details.get(key) { merged.insert(key, value.clone()); } }
+    }
+    let value: porthub_components::metrics::DriveHealth = match bson::from_document(merged) { Ok(value) => value, Err(_) => return Some(original) };
+    Some(if value.valid() { value } else { original })
 }
 fn sample_from_row(row: &Document) -> Option<Sample> {
     let original: Sample = bson::from_document(row.get_document("sample").ok()?.clone()).ok()?;
@@ -179,6 +208,14 @@ fn sample_from_row(row: &Document) -> Option<Sample> {
                 if let Some(value) = extra.get(key) { merged.insert(key, value.clone()); }
             }
             if let Ok(reading) = bson::from_document(merged) { *gpu = reading; }
+        }
+    }
+    if let Ok(details) = row.get_array("drive_details") {
+        for drive in &mut sample.drive_health {
+            let extra = details.iter().filter_map(|v| v.as_document()).find(|d| d.get_str("id").ok() == Some(drive.id.as_str()) && d.get_i64("observed_at").ok() == Some(drive.observed_at));
+            if let Ok(snapshot) = bson::to_document(&drive) {
+                if let Some(restored) = drive_from_storage(&snapshot, extra) { *drive = restored; }
+            }
         }
     }
     Some(if sample.valid() { sample } else { original })
@@ -387,8 +424,8 @@ async fn drive_history(
             row.get_datetime("at"),
             row.get_document("snapshot"),
         ) {
-            if let Ok(snapshot) =
-                bson::from_document::<porthub_components::metrics::DriveHealth>(snapshot.clone())
+            if let Some(snapshot) =
+                drive_from_storage(snapshot, row.get_document("details").ok())
             {
                 groups
                     .entry(drive.into())
@@ -423,12 +460,11 @@ async fn drive_history(
         .await?;
     let drives = latest
         .as_ref()
-        .and_then(|r| r.get_document("sample").ok())
-        .and_then(|s| s.get_array("drive_health").ok())
-        .cloned()
+        .and_then(sample_from_row)
+        .map(|sample| sample.drive_health)
         .unwrap_or_default();
     Ok(Json(
-        json!({"drives":bson::from_bson::<Value>(bson::Bson::Array(drives)).unwrap_or_else(|_|json!([])),"history":history,"days":days,"retention_days":90,"scan_interval_seconds":60,"smart_interval_minutes":30,"short_test_interval_days":7,"truncated":rows.len()>=limit as usize}),
+        json!({"drives":drives,"history":history,"days":days,"retention_days":90,"scan_interval_seconds":60,"smart_interval_minutes":30,"short_test_interval_days":7,"truncated":rows.len()>=limit as usize}),
     ))
 }
 
@@ -448,10 +484,30 @@ mod gpu_storage_tests {
     }
 
     #[test]
+    fn drive_details_round_trip_without_breaking_strict_legacy_snapshots() {
+        let drive = serde_json::json!({"id":"a".repeat(64),"name":"Toshiba","protocol":"ata","capacity":1000,"present":true,"status":"warning","observed_at":1000,"checked_at":1000,"temperature":31,"percentage_used":null,"available_spare":null,"spare_threshold":null,"power_on_hours":6790,"power_cycles":1933,"unsafe_shutdowns":null,"media_errors":null,"reallocated_sectors":0,"pending_sectors":0,"uncorrectable_sectors":null,"short_test_supported":false,"self_test":"not_run","last_test_started":null,"next_test_at":null,"reasons":[],"reported_uncorrectable_errors":2,"lifetime_read_bytes":22409203712000u64});
+        let mut original = reading(); original.drive_health = vec![serde_json::from_value(drive).unwrap()];
+        let (sample, gpu, details) = storage_sample(&original).unwrap();
+        let stored = sample.get_array("drive_health").unwrap()[0].as_document().unwrap();
+        for key in DRIVE_DETAIL_KEYS { assert!(!stored.contains_key(key)); }
+        assert!(bson::from_document::<Sample>(sample.clone()).unwrap().valid());
+        let restored = sample_from_row(&doc! {"sample":sample.clone(),"gpu_memory_details":gpu,"drive_details":details.clone()}).unwrap();
+        assert_eq!(restored.drive_health[0].reported_uncorrectable_errors,Some(2));
+        assert_eq!(restored.drive_health[0].lifetime_read_bytes,Some(22409203712000));
+        assert_eq!(sample_from_row(&doc! {"sample":sample.clone()}).unwrap().drive_health[0].reported_uncorrectable_errors,None);
+        let mut wrong = details; wrong[0].insert("observed_at",999i64);
+        assert_eq!(sample_from_row(&doc! {"sample":sample,"drive_details":wrong}).unwrap().drive_health[0].reported_uncorrectable_errors,None);
+        let mut snapshot = bson::to_document(&original.drive_health[0]).unwrap();
+        let extra = strip_drive_details(&mut snapshot);
+        assert_eq!(drive_from_storage(&snapshot,Some(&extra)).unwrap().reported_uncorrectable_errors,Some(2));
+        let mut invalid = extra; invalid.insert("lifetime_read_bytes",-1i64);
+        assert_eq!(drive_from_storage(&snapshot,Some(&invalid)).unwrap().reported_uncorrectable_errors,None);
+    }
+    #[test]
     fn shared_gpu_details_round_trip_without_polluting_legacy_storage() {
         let original = reading();
         assert!(original.valid());
-        let (sample, details) = storage_sample(&original).unwrap();
+        let (sample, details, _) = storage_sample(&original).unwrap();
         let legacy_gpu = sample.get_array("gpus").unwrap()[0].as_document().unwrap();
         for key in ["shared_memory", "shared_memory_capacity", "integrated"] {
             assert!(!legacy_gpu.contains_key(key));
@@ -466,7 +522,7 @@ mod gpu_storage_tests {
 
     #[test]
     fn old_rows_and_mismatched_adapters_never_inherit_shared_memory() {
-        let (sample, mut details) = storage_sample(&reading()).unwrap();
+        let (sample, mut details, _) = storage_sample(&reading()).unwrap();
         assert!(sample_from_row(&doc! {"sample":sample.clone()}).unwrap().gpus[0].shared_memory.is_none());
         details[0].insert("id", "different-adapter");
         let restored = sample_from_row(&doc! {"sample":sample,"gpu_memory_details":details}).unwrap();
@@ -476,7 +532,7 @@ mod gpu_storage_tests {
 
     #[test]
     fn invalid_shared_capacity_falls_back_to_valid_legacy_reading() {
-        let (sample, mut details) = storage_sample(&reading()).unwrap();
+        let (sample, mut details, _) = storage_sample(&reading()).unwrap();
         details[0].insert("shared_memory_capacity", -1i64);
         let restored = sample_from_row(&doc! {"sample":sample,"gpu_memory_details":details}).unwrap();
         assert!(restored.valid());
