@@ -62,13 +62,20 @@ async fn physical_drive_health_is_deduplicated_owner_scoped_and_retains_removed_
   case.app.collection("machines").insert_one(doc!{"_id":machine,"name":"Drive fixture","token":"drive-fixture-secret","user_id":owner,"enabled":true}).await?;
   let observed=DateTime::now().timestamp_millis();
   let drive=json!({"id":"a".repeat(64),"name":"Fixture SSD","protocol":"nvme","capacity":1_000_000,"present":true,"status":"healthy","observed_at":observed,"checked_at":observed,"temperature":35,"percentage_used":3,"available_spare":100,"spare_threshold":10,"power_on_hours":30,"power_cycles":2,"unsafe_shutdowns":0,"media_errors":0,"reallocated_sectors":null,"pending_sectors":null,"uncorrectable_sectors":null,"short_test_supported":true,"self_test":"passed","last_test_started":null,"next_test_at":null,"reasons":[]});
+  let mut drive=drive;
+  drive["reported_uncorrectable_errors"]=json!(0);
+  drive["lifetime_read_bytes"]=json!(22_409_203_712_000u64);
+  drive["lifetime_written_bytes"]=json!(4_398_008_832_000u64);
   let mut body=json!({"machine_id":id,"token":"drive-fixture-secret","sample":{"cpu":10,"cores":4,"ram":{"used":1,"total":4},"disk":{"used":10,"total":100},"gpus":[],"drive_health":[drive]}});
+  let mut invalid_detail=body.clone();invalid_detail["sample"]["drive_health"][0]["lifetime_read_bytes"]=json!(i64::MAX as u64+1);
+  case.status("POST","/api/machines/client/metrics","",invalid_detail,StatusCode::BAD_REQUEST).await?;
   let mut invalid=body.clone();invalid["sample"]["drive_health"][0]["present"]=json!(false);
   case.status("POST","/api/machines/client/metrics","",invalid,StatusCode::BAD_REQUEST).await?;
   for _ in 0..2 {case.status("POST","/api/machines/client/metrics","",body.clone(),StatusCode::OK).await?;}
   ensure!(case.app.collection("machine_drive_health_history").count_documents(doc!{"machine_id":machine}).await?==1,"cached SMART observations must not duplicate per metrics upload");
   let minute=case.app.collection("machine_metrics_history").find_one(doc!{"machine_id":machine}).await?.unwrap();ensure!(!minute.get_document("sample")?.contains_key("drive_health"),"SMART history must not be copied into minute utilization buckets");
   body["sample"]["drive_health"][0]["observed_at"]=json!(observed+1);body["sample"]["drive_health"][0]["checked_at"]=json!(observed+1);body["sample"]["drive_health"][0]["status"]=json!("warning");body["sample"]["drive_health"][0]["media_errors"]=json!(1);body["sample"]["drive_health"][0]["reasons"]=json!(["Media or data-integrity errors recorded"]);
+  body["sample"]["drive_health"][0]["reported_uncorrectable_errors"]=json!(2);
   case.status("POST","/api/machines/client/metrics","",body.clone(),StatusCode::OK).await?;
   body["sample"]["drive_health"][0]["observed_at"]=json!(observed+2);body["sample"]["drive_health"][0]["present"]=json!(false);body["sample"]["drive_health"][0]["status"]=json!("removed");body["sample"]["drive_health"][0]["reasons"]=json!(["Drive removed from this machine"]);
   case.status("POST","/api/machines/client/metrics","",body,StatusCode::OK).await?;
@@ -78,8 +85,18 @@ async fn physical_drive_health_is_deduplicated_owner_scoped_and_retains_removed_
   ensure!(output["retention_days"]==90&&output["days"]==90);
   ensure!(output["history"].as_array().unwrap().len()==3&&output["drives"][0]["status"]=="removed");
   ensure!(output["history"].as_array().unwrap().iter().any(|p|p["snapshot"]["status"]=="warning"));
+  for reading in std::iter::once(&output["drives"][0]).chain(output["history"].as_array().unwrap().iter().map(|p|&p["snapshot"])) {
+    ensure!(reading["reported_uncorrectable_errors"]==if reading["status"]=="healthy" {0}else{2},"Latest and retained history must restore historical error events");
+    ensure!(reading["lifetime_read_bytes"]==22_409_203_712_000u64&&reading["lifetime_written_bytes"]==4_398_008_832_000u64,"Lifetime counters must survive actual Mongo storage and API reads");
+  }
   ensure!(!output.to_string().contains("drive-fixture-secret"));
   let retained=case.app.collection("machine_drive_health_history").find_one(doc!{"machine_id":machine}).await?.unwrap();ensure!(retained.get_datetime("expires_at")?.timestamp_millis()-retained.get_datetime("at")?.timestamp_millis()==90*24*60*60*1000);
+  let latest=case.app.collection("machine_metrics_latest").find_one(doc!{"_id":machine}).await?.unwrap();
+  let legacy=latest.get_document("sample")?.get_array("drive_health")?[0].as_document().unwrap();
+  for key in ["reported_uncorrectable_errors","lifetime_read_bytes","lifetime_written_bytes"] {
+    ensure!(!legacy.contains_key(key)&&!retained.get_document("snapshot")?.contains_key(key),"Rollback readers require strict legacy snapshots without new fields");
+    ensure!(retained.get_document("details")?.contains_key(key),"New fields must remain durable in separate storage");
+  }
   Ok(())
  }.await;
     case.db.drop().await?;
