@@ -75,7 +75,7 @@ export default function MachineMetrics({ machineId, active }) {
   const latest = data?.latest, sample = latest?.sample;
   const history=data?.history||[];
   const devices=gpuDevices(history,sample),gpu=devices.find(d=>d.id===gpuId)||devices[0];
-  const readGpu=s=>gpuReading(s,gpu?.id);
+  const readGpu=s=>gpuReading(s,gpu?.id,gpu?.name,gpu?.allowLegacy);
   const percentText=v=>v==null?'Unavailable':`${v.toFixed(1)}%`;
   const memoryText=m=>m?`${formatBytes(m.used)} / ${formatBytes(m.total)}`:'Unavailable';
   const gpuSeries=[

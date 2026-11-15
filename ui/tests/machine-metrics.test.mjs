@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { utilization, rankedMachines, metricSegments, diskDevices, diskReading, capacityPercent } from '../src/lib/machineMetrics.mjs';
+import { utilization, rankedMachines, metricSegments, diskDevices, diskReading, capacityPercent, gpuDevices, gpuReading } from '../src/lib/machineMetrics.mjs';
 const sample = (cpu, gpu = null) => ({ cpu, ram: { used: 4, total: 8 }, disk: { used: 25, total: 100 }, gpus: gpu === null ? [] : [{ utilization: gpu }] });
 test('resource percentages normalize capacity and preserve unsupported GPU', () => {
   assert.equal(utilization(sample(10), 'ram'), 50);
@@ -35,4 +35,13 @@ test('drive histories combine mounted partitions by capacity and retain disconne
  assert.equal(capacityPercent(diskReading(sample,'/dev/nvme0n1')),20.1);
  assert.equal(diskReading({disks:[]},'/dev/sda'),null);
  assert.deepEqual(diskDevices([],{disks:[{id:'Macintosh HD',name:'Macintosh HD',used:1,total:10}]}),[{id:'Macintosh HD',name:'Macintosh HD'}]);
+});
+
+test('GPU history prefers current identities and joins only unambiguous older readings',()=>{
+ const older={gpus:[{name:'GPU',utilization:30}]},latest={gpus:[{id:'gpu-a',name:'GPU',utilization:80,temperature:60}]};
+ const devices=gpuDevices([{at:0,sample:older}],latest);assert.equal(devices.length,1);assert.equal(devices[0].id,'gpu-a');
+ assert.equal(gpuReading(older,'gpu-a','GPU',devices[0].allowLegacy).utilization,30);
+ const multiple={gpus:[...latest.gpus,{id:'gpu-b',name:'GPU',utilization:20}]};
+ const ambiguous=gpuDevices([{at:0,sample:older}],multiple);assert.equal(ambiguous[0].id,'gpu-a');assert.equal(ambiguous[0].allowLegacy,false);
+ assert.equal(gpuReading(older,'gpu-a','GPU',false),null);
 });

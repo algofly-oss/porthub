@@ -30,11 +30,23 @@ export function metricSegments(history, key, intervalMs = 60000) {
 }
 
 export const gpuIdentity = (gpu, index) => gpu.id || `${gpu.name}:${index}`;
-export function gpuReading(sample, id) { return sample?.gpus?.find((gpu,index) => gpuIdentity(gpu,index) === id); }
+export function gpuReading(sample, id, name, allowLegacy=false) {
+  const exact=sample?.gpus?.find((gpu,index)=>gpuIdentity(gpu,index)===id);
+  if(exact)return exact;
+  const older=allowLegacy?sample?.gpus?.filter(g=>!g.id&&g.name===name):[];
+  return older?.length===1?older[0]:null;
+}
 export function capacityPercent(memory) { return memory?.total > 0 ? percent(memory.used / memory.total * 100) : null; }
 export function gpuDevices(history, latest) {
-  const devices = new Map();
-  for (const sample of [...history.map(p=>p.sample), latest].filter(Boolean)) sample.gpus?.forEach((g,i)=>devices.set(gpuIdentity(g,i),{id:gpuIdentity(g,i),name:g.name}));
+  const samples=[latest,...history.slice().reverse().map(p=>p.sample)].filter(Boolean);
+  const identities=new Map();
+  for(const sample of samples)for(const gpu of sample.gpus||[])if(gpu.id){if(!identities.has(gpu.name))identities.set(gpu.name,new Set());identities.get(gpu.name).add(gpu.id);}
+  const devices=new Map();
+  for(const sample of samples)(sample.gpus||[]).forEach((g,i)=>{
+    const known=identities.get(g.name),unique=known?.size===1;
+    const id=!g.id&&unique?[...known][0]:gpuIdentity(g,i);
+    devices.set(id,{id,name:!g.id&&known?.size>1?`${g.name} · Older reports`:g.name,allowLegacy:unique});
+  });
   return [...devices.values()];
 }
 export function diskIdentity(disk) {
