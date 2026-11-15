@@ -1,3 +1,4 @@
+import WorkspaceDrawer from '@/components/ui/workspace-drawer';
 import SettingSwitch from './SettingSwitch';
 import settingsStyles from './Settings.module.css';
 import SearchDropdown from '@/components/ui/search-dropdown';
@@ -57,11 +58,11 @@ export default function VKeyboard({active=true}){
   const [layout,setLayout]=useState('auto');
   useEffect(()=>{try{setLayout(localStorage.getItem('porthub.keyboard.layout')||'auto');}catch{}},[]);
   const [sheet,setSheet]=useState('general'),[padView,setPadView]=useState(false),[preferences,setPreferences]=useState({touchpad:true,mouseButtons:true,functionKeys:false,reverseScroll:false});
-  const dialog=useRef(null),dragStart=useRef(null);
+  const [settingsOpen,setSettingsOpen]=useState(false);
   useEffect(()=>{try{const saved=JSON.parse(localStorage.getItem('porthub.keyboard.preferences')||'{}');setPreferences(current=>({...current,...Object.fromEntries(Object.entries(saved).filter(([key,value])=>['touchpad','mouseButtons','functionKeys','reverseScroll'].includes(key)&&typeof value==='boolean'))}));setPadView(localStorage.getItem('porthub.keyboard.padView')==='true');}catch{}},[]);
   const preference=(key,value)=>setPreferences(current=>{const next={...current,[key]:value};try{localStorage.setItem('porthub.keyboard.preferences',JSON.stringify(next));}catch{}return next;});
-  const openSheet=tab=>{setSheet(tab);void transport.current?.send({type:'release_all'}).catch(()=>{});dialog.current?.showModal();};
-  useEffect(()=>{if(!active)dialog.current?.close();},[active]);
+  const openSheet=tab=>{setSheet(tab);void transport.current?.send({type:'release_all'}).catch(()=>{});setSettingsOpen(true);};
+  useEffect(()=>{if(!active)setSettingsOpen(false);},[active]);
   const micDisabled=!recording&&(!status?.settings.enabled||!model?.installed||processing);
   const speechMessage=recording?'Listening…':processing?'Transcribing…':!status?.settings.enabled?'Dictation off':!model?.installed?'Choose a dictation model in Settings':'Ready';
   return <div className="relative h-full min-h-0" aria-label="VKeyboard content">
@@ -82,10 +83,8 @@ export default function VKeyboard({active=true}){
         <button type="button" aria-label={recording?'Stop recording':'Start dictation'} disabled={micDisabled} className={`${styles.mic} ${recording?styles.recording:''}`} onClick={()=>recording?stop():start()}>{recording?<IconPlayerStop size={20}/>:<IconMicrophone size={20}/>}</button>
       </div>}/>
     {error&&<div role="alert" className={styles.alert}><span>{error}</span><button type="button" aria-label="Dismiss error" onClick={()=>setError('')}><IconX size={20}/></button></div>}
-    <dialog ref={dialog} className={styles.sheet} aria-label="VKeyboard settings" onClose={()=>document.querySelector('[aria-label="Capture physical keyboard"]')?.focus({preventScroll:true})} onClick={e=>{if(e.target===dialog.current)dialog.current.close();}}>
+    <WorkspaceDrawer opened={settingsOpen} onClose={()=>setSettingsOpen(false)} title={<span className="flex w-full items-center justify-between gap-3"><span>VKeyboard</span><button type="button" className={styles.iconButton} aria-label="Close VKeyboard settings" onClick={()=>setSettingsOpen(false)}><IconX size={20}/></button></span>} size="lg" fixedHeight="min(88dvh, 760px)" withCloseButton={false}>
       <div className={styles.sheetContent}>
-        <div className={styles.grip} onPointerDown={e=>{dragStart.current=e.clientY;e.currentTarget.setPointerCapture(e.pointerId);}} onPointerMove={e=>{if(dragStart.current!==null)dialog.current.style.transform=`translateY(${Math.max(0,e.clientY-dragStart.current)}px)`;}} onPointerUp={e=>{if(dragStart.current!==null&&e.clientY-dragStart.current>110)dialog.current.close();dragStart.current=null;dialog.current.style.transform='';}} onPointerCancel={()=>{dragStart.current=null;dialog.current.style.transform='';}}><span/></div>
-        <header className={styles.sheetHeader}><h2>VKeyboard</h2><button type="button" className={styles.iconButton} aria-label="Close VKeyboard settings" onClick={()=>dialog.current.close()}><IconX size={20}/></button></header>
         <div role="tablist" aria-label="VKeyboard settings sections" className={styles.tabs}>{[['general','General'],['clients','Clients'],['models','Models'],['text','Text'],['flash','Flash']].map(([key,label])=><button type="button" role="tab" key={key} aria-selected={sheet===key} aria-controls={`keyboard-panel-${key}`} id={`keyboard-tab-${key}`} onClick={()=>setSheet(key)}>{label}</button>)}</div>
         <div className={styles.sheetBody}>
           <section id="keyboard-panel-general" role="tabpanel" aria-labelledby="keyboard-tab-general" hidden={sheet!=='general'} className="space-y-4 p-2">
@@ -115,6 +114,6 @@ export default function VKeyboard({active=true}){
           <div id="keyboard-panel-flash" role="tabpanel" aria-labelledby="keyboard-tab-flash" hidden={sheet!=='flash'}><Flashing active={active&&sheet==='flash'} onRegistered={refresh}/></div>
         </div>
       </div>
-    </dialog>
+    </WorkspaceDrawer>
   </div>;
 }
