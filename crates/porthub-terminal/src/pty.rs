@@ -54,6 +54,18 @@ fn write_measured(
     Ok(())
 }
 
+// Signals may interrupt a PTY read while an old attachment is being reaped.
+// Retry only EINTR, preserving cancellation and every actual byte/error.
+fn read_pty(reader: &mut impl Read, bytes: &mut [u8], cancel: &CancellationToken) -> std::io::Result<usize> {
+    loop {
+        if cancel.is_cancelled() { return Ok(0); }
+        match reader.read(bytes) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => return result,
+        }
+    }
+}
+
 pub struct Client {
     master: Box<dyn MasterPty + Send>,
     child: Option<Box<dyn Child + Send + Sync>>,
@@ -105,6 +117,9 @@ impl Client {
         }
         builder.env("TERM", term);
         let child = pty.slave.spawn_command(builder)?;
+        let child_pid = child.process_id();
+        let tty = pty.master.tty_name();
+        tracing::debug!(client, ?child_pid, ?tty, "Terminal attachment spawned");
         drop(pty.slave);
         let mut reader = pty.master.try_clone_reader()?;
         let mut writer = owned_writer(pty.master.as_ref())?;
@@ -115,8 +130,15 @@ impl Client {
         tokio::task::spawn_blocking(move || {
             let mut bytes = [0; 8192];
             while !reading.is_cancelled() {
-                let size = match reader.read(&mut bytes) {
-                    Ok(0) | Err(_) => break,
+                let size = match read_pty(&mut reader, &mut bytes, &reading) {
+                    Ok(0) => {
+                        tracing::debug!(client, ?child_pid, ?tty, cancelled=reading.is_cancelled(), "Terminal PTY reached EOF");
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::debug!(client, ?child_pid, ?tty, errno=error.raw_os_error(), %error, "Terminal PTY read failed");
+                        break;
+                    }
                     Ok(size) => size,
                 };
                 read_traffic.output(size);
@@ -235,6 +257,32 @@ impl Drop for Client {
 
 #[cfg(test)]
 mod input_tests {
+    #[test]
+    fn interrupted_pty_read_preserves_bytes_and_cancellation() {
+        use std::io::{self, Read};
+        struct InterruptedOnce { calls: usize, cancel: Option<tokio_util::sync::CancellationToken> }
+        impl Read for InterruptedOnce {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                self.calls += 1;
+                if self.calls == 1 {
+                    if let Some(cancel) = &self.cancel { cancel.cancel(); }
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+                bytes[..2].copy_from_slice(b"ok");
+                Ok(2)
+            }
+        }
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut source = InterruptedOnce { calls: 0, cancel: None };
+        let mut bytes = [0; 8];
+        assert_eq!(super::read_pty(&mut source, &mut bytes, &cancel).unwrap(), 2);
+        assert_eq!(&bytes[..2], b"ok");
+        assert_eq!(source.calls, 2);
+        let mut cancelled = InterruptedOnce { calls: 0, cancel: Some(cancel.clone()) };
+        assert_eq!(super::read_pty(&mut cancelled, &mut bytes, &cancel).unwrap(), 0);
+        assert_eq!(cancelled.calls, 1, "cancelled PTY must not spin after EINTR");
+    }
+
     #[test]
     fn traffic_counts_only_bytes_accepted_by_a_partial_pty_write() {
         struct Partial(usize);

@@ -7,6 +7,7 @@ use std::{
 };
 
 fn workspace() -> Result<(tempfile::TempDir, Workspace)> {
+    let _ = tracing_subscriber::fmt().with_env_filter("porthub_terminal=debug").with_test_writer().try_init();
     let directory = tempfile::tempdir()?;
     let runtime = if let Ok(bundle) = std::env::var("PORTHUB_TEST_TERMINAL_BUNDLE") {
         let cache = directory.path().join("runtime");
@@ -751,15 +752,20 @@ async fn frozen_history_routes_stable_pages_and_rejects_detached_guest_anchors()
             freeze: true, snapshot: anchor,
         })?;
         tokio::time::timeout(Duration::from_secs(5), async {
+            let mut screen = Vec::new();
             loop {
                 match router.next().await {
+                    Some(HostOutput::Output {client:7,data}) => {
+                        screen.extend(decode_data(&data)?);
+                        if screen.len()>512 { screen.drain(..screen.len()-512); }
+                    }
                     Some(HostOutput::History {client:7,page}) => {
                         assert_eq!(page.request, request);
                         assert!(page.done, "small page should fit one frame");
                         page.validate()?;
                         return Ok(page);
                     }
-                    Some(HostOutput::Closed {client:7}) | None => anyhow::bail!("history request {request} lost its attachment before the response"),
+                    Some(HostOutput::Closed {client:7}) | None => anyhow::bail!("history request {request} lost its attachment before the response; fixture output: {:?}", String::from_utf8_lossy(&screen)),
                     _ => {},
                 }
             }

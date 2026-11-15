@@ -5595,6 +5595,8 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "tracing",
+ "tracing-subscriber",
  "unicode-segmentation",
  "unicode-width",
 ]

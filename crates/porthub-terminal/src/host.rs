@@ -283,7 +283,8 @@ impl Attachments {
                         self.snapshots.lock().expect("snapshot cache").attach(client)?;
                         self.clients.insert(client, pty);
                     }
-                    Err(_) => {
+                    Err(error) => {
+                        tracing::warn!(client, generation, %error, "Terminal attachment could not start");
                         self.emit(HostOutput::Closed { client })?;
                     }
                 }
