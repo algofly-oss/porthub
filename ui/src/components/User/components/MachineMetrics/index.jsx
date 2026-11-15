@@ -1,6 +1,6 @@
 import SeriesChart from './SeriesChart';
 import SearchDropdown from '@/components/ui/search-dropdown';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { RESOURCES, utilization, rankedMachines, metricSegments, gpuDevices, gpuReading, capacityPercent, diskDevices, diskReading } from '@/lib/machineMetrics.mjs';
 import { formatBytes } from '@/shared/utils/traffic.mjs';
 
@@ -38,15 +38,33 @@ export function MachineRanking({ active, onSelect }) {
   const [selected, setSelected] = useState(['cpu']);
   const [ascending, setAscending] = useState(false);
   const machines = rankedMachines(data?.machines || [], selected, ascending);
+  const viewport = useRef(null);
+  useEffect(() => {
+    const element = viewport.current;
+    if (!element) return;
+    const contents = [...element.querySelectorAll('[data-ranking-row-content]')];
+    const measure = () => {
+      const height = element.clientHeight;
+      const minimum = Math.max(0, ...contents.map(content => content.getBoundingClientRect().height + 1));
+      if (!height || !minimum) return;
+      const count = Math.max(1, Math.min(2, Math.floor(height / minimum)));
+      element.style.setProperty('--ranking-row-height', `${height / count}px`);
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    contents.forEach(content => observer.observe(content));
+    measure();
+    return () => observer.disconnect();
+  }, [data, selected, ascending, loading]);
   return <section aria-label="Machine resource utilization" className="flex h-[360px] min-w-0 flex-col overflow-hidden rounded-xl bg-surface">
     <div className="px-4 pt-4"><div className="flex items-center justify-between gap-2"><h2 className="text-base font-semibold">Machine utilization</h2><span className="text-xs tabular-nums text-muted-foreground">{machines.length} live</span></div>
       <div className="mt-2 flex flex-wrap items-center justify-between gap-2"><fieldset className="flex gap-1"><legend className="sr-only">Combine resources for ranking</legend>{RESOURCES.map(([key, label]) => <label key={key} className="relative cursor-pointer"><input className="peer absolute inset-0 z-10 m-0 h-full w-full cursor-pointer opacity-0" type="checkbox" checked={selected.includes(key)} onChange={event => setSelected(old => event.target.checked ? [...old, key] : old.length > 1 ? old.filter(item => item !== key) : old)}/><span className="flex min-h-[44px] items-center rounded-lg border border-transparent px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-control peer-checked:border-primary/20 peer-checked:bg-primary/10 peer-checked:text-primary peer-focus-visible:ring-2 peer-focus-visible:ring-primary">{label}</span></label>)}</fieldset>
       <SearchDropdown aria-label="Resource sort order" className="min-w-0 text-xs" value={ascending ? 'low' : 'high'} onChange={event => setAscending(event.target.value === 'low')}><option value="high">Most utilized first</option><option value="low">Least utilized first</option></SearchDropdown></div>
+      {error && <p role="status" className="py-2 text-xs text-amber-600">{error}</p>}
       <p className="mb-2 text-[11px] leading-4 text-muted-foreground">{selected.length > 1 ? 'Equal-weight average · all selected readings required' : 'Ranked by utilization'} · Select a machine for history</p>
     </div>
-    <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4" tabIndex={0} role="region" aria-label="Live machine rankings" style={{scrollbarGutter:'stable',scrollbarWidth:'thin'}}>
-      {error && <p role="status" className="py-2 text-xs text-amber-600">{error}</p>}
-      {loading ? <p role="status" className="py-5 text-sm text-muted-foreground">Loading resource readings…</p> : !machines.length ? <p className="py-5 text-sm text-muted-foreground">No fresh readings. Enable metrics on an online client.</p> : <ol className="divide-y divide-border">{machines.map((machine, index) => <li key={machine.id}><button type="button" onClick={() => onSelect(machine.id)} className="w-full rounded-lg py-2.5 text-left hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary" title={`Updated ${time(machine.reading?.at)}`}><div className="mb-2 flex items-center gap-2"><span className="w-4 text-[11px] tabular-nums text-muted-foreground">{index + 1}</span><span className="min-w-0 flex-1 truncate text-sm font-medium">{machine.name}</span><span className="text-xs tabular-nums">{machine.score === null ? 'Unavailable' : `${machine.score.toFixed(1)}%${selected.length > 1 ? ' combined' : ''}`}</span></div><div className="grid grid-cols-4 gap-3">{RESOURCES.map(([key, label]) => <Usage key={key} label={label} memory={machine.reading?.sample?.[key]?.total ? machine.reading.sample[key] : null} value={utilization(machine.reading?.sample, key)} />)}</div></button></li>)}</ol>}
+    <div ref={viewport} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4" tabIndex={0} role="region" aria-label="Live machine rankings" style={{scrollbarGutter:'stable',scrollbarWidth:'thin',scrollSnapType:'y mandatory'}}>
+      {loading ? <p role="status" className="py-5 text-sm text-muted-foreground">Loading resource readings…</p> : !machines.length ? <p className="py-5 text-sm text-muted-foreground">No fresh readings. Enable metrics on an online client.</p> : <ol className="divide-y divide-border">{machines.map((machine, index) => <li key={machine.id} style={{height:'var(--ranking-row-height, 104px)',scrollSnapAlign:'start'}}><button type="button" onClick={() => onSelect(machine.id)} className="flex h-full w-full items-center rounded-lg text-left hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary" title={`Updated ${time(machine.reading?.at)}`}><div data-ranking-row-content className="w-full py-1"><div className="mb-2 flex items-center gap-2"><span className="w-4 text-[11px] tabular-nums text-muted-foreground">{index + 1}</span><span className="min-w-0 flex-1 truncate text-sm font-medium">{machine.name}</span><span className="text-xs tabular-nums">{machine.score === null ? 'Unavailable' : `${machine.score.toFixed(1)}%${selected.length > 1 ? ' combined' : ''}`}</span></div><div className="grid grid-cols-4 gap-3">{RESOURCES.map(([key, label]) => <Usage key={key} label={label} memory={machine.reading?.sample?.[key]?.total ? machine.reading.sample[key] : null} value={utilization(machine.reading?.sample, key)} />)}</div></div></button></li>)}</ol>}
     </div>
     <p className="border-t border-border px-4 py-2 text-[11px] text-muted-foreground">Updates every 15s{machines.length > 2 ? ` · Scroll to see all ${machines.length} machines` : ''}{data?.machines?.length >= data?.limit ? ` · Up to ${data.limit} machines` : ''}</p>
   </section>;

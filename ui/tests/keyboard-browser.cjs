@@ -70,6 +70,22 @@ const base=process.env.PORTHUB_TEST_UI_URL,cookie=process.env.PORTHUB_TEST_BOARD
   await page.goto(base+'/home?view=dashboard');
   const ranking=page.getByRole('region',{name:'Machine resource utilization'});await ranking.getByRole('listitem').first().waitFor();
   assert((await ranking.getByRole('listitem').first().textContent()).includes('Busy CPU host'));
+  assert.equal(await ranking.getByRole('listitem').count(),3);
+  for(const width of [1440,390]){
+    await page.setViewportSize({width,height:900});await page.waitForTimeout(150);
+    const geometry=await ranking.evaluate(card=>{
+      const viewport=card.querySelector('[aria-label="Live machine rankings"]');
+      const bounds=viewport.getBoundingClientRect();
+      const rows=[...viewport.querySelectorAll('li')].map(row=>row.getBoundingClientRect());
+      const visible=rows.filter(row=>row.bottom>bounds.top+1&&row.top<bounds.bottom-1);
+      return {height:card.getBoundingClientRect().height,viewport:bounds.height,contents:[...viewport.querySelectorAll('[data-ranking-row-content]')].map(el=>el.getBoundingClientRect().height),visible:visible.length,complete:visible.every(row=>row.top>=bounds.top-1&&row.bottom<=bounds.bottom+1)};
+    });
+    if(width===1440)assert.equal(geometry.visible,2,'Two complete rows fit the desktop card');
+    assert.equal(geometry.height,360,'Resource card preserves dashboard space');
+    assert(geometry.visible>=1&&geometry.complete,`Only complete resource rows at ${width}px: ${JSON.stringify(geometry)}`);
+    await ranking.scrollIntoViewIfNeeded();await page.screenshot({path:`${screenshots}/dashboard-${width}.png`,fullPage:true});
+  }
+  await page.setViewportSize({width:1440,height:1000});
   await ranking.getByRole('checkbox',{name:'GPU',exact:true}).check();
   assert((await ranking.getByRole('listitem').first().textContent()).includes('Isolated desktop'));
   await chooseDropdown(ranking.getByLabel('Resource sort order',{exact:true}),'Least utilized first');
