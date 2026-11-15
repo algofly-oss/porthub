@@ -486,7 +486,9 @@ jobs:
           PORTHUB_TEST_LAUNCHD: "1"
         run: cargo test --locked -p porthub-agent --test launchd_live --target ${{ matrix.target }} -- --include-ignored
       - uses: actions/upload-artifact@v4
-        if: inputs.verify_only != true
+        # Preserve core-only diagnostic builds when a later runtime check fails.
+        # Failed runs remain ineligible for release assembly and publication.
+        if: always() && inputs.verify_only != true && (success() || inputs.core_only == true)
         with:
           name: porthub-${{ matrix.artifact }}
           path: component-builds/
