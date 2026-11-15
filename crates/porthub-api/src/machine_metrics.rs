@@ -173,15 +173,16 @@ async fn history(
     for row in &rows {
         if let Ok(at) = row.get_datetime("at") {
             buckets
-                .entry((at.timestamp_millis() - since.timestamp_millis()) / interval_ms)
+                .entry(at.timestamp_millis() / interval_ms)
                 .or_default()
                 .push(row);
         }
     }
     let history: Vec<_> = buckets
-        .values()
-        .map(|chunk| {
+        .iter()
+        .map(|(bucket,chunk)| {
             let mut value = output(chunk[chunk.len() - 1]);
+            value["at"] = json!(bucket * interval_ms);
             let samples: Vec<Sample> = chunk
                 .iter()
                 .filter_map(|r| bson::from_document(r.get_document("sample").ok()?.clone()).ok())
@@ -200,21 +201,29 @@ async fn history(
                     value["sample"][key]["total"] =
                         json!((memories.iter().map(|m| m.total as f64).sum::<f64>() / n) as u64);
                 }
-                if let Some(gpus) = value["sample"]["gpus"].as_array_mut() {
-                    for gpu in gpus {
-                        let name = gpu["name"].as_str().unwrap_or_default();
-                        let readings: Vec<f32> = samples
-                            .iter()
-                            .flat_map(|s| &s.gpus)
-                            .filter(|g| g.name == name)
-                            .filter_map(|g| g.utilization)
-                            .collect();
-                        if !readings.is_empty() {
-                            gpu["utilization"] =
-                                json!(readings.iter().sum::<f32>() / readings.len() as f32);
-                        }
+                let mut gpu_groups = std::collections::BTreeMap::<String, Vec<&porthub_components::metrics::Gpu>>::new();
+                let mut disk_groups = std::collections::BTreeMap::<String, Vec<&porthub_components::metrics::Disk>>::new();
+                for sample in &samples {
+                    for (index,gpu) in sample.gpus.iter().enumerate() {
+                        let id = gpu.id.clone().unwrap_or_else(|| format!("{}:{index}",gpu.name));
+                        gpu_groups.entry(id).or_default().push(gpu);
                     }
+                    for disk in &sample.disks { disk_groups.entry(disk.id.clone()).or_default().push(disk); }
                 }
+                let average = |values: Vec<f32>| if values.is_empty() { Value::Null } else { json!(values.iter().map(|v| f64::from(*v)).sum::<f64>() / values.len() as f64) };
+                value["sample"]["gpus"] = json!(gpu_groups.values().map(|readings| {
+                    let mut gpu = serde_json::to_value(readings[readings.len()-1]).unwrap();
+                    gpu["utilization"] = average(readings.iter().filter_map(|g|g.utilization).collect());
+                    gpu["temperature"] = average(readings.iter().filter_map(|g|g.temperature).collect());
+                    gpu["fan_speed"] = average(readings.iter().filter_map(|g|g.fan_speed).collect());
+                    let memory: Vec<_> = readings.iter().filter_map(|g|g.memory.as_ref()).collect();
+                    if !memory.is_empty() { gpu["memory"] = json!({"used":(memory.iter().map(|m|m.used as f64).sum::<f64>()/memory.len() as f64) as u64,"total":(memory.iter().map(|m|m.total as f64).sum::<f64>()/memory.len() as f64) as u64}); }
+                    gpu
+                }).collect::<Vec<_>>());
+                value["sample"]["disks"] = json!(disk_groups.values().map(|readings| {
+                    let last = readings[readings.len()-1];
+                    json!({"id":last.id,"name":last.name,"used":(readings.iter().map(|d|d.used as f64).sum::<f64>()/readings.len() as f64) as u64,"total":(readings.iter().map(|d|d.total as f64).sum::<f64>()/readings.len() as f64) as u64})
+                }).collect::<Vec<_>>());
             }
             value
         })

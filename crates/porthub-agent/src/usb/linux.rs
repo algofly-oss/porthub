@@ -57,7 +57,7 @@ fn inventory_at(sys: &Path) -> Vec<Device> {
         };
         let mut blocked = None;
         if value(&path, "bDeviceClass") == "09" {
-            blocked = Some("USB hubs cannot be forwarded".into());
+            continue; // Enumerate attached devices individually; USB/IP cannot export hubs.
         }
         // Never detach an active network interface or any mounted block device.
         if let Ok(net) = std::fs::read_dir(sys.join("class/net")) {
@@ -207,9 +207,16 @@ fn restore(device: &Device) {
     // Preparation may fail after detaching an interface but before exporting.
     if let Ok(entries) = std::fs::read_dir(&path) {
         for entry in entries.flatten() {
-            if entry.file_name().to_string_lossy().starts_with(&format!("{}:", current.busid))
-                && !entry.path().join("driver").exists() {
-                let _ = write("/sys/bus/usb/drivers_probe", entry.file_name().as_encoded_bytes());
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&format!("{}:", current.busid))
+                && !entry.path().join("driver").exists()
+            {
+                let _ = write(
+                    "/sys/bus/usb/drivers_probe",
+                    entry.file_name().as_encoded_bytes(),
+                );
             }
         }
     }
@@ -242,28 +249,47 @@ fn prepare_storage(path: &Path, device: &Device) -> Result<()> {
     let mut offset = 0;
     while offset + 2 <= descriptors.len() {
         let len = descriptors[offset] as usize;
-        if len < 2 || offset + len > descriptors.len() { break; }
+        if len < 2 || offset + len > descriptors.len() {
+            break;
+        }
         let d = &descriptors[offset..offset + len];
         if len >= 9 && d[1] == 4 && d[3] == 0 && d[5] == 8 && d[7] == 0x50 {
             bulk_interfaces.push(d[2] as u32);
         }
         offset += len;
     }
-    let interfaces: Vec<_> = std::fs::read_dir(path)?.flatten().map(|entry| entry.path())
+    let interfaces: Vec<_> = std::fs::read_dir(path)?
+        .flatten()
+        .map(|entry| entry.path())
         .filter(|p| value(p, "bInterfaceClass") == "08" && value(p, "bInterfaceProtocol") == "62")
-        .filter_map(|p| u32::from_str_radix(&value(&p, "bInterfaceNumber"), 16).ok().map(|n| (p,n)))
-        .filter(|(_,n)| bulk_interfaces.contains(n)).collect();
-    if interfaces.is_empty() { return Ok(()); }
+        .filter_map(|p| {
+            u32::from_str_radix(&value(&p, "bInterfaceNumber"), 16)
+                .ok()
+                .map(|n| (p, n))
+        })
+        .filter(|(_, n)| bulk_interfaces.contains(n))
+        .collect();
+    if interfaces.is_empty() {
+        return Ok(());
+    }
     let unbind = || -> Result<()> {
         for (interface, _) in &interfaces {
             if interface.join("driver").exists() {
-                write(interface.join("driver/unbind"), interface.file_name().unwrap().as_encoded_bytes())?;
+                write(
+                    interface.join("driver/unbind"),
+                    interface.file_name().unwrap().as_encoded_bytes(),
+                )?;
             }
         }
         Ok(())
     };
-    let usb = std::fs::OpenOptions::new().read(true).write(true)
-        .open(format!("/dev/bus/usb/{:03}/{:03}", device.busnum, device.devnum))?;
+    let usb = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(format!(
+            "/dev/bus/usb/{:03}/{:03}",
+            device.busnum, device.devnum
+        ))?;
     unbind()?;
     // USBDEVFS_RESET, CLAIMINTERFACE, SETINTERFACE and RELEASEINTERFACE.
     if unsafe { libc::ioctl(usb.as_raw_fd(), 0x5514, 0) } < 0 {
@@ -275,10 +301,15 @@ fn prepare_storage(path: &Path, device: &Device) -> Result<()> {
             return Err(std::io::Error::last_os_error()).context("Claim USB storage interface");
         }
         let alternate = [*number, 0u32];
-        let result = unsafe { libc::ioctl(usb.as_raw_fd(), 0x80085504u32 as _, alternate.as_ptr()) };
+        let result =
+            unsafe { libc::ioctl(usb.as_raw_fd(), 0x80085504u32 as _, alternate.as_ptr()) };
         let error = std::io::Error::last_os_error();
-        unsafe { libc::ioctl(usb.as_raw_fd(), 0x80045510u32 as _, number); }
-        if result < 0 { return Err(error).context("Select USB bulk storage interface"); }
+        unsafe {
+            libc::ioctl(usb.as_raw_fd(), 0x80045510u32 as _, number);
+        }
+        if result < 0 {
+            return Err(error).context("Select USB bulk storage interface");
+        }
     }
     Ok(())
 }
@@ -358,10 +389,12 @@ pub(super) fn handoff(
         let status = std::fs::read_to_string("/sys/devices/platform/vhci_hcd.0/status")?;
         let port = free_port(&status, device.speed).context("No free USB/IP virtual port")?;
         let devid = ((device.busnum as u32) << 16) | device.devnum as u32;
-        let attach = |speed| write(
-            "/sys/devices/platform/vhci_hcd.0/attach",
-            format!("{port} {} {devid} {speed}", guard.kernel.as_raw_fd()),
-        );
+        let attach = |speed| {
+            write(
+                "/sys/devices/platform/vhci_hcd.0/attach",
+                format!("{port} {} {devid} {speed}", guard.kernel.as_raw_fd()),
+            )
+        };
         attach_compatible(device.speed, attach)?;
         guard.port = Some(port);
     }
@@ -370,8 +403,11 @@ pub(super) fn handoff(
 fn attach_compatible(speed: u32, attach: impl Fn(u32) -> Result<()>) -> Result<()> {
     if let Err(error) = attach(speed) {
         // Older vhci kernels reject SuperSpeedPlus but support SuperSpeed.
-        if speed == 6 && error.downcast_ref::<std::io::Error>()
-            .is_some_and(|error| error.raw_os_error() == Some(libc::EINVAL)) {
+        if speed == 6
+            && error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.raw_os_error() == Some(libc::EINVAL))
+        {
             attach(5)?;
         } else {
             return Err(error);
@@ -411,7 +447,9 @@ mod tests {
                 attempts.borrow_mut().push(value);
                 if attempts.borrow().len() == 1 {
                     Err(std::io::Error::from_raw_os_error(errno).into())
-                } else { Ok(()) }
+                } else {
+                    Ok(())
+                }
             });
             assert_eq!(*attempts.borrow(), expected);
             assert_eq!(result.is_ok(), expected.len() == 2);

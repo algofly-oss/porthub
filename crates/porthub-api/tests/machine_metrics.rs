@@ -13,7 +13,7 @@ async fn authenticated_reports_owner_scoping_minute_retention_and_history() -> R
   let(_,other)=case.user("metrics-other@example.invalid","user").await?;
   let machine=ObjectId::new();let id=machine.to_hex();
   case.app.collection("machines").insert_one(doc!{"_id":machine,"name":"Metrics desktop","token":"fixture-metrics","user_id":owner,"enabled":true}).await?;
-  let sample=json!({"cpu":42.5,"cores":4,"ram":{"used":4096,"total":8192},"disk":{"used":20,"total":100},"gpus":[{"name":"Test GPU","utilization":70,"memory":{"used":10,"total":100}}]});
+  let sample=json!({"cpu":42.5,"cores":4,"ram":{"used":4096,"total":8192},"disk":{"used":20,"total":100},"disks":[{"id":"ssd-a","name":"SSD A","used":20,"total":100},{"id":"ssd-b","name":"SSD B","used":50,"total":200}],"gpus":[{"id":"gpu-a","name":"Test GPU","utilization":70,"temperature":65,"fan_speed":40,"memory":{"used":10,"total":100}},{"id":"gpu-b","name":"Test GPU","utilization":20,"temperature":null,"fan_speed":null,"memory":null}]});
   let body=json!({"machine_id":id,"token":"fixture-metrics","sample":sample});
   let mut invalid=body.clone();invalid["token"]=json!("wrong");
   case.status("POST","/api/machines/client/metrics","",invalid,StatusCode::GONE).await?;
@@ -30,6 +30,12 @@ async fn authenticated_reports_owner_scoping_minute_retention_and_history() -> R
   case.status("GET",&format!("/api/machines/metrics/{id}"),&other,Value::Null,StatusCode::BAD_REQUEST).await?;
   let history=case.status("GET",&format!("/api/machines/metrics/{id}?hours=168"),&cookie,Value::Null,StatusCode::OK).await?;
   ensure!(history["history"].as_array().unwrap().len()==1 && history["latest"]["sample"]["ram"]["used"]==4096);
+  let readings=history["history"][0]["sample"].clone();
+  ensure!(readings["gpus"].as_array().unwrap().len()==2,"same-name GPUs must retain separate identities");
+  let a=readings["gpus"].as_array().unwrap().iter().find(|g|g["id"]=="gpu-a").unwrap();
+  let b=readings["gpus"].as_array().unwrap().iter().find(|g|g["id"]=="gpu-b").unwrap();
+  ensure!(a["temperature"]==65.0 && a["fan_speed"]==40.0 && b["temperature"].is_null() && b["fan_speed"].is_null());
+  ensure!(readings["disks"].as_array().unwrap().len()==2,"per-drive readings must survive history aggregation");
   case.app.collection("machine_metrics_latest").update_one(doc!{"_id":machine},doc!{"$set":{"at":DateTime::from_millis(DateTime::now().timestamp_millis()-60000)}}).await?;
   let stale=case.status("GET","/api/machines/metrics",&cookie,Value::Null,StatusCode::OK).await?;ensure!(stale["machines"][0]["live"]==false,"stale readings must not masquerade as idle machines");
   Ok(())

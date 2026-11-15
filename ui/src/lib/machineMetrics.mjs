@@ -18,13 +18,27 @@ export function rankedMachines(machines, selected, ascending = false) {
   }).sort((a, b) => a.score === null ? b.score === null ? a.name.localeCompare(b.name) : 1 : b.score === null ? -1 : (ascending ? a.score - b.score : b.score - a.score) || a.name.localeCompare(b.name));
 }
 export function metricSegments(history, key, intervalMs = 60000) {
-  const segments = []; let current = []; let previous = 0;
+  const segments = []; let current = []; let previous = null;
   for (const point of history) {
-    const value = utilization(point.sample, key);
-    if (value === null || (previous && point.at - previous > intervalMs * 1.5)) { if (current.length) segments.push(current); current = []; }
+    const value = typeof key === 'function' ? key(point.sample) : utilization(point.sample, key);
+    if (value === null || (previous !== null && point.at - previous > intervalMs * 1.5)) { if (current.length) segments.push(current); current = []; }
     if (value !== null) current.push({ at: point.at, value });
     previous = point.at;
   }
   if (current.length) segments.push(current);
   return segments;
+}
+
+export const gpuIdentity = (gpu, index) => gpu.id || `${gpu.name}:${index}`;
+export function gpuReading(sample, id) { return sample?.gpus?.find((gpu,index) => gpuIdentity(gpu,index) === id); }
+export function capacityPercent(memory) { return memory?.total > 0 ? percent(memory.used / memory.total * 100) : null; }
+export function gpuDevices(history, latest) {
+  const devices = new Map();
+  for (const sample of [...history.map(p=>p.sample), latest].filter(Boolean)) sample.gpus?.forEach((g,i)=>devices.set(gpuIdentity(g,i),{id:gpuIdentity(g,i),name:g.name}));
+  return [...devices.values()];
+}
+export function diskDevices(history, latest) {
+  const devices = new Map();
+  for (const sample of [...history.map(p=>p.sample), latest].filter(Boolean)) sample.disks?.forEach(d=>devices.set(d.id,{id:d.id,name:d.name}));
+  return [...devices.values()];
 }

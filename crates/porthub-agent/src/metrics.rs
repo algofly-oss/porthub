@@ -3,7 +3,7 @@ use crate::{
     control::Control,
     features::{self, Feature},
 };
-use porthub_components::metrics::{Gpu, Memory, Sample};
+use porthub_components::metrics::{Disk, Gpu, Memory, Sample};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 pub struct Worker(tokio::task::JoinHandle<()>);
@@ -35,6 +35,7 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
             disks.refresh(true);
             // Exclude network/virtual mounts and count each physical filesystem once.
             let mut seen = std::collections::HashSet::new();
+            let mut drives = Vec::new();
             let mut disk = Memory { used: 0, total: 0 };
             for d in disks.list() {
                 if matches!(d.file_system().to_str(), Some("overlay" | "aufs"))
@@ -43,6 +44,16 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
                 {
                     continue;
                 }
+                if drives.len() >= 128 {
+                    continue;
+                }
+                let name = d.name().to_string_lossy().to_string();
+                drives.push(Disk {
+                    id: name.chars().take(256).collect(),
+                    name: name.chars().take(120).collect(),
+                    used: d.total_space().saturating_sub(d.available_space()),
+                    total: d.total_space(),
+                });
                 disk.total = disk.total.saturating_add(d.total_space());
                 disk.used = disk
                     .used
@@ -58,6 +69,7 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
                 },
                 disk,
                 gpus,
+                disks: drives,
             };
             if !sample.valid() || !features::enabled(&path, Feature::Metrics) {
                 continue;
@@ -75,7 +87,7 @@ async fn gpus() -> Vec<Gpu> {
         Duration::from_secs(2),
         tokio::process::Command::new("nvidia-smi")
             .args([
-                "--query-gpu=name,utilization.gpu,memory.used,memory.total",
+                "--query-gpu=uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu,fan.speed",
                 "--format=csv,noheader,nounits",
             ])
             .kill_on_drop(true)
@@ -88,27 +100,49 @@ async fn gpus() -> Vec<Gpu> {
     if !output.status.success() {
         return vec![];
     }
-    String::from_utf8_lossy(&output.stdout)
+    parse_gpus(&String::from_utf8_lossy(&output.stdout))
+}
+fn parse_gpus(output: &str) -> Vec<Gpu> {
+    output
         .lines()
         .take(16)
         .filter_map(|line| {
-            let parts: Vec<_> = line.split(',').map(str::trim).collect();
-            if parts.len() != 4 {
+            let p: Vec<_> = line.split(',').map(str::trim).collect();
+            if p.len() != 7 {
                 return None;
             }
-            let memory = parts[2]
-                .parse::<u64>()
-                .ok()
-                .zip(parts[3].parse::<u64>().ok())
-                .map(|(used, total)| Memory {
-                    used: used.saturating_mul(1048576),
-                    total: total.saturating_mul(1048576),
-                });
+            let number = |s: &str| s.parse::<f32>().ok().filter(|v| v.is_finite());
             Some(Gpu {
-                name: parts[0].chars().take(120).collect(),
-                utilization: parts[1].parse().ok(),
-                memory,
+                id: Some(p[0].chars().take(128).collect()),
+                name: p[1].chars().take(120).collect(),
+                utilization: number(p[2]).filter(|v| (0.0..=100.0).contains(v)),
+                memory: p[3]
+                    .parse::<u64>()
+                    .ok()
+                    .zip(p[4].parse::<u64>().ok())
+                    .filter(|(used, total)| used <= total)
+                    .map(|(used, total)| Memory {
+                        used: used.saturating_mul(1048576),
+                        total: total.saturating_mul(1048576),
+                    }),
+                temperature: number(p[5]).filter(|v| (-40.0..=150.0).contains(v)),
+                fan_speed: number(p[6]).filter(|v| (0.0..=100.0).contains(v)),
             })
         })
         .collect()
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn gpu_sensors_preserve_missing_values_and_device_identity() {
+        let readings = parse_gpus("GPU-a, Same GPU, 75, 1024, 8192, 62, 40\nGPU-b, Same GPU, 20, 512, 8192, N/A, [Not Supported]");
+        assert_eq!(readings.len(), 2);
+        assert_ne!(readings[0].id, readings[1].id);
+        assert_eq!(readings[0].temperature, Some(62.));
+        assert_eq!(readings[0].fan_speed, Some(40.));
+        assert_eq!(readings[0].memory.as_ref().unwrap().used, 1073741824);
+        assert_eq!(readings[1].temperature, None);
+        assert_eq!(readings[1].fan_speed, None);
+    }
 }

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import axios from 'axios';
 import Dialog from '../HostedImages/ImageDialog';
-const button='min-h-11 rounded-lg border border-border px-3 text-xs font-medium hover:bg-control disabled:opacity-40';
+const button='inline-flex items-center justify-center gap-2 min-h-[44px] rounded-lg border border-border px-3 text-xs font-medium hover:bg-control disabled:opacity-40';
 export default function DeviceSettings({target,disconnect,refresh,onError}){
   const [editing,setEditing]=useState(false),[deleting,setDeleting]=useState(false),[name,setName]=useState(target.name),[busy,setBusy]=useState(false);
   const request=async fn=>{setBusy(true);try{await fn();await refresh();}catch(error){onError(error.response?.data?.detail||'Could not update the board');}finally{setBusy(false);}};
