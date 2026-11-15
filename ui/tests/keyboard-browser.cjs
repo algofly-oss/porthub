@@ -80,8 +80,8 @@ const base=process.env.PORTHUB_TEST_UI_URL,cookie=process.env.PORTHUB_TEST_BOARD
       const visible=rows.filter(row=>row.bottom>bounds.top+1&&row.top<bounds.bottom-1);
       return {height:card.getBoundingClientRect().height,viewport:bounds.height,contents:[...viewport.querySelectorAll('[data-ranking-row-content]')].map(el=>el.getBoundingClientRect().height),visible:visible.length,complete:visible.every(row=>row.top>=bounds.top-1&&row.bottom<=bounds.bottom+1)};
     });
-    if(width===1440)assert.equal(geometry.visible,2,'Two complete rows fit the desktop card');
-    assert.equal(geometry.height,360,'Resource card preserves dashboard space');
+    if(width===1440)assert.equal(geometry.visible,3,'Compact desktop table shows all three fixture machines');
+    if(width===1440){const traffic=await page.getByRole('heading',{name:'Public port traffic',exact:true}).locator('..').locator('..').locator('..').boundingBox();assert(Math.abs(geometry.height-traffic.height)<=1,'Resource and traffic cards share the available row height');}else assert.equal(geometry.height,360,'Phone card stays compact');
     assert(geometry.visible>=1&&geometry.complete,`Only complete resource rows at ${width}px: ${JSON.stringify(geometry)}`);
     await ranking.scrollIntoViewIfNeeded();await page.screenshot({path:`${screenshots}/dashboard-${width}.png`,fullPage:true});
   }

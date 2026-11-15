@@ -75,7 +75,7 @@ export default function Dashboard({ active = true }) {
           {traffic.error && <p role="status" className="px-5 pb-3 text-xs text-amber-600">{traffic.error}</p>}
           <button onClick={()=>navigate("traffic")} className="mt-auto flex w-full items-center justify-between border-t border-border px-5 py-3 text-xs text-muted-foreground hover:bg-muted hover:text-foreground">Inspect ports and source addresses<IconArrowUpRight size={15} /></button>
         </section>
-        <MachineRanking active={active} onSelect={id=>navigate("machines",{machine:id,machineTab:"resources"})} />
+        <div className="relative min-h-[360px]"><MachineRanking active={active} onSelect={id=>navigate("machines",{machine:id,machineTab:"resources"})} /></div>
       </div>
       <div className="grid items-stretch gap-4 lg:grid-cols-3">
         <section className="min-w-0 overflow-hidden rounded-xl bg-surface"><PanelHeading title="Busiest Ports" description={`Transferred in the last ${rangeLabel}`} onClick={()=>navigate("traffic")} />
