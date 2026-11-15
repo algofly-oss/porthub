@@ -112,6 +112,16 @@ impl Service {
                             out_bytes: delta[1],
                             drop_bytes: delta[2],
                             incoming_ips,
+                            accepted_incoming_ips: Some(
+                                state.kernel.accepted_recent(port, window).await?,
+                            ),
+                            accepted_incoming_ips_window_seconds: Some(
+                                state.kernel.observation_window(window).as_secs_f64(),
+                            ),
+                            accepted_incoming_ips_address_families: Some(vec![
+                                "ipv4".into(),
+                                "ipv6".into(),
+                            ]),
                             outgoing_ips,
                             blocked_ips,
                         },
@@ -191,20 +201,26 @@ async fn delete(State(service): State<Arc<Service>>, Path(port): Path<u16>) -> R
     }
 }
 async fn purge_history(State(service): State<Arc<Service>>, Path(port): Path<u16>) -> Response {
-    let state=service.state.lock().await;
+    let state = service.state.lock().await;
     if state.policies.contains_key(&port) {
-        return (StatusCode::CONFLICT, Json(json!({"detail":"Remove the port policy before purging its history"}))).into_response();
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"detail":"Remove the port policy before purging its history"})),
+        )
+            .into_response();
     }
     match service.store.purge(port).await {
-        Ok(())=>{
+        Ok(()) => {
             service.live.send_modify(|snapshot| {
-                let mut value=(**snapshot).clone();
-                if let Some(object)=value.as_object_mut(){object.remove(&port.to_string());}
-                *snapshot=Arc::new(value);
+                let mut value = (**snapshot).clone();
+                if let Some(object) = value.as_object_mut() {
+                    object.remove(&port.to_string());
+                }
+                *snapshot = Arc::new(value);
             });
             Json(json!({"data":{"port":port}})).into_response()
-        },
-        Err(error)=>fail(error),
+        }
+        Err(error) => fail(error),
     }
 }
 async fn list(State(service): State<Arc<Service>>) -> Json<Value> {
@@ -294,7 +310,10 @@ pub fn router(service: Arc<Service>) -> Router {
             "/api/ports/{port}/policy",
             get(policy).put(update).delete(delete),
         )
-        .route("/api/ports/{port}/history", axum::routing::delete(purge_history))
+        .route(
+            "/api/ports/{port}/history",
+            axum::routing::delete(purge_history),
+        )
         .route("/api/ports/policies/list", get(list))
         .route("/api/ports/active", get(active))
         .route("/api/ports/{port}/recent-ip-hits", get(hits))

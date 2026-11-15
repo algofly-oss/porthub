@@ -15,6 +15,14 @@ pub struct Sample {
     pub out_bytes: i64,
     pub drop_bytes: i64,
     pub incoming_ips: Vec<String>,
+    /// Packet sources allowed by PortHub's own policy. None means legacy or
+    /// unavailable telemetry; these are not application-delivery confirmations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_incoming_ips: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_incoming_ips_window_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_incoming_ips_address_families: Option<Vec<String>>,
     pub outgoing_ips: Vec<String>,
     pub blocked_ips: Vec<String>,
 }

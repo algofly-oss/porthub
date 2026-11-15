@@ -58,10 +58,18 @@ pub fn rules(
             let dropped = format!("cnt_drop_{port}");
             let recent = format!("recent_{port}");
             let recent_out = format!("recent_out_{port}");
+            let accepted = format!("accepted_{port}");
+            let accepted6 = format!("accepted6_{port}");
+            t = t.set(&accepted6, |s| {
+                s.key_type(SetKeyType::Ipv6Addr)
+                    .dynamic()
+                    .size(4096)
+                    .timeout(ttl)
+            });
             for name in [&incoming, &outgoing, &dropped] {
                 t = t.object(name, ObjectConfig::Counter);
             }
-            for name in [&recent, &recent_out] {
+            for name in [&recent, &recent_out, &accepted] {
                 t = t.set(name, |s| {
                     s.key_type(SetKeyType::Ipv4Addr)
                         .dynamic()
@@ -88,6 +96,13 @@ pub fn rules(
                             .size(4096)
                             .timeout(ttl)
                     })
+                    // Dynamic-set insertion can fail (e.g. capacity). Keep it
+                    // in a separate rule, so telemetry cannot change a verdict.
+                    .rule_keyed("input", format!("track_accepted_{port}"), |r| {
+                        r.match_tcp_dport(port)
+                            .match_saddr_in_set(&allow)
+                            .update_in_set(PacketField::Ip4Saddr, &accepted, Some(ttl))
+                    })
                     .rule_keyed("input", format!("allow_{port}"), |r| {
                         r.match_tcp_dport(port)
                             .match_saddr_in_set(&allow)
@@ -105,9 +120,24 @@ pub fn rules(
             } else {
                 // Preserve the existing policy contract: an empty allowlist
                 // does not restrict the port, even if its metadata is private.
-                t = t.rule_keyed("input", format!("allow_{port}"), |r| {
-                    r.match_tcp_dport(port).counter_named(&incoming).accept()
-                });
+                t = t
+                    .rule_keyed("input", format!("track_accepted_{port}"), |r| {
+                        r.match_tcp_dport(port).update_in_set(
+                            PacketField::Ip4Saddr,
+                            &accepted,
+                            Some(ttl),
+                        )
+                    })
+                    .rule_keyed("input", format!("track_accepted6_{port}"), |r| {
+                        r.match_tcp_dport(port).update_in_set(
+                            PacketField::Ip6Saddr,
+                            &accepted6,
+                            Some(ttl),
+                        )
+                    })
+                    .rule_keyed("input", format!("allow_{port}"), |r| {
+                        r.match_tcp_dport(port).counter_named(&incoming).accept()
+                    });
             }
             t = t
                 .rule_keyed("output", format!("recent_out_{port}"), |r| {
@@ -123,6 +153,13 @@ pub fn rules(
         }
         t
     }))
+}
+
+fn observed_within_window(remaining: Duration, retention: Duration, window: Duration) -> bool {
+    !remaining.is_zero()
+        && !window.is_zero()
+        && remaining <= retention
+        && remaining.saturating_add(window.min(retention)) >= retention
 }
 
 pub struct Kernel {
@@ -160,6 +197,44 @@ impl Kernel {
 }
 
 impl Kernel {
+    pub fn observation_window(&self, requested: Duration) -> Duration {
+        requested.min(self.ttl)
+    }
+    /// Fresh packet observations, not connection attempts or per-IP counters.
+    pub async fn accepted_recent(&self, port: u16, window: Duration) -> Result<Vec<String>> {
+        let window = self.observation_window(window);
+        let mut ips = Vec::new();
+        for (prefix, width) in [("accepted", 4), ("accepted6", 16)] {
+            for element in self
+                .connection
+                .list_set_elements(&self.table, &format!("{prefix}_{port}"), Family::Inet)
+                .await?
+            {
+                // No expiration metadata means no provable observation time.
+                let Some(left) = element.expiration() else {
+                    continue;
+                };
+                if !observed_within_window(left, self.ttl, window) {
+                    continue;
+                }
+                match width {
+                    4 => {
+                        if let Ok(bytes) = <[u8; 4]>::try_from(element.key()) {
+                            ips.push(std::net::Ipv4Addr::from(bytes).to_string());
+                        }
+                    }
+                    _ => {
+                        if let Ok(bytes) = <[u8; 16]>::try_from(element.key()) {
+                            ips.push(std::net::Ipv6Addr::from(bytes).to_string());
+                        }
+                    }
+                }
+            }
+        }
+        ips.sort();
+        ips.dedup();
+        Ok(ips)
+    }
     pub async fn recent(
         &self,
         port: u16,
@@ -191,5 +266,19 @@ impl Kernel {
         ips.sort();
         ips.dedup();
         Ok(ips)
+    }
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    #[test]
+    fn expiry_requires_a_live_address_inside_the_declared_window() {
+        let ttl = Duration::from_secs(300);
+        assert!(!observed_within_window(Duration::ZERO, ttl, ttl));
+        assert!(!observed_within_window(ttl + Duration::from_secs(1), ttl, ttl));
+        assert!(!observed_within_window(Duration::from_secs(290), ttl, Duration::from_secs(5)));
+        assert!(observed_within_window(Duration::from_secs(295), ttl, Duration::from_secs(5)));
+        assert!(!observed_within_window(ttl, ttl, Duration::ZERO));
     }
 }

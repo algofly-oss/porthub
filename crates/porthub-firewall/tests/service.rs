@@ -100,6 +100,13 @@ async fn firewall_api_authenticates_and_persists_policy_changes() -> Result<()> 
                 rows.iter().any(|s| {
                     s["in_bytes"].as_i64().unwrap_or(0) > 0
                         && s["out_bytes"].as_i64().unwrap_or(0) > 0
+                        && s["accepted_incoming_ips"]
+                            .as_array()
+                            .is_some_and(|ips| ips.iter().any(|ip| ip == "127.0.0.1"))
+                        && s["accepted_incoming_ips_window_seconds"]
+                            .as_f64()
+                            .is_some_and(|window| window > 0. && window <= 300.)
+                        && s["accepted_incoming_ips_address_families"] == json!(["ipv4", "ipv6"])
                 })
             }) {
                 break;

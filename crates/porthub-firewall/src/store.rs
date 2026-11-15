@@ -3,7 +3,15 @@ use anyhow::{ensure, Result};
 use std::{collections::BTreeMap, path::Path, time::Duration};
 use tokio_rusqlite::{params, Connection};
 
-type StoredSample = (u16, Sample, String, String, String);
+type StoredSample = (
+    u16,
+    Sample,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+);
 
 #[derive(Clone)]
 pub struct Store {
@@ -24,7 +32,7 @@ CREATE TABLE IF NOT EXISTS active_ports(port INTEGER PRIMARY KEY,last_seen INTEG
 CREATE TABLE IF NOT EXISTS recent_ip_hits(port INTEGER NOT NULL,ip TEXT NOT NULL,last_seen INTEGER NOT NULL,PRIMARY KEY(port,ip));
 CREATE TABLE IF NOT EXISTS porthub_schema(key TEXT PRIMARY KEY,value TEXT NOT NULL);")?;
             let columns:Vec<String>=db.prepare("PRAGMA table_info(traffic_buffer)")?.query_map([],|row|row.get(1))?.collect::<Result<_,_>>()?;
-            for (name,definition) in [("drop_bytes","INTEGER NOT NULL DEFAULT 0"),("blocked_ips","TEXT NOT NULL DEFAULT '[]'"),("incoming_ips","TEXT NOT NULL DEFAULT '[]'"),("outgoing_ips","TEXT NOT NULL DEFAULT '[]'"),("interval_seconds","REAL NOT NULL DEFAULT 1")] {
+            for (name,definition) in [("drop_bytes","INTEGER NOT NULL DEFAULT 0"),("blocked_ips","TEXT NOT NULL DEFAULT '[]'"),("incoming_ips","TEXT NOT NULL DEFAULT '[]'"),("outgoing_ips","TEXT NOT NULL DEFAULT '[]'"),("interval_seconds","REAL NOT NULL DEFAULT 1"),("accepted_incoming_ips","TEXT"),("accepted_incoming_ips_window_seconds","REAL"),("accepted_incoming_ips_address_families","TEXT")] {
                 if !columns.iter().any(|c|c==name){db.execute_batch(&format!("ALTER TABLE traffic_buffer ADD COLUMN {name} {definition}"))?;}
             }
             let legacy:i64=db.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='allowlists'",[],|r|r.get(0))?;
@@ -81,13 +89,15 @@ CREATE TABLE IF NOT EXISTS porthub_schema(key TEXT PRIMARY KEY,value TEXT NOT NU
         Ok(())
     }
     pub async fn purge(&self, port: u16) -> Result<()> {
-        self.db.call(move |db| -> tokio_rusqlite::rusqlite::Result<()> {
-            let tx=db.transaction()?;
-            for table in ["traffic_buffer","active_ports","recent_ip_hits"] {
-                tx.execute(&format!("DELETE FROM {table} WHERE port=?"), [port])?;
-            }
-            tx.commit()
-        }).await?;
+        self.db
+            .call(move |db| -> tokio_rusqlite::rusqlite::Result<()> {
+                let tx = db.transaction()?;
+                for table in ["traffic_buffer", "active_ports", "recent_ip_hits"] {
+                    tx.execute(&format!("DELETE FROM {table} WHERE port=?"), [port])?;
+                }
+                tx.commit()
+            })
+            .await?;
         Ok(())
     }
     pub async fn record(&self, samples: Vec<(u16, Sample)>) -> Result<()> {
@@ -97,14 +107,26 @@ CREATE TABLE IF NOT EXISTS porthub_schema(key TEXT PRIMARY KEY,value TEXT NOT NU
                 let incoming = serde_json::to_string(&s.incoming_ips)?;
                 let outgoing = serde_json::to_string(&s.outgoing_ips)?;
                 let blocked = serde_json::to_string(&s.blocked_ips)?;
-                Ok::<_, serde_json::Error>((port, s, incoming, outgoing, blocked))
+                let accepted = s
+                    .accepted_incoming_ips
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?;
+                let families = s
+                    .accepted_incoming_ips_address_families
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?;
+                Ok::<_, serde_json::Error>((
+                    port, s, incoming, outgoing, blocked, accepted, families,
+                ))
             })
             .collect::<Result<_, _>>()?;
         self.db.call(move|db|->tokio_rusqlite::rusqlite::Result<()> {
             let tx=db.transaction()?;
             let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
-            for (port,s,incoming,outgoing,blocked) in rows {
-                tx.execute("INSERT INTO traffic_buffer(port,ts,in_bytes,out_bytes,drop_bytes,incoming_ips,outgoing_ips,blocked_ips,interval_seconds) VALUES(?,?,?,?,?,?,?,?,?)",params![port,s.timestamp,s.in_bytes,s.out_bytes,s.drop_bytes,incoming,outgoing,blocked,s.interval_seconds])?;
+            for (port,s,incoming,outgoing,blocked,accepted,families) in rows {
+                tx.execute("INSERT INTO traffic_buffer(port,ts,in_bytes,out_bytes,drop_bytes,incoming_ips,outgoing_ips,blocked_ips,interval_seconds,accepted_incoming_ips,accepted_incoming_ips_window_seconds,accepted_incoming_ips_address_families) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",params![port,s.timestamp,s.in_bytes,s.out_bytes,s.drop_bytes,incoming,outgoing,blocked,s.interval_seconds,accepted,s.accepted_incoming_ips_window_seconds,families])?;
                 if s.in_bytes>0||s.out_bytes>0||s.drop_bytes>0 {
                     tx.execute("INSERT OR REPLACE INTO active_ports(port,last_seen) VALUES(?,?)",params![port,s.timestamp])?;
                 }
@@ -120,25 +142,35 @@ CREATE TABLE IF NOT EXISTS porthub_schema(key TEXT PRIMARY KEY,value TEXT NOT NU
     pub async fn snapshot(&self, ports: Vec<u16>) -> Result<BTreeMap<u16, Vec<Sample>>> {
         self.snapshot_since(ports, 0).await
     }
-    pub async fn snapshot_since(&self, ports: Vec<u16>, since: i64) -> Result<BTreeMap<u16, Vec<Sample>>> {
+    pub async fn snapshot_since(
+        &self,
+        ports: Vec<u16>,
+        since: i64,
+    ) -> Result<BTreeMap<u16, Vec<Sample>>> {
         let filter = if ports.is_empty() {
             None
         } else {
             Some(serde_json::to_string(&ports)?)
         };
         let rows=self.db.call(move|db|->tokio_rusqlite::rusqlite::Result<Vec<StoredSample>> {
-            let mut query="SELECT port,ts,interval_seconds,in_bytes,out_bytes,drop_bytes,incoming_ips,outgoing_ips,blocked_ips FROM traffic_buffer WHERE ts>=strftime('%s','now')-3600".to_owned();
+            let mut query="SELECT port,ts,interval_seconds,in_bytes,out_bytes,drop_bytes,incoming_ips,outgoing_ips,blocked_ips,accepted_incoming_ips,accepted_incoming_ips_window_seconds,accepted_incoming_ips_address_families FROM traffic_buffer WHERE ts>=strftime('%s','now')-3600".to_owned();
             let mut parameters=vec![since.to_string()];
             query.push_str(" AND ts>=CAST(? AS INTEGER)");
             if let Some(filter)=filter {query.push_str(" AND port IN (SELECT value FROM json_each(?))");parameters.push(filter);}
             query.push_str(" ORDER BY port,ts");
-            db.prepare(&query)?.query_map(tokio_rusqlite::rusqlite::params_from_iter(parameters),|r|Ok((r.get(0)?,Sample{timestamp:r.get(1)?,interval_seconds:r.get(2)?,in_bytes:r.get(3)?,out_bytes:r.get(4)?,drop_bytes:r.get(5)?,incoming_ips:vec![],outgoing_ips:vec![],blocked_ips:vec![]},r.get(6)?,r.get(7)?,r.get(8)?)))?.collect()
+            db.prepare(&query)?.query_map(tokio_rusqlite::rusqlite::params_from_iter(parameters),|r|Ok((r.get(0)?,Sample{timestamp:r.get(1)?,interval_seconds:r.get(2)?,in_bytes:r.get(3)?,out_bytes:r.get(4)?,drop_bytes:r.get(5)?,incoming_ips:vec![],outgoing_ips:vec![],blocked_ips:vec![],accepted_incoming_ips:None,accepted_incoming_ips_window_seconds:r.get(10)?,accepted_incoming_ips_address_families:None},r.get(6)?,r.get(7)?,r.get(8)?,r.get(9)?,r.get(11)?)))?.collect()
         }).await?;
         let mut output: BTreeMap<u16, Vec<Sample>> = BTreeMap::new();
-        for (port, mut sample, incoming, outgoing, blocked) in rows {
+        for (port, mut sample, incoming, outgoing, blocked, accepted, families) in rows {
             sample.incoming_ips = serde_json::from_str(&incoming)?;
             sample.outgoing_ips = serde_json::from_str(&outgoing)?;
             sample.blocked_ips = serde_json::from_str(&blocked)?;
+            sample.accepted_incoming_ips = accepted
+                .map(|value| serde_json::from_str(&value))
+                .transpose()?;
+            sample.accepted_incoming_ips_address_families = families
+                .map(|value| serde_json::from_str(&value))
+                .transpose()?;
             output.entry(port).or_default().push(sample);
         }
         Ok(output)
