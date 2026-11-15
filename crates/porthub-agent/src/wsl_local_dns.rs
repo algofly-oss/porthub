@@ -215,13 +215,41 @@ async fn revert(connection: &zbus::Connection, receipt: &Receipt, path: &Path) -
     std::fs::remove_file(path)?;
     Ok(())
 }
-async fn nat_mode() -> bool {
+// WSL installs wslinfo as /usr/bin/wslinfo -> /init. Validate its root-owned
+// non-writable chain, but execute the original name: /init dispatches by argv0.
+fn trusted_wslinfo(root: &Path, owner: u32) -> bool {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    let path = Path::new("/usr/bin/wslinfo");
-    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+    let protected = |path: &Path, directory: bool| {
+        std::fs::symlink_metadata(path).is_ok_and(|m| {
+            m.uid() == owner
+                && m.permissions().mode() & 0o022 == 0
+                && if directory {
+                    m.is_dir()
+                } else {
+                    m.is_file() && m.permissions().mode() & 0o111 != 0
+                }
+        })
+    };
+    for path in [root.to_owned(), root.join("usr"), root.join("usr/bin")] {
+        if !protected(&path, true) {
+            return false;
+        }
+    }
+    let path = root.join("usr/bin/wslinfo");
+    let Ok(metadata) = std::fs::symlink_metadata(&path) else {
         return false;
     };
-    if !metadata.is_file() || metadata.uid() != 0 || metadata.permissions().mode() & 0o022 != 0 {
+    if metadata.file_type().is_symlink() {
+        metadata.uid() == owner
+            && std::fs::read_link(&path).is_ok_and(|target| target == Path::new("/init"))
+            && protected(&root.join("init"), false)
+    } else {
+        protected(&path, false)
+    }
+}
+async fn nat_mode() -> bool {
+    let path = Path::new("/usr/bin/wslinfo");
+    if !trusted_wslinfo(Path::new("/"), 0) {
         return false;
     }
     let result = tokio::time::timeout(
@@ -372,6 +400,62 @@ mod tests {
             domains: vec![],
             default_route: false,
         }
+    }
+    #[test]
+    fn official_wslinfo_symlink_is_trusted_without_weakening_path_ownership() -> Result<()> {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let root = tempfile::tempdir()?;
+        let root = root.path();
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
+        let owner = rustix::process::getuid().as_raw();
+        std::fs::create_dir(root.join("usr"))?;
+        std::fs::create_dir(root.join("usr/bin"))?;
+        for path in [root.join("usr"), root.join("usr/bin")] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+        }
+        std::fs::write(root.join("init"), b"trusted fixture, never executed")?;
+        std::fs::set_permissions(root.join("init"), std::fs::Permissions::from_mode(0o755))?;
+        symlink("/init", root.join("usr/bin/wslinfo"))?;
+        assert!(
+            trusted_wslinfo(root, owner),
+            "Official root-protected symlink must be accepted"
+        );
+        assert!(
+            !trusted_wslinfo(root, owner.wrapping_add(1)),
+            "Foreign owner must be rejected"
+        );
+        std::fs::set_permissions(root.join("usr/bin"), std::fs::Permissions::from_mode(0o777))?;
+        assert!(
+            !trusted_wslinfo(root, owner),
+            "Writable parent must be rejected"
+        );
+        std::fs::set_permissions(root.join("usr/bin"), std::fs::Permissions::from_mode(0o755))?;
+        std::fs::set_permissions(root.join("init"), std::fs::Permissions::from_mode(0o777))?;
+        assert!(
+            !trusted_wslinfo(root, owner),
+            "Writable init target must be rejected"
+        );
+        std::fs::set_permissions(root.join("init"), std::fs::Permissions::from_mode(0o755))?;
+        std::fs::remove_file(root.join("usr/bin/wslinfo"))?;
+        symlink("/bin/sh", root.join("usr/bin/wslinfo"))?;
+        assert!(
+            !trusted_wslinfo(root, owner),
+            "Unrecognized symlink target must be rejected"
+        );
+        std::fs::remove_file(root.join("usr/bin/wslinfo"))?;
+        std::fs::write(
+            root.join("usr/bin/wslinfo"),
+            b"regular trusted executable fixture",
+        )?;
+        std::fs::set_permissions(
+            root.join("usr/bin/wslinfo"),
+            std::fs::Permissions::from_mode(0o755),
+        )?;
+        assert!(
+            trusted_wslinfo(root, owner),
+            "Existing regular root-owned executable remains supported"
+        );
+        Ok(())
     }
     #[tokio::test]
     #[ignore = "requires explicit root WSL execution with an already owned DNS route"]
