@@ -129,7 +129,6 @@ async fn private_enrollment_protects_credentials_and_rejects_unmanaged_destinati
     let _restore = ProgramData(std::env::var_os("ProgramData"));
     std::env::set_var("ProgramData", root.path());
     let native = root.path().join("PortHub/native/private");
-    porthub_agent::service::directory(&native, true)?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let server = format!("http://{}", listener.local_addr()?);
     let claims = Arc::new(AtomicUsize::new(0));
