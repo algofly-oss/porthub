@@ -29,7 +29,7 @@ async fn native_keyboard_clipboard_mouse_and_local_disable_from_embedded_portal(
     let result:Result<()>=async{
         let(owner,cookie)=case.user("keyboard-browser@example.invalid","admin").await?;let machine=ObjectId::new();let token="isolated-keyboard-native-test-token";
         case.app.collection("machines").insert_one(doc!{"_id":machine,"user_id":owner,"name":"Isolated desktop","token":token,"enabled":true}).await?;
-        let metric_sample=json!({"cpu":20,"cores":8,"ram":{"used":4_000_000_000_u64,"total":8_000_000_000_u64},"disk":{"used":50_000_000_000_u64,"total":100_000_000_000_u64},"gpus":[{"name":"Fixture GPU","utilization":80,"memory":{"used":1_000_000_000_u64,"total":4_000_000_000_u64}}]});
+        let metric_sample=json!({"cpu":20,"cores":8,"ram":{"used":4_000_000_000_u64,"total":8_000_000_000_u64},"disk":{"used":50_000_000_000_u64,"total":100_000_000_000_u64},"gpus":[{"name":"Fixture GPU","utilization":96,"memory":{"used":1_000_000_000_u64,"total":4_000_000_000_u64}}]});
         case.status("POST","/api/machines/client/metrics","",json!({"machine_id":machine.to_hex(),"token":token,"sample":metric_sample}),axum::http::StatusCode::OK).await?;
         let busy=ObjectId::new();
         case.app.collection("machines").insert_one(doc!{"_id":busy,"user_id":owner,"name":"Busy CPU host","token":"fixture-busy","enabled":true}).await?;

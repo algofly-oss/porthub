@@ -41,7 +41,7 @@ const base=process.env.PORTHUB_TEST_UI_URL,cookie=process.env.PORTHUB_TEST_BOARD
   assert((await ranking.getByRole('listitem').first().textContent()).includes('Busy CPU host'));
   await ranking.getByRole('listitem').filter({hasText:'Isolated desktop'}).getByRole('button').click();
   const health=page.getByRole('region',{name:'Machine health and resource history'});
-  await health.getByRole('img',{name:'CPU utilization history from 0 to 100 percent'}).waitFor();
+  await health.getByRole('img',{name:'CPU utilization history from 0 to 100 percent'}).waitFor();assert.equal(await health.getByRole('meter',{name:'GPU',exact:true}).getAttribute('aria-valuenow'),'96');assert.equal(await health.getByRole('meter',{name:'GPU',exact:true}).locator('div').evaluate(el=>getComputedStyle(el).backgroundColor),'rgb(239, 68, 68)');
   await chooseDropdown(health.getByLabel('Resource history period',{exact:true}),'Last hour');
   await health.getByText('Fixture GPU',{exact:false}).first().waitFor();
   assert.equal(await health.getByRole('img').count(),4);
