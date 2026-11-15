@@ -110,6 +110,31 @@ async fn host_command(args: &[&str]) -> Result<()> {
     );
     Ok(())
 }
+fn metadata_volume(path: &str) -> Result<File> {
+    let path: Vec<u16> = std::ffi::OsStr::new(path)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    unsafe {
+        // IOCTL_STORAGE_QUERY_PROPERTY is FILE_ANY_ACCESS. Do not request data
+        // read access to locked/recovery volumes just to inspect their bus type.
+        let handle = CreateFileW(
+            path.as_ptr(),
+            0,
+            7,
+            std::ptr::null(),
+            3,
+            0,
+            std::ptr::null_mut(),
+        );
+        ensure!(
+            handle != INVALID_HANDLE_VALUE,
+            "Cannot open volume metadata: {}",
+            std::io::Error::last_os_error()
+        );
+        Ok(File::from_raw_handle(handle))
+    }
+}
 fn online_usb_storage() -> Option<bool> {
     // Enumerate every volume, including volumes mounted in directories without
     // drive letters. Native query failures never grant storage capture.
@@ -136,7 +161,7 @@ fn online_usb_storage() -> Option<bool> {
                     let path = String::from_utf16_lossy(&name[..length])
                         .trim_end_matches('\\')
                         .to_owned();
-                    match File::open(path) {
+                    match metadata_volume(&path) {
                         Ok(volume) => {
                             let mut query = [0u32; 3];
                             let mut result = [0u8; 1024];

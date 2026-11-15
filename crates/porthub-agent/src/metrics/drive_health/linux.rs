@@ -118,7 +118,7 @@ fn nvme_command(device: &Device, opcode: u8, cdw10: u32, data: &mut [u8]) -> Res
     };
     let code =
         0xc0000000u64 | ((std::mem::size_of::<Nvme>() as u64) << 16) | (b'N' as u64) << 8 | 0x41;
-    if unsafe { libc::ioctl(file.as_raw_fd(), code as libc::c_ulong, &mut cmd) } != 0 {
+    if unsafe { libc::ioctl(file.as_raw_fd(), code as _, &mut cmd) } != 0 {
         return Err("NVMe SMART command unavailable".into());
     }
     Ok(())
