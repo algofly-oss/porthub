@@ -18,6 +18,14 @@ pub struct Gpu {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fan_speed: Option<f32>,
     pub memory: Option<Memory>,
+    /// Driver-reported shared system-memory use, separate from dedicated VRAM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_memory: Option<Memory>,
+    /// Maximum shareable system memory; neither reserved memory nor a budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_memory_capacity: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrated: Option<bool>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -183,6 +191,9 @@ impl Sample {
                     && g.fan_speed.is_none_or(percent)
                     && g.utilization.is_none_or(percent)
                     && g.memory.as_ref().is_none_or(memory)
+                    && g.shared_memory.as_ref().is_none_or(memory)
+                    && g.shared_memory_capacity.is_none_or(|v| v > 0 && v <= i64::MAX as u64)
+                    && g.shared_memory.as_ref().zip(g.shared_memory_capacity).is_none_or(|(m, capacity)| m.total == capacity)
             })
     }
 }

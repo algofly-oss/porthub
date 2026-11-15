@@ -14,6 +14,8 @@ pub(super) struct Cache {
     counters: Option<Option<super::gpu_counter::Counter>>,
     #[cfg(windows)]
     luids: std::collections::HashMap<String, u64>,
+    #[cfg(windows)]
+    dedicated_capacities: std::collections::HashMap<String, u64>,
 }
 impl Cache {
     pub async fn sample(&mut self) -> Vec<Gpu> {
@@ -37,6 +39,10 @@ impl Cache {
                         .iter()
                         .filter_map(|a| a.gpu.id.clone().zip(a.luid))
                         .collect();
+                    self.dedicated_capacities = adapters
+                        .iter()
+                        .filter_map(|a| a.gpu.id.clone().zip(a.dedicated_capacity))
+                        .collect();
                     self.inventory = adapters.into_iter().map(|a| a.gpu).collect();
                     self.counters = None;
                 }
@@ -49,15 +55,29 @@ impl Cache {
                     self.counters = Some(super::gpu_counter::Counter::new());
                 }
                 if let Some(Some(counters)) = &mut self.counters {
-                    if let Some(readings) = counters.sample() {
-                        for gpu in &mut result {
-                            gpu.utilization = gpu
-                                .id
-                                .as_ref()
-                                .and_then(|id| self.luids.get(id))
-                                .and_then(|luid| readings.get(luid))
-                                .copied();
-                        }
+                    let readings = counters.sample();
+                    for gpu in &mut result {
+                        let luid = gpu.id.as_ref().and_then(|id| self.luids.get(id));
+                        gpu.utilization = luid
+                            .and_then(|luid| readings.as_ref().and_then(|v| v.get(luid)))
+                            .copied();
+                        let dedicated = gpu
+                            .id
+                            .as_ref()
+                            .and_then(|id| self.dedicated_capacities.get(id))
+                            .copied();
+                        gpu.memory = luid
+                            .and_then(|luid| counters.memory().dedicated.get(luid))
+                            .copied()
+                            .zip(dedicated)
+                            .filter(|(u, t)| *t > 0 && u <= t)
+                            .map(|(used, total)| Memory { used, total });
+                        gpu.shared_memory = luid
+                            .and_then(|luid| counters.memory().shared.get(luid))
+                            .copied()
+                            .zip(gpu.shared_memory_capacity)
+                            .filter(|(u, t)| *t > 0 && u <= t)
+                            .map(|(used, total)| Memory { used, total });
                     }
                 }
             }
@@ -81,6 +101,9 @@ fn unknown(id: String, name: String) -> Gpu {
         name: label(&name, 120),
         utilization: None,
         memory: None,
+        shared_memory: None,
+        shared_memory_capacity: None,
+        integrated: None,
         temperature: None,
         fan_speed: None,
     }

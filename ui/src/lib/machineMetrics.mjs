@@ -39,6 +39,19 @@ export function gpuReading(sample, id, name, allowLegacy=false) {
   return older?.length===1?older[0]:null;
 }
 export function memoryText(memory) { return memory?.total > 0 ? `${formatBytes(memory.used)} / ${formatBytes(memory.total)}` : 'Unavailable'; }
+export function sharedGpuMemoryText(gpu) {
+  if (gpu?.shared_memory?.total > 0) return `${memoryText(gpu.shared_memory)} max`;
+  if (gpu?.shared_memory_capacity > 0) return `Up to ${formatBytes(gpu.shared_memory_capacity)} · usage unavailable`;
+  return 'Unavailable';
+}
+export function gpuMemorySummary(gpu) {
+  const parts = [gpu.name];
+  if (gpu.integrated === true) parts.push('Integrated graphics');
+  if (gpu.memory?.total > 0) parts.push(`${memoryText(gpu.memory)} dedicated`);
+  if (gpu.shared_memory?.total > 0 || gpu.shared_memory_capacity > 0) parts.push(`${sharedGpuMemoryText(gpu)} shared`);
+  return parts.join(' · ');
+}
+
 export function capacityPercent(memory) { return memory?.total > 0 ? percent(memory.used / memory.total * 100) : null; }
 export function gpuDevices(history, latest) {
   const samples=[latest,...history.slice().reverse().map(p=>p.sample)].filter(Boolean);

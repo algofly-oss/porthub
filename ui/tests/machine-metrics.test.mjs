@@ -74,3 +74,17 @@ test('unmounted physical drive keeps identity but shows unavailable capacity and
  assert.equal(memoryText({used:1024,total:2048}),'1.0 KB / 2.0 KB');
  assert.equal(diskDevices([],unavailable)[0].name,'External drive');
 });
+
+test('shared GPU limits remain separate from dedicated memory and missing usage', async () => {
+  const {sharedGpuMemoryText,gpuMemorySummary}=await import('../src/lib/machineMetrics.mjs');
+  const gpu={name:'Integrated test GPU',integrated:true,memory:{used:0,total:128*1024**2},shared_memory_capacity:8*1024**3};
+  assert.equal(capacityPercent(gpu.shared_memory),null);
+  assert.equal(sharedGpuMemoryText(gpu),'Up to 8.0 GB · usage unavailable');
+  assert.match(gpuMemorySummary(gpu),/Integrated graphics/);
+  assert.match(gpuMemorySummary(gpu),/0 B \/ 128.0 MB dedicated/);
+  assert.match(gpuMemorySummary(gpu),/8.0 GB · usage unavailable shared/);
+  gpu.shared_memory={used:256*1024**2,total:8*1024**3};
+  assert.equal(capacityPercent(gpu.shared_memory),3.125);
+  assert.equal(sharedGpuMemoryText(gpu),'256.0 MB / 8.0 GB max');
+  assert.equal(gpuMemorySummary({name:'Legacy',memory:{used:1,total:2}}),'Legacy · 1 B / 2 B dedicated');
+});

@@ -13,7 +13,7 @@ async fn authenticated_reports_owner_scoping_minute_retention_and_history() -> R
   let(_,other)=case.user("metrics-other@example.invalid","user").await?;
   let machine=ObjectId::new();let id=machine.to_hex();
   case.app.collection("machines").insert_one(doc!{"_id":machine,"name":"Metrics desktop","token":"fixture-metrics","user_id":owner,"enabled":true}).await?;
-  let sample=json!({"cpu":42.5,"cores":4,"ram":{"used":4096,"total":8192},"disk":{"used":20,"total":100},"disks":[{"id":"ssd-a","name":"SSD A","used":20,"total":100},{"id":"ssd-b","name":"SSD B","used":50,"total":200}],"gpus":[{"id":"gpu-a","name":"Test GPU","utilization":70,"temperature":65,"fan_speed":40,"memory":{"used":10,"total":100}},{"id":"gpu-b","name":"Test GPU","utilization":20,"temperature":null,"fan_speed":null,"memory":null}]});
+  let sample=json!({"cpu":42.5,"cores":4,"ram":{"used":4096,"total":8192},"disk":{"used":20,"total":100},"disks":[{"id":"ssd-a","name":"SSD A","used":20,"total":100},{"id":"ssd-b","name":"SSD B","used":50,"total":200}],"gpus":[{"id":"gpu-a","name":"Test GPU","utilization":70,"temperature":65,"fan_speed":40,"memory":{"used":10,"total":100},"integrated":true,"shared_memory":{"used":512,"total":8192},"shared_memory_capacity":8192},{"id":"gpu-b","name":"Test GPU","utilization":20,"temperature":null,"fan_speed":null,"memory":null}]});
   let body=json!({"machine_id":id,"token":"fixture-metrics","sample":sample});
   let mut invalid=body.clone();invalid["token"]=json!("wrong");
   case.status("POST","/api/machines/client/metrics","",invalid,StatusCode::GONE).await?;
@@ -22,6 +22,9 @@ async fn authenticated_reports_owner_scoping_minute_retention_and_history() -> R
   for _ in 0..2 {case.status("POST","/api/machines/client/metrics","",body.clone(),StatusCode::OK).await?;}
   ensure!(case.app.collection("machine_metrics_history").count_documents(doc!{"machine_id":machine}).await?==1,"same-minute reports must not grow history");
   let row=case.app.collection("machine_metrics_history").find_one(doc!{"machine_id":machine}).await?.unwrap();
+  let stored_gpu=row.get_document("sample")?.get_array("gpus")?[0].as_document().unwrap();
+  ensure!(!stored_gpu.contains_key("shared_memory")&&!stored_gpu.contains_key("integrated"),"rolling/rollback readers require a legacy-readable stored sample");
+  ensure!(row.get_array("gpu_memory_details")?.len()==1,"shared GPU details must be stored atomically beside the legacy sample");
   let ttl=row.get_datetime("expires_at")?.timestamp_millis()-row.get_datetime("at")?.timestamp_millis();ensure!(ttl==7*24*60*60*1000);
   let fleet=case.status("GET","/api/machines/metrics",&cookie,Value::Null,StatusCode::OK).await?;
   ensure!(fleet["machines"][0]["live"]==true && fleet["machines"][0]["reading"]["sample"]["cpu"]==42.5);
@@ -35,6 +38,9 @@ async fn authenticated_reports_owner_scoping_minute_retention_and_history() -> R
   let a=readings["gpus"].as_array().unwrap().iter().find(|g|g["id"]=="gpu-a").unwrap();
   let b=readings["gpus"].as_array().unwrap().iter().find(|g|g["id"]=="gpu-b").unwrap();
   ensure!(a["temperature"]==65.0 && a["fan_speed"]==40.0 && b["temperature"].is_null() && b["fan_speed"].is_null());
+  ensure!(a["integrated"]==true && a["shared_memory"]["used"]==512 && a["shared_memory_capacity"]==8192,"shared memory must survive owner-scoped history aggregation");
+  ensure!(b.get("shared_memory").is_none(),"shared memory must not leak to a different GPU");
+  ensure!(history["latest"]["sample"]["gpus"][0]["shared_memory"]["used"]==512,"latest must restore shared memory details");
   ensure!(readings["disks"].as_array().unwrap().len()==2,"per-drive readings must survive history aggregation");
   case.app.collection("machine_metrics_latest").update_one(doc!{"_id":machine},doc!{"$set":{"at":DateTime::from_millis(DateTime::now().timestamp_millis()-60000)}}).await?;
   let stale=case.status("GET","/api/machines/metrics",&cookie,Value::Null,StatusCode::OK).await?;ensure!(stale["machines"][0]["live"]==false,"stale readings must not masquerade as idle machines");

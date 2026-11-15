@@ -89,8 +89,8 @@ async fn report(State(app): State<Arc<App>>, Json(body): Json<Report>) -> ApiRes
         .await?;
     let now = DateTime::now();
     let minute = now.timestamp_millis() / 60000;
-    let sample =
-        bson::to_document(&body.sample).map_err(|_| ApiError::bad_request("Invalid metrics"))?;
+    let (sample, gpu_memory_details) = storage_sample(&body.sample)
+        .map_err(|_| ApiError::bad_request("Invalid metrics"))?;
     let previous = app
         .collection("machine_metrics_latest")
         .find_one(doc! {"_id":id,"owner_id":owner})
@@ -100,7 +100,7 @@ async fn report(State(app): State<Arc<App>>, Json(body): Json<Report>) -> ApiRes
         .as_ref()
         .and_then(|r| r.get_document("sample").ok())
         .and_then(|s| s.get_array("drive_health").ok());
-    let current = doc! {"machine_id":id,"owner_id":owner,"at":now,"sample":sample};
+    let current = doc! {"machine_id":id,"owner_id":owner,"at":now,"sample":sample,"gpu_memory_details":gpu_memory_details};
     // SMART is sampled much less often than utilization. Keep one immutable
     // history point per drive observation/topology event, not every 15s upload.
     for drive in &body.sample.drive_health {
@@ -142,8 +142,49 @@ async fn report(State(app): State<Arc<App>>, Json(body): Json<Report>) -> ApiRes
         .await?;
     Ok(Json(json!({"ok":true})))
 }
+// Keep the strict legacy Sample in storage readable by rolling/rollback
+// gateways. New GPU details live beside it in the same atomic document.
+fn storage_sample(sample: &Sample) -> Result<(Document, Vec<Document>), bson::ser::Error> {
+    let mut document = bson::to_document(sample)?;
+    let mut details = Vec::new();
+    if let Ok(gpus) = document.get_array_mut("gpus") {
+        for (index, gpu) in gpus.iter_mut().enumerate() {
+            let Some(gpu) = gpu.as_document_mut() else { continue };
+            let mut extra = Document::new();
+            for key in ["shared_memory", "shared_memory_capacity", "integrated"] {
+                if let Some(value) = gpu.remove(key) { extra.insert(key, value); }
+            }
+            if !extra.is_empty() {
+                extra.insert("index", index as i64);
+                extra.insert("name", gpu.get_str("name").unwrap_or_default());
+                extra.insert("id", gpu.get("id").cloned().unwrap_or(bson::Bson::Null));
+                details.push(extra);
+            }
+        }
+    }
+    Ok((document, details))
+}
+fn sample_from_row(row: &Document) -> Option<Sample> {
+    let original: Sample = bson::from_document(row.get_document("sample").ok()?.clone()).ok()?;
+    let mut sample = original.clone();
+    if let Ok(details) = row.get_array("gpu_memory_details") {
+        for extra in details.iter().take(16).filter_map(|v| v.as_document()) {
+            let Some(index) = extra.get_i64("index").ok().and_then(|v| usize::try_from(v).ok()) else { continue };
+            let Some(gpu) = sample.gpus.get_mut(index) else { continue };
+            if extra.get_str("name").ok() != Some(gpu.name.as_str()) { continue }
+            let expected = gpu.id.as_ref().map(|id| bson::Bson::String(id.clone())).unwrap_or(bson::Bson::Null);
+            if extra.get("id") != Some(&expected) { continue }
+            let mut merged = bson::to_document(gpu).ok()?;
+            for key in ["shared_memory", "shared_memory_capacity", "integrated"] {
+                if let Some(value) = extra.get(key) { merged.insert(key, value.clone()); }
+            }
+            if let Ok(reading) = bson::from_document(merged) { *gpu = reading; }
+        }
+    }
+    Some(if sample.valid() { sample } else { original })
+}
 fn output(row: &Document) -> Value {
-    json!({"at":row.get_datetime("at").ok().map(|at|at.timestamp_millis()),"sample":row.get_document("sample").ok().and_then(|d|bson::from_document::<Sample>(d.clone()).ok())})
+    json!({"at":row.get_datetime("at").ok().map(|at|at.timestamp_millis()),"sample":sample_from_row(row)})
 }
 async fn fleet(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult<Json<Value>> {
     let user = auth::current_user(&app, &headers).await?;
@@ -234,7 +275,7 @@ async fn history(
             value["at"] = json!(bucket * interval_ms);
             let samples: Vec<Sample> = chunk
                 .iter()
-                .filter_map(|r| bson::from_document(r.get_document("sample").ok()?.clone()).ok())
+                .filter_map(|r| sample_from_row(r))
                 .collect();
             if !samples.is_empty() {
                 let n = samples.len() as f64;
@@ -268,6 +309,11 @@ async fn history(
                     gpu["fan_speed"] = average(readings.iter().filter_map(|g|g.fan_speed).collect());
                     let memory: Vec<_> = readings.iter().filter_map(|g|g.memory.as_ref()).collect();
                     if !memory.is_empty() { gpu["memory"] = json!({"used":(memory.iter().map(|m|m.used as f64).sum::<f64>()/memory.len() as f64) as u64,"total":(memory.iter().map(|m|m.total as f64).sum::<f64>()/memory.len() as f64) as u64}); }
+                    let shared: Vec<_> = readings.iter().filter_map(|g|g.shared_memory.as_ref()).collect();
+                    let capacity = readings.last().and_then(|g| g.shared_memory_capacity);
+                    if !shared.is_empty() && shared.iter().all(|m| Some(m.total) == capacity) {
+                        gpu["shared_memory"] = json!({"used":(shared.iter().map(|m|m.used as f64).sum::<f64>()/shared.len() as f64) as u64,"total":capacity});
+                    }
                     gpu
                 }).collect::<Vec<_>>());
                 value["sample"]["disks"] = json!(disk_groups.values().map(|readings| {
@@ -384,4 +430,57 @@ async fn drive_history(
     Ok(Json(
         json!({"drives":bson::from_bson::<Value>(bson::Bson::Array(drives)).unwrap_or_else(|_|json!([])),"history":history,"days":days,"retention_days":90,"scan_interval_seconds":60,"smart_interval_minutes":30,"short_test_interval_days":7,"truncated":rows.len()>=limit as usize}),
     ))
+}
+
+#[cfg(test)]
+mod gpu_storage_tests {
+    use super::*;
+
+    fn reading() -> Sample {
+        serde_json::from_value(json!({
+            "cpu":12.0,"cores":4,"ram":{"used":1024,"total":8192},
+            "disk":{"used":512,"total":4096},
+            "gpus":[{"name":"Intel Iris Xe","id":"luid-16019","utilization":2.0,
+                "memory":{"used":0,"total":134217728},
+                "shared_memory":{"used":248737792,"total":8447553536u64},
+                "shared_memory_capacity":8447553536u64,"integrated":true}]
+        })).unwrap()
+    }
+
+    #[test]
+    fn shared_gpu_details_round_trip_without_polluting_legacy_storage() {
+        let original = reading();
+        assert!(original.valid());
+        let (sample, details) = storage_sample(&original).unwrap();
+        let legacy_gpu = sample.get_array("gpus").unwrap()[0].as_document().unwrap();
+        for key in ["shared_memory", "shared_memory_capacity", "integrated"] {
+            assert!(!legacy_gpu.contains_key(key));
+        }
+        let legacy: Sample = bson::from_document(sample.clone()).unwrap();
+        assert!(legacy.valid());
+        assert!(legacy.gpus[0].shared_memory.is_none());
+        let row = doc! {"sample":sample,"gpu_memory_details":details};
+        let restored = sample_from_row(&row).unwrap();
+        assert_eq!(serde_json::to_value(restored).unwrap(), serde_json::to_value(original).unwrap());
+    }
+
+    #[test]
+    fn old_rows_and_mismatched_adapters_never_inherit_shared_memory() {
+        let (sample, mut details) = storage_sample(&reading()).unwrap();
+        assert!(sample_from_row(&doc! {"sample":sample.clone()}).unwrap().gpus[0].shared_memory.is_none());
+        details[0].insert("id", "different-adapter");
+        let restored = sample_from_row(&doc! {"sample":sample,"gpu_memory_details":details}).unwrap();
+        assert!(restored.gpus[0].shared_memory.is_none());
+        assert!(restored.gpus[0].integrated.is_none());
+    }
+
+    #[test]
+    fn invalid_shared_capacity_falls_back_to_valid_legacy_reading() {
+        let (sample, mut details) = storage_sample(&reading()).unwrap();
+        details[0].insert("shared_memory_capacity", -1i64);
+        let restored = sample_from_row(&doc! {"sample":sample,"gpu_memory_details":details}).unwrap();
+        assert!(restored.valid());
+        assert!(restored.gpus[0].shared_memory.is_none());
+        assert_eq!(restored.gpus[0].memory.as_ref().unwrap().total, 134217728);
+    }
 }

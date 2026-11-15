@@ -2,7 +2,7 @@ import SeriesChart from './SeriesChart';
 import SearchDropdown from '@/components/ui/search-dropdown';
 import DriveHealthPanel from './DriveHealth';
 import { useEffect, useRef, useState } from 'react';
-import { RESOURCES, utilization, rankedMachines, metricSegments, gpuDevices, gpuReading, capacityPercent, memoryText, diskDevices, diskReading, RANKING_RESOURCES, driveAssessment } from '@/lib/machineMetrics.mjs';
+import { RESOURCES, utilization, rankedMachines, metricSegments, gpuDevices, gpuReading, capacityPercent, memoryText, diskDevices, diskReading, RANKING_RESOURCES, driveAssessment, sharedGpuMemoryText, gpuMemorySummary } from '@/lib/machineMetrics.mjs';
 import { formatBytes } from '@/shared/utils/traffic.mjs';
 
 function useMetrics(url, active, interval = 15000) {
@@ -119,7 +119,8 @@ export default function MachineMetrics({ machineId, active }) {
   const percentText=v=>v==null?'Unavailable':`${v.toFixed(1)}%`;
   const gpuSeries=[
    {id:'util',label:'GPU utilization',read:s=>readGpu(s)?.utilization??null,format:s=>percentText(readGpu(s)?.utilization)},
-   {id:'vram',label:'VRAM',read:s=>capacityPercent(readGpu(s)?.memory),format:s=>memoryText(readGpu(s)?.memory)},
+   {id:'vram',label:'Dedicated VRAM',read:s=>capacityPercent(readGpu(s)?.memory),format:s=>memoryText(readGpu(s)?.memory)},
+   ...(history.some(p=>readGpu(p.sample)?.shared_memory_capacity>0||readGpu(p.sample)?.shared_memory?.total>0)||readGpu(sample)?.shared_memory_capacity>0||readGpu(sample)?.shared_memory?.total>0 ? [{id:'shared',label:'Shared GPU memory',read:s=>capacityPercent(readGpu(s)?.shared_memory),format:s=>sharedGpuMemoryText(readGpu(s))}] : []),
    {id:'temp',label:'Temperature',read:s=>readGpu(s)?.temperature??null,scale:v=>v/150*100,format:s=>readGpu(s)?.temperature==null?'Unavailable':`${readGpu(s).temperature.toFixed(1)}°C`},
    {id:'fan',label:'Fan speed',read:s=>readGpu(s)?.fan_speed??null,format:s=>percentText(readGpu(s)?.fan_speed)}];
   const drives=diskDevices(history,sample);
@@ -129,7 +130,7 @@ export default function MachineMetrics({ machineId, active }) {
   return <section aria-label="Machine health and resource history" className="space-y-4 p-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-base font-semibold">Resources</h2><p className="mt-1 text-xs text-muted-foreground">{latest ? `${fresh ? 'Live' : 'Stale reading'} · ${time(latest.at)}` : 'Waiting for the client’s first report'}</p></div><SearchDropdown aria-label="Resource history period" className="rounded-md bg-control p-2 text-sm" value={hours} onChange={event => setHours(Number(event.target.value))}><option value={1}>Last hour</option><option value={24}>Last 24 hours</option><option value={168}>Last 7 days</option></SearchDropdown></div>
     {error && <p role="alert" className="text-sm text-amber-600">{error}</p>}
     {loading && <p role="status" className="text-sm text-muted-foreground">Loading metrics…</p>}
-    <div className="grid grid-cols-2 gap-4">{RESOURCES.map(([key, label]) => <div key={key}><Usage label={label} value={utilization(sample, key)} /><p className="mt-2 text-xs text-muted-foreground">{key === 'cpu' ? sample ? `${sample.cores} logical CPUs` : '' : key === 'gpu' ? sample?.gpus?.map(gpu => `${gpu.name}${gpu.memory ? ` · ${formatBytes(gpu.memory.used)} / ${formatBytes(gpu.memory.total)} VRAM` : ''}`).join(' · ') : sample?.[key] ? memoryText(sample[key]) : ''}</p></div>)}</div>
+    <div className="grid grid-cols-2 gap-4">{RESOURCES.map(([key, label]) => <div key={key}><Usage label={label} value={utilization(sample, key)} /><p className="mt-2 text-xs text-muted-foreground">{key === 'cpu' ? sample ? `${sample.cores} logical CPUs` : '' : key === 'gpu' ? sample?.gpus?.map(gpuMemorySummary).join(' · ') : sample?.[key] ? memoryText(sample[key]) : ''}</p></div>)}</div>
     <DriveHealthPanel data={health.data} latest={sample?.drive_health} enabled={sample?.drive_health_enabled} testsEnabled={sample?.drive_tests_enabled} error={health.error} loading={health.loading} days={driveDays} onDays={setDriveDays} selected={selectedDrive} onDrive={setDriveId}/>
     <div className="grid gap-3 xl:grid-cols-2">{RESOURCES.filter(([key])=>key==='cpu'||key==='ram').map(([key, label]) => <HistoryChart key={key} history={data?.history || []} resource={key} label={label} intervalMs={data?.interval_ms || 60000} interval={`Last ${hours} ${hours === 1 ? 'hour' : 'hours'}`} />)}<div>{devices.length>1&&<SearchDropdown aria-label="GPU device" value={gpu?.id||''} onChange={e=>setGpuId(e.target.value)}>{devices.map(d=><option key={d.id} value={d.id}>{d.name} · {d.id}</option>)}</SearchDropdown>}<SeriesChart label={gpu?`GPU · ${gpu.name}`:'GPU'} history={history} series={gpuSeries} intervalMs={data?.interval_ms||60000}/></div><SeriesChart label="Disk usage by drive" history={history} series={diskSeries} intervalMs={data?.interval_ms||60000}/></div>
     <p className="text-xs leading-5 text-muted-foreground">Readings arrive every 15 seconds. History retains minute samples for seven days; chart gaps indicate missing reports. Disk usage includes verified local storage capacity; unmounted or unverified drives are unavailable. Client owners can disable reporting with <code>porthub features disable metrics</code>.</p>
