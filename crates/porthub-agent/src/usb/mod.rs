@@ -3,6 +3,8 @@ pub(crate) mod cli;
 #[cfg(target_os = "linux")]
 mod direct;
 #[cfg(target_os = "linux")]
+mod tcp;
+#[cfg(target_os = "linux")]
 mod linux;
 use crate::{
     control::Control,
@@ -253,25 +255,39 @@ async fn next_text(socket: &mut Socket) -> Result<Value> {
         }
     }
 }
+#[cfg(target_os="linux")]
+struct Carrier {tcp:Option<tcp::Stream>,sctp:Option<direct::Direct>}
 #[cfg(target_os = "linux")]
 async fn negotiate(
     socket: &mut Socket,
     source: bool,
     allowed: bool,
     control: &Control,
-) -> Result<Option<direct::Direct>> {
+) -> Result<Carrier> {
     let candidates = if allowed {
         direct::Candidates::gather(Some(control)).await.ok()
     } else {
         None
     };
+    let listener=if source && allowed {tcp::Listener::bind(Some(control)).await.ok()} else {None};
     text(
         socket,
-        json!({"type":"hello","direct":candidates.is_some()}),
+        json!({"type":"hello","direct":candidates.is_some(),"bulk_tcp":allowed,"bulk_offer":listener.as_ref().map(|l|&l.offer)}),
     )
     .await?;
     let hello = tokio::time::timeout(Duration::from_secs(8), next_text(socket)).await??;
     ensure!(hello["type"] == "hello", "Invalid USB peer greeting");
+    if allowed && hello["bulk_tcp"]==true {
+        let stream=if source {
+            if let Some(listener)=listener {listener.accept().await.ok()} else {None}
+        } else if let Ok(offer)=serde_json::from_value::<tcp::Offer>(hello["bulk_offer"].clone()) {
+            tcp::connect(offer,Some(control)).await.ok()
+        } else {None};
+        text(socket,json!({"type":"bulk_ready","ready":stream.is_some()})).await?;
+        let remote=tokio::time::timeout(Duration::from_secs(8),next_text(socket)).await??;
+        ensure!(remote["type"]=="bulk_ready","Invalid bulk USB negotiation");
+        if remote["ready"]==true {if let Some(stream)=stream {return Ok(Carrier{tcp:Some(stream),sctp:None});}}
+    }
     let both = candidates.is_some() && hello["direct"] == true;
     let mut direct = if both {
         let candidates = candidates.context("Direct USB candidates unavailable")?;
@@ -305,12 +321,12 @@ async fn negotiate(
         if source && (!both || local_ready && peer_ready) {
             let route = if both { "direct" } else { "relay" };
             text(socket, json!({"type":"path","route":route})).await?;
-            return Ok(if both { direct } else { None });
+            return Ok(Carrier{tcp:None,sctp:if both { direct } else { None }});
         }
         tokio::select! {
          result=async{if let Some(ready)=connected.as_mut(){ready.await.map_err(|_|anyhow::anyhow!("Direct USB negotiation failed"))}else{std::future::pending().await}}=>{connected=None;if result.is_ok(){local_ready=true;text(socket,json!({"type":"direct_ready"})).await?;}else if let Some(peer)=direct.as_mut(){if let Err(error)=peer.stopped().await{tracing::debug!(%error,"USB direct negotiation unavailable; keeping gateway fallback");}}},
-         value=next_text(socket)=>{let value=value?;match value["type"].as_str(){Some("direct_ready")=>peer_ready=true,Some("path") if !source=>{return match value["route"].as_str(){Some("direct") if local_ready=>Ok(direct),Some("relay")=>Ok(None),_=>anyhow::bail!("USB path selection failed")};},_=>anyhow::bail!("Unexpected USB signaling")}},
-         _=&mut deadline=>{if source{text(socket,json!({"type":"path","route":"relay"})).await?;return Ok(None);}anyhow::bail!("USB path selection timed out")}
+         value=next_text(socket)=>{let value=value?;match value["type"].as_str(){Some("direct_ready")=>peer_ready=true,Some("path") if !source=>{return match value["route"].as_str(){Some("direct") if local_ready=>Ok(Carrier{tcp:None,sctp:direct}),Some("relay")=>Ok(Carrier{tcp:None,sctp:None}),_=>anyhow::bail!("USB path selection failed")};},_=>anyhow::bail!("Unexpected USB signaling")}},
+         _=&mut deadline=>{if source{text(socket,json!({"type":"path","route":"relay"})).await?;return Ok(Carrier{tcp:None,sctp:None});}anyhow::bail!("USB path selection timed out")}
         }
     }
 }
@@ -385,14 +401,31 @@ async fn session(
     set_state(
         &states,
         &plan.id,
-        if direct.is_some() {
+        if direct.tcp.is_some() || direct.sctp.is_some() {
             "active-direct"
         } else {
             "active-relay"
         },
         None,
     );
-    bridge(stream, socket, direct, features::subscribe(path)).await
+    if let Some(bulk)=direct.tcp {
+        tracing::info!("USB selected authenticated bulk TCP path");
+        bridge_bulk(stream,socket,bulk,features::subscribe(path)).await
+    } else {bridge(stream, socket, direct.sctp, features::subscribe(path)).await}
+}
+#[cfg(target_os="linux")]
+async fn bridge_bulk<S:tokio::io::AsyncRead+tokio::io::AsyncWrite+Unpin>(mut kernel:S,mut socket:Socket,mut bulk:tcp::Stream,mut policy:tokio::sync::watch::Receiver<features::Policy>)->Result<()> {
+    use futures_util::{SinkExt,StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let transfer=tokio::io::copy_bidirectional_with_sizes(&mut kernel,&mut bulk,65536,65536);
+    tokio::pin!(transfer);
+    let mut heartbeat=tokio::time::interval(Duration::from_secs(15));
+    loop {tokio::select! {
+        result=&mut transfer=>{let (sent,received)=result?;tracing::debug!(sent,received,"USB bulk stream closed");return Ok(());},
+        frame=socket.next()=>match frame {Some(Ok(Message::Ping(bytes)))=>socket.send(Message::Pong(bytes)).await?,Some(Ok(Message::Pong(_)))=>{},Some(Ok(Message::Close(_)))|None=>return Ok(()),Some(Err(error))=>return Err(error.into()),_=>anyhow::bail!("Unexpected bulk USB control message")},
+        _=heartbeat.tick()=>socket.send(Message::Ping(vec![].into())).await?,
+        changed=policy.changed()=>if changed.is_err()||!policy.borrow().enabled(Feature::Usb)||!policy.borrow().enabled(Feature::DirectConnections){return Ok(());}
+    }}
 }
 // Independent pumps preserve full-duplex progress when either carrier applies
 // backpressure. Never replay kernel USB requests after a path fails.

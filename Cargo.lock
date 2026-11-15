@@ -5182,7 +5182,7 @@ dependencies = [
 
 [[package]]
 name = "porthub-agent"
-version = "1.11.23"
+version = "1.11.24"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5231,6 +5231,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "smoltcp",
+ "subtle",
  "sysinfo",
  "system-configuration",
  "tempfile",

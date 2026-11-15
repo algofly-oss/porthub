@@ -138,6 +138,24 @@ impl Control {
     pub(crate) fn direct_interface_allowed(&self,name:&str,source:std::net::IpAddr)->bool {
         self.outbound_settings.interface.as_deref().is_none_or(|selected|selected==name)&&self.outbound_settings.source.is_none_or(|selected|selected==source)
     }
+    /// Application streams share HTTP/file transfer route discovery. Source-
+    /// aware FIB checks keep direct sockets inside the configured interface,
+    /// source and VPN policy instead of racing arbitrary local addresses.
+    pub(crate) async fn direct_paths(&self, destinations: &[std::net::SocketAddr]) -> anyhow::Result<Vec<crate::outbound::Candidate>> {
+        let candidates=crate::outbound::discover(&self.outbound_settings,destinations).await?;
+        let mut selection=crate::outbound::Selection::default();
+        // Keep a recently successful HTTP/file source as the first candidate
+        // only when native discovery also permits it for this destination.
+        // A USB port failure must never poison an unrelated gateway route.
+        if let Some((recent,_,until,_))=self.underlay.lock().await.as_ref() {
+            if *until>Instant::now() {
+                if let Some(candidate)=candidates.iter().find(|c|c.source==recent.source&&c.interface==recent.interface) {
+                    selection.success(candidate.clone());
+                }
+            }
+        }
+        Ok(selection.order(&candidates,Instant::now()))
+    }
     pub fn profile(&self) -> &Profile {
         &self.profile
     }
