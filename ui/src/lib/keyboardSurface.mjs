@@ -155,8 +155,8 @@ function renderVkb(){
   modKey(tool('⌘','Command (tap: next key, hold: while held)'),'meta');
   for(const [k,label] of [['left','Left'],['up','Up'],['down','Down'],['right','Right']])key(svg(k),label,k);
   // Landscape only: the microphone as the last key of this row.
-  const mic=tool(svg('mic'),'Dictate','mic-key');mic.dataset.alwaysOn='';
-  mic.addEventListener('pointerdown',e=>e.preventDefault());mic.addEventListener('click',()=>mic());
+  const micButton=tool(svg('mic'),'Dictate','mic-key');micButton.dataset.alwaysOn='';
+  micButton.addEventListener('pointerdown',e=>e.preventDefault());micButton.addEventListener('click',()=>mic());
 
   // F1–F12 (Settings → Function keys): hold to repeat, and with Ctrl/Alt/Shift (Alt+F4).
   const fkeys=[];

@@ -3,12 +3,42 @@ const assert=require('node:assert/strict');
 const {chromium}=require('playwright');
 const {execFile}=require('node:child_process');const {promisify}=require('node:util');const run=promisify(execFile);
 const fs=require('node:fs/promises');
-const base=process.env.PORTHUB_TEST_UI_URL,cookie=process.env.PORTHUB_TEST_BOARD_COOKIE.split('=')[1];
+const base=process.env.PORTHUB_TEST_UI_URL,cookie=process.env.PORTHUB_TEST_BOARD_COOKIE?.split('=')[1];
+async function verifySurfaceDictation(browser){
+ const page=await browser.newPage({viewport:{width:1440,height:900}}),errors=[];
+ page.on('pageerror',error=>errors.push(error.message));
+ try{
+  await page.setContent('<div id="surface"><div id="keyboard"></div><div id="pad"></div></div>');
+  const source=(await fs.readFile(require('node:path').join(__dirname,'../src/lib/keyboardSurface.mjs'),'utf8')).replace('export function mountKeyboardSurface','window.mountKeyboardSurface = function');
+  await page.addScriptTag({content:source});
+  await page.evaluate(()=>{
+   window.dictationCalls=0;window.preferences={connected:false};
+   window.surface=mountKeyboardSurface({root:document.querySelector('#surface'),keyboard:document.querySelector('#keyboard'),pad:document.querySelector('#pad'),read:()=>preferences,command:()=>{},mic:()=>window.dictationCalls++});
+  });
+  const dictate=()=>page.getByRole('button',{name:'Dictate',exact:true});
+  assert(await dictate().isEnabled(),'local dictation stays available without a connected input client');
+  await dictate().click();
+  await dictate().focus();await page.keyboard.press('Enter');await page.keyboard.press('Space');
+  assert.equal(await page.evaluate(()=>dictationCalls),3,'pointer and accessible keyboard activation invoke injected microphone callback');
+  await page.setViewportSize({width:844,height:390});
+  await page.evaluate(()=>{preferences.connected=true;surface.refresh();});
+  await dictate().click();
+  assert.equal(await page.evaluate(()=>dictationCalls),4,'landscape control works after surface rerender');
+  assert.deepEqual(errors,[],'dictation control never throws a browser exception');
+  await page.evaluate(()=>surface.destroy());assert.equal(await dictate().count(),0);
+ }finally{await page.close();}
+}
 (async()=>{
+ if(process.env.PORTHUB_TEST_SURFACE_ONLY==='1'){
+  const browser=await chromium.launch({headless:true,executablePath:'/usr/bin/google-chrome',args:['--no-sandbox']});
+  try{await verifySurfaceDictation(browser);console.log('PASS real browser landscape dictation callback');}finally{await browser.close();}
+  return;
+ }
  const targetBrowser=await chromium.launch({headless:false,executablePath:'/usr/bin/google-chrome',args:['--no-sandbox','--disable-gpu'],env:{...process.env}});
  const portalBrowser=await chromium.launch({headless:true,executablePath:'/usr/bin/google-chrome',args:['--no-sandbox','--disable-features=WebRtcHideLocalIpsWithMdns']});
  const errors=[];
  try{
+  await verifySurfaceDictation(portalBrowser);
   const target=await targetBrowser.newPage();await target.setContent('<title>PortHub isolated native target</title><textarea id="target" autofocus style="width:700px;height:400px"></textarea><script>window.pointer=0;window.nativeButtons=[];window.heldMoves=0;window.nativePosition=null;document.addEventListener("mousedown",e=>nativeButtons.push({type:"down",trusted:e.isTrusted}));document.addEventListener("mouseup",e=>nativeButtons.push({type:"up",trusted:e.isTrusted}));document.addEventListener("mousemove",e=>{window.pointer++;window.nativePosition={x:e.clientX,y:e.clientY};if(e.buttons&1)window.heldMoves++;});document.getElementById("target").focus();</script>');await target.bringToFront();await target.locator('textarea').focus();
   const context=await portalBrowser.newContext({viewport:{width:1440,height:1000},serviceWorkers:'block'});await context.addInitScript(()=>{delete Object.getPrototypeOf(navigator).serviceWorker;});await context.addCookies([{name:'porthub_session',value:cookie,url:base}]);
   const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));await page.goto(base+'/home?view=keyboard');
