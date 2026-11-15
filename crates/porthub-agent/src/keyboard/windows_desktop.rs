@@ -7,6 +7,13 @@ use std::{
 use windows_sys::Win32::System::{
     RemoteDesktop::ProcessIdToSessionId, Threading::GetCurrentProcessId,
 };
+/// The hidden startup action is a desktop helper, never a terminal session.
+/// FreeConsole detaches this process only; any parent shell keeps its console.
+pub(super) fn background() {
+    unsafe {
+        windows_sys::Win32::System::Console::FreeConsole();
+    }
+}
 pub(super) fn interactive() -> Result<()> {
     let mut session = 0;
     ensure!(
@@ -70,23 +77,23 @@ $previous=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
 if($previous){{
     $priorSid=$previous.Principal.UserId
     if($priorSid -notmatch '^S-1-'){{$priorSid=([Security.Principal.NTAccount]$priorSid).Translate([Security.Principal.SecurityIdentifier]).Value}}
-    if($priorSid -ne $sid -or @($previous.Actions).Count -ne 1 -or $previous.Actions[0].Arguments -ne 'keyboard run' -or -not (ManagedHelper $previous.Actions[0].Execute)){{throw 'Refusing to replace an unverified desktop task'}}
+    if($priorSid -ne $sid -or @($previous.Actions).Count -ne 1 -or $previous.Actions[0].Arguments -notin @('keyboard run','keyboard startup') -or -not (ManagedHelper $previous.Actions[0].Execute)){{throw 'Refusing to replace an unverified desktop task'}}
     $currentHelper=$false
     foreach($process in @(Get-CimInstance Win32_Process -Filter "Name='porthub.exe'")){{
-        if($process.ExecutablePath -eq $path -and $process.SessionId -ne 0 -and $process.CommandLine -match '(?i)\skeyboard\s+run\s*$'){{
+        if($process.ExecutablePath -eq $path -and $process.SessionId -ne 0 -and $process.CommandLine -match '(?i)\skeyboard\s+startup\s*$'){{
             $owner=Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid
             if($owner.ReturnValue -eq 0 -and $owner.Sid -eq $sid){{$currentHelper=$true}}
         }}
     }}
     # IgnoreNew preserves a running old image even after its action changes.
     # Stop only this verified SID-owned task when its image needs refreshing.
-    if($previous.State -eq 'Running' -and ($previous.Actions[0].Execute -ne $path -or -not $currentHelper)){{
+    if($previous.State -eq 'Running' -and ($previous.Actions[0].Execute -ne $path -or $previous.Actions[0].Arguments -ne 'keyboard startup' -or -not $currentHelper)){{
         Stop-ScheduledTask -TaskName $name
         for($attempt=0;$attempt -lt 50 -and (Get-ScheduledTask -TaskName $name).State -eq 'Running';$attempt++){{Start-Sleep -Milliseconds 100}}
         if((Get-ScheduledTask -TaskName $name).State -eq 'Running'){{throw 'Desktop task did not stop for its verified update'}}
     }}
 }}
-$action=New-ScheduledTaskAction -Execute $path -Argument 'keyboard run'
+$action=New-ScheduledTaskAction -Execute $path -Argument 'keyboard startup'
 $trigger=New-ScheduledTaskTrigger -AtLogOn -User $sid
 $principal=New-ScheduledTaskPrincipal -UserId $sid -LogonType Interactive -RunLevel Limited
 $settings=New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
@@ -144,12 +151,14 @@ mod tests {
         assert!(text.contains("Start-ScheduledTask -TaskName $name"));
         assert!(text.contains("$priorSid -ne $sid"));
         assert!(text.contains("ManagedHelper $previous.Actions[0].Execute"));
-        assert!(text.contains("$previous.Actions[0].Execute -ne $path -or -not $currentHelper"));
+        assert!(text.contains("$previous.Actions[0].Execute -ne $path -or $previous.Actions[0].Arguments -ne 'keyboard startup' -or -not $currentHelper"));
         assert!(
             text.find("Stop-ScheduledTask -TaskName $name").unwrap()
                 < text.find("Register-ScheduledTask -TaskName $name").unwrap()
         );
         assert!(!text.contains("Stop-Process"));
+        assert!(text.contains("-Argument 'keyboard startup'"));
+        assert!(text.contains("@('keyboard run','keyboard startup')"));
         assert!(!text.contains("-Password"));
         assert!(script(Path::new("C:\\bad\npath")).is_err());
     }

@@ -47,6 +47,32 @@ def wait_for(predicate, description):
 
 
 
+def assert_helper_has_no_console(pid):
+    # The short-lived probe starts without a console. Attaching and immediately
+    # detaching it never sends input or changes another process's attachment.
+    probe = r"""
+import ctypes,sys,time
+from ctypes import wintypes
+kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+kernel.AttachConsole.argtypes=[wintypes.DWORD];kernel.AttachConsole.restype=wintypes.BOOL
+kernel.FreeConsole.restype=wintypes.BOOL
+kernel.GetConsoleProcessList.argtypes=[ctypes.POINTER(wintypes.DWORD),wintypes.DWORD]
+buffer=(wintypes.DWORD*2)()
+assert kernel.GetConsoleProcessList(buffer,2)==0,'Probe unexpectedly inherited a console'
+for attempt in range(50):
+    if kernel.AttachConsole(int(sys.argv[1])):
+        kernel.FreeConsole()
+        time.sleep(.1)
+        continue
+    error=ctypes.get_last_error()
+    assert error==6,'Cannot verify helper console state: '+str(error)
+    break
+else:
+    raise AssertionError('Automatic desktop helper retained a console')
+"""
+    run([sys.executable, "-c", probe, str(pid)], creationflags=subprocess.CREATE_NO_WINDOW)
+
+
 def wait_keyboard_image(executable):
     expected = str(executable).replace("'", "''")
     result = ps(r"""$ErrorActionPreference='Stop'
@@ -56,15 +82,17 @@ $name='PortHubKeyboard-'+$sid
 for($attempt=0;$attempt -lt 100;$attempt++){
     $task=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
     $process=@(Get-CimInstance Win32_Process -Filter "Name='porthub.exe'" | Where-Object {
-        $_.ExecutablePath -eq $expected -and $_.SessionId -ne 0 -and $_.CommandLine -match '(?i)\skeyboard\s+run\s*$'
+        $_.ExecutablePath -eq $expected -and $_.SessionId -ne 0 -and $_.CommandLine -match '(?i)\skeyboard\s+startup\s*$'
     })
-    if($task -and $task.Actions[0].Execute -eq $expected -and $task.State -eq 'Running' -and $process.Count){$process[0].ProcessId;exit 0}
+    if($task -and $task.Actions[0].Execute -eq $expected -and $task.Actions[0].Arguments -eq 'keyboard startup' -and $task.State -eq 'Running' -and $process.Count){$process[0].ProcessId;exit 0}
     Start-Sleep -Milliseconds 250
 }
 Get-CimInstance Win32_Process -Filter "Name='porthub.exe'" | Select-Object ProcessId,ExecutablePath,SessionId | Format-List
 throw 'Persistent desktop helper did not advance to its published immutable image'
 """)
-    return int(result.stdout.decode().strip())
+    pid = int(result.stdout.decode().strip())
+    assert_helper_has_no_console(pid)
+    return pid
 
 
 def cleanup_desktop(state):
@@ -85,7 +113,7 @@ function OwnedRelease($path) {
 }
 $task=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
 if($task){
-    if(@($task.Actions).Count -ne 1 -or $task.Actions[0].Arguments -ne 'keyboard run' -or -not (OwnedRelease $task.Actions[0].Execute)){
+    if(@($task.Actions).Count -ne 1 -or $task.Actions[0].Arguments -notin @('keyboard run','keyboard startup') -or -not (OwnedRelease $task.Actions[0].Execute)){
         throw 'Refusing to remove a desktop task outside the fixture immutable releases'
     }
     Stop-ScheduledTask -TaskName $name
@@ -93,14 +121,14 @@ if($task){
 }
 # A previously replaced task may still have its earlier immutable helper alive.
 foreach($p in @(Get-CimInstance Win32_Process -Filter "Name='porthub.exe'")){
-    if((OwnedRelease $p.ExecutablePath) -and $p.CommandLine -match '(?i)\skeyboard\s+run(?:\s|$)'){
+    if((OwnedRelease $p.ExecutablePath) -and $p.CommandLine -match '(?i)\skeyboard\s+(?:run|startup)(?:\s|$)'){
         $live=Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue
         if($live -and $live.Path -eq $p.ExecutablePath){Stop-Process -InputObject $live -Force -ErrorAction SilentlyContinue}
     }
 }
 if(Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue){throw 'Fixture keyboard task survived cleanup'}
 $remaining=@(Get-CimInstance Win32_Process -Filter "Name='porthub.exe'" | Where-Object {
-    (OwnedRelease $_.ExecutablePath) -and $_.CommandLine -match '(?i)\skeyboard\s+run(?:\s|$)'
+    (OwnedRelease $_.ExecutablePath) -and $_.CommandLine -match '(?i)\skeyboard\s+(?:run|startup)(?:\s|$)'
 })
 if($remaining.Count){$remaining | Select-Object ProcessId,ExecutablePath,SessionId | Format-List;throw 'Fixture desktop helper survived cleanup'}
 """)

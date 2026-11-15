@@ -103,6 +103,8 @@ pub async fn run(args: Args, cancel: CancellationToken) -> Result<()> {
     match args.command.unwrap_or(Action::Status) {
         Action::Permissions { request } => input::permissions(request),
         Action::Startup => {
+            #[cfg(windows)]
+            windows_desktop::background();
             #[cfg(target_os = "linux")]
             if desktop::start() {
                 return Ok(());
