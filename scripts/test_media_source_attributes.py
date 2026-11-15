@@ -18,6 +18,9 @@ class SourceAttributesTests(unittest.TestCase):
    # Use representative LF source blobs even before optional helper files ship.
    # The real production attributes file controls the isolated checkout below.
    content={path:(b'first line\nsecond line\n' if path!='.gitattributes' else (ROOT/path).read_bytes()) for path in ['.gitattributes',*SAMPLES]}
+   # Embedded CRLF in native/JPEG bytes must survive text normalization.
+   for path in ['crates/porthub-media-helper/tests/data/fixture.jpg','crates/porthub-components/tests/data/fixture.bin','vendor/media/fixture.exe']:
+    content[path]=b'\x00\xffbinary\r\nbytes\r\n'
    for path,data in content.items():
     digest=subprocess.check_output(['git','hash-object','-w','--stdin'],cwd=ROOT,input=data).decode().strip()
     subprocess.run(['git','update-index','--add','--cacheinfo',f'100644,{digest},{path}'],cwd=ROOT,env=environment,check=True)
