@@ -46,6 +46,46 @@ def wait_for(predicate, description):
     raise AssertionError("Timed out: " + description)
 
 
+
+def cleanup_desktop(state):
+    # The disposable fixture proved that these roots did not exist at entry.
+    # Never stop a task or process solely because its executable is named PortHub.
+    root = str(state / "releases").replace("'", "''")
+    ps(r"""$ErrorActionPreference='Stop'
+$root='""" + root + r"""'
+$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$name='PortHubKeyboard-'+$sid
+function OwnedRelease($path) {
+    if(-not $path){return $false}
+    $item=Get-Item -LiteralPath $path -ErrorAction SilentlyContinue
+    if(-not $item -or $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)){return $false}
+    if($item.Name -ne 'porthub.exe' -or $item.Directory.Name -notmatch '^[a-fA-F0-9]{64}$'){return $false}
+    if($item.Directory.Parent.FullName -ne $root){return $false}
+    return (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash -eq $item.Directory.Name
+}
+$task=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+if($task){
+    if(@($task.Actions).Count -ne 1 -or $task.Actions[0].Arguments -ne 'keyboard run' -or -not (OwnedRelease $task.Actions[0].Execute)){
+        throw 'Refusing to remove a desktop task outside the fixture immutable releases'
+    }
+    Stop-ScheduledTask -TaskName $name
+    Unregister-ScheduledTask -TaskName $name -Confirm:$false
+}
+# A previously replaced task may still have its earlier immutable helper alive.
+foreach($p in @(Get-CimInstance Win32_Process -Filter "Name='porthub.exe'")){
+    if((OwnedRelease $p.ExecutablePath) -and $p.CommandLine -match '(?i)\skeyboard\s+run(?:\s|$)'){
+        $live=Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue
+        if($live -and $live.Path -eq $p.ExecutablePath){Stop-Process -InputObject $live -Force -ErrorAction SilentlyContinue}
+    }
+}
+if(Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue){throw 'Fixture keyboard task survived cleanup'}
+$remaining=@(Get-CimInstance Win32_Process -Filter "Name='porthub.exe'" | Where-Object {
+    (OwnedRelease $_.ExecutablePath) -and $_.CommandLine -match '(?i)\skeyboard\s+run(?:\s|$)'
+})
+if($remaining.Count){$remaining | Select-Object ProcessId,ExecutablePath,SessionId | Format-List;throw 'Fixture desktop helper survived cleanup'}
+""")
+
+
 def main():
     if (sys.platform != "win32" or os.environ.get("GITHUB_ACTIONS") != "true"
             or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"):
@@ -63,6 +103,8 @@ def main():
     if any(p.exists() for p in (state, display, published)):
         raise SystemExit("Refusing to modify an existing PortHub installation")
     ps("if (Get-Service -Name 'porthub-*' -ErrorAction SilentlyContinue) { exit 1 }")
+    ps("$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; "
+       "if(Get-ScheduledTask -TaskName ('PortHubKeyboard-'+$sid) -ErrorAction SilentlyContinue){throw 'Existing desktop task'}")
     registry = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
     with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, registry) as key:
         old_path, path_type = winreg.QueryValueEx(key, "Path")
@@ -214,6 +256,8 @@ def main():
         if service:
             subprocess.run(["sc.exe", "stop", service], capture_output=True, timeout=30)
             subprocess.run(["sc.exe", "delete", service], capture_output=True, timeout=30)
+        cleanup_desktop(state)
+        print("PASS fixture-owned desktop task and helper cleanup", flush=True)
         if server:
             server.shutdown()
             server.server_close()
@@ -227,6 +271,7 @@ def main():
                     break
                 except PermissionError:
                     if attempt == 19:
+                        ps("Get-CimInstance Win32_Process -Filter \"Name='porthub.exe'\" | Select-Object ProcessId,ExecutablePath,SessionId | Format-List")
                         raise
                     time.sleep(.5)
 
