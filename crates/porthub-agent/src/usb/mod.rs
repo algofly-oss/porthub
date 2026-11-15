@@ -285,7 +285,7 @@ async fn next_text(socket: &mut Socket) -> Result<Value> {
         }
     }
 }
-#[cfg(target_os="linux")]
+#[cfg(any(target_os="linux",target_os="macos",windows))]
 struct Carrier {tcp:Option<tcp::Stream>,sctp:Option<direct::Direct>}
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 async fn negotiate(
