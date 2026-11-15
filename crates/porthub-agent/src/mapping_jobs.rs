@@ -454,6 +454,13 @@ pub async fn worker(id: &str, cancel: CancellationToken) -> Result<()> {
     result
 }
 pub async fn supervise(cancel: CancellationToken) -> Result<()> {
+    // This hidden Windows command is a background supervisor. Detach only
+    // this process, never hide or close the invoking user's terminal.
+    #[cfg(windows)] unsafe {windows_sys::Win32::System::Console::FreeConsole();}
+
+    #[cfg(windows)]
+    { let current=std::env::current_exe()?;if let Some(identity)=current.parent().and_then(Path::file_name).and_then(|v|v.to_str()).filter(|v|v.len()==64&&v.bytes().all(|b|b.is_ascii_hexdigit())) {let canonical=current.canonicalize()?;ensure!(pinned_windows_executable(&current,current.parent().and_then(Path::parent).context("Mapping release root missing")?)?.is_some_and(|path|path.canonicalize().ok().as_ref()==Some(&canonical)),"Mapping supervisor image checksum failed: {identity}");}}
+
     let root = root()?;
     let daemon_path = root.join("supervisor.lock");
     if !daemon_path.try_exists()? {
@@ -485,6 +492,7 @@ pub async fn supervise(cancel: CancellationToken) -> Result<()> {
                 .stdin(std::process::Stdio::null())
                 .stdout(log.try_clone()?)
                 .stderr(log);
+            #[cfg(windows)] command.creation_flags(0x08000000); // CREATE_NO_WINDOW
             command.kill_on_drop(true);
             if let Ok(child) = command.spawn() {
                 workers.push(child);
@@ -564,7 +572,7 @@ fn executable() -> Result<PathBuf> {
 async fn command(program: &str, args: &[&str]) -> Result<()> {
     let output = tokio::time::timeout(
         Duration::from_secs(20),
-        tokio::process::Command::new(program).args(args).output(),
+        tokio::process::Command::new(program).args(args).kill_on_drop(true).output(),
     )
     .await
     .context("Startup registration timed out")??;
@@ -669,36 +677,122 @@ async fn install_recovery() -> Result<()> {
     )
     .await
 }
+#[cfg(any(windows,test))]
+fn windows_recovery_script(metadata:&serde_json::Value,suffix:&str)->Result<String>{
+    use base64::Engine;
+    ensure!(suffix.is_empty()||(suffix.len()==13&&suffix.starts_with('-')&&suffix[1..].bytes().all(|b|b.is_ascii_hexdigit())),"Invalid recovery namespace");
+    let payload=base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(metadata)?);
+    Ok(WINDOWS_RECOVERY_SCRIPT.replace("__META_PAYLOAD__",&payload).replace("__STATE_SUFFIX__",suffix))
+}
+#[cfg(any(windows,test))]
+const WINDOWS_RECOVERY_SCRIPT:&str=r###"$ErrorActionPreference='Stop'
+$metaPayload='__META_PAYLOAD__'
+$meta=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($metaPayload))|ConvertFrom-Json
+$identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+$sid=$identity.User.Value
+if($sid -in @('S-1-5-18','S-1-5-19','S-1-5-20')){throw 'Mapping recovery requires the enrolled Windows user account'}
+$name='PortHubMappings-'+$sid+'__STATE_SUFFIX__'
+$descriptionPrefix='PortHub mapping recovery v1 '+$sid+' '
+$powerShell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$runner=@'
+$ErrorActionPreference='Stop'
+$m=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('PAYLOAD_LITERAL'))|ConvertFrom-Json
+$item=Get-Item -LiteralPath $m.executable
+if($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or ($item.Directory.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Mapping image is not a regular immutable release'}
+if((Get-FileHash -LiteralPath $m.executable -Algorithm SHA256).Hash -ne $m.sha256){throw 'Mapping executable checksum changed'}
+if($null -ne $m.state_override){$env:PORTHUB_STATE_DIR=[string]$m.state_override}else{Remove-Item Env:PORTHUB_STATE_DIR -ErrorAction SilentlyContinue}
+& $m.executable mapping-supervisor
+exit $LASTEXITCODE
+'@
+function ActionArguments([string]$payload){
+ $code=$runner.Replace('PAYLOAD_LITERAL',$payload)
+ return '-NoLogo -NoProfile -NonInteractive -EncodedCommand '+[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code))
+}
+function ActionFor([string]$payload){
+ $data=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload))|ConvertFrom-Json
+ if($null -eq $data.state_override){return [pscustomobject]@{Execute=[string]$data.executable;Arguments='mapping-supervisor'}}
+ return [pscustomobject]@{Execute=$powerShell;Arguments=(ActionArguments $payload)}
+}
+function VerifiedImage([string]$candidate,[string]$hash){
+ if($hash -notmatch '^[a-fA-F0-9]{64}$'){return $false}
+ $item=Get-Item -LiteralPath $candidate -ErrorAction SilentlyContinue
+ if(-not $item -or $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or ($item.Directory.Attributes -band [IO.FileAttributes]::ReparsePoint)){return $false}
+ if($item.Name -ne 'porthub.exe' -or $item.Directory.Name -ne $hash){return $false}
+ if(@($meta.allowed_roots|Where-Object {[IO.Path]::GetFullPath($_) -eq $item.Directory.Parent.FullName}).Count -eq 0){return $false}
+ return (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash -eq $hash
+}
+if(-not (VerifiedImage $meta.executable $meta.sha256)){throw 'Mapping target is not a checksum-verified immutable release'}
+$actionSpec=ActionFor $metaPayload
+$previous=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+if($previous){
+ $priorSid=$previous.Principal.UserId
+ if($priorSid -notmatch '^S-1-'){$priorSid=([Security.Principal.NTAccount]$priorSid).Translate([Security.Principal.SecurityIdentifier]).Value}
+ if($priorSid -ne $sid -or [string]$previous.Principal.LogonType -notin @('Interactive','3') -or [string]$previous.Principal.RunLevel -notin @('Limited','0') -or @($previous.Actions).Count -ne 1 -or -not $previous.Description.StartsWith($descriptionPrefix)){throw 'Refusing to replace an unverified mapping recovery task'}
+ $oldPayload=$previous.Description.Substring($descriptionPrefix.Length)
+ try{$old=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($oldPayload))|ConvertFrom-Json}catch{throw 'Mapping task ownership metadata is invalid'}
+ $oldAction=ActionFor $oldPayload
+ if($old.kind -ne 'porthub.mapping-recovery.v1' -or [IO.Path]::GetFullPath($old.root) -ne [IO.Path]::GetFullPath($meta.root) -or $old.state_override -cne $meta.state_override -or ($previous.Actions[0].Execute -ne $oldAction.Execute) -or ($previous.Actions[0].Arguments -cne $oldAction.Arguments) -or -not (VerifiedImage $old.executable $old.sha256)){throw 'Refusing to replace a modified mapping recovery task'}
+}
+# Recognize the exact former startup template, including its verified old image.
+# Never remove an edited or unrelated startup entry just because its name matches.
+$environment=''
+if($null -ne $meta.state_override){$environment='shell.Environment("PROCESS")("PORTHUB_STATE_DIR") = "'+$meta.state_override.Replace('"','""')+'"'+"`r`n"}
+$prefix='Set shell = CreateObject("WScript.Shell")'+"`r`n"+$environment+'shell.Run Chr(34) & "'
+$suffix='" & Chr(34) & " mapping-supervisor", 0, False'+"`r`n"
+$legacy=@((Join-Path $meta.root 'recover.vbs'),(Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\PortHub mappings__STATE_SUFFIX__.vbs'))
+$ownedLegacy=@()
+foreach($path in $legacy){
+ if(!(Test-Path -LiteralPath $path)){continue}
+ $file=Get-Item -LiteralPath $path
+ if($file.PSIsContainer -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Legacy mapping recovery is not a regular file'}
+ $text=[IO.File]::ReadAllText($path)
+ if(-not $text.StartsWith($prefix) -or -not $text.EndsWith($suffix)){throw 'Refusing to remove an unverified legacy mapping startup file'}
+ $prior=$text.Substring($prefix.Length,$text.Length-$prefix.Length-$suffix.Length).Replace('""','"')
+ $hash=Split-Path (Split-Path $prior -Parent) -Leaf
+ if(-not (VerifiedImage $prior $hash)){throw 'Legacy mapping startup image is not verified'}
+ $ownedLegacy+= $path
+}
+if(-not $previous -or $previous.Actions[0].Execute -ne $actionSpec.Execute -or $previous.Actions[0].Arguments -cne $actionSpec.Arguments){
+ $action=New-ScheduledTaskAction -Execute $actionSpec.Execute -Argument $actionSpec.Arguments
+ $trigger=New-ScheduledTaskTrigger -AtLogOn -User $sid
+ $principal=New-ScheduledTaskPrincipal -UserId $sid -LogonType Interactive -RunLevel Limited
+ $settings=New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+ $task=New-ScheduledTask -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description ($descriptionPrefix+$metaPayload)
+ Register-ScheduledTask -TaskName $name -InputObject $task -Force | Out-Null
+}
+# Task Scheduler owns this process tree independently of the creating SSH job.
+# IgnoreNew preserves any existing healthy generation and active user mappings.
+Start-ScheduledTask -TaskName $name
+foreach($path in $ownedLegacy){Remove-Item -LiteralPath $path}
+"###;
 #[cfg(windows)]
 async fn install_recovery() -> Result<()> {
-    let root = root()?;
-    let exe = executable()?
-        .to_str()
-        .context("CLI path must be Unicode")?
-        .to_owned();
-    let script = root.join("recover.vbs");
-    // An OS startup shortcut runs the per-user supervisor without a console.
-    let environment = state_override()?
-        .map(|value| {
-            format!(
-                "shell.Environment(\"PROCESS\")(\"PORTHUB_STATE_DIR\") = \"{}\"\r\n",
-                value.replace('"', "\"\"")
-            )
-        })
-        .unwrap_or_default();
-    let contents=format!("Set shell = CreateObject(\"WScript.Shell\")\r\n{environment}shell.Run Chr(34) & \"{}\" & Chr(34) & \" mapping-supervisor\", 0, False\r\n",exe.replace('"',"\"\""));
-    let appdata = std::env::var_os("APPDATA").context("Cannot locate Windows startup folder")?;
-    let startup = PathBuf::from(appdata).join(format!(
-        "Microsoft/Windows/Start Menu/Programs/Startup/PortHub mappings{}.vbs",
-        recovery_suffix()?
-    ));
-    crate::profile::write_private(&script, contents.as_bytes(), true)?;
-    crate::profile::write_private(&startup, contents.as_bytes(), true)?;
-    command(
-        "wscript.exe",
-        &[script.to_str().context("Invalid startup path")?],
-    )
-    .await
+    use base64::Engine;
+    use sha2::{Digest,Sha256};
+    use std::io::Read;
+    let root=root()?;
+    let lock_path=root.join("recovery-install.lock");
+    if !lock_path.try_exists()? {let _=crate::profile::write_private(&lock_path,b"",false);}
+    let lock=crate::profile::open_private_lock(&lock_path)?;
+    lock.try_lock_exclusive().context("Mapping recovery setup is already running")?;
+    let source=executable()?;
+    let mut input=std::fs::File::open(&source)?;let mut digest=Sha256::new();let mut buffer=[0u8;65536];
+    ensure!(input.metadata()?.len()<=256*1024*1024,"Mapping executable exceeds its size limit");
+    loop{let n=input.read(&mut buffer)?;if n==0{break;}digest.update(&buffer[..n]);}
+    let hash=format!("{:x}",digest.finalize());
+    let managed=crate::service::Layout::system()?.releases;
+    let runtime=root.join("runtime");
+    let target=if source.file_name()==Some(std::ffi::OsStr::new("porthub.exe"))&&source.parent().and_then(Path::file_name).and_then(|v|v.to_str())==Some(hash.as_str())&&source.parent().and_then(Path::parent).is_some_and(|parent|parent==managed||parent==runtime) {source.clone()}else{
+        let directory=runtime.join(&hash);crate::service::directory(&directory,true)?;
+        let target=directory.join("porthub.exe");
+        if !target.try_exists()? {let bytes=std::fs::read(&source)?;ensure!(format!("{:x}",Sha256::digest(&bytes))==hash,"Mapping image changed during pinning");crate::profile::write_private(&target,&bytes,false)?;}
+        target
+    };
+    let metadata=serde_json::json!({"kind":"porthub.mapping-recovery.v1","executable":target,"sha256":hash,"root":root,"state_override":state_override()?,"allowed_roots":[managed,runtime]});
+    let script=windows_recovery_script(&metadata,&recovery_suffix()?)?;
+    let encoded=base64::engine::general_purpose::STANDARD.encode(script.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>());
+    let powershell=PathBuf::from(std::env::var_os("SystemRoot").context("Windows SystemRoot unavailable")?).join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    command(powershell.to_str().context("Invalid Windows PowerShell path")?,&["-NoLogo","-NoProfile","-NonInteractive","-EncodedCommand",&encoded]).await
 }
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 async fn install_recovery() -> Result<()> {
@@ -802,6 +896,41 @@ mod windows_executable_tests {
         assert_eq!(pinned_windows_executable(&cli,&releases)?,Some(target.clone()));
         std::fs::write(&target,b"modified release")?;
         assert!(pinned_windows_executable(&cli,&releases).is_err());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod windows_recovery_tests {
+    use super::*;
+    #[test]
+    fn scheduled_recovery_treats_paths_as_data() {
+        use base64::Engine;
+        let sentinel="C:\\state\\quoted' & $(untrusted)";
+        let metadata=serde_json::json!({"kind":"porthub.mapping-recovery.v1","root":sentinel,"executable":sentinel,"state_override":sentinel,"sha256":"a".repeat(64),"allowed_roots":[sentinel]});
+        let script=windows_recovery_script(&metadata,"-0123456789ab").unwrap();
+        assert!(!script.contains(sentinel));
+        let payload=script.split("$metaPayload='").nth(1).unwrap().split('\'').next().unwrap();
+        let decoded:serde_json::Value=serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(payload).unwrap()).unwrap();
+        assert_eq!(decoded,metadata);
+        assert!(windows_recovery_script(&metadata,"';unexpected").is_err());
+    }
+    #[test]
+    fn scheduled_recovery_checks_ownership_before_startup_migration() {
+        let script=windows_recovery_script(&serde_json::json!({}),"").unwrap();
+        assert!(script.find("Refusing to replace a modified mapping recovery task").unwrap()<script.find("Register-ScheduledTask").unwrap());
+        assert!(script.find("Refusing to remove an unverified legacy").unwrap()<script.find("Register-ScheduledTask").unwrap());
+        assert!(script.find("Start-ScheduledTask").unwrap()<script.find("Remove-Item -LiteralPath $path").unwrap());
+        assert!(!script.contains("Stop-ScheduledTask"));
+    }
+    #[test]
+    #[ignore="Explicit native Windows lifecycle fixture renderer; requires task-specific metadata/output paths"]
+    fn emit_windows_scheduler_fixture()->Result<()> {
+        let metadata=std::fs::read(std::env::var("PORTHUB_TEST_RECOVERY_METADATA")?)?;
+        ensure!(metadata.len()<16384,"Recovery fixture metadata exceeds limit");
+        let value:serde_json::Value=serde_json::from_slice(&metadata)?;
+        let script=windows_recovery_script(&value,&std::env::var("PORTHUB_TEST_RECOVERY_SUFFIX").unwrap_or_default())?;
+        std::fs::write(std::env::var("PORTHUB_TEST_RECOVERY_SCRIPT")?,script)?;
         Ok(())
     }
 }
