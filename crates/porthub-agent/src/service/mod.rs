@@ -163,6 +163,9 @@ pub trait Manager: Send + Sync {
     async fn prepare_private(&self) -> Result<()> { Ok(()) }
     async fn state(&self, spec: &Spec) -> Result<State>;
     async fn reload(&self) -> Result<()>;
+    /// Whether reconfiguration may stop the previous process before activation.
+    /// Rollback must restart that process without stopping a never-started candidate.
+    fn reconfigure_may_stop(&self) -> bool { false }
     /// Replace only a previously verified owned registration, preserving strict SCM ownership.
     async fn reconfigure(&self, _previous: &Spec, _next: &Spec) -> Result<()> { Ok(()) }
     async fn enable(&self, spec: &Spec) -> Result<()>;
@@ -957,12 +960,17 @@ async fn install_locked_mode(
         true,
     )?;
     let mut attempted_start = false;
+    let mut reconfiguration_may_have_stopped = false;
     let result = async {
-        attempted_start = true;
-        if let Some(previous) = &previous { manager.reconfigure(previous, &spec).await?; }
+        // Reload is preflight: a failure here must leave the running process alone.
         manager.reload().await?;
+        if let Some(previous) = &previous {
+            reconfiguration_may_have_stopped = manager.reconfigure_may_stop();
+            manager.reconfigure(previous, &spec).await?;
+        }
         manager.enable(&spec).await?;
         manager.reset_failed(&spec).await?;
+        attempted_start = true;
         manager.start(&spec).await?;
         readable::install(layout, &spec, &profile).await?;
         Ok::<_, anyhow::Error>(())
@@ -989,7 +997,7 @@ async fn install_locked_mode(
             if old.enabled {
                 let _ = manager.enable(previous).await;
             }
-            if old.active && attempted_start {
+            if old.active && (attempted_start || reconfiguration_may_have_stopped) {
                 let _ = manager.reset_failed(previous).await;
                 let _ = manager.start(previous).await;
             }

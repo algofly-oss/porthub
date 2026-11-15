@@ -21,6 +21,10 @@ struct Fake {
     prepared_private: AtomicUsize,
     fail_prepare: AtomicBool,
     fail_reload: AtomicBool,
+    fail_enable: AtomicBool,
+    fail_reset: AtomicBool,
+    reconfigure_stops: AtomicBool,
+    fail_reconfigure: AtomicBool,
     calls: Mutex<Vec<(String, String)>>,
 }
 impl Fake {
@@ -59,7 +63,20 @@ impl Manager for Fake {
         }
         Ok(())
     }
+    fn reconfigure_may_stop(&self) -> bool { self.reconfigure_stops.load(Ordering::SeqCst) }
+    async fn reconfigure(&self, previous: &Spec, _next: &Spec) -> Result<()> {
+        if self.reconfigure_may_stop() {
+            if self.state_value(previous).active { self.stop(previous).await?; }
+            anyhow::ensure!(!self.fail_reconfigure.swap(false, Ordering::SeqCst), "fixture reconfiguration failed after stopping previous process");
+        }
+        Ok(())
+    }
+    async fn reset_failed(&self, _spec: &Spec) -> Result<()> {
+        anyhow::ensure!(!self.fail_reset.swap(false, Ordering::SeqCst), "fixture reset failed");
+        Ok(())
+    }
     async fn enable(&self, spec: &Spec) -> Result<()> {
+        anyhow::ensure!(!self.fail_enable.swap(false, Ordering::SeqCst), "fixture enable failed");
         self.call("enable", spec);
         let mut value = self.state_value(spec);
         value.installed = true;
@@ -832,5 +849,84 @@ async fn private_dependency_failure_is_checked_before_unified_activation_and_pre
     ensure!(service::install(&layout,&source,&executable,&manager).await.is_err());
     ensure!(manager.prepared_private.load(Ordering::SeqCst)==3);
     ensure!(manager.calls.lock().unwrap().len()==calls && manager.state_value(&public).active,"failed upgrade preparation must retain the running public service");
+    Ok(())
+}
+
+#[tokio::test]
+async fn preactivation_failures_preserve_the_previous_running_process() -> Result<()> {
+    let temp = common::private_dir()?;
+    let layout = layout(temp.path());
+    let source = profile(temp.path(), "0123456789abcdef01234567")?;
+    let executable = temp.path().join("native");
+    std::fs::write(&executable, b"old executable")?;
+    let manager = Fake::default();
+    let previous = service::install(&layout, &source, &executable, &manager).await?;
+    let old_unit = std::fs::read(&previous.unit)?;
+    std::fs::write(&executable, b"new executable")?;
+    for failure in [
+        &manager.fail_reload,
+        &manager.fail_enable,
+        &manager.fail_reset,
+    ] {
+        let before = manager
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(method, _)| method == "start" || method == "stop")
+            .cloned()
+            .collect::<Vec<_>>();
+        failure.store(true, Ordering::SeqCst);
+        ensure!(service::install(&layout, &source, &executable, &manager)
+            .await
+            .is_err());
+        let after = manager
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(method, _)| method == "start" || method == "stop")
+            .cloned()
+            .collect::<Vec<_>>();
+        ensure!(
+            before == after,
+            "Preactivation failure interrupted the previous process"
+        );
+        ensure!(manager.state_value(&previous).active);
+        ensure!(std::fs::read(&previous.unit)? == old_unit);
+    }
+    Ok(())
+}
+#[tokio::test]
+async fn failed_stopping_reconfiguration_restarts_previous_without_stopping_a_candidate(
+) -> Result<()> {
+    let temp = common::private_dir()?;
+    let layout = layout(temp.path());
+    let source = profile(temp.path(), "0123456789abcdef01234567")?;
+    let executable = temp.path().join("native");
+    std::fs::write(&executable, b"old executable")?;
+    let manager = Fake::default();
+    let previous = service::install(&layout, &source, &executable, &manager).await?;
+    let old_unit = std::fs::read(&previous.unit)?;
+    std::fs::write(&executable, b"new executable")?;
+    let before = manager.calls.lock().unwrap().clone();
+    manager.reconfigure_stops.store(true, Ordering::SeqCst);
+    manager.fail_reconfigure.store(true, Ordering::SeqCst);
+    ensure!(service::install(&layout, &source, &executable, &manager)
+        .await
+        .is_err());
+    let calls = manager.calls.lock().unwrap().clone();
+    let calls = &calls[before.len()..];
+    ensure!(
+        calls.iter().filter(|(method, _)| method == "stop").count() == 1,
+        "Only reconfiguration may stop the previous process"
+    );
+    ensure!(
+        calls.iter().filter(|(method, _)| method == "start").count() == 1,
+        "Rollback must restart the previous process exactly once"
+    );
+    ensure!(manager.state_value(&previous).active);
+    ensure!(std::fs::read(&previous.unit)? == old_unit);
+    ensure!(std::fs::read(&previous.executable)? == b"old executable");
     Ok(())
 }

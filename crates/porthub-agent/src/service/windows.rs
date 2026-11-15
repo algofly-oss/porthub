@@ -144,6 +144,7 @@ async fn wait_state(spec: &Spec, expected: ServiceState) -> Result<()> {
 
 #[async_trait]
 impl Manager for Windows {
+    fn reconfigure_may_stop(&self) -> bool { true }
     async fn state(&self, spec: &Spec) -> Result<State> {
         let Some((current, start_type)) = with_owned_service(
             spec,
