@@ -80,14 +80,18 @@ const base=process.env.PORTHUB_TEST_UI_URL,cookie=process.env.PORTHUB_TEST_BOARD
       const visible=rows.filter(row=>row.bottom>bounds.top+1&&row.top<bounds.bottom-1);
       return {height:card.getBoundingClientRect().height,viewport:bounds.height,contents:[...viewport.querySelectorAll('[data-ranking-row-content]')].map(el=>el.getBoundingClientRect().height),visible:visible.length,complete:visible.every(row=>row.top>=bounds.top-1&&row.bottom<=bounds.bottom+1)};
     });
+    const bars=await ranking.getByRole('listitem').first().getByRole('meter').evaluateAll(items=>items.map(el=>el.getBoundingClientRect().top));
+    assert(Math.max(...bars)-Math.min(...bars)<=1,'All hardware progress bars share one baseline');
     if(width===1440)assert.equal(geometry.visible,3,'Compact desktop table shows all three fixture machines');
     if(width===1440){const traffic=await page.getByRole('heading',{name:'Public port traffic',exact:true}).locator('..').locator('..').locator('..').boundingBox();assert(Math.abs(geometry.height-traffic.height)<=1,'Resource and traffic cards share the available row height');}else assert.equal(geometry.height,360,'Phone card stays compact');
     assert(geometry.visible>=1&&geometry.complete,`Only complete resource rows at ${width}px: ${JSON.stringify(geometry)}`);
     await ranking.scrollIntoViewIfNeeded();await page.screenshot({path:`${screenshots}/dashboard-${width}.png`,fullPage:true});
   }
   await page.setViewportSize({width:1440,height:1000});
-  await ranking.getByRole('checkbox',{name:'GPU',exact:true}).check();
+  await ranking.getByRole('radio',{name:'GPU',exact:true}).check();
   assert((await ranking.getByRole('listitem').first().textContent()).includes('Isolated desktop'));
+  assert.equal(await ranking.locator('input[type=radio]:checked').count(),1);
+  assert.equal(await ranking.getByRole('radio',{name:'CPU',exact:true}).isChecked(),false);
   await chooseDropdown(ranking.getByLabel('Resource sort order',{exact:true}),'Least utilized first');
   assert((await ranking.getByRole('listitem').first().textContent()).includes('Busy CPU host'));
   await ranking.getByRole('listitem').filter({hasText:'Isolated desktop'}).getByRole('button').click();
@@ -110,6 +114,6 @@ const base=process.env.PORTHUB_TEST_UI_URL,cookie=process.env.PORTHUB_TEST_BOARD
   await usb.getByText('Persistent rule',{exact:true}).waitFor();
   await usb.getByRole('button',{name:'Remove',exact:true}).click();await usb.getByText('Persistent rule',{exact:true}).waitFor({state:'hidden'});
   assert.equal(await page.locator('select').count(),0,'All PortHub dropdowns use searchable custom controls');
-  assert.deepEqual(errors,[]);console.log(JSON.stringify({native_text:true,remote_clipboard:true,arbitrary_text_paste:true,physical_keys:true,mouse:true,local_transport:true,local_disable:true,embedded_flashing:true,resource_ranking:true,combined_sort:true,resource_history_graphs:true,searchable_dropdowns:true,persistent_usb_configuration:true,viewports:[320,390,768,1024,1440,1920]}));
+  assert.deepEqual(errors,[]);console.log(JSON.stringify({native_text:true,remote_clipboard:true,arbitrary_text_paste:true,physical_keys:true,mouse:true,local_transport:true,local_disable:true,embedded_flashing:true,resource_ranking:true,single_resource_sort:true,resource_history_graphs:true,searchable_dropdowns:true,persistent_usb_configuration:true,viewports:[320,390,768,1024,1440,1920]}));
  }finally{await portalBrowser.close();await targetBrowser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

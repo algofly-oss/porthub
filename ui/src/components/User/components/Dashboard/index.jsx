@@ -25,8 +25,8 @@ function DashboardSkeleton() {
   </section>;
   return <div role="status" aria-label="Loading your workspace" className="space-y-4 pb-1">
     <span className="sr-only">Loading your workspace…</span>
-    <div className="grid items-stretch gap-4 lg:grid-cols-[minmax(0,1.8fr)_minmax(290px,1fr)]">{card(0, true)}{card(3)}</div>
-    <div className="grid items-stretch gap-4 lg:grid-cols-[minmax(0,1.8fr)_minmax(290px,1fr)]">{card(4)}{card(4)}</div>
+    <div className="grid items-stretch gap-4 lg:grid-cols-3"><div className="lg:col-span-2">{card(0, true)}</div>{card(3)}</div>
+    <div className="grid items-stretch gap-4 lg:grid-cols-3">{card(4)}{card(4)}</div>
   </div>;
 }
 
@@ -67,8 +67,8 @@ export default function Dashboard({ active = true }) {
         <OverviewCard label="Web proxies" value={counts?.proxies ?? 0} detail="Manage addresses and fallback routes" onClick={()=>navigate("proxies")} />
         <OverviewCard label="Public port transfer" value={traffic.updated ? formatBytes(summary.volume) : "—"} detail={`Last ${rangeLabel} · gateway only`} onClick={()=>navigate("traffic")} />
       </div>
-      <div className="grid items-stretch gap-4 lg:grid-cols-[minmax(0,1.8fr)_minmax(290px,1fr)]">
-        <section className="flex min-w-0 flex-col overflow-hidden rounded-xl bg-surface">
+      <div className="grid items-stretch gap-4 lg:grid-cols-3">
+        <section className="flex min-w-0 flex-col overflow-hidden rounded-xl bg-surface lg:col-span-2">
           <div className="flex flex-wrap items-start justify-between gap-3 px-5 pt-5"><div><h2 className="text-base font-semibold">Public port traffic</h2><p className="mt-1 text-xs text-muted-foreground">Gateway public ports · bytes per second</p></div><div role="group" aria-label="Traffic time range" className="flex gap-1 rounded-lg bg-muted/60 p-1">{[[300,"5m"],[900,"15m"],[3600,"1h"]].map(([value,label])=><button key={value} type="button" aria-pressed={seconds===value} onClick={()=>setSeconds(value)} className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${seconds===value ? "bg-surface text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}>{label}</button>)}</div></div>
           <div className="grid grid-cols-3 gap-3 px-5 py-4"><Metric label="Incoming Speed" value={formatBytes(summary.incoming)} suffix="/s" color="text-emerald-700 dark:text-emerald-400" /><Metric label="Outgoing Speed" value={formatBytes(summary.outgoing)} suffix="/s" color="text-blue-600 dark:text-blue-400" /><Metric label="Transferred" value={formatBytes(summary.volume)} /></div>
           <TrafficMonitorPanel isDark={colorScheme === "dark"} samples={samples} isLoading={traffic.loading} title="Public port traffic" showTitle={false} plotHeight={160} className="!px-5 !pt-0" windowSeconds={Number(seconds)} />
@@ -88,7 +88,7 @@ export default function Dashboard({ active = true }) {
           {attention ? <button onClick={()=>navigate("machines",{status:"offline"})} className="mb-4 flex items-start gap-2.5 rounded-lg bg-amber-500/5 p-3 text-left hover:bg-amber-500/10"><IconAlertCircle size={18} className="mt-0.5 shrink-0 text-amber-700 dark:text-amber-400" /><span><span className="block text-sm font-medium">{attention} {attention===1 ? "machine needs" : "machines need"} attention</span><span className="mt-1 block text-xs leading-5 text-muted-foreground">Review offline clients and authentication issues.</span></span></button> : <div className="mb-4 flex items-start gap-2 rounded-lg bg-emerald-500/5 p-3"><IconCheck size={18} className="shrink-0 text-emerald-600" /><p className="text-sm">All enabled machines are connected.</p></div>}
           <div className="mt-auto"><Button variant="secondary" className="w-full" onClick={()=>navigate("machines",{create:"1"})}><IconPlus size={16} />Enroll a Machine</Button></div>
         </section>
-        <section aria-label="Recent Web Addresses" className="flex min-w-0 flex-col overflow-hidden rounded-xl bg-surface">
+        <section aria-label="Recent Web Addresses" className="flex min-w-0 flex-col overflow-hidden rounded-xl bg-surface lg:col-span-2">
           <PanelHeading title="Web Addresses" description="Most recently requested services" onClick={()=>navigate("proxies")} />
           <div>{recentlyVisited.map(proxy=><a key={proxy._id} href={`${proxy.entry_points?.includes("websecure")?"https":"http"}://${proxy.hosts?.includes(activityById.get(proxy._id)?.last_host)?activityById.get(proxy._id).last_host:proxy.hosts?.[0]}`} target="_blank" rel="noreferrer" className="flex w-full min-w-0 items-center gap-2 px-3 py-3 text-left hover:bg-accent/40 sm:gap-3 sm:px-5">
             <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-muted"><IconWorld size={19} className="text-muted-foreground" /></span>
