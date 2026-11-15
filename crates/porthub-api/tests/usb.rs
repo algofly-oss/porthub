@@ -56,6 +56,14 @@ async fn owned_device_reservations_authenticated_streams_and_revocation() -> Res
   let mut self_forward=command.clone();self_forward["destination"]=source_id.to_ascii_uppercase().into();case.status("POST","/api/usb/forwards",&cookie,self_forward,StatusCode::BAD_REQUEST).await?;
   let created=case.status("POST","/api/usb/forwards",&cookie,command.clone(),StatusCode::OK).await?;let id=created["forward"]["id"].as_str().unwrap();
   ensure!(created["forward"]["persistent"]==true);case.status("POST","/api/usb/forwards",&cookie,command.clone(),StatusCode::CONFLICT).await?;
+  // Separate devices on one source keep independent persistent reservations.
+  let mut multi_report=report.clone();let mut second=multi_report["devices"][0].clone();second["busid"]="2-4".into();second["serial"]="second-device".into();second["name"]="Test SSD".into();multi_report["devices"].as_array_mut().unwrap().push(second);
+  case.status("POST","/api/usb/client/report","",multi_report.clone(),StatusCode::OK).await?;
+  let mut second_command=command.clone();second_command["busid"]="2-4".into();
+  let second_rule=case.status("POST","/api/usb/forwards",&cookie,second_command,StatusCode::OK).await?;let second_id=second_rule["forward"]["id"].as_str().unwrap();ensure!(second_id!=id);
+  let rules=case.status("GET","/api/usb/forwards",&cookie,Value::Null,StatusCode::OK).await?;ensure!(rules["forwards"].as_array().unwrap().len()==2,"forwarding another device must preserve the first rule");
+  let assigned=case.status("POST","/api/usb/client/report","",multi_report,StatusCode::OK).await?;ensure!(assigned["forwards"].as_array().unwrap().len()==2,"source agent receives both rules");
+  case.status("DELETE",&format!("/api/usb/forwards/{second_id}"),&cookie,Value::Null,StatusCode::OK).await?;
   let ready=case.status("POST","/api/usb/client/report","",report.clone(),StatusCode::OK).await?;ensure!(ready["forwards"][0]["id"]==id,"database fields must not break typed forwarding contracts");
   let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await?;let base=format!("ws://{}",listener.local_addr()?);let router=case.router.clone();let _server=tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move{axum::serve(listener,router).await}));
   ensure!(socket(&base,id,"source",&foreign_id,"foreign-token").await.is_err());ensure!(socket(&base,id,"source",&source_id,"bad-token").await.is_err());ensure!(socket(&base,id,"source",&destination_id,"destination-token").await.is_err());
