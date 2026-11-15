@@ -44,7 +44,7 @@ pub(crate) fn record_installer(profile: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn authorized(uid: u32, profile: &Path) -> bool {
+pub(crate) fn authorized(uid: u32, profile: &Path) -> bool {
     let service_uid = rustix::process::geteuid().as_raw();
     if uid == 0 || uid == service_uid {
         return true;

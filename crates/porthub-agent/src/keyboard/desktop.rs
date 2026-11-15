@@ -4,8 +4,8 @@ use std::{
     path::Path,
     process::{Command, Stdio},
 };
-const UNIT: &str = "porthub-keyboard.service";
-fn unit(executable: &Path, user: bool) -> Result<String> {
+pub(super) const UNIT: &str = "porthub-keyboard.service";
+pub(super) fn unit(executable: &Path, user: bool) -> Result<String> {
     let path = executable
         .to_str()
         .context("Invalid desktop executable path")?;
@@ -19,6 +19,22 @@ fn unit(executable: &Path, user: bool) -> Result<String> {
         .replace('%', "%%")
         .replace('$', "$$");
     Ok(format!("[Unit]\nDescription=PortHub desktop keyboard and clipboard\nPartOf=graphical-session.target\nAfter=graphical-session-pre.target\nStartLimitIntervalSec=0\n\n[Service]\nType=simple\nExecStart=\"{quoted}\" keyboard run{}\nRestart=always\nRestartSec=5\nTimeoutStopSec=5\n\n[Install]\nWantedBy=graphical-session.target\n",if user{" --user"}else{""}))
+}
+pub(super) fn desktop_entry(executable: &Path, user: bool) -> Result<String> {
+    let path = executable
+        .to_str()
+        .context("Invalid desktop executable path")?;
+    ensure!(
+        !path.contains(['\n', '\r', '\0']),
+        "Invalid desktop executable path"
+    );
+    let quoted = path
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('`', "\\`")
+        .replace('$', "\\$")
+        .replace('%', "%%");
+    Ok(format!("[Desktop Entry]\nType=Application\nName=PortHub desktop input\nExec=\"{quoted}\" keyboard startup{}\nTerminal=false\nNoDisplay=true\nX-GNOME-Autostart-enabled=true\n",if user{" --user"}else{""}))
 }
 fn invoke(arguments: &[&str]) -> bool {
     Command::new("systemctl")
@@ -67,16 +83,10 @@ pub(super) fn install(executable: &Path, user: bool) -> Result<()> {
         autostart
     };
     std::fs::create_dir_all(&autostart)?;
-    let path = executable
-        .to_str()
-        .context("Invalid desktop executable path")?;
-    let quoted = path
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('`', "\\`")
-        .replace('$', "\\$")
-        .replace('%', "%%");
-    std::fs::write(autostart.join("porthub-keyboard.desktop"),format!("[Desktop Entry]\nType=Application\nName=PortHub desktop input\nExec=\"{quoted}\" keyboard startup{}\nTerminal=false\nNoDisplay=true\nX-GNOME-Autostart-enabled=true\n",if user{" --user"}else{""}))?;
+    std::fs::write(
+        autostart.join("porthub-keyboard.desktop"),
+        desktop_entry(executable, user)?,
+    )?;
     if !system {
         if invoke(&["--user", "is-active", "graphical-session.target"]) {
             let _ = start();

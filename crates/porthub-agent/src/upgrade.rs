@@ -470,6 +470,10 @@ pub async fn apply_requested(
             receipt.display()
         )));
     }
+    #[cfg(target_os="linux")]
+    if let Err(error)=crate::keyboard::refresh_after_update(layout,&journal.executable,&journal.entries.iter().map(|entry|entry.spec.profile.clone()).collect::<Vec<_>>(),journal.cli.as_ref().map(|(path,_)|path.as_path())).await {
+        tracing::warn!(error=%error,"Native update committed; managed desktop worker refresh incomplete");
+    }
     if let Some(request) = &journal.request {
         let source = layout.state.join(format!("{}.json", journal.public_id));
         if remember(&source, &receipt, request).is_err() {

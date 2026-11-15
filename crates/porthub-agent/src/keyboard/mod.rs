@@ -3,6 +3,8 @@
 mod broker;
 #[cfg(target_os = "linux")]
 mod desktop;
+#[cfg(target_os = "linux")]
+mod linux_refresh;
 mod direct;
 mod input;
 #[cfg(target_os = "linux")]
@@ -519,4 +521,9 @@ async fn session(
         let _ = w.execute(Command::ReleaseAll {}).await;
     }
     Ok(())
+}
+
+#[cfg(target_os="linux")]
+pub(crate) async fn refresh_after_update(layout:&crate::service::Layout,executable:&Path,profiles:&[PathBuf],cli:Option<&Path>)->Result<()> {
+    linux_refresh::refresh(layout,executable,profiles,cli).await
 }

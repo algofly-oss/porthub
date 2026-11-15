@@ -129,7 +129,7 @@ pub(crate) fn hash_adoption_source(path: &Path) -> Result<String> {
 fn hash_adoption_source(path: &Path) -> Result<String> {
     hash_file(path)
 }
-fn owned_target(layout: &Layout, target: &Path) -> Result<()> {
+pub(crate) fn owned_target(layout: &Layout, target: &Path) -> Result<()> {
     let parent = target
         .parent()
         .context("CLI target has no release directory")?;
