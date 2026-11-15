@@ -54,6 +54,10 @@ async fn owned_device_reservations_authenticated_streams_and_revocation() -> Res
   case.status("POST","/api/usb/forwards",&other_cookie,command.clone(),StatusCode::CONFLICT).await?;
   let mut cross=command.clone();cross["destination"]=foreign_id.clone().into();case.status("POST","/api/usb/forwards",&cookie,cross,StatusCode::CONFLICT).await?;
   let mut self_forward=command.clone();self_forward["destination"]=source_id.to_ascii_uppercase().into();case.status("POST","/api/usb/forwards",&cookie,self_forward,StatusCode::BAD_REQUEST).await?;
+  // Directional readiness has required a fresh destination report since the
+  // native receiver support was introduced; source discovery alone is not enough.
+  case.status("POST","/api/usb/forwards",&cookie,command.clone(),StatusCode::CONFLICT).await?;
+  case.status("POST","/api/usb/client/report","",json!({"machine_id":destination_id,"token":"destination-token","enabled":true,"supported":true,"devices":[],"states":[]}),StatusCode::OK).await?;
   let created=case.status("POST","/api/usb/forwards",&cookie,command.clone(),StatusCode::OK).await?;let id=created["forward"]["id"].as_str().unwrap();
   ensure!(created["forward"]["persistent"]==true);case.status("POST","/api/usb/forwards",&cookie,command.clone(),StatusCode::CONFLICT).await?;
   // Separate devices on one source keep independent persistent reservations.

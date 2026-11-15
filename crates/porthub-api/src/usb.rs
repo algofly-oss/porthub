@@ -30,21 +30,31 @@ use tokio::sync::oneshot;
 pub struct Hub {
     registry: Mutex<Registry>,
 }
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct PairKey {
+    owner: ObjectId,
+    source: String,
+    destination: String,
+    id: String,
+}
+fn pair_key(owner:ObjectId,forward:&Forward)->PairKey {
+    PairKey {owner,source:forward.source.clone(),destination:forward.destination.clone(),id:forward.id.clone()}
+}
 #[derive(Default)]
 struct Registry {
     waiting: HashMap<
-        String,
+        PairKey,
         (
             String,
             String,
             oneshot::Sender<(WebSocket, String, String, String)>,
         ),
     >,
-    active: HashMap<String, String>,
+    active: HashMap<PairKey, String>,
 }
 struct PairGuard {
     app: Arc<App>,
-    id: String,
+    key: PairKey,
     nonce: String,
 }
 impl Drop for PairGuard {
@@ -55,11 +65,11 @@ impl Drop for PairGuard {
             .registry
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if r.waiting.get(&self.id).is_some_and(|p| p.0 == self.nonce) {
-            r.waiting.remove(&self.id);
+        if r.waiting.get(&self.key).is_some_and(|p| p.0 == self.nonce) {
+            r.waiting.remove(&self.key);
         }
-        if r.active.get(&self.id) == Some(&self.nonce) {
-            r.active.remove(&self.id);
+        if r.active.get(&self.key) == Some(&self.nonce) {
+            r.active.remove(&self.key);
         }
     }
 }
@@ -408,7 +418,7 @@ async fn authorized_stream(
     machine_id: &str,
     token: &str,
     side: &str,
-) -> ApiResult<Forward> {
+) -> ApiResult<(ObjectId, Forward)> {
     let m = machine_client::authenticate(app, machine_id, token).await?;
     let owner = m.get_object_id("user_id").map_err(|_| unavailable())?;
     machine(app, owner, machine_id).await?;
@@ -428,7 +438,7 @@ async fn authorized_stream(
     machine(app, owner, &p.destination).await?;
     require_role(app,owner,&p.source,"can_export").await?;
     require_role(app,owner,&p.destination,"can_import").await?;
-    Ok(p)
+    Ok((owner,p))
 }
 async fn stream(
     State(app): State<Arc<App>>,
@@ -447,14 +457,19 @@ async fn stream(
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or_default()
         .to_owned();
-    authorized_stream(&app, &id, &machine_id, &token, &side).await?;
+    let (owner,forward)=authorized_stream(&app, &id, &machine_id, &token, &side).await?;
+    let key=pair_key(owner,&forward);
     Ok(ws
         .max_message_size(262144)
         .max_frame_size(262144)
-        .on_upgrade(move |socket| pair(app, id, side, machine_id, token, socket)))
+        .on_upgrade(move |socket| pair(app, key, id, side, machine_id, token, socket)))
+}
+async fn pair_authorized(app:&App,id:&str,machine_id:&str,token:&str,side:&str,key:&PairKey)->bool {
+    authorized_stream(app,id,machine_id,token,side).await.is_ok_and(|(owner,forward)|pair_key(owner,&forward)==*key)
 }
 async fn pair(
     app: Arc<App>,
+    key: PairKey,
     id: String,
     side: String,
     machine_id: String,
@@ -465,23 +480,23 @@ async fn pair(
     let (send, receive) = oneshot::channel();
     let peer = {
         let mut registry = app.usb.registry.lock().unwrap_or_else(|e| e.into_inner());
-        if registry.active.contains_key(&id) {
+        if registry.active.contains_key(&key) {
             return;
         }
         let waiting = &mut registry.waiting;
-        if let Some((_, other, _)) = waiting.get(&id) {
+        if let Some((_, other, _)) = waiting.get(&key) {
             if other == &side {
                 return;
             }
         }
-        if let Some((first, _, peer)) = waiting.remove(&id) {
-            registry.active.insert(id.clone(), first);
+        if let Some((first, _, peer)) = waiting.remove(&key) {
+            registry.active.insert(key.clone(), first);
             Some(peer)
         } else {
             if waiting.len() >= 128 {
                 return;
             }
-            waiting.insert(id.clone(), (nonce.clone(), side.clone(), send));
+            waiting.insert(key.clone(), (nonce.clone(), side.clone(), send));
             None
         }
     };
@@ -491,25 +506,21 @@ async fn pair(
     }
     let _guard = PairGuard {
         app: app.clone(),
-        id: id.clone(),
+        key: key.clone(),
         nonce: nonce.clone(),
     };
     let received = tokio::time::timeout(Duration::from_secs(30), receive).await;
     {
         let mut registry = app.usb.registry.lock().unwrap_or_else(|e| e.into_inner());
-        if registry.waiting.get(&id).is_some_and(|p| p.0 == nonce) {
-            registry.waiting.remove(&id);
+        if registry.waiting.get(&key).is_some_and(|p| p.0 == nonce) {
+            registry.waiting.remove(&key);
         }
     }
     let Ok(Ok((mut other, other_machine, other_token, other_side))) = received else {
         return;
     };
-    if authorized_stream(&app, &id, &machine_id, &token, &side)
-        .await
-        .is_err()
-        || authorized_stream(&app, &id, &other_machine, &other_token, &other_side)
-            .await
-            .is_err()
+    if !pair_authorized(&app,&id,&machine_id,&token,&side,&key).await
+        || !pair_authorized(&app,&id,&other_machine,&other_token,&other_side,&key).await
     {
         return;
     }
@@ -521,7 +532,7 @@ async fn pair(
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     loop {
         tokio::select! {
-         _=tick.tick()=>{if authorized_stream(&app,&id,&machine_id,&token,&side).await.is_err()||authorized_stream(&app,&id,&other_machine,&other_token,&other_side).await.is_err(){break;}if socket.send(Message::Ping(vec![].into())).await.is_err()||other.send(Message::Ping(vec![].into())).await.is_err(){break;}},
+         _=tick.tick()=>{if !pair_authorized(&app,&id,&machine_id,&token,&side,&key).await||!pair_authorized(&app,&id,&other_machine,&other_token,&other_side,&key).await{break;}if socket.send(Message::Ping(vec![].into())).await.is_err()||other.send(Message::Ping(vec![].into())).await.is_err(){break;}},
          m=socket.next()=>{match m{Some(Ok(Message::Binary(b)))=>{if other.send(Message::Binary(b)).await.is_err(){break;}},Some(Ok(Message::Ping(b)))=>{if socket.send(Message::Pong(b)).await.is_err(){break;}},Some(Ok(Message::Pong(_)))=>{},Some(Ok(Message::Text(t)))=>{if !signal(&t)||other.send(Message::Text(t)).await.is_err(){break;}},_=>break}},
          m=other.next()=>{match m{Some(Ok(Message::Binary(b)))=>{if socket.send(Message::Binary(b)).await.is_err(){break;}},Some(Ok(Message::Ping(b)))=>{if other.send(Message::Pong(b)).await.is_err(){break;}},Some(Ok(Message::Pong(_)))=>{},Some(Ok(Message::Text(t)))=>{if !signal(&t)||socket.send(Message::Text(t)).await.is_err(){break;}},_=>break}}
         }
