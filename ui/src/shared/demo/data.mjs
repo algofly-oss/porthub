@@ -40,6 +40,7 @@ function traffic(connection, index) {
 export function handleDemoRequest(state, method, rawPath, payload = {}) {
   const url=new URL(rawPath,"http://demo.invalid");
   const path = url.pathname.replace(/^.*\/api/, "");
+  if(path==="/traffic/hover") return state.trafficHover || {timestamp:Number(url.searchParams.get("timestamp")),contributors:[],total_contributors:0,truncated:false};
   if(path==="/terminal/traffic") {
     if(state.terminalTrafficError)throw Error(state.terminalTrafficError);
     if(state.terminalTraffic)return state.terminalTraffic;

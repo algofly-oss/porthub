@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import TrafficContributors from "./TrafficContributors";
 import { ActionIcon, Badge } from "@mantine/core";
 import { Tooltip } from "@/components/ui/tooltip";
 import { IconExternalLink } from "@tabler/icons-react";
@@ -51,6 +52,7 @@ const formatIpLabel = (ips) => {
  *   showStandaloneMeta?: boolean,
  *   showTitle?: boolean,
  *   plotHeight?: number,
+ *   inspectContributors?: boolean,
  *   className?: string,
  * }} props
  */
@@ -69,6 +71,7 @@ export default function TrafficMonitorPanel({
   showStandaloneMeta = true,
   showTitle = true,
   plotHeight,
+  inspectContributors = false,
   className = "",
 }) {
   const chartWidth = mode === "standalone" ? 960 : 560;
@@ -259,13 +262,15 @@ export default function TrafficMonitorPanel({
 
         <div>
           <div
-            className="relative w-full overflow-hidden rounded-md"
+            className={`relative w-full rounded-md ${inspectContributors ? "" : "overflow-hidden"}`}
+            onMouseLeave={() => setHoveredIndex(null)}
             style={{ height: `${chartHeight}px` }}
           >
             {activeSample ? (
               <div
-                className="pointer-events-none absolute left-2 top-2 z-10 rounded-lg border border-border bg-dialog px-2 py-1 text-[11px] text-foreground shadow-md"
+                className={`${inspectContributors ? "pointer-events-auto w-[min(360px,calc(100vw-5rem))]" : "pointer-events-none"} absolute right-2 top-2 z-30 rounded-lg border border-border bg-dialog px-3 py-2 text-[11px] text-foreground shadow-md`}
               >
+                {inspectContributors && <button type="button" aria-label="Close traffic details" onClick={() => setHoveredIndex(null)} className="float-right ml-2 flex h-7 w-7 items-center justify-center rounded hover:bg-accent">×</button>}
                 <div className="text-muted-foreground">
                   {Math.max(0, Math.floor(Date.now() / 1000) - activeSample.timestamp)}s ago
                 </div>
@@ -300,6 +305,7 @@ export default function TrafficMonitorPanel({
                     </span>
                   </div>
                 ) : null}
+                {inspectContributors && <TrafficContributors timestamp={activeSample.timestamp} />}
                 {showBlocked && blockedHoverLabel ? (
                   <div className="mt-1 grid grid-cols-[0.5rem_minmax(0,1fr)] items-start gap-x-1.5">
                     <span className="mt-[0.28rem] h-2 w-2 rounded-full bg-rose-400" />
@@ -311,6 +317,15 @@ export default function TrafficMonitorPanel({
               </div>
             ) : null}
             <svg
+              tabIndex={inspectContributors ? 0 : undefined}
+              onFocus={() => inspectContributors && setHoveredIndex(windowedSamples.length - 1)}
+              onKeyDown={event => {
+                if (event.key === "Escape") setHoveredIndex(null);
+                if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+                  event.preventDefault();
+                  setHoveredIndex(value => Math.max(0, Math.min(windowedSamples.length - 1, (value ?? windowedSamples.length - 1) + (event.key === "ArrowLeft" ? -1 : 1))));
+                }
+              }}
               role="img"
               aria-label={`${title} chart`}
               data-window-seconds={windowSeconds}
@@ -319,8 +334,12 @@ export default function TrafficMonitorPanel({
               viewBox={`0 0 ${chartWidth} ${chartHeight}`}
               preserveAspectRatio="none"
               className="h-full w-full"
-              onMouseLeave={() => setHoveredIndex(null)}
-              onMouseMove={(event) => {
+              onPointerDown={event => {
+                if (!inspectContributors) return;
+                const bounds = event.currentTarget.getBoundingClientRect();
+                if (bounds.width) setHoveredIndex(Math.round(Math.min(1, Math.max(0, (event.clientX - bounds.left) / bounds.width)) * (windowedSamples.length - 1)));
+              }}
+              onPointerMove={(event) => {
                 const bounds = event.currentTarget.getBoundingClientRect();
                 if (!bounds.width || windowedSamples.length <= 1) {
                   return;
