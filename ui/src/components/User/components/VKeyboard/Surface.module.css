@@ -46,14 +46,13 @@
 
 .wave{display:flex;align-items:center;justify-content:center;gap:3px;height:26px;min-width:72px}.wave span{width:3px;border-radius:3px;background:#ef5350;transition:height 80ms linear}@media(prefers-reduced-motion:reduce){.wave span{transition:none}}
 
-.landscape{grid-template-columns:minmax(0,1fr) minmax(0,1.5fr);grid-template-rows:auto minmax(0,1fr);max-width:1600px}.landscape .header{grid-column:1/-1}.landscape .stage{display:flex}.landscape .keyboard{display:flex;justify-content:center}.landscape .layoutToggle{display:none}.portrait{max-width:680px;grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr) auto}.portrait .stage{display:flex}.portrait .keyboard{display:flex}.portrait .layoutToggle{display:none}
+.landscape{max-width:max(1800px,calc(100dvh * 1180 / 820));grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr) auto}.portrait{max-width:480px;grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr) auto}
 
 .header{flex-wrap:wrap}.clientPicker{flex:1 1 160px}
 
 /* Keep the hand controls together on large screens. */
-.surface{max-height:900px;align-self:start}
-.landscape{max-width:1100px;max-height:620px;grid-template-columns:minmax(0,1fr) minmax(0,1.5fr)}
-.landscape .keyboard{justify-content:end}
+.surface{align-self:stretch}
+.landscape .keyboard{align-self:end;justify-content:end}.landscape .stage{display:flex;flex-direction:column}.landscape .caption{display:none}.landscape .keyboard :global(.mic-key){display:grid}
 .tabs{margin:0 0 16px;min-width:0}
 .sheetBody{padding:0 0 12px;scrollbar-gutter:stable}
 @media(max-width:767px){
@@ -84,3 +83,14 @@
   .padHint{font-size:13px;opacity:.75}
 }
 @media(max-width:359px) and (orientation:portrait){.keyboard :global(.vk.fn){font-size:12px}}
+
+/* Original VKeyboard wide layout: full-width pad above full-width keys. */
+@media(min-width:768px) and (min-height:560px){
+ .landscape,.automatic{max-width:max(1800px,calc(100dvh * 1180 / 820));grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr) auto}
+ .landscape .stage,.automatic .stage{display:flex;flex-direction:column}
+ .landscape .caption,.automatic .caption{display:none}
+ .landscape .keyboard,.automatic .keyboard{align-self:end;justify-content:end}
+ .landscape .keyboard :global(.vk),.automatic .keyboard :global(.vk){height:clamp(28px,calc(100dvh * 52 / 820),76px);font-size:clamp(20px,calc(100dvh * 20 / 820),28px)}
+ .landscape .keyboard :global(.vk.fn),.automatic .keyboard :global(.vk.fn){font-size:14px}
+ .landscape .keyboard :global(.mic-key),.automatic .keyboard :global(.mic-key){display:grid}
+}

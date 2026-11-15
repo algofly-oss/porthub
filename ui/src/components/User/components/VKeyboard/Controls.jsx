@@ -8,7 +8,7 @@ export default function Controls({send,connected,preferences,platform,microphone
   latest.current={...preferences,connected,platform,send,microphone};
   useEffect(()=>{controller.current=mountKeyboardSurface({root:root.current,keyboard:keyboard.current,pad:pad.current,read:()=>latest.current,command:value=>latest.current.send(value),mic:()=>latest.current.microphone()});return()=>controller.current?.destroy();},[]);
   useEffect(()=>{controller.current?.refresh();if(connected)root.current?.focus({preventScroll:true});},[connected,preferences.functionKeys,platform]);
-  return <div ref={root} className={`${styles.surface} ${layout==='portrait'?styles.portrait:layout==='landscape'?styles.landscape:''} ${padView?styles.padView:''}`} onBlurCapture={e=>{if(!e.currentTarget.contains(e.relatedTarget))controller.current?.release();}} role="textbox" aria-label="Capture physical keyboard" tabIndex={connected?0:-1}>
+  return <div ref={root} className={`${styles.surface} ${layout==='portrait'?styles.portrait:layout==='landscape'?styles.landscape:styles.automatic} ${padView?styles.padView:''}`} onBlurCapture={e=>{if(!e.currentTarget.contains(e.relatedTarget))controller.current?.release();}} role="textbox" aria-label="Capture physical keyboard" tabIndex={connected?0:-1}>
     {header}
     <div className={`${styles.stage} ${!preferences.touchpad?styles.noPad:''}`}>
       <div ref={pad} hidden={!preferences.touchpad} className={styles.pad} role="application" aria-label="Touchpad: drag to move, tap to click, two fingers to scroll" aria-disabled={!connected}>

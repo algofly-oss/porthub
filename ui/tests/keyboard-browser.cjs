@@ -87,7 +87,7 @@ async function verifySurfaceDictation(browser){
     await page.screenshot({path:`${screenshots}/settings-${width}.png`});
     await page.getByRole('button',{name:'Close VKeyboard settings',exact:true}).click();await page.getByRole('dialog').waitFor({state:'hidden'});
   }
-  await page.setViewportSize({width:1440,height:1000});await page.getByRole('button',{name:'Switch to portrait layout',exact:true}).click();assert(await page.locator('[aria-label="Capture physical keyboard"]').evaluate(el=>getComputedStyle(el).maxWidth==='680px'));await page.getByRole('button',{name:'Switch to landscape layout',exact:true}).click();assert(await page.locator('[aria-label="Capture physical keyboard"]').evaluate(el=>getComputedStyle(el).gridTemplateColumns.split(' ').length===2));
+  await page.setViewportSize({width:1440,height:1000});await page.getByRole('button',{name:'Switch to portrait layout',exact:true}).click();assert(await page.locator('[aria-label="Capture physical keyboard"]').evaluate(el=>getComputedStyle(el).maxWidth==='480px'));await page.getByRole('button',{name:'Switch to landscape layout',exact:true}).click();assert(await page.locator('[aria-label="Capture physical keyboard"]').evaluate(el=>getComputedStyle(el).gridTemplateColumns.split(' ').length===1));
   // High-refresh-rate pointing must stay connected through the real relay and
   // native worker, even when samples arrive faster than input can be applied.
   await page.getByRole('button',{name:'Disconnect',exact:true}).click();
