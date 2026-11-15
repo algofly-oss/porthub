@@ -148,7 +148,7 @@ async function verifySurfaceDictation(browser){
   assert.equal(await ranking.getByRole('radio',{name:'CPU',exact:true}).isChecked(),false);
   await chooseDropdown(ranking.getByLabel('Resource sort order',{exact:true}),'Least utilized first');
   assert((await ranking.getByRole('listitem').first().textContent()).includes('Busy CPU host'));
-  assert.equal(await ranking.getByRole('listitem').first().getByRole('meter').count(),5,'CPU, GPU, RAM, disk and physical-drive health bars stay visible');
+  assert.equal(await ranking.getByRole('listitem').first().getByRole('meter').count(),4,'CPU, GPU, RAM and disk bars stay visible without a dashboard health column');
   await ranking.getByRole('radio',{name:'Health',exact:true}).check();
   await chooseDropdown(ranking.getByLabel('Resource sort order',{exact:true}),'Most at risk first');
   assert((await ranking.getByRole('listitem').first().textContent()).includes('Busy CPU host'),'One critical physical drive ranks ahead of healthy hosts');
