@@ -19,6 +19,8 @@ mod private_prerequisites;
 #[cfg(target_os="linux")]
 mod private_dns_setup;
 #[cfg(target_os="linux")]
+mod wsl_local_dns;
+#[cfg(target_os="linux")]
 mod private_resolver_file;
 pub mod profile;
 mod routes;

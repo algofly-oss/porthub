@@ -218,6 +218,8 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     let (events, mut input) = mpsc::channel(4096);
     let work = cancel.child_token();
     let mut tasks = JoinSet::new();
+    #[cfg(target_os="linux")]
+    let _wsl_local_dns=crate::wsl_local_dns::start(&cancel);
     let (strategy_updates, strategy) =
         tokio::sync::watch::channel(super::strategy::load(&path)?.mode);
     tasks.spawn(super::strategy::run(

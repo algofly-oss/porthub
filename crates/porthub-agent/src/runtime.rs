@@ -438,6 +438,8 @@ pub async fn run_with_logs(
     );
     let profile = Profile::load(&path)?;
     let _lease = Lease::acquire(&path)?;
+    #[cfg(target_os="linux")]
+    let _wsl_local_dns=crate::wsl_local_dns::start(&cancel);
     let control = std::sync::Arc::new(Control::new(profile.clone())?);
     let _metrics = crate::metrics::start(path.clone(), control.clone(), cancel.clone());
     let _usb = crate::usb::start(path.clone(), control.clone(), cancel.clone());
