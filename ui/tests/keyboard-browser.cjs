@@ -44,6 +44,7 @@ const base=process.env.PORTHUB_TEST_UI_URL,cookie=process.env.PORTHUB_TEST_BOARD
   await health.getByRole('img',{name:'CPU utilization history from 0 to 100 percent'}).waitFor();await page.waitForFunction(()=>document.querySelector('section[aria-label="Machine health and resource history"] [role="meter"][aria-label="GPU"]')?.getAttribute('aria-valuenow')==='96');assert.equal(await health.getByRole('meter',{name:'GPU',exact:true}).getAttribute('aria-valuenow'),'96');assert.equal(await health.getByRole('meter',{name:'GPU',exact:true}).locator('div').evaluate(el=>getComputedStyle(el).backgroundColor),'rgb(240, 82, 82)');
   await chooseDropdown(health.getByLabel('Resource history period',{exact:true}),'Last hour');
   await health.getByText('Fixture GPU',{exact:false}).first().waitFor();
+  await page.waitForFunction(()=>document.querySelector('section[aria-label="Machine health and resource history"]')?.querySelectorAll('svg[role="img"]').length===4);
   assert.equal(await health.getByRole('img').count(),4);
   await health.getByRole('img',{name:'CPU utilization history from 0 to 100 percent'}).locator('polyline').first().waitFor();
   await page.waitForFunction(()=>[...document.querySelectorAll('svg[aria-label="CPU utilization history from 0 to 100 percent"] polyline')].some(line=>(line.getAttribute('points')||'').split(' ').length>30));
