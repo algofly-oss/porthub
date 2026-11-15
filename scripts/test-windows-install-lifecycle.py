@@ -47,6 +47,26 @@ def wait_for(predicate, description):
 
 
 
+def wait_keyboard_image(executable):
+    expected = str(executable).replace("'", "''")
+    result = ps(r"""$ErrorActionPreference='Stop'
+$expected='""" + expected + r"""'
+$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$name='PortHubKeyboard-'+$sid
+for($attempt=0;$attempt -lt 100;$attempt++){
+    $task=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+    $process=@(Get-CimInstance Win32_Process -Filter "Name='porthub.exe'" | Where-Object {
+        $_.ExecutablePath -eq $expected -and $_.SessionId -ne 0 -and $_.CommandLine -match '(?i)\skeyboard\s+run\s*$'
+    })
+    if($task -and $task.Actions[0].Execute -eq $expected -and $task.State -eq 'Running' -and $process.Count){$process[0].ProcessId;exit 0}
+    Start-Sleep -Milliseconds 250
+}
+Get-CimInstance Win32_Process -Filter "Name='porthub.exe'" | Select-Object ProcessId,ExecutablePath,SessionId | Format-List
+throw 'Persistent desktop helper did not advance to its published immutable image'
+""")
+    return int(result.stdout.decode().strip())
+
+
 def cleanup_desktop(state):
     # The disposable fixture proved that these roots did not exist at entry.
     # Never stop a task or process solely because its executable is named PortHub.
@@ -230,6 +250,7 @@ def main():
         # A PE overlay changes the content hash without changing executable behavior.
         manifest_path = state / "native" / (identity + ".service.json")
         previous_spec = json.loads(manifest_path.read_text())
+        wait_keyboard_image(previous_spec["executable"])
         with tempfile.TemporaryDirectory(prefix="porthub update candidate ") as update:
             replacement = Path(update) / "porthub.exe"
             replacement.write_bytes(source.read_bytes() + b"porthub-owned-update-fixture-v1")
@@ -241,11 +262,13 @@ def main():
             assert hashlib.sha256(Path(next_spec["executable"]).read_bytes()).digest() == hashlib.sha256(replacement.read_bytes()).digest()
             assert next_spec["cli"] == previous_spec["cli"], "SCM update lost shared CLI publication"
             assert hashlib.sha256(cli.read_bytes()).digest() == hashlib.sha256(replacement.read_bytes()).digest(), "Published CLI retained old release"
+            updated_helper = wait_keyboard_image(next_spec["executable"])
             ps("$s = Get-CimInstance Win32_Service -Filter \"Name='" + service + "'\"; "
                "if ($s.State -ne 'Running' -or -not $s.PathName.Contains('" + next_spec["executable"] + "')) { exit 1 }")
             # Idempotent reinstallation must retain this registration and credentials.
             run([str(replacement), "service", "install", "--profile", previous_spec["profile"], "--publish-cli"])
             assert json.loads(manifest_path.read_text())["identity"] == previous_spec["identity"]
+            assert wait_keyboard_image(next_spec["executable"]) == updated_helper, "Idempotent setup restarted a healthy desktop helper"
         print("PASS verified owned SCM image replacement and idempotency", flush=True)
         run([str(cli), "remove", identity[:12]])
         ps("if (Get-Service '" + service + "' -ErrorAction SilentlyContinue) { exit 1 }")

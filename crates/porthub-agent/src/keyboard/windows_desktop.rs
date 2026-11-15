@@ -57,6 +57,35 @@ $sid=$identity.User.Value
 if($sid -in @('S-1-5-18','S-1-5-19','S-1-5-20')){{exit 0}}
 $path='{path}'
 $name='PortHubKeyboard-'+$sid
+$releaseRoot=Join-Path $env:ProgramData 'PortHub\releases'
+function ManagedHelper($candidate){{
+    $item=Get-Item -LiteralPath $candidate -ErrorAction SilentlyContinue
+    if(-not $item -or $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)){{return $false}}
+    if($item.Directory.Attributes -band [IO.FileAttributes]::ReparsePoint){{return $false}}
+    if($item.Name -ne 'porthub.exe' -or $item.Directory.Name -notmatch '^[a-fA-F0-9]{{64}}$' -or $item.Directory.Parent.FullName -ne $releaseRoot){{return $false}}
+    return (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash -eq $item.Directory.Name
+}}
+if(-not (ManagedHelper $path)){{throw 'Desktop target is not a verified immutable release'}}
+$previous=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+if($previous){{
+    $priorSid=$previous.Principal.UserId
+    if($priorSid -notmatch '^S-1-'){{$priorSid=([Security.Principal.NTAccount]$priorSid).Translate([Security.Principal.SecurityIdentifier]).Value}}
+    if($priorSid -ne $sid -or @($previous.Actions).Count -ne 1 -or $previous.Actions[0].Arguments -ne 'keyboard run' -or -not (ManagedHelper $previous.Actions[0].Execute)){{throw 'Refusing to replace an unverified desktop task'}}
+    $currentHelper=$false
+    foreach($process in @(Get-CimInstance Win32_Process -Filter "Name='porthub.exe'")){{
+        if($process.ExecutablePath -eq $path -and $process.SessionId -ne 0 -and $process.CommandLine -match '(?i)\skeyboard\s+run\s*$'){{
+            $owner=Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid
+            if($owner.ReturnValue -eq 0 -and $owner.Sid -eq $sid){{$currentHelper=$true}}
+        }}
+    }}
+    # IgnoreNew preserves a running old image even after its action changes.
+    # Stop only this verified SID-owned task when its image needs refreshing.
+    if($previous.State -eq 'Running' -and ($previous.Actions[0].Execute -ne $path -or -not $currentHelper)){{
+        Stop-ScheduledTask -TaskName $name
+        for($attempt=0;$attempt -lt 50 -and (Get-ScheduledTask -TaskName $name).State -eq 'Running';$attempt++){{Start-Sleep -Milliseconds 100}}
+        if((Get-ScheduledTask -TaskName $name).State -eq 'Running'){{throw 'Desktop task did not stop for its verified update'}}
+    }}
+}}
 $action=New-ScheduledTaskAction -Execute $path -Argument 'keyboard run'
 $trigger=New-ScheduledTaskTrigger -AtLogOn -User $sid
 $principal=New-ScheduledTaskPrincipal -UserId $sid -LogonType Interactive -RunLevel Limited
@@ -113,6 +142,14 @@ mod tests {
         assert!(text.contains("-LogonType Interactive"));
         assert!(text.contains("if($sid -in @('S-1-5-18','S-1-5-19','S-1-5-20')){exit 0}"));
         assert!(text.contains("Start-ScheduledTask -TaskName $name"));
+        assert!(text.contains("$priorSid -ne $sid"));
+        assert!(text.contains("ManagedHelper $previous.Actions[0].Execute"));
+        assert!(text.contains("$previous.Actions[0].Execute -ne $path -or -not $currentHelper"));
+        assert!(
+            text.find("Stop-ScheduledTask -TaskName $name").unwrap()
+                < text.find("Register-ScheduledTask -TaskName $name").unwrap()
+        );
+        assert!(!text.contains("Stop-Process"));
         assert!(!text.contains("-Password"));
         assert!(script(Path::new("C:\\bad\npath")).is_err());
     }
