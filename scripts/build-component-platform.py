@@ -13,6 +13,10 @@ planner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(planner)
 
 
+spec = importlib.util.spec_from_file_location('catalog_history', Path(__file__).with_name('component-catalog-history.py'))
+history = importlib.util.module_from_spec(spec); spec.loader.exec_module(history)
+
+
 def previous_builds(directory, target, index=None):
     if directory is None:
         return {}
@@ -57,7 +61,7 @@ def previous_builds(directory, target, index=None):
     return result
 
 
-def run(root, target, revision, output=None, previous=None, tools=None):
+def run(root, target, revision, output=None, previous=None, tools=None, catalog_history=None):
     root = root.resolve()
     planner.require_clean_source(root, revision)
     recipes = planner.read_recipes(root)
@@ -68,12 +72,19 @@ def run(root, target, revision, output=None, previous=None, tools=None):
         if not re.fullmatch(r'[a-z][a-z0-9_-]*', tool) or not re.fullmatch(r'[a-z][a-z0-9_-]*', recipes[tool]['binary']):
             raise ValueError('Unsafe configured tool or executable name')
     old = previous_builds(previous, target)
+    published = history.read_trusted(catalog_history) if catalog_history is not None else None
     choices = []
     inputs = {}
     for tool in selected:
         candidates = [(receipt, binary) for (name, _), (receipt, binary) in old.items() if name == tool]
         latest = max(candidates, key=lambda row: planner.stable_version(row[0]['version']), default=None)
         choice = planner.plan(root, tool, target, latest[0] if latest else None)
+        ceiling = history.floor(published, tool) if published is not None and tool != 'core' else None
+        if ceiling is not None and (planner.stable_version(choice['version']) < ceiling or (choice['action'] == 'build' and planner.stable_version(choice['version']) <= ceiling) or (choice['action'] == 'reuse' and not history.reuse_safe(published,latest[0]))):
+            choice = {'tool':tool, 'target':target, 'action':'build',
+                      'version':'.'.join(map(str,(ceiling[0],ceiling[1],ceiling[2]+1))),
+                      'reason':'Allocate above trusted published component version history'}
+
         choices.append(choice)
         if choice['action'] == 'reuse':
             inputs[tool] = latest
@@ -113,6 +124,8 @@ def run(root, target, revision, output=None, previous=None, tools=None):
         for (tool, version), (receipt, source) in sorted(old.items()):
             if tool == 'core' or tool not in selected or (tool, version) in emitted:
                 continue
+            if published is not None and not history.reuse_safe(published,receipt):
+                continue  # Do not re-emit conflicting provenance from an unaccepted release.
             folder = stage/tool/version; folder.mkdir(parents=True)
             binary = folder/receipt['binary']['name']
             planner.verify_reuse(receipt, source)
@@ -135,10 +148,11 @@ def main():
     parser.add_argument('--target', required=True)
     parser.add_argument('--source-revision', required=True)
     parser.add_argument('--previous', type=Path)
+    parser.add_argument('--catalog-history', type=Path, help='Trusted gateway catalog version floor, independent of reusable archives')
     parser.add_argument('--tool', action='append')
     parser.add_argument('--output', type=Path, help='Execute and atomically publish selected builds; otherwise only plan')
     args = parser.parse_args()
-    print(json.dumps(run(args.root, args.target, args.source_revision, args.output, args.previous, args.tool), sort_keys=True))
+    print(json.dumps(run(args.root, args.target, args.source_revision, args.output, args.previous, args.tool, args.catalog_history), sort_keys=True))
 
 
 if __name__ == '__main__':

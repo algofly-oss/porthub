@@ -132,7 +132,7 @@ class CompactPublication(unittest.TestCase):
         with patch.object(publisher.subprocess, 'run', return_value=self.success):
             expected = publisher.assets(self.directory, '1.11.0', self.verifier)
             github = GitHub(expected)
-            with patch.object(publisher, 'verify_gateway') as gate:
+            with patch.object(publisher, 'verify_gateway') as gate, patch.object(publisher,'verify_catalog_successor') as successor:
                 result = publisher.publish(github, self.directory, '1.11.0', 'a'*40, True, self.verifier, 'https://gateway.test')
             self.assertEqual(result['status'], 'published')
             self.assertEqual(github.writes, [('create',21),('promote','v1.11.0')])
@@ -143,6 +143,20 @@ class CompactPublication(unittest.TestCase):
             with patch.object(publisher, 'verify_gateway', side_effect=ValueError('not deployed')):
                 with self.assertRaises(ValueError): publisher.publish(github, self.directory, '1.11.0', 'a'*40, True, self.verifier)
             self.assertEqual(github.writes, [])
+    def test_catalog_conflict_cannot_create_or_promote_release(self):
+        with patch.object(publisher.subprocess,'run',return_value=self.success), patch.object(publisher,'verify_gateway'):
+            github=GitHub(publisher.assets(self.directory,'1.11.0',self.verifier))
+            with patch.object(publisher,'verify_catalog_successor',side_effect=ValueError('published component changed')):
+                with self.assertRaises(ValueError):publisher.publish(github,self.directory,'1.11.0','a'*40,True,self.verifier,'https://gateway.test')
+            self.assertEqual(github.writes,[])
+
+    def test_live_history_is_rechecked_before_promotion(self):
+        with patch.object(publisher.subprocess,'run',return_value=self.success), patch.object(publisher,'verify_gateway'):
+            github=GitHub(publisher.assets(self.directory,'1.11.0',self.verifier))
+            with patch.object(publisher,'verify_catalog_successor',side_effect=[None,ValueError('concurrent history change')]):
+                with self.assertRaises(ValueError):publisher.publish(github,self.directory,'1.11.0','a'*40,True,self.verifier,'https://gateway.test')
+            self.assertEqual(github.writes,[('create',21)])
+
     def test_input_changed_by_verifier_is_rejected(self):
         def changed(*args, **kwargs):
             (self.directory/'0').write_bytes(b'changed'); return self.success

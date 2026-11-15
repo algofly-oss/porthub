@@ -36,6 +36,26 @@ class PlatformBuild(unittest.TestCase):
         self.assertEqual(set(builds), {('tool','0.1.0')})
         self.assertEqual(builds[('tool','0.1.0')][1].read_bytes(), self.case.binary.read_bytes())
 
+    def test_missing_archives_still_allocate_above_trusted_history(self):
+        published={'artifacts':[{'component':'tool','version':'0.1.11'}]}
+        with patch.object(platform.history,'read_trusted',return_value=published):
+            choices=platform.run(self.root,fixture.TARGET,'a'*40,tools=['tool'],catalog_history=self.root/'history.json')
+        self.assertEqual(choices[0]['action'],'build')
+        self.assertEqual(choices[0]['version'],'0.1.12')
+
+    def test_old_recovered_receipt_cannot_reset_newer_published_version(self):
+        published={'artifacts':[{'component':'tool','version':'0.1.11'}]}
+        with patch.object(platform.history,'read_trusted',return_value=published):
+            choices=platform.run(self.root,fixture.TARGET,'a'*40,previous=self.previous,tools=['tool'],catalog_history=self.root/'history.json')
+        self.assertEqual((choices[0]['action'],choices[0]['version']),('build','0.1.12'))
+
+    def test_verified_previous_reuse_is_preserved_but_conflicting_receipt_is_rebuilt(self):
+        published={'artifacts':[{'component':'tool','version':'0.1.0'}]}
+        for safe,expected in [(True,('reuse','0.1.0')),(False,('build','0.1.1'))]:
+            with patch.object(platform.history,'read_trusted',return_value=published),patch.object(platform.history,'reuse_safe',return_value=safe):
+                choice=platform.run(self.root,fixture.TARGET,'a'*40,previous=self.previous,tools=['tool'],catalog_history=self.root/'history.json')[0]
+                self.assertEqual((choice['action'],choice['version']),expected)
+
     def test_corrupt_previous_binary_fails_before_selection(self):
         (self.previous/'tool').write_bytes(b'corrupt')
         with self.assertRaises(ValueError): self.run_build(self.root/'output')

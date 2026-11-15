@@ -21,6 +21,14 @@ retention = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(retention)
 
 
+spec = importlib.util.spec_from_file_location('catalog_history', Path(__file__).with_name('component-catalog-history.py'))
+history = importlib.util.module_from_spec(spec); spec.loader.exec_module(history)
+
+
+def verify_catalog_successor(base, directory):
+    history.validate_successor(history.read(directory/'porthub-components.json'), history.fetch(base))
+
+
 def numeric(value):
     if not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', value):
         raise ValueError('Release versions must use major.minor.patch')
@@ -151,7 +159,9 @@ def publish(github,directory,version,revision,execute=False,artifact_verifier=No
     if not re.fullmatch(r'[a-f0-9]{40}',revision):raise ValueError('A full verified source revision is required')
     expected=assets(directory,version,artifact_verifier)
     compact=(directory/'porthub-components.json').exists()
-    if compact:verify_gateway(compact_gateway)
+    if compact:
+        verify_gateway(compact_gateway)
+        verify_catalog_successor(compact_gateway,directory)
     tag='v'+version
     if superseded(github.latest(),version):return {'tag':tag,'status':'superseded'}
     existing=github.release(tag)
@@ -182,7 +192,10 @@ def publish(github,directory,version,revision,execute=False,artifact_verifier=No
     verify_uploaded(draft,expected)
     # A concurrent publisher must not let this older run replace newer latest.
     if superseded(github.latest(),version):return {'tag':tag,'status':'superseded'}
-    if compact:verify_gateway(compact_gateway)
+    if compact:
+        verify_gateway(compact_gateway)
+        verify_catalog_successor(compact_gateway,directory)
+        if superseded(github.latest(),version):return {'tag':tag,'status':'superseded'}
     github.promote(tag)
     published=github.release(tag)
     if published is None or published.get('draft') or published.get('prerelease') or github.tag_commit(tag) != revision:
