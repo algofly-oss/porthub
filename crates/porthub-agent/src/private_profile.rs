@@ -492,7 +492,7 @@ pub async fn enroll(
             anyhow::ensure!(!user, "private network enrollment requires the system registration");
             let native = crate::service::Layout::system()?.state;
             anyhow::ensure!(destination.starts_with(&native) && crate::service::windows_acl::is_managed(&destination), "private credentials must be saved inside the managed native directory");
-            crate::service::windows_acl::secure(destination.parent().context("private profile directory missing")?, true)?;
+            crate::service::directory(destination.parent().context("private profile directory missing")?, true)?;
         }
         profile::validate_parent(&destination)?;
         anyhow::ensure!(
