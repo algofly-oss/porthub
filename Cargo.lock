@@ -5380,6 +5380,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "smoltcp",
+ "socket2 0.6.5",
  "subtle",
  "sysinfo",
  "system-configuration",

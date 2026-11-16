@@ -117,3 +117,59 @@ forwards a recognized private miss; OS routing after failed namespace admission
 needs separate native validation and is not covered by that proxy guarantee.
 Completing larger native namespace admission is separate
 from the registration/peer-address pool expansion.
+
+
+## Independent-review follow-up to 6bae7f0
+
+The frozen checkpoint had two source defects; its old evidence is retained.
+Broad capture-route removal omitted protected-journal retirement, allowing a later
+identical row to be mistaken for the removed owned row. The follow-up requires a
+persisted retirement before *any* explicit route deletion (capture, host or
+shutdown). Only that acknowledgement issues a non-cloneable removal permit.
+Retirement tombstones are diagnostic, never authority for recovery. Deletion
+failure/crash therefore preserves ambiguous rows and reports exact-owned repair;
+persistence failure issues no permit and leaves the original claim unchanged.
+The unshipped adapter record format is version 2, so the old potentially stale
+version-1 claims cannot silently be adopted. The native failure fixture must
+exercise both sides of this ordering, then recreate the same prefix under the
+same adapter and verify that recovery rejects it.
+
+The default Tokio/Winsock bind was not exclusive against another socket owned by
+the same Windows account. The follow-up sets and reads back
+`SO_EXCLUSIVEADDRUSE` **before** binding UDP and TCP. A failed TCP half drops its
+UDP half before any NRPT operation; it never enables address reuse as recovery.
+See [Microsoft's socket ownership contract](https://learn.microsoft.com/en-us/windows/win32/winsock/using-so-reuseaddr-and-so-exclusiveaddruse).
+
+Two ignored Windows socket tests are now present in `dns_windows.rs`, guarded by
+`PORTHUB_TEST_DISPOSABLE_WINDOWS_DNS=1`: same-account `SO_REUSEADDR` attackers
+against the exact UDP/TCP endpoint, and pre-existing foreign UDP/TCP listeners
+with partial-bind cleanup. They compile under metadata but have not run on
+Windows. A future approved native job must also use a separate same-account
+child, verify real traffic still reaches only the original endpoint, prove no
+NRPT state was touched on bind failure, and exercise graceful TCP close/rebind.
+TCP TIME_WAIT/active teardown may fail actionably or use a bounded safe retry;
+never switch off exclusivity, use unsafe reuse, or reset foreign sockets.
+
+A further audit found an unmerged legacy-compatibility issue: the ownership
+ledger's 320-row bound was derived from sparse cache/capture limits, while the
+Windows runtime also invokes it for legacy full snapshots. It therefore does
+not yet preserve the older 4096-peer route capacity. Before merging, derive a
+bounded journal/admission strategy from that existing contract or isolate this
+experimental path without altering legacy behavior. Do not solve this by
+raising global peer caps or silently dropping routes. No live client has run
+this isolated implementation.
+
+After review on an explicitly disposable Windows runner, the socket-only cases
+can be selected without NRPT or Wintun activation:
+
+```powershell
+$env:PORTHUB_TEST_DISPOSABLE_WINDOWS_DNS = '1'
+try {
+  cargo test --locked -p porthub-agent --lib --features private-sparse private_network::dns_windows::tests::native_ -- --ignored --test-threads=1
+} finally {
+  Remove-Item Env:PORTHUB_TEST_DISPOSABLE_WINDOWS_DNS
+}
+```
+
+This is a proposed invocation, not an execution receipt. Pin the source and
+artifact first; do not run it on Aero to substitute for disposable validation.

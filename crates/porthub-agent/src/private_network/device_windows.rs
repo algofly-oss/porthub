@@ -10,7 +10,7 @@ use std::{
 };
 use tokio::sync::Mutex;
 use tun_rs::DeviceBuilder;
-use super::{native_ownership::{AdapterRecord,RouteStamp},windows_state};
+use super::{native_ownership::{AdapterRecord,RouteStamp,RetiredRoute},windows_state};
 
 struct Ownership { path:PathBuf,record:std::sync::Mutex<AdapterRecord>,_lease:crate::profile::Lease }
 fn stamp(route:&Route)->RouteStamp{RouteStamp{address:route.destination(),prefix:route.prefix(),gateway:route.gateway().filter(|g|!g.is_unspecified()),metric:route.metric().unwrap_or(0)}}
@@ -39,7 +39,14 @@ impl Ownership {
     fn reserve(&self,value:RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.pending.insert(value);ensure!(r.routes.len()+r.pending.len()+r.baseline.as_ref().map_or(0,|b|b.len())<=super::native_ownership::MAX_ROUTES,"owned route intent exceeds bound");windows_state::write(&self.path,&*r)}
     fn confirm(&self,value:RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());ensure!(r.pending.remove(&value),"owned route has no prior intent");r.routes.insert(value);windows_state::write(&self.path,&*r)}
     fn cancel(&self,value:&RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.pending.remove(value);windows_state::write(&self.path,&*r)}
-    fn forget(&self,value:&RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.routes.remove(value);windows_state::write(&self.path,&*r)}
+    fn retire(&self,value:&RouteStamp)->Result<RetiredRoute>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.retire_route(value,|next|windows_state::write(&self.path,next))}
+    fn finish_retirement(&self,value:&RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.finish_retirement(value,|next|windows_state::write(&self.path,next))}
+}
+
+async fn remove_retired(manager:&mut AsyncRouteManager,index:u32,permit:RetiredRoute)->Result<RouteStamp>{
+    let stamp=permit.into_stamp();let mut route=Route::new(stamp.address,stamp.prefix).with_if_index(index).with_metric(stamp.metric);
+    if let Some(gateway)=stamp.gateway{route=route.with_gateway(gateway);}
+    manager.delete(&route).await.context("cannot remove durably retired native route; exact-owned repair may be required")?;Ok(stamp)
 }
 
 
@@ -149,7 +156,7 @@ impl Tun {
         let profile=profile.canonicalize()?;
         let binding=windows_state::profile_binding(&profile)?;
         let mut record:AdapterRecord=match windows_state::read(&path)?{
-            Some(record)=>record,None=>{let mut nonce=[0;16];getrandom::fill(&mut nonce)?;AdapterRecord{version:1,binding:binding.clone(),guid:format!("{:032x}",u128::from_be_bytes(nonce)),name:name.into(),own,mtu:porthub_mesh::MAX_PACKET as u16,baseline:None,routes:Default::default(),pending:Default::default()}},
+            Some(record)=>record,None=>{let mut nonce=[0;16];getrandom::fill(&mut nonce)?;AdapterRecord{version:2,binding:binding.clone(),guid:format!("{:032x}",u128::from_be_bytes(nonce)),name:name.into(),own,mtu:porthub_mesh::MAX_PACKET as u16,baseline:None,routes:Default::default(),pending:Default::default(),retiring:Default::default()}},
         };
         record.validate(&binding,name,record.own,record.mtu)?;
         let native_adapters=adapters()?;
@@ -178,13 +185,13 @@ impl Tun {
         }else if existing_index.is_some(){
             // The pinned builder may recreate an orphaned *already verified*
             // owned GUID. Recheck GUID/name above, then journal this fresh start.
-            record.baseline=None;record.routes.clear();record.pending.clear();windows_state::write(&path,&record)?;
+            record.baseline=None;record.routes.clear();record.pending.clear();record.retiring.clear();windows_state::write(&path,&record)?;
         }
         device.set_network_address(own,32,None)?;device.set_mtu(porthub_mesh::MAX_PACKET as u16)?;device.enabled(true)?;
         let current:std::collections::BTreeSet<_>=manager.list().await?.iter().filter(|r|r.if_index()==Some(index)).map(stamp).collect();
         let present:std::collections::BTreeSet<_>=record.routes.intersection(&current).cloned().collect();
         if record.baseline.is_none(){record.baseline=Some(current.clone());}
-        record.routes=present.clone();record.pending.clear();windows_state::write(&path,&record)?;
+        record.routes=present.clone();record.pending.clear();record.retiring.clear();windows_state::write(&path,&record)?;
         let tun=Self{device,index,name:name.into(),own,routes:Mutex::new(present.iter().filter_map(|r|if r.prefix==32{if let IpAddr::V4(ip)=r.address{Some(ip)}else{None}}else{None}).collect()),capture_routes:Mutex::new(present.iter().filter_map(|r|if r.prefix<32{if let IpAddr::V4(ip)=r.address{porthub_mesh::lan_routes::Network::from_address(ip,r.prefix).ok()}else{None}}else{None}).collect()),_driver:driver,ownership:Ownership{path,record:std::sync::Mutex::new(record),_lease:ownership_lease}};
         tun.update_routes(peers).await?;Ok(tun)
     }
@@ -199,7 +206,8 @@ impl Tun {
         let mut plan=capture_routes::plan(pools,&existing,self.index)?;
         let wanted:std::collections::BTreeSet<_>=plan.accepted.iter().copied().collect();let mut owned=self.capture_routes.lock().await;
         for prefix in owned.difference(&wanted).copied().collect::<Vec<_>>(){
-            manager.delete(&Route::new(IpAddr::V4(prefix.address()),prefix.prefix()).with_if_index(self.index)).await.context("cannot remove owned capture route")?;owned.remove(&prefix);
+            let permit=self.ownership.retire(&direct(IpAddr::V4(prefix.address()),prefix.prefix()))?;
+            let retired=remove_retired(&mut manager,self.index,permit).await?;self.ownership.finish_retirement(&retired)?;owned.remove(&prefix);
         }
         for prefix in wanted.difference(&owned).copied().collect::<Vec<_>>(){
             self.ownership.reserve(direct(IpAddr::V4(prefix.address()),prefix.prefix()))?;
@@ -271,12 +279,9 @@ impl Tun {
         }
         let removals: Vec<_> = current.difference(&wanted).copied().collect();
         for address in removals {
-            let route = Route::new(IpAddr::V4(address), 32).with_if_index(self.index).with_metric(0);
-            routes
-                .delete(&route)
-                .await
-                .context("cannot remove Windows private host route")?;
-            current.remove(&address);self.ownership.forget(&direct(IpAddr::V4(address),32))?;
+            let permit=self.ownership.retire(&direct(IpAddr::V4(address),32))?;
+            let retired=remove_retired(&mut routes,self.index,permit).await?;self.ownership.finish_retirement(&retired)?;
+            current.remove(&address);
         }
         Ok(())
     }
@@ -311,14 +316,14 @@ impl Drop for Tun {
         let Ok(native)=manager.list()else{return;};
         if let Err(error)=self.ownership.verify(self.index,&self.device,&native){tracing::warn!("owned Wintun changed externally; shutdown preserves it: {error}");return;}
         let routes=self.routes.get_mut();let captures=self.capture_routes.get_mut();
-        let mut removed=Vec::new();
         for (address,prefix) in captures.iter().map(|p|(p.address(),p.prefix())).chain(routes.iter().map(|ip|(*ip,32))){
             let expected=direct(IpAddr::V4(address),prefix);
-            if !native.iter().any(|r|r.if_index()==Some(self.index)&&stamp(r)==expected){removed.push(expected);continue;}
-            let route=Route::new(IpAddr::V4(address),prefix).with_if_index(self.index).with_metric(0);
-            if manager.delete(&route).is_ok(){removed.push(expected);}else{tracing::warn!("could not remove exact owned Windows private route during shutdown");}
+            let permit=match self.ownership.retire(&expected){Ok(permit)=>permit,Err(_)=>{tracing::warn!("could not durably retire Windows route; native entry preserved");continue;}};
+            let retired=permit.into_stamp();
+            if !native.iter().any(|r|r.if_index()==Some(self.index)&&stamp(r)==retired){let _=self.ownership.finish_retirement(&retired);continue;}
+            let route=Route::new(retired.address,retired.prefix).with_if_index(self.index).with_metric(retired.metric);
+            if manager.delete(&route).is_err(){tracing::warn!("could not remove durably retired Windows route; exact-owned repair may be required");}else if self.ownership.finish_retirement(&retired).is_err(){tracing::warn!("could not checkpoint Windows route retirement completion");}
         }
-        for route in removed{if self.ownership.forget(&route).is_err(){tracing::warn!("could not checkpoint owned Windows route cleanup");}}
         // A handle opened on a stale adapter does not delete that adapter when
         // closed. Remove only its verified own address and stop our session;
         // leave the protected GUID record so the next normal restart recovers.

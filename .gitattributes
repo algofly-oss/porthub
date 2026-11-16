@@ -19,3 +19,7 @@ scripts/build-media-helper-windows.ps1 text eol=lf
 vendor/media/Dockerfile* text eol=lf
 vendor/media/**/*.json text eol=lf
 vendor/media/**/*.toml text eol=lf
+
+# Embedded Windows NRPT command size/provenance must not change under autocrlf.
+crates/porthub-agent/src/private_network/windows_nrpt.ps1 text eol=lf
+scripts/tests/private_nrpt_transactions.ps1 text eol=lf

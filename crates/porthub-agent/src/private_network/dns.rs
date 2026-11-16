@@ -222,8 +222,10 @@ impl Server {
         let address = (Ipv4Addr::LOCALHOST, 0);
         #[cfg(windows)]
         let address = (if cfg!(feature="private-sparse"){super::native_ownership::dns_endpoint(own)}else{Ipv4Addr::LOCALHOST}, 53);
-        let socket = UdpSocket::bind(address).await?;
-        let tcp = TcpListener::bind(socket.local_addr()?).await?;
+        #[cfg(not(windows))]
+        let (socket,tcp)={let socket=UdpSocket::bind(address).await?;let tcp=TcpListener::bind(socket.local_addr()?).await?;(socket,tcp)};
+        #[cfg(windows)]
+        let (socket,tcp)=super::dns_windows::bind(std::net::SocketAddrV4::new(address.0,address.1))?;
         Ok(Self { socket, tcp, zone: Default::default(), upstream: Default::default() })
     }
     pub fn port(&self) -> Result<u16> {

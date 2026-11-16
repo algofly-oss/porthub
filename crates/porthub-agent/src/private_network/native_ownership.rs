@@ -51,7 +51,18 @@ pub(super) struct AdapterRecord {
     pub routes: BTreeSet<RouteStamp>,
     #[serde(default)]
     pub pending: BTreeSet<RouteStamp>,
+    #[serde(default)]
+    pub retiring: BTreeSet<RouteStamp>,
 }
+/// A native removal is allowed only after the old ownership claim was durably
+/// retired. This token is not cloneable and cannot be constructed by backends.
+pub(super) struct RetiredRoute(RouteStamp);
+impl RetiredRoute {
+    pub fn into_stamp(self) -> RouteStamp {
+        self.0
+    }
+}
+
 fn hex(value: &str, n: usize) -> bool {
     value.len() == n
         && value
@@ -61,8 +72,8 @@ fn hex(value: &str, n: usize) -> bool {
 impl AdapterRecord {
     pub fn validate(&self, binding: &str, name: &str, own: Ipv4Addr, mtu: u16) -> Result<()> {
         ensure!(
-            self.version == 1 && hex(&self.binding, 64) && self.binding == binding,
-            "native ownership profile binding mismatch"
+            self.version == 2 && hex(&self.binding, 64) && self.binding == binding,
+            "native ownership schema/profile mismatch; exact old owned cleanup is required"
         );
         ensure!(
             hex(&self.guid, 32) && self.guid != "0".repeat(32),
@@ -82,6 +93,7 @@ impl AdapterRecord {
         ensure!(
             self.routes.len()
                 + self.pending.len()
+                + self.retiring.len()
                 + self.baseline.as_ref().map_or(0, BTreeSet::len)
                 <= MAX_ROUTES,
             "owned route journal exceeds bound"
@@ -90,6 +102,7 @@ impl AdapterRecord {
             .routes
             .iter()
             .chain(self.pending.iter())
+            .chain(self.retiring.iter())
             .chain(self.baseline.iter().flatten())
         {
             route.validate()?;
@@ -108,8 +121,51 @@ impl AdapterRecord {
         self.baseline = None;
         self.routes.clear();
         self.pending.clear();
+        self.retiring.clear();
         Ok(())
     }
+    pub fn retire_route(
+        &mut self,
+        route: &RouteStamp,
+        persist: impl FnOnce(&AdapterRecord) -> Result<()>,
+    ) -> Result<RetiredRoute> {
+        ensure!(
+            self.routes.contains(route),
+            "cannot retire an unowned native route"
+        );
+        ensure!(
+            !self
+                .baseline
+                .as_ref()
+                .is_some_and(|base| base.contains(route)),
+            "explicit route overlaps native baseline; refusing ambiguous removal"
+        );
+        let mut next = self.clone();
+        next.routes.remove(route);
+        next.pending.remove(route);
+        next.retiring.insert(route.clone());
+        // Do not modify memory or issue a native delete if persistence fails.
+        persist(&next)?;
+        *self = next;
+        Ok(RetiredRoute(route.clone()))
+    }
+
+    pub fn finish_retirement(
+        &mut self,
+        route: &RouteStamp,
+        persist: impl FnOnce(&AdapterRecord) -> Result<()>,
+    ) -> Result<()> {
+        ensure!(
+            self.retiring.contains(route),
+            "route has no pending retirement checkpoint"
+        );
+        let mut next = self.clone();
+        next.retiring.remove(route);
+        persist(&next)?;
+        *self = next;
+        Ok(())
+    }
+
     pub fn recover(
         &self,
         guid: &str,
@@ -128,7 +184,7 @@ impl AdapterRecord {
                     || matches!(ip,IpAddr::V6(v6) if v6.is_unicast_link_local())),
             "owned adapter was changed externally; it was not modified"
         );
-        ensure!(native.iter().all(|r|baseline.contains(r)||self.routes.contains(r)),"owned adapter has an unrecorded, unacknowledged or changed native route; it was not modified");
+        ensure!(native.iter().all(|r|!self.retiring.contains(r)&&(baseline.contains(r)||self.routes.contains(r))),"owned adapter has an unrecorded, unacknowledged or changed native route; it was not modified");
         Ok(())
     }
 }
@@ -137,7 +193,7 @@ mod tests {
     use super::*;
     fn record() -> AdapterRecord {
         AdapterRecord {
-            version: 1,
+            version: 2,
             binding: "a".repeat(64),
             guid: "b".repeat(32),
             name: "ph12345678".into(),
@@ -146,6 +202,7 @@ mod tests {
             baseline: Some(BTreeSet::new()),
             routes: BTreeSet::new(),
             pending: BTreeSet::new(),
+            retiring: BTreeSet::new(),
         }
     }
     #[test]
@@ -163,9 +220,21 @@ mod tests {
         let guid = r.guid.clone();
         r.reset_absent("10.204.0.2".parse().unwrap(), 1380).unwrap();
         assert_eq!(r.guid, guid);
-        assert!(r.baseline.is_none() && r.routes.is_empty() && r.pending.is_empty());
+        assert!(
+            r.baseline.is_none()
+                && r.routes.is_empty()
+                && r.pending.is_empty()
+                && r.retiring.is_empty()
+        );
         assert_eq!(r.own, "10.204.0.2".parse::<Ipv4Addr>().unwrap());
     }
+    #[test]
+    fn stale_unshipped_schema_cannot_silently_reauthorize_old_claims() {
+        let mut r = record();
+        r.version = 1;
+        assert!(r.validate(&r.binding, &r.name, r.own, r.mtu).is_err());
+    }
+
     #[test]
     fn protected_identity_and_exact_configuration_are_required() {
         let r = record();
@@ -216,7 +285,7 @@ mod intent_tests {
             metric: 0,
         };
         let record = AdapterRecord {
-            version: 1,
+            version: 2,
             binding: "a".repeat(64),
             guid: "b".repeat(32),
             name: "ph12345678".into(),
@@ -225,6 +294,7 @@ mod intent_tests {
             baseline: Some(BTreeSet::new()),
             routes: BTreeSet::new(),
             pending: BTreeSet::from([route.clone()]),
+            retiring: BTreeSet::new(),
         };
         assert!(record
             .recover(&record.guid, &[], 1380, &BTreeSet::from([route]))
@@ -246,5 +316,102 @@ mod dns_endpoint_tests {
             assert_ne!(endpoint, own);
             assert_eq!(endpoint, super::dns_endpoint(own));
         }
+    }
+}
+
+#[cfg(test)]
+mod retirement_tests {
+    use super::*;
+    fn fixture() -> (AdapterRecord, RouteStamp) {
+        let route = RouteStamp {
+            address: "10.203.0.0".parse().unwrap(),
+            prefix: 16,
+            gateway: None,
+            metric: 0,
+        };
+        let r = AdapterRecord {
+            version: 2,
+            binding: "a".repeat(64),
+            guid: "b".repeat(32),
+            name: "ph12345678".into(),
+            own: "10.204.0.2".parse().unwrap(),
+            mtu: 1380,
+            baseline: Some(BTreeSet::new()),
+            routes: BTreeSet::from([route.clone()]),
+            pending: BTreeSet::new(),
+            retiring: BTreeSet::new(),
+        };
+        (r, route)
+    }
+    #[test]
+    fn successful_retirement_cannot_adopt_a_later_identical_foreign_prefix_on_restart() {
+        let (mut r, route) = fixture();
+        let mut disk = Vec::new();
+        let permit = r
+            .retire_route(&route, |next| {
+                disk = serde_json::to_vec(next)?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(permit.into_stamp(), route);
+        // Native delete acknowledged, then its tombstone checkpoint succeeds.
+        r.finish_retirement(&route, |next| {
+            disk = serde_json::to_vec(next)?;
+            Ok(())
+        })
+        .unwrap();
+        let restarted: AdapterRecord = serde_json::from_slice(&disk).unwrap();
+        assert!(restarted.retiring.is_empty());
+        assert!(restarted
+            .recover(&restarted.guid, &[], 1380, &BTreeSet::from([route]))
+            .is_err());
+    }
+    #[test]
+    fn crash_or_delete_failure_after_retirement_never_restores_the_old_claim() {
+        let (mut r, route) = fixture();
+        let mut disk = Vec::new();
+        let _permit = r
+            .retire_route(&route, |next| {
+                disk = serde_json::to_vec(next)?;
+                Ok(())
+            })
+            .unwrap(); /* no native delete, or native delete fails */
+        let restarted: AdapterRecord = serde_json::from_slice(&disk).unwrap();
+        assert!(restarted
+            .recover(&restarted.guid, &[], 1380, &BTreeSet::from([route]))
+            .is_err());
+    }
+    #[test]
+    fn completed_removal_checkpoint_failure_keeps_a_nonauthorizing_tombstone() {
+        let (mut r, route) = fixture();
+        let mut disk = Vec::new();
+        let _permit = r
+            .retire_route(&route, |next| {
+                disk = serde_json::to_vec(next)?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(r
+            .finish_retirement(&route, |_| anyhow::bail!("injected final fsync failure"))
+            .is_err());
+        assert!(r.retiring.contains(&route));
+        let restarted: AdapterRecord = serde_json::from_slice(&disk).unwrap();
+        restarted
+            .recover(&restarted.guid, &[], 1380, &BTreeSet::new())
+            .unwrap();
+        assert!(restarted
+            .recover(&restarted.guid, &[], 1380, &BTreeSet::from([route]))
+            .is_err());
+    }
+
+    #[test]
+    fn persistence_failure_keeps_the_claim_and_produces_no_native_removal_permit() {
+        let (mut r, route) = fixture();
+        assert!(r
+            .retire_route(&route, |_| anyhow::bail!("injected fsync failure"))
+            .is_err());
+        assert!(r.routes.contains(&route));
+        r.recover(&r.guid, &[], 1380, &BTreeSet::from([route]))
+            .unwrap();
     }
 }

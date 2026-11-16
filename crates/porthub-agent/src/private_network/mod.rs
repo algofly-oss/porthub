@@ -84,3 +84,6 @@ mod windows_state;
 
 #[cfg(windows)]
 mod windows_nrpt;
+
+#[cfg(windows)]
+mod dns_windows;

@@ -194,3 +194,14 @@ queries. The disposable opt-in native validation design is recorded in
 `sparse-windows-native-validation.md`; it has not been dispatched or run. The
 feature remains default-off and unmerged; the broader registration/range goal
 still requires the previously listed migration, exit/Tor and fairness work.
+
+
+Independent review of frozen `6bae7f0` found a missing broad-route journal
+retirement and a non-exclusive Windows DNS bind. Follow-up source retires route
+claims before native removal, retains non-authorizing diagnostic tombstones,
+uses removal permits, and fences the unshipped old record format. It explicitly
+sets/readbacks Winsock `SO_EXCLUSIVEADDRUSE` before UDP/TCP bind. The retained red
+recovery test reproduces old stale-prefix adoption; the new failure/restart
+contracts pass. Ignored native adversarial socket cases compile but are not
+native execution proof. The 320-row ownership journal's legacy-4096 compatibility
+also remains an explicit merge blocker; see the disposable validation design.
