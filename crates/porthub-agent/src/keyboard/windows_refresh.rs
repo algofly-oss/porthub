@@ -11,11 +11,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 const SCRIPT: &str = include_str!("windows_refresh.ps1");
 // Keep CreateProcess argv small; trusted script bytes travel over our child pipe.
 const BOOTSTRAP: &str = r#"$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
-[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
-$buffer=New-Object byte[] 2048;$bytes=New-Object IO.MemoryStream;$inputStream=[Console]::OpenStandardInput()
+[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
+$buffer=[Array]::CreateInstance([byte],2048);$bytes=[IO.MemoryStream]::new();$inputStream=[Console]::OpenStandardInput()
 try{
  while(($count=$inputStream.Read($buffer,0,$buffer.Length)) -gt 0){if($bytes.Length+$count -gt 131072){throw 'Desktop refresh input exceeds bounds'};$bytes.Write($buffer,0,$count)}
- $utf8=New-Object Text.UTF8Encoding($false,$true);$packet=$utf8.GetString($bytes.ToArray())|ConvertFrom-Json
+ $utf8=[Text.UTF8Encoding]::new($false,$true);$packet=$utf8.GetString($bytes.ToArray())|ConvertFrom-Json
 }finally{$bytes.Dispose();$inputStream.Dispose()}
 if($packet -isnot [pscustomobject] -or @($packet.PSObject.Properties).Count -ne 2 -or @($packet.PSObject.Properties|Where-Object{$_.Name -cnotin @('script','request')}).Count -or $packet.script -isnot [string] -or $packet.script.Length -gt 49152 -or $packet.request -isnot [pscustomobject]){throw 'Invalid desktop refresh envelope'}
 $hash=[Security.Cryptography.SHA256]::Create()
@@ -194,6 +194,7 @@ mod tests {
         assert!(command.len() <= 8192);
         assert!(SCRIPT.len() <= 49152);
         assert!(!BOOTSTRAP.contains("-ExecutionPolicy"));
+        assert!(!BOOTSTRAP.split("$packet=").next().unwrap().contains("New-Object"), "No cmdlet pipeline may run before raw stdin is consumed");
         assert!(BOOTSTRAP.contains("Desktop refresh script digest mismatch"));
     }
     #[test]

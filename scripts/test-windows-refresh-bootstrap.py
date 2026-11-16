@@ -12,13 +12,13 @@ class Bootstrap(unittest.TestCase):
   try:r=subprocess.run([PWSH,'-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',command],input=payload,capture_output=True,timeout=5,env=CHILD_ENV)
   except subprocess.TimeoutExpired as error:
    out=error.stdout or b'';err=error.stderr or b''
-   stages=re.findall(r'BOOT_PROBE_[A-Za-z0-9_:]+',err.decode('utf-8',errors='replace'))[:8]
+   stages=re.findall(r'BOOT_PROBE_[A-Za-z0-9_:]+',err.decode('utf-8',errors='replace'))[:12]
    self.fail(f'PS child deadline: elapsed_ms={int((time.monotonic()-started)*1000)} stdout_bytes={len(out)} stderr_bytes={len(err)} stages={stages}')
   r.stdout=r.stdout.decode('utf-8',errors='strict');r.stderr=r.stderr.decode('utf-8',errors='replace');return r
  def test_00_process_startup(self):
   r=self.run_child("[Console]::Write('BOOT_READY')",b'');self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(r.stdout,'BOOT_READY')
  def test_01_raw_pipe_eof(self):
-  text="[Console]::Error.WriteLine('BOOT_PROBE_START');[Console]::Error.WriteLine('BOOT_PROBE_REDIRECTED_'+[Console]::IsInputRedirected);$s=[Console]::OpenStandardInput();$b=New-Object byte[] 2048;[Console]::Error.WriteLine('BOOT_PROBE_BEFORE_READ');$n=$s.Read($b,0,$b.Length);[Console]::Error.WriteLine('BOOT_PROBE_FIRST_'+$n);$end=$s.Read($b,0,$b.Length);[Console]::Error.WriteLine('BOOT_PROBE_EOF_'+$end);[Console]::Write('read='+$n+';eof='+$end)"
+  text="[Console]::Error.WriteLine('BOOT_PROBE_START');[Console]::Error.WriteLine('BOOT_PROBE_REDIRECTED_'+[Console]::IsInputRedirected);[Console]::Error.WriteLine('BOOT_PROBE_BEFORE_OPEN');$s=[Console]::OpenStandardInput();[Console]::Error.WriteLine('BOOT_PROBE_AFTER_OPEN');[Console]::Error.WriteLine('BOOT_PROBE_BEFORE_ALLOC');$b=[Array]::CreateInstance([byte],2048);[Console]::Error.WriteLine('BOOT_PROBE_AFTER_ALLOC');[Console]::Error.WriteLine('BOOT_PROBE_BEFORE_READ');$n=$s.Read($b,0,$b.Length);[Console]::Error.WriteLine('BOOT_PROBE_FIRST_'+$n);$end=$s.Read($b,0,$b.Length);[Console]::Error.WriteLine('BOOT_PROBE_EOF_'+$end);[Console]::Write('read='+$n+';eof='+$end)"
   r=self.run_child(text,b'probe');self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(r.stdout,'read=5;eof=0')
  def run_packet(self,script,request=None,expected=None,raw=None):
   digest=expected or hashlib.sha256(script.encode()).hexdigest();text=BOOT.replace('__SCRIPT_SHA256__',digest)
