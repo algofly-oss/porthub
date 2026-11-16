@@ -1,6 +1,6 @@
-//! Experimental receive-side TCP DATA delivery/ACK foundation. No DuplexStream
-//! can bypass origin tags. Incoming native application bytes/FIN integration is
-//! deliberately unsupported until the separate RX-span protocol is complete.
+//! Experimental tagged native TCP DATA/ACK and RX origin adapter. No
+//! DuplexStream can bypass origin tags. Runtime/optimized-stream negotiation
+//! is not enabled; native outbound FIN and whole-path receipts remain separate.
 use super::{Flow, MAX_FLOWS, MTU};
 use anyhow::{ensure, Result};
 use bytes::Bytes;
@@ -23,6 +23,7 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::{CancellationToken, PollSender};
+mod rx;
 const QUEUE: usize = 256;
 const CHUNK: usize = 8192;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -31,7 +32,6 @@ pub enum AdmissionError {
     Busy,
     Invalid,
     Retired,
-    Unsupported,
 }
 impl std::fmt::Display for AdmissionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -39,7 +39,6 @@ impl std::fmt::Display for AdmissionError {
             Self::Busy => "native origin budget busy",
             Self::Invalid => "invalid native chunk",
             Self::Retired => "native origin retired",
-            Self::Unsupported => "native RX byte origins and FIN are not implemented",
         })
     }
 }
@@ -96,9 +95,58 @@ impl Budget {
         })
     }
 }
-/// Constructible only after smoltcp actually removes the whole chunk from its
-/// unacknowledged send queue while the original permit/flow remain valid.
+/// Native received bytes/EOF retain first-admission spans until downstream
+/// delivery; abandonment retires the owner rather than silently losing bytes.
+pub struct NativeRead {
+    bytes: Bytes,
+    eof: bool,
+    permit: SendPermit,
+    _credit: Option<Credit>,
+    alive: Arc<AtomicBool>,
+    delivered: bool,
+}
+impl NativeRead {
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+    pub fn eof(&self) -> bool {
+        self.eof
+    }
+    pub fn valid(&self) -> bool {
+        self.permit.valid()
+    }
+    /// Carry this immutable origin into any downstream chunk/queue admission.
+    pub fn admission(&self) -> SendPermit {
+        self.permit.clone()
+    }
+    pub async fn deliver<T, F: std::future::Future<Output = Result<T>>>(
+        mut self,
+        delivery: impl FnOnce(Bytes, bool) -> F,
+    ) -> Result<T> {
+        let result = self
+            .permit
+            .during(delivery(self.bytes.clone(), self.eof))
+            .await?;
+        if result.is_ok() {
+            self.delivered = true;
+        }
+        result
+    }
+}
+impl Drop for NativeRead {
+    fn drop(&mut self) {
+        if !self.delivered {
+            self.alive.store(false, Ordering::SeqCst);
+        }
+    }
+}
+/// Issued only after the actual native TCP send queue acknowledges the chunk.
+/// The original permit remains attached for subsequent receipt publication.
 pub struct NativeAck {
+    permit: SendPermit,
     stack_scope: Arc<()>,
     owner: u64,
     flow: Flow,
@@ -122,6 +170,7 @@ enum Command {
         permit: SendPermit,
         reply: oneshot::Sender<Result<u64>>,
         alive: Arc<AtomicBool>,
+        syn: Option<Bytes>,
     },
     Input {
         id: u64,
@@ -132,6 +181,11 @@ enum Command {
         id: u64,
         flow: Flow,
         write: Write,
+    },
+    Read {
+        id: u64,
+        flow: Flow,
+        reply: oneshot::Sender<Result<NativeRead>>,
     },
     Renew {
         id: u64,
@@ -169,6 +223,25 @@ impl Drop for RetireOnDrop {
 }
 impl Handle {
     pub async fn connect(&self, flow: Flow, permit: SendPermit) -> Result<Connection> {
+        self.open(flow, permit, None).await
+    }
+    pub async fn accept_syn(&self, syn: Bytes, permit: SendPermit) -> Result<Connection> {
+        Self::validate_input(&syn)?;
+        let incoming = Flow::from_packet(&syn).ok_or(AdmissionError::Invalid)?;
+        let ip = Ipv4Packet::new_checked(syn.as_ref())?;
+        let tcp = TcpPacket::new_checked(ip.payload())?;
+        ensure!(
+            syn.len() <= MTU
+                && tcp.syn()
+                && !tcp.ack()
+                && !tcp.rst()
+                && !tcp.fin()
+                && tcp.payload().is_empty(),
+            "invalid native SYN"
+        );
+        self.open(incoming.reverse(), permit, Some(syn)).await
+    }
+    async fn open(&self, flow: Flow, permit: SendPermit, syn: Option<Bytes>) -> Result<Connection> {
         flow.validate()?;
         ensure!(permit.valid(), "native flow admission retired");
         let (reply, waiting) = oneshot::channel();
@@ -180,6 +253,7 @@ impl Handle {
         self.commands
             .send(Command::Connect {
                 alive: alive.clone(),
+                syn,
                 flow,
                 permit,
                 reply,
@@ -200,7 +274,11 @@ impl Handle {
     }
     fn validate_input(bytes: &[u8]) -> Result<()> {
         let ip = Ipv4Packet::new_checked(bytes).map_err(|_| AdmissionError::Invalid)?;
-        if ip.next_header() != IpProtocol::Tcp || !ip.verify_checksum() {
+        if ip.next_header() != IpProtocol::Tcp
+            || !ip.verify_checksum()
+            || ip.more_frags()
+            || ip.frag_offset() != 0
+        {
             return Err(AdmissionError::Invalid.into());
         }
         let tcp = TcpPacket::new_checked(ip.payload()).map_err(|_| AdmissionError::Invalid)?;
@@ -209,9 +287,6 @@ impl Handle {
             &IpAddress::Ipv4(ip.dst_addr()),
         ) {
             return Err(AdmissionError::Invalid.into());
-        }
-        if !tcp.payload().is_empty() || tcp.fin() {
-            return Err(AdmissionError::Unsupported.into());
         }
         Ok(())
     }
@@ -246,6 +321,7 @@ impl Connection {
     }
     pub fn acknowledges(&self, ack: &NativeAck, id: [u8; 16], offset: u64, length: usize) -> bool {
         self.alive.load(Ordering::SeqCst)
+            && ack.permit.valid()
             && Arc::ptr_eq(&self.handle.stack_scope, &ack.stack_scope)
             && ack.owner == self.id
             && ack.flow == self.flow
@@ -309,6 +385,28 @@ impl Connection {
         abandoned.armed = false;
         result
     }
+    pub async fn read_chunk(&self) -> Result<NativeRead> {
+        ensure!(self.alive.load(Ordering::SeqCst), "native RX owner retired");
+        let (reply, waiting) = oneshot::channel();
+        self.handle
+            .commands
+            .send(Command::Read {
+                id: self.id,
+                flow: self.flow,
+                reply,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("native runner stopped"))?;
+        let mut abandoned = RetireOnDrop {
+            alive: self.alive.clone(),
+            armed: true,
+        };
+        let result = waiting
+            .await
+            .map_err(|_| anyhow::anyhow!("native RX retired"))?;
+        abandoned.armed = false;
+        result
+    }
     pub async fn close(&self) -> Result<()> {
         self.retire();
         self.handle
@@ -342,6 +440,7 @@ struct Input {
     bytes: Bytes,
     permit: SendPermit,
     alive: Arc<AtomicBool>,
+    rx: Option<Arc<Mutex<rx::Origins>>>,
 }
 struct Receive(Input);
 struct Transmit<'a> {
@@ -351,6 +450,25 @@ struct Transmit<'a> {
 impl RxToken for Receive {
     fn consume<R, F: FnOnce(&[u8]) -> R>(self, f: F) -> R {
         if self.0.alive.load(Ordering::SeqCst) && self.0.permit.valid() {
+            if let Some(rx) = &self.0.rx {
+                let observed = (|| -> Result<()> {
+                    let ip = Ipv4Packet::new_checked(self.0.bytes.as_ref())
+                        .map_err(|_| AdmissionError::Invalid)?;
+                    let tcp = TcpPacket::new_checked(ip.payload())
+                        .map_err(|_| AdmissionError::Invalid)?;
+                    rx.lock().unwrap_or_else(|p| p.into_inner()).observe(
+                        tcp.seq_number().0 as u32,
+                        tcp.syn(),
+                        tcp.payload().len(),
+                        tcp.fin(),
+                        self.0.permit.clone(),
+                    )
+                })();
+                if observed.is_err() {
+                    self.0.alive.store(false, Ordering::SeqCst);
+                    return f(&[]);
+                }
+            }
             f(&self.0.bytes)
         } else {
             f(&[])
@@ -441,6 +559,8 @@ struct Active {
     deadline: Instant,
     next_offset: u64,
     writes: VecDeque<Write>,
+    rx: Arc<Mutex<rx::Origins>>,
+    read: Option<oneshot::Sender<Result<NativeRead>>>,
 }
 pub struct Runner {
     stack_scope: Arc<()>,
@@ -453,6 +573,7 @@ pub struct Runner {
     flows: HashMap<Flow, Active>,
     origin: Instant,
     next_id: u64,
+    budget: Arc<Budget>,
 }
 pub fn stack() -> Result<(Handle, mpsc::Receiver<Packet>, Runner)> {
     let (commands, input) = mpsc::channel(QUEUE);
@@ -475,7 +596,7 @@ pub fn stack() -> Result<(Handle, mpsc::Receiver<Packet>, Runner)> {
             stack_scope: stack_scope.clone(),
             commands,
             bindings: bindings.clone(),
-            budget,
+            budget: budget.clone(),
         },
         packets,
         Runner {
@@ -489,6 +610,7 @@ pub fn stack() -> Result<(Handle, mpsc::Receiver<Packet>, Runner)> {
             flows: HashMap::new(),
             origin: Instant::now(),
             next_id: 1,
+            budget,
         },
     ))
 }
@@ -502,8 +624,10 @@ impl Runner {
         permit: SendPermit,
         reply: oneshot::Sender<Result<u64>>,
         alive: Arc<AtomicBool>,
+        syn: Option<Bytes>,
     ) {
-        if !alive.load(Ordering::SeqCst)
+        if self.packets.input.len() >= QUEUE
+            || !alive.load(Ordering::SeqCst)
             || !permit.valid()
             || self.flows.len() >= MAX_FLOWS
             || self.flows.contains_key(&flow)
@@ -512,22 +636,31 @@ impl Runner {
             let _ = reply.send(Err(anyhow::anyhow!("native flow unavailable")));
             return;
         }
+        let accepting = syn.is_some();
+        if accepting && (!self.packets.input.is_empty() || self.packets.output.len() >= QUEUE) {
+            let _ = reply.send(Err(AdmissionError::Busy.into()));
+            return;
+        }
         let mut socket = tcp::Socket::new(
-            tcp::SocketBuffer::new(vec![0; 4096]),
+            tcp::SocketBuffer::new(vec![0; 16 * 1024]),
             tcp::SocketBuffer::new(vec![0; super::TCP_SEND_BUFFER]),
         );
         socket.set_nagle_enabled(false);
         socket.set_ack_delay(None);
         let endpoint =
             |address: std::net::SocketAddrV4| (IpAddress::Ipv4(*address.ip()), address.port());
-        if socket
-            .connect(
-                self.interface.context(),
-                endpoint(flow.destination),
-                endpoint(flow.source),
-            )
-            .is_err()
-        {
+        let configured = if syn.is_some() {
+            socket.listen(endpoint(flow.source)).map_err(|_| ())
+        } else {
+            socket
+                .connect(
+                    self.interface.context(),
+                    endpoint(flow.destination),
+                    endpoint(flow.source),
+                )
+                .map_err(|_| ())
+        };
+        if configured.is_err() {
             let _ = reply.send(Err(anyhow::anyhow!("native flow unavailable")));
             return;
         }
@@ -544,6 +677,15 @@ impl Runner {
                     alive: alive.clone(),
                 },
             );
+        let rx: Arc<Mutex<rx::Origins>> = Default::default();
+        if let Some(bytes) = syn {
+            self.packets.input.push_back(Input {
+                bytes,
+                permit: permit.clone(),
+                alive: alive.clone(),
+                rx: Some(rx.clone()),
+            });
+        }
         self.flows.insert(
             flow,
             Active {
@@ -556,8 +698,49 @@ impl Runner {
                 deadline: Instant::now() + Duration::from_secs(10),
                 next_offset: 0,
                 writes: VecDeque::new(),
+                rx,
+                read: None,
             },
         );
+        if accepting {
+            // Bind the admitted remote before another listener for this service
+            // can exist; never let generic listen choose a different owner.
+            let active = self.flows.get(&flow).unwrap();
+            self.packets.contexts.insert(
+                flow,
+                Context {
+                    alive: active.alive.clone(),
+                    control: active.control.clone(),
+                    data: None,
+                },
+            );
+            self.interface
+                .poll(self.now(), &mut self.packets, &mut self.sockets);
+            let active = self.flows.get(&flow).unwrap();
+            let bound = self
+                .sockets
+                .get::<tcp::Socket>(active.socket)
+                .remote_endpoint()
+                .is_some_and(|r| {
+                    r.addr == endpoint(flow.destination).0 && r.port == flow.destination.port()
+                });
+            if !bound {
+                let active = self.flows.remove(&flow).unwrap();
+                active.alive.store(false, Ordering::SeqCst);
+                self.packets
+                    .input
+                    .retain(|input| !Arc::ptr_eq(&input.alive, &active.alive));
+                self.bindings
+                    .write()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .remove(&active.incoming);
+                self.packets.contexts.remove(&flow);
+                self.sockets.remove(active.socket);
+                if let Some(reply) = active.connected {
+                    let _ = reply.send(Err(anyhow::anyhow!("native SYN rejected or blocked")));
+                }
+            }
+        }
     }
     fn valid_input(bytes: &[u8]) -> bool {
         Handle::validate_input(bytes).is_ok()
@@ -575,7 +758,8 @@ impl Runner {
                             permit,
                             reply,
                             alive,
-                        } => self.create(flow, permit, reply, alive),
+                            syn,
+                        } => self.create(flow, permit, reply, alive, syn),
                         Command::Input { id, bytes, permit } => {
                             if permit.valid() && Self::valid_input(&bytes) {
                                 if let Some(incoming) = Flow::from_packet(&bytes) {
@@ -585,11 +769,14 @@ impl Runner {
                                             && a.alive.load(Ordering::SeqCst)
                                     }) {
                                         active.control = permit.clone();
-                                        self.packets.input.push_back(Input {
-                                            bytes,
-                                            permit,
-                                            alive: active.alive.clone(),
-                                        });
+                                        if self.packets.input.len() < QUEUE {
+                                            self.packets.input.push_back(Input {
+                                                bytes,
+                                                permit,
+                                                alive: active.alive.clone(),
+                                                rx: Some(active.rx.clone()),
+                                            });
+                                        }
                                     }
                                 }
                             }
@@ -621,6 +808,21 @@ impl Runner {
                             };
                             let _ = write.reply.send(Err(error.into()));
                         }
+                        Command::Read { id, flow, reply } => {
+                            if let Some(active) = self
+                                .flows
+                                .get_mut(&flow)
+                                .filter(|a| a.id == id && a.alive.load(Ordering::SeqCst))
+                            {
+                                if active.read.is_some() {
+                                    let _ = reply.send(Err(AdmissionError::Busy.into()));
+                                } else {
+                                    active.read = Some(reply);
+                                }
+                            } else {
+                                let _ = reply.send(Err(AdmissionError::Retired.into()));
+                            }
+                        }
                         Command::Renew { id, flow, permit } => {
                             if let Some(active) = self
                                 .flows
@@ -643,7 +845,9 @@ impl Runner {
         }
         self.packets.contexts.clear();
         for (flow, active) in &self.flows {
-            if !active.control.valid()
+            if !active.rx.lock().unwrap_or_else(|p| p.into_inner()).valid()
+                || active.read.as_ref().is_some_and(|r| r.is_closed())
+                || !active.control.valid()
                 || active
                     .writes
                     .iter()
@@ -682,7 +886,64 @@ impl Runner {
                 removed.push(*flow);
                 continue;
             }
-            if socket.state() == tcp::State::Established {
+            if active.read.is_some()
+                && (socket.recv_queue() > 0 || socket.state() == tcp::State::CloseWait)
+            {
+                let len = socket.recv_queue().min(CHUNK);
+                let eof = len == 0 && socket.state() == tcp::State::CloseWait;
+                let result = (|| -> Result<NativeRead> {
+                    let credit = if len > 0 {
+                        Some(self.budget.reserve(len)?)
+                    } else {
+                        None
+                    };
+                    let origins = active
+                        .rx
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .take(len, eof)?;
+                    let alive = active.alive.clone();
+                    let permit = SendPermit::new(move || {
+                        let valid =
+                            alive.load(Ordering::SeqCst) && origins.iter().all(|p| p.valid());
+                        if !valid {
+                            alive.store(false, Ordering::SeqCst);
+                        }
+                        valid
+                    });
+                    ensure!(permit.valid(), "native RX origin retired");
+                    let mut bytes = vec![0; len];
+                    if len > 0 {
+                        ensure!(
+                            socket.recv_slice(&mut bytes)? == len,
+                            "native RX length changed"
+                        );
+                    }
+                    Ok(NativeRead {
+                        bytes: bytes.into(),
+                        eof,
+                        permit,
+                        _credit: credit,
+                        alive: active.alive.clone(),
+                        delivered: false,
+                    })
+                })();
+                if result.as_ref().err().is_some_and(|e| {
+                    e.downcast_ref::<AdmissionError>() != Some(&AdmissionError::Busy)
+                }) {
+                    active.alive.store(false, Ordering::SeqCst);
+                }
+                if let Some(reply) = active.read.take() {
+                    if reply.send(result).is_err() {
+                        active.alive.store(false, Ordering::SeqCst);
+                    }
+                }
+                progress = true;
+            }
+            if matches!(
+                socket.state(),
+                tcp::State::Established | tcp::State::CloseWait
+            ) {
                 if let Some(reply) = active.connected.take() {
                     if reply.send(Ok(active.id)).is_err() {
                         active.alive.store(false, Ordering::SeqCst);
@@ -698,7 +959,12 @@ impl Runner {
                     }
                     if write.copied == write.bytes.len() && socket.send_queue() == 0 {
                         let write = active.writes.pop_front().unwrap();
+                        let origin = write.permit.clone();
+                        let alive = active.alive.clone();
                         let _ = write.reply.send(Ok(NativeAck {
+                            permit: SendPermit::new(move || {
+                                alive.load(Ordering::SeqCst) && origin.valid()
+                            }),
                             stack_scope: self.stack_scope.clone(),
                             owner: active.id,
                             flow: *flow,
@@ -778,7 +1044,7 @@ impl Drop for Runner {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     struct Rig {
         connection: Arc<Connection>,
         app: tokio::io::DuplexStream,
@@ -789,10 +1055,13 @@ mod tests {
         release: tokio::sync::watch::Sender<bool>,
         held_acks: Arc<AtomicUsize>,
         held_packets: mpsc::Receiver<Packet>,
+        held_input: mpsc::Receiver<Bytes>,
         delivered: Arc<AtomicUsize>,
-        flow: Flow,
     }
     async fn rig(hold_data: bool) -> Result<Rig> {
+        rig_rx(hold_data, false).await
+    }
+    async fn rig_rx(hold_data: bool, hold_rx: bool) -> Result<Rig> {
         let (handle, mut outgoing, runner) = stack()?;
         let (native, mut incoming, native_runner) = super::super::stack()?;
         let stop = CancellationToken::new();
@@ -831,6 +1100,7 @@ mod tests {
         let held_acks = Arc::new(AtomicUsize::new(0));
         let held_count = held_acks.clone();
         let (delivery, held_packets) = mpsc::channel(1);
+        let (rx_delivery, held_input) = mpsc::channel(32);
         let delivered = Arc::new(AtomicUsize::new(0));
         let count = delivered.clone();
         let target = native.clone();
@@ -848,7 +1118,7 @@ mod tests {
                   if hold_data&&payload>0{let _=delivery.try_send(packet);continue;}
                   let target=target.clone();let count=count.clone();let _=packet.deliver(move|bytes|async move{target.packet(bytes)?;count.fetch_add(payload,Ordering::SeqCst);Ok(())}).await;
                  },
-                 packet=incoming.recv()=>{let Some(packet)=packet else{return Ok(());};if open{let _=h.incoming(packet,SendPermit::new(||true));}else{ensure!(held.len()<32,"fixture ACK holding bound exceeded");held.push(packet);held_count.store(held.len(),Ordering::SeqCst);}}
+                 packet=incoming.recv()=>{let Some(packet)=packet else{return Ok(());};let ip=Ipv4Packet::new_checked(packet.as_ref())?;let tcp=TcpPacket::new_checked(ip.payload())?;if hold_rx&&(!tcp.payload().is_empty()||tcp.fin()){let _=rx_delivery.try_send(packet);continue;}if open{let _=h.incoming(packet,SendPermit::new(||true));}else{ensure!(held.len()<32,"fixture ACK holding bound exceeded");held.push(packet);held_count.store(held.len(),Ordering::SeqCst);}}
                 }
             }
         });
@@ -862,8 +1132,8 @@ mod tests {
             release,
             held_acks,
             held_packets,
+            held_input,
             delivered,
-            flow,
         })
     }
     async fn cleanup(rig: Rig) -> Result<()> {
@@ -881,6 +1151,346 @@ mod tests {
         );
         Ok(())
     }
+    fn portion(packet: &Bytes, start: usize, length: usize) -> Result<Bytes> {
+        let ip = Ipv4Packet::new_checked(packet.as_ref())?;
+        let tcp = TcpPacket::new_checked(ip.payload())?;
+        let ih = ip.header_len() as usize;
+        let th = tcp.header_len() as usize;
+        let mut bytes = Vec::from(&packet[..ih + th]);
+        bytes.extend_from_slice(&tcp.payload()[start..start + length]);
+        let n = bytes.len() as u16;
+        let mut ip = Ipv4Packet::new_unchecked(bytes.as_mut_slice());
+        ip.set_total_len(n);
+        ip.fill_checksum();
+        let source = IpAddress::Ipv4(ip.src_addr());
+        let destination = IpAddress::Ipv4(ip.dst_addr());
+        let mut part = TcpPacket::new_unchecked(ip.payload_mut());
+        part.set_seq_number(tcp.seq_number() + start);
+        part.set_fin(false);
+        part.fill_checksum(&source, &destination);
+        Ok(bytes.into())
+    }
+    #[tokio::test]
+    async fn real_tcp_reassembly_out_of_order_overlap_and_blocked_read_keep_first_origin(
+    ) -> Result<()> {
+        let mut rig = rig_rx(false, true).await?;
+        rig.release.send(true)?;
+        rig.app.write_all(&[9; 1024]).await?;
+        let packet = tokio::time::timeout(Duration::from_secs(1), rig.held_input.recv())
+            .await?
+            .unwrap();
+        let ip = Ipv4Packet::new_checked(packet.as_ref())?;
+        let tcp = TcpPacket::new_checked(ip.payload())?;
+        ensure!(tcp.payload().len() == 1024, "fixture segmentation changed");
+        let old = Arc::new(AtomicBool::new(true));
+        let p = old.clone();
+        rig.handle.incoming(
+            portion(&packet, 512, 512)?,
+            SendPermit::new(move || p.load(Ordering::SeqCst)),
+        )?;
+        // Fresh overlap cannot replace the original admission of the tail.
+        rig.handle
+            .incoming(packet.clone(), SendPermit::new(|| true))?;
+        let read =
+            tokio::time::timeout(Duration::from_secs(1), rig.connection.read_chunk()).await??;
+        ensure!(
+            read.len() == 1024 && !read.eof(),
+            "actual reassembly length mismatch"
+        );
+        let (entered, waiting) = oneshot::channel();
+        let (release, resume) = oneshot::channel();
+        let delivered = Arc::new(AtomicBool::new(false));
+        let copied = delivered.clone();
+        let task = tokio::spawn(async move {
+            read.deliver(move |bytes, _| async move {
+                let _ = entered.send(());
+                let _ = resume.await;
+                ensure!(
+                    bytes.as_ref() == [9; 1024],
+                    "native reassembly data mismatch"
+                );
+                copied.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .await
+        });
+        waiting.await?;
+        rig.connection
+            .renew_control(SendPermit::new(|| true))
+            .await?;
+        old.store(false, Ordering::SeqCst);
+        let _ = release.send(());
+        ensure!(
+            task.await?.is_err(),
+            "fresh control relabeled buffered receive bytes"
+        );
+        ensure!(
+            !delivered.load(Ordering::SeqCst),
+            "retired native bytes delivered"
+        );
+        cleanup(rig).await
+    }
+    #[tokio::test]
+    async fn real_tcp_payload_and_fin_have_original_delivery_and_owner() -> Result<()> {
+        let mut rig = rig_rx(false, true).await?;
+        rig.release.send(true)?;
+        rig.app.write_all(&[4; 1024]).await?;
+        let packet = tokio::time::timeout(Duration::from_secs(1), rig.held_input.recv())
+            .await?
+            .unwrap();
+        rig.handle.incoming(packet, SendPermit::new(|| true))?;
+        let read =
+            tokio::time::timeout(Duration::from_secs(1), rig.connection.read_chunk()).await??;
+        read.deliver(|bytes, eof| async move {
+            ensure!(!eof && bytes.as_ref() == [4; 1024], "native bytes changed");
+            Ok(())
+        })
+        .await?;
+        rig.app.shutdown().await?;
+        let fin = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let p = rig.held_input.recv().await.unwrap();
+                let ip = Ipv4Packet::new_checked(p.as_ref()).unwrap();
+                let t = TcpPacket::new_checked(ip.payload()).unwrap();
+                if t.fin() {
+                    break p;
+                }
+            }
+        })
+        .await?;
+        let valid = Arc::new(AtomicBool::new(true));
+        let p = valid.clone();
+        rig.handle
+            .incoming(fin, SendPermit::new(move || p.load(Ordering::SeqCst)))?;
+        let eof =
+            tokio::time::timeout(Duration::from_secs(1), rig.connection.read_chunk()).await??;
+        ensure!(eof.eof() && eof.is_empty(), "FIN was not ordered EOF");
+        rig.connection
+            .renew_control(SendPermit::new(|| true))
+            .await?;
+        valid.store(false, Ordering::SeqCst);
+        ensure!(
+            eof.deliver::<(), _>(|_, _| async { anyhow::bail!("expired FIN delivered") })
+                .await
+                .is_err(),
+            "expired FIN admitted"
+        );
+        cleanup(rig).await
+    }
+    #[tokio::test]
+    async fn accepting_two_native_syns_pins_each_remote_before_next_listener() -> Result<()> {
+        let (_, _, mut runner) = stack()?;
+        let (native, mut packets, native_runner) = super::super::stack()?;
+        let cancel = CancellationToken::new();
+        let stop = cancel.clone();
+        let task = tokio::spawn(async move { native_runner.run(stop).await });
+        let mut clients = Vec::new();
+        let mut waiters = Vec::new();
+        for port in [5101, 5102] {
+            let flow = Flow {
+                source: format!("10.234.248.1:{port}").parse()?,
+                destination: "10.234.248.2:443".parse()?,
+            };
+            let native = native.clone();
+            clients.push(tokio::spawn(async move { native.connect(flow).await }));
+            let syn = tokio::time::timeout(Duration::from_secs(1), packets.recv())
+                .await?
+                .unwrap();
+            let (reply, wait) = oneshot::channel();
+            waiters.push(wait);
+            runner.create(
+                flow.reverse(),
+                SendPermit::new(|| true),
+                reply,
+                Arc::new(AtomicBool::new(true)),
+                Some(syn),
+            );
+            let active = runner
+                .flows
+                .get(&flow.reverse())
+                .ok_or_else(|| anyhow::anyhow!("native listener rejected owned SYN"))?;
+            let remote = runner
+                .sockets
+                .get::<tcp::Socket>(active.socket)
+                .remote_endpoint()
+                .unwrap();
+            ensure!(
+                remote.addr == IpAddress::Ipv4(*flow.source.ip()) && remote.port == port,
+                "native listener borrowed another admitted remote"
+            );
+        }
+        ensure!(
+            runner.flows.len() == 2,
+            "listener alias replaced owned flow"
+        );
+        drop(runner);
+        for c in clients {
+            c.abort();
+            let _ = c.await;
+        }
+        cancel.cancel();
+        task.await??;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn real_native_accept_source_reads_and_return_chunk_waits_for_tcp_ack() -> Result<()> {
+        let (tagged, mut output, runner) = stack()?;
+        let (native, mut input, native_runner) = super::super::stack()?;
+        let cancel = CancellationToken::new();
+        let a = cancel.clone();
+        let b = cancel.clone();
+        let first = tokio::spawn(async move { runner.run(a).await });
+        let second = tokio::spawn(async move { native_runner.run(b).await });
+        let flow = Flow {
+            source: "10.234.249.1:5100".parse()?,
+            destination: "10.234.249.2:443".parse()?,
+        };
+        let n = native.clone();
+        let connecting = tokio::spawn(async move { n.connect(flow).await });
+        let syn = tokio::time::timeout(Duration::from_secs(1), input.recv())
+            .await?
+            .unwrap();
+        let h = tagged.clone();
+        let accepting =
+            tokio::spawn(async move { h.accept_syn(syn, SendPermit::new(|| true)).await });
+        let synack = tokio::time::timeout(Duration::from_secs(1), output.recv())
+            .await?
+            .unwrap();
+        let n = native.clone();
+        synack.deliver(move |b| async move { n.packet(b) }).await?;
+        let ack = tokio::time::timeout(Duration::from_secs(1), input.recv())
+            .await?
+            .unwrap();
+        tagged.incoming(ack, SendPermit::new(|| true))?;
+        let connection = Arc::new(accepting.await??);
+        let mut app = connecting.await??;
+        ensure!(
+            connection.flow() == flow.reverse(),
+            "native accepted tuple reversed incorrectly"
+        );
+        let h = tagged.clone();
+        let n = native.clone();
+        let stop = cancel.clone();
+        let pump = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _=stop.cancelled()=>return Ok::<_,anyhow::Error>(()),
+                    packet=input.recv()=>{let Some(packet)=packet else{return Ok(())};h.incoming(packet,SendPermit::new(||true))?;},
+                    packet=output.recv()=>{let Some(packet)=packet else{return Ok(())};let n=n.clone();packet.deliver(move|b|async move{n.packet(b)}).await?;}
+                }
+            }
+        });
+        app.write_all(&[5; 1024]).await?;
+        let source =
+            tokio::time::timeout(Duration::from_secs(1), connection.read_chunk()).await??;
+        source
+            .deliver(|b, eof| async move {
+                ensure!(
+                    !eof && b.as_ref() == [5; 1024],
+                    "accepted native RX origin changed"
+                );
+                Ok(())
+            })
+            .await?;
+        app.shutdown().await?;
+        let eof = tokio::time::timeout(Duration::from_secs(1), connection.read_chunk()).await??;
+        ensure!(eof.eof() && eof.is_empty(), "accepted native FIN lost");
+        eof.deliver(|_, _| async { Ok(()) }).await?;
+        let writer = connection.clone();
+        let write = tokio::spawn(async move {
+            writer
+                .write_chunk(
+                    [8; 16],
+                    0,
+                    Bytes::from(vec![6; 1024]),
+                    SendPermit::new(|| true),
+                )
+                .await
+        });
+        let mut returned = [0; 1024];
+        tokio::time::timeout(Duration::from_secs(1), app.read_exact(&mut returned)).await??;
+        ensure!(returned == [6; 1024], "native return chunk changed");
+        let ack = tokio::time::timeout(Duration::from_secs(1), write).await???;
+        ensure!(
+            connection.acknowledges(&ack, [8; 16], 0, 1024),
+            "native source ACK binding lost"
+        );
+        cancel.cancel();
+        first.await??;
+        second.await??;
+        pump.await??;
+        ensure!(
+            tagged.bindings.read().unwrap().is_empty(),
+            "accepted tuple leaked"
+        );
+        ensure!(
+            *tagged.budget.0.lock().unwrap() == 0,
+            "accepted native credits leaked"
+        );
+        Ok(())
+    }
+    #[tokio::test]
+    async fn completed_native_ack_cannot_authorize_delayed_receipt_after_original_expiry(
+    ) -> Result<()> {
+        let mut rig = rig(false).await?;
+        rig.release.send(true)?;
+        let valid = Arc::new(AtomicBool::new(true));
+        let origin = valid.clone();
+        let c = rig.connection.clone();
+        let writing = tokio::spawn(async move {
+            c.write_chunk(
+                [9; 16],
+                0,
+                Bytes::from(vec![2; 1024]),
+                SendPermit::new(move || origin.load(Ordering::SeqCst)),
+            )
+            .await
+        });
+        let mut bytes = [0; 1024];
+        tokio::time::timeout(Duration::from_secs(1), rig.app.read_exact(&mut bytes)).await??;
+        let ack = tokio::time::timeout(Duration::from_secs(1), writing).await???;
+        ensure!(
+            rig.connection.acknowledges(&ack, [9; 16], 0, 1024),
+            "fresh actual native ACK not recognized"
+        );
+        rig.connection
+            .renew_control(SendPermit::new(|| true))
+            .await?;
+        valid.store(false, Ordering::SeqCst);
+        ensure!(
+            !rig.connection.acknowledges(&ack, [9; 16], 0, 1024),
+            "late ACK receipt borrowed fresh grant"
+        );
+        cleanup(rig).await
+    }
+    #[tokio::test]
+    async fn abandoned_actual_native_read_retires_owner_and_releases_credit() -> Result<()> {
+        let mut rig = rig_rx(false, true).await?;
+        rig.release.send(true)?;
+        rig.app.write_all(&[3; 1024]).await?;
+        let packet = tokio::time::timeout(Duration::from_secs(1), rig.held_input.recv())
+            .await?
+            .unwrap();
+        rig.handle.incoming(packet, SendPermit::new(|| true))?;
+        let read =
+            tokio::time::timeout(Duration::from_secs(1), rig.connection.read_chunk()).await??;
+        ensure!(read.len() == 1024, "fixture RX length changed");
+        let original = read.admission();
+        drop(read);
+        ensure!(
+            !rig.connection.alive.load(Ordering::SeqCst) && !original.valid(),
+            "abandoned RX lost owner fence"
+        );
+        ensure!(
+            *rig.handle.budget.0.lock().unwrap() == 0,
+            "abandoned read leaked payload credit"
+        );
+        ensure!(
+            rig.connection.read_chunk().await.is_err(),
+            "retired source read again"
+        );
+        cleanup(rig).await
+    }
     #[test]
     fn queued_native_input_keeps_original_admission_and_owner_after_control_changes() {
         let mut packets = Packets::default();
@@ -890,6 +1500,7 @@ mod tests {
             bytes: Bytes::from(vec![0; 40]),
             permit: SendPermit::new(move || old.load(Ordering::SeqCst)),
             alive: Arc::new(AtomicBool::new(true)),
+            rx: None,
         });
         valid.store(false, Ordering::SeqCst);
         assert!(packets.receive(StackInstant::from_millis(0)).is_none());
@@ -899,6 +1510,7 @@ mod tests {
             bytes: Bytes::from(vec![0; 40]),
             permit: SendPermit::new(|| true),
             alive: old_owner.clone(),
+            rx: None,
         });
         old_owner.store(false, Ordering::SeqCst);
         let replacement = Arc::new(AtomicBool::new(true));
@@ -1121,17 +1733,6 @@ mod tests {
         let packet = tokio::time::timeout(Duration::from_secs(1), rig.held_packets.recv())
             .await?
             .unwrap();
-        let unsupported = rig
-            .handle
-            .incoming(packet.bytes.clone(), SendPermit::new(|| true));
-        ensure!(
-            unsupported
-                .err()
-                .as_ref()
-                .and_then(|e| e.downcast_ref::<AdmissionError>())
-                == Some(&AdmissionError::Unsupported),
-            "RX payload support was silently fabricated"
-        );
         writing.abort();
         let _ = writing.await;
         ensure!(

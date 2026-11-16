@@ -146,7 +146,7 @@ native TCP delivery readiness.
 Primary prepared-buffer implementation:
 https://github.com/quinn-rs/quinn/blob/quinn-0.11.12/quinn/src/connection.rs
 
-## Tagged native DATA/ACK foundation (TX only; not integrated)
+## Tagged native DATA/ACK foundation (initial TX checkpoint; not integrated)
 
 `porthub-network::tcp_stream::tagged` is a separate experimental adapter; the
 legacy DuplexStream runner is unchanged. The tagged API has no unlabelled
@@ -179,11 +179,33 @@ fresh control update cannot relabel them. A blocked packet delivery also
 cannot resume after expiry/cancellation. All owned simulator tasks, tuple
 bindings and payload credits are checked after cleanup.
 
-Incoming native application payload/reassembly/FIN is deliberately unsupported
-in this foundation and is not silently accepted into an unlabelled buffer.
-The next stage is RX original-byte spans (including wrap, out-of-order data and
-retransmission duplicates), followed by a production receiver that emits its
-chunk receipt only from the exact `NativeAck`. Current sender-fixture echo
-receipts still must not be described as native delivery. Actual OS TCP/TUN,
-three-OS suspend/route cleanup, protocol negotiation and whole-process resource
-fairness proofs remain open; optimized sparse streaming stays declined.
+## Tagged native RX spans (not runtime integrated)
+
+The next isolated checkpoint accepts an owned native SYN or outbound connect,
+then records first-admission sequence spans at the actual TCP device parse
+boundary. Its 16 KiB receive window and 256-span bound are explicit; sequence
+wrapping, out-of-order data and overlapping retransmissions cannot replace the
+first grant with a fresh one. Native TCP still performs its own validation and
+reassembly. Missing/ambiguous coverage retires the flow. Consumed duplicates do
+not leave false pending claims. Incoming FIN has its own ordered EOF origin.
+
+`NativeRead` carries the original span admissions through downstream queued or
+blocked work, and abandonment retires its exact flow owner. A read holds bounded
+global payload credit until delivery completes. The native input device queue,
+command queue and output queues are bounded separately. A source accepts a SYN,
+reads native bytes, observes peer EOF, and can return TCP data after that peer
+half-close; its return-chunk receipt waits for a real TCP ACK. Completed ACKs
+also retain the original chunk permit, preventing a delayed application receipt
+from borrowing a new grant after native ACK completion.
+
+Actual independent smoltcp peers exercise native reassembly, overlap under a
+first grant, blocked read delivery after expiry, accepted SYN, ordered FIN,
+half-close return traffic, abandoned reads and actual ACK/retransmission.
+Sequence-wrap/gap/metadata-bound tests supplement those consumer tests. They
+are not host OS kernel/TUN or suspend tests.
+
+Native outbound FIN and a production PHC1 receiver that publishes a receipt
+only from its exact `NativeAck` remain open, as do complete protocol negotiation,
+three-OS suspend/route cleanup and whole-process resource fairness. Current
+sender-fixture echo receipts still are not native delivery proof. Optimized
+sparse streaming stays declined and the feature remains default OFF.
