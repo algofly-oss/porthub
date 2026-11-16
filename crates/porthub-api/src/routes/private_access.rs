@@ -57,7 +57,7 @@ async fn change_peer(
             "Private peer not found",
         ));
     }
-    if !enabled { app.private_relay.revoke(std::slice::from_ref(&id)); }
+    if !enabled { app.private_relay.retire_identities(std::slice::from_ref(&id)); }
     Ok(Json(
         json!({"msg":if enabled {"Private access enabled"} else {"Private access disabled"}}),
     ))
@@ -87,7 +87,7 @@ async fn revoke_peer(
             "Private peer not found",
         ));
     }
-    app.private_relay.revoke(std::slice::from_ref(&id));
+    app.private_relay.retire_identities(std::slice::from_ref(&id));
     app.collection("private_install_tickets")
         .update_many(
             doc! {"peer_id":&id},

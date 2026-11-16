@@ -170,6 +170,13 @@ impl Hub {
         }
         true
     }
+    /// Reversible peer toggle / credential rotation: retire exact current
+    /// authority without the account-deletion quarantine. New freshly checked
+    /// credentials can enroll immediately; old request tickets stay invalid.
+    pub(crate) fn retire_identities(&self,ids:&[String]) {
+        let mut hub=self.0.lock().unwrap_or_else(|p|p.into_inner());
+        for id in ids {hub.admissions.remove(id);hub.leases.remove(id);hub.connections.remove(id);hub.pairs.retain(|_,p|p.left!=*id&&p.right!=*id);}
+    }
     pub fn revoke(&self, ids: &[String]) {
         let mut hub = self.0.lock().unwrap_or_else(|p| p.into_inner());
         let now=Instant::now();
@@ -1180,4 +1187,17 @@ mod migration_fence_tests {
         let fresh=hub.begin_workspace_admission("legacy-opaque-peer","hash","instance","a").unwrap();
         assert!(!hub.publish_admitted("legacy-opaque-peer","hash","instance",ip,HashSet::new(),Some(fresh)).is_empty());
     }
+    #[test]
+    fn reversible_retirement_rejects_old_ticket_without_quarantining_fresh_enable(){
+        let hub=Hub::default();let ip=Ipv4Addr::new(10,0,0,2);
+        let old=hub.begin_admission("peer","hash","instance").unwrap();
+        assert!(!hub.publish_admitted("peer","hash","instance",ip,HashSet::new(),Some(old)).is_empty());
+        hub.retire_identities(&["peer".into()]);
+        assert!(hub.publish_admitted("peer","hash","instance",ip,HashSet::new(),Some(old)).is_empty());
+        let fresh=hub.begin_admission("peer","hash","instance").unwrap();
+        assert!(!hub.publish_admitted("peer","hash","instance",ip,HashSet::new(),Some(fresh)).is_empty());
+        assert!(!hub.withdraw_bound("peer","hash","instance",old));
+        assert!(!hub.publish_admitted("peer","hash","instance",ip,HashSet::new(),Some(fresh)).is_empty());
+    }
+
 }
