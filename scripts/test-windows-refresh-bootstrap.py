@@ -5,7 +5,29 @@ BOOT=re.search(r'const BOOTSTRAP: &str = r#"(.*?)"#;',source,re.S)[1]
 PWSH=os.environ.get('PORTHUB_REFRESH_TEST_POWERSHELL') or shutil.which('powershell.exe') or shutil.which('pwsh')
 if not PWSH: raise RuntimeError('PowerShell executable required')
 CHILD_ENV={k:v for k,v in os.environ.items() if k.lower() not in ('psmodulepath','psmoduleanalysiscachepath')}
+def diagnostic_utility_probe(mode,budget):
+ # Metadata only: fixed JSON, numeric timing, trusted OS module origin. Never a PASS substitute.
+ prefix="$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';[Console]::Error.WriteLine('UTILITY_PROBE_ENTRY');$watch=[Diagnostics.Stopwatch]::StartNew();"
+ if mode=='explicit':
+  prefix+="$module=[IO.Path]::Combine($PSHOME,'Modules','Microsoft.PowerShell.Utility','Microsoft.PowerShell.Utility.psd1');[Console]::Error.WriteLine('UTILITY_PROBE_BEFORE_IMPORT');Import-Module -Name $module -ErrorAction Stop;[Console]::Error.WriteLine('UTILITY_PROBE_AFTER_IMPORT');"
+ text=prefix+"[Console]::Error.WriteLine('UTILITY_PROBE_BEFORE_UTILITY');$parsed=ConvertFrom-Json -InputObject '{\"ok\":true}';[Console]::Error.WriteLine('UTILITY_PROBE_AFTER_UTILITY');[Console]::WriteLine('UTILITY_ELAPSED_MS:'+ $watch.ElapsedMilliseconds);[Console]::WriteLine('UTILITY_JSON_VALID:'+($parsed.ok -is [bool] -and $parsed.ok));[Console]::WriteLine('UTILITY_ORIGIN:'+(Get-Command ConvertFrom-Json).Module.Path)"
+ command=base64.b64encode(text.encode('utf-16le')).decode();started=time.monotonic();timed=False;code=None
+ try:
+  result=subprocess.run([PWSH,'-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',command],input=b'',capture_output=True,timeout=budget,env=CHILD_ENV);out,err=result.stdout,result.stderr;code=result.returncode
+ except subprocess.TimeoutExpired as error:out,err=error.stdout or b'',error.stderr or b'';timed=True
+ output=out[:16384].decode('utf-8',errors='replace');errors=err[:16384].decode('utf-8',errors='replace')
+ origins=re.findall(r'^UTILITY_ORIGIN:([^\r\n]{0,512})$',output,re.M)
+ elapsed=re.findall(r'^UTILITY_ELAPSED_MS:([0-9]{1,9})$',output,re.M)
+ valid=re.findall(r'^UTILITY_JSON_VALID:(True|False)$',output,re.M)
+ print('UTILITY_DIAGNOSTIC_ONLY '+json.dumps({'mode':mode,'timeout':timed,'deadline_seconds':round(budget,3),'wall_ms':int((time.monotonic()-started)*1000),'returncode':code,'stdout_bytes':len(out),'stderr_bytes':len(err),'stages':re.findall(r'UTILITY_PROBE_[A-Z_]+',errors)[:8],'module_origin':origins[0] if origins else None,'utility_elapsed_ms':int(elapsed[0]) if elapsed else None,'fixed_json_valid':valid[0]=='True' if valid else None}),file=sys.stderr)
+
 class Bootstrap(unittest.TestCase):
+ @classmethod
+ def setUpClass(cls):
+  # Two independent diagnostics share <60s budget; original nine tests retain 5s deadlines.
+  end=time.monotonic()+58
+  for mode in ('autoload','explicit'):
+   diagnostic_utility_probe(mode,min(29,max(1,end-time.monotonic()-1)))
  def run_child(self,text,payload):
   command=base64.b64encode(text.encode('utf-16le')).decode();self.assertLess(len(command),8192)
   started=time.monotonic()

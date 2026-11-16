@@ -353,7 +353,7 @@ jobs:
         run: ./scripts/test-windows-bootstrap-command.ps1
       - name: Verify managed Windows desktop upgrade refresh transaction
         if: runner.os == 'Windows'
-        timeout-minutes: 2
+        timeout-minutes: 3
         shell: pwsh
         run: ./scripts/test-windows-desktop-refresh.ps1
       - name: Verify hosted native Windows desktop refresh before compilation
