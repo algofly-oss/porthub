@@ -368,6 +368,7 @@ pub async fn run_watched_sparse(
         }
         if let Some(mut reply) = reply {
             ensure!(reply.snapshot.sparse.is_none()||sparse.is_some(),"sparse private authority was not negotiated");
+            ensure!(reply.snapshot.pair_acl.is_none(),"pair-only compact ACL supplied as base authority");
             ensure!(reply.pair_responses.len()<=32,"private pair response exceeds limits");
             ensure!(
                 reply.snapshot.self_ == profile.peer_id

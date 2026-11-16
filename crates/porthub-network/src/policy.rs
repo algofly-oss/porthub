@@ -1,5 +1,6 @@
 //! Lease-bound IPv4 ACLs and reply tracking. A packet's addresses must match
 //! its authenticated remote peer; no LAN/default-gateway forwarding is allowed.
+pub mod pair_acl;
 mod sparse;
 pub use sparse::{Lookup, PairLease, PairResponse, SparseInfo, MAX_PAIR_LEASES, MAX_PRIVATE_SUFFIXES, MAX_PRIVATE_SUFFIX_BYTES};
 use anyhow::{ensure, Result};
@@ -124,6 +125,8 @@ pub struct Snapshot {
     #[serde(default)]
     pub dns_suffixes: Vec<String>,
     pub grants: Vec<Grant>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub pair_acl: Option<pair_acl::PairAcl>,
     #[serde(default)]
     pub exit_routes: Vec<ExitRoute>,
     #[serde(default, deserialize_with="blocking_dns_rules")]
@@ -277,7 +280,11 @@ struct Flow {
     phase: u8,
     fin_directions: u8,
     close_until: Option<Instant>,
+    _permit:Option<tokio::sync::OwnedSemaphorePermit>,
 }
+#[derive(Clone)]
+struct FlowBudget(std::sync::Arc<tokio::sync::Semaphore>);
+impl Default for FlowBudget {fn default()->Self{Self(std::sync::Arc::new(tokio::sync::Semaphore::new(65536)))}}
 #[derive(Default)]
 pub struct Engine {
     snapshot: Option<Snapshot>,
@@ -286,10 +293,13 @@ pub struct Engine {
     exit_flows: HashMap<Key, Flow>,
     deadline: Option<Instant>,
     pairs: HashMap<String, Box<Engine>>,
+    compiled_pair: Option<pair_acl::CompiledPairAcl>,
+    flow_budget:FlowBudget,
 }
 impl Engine {
     pub fn revoke(&mut self) {
         self.deadline = None;
+        self.compiled_pair=None;
         self.pairs.clear();
         self.flows.clear();
         self.exit_flows.clear();
@@ -298,6 +308,10 @@ impl Engine {
         let result = (|| {
             self.validate_sparse_base(&snapshot)?;
             let retain_pairs = self.same_sparse_authority(&snapshot);
+            let compiled_pair=if let Some(acl)=&snapshot.pair_acl{
+                ensure!(snapshot.sparse.is_none()&&snapshot.peers.len()==2&&snapshot.grants.is_empty()&&snapshot.exit_routes.is_empty(),"compact ACL is not a complete exact pair");
+                Some(acl.compile()?)
+            }else{None};
             let remaining = snapshot
                 .expires_at
                 .signed_duration_since(Utc::now())
@@ -405,6 +419,7 @@ impl Engine {
             }
             snapshot.peers.shrink_to_fit();
             self.ips = ips;
+            self.compiled_pair=compiled_pair;
             if !retain_pairs { self.pairs.clear(); }
             self.snapshot = Some(snapshot);
             self.deadline = Some(Instant::now() + remaining);
@@ -439,6 +454,12 @@ impl Engine {
             1 => "icmp",
             _ => return false,
         };
+        if let Some(compiled)=&self.compiled_pair {
+            let local=self.ips[&snapshot.self_];
+            let Some(remote)=snapshot.peers.iter().find(|p|p.id!=snapshot.self_).map(|p|p.ip) else{return false;};
+            let reverse=if packet.key.src==local&&packet.key.dst==remote{false}else if packet.key.src==remote&&packet.key.dst==local{true}else{return false;};
+            return compiled.allows(reverse,packet.key.protocol,packet.key.dport);
+        }
         snapshot.grants.iter().any(|g| {
             self.ips[&g.source] == packet.key.src
                 && self.ips[&g.destination] == packet.key.dst
@@ -476,7 +497,7 @@ impl Engine {
             return false;
         }
         let may_open = self.allowed(packet);
-        track_packet(&mut self.flows, packet, "", may_open, now)
+        track_packet_budget(&mut self.flows, packet, "", may_open, now,Some(&self.flow_budget))
     }
 
     // A separate state table prevents exit grants from widening private ACLs.
@@ -537,6 +558,9 @@ fn exit_target(ip: Ipv4Addr, block_lan: bool) -> bool {
 }
 
 fn track_packet(flows: &mut HashMap<Key, Flow>, packet: Packet, remote: &str, may_open: bool, now: Instant) -> bool {
+    track_packet_budget(flows,packet,remote,may_open,now,None)
+}
+fn track_packet_budget(flows: &mut HashMap<Key, Flow>, packet: Packet, remote: &str, may_open: bool, now: Instant,budget:Option<&FlowBudget>) -> bool {
         let key = packet.key;
         let reverse = Key {
             src: key.dst,
@@ -607,9 +631,11 @@ fn track_packet(flows: &mut HashMap<Key, Flow>, packet: Packet, remote: &str, ma
                 return false;
             }
         }
+        let permit=if let Some(budget)=budget{match budget.0.clone().try_acquire_owned(){Ok(permit)=>Some(permit),Err(_)=>return false}}else{None};
         flows.insert(
             key,
             Flow {
+                _permit:permit,
                 remote: remote.to_owned(),
                 expires: now + ttl(key.protocol),
                 opening: packet,

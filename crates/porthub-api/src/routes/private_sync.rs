@@ -32,6 +32,14 @@ use std::{
 pub fn router() -> Router<Arc<App>> {
     Router::new().route("/api/access/private/sync", post(sync))
 }
+const PAIR_REPLY_BYTES:usize=2*1024*1024;
+fn push_pair_response(output:&mut Vec<Value>,bytes:&mut usize,value:Value){
+    let length=serde_json::to_vec(&value).map(|v|v.len()).unwrap_or(usize::MAX);
+    let value=if bytes.saturating_add(length)>PAIR_REPLY_BYTES-16384 {
+        json!({"query":value["query"],"status":"busy"})
+    }else{value};
+    *bytes+=serde_json::to_vec(&value).expect("typed pair response").len();output.push(value);
+}
 fn forbidden(message: &str) -> ApiError {
     ApiError::new(StatusCode::FORBIDDEN, message)
 }
@@ -332,8 +340,8 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
     }
     let own_machine_id=store::id(peer.get("machine_id"));
     let mut resolutions=Vec::new();
+    let mut sparse_reachable=HashSet::new();
     let mut grants = if sparse_request.is_some() {
-        let mut result=Vec::new();
         for (query,target) in selected {
             let pair=target.map(|p|{
                 if let Some(rules)=&sparse_rules{
@@ -342,13 +350,19 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
                     rules.index.pair(source,target,&groups)
                 }else{private_policy::compile_pair(&machines,&books,&groups,&own_machine_id,&store::id(p.get("machine_id")))}
             }).unwrap_or_default();
-            if pair.is_empty(){if let Some(peer)=target{app.private_relay.revoke_pair(&input.peer_id,store::string(peer,"_id"));}resolutions.push((query,None,Vec::new()));continue;}
-            if pair.len()>128 {resolutions.push((query,None,Vec::new()));continue;}
-            result.extend(pair.iter().cloned());resolutions.push((query,target,pair));
+            if pair.is_empty(){if let Some(peer)=target{app.private_relay.revoke_pair(&input.peer_id,store::string(peer,"_id"));}resolutions.push((query,None,None));continue;}
+            let id=store::string(target.expect("nonempty exact pair"),"_id");
+            let acl=porthub_network::policy::pair_acl::PairAcl::from_iter(&input.peer_id,id,pair.into_iter().map(|g|porthub_network::policy::Grant{
+                source:mapping[&g.source].clone(),destination:mapping[&g.destination].clone(),protocol:g.protocol,
+                ports:g.ports.into_iter().map(|p|porthub_network::policy::Port{start:p.start,end:p.end}).collect(),
+            })).ok();
+            if acl.is_some(){sparse_reachable.insert(id.to_owned());}else{app.private_relay.revoke_pair(&input.peer_id,id);}
+            resolutions.push((query,target,acl));
         }
-        result
+        Vec::new()
     } else {private_policy::compile_for(&machines,&books,&groups,&own_machine_id)};
     let mut reachable = HashSet::from([input.peer_id.clone()]);
+    reachable.extend(sparse_reachable);
     for grant in &mut grants {
         grant.source = mapping[&grant.source].clone();
         grant.destination = mapping[&grant.destination].clone();
@@ -441,6 +455,10 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
         .collect();
     if let Some(rules)=&sparse_rules{crate::private_sparse::verify_rules(&app,owner,rules).await?;}
     if let Some(indexed)=&indexed{if app.collection("private_name_directory_state").find_one(doc!{"_id":owner.to_hex(),"generation":&indexed.generation,"ready":true}).projection(doc!{"_id":1}).await?.is_none(){return Err(ApiError::bad_request("Private directory changed; retry discovery"));}}
+    // Explicit complete legacy failure, never a truncated authorization snapshot.
+    if epoch.is_none() && (wire_peers.len()>4096 || grants.len()>65536) {
+        return Err(ApiError::bad_request("Private policy exceeds this client's identity capacity; upgrade to negotiated sparse private networking or narrow the rule"));
+    }
     let mut relay_auth_token = String::new();
     if let Ok(ip) = store::string(&current, "ip").parse() {
         let mut allowed: HashSet<String> = grants
@@ -461,33 +479,34 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
         } else {app.private_relay.publish_admitted(&input.peer_id,hash,&input.instance,ip,allowed,Some(admission))};
     }
     if relay_auth_token.is_empty(){return Err(ApiError::new(StatusCode::CONFLICT,"Private authority changed or is busy; retry sync"));}
-    let mut pair_responses=Vec::new();
+    let mut pair_responses=Vec::new();let mut pair_response_bytes=0usize;
     if let Some(epoch)=&epoch {
         let local:porthub_network::policy::PeerInfo=serde_json::from_value(wire_peer(&updated)).map_err(|_|ApiError::bad_request("Invalid local sparse identity"))?;
-        for (query,target,pair) in resolutions {
-            let Some(target)=target else {pair_responses.push(json!({"query":query,"status":"unavailable"}));continue;};
+        for (query,target,acl) in resolutions {
+            let Some(target)=target else {push_pair_response(&mut pair_responses,&mut pair_response_bytes,json!({"query":query,"status":"unavailable"}));continue;};
+            let Some(acl)=acl else{push_pair_response(&mut pair_responses,&mut pair_response_bytes,json!({"query":query,"status":"policy_capacity"}));continue;};
             let id=store::string(target,"_id");
             let revision=target.get_i64("revision").ok().filter(|v|*v>0).unwrap_or(0) as u64;
             let target_machine=machines.iter().find(|m|m["_id"]==store::id(target.get("machine_id"))).expect("selected target");
             let manifest=sparse_rules.as_ref().map(|r|r.manifest.iter().map(store::document).collect::<Vec<_>>()).unwrap_or_else(||books.clone());
             let target_epoch=crate::domain::private_pairs::local_epoch(target_machine,&manifest,&groups,&store::document(target));
-            if revision==0 || !app.private_relay.publish_pair_epochs(&input.peer_id,id,epoch,&target_epoch) {
-                pair_responses.push(json!({"query":query,"status":"busy"}));continue;
+            if revision==0 {
+                push_pair_response(&mut pair_responses,&mut pair_response_bytes,json!({"query":query,"status":"busy"}));continue;
             }
             let remote:porthub_network::policy::PeerInfo=serde_json::from_value(wire_peer(target)).map_err(|_|ApiError::bad_request("Invalid remote sparse identity"))?;
-            let grants=pair.into_iter().map(|mut g|{g.source=mapping[&g.source].clone();g.destination=mapping[&g.destination].clone();g}).collect::<Vec<_>>();
-            let grants=serde_json::from_value(serde_json::to_value(grants).expect("typed grants")).expect("compatible packet grants");
-            let lease=porthub_network::policy::PairLease{workspace:owner.to_hex(),self_:input.peer_id.clone(),epoch:epoch.clone(),expires_at:chrono::DateTime::from_timestamp_millis(now.timestamp_millis()+15_000).expect("current timestamp"),revision,local:local.clone(),peer:remote,grants};
-            pair_responses.push(json!({"query":query,"status":"allowed","lease":lease}));
+            let lease=porthub_network::policy::PairLease{workspace:owner.to_hex(),self_:input.peer_id.clone(),epoch:epoch.clone(),expires_at:chrono::DateTime::from_timestamp_millis(now.timestamp_millis()+15_000).expect("current timestamp"),revision,local:local.clone(),peer:remote,grants:vec![],acl:Some(acl)};
+            let value=json!({"query":query,"status":"allowed","lease":lease});
+            if pair_response_bytes.saturating_add(serde_json::to_vec(&value).expect("typed lease").len())>PAIR_REPLY_BYTES-16384
+                || !app.private_relay.publish_pair_epochs(&input.peer_id,id,epoch,&target_epoch) {
+                // Backpressure never renews the independently expiring Hub pair authority.
+                push_pair_response(&mut pair_responses,&mut pair_response_bytes,json!({"query":query,"status":"busy"}));continue;
+            }
+            push_pair_response(&mut pair_responses,&mut pair_response_bytes,value);
         }
     }
     let capture_pools=if epoch.is_some(){crate::domain::private_networks::pools(&prefs)?.iter().map(|p|p.cidr()).collect::<Vec<_>>()}else{Vec::new()};
     if capture_pools.len()>porthub_network::capture_routes::MAX_CAPTURE_PREFIXES {
         return Err(ApiError::bad_request("Private capture route capacity exceeded; operator review required"));
-    }
-    // Explicit complete legacy failure, never a truncated authorization snapshot.
-    if epoch.is_none() && (wire_peers.len()>4096 || grants.len()>65536) {
-        return Err(ApiError::bad_request("Private policy exceeds this client's identity capacity; upgrade to negotiated sparse private networking or narrow the rule"));
     }
     // This origin is configured by the gateway operator and returned only to
     // authenticated private clients. HTTP origins are supported by operator
@@ -515,5 +534,22 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
         response["snapshot"].as_object_mut().expect("snapshot object").remove("sparse");
         let root=response.as_object_mut().expect("sync object");root.remove("sparse_sequence");root.remove("pair_responses");
     }
+    if serde_json::to_vec(&response).expect("typed control response").len()>4*1024*1024 {
+        return Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE,"Private control reply exceeds bounded capacity; retry a smaller discovery batch"));
+    }
     Ok(([(header::CACHE_CONTROL,"no-store")],Json(response)).into_response())
+}
+
+#[cfg(test)]
+mod sparse_response_budget_tests{
+    use super::*;
+    #[test]
+    fn overload_returns_exact_query_busy_without_partial_lease_or_unrelated_eviction(){
+        let mut out=Vec::new();let mut bytes=0;
+        let query=json!({"kind":"peer","value":"requested"});
+        push_pair_response(&mut out,&mut bytes,json!({"query":query,"status":"allowed","lease":{"bounded_test_payload":"x".repeat(PAIR_REPLY_BYTES)}}));
+        assert_eq!(out[0],json!({"query":query,"status":"busy"}));assert!(bytes<256);
+        let other=json!({"query":{"kind":"peer","value":"other"},"status":"unavailable"});
+        push_pair_response(&mut out,&mut bytes,other.clone());assert_eq!(out[1],other);assert!(bytes<PAIR_REPLY_BYTES);
+    }
 }

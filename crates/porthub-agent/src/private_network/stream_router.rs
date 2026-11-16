@@ -30,9 +30,10 @@ const MAX_FLOWS: usize = 512;
 const MAX_STREAM_LANES: usize = 8;
 const HEADER: &[u8; 4] = b"PHT1";
 #[derive(Default)]
-struct Ports(Vec<(u16, u16)>);
+struct Ports(Vec<(u16, u16)>,Option<porthub_network::policy::pair_acl::CompiledPortMask>);
 impl Ports {
     fn contains(&self, port: u16) -> bool {
+        if let Some(mask)=&self.1{return mask.contains(port);}
         self.0
             .iter()
             .any(|&(start, end)| start <= port && port <= end)
@@ -110,6 +111,13 @@ impl Policy {
                     .0
                     .extend(grant.ports.iter().map(|port| (port.start, port.end)));
             }
+        }
+        if let Some(acl)=&snapshot.pair_acl{
+            ensure!(snapshot.sparse.is_none()&&snapshot.peers.len()==2&&snapshot.grants.is_empty()&&snapshot.exit_routes.is_empty(),"compact stream ACL is not an exact pair");
+            let other=snapshot.peers.iter().find(|p|p.id!=own).ok_or_else(||anyhow::anyhow!("compact stream ACL omits remote identity"))?;
+            let compiled=acl.compile()?;let outgoing=compiled.tcp(false);let incoming=compiled.tcp(true);
+            if outgoing.any(){policy.outgoing.insert(other.id.clone(),Ports(Vec::new(),Some(outgoing)));}
+            if incoming.any(){policy.incoming.insert(other.id.clone(),Ports(Vec::new(),Some(incoming)));}
         }
         for ports in policy
             .incoming
@@ -262,6 +270,11 @@ pub fn new(
     ))
 }
 impl Router {
+    pub fn active_peers(&self)->Vec<String>{
+        let state=self.state.lock().unwrap_or_else(|p|p.into_inner());
+        state.flows.values().filter(|flow|!flow.cancel.is_cancelled()&&(!flow.finished||self.tcp.owns(flow.flow))&&state.policy.allows(&flow.peer,flow.flow,flow.outbound))
+            .map(|flow|flow.peer.id.clone()).collect::<HashSet<_>>().into_iter().collect()
+    }
     pub fn log_transport_stats(&self) {
         if !tracing::enabled!(tracing::Level::DEBUG) {
             return;
@@ -681,6 +694,16 @@ fn spawn_reader(
   pair.grants=serde_json::from_value(serde_json::json!([{"source":"a","destination":"b","protocol":"tcp","ports":[{"start":443,"end":443}]}])).unwrap();(base,pair)
  }
  fn flow()->Flow{Flow{source:"10.203.0.2:4000".parse().unwrap(),destination:"10.203.1.2:443".parse().unwrap()}}
+ #[test]fn compact_port_masks_keep_quic_permission_exact_without_range_expansion(){
+  let a=Identity::new().unwrap();let b=Identity::new().unwrap();let(base,mut pair)=snapshots(&a,&b);
+  let grant=porthub_network::policy::Grant{source:"a".into(),destination:"b".into(),protocol:"tcp".into(),ports:(1..=u16::MAX).step_by(2).map(|port|porthub_network::policy::Port{start:port,end:port}).collect()};
+  pair.pair_acl=Some(porthub_network::policy::pair_acl::PairAcl::from_grants("a","b",&[grant]).unwrap());pair.grants.clear();
+  let policy=Policy::compile_pairs(&base,"a","10.203.0.2".parse().unwrap(),&[(pair.clone(),Instant::now()+Duration::from_secs(10))]).unwrap();let peer=mesh_peer(&pair.peers[1]);
+  assert!(policy.outgoing["b"].0.is_empty(),"compact policy must not expand into 32K range records");
+  for port in 0..=u16::MAX{let mut test=flow();test.destination.set_port(port);assert_eq!(policy.allows(&peer,test,true),port%2==1);}
+  assert!(!policy.incoming.contains_key("b"));
+  let mut spoof=peer.clone();spoof.instance="different-instance".into();assert!(!policy.allows(&spoof,flow(),true));
+ }
  #[tokio::test]async fn established_stream_guard_expires_pair_without_any_status_tick_or_base_expiry(){
   let a=Identity::new().unwrap();let b=Identity::new().unwrap();let(base,pair)=snapshots(&a,&b);let peer=mesh_peer(&pair.peers[1]);
   let(router,_background)=new("a".into(),"10.203.0.2".parse().unwrap(),a,tokio::sync::mpsc::channel(8).0,CancellationToken::new()).unwrap();

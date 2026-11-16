@@ -59,6 +59,7 @@ impl Handle {
         self.revoked.store(true, Ordering::SeqCst);
         let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
         s.deadline = None;
+        s.epoch = None;
         s.cache.clear();
         s.wanted.clear();
         drop(s);
@@ -70,6 +71,9 @@ impl Handle {
     }
     pub fn update_base(&self, snapshot: &Snapshot) {
         let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if self.revoked() {
+            return;
+        }
         let epoch = snapshot.sparse.as_ref().map(|s| s.epoch.clone());
         if s.epoch != epoch {
             s.cache.clear();
@@ -124,7 +128,7 @@ impl Handle {
     }
     pub fn enabled(&self) -> bool {
         let s = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        s.epoch.is_some()
+        !self.revoked() && s.epoch.is_some()
     }
     pub fn leases(&self) -> Vec<PairLease> {
         let s = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -146,6 +150,21 @@ impl Handle {
             .filter(|p| p.deadline > now)
             .map(|p| p.lease.peer.clone())
             .collect()
+    }
+    /// Usage affects renewal eligibility only, never locally extends authority.
+    pub fn touch_peer(&self, id: &str) -> bool {
+        let Ok(mut state) = self.state.try_lock() else {
+            return false;
+        };
+        let now = Instant::now();
+        if self.revoked() || state.deadline.is_none_or(|d| d <= now) {
+            return false;
+        }
+        let Some(cached) = state.cache.get_mut(id).filter(|c| c.deadline > now) else {
+            return false;
+        };
+        cached.last_used = now;
+        true
     }
     pub fn request_ip(&self, ip: Ipv4Addr) -> bool {
         ip.is_private()
@@ -189,7 +208,10 @@ impl Handle {
     pub fn installed(&self, query: &Lookup, lease: PairLease) {
         let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let now = Instant::now();
-        if s.epoch.as_deref() != Some(&lease.epoch) || s.deadline.is_none_or(|d| d <= now) {
+        if self.revoked()
+            || s.epoch.as_deref() != Some(&lease.epoch)
+            || s.deadline.is_none_or(|d| d <= now)
+        {
             return;
         }
         let Ok(left) = lease
@@ -294,7 +316,7 @@ pub fn apply_denial(
     policy: &mut porthub_network::policy::Engine,
     response: &porthub_network::policy::PairResponse,
 ) -> Option<PeerInfo> {
-    if response.status != "unavailable" {
+    if response.status != "unavailable" && response.status != "policy_capacity" {
         return None;
     }
     let peer = handle.cached_query(&response.query)?;
@@ -458,6 +480,40 @@ mod tests {
         assert_eq!(task.await.unwrap().unwrap().id, "b");
     }
     #[test]
+    fn active_flow_usage_renews_eligibility_without_extending_deadline_and_revoke_is_terminal() {
+        let epoch = "a".repeat(64);
+        let (h, mut control) = channel();
+        let base = base(&epoch);
+        h.update_base(&base);
+        let query = Lookup {
+            kind: "peer".into(),
+            value: "b".into(),
+        };
+        let lease = lease(&epoch);
+        h.installed(&query, lease.clone());
+        let deadline = {
+            let mut state = h.state.lock().unwrap();
+            let cached = state.cache.get_mut("b").unwrap();
+            cached.last_used = Instant::now() - Duration::from_secs(31);
+            cached.deadline = Instant::now() + Duration::from_secs(5);
+            cached.deadline
+        };
+        assert!(control.batch().unwrap()["wanted"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(h.touch_peer("b"));
+        assert_eq!(h.state.lock().unwrap().cache["b"].deadline, deadline);
+        assert_eq!(control.batch().unwrap()["wanted"][0]["value"], "b");
+        h.revoke_all();
+        h.update_base(&base);
+        h.installed(&query, lease);
+        assert!(!h.enabled());
+        assert!(!h.touch_peer("b"));
+        assert!(h.peers().is_empty());
+        assert!(h.by_id("b").is_none());
+    }
+    #[test]
     fn authoritative_denial_retires_only_matching_pair_but_busy_and_invalid_do_not() {
         let epoch = "a".repeat(64);
         let (h, _) = channel();
@@ -471,7 +527,7 @@ mod tests {
             kind: "peer".into(),
             value: "b".into(),
         };
-        h.installed(&query, pair);
+        h.installed(&query, pair.clone());
         for status in ["busy", "invalid"] {
             let response = porthub_network::policy::PairResponse {
                 query: query.clone(),
@@ -481,14 +537,18 @@ mod tests {
             assert!(apply_denial(&h, &mut engine, &response).is_none());
             assert!(engine.pair_peer("b").is_some());
         }
-        let response = porthub_network::policy::PairResponse {
-            query: query.clone(),
-            status: "unavailable".into(),
-            lease: None,
-        };
-        assert_eq!(apply_denial(&h, &mut engine, &response).unwrap().id, "b");
-        assert!(engine.pair_peer("b").is_none());
-        assert!(engine.valid_lease());
+        for status in ["unavailable", "policy_capacity"] {
+            engine.install_pair(pair.clone()).unwrap();
+            h.installed(&query, pair.clone());
+            let response = porthub_network::policy::PairResponse {
+                query: query.clone(),
+                status: status.into(),
+                lease: None,
+            };
+            assert_eq!(apply_denial(&h, &mut engine, &response).unwrap().id, "b");
+            assert!(engine.pair_peer("b").is_none());
+            assert!(engine.valid_lease());
+        }
     }
     #[tokio::test]
     async fn whole_source_revocation_clears_cache_and_wakes_waiting_name_without_extending_ttl() {

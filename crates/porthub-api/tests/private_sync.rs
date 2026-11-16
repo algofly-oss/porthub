@@ -411,8 +411,21 @@ async fn sparse_4097_broad_peers_return_bounded_pair_authority_and_legacy_fails_
         case.app.collection("workspace_members").delete_one(doc!{"workspace_id":owner,"user_id":member}).await?;
         let (status,_,_)=case.call("POST","/api/access/private/sync","",b.clone(),&[]).await?;
         ensure!(status==StatusCode::FORBIDDEN,"removed source membership was not rejected authoritatively");
-        case.app.collection("access_rulebooks").update_one(doc!{"_id":book},doc!{"$set":{"enabled":false}}).await?;
-        a["sparse"]["sequence"]=json!(7);let (_,_,revoked)=case.call("POST","/api/access/private/sync","",a,&[]).await?;
+        // A policy larger than the legacy pair grant bound must remain exact and
+        // usable through fixed-size masks, never a truncated or invented denial.
+        let complex:Vec<_>=(0..100).map(|i|doc!{"id":format!("port{i}"),"name":format!("Port{i}"),"sources":[{"kind":"all","id":"machines"}],"destinations":[{"kind":"all","id":"machines"}],"protocol":"tcp","ports":(1000+i).to_string(),"bidirectional":true,"enabled":true}).collect();
+        case.app.collection("access_rulebooks").update_one(doc!{"_id":book},doc!{"$set":{"rules":complex},"$inc":{"revision":1_i64}}).await?;
+        a["sparse"]["sequence"]=json!(7);let (_,_,cold_policy)=case.call("POST","/api/access/private/sync","",a.clone(),&[]).await?;
+        ensure!(cold_policy["pair_responses"][1]["status"]=="busy","old target policy epoch incorrectly acknowledged the new complex policy");
+        case.status("POST","/api/access/private/sync","",make("sparse-2","instance-33333333",2),StatusCode::OK).await?;
+        a["sparse"]["sequence"]=json!(8);let (_,_,capacity)=case.call("POST","/api/access/private/sync","",a.clone(),&[]).await?;
+        ensure!(capacity["pair_responses"][1]["status"]=="allowed"&&capacity["pair_responses"][1]["lease"]["acl"].is_object()&&capacity["pair_responses"][1]["lease"]["grants"]==json!([]),"complex allowed policy was denied or legacy grants were partially transmitted");
+        let compact_base=serde_json::from_value(capacity["snapshot"].clone())?;
+        let compact_lease=serde_json::from_value(capacity["pair_responses"][1]["lease"].clone())?;
+        let mut compact_engine=porthub_network::policy::Engine::default();compact_engine.apply(compact_base)?;compact_engine.install_pair(compact_lease)?;
+        ensure!(compact_engine.pair_count()==1&&serde_json::to_vec(&capacity)?.len()<65536,"compact complex authority exceeded its bounded representation");
+        case.app.collection("access_rulebooks").update_one(doc!{"_id":book},doc!{"$set":{"enabled":false},"$inc":{"revision":1_i64}}).await?;
+        a["sparse"]["sequence"]=json!(9);let (_,_,revoked)=case.call("POST","/api/access/private/sync","",a,&[]).await?;
         ensure!(revoked["snapshot"]["sparse"]["epoch"]!=denied["snapshot"]["sparse"]["epoch"],"policy generation did not change");
         ensure!(revoked["pair_responses"][0]["status"]=="unavailable"&&revoked["pair_responses"][1]["status"]=="unavailable","revoked pair remained allowed");
         Ok::<_,anyhow::Error>(())

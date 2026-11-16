@@ -43,6 +43,8 @@ pub struct PairLease {
     pub local: PeerInfo,
     pub peer: PeerInfo,
     pub grants: Vec<Grant>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acl: Option<super::pair_acl::PairAcl>,
 }
 
 fn same_identity(a: &PeerInfo, b: &PeerInfo) -> bool {
@@ -168,18 +170,26 @@ impl Engine {
             ),
             "pair address collides with cached identity"
         );
-        ensure!(
-            lease.grants.len() <= 128
-                && !lease.grants.is_empty()
-                && lease.grants.iter().all(|g| g.ports.len() <= 64),
-            "pair grant count exceeds bounds or is denied"
-        );
-        ensure!(
-            lease.grants.iter().all(|g| (g.source == lease.self_
-                && g.destination == lease.peer.id)
-                || (g.destination == lease.self_ && g.source == lease.peer.id)),
-            "pair grants include another identity"
-        );
+        if let Some(acl) = &lease.acl {
+            ensure!(
+                lease.grants.is_empty(),
+                "compact and legacy pair ACL cannot be mixed"
+            );
+            acl.compile()?;
+        } else {
+            ensure!(
+                lease.grants.len() <= 128
+                    && !lease.grants.is_empty()
+                    && lease.grants.iter().all(|g| g.ports.len() <= 64),
+                "pair grant count exceeds bounds or is denied"
+            );
+            ensure!(
+                lease.grants.iter().all(|g| (g.source == lease.self_
+                    && g.destination == lease.peer.id)
+                    || (g.destination == lease.self_ && g.source == lease.peer.id)),
+                "pair grants include another identity"
+            );
+        }
         ensure!(lease.revision > 0, "pair revision missing");
         if let Some(existing) = self
             .pairs
@@ -210,11 +220,13 @@ impl Engine {
             expires_at: lease.expires_at,
             peers: vec![lease.local, lease.peer],
             grants: lease.grants,
+            pair_acl: lease.acl,
             dns_suffixes: vec![],
             exit_routes: vec![],
             dns_rules: vec![],
         };
         let mut engine = Box::<Engine>::default();
+        engine.flow_budget = self.flow_budget.clone();
         engine.apply(snapshot.clone())?;
         // The existing engine revalidates opening ACLs and retires flows on identity changes.
         // An unchanged lease renewal must preserve established TCP reverse-flow tracking.
@@ -224,6 +236,22 @@ impl Engine {
             self.pairs.insert(id, engine);
         }
         Ok(())
+    }
+
+    /// Called by the bounded runtime tick, not each packet. Established private
+    /// flows retain on-demand renewal eligibility while independently expiring ACLs
+    /// are still reauthorized by the gateway; no deadline is extended locally.
+    pub fn active_pair_flows(&mut self) -> Vec<String> {
+        self.prune_pairs();
+        let now = Instant::now();
+        let mut active = Vec::new();
+        for (id, pair) in &mut self.pairs {
+            pair.flows.retain(|_, flow| flow.expires > now);
+            if !pair.flows.is_empty() {
+                active.push(id.clone());
+            }
+        }
+        active
     }
 
     pub fn revoke_pair(&mut self, id: &str) {
@@ -276,6 +304,7 @@ mod tests {
             epoch: epoch.into(),
             expires_at: Utc::now() + chrono::Duration::seconds(5),
             revision: 1,
+            acl: None,
             local: peer("a", "10.203.0.2"),
             peer: peer("b", "10.203.1.2"),
             grants: vec![Grant {
@@ -394,6 +423,104 @@ mod tests {
         b[10..12].copy_from_slice(&(!(sum as u16)).to_be_bytes());
         b
     }
+    #[test]
+    fn all_pair_engines_share_one_client_flow_budget_and_release_on_revoke_expiry_drop() {
+        let epoch = "a".repeat(64);
+        let mut e = Engine::default();
+        assert_eq!(e.flow_budget.0.available_permits(), 65536);
+        e.flow_budget = FlowBudget(std::sync::Arc::new(tokio::sync::Semaphore::new(2)));
+        let budget = e.flow_budget.0.clone();
+        e.apply(base(&epoch)).unwrap();
+        e.install_pair(pair(&epoch)).unwrap();
+        let mut other = pair(&epoch);
+        other.peer.id = "c".into();
+        other.peer.ip = "10.203.1.3".parse().unwrap();
+        other.grants[0].destination = "c".into();
+        e.install_pair(other.clone()).unwrap();
+        assert!(e.check(&udp("10.203.0.2", "10.203.1.2", 4000, 443), "b", false));
+        assert!(e.check(&udp("10.203.0.2", "10.203.1.3", 4000, 443), "c", false));
+        assert_eq!(budget.available_permits(), 0);
+        assert!(
+            !e.check(&udp("10.203.0.2", "10.203.1.3", 4001, 443), "c", false),
+            "another pair must not allocate another 65536-flow budget"
+        );
+        assert!(
+            e.check(&udp("10.203.1.2", "10.203.0.2", 443, 4000), "b", true),
+            "backpressure must not reject established replies"
+        );
+        e.revoke_pair("b");
+        assert_eq!(budget.available_permits(), 1);
+        assert!(e.check(&udp("10.203.0.2", "10.203.1.3", 4001, 443), "c", false));
+        for flow in e.pairs.get_mut("c").unwrap().flows.values_mut() {
+            flow.expires = Instant::now() - Duration::from_secs(1);
+        }
+        assert!(e.active_pair_flows().is_empty());
+        assert_eq!(budget.available_permits(), 2);
+        assert!(e.check(&udp("10.203.0.2", "10.203.1.3", 4002, 443), "c", false));
+        assert_eq!(e.active_pair_flows(), vec!["c".to_owned()]);
+        drop(e);
+        assert_eq!(budget.available_permits(), 2);
+    }
+
+    #[test]
+    fn compact_complex_pair_checks_real_packets_and_retires_old_flow_on_permission_change() {
+        let epoch = "a".repeat(64);
+        let mut e = Engine::default();
+        e.apply(base(&epoch)).unwrap();
+        let mut p = pair(&epoch);
+        let grants = (1..500)
+            .step_by(2)
+            .map(|port| Grant {
+                source: "a".into(),
+                destination: "b".into(),
+                protocol: "udp".into(),
+                ports: vec![Port {
+                    start: port,
+                    end: port,
+                }],
+            })
+            .collect::<Vec<_>>();
+        p.acl = Some(super::super::pair_acl::PairAcl::from_grants("a", "b", &grants).unwrap());
+        p.grants.clear();
+        e.install_pair(p.clone()).unwrap();
+        let out = udp("10.203.0.2", "10.203.1.2", 4000, 443);
+        let reply = udp("10.203.1.2", "10.203.0.2", 443, 4000);
+        assert!(e.check(&out, "b", false));
+        assert!(e.check(&reply, "b", true));
+        assert!(!e.check(&udp("10.203.0.2", "10.203.1.2", 4000, 444), "b", false));
+        assert!(!e.check(&reply, "foreign", true));
+        assert!(!e.check(&udp("10.203.1.2", "10.203.0.2", 443, 6000), "b", true));
+        let mut mixed = p.clone();
+        mixed.grants = grants.clone();
+        assert!(e.install_pair(mixed).is_err());
+        assert!(
+            e.check(&reply, "b", true),
+            "invalid replacement cannot discard current exact authority"
+        );
+        p.acl = Some(
+            super::super::pair_acl::PairAcl::from_grants(
+                "a",
+                "b",
+                &[Grant {
+                    source: "a".into(),
+                    destination: "b".into(),
+                    protocol: "udp".into(),
+                    ports: vec![Port {
+                        start: 445,
+                        end: 445,
+                    }],
+                }],
+            )
+            .unwrap(),
+        );
+        e.install_pair(p).unwrap();
+        assert!(
+            !e.check(&reply, "b", true),
+            "old opening permission must be revalidated"
+        );
+        assert!(e.check(&udp("10.203.0.2", "10.203.1.2", 4000, 445), "b", false));
+    }
+
     #[test]
     fn real_packets_keep_reverse_flow_on_renewal_but_expiry_and_identity_rotation_revoke() {
         let epoch = "a".repeat(64);

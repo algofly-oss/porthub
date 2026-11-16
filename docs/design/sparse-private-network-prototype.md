@@ -9,7 +9,11 @@ range migration.
 Implemented contracts:
 
 - A negotiated base identity plus independently expiring, exact-direction pair
-  grants. Local authority epochs, remote identity revisions, certificate/process
+  grants. Fixed-size directional protocol/port masks preserve complex unions
+  without transmitting/truncating a growing grant list. Four worst-case masks
+  occupy under 45 KiB of JSON and at most 32 KiB of decoded bitmap storage per
+  pair. Canonical encoding and exact two-identity validation are independent of
+  the API; legacy grant snapshots retain their existing format. Local authority epochs, remote identity revisions, certificate/process
   pins, cache capacity and packet/stream authorization remain distinct.
 - Indexed current peer/address, machine, workspace-membership and user checks.
   No positive credential, membership, address or pair decision is cached by the API.
@@ -19,6 +23,11 @@ Implemented contracts:
 - A separate DNS directory materializes existing name-assignment semantics on
   bootstrap, name changes and periodic refresh. Directory names never authorize
   a machine: current metadata, membership, assignment and rules are checked again.
+- One shared 65,536-private-flow admission budget covers all child pair engines;
+  their count cannot multiply that map limit. Revocation, expiration cleanup and
+  drop release permits. The existing separate exit-flow budget is unchanged.
+  Live packet/QUIC flows remain eligible for fresh gateway renewal, without any
+  local deadline extension or revival after source revocation.
 - Bounded client intent batches, demand wakeup with at most one control cycle per
   second, asynchronous private-name misses, lease-bounded DNS answers and local
   SERVFAIL on unresolved private names instead of public DNS fallback.
@@ -73,8 +82,8 @@ Evidence so far:
 
 Remaining release blockers include coherent sparse exit/LAN-exit/Tor/proxy paths,
 automatic server/client range migration when required, lifecycle/native route
-proofs on all three OSes, directory mutation/concurrency tests, complex-policy
-resource-status handling, measured admission/fairness under load, and final
+proofs on all three OSes, directory mutation/concurrency tests, definition/index/compilation resource admission, measured renewal/admission
+fairness under load, and final
 standalone-Mongo mutation/identity-race audit. Existing known-host /32 routes must
 also be reconciled safely when physical networks change; refusing a broad route
 alone does not make a stale raw IP unambiguous. Stable enrolled IDs/names can move
@@ -85,3 +94,12 @@ contract. No forced foreign-route replacement is permitted.
 No prototype source was pushed, deployed, installed on a client, or enabled in
 production during this checkpoint. All disposable Mongo containers and their
 unique test databases were independently confirmed removed after each batch.
+
+The sparse reply reserves a separate 2 MiB pair budget and enforces the existing
+4 MiB full control-response bound. A byte-budget rejection is `busy`, retains the
+exact query, and does not renew the Hub pair authority. Compilation still has
+explicit definition/index/input budgets; this is not arbitrary rule-book scale.
+A 256-entry cache and a bounded 16-intent RPC are not proof that 256 active pairs
+can be renewed fairly under every WAN latency. That scheduling/admission work and
+whole-process RSS measurements remain open. No total-transport RAM claim is made
+from the bitmap or flow-count limits alone.

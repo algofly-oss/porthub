@@ -699,6 +699,11 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             }
         },
         _=probe_tick.tick(),if device.is_some()=>{
+            if sparse_handle.enabled(){
+                for peer in policy.active_pair_flows(){sparse_handle.touch_peer(&peer);}
+                #[cfg(feature="private-stream")]
+                if let Some(router)=&stream_router{for peer in router.active_peers(){sparse_handle.touch_peer(&peer);}}
+            }
             if let Some((peers, mode, _)) = &exit_route {
                 let live = sessions.read().await;
                 let mut available = peers.iter().filter(|peer| policy.valid_lease() && online_peers.contains(*peer) && (relay_sender.is_ready() || live.get(*peer).is_some_and(|session| session.state() == porthub_mesh::State::Ready))).cloned().collect::<Vec<_>>();
