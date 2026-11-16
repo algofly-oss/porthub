@@ -19,6 +19,13 @@ pub(super) struct Origins {
     eof: bool,
 }
 impl Origins {
+    pub fn eof_pending(&self) -> bool {
+        !self.eof
+            && self
+                .fin
+                .as_ref()
+                .is_some_and(|(at, _)| *at == self.consumed)
+    }
     pub fn valid(&self) -> bool {
         self.spans.iter().all(|s| s.permit.valid())
             && self.fin.as_ref().is_none_or(|(_, p)| p.valid())

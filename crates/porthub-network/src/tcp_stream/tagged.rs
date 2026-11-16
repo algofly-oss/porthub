@@ -1,6 +1,6 @@
 //! Experimental tagged native TCP DATA/ACK and RX origin adapter. No
 //! DuplexStream can bypass origin tags. Runtime/optimized-stream negotiation
-//! is not enabled; native outbound FIN and whole-path receipts remain separate.
+//! is not enabled; whole-path chunk protocol/receipt integration remains separate.
 use super::{Flow, MAX_FLOWS, MTU};
 use anyhow::{ensure, Result};
 use bytes::Bytes;
@@ -147,12 +147,34 @@ impl Drop for NativeRead {
 /// The original permit remains attached for subsequent receipt publication.
 pub struct NativeAck {
     permit: SendPermit,
+    terminal_owner: Option<(Arc<AtomicBool>, Arc<AtomicBool>)>,
     stack_scope: Arc<()>,
     owner: u64,
     flow: Flow,
     id: [u8; 16],
     offset: u64,
     length: usize,
+}
+
+impl Drop for NativeAck {
+    fn drop(&mut self) {
+        if let Some((complete, owner)) = &self.terminal_owner {
+            if !complete.load(Ordering::SeqCst) {
+                owner.store(false, Ordering::SeqCst);
+            }
+        }
+    }
+}
+struct Terminal {
+    origin: SendPermit,
+    complete: Arc<AtomicBool>,
+}
+struct FinWrite {
+    id: [u8; 16],
+    offset: u64,
+    permit: SendPermit,
+    reply: oneshot::Sender<Result<NativeAck>>,
+    sent: bool,
 }
 
 struct Write {
@@ -181,6 +203,11 @@ enum Command {
         id: u64,
         flow: Flow,
         write: Write,
+    },
+    Finish {
+        id: u64,
+        flow: Flow,
+        fin: FinWrite,
     },
     Read {
         id: u64,
@@ -329,6 +356,33 @@ impl Connection {
             && ack.offset == offset
             && ack.length == length
     }
+    /// Publish a protocol receipt only under the exact native ACK's original
+    /// admission. Dropping/cancelling a terminal receipt retires the flow.
+    pub async fn publish_receipt<T, F: std::future::Future<Output = Result<T>>>(
+        &self,
+        ack: NativeAck,
+        id: [u8; 16],
+        offset: u64,
+        length: usize,
+        delivery: impl FnOnce() -> F,
+    ) -> Result<T> {
+        ensure!(
+            self.acknowledges(&ack, id, offset, length),
+            "native receipt binding invalid or retired"
+        );
+        let mut abandoned = RetireOnDrop {
+            alive: self.alive.clone(),
+            armed: true,
+        };
+        let result = ack.permit.during(delivery()).await?;
+        if result.is_ok() {
+            abandoned.armed = false;
+            if let Some((complete, _)) = &ack.terminal_owner {
+                complete.store(true, Ordering::SeqCst);
+            }
+        }
+        result
+    }
     pub fn retire(&self) {
         self.alive.store(false, Ordering::SeqCst);
     }
@@ -385,6 +439,39 @@ impl Connection {
         abandoned.armed = false;
         result
     }
+    /// Return only after native TCP acknowledges FIN. An abandoned terminal
+    /// receipt retires this generation; successful publication preserves peer
+    /// half-close reads. No control renewal prolongs an unpublished FIN grant.
+    pub async fn finish(&self, id: [u8; 16], offset: u64, permit: SendPermit) -> Result<NativeAck> {
+        ensure!(
+            id != [0; 16] && permit.valid() && self.alive.load(Ordering::SeqCst),
+            "native FIN admission invalid"
+        );
+        let (reply, waiting) = oneshot::channel();
+        permit
+            .during(self.handle.commands.send(Command::Finish {
+                id: self.id,
+                flow: self.flow,
+                fin: FinWrite {
+                    id,
+                    offset,
+                    permit: permit.clone(),
+                    reply,
+                    sent: false,
+                },
+            }))
+            .await?
+            .map_err(|_| anyhow::anyhow!("native runner stopped"))?;
+        let mut abandoned = RetireOnDrop {
+            alive: self.alive.clone(),
+            armed: true,
+        };
+        let result = waiting
+            .await
+            .map_err(|_| anyhow::anyhow!("native FIN retired"))?;
+        abandoned.armed = false;
+        result
+    }
     pub async fn read_chunk(&self) -> Result<NativeRead> {
         ensure!(self.alive.load(Ordering::SeqCst), "native RX owner retired");
         let (reply, waiting) = oneshot::channel();
@@ -429,6 +516,7 @@ struct Context {
     alive: Arc<AtomicBool>,
     control: SendPermit,
     data: Option<SendPermit>,
+    fin: Option<SendPermit>,
 }
 #[derive(Default)]
 struct Packets {
@@ -441,6 +529,7 @@ struct Input {
     permit: SendPermit,
     alive: Arc<AtomicBool>,
     rx: Option<Arc<Mutex<rx::Origins>>>,
+    reset: Option<Arc<AtomicBool>>,
 }
 struct Receive(Input);
 struct Transmit<'a> {
@@ -456,6 +545,11 @@ impl RxToken for Receive {
                         .map_err(|_| AdmissionError::Invalid)?;
                     let tcp = TcpPacket::new_checked(ip.payload())
                         .map_err(|_| AdmissionError::Invalid)?;
+                    if tcp.rst() {
+                        if let Some(reset) = &self.0.reset {
+                            reset.store(true, Ordering::SeqCst);
+                        }
+                    }
                     rx.lock().unwrap_or_else(|p| p.into_inner()).observe(
                         tcp.seq_number().0 as u32,
                         tcp.syn(),
@@ -490,14 +584,26 @@ impl TxToken for Transmit<'_> {
                     context.alive.store(false, Ordering::SeqCst);
                     return result;
                 }
+                let has_fin = ip
+                    .as_ref()
+                    .and_then(|ip| TcpPacket::new_checked(ip.payload()).ok())
+                    .is_some_and(|tcp| tcp.fin());
+                if has_fin && context.fin.is_none() {
+                    context.alive.store(false, Ordering::SeqCst);
+                    return result;
+                }
                 let mut context = context.clone();
                 if !has_data {
                     context.data = None;
                 }
+                if !has_fin {
+                    context.fin = None;
+                }
                 let permit = SendPermit::new(move || {
                     let valid = context.alive.load(Ordering::SeqCst)
                         && context.control.valid()
-                        && context.data.as_ref().is_none_or(|p| p.valid());
+                        && context.data.as_ref().is_none_or(|p| p.valid())
+                        && context.fin.as_ref().is_none_or(|p| p.valid());
                     if !valid {
                         context.alive.store(false, Ordering::SeqCst);
                     }
@@ -561,6 +667,11 @@ struct Active {
     writes: VecDeque<Write>,
     rx: Arc<Mutex<rx::Origins>>,
     read: Option<oneshot::Sender<Result<NativeRead>>>,
+    fin: Option<FinWrite>,
+    terminal: Option<Terminal>,
+    local_fin_done: bool,
+    prior_state: tcp::State,
+    reset: Arc<AtomicBool>,
 }
 pub struct Runner {
     stack_scope: Arc<()>,
@@ -645,6 +756,7 @@ impl Runner {
             tcp::SocketBuffer::new(vec![0; 16 * 1024]),
             tcp::SocketBuffer::new(vec![0; super::TCP_SEND_BUFFER]),
         );
+        socket.set_timeout(None);
         socket.set_nagle_enabled(false);
         socket.set_ack_delay(None);
         let endpoint =
@@ -678,12 +790,14 @@ impl Runner {
                 },
             );
         let rx: Arc<Mutex<rx::Origins>> = Default::default();
+        let reset = Arc::new(AtomicBool::new(false));
         if let Some(bytes) = syn {
             self.packets.input.push_back(Input {
                 bytes,
                 permit: permit.clone(),
                 alive: alive.clone(),
                 rx: Some(rx.clone()),
+                reset: Some(reset.clone()),
             });
         }
         self.flows.insert(
@@ -700,6 +814,11 @@ impl Runner {
                 writes: VecDeque::new(),
                 rx,
                 read: None,
+                fin: None,
+                terminal: None,
+                local_fin_done: false,
+                prior_state: tcp::State::Closed,
+                reset,
             },
         );
         if accepting {
@@ -712,6 +831,7 @@ impl Runner {
                     alive: active.alive.clone(),
                     control: active.control.clone(),
                     data: None,
+                    fin: None,
                 },
             );
             self.interface
@@ -775,6 +895,7 @@ impl Runner {
                                                 permit,
                                                 alive: active.alive.clone(),
                                                 rx: Some(active.rx.clone()),
+                                                reset: Some(active.reset.clone()),
                                             });
                                         }
                                     }
@@ -787,7 +908,9 @@ impl Runner {
                                 .get_mut(&flow)
                                 .filter(|a| a.id == id && a.alive.load(Ordering::SeqCst))
                             {
-                                if !write.permit.valid() {
+                                if active.fin.is_some() || active.local_fin_done {
+                                    AdmissionError::Invalid
+                                } else if !write.permit.valid() {
                                     AdmissionError::Retired
                                 } else if active.writes.len() >= 2 {
                                     AdmissionError::Busy
@@ -807,6 +930,29 @@ impl Runner {
                                 AdmissionError::Retired
                             };
                             let _ = write.reply.send(Err(error.into()));
+                        }
+                        Command::Finish { id, flow, fin } => {
+                            let error = if let Some(active) = self
+                                .flows
+                                .get_mut(&flow)
+                                .filter(|a| a.id == id && a.alive.load(Ordering::SeqCst))
+                            {
+                                if !fin.permit.valid() {
+                                    AdmissionError::Retired
+                                } else if active.fin.is_some()
+                                    || active.terminal.is_some()
+                                    || fin.offset != active.next_offset
+                                {
+                                    AdmissionError::Invalid
+                                } else {
+                                    active.control = fin.permit.clone();
+                                    active.fin = Some(fin);
+                                    continue;
+                                }
+                            } else {
+                                AdmissionError::Retired
+                            };
+                            let _ = fin.reply.send(Err(error.into()));
                         }
                         Command::Read { id, flow, reply } => {
                             if let Some(active) = self
@@ -849,6 +995,14 @@ impl Runner {
                 || active.read.as_ref().is_some_and(|r| r.is_closed())
                 || !active.control.valid()
                 || active
+                    .fin
+                    .as_ref()
+                    .is_some_and(|f| !f.permit.valid() || f.reply.is_closed())
+                || active
+                    .terminal
+                    .as_ref()
+                    .is_some_and(|t| !t.complete.load(Ordering::SeqCst) && !t.origin.valid())
+                || active
                     .writes
                     .iter()
                     .any(|w| !w.permit.valid() || w.reply.is_closed())
@@ -861,11 +1015,15 @@ impl Runner {
                     alive: active.alive.clone(),
                     control: active.control.clone(),
                     data: active.writes.front().map(|w| w.permit.clone()),
+                    fin: active.fin.as_ref().map(|f| f.permit.clone()),
                 },
             );
             if !active.alive.load(Ordering::SeqCst) {
                 self.sockets.get_mut::<tcp::Socket>(active.socket).abort();
             }
+        }
+        for active in self.flows.values_mut() {
+            active.prior_state = self.sockets.get::<tcp::Socket>(active.socket).state();
         }
         let now = self.now();
         progress |= self
@@ -875,9 +1033,44 @@ impl Runner {
         let mut removed = Vec::new();
         for (flow, active) in &mut self.flows {
             let socket = self.sockets.get_mut::<tcp::Socket>(active.socket);
+            let reset = active.reset.swap(false, Ordering::SeqCst);
+            let fin_acked = !reset
+                && active
+                    .fin
+                    .as_ref()
+                    .is_some_and(|f| f.sent && f.permit.valid() && !f.reply.is_closed())
+                && (matches!(socket.state(), tcp::State::FinWait2 | tcp::State::TimeWait)
+                    || socket.state() == tcp::State::Closed
+                        && active.prior_state == tcp::State::LastAck)
+                && active.alive.load(Ordering::SeqCst);
+            if fin_acked {
+                let fin = active.fin.take().unwrap();
+                let origin = fin.permit.clone();
+                let alive = active.alive.clone();
+                let complete = Arc::new(AtomicBool::new(false));
+                active.local_fin_done = true;
+                active.terminal = Some(Terminal {
+                    origin: fin.permit,
+                    complete: complete.clone(),
+                });
+                let ack = NativeAck {
+                    permit: SendPermit::new(move || alive.load(Ordering::SeqCst) && origin.valid()),
+                    terminal_owner: Some((complete, active.alive.clone())),
+                    stack_scope: self.stack_scope.clone(),
+                    owner: active.id,
+                    flow: *flow,
+                    id: fin.id,
+                    offset: fin.offset,
+                    length: 0,
+                };
+                if fin.reply.send(Ok(ack)).is_err() {
+                    active.alive.store(false, Ordering::SeqCst);
+                }
+                progress = true;
+            }
             if !active.alive.load(Ordering::SeqCst)
                 || !active.control.valid()
-                || socket.state() == tcp::State::Closed
+                || socket.state() == tcp::State::Closed && active.terminal.is_none()
                 || active.connected.as_ref().is_some_and(|r| r.is_closed())
                 || active.connected.is_some() && Instant::now() >= active.deadline
             {
@@ -886,11 +1079,16 @@ impl Runner {
                 removed.push(*flow);
                 continue;
             }
-            if active.read.is_some()
-                && (socket.recv_queue() > 0 || socket.state() == tcp::State::CloseWait)
-            {
+            let eof_ready = active.connected.is_none()
+                && !socket.may_recv()
+                && active
+                    .rx
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .eof_pending();
+            if active.read.is_some() && (socket.recv_queue() > 0 || eof_ready) {
                 let len = socket.recv_queue().min(CHUNK);
-                let eof = len == 0 && socket.state() == tcp::State::CloseWait;
+                let eof = len == 0 && eof_ready;
                 let result = (|| -> Result<NativeRead> {
                     let credit = if len > 0 {
                         Some(self.budget.reserve(len)?)
@@ -962,6 +1160,7 @@ impl Runner {
                         let origin = write.permit.clone();
                         let alive = active.alive.clone();
                         let _ = write.reply.send(Ok(NativeAck {
+                            terminal_owner: None,
                             permit: SendPermit::new(move || {
                                 alive.load(Ordering::SeqCst) && origin.valid()
                             }),
@@ -977,6 +1176,15 @@ impl Runner {
                         if let Ok(count) = socket.send_slice(&write.bytes[write.copied..]) {
                             write.copied += count;
                             progress |= count > 0;
+                        }
+                    }
+                }
+                if active.writes.is_empty() {
+                    if let Some(fin) = &mut active.fin {
+                        if !fin.sent {
+                            socket.close();
+                            fin.sent = true;
+                            progress = true;
                         }
                     }
                 }
@@ -1118,7 +1326,7 @@ mod tests {
                   if hold_data&&payload>0{let _=delivery.try_send(packet);continue;}
                   let target=target.clone();let count=count.clone();let _=packet.deliver(move|bytes|async move{target.packet(bytes)?;count.fetch_add(payload,Ordering::SeqCst);Ok(())}).await;
                  },
-                 packet=incoming.recv()=>{let Some(packet)=packet else{return Ok(());};let ip=Ipv4Packet::new_checked(packet.as_ref())?;let tcp=TcpPacket::new_checked(ip.payload())?;if hold_rx&&(!tcp.payload().is_empty()||tcp.fin()){let _=rx_delivery.try_send(packet);continue;}if open{let _=h.incoming(packet,SendPermit::new(||true));}else{ensure!(held.len()<32,"fixture ACK holding bound exceeded");held.push(packet);held_count.store(held.len(),Ordering::SeqCst);}}
+                 packet=incoming.recv()=>{let Some(packet)=packet else{return Ok(());};let ip=Ipv4Packet::new_checked(packet.as_ref())?;let tcp=TcpPacket::new_checked(ip.payload())?;if hold_rx&&(!tcp.payload().is_empty()||tcp.fin()||tcp.rst()){let _=rx_delivery.try_send(packet);continue;}if open{let _=h.incoming(packet,SendPermit::new(||true));}else{ensure!(held.len()<32,"fixture ACK holding bound exceeded");held.push(packet);held_count.store(held.len(),Ordering::SeqCst);}}
                 }
             }
         });
@@ -1429,6 +1637,226 @@ mod tests {
         );
         Ok(())
     }
+    async fn native_eof(app: &mut tokio::io::DuplexStream) -> Result<()> {
+        let mut byte = [0; 1];
+        ensure!(
+            tokio::time::timeout(Duration::from_secs(1), app.read(&mut byte)).await?? == 0,
+            "native FIN did not reach peer"
+        );
+        Ok(())
+    }
+    #[tokio::test]
+    async fn native_fin_ack_waits_for_real_tcp_ack_and_preserves_response_half_close() -> Result<()>
+    {
+        let mut rig = rig(false).await?;
+        let valid = Arc::new(AtomicBool::new(true));
+        let original = valid.clone();
+        let c = rig.connection.clone();
+        let finishing = tokio::spawn(async move {
+            c.finish(
+                [11; 16],
+                0,
+                SendPermit::new(move || original.load(Ordering::SeqCst)),
+            )
+            .await
+        });
+        native_eof(&mut rig.app).await?;
+        ensure!(
+            !finishing.is_finished(),
+            "FIN copy falsely proved native ACK"
+        );
+        rig.release.send(true)?;
+        let ack = tokio::time::timeout(Duration::from_secs(1), finishing).await???;
+        ensure!(
+            rig.connection.acknowledges(&ack, [11; 16], 0, 0),
+            "native FIN ACK not exact"
+        );
+        rig.connection
+            .publish_receipt(ack, [11; 16], 0, 0, || async { Ok(()) })
+            .await?;
+        rig.connection
+            .renew_control(SendPermit::new(|| true))
+            .await?;
+        valid.store(false, Ordering::SeqCst);
+        rig.app.write_all(&[8; 64]).await?;
+        let read =
+            tokio::time::timeout(Duration::from_secs(1), rig.connection.read_chunk()).await??;
+        read.deliver(|b, eof| async move {
+            ensure!(
+                b.as_ref() == [8; 64] && !eof,
+                "half-close lost response data"
+            );
+            Ok(())
+        })
+        .await?;
+        rig.app.shutdown().await?;
+        let eof =
+            tokio::time::timeout(Duration::from_secs(1), rig.connection.read_chunk()).await??;
+        ensure!(eof.eof(), "local FIN prevented peer EOF");
+        eof.deliver(|_, _| async { Ok(()) }).await?;
+        cleanup(rig).await
+    }
+    #[tokio::test]
+    async fn native_last_ack_closed_keeps_only_original_terminal_receipt_scope() -> Result<()> {
+        let mut rig = rig_rx(false, true).await?;
+        rig.app.shutdown().await?;
+        let fin = tokio::time::timeout(Duration::from_secs(1), rig.held_input.recv())
+            .await?
+            .unwrap();
+        rig.handle.incoming(fin, SendPermit::new(|| true))?;
+        let eof =
+            tokio::time::timeout(Duration::from_secs(1), rig.connection.read_chunk()).await??;
+        ensure!(eof.eof(), "peer half-close missing");
+        eof.deliver(|_, _| async { Ok(()) }).await?;
+        let valid = Arc::new(AtomicBool::new(true));
+        let p = valid.clone();
+        let c = rig.connection.clone();
+        let finishing = tokio::spawn(async move {
+            c.finish(
+                [12; 16],
+                0,
+                SendPermit::new(move || p.load(Ordering::SeqCst)),
+            )
+            .await
+        });
+        native_eof(&mut rig.app).await?;
+        ensure!(
+            !finishing.is_finished(),
+            "LastAck falsely completed before native ACK"
+        );
+        rig.release.send(true)?;
+        let ack = tokio::time::timeout(Duration::from_secs(1), finishing).await???;
+        ensure!(
+            rig.connection.acknowledges(&ack, [12; 16], 0, 0),
+            "clean Closed lost terminal ACK binding"
+        );
+        rig.connection
+            .renew_control(SendPermit::new(|| true))
+            .await?;
+        let (entered, waiting) = oneshot::channel();
+        let (release, resume) = oneshot::channel();
+        let c = rig.connection.clone();
+        let delivered = Arc::new(AtomicBool::new(false));
+        let out = delivered.clone();
+        let publishing = tokio::spawn(async move {
+            c.publish_receipt(ack, [12; 16], 0, 0, || async move {
+                let _ = entered.send(());
+                let _ = resume.await;
+                out.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .await
+        });
+        waiting.await?;
+        valid.store(false, Ordering::SeqCst);
+        let _ = release.send(());
+        ensure!(
+            publishing.await?.is_err() && !delivered.load(Ordering::SeqCst),
+            "delayed terminal receipt borrowed new control"
+        );
+        ensure!(
+            !rig.connection.alive.load(Ordering::SeqCst),
+            "abandoned terminal scope stayed live"
+        );
+        cleanup(rig).await
+    }
+    #[tokio::test]
+    async fn native_pending_fin_original_expiry_is_not_renewed_by_control_or_late_ack() -> Result<()>
+    {
+        let mut rig = rig(false).await?;
+        let valid = Arc::new(AtomicBool::new(true));
+        let p = valid.clone();
+        let c = rig.connection.clone();
+        let finishing = tokio::spawn(async move {
+            c.finish(
+                [14; 16],
+                0,
+                SendPermit::new(move || p.load(Ordering::SeqCst)),
+            )
+            .await
+        });
+        native_eof(&mut rig.app).await?;
+        ensure!(!finishing.is_finished(), "native FIN lacked withheld ACK");
+        rig.connection
+            .renew_control(SendPermit::new(|| true))
+            .await?;
+        valid.store(false, Ordering::SeqCst);
+        rig.release.send(true)?;
+        ensure!(
+            tokio::time::timeout(Duration::from_secs(1), finishing)
+                .await??
+                .is_err(),
+            "expired FIN accepted late ACK under fresh control"
+        );
+        cleanup(rig).await
+    }
+    #[tokio::test]
+    async fn actual_native_rst_is_not_a_fin_ack() -> Result<()> {
+        let mut rig = rig_rx(false, true).await?;
+        let c = rig.connection.clone();
+        let finishing =
+            tokio::spawn(async move { c.finish([13; 16], 0, SendPermit::new(|| true)).await });
+        native_eof(&mut rig.app).await?;
+        rig.native.close(rig.connection.flow()).await?;
+        let rst = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let p = rig
+                    .held_input
+                    .recv()
+                    .await
+                    .ok_or_else(|| anyhow::anyhow!("native RST stream ended"))?;
+                let ip = Ipv4Packet::new_checked(p.as_ref())?;
+                let tcp = TcpPacket::new_checked(ip.payload())?;
+                if tcp.rst() {
+                    return Ok::<_, anyhow::Error>(p);
+                }
+            }
+        })
+        .await??;
+        rig.handle.incoming(rst, SendPermit::new(|| true))?;
+        ensure!(
+            tokio::time::timeout(Duration::from_secs(1), finishing)
+                .await??
+                .is_err(),
+            "native RST fabricated FIN ACK"
+        );
+        cleanup(rig).await
+    }
+    #[tokio::test]
+    async fn abandoning_actual_data_ack_receipt_retires_its_native_owner() -> Result<()> {
+        let mut rig = rig(false).await?;
+        rig.release.send(true)?;
+        let c = rig.connection.clone();
+        let writing = tokio::spawn(async move {
+            c.write_chunk(
+                [15; 16],
+                0,
+                Bytes::from(vec![2; 1024]),
+                SendPermit::new(|| true),
+            )
+            .await
+        });
+        let mut bytes = [0; 1024];
+        tokio::time::timeout(Duration::from_secs(1), rig.app.read_exact(&mut bytes)).await??;
+        let ack = tokio::time::timeout(Duration::from_secs(1), writing).await???;
+        let c = rig.connection.clone();
+        let (entered, waiting) = oneshot::channel();
+        let publishing = tokio::spawn(async move {
+            c.publish_receipt(ack, [15; 16], 0, 1024, || async move {
+                let _ = entered.send(());
+                std::future::pending::<Result<()>>().await
+            })
+            .await
+        });
+        waiting.await?;
+        publishing.abort();
+        let _ = publishing.await;
+        ensure!(
+            !rig.connection.alive.load(Ordering::SeqCst),
+            "cancelled DATA receipt left native owner live"
+        );
+        cleanup(rig).await
+    }
     #[tokio::test]
     async fn completed_native_ack_cannot_authorize_delayed_receipt_after_original_expiry(
     ) -> Result<()> {
@@ -1501,6 +1929,7 @@ mod tests {
             permit: SendPermit::new(move || old.load(Ordering::SeqCst)),
             alive: Arc::new(AtomicBool::new(true)),
             rx: None,
+            reset: None,
         });
         valid.store(false, Ordering::SeqCst);
         assert!(packets.receive(StackInstant::from_millis(0)).is_none());
@@ -1511,6 +1940,7 @@ mod tests {
             permit: SendPermit::new(|| true),
             alive: old_owner.clone(),
             rx: None,
+            reset: None,
         });
         old_owner.store(false, Ordering::SeqCst);
         let replacement = Arc::new(AtomicBool::new(true));

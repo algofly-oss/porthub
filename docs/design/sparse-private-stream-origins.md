@@ -204,8 +204,31 @@ half-close return traffic, abandoned reads and actual ACK/retransmission.
 Sequence-wrap/gap/metadata-bound tests supplement those consumer tests. They
 are not host OS kernel/TUN or suspend tests.
 
-Native outbound FIN and a production PHC1 receiver that publishes a receipt
-only from its exact `NativeAck` remain open, as do complete protocol negotiation,
-three-OS suspend/route cleanup and whole-process resource fairness. Current
-sender-fixture echo receipts still are not native delivery proof. Optimized
-sparse streaming stays declined and the feature remains default OFF.
+## Native FIN and receipt publication (not runtime integrated)
+
+`finish` waits for native TCP's FIN ACK state, not just peer EOF/copying. FIN
+packets and retransmissions retain their original grant. An admitted
+RST is still validated by native TCP; observing it at the parse boundary prevents
+its closure from masquerading as the clean LastAck-to-Closed ACK transition. The TCP timeout is disabled for this adapter, so
+that clean transition cannot be manufactured by a timeout. A bounded terminal
+receipt scope retains its original FIN grant after native closure; fresh control
+cannot prolong an unpublished terminal receipt.
+
+`publish_receipt` binds the sealed ACK to this exact stack/owner/tuple/chunk,
+offset and length, and guards every asynchronous delivery poll with its original
+grant. Failed or abandoned publication retires the native owner. A successfully
+published local FIN receipt preserves opposite-direction response reads; it does
+not impose the completed FIN's old deadline on a healthy half-closed response.
+Callers still own and must close/drop their bounded `Connection` after both
+application directions finish. This is not yet a production receipt writer.
+
+Actual smoltcp consumer tests withhold FIN ACK after peer EOF, exercise clean
+LastAck-to-Closed and real RST, expire pending FINs under fresh control, block or
+cancel DATA/FIN receipt publication, and positively carry response data after a
+completed local half-close. They do not establish host OS ACK/suspend behavior.
+
+A production PHC1 receiver, pre-issued bounded receive-credit/origin binding,
+complete protocol negotiation, three-OS suspend/route cleanup and whole-process
+resource fairness remain open. Current sender-fixture echo receipts still are
+not native delivery proof. Optimized sparse streaming stays declined and the
+feature remains default OFF.
