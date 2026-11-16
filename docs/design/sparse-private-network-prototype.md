@@ -155,3 +155,42 @@ mutation, and recover legitimate stale owned instances rather than permanently
 rejecting all unclean restarts. Linux policy-routing/VPN rules and macOS local
 address routes also require native lifecycle verification. Server renumbering,
 three-OS resolver ownership, sparse exits/Tor and load fairness remain open.
+
+
+### Windows ownership and NRPT source checkpoint (native proof pending)
+
+The isolated source now writes a privileged, profile/path/identity-bound Wintun
+intent before creation, opens without assigning an address, and verifies the
+actual GUID/name before configuration. A separate ownership lease prevents a
+live owned adapter from being mistaken for a stale instance. Protected records
+retain the baseline and acknowledged explicit routes. Pending route intents are
+not confirmed ownership: an ambiguous live row after an interrupted add is
+preserved and fails actionably. Missing rows can be repaired; normal stale owned
+configuration can be recovered. A freshly proven absent adapter can rebind its
+address with the same identity. Unknown legacy/name-only adapters, renamed GUIDs,
+foreign addresses/metrics and unexpected route rows are not adopted or deleted.
+Cleanup removes only verified own rows/address and stops the own session; an
+opened stale adapter keeps its protected recovery record.
+
+Windows private namespace routing now has a source implementation using exact
+local NRPT apex/suffix rules, not only an interface search list. One hidden,
+bounded one-shot PowerShell process reads a protected journal, checks local and
+effective policy conflicts, records each addition's exact marker before mutation,
+then checkpoints returned rule GUIDs. Failed updates restore the committed set;
+a killed transaction is recovered from its recorded intents. Obsolete entries
+are removed only after additions become effective. No GPO or global DNS setting
+is written. A journal hash fences concurrent record changes. Explicit async
+shutdown and a bounded cancellation fallback clear exact owned rules; failures
+retain the journal and are not reported as cleanup success. Endpoint changes
+first clear the exact old owned policy. The listener binds an exclusive deterministic 127/8 loopback endpoint derived
+from the private address. A stale rule therefore cannot send private names onto
+a LAN after the TUN disappears. Alias bind/routing support remains a required
+Windows native test; collisions fail rather than reusing another listener.
+
+These are source and portable-contract results. They do not prove actual Wintun
+or NRPT lifecycle on Windows, PowerShell 5.1 provider behavior, complete detection
+of changes to native route flags, or absence of OS-level parallel public DNS
+queries. The disposable opt-in native validation design is recorded in
+`sparse-windows-native-validation.md`; it has not been dispatched or run. The
+feature remains default-off and unmerged; the broader registration/range goal
+still requires the previously listed migration, exit/Tor and fairness work.

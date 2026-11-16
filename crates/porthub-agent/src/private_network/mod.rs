@@ -75,3 +75,12 @@ pub mod sparse;
 pub(crate) mod address_lifecycle;
 
 pub(crate) mod topology;
+
+#[cfg(any(windows,test))]
+mod native_ownership;
+
+#[cfg(windows)]
+mod windows_state;
+
+#[cfg(windows)]
+mod windows_nrpt;

@@ -387,6 +387,9 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 if let Some(tun)=&device {
                     if snapshot.sparse.is_none(){tun.update_routes(&routes).await?;}
                 } else {
+                    #[cfg(windows)]
+                    let tun=Arc::new(Tun::open_owned(&path,&name,own.ip,&routes).await?);
+                    #[cfg(not(windows))]
                     let tun=Arc::new(Tun::open(&name,own.ip,&routes).await?);
                     local_address.configured(own.ip)?;
                     let server=dns::Server::bind(own.ip).await?;let port=server.port()?;
@@ -488,7 +491,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     let isolated = std::env::var("PORTHUB_TEST_OWNED_NETNS").as_deref() == Ok("1") && std::path::Path::new("/.dockerenv").is_file();
                     #[cfg(not(all(target_os = "linux", feature = "netns-tests")))]
                     let isolated = false;
-                    if !isolated { dns::replace_registration(&mut dns_registration,tun.index,own.ip,port,&suffixes).await?; }
+                    if !isolated { dns::replace_registration(&mut dns_registration,&path,tun.index,own.ip,port,&suffixes).await?; }
                     #[cfg(target_os="linux")]
                     {dns_target.send_if_modified(|previous| {
                         let next=Some((own.hostname.clone(),own.ip));
@@ -883,6 +886,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     for session in sessions.write().await.drain().map(|(_, session)| session) {
         session.close().await;
     }
+    if let Err(error)=dns::shutdown_registration(&mut dns_registration).await{tracing::warn!("owned private DNS cleanup pending: {error}");}
     drop(dns_registration);
     drop(device);
     if crate::service::readable::stopped(&path).is_err() {

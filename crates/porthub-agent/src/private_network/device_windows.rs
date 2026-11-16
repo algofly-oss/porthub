@@ -10,6 +10,38 @@ use std::{
 };
 use tokio::sync::Mutex;
 use tun_rs::DeviceBuilder;
+use super::{native_ownership::{AdapterRecord,RouteStamp},windows_state};
+
+struct Ownership { path:PathBuf,record:std::sync::Mutex<AdapterRecord>,_lease:crate::profile::Lease }
+fn stamp(route:&Route)->RouteStamp{RouteStamp{address:route.destination(),prefix:route.prefix(),gateway:route.gateway().filter(|g|!g.is_unspecified()),metric:route.metric().unwrap_or(0)}}
+fn direct(address:IpAddr,prefix:u8)->RouteStamp{RouteStamp{address,prefix,gateway:None,metric:0}}
+fn guid_hex(guid:&windows_sys::core::GUID)->String{format!("{:08x}{:04x}{:04x}{}",guid.data1,guid.data2,guid.data3,guid.data4.iter().map(|b|format!("{b:02x}")).collect::<String>())}
+/// Includes unaddressed adapters: getifaddrs alone cannot prove name absence.
+fn adapters()->Result<Vec<(String,String,u32,u32)>>{
+    use windows_sys::Win32::NetworkManagement::IpHelper::{GetIfTable2,FreeMibTable};
+    let mut table=std::ptr::null_mut();
+    ensure!(unsafe{GetIfTable2(&mut table)}==0&&!table.is_null(),"cannot inventory Windows adapters before ownership check");
+    struct Guard(*mut core::ffi::c_void);impl Drop for Guard{fn drop(&mut self){unsafe{FreeMibTable(self.0)}}}
+    let _guard=Guard(table.cast());
+    let count=unsafe{(*table).NumEntries}as usize;ensure!(count<=65536,"Windows adapter inventory exceeds bound");
+    let rows=unsafe{std::slice::from_raw_parts((*table).Table.as_ptr(),count)};
+    let mut found=Vec::with_capacity(count);
+    for row in rows {let end=row.Alias.iter().position(|c|*c==0).unwrap_or(row.Alias.len());found.push((String::from_utf16(&row.Alias[..end])?,guid_hex(&row.InterfaceGuid),row.InterfaceIndex,row.Mtu));}
+    Ok(found)
+}
+pub(super) fn adapter_guid(index:u32)->Result<String>{adapters()?.into_iter().find(|(_,_,i,_)|*i==index).map(|(_,g,_,_)|g).ok_or_else(||anyhow::anyhow!("owned Windows adapter disappeared"))}
+impl Ownership {
+    fn verify(&self,index:u32,device:&tun_rs::AsyncDevice,native:&[Route])->Result<()>{
+        let r=self.record.lock().unwrap_or_else(|p|p.into_inner());
+        let rows=native.iter().filter(|route|route.if_index()==Some(index)).map(stamp).collect();
+        r.recover(&adapter_guid(index)?,&device.addresses()?,device.mtu()?,&rows)
+    }
+    fn reserve(&self,value:RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.pending.insert(value);ensure!(r.routes.len()+r.pending.len()+r.baseline.as_ref().map_or(0,|b|b.len())<=super::native_ownership::MAX_ROUTES,"owned route intent exceeds bound");windows_state::write(&self.path,&*r)}
+    fn confirm(&self,value:RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());ensure!(r.pending.remove(&value),"owned route has no prior intent");r.routes.insert(value);windows_state::write(&self.path,&*r)}
+    fn cancel(&self,value:&RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.pending.remove(value);windows_state::write(&self.path,&*r)}
+    fn forget(&self,value:&RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.routes.remove(value);windows_state::write(&self.path,&*r)}
+}
+
 
 #[cfg(target_arch = "x86_64")]
 const WINTUN: &[u8] = include_bytes!("../../assets/wintun/amd64/wintun.dll");
@@ -37,6 +69,7 @@ pub struct Tun {
     routes: Mutex<HashSet<Ipv4Addr>>,
     capture_routes: Mutex<std::collections::BTreeSet<porthub_mesh::lan_routes::Network>>,
     _driver: PathBuf,
+    ownership:Ownership,
 }
 
 fn peer_routes(own: Ipv4Addr, peers: &[Ipv4Addr]) -> HashSet<Ipv4Addr> {
@@ -108,43 +141,52 @@ fn install_driver() -> Result<PathBuf> {
 }
 
 impl Tun {
-    pub async fn open(name: &str, own: Ipv4Addr, peers: &[Ipv4Addr]) -> Result<Self> {
-        ensure!(own.is_private(), "invalid private interface address");
-        ensure!(
-            peers.iter().all(Ipv4Addr::is_private),
-            "invalid private route address"
-        );
-        let driver = install_driver()?;
-        ensure!(
-            name.len() == 10
-                && name.starts_with("ph")
-                && name[2..].bytes().all(|b| b.is_ascii_hexdigit()),
-            "invalid private adapter identity"
-        );
-        let device = DeviceBuilder::new()
-            .name(name)
-            .ipv4(own, 32, None)
-            .mtu(porthub_mesh::MAX_PACKET as u16)
-            .wintun_file(driver.to_string_lossy().into_owned())
-            .build_async()
-            .context("cannot create Windows private Wintun adapter")?;
-        let name = device
-            .name()
-            .context("cannot identify Windows private adapter")?;
-        let index = device
-            .if_index()
-            .context("cannot identify Windows private adapter index")?;
-        let tun = Self {
-            device,
-            index,
-            name,
-            own,
-            routes: Mutex::new(HashSet::new()),
-            capture_routes: Mutex::new(std::collections::BTreeSet::new()),
-            _driver: driver,
+    pub async fn open_owned(profile:&std::path::Path,name:&str,own:Ipv4Addr,peers:&[Ipv4Addr])->Result<Self>{
+        ensure!(own.is_private()&&peers.iter().all(Ipv4Addr::is_private),"invalid private interface address");
+        let path=windows_state::state_path(profile,".wintun-ownership.json")?;
+        // A second caller must not treat a live owned adapter as a stale one.
+        let ownership_lease=crate::profile::Lease::acquire(&path)?;
+        let profile=profile.canonicalize()?;
+        let binding=windows_state::profile_binding(&profile)?;
+        let mut record:AdapterRecord=match windows_state::read(&path)?{
+            Some(record)=>record,None=>{let mut nonce=[0;16];getrandom::fill(&mut nonce)?;AdapterRecord{version:1,binding:binding.clone(),guid:format!("{:032x}",u128::from_be_bytes(nonce)),name:name.into(),own,mtu:porthub_mesh::MAX_PACKET as u16,baseline:None,routes:Default::default(),pending:Default::default()}},
         };
-        tun.update_routes(peers).await?;
-        Ok(tun)
+        record.validate(&binding,name,record.own,record.mtu)?;
+        let native_adapters=adapters()?;
+        let named:Vec<_>=native_adapters.iter().filter(|(alias,_,_,_)|alias.eq_ignore_ascii_case(name)).collect();ensure!(named.len()<=1,"ambiguous Windows adapter alias");
+        ensure!(!native_adapters.iter().any(|(alias,guid,_,_)|guid==&record.guid&&alias!=name),"recorded adapter was renamed; it was not modified");
+        let existing_index=named.first().map(|(_,_,i,_)|*i);
+        if existing_index.is_some(){ensure!(record.own==own&&record.mtu==porthub_mesh::MAX_PACKET as u16,"owned live adapter needs exact old configuration teardown before address/MTU migration");}
+        if let Some((_,guid,_,_))=named.first(){ensure!(guid==&record.guid,"same-name Windows adapter is foreign; it was not modified");}
+        let mut manager=AsyncRouteManager::new()?;let native=manager.list().await?;
+        // Preflight before the builder can assign an address or change MTU.
+        for route in &native{if route.if_index()!=existing_index&&conflicts_with_route(own,route){anyhow::bail!("private interface address conflicts with an existing LAN/VPN/VM route");}}
+        if let Some((_,guid,index,mtu))=named.first(){
+            let addresses:Vec<_>=getifaddrs::getifaddrs()?.filter(|i|i.index==Some(*index)).filter_map(|i|i.address.ip_addr()).collect();
+            let current=native.iter().filter(|r|r.if_index()==Some(*index)).map(stamp).collect();
+            record.recover(guid,&addresses,u16::try_from(*mtu)?,&current)?;
+        }
+        if existing_index.is_none(){record.reset_absent(own,porthub_mesh::MAX_PACKET as u16)?;}
+        windows_state::write(&path,&record)?; // protected intent precedes creation
+        let driver=install_driver()?;
+        let device=DeviceBuilder::new().name(name).device_guid(u128::from_str_radix(&record.guid,16)?).inherit_enable_state().wintun_file(driver.to_string_lossy().into_owned()).build_async().context("cannot open owned Windows private Wintun adapter")?;
+        let index=device.if_index()?;
+        ensure!(adapter_guid(index)?==record.guid&&device.name()?==name,"Wintun did not return the intended owned adapter; no address was assigned");
+        if existing_index==Some(index){
+            let current=manager.list().await?.iter().filter(|r|r.if_index()==Some(index)).map(stamp).collect();
+            record.recover(&adapter_guid(index)?,&device.addresses()?,device.mtu()?,&current)?;
+        }else if existing_index.is_some(){
+            // The pinned builder may recreate an orphaned *already verified*
+            // owned GUID. Recheck GUID/name above, then journal this fresh start.
+            record.baseline=None;record.routes.clear();record.pending.clear();windows_state::write(&path,&record)?;
+        }
+        device.set_network_address(own,32,None)?;device.set_mtu(porthub_mesh::MAX_PACKET as u16)?;device.enabled(true)?;
+        let current:std::collections::BTreeSet<_>=manager.list().await?.iter().filter(|r|r.if_index()==Some(index)).map(stamp).collect();
+        let present:std::collections::BTreeSet<_>=record.routes.intersection(&current).cloned().collect();
+        if record.baseline.is_none(){record.baseline=Some(current.clone());}
+        record.routes=present.clone();record.pending.clear();windows_state::write(&path,&record)?;
+        let tun=Self{device,index,name:name.into(),own,routes:Mutex::new(present.iter().filter_map(|r|if r.prefix==32{if let IpAddr::V4(ip)=r.address{Some(ip)}else{None}}else{None}).collect()),capture_routes:Mutex::new(present.iter().filter_map(|r|if r.prefix<32{if let IpAddr::V4(ip)=r.address{porthub_mesh::lan_routes::Network::from_address(ip,r.prefix).ok()}else{None}}else{None}).collect()),_driver:driver,ownership:Ownership{path,record:std::sync::Mutex::new(record),_lease:ownership_lease}};
+        tun.update_routes(peers).await?;Ok(tun)
     }
 
     /// Prefix capture does not authorize packets. Preserve foreign routes and isolate pool conflicts.
@@ -152,6 +194,7 @@ impl Tun {
         use porthub_network::capture_routes::{self,ExistingRoute};
         let mut manager=AsyncRouteManager::new().context("cannot open capture route manager")?;
         let native=manager.list().await.context("cannot inspect capture routes")?;
+        self.ownership.verify(self.index,&self.device,&native)?;
         let existing:Vec<_>=native.iter().filter_map(|r|match r.destination(){IpAddr::V4(address)=>Some(ExistingRoute{destination:address,prefix:r.prefix(),interface:r.if_index()}),_=>None}).collect();
         let mut plan=capture_routes::plan(pools,&existing,self.index)?;
         let wanted:std::collections::BTreeSet<_>=plan.accepted.iter().copied().collect();let mut owned=self.capture_routes.lock().await;
@@ -159,8 +202,9 @@ impl Tun {
             manager.delete(&Route::new(IpAddr::V4(prefix.address()),prefix.prefix()).with_if_index(self.index)).await.context("cannot remove owned capture route")?;owned.remove(&prefix);
         }
         for prefix in wanted.difference(&owned).copied().collect::<Vec<_>>(){
-            if manager.add(&Route::new(IpAddr::V4(prefix.address()),prefix.prefix()).with_if_index(self.index)).await.is_ok(){owned.insert(prefix);}
-            else{plan.accepted.retain(|p|*p!=prefix);plan.conflicting.push(prefix);}
+            self.ownership.reserve(direct(IpAddr::V4(prefix.address()),prefix.prefix()))?;
+            if manager.add(&Route::new(IpAddr::V4(prefix.address()),prefix.prefix()).with_if_index(self.index).with_metric(0)).await.is_ok(){self.ownership.confirm(direct(IpAddr::V4(prefix.address()),prefix.prefix()))?;owned.insert(prefix);}
+            else{self.ownership.cancel(&direct(IpAddr::V4(prefix.address()),prefix.prefix()))?;plan.accepted.retain(|p|*p!=prefix);plan.conflicting.push(prefix);}
         }
         Ok(plan)
     }
@@ -172,6 +216,7 @@ impl Tun {
         use porthub_network::capture_routes::{self,ExistingRoute};
         let mut manager=AsyncRouteManager::new().context("cannot open sparse route audit")?;
         let native=manager.list().await.context("cannot inspect sparse route audit")?;
+        self.ownership.verify(self.index,&self.device,&native)?;
         let existing:Vec<_>=native.iter().filter_map(|r|match r.destination(){IpAddr::V4(address)=>Some(ExistingRoute{destination:address,prefix:r.prefix(),interface:r.if_index()}),_=>None}).collect();
         let mut audit=capture_routes::audit(pools,self.own,peers,&existing,self.index)?;
         ensure!(!audit.own_conflict,"private TUN address conflicts with a changed LAN/VPN/VM route; private range migration is required");
@@ -206,6 +251,7 @@ impl Tun {
             .list()
             .await
             .context("cannot inspect Windows routes")?;
+        self.ownership.verify(self.index,&self.device,&existing)?;
         for address in &wanted {
             for route in &existing {
                 if route.prefix() == 0 || route.if_index() == Some(self.index) {
@@ -217,21 +263,20 @@ impl Tun {
             }
         }
         for address in additions {
-            let route = Route::new(IpAddr::V4(address), 32).with_if_index(self.index);
-            routes
-                .add(&route)
-                .await
-                .context("cannot add Windows private host route")?;
+            let route = Route::new(IpAddr::V4(address), 32).with_if_index(self.index).with_metric(0);
+            self.ownership.reserve(direct(IpAddr::V4(address),32))?;
+            if let Err(error)=routes.add(&route).await{self.ownership.cancel(&direct(IpAddr::V4(address),32))?;return Err(error).context("cannot add Windows private host route");}
+            self.ownership.confirm(direct(IpAddr::V4(address),32))?;
             current.insert(address);
         }
         let removals: Vec<_> = current.difference(&wanted).copied().collect();
         for address in removals {
-            let route = Route::new(IpAddr::V4(address), 32).with_if_index(self.index);
+            let route = Route::new(IpAddr::V4(address), 32).with_if_index(self.index).with_metric(0);
             routes
                 .delete(&route)
                 .await
                 .context("cannot remove Windows private host route")?;
-            current.remove(&address);
+            current.remove(&address);self.ownership.forget(&direct(IpAddr::V4(address),32))?;
         }
         Ok(())
     }
@@ -262,24 +307,25 @@ impl Tun {
 
 impl Drop for Tun {
     fn drop(&mut self) {
-        let routes = self.routes.get_mut();
-        let captures=self.capture_routes.get_mut();
-        if routes.is_empty() && captures.is_empty() {
-            return;
+        let Ok(mut manager)=route_manager::RouteManager::new()else{return;};
+        let Ok(native)=manager.list()else{return;};
+        if let Err(error)=self.ownership.verify(self.index,&self.device,&native){tracing::warn!("owned Wintun changed externally; shutdown preserves it: {error}");return;}
+        let routes=self.routes.get_mut();let captures=self.capture_routes.get_mut();
+        let mut removed=Vec::new();
+        for (address,prefix) in captures.iter().map(|p|(p.address(),p.prefix())).chain(routes.iter().map(|ip|(*ip,32))){
+            let expected=direct(IpAddr::V4(address),prefix);
+            if !native.iter().any(|r|r.if_index()==Some(self.index)&&stamp(r)==expected){removed.push(expected);continue;}
+            let route=Route::new(IpAddr::V4(address),prefix).with_if_index(self.index).with_metric(0);
+            if manager.delete(&route).is_ok(){removed.push(expected);}else{tracing::warn!("could not remove exact owned Windows private route during shutdown");}
         }
-        let Ok(mut manager) = route_manager::RouteManager::new() else {
-            return;
-        };
-        for prefix in std::mem::take(captures) {
-            let route=Route::new(IpAddr::V4(prefix.address()),prefix.prefix()).with_if_index(self.index);
-            if manager.delete(&route).is_err(){tracing::warn!("could not remove owned capture route during shutdown");}
+        for route in removed{if self.ownership.forget(&route).is_err(){tracing::warn!("could not checkpoint owned Windows route cleanup");}}
+        // A handle opened on a stale adapter does not delete that adapter when
+        // closed. Remove only its verified own address and stop our session;
+        // leave the protected GUID record so the next normal restart recovers.
+        if self.device.addresses().is_ok_and(|ips|ips.contains(&IpAddr::V4(self.own))){
+            if self.device.remove_address(IpAddr::V4(self.own)).is_err(){tracing::warn!("could not clear exact owned Windows interface address");}
         }
-        for address in routes.drain() {
-            let route = Route::new(IpAddr::V4(address), 32).with_if_index(self.index);
-            if manager.delete(&route).is_err() {
-                tracing::warn!("could not remove an owned Windows private route during shutdown");
-            }
-        }
+        if self.device.enabled(false).is_err(){tracing::warn!("could not stop owned Wintun session");}
     }
 }
 

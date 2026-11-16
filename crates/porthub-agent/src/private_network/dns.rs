@@ -221,7 +221,7 @@ impl Server {
         #[cfg(target_os = "macos")]
         let address = (Ipv4Addr::LOCALHOST, 0);
         #[cfg(windows)]
-        let address = (Ipv4Addr::LOCALHOST, 53);
+        let address = (if cfg!(feature="private-sparse"){super::native_ownership::dns_endpoint(own)}else{Ipv4Addr::LOCALHOST}, 53);
         let socket = UdpSocket::bind(address).await?;
         let tcp = TcpListener::bind(socket.local_addr()?).await?;
         Ok(Self { socket, tcp, zone: Default::default(), upstream: Default::default() })
@@ -318,11 +318,27 @@ pub struct Registration {
     tor_default: Option<super::dns_default_macos::Registration>,
     #[cfg(windows)]
     interface: Option<windows_sys::core::GUID>,
+    #[cfg(windows)]
+    nrpt:Option<super::windows_nrpt::Registration>,
 }
 
-/// Replace namespace registrations without first removing the still-valid set.
-/// A failed expansion leaves the previous guard and owned resolver paths alive.
-pub async fn replace_registration(current:&mut Option<Registration>,index:u32,own:Ipv4Addr,port:u16,suffixes:&[String])->Result<()> {
+/// Finish owned OS DNS cleanup before the interface address can disappear.
+pub async fn shutdown_registration(current:&mut Option<Registration>)->Result<()> {
+    #[cfg(windows)]
+    if let Some(nrpt)=current.as_mut().and_then(|r|r.nrpt.as_mut()){nrpt.close().await?;}
+    *current=None;Ok(())
+}
+
+/// Replace namespaces without first removing the still-valid owned set.
+pub async fn replace_registration(current:&mut Option<Registration>,profile:&std::path::Path,index:u32,own:Ipv4Addr,port:u16,suffixes:&[String])->Result<()> {
+    #[cfg(windows)]
+    if cfg!(feature="private-sparse") {
+        ensure!(port==53,"Windows owned DNS requires standard DNS port");
+        if let Some(registration)=current.as_mut().and_then(|r|r.nrpt.as_mut()){return registration.replace(suffixes).await;}
+        let nrpt=super::windows_nrpt::Registration::open(profile,index,own,suffixes).await?;
+        *current=Some(Registration{interface:None,nrpt:Some(nrpt)});return Ok(());
+    }
+    let _=profile;
     #[cfg(target_os="macos")]
     {
         let private:Vec<_>=suffixes.iter().filter(|s|s.as_str()!=".").cloned().collect();
@@ -647,6 +663,7 @@ pub async fn register(
     );
     Ok(Registration {
         interface: Some(interface),
+        nrpt:None,
     })
 }
 
