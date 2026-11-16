@@ -4,6 +4,9 @@ source=(ROOT/'crates/porthub-agent/src/keyboard/windows_refresh.rs').read_text()
 BOOT=re.search(r'const BOOTSTRAP: &str = r#"(.*?)"#;',source,re.S)[1]
 PWSH=os.environ.get('PORTHUB_REFRESH_TEST_POWERSHELL') or shutil.which('powershell.exe') or shutil.which('pwsh')
 if not PWSH: raise RuntimeError('PowerShell executable required')
+# Hosted ARM PS5 cold start took 5.518s; a digest-reject child took 5.156s.
+# Bound test children at 10s; production refresh retains its independent 120s limit.
+CHILD_TIMEOUT_SECONDS=10
 CHILD_ENV={k:v for k,v in os.environ.items() if k.lower() not in ('psmodulepath','psmoduleanalysiscachepath')}
 def diagnostic_utility_probe(mode,budget):
  # Metadata only: fixed JSON, numeric timing, trusted OS module origin. Never a PASS substitute.
@@ -25,14 +28,14 @@ class Bootstrap(unittest.TestCase):
  @classmethod
  def setUpClass(cls):
   if os.environ.get('PORTHUB_REFRESH_UTILITY_DIAGNOSTICS')!='1':return
-  # Two independent diagnostics share <60s budget; original nine tests retain 5s deadlines.
+  # Two independent diagnostics share <60s budget; nine strict test children retain bounded 10s deadlines.
   end=time.monotonic()+58
   for mode in ('autoload','explicit'):
    diagnostic_utility_probe(mode,min(29,max(1,end-time.monotonic()-1)))
  def run_child(self,text,payload):
   command=base64.b64encode(text.encode('utf-16le')).decode();self.assertLess(len(command),8192)
   started=time.monotonic()
-  try:r=subprocess.run([PWSH,'-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',command],input=payload,capture_output=True,timeout=5,env=CHILD_ENV)
+  try:r=subprocess.run([PWSH,'-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',command],input=payload,capture_output=True,timeout=CHILD_TIMEOUT_SECONDS,env=CHILD_ENV)
   except subprocess.TimeoutExpired as error:
    out=error.stdout or b'';err=error.stderr or b''
    stages=re.findall(r'BOOT_PROBE_[A-Za-z0-9_:]+',err.decode('utf-8',errors='replace'))[:12]
@@ -71,7 +74,7 @@ class Bootstrap(unittest.TestCase):
   command=base64.b64encode(trace.encode('utf-16le')).decode();self.assertLess(len(command),8192)
   code=None;timed_out=False
   try:
-   result=subprocess.run([PWSH,'-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',command],input=payload,capture_output=True,timeout=5,env=CHILD_ENV);out,err=result.stdout,result.stderr;code=result.returncode
+   result=subprocess.run([PWSH,'-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',command],input=payload,capture_output=True,timeout=CHILD_TIMEOUT_SECONDS,env=CHILD_ENV);out,err=result.stdout,result.stderr;code=result.returncode
   except subprocess.TimeoutExpired as error:out,err=error.stdout or b'',error.stderr or b'';timed_out=True
   stages=re.findall(r'BOOT_STAGE_[A-Z_]+',err.decode('utf-8',errors='replace'))[:16]
   print('BOOT_DIAGNOSTIC_ONLY '+json.dumps({'timeout':timed_out,'returncode':code,'stdout_bytes':len(out),'stderr_bytes':len(err),'stages':stages}),file=sys.stderr)
