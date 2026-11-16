@@ -39,6 +39,19 @@ impl Fences {
         Ok(lock.lock_owned().await)
     }
 }
+/// Only this constructor can provide mutation authority to the journal. Lock
+/// order is allocation -> workspace, matching enrollment and manual range edits.
+pub(super) struct Exclusive<'a> {
+    pub(super) app:&'a App,
+    pub(super) workspace:ObjectId,
+    _allocation:tokio::sync::MutexGuard<'a,()>,
+    _publication:OwnedMutexGuard<()>,
+}
+pub(super) async fn exclusive(app:&App,workspace:ObjectId)->ApiResult<Exclusive<'_>> {
+    let allocation=app.private_network_lock.lock().await;
+    let publication=app.private_sparse.workspace_fences.acquire(&workspace.to_hex()).await?;
+    Ok(Exclusive{app,workspace,_allocation:allocation,_publication:publication})
+}
 /// Authoritative revocation remains possible while a crashed migration is
 /// fenced. It serializes with a live runner but never restores publication.
 pub(crate) async fn revocation(app:&App,workspace:ObjectId)->ApiResult<OwnedMutexGuard<()>> {
