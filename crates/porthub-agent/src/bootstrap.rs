@@ -275,9 +275,12 @@ fn append_windows_path(key: &windows_registry::Key, directory: &Path) -> Result<
         !directory.contains(';') && !directory.chars().any(char::is_control),
         "CLI directory cannot contain PATH separators or control characters"
     );
-    let current = key
-        .get_string("Path")
+    let value = key
+        .get_value("Path")
         .context("cannot read the machine PATH registry value")?;
+    let kind = value.ty();
+    let current: String = value.try_into()
+        .context("machine PATH registry value must be a string")?;
     if !env::split_paths(std::ffi::OsStr::new(&current))
         .any(|entry| entry.to_string_lossy().eq_ignore_ascii_case(directory))
     {
@@ -286,8 +289,11 @@ fn append_windows_path(key: &windows_registry::Key, directory: &Path) -> Result<
             updated.push(';');
         }
         updated.push_str(directory);
-        key.set_expand_string("Path", updated)
-            .context("cannot add PortHub to the machine PATH")?;
+        match kind {
+            windows_registry::Type::String => key.set_string("Path", updated),
+            windows_registry::Type::ExpandString => key.set_expand_string("Path", updated),
+            _ => unreachable!("String conversion validated the registry type"),
+        }.context("cannot add PortHub to the machine PATH")?;
     }
     Ok(())
 }
@@ -311,13 +317,21 @@ mod windows_path_tests {
         }
         let _cleanup = Cleanup(name.clone());
         let key = windows_registry::CURRENT_USER.create(&name)?;
-        key.set_expand_string("Path", r"%SystemRoot%\System32;C:\Existing Tools")?;
-        append_windows_path(&key, Path::new(r"C:\Program Files\PortHub\bin"))?;
-        append_windows_path(&key, Path::new(r"c:\program files\porthub\BIN"))?;
-        anyhow::ensure!(
-            key.get_string("Path")?
-                == r"%SystemRoot%\System32;C:\Existing Tools;C:\Program Files\PortHub\bin"
-        );
+        for kind in [windows_registry::Type::String, windows_registry::Type::ExpandString] {
+            let original = r"%SystemRoot%\System32;C:\Existing Tools";
+            match kind {
+                windows_registry::Type::String => key.set_string("Path", original)?,
+                windows_registry::Type::ExpandString => key.set_expand_string("Path", original)?,
+                _ => unreachable!(),
+            }
+            append_windows_path(&key, Path::new(r"C:\Program Files\PortHub\bin"))?;
+            let once = key.get_value("Path")?;
+            anyhow::ensure!(once.ty() == kind);
+            let text: String = once.clone().try_into()?;
+            anyhow::ensure!(text == r"%SystemRoot%\System32;C:\Existing Tools;C:\Program Files\PortHub\bin");
+            append_windows_path(&key, Path::new(r"c:\program files\porthub\BIN"))?;
+            anyhow::ensure!(key.get_value("Path")? == once, "Idempotent registration changed raw registry value");
+        }
         Ok(())
     }
 }
