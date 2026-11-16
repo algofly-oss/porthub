@@ -11,3 +11,5 @@ mod finish;
 pub mod recover;
 
 pub mod deferred;
+
+pub mod worker;
