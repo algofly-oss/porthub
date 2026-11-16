@@ -283,7 +283,7 @@ pub async fn run_watched_identity(
     local: LocalIdentity,
     cancel: CancellationToken,
 ) -> Result<()> {
-    run_watched_sparse(profile,interfaces,sessions,events,relay_config,local,cancel,None).await
+    run_watched_sparse(profile,interfaces,sessions,events,relay_config,local,cancel,None,None).await
 }
 pub async fn run_watched_sparse(
     profile: Profile,
@@ -294,6 +294,7 @@ pub async fn run_watched_sparse(
     local: LocalIdentity,
     cancel: CancellationToken,
     mut sparse: Option<super::sparse::Control>,
+    authority_domain:Option<super::authority_event::Domain>,
 ) -> Result<()> {
     ensure!(
         interfaces.borrow().len() <= 16,
@@ -355,7 +356,7 @@ pub async fn run_watched_sparse(
             "acks":&acks[..acked],"paths":paths,"lan_networks":lan_networks,"lan_exit":cfg!(any(target_os="linux",target_os="macos")),"application_proxy":cfg!(feature="local-tor")});
         if let Some(resolver)=&mut sparse {body["sparse"]=resolver.batch()?;}
         let mut reply = None;
-        let request_window = super::authority_event::request_start()?;
+        let request_window = super::authority_event::request_start(authority_domain.as_ref())?;
         let request = control.request(reqwest::Method::POST,"access/private/sync",Some(body),&[]);
         let result = tokio::select! { _=cancel.cancelled()=>return Ok(()), result=request=>result };
         match result {

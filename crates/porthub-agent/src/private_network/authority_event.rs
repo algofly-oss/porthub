@@ -7,9 +7,47 @@ pub(crate) type Witness = super::authority_clock::RequestWindow;
 #[cfg(not(feature = "private-sparse"))]
 pub(crate) type Witness = ();
 
+/// Unique runtime owner is created only after the protected profile Lease. All
+/// domain clones are observation-only; dropping the owner cannot be reversed.
+#[derive(Clone)]
+pub(crate) struct Domain {
+    active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+pub(crate) struct Owner {
+    domain: Domain,
+}
+impl Owner {
+    pub(crate) fn new() -> Self {
+        Self {
+            domain: Domain {
+                active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            },
+        }
+    }
+    pub(crate) fn domain(&self) -> Domain {
+        self.domain.clone()
+    }
+    pub(crate) fn revoke(&self) {
+        self.domain
+            .active
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+impl Drop for Owner {
+    fn drop(&mut self) {
+        self.revoke();
+    }
+}
+impl Domain {
+    pub(crate) fn valid(&self) -> bool {
+        self.active.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
 #[derive(Clone)]
 pub struct Authority<T> {
     pub(crate) value: T,
+    retirement: Option<Domain>,
     #[cfg(feature = "private-sparse")]
     witness: Option<Witness>,
     #[cfg(feature = "private-sparse")]
@@ -25,13 +63,22 @@ impl<T> Authority<T> {
         let _ = (witness, expiry);
         Self {
             value,
+            retirement: None,
             #[cfg(feature = "private-sparse")]
             witness,
             #[cfg(feature = "private-sparse")]
             expiry: expiry.into(),
         }
     }
+    pub(crate) fn retired_with(mut self, domain: Domain) -> Self {
+        self.retirement = Some(domain);
+        self
+    }
     pub(crate) fn check(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.retirement.as_ref().is_none_or(|domain| domain.valid()),
+            "private authority retired"
+        );
         #[cfg(feature = "private-sparse")]
         if let Some(witness) = &self.witness {
             witness.check(self.expiry)?;
@@ -62,6 +109,10 @@ impl<T> Authority<T> {
         }
     }
     pub(crate) fn remaining(&self) -> Result<Option<std::time::Duration>> {
+        anyhow::ensure!(
+            self.retirement.as_ref().is_none_or(|domain| domain.valid()),
+            "private authority retired"
+        );
         #[cfg(feature = "private-sparse")]
         if let Some(witness) = &self.witness {
             return witness.remaining(self.expiry).map(Some);
@@ -71,6 +122,7 @@ impl<T> Authority<T> {
     pub(crate) fn retained(&self) -> Authority<()> {
         Authority {
             value: (),
+            retirement: self.retirement.clone(),
             #[cfg(feature = "private-sparse")]
             witness: self.witness.clone(),
             #[cfg(feature = "private-sparse")]
@@ -87,12 +139,15 @@ impl<T> Authority<T> {
     }
 }
 
-pub(crate) fn request_start() -> Result<Option<Witness>> {
+pub(crate) fn request_start(domain: Option<&Domain>) -> Result<Option<Witness>> {
+    #[cfg(not(feature = "private-sparse"))]
+    let _ = domain;
     #[cfg(feature = "private-sparse")]
     {
-        return super::authority_clock::RequestWindow::start(std::sync::Arc::new(
-            super::authority_clock::NativeClock,
-        ))
+        return super::authority_clock::RequestWindow::start_in(
+            std::sync::Arc::new(super::authority_clock::NativeClock),
+            domain.cloned(),
+        )
         .map(Some);
     }
     #[cfg(not(feature = "private-sparse"))]
@@ -221,5 +276,50 @@ mod tests {
         reader.read_to_end(&mut bytes).await.unwrap();
         assert!(task.await.unwrap().is_err());
         assert_eq!(bytes, vec![1]);
+    }
+    #[tokio::test]
+    async fn profile_owner_drop_revokes_queued_witness_and_real_pending_writer() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let clock = Arc::new(Clock(AtomicU64::new(0)));
+        let owner = Owner::new();
+        let old_domain = owner.domain();
+        let witness = super::super::authority_clock::RequestWindow::start_in(
+            clock.clone(),
+            Some(old_domain.clone()),
+        )
+        .unwrap();
+        let authority = Authority::new(
+            (),
+            Some(witness),
+            chrono::Utc::now() + chrono::Duration::seconds(30),
+        );
+        let cached = authority.clone();
+        let (mut writer, mut reader) = tokio::io::duplex(1);
+        let (started, wait) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            authority
+                .during(async {
+                    writer.write_all(&[1]).await?;
+                    started.send(()).unwrap();
+                    writer.write_all(&[2]).await?;
+                    Ok(())
+                })
+                .await
+        });
+        wait.await.unwrap();
+        drop(owner);
+        assert!(!old_domain.valid());
+        assert!(cached.check().is_err());
+        let replacement = Owner::new();
+        assert!(replacement.domain().valid());
+        assert!(cached.check().is_err());
+        assert!(
+            super::super::authority_clock::RequestWindow::start_in(clock, Some(old_domain))
+                .is_err()
+        );
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await.unwrap();
+        assert_eq!(bytes, vec![1]);
+        assert!(task.await.unwrap().is_err());
     }
 }

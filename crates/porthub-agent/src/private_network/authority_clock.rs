@@ -84,14 +84,26 @@ fn native_now() -> Result<Duration> {
 #[derive(Clone)]
 pub(crate) struct RequestWindow {
     clock: Arc<dyn SuspendClock>,
+    domain: Option<super::authority_event::Domain>,
     boot_start: Duration,
     awake_start: Instant,
 }
 impl RequestWindow {
     pub(crate) fn start(clock: Arc<dyn SuspendClock>) -> Result<Self> {
+        Self::start_in(clock, None)
+    }
+    pub(crate) fn start_in(
+        clock: Arc<dyn SuspendClock>,
+        domain: Option<super::authority_event::Domain>,
+    ) -> Result<Self> {
+        ensure!(
+            domain.as_ref().is_none_or(|d| d.valid()),
+            "profile authority owner stopped"
+        );
         let boot_start = clock.elapsed_since_boot()?;
         Ok(Self {
             clock,
+            domain,
             boot_start,
             awake_start: Instant::now(),
         })
@@ -100,6 +112,10 @@ impl RequestWindow {
         self.remaining(server_expiry).map(|_| ())
     }
     pub(crate) fn remaining(&self, server_expiry: SystemTime) -> Result<Duration> {
+        ensure!(
+            self.domain.as_ref().is_none_or(|d| d.valid()),
+            "profile authority owner stopped"
+        );
         let now = self.clock.elapsed_since_boot()?;
         let elapsed = now
             .checked_sub(self.boot_start)

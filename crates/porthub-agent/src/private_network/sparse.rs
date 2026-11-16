@@ -23,6 +23,7 @@ pub struct Control {
     sequence: u64,
 }
 struct Cached {
+    _retirement_owner:Option<super::authority_event::Owner>,
     authority: Option<super::authority_event::Authority<()>>,
     lease: PairLease,
     deadline: Instant,
@@ -258,9 +259,12 @@ impl Handle {
             .get(&lease.peer.id)
             .map(|c| c.last_used)
             .unwrap_or(now);
+        let retirement_owner=authority.as_ref().map(|_|super::authority_event::Owner::new());
+        let authority=authority.zip(retirement_owner.as_ref()).map(|(authority,owner)|authority.retired_with(owner.domain()));
         s.cache.insert(
             lease.peer.id.clone(),
             Cached {
+                _retirement_owner:retirement_owner,
                 authority,
                 lease,
                 deadline: now + left,
@@ -475,6 +479,18 @@ mod tests {
         let response=Message::from_vec(&zone.answer(&bytes).unwrap()).unwrap();
         assert_eq!(response.metadata.response_code,ResponseCode::ServFail);assert!(response.answers.is_empty());
         assert!(!h.authority_valid());assert!(!h.request_peer("b"));
+    }
+    #[cfg(feature="private-sparse")]
+    #[test]
+    fn actual_pair_cache_retirement_revokes_old_queued_permit_without_reviving_on_reinstall() {
+        let (handle,_)=channel();let epoch="a".repeat(64);let base=base(&epoch);let pair=lease(&epoch);
+        let witness=||super::super::authority_event::request_start(None).unwrap();
+        let expiry=pair.expires_at;
+        let authority=||super::super::authority_event::Authority::new((),witness(),expiry);
+        handle.update_base_authority(&base,authority());let query=Lookup{kind:"peer".into(),value:"b".into()};
+        handle.installed_authority(&query,pair.clone(),authority());let old=handle.pair_authority("b").unwrap();assert!(old.check().is_ok());
+        handle.retire("b");assert!(old.check().is_err());
+        handle.installed_authority(&query,pair,authority());assert!(handle.pair_authority("b").unwrap().check().is_ok());assert!(old.check().is_err());
     }
     #[test]
     fn miss_intents_deduplicate_and_stop_at_a_hard_bound() {

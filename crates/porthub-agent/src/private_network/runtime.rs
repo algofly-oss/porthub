@@ -224,6 +224,8 @@ pub(crate) async fn run_embedded(path: PathBuf, cancel: CancellationToken) -> Re
 async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate::logs::Buffer>) -> Result<()> {
     let profile = Profile::load(&path)?;
     let _lease = Lease::acquire(&path)?;
+    // Declared after Lease: revocation drops before another runtime can own it.
+    let authority_owner=super::authority_event::Owner::new();
     let control = Arc::new(crate::control::Control::new_private(&profile)?);
     // Embedded private networking shares the parent registration's maintenance
     // worker. A standalone private enrollment owns its own background updates.
@@ -291,6 +293,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         },
         work.clone(),
         if cfg!(feature="private-sparse"){Some(sparse_control)}else{None},
+        Some(authority_owner.domain()),
     ));
     let mut device: Option<Arc<Tun>> = None;
     let mut local_address=super::address_lifecycle::Binding::default();
@@ -389,6 +392,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 installed_authority=Some(authority.retained());
                 sparse_authority=Some(snapshot.clone());
                 sparse_handle.update_base_authority(&snapshot,authority.retained());
+                relay_sender.update_authority(authority.retained(),sparse_handle.clone());
                 let mut routes=routes;
                 routes.extend(sparse_handle.peers().iter().map(|p|p.ip));
                 #[cfg(feature="private-stream")]
@@ -905,6 +909,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         let status=crate::runtime::Status{pid:std::process::id(),state:"stopped".into(),agent_version:crate::VERSION.into(),config_version:String::new(),service_count:0,route:"private".into(),updated_at:SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),update_request_id:String::new(),private_status:Some(private_status.clone())};
         if let Ok(bytes)=serde_json::to_vec(&status) {if profile::write_private(&profile::sibling(&path,".status.json"),&bytes,true).is_err(){tracing::warn!("expired private authority status update failed");}}
     }
+    authority_owner.revoke();
     work.cancel();
     drop(component_maintenance);
     if tokio::time::timeout(Duration::from_secs(2), async {
