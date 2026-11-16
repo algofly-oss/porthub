@@ -43,6 +43,7 @@ foreach($sid in $accounts){
  if((Sid $d.Principal.UserId) -ne $sid -or [int]$d.Principal.LogonType -ne 3 -or [int]$d.Principal.RunLevel -ne 0 -or $d.Actions.Count -ne 1){continue}
  $a=$d.Actions.Item(1);if([int]$a.Type -ne 0 -or $a.Arguments -notin @('keyboard run','keyboard startup')){continue}
  $paths=@([string]$a.Path)
+Import-Module -Name "$PSHOME\Modules\CimCmdlets\CimCmdlets.psd1" -ErrorAction Stop
  foreach($p in @(Get-CimInstance Win32_Process -Filter "Name='porthub.exe'")){
   if($p.SessionId -gt 0 -and $p.CommandLine -match '(?i)\skeyboard\s+(?:run|startup)\s*$'){
    $owner=Invoke-CimMethod -InputObject $p -MethodName GetOwnerSid
@@ -101,6 +102,92 @@ ConvertTo-Json -InputObject @($rows) -Depth 4 -Compress
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_cim_cmdlets_import_uses_trusted_module_under_hostile_search_path() -> Result<()>
+    {
+        // Use the exact production import immediately preceding the query.
+        // Only inspect command/module metadata; never issue CIM queries or task writes.
+        let source = include_str!("desktop.rs");
+        let script = source
+            .split_once("let script = r#\"")
+            .context("Production script missing")?
+            .1
+            .split_once("\"#;")
+            .context("Production script terminator missing")?
+            .0;
+        let query = script
+            .find(" foreach($p in @(Get-CimInstance")
+            .context("Production CIM query missing")?;
+        let import = script[..query]
+            .lines()
+            .last()
+            .context("Production CIM import missing")?;
+        let metadata = format!(
+            r#"
+$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
+if($PSVersionTable.PSVersion.Major -ne 5){{throw 'Windows PowerShell 5 required'}}
+{import}
+$expected=[IO.Path]::GetFullPath($PSHOME+'\Modules\CimCmdlets')
+function Trusted($name){{
+ $c=$ExecutionContext.InvokeCommand.GetCommand($name,[Management.Automation.CommandTypes]::Cmdlet)
+ return ($null -ne $c -and $c.ModuleName -eq 'CimCmdlets' -and [String]::Equals([IO.Path]::GetFullPath($c.Module.ModuleBase),$expected,[StringComparison]::OrdinalIgnoreCase))
+}}
+$one=Trusted 'Get-CimInstance';$two=Trusted 'Invoke-CimMethod'
+[Console]::WriteLine(('{{"get_cim":'+$one.ToString().ToLowerInvariant()+',"invoke_cim":'+$two.ToString().ToLowerInvariant()+'}}'))
+"#
+        );
+        let root = PathBuf::from(
+            std::env::var_os("SystemRoot").context("Windows SystemRoot unavailable")?,
+        );
+        let executable = root.join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let hostile = root.join(format!("PortHub-absent-CIM-modules-{}", std::process::id()));
+        let run = async {
+            let mut child = tokio::process::Command::new(executable)
+                .args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    &metadata,
+                ])
+                .env("PSModulePath", hostile)
+                .env("PSModuleAnalysisCachePath", "NUL")
+                .creation_flags(0x08000000)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .spawn()?;
+            let mut bytes = Vec::new();
+            child
+                .stdout
+                .take()
+                .context("CIM module metadata unavailable")?
+                .take(513)
+                .read_to_end(&mut bytes)
+                .await?;
+            ensure!(
+                bytes.len() <= 512 && child.wait().await?.success(),
+                "Trusted CIM module metadata failed"
+            );
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Commands {
+                get_cim: bool,
+                invoke_cim: bool,
+            }
+            let commands: Commands = serde_json::from_slice(&bytes)?;
+            ensure!(
+                commands.get_cim && commands.invoke_cim,
+                "CIM commands escaped the trusted system module"
+            );
+            Ok::<_, anyhow::Error>(())
+        };
+        tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .context("Trusted CIM module metadata timed out")?
+    }
 
     #[tokio::test]
     async fn native_powershell_account_iteration_preserves_scalar_rows_for_zero_one_and_two_accounts(
