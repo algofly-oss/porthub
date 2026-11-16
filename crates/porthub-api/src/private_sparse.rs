@@ -203,6 +203,7 @@ pub async fn indices(app: &App) -> ApiResult<()> {
         .get_or_try_init(|| async {
             for (collection, keys) in [
                 ("private_peers", doc! {"workspace_id":1,"ip":1}),
+                ("private_peers", doc! {"machine_id":1,"workspace_id":1}),
                 (
                     "private_name_directory",
                     doc! {"workspace_id":1,"kind":1,"name":1},
@@ -219,13 +220,58 @@ pub async fn indices(app: &App) -> ApiResult<()> {
                 ),
             ] {
                 app.collection(collection)
-                    .create_index(IndexModel::builder().keys(keys).options(if collection=="private_peers"{Some(mongodb::options::IndexOptions::builder().unique(true).build())}else{None}).build())
+                    .create_index(
+                        IndexModel::builder()
+                            .keys(keys.clone())
+                            .options(
+                                if collection == "private_peers" && keys.contains_key("ip") {
+                                    Some(
+                                        mongodb::options::IndexOptions::builder()
+                                            .unique(true)
+                                            .build(),
+                                    )
+                                } else {
+                                    None
+                                },
+                            )
+                            .build(),
+                    )
                     .await?;
             }
             Ok::<_, ApiError>(())
         })
         .await?;
     Ok(())
+}
+/// Serialize namespace-affecting machine mutation with directory publication. Invalidate
+/// BEFORE the write; a failed write/recovery still requires a fresh complete rebuild.
+pub(crate) async fn namespace_write<'a>(
+    app: &'a App,
+    machine: ObjectId,
+) -> ApiResult<tokio::sync::MutexGuard<'a, ()>> {
+    indices(app).await?;
+    let guard = app.private_sparse.directory.lock().await;
+    let peers: Vec<_> = app
+        .collection("private_peers")
+        .find(doc! {"machine_id":machine})
+        .projection(doc! {"_id":0,"workspace_id":1})
+        .limit(65537)
+        .await?
+        .try_collect()
+        .await?;
+    if peers.len() > 65536 {
+        return Err(ApiError::bad_request(
+            "Private namespace mutation exceeds workspace capacity",
+        ));
+    }
+    let owners: Vec<_> = peers
+        .iter()
+        .filter_map(|p| p.get_object_id("workspace_id").ok().map(|id| id.to_hex()))
+        .collect();
+    app.collection("private_name_directory_state")
+        .update_many(doc! {"_id":{"$in":owners}}, doc! {"$set":{"ready":false}})
+        .await?;
+    Ok(guard)
 }
 async fn marker(
     app: &App,
@@ -235,7 +281,7 @@ async fn marker(
 ) -> ApiResult<Option<Document>> {
     let value = app
         .collection("private_name_directory_state")
-        .find_one(doc! {"_id":owner.to_hex(),"ready":true,"suffix":suffix})
+        .find_one(doc! {"_id":owner.to_hex(),"ready":true,"suffix":suffix,"namespace_schema":1})
         .await?;
     Ok(value.filter(|d| {
         d.get_datetime("updated_at").is_ok_and(|t| {
@@ -365,6 +411,7 @@ async fn directory_with_age(
         .await?;
     let mut batch = Vec::new();
     let mut count = 0usize;
+    let mut suffixes = std::collections::BTreeSet::from([suffix.to_ascii_lowercase()]);
     for peer in &peers {
         let before_batch = batch.len();
         let id = store::string(peer, "_id");
@@ -377,6 +424,18 @@ async fn directory_with_age(
             .cloned()
             .unwrap_or_else(|| "machine".into());
         let aliases = names.aliases.get(id).cloned().unwrap_or_default();
+        for domain in private_domains::from_document(machine)
+            .into_iter()
+            .filter(|d| !d.default)
+        {
+            suffixes.insert(domain.suffix.to_ascii_lowercase());
+            if suffixes.len() > porthub_network::policy::MAX_PRIVATE_SUFFIXES
+                || suffixes.iter().map(String::len).sum::<usize>()
+                    > porthub_network::policy::MAX_PRIVATE_SUFFIX_BYTES
+            {
+                return Err(ApiError::bad_request("Private namespace suffix metadata exceeds supported capacity; no partial namespace was published"));
+            }
+        }
         let metadata = name_digest(peer, machine, suffix);
         batch.push(doc!{"_id":key(owner,"peer",id),"workspace_id":owner,"kind":"peer","peer":id,"metadata":&metadata,"primary":&primary,"aliases":&aliases,"generation":&generation});
         let mut full = vec![format!("{primary}.{suffix}")];
@@ -413,11 +472,11 @@ async fn directory_with_age(
     app.collection("private_name_directory_state")
         .update_one(
             doc! {"_id":owner.to_hex(),"generation":&generation},
-            doc! {"$set":{"ready":true,"updated_at":at}},
+            doc! {"$set":{"ready":true,"updated_at":at,"namespace_schema":1,"dns_suffixes":suffixes.iter().cloned().collect::<Vec<_>>()}},
         )
         .await?;
     Ok(
-        doc! {"_id":owner.to_hex(),"generation":generation,"ready":true,"suffix":suffix,"updated_at":at},
+        doc! {"_id":owner.to_hex(),"generation":generation,"ready":true,"suffix":suffix,"updated_at":at,"namespace_schema":1,"dns_suffixes":suffixes.into_iter().collect::<Vec<_>>()},
     )
 }
 pub async fn names(
@@ -470,6 +529,7 @@ pub struct Selection {
     pub prefs: Document,
     pub suffix: String,
     pub generation: String,
+    pub suffixes: Vec<String>,
 }
 async fn machine(app: &App, workspace: ObjectId, peer: &Document) -> ApiResult<Option<Document>> {
     use mongodb::bson::Bson;
@@ -636,5 +696,15 @@ pub async fn select(
         prefs,
         suffix,
         generation,
+        suffixes: state
+            .get_array("dns_suffixes")
+            .map_err(|_| ApiError::bad_request("Private namespace suffix metadata missing"))?
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| ApiError::bad_request("Invalid private namespace suffix"))
+            })
+            .collect::<ApiResult<Vec<_>>>()?,
     })
 }

@@ -272,6 +272,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         if cfg!(feature="private-sparse"){Some(sparse_control)}else{None},
     ));
     let mut device: Option<Arc<Tun>> = None;
+    let mut local_address=super::address_lifecycle::Binding::default();
     #[cfg(feature = "private-stream")]
     let mut stream_router: Option<super::stream_router::Router> = None;
     let mut zone = None;
@@ -355,6 +356,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     apply_cli_system_tor(&mut route_snapshot,&tor_settings.borrow());
                 }
                 let own=snapshot.peers.iter().find(|p|p.id==profile.peer_id).ok_or_else(||anyhow::anyhow!("private policy omits local peer"))?;
+                local_address.check(own.ip)?;
                 let routes:Vec<_>=snapshot.peers.iter().filter(|p|p.id!=profile.peer_id).map(|p|p.ip).collect();
                 let first_ready = device.is_none();
                 policy.apply(snapshot.clone())?;
@@ -374,6 +376,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     tun.update_routes(&routes).await?;
                 } else {
                     let tun=Arc::new(Tun::open(&name,own.ip,&routes).await?);
+                    local_address.configured(own.ip)?;
                     let server=dns::Server::bind(own.ip).await?;let port=server.port()?;
                     server.zone.write().await.set_sparse(sparse_handle.clone());
                     #[cfg(feature="local-tor")]

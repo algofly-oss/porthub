@@ -188,12 +188,13 @@ mod sparse_dns_tests {
     use hickory_proto::{op::Query,rr::Name};
     #[tokio::test(start_paused=true)]
     async fn private_miss_does_not_fall_through_even_when_public_dns_is_forwarded()->Result<()> {
-        let snapshot:Snapshot=serde_json::from_value(serde_json::json!({"workspace":"w","self":"a","revision":1,"expires_at":chrono::Utc::now()+chrono::Duration::seconds(30),"sparse":{"protocol":1,"epoch":"a".repeat(64)},"peers":[{"id":"a","ip":"10.203.0.2","hostname":"a.phub","fingerprint":"local","instance":"local-instance"}],"grants":[]}))?;
+        let snapshot:Snapshot=serde_json::from_value(serde_json::json!({"workspace":"w","self":"a","revision":1,"expires_at":chrono::Utc::now()+chrono::Duration::seconds(30),"sparse":{"protocol":1,"epoch":"a".repeat(64)},"dns_suffixes":["custom.internal"],"peers":[{"id":"a","ip":"10.203.0.2","hostname":"a.phub","fingerprint":"local","instance":"local-instance"}],"grants":[]}))?;
+        for name in ["unknown.phub.","cold.custom.internal."] {
         let(handle,mut control)=super::super::sparse::channel();handle.update_base(&snapshot);let mut zone=Zone::default();zone.set_sparse(handle);zone.update(&snapshot)?;zone.forward_all=true;
-        let mut query=Message::query();query.add_query(Query::query(Name::from_ascii("unknown.phub.")?,RecordType::A));let bytes=query.to_vec()?;
-        assert!(!zone.needs_upstream(&bytes));assert_eq!(zone.missing_private(&bytes).as_deref(),Some("unknown.phub."));
+        let mut query=Message::query();query.add_query(Query::query(Name::from_ascii(name)?,RecordType::A));let bytes=query.to_vec()?;
+        assert!(!zone.needs_upstream(&bytes));assert_eq!(zone.missing_private(&bytes).as_deref(),Some(name));
         let zone=RwLock::new(zone);let response=answer_with_upstream(&zone,&Default::default(),&bytes,"127.0.0.1:0".parse()?,false).await.expect("private timeout must be an explicit local DNS error, never upstream/no response");
-        assert_eq!(Message::from_vec(&response)?.metadata.response_code,ResponseCode::ServFail);assert_eq!(control.batch()?["wanted"][0]["value"],"unknown.phub");Ok(())
+        assert_eq!(Message::from_vec(&response)?.metadata.response_code,ResponseCode::ServFail);assert_eq!(control.batch()?["wanted"][0]["value"],name.trim_end_matches('.'));}Ok(())
     }
 }
 pub struct Server {

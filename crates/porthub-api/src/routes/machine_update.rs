@@ -132,6 +132,11 @@ async fn update(
     if !unset.is_empty() {
         mutation.insert("$unset", unset.clone());
     }
+    // A sparse client must learn custom private zones before any cold name lookup;
+    // serialize invalidation with the only explicit private_domains update path.
+    let _namespace=if cfg!(feature="private-sparse") && set.get("private_domains").is_some_and(|next|previous.get("private_domains")!=Some(next)) {
+        Some(crate::private_sparse::namespace_write(&app,id).await?)
+    }else{None};
     let updated = app
         .collection("machines")
         .find_one_and_update(filter.clone(), mutation)

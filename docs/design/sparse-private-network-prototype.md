@@ -31,6 +31,14 @@ Implemented contracts:
   in-flight publication after a source denial, without evicting a newer incarnation
   or quarantining later freshly authorized recovery. Established QUIC copies have their own deadline/renewal
   guard rather than relying on a periodic base-policy tick.
+- Cold custom private suffixes are published as bounded namespace-only metadata,
+  independently of selected pair identities. The actual private-domain mutation
+  path invalidates that materialization under its publication lock before the
+  write; failed writes/recovery still require a complete rebuild. No partial
+  namespace is published when its explicit suffix/byte budget is exceeded.
+- A changed local address cannot be applied to an already-configured TUN/DNS
+  listener. It ends the private worker; the existing supervisor closes its old
+  resources before restarting with the new address and unchanged registration.
 - Shared collision planning and Linux/Windows/macOS owned capture-prefix adapters.
   A private prefix routes packets to the ACL engine; it never grants permission.
   A newly conflicting prefix cannot force itself over an existing LAN/VPN route.
@@ -41,9 +49,9 @@ Evidence so far:
   unique workspace/address index that normal enrollment already creates. A sparse base
   and exact pair lease stay below 16 KiB of response JSON; a legacy oversized
   snapshot fails with an upgrade/narrow-rule explanation.
-- A warm broad lookup examined 17 documents / 20 keys with 7,852 bytes of Mongo
-  responses. A representative explicit-group case with 4,097 distinct users
-  examined 18 documents / 23 keys with 8,590 bytes. Rule-manifest and group queries
+- With the custom-namespace fixture, a warm broad lookup examined 18 documents /
+  21 keys with 8,821 bytes of Mongo responses. A representative explicit-group
+  case with 4,097 distinct users examined 18 documents / 23 keys with 8,908 bytes. Rule-manifest and group queries
   examined zero documents through covered indexes. These are 2–3 API callers,
   not 4,097 running agents or a full-mesh throughput benchmark.
 - Actual target-only group removal leaves the source epoch unchanged but retires
@@ -51,6 +59,13 @@ Evidence so far:
   changes the epoch and removes remaining grants. Removing source workspace
   membership returns HTTP 403; the client rejection regression begins with an
   unexpired installed pair and verifies immediate cache/DNS/work cancellation.
+- The same Mongo fixture calls the real machine-update route to add a custom
+  suffix to a cold peer, immediately receives that suffix without exposing the
+  cold identity in the base snapshot, then resolves its exact authorized name.
+  Local DNS proxy regressions prevent both default and custom private misses from
+  falling through even when public queries are forwarded. Native OS resolver
+  registration and dynamic configuration propagation are not established by these
+  portable/API tests.
 - Portable engine, resolver, DNS, rule-index parity, stream-deadline and HTTP
   rejection regressions pass. Windows x64/ARM64 and macOS x64/ARM64 adapter metadata compile
   against the actual platform source; metadata compilation is not native route

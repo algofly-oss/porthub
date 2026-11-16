@@ -1,7 +1,7 @@
 //! Lease-bound IPv4 ACLs and reply tracking. A packet's addresses must match
 //! its authenticated remote peer; no LAN/default-gateway forwarding is allowed.
 mod sparse;
-pub use sparse::{Lookup, PairLease, PairResponse, SparseInfo, MAX_PAIR_LEASES};
+pub use sparse::{Lookup, PairLease, PairResponse, SparseInfo, MAX_PAIR_LEASES, MAX_PRIVATE_SUFFIXES, MAX_PRIVATE_SUFFIX_BYTES};
 use anyhow::{ensure, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

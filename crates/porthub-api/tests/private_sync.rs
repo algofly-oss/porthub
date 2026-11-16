@@ -316,12 +316,14 @@ async fn cross_pool_growth_keeps_legacy_sync_identity_acl_and_peer_ips() -> Resu
 async fn sparse_4097_broad_peers_return_bounded_pair_authority_and_legacy_fails_actionably()->Result<()> {
     let case=Case::new(Config::default()).await?;
     let result=async {
-        let (owner,_)=case.user("sparse-owner@test.invalid","user").await?;
+        let (owner,cookie)=case.user("sparse-owner@test.invalid","user").await?;
         let token="fixture-token-0123456789abcdef0123456789";
         let mut machines=Vec::new();let mut peers=Vec::new();
         for i in 0..4097u32 {
             let mid=ObjectId::new();let ip=std::net::Ipv4Addr::from(u32::from(std::net::Ipv4Addr::new(10,203,0,1))+i);
-            machines.push(doc!{"_id":mid,"user_id":owner,"name":format!("Sparse{i}")});
+            let mut machine=doc!{"_id":mid,"user_id":owner,"name":format!("Sparse{i}")};
+            if i==4096 {machine.insert("private_domains",vec![doc!{"default":true},doc!{"host":"cold","suffix":"custom.internal","default":false}]);}
+            machines.push(machine);
             peers.push(doc!{"_id":format!("sparse-{i}"),"workspace_id":owner,"machine_id":mid,"owner_id":owner,"ip":ip.to_string(),"enabled":true,"credential_hash":token_digest(token)});
         }
         case.app.collection("machines").insert_many(machines).await?;case.app.collection("private_peers").insert_many(peers).await?;
@@ -333,7 +335,17 @@ async fn sparse_4097_broad_peers_return_bounded_pair_authority_and_legacy_fails_
         let mut a=make("sparse-0","instance-00000000",1);let b=make("sparse-4096","instance-11111111",1);
         let (_,_,first)=case.call("POST","/api/access/private/sync","",a.clone(),&[]).await?;
         ensure!(first["snapshot"]["peers"].as_array().is_some_and(|p|p.len()==1),"sparse base was not bounded");
+        ensure!(first["snapshot"]["dns_suffixes"].as_array().is_some_and(|s|s.iter().any(|v|v=="custom.internal")),"cold peer's custom namespace was not protected before pair discovery");
+        let cold=case.app.collection("private_peers").find_one(doc!{"_id":"sparse-4096"}).await?.unwrap().get_object_id("machine_id")?;
+        case.status("PUT","/api/machines/update",&cookie,json!({"data_id":cold.to_hex(),"name":"Sparse4096","private_domains":[{"default":true},{"host":"cold","suffix":"custom.internal"},{"host":"fresh","suffix":"new.private.example"}]}),StatusCode::OK).await?;
+        let (_,_,fresh_namespace)=case.call("POST","/api/access/private/sync","",a.clone(),&[]).await?;
+        ensure!(fresh_namespace["snapshot"]["dns_suffixes"].as_array().is_some_and(|s|s.iter().any(|v|v=="new.private.example")),"native machine update did not invalidate cold namespace metadata immediately");
+        ensure!(fresh_namespace["snapshot"]["peers"].as_array().is_some_and(|p|p.len()==1),"suffix-only update disclosed cold peer identities");
+
         case.status("POST","/api/access/private/sync","",b,StatusCode::OK).await?;
+        let mut custom=a.clone();custom["sparse"]["wanted"]=json!([{"kind":"name","value":"fresh.new.private.example"}]);
+        let (status,_,custom)=case.call("POST","/api/access/private/sync","",custom,&[]).await?;
+        ensure!(status==StatusCode::OK&&custom["pair_responses"][0]["status"]=="allowed"&&custom["pair_responses"][0]["lease"]["peer"]["id"]=="sparse-4096","cold custom namespace name did not resolve through exact private pair authority");
         a["sparse"]["sequence"]=json!(2);a["sparse"]["wanted"]=json!([{"kind":"ip","value":"10.203.16.1"}]);
         case.db.run_command(doc!{"profile":2}).await?;
         let measured_start=DateTime::now();

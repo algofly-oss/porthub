@@ -207,6 +207,7 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
         (prefs,suffix,names,machine_docs)
     };
     let mut dns_suffixes: HashSet<String> = [suffix.to_ascii_lowercase()].into_iter().collect();
+    if let Some(indexed)=&indexed {dns_suffixes.extend(indexed.suffixes.iter().cloned());}
     let mut domains_by_machine = HashMap::new();
     for machine in &machine_docs {
         let domains = crate::domain::private_domains::from_document(machine);

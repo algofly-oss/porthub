@@ -2,6 +2,8 @@
 use super::*;
 
 pub const MAX_PAIR_LEASES: usize = 256;
+pub const MAX_PRIVATE_SUFFIXES: usize = 256;
+pub const MAX_PRIVATE_SUFFIX_BYTES: usize = 32768;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(deny_unknown_fields)]
@@ -58,6 +60,21 @@ impl Engine {
                         .bytes()
                         .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
                 "unsupported sparse private authority"
+            );
+            ensure!(
+                snapshot.dns_suffixes.len() <= MAX_PRIVATE_SUFFIXES
+                    && snapshot.dns_suffixes.iter().map(String::len).sum::<usize>()
+                        <= MAX_PRIVATE_SUFFIX_BYTES
+                    && snapshot.dns_suffixes.iter().all(|s| !s.is_empty()
+                        && s.len() <= 253
+                        && s.split('.').all(|label| !label.is_empty()
+                            && label.len() <= 63
+                            && !label.starts_with('-')
+                            && !label.ends_with('-')
+                            && label
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b == b'-'))),
+                "sparse private namespace metadata exceeds bounds or is invalid"
             );
             ensure!(
                 sparse.capture_pools.len() <= crate::capture_routes::MAX_CAPTURE_PREFIXES,
@@ -269,6 +286,34 @@ mod tests {
             }],
         }
     }
+    #[test]
+    fn namespace_metadata_is_bounded_and_malformed_replacement_fails_closed() {
+        let epoch = "a".repeat(64);
+        let mut valid = base(&epoch);
+        valid.dns_suffixes = vec!["phub".into(), "custom.internal".into()];
+        let mut e = Engine::default();
+        e.apply(valid.clone()).unwrap();
+        e.install_pair(pair(&epoch)).unwrap();
+        let mut bad = valid.clone();
+        bad.dns_suffixes.push(".invalid".into());
+        assert!(e.apply(bad).is_err());
+        assert!(!e.valid_lease());
+        assert_eq!(e.pair_count(), 0);
+        let mut too_many = valid.clone();
+        too_many.dns_suffixes = vec!["custom.internal".into(); MAX_PRIVATE_SUFFIXES + 1];
+        assert!(e.apply(too_many).is_err());
+        let long = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61)
+        );
+        let mut too_big = valid;
+        too_big.dns_suffixes = vec![long; 130];
+        assert!(e.apply(too_big).is_err());
+    }
+
     #[test]
     fn base_refresh_does_not_refresh_pair_and_generation_change_retires_identity() {
         let epoch = "a".repeat(64);
