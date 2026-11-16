@@ -27,13 +27,14 @@ const RELAY_QUEUE_PACKETS: usize = 2048;
 pub struct Queued {
     bytes:Bytes,
     guards:Vec<super::authority_event::Authority<()>>,
+    permits:Vec<porthub_mesh::udp::SendPermit>,
 }
-impl From<Bytes> for Queued {fn from(bytes:Bytes)->Self{Self{bytes,guards:Vec::new()}}}
+impl From<Bytes> for Queued {fn from(bytes:Bytes)->Self{Self{bytes,guards:Vec::new(),permits:Vec::new()}}}
 impl std::ops::Deref for Queued {type Target=Bytes;fn deref(&self)->&Bytes{&self.bytes}}
 impl Queued {
-    fn check(&self)->Result<()> {for guard in &self.guards {guard.check()?;}Ok(())}
+    fn check(&self)->Result<()> {for guard in &self.guards {guard.check()?;}ensure!(self.permits.iter().all(|permit|permit.valid()),"private relay originating permit retired");Ok(())}
     async fn during<T>(&self,operation:impl std::future::Future<Output=Result<T>>)->Result<T> {
-        if self.guards.is_empty(){return operation.await;}
+        if self.guards.is_empty()&&self.permits.is_empty(){return operation.await;}
         tokio::pin!(operation);let mut tick=tokio::time::interval(Duration::from_millis(50));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -66,10 +67,12 @@ impl Sender {
             base.check()?;if base.remaining()?.is_some(){guards.push(base);}
             if pairs.enabled(){guards.push(pairs.pair_authority(peer).ok_or_else(||anyhow::anyhow!("private relay pair authority expired"))?);}
         }
-        Ok(Queued{bytes,guards})
+        Ok(Queued{bytes,guards,permits:Vec::new()})
     }
     #[cfg(feature = "private-stream")]
-    pub async fn send_stream(&self, peer: &str, packet: &[u8]) -> Result<()> {
+    pub async fn send_stream(&self, peer: &str, packet: &[u8]) -> Result<()> {self.send_stream_guarded(peer,packet,None).await}
+    #[cfg(feature="private-stream")]
+    pub async fn send_stream_guarded(&self,peer:&str,packet:&[u8],permit:Option<porthub_mesh::udp::SendPermit>)->Result<()> {
         ensure!(self.is_ready(), "private relay is not ready");
         ensure!(
             !peer.is_empty() && peer.len() <= 60 && (20..=1380).contains(&packet.len()),
@@ -82,7 +85,7 @@ impl Sender {
         let bytes = Bytes::from(bytes);
         let lane = self.packet_lane(peer, packet)?;
         self.output[lane]
-            .send(self.admitted(peer,bytes)?)
+            .send({let mut record=self.admitted(peer,bytes)?;if let Some(permit)=permit{ensure!(permit.valid(),"private relay originating permit retired");record.permits.push(permit);}record})
             .await
             .map_err(|_| anyhow::anyhow!("private relay stopped"))
     }
@@ -137,7 +140,8 @@ impl Sender {
             state.store(ready, Ordering::Release);
         }
     }
-    pub fn send(&self, peer: &str, packet: &[u8]) -> Result<()> {
+    pub fn send(&self, peer: &str, packet: &[u8]) -> Result<()> {self.send_guarded(peer,packet,None)}
+    pub(crate) fn send_guarded(&self,peer:&str,packet:&[u8],permit:Option<porthub_mesh::udp::SendPermit>)->Result<()> {
         ensure!(self.is_ready(), "private relay is not ready");
         ensure!(
             !peer.is_empty() && peer.len() <= 60 && (20..=1380).contains(&packet.len()),
@@ -149,7 +153,7 @@ impl Sender {
         bytes.extend_from_slice(packet);
         let bytes = Bytes::from(bytes);
         let lane = self.packet_lane(peer, packet)?;
-        if self.output[lane].try_send(self.admitted(peer,bytes)?).is_ok() {
+        if self.output[lane].try_send({let mut record=self.admitted(peer,bytes)?;if let Some(permit)=permit{ensure!(permit.valid(),"private relay originating permit retired");record.permits.push(permit);}record}).is_ok() {
             return Ok(());
         }
         self.dropped_packets.fetch_add(1, Ordering::Relaxed);
@@ -560,10 +564,10 @@ async fn write_lane(
             packet=packets.recv()=>{
                 let Some(packet)=packet else {return Ok(());};
                 if packet.check().is_err(){continue;}
-                let mut records=vec![packet.bytes.clone()];let mut guards=packet.guards;
-                if batch {for _ in 1..32 {match packets.try_recv(){Ok(next)=>{if next.check().is_ok(){records.push(next.bytes);guards.extend(next.guards);}},Err(_)=>break}}}
+                let mut records=vec![packet.bytes.clone()];let mut guards=packet.guards;let mut permits=packet.permits;
+                if batch {for _ in 1..32 {match packets.try_recv(){Ok(next)=>{if next.check().is_ok(){records.push(next.bytes);guards.extend(next.guards);permits.extend(next.permits);}},Err(_)=>break}}}
                 let message=if batch {Message::Binary(porthub_mesh::batch::encode(&records,prefixes)?.into())}else{Message::Binary(records.pop().unwrap())};
-                (message,Queued{bytes:Bytes::new(),guards})
+                (message,Queued{bytes:Bytes::new(),guards,permits})
             },
             pong=pongs.recv()=>{
                 let Some(pong)=pong else {return Ok(());};

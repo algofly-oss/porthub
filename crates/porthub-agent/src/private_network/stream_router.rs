@@ -62,6 +62,8 @@ struct Policy {
     incoming: HashMap<String, Ports>,
     outgoing: HashMap<String, Ports>,
     pair_deadlines: HashMap<String,Instant>,
+    base_authority:Option<super::authority_event::Authority<()>>,
+    pair_authorities:HashMap<String,super::authority_event::Authority<()>>,
 }
 impl Policy {
     fn empty(own: String, ip: Ipv4Addr) -> Self {
@@ -73,6 +75,8 @@ impl Policy {
             incoming: HashMap::new(),
             outgoing: HashMap::new(),
             pair_deadlines: HashMap::new(),
+            base_authority:None,
+            pair_authorities:HashMap::new(),
         }
     }
     fn compile(snapshot: &Snapshot, own: &str, ip: Ipv4Addr) -> Result<Self> {
@@ -150,7 +154,13 @@ impl Policy {
             policy.peers.extend(pair_policy.peers);policy.incoming.extend(pair_policy.incoming);policy.outgoing.extend(pair_policy.outgoing);
         }}Ok(policy)
     }
+    fn permit(&self,id:&str)->Result<Option<porthub_mesh::udp::SendPermit>> {
+        let Some(base)=&self.base_authority else{return Ok(None);};base.check()?;
+        let pair=self.pair_authorities.get(id).ok_or_else(||anyhow::anyhow!("private stream pair retired"))?.clone();pair.check()?;let base=base.clone();
+        Ok(Some(porthub_mesh::udp::SendPermit::new(move||base.check().is_ok()&&pair.check().is_ok())))
+    }
     fn allows(&self, peer: &Peer, flow: Flow, outbound: bool) -> bool {
+        if self.base_authority.as_ref().is_some_and(|base|base.check().is_err()||self.pair_authorities.get(&peer.id).is_none_or(|pair|pair.check().is_err())){return false;}
         if self.deadline<=Instant::now() || self.pair_deadlines.get(&peer.id).is_some_and(|d|*d<=Instant::now()) || self.peers.get(&peer.id) != Some(peer) {
             return false;
         }
@@ -315,16 +325,27 @@ impl Router {
                 .is_some_and(|peer| self.endpoint.prepared(peer).is_some())
     }
     pub fn update(&self, snapshot: &Snapshot) -> Result<()> { self.update_pairs(snapshot,&[]) }
-    pub fn update_pairs(&self,snapshot:&Snapshot,pairs:&[(Snapshot,Instant)])->Result<()> {
+    pub fn update_pairs(&self,snapshot:&Snapshot,pairs:&[(Snapshot,Instant)])->Result<()> {self.update_pairs_authorized(snapshot,pairs,None,None)}
+    pub(crate) fn update_pairs_authorized(&self,snapshot:&Snapshot,pairs:&[(Snapshot,Instant)],base:Option<super::authority_event::Authority<()>>,handle:Option<super::sparse::Handle>)->Result<()> {
         ensure!(pairs.len()<=porthub_network::policy::MAX_PAIR_LEASES,"private stream pair cache exceeds bounds");
         let (own, ip) = {
             let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             (state.policy.own.clone(), state.policy.ip)
         };
-        let policy=Policy::compile_pairs(snapshot,&own,ip,pairs)?;
+        let mut policy=Policy::compile_pairs(snapshot,&own,ip,pairs)?;
+        if let Some(base)=base.filter(|_|snapshot.sparse.is_some()) {
+            base.check()?;
+            if base.remaining()?.is_some(){
+                policy.base_authority=Some(base);
+                let handle=handle.ok_or_else(||anyhow::anyhow!("private stream authority owner missing"))?;
+                for id in policy.peers.keys(){if let Some(authority)=handle.pair_authority(id){policy.pair_authorities.insert(id.clone(),authority);}}
+            }
+        }
         self.endpoint.set_peer_connection_budget(if snapshot.sparse.is_some(){64}else{512})?;
         self.endpoint
             .update_peers(policy.peers.values().cloned().collect())?;
+        let admissions=if policy.base_authority.is_some(){Some(policy.peers.values().filter_map(|peer|policy.permit(&peer.id).ok().flatten().map(|permit|(peer.ip,permit))).collect())}else{None};
+        self.endpoint.update_send_admissions(admissions)?;
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         for entry in state.flows.values() {
             if !policy.allows(&entry.peer, entry.flow, entry.outbound) {
@@ -339,18 +360,14 @@ impl Router {
         Ok(())
     }
     pub fn valid_lease(&self) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .policy
-            .deadline
-            > Instant::now()
+        let state=self.state.lock().unwrap_or_else(|p|p.into_inner());
+        state.policy.deadline>Instant::now()&&state.policy.base_authority.as_ref().is_none_or(|authority|authority.check().is_ok())
     }
     pub async fn receive(&self, source: Ipv4Addr, payload: Bytes) {
-        let deadline = {
+        let (deadline,admission) = {
             let state=self.state.lock().unwrap_or_else(|p|p.into_inner());
             let Some(peer)=state.policy.peers.values().find(|p|p.ip==source) else{return;};
-            state.policy.pair_deadlines.get(&peer.id).copied().unwrap_or(state.policy.deadline).min(state.policy.deadline)
+            (state.policy.pair_deadlines.get(&peer.id).copied().unwrap_or(state.policy.deadline).min(state.policy.deadline),match state.policy.permit(&peer.id){Ok(permit)=>permit,Err(_)=>return})
         };
         let now = Instant::now();
         if deadline <= now {
@@ -360,7 +377,7 @@ impl Router {
         // wait preserves receive pressure without trapping control-plane work.
         let deadline = deadline.min(now + Duration::from_millis(200));
         if !matches!(
-            tokio::time::timeout_at(deadline.into(), self.ingress.send_reliable(source, payload))
+            tokio::time::timeout_at(deadline.into(), async {if let Some(admission)=admission {admission.during(self.ingress.send_reliable_guarded(source,payload,Some(admission.clone()))).await?}else{self.ingress.send_reliable(source,payload).await}})
                 .await,
             Ok(Ok(()))
         ) {
@@ -461,10 +478,10 @@ impl Router {
     async fn authority_guard(&self,peer:&Peer,flow:Flow,outbound:bool){
         let mut changed=self.changed.subscribe();
         loop{
-            let deadline={let state=self.state.lock().unwrap_or_else(|p|p.into_inner());
+            let (deadline,guarded)={let state=self.state.lock().unwrap_or_else(|p|p.into_inner());
                 if !state.policy.allows(peer,flow,outbound){return;}
-                state.policy.pair_deadlines.get(&peer.id).copied().unwrap_or(state.policy.deadline).min(state.policy.deadline)};
-            tokio::select!{_=self.cancel.cancelled()=>return, result=changed.changed()=>{if result.is_err(){return;}},_=tokio::time::sleep_until(deadline.into())=>{}}
+                (state.policy.pair_deadlines.get(&peer.id).copied().unwrap_or(state.policy.deadline).min(state.policy.deadline),state.policy.base_authority.is_some())};
+            tokio::select!{_=self.cancel.cancelled()=>return, result=changed.changed()=>{if result.is_err(){return;}},_=tokio::time::sleep_until(deadline.into())=>{},_=async {if guarded {tokio::time::sleep(Duration::from_millis(50)).await}else{std::future::pending::<()>().await}}=>{}}
         }
     }
     async fn source(&self, kernel: Flow, syn: Bytes, connection: streams::Connection) -> Finished {
@@ -599,7 +616,7 @@ impl Background {
                 let Some(packet)=packet else{ensure!(transport.cancel.is_cancelled(),"private stream packet owner stopped");return Ok(());};
                 if let Some(carrier)=&carrier {
                     tokio::select! {_=transport.cancel.cancelled()=>return Ok(()),result=carrier.send(packet)=>{ensure!(result.is_ok(),"private stream carrier stopped");}}
-                } else {transport.event(Event::StreamDatagram {destination:packet.address,payload:packet.payload}).await;}
+                } else {transport.event(Event::StreamDatagram {destination:packet.address,payload:packet.payload,permit:packet.permit}).await;}
             }
         }}}.await;Finished::Owner(result)});
         let accepting = router.clone();
@@ -694,6 +711,27 @@ fn spawn_reader(
   pair.grants=serde_json::from_value(serde_json::json!([{"source":"a","destination":"b","protocol":"tcp","ports":[{"start":443,"end":443}]}])).unwrap();(base,pair)
  }
  fn flow()->Flow{Flow{source:"10.203.0.2:4000".parse().unwrap(),destination:"10.203.1.2:443".parse().unwrap()}}
+ #[cfg(feature="private-sparse")]
+ #[tokio::test]async fn real_router_guard_rejects_suspended_old_pair_despite_fresh_base(){
+  struct Clock(std::sync::atomic::AtomicU64);
+  impl super::super::authority_clock::SuspendClock for Clock{fn elapsed_since_boot(&self)->Result<Duration>{Ok(Duration::from_millis(self.0.load(Ordering::SeqCst)))}}
+  let clock=Arc::new(Clock(std::sync::atomic::AtomicU64::new(0)));
+  let witness=||super::super::authority_clock::RequestWindow::start(clock.clone()).unwrap();
+  let a=Identity::new().unwrap();let b=Identity::new().unwrap();let(base,pair)=snapshots(&a,&b);let peer=mesh_peer(&pair.peers[1]);
+  let lease=porthub_network::policy::PairLease{workspace:pair.workspace.clone(),self_:pair.self_.clone(),epoch:base.sparse.as_ref().unwrap().epoch.clone(),expires_at:pair.expires_at,revision:pair.revision,local:pair.peers[0].clone(),peer:pair.peers[1].clone(),grants:pair.grants.clone(),acl:pair.pair_acl.clone()};
+  let(handle,_)=super::super::sparse::channel();let query=porthub_network::policy::Lookup{kind:"peer".into(),value:"b".into()};
+  handle.update_base_authority(&base,super::super::authority_event::Authority::new((),Some(witness()),base.expires_at));
+  handle.installed_authority(&query,lease,super::super::authority_event::Authority::new((),Some(witness()),pair.expires_at));
+  clock.0.store(10000,Ordering::SeqCst);
+  let base_authority=super::super::authority_event::Authority::new((),Some(witness()),base.expires_at);
+  handle.update_base_authority(&base,base_authority.clone());
+  let(router,_)=new("a".into(),"10.203.0.2".parse().unwrap(),a,tokio::sync::mpsc::channel(8).0,CancellationToken::new()).unwrap();
+  router.update_pairs_authorized(&base,&[(pair,Instant::now()+Duration::from_secs(10))],Some(base_authority),Some(handle.clone())).unwrap();
+  assert!(router.state.lock().unwrap().policy.allows(&peer,flow(),true));
+  clock.0.store(15000,Ordering::SeqCst);
+  tokio::time::timeout(Duration::from_millis(500),router.authority_guard(&peer,flow(),true)).await.unwrap();
+  assert!(router.valid_lease());assert!(!router.state.lock().unwrap().policy.allows(&peer,flow(),true));
+ }
  #[test]fn compact_port_masks_keep_quic_permission_exact_without_range_expansion(){
   let a=Identity::new().unwrap();let b=Identity::new().unwrap();let(base,mut pair)=snapshots(&a,&b);
   let grant=porthub_network::policy::Grant{source:"a".into(),destination:"b".into(),protocol:"tcp".into(),ports:(1..=u16::MAX).step_by(2).map(|port|porthub_network::policy::Port{start:port,end:port}).collect()};

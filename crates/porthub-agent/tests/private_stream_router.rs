@@ -70,6 +70,7 @@ fn node(
             _=cancel.cancelled()=>return Ok(()),
             packet=datagrams.recv()=>{
                 let Some(packet)=packet else {ensure!(cancel.is_cancelled(),"stream carrier stopped");return Ok(());};
+                ensure!(packet.permit.is_none(),"legacy stream fixture must not discard sparse admission witnesses");
                 if carrier.send(Delivery {source:own,destination:packet.address,payload:packet.payload}).await.is_err() {
                     ensure!(cancel.is_cancelled(), "test carrier stopped before cancellation");
                     return Ok(());
@@ -81,7 +82,8 @@ fn node(
                 if admitted {ensure!(router.kernel_packet(&other,packet,true),"prepared private stream unexpectedly fell back to packets");}
             },
             event=events.recv()=>match event {
-                Some(Event::StreamDatagram {destination,payload})=>{
+                Some(Event::StreamDatagram {destination,payload,permit})=>{
+                    ensure!(permit.is_none(),"legacy stream fixture must not discard sparse admission witnesses");
                     let envelope=control_packet::encode(control_packet::STREAM,own,destination,&payload)?;
                     let envelope=control_packet::decode(control_packet::STREAM,envelope).context("stream carrier envelope rejected")?;
                     if carrier.send(Delivery {source:envelope.source,destination:envelope.destination,payload:envelope.payload}).await.is_err() {

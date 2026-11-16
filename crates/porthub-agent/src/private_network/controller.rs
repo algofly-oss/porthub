@@ -199,6 +199,7 @@ pub enum Event {
     },
     #[cfg(feature = "private-stream")]
     StreamDatagram {
+        permit:Option<porthub_mesh::udp::SendPermit>,
         destination: std::net::Ipv4Addr,
         payload: Bytes,
     },

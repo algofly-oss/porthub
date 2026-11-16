@@ -49,7 +49,9 @@ pub struct Peer {
     pub instance: String,
 }
 type Peers = Arc<RwLock<HashMap<Ipv4Addr, Peer>>>;
+type Admissions = Arc<RwLock<Option<HashMap<Ipv4Addr,crate::udp::SendPermit>>>>;
 pub struct Datagram {
+    pub permit:Option<crate::udp::SendPermit>,
     pub address: Ipv4Addr,
     pub payload: Bytes,
 }
@@ -77,6 +79,7 @@ impl Ingress {
         self.validate(source, &payload)?;
         self.input
             .try_send(Datagram {
+                permit:None,
                 address: source,
                 payload,
             })
@@ -84,7 +87,9 @@ impl Ingress {
     }
     /// Preserve reliable-carrier backpressure instead of creating local loss.
     /// Recheck admission after waiting because policy can change while queued.
-    pub async fn send_reliable(&self, source: Ipv4Addr, payload: Bytes) -> Result<()> {
+    pub async fn send_reliable(&self, source: Ipv4Addr, payload: Bytes) -> Result<()> {self.send_reliable_guarded(source,payload,None).await}
+    pub async fn send_reliable_guarded(&self,source:Ipv4Addr,payload:Bytes,admission:Option<crate::udp::SendPermit>)->Result<()> {
+        ensure!(admission.as_ref().is_none_or(|permit|permit.valid()),"private stream admission retired");
         self.validate(source, &payload)?;
         let permit = self
             .input
@@ -92,7 +97,9 @@ impl Ingress {
             .await
             .map_err(|_| anyhow::anyhow!("private stream receive queue unavailable"))?;
         self.validate(source, &payload)?;
+        ensure!(admission.as_ref().is_none_or(|permit|permit.valid()),"private stream admission retired");
         permit.send(Datagram {
+            permit:admission,
             address: source,
             payload,
         });
@@ -112,7 +119,7 @@ impl PacketIo {
         }
     }
     pub async fn outgoing(&mut self) -> Option<Datagram> {
-        self.output.recv().await
+        let mut dropped=0;loop {let packet=self.output.recv().await?;if packet.permit.as_ref().is_none_or(|permit|permit.valid()){return Some(packet);}dropped+=1;if dropped%32==0{tokio::task::yield_now().await;}}
     }
     /// The caller must derive `source` from the authenticated peer identity,
     /// never from an untrusted packet's claimed IP address.
@@ -121,6 +128,7 @@ impl PacketIo {
     }
 }
 struct PacketSocket {
+    admissions:Admissions,
     local: Ipv4Addr,
     input: Mutex<mpsc::Receiver<Datagram>>,
     output: mpsc::Sender<Datagram>,
@@ -167,8 +175,12 @@ impl AsyncUdpSocket for PacketSocket {
         {
             return Ok(());
         }
+        let permit=match &*self.admissions.read().unwrap_or_else(|p|p.into_inner()) {
+            Some(admissions)=>match admissions.get(&destination){Some(permit) if permit.valid()=>Some(permit.clone()),_=>return Ok(())},None=>None
+        };
         self.output
             .try_send(Datagram {
+                permit,
                 address: destination,
                 payload: Bytes::copy_from_slice(transmit.contents),
             })
@@ -186,6 +198,9 @@ impl AsyncUdpSocket for PacketSocket {
         let mut input = self.input.lock().unwrap_or_else(|p| p.into_inner());
         match input.poll_recv(cx) {
             Poll::Ready(Some(packet)) => {
+                let current=self.admissions.read().unwrap_or_else(|p|p.into_inner());
+                let accepted=match &*current {Some(admissions)=>admissions.get(&packet.address).is_some_and(|permit|permit.valid())&&packet.permit.as_ref().is_some_and(|permit|permit.valid()),None=>packet.permit.as_ref().is_none_or(|permit|permit.valid())};
+                if !accepted {cx.waker().wake_by_ref();return Poll::Pending;}
                 if bufs.is_empty() || meta.is_empty() || packet.payload.len() > bufs[0].len() {
                     return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
                 }
@@ -348,6 +363,8 @@ fn transport(idle_timeout: Option<Duration>) -> Result<Arc<quinn::TransportConfi
     Ok(Arc::new(config))
 }
 pub struct Endpoint {
+    admissions:Admissions,
+    admission_bindings:Mutex<HashMap<Ipv4Addr,Arc<std::sync::atomic::AtomicBool>>>,
     inner: quinn::Endpoint,
     local: Ipv4Addr,
     identity: Identity,
@@ -368,6 +385,7 @@ impl Endpoint {
     ) -> Result<(Self, PacketIo)> {
         ensure!(local.is_private(), "invalid private stream endpoint");
         let peers: Peers = Default::default();
+        let admissions:Admissions=Default::default();
         let provider = rustls::crypto::ring::default_provider();
         let verifier = Arc::new(Verifier {
             expected: None,
@@ -387,7 +405,7 @@ impl Endpoint {
         let (input, incoming) = mpsc::channel(QUEUE);
         let (outgoing, output) = mpsc::channel(QUEUE);
         let socket = Arc::new(PacketSocket {
-            local,
+            admissions:admissions.clone(),            local,
             input: Mutex::new(incoming),
             output: outgoing,
         });
@@ -401,6 +419,8 @@ impl Endpoint {
         )?;
         Ok((
             Self {
+                admissions,
+                admission_bindings:Default::default(),
                 inner,
                 local,
                 identity,
@@ -431,6 +451,18 @@ impl Endpoint {
     }
     /// Pins originate only from an authenticated private-policy snapshot.
     /// Port grants are checked separately when a TCP stream is opened.
+    /// None preserves legacy behavior. Some is an explicit fail-closed sparse
+    /// admission table; original permits are copied into each emitted datagram.
+    pub fn update_send_admissions(&self,admissions:Option<HashMap<Ipv4Addr,crate::udp::SendPermit>>)->Result<()> {
+        let peers=self.peers.read().unwrap_or_else(|p|p.into_inner());
+        let bindings=self.admission_bindings.lock().unwrap_or_else(|p|p.into_inner());
+        let admissions=if let Some(next)=admissions {
+            ensure!(next.len()<=MAX_PEERS,"private stream admissions exceed bound");
+            ensure!(next.keys().all(|ip|peers.contains_key(ip)&&bindings.contains_key(ip)),"stream admission does not match current peer");
+            Some(next.into_iter().map(|(ip,permit)|{let binding=bindings[&ip].clone();(ip,crate::udp::SendPermit::new(move||binding.load(Ordering::SeqCst)&&permit.valid()))}).collect())
+        }else{None};
+        *self.admissions.write().unwrap_or_else(|p|p.into_inner())=admissions;Ok(())
+    }
     pub fn update_peers(&self, peers: Vec<Peer>) -> Result<()> {
         ensure!(peers.len() <= MAX_PEERS, "too many private stream peers");
         let mut next = HashMap::new();
@@ -460,6 +492,12 @@ impl Endpoint {
             );
         }
         let mut trusted = self.peers.write().unwrap_or_else(|p| p.into_inner());
+        // Retire old queued/native permits BEFORE closing old connections: close
+        // wakes the QUIC driver and must not emit stale buffered application data.
+        let mut bindings=self.admission_bindings.lock().unwrap_or_else(|p|p.into_inner());
+        bindings.retain(|ip,active|{let keep=trusted.get(ip)==next.get(ip);if !keep{active.store(false,Ordering::SeqCst);}keep});
+        for ip in next.keys(){bindings.entry(*ip).or_insert_with(||Arc::new(std::sync::atomic::AtomicBool::new(true)));}
+        drop(bindings);
         self.connections
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -671,6 +709,7 @@ impl Endpoint {
         self.register(connection, None)
     }
     pub fn close(&self) {
+        for active in self.admission_bindings.lock().unwrap_or_else(|p|p.into_inner()).values(){active.store(false,Ordering::SeqCst);}
         self.inner
             .close(0u8.into(), b"private stream owner stopped");
     }
@@ -685,6 +724,40 @@ impl Drop for Endpoint {
 mod ingress_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn endpoint_identity_replacement_retires_already_queued_permits()->Result<()> {
+        let a=Identity::new()?;let b=Identity::new()?;let (endpoint,_)=Endpoint::new(a,"10.234.253.1".parse()?)?;
+        let mut peer=Peer{id:"b".into(),ip:"10.234.253.2".parse()?,fingerprint:b.fingerprint().into(),instance:"old".into()};
+        endpoint.update_peers(vec![peer.clone()])?;
+        endpoint.update_send_admissions(Some(HashMap::from([(peer.ip,crate::udp::SendPermit::new(||true))])))?;
+        let old=endpoint.admissions.read().unwrap().as_ref().unwrap()[&peer.ip].clone();assert!(old.valid());
+        peer.instance="new".into();endpoint.update_peers(vec![peer.clone()])?;assert!(!old.valid());
+        endpoint.update_send_admissions(Some(HashMap::from([(peer.ip,crate::udp::SendPermit::new(||true))])))?;
+        assert!(endpoint.admissions.read().unwrap().as_ref().unwrap()[&peer.ip].valid());assert!(!old.valid());
+        endpoint.close();assert!(!endpoint.admissions.read().unwrap().as_ref().unwrap()[&peer.ip].valid());Ok(())
+    }
+    #[tokio::test]
+    async fn actual_packet_socket_and_packetio_keep_original_admission_on_both_queues()->Result<()> {
+        let local=Ipv4Addr::new(10,234,253,1);let remote=Ipv4Addr::new(10,234,253,2);
+        let active=Arc::new(std::sync::atomic::AtomicBool::new(true));let old_active=active.clone();
+        let old=crate::udp::SendPermit::new(move||old_active.load(Ordering::SeqCst));
+        let fresh=crate::udp::SendPermit::new(||true);
+        let admissions:Admissions=Arc::new(RwLock::new(Some(HashMap::from([(remote,old.clone())]))));
+        let (send,input)=mpsc::channel(2);let (output,receive)=mpsc::channel(2);
+        let socket=PacketSocket{local,input:Mutex::new(input),output,admissions:admissions.clone()};
+        let mut io=PacketIo{input:send.clone(),output:receive,peers:Default::default()};
+        socket.try_send(&quinn::udp::Transmit{destination:(remote,PORT).into(),ecn:None,contents:b"old",segment_size:None,src_ip:None})?;
+        send.send(Datagram{address:remote,payload:Bytes::from_static(b"old"),permit:Some(old)}).await?;
+        active.store(false,Ordering::SeqCst);*admissions.write().unwrap()=Some(HashMap::from([(remote,fresh.clone())]));
+        socket.try_send(&quinn::udp::Transmit{destination:(remote,PORT).into(),ecn:None,contents:b"new",segment_size:None,src_ip:None})?;
+        let received=tokio::time::timeout(Duration::from_secs(1),io.outgoing()).await?.unwrap();assert_eq!(received.payload,Bytes::from_static(b"new"));
+        let mut bytes=[0;16];let mut bufs=[IoSliceMut::new(&mut bytes)];let mut metadata=[quinn::udp::RecvMeta::default()];
+        let mut context=Context::from_waker(futures_util::task::noop_waker_ref());
+        assert!(socket.poll_recv(&mut context,&mut bufs,&mut metadata).is_pending(),"retired ingress must not reach Quinn");
+        send.send(Datagram{address:remote,payload:Bytes::from_static(b"new"),permit:Some(fresh)}).await?;
+        assert!(matches!(socket.poll_recv(&mut context,&mut bufs,&mut metadata),Poll::Ready(Ok(1))));assert_eq!(&bufs[0][..metadata[0].len],b"new");
+        Ok(())
+    }
     #[tokio::test]
     async fn parallel_lanes_negotiate_and_legacy_peers_keep_one_connection() -> Result<()> {
         for parallel in [false, true] {

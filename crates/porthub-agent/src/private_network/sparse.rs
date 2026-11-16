@@ -57,6 +57,16 @@ pub fn channel() -> (Handle, Control) {
         },
     )
 }
+// A routine renewal is not retirement. Keep its revocation domain only when
+// identity/assignment/epoch/exact ACL is unchanged; each queued request still
+// retains its own ORIGINAL expiry witness. No grant/range expansion is needed.
+fn same_pair_authority(a:&PairLease,b:&PairLease)->bool {
+    let identity=|a:&PeerInfo,b:&PeerInfo|a.id==b.id&&a.ip==b.ip&&a.fingerprint==b.fingerprint&&a.instance==b.instance;
+    a.workspace==b.workspace&&a.self_==b.self_&&a.epoch==b.epoch&&a.revision==b.revision&&identity(&a.local,&b.local)&&identity(&a.peer,&b.peer)
+        &&a.grants.len()==b.grants.len()&&a.grants.iter().zip(&b.grants).all(|(a,b)|a.source==b.source&&a.destination==b.destination&&a.protocol==b.protocol&&a.ports.len()==b.ports.len()&&a.ports.iter().zip(&b.ports).all(|(a,b)|a.start==b.start&&a.end==b.end))
+        &&match (serde_json::to_vec(&a.acl),serde_json::to_vec(&b.acl)){(Ok(a),Ok(b))=>a==b,_=>false}
+}
+
 impl Handle {
     pub fn revoke_all(&self) {
         self.revoked.store(true, Ordering::SeqCst);
@@ -259,7 +269,9 @@ impl Handle {
             .get(&lease.peer.id)
             .map(|c| c.last_used)
             .unwrap_or(now);
-        let retirement_owner=authority.as_ref().map(|_|super::authority_event::Owner::new());
+        let mut previous=s.cache.remove(&lease.peer.id);
+        let retained_owner=if authority.is_some(){previous.as_mut().filter(|cached|same_pair_authority(&cached.lease,&lease)).and_then(|cached|cached._retirement_owner.take())}else{None};
+        let retirement_owner=retained_owner.or_else(||authority.as_ref().map(|_|super::authority_event::Owner::new()));
         let authority=authority.zip(retirement_owner.as_ref()).map(|(authority,owner)|authority.retired_with(owner.domain()));
         s.cache.insert(
             lease.peer.id.clone(),
@@ -491,6 +503,22 @@ mod tests {
         handle.installed_authority(&query,pair.clone(),authority());let old=handle.pair_authority("b").unwrap();assert!(old.check().is_ok());
         handle.retire("b");assert!(old.check().is_err());
         handle.installed_authority(&query,pair,authority());assert!(handle.pair_authority("b").unwrap().check().is_ok());assert!(old.check().is_err());
+    }
+    #[cfg(feature="private-sparse")]
+    #[test]
+    fn ordinary_identical_pair_renewal_preserves_domain_but_never_extends_old_request_window() {
+        struct Clock(std::sync::atomic::AtomicU64);
+        impl super::super::authority_clock::SuspendClock for Clock {fn elapsed_since_boot(&self)->anyhow::Result<Duration>{Ok(Duration::from_millis(self.0.load(Ordering::SeqCst)))}}
+        let clock=Arc::new(Clock(std::sync::atomic::AtomicU64::new(0)));
+        let expiry=chrono::Utc::now()+chrono::Duration::seconds(30);
+        let authority=||super::super::authority_event::Authority::new((),Some(super::super::authority_clock::RequestWindow::start(clock.clone()).unwrap()),expiry);
+        let(handle,_)=channel();let epoch="a".repeat(64);handle.update_base_authority(&base(&epoch),authority());
+        let pair=lease(&epoch);let query=Lookup{kind:"peer".into(),value:"b".into()};
+        handle.installed_authority(&query,pair.clone(),authority());let old=handle.pair_authority("b").unwrap();
+        clock.0.store(10000,Ordering::SeqCst);handle.update_base_authority(&base(&epoch),authority());handle.installed_authority(&query,pair.clone(),authority());
+        assert!(old.check().is_ok(),"identical renewal must not spuriously retire live operations");
+        clock.0.store(15000,Ordering::SeqCst);assert!(old.check().is_err());let fresh=handle.pair_authority("b").unwrap();assert!(fresh.check().is_ok());
+        let mut changed=pair;changed.grants.clear();handle.installed_authority(&query,changed,authority());assert!(fresh.check().is_err(),"changed ACL retires the old domain");
     }
     #[test]
     fn miss_intents_deduplicate_and_stop_at_a_hard_bound() {
