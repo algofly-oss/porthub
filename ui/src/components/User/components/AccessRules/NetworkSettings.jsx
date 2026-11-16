@@ -14,7 +14,7 @@ export default function NetworkSettings({ data, manage, params, onSaved }) {
     event.preventDefault();
     setBusy(true);
     try {
-      await axios.put(`${API}/network`, form, { params });
+      await axios.put(`${API}/network`, { cidr: form.cidr, dns_suffix: form.dns_suffix }, { params });
       await onSaved();
       toast.success("Network preferences saved. No machine routes changed.");
     } catch (error) {
@@ -28,7 +28,8 @@ export default function NetworkSettings({ data, manage, params, onSaved }) {
       <h2 className="text-base font-semibold">Private Network Preferences</h2>
       <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
         Addressing and names for this workspace. Every workspace has its own
-        suffix; machines follow the workspace they joined.
+        suffix; machines follow the workspace they joined. Address pools grow
+        automatically as machines join, while existing addresses and communication rules stay in place.
       </p>
       <form onSubmit={save} className="mt-6 max-w-xl space-y-5">
         <label className="block text-sm font-medium">
@@ -43,10 +44,18 @@ export default function NetworkSettings({ data, manage, params, onSaved }) {
             disabled={!manage}
           />
           <span className="mt-2 block text-xs font-normal leading-5 text-muted-foreground">
-            Suggested range only. Client-side conflict checks are required
-            before any routes can be installed.
+            PortHub expands this range when needed. If a neighbouring range is
+            reserved, it adds another pool to the same private network.
           </span>
         </label>
+        {data.network.auto_expand && (
+          <div className="rounded-lg bg-control p-3 text-xs leading-5 text-muted-foreground">
+            <p className="font-medium text-foreground">Automatic address allocation</p>
+            <p>{Number(data.network.address_capacity || 0).toLocaleString()} addresses across the current pools.</p>
+            <p className="mt-1 break-words font-mono">{(data.network.cidrs || [data.network.cidr]).join(", ")}</p>
+            <p className="mt-1">Machines in different pools can communicate when your rules allow it.</p>
+          </div>
+        )}
         <label className="block text-sm font-medium">
           Private DNS suffix
           <Input

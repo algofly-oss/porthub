@@ -346,29 +346,17 @@ async fn machine_creation_enrolls_privately_and_checks_group_ownership() -> Resu
             .await?
             == before
     );
-    // Exhaustion must roll back the new machine, not leave an unenrolled record.
-    case.app
-        .collection("private_networks")
-        .insert_one(doc! {"_id":other.to_hex(),"cidr":"10.203.0.0/28"})
-        .await?;
+    // Exhaustion grows a nonoverlapping pool without losing the new machine.
+    case.app.collection("private_networks").insert_one(doc! {"_id":other.to_hex(),"cidr":"10.203.0.0/28"}).await?;
     for host in 1..=14 {
         case.app.collection("private_peers").insert_one(doc! {"_id":format!("full-{host}"),"workspace_id":other,"ip":format!("10.203.0.{host}")}).await?;
     }
-    case.status(
-        "POST",
-        "/api/machines/add",
-        &other_cookie,
-        json!({"name":"exhausted"}),
-        StatusCode::BAD_REQUEST,
-    )
-    .await?;
-    ensure!(
-        case.app
-            .collection("machines")
-            .count_documents(doc! {})
-            .await?
-            == 1
-    );
+    let grown = case.status("POST", "/api/machines/add", &other_cookie,
+        json!({"name":"automatically-grown"}), StatusCode::OK).await?;
+    let grown_id = ObjectId::parse_str(grown["data"]["_id"].as_str().unwrap())?;
+    let grown_peer = case.app.collection("private_peers").find_one(doc! {"machine_id":grown_id}).await?.context("new grown peer")?;
+    ensure!(!porthub_api::domain::enrollment::Network::parse("10.203.0.0/28").unwrap().contains(grown_peer.get_str("ip")?.parse()?));
+    ensure!(case.app.collection("machines").count_documents(doc! {}).await? == 2);
     case.db.drop().await?;
     Ok(())
 }

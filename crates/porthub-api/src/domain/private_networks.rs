@@ -8,7 +8,149 @@ use crate::{
 use axum::http::StatusCode;
 use futures_util::TryStreamExt;
 use mongodb::bson::{doc, Document};
-use std::net::Ipv4Addr;
+use std::{collections::HashSet, net::Ipv4Addr};
+
+/// Additional pools share the same identity-based mesh and ACLs. Agents route
+/// individual peer addresses, so growth never requires renumbering live peers.
+pub fn pools(document: &Document) -> ApiResult<Vec<Network>> {
+    let mut result = vec![enrollment::preferences(document)?.0];
+    if let Some(value) = document.get("additional_cidrs") {
+        let items = value
+            .as_array()
+            .ok_or_else(|| ApiError::bad_request("Invalid private address pools"))?;
+        for value in items {
+            let network = Network::parse(
+                value
+                    .as_str()
+                    .ok_or_else(|| ApiError::bad_request("Invalid private address pool"))?,
+            )
+            .map_err(ApiError::bad_request)?;
+            if !result.iter().any(|old| old.cidr() == network.cidr()) {
+                result.push(network);
+            }
+        }
+    }
+    Ok(result)
+}
+
+pub fn describe(document: &Document) -> ApiResult<serde_json::Value> {
+    let (primary, suffix) = enrollment::preferences(document)?;
+    let ranges = pools(document)?;
+    let capacity: u64 = ranges
+        .iter()
+        .filter(|range| {
+            !ranges
+                .iter()
+                .any(|other| other.capacity() > range.capacity() && other.overlaps(**range))
+        })
+        .map(|range| u64::from(range.capacity()))
+        .sum();
+    Ok(
+        serde_json::json!({"cidr":primary.cidr(),"dns_suffix":suffix,"auto_expand":true,
+        "cidrs":ranges.iter().map(|range| range.cidr()).collect::<Vec<_>>(),"address_capacity":capacity}),
+    )
+}
+
+fn overflow_candidates() -> impl Iterator<Item = Network> {
+    (0..65536u32)
+        .map(|offset| {
+            let index = (203 * 256 + offset) % 65536;
+            format!("10.{}.{}.0/24", index / 256, index % 256)
+        })
+        .chain((0..4096u32).map(|i| format!("172.{}.{}.0/24", 16 + i / 256, i % 256)))
+        .chain((0..256u32).map(|i| format!("192.168.{i}.0/24")))
+        .map(|cidr| Network::parse(&cidr).expect("RFC1918 candidate"))
+}
+
+async fn workspace_lans(
+    app: &App,
+    owner: &str,
+) -> ApiResult<Vec<porthub_mesh::lan_routes::Network>> {
+    let owner = mongodb::bson::oid::ObjectId::parse_str(owner)
+        .map_err(|_| ApiError::bad_request("Invalid workspace"))?;
+    let peers: Vec<Document> = app
+        .collection("private_peers")
+        .find(doc! {"workspace_id":owner,"enabled":{"$ne":false}})
+        .projection(doc! {"lan_networks":1})
+        .await?
+        .try_collect()
+        .await?;
+    let mut lans = HashSet::new();
+    for peer in peers {
+        if let Ok(values) = peer.get_array("lan_networks") {
+            for value in values {
+                if let Some(raw) = value.as_str() {
+                    if let Ok(network) = raw.parse::<porthub_mesh::lan_routes::Network>() {
+                        lans.insert(network.to_string());
+                    }
+                }
+            }
+        }
+    }
+    Ok(lans
+        .into_iter()
+        .filter_map(|value| value.parse().ok())
+        .collect())
+}
+
+fn avoids_lans(network: Network, lans: &[porthub_mesh::lan_routes::Network]) -> bool {
+    let candidate: porthub_mesh::lan_routes::Network =
+        network.cidr().parse().expect("validated private pool");
+    !lans.iter().any(|lan| candidate.overlaps(*lan))
+}
+
+/// Caller holds private_network_lock through allocation AND peer insertion.
+pub(crate) async fn allocate_locked(
+    app: &App,
+    owner: &str,
+    machine: &str,
+    used: &HashSet<String>,
+) -> ApiResult<String> {
+    let document = ensure_locked(app, owner).await?;
+    let current = pools(&document)?;
+    let lans = workspace_lans(app, owner).await?;
+    for pool in &current {
+        if !avoids_lans(*pool, &lans) {
+            continue;
+        }
+        if let Some(ip) = pool.available_address(machine, used) {
+            return Ok(ip);
+        }
+    }
+    let (foreign, addresses) = occupied(app, owner).await?;
+    // Prefer a contiguous expansion, but never claim another tenant's range.
+    if let Some(parent) = current[0]
+        .parent()
+        .filter(|p| available(*p, &foreign, &addresses) && avoids_lans(*p, &lans))
+    {
+        if let Some(ip) = parent.available_address(machine, used) {
+            app.collection("private_networks").update_one(doc! {"_id":owner},
+                doc! {"$set":{"cidr":parent.cidr(),"updated_at":mongodb::bson::DateTime::now()}}).await?;
+            return Ok(ip);
+        }
+    }
+    let mut reserved = foreign;
+    reserved.extend(current);
+    let next = overflow_candidates()
+        .find(|candidate| {
+            available(*candidate, &reserved, &addresses) && avoids_lans(*candidate, &lans)
+        })
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::CONFLICT,
+                "All available RFC1918 private address pools are occupied",
+            )
+        })?;
+    let ip = next.available_address(machine, used).ok_or_else(|| {
+        ApiError::new(
+            StatusCode::CONFLICT,
+            "Private address pool allocation changed; retry",
+        )
+    })?;
+    app.collection("private_networks").update_one(doc! {"_id":owner},
+        doc! {"$addToSet":{"additional_cidrs":next.cidr()},"$set":{"updated_at":mongodb::bson::DateTime::now()}}).await?;
+    Ok(ip)
+}
 
 async fn occupied(app: &App, owner: &str) -> ApiResult<(Vec<Network>, Vec<Ipv4Addr>)> {
     let networks: Vec<Document> = app
@@ -21,7 +163,7 @@ async fn occupied(app: &App, owner: &str) -> ApiResult<(Vec<Network>, Vec<Ipv4Ad
     let mut configured = std::collections::HashSet::new();
     for network in networks {
         configured.insert(store::string(&network, "_id").to_owned());
-        ranges.push(enrollment::preferences(&network)?.0);
+        ranges.extend(pools(&network)?);
     }
     // Reserve legacy defaults even when no preferences document was saved.
     // Also reserve old assigned addresses after a tenant edits its range.
@@ -74,12 +216,9 @@ pub(crate) async fn ensure_locked(app: &App, owner: &str) -> ApiResult<Document>
         .is_some();
     let (ranges, addresses) = occupied(app, owner).await?;
     let mut chosen = None;
-    // Prefer the historic default, then walk the private 10/8 space in /24s.
+    // Prefer the historic default, then walk RFC1918 space in /24s.
     // Legacy tenants retain their default even if historical ranges overlap.
-    for offset in 0..65536u32 {
-        let index = (203 * 256 + offset) % 65536;
-        let range = Network::parse(&format!("10.{}.{}.0/24", index / 256, index % 256))
-            .expect("private /24");
+    for range in overflow_candidates() {
         if legacy || available(range, &ranges, &addresses) {
             chosen = Some(range);
             break;
@@ -136,5 +275,28 @@ mod tests {
             &[],
             &["192.168.1.42".parse().unwrap()]
         ));
+    }
+
+    #[test]
+    fn growth_crosses_octets_and_reports_unique_capacity() {
+        let old = Network::parse("10.203.0.0/24").unwrap();
+        let expanded = old.parent().unwrap();
+        assert_eq!(expanded.cidr(), "10.203.0.0/23");
+        let used: HashSet<_> = (1..=254).map(|n| format!("10.203.0.{n}")).collect();
+        let next: Ipv4Addr = expanded
+            .available_address("new-machine", &used)
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(!used.contains(&next.to_string()));
+        assert!(expanded.contains(next));
+        assert!(Network::parse("10.203.0.0/16").unwrap().parent().is_none());
+        let value = describe(
+            &doc! {"cidr":"10.203.0.0/23", "additional_cidrs":["10.203.0.0/24","172.16.0.0/24"]},
+        )
+        .map_err(|error| error.detail.to_string())
+        .unwrap();
+        assert_eq!(value["address_capacity"], 510 + 254);
+        assert_eq!(value["auto_expand"], true);
     }
 }

@@ -87,7 +87,7 @@ async fn enroll(
         ));
     }
     let prefs = crate::domain::private_networks::ensure_locked(&app, &owner.to_hex()).await?;
-    let (network, suffix) = preferences(&prefs)?;
+    let (_, suffix) = preferences(&prefs)?;
     if let Some(name) = &name {
         enrollment::check_name(&app, owner, &Bson::ObjectId(mid), name).await?;
     }
@@ -100,7 +100,7 @@ async fn enroll(
         address = if let Some(existing) = &existing {
             store::string(existing, "ip").into()
         } else {
-            network.allocate(&mid.to_hex(), &enrollment::occupied(&peers))?
+            crate::domain::private_networks::allocate_locked(&app, &owner.to_hex(), &mid.to_hex(), &enrollment::occupied(&peers)).await?
         };
         let mut set = doc! {"workspace_id":owner,"machine_id":mid,"owner_id":machine.get("user_id"),"ip":&address,"enabled":true,"updated_at":now,"enrollment_generation":&generation};
         if let Some(name) = &name {

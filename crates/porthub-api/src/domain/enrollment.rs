@@ -79,6 +79,10 @@ impl Network {
         format!("{}/{}", Ipv4Addr::from(self.base), self.bits)
     }
 
+    pub(crate) fn capacity(self) -> u32 {
+        (1u32 << (32 - self.bits)) - 2
+    }
+
     pub fn contains(self, ip: Ipv4Addr) -> bool {
         let mask = u32::MAX << (32 - self.bits);
         u32::from(ip) & mask == self.base
@@ -89,16 +93,32 @@ impl Network {
     }
 
     pub fn allocate(self, machine_id: &str, occupied: &HashSet<String>) -> ApiResult<String> {
+        self.available_address(machine_id, occupied)
+            .ok_or_else(|| ApiError::bad_request("The private address range is full"))
+    }
+
+    pub(crate) fn available_address(
+        self,
+        machine_id: &str,
+        occupied: &HashSet<String>,
+    ) -> Option<String> {
         let count = (1u32 << (32 - self.bits)) - 2;
         let digest = Sha256::digest(machine_id.as_bytes());
         let start = (u64::from_be_bytes(digest[..8].try_into().unwrap()) % u64::from(count)) as u32;
         for offset in 0..count {
             let ip = Ipv4Addr::from(self.base + (start + offset) % count + 1).to_string();
             if !occupied.contains(&ip) {
-                return Ok(ip);
+                return Some(ip);
             }
         }
-        Err(ApiError::bad_request("The private address range is full"))
+        None
+    }
+
+    pub(crate) fn parent(self) -> Option<Self> {
+        (self.bits > 16).then(|| Self {
+            base: self.base & (u32::MAX << (33 - self.bits)),
+            bits: self.bits - 1,
+        })
     }
 }
 
@@ -167,7 +187,12 @@ pub async fn ensure(app: &App, machine: &Document) -> ApiResult<()> {
     let owner = machine
         .get("user_id")
         .ok_or_else(ApiError::unauthenticated)?;
-    if app.collection("users").find_one(doc! {"_id":owner,"account_deletion":{"$exists":false}}).await?.is_none() {
+    if app
+        .collection("users")
+        .find_one(doc! {"_id":owner,"account_deletion":{"$exists":false}})
+        .await?
+        .is_none()
+    {
         return Ok(());
     }
     let machine_id = machine.get("_id").ok_or_else(ApiError::unauthenticated)?;
@@ -179,8 +204,6 @@ pub async fn ensure(app: &App, machine: &Document) -> ApiResult<()> {
     {
         return Ok(());
     }
-    let document = super::private_networks::ensure_locked(app, &store::id(Some(owner))).await?;
-    let (network, _) = preferences(&document)?;
     peers
         .create_index(
             IndexModel::builder()
@@ -203,7 +226,13 @@ pub async fn ensure(app: &App, machine: &Document) -> ApiResult<()> {
             .iter()
             .map(|peer| store::string(peer, "ip").to_owned())
             .collect();
-        let ip = network.allocate(&store::id(Some(machine_id)), &occupied)?;
+        let ip = super::private_networks::allocate_locked(
+            app,
+            &store::id(Some(owner)),
+            &store::id(Some(machine_id)),
+            &occupied,
+        )
+        .await?;
         let now = DateTime::now();
         let result = peers
             .update_one(

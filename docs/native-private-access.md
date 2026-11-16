@@ -33,6 +33,18 @@ its installer tickets and deleting incoming/outgoing signaling records. Cleanup
 can be retried. Public machine credentials and forwarding configuration are not
 modified by these operations.
 
+Private address capacity grows automatically during public-machine enrollment
+and explicit private enrollment. When a pool fills, the API first expands the
+primary CIDR up to `/16` if doing so does not overlap another workspace's pools
+or retained addresses. Otherwise it reserves an additional `/24` from RFC1918
+space. Additional pools are durable and reserved against other workspaces.
+Existing peers keep their addresses, identities, credentials and communication
+rules; all pools participate in the same private mesh using peer-specific routes
+and identity-based grants. Growth does not grant new access or re-enable a
+revoked client. Network preferences report `auto_expand`, `cidrs` and the current
+`address_capacity`. There is no fixed 254-machine account limit; finite IPv4
+address space and deployment resources still bound capacity.
+
 Private names retain the original enrollment ordering, custom-name priority,
 machine-name reservations and alias ownership. BSON ObjectIds and equal-looking
 string identifiers remain distinct when joining machines. Existing unambiguous

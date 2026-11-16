@@ -233,3 +233,79 @@ async fn exit_discovery_is_scoped_without_creating_private_port_grants() -> Resu
     case.db.drop().await?;
     result
 }
+
+#[tokio::test]
+#[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn cross_pool_growth_keeps_legacy_sync_identity_acl_and_peer_ips() -> Result<()> {
+    let case = Case::new(Config::default()).await?;
+    let result = async {
+        let (owner, _) = case.user("cross-pool-owner@test.invalid", "user").await?;
+        let (neighbor, _) = case.user("cross-pool-neighbor@test.invalid", "user").await?;
+        case.app.collection("private_networks").insert_one(doc! {"_id":owner.to_hex(),"cidr":"10.222.0.0/28","dns_suffix":"phub"}).await?;
+        case.app.collection("private_networks").insert_one(doc! {"_id":neighbor.to_hex(),"cidr":"10.222.0.16/28","dns_suffix":"internal"}).await?;
+        let token = "fixture-token-0123456789abcdef0123456789";
+        let mut old = Vec::new();
+        let mut ids = Vec::new();
+        for host in 1..=14 {
+            let machine = ObjectId::new();
+            let peer = format!("{owner}:{machine}");
+            let ip = format!("10.222.0.{host}");
+            case.app.collection("machines").insert_one(doc! {"_id":machine,"user_id":owner,"name":format!("Old machine {host}")}).await?;
+            case.app.collection("private_peers").insert_one(doc! {"_id":&peer,"workspace_id":owner,"machine_id":machine,"owner_id":owner,"ip":&ip,"enabled":true,"credential_hash":token_digest(token)}).await?;
+            old.push((peer, ip));
+            ids.push(machine);
+        }
+        let joined = ObjectId::new();
+        case.app.collection("machines").insert_one(doc! {"_id":joined,"user_id":owner,"name":"Overflow machine"}).await?;
+        porthub_api::domain::enrollment::ensure(&case.app, &doc! {"_id":joined,"user_id":owner}).await.map_err(|e| anyhow::anyhow!("{}", e.detail))?;
+        let destination = format!("{owner}:{joined}");
+        case.app.collection("private_peers").update_one(doc! {"_id":&destination},doc! {"$set":{"credential_hash":token_digest(token)}}).await?;
+        let added = case.app.collection("private_peers").find_one(doc! {"_id":&destination}).await?.unwrap();
+        let added_ip = added.get_str("ip")?.to_owned();
+        ensure!(!porthub_api::domain::enrollment::Network::parse("10.222.0.0/28").unwrap().contains(added_ip.parse()?));
+        let group = ObjectId::new();
+        case.app.collection("machine_groups").insert_one(doc! {"_id":group,"user_id":owner}).await?;
+        case.app.collection("access_rulebooks").insert_one(doc! {"_id":ObjectId::new(),"user_id":owner,"group_id":group.to_hex(),"rules":[{"id":"cross-pool-https","name":"Cross-pool HTTPS","sources":[{"kind":"machine","id":ids[0].to_hex()}],"destinations":[{"kind":"machine","id":joined.to_hex()}],"ports":"443"}]}).await?;
+        // Original client request shape has no pool/network extension fields.
+        let request_b = sync(&destination, &fingerprint("CD"), "instance-11111111");
+        let b = case.status("POST", "/api/access/private/sync", "", request_b, StatusCode::OK).await?;
+        let a = case.status("POST", "/api/access/private/sync", "", sync(&old[0].0, &fingerprint("AB"), "instance-00000000"), StatusCode::OK).await?;
+        let denied = case.status("POST", "/api/access/private/sync", "", sync(&old[1].0, &fingerprint("EF"), "instance-22222222"), StatusCode::OK).await?;
+        let snapshot = &a["snapshot"];
+        ensure!(snapshot["peers"].as_array().unwrap().len() == 2);
+        ensure!(snapshot["peers"].as_array().unwrap().iter().any(|p| p["id"] == destination && p["ip"] == added_ip));
+        ensure!(snapshot["peers"].as_array().unwrap().iter().any(|p| p["id"] == old[0].0 && p["ip"] == old[0].1));
+        ensure!(snapshot["grants"].as_array().unwrap().len() == 1);
+        ensure!(snapshot["grants"][0]["source"] == old[0].0 && snapshot["grants"][0]["destination"] == destination);
+        ensure!(snapshot.get("cidrs").is_none() && snapshot.get("additional_cidrs").is_none());
+        ensure!(denied["snapshot"]["peers"].as_array().unwrap().len() == 1 && denied["snapshot"]["grants"] == json!([]));
+        // Apply the actual gateway snapshots to the existing packet policy:
+        // CIDR boundaries grant nothing, and /32 identity bindings still govern.
+        fn syn(source: &str, destination: &str, port: u16) -> Vec<u8> {
+            let mut p = vec![0u8; 40];
+            p[0] = 0x45; p[2..4].copy_from_slice(&40u16.to_be_bytes()); p[8] = 64; p[9] = 6;
+            p[12..16].copy_from_slice(&source.parse::<std::net::Ipv4Addr>().unwrap().octets());
+            p[16..20].copy_from_slice(&destination.parse::<std::net::Ipv4Addr>().unwrap().octets());
+            p[20..22].copy_from_slice(&32123u16.to_be_bytes()); p[22..24].copy_from_slice(&port.to_be_bytes()); p[32] = 0x50; p[33] = 2;
+            let mut sum: u32 = p[..20].chunks_exact(2).map(|b| u32::from(u16::from_be_bytes([b[0],b[1]]))).sum();
+            while sum >> 16 != 0 { sum = (sum & 65535) + (sum >> 16); }
+            p[10..12].copy_from_slice(&(!(sum as u16)).to_be_bytes()); p
+        }
+        let mut source_policy = porthub_agent::private_network::policy::Engine::default();
+        source_policy.apply(serde_json::from_value(snapshot.clone())?)?;
+        let mut destination_policy = porthub_agent::private_network::policy::Engine::default();
+        destination_policy.apply(serde_json::from_value(b["snapshot"].clone())?)?;
+        ensure!(source_policy.check(&syn(&old[0].1, &added_ip, 443), &destination, false));
+        ensure!(destination_policy.check(&syn(&old[0].1, &added_ip, 443), &old[0].0, true));
+        ensure!(!source_policy.check(&syn(&old[0].1, &added_ip, 22), &destination, false));
+        ensure!(!source_policy.check(&syn(&old[0].1, &old[1].1, 443), &old[1].0, false));
+        ensure!(!destination_policy.check(&syn(&old[1].1, &added_ip, 443), &old[0].0, true), "A denied peer cannot spoof an allowed identity across pools");
+        for (peer, ip) in old {
+            let row = case.app.collection("private_peers").find_one(doc! {"_id":peer}).await?.unwrap();
+            ensure!(row.get_str("ip")? == ip && row.get_str("credential_hash")? == token_digest(token) && row.get_bool("enabled")?);
+        }
+        Ok::<_, anyhow::Error>(())
+    }.await;
+    case.db.drop().await?;
+    result
+}

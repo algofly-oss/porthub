@@ -249,7 +249,6 @@ async fn snapshot(
         .find_one(doc! {"_id":owner.to_hex()})
         .await?
         .unwrap_or_default();
-    let (network, suffix) = enrollment::preferences(&prefs)?;
     let mut peers: Vec<Document> = app
         .collection("private_peers")
         .find(doc! {"workspace_id":owner})
@@ -318,7 +317,7 @@ async fn snapshot(
         .find(doc! {"workspace_id":owner}).await?.try_collect().await?;
     Ok(Json(
         json!({"workspace_id":owner.to_hex(),"role":role,"transport_ready":false,
-        "network":{"cidr":network.cidr(),"dns_suffix":suffix},"machines":machines,"users":users,"groups":groups,
+        "network":crate::domain::private_networks::describe(&prefs)?,"machines":machines,"users":users,"groups":groups,
         "books":books.iter().map(store::document).collect::<Vec<_>>(),"private_peers":private_peers,
         "exit_nodes":exit_nodes.iter().map(crate::routes::exit_nodes::serialize).collect::<Vec<_>>(),
         "dns_rules":dns_rules.iter().map(crate::routes::dns_rules::serialize).collect::<Vec<_>>(),
