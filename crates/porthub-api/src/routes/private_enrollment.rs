@@ -173,6 +173,14 @@ async fn bootstrap(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiRes
     let (claim, peer) = enrollment::resolve(&app, &ticket).await?;
     #[cfg(feature="private-sparse")]
     let _workspace_guard=crate::private_renumber::fence::stable(&app,peer.get_object_id("workspace_id").map_err(|_|ApiError::bad_request("Invalid workspace"))?).await?;
+    #[cfg(feature="private-sparse")]
+    let (claim,peer)={
+        let (fresh_claim,fresh_peer)=enrollment::resolve(&app,&ticket).await?;
+        if fresh_peer.get("_id")!=peer.get("_id") || fresh_peer.get("workspace_id")!=peer.get("workspace_id") || fresh_claim.get("_id")!=claim.get("_id") {
+            return Err(conflict("Enrollment identity changed while waiting"));
+        }
+        (fresh_claim,fresh_peer)
+    };
     let now = DateTime::now();
     let claimed = app
         .collection("private_install_tickets")

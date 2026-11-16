@@ -42,6 +42,7 @@ struct Lease {
     allowed: HashSet<String>,
     expires: Instant,
     sparse_epoch: Option<String>,
+    workspace: Option<(String,u64)>,
 }
 pub(crate) struct PairPeerPin {pub id:String,pub hash:String,pub instance:String,pub ip:Ipv4Addr,pub epoch:Option<String>,pub generation:Option<u64>}
 #[derive(Clone)]
@@ -65,7 +66,7 @@ struct Forward<'a> {
     generation: u64,
     expires: Instant,
 }
-struct Admission { hash:String, instance:String, generation:u64, expires:Instant }
+struct Admission { hash:String, instance:String, generation:u64, expires:Instant, workspace:Option<(String,u64)> }
 #[derive(Default)]
 struct Inner {
     leases: HashMap<String, Lease>,
@@ -126,26 +127,32 @@ impl Hub {
         if old.is_some_and(|(g,_)|generation<g) {return false;}
         if old.is_none()&&hub.workspace_generations.len()>=16384 {return false;}
         if old==Some((generation,blocked)){return !blocked;}
-        let prefix=format!("{workspace}:");
-        hub.admissions.retain(|id,_|!id.starts_with(&prefix));
-        hub.leases.retain(|id,_|!id.starts_with(&prefix));
-        hub.connections.retain(|id,_|!id.starts_with(&prefix));
-        hub.pairs.retain(|_,pair|!pair.left.starts_with(&prefix)&&!pair.right.starts_with(&prefix));
+        let retired:HashSet<String>=hub.admissions.iter().filter(|(_,a)|a.workspace.as_ref().is_some_and(|(w,_)|w==workspace)).map(|(id,_)|id.clone())
+            .chain(hub.leases.iter().filter(|(_,l)|l.workspace.as_ref().is_some_and(|(w,_)|w==workspace)).map(|(id,_)|id.clone())).collect();
+        hub.admissions.retain(|id,_|!retired.contains(id));
+        hub.leases.retain(|id,_|!retired.contains(id));
+        hub.connections.retain(|id,_|!retired.contains(id));
+        hub.pairs.retain(|_,pair|!retired.contains(&pair.left)&&!retired.contains(&pair.right));
         hub.workspace_generations.insert(workspace.into(),(generation,blocked));
         !blocked
     }
     /// A bounded authenticated control-read ticket. A denial/identity replacement invalidates
     /// earlier in-flight reads without quarantining later newly authorized requests.
-    pub(crate) fn begin_admission(&self,id:&str,hash:&str,instance:&str)->Option<u64>{
+    pub(crate) fn begin_admission(&self,id:&str,hash:&str,instance:&str)->Option<u64>{self.begin_admission_bound(id,hash,instance,None)}
+    pub(crate) fn begin_workspace_admission(&self,id:&str,hash:&str,instance:&str,workspace:&str)->Option<u64>{self.begin_admission_bound(id,hash,instance,Some(workspace))}
+    fn begin_admission_bound(&self,id:&str,hash:&str,instance:&str,workspace:Option<&str>)->Option<u64>{
         let mut hub=self.0.lock().unwrap_or_else(|p|p.into_inner());let now=Instant::now();
-        if id.split_once(':').is_some_and(|(workspace,_)|hub.workspace_generations.get(workspace).is_some_and(|(_,blocked)|*blocked)){return None;}
+        let workspace=match workspace {
+            Some(w)=>Some((w.to_owned(),hub.workspace_generations.get(w).filter(|(_,blocked)|!*blocked)?.0)),
+            None=>None,
+        };
         if hub.admission_cleanup_at.is_none_or(|at|at<=now){
             hub.admissions.retain(|_,a|a.expires>now);hub.admission_cleanup_at=Some(now+Duration::from_secs(60));
         }
         if hub.admissions.len()>=16384&&!hub.admissions.contains_key(id){return None;}
         hub.admission_generation=hub.admission_generation.checked_add(1)?;
         let generation=hub.admission_generation;
-        hub.admissions.insert(id.into(),Admission{hash:hash.into(),instance:instance.into(),generation,expires:now+Duration::from_secs(60)});
+        hub.admissions.insert(id.into(),Admission{hash:hash.into(),instance:instance.into(),generation,expires:now+Duration::from_secs(60),workspace});
         Some(generation)
     }
     pub(crate) fn admission_snapshot(&self,id:&str,hash:&str,instance:&str)->Option<u64>{
@@ -206,6 +213,7 @@ impl Hub {
             })
             .map(|lease| lease.relay_token.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
+        let workspace=admission.and_then(|_|hub.admissions.get(id).and_then(|a|a.workspace.clone()));
         hub.leases.insert(
             id.into(),
             Lease {
@@ -217,6 +225,7 @@ impl Hub {
                 allowed,
                 expires: now + Duration::from_secs(15),
                 sparse_epoch: None,
+                workspace,
             },
         );
         relay_token
@@ -237,7 +246,8 @@ impl Hub {
         let unchanged=old.is_some_and(|l|l.credential_hash==hash&&l.instance==instance&&l.ip==ip&&l.sparse_epoch.as_deref()==Some(epoch));
         let token=old.filter(|l|l.credential_hash==hash&&l.instance==instance).map(|l|l.relay_token.clone()).unwrap_or_else(||uuid::Uuid::new_v4().simple().to_string());
         if !unchanged {hub.pairs.retain(|_,p|p.left!=id&&p.right!=id);}
-        hub.leases.insert(id.into(),Lease{credential_hash:hash.into(),hash:token_digest(&token),relay_token:token.clone(),instance:instance.into(),ip,allowed:HashSet::new(),expires:now+Duration::from_secs(15),sparse_epoch:Some(epoch.into())});
+        let workspace=admission.and_then(|_|hub.admissions.get(id).and_then(|a|a.workspace.clone()));
+        hub.leases.insert(id.into(),Lease{workspace,credential_hash:hash.into(),hash:token_digest(&token),relay_token:token.clone(),instance:instance.into(),ip,allowed:HashSet::new(),expires:now+Duration::from_secs(15),sparse_epoch:Some(epoch.into())});
         token
     }
     /// Called only after an authenticated API pair lookup has compiled a nonempty exact ACL.
@@ -1157,17 +1167,17 @@ mod migration_fence_tests {
     fn workspace_fence_retires_late_tickets_without_touching_other_tenant() {
         let hub=Hub::default();let ip=Ipv4Addr::new(10,0,0,2);
         assert!(hub.workspace_generation("a",0,false));
-        let old=hub.begin_admission("a:p","hash","instance").unwrap();
+        let old=hub.begin_workspace_admission("legacy-opaque-peer","hash","instance","a").unwrap();
         let foreign=hub.begin_admission("ab:p","hash","instance").unwrap();
-        assert!(!hub.publish_admitted("a:p","hash","instance",ip,HashSet::new(),Some(old)).is_empty());
+        assert!(!hub.publish_admitted("legacy-opaque-peer","hash","instance",ip,HashSet::new(),Some(old)).is_empty());
         assert!(!hub.workspace_generation("a",1,true));
-        assert!(hub.begin_admission("a:p","hash","instance").is_none());
-        assert!(hub.publish_admitted("a:p","hash","instance",ip,HashSet::new(),Some(old)).is_empty());
+        assert!(hub.begin_workspace_admission("legacy-opaque-peer","hash","instance","a").is_none());
+        assert!(hub.publish_admitted("legacy-opaque-peer","hash","instance",ip,HashSet::new(),Some(old)).is_empty());
         assert!(!hub.publish_admitted("ab:p","hash","instance",ip,HashSet::new(),Some(foreign)).is_empty());
         assert!(!hub.workspace_generation("a",0,false));
         assert!(hub.workspace_generation("a",1,false));
-        assert!(hub.publish_admitted("a:p","hash","instance",ip,HashSet::new(),Some(old)).is_empty());
-        let fresh=hub.begin_admission("a:p","hash","instance").unwrap();
-        assert!(!hub.publish_admitted("a:p","hash","instance",ip,HashSet::new(),Some(fresh)).is_empty());
+        assert!(hub.publish_admitted("legacy-opaque-peer","hash","instance",ip,HashSet::new(),Some(old)).is_empty());
+        let fresh=hub.begin_workspace_admission("legacy-opaque-peer","hash","instance","a").unwrap();
+        assert!(!hub.publish_admitted("legacy-opaque-peer","hash","instance",ip,HashSet::new(),Some(fresh)).is_empty());
     }
 }

@@ -150,6 +150,13 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
     };
     #[cfg(feature="private-sparse")]
     let _workspace_guard=crate::private_renumber::fence::stable(&app,peer.get_object_id("workspace_id").map_err(|_|forbidden("Invalid workspace"))?).await?;
+    #[cfg(feature="private-sparse")]
+    let peer=app.collection("private_peers").find_one(doc!{"_id":&input.peer_id,"workspace_id":peer.get("workspace_id"),"enabled":true,"credential_hash":&hash}).await?
+        .ok_or_else(||forbidden("Private credential changed or was revoked while waiting"))?;
+    #[cfg(feature="private-sparse")]
+    let admission=app.private_relay.begin_workspace_admission(&input.peer_id,&hash,&input.instance,&peer.get_object_id("workspace_id").map_err(|_|forbidden("Invalid workspace"))?.to_hex())
+        .ok_or_else(||ApiError::new(StatusCode::SERVICE_UNAVAILABLE,"Private control admission is busy; retry"))?;
+    #[cfg(not(feature="private-sparse"))]
     let admission=app.private_relay.begin_admission(&input.peer_id,&hash,&input.instance)
         .ok_or_else(||ApiError::new(StatusCode::SERVICE_UNAVAILABLE,"Private control admission is busy; retry"))?;
     let observed_pairs=if cfg!(feature="private-sparse")&&input.sparse.is_some(){app.private_relay.observe_pairs(&input.peer_id,&hash,&input.instance,admission)}else{HashMap::new()};
@@ -564,5 +571,47 @@ mod sparse_response_budget_tests{
         assert_eq!(out[0],json!({"query":query,"status":"busy"}));assert!(bytes<256);
         let other=json!({"query":{"kind":"peer","value":"other"},"status":"unavailable"});
         push_pair_response(&mut out,&mut bytes,other.clone());assert_eq!(out[1],other);assert!(bytes<PAIR_REPLY_BYTES);
+    }
+}
+
+#[cfg(all(test,feature="private-sparse"))]
+mod renumber_wait_tests {
+    use super::*;
+    use anyhow::{ensure,Result};
+    #[tokio::test]
+    #[ignore="requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+    async fn sync_waiting_on_migration_rereads_address_revocation_and_rotated_credential()->Result<()> {
+        let client=mongodb::Client::with_uri_str(std::env::var("PORTHUB_TEST_MONGO_URI")?).await?;
+        let db=client.database(&format!("porthub_renumber_wait_{}",uuid::Uuid::new_v4().simple()));
+        let app=Arc::new(App::new(crate::config::Config::default(),db.clone()));
+        let result=async {
+            for kind in ["address","revoked","rotated"] {
+                let owner=ObjectId::new();let mid=ObjectId::new();let id=format!("{owner}:{mid}");
+                let token="fixture-token-0123456789abcdef0123456789";
+                app.collection("users").insert_one(doc!{"_id":owner,"enabled":true}).await?;
+                app.collection("machines").insert_one(doc!{"_id":mid,"user_id":owner,"name":"Migration fixture"}).await?;
+                app.collection("private_peers").insert_one(doc!{"_id":&id,"workspace_id":owner,"owner_id":owner,"machine_id":mid,"enabled":true,"credential_hash":token_digest(token),"ip":"10.203.0.2"}).await?;
+                let guard=crate::private_renumber::fence::stable(&app,owner).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
+                let request=json!({"peer_id":id,"token":token,"fingerprint":vec!["AB";32].join(":"),"instance":"instance-00000000","sparse":{"protocol":1,"sequence":1,"wanted":[]}});
+                let task={let app=app.clone();tokio::spawn(async move{sync(State(app),ApiBody(request)).await})};
+                let waited=tokio::time::timeout(Duration::from_secs(3),async {
+                    loop {if app.private_sparse.workspace_fences.waiting(&owner.to_hex()).await {break;} tokio::task::yield_now().await;}
+                }).await;
+                if waited.is_err(){task.abort();drop(guard);let _=task.await;anyhow::bail!("sync did not reach the held workspace fence");}
+                let update=match kind {"address"=>doc!{"$set":{"ip":"10.204.0.2"}},"revoked"=>doc!{"$set":{"enabled":false}},_=>doc!{"$set":{"credential_hash":token_digest("replacement-credential")}}};
+                app.collection("private_peers").update_one(doc!{"_id":&id},update).await?;
+                if kind=="address" {app.collection("private_renumber_heads").insert_one(doc!{"_id":owner.to_hex(),"generation":1_i64,"state":"stable"}).await?;}
+                drop(guard);
+                let actual=tokio::time::timeout(Duration::from_secs(5),task).await??;
+                if kind=="address" {
+                    let response=actual.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
+                    let body=axum::body::to_bytes(response.into_body(),4*1024*1024).await?;
+                    let body:Value=serde_json::from_slice(&body)?;
+                    ensure!(body["snapshot"]["peers"].as_array().is_some_and(|rows|rows.iter().any(|p|p["id"]==id&&p["ip"]=="10.204.0.2")),"stale pre-fence address leaked: {body}");
+                }else {ensure!(actual.err().is_some_and(|e|e.status==StatusCode::FORBIDDEN),"revoked/rotated waiter published authority");}
+            }
+            Ok::<_,anyhow::Error>(())
+        }.await;
+        db.drop().await?;result
     }
 }

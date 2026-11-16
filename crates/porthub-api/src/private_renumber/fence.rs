@@ -14,6 +14,10 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 #[derive(Default)]
 pub struct Fences(Mutex<HashMap<String, Weak<Mutex<()>>>>);
 impl Fences {
+    #[cfg(test)]
+    pub(crate) async fn waiting(&self,workspace:&str)->bool {
+        self.0.lock().await.get(workspace).is_some_and(|lock|lock.strong_count()>1)
+    }
     async fn acquire(&self, workspace: &str) -> ApiResult<OwnedMutexGuard<()>> {
         let lock = {
             let mut locks = self.0.lock().await;
