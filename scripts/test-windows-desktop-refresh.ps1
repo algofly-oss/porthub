@@ -141,4 +141,11 @@ foreach($case in @('different-text','attribute','child','duplicate','action','re
 Reset-Case;$global:RegisterSdInsert=$true;$global:MutateOnStart=$true;Expect-Failure {Run-Refresh} 'postwrite-concurrent-edit'
 if($global:Updates -ne 1 -or !$global:Task.Xml.Contains('ForeignEdit')){throw 'Concurrent post-write task edit was overwritten'}
 $results+=@{case='postwrite-concurrent-edit-not-overwritten';passed=$true}
+$priorPowerShell=$env:PORTHUB_REFRESH_TEST_POWERSHELL
+try{
+ $env:PORTHUB_REFRESH_TEST_POWERSHELL=if($env:SystemRoot){Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'}else{[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName}
+ $transportOutput=& python (Join-Path $PSScriptRoot 'test-windows-refresh-bootstrap.py') 2>&1
+ if($LASTEXITCODE -ne 0){throw 'Extracted desktop bootstrap transport regressions failed'}
+ $results+=@{case='bootstrap-transport-seven-real-child-regressions';passed=$true}
+}finally{$env:PORTHUB_REFRESH_TEST_POWERSHELL=$priorPowerShell}
 $results|ConvertTo-Json -Depth 4
