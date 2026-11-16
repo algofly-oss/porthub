@@ -24,9 +24,16 @@ async fn download(control:&Control,package:&Package,path:&Path)->Result<()> {
     while let Some(chunk)=response.chunk().await.map_err(|_|anyhow::anyhow!("Windows USB installer download interrupted"))?{ensure!(bytes.len()+chunk.len()<=64*1024*1024,"Windows USB installer exceeds its size limit");bytes.extend_from_slice(&chunk);}
     ensure!(format!("{:x}",Sha256::digest(&bytes))==package.hash,"Windows USB installer checksum mismatch");crate::profile::write_private(path,&bytes,false)?;Ok(())
 }
+const SIGNATURE_SCRIPT:&str=r#"$ErrorActionPreference='Stop';Import-Module -Name "$PSHOME\Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1" -ErrorAction Stop;if((Get-AuthenticodeSignature -LiteralPath $env:PORTHUB_USB_INSTALLER).Status -ne 'Valid'){throw 'Windows USB package signature rejected'}"#;
+fn configure_signature(command:&mut tokio::process::Command,path:&Path){
+    command.args(["-NoLogo","-NoProfile","-NonInteractive","-Command",SIGNATURE_SCRIPT])
+        .env_remove("PSModulePath").env_remove("PSModuleAnalysisCachePath")
+        .env("PORTHUB_USB_INSTALLER",path).kill_on_drop(true);
+}
 async fn signed(path:&Path)->Result<()> {
-    let script="$ErrorActionPreference='Stop';if((Get-AuthenticodeSignature -LiteralPath $env:PORTHUB_USB_INSTALLER).Status -ne 'Valid'){throw 'Windows USB package signature rejected'}";
-    let result=tokio::time::timeout(Duration::from_secs(40),tokio::process::Command::new(system("WindowsPowerShell/v1.0/powershell.exe")?).args(["-NoLogo","-NoProfile","-NonInteractive","-Command",script]).env("PORTHUB_USB_INSTALLER",path).kill_on_drop(true).output()).await??;
+    let mut command=tokio::process::Command::new(system("WindowsPowerShell/v1.0/powershell.exe")?);
+    configure_signature(&mut command,path);
+    let result=tokio::time::timeout(Duration::from_secs(40),command.output()).await??;
     ensure!(result.status.success(),"Windows did not validate the USB installer signature");Ok(())
 }
 async fn install(package:&Package,path:&Path,profile:&Path)->Result<bool> {
@@ -78,4 +85,51 @@ pub(super) async fn prepare(path:&Path,control:Arc<Control>)->Result<()> {
     ensure!(!wanted.host||super::windows::host_installed(),"Windows USB source driver is not ready; Windows may require a restart");
     ensure!(!wanted.receive||super::windows::receive_installed(),"Windows USB receive controller is not ready; Windows may require a restart");
     Ok(())
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::*;
+    #[test]
+    fn signature_child_configuration_preserves_unrelated_environment_and_exact_policy(){
+        let mut child=tokio::process::Command::new("must-not-execute-metadata-fixture");
+        child.env("PSModulePath","contaminated").env("PSModuleAnalysisCachePath","contaminated").env("PORTHUB_TEST_PRESERVED","same");
+        configure_signature(&mut child,Path::new("owned-installer.msi"));
+        let environment:std::collections::BTreeMap<_,_>=child.as_std().get_envs().collect();
+        assert_eq!(environment[std::ffi::OsStr::new("PSModulePath")],None);
+        assert_eq!(environment[std::ffi::OsStr::new("PSModuleAnalysisCachePath")],None);
+        assert_eq!(environment[std::ffi::OsStr::new("PORTHUB_TEST_PRESERVED")],Some(std::ffi::OsStr::new("same")));
+        let arguments:Vec<_>=child.as_std().get_args().collect();
+        assert_eq!(arguments,vec!["-NoLogo","-NoProfile","-NonInteractive","-Command",SIGNATURE_SCRIPT]);
+        assert!(SIGNATURE_SCRIPT.contains("$PSHOME\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1"));
+        assert!(SIGNATURE_SCRIPT.contains(".Status -ne 'Valid'"));
+        assert!(!SIGNATURE_SCRIPT.contains("ExecutionPolicy"));
+    }
+
+    #[tokio::test]
+    async fn native_signature_of_system_executable_survives_contaminated_module_environment()->Result<()> {
+        // Read-only OS signature query; no installer, certificate-store edit,
+        // policy mutation, device activation or global environment mutation.
+        let executable=system("cmd.exe")?;
+        ensure!(executable.is_file(),"Trusted system executable missing");
+        let shell=system("WindowsPowerShell/v1.0/powershell.exe")?;
+        let missing=system(&format!("porthub-absent-modules-{}",uuid::Uuid::new_v4().simple()))?;
+        ensure!(!missing.exists(),"Contamination fixture path must not exist");
+        let legacy="$ErrorActionPreference='Stop';if((Get-AuthenticodeSignature -LiteralPath $env:PORTHUB_USB_INSTALLER).Status -ne 'Valid'){throw 'Windows USB package signature rejected'}";
+        let mut inherited=tokio::process::Command::new(&shell);
+        inherited.args(["-NoLogo","-NoProfile","-NonInteractive","-Command",legacy])
+            .env("PSModulePath",&missing).env("PSModuleAnalysisCachePath","NUL")
+            .env("PORTHUB_USB_INSTALLER",&executable).kill_on_drop(true);
+        let rejected=tokio::time::timeout(Duration::from_secs(40),inherited.output()).await??;
+        ensure!(!rejected.status.success(),"Contaminated legacy child unexpectedly passed");
+        let mut fixed=tokio::process::Command::new(&shell);
+        fixed.env("PSModulePath",&missing).env("PSModuleAnalysisCachePath","NUL");
+        configure_signature(&mut fixed,&executable);
+        for key in ["PSModulePath","PSModuleAnalysisCachePath"]{
+            ensure!(fixed.as_std().get_envs().any(|(name,value)|name==std::ffi::OsStr::new(key)&&value.is_none()),"Signature child did not remove inherited module environment");
+        }
+        let verified=tokio::time::timeout(Duration::from_secs(40),fixed.output()).await??;
+        ensure!(verified.status.success(),"Fixed native system signature query failed");
+        Ok(())
+    }
 }
