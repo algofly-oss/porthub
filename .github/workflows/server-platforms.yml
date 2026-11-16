@@ -183,6 +183,16 @@ jobs:
           PORTHUB_TEST_MONGO_URI: mongodb://127.0.0.1:${{ job.services.mongo.ports['27017'] }}
           NODE_PATH: ${{ runner.temp }}/terminal-browser-tools/node_modules
         run: python3 scripts/test-terminal-browser-integration.py --ui-root terminal-browser-assets/ui
+      - name: Retain failed phone layout geometry screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: portal-phone-layout-diagnostics
+          path: |
+            /tmp/porthub-iphone-*.png
+            /tmp/porthub-native-media-*.png
+          if-no-files-found: ignore
+          retention-days: 3
   ui:
     needs: [keyboard-firmware]
     name: Build and test production browser assets

@@ -1,5 +1,5 @@
 const assert=require('node:assert/strict');
-const {launchBrowser,navigateWorkspace}=require('./browser.cjs');
+const {launchBrowser,navigateWorkspace,waitForWorkspaceLayout}=require('./browser.cjs');
 (async()=>{
  const {makeDemoData,handleDemoRequest}=await import('../src/shared/demo/data.mjs');
  const browser=await launchBrowser(),engine=process.env.REVIEW_BROWSER||'chromium';
@@ -25,10 +25,11 @@ const {launchBrowser,navigateWorkspace}=require('./browser.cjs');
   });
   const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
   const audit=async name=>{
-   await page.waitForTimeout(350);
-   const info=await page.evaluate(()=>({width:innerWidth,height:innerHeight,scale:visualViewport?.scale,viewport:document.querySelector('meta[name=viewport]')?.content,overflow:document.documentElement.scrollWidth>innerWidth+1,smallFields:[...document.querySelectorAll('input:not([type=checkbox]):not([type=radio]):not([type=hidden]),textarea,select')].filter(e=>e.getBoundingClientRect().width&&e.getBoundingClientRect().height&&parseFloat(getComputedStyle(e).fontSize)<16).map(e=>({name:e.getAttribute('aria-label')||e.placeholder,size:getComputedStyle(e).fontSize})),dialogs:[...document.querySelectorAll('[role=dialog]')].filter(e=>e.getBoundingClientRect().width).map(e=>{const r=e.getBoundingClientRect();return{x:r.x,y:r.y,right:r.right,bottom:r.bottom}})}));
-   assert(!info.overflow,`${name} horizontal overflow`);assert.equal(info.scale,1,`${name} initial viewport scale`);assert.deepEqual(info.smallFields,[],`${name} form fields avoid iOS auto zoom`);for(const d of info.dialogs)assert(d.x>=-1&&d.right<=info.width+1&&d.y>=-1&&d.bottom<=info.height+1,`${name} dialog fits viewport`);
+   let settlingError;try{await waitForWorkspaceLayout(page,{dialog:!['keyboard','touchpad','dashboard','settings'].includes(name)});}catch(error){settlingError=error;}
+   const info=await page.evaluate(()=>({width:innerWidth,height:innerHeight,scale:visualViewport?.scale,viewport:document.querySelector('meta[name=viewport]')?.content,overflow:document.documentElement.scrollWidth>innerWidth+1,smallFields:[...document.querySelectorAll('input:not([type=checkbox]):not([type=radio]):not([type=hidden]),textarea,select')].filter(e=>e.getBoundingClientRect().width&&e.getBoundingClientRect().height&&parseFloat(getComputedStyle(e).fontSize)<16).map(e=>({name:e.getAttribute('aria-label')||e.placeholder,size:getComputedStyle(e).fontSize})),dialogs:[...document.querySelectorAll('[role=dialog]')].filter(e=>e.getBoundingClientRect().width).map(e=>{const r=e.getBoundingClientRect();return{x:r.x,y:r.y,right:r.right,bottom:r.bottom,transform:getComputedStyle(e).transform,animations:e.getAnimations().map(a=>({state:a.playState,currentTime:a.currentTime,endTime:a.effect?.getComputedTiming().endTime}))}})}));
    await page.screenshot({path:`/tmp/porthub-iphone-current-${engine}-${viewport.width}x${viewport.height}-${name}.png`});console.log(JSON.stringify({engine,viewport,name,...info}));
+   if(settlingError)throw settlingError;
+   assert(!info.overflow,`${name} horizontal overflow`);assert.equal(info.scale,1,`${name} initial viewport scale`);assert.deepEqual(info.smallFields,[],`${name} form fields avoid iOS auto zoom`);for(const d of info.dialogs)assert(d.x>=-1&&d.right<=info.width+1&&d.y>=-1&&d.bottom<=info.height+1,`${name} dialog fits viewport`);
   };
   await page.goto(`${process.env.REVIEW_ORIGIN||'http://127.0.0.1:3220'}/home?view=keyboard`);
   await page.getByRole('button',{name:'VKeyboard settings',exact:true}).waitFor();await audit('keyboard');

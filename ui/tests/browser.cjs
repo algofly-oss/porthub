@@ -33,3 +33,21 @@ exports.launchBrowser = async () => {
     LD_LIBRARY_PATH:[process.env.WEBKIT_LIBRARY_PATH,path.join(base,"lib"),path.join(base,"sys/lib")].join(":"),
   }});
 };
+
+// Opening a drawer schedules its transition after React commits. A fixed delay
+// measured from click() can still sample WebKit mid-transition on a busy runner.
+exports.waitForWorkspaceLayout = async (page,{dialog=false}={}) => {
+  const deadline=performance.now()+5000,remaining=()=>Math.max(1,Math.ceil(deadline-performance.now()));
+  const frame=()=>page.evaluate(timeout=>new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>reject(Error('Workspace animation frame deadline')),timeout);
+    requestAnimationFrame(()=>requestAnimationFrame(()=>{clearTimeout(timer);resolve();}));
+  }),remaining());
+  if(dialog)await page.getByRole('dialog').waitFor({state:'visible',timeout:remaining()});
+  await frame();
+  await page.waitForFunction(() => (!document.fonts || document.fonts.status === 'loaded') &&
+    [...document.querySelectorAll('[role="dialog"]')].filter(e => e.getBoundingClientRect().width)
+      .every(e => e.getAnimations({subtree:true}).every(a =>
+        !Number.isFinite(a.effect?.getComputedTiming().endTime) || (!a.pending && a.playState !== 'running'))),
+    null, {timeout:remaining()});
+  await frame();
+};

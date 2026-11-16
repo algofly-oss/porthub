@@ -1,5 +1,5 @@
 const assert=require('node:assert/strict');
-const {launchBrowser,navigateWorkspace}=require('./browser.cjs');
+const {launchBrowser,navigateWorkspace,waitForWorkspaceLayout}=require('./browser.cjs');
 (async()=>{
  const {makeDemoData,handleDemoRequest}=await import('../src/shared/demo/data.mjs');
  const browser=await launchBrowser(),engine=process.env.REVIEW_BROWSER||'chromium';
@@ -25,11 +25,12 @@ const {launchBrowser,navigateWorkspace}=require('./browser.cjs');
   });
   const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
   const audit=async name=>{
-   await page.waitForTimeout(350);
-   const info=await page.evaluate(()=>({width:innerWidth,height:innerHeight,scale:visualViewport?.scale,viewport:document.querySelector('meta[name=viewport]')?.content,overflow:document.documentElement.scrollWidth>innerWidth+1,smallFields:[...document.querySelectorAll('input:not([type=checkbox]):not([type=radio]):not([type=hidden]),textarea,select')].filter(e=>e.getBoundingClientRect().width&&e.getBoundingClientRect().height&&parseFloat(getComputedStyle(e).fontSize)<16).map(e=>({name:e.getAttribute('aria-label')||e.placeholder,size:getComputedStyle(e).fontSize})),dialogs:[...document.querySelectorAll('[role=dialog]')].filter(e=>e.getBoundingClientRect().width).map(e=>{const r=e.getBoundingClientRect();return{x:r.x,y:r.y,right:r.right,bottom:r.bottom}})}));
+   let settlingError;try{await waitForWorkspaceLayout(page,{dialog:!['keyboard','touchpad','dashboard','settings'].includes(name)});}catch(error){settlingError=error;}
+   const info=await page.evaluate(()=>({width:innerWidth,height:innerHeight,scale:visualViewport?.scale,viewport:document.querySelector('meta[name=viewport]')?.content,overflow:document.documentElement.scrollWidth>innerWidth+1,smallFields:[...document.querySelectorAll('input:not([type=checkbox]):not([type=radio]):not([type=hidden]),textarea,select')].filter(e=>e.getBoundingClientRect().width&&e.getBoundingClientRect().height&&parseFloat(getComputedStyle(e).fontSize)<16).map(e=>({name:e.getAttribute('aria-label')||e.placeholder,size:getComputedStyle(e).fontSize})),dialogs:[...document.querySelectorAll('[role=dialog]')].filter(e=>e.getBoundingClientRect().width).map(e=>{const r=e.getBoundingClientRect();return{x:r.x,y:r.y,right:r.right,bottom:r.bottom,transform:getComputedStyle(e).transform,animations:e.getAnimations().map(a=>({state:a.playState,currentTime:a.currentTime,endTime:a.effect?.getComputedTiming().endTime}))}})}));
+   if(settlingError)throw settlingError;
+   await page.screenshot({path:`/tmp/porthub-iphone-safe-area-${engine}-${viewport.left}-${viewport.right}-${name}.png`});console.log(JSON.stringify({engine,viewport,name,...info}));
    const exposed=await page.evaluate(({left,right})=>[...document.querySelectorAll('button,input,textarea,[role=combobox]')].flatMap(e=>{const r=e.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;if(!r.width||!r.height||x<0||x>=innerWidth||y<0||y>=innerHeight)return [];const hit=document.elementFromPoint(x,y);if(!hit||!(e===hit||e.contains(hit)))return [];return r.left<left-1||r.right>innerWidth-right+1?[{label:e.getAttribute('aria-label')||e.innerText,left:r.left,right:r.right}]:[];}),{left:viewport.left,right:viewport.right});assert.deepEqual(exposed,[],`${name} exposed controls clear simulated notch`);
    assert(!info.overflow,`${name} horizontal overflow`);assert.equal(info.scale,1,`${name} initial viewport scale`);assert.deepEqual(info.smallFields,[],`${name} form fields avoid iOS auto zoom`);for(const d of info.dialogs)assert(d.x>=-1&&d.right<=info.width+1&&d.y>=-1&&d.bottom<=info.height+1,`${name} dialog fits viewport`);
-   await page.screenshot({path:`/tmp/porthub-iphone-safe-area-${engine}-${viewport.left}-${viewport.right}-${name}.png`});console.log(JSON.stringify({engine,viewport,name,...info}));
   };
   await page.goto(`${process.env.REVIEW_ORIGIN||'http://127.0.0.1:3220'}/home?view=keyboard`);
   await page.getByRole('button',{name:'VKeyboard settings',exact:true}).waitFor();await audit('keyboard');
