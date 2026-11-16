@@ -363,12 +363,12 @@ fn run_service() -> Result<()> {
         Ok(runtime)
     })();
     let result = match runtime {
-        Ok(runtime) => runtime.block_on(crate::runtime::run_with_logs(
-            profile,
-            stop,
-            Default::default(),
-            logs,
-        )),
+        Ok(runtime) => runtime.block_on(async {
+            if let Err(error)=crate::windows_update::service_start_recovery(&profile).await {
+                tracing::warn!(%error,"Windows update recovery pending; existing forwarding remains available");
+            }
+            crate::runtime::run_with_logs(profile,stop,Default::default(),logs).await
+        }),
         Err(error) => Err(error),
     };
     if let Err(error) = &result {

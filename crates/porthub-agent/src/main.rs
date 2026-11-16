@@ -203,6 +203,14 @@ enum Command {
         #[arg(long)]
         profile: PathBuf,
     },
+    /// Read-only staging handshake for the Windows maintenance protocol.
+    #[cfg(windows)]
+    #[command(name = "__windows-update-protocol", hide = true)]
+    WindowsUpdateProtocol,
+    /// Verified independent Windows maintenance worker, never a user installer.
+    #[cfg(windows)]
+    #[command(name = "__windows-update", hide = true)]
+    WindowsUpdate { #[arg(long)] record: PathBuf },
     /// Hidden Windows SCM entrypoint used by a managed PortHub service.
     #[cfg(windows)]
     #[command(name = "__windows-service", hide = true)]
@@ -1655,6 +1663,10 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Some(Command::Service { action, user }) => service_command(action, user).await,
+        #[cfg(windows)]
+        Some(Command::WindowsUpdateProtocol) => {println!("{}",porthub_agent::windows_update::PROTOCOL);Ok(())},
+        #[cfg(windows)]
+        Some(Command::WindowsUpdate { record }) => porthub_agent::windows_update::maintenance(&record).await,
         #[cfg(windows)]
         Some(Command::WindowsServiceHost {
             service_name,

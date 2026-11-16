@@ -232,8 +232,10 @@ impl Staged {
         let check = async {
             use std::process::Stdio;
             use tokio::io::AsyncReadExt;
-            let mut child = tokio::process::Command::new(verified)
-                .arg("version")
+            let mut command = tokio::process::Command::new(verified);
+            #[cfg(windows)]
+            command.creation_flags(0x08000000);
+            let mut child = command.arg("version")
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())

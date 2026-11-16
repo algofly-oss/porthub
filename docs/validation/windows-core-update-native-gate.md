@@ -1,0 +1,74 @@
+# Disposable Windows core update gate (not executed)
+
+Run only on an explicitly reviewed disposable GitHub-hosted Windows runner with
+an administrator token and no existing PortHub installation. Preserve the final
+native artifact SHA/size, source commits, targets and version outputs for TWO real
+agent executables A/B. Both must contain the reviewed Windows updater; B must be
+strictly newer. Do not use a tiny inert executable as a substitute for SCM/runtime
+readiness. This gate is independent of USB driver prerequisites.
+
+Use a private loopback HTTP fixture gateway with the existing explicit
+allow_insecure_http_for_tests flag. No TLS bypass or authority exception is added
+to production. Each scenario gets a random machine ID, random local-only token
+and own canonical protected profile. Serve only the exact digest-pinned A/B bytes,
+correct native catalog/response headers and authenticated configuration. Never
+accept a request merely because it arrived on localhost: validate its fixture
+token and machine binding. No real user credentials, account grants or physical
+USB/audio/camera device are required.
+
+Install A via the actual `service install --profile` command without
+`--publish-cli`; no GUI task is needed. Disable all unrelated client features and
+initially AutoUpdate in the canonical split policy files before service startup.
+Only the ordinary feature CLI may enable AutoUpdate afterward. SCM must own the
+same PID and immutable A image reported by the runtime.
+
+## Separate scenarios, stop on unexpected failure
+
+1. **Disabled → enabled successful upgrade.** Advertise B while AutoUpdate is off;
+   confirm no B download/journal/worker or replacement. Enable it locally. Observe
+   the real service-owned authenticated discovery/download, bounded hidden probes,
+   independent maintenance worker, actual new SCM/runtime B image and Committed
+   record before the first nonempty handled-request acknowledgment. Verify the
+   token, profile, policies and other registrations unchanged. No extra scheduled
+   task/service may appear. Repeated identical request headers must not reinstall.
+2. **Readiness failure and rollback.** Allow B download but make only B's
+   authenticated runtime sync unavailable. Observe verified A restoration,
+   RolledBack and no success acknowledgment. Confirm journal-based cooldown stops
+   immediate reinstallation after A restarts. Turn off AutoUpdate before another
+   attempt; do not infer a rollback from process exit status alone.
+3. **Revocation during download.** Hold the B response after a bounded first chunk,
+   disable AutoUpdate through the local CLI, and verify staging is cancelled and
+   no maintenance worker/install starts. Preserve zero installer/mutation counts.
+4. **Revocation during readiness.** Delay B configuration until the worker reaches
+   Verifying, then disable AutoUpdate. Release the configuration barrier; the
+   in-flight service transaction must settle and restore A without a Committed
+   acknowledgment. New attempts must remain off.
+5. **Worker loss/recovery.** Hold B runtime readiness. Identify ONLY the fixture's
+   exact B maintenance process by immutable digest, command arguments containing
+   the exact protected record path, SYSTEM SID, parent/creation time and pinned
+   native handle. Terminate that worker while Verifying, not an unrelated agent.
+   Release B readiness. The service-owned recovery path must complete one matching
+   transaction without duplicate installations or a false precommit acknowledgment.
+6. **Service restart recovery.** With the same verified Verifying record and no
+   maintenance process, restart only the fixture service. Confirm startup recovery
+   preserves SCM ownership, resumes the protected journal and waits for real
+   runtime readiness. Unit/manifest mixed old/new crash cases are additionally
+   exercised against exact known snapshots; unknown changes must fail closed.
+7. **Authority/tamper negatives.** A copied-profile foreground process must not
+   authorize an update. Reject a worker record outside managed state, wrong
+   enrollment/request/target/build, corrupt immutable bytes and unknown unit/CLI
+   changes. Preserve those operator changes rather than restoring over them.
+8. **Legacy pending request.** No journal + equal-version header produces neither
+   installation nor acknowledgment; a later B request still executes. A strictly
+   older pending target uses the existing server supersession behavior, never an
+   invented client receipt.
+
+Use no hardware, models or media capture. Keep all timeouts finite. Archive only
+credential-free phase/request/digest/PID/timing/counter projections and bounded
+errors. Finally stop/uninstall only the exact fixture registration, independently
+verify worker/service absence, and remove only nonce-claimed fixture files.
+Do not uninstall system USB drivers or touch another installed PortHub instance.
+
+The real Windows native full-agent compilation and this opt-in SCM execution
+require separate review. Metadata-only harnesses with refusing OS stubs cannot
+replace either gate.
