@@ -100,6 +100,8 @@ pub(super) async fn refresh(
             "-EncodedCommand",
             &base64::engine::general_purpose::STANDARD.encode(script),
         ])
+        .env_remove("PSModulePath")
+        .env_remove("PSModuleAnalysisCachePath")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

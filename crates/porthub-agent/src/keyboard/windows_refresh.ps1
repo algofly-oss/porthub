@@ -1,12 +1,14 @@
 # Updates existing managed desktop tasks only. No service/task installation,
 # feature preference changes, account inference, or interactive login creation.
 $ErrorActionPreference='Stop'
+$ProgressPreference='SilentlyContinue'
 function Test-RefreshSid([string]$Sid){return $Sid.Length -lt 184 -and $Sid -match '^S-1-[0-9]+(?:-[0-9]+)+$' -and $Sid -notin @('S-1-5-18','S-1-5-19','S-1-5-20')}
 function Test-RefreshExecutable([string]$Path,[string]$ReleaseRoot){
  $item=Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
  if(!$item -or $item.PSIsContainer -or $item.Name -cne 'porthub.exe' -or $item.Directory.Name -notmatch '^[a-fA-F0-9]{64}$' -or ![string]::Equals($item.Directory.Parent.FullName,$ReleaseRoot,[StringComparison]::OrdinalIgnoreCase)){return $false}
  for($at=$item;$null -ne $at;$at=$at.Parent){if($at.Attributes -band [IO.FileAttributes]::ReparsePoint){return $false};if($at -is [IO.FileInfo]){$at=$at.Directory;if($at.Attributes -band [IO.FileAttributes]::ReparsePoint){return $false}}}
- return (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash -ieq $item.Directory.Name
+ $stream=[IO.File]::OpenRead($item.FullName);$hash=[Security.Cryptography.SHA256]::Create()
+ try{return ([BitConverter]::ToString($hash.ComputeHash($stream)).Replace('-','')) -ieq $item.Directory.Name}finally{$hash.Dispose();$stream.Dispose()}
 }
 function Read-RefreshXml([string]$Text){
  if($Text.Length -gt 131072){throw 'Desktop task definition exceeds bounds'}
@@ -48,9 +50,34 @@ function Set-RefreshDefinition($Service,$Folder,[string]$Name,[string]$Xml,[stri
  # UPDATE only: never create, grant a principal ACE, or fire registration triggers.
  return $Folder.RegisterTaskDefinition($Name,$definition,52,$Sid,$null,3,$Sddl)
 }
-function Assert-RefreshSnapshot($Task,[string]$Xml,[string]$Sddl){
- if(!$Task -or (Read-RefreshXml $Task.Xml).OuterXml -cne (Read-RefreshXml $Xml).OuterXml -or $Task.GetSecurityDescriptor(7) -cne $Sddl){throw 'Desktop task definition or security descriptor changed'}
+function Get-RefreshTextHash([string]$Text){
+ $hash=[Security.Cryptography.SHA256]::Create()
+ try{return [BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text))).Replace('-','').ToLowerInvariant()}finally{$hash.Dispose()}
 }
+function Get-RefreshXmlFields($Document){
+ $fields=@{};$stack=New-Object Collections.Stack;$stack.Push([pscustomobject]@{Node=$Document.DocumentElement;Path='/Task'})
+ $allowed=@('Task','RegistrationInfo','Date','Author','Description','URI','Version','Source','SecurityDescriptor','Documentation','Triggers','LogonTrigger','UserId','Enabled','Delay','StartBoundary','EndBoundary','ExecutionTimeLimit','Repetition','Interval','Duration','StopAtDurationEnd','Principals','Principal','GroupId','DisplayName','LogonType','RunLevel','ProcessTokenSidType','RequiredPrivileges','Privilege','Settings','MultipleInstancesPolicy','DisallowStartIfOnBatteries','StopIfGoingOnBatteries','AllowHardTerminate','StartWhenAvailable','NetworkProfileName','RunOnlyIfNetworkAvailable','WakeToRun','Hidden','IdleSettings','Duration','WaitTimeout','StopOnIdleEnd','RestartOnIdle','RunOnlyIfIdle','RestartOnFailure','Count','Priority','DeleteExpiredTaskAfter','UseUnifiedSchedulingEngine','DisallowStartOnRemoteAppSession','MaintenanceSettings','Period','Deadline','Exclusive','Volatile','Actions','Exec','Command','Arguments','WorkingDirectory')
+ $count=0
+ while($stack.Count){
+  $entry=$stack.Pop();$node=$entry.Node;$path=[string]$entry.Path;$count++;if($count -gt 2048){throw 'Desktop task structural diagnostics exceeds bounds'}
+  $attributes=@($node.Attributes|ForEach-Object{if($_.Prefix -ne 'xmlns' -and $_.Name -ne 'xmlns'){$_.Name+'='+$_.Value}});$fields[$path+'/@attributes']=Get-RefreshTextHash ($attributes -join '|')
+  $children=@($node.ChildNodes|Where-Object{$_ -is [Xml.XmlElement]})
+  if(!$children.Count){$fields[$path]=Get-RefreshTextHash $node.InnerText}
+  for($i=0;$i -lt $children.Count;$i++){$child=$children[$i];$name=if($child.LocalName -cin $allowed){$child.LocalName}else{'custom-node'};$stack.Push([pscustomobject]@{Node=$child;Path=($path+'/'+$name+'['+$i+']')})}
+ }
+ return $fields
+}
+function Assert-RefreshSnapshot($Task,[string]$Xml,[string]$Sddl){
+ if(!$Task){throw 'Desktop task snapshot unavailable'}
+ $actual=Read-RefreshXml $Task.Xml;$expected=Read-RefreshXml $Xml;$actualSd=[string]$Task.GetSecurityDescriptor(7)
+ if($actual.OuterXml -cne $expected.OuterXml -or $actualSd -cne $Sddl){
+  $left=Get-RefreshXmlFields $expected;$right=Get-RefreshXmlFields $actual
+  $paths=@(@($left.Keys)+@($right.Keys)|Sort-Object -Unique|Where-Object{$left[$_] -cne $right[$_]}|Select-Object -First 16)
+  $detail=@{xml_changed=($actual.OuterXml -cne $expected.OuterXml);sd_changed=($actualSd -cne $Sddl);expected_xml_sha256=(Get-RefreshTextHash $expected.OuterXml);actual_xml_sha256=(Get-RefreshTextHash $actual.OuterXml);expected_sd_sha256=(Get-RefreshTextHash $Sddl);actual_sd_sha256=(Get-RefreshTextHash $actualSd);field_paths=$paths}|ConvertTo-Json -Compress -Depth 3
+  throw ('Desktop task definition or security descriptor changed; bounded structural diff '+$detail)
+ }
+}
+
 function Connect-RefreshScheduler{
  $service=New-Object -ComObject 'Schedule.Service';$service.Connect();return [pscustomobject]@{Service=$service;Folder=$service.GetFolder('\')}
 }
