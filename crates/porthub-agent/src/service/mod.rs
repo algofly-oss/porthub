@@ -1267,6 +1267,7 @@ pub const OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
 #[cfg(all(test, windows))]
 mod windows_file_transaction_tests {
     use super::*;
+    use std::fs;
     use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
     use windows_sys::Win32::Storage::FileSystem::{
         GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_SHARE_READ, FILE_SHARE_WRITE,
