@@ -14,9 +14,21 @@ const {chooseDropdown}=require('./search-dropdown.cjs');
   async function closed(short,full){
    await page.waitForFunction(({short})=>document.querySelector('[aria-label="Resource sort order"]')?.value===short,{short});
    assert.equal(await input.getAttribute('title'),full);
-   const geometry=await input.evaluate(e=>{const css=getComputedStyle(e),c=document.createElement('canvas').getContext('2d');c.font=css.font;return {text:c.measureText(e.value).width,room:e.clientWidth-parseFloat(css.paddingLeft)-parseFloat(css.paddingRight),width:e.getBoundingClientRect().width};});
-   assert(geometry.text<=geometry.room+1,`${short} must fit closed112px control ${JSON.stringify(geometry)}`);
+   const geometry=await input.evaluate(e=>{
+    const css=getComputedStyle(e),rect=e.getBoundingClientRect(),canvas=document.createElement('canvas').getContext('2d');canvas.font=css.font;
+    const scaleX=rect.width/e.offsetWidth;
+    // clientWidth for type=search differs across Blink versions. Use the
+    // rendered border box, scaling CSS border/padding and font consistently.
+    let axisAligned=true;
+    for(let parent=e;parent;parent=parent.parentElement){const transform=getComputedStyle(parent).transform;if(transform!=='none'){const matrix=new DOMMatrixReadOnly(transform);if(matrix.b!==0||matrix.c!==0||!matrix.is2D)axisAligned=false;}}
+    return {text:canvas.measureText(e.value).width*scaleX,room:rect.width-(parseFloat(css.borderLeftWidth)+parseFloat(css.borderRightWidth)+parseFloat(css.paddingLeft)+parseFloat(css.paddingRight))*scaleX,width:rect.width,height:rect.height,clientWidth:e.clientWidth,paddingLeft:css.paddingLeft,paddingRight:css.paddingRight,font:css.font,scaleX,zoom:css.zoom,axisAligned};
+   });
+   console.log(JSON.stringify({viewport:size,selected:short,geometry}));
+   if(!geometry.axisAligned||!(geometry.scaleX>0)||geometry.text>geometry.room){console.log(JSON.stringify({viewport:size,selected:short,geometry}));await ranking.screenshot({path:`/tmp/porthub-ranking-fit-${process.env.REVIEW_BROWSER||'chromium'}-${size.width}.png`});}
+   assert(geometry.axisAligned&&geometry.scaleX>0,'Text geometry requires measurable axis-aligned transforms');
+   assert(geometry.text<=geometry.room,`${short} must fit closed112px control ${JSON.stringify(geometry)}`);
    assert(geometry.width<=112.5,'Header control does not widen');
+   assert(geometry.height >= (size.width<768?44:40),'Existing full-height control hit target retained');
    assert.equal(await ranking.locator('input[type=radio]:checked').count(),1,'Exactly one resource sort active');
   }
   await closed('High first','Most utilized first');
@@ -29,6 +41,6 @@ const {chooseDropdown}=require('./search-dropdown.cjs');
   assert.equal(await row.getByRole('meter').count(),4,'All four utilization bars retained');
   const aligned=await ranking.evaluate(el=>{const header=el.querySelector('[aria-hidden="true"].grid'),row=el.querySelector('[data-ranking-row-content]');return {header:getComputedStyle(header).gridTemplateColumns,row:getComputedStyle(row).gridTemplateColumns};});
   assert.equal(aligned.header,aligned.row,'Header and four-bar row grid align');
-  assert.deepEqual(errors,[]);await page.screenshot({path:`/tmp/porthub-ranking-labels-${process.env.REVIEW_BROWSER||'chromium'}-${size.width}.png`});await context.close();console.log('PASS concise selected labels/full searchable labels/single sort/four bars',size);
+  assert.deepEqual(errors,[]);await ranking.screenshot({path:`/tmp/porthub-ranking-labels-${process.env.REVIEW_BROWSER||'chromium'}-${size.width}.png`});await context.close();console.log('PASS concise selected labels/full searchable labels/single sort/four bars',size);
  }}finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});
