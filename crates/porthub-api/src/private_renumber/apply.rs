@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 fn conflict(message: &str) -> ApiError {
     ApiError::new(StatusCode::CONFLICT, message)
 }
-fn decode(row: &Document) -> ApiResult<super::recovery::Assignment> {
+pub(super) fn decode(row: &Document) -> ApiResult<super::recovery::Assignment> {
     let text = |field: &str| {
         row.get_str(field)
             .map(str::to_owned)
@@ -43,7 +43,7 @@ fn decode(row: &Document) -> ApiResult<super::recovery::Assignment> {
 }
 /// First pass validates the ENTIRE immutable journal before a single peer write.
 /// Progress cursors never authorize skipping validation or assuming an update.
-async fn verify(
+pub(super) async fn verify(
     app: &App,
     owner: ObjectId,
     job: &str,

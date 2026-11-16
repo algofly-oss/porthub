@@ -165,6 +165,17 @@ pub(super) async fn prepare(
             "Migration peer was deleted; explicit recovery is required",
         ));
     }
+    let previous=app.collection("private_networks").find_one(doc!{"_id":&first.workspace}).await?;
+    let mut previous_fields=Document::new();
+    if let Some(previous)=&previous {
+        for field in ["cidr","additional_cidrs","dns_suffix","_renumber_job","_address_generation"] {
+            if let Some(value)=previous.get(field){previous_fields.insert(field,value.clone());}
+        }
+    }
+    if mongodb::bson::to_vec(&previous_fields).map_err(|_|conflict("Invalid previous preferences"))?.len()>16384 {
+        return Err(conflict("Previous private preferences exceed migration journal bounds"));
+    }
+    let previous_preferences=doc!{"existed":previous.is_some(),"fields":previous_fields};
     let heads = durable(app, "private_renumber_heads");
     // Historical generation zero is explicit before the CAS. A duplicate insert
     // is tolerated only by reading and checking the existing head below.
@@ -187,7 +198,7 @@ pub(super) async fn prepare(
         }
     }
     let transition=heads.update_one(doc!{"_id":&first.workspace,"generation":first.previous_generation as i64,"state":"stable"},
-        doc!{"$set":{"generation":first.generation as i64,"state":"preparing","job":job,"digest":&digest,"count":rows.len() as i64,"target_cidrs":target_cidrs.to_vec()}}).await;
+        doc!{"$set":{"generation":first.generation as i64,"state":"preparing","job":job,"digest":&digest,"count":rows.len() as i64,"target_cidrs":target_cidrs.to_vec(),"previous_preferences":previous_preferences}}).await;
     // Even a write-concern timeout may have committed. Never claim failure means
     // unchanged state; exact persisted ownership is the only recovery authority.
     let head = heads
