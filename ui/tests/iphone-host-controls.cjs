@@ -25,6 +25,38 @@ const page=await context.newPage(),errors=[];
 page.on('pageerror',e=>errors.push(e.message));
 await page.goto(`${process.env.REVIEW_ORIGIN||'http://127.0.0.1:3019'}/home?view=dashboard`);
 await page.getByRole('region',{name:'Machine resource utilization'}).getByRole('button').filter({hasText:host.name}).click();
+// Reload the actual URL-backed Resources selection: clicking first would let
+// browser/Playwright focus scrolling hide a missing StatusTabs mount effect.
+await page.waitForURL(url=>url.searchParams.get('machineTab')==='resources');
+await page.reload();
+const sections=page.getByRole('group',{name:'Machine configuration sections',exact:true});
+await sections.waitFor();
+const selectedGeometry=()=>sections.evaluate(group=>{
+ const selected=group.querySelector('[aria-pressed="true"]');
+ let parent=group.parentElement;
+ while(parent&&!['auto','scroll'].includes(getComputedStyle(parent).overflowX))parent=parent.parentElement;
+ const tab=selected.getBoundingClientRect(),clip=parent.getBoundingClientRect();
+ return {label:selected.textContent,visible:tab.left>=clip.left+parent.clientLeft-1&&tab.right<=clip.left+parent.clientLeft+parent.clientWidth+1};
+});
+const vertical=()=>page.evaluate(()=>({page:scrollY,modal:[...document.querySelectorAll('[role="dialog"], [role="dialog"] *')].filter(el=>['auto','scroll'].includes(getComputedStyle(el).overflowY)).map(el=>el.scrollTop)}));
+await page.waitForFunction(()=>{const g=document.querySelector('[aria-label="Machine configuration sections"]'),b=g?.querySelector('[aria-pressed="true"]');if(!b)return false;const p=g.parentElement,r=p.getBoundingClientRect(),t=b.getBoundingClientRect();return t.left>=r.left-1&&t.right<=r.left+p.clientWidth+1;});
+assert.deepEqual(await selectedGeometry(),{label:'Resources',visible:true},'Deep-linked selected Resources is visible after mounting');
+const before=await vertical();
+// DOM click deliberately avoids Playwright's automatic scrollIntoView.
+await sections.getByRole('button',{name:'Details',exact:true}).evaluate(button=>button.click());
+await page.waitForURL(url=>url.searchParams.get('machineTab')==='groups');
+await page.waitForFunction(()=>document.querySelector('[aria-label="Machine configuration sections"] [aria-pressed="true"]')?.textContent==='Details');
+await page.waitForTimeout(50);
+assert.deepEqual(await selectedGeometry(),{label:'Details',visible:true},'Value change reveals the selected tab');
+assert.deepEqual(await vertical(),before,'Tab reveal does not scroll page or modal vertically');
+await sections.getByRole('button',{name:'Resources',exact:true}).evaluate(button=>button.click());
+await page.waitForURL(url=>url.searchParams.get('machineTab')==='resources');
+await page.setViewportSize({width:320,height:viewport.height});
+await page.waitForTimeout(50);
+assert.deepEqual(await selectedGeometry(),{label:'Resources',visible:true},'Resize keeps Resources visible');
+assert.deepEqual(await vertical(),before,'Resize reveal preserves vertical scroll');
+await page.setViewportSize(viewport);
+
 for(const tab of ['Resources','USB']){await page.getByRole('button',{name:tab,exact:true}).click();
 const dialog=page.getByRole('dialog');
 await page.waitForTimeout(200);
