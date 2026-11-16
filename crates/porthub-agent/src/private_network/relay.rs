@@ -209,6 +209,30 @@ pub async fn run(
     run_bound(profile, instance, sender, packets, config, interfaces, events, cancel).await
 }
 
+async fn candidate_paths<F, Fut>(
+    settings: &crate::outbound::Settings,
+    allow_local_test: bool,
+    destinations: &[std::net::SocketAddr],
+    selection: &mut crate::outbound::Selection,
+    discover: F,
+) -> Result<Vec<Option<crate::outbound::Candidate>>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<crate::outbound::Candidate>>>,
+{
+    // System mode deliberately delegates route/source selection to the kernel.
+    // Explicit local test profiles also need no interface inventory. Never let
+    // a failed or blocking inventory gate a connection that will not use it.
+    let local_test = allow_local_test
+        && !destinations.is_empty()
+        && destinations.iter().all(|address| address.ip().is_loopback());
+    if settings.system || local_test {
+        return Ok(vec![None]);
+    }
+    let paths = tokio::time::timeout(Duration::from_secs(2), discover()).await??;
+    Ok(selection.order(&paths, Instant::now()).into_iter().map(Some).collect())
+}
+
 pub async fn run_bound(
     profile: Profile,
     instance: String,
@@ -274,13 +298,11 @@ pub async fn run_bound(
                 Ok(Ok(addresses)) => addresses.take(16).collect(),
                 _ => continue,
             };
-            let paths = match tokio::time::timeout(Duration::from_secs(2),crate::outbound::discover(&settings,&destinations)).await {
-                Ok(Ok(paths)) => selection.order(&paths,Instant::now()),
-                _ => continue,
+            let paths = match candidate_paths(&settings, profile.allow_insecure_http_for_tests,
+                &destinations, &mut selection, || crate::outbound::discover(&settings, &destinations)).await {
+                Ok(paths) => paths,
+                Err(_) => continue,
             };
-            // Loopback is reserved for explicitly enabled local test profiles.
-            let unbound = settings.system || (profile.allow_insecure_http_for_tests && destinations.iter().all(|a| a.ip().is_loopback()));
-            let paths: Vec<Option<crate::outbound::Candidate>> = if unbound { vec![None] } else { paths.into_iter().map(Some).collect() };
             for path in paths {
                 local = path.as_ref().map(|p|vec![p.source]).unwrap_or_default();
                 if let Some(connection) = connect_lane(&base,&token,&profile.peer_id,&instance,0,RELAY_LANES as u8,&local,&cancel).await? {
@@ -951,5 +973,62 @@ mod tests {
             assert_eq!(bytes.len(), 20);
             assert!(!direct);
         }
+    }
+}
+
+#[cfg(test)]
+mod candidate_path_tests {
+    use super::*;
+    fn destination(value: &str) -> Vec<std::net::SocketAddr> { vec![value.parse().unwrap()] }
+    #[tokio::test]
+    async fn system_and_explicit_loopback_never_call_failed_inventory() -> Result<()> {
+        for (system, local, addresses) in [
+            (true, false, destination("192.0.2.1:443")),
+            (false, true, destination("127.0.0.1:443")),
+            (false, true, destination("[::1]:443")),
+        ] {
+            let settings = crate::outbound::Settings { system, ..Default::default() };
+            let called = std::cell::Cell::new(false);
+            let paths = candidate_paths(&settings, local, &addresses, &mut Default::default(), || {
+                called.set(true);
+                std::future::ready(Err(anyhow::anyhow!("injected interface inventory failure")))
+            }).await?;
+            assert!(!called.get());
+            assert_eq!(paths, vec![None]);
+        }
+        Ok(())
+    }
+    #[tokio::test]
+    async fn unbound_path_does_not_poll_blocked_inventory() -> Result<()> {
+        let settings = crate::outbound::Settings { system: true, ..Default::default() };
+        let paths = tokio::time::timeout(Duration::from_millis(100), candidate_paths(
+            &settings, false, &destination("192.0.2.1:443"), &mut Default::default(),
+            || std::future::pending(),
+        )).await??;
+        assert_eq!(paths, vec![None]);
+        Ok(())
+    }
+    #[tokio::test]
+    async fn bound_and_nonlocal_profiles_preserve_inventory_errors_without_unbound_fallback() {
+        for (local, addresses) in [
+            (false, destination("127.0.0.1:443")),
+            (true, destination("192.0.2.1:443")),
+            (true, vec!["127.0.0.1:443".parse().unwrap(), "192.0.2.1:443".parse().unwrap()]),
+            (true, Vec::new()),
+        ] {
+            let result = candidate_paths(&Default::default(), local, &addresses, &mut Default::default(),
+                || std::future::ready(Err(anyhow::anyhow!("injected inventory failure")))).await;
+            assert!(result.is_err());
+        }
+    }
+    #[tokio::test]
+    async fn explicit_bound_candidate_retains_source_interface_destination_and_selection() -> Result<()> {
+        let addresses = destination("192.0.2.1:443");
+        let candidate = crate::outbound::Candidate { source:"10.1.2.3".parse()?,interface:"vpn0".into(),destination:addresses[0],gateway:Some("10.1.2.1".parse()?),metric:Some(17) };
+        let settings = crate::outbound::Settings { interface:Some("vpn0".into()),source:Some(candidate.source),system:false };
+        let paths = candidate_paths(&settings, false, &addresses, &mut Default::default(),
+            || std::future::ready(Ok(vec![candidate.clone()]))).await?;
+        assert_eq!(paths,vec![Some(candidate)]);
+        Ok(())
     }
 }
