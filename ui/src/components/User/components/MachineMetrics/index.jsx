@@ -1,7 +1,9 @@
 import SeriesChart from './SeriesChart';
 import SearchDropdown from '@/components/ui/search-dropdown';
 import DriveHealthPanel from './DriveHealth';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { observeRankingRows } from '@/shared/utils/ranking-measure.mjs';
+const useClientLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
 import { RESOURCES, utilization, rankedMachines, metricSegments, gpuDevices, gpuReading, capacityPercent, memoryText, diskDevices, diskReading, RANKING_RESOURCES, driveAssessment, sharedGpuMemoryText, gpuMemorySummary } from '@/lib/machineMetrics.mjs';
 import { formatBytes } from '@/shared/utils/traffic.mjs';
 
@@ -58,19 +60,9 @@ export function MachineRanking({ active, onSelect }) {
   const [selected,setSelected]=useState('cpu'),[ascending,setAscending]=useState(false);
   const machines=rankedMachines(data?.machines||[],[selected],ascending);
   const viewport=useRef(null);
-  useEffect(()=>{
-    const element=viewport.current;if(!element)return;
-    const contents=[...element.querySelectorAll('[data-ranking-row-content]')];
-    const measure=()=>{
-      const height=element.clientHeight;
-      element.parentElement.style.setProperty('--ranking-scrollbar',`${element.offsetWidth-element.clientWidth}px`);
-      const minimum=Math.max(0,...contents.map(content=>content.getBoundingClientRect().height+1));
-      if(!height||!minimum)return;
-      const count=Math.max(1,Math.min(contents.length,Math.floor(height/minimum)));
-      element.style.setProperty('--ranking-row-height',`${contents.length<=count?minimum:height/count}px`);
-    };
-    const observer=new ResizeObserver(measure);observer.observe(element);contents.forEach(content=>observer.observe(content));measure();
-    return ()=>observer.disconnect();
+  useClientLayoutEffect(()=>{
+    const element=viewport.current;
+    if(element)return observeRankingRows(element);
   },[data,selected,ascending,loading]);
   return <section aria-label="Machine resource utilization" className="absolute inset-0 flex min-w-0 flex-col overflow-hidden rounded-xl bg-surface">
     <div className="px-4 pt-4"><div className="flex items-center justify-between gap-2"><h2 className="text-base font-semibold">Machine utilization</h2><span className="text-xs tabular-nums text-muted-foreground">{machines.length} live</span></div>
