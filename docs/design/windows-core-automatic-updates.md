@@ -50,6 +50,15 @@ preserved. A service-start hook can resume an already protected journal even whe
 the manifest is temporarily ahead of the real SCM image; the starting SCM PID and
 image must still match a journal endpoint. No startup task is installed.
 
+Idle validation keeps at most eight verified digest/identity records, not open
+file handles. Windows volume/file IDs, size, write/change times and current path
+identity invalidate the cache; every open permits read/write/delete sharing so
+publication is never blocked by the cache. A hash mismatch is never cached.
+Staging and every execution/restart boundary still perform uncached verification.
+Startup reconciliation tolerates a temporary installed-manifest mismatch only
+while the exact journal-old/generated-new snapshots remain authoritative, and
+waits at most ten seconds; foreign files fail closed.
+
 Preparation uses exponential retry delays capped at 15 minutes. Attempt cooldown
 is also journaled so restarting after rollback cannot create an immediate update
 loop. Unrelated feature changes do not bypass a pending delay. Old immutable

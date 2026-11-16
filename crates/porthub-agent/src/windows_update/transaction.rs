@@ -155,6 +155,9 @@ pub(super) async fn execute<B: Backend, J: Journal>(backend: &B, journal: &mut J
             return rollback(backend, journal).await;
         }
     }
+    if !backend.permitted() {
+        return rollback(backend, journal).await;
+    }
     journal.persist(Phase::Verifying)?;
     if backend.ready_candidate().await.is_err() || !backend.permitted() {
         return rollback(backend, journal).await;

@@ -44,6 +44,25 @@ fn permitted(source: &Path) -> bool {
 fn expected_target() -> &'static str {
     env!("PORTHUB_RUST_TARGET")
 }
+fn pinned_release(layout: &Layout, path: &Path, expected: &str) -> Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    ensure!(
+        expected.len() == 64
+            && expected.bytes().all(|b| b.is_ascii_hexdigit())
+            && path == layout.releases.join(expected).join("porthub.exe"),
+        "Release path is outside its pinned immutable directory"
+    );
+    let directory = std::fs::symlink_metadata(path.parent().context("Release parent missing")?)?;
+    ensure!(
+        directory.is_dir() && directory.file_attributes() & 0x400 == 0,
+        "Release directory must not be a reparse point"
+    );
+    ensure!(
+        super::verified_file::hash(path, &[expected])?.eq_ignore_ascii_case(expected),
+        "Pinned update executable changed"
+    );
+    Ok(())
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Record {
@@ -112,7 +131,10 @@ impl Record {
                 *cli == crate::bootstrap::cli_path(false, None)?,
                 "Automatic updates require the existing standard managed Windows CLI"
             );
-            let hash = service::publication::hash_file(cli)?;
+            let hash = super::verified_file::hash(
+                cli,
+                &[self.previous_sha256.as_str(), self.release.sha256.as_str()],
+            )?;
             ensure!(
                 hash == self.previous_sha256 || hash.eq_ignore_ascii_case(&self.release.sha256),
                 "Shared CLI changed outside this update; preserved"
@@ -156,14 +178,8 @@ impl Record {
             self.previous_sha256 != self.release.sha256 && self.authorizer_pid > 0,
             "Invalid previous/candidate endpoints"
         );
-        service::publication::owned_target(layout, &self.previous.executable)?;
-        service::publication::owned_target(layout, &self.candidate)?;
-        ensure!(
-            service::publication::hash_file(&self.previous.executable)? == self.previous_sha256
-                && service::publication::hash_file(&self.candidate)?
-                    .eq_ignore_ascii_case(&self.release.sha256),
-            "Pinned update executable changed"
-        );
+        pinned_release(layout, &self.previous.executable, &self.previous_sha256)?;
+        pinned_release(layout, &self.candidate, &self.release.sha256)?;
         Ok(())
     }
     fn load(layout: &Layout, path: &Path) -> Result<Self> {
@@ -342,6 +358,11 @@ impl Backend for Actual {
             self.permitted(),
             "Automatic updates disabled before service transaction"
         );
+        service::publication::owned_target(&self.layout, &self.record.candidate)?;
+        ensure!(
+            self.permitted(),
+            "Automatic updates revoked during final executable verification"
+        );
         service::install_published(
             &self.layout,
             &self.record.previous.profile,
@@ -364,6 +385,7 @@ impl Backend for Actual {
     async fn restore_previous(&self) -> Result<()> {
         // Rollback needs no AutoUpdate permission: it restores only the same
         // enrollment and two previously verified service/CLI endpoints.
+        service::publication::owned_target(&self.layout, &self.record.previous.executable)?;
         service::install_published(
             &self.layout,
             &self.record.previous.profile,
@@ -437,7 +459,13 @@ async fn reconcile(layout: &Layout, record: &Record) -> Result<()> {
         profile::write_private(&record.previous.unit, actual_unit, true)?;
     }
     if let Some(cli) = &record.previous.cli {
-        let hash = service::publication::hash_file(cli)?;
+        let hash = super::verified_file::hash(
+            cli,
+            &[
+                record.previous_sha256.as_str(),
+                record.release.sha256.as_str(),
+            ],
+        )?;
         let expected = service::publication::hash_file(&actual.executable)?;
         if hash != expected {
             let mut publication =
@@ -446,9 +474,52 @@ async fn reconcile(layout: &Layout, record: &Record) -> Result<()> {
         }
     }
     if !state.active {
+        service::publication::owned_target(layout, &actual.executable)?;
         manager.start(actual).await?;
     }
     Ok(())
+}
+fn startup_snapshots(layout: &Layout, record: &Record) -> Result<super::recovery_wait::Snapshot> {
+    use super::recovery_wait::Snapshot;
+    let mut candidate = record.previous.clone();
+    candidate.executable = record.candidate.clone();
+    let wanted = [
+        (
+            layout
+                .state
+                .join(format!("{}.service.json", record.previous.identity)),
+            &record.previous_manifest,
+            serde_json::to_vec_pretty(&candidate)?,
+        ),
+        (
+            record.previous.unit.clone(),
+            &record.previous_unit,
+            service::unit(&candidate)?.into_bytes(),
+        ),
+    ];
+    for (path, old, new) in wanted {
+        match profile::read_private(&path) {
+            Ok(bytes) => {
+                if !transaction::known_snapshot(&bytes, old, &new) {
+                    return Ok(Snapshot::Foreign);
+                }
+            }
+            Err(error) => {
+                if error.downcast_ref::<std::io::Error>().is_some_and(|e| {
+                    matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound
+                            | std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::Interrupted
+                    ) || matches!(e.raw_os_error(), Some(32 | 33))
+                }) {
+                    return Ok(Snapshot::Transient);
+                }
+                return Err(error);
+            }
+        }
+    }
+    Ok(Snapshot::Known)
 }
 /// A protected unfinished record may survive reboot with its manifest ahead of
 /// SCM. Prove the REAL starting SCM process against either endpoint before
@@ -485,16 +556,15 @@ pub(crate) async fn service_start_recovery(source: &Path) -> Result<()> {
     // A crash can leave the manifest ahead of SCM. Let reconciliation align it
     // before runtime constructs its SCM-authorized Controller. Do not wait for
     // candidate readiness here: the worker needs this runtime to start first.
-    let until = tokio::time::Instant::now() + Duration::from_secs(10);
-    while tokio::time::Instant::now() < until {
-        if service::installed(&layout, &record.previous.identity)?
-            .is_some_and(|s| same_file(&s.executable, &current))
-        {
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    anyhow::bail!("Windows recovery metadata is still pending")
+    super::recovery_wait::wait(
+        || startup_snapshots(&layout, &record),
+        || {
+            Ok(service::installed(&layout, &record.previous.identity)?
+                .is_some_and(|s| same_file(&s.executable, &current)))
+        },
+        Duration::from_secs(10),
+    )
+    .await
 }
 /// Runs only from a verified staged executable, independently of the SCM process
 /// it will replace. The durable per-registration lease prevents concurrent work.
@@ -572,6 +642,8 @@ async fn provenance(staged: &Staged, cancel: &CancellationToken) -> Result<Strin
     tokio::select! {_=cancel.cancelled()=>anyhow::bail!("Version probe cancelled"),r=tokio::time::timeout(Duration::from_secs(8),probe)=>r.context("Version provenance probe timed out")?}
 }
 async fn spawn_worker(record: &Record, path: &Path) -> Result<()> {
+    // Cached validation is never sufficient immediately before execution.
+    service::publication::owned_target(&Layout::system()?, &record.candidate)?;
     // Worker is short-lived and must survive the old service's normal shutdown.
     let child = tokio::process::Command::new(&record.candidate)
         .arg("__windows-update")

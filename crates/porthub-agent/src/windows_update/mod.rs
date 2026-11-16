@@ -3,7 +3,9 @@
 #[cfg(windows)]
 mod native;
 mod preparation;
+mod recovery_wait;
 mod transaction;
+mod verified_file;
 #[cfg(windows)]
 pub(crate) use native::{service_start_recovery, Controller};
 #[cfg(windows)]
