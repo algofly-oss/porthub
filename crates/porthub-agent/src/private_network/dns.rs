@@ -108,6 +108,10 @@ impl Zone {
         );
         reply.metadata.authoritative = true;
         reply.metadata.recursion_desired = query.metadata.recursion_desired;
+        if self.sparse.as_ref().is_some_and(|handle|!handle.authority_valid()) {
+            reply.metadata.response_code=ResponseCode::ServFail;
+            return reply.to_vec().ok();
+        }
         reply.add_query(q.clone());
         if query.metadata.op_code == OpCode::Query {
             if porthub_mesh::dns_policy::matching(&self.rules, &name).is_some() {
@@ -134,7 +138,9 @@ impl Zone {
             && q.query_type() == RecordType::A
         {
             if let Some(ip) = self.records.get(&name) {
-                reply.add_answer(Record::from_rdata(q.name().clone(), self.ttl.max(1), RData::A(A(*ip))));
+                let ttl=self.sparse.as_ref().map(|handle|handle.authority_ttl()).unwrap_or(Some(self.ttl.max(1)));
+                if let Some(ttl)=ttl {reply.add_answer(Record::from_rdata(q.name().clone(), self.ttl.max(1).min(ttl), RData::A(A(*ip))));}
+                else {reply.metadata.response_code=ResponseCode::ServFail;}
             }
         }
         reply.to_vec().ok()
@@ -149,6 +155,7 @@ impl Zone {
         let name = question.name().to_ascii().trim_end_matches('.').to_ascii_lowercase();
         if self.suffixes.iter().any(|suffix| within(&name, suffix.trim_end_matches('.'))) { return false; }
         if self.management_names.contains(&name) {return true;}
+        if self.sparse.as_ref().is_some_and(|handle|!handle.authority_valid()){return false;}
         porthub_mesh::dns_policy::matching(&self.rules, &name).is_none()
             && (self.forward_all || self.rules.iter().any(|rule| within(&name, porthub_mesh::dns_policy::zone(rule))))
     }

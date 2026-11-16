@@ -38,6 +38,45 @@ impl<T> Authority<T> {
         }
         Ok(())
     }
+    /// Revalidate BEFORE every poll of a pending operation, including the first
+    /// poll after resume/backpressure. The bounded timer also cancels a stalled
+    /// operation that otherwise never wakes. It never refreshes the witness.
+    pub(crate) async fn during<R>(
+        &self,
+        operation: impl std::future::Future<Output = Result<R>>,
+    ) -> Result<R> {
+        if self.remaining()?.is_none() {
+            return operation.await;
+        }
+        tokio::pin!(operation);
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            let guarded = std::future::poll_fn(|cx| {
+                if let Err(error) = self.check() {
+                    return std::task::Poll::Ready(Err(error));
+                }
+                operation.as_mut().poll(cx)
+            });
+            tokio::select! {result=guarded=>return result,_=tick.tick()=>self.check()?}
+        }
+    }
+    pub(crate) fn remaining(&self) -> Result<Option<std::time::Duration>> {
+        #[cfg(feature = "private-sparse")]
+        if let Some(witness) = &self.witness {
+            return witness.remaining(self.expiry).map(Some);
+        }
+        Ok(None)
+    }
+    pub(crate) fn retained(&self) -> Authority<()> {
+        Authority {
+            value: (),
+            #[cfg(feature = "private-sparse")]
+            witness: self.witness.clone(),
+            #[cfg(feature = "private-sparse")]
+            expiry: self.expiry,
+        }
+    }
     pub(crate) fn accepted(&self) -> Result<&T> {
         self.check()?;
         Ok(&self.value)
@@ -152,5 +191,35 @@ mod tests {
         clock.0.store(15000, Ordering::SeqCst);
         finish.send(()).unwrap();
         assert!(install.await.unwrap().is_err());
+    }
+    #[tokio::test]
+    async fn real_backpressured_writer_cannot_resume_delivery_after_suspend_expiry() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let clock = Arc::new(Clock(AtomicU64::new(0)));
+        let witness = super::super::authority_clock::RequestWindow::start(clock.clone()).unwrap();
+        let authority = Authority::new(
+            (),
+            Some(witness),
+            chrono::Utc::now() + chrono::Duration::seconds(30),
+        );
+        let (mut writer, mut reader) = tokio::io::duplex(1);
+        let (started, wait) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            authority
+                .during(async {
+                    writer.write_all(&[1]).await?;
+                    started.send(()).unwrap();
+                    writer.write_all(&[2]).await?;
+                    Ok(())
+                })
+                .await
+        });
+        wait.await.unwrap();
+        assert!(!task.is_finished());
+        clock.0.store(15000, Ordering::SeqCst);
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await.unwrap();
+        assert!(task.await.unwrap().is_err());
+        assert_eq!(bytes, vec![1]);
     }
 }

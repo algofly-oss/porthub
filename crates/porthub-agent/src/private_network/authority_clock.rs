@@ -97,19 +97,27 @@ impl RequestWindow {
         })
     }
     pub(crate) fn check(&self, server_expiry: SystemTime) -> Result<()> {
+        self.remaining(server_expiry).map(|_| ())
+    }
+    pub(crate) fn remaining(&self, server_expiry: SystemTime) -> Result<Duration> {
         let now = self.clock.elapsed_since_boot()?;
         let elapsed = now
             .checked_sub(self.boot_start)
             .ok_or_else(|| anyhow::anyhow!("authority clock regressed"))?;
-        ensure!(
-            elapsed < REQUEST_VALIDITY && self.awake_start.elapsed() < REQUEST_VALIDITY,
-            "logical authority request expired"
-        );
-        ensure!(
-            SystemTime::now() < server_expiry,
-            "server authority expired"
-        );
-        Ok(())
+        let boot = REQUEST_VALIDITY
+            .checked_sub(elapsed)
+            .filter(|left| !left.is_zero())
+            .ok_or_else(|| anyhow::anyhow!("logical authority request expired"))?;
+        let awake = REQUEST_VALIDITY
+            .checked_sub(self.awake_start.elapsed())
+            .filter(|left| !left.is_zero())
+            .ok_or_else(|| anyhow::anyhow!("logical authority request expired"))?;
+        let server = server_expiry
+            .duration_since(SystemTime::now())
+            .ok()
+            .filter(|left| !left.is_zero())
+            .ok_or_else(|| anyhow::anyhow!("server authority expired"))?;
+        Ok(boot.min(awake).min(server))
     }
 }
 

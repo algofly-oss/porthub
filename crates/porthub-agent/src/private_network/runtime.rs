@@ -35,6 +35,14 @@ async fn audit_capture(tun:&Tun,snapshot:&Snapshot,peers:&[std::net::Ipv4Addr])-
         .map_err(|_|anyhow::anyhow!("private capture route audit timed out; refusing stale native routing"))?
 }
 
+async fn write_authorized(authority:Option<&super::authority_event::Authority<()>>,handle:&super::sparse::Handle,peer:Option<&str>,tun:&Tun,bytes:&[u8])->Result<()> {
+    let pair=if handle.enabled(){
+        if let Some(peer)=peer {match handle.pair_authority(peer){Some(pair)=>Some(pair),None=>return Ok(())}}else{None}
+    }else{None};
+    let delivery=async {if let Some(pair)=pair {pair.during(tun.write(bytes)).await}else{tun.write(bytes).await}};
+    if let Some(authority)=authority {authority.during(delivery).await} else {delivery.await}
+}
+
 fn mark_activity(activity: &mut HashMap<String, Instant>, peer: &str, now: Instant) {
     if let Some(last) = activity.get_mut(peer) {
         *last = now;
@@ -297,6 +305,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     let mut dns_upstream:Option<Arc<super::dns_upstream::Upstream>>=None;
     let mut policy = Engine::default();
     let mut sparse_authority:Option<Snapshot>=None;
+    let mut installed_authority:Option<super::authority_event::Authority<()>>=None;
     let mut capture_configured=false;
     let mut private_status = crate::runtime::PrivateStatus::default();
     #[cfg(target_os="linux")]
@@ -354,7 +363,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     let mut probe_tick = tokio::time::interval(Duration::from_secs(1));
     probe_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result:Result<()>=async {loop {
-        if sparse_handle.revoked(){policy.revoke();anyhow::bail!("private gateway revoked the base authority");}
+        if installed_authority.as_ref().is_some_and(|a|a.check().is_err()) || !sparse_handle.authority_valid(){policy.revoke();anyhow::bail!("private gateway revoked the base authority");}
         tokio::select! {
         _=cancel.cancelled()=>break,
         _=work.cancelled()=>{policy.revoke();if cancel.is_cancelled(){break;}anyhow::bail!("private worker authority ended");},
@@ -377,8 +386,9 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 let routes:Vec<_>=snapshot.peers.iter().filter(|p|p.id!=profile.peer_id).map(|p|p.ip).collect();
                 let first_ready = device.is_none();
                 policy.apply(snapshot.clone())?;
+                installed_authority=Some(authority.retained());
                 sparse_authority=Some(snapshot.clone());
-                sparse_handle.update_base(&snapshot);
+                sparse_handle.update_base_authority(&snapshot,authority.retained());
                 let mut routes=routes;
                 routes.extend(sparse_handle.peers().iter().map(|p|p.ip));
                 #[cfg(feature="private-stream")]
@@ -548,12 +558,13 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 }
                 by_ip.retain(|_,peer|peer!=&id);by_ip.insert(lease.peer.ip,id.clone());peer_ips.insert(id.clone(),lease.peer.ip);
                 authority.check()?;
-                sparse_handle.installed(&response.query,lease);
+                sparse_handle.installed_authority(&response.query,lease,authority.retained());
                 #[cfg(feature="private-stream")]
                 if let (Some(router),Some(base))=(&stream_router,&sparse_authority){router.update_pairs(base,&policy.pair_snapshots())?;}
             },
             Some(Event::Packet{peer,bytes,direct,received_at})=>{
-                if sparse_handle.enabled()&&policy.pair_peer(&peer).is_none(){sparse_handle.request_peer(&peer);continue;}
+                if installed_authority.as_ref().is_some_and(|a|a.check().is_err()) || !sparse_handle.authority_valid(){policy.revoke();anyhow::bail!("private request-start authority expired");}
+                if sparse_handle.enabled()&&(policy.pair_peer(&peer).is_none()||sparse_handle.by_id(&peer).is_none()){sparse_handle.request_peer(&peer);continue;}
                 let now=received_at;
                 if let Some(envelope) = porthub_mesh::control_packet::decode(porthub_mesh::control_packet::EXIT, bytes.clone()) {
                     if peer_ips.get(&peer) != Some(&envelope.source) || peer_ips.get(&profile.peer_id) != Some(&envelope.destination) { continue; }
@@ -570,7 +581,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                             exit_selection.observe(&packet.flow_id(), &peer, Instant::now(), packet.flow_ttl());
                             exit_selection.observe_close(&packet.flow_id(), &peer, false, packet.is_finish(), packet.is_reset(), Instant::now());
                         }
-                        if let Some(tun) = &device { tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=tun.write(&envelope.payload)=>result?}; }
+                        if let Some(tun) = &device { tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=write_authorized(installed_authority.as_ref(),&sparse_handle,Some(&peer),tun,&envelope.payload)=>result?}; }
                     }
                     continue;
                 }
@@ -600,22 +611,25 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 mark_activity(&mut last_activity,&peer,now);
                 if policy.check(&bytes,&peer,true) {
                     if let Some(packet)=Packet::parse(&bytes) {paths.observe(packet,direct);}
-                    if let Some(tun)=&device {tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=tun.write(&bytes)=>result?};}
+                    if let Some(tun)=&device {tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=write_authorized(installed_authority.as_ref(),&sparse_handle,Some(&peer),tun,&bytes)=>result?};}
                 }
             },
             #[cfg(feature="private-stream")]
             Some(Event::StreamLocal {peer,bytes})=>{
+            if installed_authority.as_ref().is_some_and(|a|a.check().is_err()){policy.revoke();anyhow::bail!("private request-start authority expired");}
+                if sparse_handle.enabled()&&sparse_handle.by_id(&peer).is_none(){continue;}
                 let parsed=Packet::parse(&bytes);
                 let reset=parsed.is_some_and(|packet|packet.is_reset() && peer_ips.get(&profile.peer_id)==Some(&packet.destination()));
                 if policy.check(&bytes,&peer,true) || reset {
-                    if let Some(tun)=&device {tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=tun.write(&bytes)=>result?};}
+                    if let Some(tun)=&device {tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=write_authorized(installed_authority.as_ref(),&sparse_handle,Some(&peer),tun,&bytes)=>result?};}
                 }
             },
             #[cfg(feature="private-stream")]
             Some(Event::StreamDatagram {destination,payload})=>{
+            if installed_authority.as_ref().is_some_and(|a|a.check().is_err()){policy.revoke();anyhow::bail!("private request-start authority expired");}
                 let Some(router)=&stream_router else {continue;};if !router.valid_lease(){continue;}
                 let (Some(peer),Some(source))=(by_ip.get(&destination),peer_ips.get(&profile.peer_id)) else {sparse_handle.request_ip(destination);continue;};
-                if sparse_handle.enabled()&&policy.pair_peer(peer).is_none(){sparse_handle.request_ip(destination);continue;}
+                if sparse_handle.enabled()&&(policy.pair_peer(peer).is_none()||sparse_handle.by_id(peer).is_none()){sparse_handle.request_ip(destination);continue;}
                 let packet=porthub_mesh::control_packet::encode(porthub_mesh::control_packet::STREAM,*source,destination,&payload)?;
                 let peers=sessions.read().await;
                 let direct=peers.get(peer).filter(|session|session.state()==porthub_mesh::State::Ready);
@@ -630,14 +644,16 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             },
             #[cfg(feature="local-tor")]
             Some(Event::TorLocal {bytes})=>{
+            if installed_authority.as_ref().is_some_and(|a|a.check().is_err()){policy.revoke();anyhow::bail!("private request-start authority expired");}
                 if local_tor.is_some() && Packet::parse(&bytes).is_some_and(|packet|peer_ips.get(&profile.peer_id)==Some(&packet.destination())) {
-                    if let Some(tun)=&device {tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=tun.write(&bytes)=>result?};}
+                    if let Some(tun)=&device {tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=write_authorized(installed_authority.as_ref(),&sparse_handle,None,tun,&bytes)=>result?};}
                 }
             },
             None=>anyhow::bail!("private control owner stopped"),
         },
         packet=async {match &device {Some(device)=>device.read(&mut buffer).await,None=>std::future::pending().await}}=>{
             let size=packet?;if size>porthub_mesh::MAX_PACKET {continue;}
+            if installed_authority.as_ref().is_some_and(|a|a.check().is_err()){policy.revoke();anyhow::bail!("private request-start authority expired");}
             let Some(parsed)=Packet::parse(&buffer[..size]) else {continue;};
             #[cfg(feature="local-tor")]
             if let Some(tor)=local_tor.as_mut().filter(|tor|tor.owns(&buffer[..size])) {
@@ -687,7 +703,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 continue;
             }
             let Some(peer)=by_ip.get(&parsed.destination()) else {if peer_ips.get(&profile.peer_id)==Some(&parsed.source()){sparse_handle.request_ip(parsed.destination());}continue;};
-            if sparse_handle.enabled()&&policy.pair_peer(peer).is_none(){sparse_handle.request_ip(parsed.destination());continue;}
+            if sparse_handle.enabled()&&(policy.pair_peer(peer).is_none()||sparse_handle.by_id(peer).is_none()){sparse_handle.request_ip(parsed.destination());continue;}
             if policy.check(&buffer[..size],peer,false) {
                 mark_activity(&mut last_activity,peer,std::time::Instant::now());
                 let peers=sessions.read().await;
@@ -743,6 +759,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             }
         },
         _=probe_tick.tick(),if device.is_some()=>{
+            if installed_authority.as_ref().is_some_and(|a|a.check().is_err()){policy.revoke();anyhow::bail!("private request-start authority expired");}
             if sparse_handle.enabled()&&last_route_audit.is_none_or(|at|at.elapsed()>=Duration::from_secs(5)){
                 if let (Some(tun),Some(base))=(&device,&sparse_authority){
                     let audit=audit_capture(tun,base,&peer_ips.values().copied().collect::<Vec<_>>()).await?;last_route_audit=Some(Instant::now());
@@ -753,6 +770,10 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 }
             }
             if sparse_handle.enabled(){
+                let expired:Vec<_>=policy.pair_snapshots().into_iter().filter_map(|(snapshot,_)| snapshot.peers.into_iter().find(|p|p.id!=profile.peer_id)).filter(|p|sparse_handle.by_id(&p.id).is_none()).map(|p|p.id).collect();
+                let removed=!expired.is_empty();
+                for id in expired {policy.revoke_pair(&id);sparse_handle.retire(&id);peer_ips.remove(&id);by_ip.retain(|_,peer|peer!=&id);}
+                if removed {if let Some(tun)=&device {tun.update_routes(&peer_ips.values().copied().collect::<Vec<_>>()).await?;}}
                 for peer in policy.active_pair_flows(){sparse_handle.touch_peer(&peer);}
                 #[cfg(feature="private-stream")]
                 if let Some(router)=&stream_router{for peer in router.active_peers(){sparse_handle.touch_peer(&peer);}}
@@ -824,6 +845,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             }
         },
         _=status_tick.tick()=>{
+            if installed_authority.as_ref().is_some_and(|a|a.check().is_err()){policy.revoke();anyhow::bail!("private request-start authority expired");}
             #[cfg(feature="private-stream")]
             if let Some(router)=&stream_router {router.log_transport_stats();}
             let peers=sessions.read().await;
@@ -878,6 +900,11 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             if crate::service::readable::refresh(&path,&status).is_err(){tracing::debug!("local registration display snapshot unavailable");}
         }
     }}Ok(())}.await;
+    if installed_authority.as_ref().is_some_and(|authority|authority.check().is_err()) {
+        policy.revoke();sparse_handle.revoke_all();private_status.lease_valid=false;
+        let status=crate::runtime::Status{pid:std::process::id(),state:"stopped".into(),agent_version:crate::VERSION.into(),config_version:String::new(),service_count:0,route:"private".into(),updated_at:SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),update_request_id:String::new(),private_status:Some(private_status.clone())};
+        if let Ok(bytes)=serde_json::to_vec(&status) {if profile::write_private(&profile::sibling(&path,".status.json"),&bytes,true).is_err(){tracing::warn!("expired private authority status update failed");}}
+    }
     work.cancel();
     drop(component_maintenance);
     if tokio::time::timeout(Duration::from_secs(2), async {

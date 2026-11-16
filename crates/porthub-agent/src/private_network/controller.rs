@@ -402,7 +402,7 @@ pub async fn run_watched_sparse(
             if let Some(resolver)=&sparse {
                 if reply.snapshot.sparse.is_some() {
                     ensure!(reply.sparse_sequence==Some(resolver.sequence()),"private pair response sequence changed");
-                    resolver.handle().update_base(&reply.snapshot);
+                    resolver.handle().update_base_authority(&reply.snapshot,super::authority_event::Authority::new((),request_window.clone(),reply.snapshot.expires_at));
                     transport_peers.extend(resolver.handle().peers());
                     let mut validator=porthub_network::policy::Engine::default();validator.apply(reply.snapshot.clone())?;
                     for cached in resolver.handle().leases(){let _=validator.install_pair(cached);}
@@ -416,7 +416,7 @@ pub async fn run_watched_sparse(
                             }
                         }
                     }
-                } else {resolver.handle().update_base(&reply.snapshot);}
+                } else {resolver.handle().update_base_authority(&reply.snapshot,super::authority_event::Authority::new((),request_window.clone(),reply.snapshot.expires_at));}
             }
             let direct_relay = if reply.snapshot.sparse.is_some() && transport_peers.iter().all(|p|p.id==profile.peer_id){None}else{Some(super::relay::Config {
                 direct_url: reply.direct_relay_url.clone().filter(|url|!url.is_empty()),

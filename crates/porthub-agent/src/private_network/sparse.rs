@@ -23,6 +23,7 @@ pub struct Control {
     sequence: u64,
 }
 struct Cached {
+    authority: Option<super::authority_event::Authority<()>>,
     lease: PairLease,
     deadline: Instant,
     last_used: Instant,
@@ -34,6 +35,7 @@ struct Intent {
 }
 #[derive(Default)]
 struct State {
+    authority: Option<super::authority_event::Authority<()>>,
     epoch: Option<String>,
     deadline: Option<Instant>,
     cache: BTreeMap<String, Cached>,
@@ -66,10 +68,29 @@ impl Handle {
         self.changed.notify_waiters();
         self.demand.notify_waiters();
     }
+    pub(crate) fn pair_authority(&self,id:&str)->Option<super::authority_event::Authority<()>> {
+        let s=self.state.lock().unwrap_or_else(|p|p.into_inner());
+        if self.revoked()||s.authority.as_ref().is_some_and(|a|a.check().is_err()){return None;}
+        let cached=s.cache.get(id)?;
+        if cached.deadline<=Instant::now(){return None;}
+        let authority=cached.authority.as_ref()?;authority.check().ok()?;Some(authority.clone())
+    }
+    pub(crate) fn authority_ttl(&self)->Option<u32> {
+        let s=self.state.lock().unwrap_or_else(|p|p.into_inner());
+        if self.revoked(){return None;}
+        let left=match &s.authority {Some(authority)=>authority.remaining().ok()?.map(|left|left.as_secs()).unwrap_or(5),None=>5};
+        (left>0).then_some(left.min(5) as u32)
+    }
+    pub(crate) fn authority_valid(&self)->bool {
+        let s=self.state.lock().unwrap_or_else(|p|p.into_inner());
+        !self.revoked() && s.authority.as_ref().is_none_or(|a|a.check().is_ok())
+    }
     pub fn revoked(&self) -> bool {
         self.revoked.load(Ordering::SeqCst)
     }
-    pub fn update_base(&self, snapshot: &Snapshot) {
+    pub fn update_base(&self, snapshot: &Snapshot) { self.update_base_inner(snapshot,None); }
+    pub(crate) fn update_base_authority(&self,snapshot:&Snapshot,authority:super::authority_event::Authority<()>) { self.update_base_inner(snapshot,Some(authority)); }
+    fn update_base_inner(&self, snapshot: &Snapshot, authority:Option<super::authority_event::Authority<()>>) {
         let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
         if self.revoked() {
             return;
@@ -79,6 +100,7 @@ impl Handle {
             s.cache.clear();
         }
         s.epoch = epoch;
+        s.authority = authority;
         s.deadline = snapshot
             .expires_at
             .signed_duration_since(chrono::Utc::now())
@@ -95,29 +117,30 @@ impl Handle {
     fn peer(&self, select: impl Fn(&PeerInfo) -> bool) -> Option<PeerInfo> {
         let mut s = self.state.try_lock().ok()?;
         let now = Instant::now();
-        if s.epoch.is_none() || s.deadline.is_none_or(|d| d <= now) {
+        if s.epoch.is_none() || s.deadline.is_none_or(|d| d <= now) || s.authority.as_ref().is_some_and(|a|a.check().is_err()) {
             return None;
         }
         let hit = s
             .cache
             .values_mut()
-            .find(|c| c.deadline > now && select(&c.lease.peer))?;
+            .find(|c| select(&c.lease.peer) && c.deadline > now && c.authority.as_ref().is_none_or(|a|a.check().is_ok()))?;
         hit.last_used = now;
         Some(hit.lease.peer.clone())
     }
     pub fn dns_ttl(&self, ip: Ipv4Addr) -> Option<u32> {
         let s = self.state.try_lock().ok()?;
         let now = Instant::now();
+        if s.authority.as_ref().is_some_and(|a|a.check().is_err()){return None;}
         let base = s.deadline?;
         let peer = s
             .cache
             .values()
-            .find(|c| c.lease.peer.ip == ip && c.deadline > now)?;
-        let remaining = peer
-            .deadline
-            .min(base)
-            .checked_duration_since(now)?
-            .as_secs();
+            .find(|c| c.lease.peer.ip == ip && c.deadline > now && c.authority.as_ref().is_none_or(|a|a.check().is_ok()))?;
+        let mut remaining=peer.deadline.min(base).checked_duration_since(now)?;
+        for authority in [s.authority.as_ref(),peer.authority.as_ref()].into_iter().flatten(){
+            if let Some(left)=authority.remaining().ok()? {remaining=remaining.min(left);}
+        }
+        let remaining=remaining.as_secs();
         (remaining > 0).then_some(remaining.min(5) as u32)
     }
     pub fn by_ip(&self, ip: Ipv4Addr) -> Option<PeerInfo> {
@@ -132,22 +155,23 @@ impl Handle {
     }
     pub fn leases(&self) -> Vec<PairLease> {
         let s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if s.authority.as_ref().is_some_and(|a|a.check().is_err()){return Vec::new();}
         let now = Instant::now();
         s.cache
             .values()
-            .filter(|c| c.deadline > now)
+            .filter(|c| c.deadline > now && c.authority.as_ref().is_none_or(|a|a.check().is_ok()))
             .map(|c| c.lease.clone())
             .collect()
     }
     pub fn peers(&self) -> Vec<PeerInfo> {
         let s = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let now = Instant::now();
-        if s.epoch.is_none() || s.deadline.is_none_or(|d| d <= now) {
+        if s.epoch.is_none() || s.deadline.is_none_or(|d| d <= now) || s.authority.as_ref().is_some_and(|a|a.check().is_err()) {
             return Vec::new();
         }
         s.cache
             .values()
-            .filter(|p| p.deadline > now)
+            .filter(|p| p.deadline > now && p.authority.as_ref().is_none_or(|a|a.check().is_ok()))
             .map(|p| p.lease.peer.clone())
             .collect()
     }
@@ -157,10 +181,10 @@ impl Handle {
             return false;
         };
         let now = Instant::now();
-        if self.revoked() || state.deadline.is_none_or(|d| d <= now) {
+        if self.revoked() || state.deadline.is_none_or(|d| d <= now) || state.authority.as_ref().is_some_and(|a|a.check().is_err()) {
             return false;
         }
-        let Some(cached) = state.cache.get_mut(id).filter(|c| c.deadline > now) else {
+        let Some(cached) = state.cache.get_mut(id).filter(|c| c.deadline > now && c.authority.as_ref().is_none_or(|a|a.check().is_ok())) else {
             return false;
         };
         cached.last_used = now;
@@ -186,7 +210,7 @@ impl Handle {
             return false;
         };
         let now = Instant::now();
-        if s.epoch.is_none() || s.deadline.is_none_or(|d| d <= now) {
+        if s.epoch.is_none() || s.deadline.is_none_or(|d| d <= now) || s.authority.as_ref().is_some_and(|a|a.check().is_err()) {
             return false;
         }
         if !s.wanted.contains_key(&query) && s.wanted.len() >= MAX_INTENTS {
@@ -205,12 +229,16 @@ impl Handle {
         true
     }
     /// Called only by the packet owner AFTER Engine and native /32 route installation succeed.
-    pub fn installed(&self, query: &Lookup, lease: PairLease) {
+    pub fn installed(&self, query: &Lookup, lease: PairLease) {self.installed_inner(query,lease,None);}
+    pub(crate) fn installed_authority(&self,query:&Lookup,lease:PairLease,authority:super::authority_event::Authority<()>) {self.installed_inner(query,lease,Some(authority));}
+    fn installed_inner(&self, query: &Lookup, lease: PairLease, authority:Option<super::authority_event::Authority<()>>) {
         let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let now = Instant::now();
         if self.revoked()
             || s.epoch.as_deref() != Some(&lease.epoch)
             || s.deadline.is_none_or(|d| d <= now)
+            || s.authority.as_ref().is_some_and(|a|a.check().is_err())
+            || authority.as_ref().is_some_and(|a|a.check().is_err())
         {
             return;
         }
@@ -221,7 +249,7 @@ impl Handle {
         else {
             return;
         };
-        s.cache.retain(|_, c| c.deadline > now);
+        s.cache.retain(|_, c| c.deadline > now && c.authority.as_ref().is_none_or(|a|a.check().is_ok()));
         if !s.cache.contains_key(&lease.peer.id) && s.cache.len() >= MAX_PAIR_LEASES {
             return;
         }
@@ -233,6 +261,7 @@ impl Handle {
         s.cache.insert(
             lease.peer.id.clone(),
             Cached {
+                authority,
                 lease,
                 deadline: now + left,
                 last_used: used,
@@ -244,11 +273,12 @@ impl Handle {
     }
     pub fn cached_query(&self, query: &Lookup) -> Option<PeerInfo> {
         let s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if s.authority.as_ref().is_some_and(|a|a.check().is_err()){return None;}
         let now = Instant::now();
         s.cache
             .values()
             .find(|c| {
-                c.deadline > now
+                c.deadline > now && c.authority.as_ref().is_none_or(|a|a.check().is_ok())
                     && match query.kind.as_str() {
                         "peer" => c.lease.peer.id == query.value,
                         "ip" => c.lease.peer.ip.to_string() == query.value,
@@ -342,7 +372,7 @@ impl Control {
             .ok_or_else(|| anyhow::anyhow!("sparse sequence exhausted"))?;
         let mut s = self.handle.state.lock().unwrap_or_else(|p| p.into_inner());
         let now = Instant::now();
-        s.cache.retain(|_, c| c.deadline > now);
+        s.cache.retain(|_, c| c.deadline > now && c.authority.as_ref().is_none_or(|a|a.check().is_ok()));
         s.wanted
             .retain(|_, i| now.saturating_duration_since(i.used) < Duration::from_secs(30));
         let mut renew: Vec<_> = s
@@ -411,6 +441,40 @@ mod tests {
     }
     fn lease(epoch: &str) -> PairLease {
         serde_json::from_value(serde_json::json!({"workspace":"w","self":"a","epoch":epoch,"revision":1,"expires_at":chrono::Utc::now()+chrono::Duration::seconds(15),"local":{"id":"a","ip":"10.203.0.2","fingerprint":"local","instance":"local-instance","hostname":"a.phub"},"peer":{"id":"b","ip":"10.203.1.2","fingerprint":"remote","instance":"remote-instance","hostname":"b.phub","aliases":["alias.phub"]},"grants":[{"source":"a","destination":"b","protocol":"any","ports":[]}]})).unwrap()
+    }
+    #[cfg(feature="private-sparse")]
+    #[test]
+    fn refreshed_base_cannot_extend_pair_dns_or_identity_across_simulated_suspend() {
+        use std::sync::atomic::AtomicU64;
+        struct Clock(AtomicU64);
+        impl super::super::authority_clock::SuspendClock for Clock {
+            fn elapsed_since_boot(&self)->anyhow::Result<Duration>{Ok(Duration::from_millis(self.0.load(Ordering::SeqCst)))}
+        }
+        let clock=Arc::new(Clock(AtomicU64::new(0)));
+        let witness=||super::super::authority_clock::RequestWindow::start(clock.clone()).unwrap();
+        let epoch="a".repeat(64);let base=base(&epoch);let pair=lease(&epoch);
+        let (h,_)=channel();
+        h.update_base_authority(&base,super::super::authority_event::Authority::new((),Some(witness()),base.expires_at));
+        let query=Lookup{kind:"name".into(),value:"b.phub".into()};
+        h.installed_authority(&query,pair.clone(),super::super::authority_event::Authority::new((),Some(witness()),pair.expires_at));
+        assert!(h.by_id("b").is_some());assert!(h.dns_ttl(pair.peer.ip).is_some());
+        clock.0.store(10000,Ordering::SeqCst);
+        h.update_base_authority(&base,super::super::authority_event::Authority::new((),Some(witness()),base.expires_at));
+        clock.0.store(14999,Ordering::SeqCst);
+        assert!(h.by_id("b").is_some());assert!(h.dns_ttl(pair.peer.ip).is_none(),"DNS must not cache beyond request lifetime");
+        clock.0.store(15000,Ordering::SeqCst);
+        assert!(h.authority_valid());assert!(h.by_id("b").is_none());assert!(h.by_ip(pair.peer.ip).is_none());
+        assert!(h.cached_query(&query).is_none());assert!(h.dns_ttl(pair.peer.ip).is_none());
+        assert!(h.peers().is_empty());assert!(h.leases().is_empty());assert!(!h.touch_peer("b"));
+        let mut zone=super::super::dns::Zone::default();zone.set_sparse(h.clone());zone.update(&base).unwrap();
+        use hickory_proto::{op::{Message,MessageType,OpCode,Query,ResponseCode},rr::{Name,RecordType}};
+        let mut question=Message::new(1,MessageType::Query,OpCode::Query);
+        question.add_query(Query::query(Name::from_ascii("a.phub").unwrap(),RecordType::A));let bytes=question.to_vec().unwrap();
+        assert_eq!(Message::from_vec(&zone.answer(&bytes).unwrap()).unwrap().answers.len(),1);
+        clock.0.store(25000,Ordering::SeqCst);
+        let response=Message::from_vec(&zone.answer(&bytes).unwrap()).unwrap();
+        assert_eq!(response.metadata.response_code,ResponseCode::ServFail);assert!(response.answers.is_empty());
+        assert!(!h.authority_valid());assert!(!h.request_peer("b"));
     }
     #[test]
     fn miss_intents_deduplicate_and_stop_at_a_hard_bound() {
