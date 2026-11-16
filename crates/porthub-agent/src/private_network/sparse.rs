@@ -67,6 +67,16 @@ fn same_pair_authority(a:&PairLease,b:&PairLease)->bool {
         &&match (serde_json::to_vec(&a.acl),serde_json::to_vec(&b.acl)){(Ok(a),Ok(b))=>a==b,_=>false}
 }
 
+/// One locked cache read binds policy bytes and BOTH original witnesses.
+/// Fields are private: callers cannot relabel a permit from another peer.
+#[cfg(feature="private-sparse")]
+pub(crate) struct BoundPairAuthority {lease:PairLease,permit:porthub_mesh::udp::SendPermit}
+#[cfg(feature="private-sparse")]
+impl BoundPairAuthority {
+    pub(crate) fn lease(&self)->&PairLease{&self.lease}
+    pub(crate) fn permit(&self)->porthub_mesh::udp::SendPermit{self.permit.clone()}
+}
+
 impl Handle {
     pub fn revoke_all(&self) {
         self.revoked.store(true, Ordering::SeqCst);
@@ -78,6 +88,18 @@ impl Handle {
         drop(s);
         self.changed.notify_waiters();
         self.demand.notify_waiters();
+    }
+    #[cfg(feature="private-sparse")]
+    pub(crate) fn bound_pair_authority(&self,id:&str)->Option<BoundPairAuthority>{
+        let state=self.state.lock().unwrap_or_else(|p|p.into_inner());
+        if self.revoked()||state.deadline.is_none_or(|d|d<=Instant::now()){return None;}
+        let base=state.authority.as_ref()?.clone();base.check().ok()?;base.remaining().ok()??;
+        let cached=state.cache.get(id)?;
+        if cached.deadline<=Instant::now()||cached.lease.peer.id!=id||state.epoch.as_deref()!=Some(cached.lease.epoch.as_str())||cached.lease.self_!=cached.lease.local.id{return None;}
+        let pair=cached.authority.as_ref()?.clone();pair.check().ok()?;pair.remaining().ok()??;
+        let lease=cached.lease.clone();
+        let permit=porthub_mesh::udp::SendPermit::bounded(||true,move||Some(base.remaining().ok()??.min(pair.remaining().ok()??)));
+        Some(BoundPairAuthority{lease,permit})
     }
     pub(crate) fn pair_authority(&self,id:&str)->Option<super::authority_event::Authority<()>> {
         let s=self.state.lock().unwrap_or_else(|p|p.into_inner());
@@ -519,6 +541,16 @@ mod tests {
         assert!(old.check().is_ok(),"identical renewal must not spuriously retire live operations");
         clock.0.store(15000,Ordering::SeqCst);assert!(old.check().is_err());let fresh=handle.pair_authority("b").unwrap();assert!(fresh.check().is_ok());
         let mut changed=pair;changed.grants.clear();handle.installed_authority(&query,changed,authority());assert!(fresh.check().is_err(),"changed ACL retires the old domain");
+    }
+    #[cfg(feature="private-sparse")]
+    #[test]
+    fn bound_pair_view_cannot_mix_new_metadata_with_old_or_other_peer_authority(){
+        struct Clock(std::sync::atomic::AtomicU64);impl super::super::authority_clock::SuspendClock for Clock{fn elapsed_since_boot(&self)->anyhow::Result<Duration>{Ok(Duration::from_millis(self.0.load(Ordering::SeqCst)))}}
+        let clock=Arc::new(Clock(std::sync::atomic::AtomicU64::new(0)));let expiry=chrono::Utc::now()+chrono::Duration::seconds(60);let authority=||super::super::authority_event::Authority::new((),Some(super::super::authority_clock::RequestWindow::start(clock.clone()).unwrap()),expiry);
+        let (handle,_)=channel();let epoch="a".repeat(64);let query=Lookup{kind:"peer".into(),value:"b".into()};handle.update_base_authority(&base(&epoch),authority());handle.installed_authority(&query,lease(&epoch),authority());
+        let old=handle.bound_pair_authority("b").unwrap();assert_eq!(old.lease().peer.id,"b");assert!(handle.bound_pair_authority("foreign").is_none());
+        clock.0.store(10000,Ordering::SeqCst);let mut changed=lease(&epoch);changed.peer.instance="new-instance".into();handle.update_base_authority(&base(&epoch),authority());handle.installed_authority(&query,changed,authority());
+        assert!(!old.permit().valid());let fresh=handle.bound_pair_authority("b").unwrap();assert_eq!(fresh.lease().peer.instance,"new-instance");clock.0.store(15000,Ordering::SeqCst);assert!(fresh.permit().valid());clock.0.store(25000,Ordering::SeqCst);assert!(!fresh.permit().valid());assert!(handle.bound_pair_authority("b").is_none());
     }
     #[test]
     fn miss_intents_deduplicate_and_stop_at_a_hard_bound() {

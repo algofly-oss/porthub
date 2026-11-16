@@ -20,6 +20,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 pub(crate) mod receiver;
+pub(crate) mod flow_authority;
 const CHUNK: usize = 8192;
 const HEADER: usize = 96;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -263,7 +264,7 @@ impl Drop for Abandon {
     }
 }
 impl Sender {
-    pub(crate) async fn send(&self, payload: Bytes, permit: SendPermit) -> Result<[u8; HEADER]> {
+    async fn send(&self, payload: Bytes, permit: SendPermit) -> Result<[u8; HEADER]> {
         let permit = SendPermit::combine(vec![permit, self.gate.state.parent.clone()]);
         ensure!(
             self.gate.state.alive.load(Ordering::SeqCst) && permit.valid(),

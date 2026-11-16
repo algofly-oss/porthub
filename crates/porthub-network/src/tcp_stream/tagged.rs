@@ -104,6 +104,9 @@ impl Budget {
 /// Native received bytes/EOF retain first-admission spans until downstream
 /// delivery; abandonment retires the owner rather than silently losing bytes.
 pub struct NativeRead {
+    stack_scope: Arc<()>,
+    owner: u64,
+    flow: Flow,
     bytes: Bytes,
     eof: bool,
     permit: SendPermit,
@@ -355,6 +358,13 @@ impl Handle {
 impl Connection {
     pub fn flow(&self) -> Flow {
         self.flow
+    }
+    pub fn owns_read(&self, read: &NativeRead) -> bool {
+        self.alive.load(Ordering::SeqCst)
+            && read.valid()
+            && Arc::ptr_eq(&self.handle.stack_scope, &read.stack_scope)
+            && self.id == read.owner
+            && self.flow == read.flow
     }
     pub fn acknowledges(&self, ack: &NativeAck, id: [u8; 16], offset: u64, length: usize) -> bool {
         self.alive.load(Ordering::SeqCst)
@@ -1132,6 +1142,9 @@ impl Runner {
                         );
                     }
                     Ok(NativeRead {
+                        stack_scope: self.stack_scope.clone(),
+                        owner: active.id,
+                        flow: *flow,
                         bytes: bytes.into(),
                         eof,
                         permit,
@@ -1420,6 +1433,16 @@ mod tests {
         )?;
         let read =
             tokio::time::timeout(Duration::from_secs(1), rig.connection.read_chunk()).await??;
+        ensure!(
+            rig.connection.owns_read(&read),
+            "own native read lost origin binding"
+        );
+        let other = rig_rx(false, true).await?;
+        ensure!(
+            !other.connection.owns_read(&read),
+            "same tuple on another stack adopted read"
+        );
+        cleanup(other).await?;
         ensure!(
             read.len() == 1024 && !read.eof(),
             "actual reassembly length mismatch"
