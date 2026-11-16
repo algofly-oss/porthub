@@ -261,24 +261,32 @@ impl Drop for RetireOnDrop {
         }
     }
 }
+/// Validate the exact initial SYN before asynchronous flow-open admission.
+/// No packet origin is created here; the caller must retain its sealed policy
+/// admission when transferring this immutable packet into a native owner.
+pub fn validate_syn(syn: &[u8]) -> Result<Flow> {
+    Handle::validate_input(syn)?;
+    let incoming = Flow::from_packet(syn).ok_or(AdmissionError::Invalid)?;
+    let ip = Ipv4Packet::new_checked(syn)?;
+    let tcp = TcpPacket::new_checked(ip.payload())?;
+    ensure!(
+        syn.len() <= MTU
+            && tcp.syn()
+            && !tcp.ack()
+            && !tcp.rst()
+            && !tcp.fin()
+            && tcp.payload().is_empty(),
+        "invalid native SYN"
+    );
+    incoming.validate()?;
+    Ok(incoming)
+}
 impl Handle {
     pub async fn connect(&self, flow: Flow, permit: SendPermit) -> Result<Connection> {
         self.open(flow, permit, None).await
     }
     pub async fn accept_syn(&self, syn: Bytes, permit: SendPermit) -> Result<Connection> {
-        Self::validate_input(&syn)?;
-        let incoming = Flow::from_packet(&syn).ok_or(AdmissionError::Invalid)?;
-        let ip = Ipv4Packet::new_checked(syn.as_ref())?;
-        let tcp = TcpPacket::new_checked(ip.payload())?;
-        ensure!(
-            syn.len() <= MTU
-                && tcp.syn()
-                && !tcp.ack()
-                && !tcp.rst()
-                && !tcp.fin()
-                && tcp.payload().is_empty(),
-            "invalid native SYN"
-        );
+        let incoming = validate_syn(&syn)?;
         self.open(incoming.reverse(), permit, Some(syn)).await
     }
     async fn open(&self, flow: Flow, permit: SendPermit, syn: Option<Bytes>) -> Result<Connection> {

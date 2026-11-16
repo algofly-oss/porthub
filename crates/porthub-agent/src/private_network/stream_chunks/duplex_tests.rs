@@ -84,17 +84,15 @@ impl Drop for Native {
         self.connection.retire();
     }
 }
-async fn native(flow: tcp_stream::Flow) -> Result<Native> {
+async fn native_destination(opened: &flow_open::Opened) -> Result<Native> {
     let (handle, mut output, runner) = tagged::stack()?;
     let (peer, mut input, peer_runner) = tcp_stream::stack()?;
     let stop = CancellationToken::new();
     let a = tokio::spawn(runner.run(stop.clone()));
     let b = tokio::spawn(peer_runner.run(stop.clone()));
     let h = handle.clone();
-    let connecting = tokio::spawn(async move { h.connect(flow, lease()).await });
-    let syn = timeout(Duration::from_secs(1), output.recv())
-        .await?
-        .unwrap();
+    let mut connecting = Box::pin(async move { opened.connect_destination(&h).await });
+    let syn=timeout(Duration::from_secs(1),async{tokio::select!{p=output.recv()=>p.ok_or_else(||anyhow::anyhow!("destination native output ended")),r=&mut connecting=>{r?;anyhow::bail!("destination connected before SYN")}}}).await??;
     let other = peer.clone();
     let accepting = tokio::spawn(async move {
         syn.deliver(|bytes| async move { other.accept_syn(bytes).await })
@@ -112,7 +110,7 @@ async fn native(flow: tcp_stream::Flow) -> Result<Native> {
     let other = peer.clone();
     ack.deliver(|bytes| async move { other.packet(bytes) })
         .await?;
-    let connection = Arc::new(connecting.await??);
+    let connection = Arc::new(connecting.await?);
     let (_, app) = accepting.await??;
     let cancel = stop.clone();
     let hold_ack = Arc::new(AtomicBool::new(false));
@@ -130,6 +128,75 @@ async fn native(flow: tcp_stream::Flow) -> Result<Native> {
         stop,
         tasks: vec![a, b, pump],
         hold_ack,
+    })
+}
+
+struct PendingSource {
+    syn: flow_authority::PendingSyn,
+    handle: tagged::Handle,
+    user: tcp_stream::Handle,
+    output: tokio::sync::mpsc::Receiver<tagged::Packet>,
+    input: tokio::sync::mpsc::Receiver<Bytes>,
+    stop: CancellationToken,
+    tasks: Vec<JoinHandle<Result<()>>>,
+    connecting: JoinHandle<Result<tokio::io::DuplexStream>>,
+}
+async fn prepare_source(local: &LocalAuthority, flow: tcp_stream::Flow) -> Result<PendingSource> {
+    let (handle, output, runner) = tagged::stack()?;
+    let (user, mut input, user_runner) = tcp_stream::stack()?;
+    let stop = CancellationToken::new();
+    let a = tokio::spawn(runner.run(stop.clone()));
+    let b = tokio::spawn(user_runner.run(stop.clone()));
+    let source = user.clone();
+    let connecting = tokio::spawn(async move { source.connect(flow).await });
+    let bytes = timeout(Duration::from_secs(1), input.recv())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("source SYN missing"))?;
+    let syn = local.admit_syn(bytes)?;
+    Ok(PendingSource {
+        syn,
+        handle,
+        user,
+        output,
+        input,
+        stop,
+        tasks: vec![a, b],
+        connecting,
+    })
+}
+async fn accept_source(prepared: PendingSource, opened: &flow_open::Opened) -> Result<Native> {
+    let PendingSource {
+        syn,
+        handle,
+        user,
+        mut output,
+        mut input,
+        stop,
+        mut tasks,
+        connecting,
+    } = prepared;
+    let cancel = stop.clone();
+    let h = handle.clone();
+    let pump = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _=cancel.cancelled()=>break,
+                p=output.recv()=>match p{Some(p)=>{let user=user.clone();p.deliver(|bytes|async move{user.packet(bytes)}).await?;},None=>break},
+                p=input.recv()=>match p{Some(bytes)=>{h.incoming(bytes,lease())?;},None=>break}
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+    tasks.push(pump);
+    let connection =
+        Arc::new(timeout(Duration::from_secs(1), opened.accept_source(&handle, syn)).await??);
+    let app = timeout(Duration::from_secs(1), connecting).await???;
+    Ok(Native {
+        connection,
+        app,
+        stop,
+        tasks,
+        hold_ack: Arc::new(AtomicBool::new(false)),
     })
 }
 fn source_current(local: Arc<LocalAuthority>) -> source::Current {
@@ -166,8 +233,16 @@ async fn exercise(revoke: bool) -> Result<()> {
     let (_ha, la) = flow_open::tests::local(&ap, &bp, "a")?;
     let (_hb, lb) = flow_open::tests::local(&bp, &ap, "b")?;
     let (la, lb) = (Arc::new(la), Arc::new(lb));
+    let prepared = prepare_source(
+        &la,
+        tcp_stream::Flow {
+            source: std::net::SocketAddrV4::new(ap.ip, 42000),
+            destination: std::net::SocketAddrV4::new(bp.ip, 443),
+        },
+    )
+    .await?;
     let (open_a, open_b) = tokio::try_join!(
-        flow_open::initiate(&ab.client, &gas, &la, [8; 16], 42000, 443),
+        flow_open::initiate_native(&ab.client, &gas, &la, &prepared.syn),
         flow_open::accept(ab.server.as_mut().unwrap(), &gbr, &lb)
     )?;
     let (reply_b, reply_a) = tokio::try_join!(
@@ -180,8 +255,8 @@ async fn exercise(revoke: bool) -> Result<()> {
         "response bridge changed flow identity"
     );
     let context = open_a.context();
-    let mut na = native(context.source_native_tuple(Side::Initiator)).await?;
-    let mut nb = native(context.source_native_tuple(Side::Acceptor)).await?;
+    let mut na = accept_source(prepared, &open_a).await?;
+    let mut nb = native_destination(&open_b).await?;
     nb.hold_ack.store(revoke, Ordering::SeqCst);
     let budgets = [Budget::default(), Budget::default()];
     // Constructor rejects a real other native generation/tuple before actor creation.

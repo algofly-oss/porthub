@@ -555,7 +555,8 @@ mod tests {
         };
         let gate = Gate::new(SendPermit::control(|| true));
         let (source, mut a_io) = Endpoint::new_fenced_source(a, a_ip, gate.factory())?;
-        let (destination, mut b_io) = Endpoint::new(b, b_ip)?;
+        let receiver_gate=Gate::new(SendPermit::control(||true));
+        let (destination, mut b_io) = Endpoint::new_fenced_credited(b, b_ip,receiver_gate.factory())?;
         source.update_peers(vec![b_peer.clone()])?;
         destination.update_peers(vec![a_peer])?;
         let a_in = a_io.ingress();
@@ -574,18 +575,20 @@ mod tests {
         let source = Arc::new(source);
         let destination = Arc::new(destination);
         let (client, accepted) = tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            tokio::join!(source.connect_source(&b_peer), destination.accept())
+            tokio::join!(source.connect_source(&b_peer), destination.accept_credited())
         })
         .await?;
         let client = client?;
-        let (_, remote) = accepted?;
+        let mut remote = accepted?;
+        let remote_closed=remote.closer();
         let server_stop = stop.clone();
         let server = tokio::spawn(async move {
-            let (mut reply, mut receive) = remote.accept_bi().await?;
+            let origin=lease(||true);
+            let (mut reply, mut receive) = remote.accept_one(&origin).await?;
             if mode == 2 {
                 receive.stop(7u8.into())?;
                 reply.reset(7u8.into())?;
-                tokio::select! {_=remote.closed()=>{},_=server_stop.cancelled()=>{}}
+                tokio::select! {_=remote_closed.closed()=>{},_=server_stop.cancelled()=>{}}
                 return Ok(());
             }
             let mut header = [0; HEADER];
@@ -604,7 +607,7 @@ mod tests {
                 "sender did not finish finite chunk"
             );
             if mode == 1 {
-                tokio::select! {_=remote.closed()=>{},_=server_stop.cancelled()=>{}}
+                tokio::select! {_=remote_closed.closed()=>{},_=server_stop.cancelled()=>{}}
                 return Ok(());
             }
             if mode == 3 {
@@ -613,7 +616,7 @@ mod tests {
             reply.write_all(&header).await?;
             reply.finish()?;
             // This fixture is an application receipt, NOT a native TCP ACK witness.
-            tokio::select! {_=remote.closed()=>{},_=server_stop.cancelled()=>{}}
+            tokio::select! {_=remote_closed.closed()=>{},_=server_stop.cancelled()=>{}}
             Ok(())
         });
         let budget = Budget::default();

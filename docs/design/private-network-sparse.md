@@ -54,3 +54,33 @@ production distributed completion/drain controller, idle-credit renewal without
 relabeling buffered work, runtime SYN admission/dispatch, multiplexing/fairness,
 and native three-OS route/suspend proof remain required. This prototype is not
 production-negotiated, advertised, or enabled by default.
+
+### Sealed native SYN and transport-profile admission
+
+The initial source opener now requires a sealed `PendingSyn`, issued only by
+an atomic local pair authority after validating a real TCP SYN, exact local and
+remote private IPs, service permission, and original bounded witness. Its nonce,
+ports, peer descriptors, and own epoch cannot be relabeled after queueing.
+`initiate_native` retains that original admission through flow-open; a fresh
+later pair publication cannot revive an expired queued SYN. Native source
+acceptance consumes that same sealed SYN and checks the opened context before
+creating the proxy leg. Destination connection creation uses the reciprocal
+opening witness. The joined actual duplex fixture exercises both methods.
+The arbitrary-port initial opener exists only in test builds.
+
+Origin-credit transport profiles use the distinct
+`porthub-private-stream/2-origin` ALPN. Legacy PHT1 ALPN and windows remain
+unchanged. A native handshake test proves the origin source rejects a legacy
+server before any application open. The adversarial receipt-window test still
+uses an explicitly lying test peer to prove the local 96-byte receive bound;
+transport-profile claims do not replace per-side native/ACL authorization.
+
+The next runtime seam must synchronously reserve the pending SYN's tuple before
+queueing work, consume retransmitted SYNs for that pending owner, and roll back
+an unstarted admission before retaining the raw packet path. It must dispatch
+separate bounded source/receiver socket generations by authenticated peer,
+flow nonce, direction, and role; carrier metadata alone must never authorize a
+native connection. Tagged native output must retain its sealed first-origin
+through the event queue and TUN write, rather than borrowing the legacy
+unlabeled `StreamLocal` byte event. None of these dispatch or advertisement
+changes is enabled by the current source checkpoint.

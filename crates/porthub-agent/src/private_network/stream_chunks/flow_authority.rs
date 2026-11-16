@@ -11,6 +11,7 @@ pub(crate) enum Side {
     Initiator,
     Acceptor,
 }
+#[derive(Clone)]
 pub(crate) struct LocalAuthority {
     workspace: String,
     local: Peer,
@@ -103,6 +104,78 @@ impl LocalAuthority {
         self.epoch
     }
 }
+/// Sealed at the synchronous kernel-packet admission boundary. A caller cannot
+/// relabel an opaque permit or another peer's SYN after flow-open has waited.
+pub(crate) struct PendingSyn {
+    local: LocalAuthority,
+    bytes: Bytes,
+    flow: tcp_stream::Flow,
+    nonce: [u8; 16],
+}
+impl LocalAuthority {
+    pub(crate) fn admit_syn(&self, bytes: Bytes) -> Result<PendingSyn> {
+        let flow = tcp_stream::tagged::validate_syn(&bytes)?;
+        ensure!(
+            *flow.source.ip() == self.local.ip
+                && *flow.destination.ip() == self.peer.ip
+                && self.outgoing.contains(flow.destination.port())
+                && self.permit.remaining().is_some(),
+            "native SYN identity/service/original denied"
+        );
+        let mut nonce = [0; 16];
+        getrandom::fill(&mut nonce).map_err(|_| anyhow::anyhow!("native SYN nonce unavailable"))?;
+        ensure!(nonce != [0; 16], "invalid native SYN nonce");
+        Ok(PendingSyn {
+            local: self.clone(),
+            bytes,
+            flow,
+            nonce,
+        })
+    }
+}
+impl PendingSyn {
+    pub(super) fn parameters(&self) -> ([u8; 16], u16, u16) {
+        (
+            self.nonce,
+            self.flow.source.port(),
+            self.flow.destination.port(),
+        )
+    }
+    pub(super) fn bind_current(&self, current: &LocalAuthority) -> Result<SendPermit> {
+        ensure!(
+            self.local.workspace == current.workspace
+                && self.local.local == current.local
+                && self.local.peer == current.peer
+                && self.local.epoch == current.epoch
+                && current.outgoing.contains(self.flow.destination.port()),
+            "native SYN current pair/epoch changed while queued"
+        );
+        let permit = SendPermit::combine(vec![self.local.original(), current.original()]);
+        ensure!(
+            permit.remaining().is_some(),
+            "native SYN original admission retired"
+        );
+        Ok(permit)
+    }
+    pub(super) async fn accept(
+        self,
+        context: &Context,
+        handle: &tcp_stream::tagged::Handle,
+        opening: SendPermit,
+    ) -> Result<tcp_stream::tagged::Connection> {
+        ensure!(
+            context.parameters() == self.parameters()
+                && context.source_native_tuple(Side::Initiator) == self.flow.reverse(),
+            "native SYN does not own opened context/tuple"
+        );
+        let original = context.authorize(&self.local, Side::Initiator)?;
+        let permit = SendPermit::combine(vec![original, opening]);
+        permit
+            .during(handle.accept_syn(self.bytes, permit.clone()))
+            .await?
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct Context {
     workspace: String,
@@ -372,5 +445,57 @@ mod tests {
             c.source_native_tuple(Side::Initiator),
             c.source_native_tuple(Side::Acceptor)
         );
+    }
+    #[tokio::test]
+    async fn actual_native_syn_owns_peer_tuple_and_original_queued_admission() -> Result<()> {
+        let clock = Arc::new(Clock(AtomicU64::new(0)));
+        let (_ha, a) = capture("a", "b", "a", clock.clone());
+        let (_hb, b) = capture("b", "a", "b", clock.clone());
+        let (handle, mut output, runner) = tcp_stream::stack()?;
+        let stop = CancellationToken::new();
+        let running = tokio::spawn(runner.run(stop.clone()));
+        let flow = tcp_stream::Flow {
+            source: "10.203.0.2:42000".parse()?,
+            destination: "10.203.1.2:443".parse()?,
+        };
+        let connecting = tokio::spawn(async move { handle.connect(flow).await });
+        let bytes = tokio::time::timeout(std::time::Duration::from_secs(1), output.recv())
+            .await?
+            .unwrap();
+        let result = (|| -> Result<()> {
+            let syn = a.admit_syn(bytes.clone())?;
+            ensure!(
+                syn.flow == flow && syn.parameters().1 == 42000 && syn.parameters().2 == 443,
+                "native SYN tuple was relabeled"
+            );
+            ensure!(
+                b.admit_syn(bytes.clone()).is_err(),
+                "foreign pair adopted SYN"
+            );
+            let mut invalid = bytes.to_vec();
+            invalid[0] = 0;
+            ensure!(
+                a.admit_syn(invalid.into()).is_err(),
+                "malformed SYN opened authority"
+            );
+            let mut changed = a.clone();
+            changed.peer.instance = "replacement".into();
+            ensure!(
+                syn.bind_current(&changed).is_err(),
+                "peer replacement adopted queued SYN"
+            );
+            clock.0.store(15000, Ordering::SeqCst);
+            let (_fresh_handle, fresh) = capture("a", "b", "a", clock.clone());
+            ensure!(
+                syn.bind_current(&fresh).is_err(),
+                "fresh pair publication renewed queued original SYN"
+            );
+            Ok(())
+        })();
+        stop.cancel();
+        connecting.abort();
+        let _ = connecting.await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), running).await???;
+        result
     }
 }

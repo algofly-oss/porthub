@@ -1,5 +1,5 @@
 //! Bounded pinned-TLS flow-open. A remote epoch is context, never authority.
-use super::flow_authority::{Context, LocalAuthority, Side};
+use super::flow_authority::{Context, LocalAuthority, PendingSyn, Side};
 use super::*;
 use crate::private_network::authority_clock::{NativeClock, RequestWindow};
 use porthub_mesh::streams::CreditedReceiverConnection;
@@ -119,6 +119,18 @@ impl Opened {
     pub(crate) fn context(&self) -> Context {
         self.context.clone()
     }
+    pub(crate) async fn accept_source(
+        &self,
+        handle: &porthub_network::tcp_stream::tagged::Handle,
+        syn: PendingSyn,
+    ) -> Result<porthub_network::tcp_stream::tagged::Connection> {
+        ensure!(
+            self.side == Side::Initiator,
+            "acceptor cannot own source SYN"
+        );
+        syn.accept(&self.context, handle, self.opening.clone())
+            .await
+    }
     pub(crate) async fn connect_destination(
         &self,
         handle: &porthub_network::tcp_stream::tagged::Handle,
@@ -144,13 +156,18 @@ async fn initiate_inner(
     destination: u16,
     side: Side,
     expected: Option<&Context>,
+    origin: Option<SendPermit>,
 ) -> Result<Opened> {
     local.bind_transport(
         connection.peer(),
         connection.local_ip(),
         connection.belongs_to(&gate.factory),
     )?;
-    let original = SendPermit::combine(vec![local.original(), gate.state.parent.clone()]);
+    let mut origins = vec![local.original(), gate.state.parent.clone()];
+    if let Some(origin) = origin {
+        origins.push(origin);
+    }
+    let original = SendPermit::combine(origins);
     ensure!(original.remaining().is_some(), "flow-open unknown original");
     // This start precedes the remote response witness sampling. Never start a
     // remote deadline when its delayed response arrives.
@@ -228,13 +245,18 @@ async fn accept_inner(
     local: &LocalAuthority,
     side: Side,
     expected: Option<&Context>,
+    origin: Option<SendPermit>,
 ) -> Result<Opened> {
     local.bind_transport(
         connection.peer(),
         connection.local_ip(),
         connection.belongs_to(&gate.factory),
     )?;
-    let original = SendPermit::combine(vec![local.original(), gate.state.parent.clone()]);
+    let mut origins = vec![local.original(), gate.state.parent.clone()];
+    if let Some(origin) = origin {
+        origins.push(origin);
+    }
+    let original = SendPermit::combine(origins);
     ensure!(
         original.remaining().is_some(),
         "flow-open unknown local original"
@@ -311,6 +333,7 @@ async fn accept_inner(
     Ok(result)
 }
 
+#[cfg(test)]
 pub(crate) async fn initiate(
     connection: &BoundedSourceConnection,
     gate: &Gate,
@@ -328,6 +351,28 @@ pub(crate) async fn initiate(
         destination,
         Side::Initiator,
         None,
+        None,
+    )
+    .await
+}
+pub(crate) async fn initiate_native(
+    connection: &BoundedSourceConnection,
+    gate: &Gate,
+    local: &LocalAuthority,
+    syn: &PendingSyn,
+) -> Result<Opened> {
+    let original = syn.bind_current(local)?;
+    let (nonce, source, destination) = syn.parameters();
+    initiate_inner(
+        connection,
+        gate,
+        local,
+        nonce,
+        source,
+        destination,
+        Side::Initiator,
+        None,
+        Some(original),
     )
     .await
 }
@@ -336,7 +381,7 @@ pub(crate) async fn accept(
     gate: &Gate,
     local: &LocalAuthority,
 ) -> Result<Opened> {
-    accept_inner(connection, gate, local, Side::Acceptor, None).await
+    accept_inner(connection, gate, local, Side::Acceptor, None, None).await
 }
 pub(crate) async fn initiate_response(
     connection: &BoundedSourceConnection,
@@ -358,6 +403,7 @@ pub(crate) async fn initiate_response(
         destination,
         Side::Acceptor,
         Some(&opened.context),
+        Some(opened.opening.clone()),
     )
     .await
 }
@@ -377,6 +423,7 @@ pub(crate) async fn accept_response(
         local,
         Side::Initiator,
         Some(&opened.context),
+        Some(opened.opening.clone()),
     )
     .await
 }

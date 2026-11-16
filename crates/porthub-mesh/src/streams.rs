@@ -39,6 +39,7 @@ const MAX_PEERS: usize = 4096;
 const MAX_CONNECTIONS: usize = 512;
 const MAX_CONNECTIONS_PER_PEER: usize = 8;
 const ALPN: &[u8] = b"porthub-private-stream/1";
+const ORIGIN_ALPN: &[u8] = b"porthub-private-stream/2-origin";
 const PARALLEL_ALPN: &[u8] = b"porthub-private-stream/1-lanes8";
 
 #[derive(Clone, PartialEq, Eq)]
@@ -453,10 +454,10 @@ impl Endpoint {
     /// Experimental receiver profile: advertise no incoming application stream
     /// until its immutable origin credit is installed. Legacy profile unchanged.
     pub fn new_fenced_credited(identity:Identity,local:Ipv4Addr,generation:crate::udp::SendFactory)->Result<(Self,PacketIo)>{
-        Self::with_protocols_profile(identity,local,vec![ALPN.into()],Some(generation),QUEUE,true,false)
+        Self::with_protocols_profile(identity,local,vec![ORIGIN_ALPN.into()],Some(generation),QUEUE,true,false)
     }
     pub fn new_fenced_source(identity:Identity,local:Ipv4Addr,generation:crate::udp::SendFactory)->Result<(Self,PacketIo)>{
-        Self::with_protocols_profile(identity,local,vec![ALPN.into()],Some(generation),QUEUE,false,true)
+        Self::with_protocols_profile(identity,local,vec![ORIGIN_ALPN.into()],Some(generation),QUEUE,false,true)
     }
     fn with_protocols(identity:Identity,local:Ipv4Addr,protocols:Vec<Vec<u8>>)->Result<(Self,PacketIo)> {Self::with_protocols_fenced(identity,local,protocols,None)}
     fn with_protocols_fenced(identity:Identity,local:Ipv4Addr,protocols:Vec<Vec<u8>>,generation:Option<crate::udp::SendFactory>)->Result<(Self,PacketIo)>{Self::with_protocols_fenced_capacity(identity,local,protocols,generation,QUEUE)}
@@ -854,11 +855,24 @@ mod ingress_tests {
     use super::*;
 
     #[tokio::test]
+    async fn origin_profile_rejects_legacy_alpn_before_any_application_open()->Result<()>{
+        let a=Identity::new()?;let b=Identity::new()?;let aip="10.234.245.1".parse()?;let bip="10.234.245.2".parse()?;
+        let ap=Peer{id:"a".into(),ip:aip,fingerprint:a.fingerprint().into(),instance:"a".into()};let bp=Peer{id:"b".into(),ip:bip,fingerprint:b.fingerprint().into(),instance:"b".into()};
+        let factory=crate::udp::SendFactory::new(||Some(crate::udp::SendPermit::control(||true)));
+        let(source,mut ai)=Endpoint::new_fenced_source(a,aip,factory)?;let(target,mut bi)=Endpoint::new(b,bip)?;
+        source.update_peers(vec![bp.clone()])?;target.update_peers(vec![ap])?;
+        let ia=ai.ingress();let ib=bi.ingress();let stop=tokio_util::sync::CancellationToken::new();let cancel=stop.clone();
+        let pump=tokio::spawn(async move{loop{tokio::select!{_=cancel.cancelled()=>break,p=ai.outgoing()=>match p{Some(p)=>{let _=ib.send_reliable_guarded(aip,p.payload,p.permit).await;},None=>break},p=bi.outgoing()=>match p{Some(p)=>{let _=ia.send_reliable_guarded(bip,p.payload,p.permit).await;},None=>break}}}});
+        let result=tokio::time::timeout(Duration::from_secs(2),async{tokio::join!(source.connect_source(&bp),target.accept())}).await;
+        source.close();target.close();stop.cancel();pump.await?;
+        ensure!(matches!(result,Ok((Err(_),Err(_)))),"origin profile negotiated legacy/raw stream protocol");Ok(())
+    }
+    #[tokio::test]
     async fn bounded_source_has_no_unsolicited_streams_and_exact_96_byte_receipt_window()->Result<()>{
         let a=Identity::new()?;let b=Identity::new()?;let a_ip="10.234.246.1".parse()?;let b_ip="10.234.246.2".parse()?;
         let a_peer=Peer{id:"source".into(),ip:a_ip,fingerprint:a.fingerprint().into(),instance:"one".into()};let b_peer=Peer{id:"receiver".into(),ip:b_ip,fingerprint:b.fingerprint().into(),instance:"two".into()};
         let factory=crate::udp::SendFactory::new(||Some(crate::udp::SendPermit::control(||true)));
-        let(source,mut a_io)=Endpoint::new_fenced_source(a,a_ip,factory.clone())?;let(destination,mut b_io)=Endpoint::new(b,b_ip)?;source.update_peers(vec![b_peer.clone()])?;destination.update_peers(vec![a_peer.clone()])?;
+        let(source,mut a_io)=Endpoint::new_fenced_source(a,a_ip,factory.clone())?;let(destination,mut b_io)=Endpoint::with_protocols(b,b_ip,vec![ORIGIN_ALPN.into()])?;source.update_peers(vec![b_peer.clone()])?;destination.update_peers(vec![a_peer.clone()])?;
         assert!(source.set_peer_connection_budget(65).is_err());assert!(destination.set_peer_connection_budget(512).is_ok());
         let a_in=a_io.ingress();let b_in=b_io.ingress();let stop=tokio_util::sync::CancellationToken::new();let cancel=stop.clone();let pump=tokio::spawn(async move{loop{tokio::select!{
             _=cancel.cancelled()=>break,
