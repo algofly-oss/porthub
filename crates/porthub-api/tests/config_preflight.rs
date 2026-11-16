@@ -119,7 +119,7 @@ async fn actual_preflight_binary_requires_mongo_and_fails_bounded_without_startu
     // Hold an owned loopback endpoint without a Mongo protocol responder, avoiding
     // assumptions about an unrelated host port or accidental real DB contact.
     let unavailable=std::net::TcpListener::bind("127.0.0.1:0")?;
-    let uri=format!("mongodb://127.0.0.1:{}/?serverSelectionTimeoutMS=200&connectTimeoutMS=200&socketTimeoutMS=200",unavailable.local_addr()?.port());
+    let uri=format!("mongodb://127.0.0.1:{}/?serverSelectionTimeoutMS=200&connectTimeoutMS=200",unavailable.local_addr()?.port());
     let mut command=tokio::process::Command::new(env!("CARGO_BIN_EXE_porthub-api"));
     command.kill_on_drop(true).arg("--check-config")
         .env("MONGO_DATABASE_URI",uri).env("MONGO_DATABASE_NAME","preflight_unavailable_fixture")
@@ -134,6 +134,8 @@ async fn actual_preflight_binary_requires_mongo_and_fails_bounded_without_startu
         .env("FW_API_KEY","unused-preflight-fixture-key");
     let output=tokio::time::timeout(Duration::from_secs(5),command.output()).await??;
     ensure!(!output.status.success(),"database-backed configuration check silently succeeded without Mongo");
+    let diagnostic=String::from_utf8_lossy(&output.stderr);
+    ensure!(diagnostic.contains("private migration preflight failed")||diagnostic.contains("configuration preflight failed"),"failure happened before the actual database preflight: {diagnostic}");
     ensure!(directory.path().read_dir()?.next().is_none(),"failed offline preflight wrote startup files or IPC");
     drop(unavailable);Ok(())
 }
