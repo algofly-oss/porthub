@@ -181,6 +181,15 @@ struct Live {
     nonce: String,
     created: Instant,
 }
+// Advertisement follows negotiated mode. Sparse must never offer PHT1 while
+// application/retransmission origins are not bounded by an ACK-chunk protocol.
+struct StreamOffer {legacy:bool}
+impl StreamOffer {
+    fn new(negotiating_sparse:bool)->Self{Self{legacy:!negotiating_sparse}}
+    fn observe(&mut self,sparse:bool){self.legacy=!sparse;}
+    fn transport(&self)->&'static str {if cfg!(feature="private-stream")&&self.legacy{"quic1"}else{""}}
+}
+
 pub enum Event {
     #[cfg(feature = "local-tor")]
     TorLocal { bytes: Bytes },
@@ -308,6 +317,9 @@ pub async fn run_watched_sparse(
     } = local;
     let control = crate::control::Control::new_private(&profile)?;
     let mut bases = control.authorities();
+    // Never advertise PHT1 for guarded sparse mode until ACK-chunk provenance exists.
+    // An older gateway declining sparse negotiation restores legacy PHT1 next sync.
+    let mut stream_offer=StreamOffer::new(sparse.is_some());
     let mut preferred = 0;
     let mut peers: HashMap<String, Live> = HashMap::new();
     let mut readers = JoinSet::new();
@@ -353,7 +365,7 @@ pub async fn run_watched_sparse(
             })
             .collect();
         let mut body = serde_json::json!({"peer_id":profile.peer_id,"token":profile.token,
-            "fingerprint":identity.fingerprint(),"instance":instance,"stream_transport":if cfg!(feature="private-stream") {"quic1"} else {""},"tor_exit":cfg!(all(feature="local-tor",any(target_os="linux",target_os="macos"))),"signals":&pending[..sent],
+            "fingerprint":identity.fingerprint(),"instance":instance,"stream_transport":stream_offer.transport(),"tor_exit":cfg!(all(feature="local-tor",any(target_os="linux",target_os="macos"))),"signals":&pending[..sent],
             "acks":&acks[..acked],"paths":paths,"lan_networks":lan_networks,"lan_exit":cfg!(any(target_os="linux",target_os="macos")),"application_proxy":cfg!(feature="local-tor")});
         if let Some(resolver)=&mut sparse {body["sparse"]=resolver.batch()?;}
         let mut reply = None;
@@ -370,6 +382,7 @@ pub async fn run_watched_sparse(
             Err(_) => {}
         }
         if let Some(mut reply) = reply {
+            stream_offer.observe(reply.snapshot.sparse.is_some());
             let request_window = if reply.snapshot.sparse.is_some() {request_window} else {None};
             super::authority_event::Authority::new((),request_window.clone(),reply.snapshot.expires_at).check()?;
             ensure!(reply.snapshot.sparse.is_none()||sparse.is_some(),"sparse private authority was not negotiated");
@@ -648,6 +661,16 @@ async fn read_packets(
 
 #[cfg(test)]
 mod origin_tests {
+    #[test]
+    fn stream_advertisement_declines_sparse_and_restores_legacy_after_old_gateway_reply(){
+        let expected=if cfg!(feature="private-stream"){"quic1"}else{""};
+        assert_eq!(super::StreamOffer::new(false).transport(),expected);
+        let mut offer=super::StreamOffer::new(true);assert_eq!(offer.transport(),"");
+        offer.observe(false);assert_eq!(offer.transport(),expected);
+        offer.observe(true);assert_eq!(offer.transport(),"");
+        offer.observe(false);assert_eq!(offer.transport(),expected);
+    }
+
     use super::turn_origins;
     #[test]
     fn authenticated_direct_turn_origin_precedes_secure_fallback() {

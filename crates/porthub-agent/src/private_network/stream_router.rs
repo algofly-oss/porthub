@@ -333,6 +333,13 @@ impl Router {
             (state.policy.own.clone(), state.policy.ip)
         };
         let mut policy=Policy::compile_pairs(snapshot,&own,ip,pairs)?;
+        // PHT1 is an unframed long-lived byte stream. Quinn writes enqueue;
+        // they do not prove acknowledgement/original retransmission authority.
+        // Decline ONLY sparse optimization until bounded ACK chunks and runner
+        // origins exist. Raw guarded packet/relay routing remains available.
+        // This intermediate boundary is NOT sparse optimized-stream readiness.
+        if snapshot.sparse.is_some(){policy.peers.clear();policy.incoming.clear();policy.outgoing.clear();policy.pair_deadlines.clear();}
+
         if let Some(base)=base.filter(|_|snapshot.sparse.is_some()) {
             base.check()?;
             if base.remaining()?.is_some(){
@@ -712,7 +719,7 @@ fn spawn_reader(
  }
  fn flow()->Flow{Flow{source:"10.203.0.2:4000".parse().unwrap(),destination:"10.203.1.2:443".parse().unwrap()}}
  #[cfg(feature="private-sparse")]
- #[tokio::test]async fn real_router_guard_rejects_suspended_old_pair_despite_fresh_base(){
+ #[tokio::test]async fn guarded_sparse_policy_does_not_publish_pht1_even_with_valid_authority(){
   struct Clock(std::sync::atomic::AtomicU64);
   impl super::super::authority_clock::SuspendClock for Clock{fn elapsed_since_boot(&self)->Result<Duration>{Ok(Duration::from_millis(self.0.load(Ordering::SeqCst)))}}
   let clock=Arc::new(Clock(std::sync::atomic::AtomicU64::new(0)));
@@ -727,10 +734,23 @@ fn spawn_reader(
   handle.update_base_authority(&base,base_authority.clone());
   let(router,_)=new("a".into(),"10.203.0.2".parse().unwrap(),a,tokio::sync::mpsc::channel(8).0,CancellationToken::new()).unwrap();
   router.update_pairs_authorized(&base,&[(pair,Instant::now()+Duration::from_secs(10))],Some(base_authority),Some(handle.clone())).unwrap();
-  assert!(router.state.lock().unwrap().policy.allows(&peer,flow(),true));
-  clock.0.store(15000,Ordering::SeqCst);
-  tokio::time::timeout(Duration::from_millis(500),router.authority_guard(&peer,flow(),true)).await.unwrap();
-  assert!(router.valid_lease());assert!(!router.state.lock().unwrap().policy.allows(&peer,flow(),true));
+  assert!(!router.state.lock().unwrap().policy.allows(&peer,flow(),true),"sparse PHT1 must be declined even with valid independent authority");
+  assert!(router.valid_lease());assert!(router.state.lock().unwrap().policy.peers.is_empty());assert!(!router.prepared("b"));
+ }
+ #[cfg(feature="private-sparse")]
+ #[tokio::test]async fn real_kernel_syn_with_valid_sparse_acl_retains_guarded_packet_fallback(){
+  let a=Identity::new().unwrap();let b=Identity::new().unwrap();let(base,pair)=snapshots(&a,&b);
+  let lease=porthub_network::policy::PairLease{workspace:pair.workspace.clone(),self_:pair.self_.clone(),epoch:base.sparse.as_ref().unwrap().epoch.clone(),expires_at:pair.expires_at,revision:pair.revision,local:pair.peers[0].clone(),peer:pair.peers[1].clone(),grants:pair.grants.clone(),acl:pair.pair_acl.clone()};
+  let mut policy=porthub_network::policy::Engine::default();policy.apply(base.clone()).unwrap();policy.install_pair(lease).unwrap();
+  let(router,_)=new("a".into(),"10.203.0.2".parse().unwrap(),a,tokio::sync::mpsc::channel(8).0,CancellationToken::new()).unwrap();
+  router.update_pairs(&base,&[(pair,Instant::now()+Duration::from_secs(10))]).unwrap();
+  let (kernel,mut packets,runner)=tcp_stream::stack().unwrap();let cancel=CancellationToken::new();let stop=cancel.clone();
+  let task=tokio::spawn(async move{runner.run(stop).await});let waiting=tokio::spawn(async move{kernel.connect(flow()).await});
+  let syn=tokio::time::timeout(Duration::from_secs(1),packets.recv()).await.unwrap().unwrap();
+  assert!(policy.check(&syn,"b",false),"sparse raw packet ACL remains authorized");
+  assert!(!router.kernel_packet("b",syn,true),"unsupported optimization must return raw path, not swallow SYN");
+  assert!(router.state.lock().unwrap().flows.is_empty());assert!(router.endpoint.prepared(&mesh_peer(&policy.pair_peer("b").unwrap())).is_none());
+  cancel.cancel();task.await.unwrap().unwrap();assert!(waiting.await.unwrap().is_err());
  }
  #[test]fn compact_port_masks_keep_quic_permission_exact_without_range_expansion(){
   let a=Identity::new().unwrap();let b=Identity::new().unwrap();let(base,mut pair)=snapshots(&a,&b);
@@ -745,7 +765,7 @@ fn spawn_reader(
  #[tokio::test]async fn established_stream_guard_expires_pair_without_any_status_tick_or_base_expiry(){
   let a=Identity::new().unwrap();let b=Identity::new().unwrap();let(base,pair)=snapshots(&a,&b);let peer=mesh_peer(&pair.peers[1]);
   let(router,_background)=new("a".into(),"10.203.0.2".parse().unwrap(),a,tokio::sync::mpsc::channel(8).0,CancellationToken::new()).unwrap();
-  router.update_pairs(&base,&[(pair,Instant::now()+Duration::from_millis(40))]).unwrap();
+  router.update(&pair).unwrap();router.state.lock().unwrap().policy.pair_deadlines.insert("b".into(),Instant::now()+Duration::from_millis(40));
   assert!(router.state.lock().unwrap().policy.allows(&peer,flow(),true));
   tokio::time::timeout(Duration::from_secs(1),router.authority_guard(&peer,flow(),true)).await.expect("pair guard must not wait for 30s base or status tick");
   assert!(router.valid_lease());assert!(!router.state.lock().unwrap().policy.allows(&peer,flow(),true));
@@ -753,9 +773,9 @@ fn spawn_reader(
  #[tokio::test]async fn renewal_updates_guard_but_authoritative_pair_removal_wakes_it_immediately(){
   let a=Identity::new().unwrap();let b=Identity::new().unwrap();let(base,pair)=snapshots(&a,&b);let peer=mesh_peer(&pair.peers[1]);
   let(router,_background)=new("a".into(),"10.203.0.2".parse().unwrap(),a,tokio::sync::mpsc::channel(8).0,CancellationToken::new()).unwrap();
-  router.update_pairs(&base,&[(pair.clone(),Instant::now()+Duration::from_secs(1))]).unwrap();
+  router.update(&pair).unwrap();router.state.lock().unwrap().policy.pair_deadlines.insert("b".into(),Instant::now()+Duration::from_secs(1));
   let own=router.clone();let wait=tokio::spawn(async move{own.authority_guard(&peer,flow(),true).await});tokio::task::yield_now().await;
-  router.update_pairs(&base,&[(pair,Instant::now()+Duration::from_secs(2))]).unwrap();tokio::task::yield_now().await;assert!(!wait.is_finished());
+  router.update(&pair).unwrap();router.state.lock().unwrap().policy.pair_deadlines.insert("b".into(),Instant::now()+Duration::from_secs(2));tokio::task::yield_now().await;assert!(!wait.is_finished());
   router.update_pairs(&base,&[]).unwrap();tokio::time::timeout(Duration::from_millis(500),wait).await.unwrap().unwrap();assert!(router.valid_lease());
  }
 }
