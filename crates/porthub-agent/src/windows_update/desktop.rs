@@ -35,7 +35,8 @@ pub(super) async fn paths(layout: &Layout, source: &Path) -> Result<Vec<(String,
 $ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
 function Sid($v){if($v -like 'S-1-*'){return $v};return ([Security.Principal.NTAccount]$v).Translate([Security.Principal.SecurityIdentifier]).Value}
 $scheduler=[Activator]::CreateInstance([type]::GetTypeFromProgID('Schedule.Service'));$scheduler.Connect();$rows=@()
-foreach($sid in @($env:PORTHUB_UPDATE_ACCOUNTS|ConvertFrom-Json)){
+$accounts=$env:PORTHUB_UPDATE_ACCOUNTS|ConvertFrom-Json
+foreach($sid in $accounts){
  try{$task=$scheduler.GetFolder('\').GetTask('PortHubKeyboard-'+$sid)}catch{$e=$_.Exception;while($e.InnerException){$e=$e.InnerException};if($e.HResult -in @(-2147024894,-2147216625)){continue};throw}
  $d=$task.Definition
  if((Sid $d.Principal.UserId) -ne $sid -or [int]$d.Principal.LogonType -ne 3 -or [int]$d.Principal.RunLevel -ne 0 -or $d.Actions.Count -ne 1){continue}
@@ -93,4 +94,90 @@ ConvertTo-Json -InputObject @($rows) -Depth 4 -Compress
     tokio::time::timeout(Duration::from_secs(10), probe)
         .await
         .context("Desktop metadata inspection timed out")?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn native_powershell_account_iteration_preserves_scalar_rows_for_zero_one_and_two_accounts(
+    ) -> Result<()> {
+        // Execute the input/iteration boundary extracted from the production
+        // script itself. Replace only its read-only Scheduler body with a row
+        // projection, so this test never queries or creates a real task.
+        let source = include_str!("desktop.rs");
+        let script = source
+            .split_once("let script = r#\"")
+            .context("Production script missing")?
+            .1
+            .split_once("\"#;")
+            .context("Production script terminator missing")?
+            .0;
+        let start = script.find("$accounts=").context("Account input missing")?;
+        let end = script[start..]
+            .find(" try{$task=")
+            .context("Scheduler boundary missing")?
+            + start;
+        let boundary = &script[start..end];
+        let projection = format!("$ErrorActionPreference='Stop';$rows=@()\n{boundary}\n$rows+=@{{sid=$sid;paths=@()}}\n}}\nConvertTo-Json -InputObject @($rows) -Depth 4 -Compress");
+        let executable = PathBuf::from(
+            std::env::var_os("SystemRoot").context("Windows SystemRoot unavailable")?,
+        )
+        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        for accounts in [
+            vec![],
+            vec!["S-1-5-21-1-2-3-1001"],
+            vec!["S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1002"],
+        ] {
+            let run = async {
+                let mut child = tokio::process::Command::new(&executable)
+                    .args([
+                        "-NoLogo",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        &projection,
+                    ])
+                    .env_remove("PSModulePath")
+                    .env("PORTHUB_UPDATE_ACCOUNTS", serde_json::to_string(&accounts)?)
+                    .creation_flags(0x08000000)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .kill_on_drop(true)
+                    .spawn()?;
+                let mut bytes = Vec::new();
+                child
+                    .stdout
+                    .take()
+                    .context("Projection output missing")?
+                    .take(4097)
+                    .read_to_end(&mut bytes)
+                    .await?;
+                ensure!(
+                    bytes.len() <= 4096 && child.wait().await?.success(),
+                    "Native account projection failed"
+                );
+                let rows: Vec<Row> = serde_json::from_slice(&bytes)?;
+                ensure!(rows.len() == accounts.len());
+                for (row, expected) in rows.iter().zip(&accounts) {
+                    ensure!(
+                        row.sid == *expected && row.paths.is_empty(),
+                        "Account identity changed during iteration"
+                    );
+                }
+                Ok::<_, anyhow::Error>(())
+            };
+            tokio::time::timeout(Duration::from_secs(10), run)
+                .await
+                .context("Native account boundary timed out")??;
+        }
+        // The parser remains strict; the observed PS5 wrapper is not accepted.
+        ensure!(serde_json::from_str::<Vec<Row>>(
+            r#"[{"sid":{"value":["S-1-5-21-1-2-3-1001"],"Count":1},"paths":[]}]"#
+        )
+        .is_err());
+        Ok(())
+    }
 }
