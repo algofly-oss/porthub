@@ -319,7 +319,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     #[cfg(feature="local-tor")]
     let (tor_changes,mut tor_settings)=watch::channel(super::tor_preferences::load(&path)?);
     #[cfg(feature="local-tor")]
-    let mut latest_snapshot: Option<Snapshot> = None;
+    let mut latest_snapshot: Option<super::authority_event::Authority<Snapshot>> = None;
     #[cfg(feature="local-tor")]
     tasks.spawn(super::tor_preferences::run(path.clone(),tor_changes,work.clone()));
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -360,12 +360,16 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         _=work.cancelled()=>{policy.revoke();if cancel.is_cancelled(){break;}anyhow::bail!("private worker authority ended");},
         finished=tasks.join_next(),if !tasks.is_empty()=>{match finished {Some(Ok(Ok(()))) if work.is_cancelled()=>break,Some(Ok(Err(error)))=>return Err(error),_=>anyhow::bail!("private background task stopped")}},
         event=input.recv()=>match event {
-            Some(Event::Snapshot(snapshot))=>{
+            Some(Event::Snapshot(authority))=>{
+                authority.check()?;
+                #[cfg(feature="local-tor")]
+                let cached_authority=authority.clone();
+                let snapshot=authority.accepted()?.clone();
                 ensure!(snapshot.self_==profile.peer_id && snapshot.workspace==profile.workspace,"private policy identity changed");
                 let mut route_snapshot=snapshot.clone();
                 #[cfg(feature="local-tor")]
                 {
-                    latest_snapshot=Some(snapshot.clone());
+                    latest_snapshot=Some(cached_authority);
                     apply_cli_system_tor(&mut route_snapshot,&tor_settings.borrow());
                 }
                 let own=snapshot.peers.iter().find(|p|p.id==profile.peer_id).ok_or_else(||anyhow::anyhow!("private policy omits local peer"))?;
@@ -415,7 +419,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     capture_configured=true;last_route_audit=Some(Instant::now());
                 }else if capture_configured{device.as_ref().unwrap().update_capture_routes(&[]).await?;capture_configured=false;}
                 #[cfg(feature="private-stream")]
-                stream_router.as_ref().unwrap().update_pairs(&snapshot,&policy.pair_snapshots())?;
+                {authority.check()?;stream_router.as_ref().unwrap().update_pairs(&snapshot,&policy.pair_snapshots())?;}
                 online_peers = snapshot.peers.iter().filter(|peer| peer.online).map(|peer| peer.id.clone()).collect();
                 private_status.revision = snapshot.revision;
                 private_status.grants = snapshot.grants.len();
@@ -478,7 +482,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 refresh_tor_dns(&dns_upstream,&local_tor,&exit_route,exit_available,&policy);
                 // Register every advertised private DNS suffix on the owned
                 // tunnel resolver. This also applies suffix changes live.
-                zone.as_ref().unwrap().write().await.update(&route_snapshot)?;
+                {let mut zone=zone.as_ref().unwrap().write().await;authority.check()?;zone.update(&route_snapshot)?;}
                 let mut suffixes=snapshot.dns_suffixes.iter().map(|suffix|suffix.trim_matches('.').to_ascii_lowercase()).filter(|suffix|!suffix.is_empty()).collect::<Vec<_>>();
                 if let Some((_,suffix))=own.hostname.split_once('.') { suffixes.push(suffix.trim_matches('.').to_ascii_lowercase()); }
                 suffixes.extend(snapshot.dns_rules.iter().map(|rule|porthub_mesh::dns_policy::zone(rule).trim_end_matches('.').to_ascii_lowercase()));
@@ -506,6 +510,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 // Publish initial readiness immediately. Waiting for
                 // the periodic refresh can make a healthy service miss the
                 // installer's readiness deadline after a slow initial sync.
+                authority.check()?;
                 if first_ready {
                     status_tick.reset_immediately();
                     if owns_component_maintenance {
@@ -514,7 +519,9 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     }
                 }
             },
-            Some(Event::Pair(response))=>{
+            Some(Event::Pair(authority))=>{
+                authority.check()?;
+                let response=authority.accepted()?.clone();
                 if response.status!="allowed"||response.lease.is_none(){
                     if let Some(peer)=super::sparse::apply_denial(&sparse_handle,&mut policy,&response){
                         by_ip.retain(|_,id|id!=&peer.id);peer_ips.remove(&peer.id);
@@ -540,6 +547,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     continue;
                 }
                 by_ip.retain(|_,peer|peer!=&id);by_ip.insert(lease.peer.ip,id.clone());peer_ips.insert(id.clone(),lease.peer.ip);
+                authority.check()?;
                 sparse_handle.installed(&response.query,lease);
                 #[cfg(feature="private-stream")]
                 if let (Some(router),Some(base))=(&stream_router,&sparse_authority){router.update_pairs(base,&policy.pair_snapshots())?;}
@@ -712,7 +720,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             {
                 super::tor_exit::reconcile(&mut local_tor,tor_route_groups,&tor_settings.borrow(),&path.with_extension("tor"),interfaces.clone(),events.clone(),work.child_token())?;
                 refresh_tor_dns(&dns_upstream,&local_tor,&exit_route,exit_available,&policy);
-                if let Some(snapshot)=latest_snapshot.clone().filter(|snapshot| snapshot.expires_at > chrono::Utc::now()) {
+                if let Some(snapshot)=latest_snapshot.clone().filter(|snapshot| snapshot.value.expires_at > chrono::Utc::now() && snapshot.check().is_ok()) {
                     events.send(Event::Snapshot(snapshot)).await.map_err(|_|anyhow::anyhow!("private packet owner closed"))?;
                 }
             }

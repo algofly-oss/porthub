@@ -184,8 +184,8 @@ struct Live {
 pub enum Event {
     #[cfg(feature = "local-tor")]
     TorLocal { bytes: Bytes },
-    Snapshot(Snapshot),
-    Pair(porthub_network::policy::PairResponse),
+    Snapshot(super::authority_event::Authority<Snapshot>),
+    Pair(super::authority_event::Authority<porthub_network::policy::PairResponse>),
     Packet {
         peer: String,
         bytes: Bytes,
@@ -355,6 +355,7 @@ pub async fn run_watched_sparse(
             "acks":&acks[..acked],"paths":paths,"lan_networks":lan_networks,"lan_exit":cfg!(any(target_os="linux",target_os="macos")),"application_proxy":cfg!(feature="local-tor")});
         if let Some(resolver)=&mut sparse {body["sparse"]=resolver.batch()?;}
         let mut reply = None;
+        let request_window = super::authority_event::request_start()?;
         let request = control.request(reqwest::Method::POST,"access/private/sync",Some(body),&[]);
         let result = tokio::select! { _=cancel.cancelled()=>return Ok(()), result=request=>result };
         match result {
@@ -367,6 +368,8 @@ pub async fn run_watched_sparse(
             Err(_) => {}
         }
         if let Some(mut reply) = reply {
+            let request_window = if reply.snapshot.sparse.is_some() {request_window} else {None};
+            super::authority_event::Authority::new((),request_window.clone(),reply.snapshot.expires_at).check()?;
             ensure!(reply.snapshot.sparse.is_none()||sparse.is_some(),"sparse private authority was not negotiated");
             ensure!(reply.snapshot.pair_acl.is_none(),"pair-only compact ACL supplied as base authority");
             ensure!(reply.pair_responses.len()<=32,"private pair response exceeds limits");
@@ -596,9 +599,10 @@ pub async fn run_watched_sparse(
                 pending.len() <= 1024,
                 "private signaling backlog exceeds limit"
             );
-            tokio::select! {_=cancel.cancelled()=>return Ok(()), result=events.send(Event::Snapshot(reply.snapshot))=>ensure!(result.is_ok(),"private packet owner closed")};
+            let response_expiry=reply.snapshot.expires_at;
+            tokio::select! {_=cancel.cancelled()=>return Ok(()), result=events.send(Event::Snapshot(super::authority_event::Authority::new(reply.snapshot,request_window.clone(),response_expiry)))=>ensure!(result.is_ok(),"private packet owner closed")};
             for resolution in reply.pair_responses {
-                tokio::select!{_=cancel.cancelled()=>return Ok(()),result=events.send(Event::Pair(resolution))=>ensure!(result.is_ok(),"private pair owner closed")};
+                tokio::select!{_=cancel.cancelled()=>return Ok(()),result=events.send(Event::Pair(super::authority_event::Authority::new(resolution,request_window.clone(),response_expiry)))=>ensure!(result.is_ok(),"private pair owner closed")};
             }
         }
         while readers.try_join_next().is_some() {}

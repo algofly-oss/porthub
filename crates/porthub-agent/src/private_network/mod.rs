@@ -90,3 +90,5 @@ mod dns_windows;
 
 #[cfg(feature = "private-sparse")]
 mod authority_clock;
+
+mod authority_event;
