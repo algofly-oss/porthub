@@ -201,6 +201,7 @@ mod tests {
             let owner=ObjectId::new();let machine=ObjectId::new();let key=owner.to_hex();let id=format!("{owner}:{machine}");let job="2123456789abcdef0123456789abcdef";
             let app=App::new(crate::config::Config::default(),db.clone());
             let row=super::super::recovery::Assignment{peer:id.clone(),machine:machine.to_hex(),workspace:key.clone(),credential_generation:"enrollment-1".into(),old:"10.203.0.2".parse()?,new:"10.204.0.2".parse()?,previous_generation:0,generation:1};
+            app.collection("users").insert_one(doc!{"_id":owner,"enabled":true}).await?;
             let peer=doc!{"_id":&id,"workspace_id":owner,"machine_id":machine,"owner_id":owner,"ip":row.old.to_string(),"enabled":true,"credential_hash":"unchanged-fixture-private-hash","enrollment_generation":"enrollment-1","custom_hostname":"stable-dns-name"};
             app.collection("private_peers").insert_one(peer.clone()).await?;
             app.collection("private_networks").insert_one(doc!{"_id":&key,"cidr":"10.203.0.0/24","dns_suffix":"private.test","unrelated":"preserved"}).await?;
@@ -214,14 +215,30 @@ mod tests {
             let head=app.collection("private_renumber_heads").find_one(doc!{"_id":&key}).await?.unwrap();assert_eq!(head.get_str("state")?,"committing");
             assert!(fence::stable(&app,owner).await.is_err());drop(app);
             let reopened=App::new(crate::config::Config::default(),db.clone());
+            let deferred_id=ObjectId::new();let deferred_machine=doc!{"_id":deferred_id,"user_id":owner,"name":"Queued registered machine"};
+            reopened.collection("machines").insert_one(deferred_machine.clone()).await?;
+            crate::domain::enrollment::ensure(&reopened,&deferred_machine).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
+            assert!(reopened.collection("private_peers").find_one(doc!{"machine_id":deferred_id}).await?.is_none());
+            assert_eq!(reopened.collection("private_renumber_deferred").count_documents(doc!{"_id":deferred_id.to_hex()}).await?,1);
+
             // Authoritative foreign preference edit must block recovery, not be
             // silently normalized into the old migration's desired state.
             reopened.collection("private_networks").update_one(doc!{"_id":&key},doc!{"$set":{"dns_suffix":"foreign.test"}}).await?;
             assert!(run(&reopened,owner,job,Fault::None).await.is_err());
             let current=reopened.collection("private_networks").find_one(doc!{"_id":&key}).await?.unwrap();assert_eq!(current.get_str("dns_suffix")?,"foreign.test");
             reopened.collection("private_networks").update_one(doc!{"_id":&key,"dns_suffix":"foreign.test"},doc!{"$set":{"dns_suffix":"private.test"}}).await?;
-            assert_eq!(run(&reopened,owner,job,Fault::None).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?,Outcome::Committed);
+            let batch=super::super::recover::pending_once(&reopened,None).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
+            assert_eq!(batch.attempts.len(),1);assert_eq!(batch.attempts[0].workspace,owner);assert_eq!(batch.attempts[0].outcome,super::super::recover::Outcome::Committed);
+            assert_eq!(batch.next,Some(owner));
+            assert!(super::super::recover::pending_once(&reopened,batch.next).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?.attempts.is_empty());
             assert!(fence::stable(&reopened,owner).await.is_ok());
+            let enrollment=super::super::deferred::pending_once(&reopened,None).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
+            assert_eq!(enrollment.attempted,1);assert_eq!(enrollment.completed,1);
+            assert_eq!(enrollment.next,Some(deferred_id));
+            let new_peer=reopened.collection("private_peers").find_one(doc!{"machine_id":deferred_id,"workspace_id":owner}).await?.unwrap();
+            assert!(crate::domain::enrollment::Network::parse("10.204.0.0/16").unwrap().contains(new_peer.get_str("ip")?.parse()?));
+            assert_eq!(reopened.collection("private_renumber_deferred").count_documents(doc!{"_id":deferred_id.to_hex()}).await?,0);
+
             let preferences=reopened.collection("private_networks").find_one(doc!{"_id":&key}).await?.unwrap();assert_eq!(preferences.get_str("cidr")?,"10.204.0.0/16");assert_eq!(preferences.get_str("dns_suffix")?,"private.test");assert_eq!(preferences.get_str("unrelated")?,"preserved");
             let mut expected_peer=peer;expected_peer.insert("ip",row.new.to_string());expected_peer.insert("address_generation",1_i64);
             assert_eq!(reopened.collection("private_peers").find_one(doc!{"_id":&id}).await?.unwrap(),expected_peer);

@@ -20,6 +20,8 @@ pub struct State {
     directory: Mutex<()>,
     #[cfg(feature="private-sparse")]
     pub(crate) workspace_fences: crate::private_renumber::fence::Fences,
+    #[cfg(feature="private-sparse")]
+    pub(crate) renumber_indexes:OnceCell<()>,
     indices: OnceCell<()>,
     rules: Mutex<HashMap<String, (Arc<Index>, Instant)>>,
 }

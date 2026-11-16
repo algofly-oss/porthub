@@ -30,6 +30,14 @@ pub(super) fn durable(app: &App, name: &str) -> Collection<Document> {
             .build(),
     )
 }
+pub(super) async fn indexes(app:&App)->ApiResult<()> {
+    app.private_sparse.renumber_indexes.get_or_try_init(||async {
+        durable(app,"private_renumber_heads").create_index(mongodb::IndexModel::builder().keys(doc!{"state":1,"_id":1}).build()).await?;
+        durable(app,"private_renumber_assignments").create_index(mongodb::IndexModel::builder().keys(doc!{"job":1,"index":1}).options(mongodb::options::IndexOptions::builder().unique(true).build()).build()).await?;
+        durable(app,"private_renumber_assignments").create_index(mongodb::IndexModel::builder().keys(doc!{"workspace":1,"job":1}).build()).await?;
+        Ok::<_,ApiError>(())
+    }).await?;Ok(())
+}
 pub(super) fn assignment_doc(row: &Assignment) -> Document {
     doc! {"peer":&row.peer,"machine":&row.machine,"workspace":&row.workspace,
     "credential_generation":&row.credential_generation,"old":row.old.to_string(),"new":row.new.to_string(),
@@ -113,6 +121,7 @@ async fn prepare_with_fault(
         return Err(conflict("Invalid migration job or reserved pools"));
     }
     guard.require_allocation()?;
+    indexes(guard.app).await?;
     let digest = plan_digest(rows)?;
     let first = &rows[0];
     let app = guard.app;

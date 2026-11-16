@@ -7,3 +7,7 @@ pub mod journal;
 mod apply;
 
 mod finish;
+
+pub mod recover;
+
+pub mod deferred;
