@@ -60,6 +60,7 @@ struct Policy {
     peers: HashMap<String, Peer>,
     incoming: HashMap<String, Ports>,
     outgoing: HashMap<String, Ports>,
+    pair_deadlines: HashMap<String,Instant>,
 }
 impl Policy {
     fn empty(own: String, ip: Ipv4Addr) -> Self {
@@ -70,6 +71,7 @@ impl Policy {
             peers: HashMap::new(),
             incoming: HashMap::new(),
             outgoing: HashMap::new(),
+            pair_deadlines: HashMap::new(),
         }
     }
     fn compile(snapshot: &Snapshot, own: &str, ip: Ipv4Addr) -> Result<Self> {
@@ -129,8 +131,19 @@ impl Policy {
         }
         Ok(policy)
     }
+    fn compile_pairs(snapshot:&Snapshot,own:&str,ip:Ipv4Addr,pairs:&[(Snapshot,Instant)])->Result<Self>{
+        let mut policy=Self::compile(snapshot,own,ip)?;
+        if snapshot.sparse.is_some(){for (pair,deadline) in pairs{
+            if *deadline<=Instant::now(){continue;}
+            ensure!(pair.workspace==snapshot.workspace&&pair.self_==snapshot.self_&&pair.sparse.is_none()&&pair.peers.len()==2&&pair.exit_routes.is_empty(),"private stream pair authority changed");
+            ensure!(*deadline<=Instant::now()+Duration::from_secs(60),"private stream pair lease exceeds bound");
+            let pair_policy=Self::compile(pair,own,ip)?;
+            for id in pair_policy.peers.keys(){policy.pair_deadlines.insert(id.clone(),*deadline);}
+            policy.peers.extend(pair_policy.peers);policy.incoming.extend(pair_policy.incoming);policy.outgoing.extend(pair_policy.outgoing);
+        }}Ok(policy)
+    }
     fn allows(&self, peer: &Peer, flow: Flow, outbound: bool) -> bool {
-        if self.peers.get(&peer.id) != Some(peer) {
+        if self.deadline<=Instant::now() || self.pair_deadlines.get(&peer.id).is_some_and(|d|*d<=Instant::now()) || self.peers.get(&peer.id) != Some(peer) {
             return false;
         }
         let (ports, source, destination) = if outbound {
@@ -281,18 +294,22 @@ impl Router {
     pub fn prepared(&self, peer_id: &str) -> bool {
         let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.policy.deadline > Instant::now()
+            && state.policy.pair_deadlines.get(peer_id).is_none_or(|d|*d>Instant::now())
             && state
                 .policy
                 .peers
                 .get(peer_id)
                 .is_some_and(|peer| self.endpoint.prepared(peer).is_some())
     }
-    pub fn update(&self, snapshot: &Snapshot) -> Result<()> {
+    pub fn update(&self, snapshot: &Snapshot) -> Result<()> { self.update_pairs(snapshot,&[]) }
+    pub fn update_pairs(&self,snapshot:&Snapshot,pairs:&[(Snapshot,Instant)])->Result<()> {
+        ensure!(pairs.len()<=porthub_network::policy::MAX_PAIR_LEASES,"private stream pair cache exceeds bounds");
         let (own, ip) = {
             let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             (state.policy.own.clone(), state.policy.ip)
         };
-        let policy = Policy::compile(snapshot, &own, ip)?;
+        let policy=Policy::compile_pairs(snapshot,&own,ip,pairs)?;
+        self.endpoint.set_peer_connection_budget(if snapshot.sparse.is_some(){64}else{512})?;
         self.endpoint
             .update_peers(policy.peers.values().cloned().collect())?;
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -317,12 +334,11 @@ impl Router {
             > Instant::now()
     }
     pub async fn receive(&self, source: Ipv4Addr, payload: Bytes) {
-        let deadline = self
-            .state
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .policy
-            .deadline;
+        let deadline = {
+            let state=self.state.lock().unwrap_or_else(|p|p.into_inner());
+            let Some(peer)=state.policy.peers.values().find(|p|p.ip==source) else{return;};
+            state.policy.pair_deadlines.get(&peer.id).copied().unwrap_or(state.policy.deadline).min(state.policy.deadline)
+        };
         let now = Instant::now();
         if deadline <= now {
             return;
@@ -347,7 +363,7 @@ impl Router {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(entry) = state.flows.get(&kernel) {
             if entry.peer.id == peer_id {
-                if state.policy.deadline > Instant::now() && !entry.cancel.is_cancelled() {
+                if state.policy.allows(&entry.peer,entry.flow,entry.outbound) && !entry.cancel.is_cancelled() {
                     let _ = self.tcp.packet(packet);
                 }
                 return true;
@@ -427,6 +443,17 @@ impl Router {
         );
         Ok((kernel, cancel))
     }
+    /// Independent deadline guard: established QUIC copying cannot outlive a pair lease
+    /// while an unrelated base refresh or blocked data writer keeps the stream alive.
+    async fn authority_guard(&self,peer:&Peer,flow:Flow,outbound:bool){
+        let mut changed=self.changed.subscribe();
+        loop{
+            let deadline={let state=self.state.lock().unwrap_or_else(|p|p.into_inner());
+                if !state.policy.allows(peer,flow,outbound){return;}
+                state.policy.pair_deadlines.get(&peer.id).copied().unwrap_or(state.policy.deadline).min(state.policy.deadline)};
+            tokio::select!{_=self.cancel.cancelled()=>return, result=changed.changed()=>{if result.is_err(){return;}},_=tokio::time::sleep_until(deadline.into())=>{}}
+        }
+    }
     async fn source(&self, kernel: Flow, syn: Bytes, connection: streams::Connection) -> Finished {
         let entry = {
             let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -439,6 +466,7 @@ impl Router {
             return Finished::Flow(None);
         };
         let result = tokio::select! {
+            _=self.authority_guard(&peer,kernel,true)=>Err(anyhow::anyhow!("private TCP source authority expired")),
             _=cancel.cancelled()=>Err(anyhow::anyhow!("private TCP stream cancelled")),
             result=async {
                 let opening=async {tokio::time::timeout(Duration::from_secs(12),async {
@@ -502,6 +530,7 @@ impl Router {
             admitted = Some((kernel, flow));
             drop(permit);
             tokio::select! {
+                _=self.authority_guard(&peer,flow,false)=>Err(anyhow::anyhow!("private TCP target authority expired")),
                 _=cancel.cancelled()=>Err(anyhow::anyhow!("private TCP stream cancelled")),
                 result=async {
                     let mut local=self.tcp.connect(flow).await?;
@@ -577,6 +606,8 @@ impl Background {
                     let lanes=if router.endpoint.supports_parallel(peer){MAX_STREAM_LANES}else{1};
                     let connections=router.endpoint.connection_count(peer);
                     state.policy.deadline>Instant::now()
+                        && state.policy.pair_deadlines.get(&peer.id).is_none_or(|d|*d>Instant::now())
+                        && router.endpoint.capacity_for(peer)
                         && (connections>0 || state.policy.own<peer.id)
                         && connections<lanes
                         && !preparing.contains(&peer.id)
@@ -639,4 +670,31 @@ fn spawn_reader(
         let command=Command::Incoming {peer:peer.clone(),send,receive,permit};
         tokio::select! {_=router.cancel.cancelled()=>return Finished::Reader(id),result=router.commands.send(command)=>if result.is_err(){return Finished::Reader(id);}}
     }});
+}
+
+#[cfg(test)]mod sparse_lease_tests{
+ use super::*;
+ fn snapshots(a:&Identity,b:&Identity)->(Snapshot,Snapshot){
+  let base:Snapshot=serde_json::from_value(serde_json::json!({"workspace":"w","self":"a","revision":1,"expires_at":chrono::Utc::now()+chrono::Duration::seconds(30),"sparse":{"protocol":1,"epoch":"a".repeat(64)},"peers":[{"id":"a","ip":"10.203.0.2","fingerprint":a.fingerprint(),"instance":"instance-a","hostname":"a.phub","stream_transport":"quic1"}],"grants":[]})).unwrap();
+  let mut pair=base.clone();pair.sparse=None;pair.expires_at=chrono::Utc::now()+chrono::Duration::seconds(15);
+  pair.peers.push(serde_json::from_value(serde_json::json!({"id":"b","ip":"10.203.1.2","fingerprint":b.fingerprint(),"instance":"instance-b","hostname":"b.phub","stream_transport":"quic1"})).unwrap());
+  pair.grants=serde_json::from_value(serde_json::json!([{"source":"a","destination":"b","protocol":"tcp","ports":[{"start":443,"end":443}]}])).unwrap();(base,pair)
+ }
+ fn flow()->Flow{Flow{source:"10.203.0.2:4000".parse().unwrap(),destination:"10.203.1.2:443".parse().unwrap()}}
+ #[tokio::test]async fn established_stream_guard_expires_pair_without_any_status_tick_or_base_expiry(){
+  let a=Identity::new().unwrap();let b=Identity::new().unwrap();let(base,pair)=snapshots(&a,&b);let peer=mesh_peer(&pair.peers[1]);
+  let(router,_background)=new("a".into(),"10.203.0.2".parse().unwrap(),a,tokio::sync::mpsc::channel(8).0,CancellationToken::new()).unwrap();
+  router.update_pairs(&base,&[(pair,Instant::now()+Duration::from_millis(40))]).unwrap();
+  assert!(router.state.lock().unwrap().policy.allows(&peer,flow(),true));
+  tokio::time::timeout(Duration::from_secs(1),router.authority_guard(&peer,flow(),true)).await.expect("pair guard must not wait for 30s base or status tick");
+  assert!(router.valid_lease());assert!(!router.state.lock().unwrap().policy.allows(&peer,flow(),true));
+ }
+ #[tokio::test]async fn renewal_updates_guard_but_authoritative_pair_removal_wakes_it_immediately(){
+  let a=Identity::new().unwrap();let b=Identity::new().unwrap();let(base,pair)=snapshots(&a,&b);let peer=mesh_peer(&pair.peers[1]);
+  let(router,_background)=new("a".into(),"10.203.0.2".parse().unwrap(),a,tokio::sync::mpsc::channel(8).0,CancellationToken::new()).unwrap();
+  router.update_pairs(&base,&[(pair.clone(),Instant::now()+Duration::from_secs(1))]).unwrap();
+  let own=router.clone();let wait=tokio::spawn(async move{own.authority_guard(&peer,flow(),true).await});tokio::task::yield_now().await;
+  router.update_pairs(&base,&[(pair,Instant::now()+Duration::from_secs(2))]).unwrap();tokio::task::yield_now().await;assert!(!wait.is_finished());
+  router.update_pairs(&base,&[]).unwrap();tokio::time::timeout(Duration::from_millis(500),wait).await.unwrap().unwrap();assert!(router.valid_lease());
+ }
 }

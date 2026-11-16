@@ -17,6 +17,8 @@ pub struct Signal {
 }
 #[derive(Serialize)]
 pub struct Sync {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sparse: Option<super::private_pairs::Request>,
     pub peer_id: String,
     pub token: String,
     pub fingerprint: String,
@@ -54,6 +56,8 @@ pub fn parse(raw: Value) -> ApiResult<Sync> {
     let raw = input_compat::dictionary(raw.clone())
         .map(Value::Object)
         .unwrap_or(raw);
+    let sparse=raw.get("sparse").filter(|v| !v.is_null()).map(|v|serde_json::from_value::<super::private_pairs::Request>(v.clone()).map_err(|_| crate::error::ApiError::bad_request("Invalid sparse private request"))).transpose()?;
+    if let Some(request)=&sparse { request.validate()?; }
     let mut model = Model::new(raw)?;
     let peer_id = string(&mut model, "peer_id", 0, 60);
     let token = string(&mut model, "token", 32, 200);
@@ -120,6 +124,7 @@ pub fn parse(raw: Value) -> ApiResult<Sync> {
     }
     model.finish()?;
     Ok(Sync {
+        sparse,
         peer_id,
         token,
         fingerprint: fingerprint.to_ascii_uppercase(),

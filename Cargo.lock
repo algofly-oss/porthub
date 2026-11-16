@@ -5428,6 +5428,7 @@ dependencies = [
  "porthub-egress",
  "porthub-identity",
  "porthub-mesh",
+ "porthub-network",
  "porthub-runtime",
  "porthub-terminal",
  "porthub-tunnel",

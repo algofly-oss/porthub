@@ -1,5 +1,7 @@
 //! Lease-bound IPv4 ACLs and reply tracking. A packet's addresses must match
 //! its authenticated remote peer; no LAN/default-gateway forwarding is allowed.
+mod sparse;
+pub use sparse::{Lookup, PairLease, PairResponse, SparseInfo, MAX_PAIR_LEASES};
 use anyhow::{ensure, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -111,6 +113,8 @@ mod tor_route_tests {
 }
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Snapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sparse: Option<SparseInfo>,
     pub workspace: String,
     #[serde(rename = "self")]
     pub self_: String,
@@ -281,15 +285,19 @@ pub struct Engine {
     flows: HashMap<Key, Flow>,
     exit_flows: HashMap<Key, Flow>,
     deadline: Option<Instant>,
+    pairs: HashMap<String, Box<Engine>>,
 }
 impl Engine {
     pub fn revoke(&mut self) {
         self.deadline = None;
+        self.pairs.clear();
         self.flows.clear();
         self.exit_flows.clear();
     }
     pub fn apply(&mut self, mut snapshot: Snapshot) -> Result<()> {
         let result = (|| {
+            self.validate_sparse_base(&snapshot)?;
+            let retain_pairs = self.same_sparse_authority(&snapshot);
             let remaining = snapshot
                 .expires_at
                 .signed_duration_since(Utc::now())
@@ -397,6 +405,7 @@ impl Engine {
             }
             snapshot.peers.shrink_to_fit();
             self.ips = ips;
+            if !retain_pairs { self.pairs.clear(); }
             self.snapshot = Some(snapshot);
             self.deadline = Some(Instant::now() + remaining);
             let old = std::mem::take(&mut self.flows);
@@ -441,6 +450,10 @@ impl Engine {
         })
     }
     pub fn check(&mut self, bytes: &[u8], remote: &str, inbound: bool) -> bool {
+        if self.snapshot.as_ref().is_some_and(|s| s.sparse.is_some()) {
+            if !self.valid_lease() { self.pairs.clear(); return false; }
+            if let Some(pair) = self.pairs.get_mut(remote) { return pair.check(bytes, remote, inbound); }
+        }
         let Some(packet) = Packet::parse(bytes) else {
             return false;
         };

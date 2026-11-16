@@ -69,3 +69,5 @@ mod tor_exit;
 pub(crate) fn owned_exit_underlay(index: u32, source: std::net::IpAddr) -> bool {
     exit_journal::Journal::allows_underlay(index,source)
 }
+
+pub mod sparse;

@@ -133,18 +133,30 @@ pub fn validate_signal(
 }
 
 async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<Response> {
-    let input = private_sync::parse(raw)?;
-    let hash = token_digest(&input.token);
-    let filter = doc! {"_id":&input.peer_id,"enabled":true,"credential_hash":&hash};
-    let peer = app
-        .collection("private_peers")
-        .find_one(filter.clone())
-        .await?
-        .ok_or_else(|| forbidden("Private credential invalid or revoked"))?;
+    let input=private_sync::parse(raw)?;let hash=token_digest(&input.token);
+    let filter=doc!{"_id":&input.peer_id,"enabled":true,"credential_hash":&hash};
+    let Some(peer)=app.collection("private_peers").find_one(filter).await? else {
+        app.private_relay.withdraw_bound(&input.peer_id,&hash,&input.instance,None);
+        return Err(forbidden("Private credential invalid or revoked"));
+    };
+    let admission=app.private_relay.begin_admission(&input.peer_id,&hash,&input.instance)
+        .ok_or_else(||ApiError::new(StatusCode::SERVICE_UNAVAILABLE,"Private control admission is busy; retry"))?;
+    let result=sync_admitted(&app,&input,peer,&hash,admission).await;
+    if result.as_ref().is_err_and(|e|matches!(e.status,StatusCode::UNAUTHORIZED|StatusCode::FORBIDDEN)){
+        app.private_relay.withdraw_bound(&input.peer_id,&hash,&input.instance,Some(admission));
+    }
+    result
+}
+async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,hash:&str,admission:u64)->ApiResult<Response>{
+    let filter=doc!{"_id":&input.peer_id,"enabled":true,"credential_hash":hash};
     let owner = peer
         .get_object_id("workspace_id")
         .map_err(|_| forbidden("Machine or workspace membership is disabled"))?;
-    let (mut peers, inventory) = active(&app, owner).await?;
+    let indexed=if cfg!(feature="private-sparse") && input.sparse.is_some()
+        && app.collection("private_exit_nodes").find_one(doc!{"workspace_id":owner,"enabled":{"$ne":false}}).projection(doc!{"_id":1}).await?.is_none() {
+        Some(crate::private_sparse::select(&app,owner,&peer,input.sparse.as_ref().expect("negotiated request")).await?)
+    }else{None};
+    let (mut peers,inventory)=if let Some(indexed)=&indexed{(indexed.peers.clone(),indexed.inventory.clone())}else{active(&app,owner).await?};
     if !peers
         .iter()
         .any(|p| store::string(p, "_id") == input.peer_id)
@@ -164,12 +176,66 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
             *p = updated.clone();
         }
     }
-    let groups: Vec<Document> = app
+    let (prefs,suffix,names,machine_docs)=if let Some(indexed)=&indexed {
+        (indexed.prefs.clone(),indexed.suffix.clone(),indexed.names.clone(),indexed.inventory.values().cloned().collect::<Vec<_>>())
+    }else{
+        let prefs = app
+        .collection("private_networks")
+        .find_one(doc! {"_id":owner.to_hex()})
+        .await?
+        .unwrap_or_default();
+    let (_, suffix) = enrollment::preferences(&prefs)?;
+    let all: Vec<Document> = app
+        .collection("private_peers")
+        .find(doc! {"workspace_id":owner})
+        .projection(doc! {"machine_id":1,"created_at":1,"hostname":1})
+        .await?
+        .try_collect()
+        .await?;
+    let ids: Vec<_> = all
+        .iter()
+        .filter_map(|p| p.get("machine_id").cloned())
+        .collect();
+    let machine_docs: Vec<Document> = app
+        .collection("machines")
+        .find(doc! {"$or":[{"user_id":owner},{"_id":{"$in":ids}}],"deletion_pending":{"$ne":true}})
+        .projection(doc! {"name":1,"aliases":1,"private_domains":1})
+        .await?
+        .try_collect()
+        .await?;
+    let names = private_names::assign(&machine_docs, &all);
+        (prefs,suffix,names,machine_docs)
+    };
+    let mut dns_suffixes: HashSet<String> = [suffix.to_ascii_lowercase()].into_iter().collect();
+    let mut domains_by_machine = HashMap::new();
+    for machine in &machine_docs {
+        let domains = crate::domain::private_domains::from_document(machine);
+        for domain in domains.iter().filter(|domain| !domain.default) {
+            dns_suffixes.insert(domain.suffix.clone());
+        }
+        domains_by_machine.insert(store::id(machine.get("_id")), domains);
+    }
+    let wire_peer = |p: &Document| {
+        let id=store::string(p,"_id");let machine_id=store::id(p.get("machine_id"));
+        let mut aliases=names.aliases.get(id).into_iter().flatten().map(|name|format!("{name}.{suffix}")).collect::<Vec<_>>();
+        aliases.extend(domains_by_machine.get(&machine_id).into_iter().flatten().filter(|domain| !domain.default).map(|domain|format!("{}.{}",domain.host,domain.suffix)));
+        let online = p.get_datetime("last_seen_at").is_ok_and(|seen| {
+            let age = now.timestamp_millis() - seen.timestamp_millis();
+            (0..15_000).contains(&age)
+        }) && !store::string(p, "fingerprint").is_empty() && !store::string(p, "instance").is_empty();
+        json!({"id":id,"online":online,"ip":store::field(p,"ip"),"fingerprint":store::string(p,"fingerprint"),"instance":store::string(p,"instance"),"stream_transport":store::string(p,"stream_transport"),"lan_networks":p.get_array("lan_networks").cloned().unwrap_or_default(),
+            "hostname":format!("{}.{suffix}",names.primary.get(id).map(String::as_str).unwrap_or("machine")),"aliases":aliases})
+    };
+    let sparse_rules=if indexed.is_some(){Some(crate::private_sparse::rules(&app,owner).await?)}else{None};
+    let indexed_groups=if let Some(rules)=&sparse_rules{Some(crate::private_sparse::groups(&app,owner,&rules.index,&peers.iter().map(|p|store::id(p.get("owner_id"))).collect::<Vec<_>>()).await?)}else{None};
+    let groups:Vec<Document>=if let Some(groups)=&indexed_groups{groups.values().map(|v|mongodb::bson::to_document(v).expect("typed group view")).collect()}else{
+        app
         .collection("machine_groups")
         .find(doc! {"user_id":owner})
         .await?
         .try_collect()
-        .await?;
+        .await?
+    };
     let exit_definitions: Vec<Document> = app.collection("private_exit_nodes")
         .find(doc! {"workspace_id":owner,"enabled":{"$ne":false}})
         .sort(doc! {"created_at":1,"_id":1})
@@ -202,12 +268,14 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
         ((!routing_peers.is_empty() || route.get_bool("tor_enabled")==Ok(true)) && !clients.is_empty()).then(|| json!({"id":store::id(route.get("_id")),"name":store::string(route,"name"),"routing_peers":routing_peers,"clients":clients,
             "selection":route.get_str("selection").unwrap_or("sticky"),"allow_direct_fallback":route.get_bool("allow_direct_fallback").unwrap_or(false),"tor_enabled":is_client && route.get_bool("tor_enabled").unwrap_or(false),"tor_circuit_groups":route.get_i64("tor_circuit_groups").unwrap_or(4),"traffic_mode":route.get_str("traffic_mode").unwrap_or("internet_only"),"masquerade":true,"block_lan_access":route.get_str("traffic_mode").unwrap_or("internet_only") == "internet_only"}))
     }).collect();
-    let books: Vec<Document> = app
+    let books:Vec<Document>=if sparse_rules.is_some(){Vec::new()}else{
+        app
         .collection("access_rulebooks")
         .find(doc! {"user_id":owner})
         .await?
         .try_collect()
-        .await?;
+        .await?
+    };
     let mut machines = Vec::new();
     let mut mapping = HashMap::new();
     for p in &peers {
@@ -226,12 +294,59 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
         .map(|g| (store::id(g.get("_id")), store::document(g)))
         .collect();
     let books = books.iter().map(store::document).collect::<Vec<_>>();
-    let mut grants = private_policy::compile_for(
-        &machines,
-        &books,
-        &groups,
-        &store::id(peer.get("machine_id")),
-    );
+    // Exit policies retain the complete legacy representation until their independently
+    // bounded sparse exit-plan protocol is negotiated; never truncate an exit's client list.
+    let sparse_request = input.sparse.as_ref().filter(|_| cfg!(feature="private-sparse") && indexed.is_some());
+    let epoch=sparse_request.map(|_|{
+        let own_machine=machines.iter().find(|m|m["_id"]==store::id(peer.get("machine_id"))).expect("active local machine");
+        let manifest=sparse_rules.as_ref().map(|r|r.manifest.iter().map(store::document).collect::<Vec<_>>()).unwrap_or_else(||books.clone());
+        crate::domain::private_pairs::local_epoch(own_machine,&manifest,&groups,&store::document(&peer))
+    });
+    let mut selected = Vec::new();
+    if let Some(request) = sparse_request {
+        for query in &request.wanted {
+            let mut matches=peers.iter().filter(|p| {
+                let value=wire_peer(p);
+                match query.kind.as_str() {
+                    "peer"=>store::string(p,"_id")==query.value,
+                    "ip"=>store::string(p,"ip")==query.value,
+                    "name"=>{
+                        let name=query.value.trim_end_matches('.').to_ascii_lowercase();
+                        value["hostname"].as_str().is_some_and(|v|v.eq_ignore_ascii_case(&name))
+                            || value["aliases"].as_array().into_iter().flatten().any(|v|v.as_str().is_some_and(|v|v.eq_ignore_ascii_case(&name)))
+                    }, _=>false,
+                }
+            });
+            let first=matches.next();
+            // Never choose one of multiple bindings or reveal an inaccessible name as allowed.
+            selected.push((query.clone(),if matches.next().is_none(){first}else{None}));
+        }
+        // A cold receiver learns only recently authorized incident peers, not the whole workspace.
+        for id in app.private_relay.pair_neighbors(&input.peer_id).into_iter().take(16) {
+            if selected.len()>=32 {break;}
+            if !selected.iter().any(|(_,p)|p.is_some_and(|p|store::string(p,"_id")==id)) {
+                selected.push((crate::domain::private_pairs::Lookup{kind:"peer".into(),value:id.clone()},peers.iter().find(|p|store::string(p,"_id")==id)));
+            }
+        }
+    }
+    let own_machine_id=store::id(peer.get("machine_id"));
+    let mut resolutions=Vec::new();
+    let mut grants = if sparse_request.is_some() {
+        let mut result=Vec::new();
+        for (query,target) in selected {
+            let pair=target.map(|p|{
+                if let Some(rules)=&sparse_rules{
+                    let source=machines.iter().find(|m|m["_id"]==own_machine_id).expect("local machine");
+                    let target=machines.iter().find(|m|m["_id"]==store::id(p.get("machine_id"))).expect("selected machine");
+                    rules.index.pair(source,target,&groups)
+                }else{private_policy::compile_pair(&machines,&books,&groups,&own_machine_id,&store::id(p.get("machine_id")))}
+            }).unwrap_or_default();
+            if pair.is_empty(){if let Some(peer)=target{app.private_relay.revoke_pair(&input.peer_id,store::string(peer,"_id"));}resolutions.push((query,None,Vec::new()));continue;}
+            if pair.len()>128 {resolutions.push((query,None,Vec::new()));continue;}
+            result.extend(pair.iter().cloned());resolutions.push((query,target,pair));
+        }
+        result
+    } else {private_policy::compile_for(&machines,&books,&groups,&own_machine_id)};
     let mut reachable = HashSet::from([input.peer_id.clone()]);
     for grant in &mut grants {
         grant.source = mapping[&grant.source].clone();
@@ -293,51 +408,7 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
     let signals:Vec<_>=incoming.iter().filter(|s|by_id.get(store::string(s,"from")).is_some_and(|p|
         s.get("source_instance")==p.get("instance") && s.get("fingerprint")==p.get("fingerprint")))
         .map(|s|json!({"id":store::field(s,"_id"),"from":store::field(s,"from"),"session":store::field(s,"session"),"description":store::field(s,"description")})).collect();
-    let prefs = app
-        .collection("private_networks")
-        .find_one(doc! {"_id":owner.to_hex()})
-        .await?
-        .unwrap_or_default();
-    let (_, suffix) = enrollment::preferences(&prefs)?;
-    let all: Vec<Document> = app
-        .collection("private_peers")
-        .find(doc! {"workspace_id":owner})
-        .projection(doc! {"machine_id":1,"created_at":1,"hostname":1})
-        .await?
-        .try_collect()
-        .await?;
-    let ids: Vec<_> = all
-        .iter()
-        .filter_map(|p| p.get("machine_id").cloned())
-        .collect();
-    let machine_docs: Vec<Document> = app
-        .collection("machines")
-        .find(doc! {"$or":[{"user_id":owner},{"_id":{"$in":ids}}],"deletion_pending":{"$ne":true}})
-        .projection(doc! {"name":1,"aliases":1,"private_domains":1})
-        .await?
-        .try_collect()
-        .await?;
-    let names = private_names::assign(&machine_docs, &all);
-    let mut dns_suffixes: HashSet<String> = [suffix.to_ascii_lowercase()].into_iter().collect();
-    let mut domains_by_machine = HashMap::new();
-    for machine in &machine_docs {
-        let domains = crate::domain::private_domains::from_document(machine);
-        for domain in domains.iter().filter(|domain| !domain.default) {
-            dns_suffixes.insert(domain.suffix.clone());
-        }
-        domains_by_machine.insert(store::id(machine.get("_id")), domains);
-    }
-    let peers:Vec<_>=peers.iter().filter(|p|by_id.contains_key(store::string(p,"_id"))).map(|p| {
-        let id=store::string(p,"_id");let machine_id=store::id(p.get("machine_id"));
-        let mut aliases=names.aliases.get(id).into_iter().flatten().map(|name|format!("{name}.{suffix}")).collect::<Vec<_>>();
-        aliases.extend(domains_by_machine.get(&machine_id).into_iter().flatten().filter(|domain| !domain.default).map(|domain|format!("{}.{}",domain.host,domain.suffix)));
-        let online = p.get_datetime("last_seen_at").is_ok_and(|seen| {
-            let age = now.timestamp_millis() - seen.timestamp_millis();
-            (0..15_000).contains(&age)
-        }) && !store::string(p, "fingerprint").is_empty() && !store::string(p, "instance").is_empty();
-        json!({"id":id,"online":online,"ip":store::field(p,"ip"),"fingerprint":store::string(p,"fingerprint"),"instance":store::string(p,"instance"),"stream_transport":store::string(p,"stream_transport"),"lan_networks":p.get_array("lan_networks").cloned().unwrap_or_default(),
-            "hostname":format!("{}.{suffix}",names.primary.get(id).map(String::as_str).unwrap_or("machine")),"aliases":aliases})
-    }).collect();
+    let wire_peers:Vec<_>=peers.iter().filter(|p|by_id.contains_key(store::string(p,"_id"))).map(wire_peer).collect();
     let current = app
         .collection("private_peers")
         .find_one(filter)
@@ -367,6 +438,8 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
             s.strip_suffix("/api").unwrap_or(s).to_owned()
         })
         .collect();
+    if let Some(rules)=&sparse_rules{crate::private_sparse::verify_rules(&app,owner,rules).await?;}
+    if let Some(indexed)=&indexed{if app.collection("private_name_directory_state").find_one(doc!{"_id":owner.to_hex(),"generation":&indexed.generation,"ready":true}).projection(doc!{"_id":1}).await?.is_none(){return Err(ApiError::bad_request("Private directory changed; retry discovery"));}}
     let mut relay_auth_token = String::new();
     if let Ok(ip) = store::string(&current, "ip").parse() {
         let mut allowed: HashSet<String> = grants
@@ -382,9 +455,38 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
             })
             .collect();
         allowed.extend(exit_neighbors.iter().cloned());
-        relay_auth_token =
-            app.private_relay
-                .publish(&input.peer_id, &hash, &input.instance, ip, allowed);
+        relay_auth_token = if let Some(epoch)=&epoch {
+            app.private_relay.publish_sparse_admitted(&input.peer_id,hash,&input.instance,ip,epoch,Some(admission))
+        } else {app.private_relay.publish_admitted(&input.peer_id,hash,&input.instance,ip,allowed,Some(admission))};
+    }
+    if relay_auth_token.is_empty(){return Err(ApiError::new(StatusCode::CONFLICT,"Private authority changed or is busy; retry sync"));}
+    let mut pair_responses=Vec::new();
+    if let Some(epoch)=&epoch {
+        let local:porthub_network::policy::PeerInfo=serde_json::from_value(wire_peer(&updated)).map_err(|_|ApiError::bad_request("Invalid local sparse identity"))?;
+        for (query,target,pair) in resolutions {
+            let Some(target)=target else {pair_responses.push(json!({"query":query,"status":"unavailable"}));continue;};
+            let id=store::string(target,"_id");
+            let revision=target.get_i64("revision").ok().filter(|v|*v>0).unwrap_or(0) as u64;
+            let target_machine=machines.iter().find(|m|m["_id"]==store::id(target.get("machine_id"))).expect("selected target");
+            let manifest=sparse_rules.as_ref().map(|r|r.manifest.iter().map(store::document).collect::<Vec<_>>()).unwrap_or_else(||books.clone());
+            let target_epoch=crate::domain::private_pairs::local_epoch(target_machine,&manifest,&groups,&store::document(target));
+            if revision==0 || !app.private_relay.publish_pair_epochs(&input.peer_id,id,epoch,&target_epoch) {
+                pair_responses.push(json!({"query":query,"status":"busy"}));continue;
+            }
+            let remote:porthub_network::policy::PeerInfo=serde_json::from_value(wire_peer(target)).map_err(|_|ApiError::bad_request("Invalid remote sparse identity"))?;
+            let grants=pair.into_iter().map(|mut g|{g.source=mapping[&g.source].clone();g.destination=mapping[&g.destination].clone();g}).collect::<Vec<_>>();
+            let grants=serde_json::from_value(serde_json::to_value(grants).expect("typed grants")).expect("compatible packet grants");
+            let lease=porthub_network::policy::PairLease{workspace:owner.to_hex(),self_:input.peer_id.clone(),epoch:epoch.clone(),expires_at:chrono::DateTime::from_timestamp_millis(now.timestamp_millis()+15_000).expect("current timestamp"),revision,local:local.clone(),peer:remote,grants};
+            pair_responses.push(json!({"query":query,"status":"allowed","lease":lease}));
+        }
+    }
+    let capture_pools=if epoch.is_some(){crate::domain::private_networks::pools(&prefs)?.iter().map(|p|p.cidr()).collect::<Vec<_>>()}else{Vec::new()};
+    if capture_pools.len()>porthub_network::capture_routes::MAX_CAPTURE_PREFIXES {
+        return Err(ApiError::bad_request("Private capture route capacity exceeded; operator review required"));
+    }
+    // Explicit complete legacy failure, never a truncated authorization snapshot.
+    if epoch.is_none() && (wire_peers.len()>4096 || grants.len()>65536) {
+        return Err(ApiError::bad_request("Private policy exceeds this client's identity capacity; upgrade to negotiated sparse private networking or narrow the rule"));
     }
     // This origin is configured by the gateway operator and returned only to
     // authenticated private clients. HTTP origins are supported by operator
@@ -403,9 +505,14 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
     } else {false};
     app.proxy_pending.publish(crate::peer_proxy::Binding {id:input.peer_id.clone(),instance:input.instance.clone(),fingerprint:input.fingerprint.clone()},&hash,owner.to_hex(),proxy_provider);
     let proxy_jobs=app.proxy_pending.jobs(&input.peer_id,&input.instance,&input.fingerprint);
-    Ok(([(header::CACHE_CONTROL,"no-store")],Json(json!({"snapshot":{"workspace":owner.to_hex(),"self":input.peer_id,"revision":store::field(&updated,"revision"),"dns_rules":dns_rules,
-        "expires_at":chrono::DateTime::from_timestamp_millis(now.timestamp_millis()+15_000).expect("current timestamp").to_rfc3339_opts(chrono::SecondsFormat::Millis,true),"peers":peers,"dns_suffixes":dns_suffixes,"grants":grants,"exit_routes":exit_routes},"signals":signals,
+    let mut response=json!({"snapshot":{"workspace":owner.to_hex(),"self":input.peer_id,"revision":store::field(&updated,"revision"),"dns_rules":dns_rules,
+        "expires_at":chrono::DateTime::from_timestamp_millis(now.timestamp_millis()+15_000).expect("current timestamp").to_rfc3339_opts(chrono::SecondsFormat::Millis,true),"peers":if epoch.is_some(){wire_peers.iter().filter(|p|p["id"]==input.peer_id).cloned().collect::<Vec<_>>()}else{wire_peers},"sparse":epoch.as_ref().map(|epoch|json!({"protocol":1,"epoch":epoch,"capture_pools":capture_pools})),"dns_suffixes":dns_suffixes,"grants":if epoch.is_some(){Vec::<private_policy::Grant>::new()}else{grants},"exit_routes":exit_routes},"signals":signals,
         "ice_servers":app.config.private_transport.ice(&input.peer_id,now.timestamp_millis()/1000),"relay_routes":app.config.private_transport.relay_routes,
         "direct_relay_url":direct_relay_url,"relay_auth_token":relay_auth_token,"proxy_jobs":proxy_jobs,"proxy_provider":proxy_provider,
-        "control_fallback_urls":fallback,"poll_seconds":1}))).into_response())
+        "sparse_sequence":sparse_request.map(|r|r.sequence),"pair_responses":pair_responses,"control_fallback_urls":fallback,"poll_seconds":1});
+    if epoch.is_none() {
+        response["snapshot"].as_object_mut().expect("snapshot object").remove("sparse");
+        let root=response.as_object_mut().expect("sync object");root.remove("sparse_sequence");root.remove("pair_responses");
+    }
+    Ok(([(header::CACHE_CONTROL,"no-store")],Json(response)).into_response())
 }

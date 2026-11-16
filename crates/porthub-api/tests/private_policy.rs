@@ -136,3 +136,28 @@ fn private_decisions_and_compiled_grants_match_original_and_fail_closed() {
     assert!(policy::compile(machines, &invalid, &groups).is_empty());
     let _: Vec<Grant> = grants;
 }
+
+#[test]
+fn exact_pair_compilation_matches_legacy_selectors_without_unrelated_grants() {
+    let data=vectors();let data=&data["policy"];
+    let machines=data["machines"].as_array().unwrap();let books=data["books"].as_array().unwrap();
+    let groups:HashMap<String,Value>=serde_json::from_value(data["groups"].clone()).unwrap();
+    for source in machines { for destination in machines {
+        let a=source["_id"].as_str().unwrap();let b=destination["_id"].as_str().unwrap();
+        let expected:Vec<_>=policy::compile_for(machines,books,&groups,a).into_iter()
+            .filter(|g| (g.source==a&&g.destination==b)||(g.source==b&&g.destination==a)).collect();
+        assert_eq!(serde_json::to_value(policy::compile_pair(machines,books,&groups,a,b)).unwrap(),
+            serde_json::to_value(expected).unwrap(),"pair {a} -> {b}");
+    }}
+    assert!(policy::compile_pair(machines,books,&groups,"missing","other").is_empty());
+}
+
+#[test]
+fn compiled_selector_index_matches_pair_rules_with_current_group_and_machine_memberships(){
+    let data=vectors();let data=&data["policy"];let machines=data["machines"].as_array().unwrap();let books=data["books"].as_array().unwrap();
+    let groups:HashMap<String,Value>=serde_json::from_value(data["groups"].clone()).unwrap();let index=porthub_api::domain::private_rule_index::Index::compile(books).unwrap_or_else(|_|panic!("valid indexed rule fixture"));
+    assert!(index.weight_bytes()<16*1024*1024);
+    let normalized=|grants:Vec<Grant>|{let mut values=grants.into_iter().map(|g|serde_json::to_string(&g).unwrap()).collect::<Vec<_>>();values.sort();values};
+    for a in machines{for b in machines{let expected=policy::compile_pair(machines,books,&groups,a["_id"].as_str().unwrap(),b["_id"].as_str().unwrap());assert_eq!(normalized(index.pair(a,b,&groups)),normalized(expected));}}
+    assert!(index.pair(&machines[0],&machines[1],&HashMap::new()).is_empty());
+}

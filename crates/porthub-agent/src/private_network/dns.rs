@@ -13,15 +13,27 @@ use std::{
 };
 use tokio::{net::{TcpListener, UdpSocket}, sync::RwLock};
 use tokio_util::sync::CancellationToken;
-#[derive(Default)]
+#[derive(Default,Clone)]
 pub struct Zone {
     suffixes: HashSet<String>,
     records: HashMap<String, Ipv4Addr>,
     rules: Vec<porthub_mesh::dns_policy::Rule>,
     forward_all: bool,
     management_names: HashSet<String>,
+    sparse: Option<super::sparse::Handle>,
+    ttl: u32,
 }
 impl Zone {
+    pub fn set_sparse(&mut self,handle:super::sparse::Handle){self.sparse=Some(handle);}
+    fn missing_private(&self,bytes:&[u8])->Option<String>{
+        let query=Message::from_vec(bytes).ok()?;
+        if bytes.len()>1500||query.metadata.message_type!=MessageType::Query||query.metadata.op_code!=OpCode::Query||query.queries.len()!=1{return None;}
+        let q=&query.queries[0];if q.query_class()!=DNSClass::IN||q.query_type()!=RecordType::A{return None;}
+        let name=q.name().to_ascii().to_ascii_lowercase();
+        if self.records.contains_key(&name)||self.suffixes.contains(&name)||!self.suffixes.iter().any(|s|name.ends_with(&format!(".{s}"))){return None;}
+        self.sparse.as_ref().filter(|h|h.enabled()).map(|_|name)
+    }
+
     pub fn update(&mut self, snapshot: &Snapshot) -> Result<()> {
         let own = snapshot
             .peers
@@ -72,6 +84,7 @@ impl Zone {
                 || suffix.ends_with(&format!(".{domain}"))),
                 "DNS policy conflicts with a private identity zone");
         }
+        self.ttl=5;
         self.rules = rules;
         self.suffixes = suffixes;
         self.records = records;
@@ -121,7 +134,7 @@ impl Zone {
             && q.query_type() == RecordType::A
         {
             if let Some(ip) = self.records.get(&name) {
-                reply.add_answer(Record::from_rdata(q.name().clone(), 5, RData::A(A(*ip))));
+                reply.add_answer(Record::from_rdata(q.name().clone(), self.ttl.max(1), RData::A(A(*ip))));
             }
         }
         reply.to_vec().ok()
@@ -157,6 +170,7 @@ mod tor_coexistence_tests {
             records:HashMap::from([("miro.phub.".into(),"10.203.0.2".parse()?)]),
             rules:vec![Rule {domain:"blocked.test".into(),include_subdomains:false,action:Action::Block},Rule {domain:"gateway.test".into(),include_subdomains:false,action:Action::Block}],
             forward_all:true,management_names:HashSet::from(["gateway.test".into()]),
+            sparse:None,ttl:5,
         };
         let query=|name:&str|->Result<Vec<u8>> {let mut query=Message::query();query.add_query(Query::query(Name::from_ascii(name)?,RecordType::A));Ok(query.to_vec()?)};
         let private=query("miro.phub.")?;assert!(!zone.needs_upstream(&private));
@@ -166,6 +180,20 @@ mod tor_coexistence_tests {
         assert!(zone.needs_upstream(&query("public.test.")?));
         assert!(zone.needs_upstream(&query("gateway.test.")?));
         Ok(())
+    }
+}
+#[cfg(test)]
+mod sparse_dns_tests {
+    use super::*;
+    use hickory_proto::{op::Query,rr::Name};
+    #[tokio::test(start_paused=true)]
+    async fn private_miss_does_not_fall_through_even_when_public_dns_is_forwarded()->Result<()> {
+        let snapshot:Snapshot=serde_json::from_value(serde_json::json!({"workspace":"w","self":"a","revision":1,"expires_at":chrono::Utc::now()+chrono::Duration::seconds(30),"sparse":{"protocol":1,"epoch":"a".repeat(64)},"peers":[{"id":"a","ip":"10.203.0.2","hostname":"a.phub","fingerprint":"local","instance":"local-instance"}],"grants":[]}))?;
+        let(handle,mut control)=super::super::sparse::channel();handle.update_base(&snapshot);let mut zone=Zone::default();zone.set_sparse(handle);zone.update(&snapshot)?;zone.forward_all=true;
+        let mut query=Message::query();query.add_query(Query::query(Name::from_ascii("unknown.phub.")?,RecordType::A));let bytes=query.to_vec()?;
+        assert!(!zone.needs_upstream(&bytes));assert_eq!(zone.missing_private(&bytes).as_deref(),Some("unknown.phub."));
+        let zone=RwLock::new(zone);let response=answer_with_upstream(&zone,&Default::default(),&bytes,"127.0.0.1:0".parse()?,false).await.expect("private timeout must be an explicit local DNS error, never upstream/no response");
+        assert_eq!(Message::from_vec(&response)?.metadata.response_code,ResponseCode::ServFail);assert_eq!(control.batch()?["wanted"][0]["value"],"unknown.phub");Ok(())
     }
 }
 pub struct Server {
@@ -240,7 +268,7 @@ impl Server {
                 },
                 packet=socket.recv_from(&mut buffer)=>{
                 let (n,remote)=packet?; if remote.ip()!=own && !remote.ip().is_loopback() {continue;}
-                if self.zone.read().await.needs_upstream(&buffer[..n]) {
+                if {let zone=self.zone.read().await;zone.needs_upstream(&buffer[..n])||zone.missing_private(&buffer[..n]).is_some()} {
                     if connections.len() >= 32 { continue; }
                     let query = buffer[..n].to_vec();
                     let upstream = upstream.clone();
@@ -262,6 +290,15 @@ impl Server {
 
 async fn answer_with_upstream(zone: &RwLock<Zone>, upstream: &super::dns_upstream::Upstream,
     bytes: &[u8], address: std::net::SocketAddr, tcp: bool) -> Option<Vec<u8>> {
+    let private={let state=zone.read().await;state.missing_private(bytes).zip(state.sparse.clone())};
+    if let Some((name,resolver))=private {
+        let peer=resolver.resolve_name(&name).await;
+        let state=zone.read().await;
+        // Recheck the latest namespace after await. Never send this private query upstream.
+        if state.missing_private(bytes).as_deref()!=Some(name.as_str()){return state.answer(bytes);}
+        if let Some(peer)=peer {if let Some(ttl)=resolver.dns_ttl(peer.ip){let mut answer=state.clone();answer.records.insert(name,peer.ip);answer.ttl=ttl;return answer.answer(bytes);}}
+        let mut answer=Message::from_vec(&state.answer(bytes)?).ok()?;answer.metadata.response_code=ResponseCode::ServFail;return answer.to_vec().ok();
+    }
     {
         let zone = zone.read().await;
         if !zone.needs_upstream(bytes) { return zone.answer(bytes); }

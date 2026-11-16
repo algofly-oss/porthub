@@ -7,3 +7,5 @@ pub mod paths;
 pub mod policy;
 #[cfg(feature = "private-stream")]
 pub mod tcp_stream;
+
+pub mod capture_routes;

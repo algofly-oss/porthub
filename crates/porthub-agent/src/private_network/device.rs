@@ -16,6 +16,7 @@ pub struct Tun {
     pub index: u32,
     pub name: String,
     routes: Mutex<HashSet<Ipv4Addr>>,
+    capture_routes: Mutex<std::collections::BTreeSet<porthub_mesh::lan_routes::Network>>,
 }
 fn safe<T, E>(result: std::result::Result<T, E>, message: &'static str) -> Result<T> {
     result.map_err(|_| anyhow::anyhow!(message))
@@ -94,10 +95,33 @@ impl Tun {
             index,
             name: name.into(),
             routes: Mutex::new(HashSet::new()),
+            capture_routes: Mutex::new(std::collections::BTreeSet::new()),
         };
         tun.update_routes(peers).await?;
         Ok(tun)
     }
+    /// Reconcile only prefixes validated against the current native route inventory.
+    /// A conflicting pool is reported separately; other safe pools remain usable.
+    pub async fn update_capture_routes(&self, pools: &[porthub_mesh::lan_routes::Network]) -> Result<porthub_network::capture_routes::CapturePlan> {
+        use porthub_network::capture_routes::{self, ExistingRoute};
+        let native = safe(self.netlink.get_routes().await, "capture route inventory failed")?;
+        let existing:Vec<_> = native.iter().filter_map(|route| match route.destination() {
+            Some(IpAddr::V4(address)) => Some(ExistingRoute { destination:*address, prefix:route.dst_len(), interface:route.oif() }), _=>None,
+        }).collect();
+        let mut plan=capture_routes::plan(pools,&existing,self.index)?;
+        let wanted:std::collections::BTreeSet<_>=plan.accepted.iter().copied().collect();
+        let mut owned=self.capture_routes.lock().await;
+        for prefix in owned.difference(&wanted).copied().collect::<Vec<_>>() {
+            safe(self.netlink.del_route(Ipv4Route::new(prefix.address(),prefix.prefix()).dev_index(self.index).scope(RouteScope::Link)).await,"capture route removal failed")?;
+            owned.remove(&prefix);
+        }
+        for prefix in wanted.difference(&owned).copied().collect::<Vec<_>>() {
+            if self.netlink.add_route(Ipv4Route::new(prefix.address(),prefix.prefix()).dev_index(self.index).scope(RouteScope::Link)).await.is_ok() { owned.insert(prefix); }
+            else {plan.accepted.retain(|p|*p!=prefix);plan.conflicting.push(prefix);}
+        }
+        Ok(plan)
+    }
+
     pub async fn update_routes(&self, peers: &[Ipv4Addr]) -> Result<()> {
         let wanted: HashSet<_> = peers.iter().copied().collect();
         let mut current = self.routes.lock().await;

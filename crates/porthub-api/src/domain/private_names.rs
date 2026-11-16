@@ -33,6 +33,7 @@ pub fn label(value: Option<&Bson>) -> String {
     }
 }
 
+#[derive(Clone)]
 pub struct Names {
     pub primary: HashMap<String, String>,
     pub aliases: HashMap<String, Vec<String>>,

@@ -14,3 +14,7 @@ pub mod private_sync;
 pub mod telegram;
 pub mod traffic_routes;
 pub mod workspaces;
+
+pub mod private_pairs;
+
+pub mod private_rule_index;

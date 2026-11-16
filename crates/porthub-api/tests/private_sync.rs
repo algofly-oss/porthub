@@ -309,3 +309,110 @@ async fn cross_pool_growth_keeps_legacy_sync_identity_acl_and_peer_ips() -> Resu
     case.db.drop().await?;
     result
 }
+
+#[cfg(feature="private-sparse")]
+#[tokio::test]
+#[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn sparse_4097_broad_peers_return_bounded_pair_authority_and_legacy_fails_actionably()->Result<()> {
+    let case=Case::new(Config::default()).await?;
+    let result=async {
+        let (owner,_)=case.user("sparse-owner@test.invalid","user").await?;
+        let token="fixture-token-0123456789abcdef0123456789";
+        let mut machines=Vec::new();let mut peers=Vec::new();
+        for i in 0..4097u32 {
+            let mid=ObjectId::new();let ip=std::net::Ipv4Addr::from(u32::from(std::net::Ipv4Addr::new(10,203,0,1))+i);
+            machines.push(doc!{"_id":mid,"user_id":owner,"name":format!("Sparse{i}")});
+            peers.push(doc!{"_id":format!("sparse-{i}"),"workspace_id":owner,"machine_id":mid,"owner_id":owner,"ip":ip.to_string(),"enabled":true,"credential_hash":token_digest(token)});
+        }
+        case.app.collection("machines").insert_many(machines).await?;case.app.collection("private_peers").insert_many(peers).await?;
+        case.app.collection("private_peers").create_index(mongodb::IndexModel::builder().keys(doc!{"workspace_id":1,"ip":1}).options(mongodb::options::IndexOptions::builder().unique(true).build()).build()).await?;
+        let group=ObjectId::new();case.app.collection("machine_groups").insert_one(doc!{"_id":group,"user_id":owner}).await?;
+        let book=ObjectId::new();case.app.collection("access_rulebooks").insert_one(doc!{"_id":book,"user_id":owner,"group_id":group.to_hex(),"revision":1_i64,"enabled":true,"updated_at":DateTime::now(),"rules":[{"id":"broad","name":"Broad private fixture","sources":[{"kind":"all","id":"machines"}],"destinations":[{"kind":"all","id":"machines"}],"protocol":"any","ports":"","bidirectional":true,"enabled":true}]}).await?;
+        case.app.collection("private_networks").insert_one(doc!{"_id":owner.to_hex(),"cidr":"10.203.0.0/19","dns_suffix":"phub"}).await?;
+        let make=|id:&str,instance:&str,sequence:u64|{let fp=if id=="sparse-0"{"AB"}else if id=="sparse-4096"{"CD"}else{"EF"};let mut body=sync(id,&fingerprint(fp),instance);body["sparse"]=json!({"protocol":1,"sequence":sequence,"wanted":[]});body};
+        let mut a=make("sparse-0","instance-00000000",1);let b=make("sparse-4096","instance-11111111",1);
+        let (_,_,first)=case.call("POST","/api/access/private/sync","",a.clone(),&[]).await?;
+        ensure!(first["snapshot"]["peers"].as_array().is_some_and(|p|p.len()==1),"sparse base was not bounded");
+        case.status("POST","/api/access/private/sync","",b,StatusCode::OK).await?;
+        a["sparse"]["sequence"]=json!(2);a["sparse"]["wanted"]=json!([{"kind":"ip","value":"10.203.16.1"}]);
+        case.db.run_command(doc!{"profile":2}).await?;
+        let measured_start=DateTime::now();
+        let measured=case.call("POST","/api/access/private/sync","",a.clone(),&[]).await;
+        case.db.run_command(doc!{"profile":0}).await?;
+        let (status,_,reply)=measured?;ensure!(status==StatusCode::OK,"sparse pair request failed");
+        let broad_cost=sparse_profile_cost(&case,measured_start).await?;
+        ensure!(broad_cost["docs_examined"].as_i64().unwrap_or(i64::MAX)<128,"broad sparse lookup scanned registration population: {broad_cost}");
+        println!("sparse4097_broad_cost={broad_cost}");
+        ensure!(reply["pair_responses"][0]["status"]=="allowed","sparse pair was not allowed");
+        let base:porthub_agent::private_network::policy::Snapshot=serde_json::from_value(reply["snapshot"].clone())?;
+        let pair:porthub_network::policy::PairLease=serde_json::from_value(reply["pair_responses"][0]["lease"].clone())?;
+        let mut engine=porthub_network::policy::Engine::default();engine.apply(base)?;engine.install_pair(pair)?;
+        ensure!(engine.pair_count()==1 && serde_json::to_vec(&reply)?.len()<16384,"pair wire exceeded fixture byte budget");
+        // Representative large explicit group: members are per-machine group_ids, not a
+        // huge list fetched/scanned for every caller. Book selectors reference one group.
+        case.app.collection("machines").update_many(doc!{"user_id":owner},doc!{"$set":{"group_ids":[group]}}).await?;
+        let mut member_ids=(0..4096).map(|_|ObjectId::new()).collect::<Vec<_>>();member_ids.push(owner);
+        case.app.collection("users").insert_many(member_ids.iter().take(4096).map(|id|doc!{"_id":id,"role":"user","name":"private fixture member"})).await?;
+        case.app.collection("workspace_members").insert_many(member_ids.iter().take(4096).map(|id|doc!{"_id":ObjectId::new(),"workspace_id":owner,"user_id":id,"role":"member"})).await?;
+        case.app.collection("machine_groups").update_one(doc!{"_id":group},doc!{"$set":{"user_ids":&member_ids}}).await?;
+        case.app.collection("access_rulebooks").update_one(doc!{"_id":book},doc!{"$set":{"rules":[{"id":"group","name":"Explicit group fixture","sources":[{"kind":"group","id":group.to_hex()}],"destinations":[{"kind":"group","id":group.to_hex()}],"protocol":"tcp","ports":"443","bidirectional":true,"enabled":true}]},"$inc":{"revision":1_i64}}).await?;
+        // Warm each local authority and immutable rule index once after the real policy edit.
+        let b=make("sparse-4096","instance-11111111",2);case.status("POST","/api/access/private/sync","",b.clone(),StatusCode::OK).await?;
+        a["sparse"]["sequence"]=json!(3);case.status("POST","/api/access/private/sync","",a.clone(),StatusCode::OK).await?;
+        case.db.run_command(doc!{"profile":2}).await?;let measured_start=DateTime::now();
+        a["sparse"]["sequence"]=json!(4);let measured=case.call("POST","/api/access/private/sync","",a.clone(),&[]).await;case.db.run_command(doc!{"profile":0}).await?;
+        let (status,_,group_reply)=measured?;ensure!(status==StatusCode::OK&&group_reply["pair_responses"][0]["status"]=="allowed","explicit group sparse lease failed");
+        let group_cost=sparse_profile_cost(&case,measured_start).await?;ensure!(group_cost["docs_examined"].as_i64().unwrap_or(i64::MAX)<128,"explicit membership lookup scanned population: {group_cost}");
+        ensure!(group_cost["collections"]["machine_groups"]["docs_examined"]==0 && group_cost["collections"]["access_rulebooks"]["docs_examined"]==0,"policy metadata fetch was not covered: {group_cost}");
+        println!("sparse4097_explicit_group_cost={group_cost}");
+        let legacy=sync("sparse-1",&fingerprint("CD"),"instance-22222222");
+        let (status,_,error)=case.call("POST","/api/access/private/sync","",legacy,&[]).await?;ensure!(status==StatusCode::BAD_REQUEST && error.to_string().contains("upgrade"),"legacy capacity failure not actionable (status {status})");
+        // A target-only user-group removal changes B's authority, not A's base epoch.
+        // The exact authenticated denial must still retire A's installed pair immediately.
+        let target=case.app.collection("private_peers").find_one(doc!{"_id":"sparse-4096"}).await?.unwrap();
+        let target_machine=target.get_object_id("machine_id")?;let member=member_ids[0];
+        let source=case.app.collection("private_peers").find_one(doc!{"_id":"sparse-0"}).await?.unwrap();
+        case.app.collection("machines").update_many(doc!{"_id":{"$in":[target_machine,source.get_object_id("machine_id")?]}},doc!{"$unset":{"group_ids":"","group_id":""}}).await?;
+        case.app.collection("machines").update_one(doc!{"_id":target_machine},doc!{"$set":{"user_id":member}}).await?;
+        case.app.collection("private_peers").update_one(doc!{"_id":"sparse-4096"},doc!{"$set":{"owner_id":member}}).await?;
+        case.status("POST","/api/access/private/sync","",make("sparse-4096","instance-11111111",3),StatusCode::OK).await?;
+        case.status("POST","/api/access/private/sync","",make("sparse-2","instance-33333333",1),StatusCode::OK).await?;
+        a["sparse"]["wanted"].as_array_mut().unwrap().push(json!({"kind":"ip","value":"10.203.0.3"}));
+        a["sparse"]["sequence"]=json!(5);let (_,_,member_reply)=case.call("POST","/api/access/private/sync","",a.clone(),&[]).await?;
+        ensure!(member_reply["pair_responses"][0]["status"]=="allowed","cross-owner group member was not allowed");
+        let authority:porthub_network::policy::Snapshot=serde_json::from_value(member_reply["snapshot"].clone())?;
+        let lease:porthub_network::policy::PairLease=serde_json::from_value(member_reply["pair_responses"][0]["lease"].clone())?;
+        let (handle,_)=porthub_agent::private_network::sparse::channel();handle.update_base(&authority);
+        let mut policy=porthub_network::policy::Engine::default();policy.apply(authority)?;policy.install_pair(lease.clone())?;
+        handle.installed(&porthub_network::policy::Lookup{kind:"ip".into(),value:"10.203.16.1".into()},lease);
+        let other:porthub_network::policy::PairLease=serde_json::from_value(member_reply["pair_responses"][1]["lease"].clone())?;
+        policy.install_pair(other.clone())?;handle.installed(&porthub_network::policy::Lookup{kind:"ip".into(),value:"10.203.0.3".into()},other);
+        case.app.collection("machine_groups").update_one(doc!{"_id":group},doc!{"$pull":{"user_ids":member}}).await?;
+        a["sparse"]["sequence"]=json!(6);let (_,_,denied)=case.call("POST","/api/access/private/sync","",a.clone(),&[]).await?;
+        ensure!(denied["snapshot"]["sparse"]["epoch"]==member_reply["snapshot"]["sparse"]["epoch"],"unrelated local authority unexpectedly changed");
+        let denial:porthub_network::policy::PairResponse=serde_json::from_value(denied["pair_responses"][0].clone())?;
+        ensure!(denial.status=="unavailable"&&porthub_agent::private_network::sparse::apply_denial(&handle,&mut policy,&denial).is_some(),"fresh target-member denial did not retire its own pair");
+        ensure!(policy.valid_lease()&&policy.pair_peer("sparse-4096").is_none()&&policy.pair_peer("sparse-2").is_some(),"target denial incorrectly revoked base or retained pair");
+        // Membership denial of the SOURCE is a whole-enrollment rejection, not a pair miss.
+        let (status,_,_)=case.call("POST","/api/access/private/sync","",b.clone(),&[]).await?;
+        ensure!(status==StatusCode::OK,"current member source could not synchronize");
+        case.app.collection("workspace_members").delete_one(doc!{"workspace_id":owner,"user_id":member}).await?;
+        let (status,_,_)=case.call("POST","/api/access/private/sync","",b.clone(),&[]).await?;
+        ensure!(status==StatusCode::FORBIDDEN,"removed source membership was not rejected authoritatively");
+        case.app.collection("access_rulebooks").update_one(doc!{"_id":book},doc!{"$set":{"enabled":false}}).await?;
+        a["sparse"]["sequence"]=json!(7);let (_,_,revoked)=case.call("POST","/api/access/private/sync","",a,&[]).await?;
+        ensure!(revoked["snapshot"]["sparse"]["epoch"]!=denied["snapshot"]["sparse"]["epoch"],"policy generation did not change");
+        ensure!(revoked["pair_responses"][0]["status"]=="unavailable"&&revoked["pair_responses"][1]["status"]=="unavailable","revoked pair remained allowed");
+        Ok::<_,anyhow::Error>(())
+    }.await;let _=case.db.drop().await;result
+}
+
+#[cfg(feature="private-sparse")]
+async fn sparse_profile_cost(case:&Case,start:DateTime)->Result<Value>{
+ use futures_util::TryStreamExt;
+ let rows:Vec<mongodb::bson::Document>=case.db.collection("system.profile").find(doc!{"ts":{"$gte":start}}).projection(doc!{"ns":1,"docsExamined":1,"keysExamined":1,"responseLength":1,"nreturned":1}).limit(1024).await?.try_collect().await?;
+ let mut docs=0i64;let mut keys=0i64;let mut bytes=0i64;let mut calls=0usize;let mut collections=std::collections::BTreeMap::<String,Value>::new();
+ for row in rows{let ns=row.get_str("ns").unwrap_or_default();if ns.ends_with(".system.profile"){continue;}let read=|key|row.get_i64(key).ok().or_else(||row.get_i32(key).ok().map(i64::from)).unwrap_or(0);docs+=read("docsExamined");keys+=read("keysExamined");bytes+=read("responseLength");calls+=1;let collection=collections.entry(ns.split('.').skip(1).collect::<Vec<_>>().join(".")).or_insert(json!({"commands":0,"docs_examined":0,"keys_examined":0,"bytes":0}));
+  for (key,delta) in [("commands",1),("docs_examined",read("docsExamined")),("keys_examined",read("keysExamined")),("bytes",read("responseLength"))]{collection[key]=json!(collection[key].as_i64().unwrap()+delta);}}
+ Ok(json!({"registered":4097,"commands":calls,"docs_examined":docs,"keys_examined":keys,"response_bytes":bytes,"collections":collections}))
+}

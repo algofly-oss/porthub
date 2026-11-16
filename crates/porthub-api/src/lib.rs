@@ -1,3 +1,4 @@
+pub mod private_sparse;
 pub mod access_inventory;
 pub mod account_delete;
 pub mod application_proxy;
@@ -91,6 +92,7 @@ pub struct App {
     pub firewall_changes: tokio::sync::Notify,
     pub deletion_changes: tokio::sync::Notify,
     pub private_network_lock: tokio::sync::Mutex<()>,
+    pub private_sparse: private_sparse::State,
     pub connection_lock: tokio::sync::Mutex<()>,
     pub db: Database,
     pub http: reqwest::Client,
@@ -164,6 +166,7 @@ impl App {
             deletion_changes: tokio::sync::Notify::new(),
             firewall: firewall::Client::new(&config).expect("validated firewall configuration"),
             private_network_lock: tokio::sync::Mutex::new(()),
+            private_sparse: Default::default(),
             connection_lock: tokio::sync::Mutex::new(()),
             gateway_config_lock: tokio::sync::Mutex::new(()),
             traffic_route_lock: tokio::sync::Mutex::new(()),

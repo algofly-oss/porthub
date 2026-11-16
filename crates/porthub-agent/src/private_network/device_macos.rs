@@ -17,6 +17,7 @@ pub struct Tun {
     pub name: String,
     own: Ipv4Addr,
     routes: Mutex<HashSet<Ipv4Addr>>,
+    capture_routes: Mutex<std::collections::BTreeSet<porthub_mesh::lan_routes::Network>>,
 }
 
 fn conflicts_with_route(address: Ipv4Addr, route: &Route) -> bool {
@@ -61,9 +62,28 @@ impl Tun {
             name,
             own,
             routes: Mutex::new(HashSet::new()),
+            capture_routes: Mutex::new(std::collections::BTreeSet::new()),
         };
         tun.update_routes(peers).await?;
         Ok(tun)
+    }
+
+    /// Prefix capture does not authorize packets. Preserve foreign routes and isolate pool conflicts.
+    pub async fn update_capture_routes(&self,pools:&[porthub_mesh::lan_routes::Network])->Result<porthub_network::capture_routes::CapturePlan>{
+        use porthub_network::capture_routes::{self,ExistingRoute};
+        let mut manager=AsyncRouteManager::new().context("cannot open capture route manager")?;
+        let native=manager.list().await.context("cannot inspect capture routes")?;
+        let existing:Vec<_>=native.iter().filter_map(|r|match r.destination(){IpAddr::V4(address)=>Some(ExistingRoute{destination:address,prefix:r.prefix(),interface:r.if_index()}),_=>None}).collect();
+        let mut plan=capture_routes::plan(pools,&existing,self.index)?;
+        let wanted:std::collections::BTreeSet<_>=plan.accepted.iter().copied().collect();let mut owned=self.capture_routes.lock().await;
+        for prefix in owned.difference(&wanted).copied().collect::<Vec<_>>(){
+            manager.delete(&Route::new(IpAddr::V4(prefix.address()),prefix.prefix()).with_if_index(self.index)).await.context("cannot remove owned capture route")?;owned.remove(&prefix);
+        }
+        for prefix in wanted.difference(&owned).copied().collect::<Vec<_>>(){
+            if manager.add(&Route::new(IpAddr::V4(prefix.address()),prefix.prefix()).with_if_index(self.index)).await.is_ok(){owned.insert(prefix);}
+            else{plan.accepted.retain(|p|*p!=prefix);plan.conflicting.push(prefix);}
+        }
+        Ok(plan)
     }
 
     pub async fn update_routes(&self, peers: &[Ipv4Addr]) -> Result<()> {
@@ -173,12 +193,17 @@ mod tests {
 impl Drop for Tun {
     fn drop(&mut self) {
         let routes = self.routes.get_mut();
-        if routes.is_empty() {
+        let captures=self.capture_routes.get_mut();
+        if routes.is_empty() && captures.is_empty() {
             return;
         }
         let Ok(mut manager) = route_manager::RouteManager::new() else {
             return;
         };
+        for prefix in std::mem::take(captures) {
+            let route=Route::new(IpAddr::V4(prefix.address()),prefix.prefix()).with_if_index(self.index);
+            if manager.delete(&route).is_err(){tracing::warn!("could not remove owned capture route during shutdown");}
+        }
         for address in routes.drain() {
             let route = Route::new(IpAddr::V4(address), 32).with_if_index(self.index);
             if manager.delete(&route).is_err() {

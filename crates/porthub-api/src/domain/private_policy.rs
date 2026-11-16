@@ -423,6 +423,20 @@ pub fn compile_for(
 ) -> Vec<Grant> {
     compile_inner(machines, books, groups, Some(machine))
 }
+/// Compile only one authenticated identity pair using the same selector semantics as legacy snapshots.
+/// Filtering before expansion prevents broad workspace rules from materializing a full mesh.
+pub fn compile_pair(
+    machines: &[Value], books: &[Value], groups: &HashMap<String, Value>,
+    source: &str, destination: &str,
+) -> Vec<Grant> {
+    if source == destination { return Vec::new(); }
+    let selected: Vec<_> = machines.iter()
+        .filter(|m| { let id=field(m, "_id"); id==source || id==destination })
+        .cloned().collect();
+    if selected.len()!=2 { return Vec::new(); }
+    compile_inner(&selected, books, groups, Some(source))
+}
+
 fn compile_inner(
     machines: &[Value],
     books: &[Value],

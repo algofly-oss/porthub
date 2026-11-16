@@ -9,6 +9,8 @@ name = "porthub"
 path = "src/main.rs"
 
 [features]
+# Unpublished sparse-network prototype: not in default or release feature sets.
+private-sparse = []
 default = ["private-stream", "local-tor", "terminal-direct"]
 local-tor = ["private-stream", "dep:porthub-egress"]
 netns-tests = ["porthub-network/netns-tests"]

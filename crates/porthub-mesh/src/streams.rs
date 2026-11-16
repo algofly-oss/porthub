@@ -354,6 +354,7 @@ pub struct Endpoint {
     peers: Peers,
     connections: Mutex<HashMap<Ipv4Addr, Vec<quinn::Connection>>>,
     next_connection: AtomicUsize,
+    peer_budget: AtomicUsize,
     protocols: Vec<Vec<u8>>,
 }
 impl Endpoint {
@@ -406,6 +407,7 @@ impl Endpoint {
                 peers: peers.clone(),
                 connections: Default::default(),
                 next_connection: AtomicUsize::new(0),
+                peer_budget: AtomicUsize::new(MAX_CONNECTIONS),
                 protocols,
             },
             PacketIo {
@@ -414,6 +416,18 @@ impl Endpoint {
                 peers,
             },
         ))
+    }
+    /// A sparse identity cache is not a request to eagerly allocate sockets for every entry.
+    /// This lowers admission only; it never increases the existing endpoint bounds.
+    pub fn set_peer_connection_budget(&self,limit:usize)->Result<()> {
+        ensure!((1..=MAX_CONNECTIONS).contains(&limit),"invalid private stream peer budget");
+        self.peer_budget.store(limit,Ordering::Relaxed);Ok(())
+    }
+    pub fn capacity_for(&self,peer:&Peer)->bool {
+        let connections=self.connections.lock().unwrap_or_else(|p|p.into_inner());
+        let active=|connections:&Vec<quinn::Connection>|connections.iter().any(|c|c.close_reason().is_none());
+        connections.get(&peer.ip).is_some_and(active)
+            || connections.values().filter(|c|active(c)).count()<self.peer_budget.load(Ordering::Relaxed)
     }
     /// Pins originate only from an authenticated private-policy snapshot.
     /// Port grants are checked separately when a TCP stream is opened.
@@ -495,6 +509,9 @@ impl Endpoint {
             peer_connections.retain(|connection| connection.close_reason().is_none());
             !peer_connections.is_empty()
         });
+        if !connections.contains_key(&ip) && connections.len()>=self.peer_budget.load(Ordering::Relaxed) {
+            connection.close(2u8.into(),b"private stream peer budget reached");anyhow::bail!("private stream peer budget reached");
+        }
         let connection_count: usize = connections.values().map(Vec::len).sum();
         ensure!(
             connection_count < MAX_CONNECTIONS * MAX_CONNECTIONS_PER_PEER,
@@ -557,6 +574,7 @@ impl Endpoint {
     }
     pub async fn connect(&self, expected: &Peer) -> Result<quinn::Connection> {
         let ip = expected.ip;
+        ensure!(self.capacity_for(expected),"private stream peer budget reached");
         ensure!(
             self.peers
                 .read()
