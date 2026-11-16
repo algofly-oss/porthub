@@ -72,6 +72,7 @@ def main():
                 print(f'Verify terminal dashboard: {browser}', flush=True)
                 run(preview, ['node', str(ROOT / 'ui/tests/terminal-dashboard.cjs')])
                 run(preview, ['node', str(ROOT / 'ui/tests/ranking-resize-browser.cjs')])
+                run(preview, ['node', str(ROOT / 'ui/tests/ranking-labels-browser.cjs')])
                 run(preview, ['node', str(ROOT / 'ui/tests/terminal-connectivity.cjs')])
                 run(preview, ['node', str(ROOT / 'ui/tests/proxy-activity.cjs')])
                 for transport in transports:
