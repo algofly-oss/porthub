@@ -116,35 +116,194 @@ pub(crate) struct Opened {
     side: Side,
 }
 impl Opened {
+    pub(crate) fn source_key(&self) -> super::carrier::Key {
+        super::carrier::Key::new(
+            self.context.parameters().0,
+            if self.side == Side::Initiator { 0 } else { 1 },
+            super::carrier::Role::Source,
+        )
+        .expect("validated flow key")
+    }
+    pub(crate) fn receiver_key(&self) -> super::carrier::Key {
+        super::carrier::Key::new(
+            self.context.parameters().0,
+            if self.side == Side::Initiator { 1 } else { 0 },
+            super::carrier::Role::Receiver,
+        )
+        .expect("validated flow key")
+    }
     pub(crate) fn context(&self) -> Context {
         self.context.clone()
     }
-    pub(crate) async fn accept_source(
+    pub(crate) async fn prepare_source(
         &self,
         handle: &porthub_network::tcp_stream::tagged::Handle,
         syn: PendingSyn,
-    ) -> Result<porthub_network::tcp_stream::tagged::Connection> {
+    ) -> Result<NativeOpening> {
         ensure!(
             self.side == Side::Initiator,
             "acceptor cannot own source SYN"
         );
-        syn.accept(&self.context, handle, self.opening.clone())
-            .await
+        let pending = syn
+            .prepare(&self.context, handle, self.opening.clone())
+            .await?;
+        Ok(NativeOpening {
+            pending,
+            context: self.context.clone(),
+            side: self.side,
+        })
     }
-    pub(crate) async fn connect_destination(
+    pub(crate) async fn prepare_destination(
         &self,
         handle: &porthub_network::tcp_stream::tagged::Handle,
-    ) -> Result<porthub_network::tcp_stream::tagged::Connection> {
+    ) -> Result<NativeOpening> {
         ensure!(
             self.side == Side::Acceptor,
             "initiator cannot create destination native leg"
         );
-        // Destination initiates the OS application leg only AFTER reciprocal
-        // flow-open. The native connection's outgoing tuple is initiator→service.
         let tuple = self.context.source_native_tuple(Side::Acceptor);
-        self.opening
-            .during(handle.connect(tuple, self.opening.clone()))
+        let pending = self
+            .opening
+            .during(handle.prepare_connect(tuple, self.opening.clone()))
+            .await??;
+        Ok(NativeOpening {
+            pending,
+            context: self.context.clone(),
+            side: self.side,
+        })
+    }
+}
+/// Runtime ingress accepts bytes, never a caller-supplied opaque grant. The
+/// current snapshot is prepared by control updates, not compiled per packet.
+#[derive(Clone)]
+pub(crate) struct NativeIngress {
+    native: porthub_network::tcp_stream::tagged::Ingress,
+    context: Context,
+    side: Side,
+    current: super::source::Current,
+}
+impl NativeIngress {
+    pub(crate) async fn publish(
+        &self,
+        packet: porthub_network::tcp_stream::tagged::Packet,
+        events: &mpsc::Sender<crate::private_network::controller::Event>,
+    ) -> Result<()> {
+        ensure!(
+            self.native.owns_packet(&packet),
+            "native output belongs to another stack/connection generation"
+        );
+        let local = (self.current)()
+            .ok_or_else(|| anyhow::anyhow!("native output current authority missing"))?;
+        let original = self.context.authorize(&local, self.side)?;
+        let context = self.context.clone();
+        let side = self.side;
+        let current = self.current.clone();
+        let current = original
+            .constrain(move || current().is_some_and(|now| context.authorize(&now, side).is_ok()));
+        let packet = packet.intersect(current);
+        ensure!(
+            packet.remaining().is_some(),
+            "native output original lifetime unknown"
+        );
+        let peer = self.context.remote_peer(self.side).id;
+        let queued = packet.clone();
+        packet
+            .deliver(|_| async move {
+                events
+                    .send(
+                        crate::private_network::controller::Event::GuardedStreamLocal {
+                            peer,
+                            packet: queued,
+                        },
+                    )
+                    .await
+                    .map_err(|_| anyhow::anyhow!("native event owner stopped"))
+            })
+            .await
+    }
+    pub(crate) fn input(&self, bytes: Bytes) -> Result<()> {
+        let local = (self.current)()
+            .ok_or_else(|| anyhow::anyhow!("native ingress authority unavailable"))?;
+        let original = self.context.authorize(&local, self.side)?;
+        let current = self.current.clone();
+        let context = self.context.clone();
+        let side = self.side;
+        let permit = original
+            .constrain(move || current().is_some_and(|now| context.authorize(&now, side).is_ok()));
+        ensure!(
+            permit.remaining().is_some(),
+            "native ingress original unknown/expired"
+        );
+        self.native.input(bytes, permit)
+    }
+}
+/// The pending/established owner is minted ONLY by reciprocal flow-open. A
+/// same-tuple connection from another stack cannot be substituted by callers.
+pub(crate) struct NativeOpening {
+    pending: porthub_network::tcp_stream::tagged::PendingConnection,
+    context: Context,
+    side: Side,
+}
+#[derive(Clone)]
+pub(crate) struct NativeOwner {
+    native: Arc<porthub_network::tcp_stream::tagged::Connection>,
+    context: Context,
+    side: Side,
+}
+impl NativeOpening {
+    pub(crate) fn ingress(&self, current: super::source::Current) -> Result<NativeIngress> {
+        let local =
+            (current)().ok_or_else(|| anyhow::anyhow!("opening ingress authority missing"))?;
+        self.context.authorize(&local, self.side)?;
+        Ok(NativeIngress {
+            native: self.pending.ingress(),
+            context: self.context.clone(),
+            side: self.side,
+            current,
+        })
+    }
+    pub(crate) async fn established(self) -> Result<NativeOwner> {
+        Ok(NativeOwner {
+            native: Arc::new(self.pending.established().await?),
+            context: self.context,
+            side: self.side,
+        })
+    }
+}
+impl NativeOwner {
+    pub(crate) async fn renew_control(&self, current: super::source::Current) -> Result<()> {
+        let local =
+            (current)().ok_or_else(|| anyhow::anyhow!("native control authority unavailable"))?;
+        let at_issue = self.context.authorize(&local, self.side)?;
+        let context = self.context.clone();
+        let side = self.side;
+        let permit = at_issue
+            .constrain(move || current().is_some_and(|now| context.authorize(&now, side).is_ok()));
+        // This only refreshes established native control. Tagged payload/FIN
+        // spans and prepared packets keep their own immutable original grants.
+        permit
+            .during(self.native.renew_control(permit.clone()))
             .await?
+    }
+    pub(super) fn parts(
+        &self,
+    ) -> (
+        Context,
+        Side,
+        Arc<porthub_network::tcp_stream::tagged::Connection>,
+    ) {
+        (self.context.clone(), self.side, self.native.clone())
+    }
+    pub(crate) fn ingress(&self, current: super::source::Current) -> Result<NativeIngress> {
+        let local =
+            (current)().ok_or_else(|| anyhow::anyhow!("native ingress authority missing"))?;
+        self.context.authorize(&local, self.side)?;
+        Ok(NativeIngress {
+            native: self.native.ingress(),
+            context: self.context.clone(),
+            side: self.side,
+            current,
+        })
     }
 }
 async fn initiate_inner(
@@ -246,6 +405,7 @@ async fn accept_inner(
     side: Side,
     expected: Option<&Context>,
     origin: Option<SendPermit>,
+    channel: Option<super::carrier::Key>,
 ) -> Result<Opened> {
     local.bind_transport(
         connection.peer(),
@@ -286,6 +446,12 @@ async fn accept_inner(
                 "foreign/noncanonical flow-open request"
             );
             let nonce = request[36..52].try_into()?;
+            ensure!(
+                channel.is_none_or(|key| key.role() == super::carrier::Role::Receiver
+                    && key.nonce() == nonce
+                    && key.local_side() == side),
+                "flow-open carrier nonce/direction/role mismatch"
+            );
             let source = u16::from_be_bytes(request[52..54].try_into()?);
             let destination = u16::from_be_bytes(request[54..56].try_into()?);
             let context = Context::from_local(
@@ -376,12 +542,34 @@ pub(crate) async fn initiate_native(
     )
     .await
 }
+#[cfg(test)]
 pub(crate) async fn accept(
     connection: &mut CreditedReceiverConnection,
     gate: &Gate,
     local: &LocalAuthority,
 ) -> Result<Opened> {
-    accept_inner(connection, gate, local, Side::Acceptor, None, None).await
+    accept_inner(connection, gate, local, Side::Acceptor, None, None, None).await
+}
+pub(crate) async fn accept_request(
+    connection: &mut CreditedReceiverConnection,
+    gate: &Gate,
+    local: &LocalAuthority,
+    channel: super::carrier::Key,
+) -> Result<Opened> {
+    ensure!(
+        channel.direction() == 0 && channel.role() == super::carrier::Role::Receiver,
+        "not an initiating receiver channel"
+    );
+    accept_inner(
+        connection,
+        gate,
+        local,
+        Side::Acceptor,
+        None,
+        None,
+        Some(channel),
+    )
+    .await
 }
 pub(crate) async fn initiate_response(
     connection: &BoundedSourceConnection,
@@ -412,10 +600,15 @@ pub(crate) async fn accept_response(
     gate: &Gate,
     local: &LocalAuthority,
     opened: &Opened,
+    channel: super::carrier::Key,
 ) -> Result<Opened> {
     ensure!(
         opened.side == Side::Initiator,
         "only initiating flow can accept response binding"
+    );
+    ensure!(
+        channel == opened.receiver_key(),
+        "response receiver channel does not own original flow"
     );
     accept_inner(
         connection,
@@ -424,6 +617,7 @@ pub(crate) async fn accept_response(
         Side::Initiator,
         Some(&opened.context),
         Some(opened.opening.clone()),
+        Some(channel),
     )
     .await
 }
@@ -468,7 +662,7 @@ pub(super) mod tests {
         let view = LocalAuthority::capture(&h, "w", &own.id, &remote.id)?;
         Ok((h, view))
     }
-    async fn exercise(port: u16) -> Result<()> {
+    async fn exercise(port: u16, bad_channel: bool) -> Result<()> {
         let a = Identity::new()?;
         let b = Identity::new()?;
         let ap = Peer {
@@ -507,14 +701,19 @@ pub(super) mod tests {
             let mut server = server?;
             let (_ha, a) = local(&ap, &bp, "a")?;
             let (_hb, b) = local(&bp, &ap, "b")?;
+            let channel = super::super::carrier::Key::new(
+                if bad_channel { [8; 16] } else { [9; 16] },
+                0,
+                super::super::carrier::Role::Receiver,
+            )?;
             let (left, right) = timeout(Duration::from_secs(3), async {
                 tokio::join!(
                     initiate(&client, &ga, &a, [9; 16], 42000, port),
-                    accept(&mut server, &gb, &b)
+                    accept_request(&mut server, &gb, &b, channel)
                 )
             })
             .await?;
-            if port == 443 {
+            if port == 443 && !bad_channel {
                 let l = left?;
                 let r = right?;
                 ensure!(
@@ -552,11 +751,16 @@ pub(super) mod tests {
     #[tokio::test]
     async fn actual_pinned_tls_reciprocal_open_binds_distinct_local_epochs_and_original_deadlines(
     ) -> Result<()> {
-        exercise(443).await
+        exercise(443, false).await
     }
     #[tokio::test]
     async fn actual_pinned_tls_denied_service_never_publishes_opening_authority() -> Result<()> {
-        exercise(80).await
+        exercise(80, false).await
+    }
+    #[tokio::test]
+    async fn actual_pinned_tls_nonce_mismatched_dispatch_channel_cannot_open_native_authority(
+    ) -> Result<()> {
+        exercise(443, true).await
     }
 }
 

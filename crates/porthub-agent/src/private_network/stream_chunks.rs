@@ -23,6 +23,7 @@ pub(crate) mod receiver;
 pub(crate) mod flow_authority;
 pub(crate) mod source;
 pub(crate) mod flow_open;
+pub(crate) mod carrier;
 pub(crate) mod duplex;
 const CHUNK: usize = 8192;
 const HEADER: usize = 96;

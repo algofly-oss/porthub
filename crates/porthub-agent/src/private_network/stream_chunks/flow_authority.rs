@@ -157,12 +157,12 @@ impl PendingSyn {
         );
         Ok(permit)
     }
-    pub(super) async fn accept(
+    pub(super) async fn prepare(
         self,
         context: &Context,
         handle: &tcp_stream::tagged::Handle,
         opening: SendPermit,
-    ) -> Result<tcp_stream::tagged::Connection> {
+    ) -> Result<tcp_stream::tagged::PendingConnection> {
         ensure!(
             context.parameters() == self.parameters()
                 && context.source_native_tuple(Side::Initiator) == self.flow.reverse(),
@@ -171,7 +171,7 @@ impl PendingSyn {
         let original = context.authorize(&self.local, Side::Initiator)?;
         let permit = SendPermit::combine(vec![original, opening]);
         permit
-            .during(handle.accept_syn(self.bytes, permit.clone()))
+            .during(handle.prepare_syn(self.bytes, permit.clone()))
             .await?
     }
 }
@@ -253,6 +253,12 @@ impl Context {
         };
         context.authorize(local, side)?;
         Ok(context)
+    }
+    pub(super) fn remote_peer(&self, side: Side) -> Peer {
+        match side {
+            Side::Initiator => self.acceptor.clone(),
+            Side::Acceptor => self.initiator.clone(),
+        }
     }
     pub(super) fn parameters(&self) -> ([u8; 16], u16, u16) {
         (self.nonce, self.source_port, self.destination_port)

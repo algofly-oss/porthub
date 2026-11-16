@@ -55,7 +55,28 @@ impl Drop for Receiving {
     }
 }
 impl Receiver {
-    pub(crate) fn new(
+    pub(crate) fn from_native(
+        owner: super::flow_open::NativeOwner,
+        connection: CreditedReceiverConnection,
+        gate: Gate,
+        budget: Budget,
+        current: Current,
+    ) -> Result<Self> {
+        let (context, side, native) = owner.parts();
+        let other = match side {
+            super::flow_authority::Side::Initiator => super::flow_authority::Side::Acceptor,
+            super::flow_authority::Side::Acceptor => super::flow_authority::Side::Initiator,
+        };
+        Self::new(
+            connection,
+            gate,
+            budget,
+            context.data_flow(other),
+            native,
+            current,
+        )
+    }
+    fn new(
         connection: CreditedReceiverConnection,
         gate: Gate,
         budget: Budget,

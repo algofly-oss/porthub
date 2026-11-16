@@ -45,10 +45,23 @@ impl std::fmt::Display for AdmissionError {
 impl std::error::Error for AdmissionError {}
 #[derive(Clone)]
 pub struct Packet {
+    stack_scope: Arc<()>,
+    owner: u64,
+    flow: Flow,
+    alive: Arc<AtomicBool>,
     bytes: Bytes,
     permit: SendPermit,
 }
 impl Packet {
+    pub fn remaining(&self) -> Option<Duration> {
+        self.permit.remaining()
+    }
+    /// Add an independent authority; never replace or reset the first origin.
+    pub fn intersect(&self, additional: SendPermit) -> Self {
+        let mut packet = self.clone();
+        packet.permit = SendPermit::combine(vec![self.permit.clone(), additional]);
+        packet
+    }
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -250,6 +263,110 @@ pub struct Connection {
     flow: Flow,
     id: u64,
 }
+/// A pinned ingress capability exists before the handshake finishes. Its
+/// stack, tuple and owner Arc are immutable; it cannot adopt a replacement.
+#[derive(Clone)]
+pub struct Ingress {
+    handle: Handle,
+    flow: Flow,
+    alive: Arc<AtomicBool>,
+    opening: Option<SendPermit>,
+}
+impl Ingress {
+    pub fn flow(&self) -> Flow {
+        self.flow
+    }
+    pub fn valid(&self) -> bool {
+        self.alive.load(Ordering::SeqCst) && self.opening.as_ref().is_none_or(SendPermit::valid)
+    }
+    pub fn owns_packet(&self, packet: &Packet) -> bool {
+        self.valid()
+            && packet.valid()
+            && self.flow == packet.flow
+            && Arc::ptr_eq(&self.handle.stack_scope, &packet.stack_scope)
+            && Arc::ptr_eq(&self.alive, &packet.alive)
+    }
+    pub fn input(&self, bytes: Bytes, original: SendPermit) -> Result<()> {
+        ensure!(
+            self.valid() && original.valid(),
+            "native ingress owner/origin retired"
+        );
+        Handle::validate_input(&bytes)?;
+        let incoming = Flow::from_packet(&bytes).ok_or(AdmissionError::Invalid)?;
+        ensure!(
+            bytes.len() <= MTU && incoming == self.flow.reverse(),
+            "native ingress tuple mismatch"
+        );
+        let binding = self
+            .handle
+            .bindings
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&incoming)
+            .cloned()
+            .ok_or(AdmissionError::Retired)?;
+        ensure!(
+            Arc::ptr_eq(&binding.alive, &self.alive) && binding.alive.load(Ordering::SeqCst),
+            "native ingress generation replaced"
+        );
+        let permit = match &self.opening {
+            Some(opening) => SendPermit::combine(vec![opening.clone(), original]),
+            None => original,
+        };
+        ensure!(
+            permit.valid(),
+            "native opening/original expired before enqueue"
+        );
+        self.handle
+            .commands
+            .try_send(Command::Input {
+                id: binding.id,
+                bytes,
+                permit,
+            })
+            .map_err(|_| AdmissionError::Busy.into())
+    }
+}
+/// Creation is queued, but no caller needs to await TCP establishment before
+/// routing its SYNACK/ACK into the exact admitted generation.
+pub struct PendingConnection {
+    ingress: Ingress,
+    waiting: Option<oneshot::Receiver<Result<u64>>>,
+    complete: bool,
+}
+impl PendingConnection {
+    pub fn ingress(&self) -> Ingress {
+        self.ingress.clone()
+    }
+    pub async fn established(mut self) -> Result<Connection> {
+        let original = self
+            .ingress
+            .opening
+            .as_ref()
+            .ok_or(AdmissionError::Invalid)?
+            .clone();
+        let waiting = self.waiting.take().ok_or(AdmissionError::Invalid)?;
+        let id = original
+            .during(waiting)
+            .await?
+            .map_err(|_| anyhow::anyhow!("native runner stopped"))??;
+        ensure!(self.ingress.valid(), "native opening owner retired");
+        self.complete = true;
+        Ok(Connection {
+            alive: self.ingress.alive.clone(),
+            handle: self.ingress.handle.clone(),
+            flow: self.ingress.flow,
+            id,
+        })
+    }
+}
+impl Drop for PendingConnection {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.ingress.alive.store(false, Ordering::SeqCst);
+        }
+    }
+}
 struct RetireOnDrop {
     alive: Arc<AtomicBool>,
     armed: bool,
@@ -283,13 +400,31 @@ pub fn validate_syn(syn: &[u8]) -> Result<Flow> {
 }
 impl Handle {
     pub async fn connect(&self, flow: Flow, permit: SendPermit) -> Result<Connection> {
-        self.open(flow, permit, None).await
+        self.prepare_connect(flow, permit)
+            .await?
+            .established()
+            .await
     }
     pub async fn accept_syn(&self, syn: Bytes, permit: SendPermit) -> Result<Connection> {
-        let incoming = validate_syn(&syn)?;
-        self.open(incoming.reverse(), permit, Some(syn)).await
+        self.prepare_syn(syn, permit).await?.established().await
     }
-    async fn open(&self, flow: Flow, permit: SendPermit, syn: Option<Bytes>) -> Result<Connection> {
+    pub async fn prepare_connect(
+        &self,
+        flow: Flow,
+        permit: SendPermit,
+    ) -> Result<PendingConnection> {
+        self.prepare(flow, permit, None).await
+    }
+    pub async fn prepare_syn(&self, syn: Bytes, permit: SendPermit) -> Result<PendingConnection> {
+        let incoming = validate_syn(&syn)?;
+        self.prepare(incoming.reverse(), permit, Some(syn)).await
+    }
+    async fn prepare(
+        &self,
+        flow: Flow,
+        permit: SendPermit,
+        syn: Option<Bytes>,
+    ) -> Result<PendingConnection> {
         flow.validate()?;
         ensure!(permit.valid(), "native flow admission retired");
         let (reply, waiting) = oneshot::channel();
@@ -298,26 +433,26 @@ impl Handle {
             alive: alive.clone(),
             armed: true,
         };
-        self.commands
-            .send(Command::Connect {
+        permit
+            .during(self.commands.send(Command::Connect {
                 alive: alive.clone(),
                 syn,
                 flow,
-                permit,
+                permit: permit.clone(),
                 reply,
-            })
-            .await
+            }))
+            .await?
             .map_err(|_| anyhow::anyhow!("native runner stopped"))?;
-        let id = waiting
-            .await
-            .map_err(|_| anyhow::anyhow!("native runner stopped"))??;
-        ensure!(alive.load(Ordering::SeqCst), "native connect owner retired");
         abandoned.armed = false;
-        Ok(Connection {
-            alive,
-            handle: self.clone(),
-            flow,
-            id,
+        Ok(PendingConnection {
+            ingress: Ingress {
+                handle: self.clone(),
+                flow,
+                alive,
+                opening: Some(permit),
+            },
+            waiting: Some(waiting),
+            complete: false,
         })
     }
     fn validate_input(bytes: &[u8]) -> Result<()> {
@@ -364,6 +499,17 @@ impl Handle {
     }
 }
 impl Connection {
+    pub fn owns_packet(&self, packet: &Packet) -> bool {
+        self.id == packet.owner && self.ingress().owns_packet(packet)
+    }
+    pub fn ingress(&self) -> Ingress {
+        Ingress {
+            handle: self.handle.clone(),
+            flow: self.flow,
+            alive: self.alive.clone(),
+            opening: None,
+        }
+    }
     pub fn flow(&self) -> Flow {
         self.flow
     }
@@ -541,6 +687,8 @@ impl Drop for Connection {
 }
 #[derive(Clone)]
 struct Context {
+    stack_scope: Arc<()>,
+    owner: u64,
     alive: Arc<AtomicBool>,
     control: SendPermit,
     data: Option<SendPermit>,
@@ -630,6 +778,9 @@ impl TxToken for Transmit<'_> {
                 let mut origins = vec![context.control.clone()];
                 origins.extend(context.data.iter().cloned());
                 origins.extend(context.fin.iter().cloned());
+                let stack_scope = context.stack_scope.clone();
+                let owner = context.owner;
+                let alive = context.alive.clone();
                 let permit = SendPermit::combine(origins).constrain(move || {
                     let valid = context.alive.load(Ordering::SeqCst)
                         && context.control.valid()
@@ -642,6 +793,10 @@ impl TxToken for Transmit<'_> {
                 });
                 if permit.valid() {
                     self.output.push_back(Packet {
+                        stack_scope,
+                        owner,
+                        flow,
+                        alive,
                         bytes: bytes.into(),
                         permit,
                     });
@@ -859,6 +1014,8 @@ impl Runner {
             self.packets.contexts.insert(
                 flow,
                 Context {
+                    stack_scope: self.stack_scope.clone(),
+                    owner: active.id,
                     alive: active.alive.clone(),
                     control: active.control.clone(),
                     data: None,
@@ -1043,6 +1200,8 @@ impl Runner {
             self.packets.contexts.insert(
                 *flow,
                 Context {
+                    stack_scope: self.stack_scope.clone(),
+                    owner: active.id,
                     alive: active.alive.clone(),
                     control: active.control.clone(),
                     data: active.writes.front().map(|w| w.permit.clone()),
@@ -2329,5 +2488,135 @@ mod tests {
             "unacknowledged bytes got receipt"
         );
         cleanup(rig).await
+    }
+    #[tokio::test]
+    async fn actual_pending_handshake_ingress_and_delayed_establishment_cannot_renew_or_adopt_replacement(
+    ) -> Result<()> {
+        use std::sync::atomic::AtomicU64;
+        let (handle, mut output, runner) = stack()?;
+        let (peer, mut input, peer_runner) = super::super::stack()?;
+        let stop = CancellationToken::new();
+        let a = tokio::spawn(runner.run(stop.clone()));
+        let b = tokio::spawn(peer_runner.run(stop.clone()));
+        let clock = Arc::new(AtomicU64::new(0));
+        let expiry = clock.clone();
+        let original = SendPermit::bounded(
+            || true,
+            move || {
+                Duration::from_secs(15)
+                    .checked_sub(Duration::from_millis(expiry.load(Ordering::SeqCst)))
+                    .filter(|n| !n.is_zero())
+            },
+        );
+        let fresh = || SendPermit::bounded(|| true, || Some(Duration::from_secs(15)));
+        let flow = Flow {
+            source: "10.234.244.1:42000".parse()?,
+            destination: "10.234.244.2:443".parse()?,
+        };
+        let pending = handle.prepare_connect(flow, original).await?;
+        let old = pending.ingress();
+        let syn = tokio::time::timeout(Duration::from_secs(1), output.recv())
+            .await?
+            .unwrap();
+        let origin_packet = syn.clone();
+        let other = peer.clone();
+        let accepting = tokio::spawn(async move {
+            syn.deliver(|bytes| async move { other.accept_syn(bytes).await })
+                .await
+        });
+        let synack = tokio::time::timeout(Duration::from_secs(1), input.recv())
+            .await?
+            .unwrap();
+        old.input(synack.clone(), fresh())?;
+        let ack = tokio::time::timeout(Duration::from_secs(1), output.recv())
+            .await?
+            .unwrap();
+        let other = peer.clone();
+        ack.deliver(|bytes| async move { other.packet(bytes) })
+            .await?;
+        let _app = accepting.await??;
+        // Receiving the actual final ACK proves the TCP handshake progressed;
+        // publication is intentionally delayed until the original bound expires.
+        let short_clock = clock.clone();
+        let shortened = origin_packet.intersect(SendPermit::bounded(
+            || true,
+            move || {
+                Duration::from_secs(5)
+                    .checked_sub(Duration::from_millis(short_clock.load(Ordering::SeqCst)))
+                    .filter(|n| !n.is_zero())
+            },
+        ));
+        clock.store(5000, Ordering::SeqCst);
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = called.clone();
+        ensure!(
+            shortened
+                .deliver(|_| {
+                    seen.store(true, Ordering::SeqCst);
+                    async { Ok::<_, anyhow::Error>(()) }
+                })
+                .await
+                .is_err()
+                && !called.load(Ordering::SeqCst),
+            "queued output ignored independent current-at-issue deadline"
+        );
+        ensure!(
+            origin_packet.valid(),
+            "retiring a narrowed queued control record destroyed still-valid original owner"
+        );
+        clock.store(15000, Ordering::SeqCst);
+        ensure!(
+            pending.established().await.is_err(),
+            "queued established result acquired a fresh publication lifetime"
+        );
+        ensure!(
+            !old.valid() && old.input(synack.clone(), fresh()).is_err(),
+            "retired opening ingress borrowed fresh caller authority"
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !handle
+                    .bindings
+                    .read()
+                    .unwrap()
+                    .contains_key(&flow.reverse())
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        let replacement = handle.prepare_connect(flow, fresh()).await?;
+        let new = replacement.ingress();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if handle
+                    .bindings
+                    .read()
+                    .unwrap()
+                    .get(&flow.reverse())
+                    .is_some_and(|binding| Arc::ptr_eq(&binding.alive, &new.alive))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        ensure!(
+            new.valid() && old.flow() == new.flow() && !Arc::ptr_eq(&old.alive, &new.alive),
+            "replacement did not receive distinct immutable generation"
+        );
+        ensure!(
+            old.input(synack, fresh()).is_err(),
+            "same-tuple replacement adopted stale ingress callback"
+        );
+        drop(replacement);
+        ensure!(!new.valid(), "abandoned pending native owner remained live");
+        stop.cancel();
+        tokio::time::timeout(Duration::from_secs(1), a).await???;
+        tokio::time::timeout(Duration::from_secs(1), b).await???;
+        Ok(())
     }
 }

@@ -34,6 +34,9 @@ use tokio_util::sync::PollSender;
 
 const PORT: u16 = 1;
 pub const MAX_DATAGRAM: usize = crate::MAX_PACKET - 20;
+/// Reserved for the experimental nonce/direction/role carrier envelope.
+pub const ORIGIN_CARRIER_OVERHEAD:usize=24;
+pub const MAX_ORIGIN_DATAGRAM:usize=MAX_DATAGRAM-ORIGIN_CARRIER_OVERHEAD;
 const QUEUE: usize = 256;
 const MAX_PEERS: usize = 4096;
 const MAX_CONNECTIONS: usize = 512;
@@ -356,8 +359,8 @@ fn transport(idle_timeout: Option<Duration>,credited:bool,bounded_source:bool) -
         // PTO still probes a stalled path and real loss remains recoverable.
         .packet_threshold(16384)
         .time_threshold(4.0)
-        .initial_mtu(MAX_DATAGRAM as u16)
-        .min_mtu(MAX_DATAGRAM as u16)
+        .initial_mtu(if credited||bounded_source{MAX_ORIGIN_DATAGRAM as u16}else{MAX_DATAGRAM as u16})
+        .min_mtu(if credited||bounded_source{MAX_ORIGIN_DATAGRAM as u16}else{MAX_DATAGRAM as u16})
         .mtu_discovery_config(None)
         .max_idle_timeout(None)
         .stream_receive_window((16u32 * 1024 * 1024).into())
@@ -502,7 +505,7 @@ impl Endpoint {
             output: outgoing,
         });
         let mut config = quinn::EndpointConfig::default();
-        config.max_udp_payload_size(MAX_DATAGRAM as u16)?;
+        config.max_udp_payload_size(if credited||bounded_source{MAX_ORIGIN_DATAGRAM as u16}else{MAX_DATAGRAM as u16})?;
         let inner = quinn::Endpoint::new_with_abstract_socket(
             config,
             if bounded_source{None}else{Some(server)},

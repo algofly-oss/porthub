@@ -623,6 +623,26 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     if let Some(tun)=&device {tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=write_authorized(installed_authority.as_ref(),&sparse_handle,Some(&peer),tun,&bytes)=>result?};}
                 }
             },
+            #[cfg(all(feature="private-sparse",feature="private-stream"))]
+            Some(Event::GuardedStreamLocal{peer,packet})=>{
+                // The queue owns the exact native first-origin packet. Never
+                // relabel it using StreamLocal's current-only byte delivery.
+                if !sparse_handle.enabled(){continue;}
+                if installed_authority.as_ref().is_none_or(|a|a.check().is_err()) {
+                    policy.revoke();anyhow::bail!("guarded native request-start authority expired");
+                }
+                if !sparse_handle.enabled()||!packet.valid()||sparse_handle.by_id(&peer).is_none(){continue;}
+                if !policy.check(packet.bytes(),&peer,true){continue;}
+                if let Some(tun)=&device {
+                    let cancelled=&work;let authority=installed_authority.as_ref();let handles=&sparse_handle;let remote=&peer;
+                    let delivered=packet.deliver(|bytes|async move {
+                        tokio::select!{_=cancelled.cancelled()=>anyhow::bail!("private native owner ended before delivery"),result=write_authorized(authority,handles,Some(remote),tun,&bytes)=>result}
+                    }).await;
+                    // Retired per-flow originals are dropped; an actual native
+                    // IO failure remains actionable instead of hiding it.
+                    if packet.valid(){delivered?;}
+                }
+            },
             #[cfg(feature="private-stream")]
             Some(Event::StreamLocal {peer,bytes})=>{
             if installed_authority.as_ref().is_some_and(|a|a.check().is_err()){policy.revoke();anyhow::bail!("private request-start authority expired");}

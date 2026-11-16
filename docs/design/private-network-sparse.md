@@ -84,3 +84,49 @@ native connection. Tagged native output must retain its sealed first-origin
 through the event queue and TUN write, rather than borrowing the legacy
 unlabeled `StreamLocal` byte event. None of these dispatch or advertisement
 changes is enabled by the current source checkpoint.
+
+### Pending native owner and original event delivery
+
+A native connection must receive handshake ACKs before its establishment future
+returns. `PendingConnection` now supplies an ingress capability pinned to the
+native stack, tuple, and unique owner Arc while retaining its original opening
+witness. Dropping or expiring that pending owner retires the capability; a later
+same-tuple generation cannot be adopted by a stale callback. Delaying publication
+after an actual TCP handshake does not reset its original establishment bound.
+Established ingress uses the same pinned owner and per-packet first admission.
+
+The agent exposes `NativeOpening`/`NativeOwner` only from reciprocal flow-open.
+Its runtime ingress accepts bytes, not a caller-selected permit. Prepared current
+local authority supplies the exact context/role permission and original request
+witness. Source and receiver production constructors consume these sealed owners;
+raw context-plus-connection constructors are private implementation/test details.
+Control renewal is separate and cannot rewrite pending payload/FIN origins.
+
+Native output now carries sealed stack/generation/tuple metadata as well as its
+first-origin permit. Publishing intersects the current-at-issue authority without
+replacing the old origin, verifies the pinned owner, and queues a typed
+`GuardedStreamLocal` event. The runtime TUN branch retains that packet through
+current-policy checks and asynchronous native delivery; it does not convert it
+to the legacy unlabeled byte event. The joined actual duplex tests exercise this
+bounded event path and reject a real same-tuple packet from another native stack.
+The complete carrier dispatcher/flow actor is still required to select and own
+these paths; this is not an advertisement or native-OS readiness claim.
+
+### Carrier channel and unchanged physical packet bound
+
+PHG2 routing metadata carries a nonzero nonce, direction, source/receiver target
+role, and exact bounded ciphertext length. It is not authorization. Incoming
+flow-open must match the selected receiver channel before an opening token can
+be published; response channels must match the original opened context. Tests
+reject unknown flags, role/direction changes, zero nonces, length/trailing-byte
+errors, and an actual pinned-TLS request routed to another nonce's channel.
+
+The origin profile reserves 24 bytes for this header, reducing only its QUIC
+payload MTU from 1360 to 1336 bytes. The existing 20-byte control envelope and
+1380-byte total bound remain unchanged; legacy transport MTU is unchanged.
+The joined fixture now sends a 16,577-byte request and 16,461-byte response
+through encoded/decoded carrier envelopes, multiple finite chunks, pinned TLS,
+sealed native event queues, and native DATA/FIN ACK boundaries. It is still an
+in-process controlled carrier, not a normal gateway/three-OS route proof. The
+global authenticated flow dispatcher and its admission/fairness lifecycle remain
+the next runtime work; no capability or protocol offer is published yet.

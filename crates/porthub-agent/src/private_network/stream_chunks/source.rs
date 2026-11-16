@@ -15,7 +15,17 @@ pub(crate) struct Source {
     terminal: Option<SendPermit>,
 }
 impl Source {
-    pub(crate) fn new(
+    pub(crate) fn from_native(
+        owner: super::flow_open::NativeOwner,
+        connection: BoundedSourceConnection,
+        gate: Gate,
+        budget: Budget,
+        current: Current,
+    ) -> Result<Self> {
+        let (context, side, native) = owner.parts();
+        Self::new(context, side, connection, gate, budget, native, current)
+    }
+    fn new(
         context: Context,
         side: Side,
         connection: BoundedSourceConnection,

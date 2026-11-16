@@ -201,6 +201,11 @@ pub enum Event {
         direct: bool,
         received_at: Instant,
     },
+    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+    GuardedStreamLocal {
+        peer:String,
+        packet:porthub_network::tcp_stream::tagged::Packet,
+    },
     #[cfg(feature = "private-stream")]
     StreamLocal {
         peer: String,

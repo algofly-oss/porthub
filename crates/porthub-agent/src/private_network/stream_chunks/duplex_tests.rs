@@ -12,20 +12,14 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     time::{timeout, Duration},
 };
-fn lease() -> SendPermit {
-    let start = std::time::Instant::now();
-    SendPermit::bounded(
-        || true,
-        move || Duration::from_secs(15).checked_sub(start.elapsed()),
-    )
-}
+
 struct Link {
     client: BoundedSourceConnection,
     server: Option<CreditedReceiverConnection>,
     source: Arc<Endpoint>,
     destination: Arc<Endpoint>,
     stop: CancellationToken,
-    pump: JoinHandle<()>,
+    pump: JoinHandle<Result<()>>,
 }
 impl Drop for Link {
     fn drop(&mut self) {
@@ -34,6 +28,39 @@ impl Drop for Link {
         self.destination.close();
     }
 }
+async fn forward_carrier(
+    datagram: porthub_mesh::streams::Datagram,
+    source: std::net::Ipv4Addr,
+    destination: std::net::Ipv4Addr,
+    key: carrier::Key,
+    ingress: &porthub_mesh::streams::Ingress,
+) -> Result<()> {
+    let frame = carrier::Frame::new(key, datagram.payload)?.encode();
+    let wire = porthub_mesh::control_packet::encode(
+        porthub_mesh::control_packet::STREAM,
+        source,
+        destination,
+        &frame,
+    )?;
+    ensure!(
+        wire.len() <= porthub_mesh::MAX_PACKET,
+        "origin carrier exceeded existing native packet bound"
+    );
+    let envelope = porthub_mesh::control_packet::decode(porthub_mesh::control_packet::STREAM, wire)
+        .ok_or_else(|| anyhow::anyhow!("carrier envelope rejected"))?;
+    ensure!(
+        envelope.source == source && envelope.destination == destination,
+        "carrier authenticated source/target changed"
+    );
+    let frame = carrier::Frame::decode(envelope.payload)?;
+    ensure!(
+        frame.key() == key,
+        "carrier endpoint nonce/direction/role changed"
+    );
+    ingress
+        .send_reliable_guarded(source, frame.payload(), datagram.permit)
+        .await
+}
 async fn link(
     a: Identity,
     b: Identity,
@@ -41,6 +68,7 @@ async fn link(
     bp: &Peer,
     ga: &Gate,
     gb: &Gate,
+    key: carrier::Key,
 ) -> Result<Link> {
     let (source, mut ai) = Endpoint::new_fenced_source(a, ap.ip, ga.factory())?;
     let (destination, mut bi) = Endpoint::new_fenced_credited(b, bp.ip, gb.factory())?;
@@ -54,8 +82,9 @@ async fn link(
     let cancel = stop.clone();
     let pump = tokio::spawn(async move {
         loop {
-            tokio::select! {_=cancel.cancelled()=>break,p=ai.outgoing()=>match p{Some(p)=>{let _=ib.send_reliable_guarded(aip,p.payload,p.permit).await;},None=>break},p=bi.outgoing()=>match p{Some(p)=>{let _=ia.send_reliable_guarded(bip,p.payload,p.permit).await;},None=>break}}
+            tokio::select! {_=cancel.cancelled()=>break,p=ai.outgoing()=>match p{Some(p)=>{forward_carrier(p,aip,bip,key.reverse(),&ib).await?;},None=>break},p=bi.outgoing()=>match p{Some(p)=>{forward_carrier(p,bip,aip,key,&ia).await?;},None=>break}}
         }
+        Ok::<_, anyhow::Error>(())
     });
     let (source, destination) = (Arc::new(source), Arc::new(destination));
     let (c, s) = timeout(Duration::from_secs(2), async {
@@ -71,7 +100,32 @@ async fn link(
         pump,
     })
 }
+async fn forward_native(
+    ingress: &flow_open::NativeIngress,
+    packet: &tagged::Packet,
+    target: &tcp_stream::Handle,
+) -> Result<()> {
+    let (tx, mut rx) = mpsc::channel(1);
+    ingress.publish(packet.clone(), &tx).await?;
+    let event = rx
+        .recv()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("native event queue closed"))?;
+    let crate::private_network::controller::Event::GuardedStreamLocal { peer, packet } = event
+    else {
+        anyhow::bail!("native output lost sealed event type")
+    };
+    ensure!(
+        !peer.is_empty() && packet.remaining().is_some(),
+        "native event lost peer/original bound"
+    );
+    let target = target.clone();
+    packet
+        .deliver(|bytes| async move { target.packet(bytes) })
+        .await
+}
 struct Native {
+    owner: flow_open::NativeOwner,
     connection: Arc<tagged::Connection>,
     app: tokio::io::DuplexStream,
     stop: CancellationToken,
@@ -84,33 +138,44 @@ impl Drop for Native {
         self.connection.retire();
     }
 }
-async fn native_destination(opened: &flow_open::Opened) -> Result<Native> {
+async fn native_destination(
+    opened: &flow_open::Opened,
+    current: source::Current,
+) -> Result<Native> {
     let (handle, mut output, runner) = tagged::stack()?;
     let (peer, mut input, peer_runner) = tcp_stream::stack()?;
     let stop = CancellationToken::new();
     let a = tokio::spawn(runner.run(stop.clone()));
     let b = tokio::spawn(peer_runner.run(stop.clone()));
-    let h = handle.clone();
-    let mut connecting = Box::pin(async move { opened.connect_destination(&h).await });
-    let syn=timeout(Duration::from_secs(1),async{tokio::select!{p=output.recv()=>p.ok_or_else(||anyhow::anyhow!("destination native output ended")),r=&mut connecting=>{r?;anyhow::bail!("destination connected before SYN")}}}).await??;
+    let opening = opened.prepare_destination(&handle).await?;
+    let ingress = opening.ingress(current.clone())?;
+    let syn = timeout(Duration::from_secs(1), output.recv())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("destination SYN missing"))?;
+    let (tx, mut rx) = mpsc::channel(1);
+    ingress.publish(syn, &tx).await?;
+    let crate::private_network::controller::Event::GuardedStreamLocal { packet: syn, .. } =
+        rx.recv().await.unwrap()
+    else {
+        anyhow::bail!("SYN lost origin event")
+    };
     let other = peer.clone();
     let accepting = tokio::spawn(async move {
         syn.deliver(|bytes| async move { other.accept_syn(bytes).await })
             .await
     });
-    handle.incoming(
+    ingress.input(
         timeout(Duration::from_secs(1), input.recv())
             .await?
             .unwrap(),
-        lease(),
     )?;
     let ack = timeout(Duration::from_secs(1), output.recv())
         .await?
         .unwrap();
-    let other = peer.clone();
-    ack.deliver(|bytes| async move { other.packet(bytes) })
-        .await?;
-    let connection = Arc::new(connecting.await?);
+    forward_native(&ingress, &ack, &peer).await?;
+    let owner = timeout(Duration::from_secs(1), opening.established()).await??;
+    let (_, _, connection) = owner.parts();
+    let ingress = owner.ingress(current)?;
     let (_, app) = accepting.await??;
     let cancel = stop.clone();
     let hold_ack = Arc::new(AtomicBool::new(false));
@@ -118,11 +183,16 @@ async fn native_destination(opened: &flow_open::Opened) -> Result<Native> {
     let pump = tokio::spawn(async move {
         let mut held = Vec::new();
         loop {
-            tokio::select! {_=cancel.cancelled()=>break,p=output.recv()=>match p{Some(p)=>{let other=peer.clone();p.deliver(|bytes|async move{other.packet(bytes)}).await?;},None=>break},p=input.recv()=>match p{Some(p)=>{if hold.load(Ordering::SeqCst){ensure!(held.len()<32,"held native ACK fixture bound");held.push(p);}else{handle.incoming(p,lease())?;}},None=>break}}
+            tokio::select! {
+                _=cancel.cancelled()=>break,
+                p=output.recv()=>match p{Some(p)=>{let result=forward_native(&ingress,&p,&peer).await;if p.valid(){result?;}},None=>break},
+                p=input.recv()=>match p{Some(p)=>{if hold.load(Ordering::SeqCst){ensure!(held.len()<32,"held native ACK fixture bound");held.push(p);}else{ingress.input(p)?;}},None=>break}
+            }
         }
         Ok::<_, anyhow::Error>(())
     });
     Ok(Native {
+        owner,
         connection,
         app,
         stop,
@@ -164,7 +234,11 @@ async fn prepare_source(local: &LocalAuthority, flow: tcp_stream::Flow) -> Resul
         connecting,
     })
 }
-async fn accept_source(prepared: PendingSource, opened: &flow_open::Opened) -> Result<Native> {
+async fn accept_source(
+    prepared: PendingSource,
+    opened: &flow_open::Opened,
+    current: source::Current,
+) -> Result<Native> {
     let PendingSource {
         syn,
         handle,
@@ -175,23 +249,35 @@ async fn accept_source(prepared: PendingSource, opened: &flow_open::Opened) -> R
         mut tasks,
         connecting,
     } = prepared;
+    let opening = opened.prepare_source(&handle, syn).await?;
+    let ingress = opening.ingress(current.clone())?;
+    let synack = timeout(Duration::from_secs(1), output.recv())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("source SYNACK missing"))?;
+    forward_native(&ingress, &synack, &user).await?;
+    ingress.input(
+        timeout(Duration::from_secs(1), input.recv())
+            .await?
+            .unwrap(),
+    )?;
+    let owner = timeout(Duration::from_secs(1), opening.established()).await??;
+    let (_, _, connection) = owner.parts();
+    let ingress = owner.ingress(current)?;
+    let app = timeout(Duration::from_secs(1), connecting).await???;
     let cancel = stop.clone();
-    let h = handle.clone();
     let pump = tokio::spawn(async move {
         loop {
             tokio::select! {
                 _=cancel.cancelled()=>break,
-                p=output.recv()=>match p{Some(p)=>{let user=user.clone();p.deliver(|bytes|async move{user.packet(bytes)}).await?;},None=>break},
-                p=input.recv()=>match p{Some(bytes)=>{h.incoming(bytes,lease())?;},None=>break}
+                p=output.recv()=>match p{Some(p)=>{let result=forward_native(&ingress,&p,&user).await;if p.valid(){result?;}},None=>break},
+                p=input.recv()=>match p{Some(bytes)=>{ingress.input(bytes)?;},None=>break}
             }
         }
         Ok::<_, anyhow::Error>(())
     });
     tasks.push(pump);
-    let connection =
-        Arc::new(timeout(Duration::from_secs(1), opened.accept_source(&handle, syn)).await??);
-    let app = timeout(Duration::from_secs(1), connecting).await???;
     Ok(Native {
+        owner,
         connection,
         app,
         stop,
@@ -199,6 +285,7 @@ async fn accept_source(prepared: PendingSource, opened: &flow_open::Opened) -> R
         hold_ack: Arc::new(AtomicBool::new(false)),
     })
 }
+
 fn source_current(local: Arc<LocalAuthority>) -> source::Current {
     Arc::new(move || Some(local.clone()))
 }
@@ -228,8 +315,6 @@ async fn exercise(revoke: bool) -> Result<()> {
     let gar = Gate::new(SendPermit::control(|| true));
     let gbs = Gate::new(SendPermit::control(|| true));
     let gbr = Gate::new(SendPermit::control(|| true));
-    let mut ab = link(a.clone(), b.clone(), &ap, &bp, &gas, &gbr).await?;
-    let mut ba = link(b, a, &bp, &ap, &gbs, &gar).await?;
     let (_ha, la) = flow_open::tests::local(&ap, &bp, "a")?;
     let (_hb, lb) = flow_open::tests::local(&bp, &ap, "b")?;
     let (la, lb) = (Arc::new(la), Arc::new(lb));
@@ -241,13 +326,45 @@ async fn exercise(revoke: bool) -> Result<()> {
         },
     )
     .await?;
+    let nonce = prepared.syn.parameters().0;
+    let mut ab = link(
+        a.clone(),
+        b.clone(),
+        &ap,
+        &bp,
+        &gas,
+        &gbr,
+        carrier::Key::new(nonce, 0, carrier::Role::Source)?,
+    )
+    .await?;
+    let mut ba = link(
+        b,
+        a,
+        &bp,
+        &ap,
+        &gbs,
+        &gar,
+        carrier::Key::new(nonce, 1, carrier::Role::Source)?,
+    )
+    .await?;
     let (open_a, open_b) = tokio::try_join!(
         flow_open::initiate_native(&ab.client, &gas, &la, &prepared.syn),
-        flow_open::accept(ab.server.as_mut().unwrap(), &gbr, &lb)
+        flow_open::accept_request(
+            ab.server.as_mut().unwrap(),
+            &gbr,
+            &lb,
+            carrier::Key::new(prepared.syn.parameters().0, 0, carrier::Role::Receiver)?
+        )
     )?;
     let (reply_b, reply_a) = tokio::try_join!(
         flow_open::initiate_response(&ba.client, &gbs, &lb, &open_b),
-        flow_open::accept_response(ba.server.as_mut().unwrap(), &gar, &la, &open_a)
+        flow_open::accept_response(
+            ba.server.as_mut().unwrap(),
+            &gar,
+            &la,
+            &open_a,
+            open_a.receiver_key()
+        )
     )?;
     ensure!(
         open_a.context().digest() == reply_a.context().digest()
@@ -255,58 +372,70 @@ async fn exercise(revoke: bool) -> Result<()> {
         "response bridge changed flow identity"
     );
     let context = open_a.context();
-    let mut na = accept_source(prepared, &open_a).await?;
-    let mut nb = native_destination(&open_b).await?;
+    let mut na = accept_source(prepared, &open_a, source_current(la.clone())).await?;
+    let mut nb = native_destination(&open_b, source_current(lb.clone())).await?;
     nb.hold_ack.store(revoke, Ordering::SeqCst);
-    let budgets = [Budget::default(), Budget::default()];
-    // Constructor rejects a real other native generation/tuple before actor creation.
+    // Same tuple and valid policy are insufficient: this real packet comes
+    // from an independently created native stack/generation.
+    let (foreign, mut foreign_output, foreign_runner) = tagged::stack()?;
+    let foreign_stop = CancellationToken::new();
+    let foreign_task = tokio::spawn(foreign_runner.run(foreign_stop.clone()));
+    let foreign_pending = foreign
+        .prepare_connect(context.source_native_tuple(Side::Initiator), la.original())
+        .await?;
+    let foreign_packet = timeout(Duration::from_secs(1), foreign_output.recv())
+        .await?
+        .unwrap();
+    let own_ingress = na.owner.ingress(source_current(la.clone()))?;
+    let (tx, mut rx) = mpsc::channel(1);
     ensure!(
-        Source::new(
-            context.clone(),
-            Side::Initiator,
+        own_ingress.publish(foreign_packet, &tx).await.is_err() && rx.try_recv().is_err(),
+        "same-tuple foreign native stack published through current owner"
+    );
+    drop(foreign_pending);
+    foreign_stop.cancel();
+    timeout(Duration::from_secs(1), foreign_task).await???;
+    let budgets = [Budget::default(), Budget::default()];
+    // A sealed native owner from the other endpoint cannot be relabeled.
+    ensure!(
+        Source::from_native(
+            nb.owner.clone(),
             ab.client.clone(),
             gas.clone(),
             budgets[0].clone(),
-            nb.connection.clone(),
             source_current(la.clone())
         )
         .is_err(),
-        "source adopted another native leg"
+        "source adopted foreign native owner"
     );
-    let sa = Source::new(
-        context.clone(),
-        Side::Initiator,
+    let sa = Source::from_native(
+        na.owner.clone(),
         ab.client.clone(),
         gas,
         budgets[0].clone(),
-        na.connection.clone(),
         source_current(la.clone()),
     )?;
-    let sb = Source::new(
-        context.clone(),
-        Side::Acceptor,
+    let sb = Source::from_native(
+        nb.owner.clone(),
         ba.client.clone(),
         gbs,
         budgets[1].clone(),
-        nb.connection.clone(),
         source_current(lb.clone()),
     )?;
     let ca = receiver_current(context.clone(), la.clone(), Side::Initiator);
     let cb = receiver_current(context.clone(), lb.clone(), Side::Acceptor);
-    let ra = Receiver::new(
+    let ra = Receiver::from_native(
+        na.owner.clone(),
         ba.server.take().unwrap(),
         gar,
         budgets[0].clone(),
-        context.data_flow(Side::Acceptor),
-        na.connection.clone(),
         ca.clone(),
     )?;
-    let rb = Receiver::new(
+    let rb = Receiver::from_native(
+        nb.owner.clone(),
         ab.server.take().unwrap(),
         gbr,
         budgets[1].clone(),
-        context.data_flow(Side::Initiator),
-        nb.connection.clone(),
         cb.clone(),
     )?;
     let mut da = Duplex::new(sa, ra, ca)?;
@@ -340,23 +469,22 @@ async fn exercise(revoke: bool) -> Result<()> {
             return Ok::<_, anyhow::Error>(());
         }
         eprintln!("app-a write request");
-        na.app.write_all(b"native-request-body").await?;
+        let request_body = vec![3; 2 * CHUNK + 193];
+        na.app.write_all(&request_body).await?;
         na.app.shutdown().await?;
         let mut request = Vec::new();
         eprintln!("app-b wait request EOF");
         nb.app.read_to_end(&mut request).await?;
         eprintln!("app-b request EOF");
-        ensure!(request == b"native-request-body", "native request differs");
-        nb.app.write_all(b"response-after-request-fin").await?;
+        ensure!(request == request_body, "native request differs");
+        let response_body = vec![7; 2 * CHUNK + 77];
+        nb.app.write_all(&response_body).await?;
         nb.app.shutdown().await?;
         let mut response = Vec::new();
         eprintln!("app-a wait response EOF");
         na.app.read_to_end(&mut response).await?;
         eprintln!("app-a response EOF");
-        ensure!(
-            response == b"response-after-request-fin",
-            "native response differs"
-        );
+        ensure!(response == response_body, "native response differs");
         let (mut da, ra) = ta.await?;
         ra?;
         let (mut db, rb) = tb.await?;
@@ -380,6 +508,8 @@ async fn exercise(revoke: bool) -> Result<()> {
     ab.destination.close();
     ba.source.close();
     ba.destination.close();
+    timeout(Duration::from_secs(1), &mut ab.pump).await???;
+    timeout(Duration::from_secs(1), &mut ba.pump).await???;
     for task in na.tasks.drain(..).chain(nb.tasks.drain(..)) {
         timeout(Duration::from_secs(1), task).await???;
     }
