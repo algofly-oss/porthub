@@ -128,6 +128,9 @@ impl PacketIo {
     }
 }
 struct PacketSocket {
+    #[cfg(test)] blocked_sends:Arc<AtomicUsize>,
+    #[cfg(test)] denied_sends:Arc<AtomicUsize>,
+    generation:Option<crate::udp::SendFactory>,
     admissions:Admissions,
     local: Ipv4Addr,
     input: Mutex<mpsc::Receiver<Datagram>>,
@@ -139,7 +142,7 @@ impl fmt::Debug for PacketSocket {
             .finish_non_exhaustive()
     }
 }
-struct Writable(Mutex<PollSender<Datagram>>);
+struct Writable {sender:Mutex<PollSender<Datagram>>,#[cfg(test)] blocked:Arc<AtomicUsize>}
 impl fmt::Debug for Writable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("PrivateStreamWritable")
@@ -147,22 +150,23 @@ impl fmt::Debug for Writable {
 }
 impl UdpPoller for Writable {
     fn poll_writable(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let mut sender = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let mut sender = self.sender.lock().unwrap_or_else(|p| p.into_inner());
         match sender.poll_reserve(cx) {
             Poll::Ready(Ok(())) => {
                 sender.abort_send();
                 Poll::Ready(Ok(()))
             }
             Poll::Ready(Err(_)) => Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => {#[cfg(test)] self.blocked.fetch_add(1,Ordering::SeqCst);Poll::Pending},
         }
     }
 }
 impl AsyncUdpSocket for PacketSocket {
     fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
-        Box::pin(Writable(Mutex::new(PollSender::new(self.output.clone()))))
+        Box::pin(Writable{sender:Mutex::new(PollSender::new(self.output.clone())),#[cfg(test)] blocked:self.blocked_sends.clone()})
     }
     fn try_send(&self, transmit: &quinn::udp::Transmit<'_>) -> io::Result<()> {
+        let generation=match &self.generation {Some(factory)=>match factory.snapshot(){Some(permit) if permit.valid()=>Some(permit),_=>{#[cfg(test)] self.denied_sends.fetch_add(1,Ordering::SeqCst);return Ok(());}},None=>None};
         let IpAddr::V4(destination) = transmit.destination.ip() else {
             return Ok(());
         };
@@ -178,6 +182,7 @@ impl AsyncUdpSocket for PacketSocket {
         let permit=match &*self.admissions.read().unwrap_or_else(|p|p.into_inner()) {
             Some(admissions)=>match admissions.get(&destination){Some(permit) if permit.valid()=>Some(permit.clone()),_=>return Ok(())},None=>None
         };
+        let permit=match (generation,permit){(Some(a),Some(b))=>Some(crate::udp::SendPermit::new(move||a.valid()&&b.valid())),(a,b)=>a.or(b)};
         self.output
             .try_send(Datagram {
                 permit,
@@ -185,7 +190,7 @@ impl AsyncUdpSocket for PacketSocket {
                 payload: Bytes::copy_from_slice(transmit.contents),
             })
             .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => io::ErrorKind::WouldBlock.into(),
+                mpsc::error::TrySendError::Full(_) => {#[cfg(test)] self.blocked_sends.fetch_add(1,Ordering::SeqCst);io::ErrorKind::WouldBlock.into()},
                 mpsc::error::TrySendError::Closed(_) => io::ErrorKind::BrokenPipe.into(),
             })
     }
@@ -199,7 +204,8 @@ impl AsyncUdpSocket for PacketSocket {
         match input.poll_recv(cx) {
             Poll::Ready(Some(packet)) => {
                 let current=self.admissions.read().unwrap_or_else(|p|p.into_inner());
-                let accepted=match &*current {Some(admissions)=>admissions.get(&packet.address).is_some_and(|permit|permit.valid())&&packet.permit.as_ref().is_some_and(|permit|permit.valid()),None=>packet.permit.as_ref().is_none_or(|permit|permit.valid())};
+                let generation=self.generation.as_ref().is_none_or(|factory|factory.snapshot().is_some_and(|permit|permit.valid()));
+                let accepted=generation&&match &*current {Some(admissions)=>admissions.get(&packet.address).is_some_and(|permit|permit.valid())&&packet.permit.as_ref().is_some_and(|permit|permit.valid()),None=>packet.permit.as_ref().is_none_or(|permit|permit.valid())};
                 if !accepted {cx.waker().wake_by_ref();return Poll::Pending;}
                 if bufs.is_empty() || meta.is_empty() || packet.payload.len() > bufs[0].len() {
                     return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
@@ -362,7 +368,20 @@ fn transport(idle_timeout: Option<Duration>) -> Result<Arc<quinn::TransportConfi
     config.congestion_controller_factory(Arc::new(quinn::congestion::CubicConfig::default()));
     Ok(Arc::new(config))
 }
+/// Proof that this connection was created by an endpoint whose immutable
+/// socket-generation factory is the supplied one, not a later admission map.
+#[derive(Clone)]
+pub struct FencedConnection {connection:Connection,generation:crate::udp::SendFactory,peer:Peer}
+impl FencedConnection {
+    pub fn peer(&self)->&Peer{&self.peer}
+    pub fn connection(&self)->&Connection{&self.connection}
+    pub fn belongs_to(&self,generation:&crate::udp::SendFactory)->bool{self.generation.same_generation(generation)}
+}
+
 pub struct Endpoint {
+    #[cfg(test)] blocked_sends:Arc<AtomicUsize>,
+    #[cfg(test)] denied_sends:Arc<AtomicUsize>,
+    generation:Option<crate::udp::SendFactory>,
     admissions:Admissions,
     admission_bindings:Mutex<HashMap<Ipv4Addr,Arc<std::sync::atomic::AtomicBool>>>,
     inner: quinn::Endpoint,
@@ -378,11 +397,19 @@ impl Endpoint {
     pub fn new(identity: Identity, local: Ipv4Addr) -> Result<(Self, PacketIo)> {
         Self::with_protocols(identity, local, vec![PARALLEL_ALPN.into(), ALPN.into()])
     }
-    fn with_protocols(
+    pub fn new_fenced(identity:Identity,local:Ipv4Addr,generation:crate::udp::SendFactory)->Result<(Self,PacketIo)> {
+        Self::with_protocols_fenced(identity,local,vec![PARALLEL_ALPN.into(),ALPN.into()],Some(generation))
+    }
+    fn with_protocols(identity:Identity,local:Ipv4Addr,protocols:Vec<Vec<u8>>)->Result<(Self,PacketIo)> {Self::with_protocols_fenced(identity,local,protocols,None)}
+    fn with_protocols_fenced(identity:Identity,local:Ipv4Addr,protocols:Vec<Vec<u8>>,generation:Option<crate::udp::SendFactory>)->Result<(Self,PacketIo)>{Self::with_protocols_fenced_capacity(identity,local,protocols,generation,QUEUE)}
+    fn with_protocols_fenced_capacity(
         identity: Identity,
         local: Ipv4Addr,
         protocols: Vec<Vec<u8>>,
+        generation:Option<crate::udp::SendFactory>,
+        capacity:usize,
     ) -> Result<(Self, PacketIo)> {
+        ensure!((1..=QUEUE).contains(&capacity),"invalid bounded stream queue capacity");
         ensure!(local.is_private(), "invalid private stream endpoint");
         let peers: Peers = Default::default();
         let admissions:Admissions=Default::default();
@@ -403,9 +430,12 @@ impl Endpoint {
         ));
         server.transport = transport(None)?;
         let (input, incoming) = mpsc::channel(QUEUE);
-        let (outgoing, output) = mpsc::channel(QUEUE);
+        let (outgoing, output) = mpsc::channel(capacity);
+        #[cfg(test)] let blocked_sends=Arc::new(AtomicUsize::new(0));
+        #[cfg(test)] let denied_sends=Arc::new(AtomicUsize::new(0));
         let socket = Arc::new(PacketSocket {
-            admissions:admissions.clone(),            local,
+            #[cfg(test)] blocked_sends:blocked_sends.clone(),
+            #[cfg(test)] denied_sends:denied_sends.clone(),            generation:generation.clone(),            admissions:admissions.clone(),            local,
             input: Mutex::new(incoming),
             output: outgoing,
         });
@@ -419,6 +449,9 @@ impl Endpoint {
         )?;
         Ok((
             Self {
+                #[cfg(test)] blocked_sends,
+                #[cfg(test)] denied_sends,
+                generation,
                 admissions,
                 admission_bindings:Default::default(),
                 inner,
@@ -610,6 +643,10 @@ impl Endpoint {
         }
         stats
     }
+    pub async fn connect_fenced(&self,peer:&Peer)->Result<FencedConnection> {
+        let generation=self.generation.clone().ok_or_else(||anyhow::anyhow!("connection has no immutable socket-generation fence"))?;
+        let connection=self.connect(peer).await?;Ok(FencedConnection{connection,generation,peer:peer.clone()})
+    }
     pub async fn connect(&self, expected: &Peer) -> Result<quinn::Connection> {
         let ip = expected.ip;
         ensure!(self.capacity_for(expected),"private stream peer budget reached");
@@ -725,6 +762,47 @@ mod ingress_tests {
     use super::*;
 
     #[tokio::test]
+    async fn actual_quinn_prepared_transmit_cannot_borrow_republished_admission_on_retired_socket()->Result<()> {
+        let a=Identity::new()?;let b=Identity::new()?;let a_ip="10.234.251.1".parse()?;let b_ip="10.234.251.2".parse()?;
+        let alive=Arc::new(std::sync::atomic::AtomicBool::new(true));let original=alive.clone();
+        let factory=crate::udp::SendFactory::new(move||{
+            if !original.load(Ordering::SeqCst){return None;}
+            let original=original.clone();Some(crate::udp::SendPermit::new(move||original.load(Ordering::SeqCst)))
+        });
+        let b_peer=Peer{id:"b".into(),ip:b_ip,fingerprint:b.fingerprint().into(),instance:"b".into()};
+        let a_peer=Peer{id:"a".into(),ip:a_ip,fingerprint:a.fingerprint().into(),instance:"a".into()};
+        // Capacity 1 forces poll_writable Pending. Pinned Quinn 0.11.12
+        // State::drive_transmit prepares t BEFORE poll_writable and stores it
+        // in buffered_transmit on Pending; no try_send(WouldBlock) is required.
+        // Production still uses unchanged QUEUE=256.
+        let(source,mut a_io)=Endpoint::with_protocols_fenced_capacity(a,a_ip,vec![ALPN.into()],Some(factory.clone()),1)?;
+        let(destination,mut b_io)=Endpoint::new(b,b_ip)?;source.update_peers(vec![b_peer.clone()])?;destination.update_peers(vec![a_peer])?;
+        let a_in=a_io.ingress();let b_in=b_io.ingress();let stop=tokio_util::sync::CancellationToken::new();let cancel=stop.clone();
+        let(pause,mut paused)=tokio::sync::watch::channel(false);let(report,mut reported)=tokio::sync::watch::channel(false);
+        let pump=tokio::spawn(async move{let mut halted=false;loop{tokio::select!{biased;
+            _=cancel.cancelled()=>break,
+            result=paused.changed()=>{if result.is_err(){break;}halted=*paused.borrow_and_update();report.send_replace(halted);},
+            packet=a_io.outgoing(),if !halted=>match packet{Some(packet)=>{let _=b_in.send_reliable_guarded(a_ip,packet.payload,packet.permit).await;},None=>break},
+            packet=b_io.outgoing()=>match packet{Some(packet)=>{let _=a_in.send_reliable_guarded(b_ip,packet.payload,packet.permit).await;},None=>break}
+        }}});
+        let(client,server)=tokio::time::timeout(Duration::from_secs(3),async{tokio::join!(source.connect_fenced(&b_peer),destination.accept())}).await?;
+        let client=client?;let(_,server)=server?;
+        ensure!(client.belongs_to(&factory),"fenced connection lost immutable factory");
+        ensure!(!client.belongs_to(&crate::udp::SendFactory::new(||Some(crate::udp::SendPermit::new(||true)))),"fresh generation aliased old connection");
+        pause.send(true)?;while !*reported.borrow_and_update(){reported.changed().await?;}
+        source.blocked_sends.store(0,Ordering::SeqCst);let baseline=client.connection().stats().frame_tx.stream;
+        let(mut send,_receive)=client.connection().open_bi().await?;send.write_all(&vec![3;8192]).await?;send.finish()?;
+        tokio::time::timeout(Duration::from_secs(1),async{while source.blocked_sends.load(Ordering::SeqCst)==0||client.connection().stats().frame_tx.stream<=baseline{tokio::task::yield_now().await;}}).await?;
+        alive.store(false,Ordering::SeqCst);
+        // A current mutable peer admission must not re-authorize Quinn's OLD
+        // already-prepared bytes: the socket's factory cannot be replaced.
+        source.update_send_admissions(Some(HashMap::from([(b_ip,crate::udp::SendPermit::new(||true))])))?;
+        pause.send(false)?;while *reported.borrow_and_update(){reported.changed().await?;}
+        tokio::time::timeout(Duration::from_secs(1),async{while source.denied_sends.load(Ordering::SeqCst)==0{tokio::task::yield_now().await;}}).await?;
+        ensure!(tokio::time::timeout(Duration::from_millis(50),server.accept_bi()).await.is_err(),"retired prepared application transmit reached peer");
+        let _=send.reset(1u8.into());source.close();destination.close();stop.cancel();pump.await?;Ok(())
+    }
+    #[tokio::test]
     async fn endpoint_identity_replacement_retires_already_queued_permits()->Result<()> {
         let a=Identity::new()?;let b=Identity::new()?;let (endpoint,_)=Endpoint::new(a,"10.234.253.1".parse()?)?;
         let mut peer=Peer{id:"b".into(),ip:"10.234.253.2".parse()?,fingerprint:b.fingerprint().into(),instance:"old".into()};
@@ -744,7 +822,7 @@ mod ingress_tests {
         let fresh=crate::udp::SendPermit::new(||true);
         let admissions:Admissions=Arc::new(RwLock::new(Some(HashMap::from([(remote,old.clone())]))));
         let (send,input)=mpsc::channel(2);let (output,receive)=mpsc::channel(2);
-        let socket=PacketSocket{local,input:Mutex::new(input),output,admissions:admissions.clone()};
+        let socket=PacketSocket{blocked_sends:Default::default(),denied_sends:Default::default(),generation:None,local,input:Mutex::new(input),output,admissions:admissions.clone()};
         let mut io=PacketIo{input:send.clone(),output:receive,peers:Default::default()};
         socket.try_send(&quinn::udp::Transmit{destination:(remote,PORT).into(),ecn:None,contents:b"old",segment_size:None,src_ip:None})?;
         send.send(Datagram{address:remote,payload:Bytes::from_static(b"old"),permit:Some(old)}).await?;

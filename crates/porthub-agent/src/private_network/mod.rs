@@ -92,3 +92,6 @@ mod dns_windows;
 mod authority_clock;
 
 mod authority_event;
+
+#[cfg(all(feature="private-sparse",feature="private-stream"))]
+mod stream_chunks;

@@ -35,6 +35,16 @@ impl SendPermit {
         }
     }
 }
+/// Immutable socket-generation factory. It may snapshot original pending
+/// origins, but the factory itself is never replaced on an existing socket.
+#[derive(Clone)]
+pub struct SendFactory(Arc<dyn Fn()->Option<SendPermit>+Send+Sync>);
+impl SendFactory {
+    pub fn new(factory:impl Fn()->Option<SendPermit>+Send+Sync+'static)->Self{Self(Arc::new(factory))}
+    pub fn snapshot(&self)->Option<SendPermit>{(self.0)()}
+    pub fn same_generation(&self,other:&Self)->bool{Arc::ptr_eq(&self.0,&other.0)}
+}
+
 struct Outbound {bytes:Bytes,permit:Option<SendPermit>}
 
 #[derive(Clone, Copy, Default, Debug)]
