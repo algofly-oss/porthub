@@ -123,12 +123,16 @@ mod tests {
             .lines()
             .last()
             .context("Production CIM import missing")?;
-        let metadata = format!(
-            r#"
+        // Import with normal module dependency resolution, as production does.
+        // Disable discovery only for the subsequent command lookup. A separate
+        // fresh child without the import proves lookup cannot autoload it.
+        for (selected_import, expected_present) in [(import, true), ("", false)] {
+            let metadata = format!(
+                r#"
 $ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
 if($PSVersionTable.PSVersion.Major -ne 5){{throw 'Windows PowerShell 5 required'}}
+{selected_import}
 $PSModuleAutoLoadingPreference='None'
-{import}
 $expected=[IO.Path]::GetFullPath($PSHOME+'\Modules\CimCmdlets')
 function Trusted($name){{
  $c=$ExecutionContext.InvokeCommand.GetCommand($name,[Management.Automation.CommandTypes]::Cmdlet)
@@ -137,57 +141,61 @@ function Trusted($name){{
 $one=Trusted 'Get-CimInstance';$two=Trusted 'Invoke-CimMethod'
 [Console]::WriteLine(('{{"get_cim":'+$one.ToString().ToLowerInvariant()+',"invoke_cim":'+$two.ToString().ToLowerInvariant()+'}}'))
 "#
-        );
-        let root = PathBuf::from(
-            std::env::var_os("SystemRoot").context("Windows SystemRoot unavailable")?,
-        );
-        let executable = root.join("System32/WindowsPowerShell/v1.0/powershell.exe");
-        let hostile = root.join(format!("PortHub-absent-CIM-modules-{}", std::process::id()));
-        let run = async {
-            let mut child = tokio::process::Command::new(executable)
-                .args([
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-Command",
-                    &metadata,
-                ])
-                .env("PSModulePath", hostile)
-                .env("PSModuleAnalysisCachePath", "NUL")
-                .creation_flags(0x08000000)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .kill_on_drop(true)
-                .spawn()?;
-            let mut bytes = Vec::new();
-            child
-                .stdout
-                .take()
-                .context("CIM module metadata unavailable")?
-                .take(513)
-                .read_to_end(&mut bytes)
-                .await?;
-            ensure!(
-                bytes.len() <= 512 && child.wait().await?.success(),
-                "Trusted CIM module metadata failed"
             );
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct Commands {
-                get_cim: bool,
-                invoke_cim: bool,
-            }
-            let commands: Commands = serde_json::from_slice(&bytes)?;
-            ensure!(
-                commands.get_cim && commands.invoke_cim,
-                "CIM commands escaped the trusted system module"
+            let root = PathBuf::from(
+                std::env::var_os("SystemRoot").context("Windows SystemRoot unavailable")?,
             );
-            Ok::<_, anyhow::Error>(())
-        };
-        tokio::time::timeout(Duration::from_secs(10), run)
-            .await
-            .context("Trusted CIM module metadata timed out")?
+            let executable = root.join("System32/WindowsPowerShell/v1.0/powershell.exe");
+            let hostile = root.join(format!("PortHub-absent-CIM-modules-{}", std::process::id()));
+            let run = async {
+                let mut child = tokio::process::Command::new(&executable)
+                    .args([
+                        "-NoLogo",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        &metadata,
+                    ])
+                    .env("PSModulePath", &hostile)
+                    .env("PSModuleAnalysisCachePath", "NUL")
+                    .creation_flags(0x08000000)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .kill_on_drop(true)
+                    .spawn()?;
+                let mut bytes = Vec::new();
+                child
+                    .stdout
+                    .take()
+                    .context("CIM module metadata unavailable")?
+                    .take(513)
+                    .read_to_end(&mut bytes)
+                    .await?;
+                ensure!(
+                    bytes.len() <= 512 && child.wait().await?.success(),
+                    "Trusted CIM module metadata failed"
+                );
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Commands {
+                    get_cim: bool,
+                    invoke_cim: bool,
+                }
+                let commands: Commands = serde_json::from_slice(&bytes)?;
+                ensure!(
+                    commands.get_cim == expected_present && commands.invoke_cim == expected_present,
+                    "CIM command lookup did not match explicit trusted import"
+                );
+                Ok::<_, anyhow::Error>(())
+            };
+            tokio::time::timeout(Duration::from_secs(10), run)
+                .await
+                .with_context(|| {
+                    format!("Trusted CIM module metadata timed out; imported={expected_present}")
+                })??;
+        }
+        Ok(())
     }
 
     #[tokio::test]
