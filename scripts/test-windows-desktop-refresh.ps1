@@ -146,6 +146,6 @@ try{
  $env:PORTHUB_REFRESH_TEST_POWERSHELL=if($env:SystemRoot){Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'}else{[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName}
  $transportOutput=& python (Join-Path $PSScriptRoot 'test-windows-refresh-bootstrap.py') 2>&1
  if($LASTEXITCODE -ne 0){$detail=($transportOutput|Out-String);throw ('Extracted desktop bootstrap transport regressions failed; bounded inert-test diagnostics: '+$detail.Substring(0,[Math]::Min(8192,$detail.Length)))}
- $results+=@{case='bootstrap-transport-seven-real-child-regressions';passed=$true}
+ $results+=@{case='bootstrap-transport-and-startup-regressions';passed=$true}
 }finally{$env:PORTHUB_REFRESH_TEST_POWERSHELL=$priorPowerShell}
 $results|ConvertTo-Json -Depth 4
