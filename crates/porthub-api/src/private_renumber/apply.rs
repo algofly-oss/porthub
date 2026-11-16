@@ -49,6 +49,7 @@ pub(super) async fn verify(
     job: &str,
     head: &Document,
 ) -> ApiResult<Vec<[u8; 32]>> {
+    if head.get_i64("plan_version").ok()!=Some(2){return Err(conflict("Unsupported prototype migration plan version; explicit recovery required"));}
     let count = head
         .get_i64("count")
         .ok()

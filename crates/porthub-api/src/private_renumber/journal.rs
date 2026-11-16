@@ -77,14 +77,31 @@ pub fn plan_digest(rows: &[Assignment]) -> ApiResult<String> {
     }
     Ok(format!("{:x}", hash.finalize()))
 }
-/// A head becomes fenced BEFORE its first row is written. Uncertain write results
+/// A head becomes fenced only AFTER its complete immutable plan is staged, and
+/// BEFORE any peer address can be written. Uncertain write results
 /// must be reconciled by exact fresh reads; they are never rolled back implicitly.
 /// Caller must hold allocation and workspace publication guards.
+#[derive(Clone, Copy, Default)]
+pub(super) enum Fault {
+    #[default]
+    None,
+    #[cfg(test)]
+    AfterStagedRow(usize),
+}
 pub(super) async fn prepare(
     guard: &super::fence::Exclusive<'_>,
     job: &str,
     rows: &[Assignment],
     target_cidrs: &[String],
+) -> ApiResult<()> {
+    prepare_with_fault(guard, job, rows, target_cidrs, Fault::None).await
+}
+async fn prepare_with_fault(
+    guard: &super::fence::Exclusive<'_>,
+    job: &str,
+    rows: &[Assignment],
+    target_cidrs: &[String],
+    fault: Fault,
 ) -> ApiResult<()> {
     if job.len() != 32
         || !job
@@ -165,17 +182,34 @@ pub(super) async fn prepare(
             "Migration peer was deleted; explicit recovery is required",
         ));
     }
-    let previous=app.collection("private_networks").find_one(doc!{"_id":&first.workspace}).await?;
-    let mut previous_fields=Document::new();
-    if let Some(previous)=&previous {
-        for field in ["cidr","additional_cidrs","dns_suffix","_renumber_job","_address_generation"] {
-            if let Some(value)=previous.get(field){previous_fields.insert(field,value.clone());}
+    let previous = app
+        .collection("private_networks")
+        .find_one(doc! {"_id":&first.workspace})
+        .await?;
+    let mut previous_fields = Document::new();
+    if let Some(previous) = &previous {
+        for field in [
+            "cidr",
+            "additional_cidrs",
+            "dns_suffix",
+            "_renumber_job",
+            "_address_generation",
+        ] {
+            if let Some(value) = previous.get(field) {
+                previous_fields.insert(field, value.clone());
+            }
         }
     }
-    if mongodb::bson::to_vec(&previous_fields).map_err(|_|conflict("Invalid previous preferences"))?.len()>16384 {
-        return Err(conflict("Previous private preferences exceed migration journal bounds"));
+    if mongodb::bson::to_vec(&previous_fields)
+        .map_err(|_| conflict("Invalid previous preferences"))?
+        .len()
+        > 16384
+    {
+        return Err(conflict(
+            "Previous private preferences exceed migration journal bounds",
+        ));
     }
-    let previous_preferences=doc!{"existed":previous.is_some(),"fields":previous_fields};
+    let previous_preferences = doc! {"existed":previous.is_some(),"fields":previous_fields};
     let heads = durable(app, "private_renumber_heads");
     // Historical generation zero is explicit before the CAS. A duplicate insert
     // is tolerated only by reading and checking the existing head below.
@@ -197,31 +231,25 @@ pub(super) async fn prepare(
             }
         }
     }
-    let transition=heads.update_one(doc!{"_id":&first.workspace,"generation":first.previous_generation as i64,"state":"stable"},
-        doc!{"$set":{"generation":first.generation as i64,"state":"preparing","job":job,"digest":&digest,"count":rows.len() as i64,"target_cidrs":target_cidrs.to_vec(),"previous_preferences":previous_preferences}}).await;
-    // Even a write-concern timeout may have committed. Never claim failure means
-    // unchanged state; exact persisted ownership is the only recovery authority.
-    let head = heads
+    let initial = heads
         .find_one(doc! {"_id":&first.workspace})
         .await?
         .ok_or_else(|| conflict("Migration head disappeared"))?;
-    if head.get_str("job").ok() != Some(job)
-        || head.get_str("digest").ok() != Some(digest.as_str())
-        || head.get_i64("generation").ok() != Some(first.generation as i64)
-        || head.get_i64("count").ok() != Some(rows.len() as i64)
-        || head.get_array("target_cidrs").ok()
-            != Some(&target_cidrs.iter().cloned().map(Into::into).collect())
-    {
-        return match transition {
-            Err(error) => Err(error.into()),
-            Ok(_) => Err(conflict("Another migration owns this workspace")),
-        };
+    let idle = initial.get_str("state").ok() == Some("stable")
+        && initial.get_i64("generation").ok() == Some(first.previous_generation as i64);
+    let resume = initial.get_str("state").ok() == Some("applying")
+        && initial.get_i64("plan_version").ok() == Some(2)
+        && initial.get_str("job").ok() == Some(job)
+        && initial.get_str("digest").ok() == Some(digest.as_str());
+    if !idle && !resume {
+        return Err(conflict(
+            "Another migration owns this workspace or prototype recovery version is unsupported",
+        ));
     }
-    if !matches!(head.get_str("state"), Ok("preparing" | "applying")) {
-        return Err(conflict("Migration head is not resumable"));
-    }
-    app.private_relay
-        .workspace_generation(&first.workspace, first.generation, true);
+    // Both allocation/publication guards remain held while staging. Until the
+    // complete immutable plan is journaled, head stays Stable and no peer writes
+    // are possible. A crash leaves ONLY inert orphan rows, never a partial active
+    // migration or a reservation capable of authorizing address changes.
     let assignments = durable(app, "private_renumber_assignments");
     for (index, row) in rows.iter().enumerate() {
         let id = format!("{job}:{index:05}");
@@ -241,21 +269,42 @@ pub(super) async fn prepare(
         if stored != immutable {
             return Err(conflict("Migration assignment was replaced or changed"));
         }
-    }
-    let done = heads
-        .update_one(
-            doc! {"_id":&first.workspace,"job":job,"digest":&digest,"state":"preparing"},
-            doc! {"$set":{"state":"applying"}},
-        )
-        .await?;
-    if done.matched_count == 0 {
-        let head = heads
-            .find_one(doc! {"_id":&first.workspace,"job":job,"digest":&digest,"state":"applying"})
-            .await?;
-        if head.is_none() {
-            return Err(conflict("Migration head changed before application"));
+        #[cfg(test)]
+        if matches!(fault,Fault::AfterStagedRow(n) if n==index+1) {
+            return Err(conflict("Injected crash before complete plan activation"));
         }
+        #[cfg(not(test))]
+        let _ = fault;
     }
+    // One atomic head CAS activates BOTH the complete plan and its target pool
+    // reservation. No per-peer mutation can precede this durable fence.
+    let transition=heads.update_one(doc!{"_id":&first.workspace,"generation":first.previous_generation as i64,"state":"stable"},
+        doc!{"$set":{"generation":first.generation as i64,"state":"applying","plan_version":2_i64,"job":job,"digest":&digest,"count":rows.len() as i64,"target_cidrs":target_cidrs.to_vec(),"previous_preferences":previous_preferences}}).await;
+    // Even a write-concern timeout may have committed. Never claim failure means
+    // unchanged state; exact persisted ownership is the only recovery authority.
+    let head = heads
+        .find_one(doc! {"_id":&first.workspace})
+        .await?
+        .ok_or_else(|| conflict("Migration head disappeared"))?;
+    if head.get_str("job").ok() != Some(job)
+        || head.get_str("digest").ok() != Some(digest.as_str())
+        || head.get_i64("generation").ok() != Some(first.generation as i64)
+        || head.get_i64("count").ok() != Some(rows.len() as i64)
+        || head.get_array("target_cidrs").ok()
+            != Some(&target_cidrs.iter().cloned().map(Into::into).collect())
+    {
+        return match transition {
+            Err(error) => Err(error.into()),
+            Ok(_) => Err(conflict("Another migration owns this workspace")),
+        };
+    }
+    if head.get_str("state").ok() != Some("applying")
+        || head.get_i64("plan_version").ok() != Some(2)
+    {
+        return Err(conflict("Migration head is not resumable"));
+    }
+    app.private_relay
+        .workspace_generation(&first.workspace, first.generation, true);
     Ok(())
 }
 #[cfg(test)]
@@ -335,6 +384,44 @@ mod tests {
             assignments.update_one(doc!{"job":job},doc!{"$set":{"new":"10.204.5.99"}}).await?;
             let guard=super::super::fence::exclusive(&reopened,owner).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
             assert!(prepare(&guard,job,&[row],&pools).await.is_err(),"changed immutable row adopted");
+            Ok::<_,anyhow::Error>(())
+        }.await;
+        db.drop().await?;
+        result
+    }
+    #[tokio::test]
+    #[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+    async fn crash_during_inert_staging_never_activates_partial_plan_or_reserves_targets(
+    ) -> anyhow::Result<()> {
+        let client =
+            mongodb::Client::with_uri_str(std::env::var("PORTHUB_TEST_MONGO_URI")?).await?;
+        let db = client.database(&format!(
+            "porthub_renumber_stage_crash_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let result=async {
+            let owner=mongodb::bson::oid::ObjectId::new();let mut rows=Vec::new();let job="3123456789abcdef0123456789abcdef";
+            let app=App::new(crate::config::Config::default(),db.clone());
+            for i in 0..2 {let machine=mongodb::bson::oid::ObjectId::new();let mut value=row(i);value.machine=machine.to_hex();value.workspace=owner.to_hex();app.collection("private_peers").insert_one(doc!{"_id":&value.peer,"workspace_id":owner,"machine_id":machine,"ip":value.old.to_string(),"enrollment_generation":&value.credential_generation}).await?;rows.push(value);}
+            let pools=vec!["10.204.0.0/16".to_owned()];
+            let guard=super::super::fence::exclusive(&app,owner).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
+            assert!(prepare_with_fault(&guard,job,&rows,&pools,Fault::AfterStagedRow(1)).await.is_err());drop(guard);drop(app);
+            let reopened=App::new(crate::config::Config::default(),db.clone());
+            let head=reopened.collection("private_renumber_heads").find_one(doc!{"_id":owner.to_hex()}).await?.unwrap();assert_eq!(head.get_str("state")?,"stable");assert_eq!(head.get_i64("generation")?,0);assert!(!head.contains_key("job"));
+            assert!(super::super::fence::stable(&reopened,owner).await.is_ok(),"incomplete inert rows fenced a workspace after restart");
+            assert_eq!(reopened.collection("private_renumber_assignments").count_documents(doc!{"job":job}).await?,1);
+            let other=mongodb::bson::oid::ObjectId::new().to_hex();let target=crate::domain::enrollment::Network::parse(&pools[0]).unwrap();
+            assert!(crate::domain::private_networks::validate_migration_targets_locked(&reopened,&other,&[target]).await.is_ok(),"inert staging incorrectly reserved an address pool");
+            reopened.collection("private_networks").insert_one(doc!{"_id":&other,"cidr":&pools[0],"dns_suffix":"other.private"}).await?;
+            let guard=super::super::fence::exclusive(&reopened,owner).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
+            assert!(prepare(&guard,job,&rows,&pools).await.is_err(),"restart ignored newly acquired foreign reservation");drop(guard);
+            assert_eq!(reopened.collection("private_renumber_heads").find_one(doc!{"_id":owner.to_hex()}).await?.unwrap().get_str("state")?,"stable");
+            reopened.collection("private_networks").delete_one(doc!{"_id":&other,"cidr":&pools[0]}).await?;
+            let guard=super::super::fence::exclusive(&reopened,owner).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
+            prepare(&guard,job,&rows,&pools).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;drop(guard);
+            let head=reopened.collection("private_renumber_heads").find_one(doc!{"_id":owner.to_hex()}).await?.unwrap();assert_eq!(head.get_str("state")?,"applying");assert_eq!(head.get_i64("plan_version")?,2);
+            assert_eq!(super::super::apply::verify(&reopened,owner,job,&head).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?.len(),2);
+            for row in rows {assert_eq!(reopened.collection("private_peers").find_one(doc!{"_id":&row.peer}).await?.unwrap().get_str("ip")?,row.old.to_string());}
             Ok::<_,anyhow::Error>(())
         }.await;
         db.drop().await?;
