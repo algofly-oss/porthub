@@ -97,7 +97,9 @@ jobs:
           cargo test --locked -p porthub-api --lib file_relay::tests
           cargo test --locked -p porthub-api --test keyboard --test machine_metrics --test usb -- --include-ignored
           cargo test --locked -p porthub-api --lib native_media::
-          cargo test --locked -p porthub-api --test native_media -- --include-ignored
+          # The real inventory DTO case needs an operator's physical microphone;
+          # hosted CI runs the portable API contracts, not that hardware gate.
+          cargo test --locked -p porthub-api --test native_media -- --include-ignored --skip real_readonly_helper_inventory_allows_explicit_unknown_permission_but_never_denied_or_camera
           cargo test --locked -p porthub-components --test media_distribution
           cargo test --locked -p porthub-agent --lib autoupdate::version_tests
           cargo test --locked -p porthub-components --lib release_version

@@ -631,28 +631,42 @@ mod tests {
         assert_eq!(stats.percentile(50),499);assert_eq!(stats.percentile(95),999);assert_eq!(stats.percentile(99),999);
         stats.add(u64::MAX);assert_eq!(stats.bins.len(),1002);assert_eq!(stats.max_us,u64::MAX);
     }
+    async fn assert_ten_normalized_hcd_packets(hcd: ReceiverHcd) -> Result<(Duration, Duration)> {
+        let (engine,streaming)=fixture();let cancel=CancellationToken::new();
+        let _cancel_on_exit=cancel.clone().drop_guard();
+        let (server,mut client)=tokio::io::duplex(16384);
+        let task=tokio_util::task::AbortOnDropHandle::new(tokio::spawn(super::serve_for_hcd(server,engine,0xffff0001,streaming,cancel.clone(),hcd)));
+        let (valid,foreign)=match hcd {ReceiverHcd::LinuxVhci=>(1,4),ReceiverHcd::WindowsUde=>(4,1)};
+        let mut wrong=submit(1,1,960,10);wrong[36..40].copy_from_slice(&(foreign as u32).to_be_bytes());client.write_all(&wrong).await?;
+        let mut header=[0;48];client.read_exact(&mut header).await?;assert_eq!(word(&header,20) as i32,-22);
+        let mut rejected=[0;160];client.read_exact(&mut rejected).await?;
+        let mut request=submit(2,1,960,10);request[36..40].copy_from_slice(&(valid as u32).to_be_bytes());
+        let start=Instant::now();let wall_start=std::time::Instant::now();client.write_all(&request).await?;client.read_exact(&mut header).await?;
+        let elapsed=(start.elapsed(),wall_start.elapsed());
+        assert_eq!(word(&header,20),0);assert_eq!(word(&header,24),960);assert_eq!(word(&header,32),10);
+        let mut payload=vec![1;1120];client.read_exact(&mut payload).await?;
+        assert!(payload[..960].iter().all(|b|*b==0));
+        for i in 0..10 {assert_eq!(word(&payload,960+i*16+8),96);assert_eq!(word(&payload,960+i*16+12),0);}
+        cancel.cancel();task.await??;Ok(elapsed)
+    }
     #[tokio::test(start_paused = true)]
     async fn local_hcd_normalizes_ten_windows_packets_without_relaxing_linux() -> Result<()> {
-        for hcd in [ReceiverHcd::LinuxVhci,ReceiverHcd::WindowsUde] {
-            let (engine,streaming)=fixture();let cancel=CancellationToken::new();
-            let (server,mut client)=tokio::io::duplex(16384);
-            let task=tokio::spawn(super::serve_for_hcd(server,engine,0xffff0001,streaming,cancel.clone(),hcd));
-            let (valid,foreign)=match hcd {ReceiverHcd::LinuxVhci=>(1,4),ReceiverHcd::WindowsUde=>(4,1)};
-            let mut wrong=submit(1,1,960,10);wrong[36..40].copy_from_slice(&(foreign as u32).to_be_bytes());client.write_all(&wrong).await?;
-            let mut header=[0;48];client.read_exact(&mut header).await?;assert_eq!(word(&header,20) as i32,-22);
-            let mut rejected=[0;160];client.read_exact(&mut rejected).await?;
-            let mut request=submit(2,1,960,10);request[36..40].copy_from_slice(&(valid as u32).to_be_bytes());
-            let start=Instant::now();client.write_all(&request).await?;client.read_exact(&mut header).await?;
-            assert_eq!(word(&header,20),0);assert_eq!(word(&header,24),960);assert_eq!(word(&header,32),10);
-            assert_eq!(start.elapsed(),Duration::from_millis(10));
-            let mut payload=vec![1;1120];client.read_exact(&mut payload).await?;
-            assert!(payload[..960].iter().all(|b|*b==0));
-            for i in 0..10 {assert_eq!(word(&payload,960+i*16+8),96);assert_eq!(word(&payload,960+i*16+12),0);}
-            cancel.cancel();task.await??;
-        }
+        // Windows UDE owns a real native timer, which intentionally does not
+        // advance paused Tokio time. Its wire/clock integration is tested below.
+        #[cfg(windows)] let portable=[ReceiverHcd::LinuxVhci];
+        #[cfg(not(windows))] let portable=[ReceiverHcd::LinuxVhci,ReceiverHcd::WindowsUde];
+        for hcd in portable {assert_eq!(assert_ten_normalized_hcd_packets(hcd).await?.0,Duration::from_millis(10));}
         for hcd in [ReceiverHcd::LinuxVhci,ReceiverHcd::WindowsUde] {
             for invalid in [0,2,3,5,8,u32::MAX] {assert!(!hcd.accepts_interval(invalid));}
         }
+        Ok(())
+    }
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn native_windows_hcd_normalizes_ten_packets_on_real_clock() -> Result<()> {
+        let (_,wall)=tokio::time::timeout(Duration::from_secs(2),assert_ten_normalized_hcd_packets(ReceiverHcd::WindowsUde)).await??;
+        assert!(wall>=Duration::from_millis(10),"Native UDE completed ten 1ms packets before their real deadline");
+        assert!(wall<Duration::from_secs(2),"Native UDE exceeded the bounded test lifetime");
         Ok(())
     }
     #[tokio::test(start_paused = true)]
