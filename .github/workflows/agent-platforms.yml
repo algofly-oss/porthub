@@ -356,6 +356,20 @@ jobs:
         timeout-minutes: 2
         shell: pwsh
         run: ./scripts/test-windows-desktop-refresh.ps1
+      - name: Verify hosted native Windows desktop refresh before compilation
+        if: runner.os == 'Windows'
+        id: native-desktop-refresh
+        timeout-minutes: 5
+        shell: pwsh
+        run: python scripts/test-windows-refresh-native.py --receipt "$env:RUNNER_TEMP/desktop-refresh-native.json"
+      - name: Preserve hosted desktop refresh proof
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-refresh-native-${{ matrix.artifact }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/desktop-refresh-native.json
+          if-no-files-found: ignore
+          retention-days: 3
       - name: Build independent sync fixture for core command checks
         shell: bash
         run: |
