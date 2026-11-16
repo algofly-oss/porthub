@@ -400,6 +400,7 @@ jobs:
         shell: bash
         run: |
           python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --lib windows_path_tests --target ${{ matrix.target }}
+          python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --lib usb::windows_drivers::installer_path_tests --target ${{ matrix.target }}
           python scripts/run-with-timeout.py 90 cargo test --locked -p porthub-agent --test windows_bootstrap --target ${{ matrix.target }} -- --include-ignored --test-threads=1
       - name: Verify Windows watch jobs with a bounded runtime
         if: runner.os == 'Windows'
