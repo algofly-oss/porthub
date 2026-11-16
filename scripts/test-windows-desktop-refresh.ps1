@@ -1,6 +1,7 @@
 $ErrorActionPreference='Stop'
 # OS scheduler/process/file-identity boundaries are mocked; no live task is changed.
 . (Join-Path $PSScriptRoot '../crates/porthub-agent/src/keyboard/windows_refresh.ps1')
+$ExecutableValidator=${function:Test-RefreshExecutable}
 $global:Rsid='S-1-5-21-123-456-789-1001';$global:Rold='C:\ProgramData\PortHub\releases\'+('a'*64)+'\porthub.exe';$global:Rnew='C:\ProgramData\PortHub\releases\'+('b'*64)+'\porthub.exe';$global:Rroot='C:\ProgramData\PortHub\releases'
 function Test-RefreshExecutable([string]$Path,[string]$ReleaseRoot){return $ReleaseRoot -ceq $global:Rroot -and (($Path -ceq $global:Rnew -and $global:NewHashOk) -or ($Path -ceq $global:Rold -and $global:OldHashOk))}
 function Collection($Value){$o=[pscustomobject]@{Count=1;Value=$Value};$o|Add-Member ScriptMethod Item {param($n)if($n -ne 1){throw 'One-based COM index required'};return $this.Value};return $o}
@@ -77,4 +78,30 @@ foreach($sid in @('S-1-5-18','S-1-5-19','S-1-5-20','invalid')){
  if($global:Stops -or $global:Starts -or $global:Updates){throw 'Unauthorized account touched task'};$results+=@{case=('forbidden-'+$sid);passed=$true}
 }
 Expect-Failure {Read-RefreshXml '<!DOCTYPE Task [<!ENTITY x SYSTEM "file:///not-a-proof-input">]><Task>&x;</Task>'} 'DTD-prohibited';$results+=@{case='DTD-prohibited';passed=$true}
+# Hash verification must not depend on inherited module auto-loading.
+$hashRoot=Join-Path ([IO.Path]::GetTempPath()) ('porthub-refresh-hash-'+[Guid]::NewGuid().ToString('N'))
+try{
+ $bytes=[Text.Encoding]::UTF8.GetBytes('inert refresh hashing fixture');$sha=[Security.Cryptography.SHA256]::Create()
+ try{$digest=[BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+ $dir=Join-Path $hashRoot $digest;[IO.Directory]::CreateDirectory($dir)|Out-Null;$file=Join-Path $dir 'porthub.exe';[IO.File]::WriteAllBytes($file,$bytes)
+ function Get-FileHash {throw 'Inherited module hash cmdlet must not be used'}
+ if(!(&$ExecutableValidator $file $hashRoot)){throw 'Native SHA256 immutable path validation failed'}
+ [IO.File]::WriteAllBytes($file,[byte[]]@(1,2,3));if(&$ExecutableValidator $file $hashRoot){throw 'Corrupt executable passed SHA256'}
+ $results+=@{case='hash-without-module-autoload';passed=$true}
+}finally{Remove-Item -LiteralPath $hashRoot -Recurse -Force -ErrorAction SilentlyContinue}
+foreach($case in @('xml-text','xml-attribute','principal-alias','security-descriptor')){
+ Reset-Case
+ switch($case){
+ 'xml-text'{$global:Task.Xml=$global:Task.Xml.Replace('Preserved','NeverEmitTaskContent')}
+ 'xml-attribute'{$global:Task.Xml=$global:Task.Xml.Replace('<Task ','<Task private="NeverEmitTaskContent" ')}
+ 'principal-alias'{$global:Task.Xml=$global:Task.Xml.Replace('<Principal><UserId>'+$global:Rsid,'<Principal><UserId>NeverEmitAccount')}
+ 'security-descriptor'{$global:Task.Sddl+='(A;;FR;;;WD)'}
+ }
+ $message='';try{Assert-RefreshSnapshot $global:Task $global:OldXml $global:OldSd}catch{$message=$_.Exception.Message}
+ if(!$message.Contains('bounded structural diff ') -or $message.Contains('NeverEmit') -or $message.Contains($global:Rsid) -or $message.Contains($global:Rold)){throw 'Structural diagnostics leaked task/account values or missed mismatch'}
+ $record=$message.Substring($message.IndexOf('bounded structural diff ')+24)|ConvertFrom-Json
+ if(@($record.field_paths).Count -gt 16 -or $record.expected_xml_sha256 -notmatch '^[a-f0-9]{64}$'){throw 'Structural diagnostic bounds/hash failed'}
+ if($case -eq 'security-descriptor'){if(!$record.sd_changed){throw 'SD mutation missed'}}elseif(!$record.xml_changed -or !@($record.field_paths).Count){throw 'XML mutation missed'}
+ $results+=@{case=('diagnostic-'+$case);passed=$true}
+}
 $results|ConvertTo-Json -Depth 4
