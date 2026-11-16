@@ -291,7 +291,12 @@ impl Lease {
         }
         let file = Self::file(profile, false)?;
         match fs2::FileExt::try_lock_exclusive(&file) {
-            Ok(()) => Ok(false),
+            Ok(()) => {
+                // File close alone can leave the flock alive in a concurrent
+                // fork child until exec closes its inherited descriptor.
+                fs2::FileExt::unlock(&file)?;
+                Ok(false)
+            },
             Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
                 Ok(true)
             }
@@ -303,5 +308,38 @@ impl Lease {
         fs2::FileExt::try_lock_exclusive(&file)
             .context("this machine profile is already running")?;
         Ok(Self { _file: file })
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        // Release logical ownership now, even if a concurrent fork still holds
+        // a duplicate of this open-file description before exec.
+        let _ = fs2::FileExt::unlock(&self._file);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod lease_lifetime_tests {
+    use super::*;
+
+    #[test]
+    fn owner_drop_releases_lock_even_while_fork_duplicate_survives() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("machine.json");
+        let owner = Lease::acquire(&path)?;
+        // fork inherits this same open-file description until exec closes its
+        // CLOEXEC descriptor. A clone deterministically holds that exact state.
+        let inherited = owner._file.try_clone()?;
+        assert!(Lease::running(&path)?);
+        assert!(Lease::acquire(&path).is_err(), "A live owner remains exclusive");
+        drop(owner);
+        let replacement = Lease::acquire(&path)?;
+        drop(inherited);
+        assert!(Lease::running(&path)?, "Closing the inherited descriptor must not release the replacement's lock");
+        assert!(Lease::acquire(&path).is_err());
+        drop(replacement);
+        assert!(!Lease::running(&path)?);
+        Ok(())
     }
 }
