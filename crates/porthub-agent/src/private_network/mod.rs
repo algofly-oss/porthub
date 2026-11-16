@@ -87,3 +87,6 @@ mod windows_nrpt;
 
 #[cfg(windows)]
 mod dns_windows;
+
+#[cfg(feature = "private-sparse")]
+mod authority_clock;
