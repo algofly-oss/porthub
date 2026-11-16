@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 fn conflict(message: &str) -> ApiError {
     ApiError::new(StatusCode::CONFLICT, message)
 }
-fn durable(app: &App, name: &str) -> Collection<Document> {
+pub(super) fn durable(app: &App, name: &str) -> Collection<Document> {
     app.db.collection_with_options(
         name,
         CollectionOptions::builder()
@@ -30,7 +30,7 @@ fn durable(app: &App, name: &str) -> Collection<Document> {
             .build(),
     )
 }
-fn assignment_doc(row: &Assignment) -> Document {
+pub(super) fn assignment_doc(row: &Assignment) -> Document {
     doc! {"peer":&row.peer,"machine":&row.machine,"workspace":&row.workspace,
     "credential_generation":&row.credential_generation,"old":row.old.to_string(),"new":row.new.to_string(),
     "previous_generation":row.previous_generation as i64,"generation":row.generation as i64}
