@@ -60,6 +60,7 @@ fn script(executable: &Path) -> Result<String> {
     Ok(format!(
         r#"$ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
+Import-Module -Name "$PSHOME\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1" -ErrorAction Stop
 $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
 $sid=$identity.User.Value
 if($sid -in @('S-1-5-18','S-1-5-19','S-1-5-20')){{exit 0}}
@@ -126,29 +127,40 @@ Start-ScheduledTask -TaskName $name
 "#
     ))
 }
-pub(super) fn install(executable: &Path) -> Result<()> {
-    use base64::Engine;
+fn powershell_command(encoded: &str) -> Result<Command> {
     use std::os::windows::process::CommandExt;
-    let release = resolve(executable)?;
-    let encoded = script(&release)?
-        .encode_utf16()
-        .flat_map(u16::to_le_bytes)
-        .collect::<Vec<_>>();
     let powershell = std::env::var_os("SystemRoot").context("Windows SystemRoot is unavailable")?;
     let powershell = Path::new(&powershell).join("System32/WindowsPowerShell/v1.0/powershell.exe");
-    let status = Command::new(powershell)
+    ensure!(
+        encoded.len() + powershell.as_os_str().len() + 256 < 30000,
+        "Desktop startup PowerShell command exceeds conservative native limit"
+    );
+    let mut command = Command::new(powershell);
+    command
         .args([
             "-NoLogo",
             "-NoProfile",
             "-NonInteractive",
             "-EncodedCommand",
-            &base64::engine::general_purpose::STANDARD.encode(encoded),
+            encoded,
         ])
+        .env_remove("PSModulePath")
+        .env_remove("PSModuleAnalysisCachePath")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .creation_flags(0x08000000)
-        .status()?;
+        .creation_flags(0x08000000);
+    Ok(command)
+}
+pub(super) fn install(executable: &Path) -> Result<()> {
+    use base64::Engine;
+    let release = resolve(executable)?;
+    let encoded = script(&release)?
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(encoded);
+    let status = powershell_command(&encoded)?.status()?;
     ensure!(status.success(),"Cannot register interactive desktop startup; run porthub keyboard enable from the desktop account");
     Ok(())
 }
@@ -161,6 +173,33 @@ mod tests {
         assert_eq!(layouts.len(), 1);
         assert!(!layouts[0].user);
         assert!(super::super::registration_layouts(true).is_err());
+    }
+    #[test]
+    fn fresh_desktop_child_uses_native_utility_without_inherited_module_configuration() -> Result<()>
+    {
+        use base64::Engine;
+        let source = script(Path::new(
+            r"C:\ProgramData\PortHub\releases\0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\porthub.exe",
+        ))?;
+        ensure!(source.find("Import-Module").unwrap() < source.find("Get-FileHash").unwrap());
+        ensure!(source.contains(r#""$PSHOME\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1" -ErrorAction Stop"#));
+        let encoded = base64::engine::general_purpose::STANDARD.encode(
+            source
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        );
+        let command = powershell_command(&encoded)?;
+        let environment: Vec<_> = command.get_envs().collect();
+        for name in ["PSModulePath", "PSModuleAnalysisCachePath"] {
+            ensure!(environment
+                .iter()
+                .any(|(key, value)| *key == std::ffi::OsStr::new(name) && value.is_none()));
+        }
+        let arguments: Vec<_> = command.get_args().collect();
+        ensure!(arguments.last() == Some(&std::ffi::OsStr::new(&encoded)));
+        ensure!(powershell_command(&"A".repeat(30000)).is_err());
+        Ok(())
     }
     #[test]
     fn startup_uses_interactive_token_without_account_password_or_system_hive() {
