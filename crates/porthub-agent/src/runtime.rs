@@ -463,7 +463,7 @@ pub async fn run_with_logs(
     let mut session = Session::new();
     session.control=Some(control.clone());
     session.health=Some(crate::service_health::Monitor::new(&path));
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     let mut updater = crate::autoupdate::Controller::new(&path, &profile)
         .await
         .unwrap_or_else(|_| {
@@ -510,15 +510,15 @@ pub async fn run_with_logs(
             || tokio::time::Instant::now() >= next_heartbeat;
         let started = tokio::time::Instant::now();
         monitor.set(session.revision, session.route_snapshot());
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         let handled = updater
             .as_ref()
             .map(|updater| updater.handled())
             .unwrap_or_default();
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         let handled = String::new();
         let maintenance = async {
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
             if let Some(updater) = &mut updater {
                 return updater.next().await.is_some();
             }
@@ -537,7 +537,7 @@ pub async fn run_with_logs(
         let reply = tokio::select! {
             _=cancel.cancelled()=>break,
             _alive=maintenance=>{
-                #[cfg(target_os="linux")]
+                #[cfg(any(target_os="linux",windows))]
                 if !_alive {updater=None;tracing::warn!("automatic update worker stopped");}
                 next_heartbeat=tokio::time::Instant::now();continue;
             },
@@ -586,6 +586,13 @@ pub async fn run_with_logs(
                         if let Some(updater) = &mut updater {
                             updater.request(if crate::features::enabled(&path,crate::features::Feature::AutoUpdate){session.pending_update.clone()}else{None});
                         }
+                        #[cfg(windows)]
+                        if let Some(updater) = &mut updater {
+                            // Observe requests even while locally disabled: a previously
+                            // committed receipt may be acknowledged without new work.
+                            // The independent Windows controller enforces AutoUpdate.
+                            updater.request(session.pending_update.clone());
+                        }
                     }
                     Err(_) => {
                         tracing::warn!(
@@ -614,7 +621,7 @@ pub async fn run_with_logs(
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 private_install_cancel.cancel();
                 if let Some(module) = &mut private_module { module.stop().await; }
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                 if let Some(updater) = &mut updater {
                     updater.stop().await;
                 }
@@ -627,7 +634,7 @@ pub async fn run_with_logs(
             }
             Err(error) => {
                 let name = if matches!(error, Failure::Rejected(400 | 401 | 403)) {
-                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                     if let Some(updater) = &mut updater {
                         updater.request(None);
                     }
@@ -652,7 +659,7 @@ pub async fn run_with_logs(
             }
         }
     }
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     if let Some(updater) = &mut updater {
         updater.stop().await;
     }

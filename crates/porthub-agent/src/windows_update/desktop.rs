@@ -1,0 +1,96 @@
+//! Read-only selection of already authorized, checksum-backed desktop images.
+//! The existing strict refresh still owns all task validation and mutation.
+use super::shared_image::Image;
+use crate::service::Layout;
+use anyhow::{ensure, Context, Result};
+use serde::{Deserialize, Serialize};
+use std::{
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
+use tokio::io::AsyncReadExt;
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Desktop {
+    pub sid: String,
+    pub image: Image,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Row {
+    sid: String,
+    paths: Vec<PathBuf>,
+}
+pub(super) async fn paths(layout: &Layout, source: &Path) -> Result<Vec<(String, Vec<PathBuf>)>> {
+    let accounts = crate::keyboard::refresh_accounts(layout, &[source.into()])?;
+    if accounts.is_empty() {
+        return Ok(vec![]);
+    }
+    let exe = PathBuf::from(
+        std::env::var_os("SystemRoot").context("Windows system directory unavailable")?,
+    )
+    .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let script = r#"
+$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
+function Sid($v){if($v -like 'S-1-*'){return $v};return ([Security.Principal.NTAccount]$v).Translate([Security.Principal.SecurityIdentifier]).Value}
+$scheduler=[Activator]::CreateInstance([type]::GetTypeFromProgID('Schedule.Service'));$scheduler.Connect();$rows=@()
+foreach($sid in @($env:PORTHUB_UPDATE_ACCOUNTS|ConvertFrom-Json)){
+ try{$task=$scheduler.GetFolder('\').GetTask('PortHubKeyboard-'+$sid)}catch{$e=$_.Exception;while($e.InnerException){$e=$e.InnerException};if($e.HResult -in @(-2147024894,-2147216625)){continue};throw}
+ $d=$task.Definition
+ if((Sid $d.Principal.UserId) -ne $sid -or [int]$d.Principal.LogonType -ne 3 -or [int]$d.Principal.RunLevel -ne 0 -or $d.Actions.Count -ne 1){continue}
+ $a=$d.Actions.Item(1);if([int]$a.Type -ne 0 -or $a.Arguments -notin @('keyboard run','keyboard startup')){continue}
+ $paths=@([string]$a.Path)
+ foreach($p in @(Get-CimInstance Win32_Process -Filter "Name='porthub.exe'")){
+  if($p.SessionId -gt 0 -and $p.CommandLine -match '(?i)\skeyboard\s+(?:run|startup)\s*$'){
+   $owner=Invoke-CimMethod -InputObject $p -MethodName GetOwnerSid
+   if($owner.ReturnValue -eq 0 -and $owner.Sid -eq $sid -and $p.ExecutablePath){$paths+=[string]$p.ExecutablePath}
+  }
+ }
+ $rows+=@{sid=$sid;paths=@($paths|Select-Object -Unique)}
+}
+ConvertTo-Json -InputObject @($rows) -Depth 4 -Compress
+"#;
+    let probe = async {
+        let mut child = tokio::process::Command::new(exe)
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                script,
+            ])
+            .env_remove("PSModulePath")
+            .env("PORTHUB_UPDATE_ACCOUNTS", serde_json::to_string(&accounts)?)
+            .creation_flags(0x08000000)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        let mut bytes = Vec::new();
+        child
+            .stdout
+            .take()
+            .context("Desktop metadata unavailable")?
+            .take(32769)
+            .read_to_end(&mut bytes)
+            .await?;
+        ensure!(
+            bytes.len() <= 32768 && child.wait().await?.success(),
+            "Desktop metadata inspection failed"
+        );
+        let rows: Vec<Row> = serde_json::from_slice(&bytes)?;
+        ensure!(
+            rows.len() <= accounts.len()
+                && rows
+                    .iter()
+                    .all(|r| accounts.contains(&r.sid) && r.paths.len() <= 16),
+            "Desktop metadata exceeds authorized scope"
+        );
+        Ok(rows.into_iter().map(|r| (r.sid, r.paths)).collect())
+    };
+    tokio::time::timeout(Duration::from_secs(10), probe)
+        .await
+        .context("Desktop metadata inspection timed out")?
+}

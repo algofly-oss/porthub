@@ -88,3 +88,9 @@ mod metrics;
 pub mod usb;
 
 pub mod media;
+
+#[cfg(any(windows, test))]
+pub mod windows_update;
+
+#[cfg(windows)]
+use windows_update as autoupdate;
