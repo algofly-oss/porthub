@@ -33,6 +33,7 @@ pub(super) async fn paths(layout: &Layout, source: &Path) -> Result<Vec<(String,
     .join("System32/WindowsPowerShell/v1.0/powershell.exe");
     let script = r#"
 $ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
+Import-Module -Name "$PSHOME\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1" -ErrorAction Stop
 function Sid($v){if($v -like 'S-1-*'){return $v};return ([Security.Principal.NTAccount]$v).Translate([Security.Principal.SecurityIdentifier]).Value}
 $scheduler=[Activator]::CreateInstance([type]::GetTypeFromProgID('Schedule.Service'));$scheduler.Connect();$rows=@()
 $accounts=$env:PORTHUB_UPDATE_ACCOUNTS|ConvertFrom-Json
@@ -62,6 +63,7 @@ ConvertTo-Json -InputObject @($rows) -Depth 4 -Compress
                 script,
             ])
             .env_remove("PSModulePath")
+            .env_remove("PSModuleAnalysisCachePath")
             .env("PORTHUB_UPDATE_ACCOUNTS", serde_json::to_string(&accounts)?)
             .creation_flags(0x08000000)
             .stdin(Stdio::null())
@@ -120,7 +122,11 @@ mod tests {
             .context("Scheduler boundary missing")?
             + start;
         let boundary = &script[start..end];
-        let projection = format!("$ErrorActionPreference='Stop';$rows=@()\n{boundary}\n$rows+=@{{sid=$sid;paths=@()}}\n}}\nConvertTo-Json -InputObject @($rows) -Depth 4 -Compress");
+        let setup = script
+            .split_once("function Sid(")
+            .context("Production setup missing")?
+            .0;
+        let projection = format!("[Console]::Error.WriteLine('porthub-account-stage:started');\n{setup}\n[Console]::Error.WriteLine('porthub-account-stage:setup-complete');\n$rows=@();[Console]::Error.WriteLine('porthub-account-stage:boundary');\n{boundary}\n$rows+=@{{sid=$sid;paths=@()}}\n}}\n[Console]::Error.WriteLine('porthub-account-stage:boundary-complete');\nConvertTo-Json -InputObject @($rows) -Depth 4 -Compress");
         let executable = PathBuf::from(
             std::env::var_os("SystemRoot").context("Windows SystemRoot unavailable")?,
         )
@@ -130,6 +136,7 @@ mod tests {
             vec!["S-1-5-21-1-2-3-1001"],
             vec!["S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1002"],
         ] {
+            let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
             let run = async {
                 let mut child = tokio::process::Command::new(&executable)
                     .args([
@@ -140,21 +147,40 @@ mod tests {
                         &projection,
                     ])
                     .env_remove("PSModulePath")
+                    .env_remove("PSModuleAnalysisCachePath")
                     .env("PORTHUB_UPDATE_ACCOUNTS", serde_json::to_string(&accounts)?)
                     .creation_flags(0x08000000)
                     .stdin(Stdio::null())
                     .stdout(Stdio::piped())
-                    .stderr(Stdio::null())
+                    .stderr(Stdio::piped())
                     .kill_on_drop(true)
                     .spawn()?;
-                let mut bytes = Vec::new();
-                child
-                    .stdout
+                let mut stdout = child.stdout.take().context("Projection output missing")?;
+                let mut stderr = child
+                    .stderr
                     .take()
-                    .context("Projection output missing")?
-                    .take(4097)
-                    .read_to_end(&mut bytes)
-                    .await?;
+                    .context("Projection stage output missing")?;
+                let mut bytes = Vec::new();
+                let read_stdout = async { stdout.take(4097).read_to_end(&mut bytes).await };
+                let read_stages = async {
+                    let mut buffer = [0u8; 256];
+                    loop {
+                        let n = stderr.read(&mut buffer).await?;
+                        if n == 0 {
+                            break;
+                        }
+                        let mut output = captured.lock().unwrap();
+                        ensure!(
+                            output.len() + n <= 1024,
+                            "Native stage output exceeds bound"
+                        );
+                        output.extend_from_slice(&buffer[..n]);
+                    }
+                    Ok::<_, anyhow::Error>(())
+                };
+                let (output, stages) = tokio::join!(read_stdout, read_stages);
+                output?;
+                stages?;
                 ensure!(
                     bytes.len() <= 4096 && child.wait().await?.success(),
                     "Native account projection failed"
@@ -169,9 +195,30 @@ mod tests {
                 }
                 Ok::<_, anyhow::Error>(())
             };
-            tokio::time::timeout(Duration::from_secs(10), run)
-                .await
-                .context("Native account boundary timed out")??;
+            let result = tokio::time::timeout(Duration::from_secs(10), run).await;
+            // Report only known constant stages, never arbitrary stderr/source.
+            let output = captured.lock().unwrap();
+            let text = String::from_utf8_lossy(&output);
+            let stages: Vec<_> = ["started", "setup-complete", "boundary", "boundary-complete"]
+                .into_iter()
+                .filter(|stage| {
+                    text.lines()
+                        .any(|line| line.trim() == format!("porthub-account-stage:{stage}"))
+                })
+                .collect();
+            result
+                .with_context(|| {
+                    format!(
+                        "Native account boundary timed out; accounts={}; stages={stages:?}",
+                        accounts.len()
+                    )
+                })?
+                .with_context(|| {
+                    format!(
+                        "Native account boundary failed; accounts={}; stages={stages:?}",
+                        accounts.len()
+                    )
+                })?;
         }
         // The parser remains strict; the observed PS5 wrapper is not accepted.
         ensure!(serde_json::from_str::<Vec<Row>>(
