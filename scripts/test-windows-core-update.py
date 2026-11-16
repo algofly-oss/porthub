@@ -199,6 +199,15 @@ def wait_for(predicate, seconds, label):
     raise RuntimeError('Timed out: ' + label)
 
 
+def service_manifest_path(profile, identity):
+    profile = Path(profile)
+    if profile.name != identity + '.json':
+        raise ValueError('Enrollment profile does not match service identity')
+    # service::manifest uses layout.state/<identity>.service.json, whereas
+    # policy/journal siblings append their suffix to the complete profile name.
+    return profile.parent / (identity + '.service.json')
+
+
 def artifacts_from_manifest(path):
     receipt_path = Path(path)
     if receipt_path.stat().st_size > 65536:
@@ -483,7 +492,7 @@ $allow=@($a.Access|Where-Object AccessControlType -eq Allow|ForEach-Object {$_.I
 
     def preservation_snapshot(self):
         other = next(value for machine, value in self.profiles.items() if machine != self.machine)
-        paths = {str(other['profile']) + '.service.json'}
+        paths = {str(service_manifest_path(other['profile'], other['identity']))}
         for row in self.profiles.values():
             paths.update(str(row['profile']) + suffix for suffix in ('', '.config.json', '.private-module.json'))
         policies = self.policy_paths()
@@ -493,7 +502,7 @@ $allow=@($a.Access|Where-Object AccessControlType -eq Allow|ForEach-Object {$_.I
         if task is None or process['sha256'] != self.c['sha256']:
             raise RuntimeError('Higher shared enrollment/GUI not ready at baseline')
         snapshots = {path: self.file_snapshot(path) for path in sorted(paths)}
-        mandatory = [str(row['profile']) for row in self.profiles.values()] + [str(other['profile']) + '.service.json']
+        mandatory = [str(row['profile']) for row in self.profiles.values()] + [str(service_manifest_path(other['profile'], other['identity']))]
         if any(not snapshots[path]['exists'] for path in mandatory):
             raise RuntimeError('Required enrollment/other manifest missing at baseline')
         self.shared_cli_snapshot = self.file_snapshot(self.cli_path, private=False)
@@ -646,7 +655,7 @@ $allow=@($a.Access|Where-Object AccessControlType -eq Allow|ForEach-Object {$_.I
         if scenario == 'tamper':
             return self.exercise_tamper(record, killed)
         if scenario == 'restart-recovery':
-            manifest = Path(str(self.profile) + '.service.json')
+            manifest = service_manifest_path(self.profile, self.identity)
             with shared_reader(manifest) as stream:
                 saved = stream.read(4 * 1024 * 1024 + 1)
             previous = bytes(record['previous_manifest'])
@@ -766,7 +775,7 @@ $allow=@($a.Access|Where-Object AccessControlType -eq Allow|ForEach-Object {$_.I
         record = wait_for(lambda: (r if (r := self.journal_for(self.machine)) and r.get('phase') == phase else None),
                           150, 'real native transaction ' + phase)
         expected = self.a if rollback else self.b
-        spec = read_json(Path(str(self.profile) + '.service.json'))
+        spec = read_json(service_manifest_path(self.profile, self.identity))
         if digest(spec['executable']) != expected['sha256']:
             raise RuntimeError('SCM registration has wrong endpoint image')
         service = 'porthub-' + self.identity[:24]
@@ -996,7 +1005,7 @@ $allow=@($a.Access|Where-Object AccessControlType -eq Allow|ForEach-Object {$_.I
         files, dirs = super().allowed_managed()
         suffixes = ('', '.lock', '.config.json', '.status.json', '.local-access.json',
                     '.client-features.json', '.media-policy.json', '.drive-health-policy.json',
-                    '.drive-health-schedule.json', '.service.json', '.windows-update.json',
+                    '.drive-health-schedule.json', '.windows-update.json',
                     '.windows-update.json.worker.lock')
         for row in self.profiles.values():
             identity = row['identity']

@@ -52,7 +52,7 @@ class Scenarios(unittest.TestCase):
         a.assert_previous_without_attempt = lambda: True
         a.cli = lambda *args: self.calls.append(('cli', args))
         a.private = lambda path, value: path.write_text(json.dumps(value))
-        self.manifest = Path(str(a.profile) + '.service.json')
+        self.manifest = a.profile.parent / (a.identity + '.service.json')
         self.manifest.write_bytes(b'candidate-manifest')
         self.unit = self.root / 'services' / 'porthub-owned.json'
         self.unit.write_text('{"owned":true}')
@@ -102,6 +102,8 @@ class Scenarios(unittest.TestCase):
         self.assertFalse(proof['restart_mixed_metadata'])
 
     def test_restart_injects_exact_old_manifest_only_after_stop_and_held_kill(self):
+        wrong = Path(str(self.adapter.profile) + '.service.json')
+        wrong.write_bytes(b'wrong-suffix-sentinel')
         def start(record, allow_failure=False):
             self.assertEqual(self.manifest.read_bytes(), b'previous-manifest')
             self.assertEqual(self.calls[0], 'Inspect')
@@ -113,6 +115,7 @@ class Scenarios(unittest.TestCase):
         self.assertTrue(proof['restart_mixed_metadata'])
         self.adapter.restore_injected_metadata()
         self.assertIsNone(self.adapter.injected_metadata)
+        self.assertEqual(wrong.read_bytes(), b'wrong-suffix-sentinel')
 
     def test_tamper_preserved_then_only_exact_injected_bytes_restored(self):
         proof = self.adapter.exercise_scenario('tamper')
@@ -322,7 +325,7 @@ class PreservationTests(unittest.TestCase):
             Path(str(profile) + '.client-features.json').write_text(json.dumps({'disabled': {'auto-update': True, 'keyboard': True}}))
             for suffix in ('.media-policy.json', '.drive-health-policy.json', '.local-access.json'):
                 Path(str(profile) + suffix).write_text('{"original":true}')
-        Path(str(other) + '.service.json').write_text('{"other":"unchanged"}')
+        (other.parent / 'c.service.json').write_text('{"other":"unchanged"}')
         a.cli_path = root / 'shared.exe'
         a.cli_path.write_bytes(b'shared-cli')
         a.c = {'sha256': controller.digest(a.cli_path)}
@@ -340,6 +343,20 @@ class PreservationTests(unittest.TestCase):
         self.patch.start()
         self.baseline = a.preservation_snapshot()
         self.enable_own()
+
+    def test_baseline_requires_actual_native_manifest_not_profile_appended_suffix(self):
+        other = self.a.profiles['c']['profile']
+        actual = other.parent / 'c.service.json'
+        wrong = Path(str(other) + '.service.json')
+        saved = actual.read_bytes();actual.unlink();wrong.write_bytes(saved)
+        with self.assertRaisesRegex(RuntimeError, 'Required enrollment/other manifest missing'):
+            self.a.preservation_snapshot()
+        actual.write_bytes(saved)
+        baseline = self.a.preservation_snapshot()
+        self.assertTrue(baseline['files'][str(actual)]['exists'])
+        self.assertNotIn(str(wrong), baseline['files'])
+        self.assertEqual(controller.service_manifest_path(other, 'c'), actual)
+        with self.assertRaises(ValueError):controller.service_manifest_path(other, 'foreign')
 
     def enable_own(self):
         path = Path(str(self.a.profile) + '.client-features.json')
