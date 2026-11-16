@@ -8,7 +8,8 @@ export const dialogHeader = "!border-0 !bg-dialog !px-5 !py-4 !text-foreground d
 export function Dialog({ classNames = {}, overlayProps = {}, zIndex = 300, ...props }) {
   return <Modal {...props} zIndex={zIndex} centered radius="lg" overlayProps={{ opacity: .42, blur: 5, ...overlayProps }} classNames={{
     ...classNames,
-    content: cn(classNames.content, dialogSurface),
+    inner: cn(classNames.inner, "workspace-modal-inner"),
+    content: cn(classNames.content, dialogSurface, "workspace-modal-content"),
     header: cn(classNames.header, dialogHeader),
     title: cn(classNames.title, "!text-[15px] !font-semibold !text-foreground"),
     body: cn(classNames.body, "!bg-dialog !px-5 !pb-5 !text-foreground"),

@@ -3,6 +3,7 @@
 @tailwind utilities;
 
 :root {
+  --safe-left: env(safe-area-inset-left, 0px); --safe-right: env(safe-area-inset-right, 0px);
   --background: 220 14% 96%; --surface: 0 0% 100%; --foreground: 225 15% 15%; --muted: 220 14% 94%;
   --muted-foreground: 240 5% 36%; --border: 240 5% 92%; --input: 240 5% 88%; --accent: 240 5% 90%;
   --dialog: 0 0% 100%; --control: 0 0% 100%;
@@ -257,3 +258,13 @@ html:not([data-keyboard-navigation]) :is([role="checkbox"], input[type="checkbox
   .workspace[data-keyboard-active="true"] .workspace-sidebar .nav-item span { display:none; }
   .workspace[data-keyboard-active="true"] .workspace-body { margin-left:64px !important; }
 }
+
+/* Keep controls clear of landscape cutouts while retaining edge-to-edge backgrounds.
+   Variables also permit explicit geometry checks where emulation reports zero env insets. */
+.workspace { padding-left:var(--safe-left); padding-right:var(--safe-right); }
+@media (min-width:768px) { .workspace-sidebar { left:var(--safe-left) !important; } }
+.workspace-modal-inner { padding-left:max(var(--modal-x-offset, 5vw),var(--safe-left)) !important; padding-right:max(var(--modal-x-offset, 5vw),var(--safe-right)) !important; }
+.workspace-modal-content { max-width:calc(100vw - var(--safe-left) - var(--safe-right) - 32px) !important; }
+.workspace-drawer-header { padding-left:calc(20px + var(--safe-left)); padding-right:calc(20px + var(--safe-right)); }
+.workspace-drawer-body { padding-left:calc(20px + var(--safe-left)); padding-right:calc(20px + var(--safe-right)); }
+@media(max-width:767px) { .workspace-drawer-body { padding-left:calc(16px + var(--safe-left)); padding-right:calc(16px + var(--safe-right)); } }
