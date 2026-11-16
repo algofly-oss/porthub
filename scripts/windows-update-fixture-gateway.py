@@ -27,6 +27,7 @@ class Gateway:
         self.release_download = threading.Event()
         self.release_download.set()
         self.candidate_sync_seen = threading.Event()
+        self.rollback_sync_pulsed = False
         self.server = None
 
     def advertise(self, machine, version):
@@ -143,7 +144,18 @@ class Gateway:
                                   'target_version': headers['x-porthub-client-target-version']})
                     headers.update({'x-porthub-machine-id': machine,
                                     'x-porthub-config-version': 'native-update-gate'})
-                    return self.reply(204, headers=headers)
+                    record = owner.journal(machine)
+                    if (record and record.get('phase') == 'rolled-back' and headers.get('x-porthub-client-update-request-id')
+                            and not owner.rollback_sync_pulsed):
+                        owner.rollback_sync_pulsed = True
+                        owner.record({'kind': 'rollback-sync-pulse', 'machine': machine})
+                        return self.reply(503)  # Exercise ordinary retry→sync, not a faster client default.
+                    self.reply(204, headers=headers)
+                    owner.record({'kind': 'changes-cycle', 'machine': machine,
+                                  'request_id': headers.get('x-porthub-client-update-request-id'),
+                                  'target_version': headers.get('x-porthub-client-target-version'),
+                                  'journal_phase': record.get('phase') if record else None})
+                    return
                 parts = parsed.path.strip('/').split('/')
                 if len(parts) < 6 or parts[:2] != ['api', 'machines'] or parts[4] != 'downloads':
                     return self.reply(404)

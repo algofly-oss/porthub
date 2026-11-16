@@ -8,6 +8,7 @@ Default invocation validates artifacts only. No native execution occurs on impor
 """
 import argparse
 import base64
+from contextlib import contextmanager
 import hashlib
 import importlib.util
 import json
@@ -15,6 +16,8 @@ import os
 from pathlib import Path
 import subprocess
 import shutil
+import queue
+import threading
 import sys
 import time
 import uuid
@@ -35,13 +38,15 @@ def ps_result(script):
     environment = os.environ.copy()
     environment.pop('PSModulePath', None)
     executable = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
-    prefix = "$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);"
+    prefix = ("$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);"
+              r'Import-Module -Name "$PSHOME\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1" -ErrorAction Stop;'
+              r'Import-Module -Name "$PSHOME\Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1" -ErrorAction Stop;')
     encoded = base64.b64encode((prefix + script).encode('utf-16le')).decode()
     args = [str(executable), '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded]
     if len(subprocess.list2cmdline(args)) > 30000:
         raise RuntimeError('Fixture PowerShell command exceeds conservative native limit')
     result = subprocess.run(args,
-                            env=environment, capture_output=True, timeout=60, creationflags=0x08000000)
+                            env=environment, stdin=subprocess.DEVNULL, capture_output=True, timeout=60, creationflags=0x08000000)
     if result.returncode or len(result.stdout) > 262144 or len(result.stderr) > 32768:
         raise RuntimeError('Bounded native PowerShell fixture operation failed')
     return result
@@ -51,9 +56,135 @@ def ps(script):
     return ps_result(script).stdout.decode('utf-8-sig', errors='strict').strip()
 
 
+# Retain the reviewed cold-wrapper ownership logic, but use the same bounded,
+# hidden Windows PowerShell transport with a clean PSModulePath for its probes.
+cold.ps = ps
+
+
+@contextmanager
+def shared_reader(path):
+    """Observers must not block the agent's atomic journal/config publication."""
+    if sys.platform != 'win32':
+        with Path(path).open('rb') as stream:
+            yield stream
+        return
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                  wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    handle = kernel.CreateFileW(str(path), 0x80000000, 7, None, 3, 0x00200000, None)
+    if not handle or handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        descriptor = msvcrt.open_osfhandle(int(handle), os.O_RDONLY | os.O_BINARY)
+    except Exception:
+        kernel.CloseHandle(handle)
+        raise
+    try:
+        stream = os.fdopen(descriptor, 'rb')
+    except Exception:
+        os.close(descriptor)
+        raise
+    with stream:
+        yield stream
+
+
+def read_json(path):
+    with shared_reader(path) as stream:
+        data = stream.read(4 * 1024 * 1024 + 1)
+    if len(data) > 4 * 1024 * 1024:
+        raise ValueError('Fixture JSON observer exceeds bound')
+    return json.loads(data.decode('utf-8'))
+
+
 def digest(path):
-    with Path(path).open('rb') as stream:
+    with shared_reader(path) as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+class ProcessBirthWatch:
+    """Ephemeral read-only WMI subscription; no production hooks or privileges."""
+    def __init__(self, root):
+        self.stop_path = Path(root) / ('process-watch-stop-' + uuid.uuid4().hex)
+        self.stop_identity = None
+
+    def __enter__(self):
+        script = Path(__file__).with_name('windows-update-process-watch.ps1').read_text()
+        encoded = base64.b64encode(script.encode('utf-16le')).decode()
+        executable = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+        environment = os.environ.copy()
+        environment.pop('PSModulePath', None)
+        environment['PORTHUB_UPDATE_OBSERVER_STOP'] = str(self.stop_path)
+        if os.path.lexists(self.stop_path):
+            raise RuntimeError('Observer stop marker already exists')
+        self.child = subprocess.Popen([str(executable), '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+                                      stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                      env=environment, creationflags=0x08000000)
+        self.frames = queue.Queue(maxsize=2)
+        def read():
+            try:
+                for _ in range(2):
+                    line = self.child.stdout.readline(4097)
+                    if not line or len(line) > 4096:
+                        raise RuntimeError('Missing/bounded process observer frame')
+                    self.frames.put(json.loads(line.decode('utf-8-sig')), timeout=1)
+            except Exception:
+                try:
+                    self.frames.put({'error': True}, timeout=1)
+                except queue.Full:
+                    pass
+        self.reader = threading.Thread(target=read, daemon=True)
+        self.reader.start()
+        try:
+            if self.frames.get(timeout=10) != {'ready': True}:
+                raise RuntimeError('Native process observer did not become ready')
+        except Exception:
+            self.close(force=True)
+            raise
+        return self
+
+    def close(self, force=False):
+        try:
+            if force:
+                if self.child.poll() is None:
+                    self.child.terminate()  # Exact retained Popen process handle.
+                self.child.wait(timeout=3)
+                return
+            if self.child.poll() is not None:
+                raise RuntimeError('Process observer expired before verification')
+            with self.stop_path.open('xb') as marker:
+                info = os.fstat(marker.fileno())
+                self.stop_identity = (info.st_dev, info.st_ino)
+                marker.flush()
+                os.fsync(marker.fileno())
+            frame = self.frames.get(timeout=3)
+            self.child.wait(timeout=3)
+            if self.child.returncode or frame.get('error') or frame.get('expired') or frame.get('count') != 0:
+                raise RuntimeError('Repeated committed headers started a new PortHub process or observer failed')
+            self.proof = {'new_porthub_processes': 0, 'read_only_wmi': True}
+        finally:
+            if self.child.poll() is None:
+                self.child.terminate()
+                self.child.wait(timeout=3)
+            self.reader.join(timeout=2)
+            if self.reader.is_alive():
+                raise RuntimeError('Process observer pipe reader did not stop')
+            self.child.stdout.close()
+            if self.stop_identity is not None:
+                info = self.stop_path.lstat()
+                if (self.stop_path.is_symlink() or not self.stop_path.is_file()
+                        or (info.st_dev, info.st_ino) != self.stop_identity or info.st_size != 0
+                        or getattr(info, 'st_file_attributes', 0) & 0x400):
+                    raise RuntimeError('Changed observer stop marker preserved')
+                self.stop_path.unlink()
+
+    def __exit__(self, kind, value, traceback):
+        self.close(force=kind is not None)
 
 
 def wait_for(predicate, seconds, label):
@@ -162,6 +293,17 @@ class Native(cold.Native):
         self.grant_fixture_user = False
         self.status_root = self.root.with_name('PortHubStatus')
         self.published = Path(os.environ.get('ProgramFiles', '')) / 'PortHub'
+        self.cli_path = self.published / 'bin/porthub.exe'
+
+    def system_snapshot(self):
+        return json.loads(ps(r"""
+@{tasks=@(Get-ScheduledTask|Where-Object TaskName -like 'PortHub*'|ForEach-Object {$_.TaskPath+$_.TaskName}|Sort-Object);
+porthub_services=@(Get-CimInstance Win32_Service -Filter "Name LIKE 'porthub-%'"|Select-Object -ExpandProperty Name|Sort-Object);
+usbipd_service=[bool](Get-Service usbipd -ErrorAction SilentlyContinue);
+usbip_products=@(Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue|Where-Object DisplayName -match 'USB.?IP'|Select-Object -ExpandProperty PSChildName|Sort-Object);
+usbip_drivers=@(Get-CimInstance Win32_PnPSignedDriver|Where-Object {$_.DeviceName -match 'USB.?IP' -or $_.DriverProviderName -match 'usbip|VirtualHere'}|Select-Object DeviceID,InfName,DriverVersion|Sort-Object DeviceID,InfName,DriverVersion);
+cli=[bool](Test-Path "$env:ProgramFiles\PortHub\bin\porthub.exe")}|ConvertTo-Json -Depth 6 -Compress
+"""))
 
     def preflight(self):
         result = super().preflight()
@@ -227,7 +369,7 @@ class Native(cold.Native):
         if not row:
             return None
         try:
-            return json.loads(Path(str(row['profile']) + '.windows-update.json').read_text())
+            return read_json(Path(str(row['profile']) + '.windows-update.json'))
         except (OSError, ValueError):
             return None
 
@@ -270,6 +412,10 @@ class Native(cold.Native):
             profile = self.profiles[machine]
             self.installed_ids.append(machine)
             self.invoke(row, 'service', 'install', '--profile', profile['input'], '--publish-cli')
+            captured = self.file_snapshot(self.cli_path, private=False)
+            if not captured['exists'] or captured['sha256'] != row['sha256']:
+                raise RuntimeError('Normal installation did not publish its pinned CLI image')
+            self.shared_cli_snapshot = captured
         self.cli_path = self.published / 'bin/porthub.exe'
         if digest(self.cli_path) != self.c['sha256']:
             raise RuntimeError('Other enrollment did not publish the higher CLI')
@@ -303,19 +449,60 @@ $processes=@();foreach($p in @(Get-CimInstance Win32_Process -Filter "Name='port
             return None
         return value
 
+    def file_snapshot(self, path, private=True):
+        path = Path(path)
+        if not os.path.lexists(path):
+            return {'exists': False}
+        metadata = path.lstat()
+        if path.is_symlink() or not path.is_file() or getattr(metadata, 'st_file_attributes', 0) & 0x400:
+            raise RuntimeError('Unsafe preservation path')
+        before = digest(path)
+        security = json.loads(ps('$path=' + cold.quote(path) + r""";
+$a=Get-Acl -LiteralPath $path
+$owner=$a.GetOwner([Security.Principal.SecurityIdentifier]).Value
+$sections=[Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Group -bor [Security.AccessControl.AccessControlSections]::Access
+$allow=@($a.Access|Where-Object AccessControlType -eq Allow|ForEach-Object {$_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value}|Sort-Object -Unique)
+@{owner=$owner;protected=[bool]$a.AreAccessRulesProtected;sddl=$a.GetSecurityDescriptorSddlForm($sections);allow=@($allow)}|ConvertTo-Json -Compress
+"""))
+        if private and (not security['protected'] or any(sid not in ('S-1-5-18', 'S-1-5-32-544') for sid in security['allow'])):
+            raise RuntimeError('Private enrollment/config/policy DACL is not protected')
+        if digest(path) != before:
+            raise RuntimeError('Preservation file changed during inspection')
+        return {'exists': True, 'sha256': before, 'security': security}
+
+    def policy_paths(self):
+        result = set()
+        for row in self.profiles.values():
+            profile = row['profile']
+            for suffix in ('.client-features.json', '.media-policy.json', '.drive-health-policy.json', '.local-access.json'):
+                result.add(str(profile) + suffix)
+            for path in profile.parent.glob(profile.name + '*'):
+                if path.name.endswith(('-policy.json', '-features.json', '-access.json')):
+                    result.add(str(path))
+        return result
+
     def preservation_snapshot(self):
         other = next(value for machine, value in self.profiles.items() if machine != self.machine)
-        paths = [other['profile'], Path(str(other['profile']) + '.service.json')]
-        for value in self.profiles.values():
-            paths.extend(Path(str(value['profile']) + suffix) for suffix in
-                         ('.client-features.json', '.media-policy.json', '.drive-health-policy.json', '.local-access.json'))
+        paths = {str(other['profile']) + '.service.json'}
+        for row in self.profiles.values():
+            paths.update(str(row['profile']) + suffix for suffix in ('', '.config.json', '.private-module.json'))
+        policies = self.policy_paths()
+        paths.update(policies)
         task = self.task_snapshot()
         process = self.scm_snapshot(other['identity'])
         if task is None or process['sha256'] != self.c['sha256']:
             raise RuntimeError('Higher shared enrollment/GUI not ready at baseline')
-        return {'files': {str(path): digest(path) for path in paths if path.exists()},
+        snapshots = {path: self.file_snapshot(path) for path in sorted(paths)}
+        mandatory = [str(row['profile']) for row in self.profiles.values()] + [str(other['profile']) + '.service.json']
+        if any(not snapshots[path]['exists'] for path in mandatory):
+            raise RuntimeError('Required enrollment/other manifest missing at baseline')
+        self.shared_cli_snapshot = self.file_snapshot(self.cli_path, private=False)
+        if not self.shared_cli_snapshot['exists'] or self.shared_cli_snapshot['sha256'] != self.c['sha256']:
+            raise RuntimeError('Higher shared CLI missing/changed before baseline')
+        return {'files': snapshots,
+                'policy_paths': sorted(policies), 'cli': self.shared_cli_snapshot,
                 'other_identity': other['identity'], 'other_process': process, 'task': task,
-                'own_policy': json.loads(Path(str(self.profile) + '.client-features.json').read_text())}
+                'own_policy': read_json(Path(str(self.profile) + '.client-features.json'))}
 
     def scm_snapshot(self, identity):
         service = 'porthub-' + identity[:24]
@@ -434,7 +621,7 @@ $processes=@();foreach($p in @(Get-CimInstance Win32_Process -Filter "Name='port
             path = Path(str(self.profile) + '.windows-update.json')
             before = digest(path)
             copy = self.folder / 'foreign-record.json'
-            self.private(copy, json.loads(path.read_text()))
+            self.private(copy, read_json(path))
             try:
                 attempt = subprocess.run([self.b['path'], '__windows-update', '--record', str(copy)],
                                          capture_output=True, timeout=10, creationflags=0x08000000)
@@ -460,7 +647,8 @@ $processes=@();foreach($p in @(Get-CimInstance Win32_Process -Filter "Name='port
             return self.exercise_tamper(record, killed)
         if scenario == 'restart-recovery':
             manifest = Path(str(self.profile) + '.service.json')
-            saved = manifest.read_bytes()
+            with shared_reader(manifest) as stream:
+                saved = stream.read(4 * 1024 * 1024 + 1)
             previous = bytes(record['previous_manifest'])
             if saved == previous:
                 raise RuntimeError('No candidate manifest to exercise mixed-state recovery')
@@ -493,7 +681,7 @@ $processes=@();foreach($p in @(Get-CimInstance Win32_Process -Filter "Name='port
                 if child.poll() is not None:
                     raise RuntimeError('Copied foreground agent exited before authorization test')
                 try:
-                    value = json.loads(status.read_text())
+                    value = read_json(status)
                 except (OSError, ValueError):
                     return False
                 return value.get('state') == 'running' and value.get('pid') == child.pid
@@ -537,7 +725,8 @@ $processes=@();foreach($p in @(Get-CimInstance Win32_Process -Filter "Name='port
         path = Path(record['previous']['unit'])
         if path.parent != self.root / 'services':
             raise RuntimeError('Unit intervention is outside exact fixture services')
-        saved = path.read_bytes()
+        with shared_reader(path) as stream:
+            saved = stream.read(4 * 1024 * 1024 + 1)
         value = json.loads(saved)
         value['fixture_operator_change'] = record['nonce']
         foreign = json.dumps(value, sort_keys=True).encode()
@@ -577,7 +766,7 @@ $processes=@();foreach($p in @(Get-CimInstance Win32_Process -Filter "Name='port
         record = wait_for(lambda: (r if (r := self.journal_for(self.machine)) and r.get('phase') == phase else None),
                           150, 'real native transaction ' + phase)
         expected = self.a if rollback else self.b
-        spec = json.loads(Path(str(self.profile) + '.service.json').read_text())
+        spec = read_json(Path(str(self.profile) + '.service.json'))
         if digest(spec['executable']) != expected['sha256']:
             raise RuntimeError('SCM registration has wrong endpoint image')
         service = 'porthub-' + self.identity[:24]
@@ -597,33 +786,78 @@ $processes=@();foreach($p in @(Get-CimInstance Win32_Process -Filter "Name='port
                 'version': expected['version'], 'pid': process['pid']}
 
     def assert_preserved(self, baseline):
-        for path, sha in baseline['files'].items():
-            # AutoUpdate is intentionally toggled for the updated enrollment.
-            if path == str(self.profile) + '.client-features.json':
-                continue
-            if digest(path) != sha:
-                raise RuntimeError('Other enrollment or protected policy changed')
-        current_policy = json.loads(Path(str(self.profile) + '.client-features.json').read_text())
-        previous_policy = json.loads(json.dumps(baseline['own_policy']))
-        current_policy.get('disabled', {}).pop('auto-update', None)
-        previous_policy.get('disabled', {}).pop('auto-update', None)
-        if current_policy != previous_policy:
-            raise RuntimeError('Unrelated local client permission changed')
+        own_policy = str(self.profile) + '.client-features.json'
+        if sorted(self.policy_paths()) != baseline['policy_paths']:
+            raise RuntimeError('Unexpected policy/access file added or removed')
+        scenario = getattr(self, 'fixture_scenario', 'success')
+        toggled = scenario not in ('default-on', 'foreground-reject')
+        for path, expected in baseline['files'].items():
+            current = self.file_snapshot(path)
+            if path == own_policy and toggled:
+                if not current['exists'] or current['security'] != expected['security']:
+                    raise RuntimeError('Local AutoUpdate policy owner/DACL changed')
+            elif current != expected:
+                raise RuntimeError('Enrollment/config/protected policy bytes or security changed')
+        current_policy = read_json(Path(own_policy))
+        expected_policy = json.loads(json.dumps(baseline['own_policy']))
+        if toggled:
+            if scenario in ('download-revoke', 'readiness-revoke'):
+                expected_policy['disabled']['auto-update'] = True
+            else:
+                expected_policy['disabled'].pop('auto-update', None)
+        if current_policy != expected_policy:
+            raise RuntimeError('Unexpected local feature delta or AutoUpdate state')
         if self.scm_snapshot(baseline['other_identity']) != baseline['other_process']:
             raise RuntimeError('Other enrollment SCM process changed')
-        if digest(self.cli_path) != self.c['sha256'] or self.task_snapshot() != baseline['task']:
-            raise RuntimeError('Higher shared CLI/GUI command or XML/SD was rewound')
-        self.preservation_proof = {'cli_sha256': self.c['sha256'],
+        if self.file_snapshot(self.cli_path, private=False) != baseline['cli'] or self.task_snapshot() != baseline['task']:
+            raise RuntimeError('Higher shared CLI/GUI bytes, owner, DACL or command changed')
+        self.preservation_proof = {'cli': baseline['cli'],
                                    'task_xml_sha256': hashlib.sha256(baseline['task']['xml'].encode()).hexdigest(),
                                    'task_sd_sha256': hashlib.sha256(baseline['task']['sd'].encode()).hexdigest(),
                                    'helper_processes': baseline['task']['processes'],
                                    'other_scm_process': baseline['other_process'],
-                                   'unchanged_file_hashes': baseline['files'],
+                                   'enrollment_config_policy_snapshots': baseline['files'],
+                                   'intended_auto_policy_delta': scenario,
                                    'other_permissions_unchanged': True}
 
     def assert_final_observations(self):
         if self.gateway and (self.gateway.overflow or any(e['kind'] in ('invalid-ack', 'artifact-changed', 'download-barrier-timeout') for e in self.gateway.events)):
             raise RuntimeError('Fixture integrity/acknowledgment observation failed')
+
+    def idempotence_snapshot(self):
+        record = self.journal_for(self.machine)
+        if not record or record['phase'] != 'committed' or self.workers():
+            raise RuntimeError('Committed idempotence snapshot has an active worker or wrong phase')
+        return {'scm': self.scm_snapshot(self.identity),
+                'journal_nonce': record['nonce'], 'journal_attempts': record['attempts'],
+                'journal_sha256': digest(Path(str(self.profile) + '.windows-update.json')),
+                'cli': self.file_snapshot(self.cli_path, private=False), 'gui': self.task_snapshot(),
+                'downloads': sum(e['kind'] == 'download' for e in self.gateway.events)}
+
+    def assert_repeated_headers_idempotent(self):
+        wait_for(lambda: not self.workers(), 5, 'committed maintenance worker exited')
+        self.validate_claim('temp')
+        with ProcessBirthWatch(self.folder) as observer:
+            before = self.idempotence_snapshot()
+            if before['gui'] is None:
+                raise RuntimeError('Shared GUI unavailable before idempotence observation')
+            sequence = max((e['sequence'] for e in self.gateway.events), default=0)
+            started = time.monotonic()
+            def repeated():
+                cycles = [e for e in self.gateway.events if e['kind'] == 'changes-cycle'
+                          and e.get('machine') == self.machine and e.get('request_id') == self.request_id
+                          and e.get('target_version') == self.b['version'] and e.get('journal_phase') == 'committed'
+                          and e['sequence'] > sequence]
+                return cycles if len(cycles) >= 2 else None
+            cycles = wait_for(repeated, 5, 'two normal authenticated repeated post-commit header cycles')
+            observed = time.monotonic() - started
+            after = self.idempotence_snapshot()
+            if after != before:
+                raise RuntimeError('Repeated committed headers changed SCM, journal, CLI/GUI or downloaded again')
+        self.idempotence_proof = {'cycles': len(cycles), 'first_sequence': cycles[0]['sequence'],
+                                  'last_sequence': cycles[-1]['sequence'], 'cycle_seconds': observed,
+                                  'process_observer': observer.proof,
+                                  'stable': {key: value for key, value in before.items() if key != 'gui'}}
 
     def assert_ack(self, rollback):
         def acknowledged():
@@ -658,6 +892,7 @@ $processes=@();foreach($p in @(Get-CimInstance Win32_Process -Filter "Name='port
                               'quiet_seconds': time.monotonic() - started, 'new_downloads': 0, 'handled': False}
         else:
             wait_for(acknowledged, 45, 'committed request acknowledgment')
+            self.assert_repeated_headers_idempotent()
         self.assert_final_observations()
 
     def disable_updates(self):
@@ -741,6 +976,21 @@ $processes=@();foreach($p in @(Get-CimInstance Win32_Process -Filter "Name='port
             raise RuntimeError('Owned maintenance process remains')
         ps('$r=' + cold.quote(str(self.root / 'releases')) + r""";if(@(Get-CimInstance Win32_Process -Filter "Name='porthub.exe'" | Where-Object {$_.ExecutablePath -and $_.ExecutablePath.StartsWith($r+'\',[StringComparison]::OrdinalIgnoreCase)}).Count){throw 'Owned immutable process remains'}""")
         ps("$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;if(Get-ScheduledTask -TaskName ('PortHubKeyboard-'+$sid) -ErrorAction SilentlyContinue){throw 'Fixture GUI task remains'}")
+        self.assert_global_preserved()
+
+    def assert_global_preserved(self, final=False):
+        current = self.system_snapshot()
+        expected = dict(self.before)
+        current_cli = current.pop('cli')
+        expected_cli = expected.pop('cli')
+        if current != expected:
+            raise RuntimeError('Unexpected global PortHub service/task or USB prerequisite change; preserved')
+        if final:
+            if current_cli != expected_cli:
+                raise RuntimeError('Global CLI baseline not restored')
+        elif current_cli:
+            if not getattr(self, 'shared_cli_snapshot', None) or self.file_snapshot(self.cli_path, private=False) != self.shared_cli_snapshot:
+                raise RuntimeError('Unexpected shared CLI security/bytes preserved')
 
     def allowed_managed(self):
         files, dirs = super().allowed_managed()
@@ -810,6 +1060,13 @@ $processes=@();foreach($p in @(Get-CimInstance Win32_Process -Filter "Name='port
             super().remove_staging()
         except Exception as error:
             errors.append('canonical-staging: ' + str(error))
+        try:
+            if hasattr(self, 'before'):
+                self.assert_global_preserved(final=True)
+            elif self.created_root:
+                raise RuntimeError('Managed state created without a global baseline')
+        except Exception as error:
+            errors.append('global-baseline: ' + str(error))
         if errors:
             raise RuntimeError('; '.join(errors))
 
@@ -823,7 +1080,8 @@ $processes=@();foreach($p in @(Get-CimInstance Win32_Process -Filter "Name='port
                 finally:
                     self.final_observations = {'events': list(self.gateway.events),
                                                'ack_proof': getattr(self, 'ack_proof', None),
-                                               'preservation': getattr(self, 'preservation_proof', None)}
+                                               'preservation': getattr(self, 'preservation_proof', None),
+                                               'idempotence': getattr(self, 'idempotence_proof', None)}
                     self.assert_final_observations()
 
 

@@ -234,27 +234,6 @@ class Scenarios(unittest.TestCase):
         self.assertEqual(list(self.root.glob('foreground-profile.json*')), [])
         self.assertIsNone(a.foreground_child)
 
-    def test_preservation_allows_only_auto_flag_change_not_keyboard_permission(self):
-        a = self.adapter
-        path = Path(str(a.profile) + '.client-features.json')
-        original = {'disabled': {'auto-update': True, 'keyboard': True}}
-        path.write_text(json.dumps(original))
-        a.cli_path = self.root / 'shared.exe'
-        a.cli_path.write_bytes(b'owned-shared-cli')
-        a.c = {'sha256': controller.digest(a.cli_path)}
-        task = dict(xml='<Task/>', sd='fixed-sddl', processes=[dict(pid=8, created='fixed')])
-        other = dict(pid=7, sha256=a.c['sha256'])
-        baseline = dict(files={str(path): controller.digest(path)}, own_policy=original,
-                        other_identity='other', other_process=other, task=task)
-        a.task_snapshot = lambda: task
-        a.scm_snapshot = lambda _: other
-        path.write_text(json.dumps({'disabled': {'auto-update': False, 'keyboard': True}}))
-        a.assert_preserved(baseline)
-        self.assertTrue(a.preservation_proof['other_permissions_unchanged'])
-        path.write_text(json.dumps({'disabled': {'auto-update': False, 'keyboard': False}}))
-        with self.assertRaises(RuntimeError):
-            a.assert_preserved(baseline)
-
     def test_native_ps_wrapper_rejects_command_limit_and_sanitizes_module_path(self):
         with patch.dict(controller.os.environ, {'SystemRoot': 'C:/Windows', 'PSModulePath': 'foreign-modules'}):
             with patch.object(controller.subprocess, 'run', return_value=types.SimpleNamespace(returncode=0, stdout=b'{}', stderr=b'')) as run:
@@ -264,6 +243,215 @@ class Scenarios(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     controller.ps_result('x' * 20000)
                 self.assertEqual(run.call_count, 1)
+
+    def test_repeated_headers_require_two_cycles_and_identical_postcommit_state(self):
+        a = self.adapter
+        a.workers = lambda: []
+        a.gateway.events = [dict(kind='sync', sequence=1)]
+        stable = dict(gui={'fixed': True}, scm={'pid': 99}, journal_nonce='nonce', journal_attempts=0, downloads=1)
+        a.idempotence_snapshot = lambda: dict(stable)
+        class Observer:
+            def __init__(self, *_): pass
+            proof = {'new_porthub_processes': 0}
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+        def sleep(seconds):
+            self.clock.sleep(seconds)
+            a.gateway.events.append(dict(kind='changes-cycle', machine=a.machine, request_id=a.request_id,
+                                         target_version=a.b['version'], journal_phase='committed', sequence=len(a.gateway.events)+1))
+        with patch.object(controller, 'ProcessBirthWatch', Observer), patch.object(controller.time, 'sleep', sleep):
+            a.assert_repeated_headers_idempotent()
+        self.assertGreaterEqual(a.idempotence_proof['cycles'], 2)
+        self.assertLessEqual(a.idempotence_proof['cycle_seconds'], 5)
+        calls = []
+        def changed():
+            calls.append(True)
+            return dict(stable, scm={'pid': 100 if len(calls) > 1 else 99})
+        a.idempotence_snapshot = changed
+        with patch.object(controller, 'ProcessBirthWatch', Observer), patch.object(controller.time, 'sleep', sleep):
+            with self.assertRaises(RuntimeError):
+                a.assert_repeated_headers_idempotent()
+
+    def test_committed_snapshot_rejects_any_active_worker(self):
+        self.adapter.journal_for = lambda _: {'phase': 'committed'}
+        self.adapter.workers = lambda: [dict(ProcessId=9)]
+        with self.assertRaises(RuntimeError):
+            self.adapter.idempotence_snapshot()
+
+    def test_process_observer_transport_rejects_births_and_closes_owned_pipes(self):
+        import io
+        made = []
+        count = [0]
+        class Child:
+            returncode = None
+            def __init__(self, *args, **kwargs):
+                self.stdin = io.BytesIO()
+                self.stdout = io.BytesIO((json.dumps({'ready': True})+'\n'+json.dumps({'count': count[0], 'expired': False})+'\n').encode())
+                made.append(self)
+            def poll(self): return self.returncode
+            def wait(self, timeout): self.returncode = 0; return 0
+            def terminate(self): self.returncode = -1
+        with patch.dict(controller.os.environ, {'SystemRoot':'C:/Windows'}), patch.object(controller.subprocess, 'Popen', Child):
+            with controller.ProcessBirthWatch(self.root) as observer:
+                pass
+            self.assertEqual(observer.proof['new_porthub_processes'], 0)
+            self.assertEqual(list(self.root.glob('process-watch-stop-*')), [])
+            self.assertTrue(made[-1].stdout.closed)
+            count[0] = 1
+            with self.assertRaises(RuntimeError):
+                with controller.ProcessBirthWatch(self.root):
+                    pass
+            self.assertTrue(made[-1].stdout.closed)
+
+
+class PreservationTests(unittest.TestCase):
+    def setUp(self):
+        import copy
+        self.temporary = tempfile.TemporaryDirectory()
+        root = Path(self.temporary.name)
+        self.a = controller.Native.__new__(controller.Native)
+        a = self.a
+        a.machine = 'a'
+        a.profile = root / 'a.json'
+        other = root / 'c.json'
+        a.profiles = {'a': {'identity': 'a', 'profile': a.profile}, 'c': {'identity': 'c', 'profile': other}}
+        a.fixture_scenario = 'success'
+        for profile in (a.profile, other):
+            profile.write_text(json.dumps(dict(token='original-token', server='https://original.invalid', machine_id=profile.stem)))
+            Path(str(profile) + '.config.json').write_text('{"machine_id":"original","version":"fixed","toml":"fixed"}')
+            Path(str(profile) + '.client-features.json').write_text(json.dumps({'disabled': {'auto-update': True, 'keyboard': True}}))
+            for suffix in ('.media-policy.json', '.drive-health-policy.json', '.local-access.json'):
+                Path(str(profile) + suffix).write_text('{"original":true}')
+        Path(str(other) + '.service.json').write_text('{"other":"unchanged"}')
+        a.cli_path = root / 'shared.exe'
+        a.cli_path.write_bytes(b'shared-cli')
+        a.c = {'sha256': controller.digest(a.cli_path)}
+        self.task = dict(xml='<Task/>', sd='fixed-sddl', processes=[dict(pid=8, created='fixed')])
+        a.task_snapshot = lambda: self.task
+        a.scm_snapshot = lambda _: dict(pid=7, sha256=a.c['sha256'])
+        self.security = dict(owner='S-1-5-18', protected=True, sddl='O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)', allow=['S-1-5-18','S-1-5-32-544'])
+        self.overrides = {}
+        def os_security(script):
+            for path, value in self.overrides.items():
+                if '$path=' + controller.cold.quote(path) + ';' in script:
+                    return json.dumps(value)
+            return json.dumps(self.security)
+        self.patch = patch.object(controller, 'ps', side_effect=os_security)
+        self.patch.start()
+        self.baseline = a.preservation_snapshot()
+        self.enable_own()
+
+    def enable_own(self):
+        path = Path(str(self.a.profile) + '.client-features.json')
+        value = json.loads(path.read_text())
+        value['disabled'].pop('auto-update', None)
+        path.write_text(json.dumps(value))
+
+    def tearDown(self):
+        self.patch.stop()
+        self.temporary.cleanup()
+
+    def test_both_profiles_and_configs_are_frozen_with_security(self):
+        for row in self.a.profiles.values():
+            for suffix in ('', '.config.json'):
+                saved = self.baseline['files'][str(row['profile']) + suffix]
+                self.assertTrue(saved['exists'])
+                self.assertEqual(saved['security']['owner'], 'S-1-5-18')
+                self.assertTrue(saved['security']['protected'])
+        self.a.assert_preserved(self.baseline)
+
+    def test_token_server_machine_and_config_mutations_rejected_for_both_enrollments(self):
+        for row in self.a.profiles.values():
+            for suffix, field in [('', 'token'), ('', 'server'), ('', 'machine_id'), ('.config.json', 'toml')]:
+                path = Path(str(row['profile']) + suffix)
+                original = path.read_bytes()
+                value = json.loads(original)
+                value[field] = 'unexpected mutation'
+                path.write_text(json.dumps(value))
+                with self.subTest(profile=path.name, field=field), self.assertRaises(RuntimeError):
+                    self.a.assert_preserved(self.baseline)
+                path.write_bytes(original)
+
+    def test_owner_dacl_unprotected_and_cli_permission_mutations_rejected(self):
+        import copy
+        for path in [str(self.a.profile), str(self.a.profile) + '.config.json', str(self.a.cli_path)]:
+            for mutation in [{'owner': 'S-1-5-21-foreign'}, {'protected': False},
+                             {'sddl': 'widened-dacl', 'allow': ['S-1-1-0']}]:
+                changed = copy.deepcopy(self.security)
+                changed.update(mutation)
+                self.overrides[path] = changed
+                with self.subTest(path=path, mutation=mutation), self.assertRaises(RuntimeError):
+                    self.a.assert_preserved(self.baseline)
+                self.overrides.clear()
+
+    def test_extra_feature_top_level_and_new_policy_file_rejected(self):
+        path = Path(str(self.a.profile) + '.client-features.json')
+        original = path.read_bytes()
+        for mutation in [{'disabled': {'keyboard': False}}, {'disabled': {'keyboard': True}, 'extra': True},
+                         {'disabled': {'keyboard': True, 'auto-update': False}}]:
+            path.write_text(json.dumps(mutation))
+            with self.assertRaises(RuntimeError):
+                self.a.assert_preserved(self.baseline)
+        path.write_bytes(original)
+        extra = Path(str(self.a.profile) + '.unexpected-policy.json')
+        extra.write_text('{}')
+        with self.assertRaises(RuntimeError):
+            self.a.assert_preserved(self.baseline)
+
+    def test_default_omission_and_foreground_no_toggle_are_exact(self):
+        for scenario, omit in [('default-on', True), ('foreground-reject', False)]:
+            self.a.fixture_scenario = scenario
+            path = Path(str(self.a.profile) + '.client-features.json')
+            value = {'disabled': {'keyboard': True}}
+            if not omit:
+                value['disabled']['auto-update'] = True
+            path.write_text(json.dumps(value))
+            baseline = self.a.preservation_snapshot()
+            self.a.assert_preserved(baseline)
+            value['disabled']['auto-update'] = False
+            path.write_text(json.dumps(value))
+            with self.assertRaises(RuntimeError):
+                self.a.assert_preserved(baseline)
+
+    def test_revocation_allows_exact_off_state_but_not_missing_override(self):
+        self.a.fixture_scenario = 'readiness-revoke'
+        path = Path(str(self.a.profile) + '.client-features.json')
+        path.write_text(json.dumps(self.baseline['own_policy'], indent=2))
+        self.a.assert_preserved(self.baseline)
+        self.enable_own()
+        with self.assertRaises(RuntimeError):
+            self.a.assert_preserved(self.baseline)
+
+    def test_unknown_global_services_tasks_and_usb_changes_preserved(self):
+        import copy
+        baseline = dict(tasks=[], porthub_services=[], usbipd_service=False, usbip_products=[], usbip_drivers=[], cli=False)
+        self.a.before = baseline
+        sentinel = self.a.profile
+        for field, value in [('porthub_services', ['porthub-foreign']), ('tasks', ['\\PortHubForeign']),
+                             ('usbip_products', ['foreign-usb-install']), ('usbip_drivers', [{'DeviceID':'foreign'}])]:
+            changed = copy.deepcopy(baseline)
+            changed[field] = value
+            self.a.system_snapshot = lambda changed=changed: copy.deepcopy(changed)
+            self.a.postcheck = self.a.assert_global_preserved
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                self.a.remove_staging()
+            self.assertTrue(sentinel.exists())
+
+    def test_global_cli_security_widening_rejected_and_final_cli_absence_required(self):
+        import copy
+        baseline = dict(tasks=[], porthub_services=[], usbipd_service=False, usbip_products=[], usbip_drivers=[], cli=False)
+        self.a.before = baseline
+        current = dict(baseline, cli=True)
+        self.a.system_snapshot = lambda: dict(current)
+        self.a.assert_global_preserved()
+        self.overrides[str(self.a.cli_path)] = dict(self.security, sddl='widened-cli')
+        with self.assertRaises(RuntimeError):
+            self.a.assert_global_preserved()
+        self.overrides.clear()
+        with self.assertRaises(RuntimeError):
+            self.a.assert_global_preserved(final=True)
+        current['cli'] = False
+        self.a.assert_global_preserved(final=True)
 
 
 if __name__ == '__main__':

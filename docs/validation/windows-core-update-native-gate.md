@@ -201,12 +201,41 @@ source still needs full native compilation and execution review; this checkpoint
 
 ## Registration scope
 
-This implementation/gate targets Windows public registrations, including paired
-private routing hosted by the public runtime. Private-only network profiles enter
-`private_network::runtime` directly and currently have no core update request or
-handled-ack integration on any platform. Advancing a shared CLI is not evidence
-that a separate private-only SCM registration updated. Extending that mode needs
-its own server authority/credential and lifecycle assessment; no capability or
-credential bypass is added here. The disposable fixtures use a public-only
-loopback configuration; actual paired-private settings preservation remains part
-of the separately reviewed installed-host upgrade trial.
+Windows installation supports public registrations and private networking paired
+into that public owner's SCM process. `service::install_locked_mode` first pairs
+matching private enrollment through `unified::configuration_path`; its Windows
+unpaired-private guard then rejects creating a separate `RegistrationProfile::Private`
+service. The updater therefore covers the supported Windows installed registration
+forms without inventing a private-only Windows service authority. A manually run
+foreground process has no owned SCM maintenance authority by design.
+
+Linux/macOS can have separate system private-only services; their existing
+`private_network::runtime` has no core update request/handled-ack integration.
+That is a separate existing platform/runtime gap requiring its own authority and
+credential assessment, not a newly installable unsupported Windows service type.
+These fixtures use public-only loopback configuration; actual paired-private
+settings preservation remains part of the separately reviewed installed-host trial.
+
+## Preservation and cleanup assertions
+
+Before advertising any update, the controller freezes **both** canonical native
+profile files, their present `profile + ".config.json"` caches and private-module
+configuration, every policy/access sidecar, and the other enrollment's unchanged
+service manifest. Optional absence is frozen too. Each snapshot includes the byte
+SHA256, owner SID, protected-DACL flag and owner/group/DACL SDDL. Private snapshots
+must already be protected and allow only SYSTEM/Administrators. The higher shared
+CLI receives the same owner/DACL projection as well as its executable digest.
+
+Only the updated enrollment's client-feature file may have the scenario's exact
+intended AutoUpdate delta: enabling removes its disabled override; explicit revoke
+restores `auto-update:true`; default-on and foreground-reject leave the installed
+policy entirely unchanged. No unrelated feature key, top-level property, newly
+created policy/access file, token/server/machine ID, config byte or security change
+is accepted. The snapshot comparison does not skip the whole client-feature file.
+
+After scoped cleanup, fresh global PortHub service/task sets and read-only USB
+prerequisite inventories must match the preflight baseline. An unexpected service,
+task, driver/product or CLI security change makes the gate fail and preserves the
+unknown state; cleanup never removes an object merely because it has a PortHub
+prefix. The final inventory also requires the original global CLI presence state
+after the nonce-owned published directory has been removed.

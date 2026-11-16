@@ -116,6 +116,21 @@ class GatewayTests(unittest.TestCase):
         self.assertGreater(event['sequence'], 0)
         self.assertGreater(event['monotonic'], 0)
 
+    def test_repeated_committed_changes_cycles_and_one_explicit_rollback_sync_pulse(self):
+        self.journal = {'phase': 'committed'}
+        path = '/api/machines/client/changes.toml?machine_id=a&token=secret-a'
+        self.fetch(path)
+        self.fetch(path)
+        cycles = [e for e in self.gateway.events if e['kind'] == 'changes-cycle']
+        self.assertEqual(len(cycles), 2)
+        self.assertTrue(all(e['request_id'] == self.request and e['journal_phase'] == 'committed' for e in cycles))
+        self.journal = {'phase':'rolled-back'}
+        with self.assertRaises(HTTPError) as error:
+            self.fetch(path)
+        self.assertEqual(error.exception.code, 503)
+        self.assertEqual(self.fetch(path)[0], 204)
+        self.assertEqual(sum(e['kind']=='rollback-sync-pulse' for e in self.gateway.events), 1)
+
 
 if __name__ == '__main__':
     unittest.main()
