@@ -110,6 +110,7 @@ mod signature_tests {
     async fn native_signature_of_system_executable_survives_contaminated_module_environment()->Result<()> {
         // Read-only OS signature query; no installer, certificate-store edit,
         // policy mutation, device activation or global environment mutation.
+        // Only an owned inert unsigned fixture is written, never executed.
         let executable=system("cmd.exe")?;
         ensure!(executable.is_file(),"Trusted system executable missing");
         let shell=system("WindowsPowerShell/v1.0/powershell.exe")?;
@@ -120,8 +121,16 @@ mod signature_tests {
         inherited.args(["-NoLogo","-NoProfile","-NonInteractive","-Command",legacy])
             .env("PSModulePath",&missing).env("PSModuleAnalysisCachePath","NUL")
             .env("PORTHUB_USB_INSTALLER",&executable).kill_on_drop(true);
-        let rejected=tokio::time::timeout(Duration::from_secs(40),inherited.output()).await??;
-        ensure!(!rejected.status.success(),"Contaminated legacy child unexpectedly passed");
+        // Legacy can succeed on hosts that repair/cache built-in module paths.
+        // Record bounded observations; none is a required negative precondition.
+        match tokio::time::timeout(Duration::from_secs(40),inherited.output()).await {
+            Ok(Ok(observed))=>{
+                ensure!(observed.stdout.len()<=65536&&observed.stderr.len()<=65536,"Legacy observation output exceeds bound");
+                eprintln!("PORTHUB_SIGNATURE_LEGACY_OBSERVATION exit={:?} stdout_bytes={} stderr_bytes={} timed_out=false",observed.status.code(),observed.stdout.len(),observed.stderr.len());
+            },
+            Ok(Err(_))=>eprintln!("PORTHUB_SIGNATURE_LEGACY_OBSERVATION spawn_failed=true"),
+            Err(_)=>eprintln!("PORTHUB_SIGNATURE_LEGACY_OBSERVATION timed_out=true"),
+        }
         let mut fixed=tokio::process::Command::new(&shell);
         fixed.env("PSModulePath",&missing).env("PSModuleAnalysisCachePath","NUL");
         configure_signature(&mut fixed,&executable);
@@ -129,7 +138,17 @@ mod signature_tests {
             ensure!(fixed.as_std().get_envs().any(|(name,value)|name==std::ffi::OsStr::new(key)&&value.is_none()),"Signature child did not remove inherited module environment");
         }
         let verified=tokio::time::timeout(Duration::from_secs(40),fixed.output()).await??;
+        ensure!(verified.stdout.len()<=65536&&verified.stderr.len()<=65536,"Fixed signature output exceeds bound");
         ensure!(verified.status.success(),"Fixed native system signature query failed");
+        let directory=tempfile::Builder::new().prefix("porthub-unsigned-signature-").tempdir()?;
+        let fixture=directory.path().join("inert-never-executed.ps1");
+        std::fs::write(&fixture,b"# Owned unsigned signature fixture. Never executed.\r\n")?;
+        let mut unsigned=tokio::process::Command::new(&shell);
+        unsigned.env("PSModulePath",&missing).env("PSModuleAnalysisCachePath","NUL");
+        configure_signature(&mut unsigned,&fixture);
+        let denied=tokio::time::timeout(Duration::from_secs(40),unsigned.output()).await??;
+        ensure!(denied.stdout.len()<=65536&&denied.stderr.len()<=65536,"Unsigned signature output exceeds bound");
+        ensure!(!denied.status.success(),"Signature guard accepted a known owned unsigned script");
         Ok(())
     }
 }
