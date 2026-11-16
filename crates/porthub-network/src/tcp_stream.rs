@@ -585,3 +585,6 @@ mod exit_admission_tests {
         assert!(Flow {source:"8.8.8.8:12345".parse().unwrap(),..flow}.validate_exit().is_err());
     }
 }
+
+/// Experimental origin-tagged native DATA/ACK foundation; no default runtime hookup.
+pub mod tagged;

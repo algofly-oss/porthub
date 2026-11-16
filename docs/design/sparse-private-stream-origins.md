@@ -145,3 +145,45 @@ native TCP delivery readiness.
 
 Primary prepared-buffer implementation:
 https://github.com/quinn-rs/quinn/blob/quinn-0.11.12/quinn/src/connection.rs
+
+## Tagged native DATA/ACK foundation (TX only; not integrated)
+
+`porthub-network::tcp_stream::tagged` is a separate experimental adapter; the
+legacy DuplexStream runner is unchanged. The tagged API has no unlabelled
+DuplexStream writer. A chunk keeps its original permit through the existing
+128 KiB smoltcp send buffer and every generated/retransmitted payload packet.
+Only one chunk is copied into that buffer until its bytes are TCP-acknowledged;
+a second bounded chunk may wait without re-authorizing the first. Global
+pending payload credit is 8 MiB, chunks are at most 8 KiB, and the existing
+512-flow limit remains unchanged. Packet/device and external output queues
+remain bounded at 256 entries. These are safety ceilings, not a throughput or
+multiplexing result.
+
+A `NativeAck` is issued only after the whole chunk was copied AND smoltcp's
+unacknowledged send queue is empty in Established state, with the original
+permit and owner still valid. It binds an unforgeable in-process stack scope,
+monotonic native-flow generation, tuple, chunk ID, offset and exact length.
+A receipt from another stack/registration or retired owner cannot be reused.
+Fresh control grants can maintain control traffic but never replace old chunk
+origins. Native connect/write abandonment and connection-owner drop retire
+queued packet scopes synchronously; command generation IDs reject stale queued
+operations. Budget Busy is explicit and does not revoke prior work.
+
+The tests use an independent real smoltcp TCP peer, not an OS kernel: they hold
+actual generated ACK packets, demonstrate that copying bytes to the peer is not
+receipt completion, release ACKs for positive proof, and show that late ACKs
+under fresh control cannot extend an old chunk. An actual TCP retransmission
+after the initial one-second RTO retains the old origin too. Queued incoming
+control packets retain their own admission and exact owner before parsing; a
+fresh control update cannot relabel them. A blocked packet delivery also
+cannot resume after expiry/cancellation. All owned simulator tasks, tuple
+bindings and payload credits are checked after cleanup.
+
+Incoming native application payload/reassembly/FIN is deliberately unsupported
+in this foundation and is not silently accepted into an unlabelled buffer.
+The next stage is RX original-byte spans (including wrap, out-of-order data and
+retransmission duplicates), followed by a production receiver that emits its
+chunk receipt only from the exact `NativeAck`. Current sender-fixture echo
+receipts still must not be described as native delivery. Actual OS TCP/TUN,
+three-OS suspend/route cleanup, protocol negotiation and whole-process resource
+fairness proofs remain open; optimized sparse streaming stays declined.
