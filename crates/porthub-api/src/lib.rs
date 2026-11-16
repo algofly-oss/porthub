@@ -1,3 +1,5 @@
+#[cfg(feature = "private-sparse")]
+pub mod private_renumber;
 pub mod private_sparse;
 pub mod access_inventory;
 pub mod account_delete;
