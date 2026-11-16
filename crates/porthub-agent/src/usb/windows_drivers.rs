@@ -36,14 +36,23 @@ async fn signed(path:&Path)->Result<()> {
     let result=tokio::time::timeout(Duration::from_secs(40),command.output()).await??;
     ensure!(result.status.success(),"Windows did not validate the USB installer signature");Ok(())
 }
+fn installer_folder(state:&Path)->Result<PathBuf>{
+    Ok(state.parent().context("Managed Windows state directory missing")?.join("drivers").join("usb-installers"))
+}
+fn installer_command(package:&Package,path:&Path)->Result<tokio::process::Command>{
+    Ok(if package.msi{let mut c=tokio::process::Command::new(system("msiexec.exe")?);c.arg("/i").arg(path).args(["/qn","/norestart"]);c}else{let mut c=tokio::process::Command::new(path);c.args(["/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/COMPONENTS=main,client","/TASKS=vcredist"]);c})
+}
+fn installation_succeeded(code:Option<i32>)->Result<()>{
+    ensure!(matches!(code,Some(0|3010)),"Windows USB driver installation failed (exit code: {code:?})");Ok(())
+}
 async fn install(package:&Package,path:&Path,profile:&Path)->Result<bool> {
     super::prerequisite_retry::after_verification(signed(path),||{
         let requested=super::prerequisite_retry::Requested::from_policy(&features::load(profile)?);
         Ok(if package.msi{requested.host}else{requested.receive})
     },||async {
-    let mut command=if package.msi{let mut c=tokio::process::Command::new(system("msiexec.exe")?);c.arg("/i").arg(path).args(["/qn","/norestart"]);c}else{let mut c=tokio::process::Command::new(path);c.args(["/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/COMPONENTS=main,client","/TASKS=vcredist"]);c};
+    let mut command=installer_command(package,path)?;
     let result=tokio::time::timeout(Duration::from_secs(240),command.kill_on_drop(true).output()).await??;
-    ensure!(matches!(result.status.code(),Some(0|3010)),"Windows USB driver installation failed");
+    installation_succeeded(result.status.code())?;
     if result.status.code()==Some(3010){tracing::warn!("Windows USB prerequisite installed; Windows requested a restart. PortHub will not restart the machine.");}
     Ok(())
     }).await
@@ -67,7 +76,7 @@ pub(super) async fn prepare(path:&Path,control:Arc<Control>)->Result<()> {
     // plaintext gateway and must not install unrelated OS drivers.
     if control.profile().allow_insecure_http_for_tests && url::Url::parse(&control.profile().server).ok().and_then(|u|u.host_str().map(str::to_owned)).is_some_and(|h|h=="127.0.0.1"||h=="localhost"||h=="::1") {return Ok(());}
     let Some(layout)=crate::private_profile::windows_service_layout(path,control.profile())? else {return Ok(());};
-    let folder=layout.state.parent().context("Managed Windows state directory missing")?.join("drivers/usb-installers");crate::service::directory(&folder,true)?;
+    let folder=installer_folder(&layout.state)?;crate::service::directory(&folder,true)?;
     let wanted=requested()?;
     if wanted.host && super::windows::host_installed(){restrict_raw_host().await?;}
     let required=[wanted.host&&!super::windows::host_installed(),wanted.receive&&!super::windows::receive_installed()];
@@ -150,5 +159,34 @@ mod signature_tests {
         ensure!(denied.stdout.len()<=65536&&denied.stderr.len()<=65536,"Unsigned signature output exceeds bound");
         ensure!(!denied.status.success(),"Signature guard accepted a known owned unsigned script");
         Ok(())
+    }
+}
+
+#[cfg(all(test,windows))]
+mod installer_path_tests {
+    use super::*;
+    #[test]
+    fn native_msi_argument_uses_component_joined_path(){
+        for state in [r"C:\ProgramData\PortHub\native",r"C:\Program Data\PortHub\native",r"C:\測試\PortHub\native"]{
+            let folder=installer_folder(Path::new(state)).unwrap();
+            let expected=Path::new(state).parent().unwrap().join("drivers").join("usb-installers");
+            assert_eq!(folder,expected);assert!(!folder.as_os_str().to_string_lossy().contains('/'));
+            let package=packages().into_iter().find(|p|p.msi).unwrap();let path=folder.join(package.file);
+            let command=installer_command(&package,&path).unwrap();let args:Vec<_>=command.as_std().get_args().collect();
+            assert_eq!(args,vec![std::ffi::OsStr::new("/i"),path.as_os_str(),std::ffi::OsStr::new("/qn"),std::ffi::OsStr::new("/norestart")]);
+            assert!(!args[1].to_string_lossy().contains('/'));
+        }
+    }
+    #[test]
+    fn native_installer_failure_retains_actual_code(){
+        assert!(installation_succeeded(Some(0)).is_ok());assert!(installation_succeeded(Some(3010)).is_ok());
+        let error=installation_succeeded(Some(1619)).unwrap_err();assert_eq!(error.to_string(),"Windows USB driver installation failed (exit code: Some(1619))");
+        assert!(installation_succeeded(None).is_err());
+    }
+    #[test]
+    fn native_receiver_command_arguments_are_unchanged(){
+        let package=packages().into_iter().find(|p|!p.msi).unwrap();let path=Path::new(r"C:\owned\drivers\usb-installers").join(package.file);
+        let command=installer_command(&package,&path).unwrap();assert_eq!(command.as_std().get_program(),path.as_os_str());
+        assert_eq!(command.as_std().get_args().collect::<Vec<_>>(),vec!["/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/COMPONENTS=main,client","/TASKS=vcredist"]);
     }
 }
