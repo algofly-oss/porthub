@@ -576,32 +576,102 @@ async fn bridge_bulk<S:tokio::io::AsyncRead+tokio::io::AsyncWrite+Unpin>(kernel:
     bridge_bulk_with_policy(kernel,socket,bulk,policy,reroute,restart,Feature::Usb).await
 }
 #[cfg(any(target_os="linux",target_os="macos",windows))]
-async fn bridge_bulk_with_policy<S:tokio::io::AsyncRead+tokio::io::AsyncWrite+Unpin>(mut kernel:S,mut socket:Socket,mut bulk:tcp::Stream,mut policy:tokio::sync::watch::Receiver<features::Policy>,mut reroute:Option<tokio::sync::watch::Receiver<u64>>,restart:bool,required:Feature)->Result<()> {
-    use futures_util::{SinkExt,StreamExt};
+async fn send_control(
+    socket: &mut Socket,
+    message: tokio_tungstenite::tungstenite::Message,
+) -> Result<()> {
+    use futures_util::SinkExt;
+    tokio::time::timeout(Duration::from_secs(2), socket.send(message))
+        .await
+        .map_err(|_| anyhow::anyhow!("USB control write timed out"))??;
+    Ok(())
+}
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+async fn bridge_bulk_with_policy<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    kernel: S,
+    mut socket: Socket,
+    mut bulk: tcp::Stream,
+    policy: tokio::sync::watch::Receiver<features::Policy>,
+    mut reroute: Option<tokio::sync::watch::Receiver<u64>>,
+    restart: bool,
+    required: Feature,
+) -> Result<()> {
+    use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
-    let mut kernel=relay::RoutedStream::new(kernel,reroute.is_some());
-    let transfer=tokio::io::copy_bidirectional_with_sizes(&mut kernel,&mut bulk,65536,65536);
-    tokio::pin!(transfer);
-    let mut heartbeat=tokio::time::interval(Duration::from_secs(15));
-    loop {tokio::select! {
-        result=&mut transfer=>{let (sent,received)=result?;tracing::debug!(sent,received,"USB bulk stream closed");return Ok(());},
-        frame=socket.next()=>match frame {Some(Ok(Message::Ping(bytes)))=>socket.send(Message::Pong(bytes)).await?,Some(Ok(Message::Pong(_)))=>{},Some(Ok(Message::Text(value))) if planned_restart(&value)=>{socket.send(restart_frame(true)).await?;return Err(relay::Reconfigure.into());},Some(Ok(Message::Text(value))) if planned_ack(&value)=>return Err(relay::Reconfigure.into()),Some(Ok(Message::Close(_)))|None=>return Ok(()),Some(Err(error))=>return Err(error.into()),_=>anyhow::bail!("Unexpected bulk USB control message")},
-        _=heartbeat.tick()=>socket.send(Message::Ping(vec![].into())).await?,
-        _=rerouted(&mut reroute),if restart=>{
-            // Keep the bulk socket alive until the authenticated peer has
-            // acknowledged rerouting. A LAN EOF must not beat WAN signaling
-            // and be misclassified as an unexpected direct-path failure.
-            tokio::time::timeout(Duration::from_secs(2),async {
-                socket.send(restart_frame(false)).await?;
-                let value=next_text(&mut socket).await?;
-                if planned_restart(&value.to_string()){socket.send(restart_frame(true)).await?;}
-                else {ensure!(planned_ack(&value.to_string()),"USB peer did not acknowledge rerouting");}
-                Ok::<(),anyhow::Error>(())
-            }).await??;
-            return Err(relay::Reconfigure.into());
-        },
-        changed=policy.changed()=>if changed.is_err()||!policy.borrow().enabled(required)||!policy.borrow().enabled(Feature::DirectConnections){return Ok(());}
-    }}
+    enum Action {
+        Closed,
+        LocalRestart,
+        PeerRestart,
+        PeerAck,
+    }
+    let revoked = |mut policy: tokio::sync::watch::Receiver<features::Policy>| async move {
+        loop {
+            if !policy.borrow().enabled(required)
+                || !policy.borrow().enabled(Feature::DirectConnections)
+            {
+                return;
+            }
+            if policy.changed().await.is_err() {
+                return;
+            }
+        }
+    };
+    let mut kernel = relay::RoutedStream::new(kernel, reroute.is_some());
+    // Normal control traffic must never suspend payload copying or local revocation.
+    let action = {
+        let transfer =
+            tokio::io::copy_bidirectional_with_sizes(&mut kernel, &mut bulk, 65536, 65536);
+        let control = async {
+            let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
+            loop {
+                tokio::select! {
+                    frame = socket.next() => match frame {
+                        Some(Ok(Message::Ping(bytes))) => send_control(&mut socket, Message::Pong(bytes)).await?,
+                        Some(Ok(Message::Pong(_))) => {},
+                        Some(Ok(Message::Text(value))) if planned_restart(&value) => return Ok::<_, anyhow::Error>(Action::PeerRestart),
+                        Some(Ok(Message::Text(value))) if planned_ack(&value) => return Ok(Action::PeerAck),
+                        Some(Ok(Message::Close(_))) | None => return Ok(Action::Closed),
+                        Some(Err(error)) => return Err(error.into()),
+                        _ => anyhow::bail!("Unexpected bulk USB control message"),
+                    },
+                    _ = heartbeat.tick() => send_control(&mut socket, Message::Ping(vec![].into())).await?,
+                    _ = rerouted(&mut reroute), if restart => return Ok(Action::LocalRestart),
+                }
+            }
+        };
+        tokio::select! {
+            result = transfer => { let (sent, received) = result?; tracing::debug!(sent, received, "USB bulk stream closed"); return Ok(()); },
+            result = control => result?,
+            _ = revoked(policy.clone()) => return Ok(()),
+        }
+    }; // Drop the copy future, retaining both carrier handles for the planned ACK.
+    match action {
+        Action::Closed => Ok(()),
+        Action::PeerAck => Err(relay::Reconfigure.into()),
+        Action::LocalRestart | Action::PeerRestart => {
+            let handshake = async {
+                if matches!(action, Action::PeerRestart) {
+                    socket.send(restart_frame(true)).await?;
+                } else {
+                    socket.send(restart_frame(false)).await?;
+                    let value = next_text(&mut socket).await?;
+                    if planned_restart(&value.to_string()) {
+                        socket.send(restart_frame(true)).await?;
+                    } else {
+                        ensure!(
+                            planned_ack(&value.to_string()),
+                            "USB peer did not acknowledge rerouting"
+                        );
+                    }
+                }
+                Err::<(), anyhow::Error>(relay::Reconfigure.into())
+            };
+            tokio::select! {
+                result = tokio::time::timeout(Duration::from_secs(2), handshake) => result?,
+                _ = revoked(policy) => Ok(()),
+            }
+        }
+    }
 }
 // Independent pumps preserve full-duplex progress when either carrier applies
 // backpressure. Never replay kernel USB requests after a path fails.
@@ -883,8 +953,8 @@ mod stream_tests {
             // its notification. A fast FIN must not outrun the slower gateway.
             drop(app_a);tokio::task::yield_now().await;change.send_replace(1);
             let(first,second)=tokio::time::timeout(Duration::from_secs(3),async{tokio::join!(&mut first,&mut second)}).await?;
-            ensure!(first?.is_err_and(|e|e.is::<relay::Reconfigure>()),"initiator misclassified planned rerouting");
-            ensure!(second?.is_err_and(|e|e.is::<relay::Reconfigure>()),"peer treated planned rerouting as direct-path failure");
+            let first=first?;ensure!(first.as_ref().is_err_and(|e|e.is::<relay::Reconfigure>()),"initiator bulk={bulk} misclassified planned rerouting: {first:?}");
+            let second=second?;ensure!(second.as_ref().is_err_and(|e|e.is::<relay::Reconfigure>()),"peer bulk={bulk} treated planned rerouting as direct-path failure: {second:?}");
         }
         Ok(())
     }
@@ -926,5 +996,157 @@ mod capability_tests {
             assert!(body.get("can_export").is_none()&&body.get("can_import").is_none());
             assert_eq!(body["enabled"],true);
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod control_backpressure_tests {
+    use super::*;
+    use futures_util::SinkExt;
+    use std::{
+        os::fd::AsRawFd,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    async fn scenario(revoke: bool) -> Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let client = tokio::net::TcpStream::connect(listener.local_addr()?).await?;
+        let (server, _) = listener.accept().await?;
+        for (stream, opt) in [(&client, libc::SO_SNDBUF), (&server, libc::SO_RCVBUF)] {
+            let size = 1024i32;
+            ensure!(
+                unsafe {
+                    libc::setsockopt(
+                        stream.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        opt,
+                        (&size as *const i32).cast(),
+                        4,
+                    )
+                } == 0
+            );
+        }
+        let client = Socket::from_raw_socket(
+            tokio_tungstenite::MaybeTlsStream::Plain(client),
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        let mut server = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            server,
+            tokio_tungstenite::tungstenite::protocol::Role::Server,
+            None,
+        )
+        .await;
+        let (mut kernel, internal) = tokio::io::duplex(4096);
+        let listener = tcp::Listener::bind(None).await?;
+        let offer = listener.offer.clone();
+        let (a, b) = tokio::join!(listener.accept(), tcp::connect(offer, None));
+        let (bulk, mut peer) = (a?, b?);
+        let (policy, rx) = tokio::sync::watch::channel(crate::features::Policy::default());
+        let mut bridge = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
+            bridge_bulk_with_policy(internal, client, bulk, rx, None, false, Feature::Usb),
+        ));
+        kernel.write_all(b"initial").await?;
+        let mut initial = [0u8; 7];
+        tokio::time::timeout(Duration::from_secs(1), peer.read_exact(&mut initial)).await??;
+        ensure!(&initial == b"initial");
+        let count = Arc::new(AtomicUsize::new(0));
+        let sent = count.clone();
+        let flood = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            for _ in 0..100000 {
+                server
+                    .send(tokio_tungstenite::tungstenite::Message::Ping(
+                        vec![1; 125].into(),
+                    ))
+                    .await?;
+                sent.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok::<(), anyhow::Error>(())
+        }));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let before = count.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let after = count.load(Ordering::SeqCst);
+        kernel.write_all(b"blocked").await?;
+        let mut data = [0u8; 7];
+        let payload_stalled =
+            tokio::time::timeout(Duration::from_millis(300), peer.read_exact(&mut data))
+                .await
+                .is_err();
+        let forward: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let backward: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 239) as u8).collect();
+        let mut got_forward = vec![0; forward.len()];
+        let mut got_backward = vec![0; backward.len()];
+        {
+            let (kr, kw) = tokio::io::split(&mut kernel);
+            let (pr, pw) = tokio::io::split(&mut peer);
+            let (mut kr, mut kw, mut pr, mut pw) = (kr, kw, pr, pw);
+            tokio::time::timeout(Duration::from_secs(1), async {
+                let (a, b, c, d) = tokio::join!(
+                    kw.write_all(&forward),
+                    pr.read_exact(&mut got_forward),
+                    pw.write_all(&backward),
+                    kr.read_exact(&mut got_backward)
+                );
+                a?;
+                b?;
+                c?;
+                d?;
+                Ok::<(), anyhow::Error>(())
+            })
+            .await??;
+        }
+        ensure!(
+            got_forward == forward && got_backward == backward,
+            "bulk full-duplex byte ordering changed"
+        );
+        peer.write_all(b"reverse").await?;
+        let mut reverse = [0; 7];
+        tokio::time::timeout(Duration::from_millis(300), kernel.read_exact(&mut reverse)).await??;
+        ensure!(&reverse == b"reverse");
+        if revoke {
+            let mut disabled = crate::features::Policy::default();
+            disabled.disabled.insert(Feature::Usb, true);
+            policy.send_replace(disabled);
+        }
+        let bound = if revoke {
+            Duration::from_millis(300)
+        } else {
+            Duration::from_secs(3)
+        };
+        let outcome = tokio::time::timeout(bound, &mut bridge).await?;
+        flood.abort();
+        let _ = flood.await;
+        if revoke {
+            outcome??;
+        } else {
+            ensure!(
+                outcome?
+                    .unwrap_err()
+                    .to_string()
+                    .contains("control write timed out")
+            );
+        }
+        eprintln!(
+            "real TCP websocket: ping_count_before={before} after={after} payload_stalled={payload_stalled} revoke={revoke}"
+        );
+        ensure!(
+            before > 0 && before == after,
+            "control sender did not become backpressured"
+        );
+        ensure!(!payload_stalled, "pending control must not block payload");
+        Ok(())
+    }
+    #[tokio::test]
+    async fn blocked_control_keeps_full_duplex_and_revokes_immediately() -> Result<()> {
+        scenario(true).await
+    }
+    #[tokio::test]
+    async fn blocked_control_disconnects_at_bounded_deadline() -> Result<()> {
+        scenario(false).await
     }
 }
