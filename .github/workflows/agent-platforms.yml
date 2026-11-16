@@ -7,7 +7,7 @@ on:
         type: boolean
         default: false
       reuse_run_id:
-        description: Reuse successful platforms from a completed run with identical production inputs
+        description: Ordered primary,supplement run IDs; one immutable source and identical production inputs
         type: string
         default: ''
       promote_run_id:
@@ -34,7 +34,7 @@ on:
   workflow_dispatch:
     inputs:
       reuse_run_id:
-        description: Reuse successful platforms from a completed run with identical production inputs
+        description: Ordered primary,supplement run IDs; one immutable source and identical production inputs
         type: string
         default: ''
       promote_run_id:

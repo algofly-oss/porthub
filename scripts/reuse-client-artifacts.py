@@ -89,30 +89,65 @@ def retained(run, jobs, artifacts, repository, native, cross):
                 or not 0 < artifact['size_in_bytes'] <= 256 * 1024 * 1024
                 or not re.fullmatch('sha256:[a-f0-9]{64}', artifact.get('digest', ''))):
             raise ValueError('Reusable artifact identity, digest, size or expiry is invalid')
+        job_id = successful[0].get('id')
+        if type(job_id) is not int or job_id <= 0:
+            raise ValueError('Successful platform job identity is invalid')
         selected.append(dict(platform=name, id=artifact['id'], digest=artifact['digest'],
-                             size=artifact['size_in_bytes']))
+                             size=artifact['size_in_bytes'], run=run['id'], job=job_id,
+                             source_revision=run['head_sha']))
     return selected
 
 
+def source_runs(value):
+    # Ordered primary plus explicit supplements, never recursive/transitive reuse.
+    parts = str(value).split(',')
+    if not 1 <= len(parts) <= 4 or any(not re.fullmatch('[1-9][0-9]{0,19}', p) for p in parts):
+        raise ValueError('One to four explicit ordered source run IDs are required')
+    result = [int(p) for p in parts]
+    if len(set(result)) != len(result):
+        raise ValueError('Duplicate source run IDs are forbidden')
+    return result
+
+
 def plan(repository, run_id):
-    if not re.fullmatch(r'[\w.-]+/[\w.-]+', repository) or not re.fullmatch('[1-9][0-9]*', str(run_id)):
+    if not re.fullmatch(r'[\w.-]+/[\w.-]+', repository):
         raise ValueError('Explicit repository and source run are required')
-    prefix = '/actions/runs/' + str(run_id)
-    run = stage.api(repository, prefix)
+    run_ids = source_runs(run_id)
     native, cross = matrices()
-    selected = retained(run, stage.pages(repository, prefix + '/jobs', 'jobs'),
-                        stage.pages(repository, prefix + '/artifacts', 'artifacts'), repository, native, cross)
+    selected = {}
+    origins = []
+    source_revision = None
+    for current_id in run_ids:
+        prefix = '/actions/runs/' + str(current_id)
+        run = stage.api(repository, prefix)
+        if run.get('id') != current_id:
+            raise ValueError('Source run identity differs from requested run')
+        if source_revision is not None and run.get('head_sha') != source_revision:
+            raise ValueError('All supplementary producers must share one immutable source revision')
+        candidates = retained(run, stage.pages(repository, prefix + '/jobs', 'jobs'),
+                              stage.pages(repository, prefix + '/artifacts', 'artifacts'), repository, native, cross)
+        source_revision = run['head_sha']
+        if not candidates:
+            raise ValueError('Explicit source run has no successfully verified client artifacts')
+        origins.append(dict(run=current_id, source_revision=source_revision,
+                            successful_artifacts=candidates))
+        for item in candidates:
+            # Earlier sources win overlap. Every explicit producer/artifact is
+            # independently validated above; no origin receipt is rewritten.
+            selected.setdefault(item['platform'], item)
     if git('status', '--porcelain', '--untracked-files=no').strip():
         raise ValueError('Artifact reuse requires an unchanged source checkout')
     revision = git('rev-parse', 'HEAD').decode().strip()
-    subprocess.run(['git', 'merge-base', '--is-ancestor', run['head_sha'], revision], cwd=ROOT, check=True)
-    source = fingerprint(run['head_sha'])
+    subprocess.run(['git', 'merge-base', '--is-ancestor', source_revision, revision], cwd=ROOT, check=True)
+    source = fingerprint(source_revision)
     if source != fingerprint(revision):
         raise ValueError('Production sources or client build recipes changed; rebuild all platforms')
-    if not selected:
-        raise ValueError('No successfully verified client artifacts can be reused')
-    return dict(repository=repository, run=int(run_id), source_revision=run['head_sha'],
-                revision=revision, production_fingerprint=source, retained=selected)
+    if source_revision != revision and set(selected) != {p['artifact'] for p in native + cross}:
+        raise ValueError('Cross-revision reuse requires complete same-source coverage of all platforms')
+    return dict(repository=repository, run=run_ids[0], runs=run_ids,
+                source_revision=source_revision, revision=revision,
+                production_fingerprint=source, source_runs=origins,
+                retained=list(selected.values()))
 
 
 def extract(archive, item, destination):
@@ -197,14 +232,14 @@ def extract_indexed(zipped, entries, platform, target):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--run-id')
+    parser.add_argument('--run-id', help='Primary run ID, optionally followed by up to three comma-separated same-source supplements')
     parser.add_argument('--download', type=Path)
     args = parser.parse_args()
     if args.download:
         expected = json.loads(os.environ['PORTHUB_REUSE_PLAN'])
         if expected['repository'] != os.environ['GITHUB_REPOSITORY']:
             raise ValueError('Foreign repository reuse is forbidden')
-        proof = plan(expected['repository'], expected['run'])
+        proof = plan(expected['repository'], ','.join(map(str, expected.get('runs', [expected['run']]))))
         if proof != expected:
             raise ValueError('Reuse provenance changed after platform selection')
         args.download.mkdir(parents=True, exist_ok=True)

@@ -1,6 +1,9 @@
 import copy
 import hashlib
 import importlib.util
+import json
+import os
+import sys
 from pathlib import Path
 import stat
 import tempfile
@@ -22,8 +25,8 @@ class Reuse(unittest.TestCase):
                         head_repository=dict(full_name=self.repo))
         self.native = [dict(artifact='x86_64', target='x86_64-unknown-linux-gnu')]
         self.cross = [dict(artifact='armv7', target='armv7-unknown-linux-gnueabihf')]
-        self.jobs = [dict(name='x86_64', status='completed', conclusion='success'),
-                     dict(name='linux-32 (armv7-unknown-linux-gnueabihf, armv7, compiler)',
+        self.jobs = [dict(id=101, name='x86_64', status='completed', conclusion='success'),
+                     dict(id=102, name='linux-32 (armv7-unknown-linux-gnueabihf, armv7, compiler)',
                           status='completed', conclusion='failure')]
         self.artifact = dict(id=3, name='porthub-x86_64', expired=False, size_in_bytes=100,
                              digest='sha256:'+'b'*64, workflow_run=dict(id=42, head_sha='a'*40))
@@ -94,6 +97,72 @@ class Reuse(unittest.TestCase):
         native, cross = reuse.matrices()
         self.assertEqual(len(native)+len(cross),10)
         self.assertEqual(len({item['artifact'] for item in native+cross}),10)
+
+    def prepare_producers(self, split=True):
+        native, cross = reuse.matrices()
+        rows = native + cross
+        producers = {}
+        for run_id, selected in [(42, rows[:7] if split else rows), (43, rows[7:])]:
+            run = {**copy.deepcopy(self.run), 'id': run_id}
+            jobs=[];artifacts=[]
+            for index, platform in enumerate(selected):
+                name=platform['artifact']
+                job_name=name if platform in native else 'linux-32 ('+platform['target']+', '+name+', compiler)'
+                jobs.append(dict(id=run_id*100+index,name=job_name,status='completed',conclusion='success'))
+                artifacts.append(dict(id=run_id*1000+index,name='porthub-'+name,expired=False,size_in_bytes=100,
+                                      digest='sha256:'+'b'*64,workflow_run=dict(id=run_id,head_sha=run['head_sha'])))
+            producers[run_id]=(run,jobs,artifacts)
+        return producers
+
+    def planned(self, producers, ids='42,43', revision='c'*40):
+        def api(repository,path):return producers[int(path.rsplit('/',1)[1])][0]
+        def pages(repository,path,key):return producers[int(path.split('/')[-2])][1 if key=='jobs' else 2]
+        def git(*args):return b'' if args[0]=='status' else revision.encode()
+        with patch.object(reuse.stage,'api',side_effect=api),patch.object(reuse.stage,'pages',side_effect=pages),patch.object(reuse,'git',side_effect=git),patch.object(reuse,'fingerprint',return_value='fixed'),patch.object(reuse.subprocess,'run'):
+            return reuse.plan(self.repo,ids)
+
+    def test_explicit_same_source_supplements_complete_all_ten_without_relabeling(self):
+        producers=self.prepare_producers()
+        before=copy.deepcopy(producers)
+        proof=self.planned(producers)
+        self.assertEqual(len(proof['retained']),10)
+        self.assertEqual(proof['source_revision'],'a'*40)
+        self.assertEqual(proof['runs'],[42,43])
+        self.assertEqual([x['run'] for x in proof['retained']], [42]*7+[43]*3)
+        self.assertEqual([x['run'] for x in proof['source_runs']],[42,43])
+        self.assertEqual(producers,before,'Producer receipts and source metadata must never be rewritten')
+        self.assertTrue(all(x['source_revision']=='a'*40 and x['job']>0 for x in proof['retained']))
+
+    def test_cross_revision_partial_fails_but_single_same_head_partial_still_works(self):
+        producers=self.prepare_producers()
+        with self.assertRaisesRegex(ValueError,'complete same-source coverage'):
+            self.planned(producers,'42')
+        proof=self.planned(producers,'42',revision='a'*40)
+        self.assertEqual(len(proof['retained']),7)
+        self.assertEqual(proof['runs'],[42])
+
+    def test_mixed_source_duplicate_foreign_and_changed_digest_fail_closed(self):
+        producers=self.prepare_producers()
+        producers[43][0]['head_sha']='d'*40
+        with self.assertRaisesRegex(ValueError,'one immutable source'):
+            self.planned(producers)
+        for ids in ['42,42','42,43,44,45,46','42, 43','0','42,']:
+            with self.subTest(ids=ids),self.assertRaises(ValueError):self.planned(self.prepare_producers(),ids)
+        producers=self.prepare_producers();producers[43][0]['head_repository']['full_name']='foreign/repo'
+        with self.assertRaises(ValueError):self.planned(producers)
+        producers=self.prepare_producers();first=self.planned(producers)
+        producers[43][2][0]['digest']='sha256:'+'e'*64
+        second=self.planned(producers)
+        self.assertNotEqual(first,second,'Download revalidation must detect a changed selected artifact digest')
+        with tempfile.TemporaryDirectory() as temporary:
+            target=Path(temporary)/'not-created'
+            with patch.object(reuse,'plan',return_value=second),patch.dict(os.environ,{'PORTHUB_REUSE_PLAN':json.dumps(first),'GITHUB_REPOSITORY':self.repo}),patch.object(sys,'argv',['reuse','--download',str(target)]),patch.object(reuse.subprocess,'run') as download:
+                with self.assertRaisesRegex(ValueError,'provenance changed'):
+                    reuse.main()
+            download.assert_not_called()
+            self.assertFalse(target.exists())
+        producers[43][2][0]['workflow_run']['head_sha']='f'*40
+        with self.assertRaises(ValueError):self.planned(producers)
 
     def test_archive_digest_canonical_paths_links_and_collisions(self):
         with tempfile.TemporaryDirectory() as temporary:
