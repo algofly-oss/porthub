@@ -624,7 +624,11 @@ mod tests {
             let (mut stream, _) = rejecting.accept().await?;
             let mut request = vec![0u8; 4096];
             let _ = stream.read(&mut request).await?;
-            stream.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
+            stream
+                .write_all(
+                    b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await?;
             Ok::<_, anyhow::Error>(())
         });
 
@@ -670,13 +674,19 @@ mod tests {
             cancel.clone(),
         ));
         let result = async {
-            tokio::time::timeout(Duration::from_secs(3), rejection).await???;
+            use anyhow::Context;
+            tokio::time::timeout(Duration::from_secs(3), rejection)
+                .await
+                .context("direct-origin rejection timed out")?
+                .context("direct-origin rejection task failed")?
+                .context("direct-origin rejection failed")?;
             tokio::time::timeout(Duration::from_secs(2), async {
                 while !sender.is_ready() {
                     tokio::time::sleep(Duration::from_millis(1)).await;
                 }
             })
-            .await?;
+            .await
+            .context("fallback relay did not become ready")?;
             let sending = sender.clone();
             let fill = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
                 for _ in 0..20000 {
@@ -684,7 +694,9 @@ mod tests {
                 }
                 Ok::<_, anyhow::Error>(())
             }));
-            let event = tokio::time::timeout(Duration::from_secs(2), received.recv()).await?;
+            let event = tokio::time::timeout(Duration::from_secs(2), received.recv())
+                .await
+                .context("reverse packet timed out under outbound pressure")?;
             ensure!(
                 matches!(event,Some(Event::Packet {ref peer,..}) if peer=="p"),
                 "reverse packet was not delivered"
@@ -699,10 +711,44 @@ mod tests {
         }
         .await;
         cancel.cancel();
-        tokio::time::timeout(Duration::from_secs(2), owner).await???;
-        tokio::time::timeout(Duration::from_secs(2), gateway).await???;
-        ensure!(!sender.is_ready(), "cancelled relay remained ready");
-        result
+        // Always observe both cleanup tasks; cancellation/handshake errors must
+        // not hide the original readiness or reverse-packet failure.
+        let owner_cleanup = async {
+            use anyhow::Context;
+            tokio::time::timeout(Duration::from_secs(2), owner)
+                .await
+                .context("owner cleanup timed out")?
+                .context("owner cleanup task failed")??;
+            Ok::<_, anyhow::Error>(())
+        };
+        let gateway_cleanup = async {
+            use anyhow::Context;
+            tokio::time::timeout(Duration::from_secs(2), gateway)
+                .await
+                .context("gateway cleanup timed out")?
+                .context("gateway cleanup task failed")??;
+            Ok::<_, anyhow::Error>(())
+        };
+        let (owner_result, gateway_result) = tokio::join!(owner_cleanup, gateway_cleanup);
+        let mut cleanup_errors = Vec::new();
+        for (name, outcome) in [("owner", owner_result), ("gateway", gateway_result)] {
+            if let Err(error) = outcome {
+                cleanup_errors.push(format!("{name}: {error:#}"));
+            }
+        }
+        if sender.is_ready() {
+            cleanup_errors.push("cancelled relay remained ready".into());
+        }
+        if let Err(error) = result {
+            anyhow::bail!(
+                "primary scenario failure: {error:#}; cleanup errors: {cleanup_errors:?}"
+            );
+        }
+        ensure!(
+            cleanup_errors.is_empty(),
+            "relay cleanup failed: {cleanup_errors:?}"
+        );
+        Ok(())
     }
 
     #[tokio::test]
