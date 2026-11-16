@@ -1,6 +1,8 @@
 //! Small process-local integrity cache for protected immutable core files.
 //! Holds identity/digest data only, never an open handle across calls. Critical
 //! staging/execution checks still use the existing uncached SHA verification.
+//! Metadata stamps are an idle-check optimization, not proof that bytes cannot
+//! change: a cached digest outside the current expected set must be rehashed.
 use anyhow::{ensure, Result};
 use sha2::{Digest, Sha256};
 use std::{
@@ -115,14 +117,19 @@ impl Cache {
             .get(path)
             .cloned()
         {
-            if previous == identity && stamp(&open(path)?)? == identity {
-                ensure!(
-                    expected.iter().any(|e| digest.eq_ignore_ascii_case(e)),
-                    "Cached core digest differs from pinned release"
-                );
+            if previous == identity
+                && expected.iter().any(|e| digest.eq_ignore_ascii_case(e))
+                && stamp(&open(path)?)? == identity
+            {
                 return Ok(digest);
             }
         }
+        // Once fresh validation is required, an unsuccessful read or digest
+        // mismatch must not leave an older digest eligible for a later caller.
+        self.entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(path);
         let mut hash = Sha256::new();
         let mut buffer = [0u8; 65536];
         let mut total = 0u64;
@@ -183,6 +190,35 @@ mod tests {
         std::fs::write(&path, b"modified").unwrap();
         assert_ne!(c.hash(&path, &[&expected(b"modified")]).unwrap(), first);
         assert_eq!(c.reads.load(Ordering::SeqCst), 2);
+    }
+    #[test]
+    fn same_stamp_cached_mismatch_rehashes_current_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("core.exe");
+        std::fs::write(&path, b"modified").unwrap();
+        let c = Cache::default();
+        // Model a same-size edit whose Windows timestamps did not advance.
+        // Inject the exact current stamp so this regression never relies on
+        // scheduler timing, timestamp granularity, or a sleep.
+        let identity = stamp(&open(&path).unwrap()).unwrap();
+        c.entries
+            .lock()
+            .unwrap()
+            .insert(path.clone(), (identity.clone(), expected(b"original")));
+        assert_eq!(
+            c.hash(&path, &[&expected(b"modified")]).unwrap(),
+            expected(b"modified")
+        );
+        assert_eq!(c.reads.load(Ordering::SeqCst), 1);
+        c.entries
+            .lock()
+            .unwrap()
+            .insert(path.clone(), (identity, expected(b"original")));
+        assert!(c.hash(&path, &[&expected(b"unknown!")]).is_err());
+        assert_eq!(c.reads.load(Ordering::SeqCst), 2);
+        assert!(c.entries.lock().unwrap().get(&path).is_none());
+        assert!(c.hash(&path, &[&expected(b"original")]).is_err());
+        assert_eq!(c.reads.load(Ordering::SeqCst), 3);
     }
     #[test]
     fn atomic_replacement_invalidates_identity_and_cache_holds_no_rename_blocking_handle() {
