@@ -320,6 +320,42 @@ pub struct Registration {
     interface: Option<windows_sys::core::GUID>,
 }
 
+/// Replace namespace registrations without first removing the still-valid set.
+/// A failed expansion leaves the previous guard and owned resolver paths alive.
+pub async fn replace_registration(current:&mut Option<Registration>,index:u32,own:Ipv4Addr,port:u16,suffixes:&[String])->Result<()> {
+    #[cfg(target_os="macos")]
+    {
+        let private:Vec<_>=suffixes.iter().filter(|s|s.as_str()!=".").cloned().collect();
+        let needs_default=suffixes.iter().any(|s|s==".");
+        // Finish every fallible operation before transferring old file ownership.
+        // In particular a failed Tor-default registration must not remove the
+        // retained private suffixes when its temporary guard is dropped.
+        let new_default=if needs_default&&current.as_ref().is_none_or(|old|old.tor_default.is_none()) {
+            Some(super::dns_default_macos::register(port).await?)
+        }else{None};
+        let mut next=replace_files(current.as_mut(),std::path::Path::new("/etc/resolver"),port,&private)?;
+        if needs_default {next.tor_default=current.as_mut().and_then(|old|old.tor_default.take()).or(new_default);}
+        *current=Some(next);
+        let _=(index,own);
+    }
+    #[cfg(not(target_os="macos"))]
+    {
+        let next=register(index,own,port,suffixes).await?;
+        #[cfg(windows)]
+        if let Some(old)=current.as_mut() {
+            // Both registrations describe this same live, owned TUN. Do not let
+            // the old guard clear the settings that register() just replaced.
+            let same=match (&old.interface,&next.interface) {
+                (Some(a),Some(b))=>a.data1==b.data1&&a.data2==b.data2&&a.data3==b.data3&&a.data4==b.data4,
+                _=>false,
+            };
+            if same {old.interface=None;}
+        }
+        *current=Some(next);
+    }
+    Ok(())
+}
+
 impl Drop for Registration {
     fn drop(&mut self) {
         #[cfg(target_os = "macos")]
@@ -470,9 +506,52 @@ fn register_files(directory: &std::path::Path, port: u16, suffixes: &[String]) -
     Ok(registration)
 }
 
+#[cfg(target_os="macos")]
+fn replace_files(current:Option<&mut Registration>,directory:&std::path::Path,port:u16,suffixes:&[String])->Result<Registration> {
+    // Retained files must still be byte-identical to this guard's own writes.
+    // Never adopt a pre-existing file based only on a matching name or prefix.
+    let retained:Vec<_>=current.as_ref().map(|old|old.paths.iter().filter(|(path,_)|suffixes.iter().any(|s|directory.join(s)==*path)).cloned().collect()).unwrap_or_default();
+    for (path,contents) in &retained {
+        ensure!(std::fs::read(path).ok().as_deref()==Some(contents.as_slice()),"owned private resolver was changed externally");
+        let suffix=path.file_name().and_then(|s|s.to_str()).ok_or_else(||anyhow::anyhow!("invalid owned resolver identity"))?;
+        let expected=format!("# Managed by PortHub native agent\ndomain {suffix}\nnameserver 127.0.0.1\nport {port}\nsearch_order 100\ntimeout 2\n");
+        ensure!(contents==expected.as_bytes(),"private resolver endpoint changed; clean owned rebind required");
+    }
+    let additions:Vec<_>=suffixes.iter().filter(|suffix|!retained.iter().any(|(path,_)|*path==directory.join(suffix))).cloned().collect();
+    let mut next=if additions.is_empty(){Registration::default()}else{register_files(directory,port,&additions)?};
+    // Transfer ownership only after every new file was installed successfully.
+    if let Some(old)=current {old.paths.retain(|(path,_)|!retained.iter().any(|(keep,_)|keep==path));}
+    next.paths.extend(retained);
+    Ok(next)
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod macos_registration_tests {
     use super::*;
+
+    #[test]
+    fn expansion_failure_retains_previous_namespace_and_success_transfers_only_owned_files()->Result<()> {
+        let directory=tempfile::tempdir()?;
+        let mut old=register_files(directory.path(),53001,&["private.test".into(),"obsolete.test".into()])?;
+        std::fs::write(directory.path().join("foreign.test"),b"foreign")?;
+        assert!(replace_files(Some(&mut old),directory.path(),53001,&["private.test".into(),"new.test".into(),"foreign.test".into()]).is_err());
+        assert!(directory.path().join("private.test").exists());assert!(directory.path().join("obsolete.test").exists());assert!(!directory.path().join("new.test").exists());
+        let next=replace_files(Some(&mut old),directory.path(),53001,&["private.test".into(),"new.test".into()])?;
+        drop(old);assert!(!directory.path().join("obsolete.test").exists());assert!(directory.path().join("private.test").exists());
+        drop(next);assert!(!directory.path().join("private.test").exists());assert!(!directory.path().join("new.test").exists());assert_eq!(std::fs::read(directory.path().join("foreign.test"))?,b"foreign");
+        Ok(())
+    }
+
+    #[test]
+    fn externally_changed_or_rebound_resolver_is_never_adopted()->Result<()> {
+        let directory=tempfile::tempdir()?;
+        let mut old=register_files(directory.path(),53001,&["private.test".into()])?;
+        assert!(replace_files(Some(&mut old),directory.path(),53002,&["private.test".into()]).is_err());
+        let path=directory.path().join("private.test");std::fs::write(&path,b"foreign edit")?;
+        assert!(replace_files(Some(&mut old),directory.path(),53001,&["private.test".into(),"new.test".into()]).is_err());
+        assert!(!directory.path().join("new.test").exists());drop(old);assert_eq!(std::fs::read(path)?,b"foreign edit");
+        Ok(())
+    }
 
     #[test]
     fn a_conflicting_suffix_rolls_back_only_owned_resolvers() -> Result<()> {

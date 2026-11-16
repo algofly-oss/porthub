@@ -73,3 +73,5 @@ pub(crate) fn owned_exit_underlay(index: u32, source: std::net::IpAddr) -> bool 
 pub mod sparse;
 
 pub(crate) mod address_lifecycle;
+
+pub(crate) mod topology;

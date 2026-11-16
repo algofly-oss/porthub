@@ -42,8 +42,10 @@ pub(crate) async fn current() -> Result<Vec<SocketAddr>> {
     Ok(porthub_mesh::underlay::candidates(found))
 }
 
-pub(crate) async fn watch(
+pub(crate) async fn watch(output:watch::Sender<Vec<SocketAddr>>,cancel:CancellationToken)->Result<()>{watch_with_routes(output,None,cancel).await}
+pub(crate) async fn watch_with_routes(
     output: watch::Sender<Vec<SocketAddr>>,
+    route_changes:Option<watch::Sender<u64>>,
     cancel: CancellationToken,
 ) -> Result<()> {
     let mut backoff = Duration::from_secs(1);
@@ -56,7 +58,7 @@ pub(crate) async fn watch(
                 continue;
             }
         };
-        refresh(&output, &cancel).await?;
+        refresh(&output,route_changes.as_ref(), &cancel).await?;
         let mut interval = tokio::time::interval(Duration::from_secs(120));
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut changed = false;
@@ -71,7 +73,7 @@ pub(crate) async fn watch(
                 }
                 _ = async { if changed { tokio::time::sleep(Duration::from_millis(250)).await } else { std::future::pending::<()>().await } } => {
                     changed = false;
-                    refresh(&output, &cancel).await?;
+                    refresh(&output,route_changes.as_ref(), &cancel).await?;
                     backoff = Duration::from_secs(1);
                 }
             }
@@ -83,6 +85,7 @@ pub(crate) async fn watch(
 
 async fn refresh(
     output: &watch::Sender<Vec<SocketAddr>>,
+    route_changes:Option<&watch::Sender<u64>>,
     cancel: &CancellationToken,
 ) -> Result<()> {
     let result = tokio::select! {
@@ -90,13 +93,7 @@ async fn refresh(
         result = tokio::time::timeout(Duration::from_secs(3), current()) => result,
     };
     if let Ok(Ok(addresses)) = result {
-        output.send_if_modified(|previous| {
-            if *previous == addresses {
-                return false;
-            }
-            *previous = addresses;
-            true
-        });
-    }
+        super::topology::publish(output,route_changes,Some(addresses));
+    }else{super::topology::publish(output,route_changes,None);}
     Ok(())
 }

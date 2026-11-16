@@ -79,8 +79,10 @@ pub(crate) async fn current() -> Result<Vec<SocketAddr>> {
     Ok(porthub_mesh::underlay::candidates(interfaces))
 }
 
-pub(crate) async fn watch(
+pub(crate) async fn watch(output:watch::Sender<Vec<SocketAddr>>,cancel:CancellationToken)->Result<()>{watch_with_routes(output,None,cancel).await}
+pub(crate) async fn watch_with_routes(
     output: watch::Sender<Vec<SocketAddr>>,
+    route_changes:Option<watch::Sender<u64>>,
     cancel: CancellationToken,
 ) -> Result<()> {
     let mut backoff = Duration::from_secs(1);
@@ -130,14 +132,8 @@ pub(crate) async fn watch(
                     };
                     if let Ok(Ok(addresses)) = result {
                         backoff = Duration::from_secs(1);
-                        output.send_if_modified(|previous| {
-                            if *previous == addresses {
-                                return false;
-                            }
-                            *previous = addresses;
-                            true
-                        });
-                    }
+                        super::topology::publish(&output,route_changes.as_ref(),Some(addresses));
+                    }else{super::topology::publish(&output,route_changes.as_ref(),None);}
                 }
             }
         }

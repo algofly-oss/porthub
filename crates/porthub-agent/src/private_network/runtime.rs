@@ -24,6 +24,17 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+fn retire_route_conflicts(policy:&mut Engine,handle:&super::sparse::Handle,conflicts:&[std::net::Ipv4Addr])->Vec<String>{
+    let peers:Vec<_>=handle.peers().into_iter().filter(|peer|conflicts.contains(&peer.ip)).collect();
+    for peer in &peers{policy.revoke_pair(&peer.id);handle.retire(&peer.id);}
+    peers.into_iter().map(|peer|peer.id).collect()
+}
+async fn audit_capture(tun:&Tun,snapshot:&Snapshot,peers:&[std::net::Ipv4Addr])->Result<porthub_network::capture_routes::SparseAudit>{
+    let sparse=snapshot.sparse.as_ref().ok_or_else(||anyhow::anyhow!("private capture audit requires negotiated authority"))?;
+    tokio::time::timeout(Duration::from_secs(2),tun.reconcile_sparse(&sparse.capture_pools,peers)).await
+        .map_err(|_|anyhow::anyhow!("private capture route audit timed out; refusing stale native routing"))?
+}
+
 fn mark_activity(activity: &mut HashMap<String, Instant>, peer: &str, now: Instant) {
     if let Some(last) = activity.get_mut(peer) {
         *last = now;
@@ -232,7 +243,9 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     let identity = porthub_mesh::Identity::new()?;
     let mut next_probe_id = u64::from_str_radix(&instance[..16], 16)?;
     let (interface_updates, mut interfaces) = tokio::sync::watch::channel(Vec::new());
-    tasks.spawn(super::interfaces::watch(interface_updates, work.clone()));
+    let (route_changes,mut route_events)=tokio::sync::watch::channel(0u64);
+    let mut route_events_open=true;let mut last_route_audit:Option<Instant>=None;
+    tasks.spawn(super::interfaces::watch_with_routes(interface_updates,if cfg!(feature="private-sparse"){Some(route_changes)}else{None}, work.clone()));
     let (relay_sender, relay_input) = super::relay::channel();
     #[cfg(feature = "private-stream")]
     let (stream_output, stream_input) = mpsc::channel(256);
@@ -370,10 +383,9 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                         let (router,background)=super::stream_router::new(profile.peer_id.clone(),own.ip,identity.clone(),events.clone(),work.child_token())?;
                         stream_router=Some(router);tasks.spawn(background.with_carrier(stream_output.clone()).run());
                     }
-                    stream_router.as_ref().unwrap().update_pairs(&snapshot,&policy.pair_snapshots())?;
                 }
                 if let Some(tun)=&device {
-                    tun.update_routes(&routes).await?;
+                    if snapshot.sparse.is_none(){tun.update_routes(&routes).await?;}
                 } else {
                     let tun=Arc::new(Tun::open(&name,own.ip,&routes).await?);
                     local_address.configured(own.ip)?;
@@ -393,12 +405,14 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     dns_port=Some(port);
                     device=Some(tun);
                 }
-                if snapshot.sparse.is_some()||capture_configured {
-                    let captures=snapshot.sparse.as_ref().map(|s|s.capture_pools.as_slice()).unwrap_or(&[]);
-                    let capture_plan=device.as_ref().expect("private tunnel initialized").update_capture_routes(captures).await?;
-                    if !capture_plan.conflicting.is_empty(){tracing::warn!(conflicting_pools=capture_plan.conflicting.len(),"private capture pools conflict with existing routes; safe pools retained");}
-                    capture_configured=snapshot.sparse.is_some();
-                }
+                if snapshot.sparse.is_some(){
+                    let audit=audit_capture(device.as_ref().unwrap(),&snapshot,&routes).await?;
+                    retire_route_conflicts(&mut policy,&sparse_handle,&audit.conflicting_peers);
+                    if !audit.capture.conflicting.is_empty(){tracing::warn!(conflicting_pools=audit.capture.conflicting.len(),"private capture pools conflict with existing routes; safe known hosts retained, range migration required for ambiguous addresses");}
+                    capture_configured=true;last_route_audit=Some(Instant::now());
+                }else if capture_configured{device.as_ref().unwrap().update_capture_routes(&[]).await?;capture_configured=false;}
+                #[cfg(feature="private-stream")]
+                stream_router.as_ref().unwrap().update_pairs(&snapshot,&policy.pair_snapshots())?;
                 online_peers = snapshot.peers.iter().filter(|peer| peer.online).map(|peer| peer.id.clone()).collect();
                 private_status.revision = snapshot.revision;
                 private_status.grants = snapshot.grants.len();
@@ -470,12 +484,11 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 if registered_suffixes!=suffixes || registered_rules!=snapshot.dns_rules {
                     let tun=device.as_ref().expect("private tunnel initialized");
                     let port=dns_port.ok_or_else(||anyhow::anyhow!("private DNS listener missing"))?;
-                    dns_registration=None;
                     #[cfg(all(target_os = "linux", feature = "netns-tests"))]
                     let isolated = std::env::var("PORTHUB_TEST_OWNED_NETNS").as_deref() == Ok("1") && std::path::Path::new("/.dockerenv").is_file();
                     #[cfg(not(all(target_os = "linux", feature = "netns-tests")))]
                     let isolated = false;
-                    if !isolated { dns_registration=Some(dns::register(tun.index,own.ip,port,&suffixes).await?); }
+                    if !isolated { dns::replace_registration(&mut dns_registration,tun.index,own.ip,port,&suffixes).await?; }
                     #[cfg(target_os="linux")]
                     {dns_target.send_if_modified(|previous| {
                         let next=Some((own.hostname.clone(),own.ip));
@@ -513,7 +526,16 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 if policy.install_pair(lease.clone()).is_err(){sparse_handle.unavailable(&response.query);continue;}
                 let Some(tun)=&device else{policy.revoke_pair(&id);continue;};
                 let mut routes:Vec<_>=peer_ips.values().copied().collect();routes.retain(|ip|peer_ips.get(&id)!=Some(ip));routes.push(lease.peer.ip);
-                if tun.update_routes(&routes).await.is_err(){policy.revoke_pair(&id);sparse_handle.retire(&id);sparse_handle.unavailable(&response.query);continue;}
+                let base=sparse_authority.as_ref().ok_or_else(||anyhow::anyhow!("private pair arrived before base authority"))?;
+                let audit=audit_capture(tun,base,&routes).await?;last_route_audit=Some(Instant::now());
+                let retired=retire_route_conflicts(&mut policy,&sparse_handle,&audit.conflicting_peers);
+                for retired in retired{peer_ips.remove(&retired);by_ip.retain(|_,peer|peer!=&retired);}
+                if !audit.accepted_peers.contains(&lease.peer.ip){
+                    policy.revoke_pair(&id);sparse_handle.retire(&id);sparse_handle.unavailable(&response.query);peer_ips.remove(&id);by_ip.retain(|_,peer|peer!=&id);
+                    #[cfg(feature="private-stream")]
+                    if let Some(router)=&stream_router{router.update_pairs(base,&policy.pair_snapshots())?;}
+                    continue;
+                }
                 by_ip.retain(|_,peer|peer!=&id);by_ip.insert(lease.peer.ip,id.clone());peer_ips.insert(id.clone(),lease.peer.ip);
                 sparse_handle.installed(&response.query,lease);
                 #[cfg(feature="private-stream")]
@@ -692,6 +714,17 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 }
             }
         },
+        changed=route_events.changed(),if route_events_open=>{
+            if changed.is_err(){route_events_open=false;}else if sparse_handle.enabled(){
+                if let (Some(tun),Some(base))=(&device,&sparse_authority){
+                    let audit=audit_capture(tun,base,&peer_ips.values().copied().collect::<Vec<_>>()).await?;last_route_audit=Some(Instant::now());
+                    let retired=retire_route_conflicts(&mut policy,&sparse_handle,&audit.conflicting_peers);
+                    for id in retired{peer_ips.remove(&id);by_ip.retain(|_,peer|peer!=&id);}
+                    #[cfg(feature="private-stream")]
+                    if let Some(router)=&stream_router{router.update_pairs(base,&policy.pair_snapshots())?;}
+                }
+            }
+        },
         changed=interfaces.changed(),if interface_changes_open=>{
             if changed.is_err(){interface_changes_open=false;}
             else {
@@ -699,6 +732,15 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             }
         },
         _=probe_tick.tick(),if device.is_some()=>{
+            if sparse_handle.enabled()&&last_route_audit.is_none_or(|at|at.elapsed()>=Duration::from_secs(5)){
+                if let (Some(tun),Some(base))=(&device,&sparse_authority){
+                    let audit=audit_capture(tun,base,&peer_ips.values().copied().collect::<Vec<_>>()).await?;last_route_audit=Some(Instant::now());
+                    let retired=retire_route_conflicts(&mut policy,&sparse_handle,&audit.conflicting_peers);
+                    for id in retired{peer_ips.remove(&id);by_ip.retain(|_,peer|peer!=&id);}
+                    #[cfg(feature="private-stream")]
+                    if let Some(router)=&stream_router{router.update_pairs(base,&policy.pair_snapshots())?;}
+                }
+            }
             if sparse_handle.enabled(){
                 for peer in policy.active_pair_flows(){sparse_handle.touch_peer(&peer);}
                 #[cfg(feature="private-stream")]
@@ -863,4 +905,26 @@ fn refresh_tor_dns(upstream:&Option<Arc<super::dns_upstream::Upstream>>,tor:&Opt
         }
     });
     upstream.set_tor(configuration);
+}
+
+#[cfg(test)]
+mod sparse_native_audit_tests {
+    use super::*;
+    #[test]
+    fn native_conflict_retires_only_exact_peer_authority_and_dns_cache() {
+        use porthub_network::policy::{Lookup,PairLease};
+        let epoch="a".repeat(64);
+        let snapshot:Snapshot=serde_json::from_value(serde_json::json!({"workspace":"w","self":"a","revision":1,"expires_at":chrono::Utc::now()+chrono::Duration::seconds(30),"sparse":{"protocol":1,"epoch":epoch},"peers":[{"id":"a","ip":"10.203.0.2","fingerprint":"local","instance":"local-instance","hostname":"a.phub"}],"grants":[]})).unwrap();
+        let (handle,_)=super::super::sparse::channel();handle.update_base(&snapshot);
+        let mut policy=Engine::default();policy.apply(snapshot).unwrap();
+        for (id,ip) in [("b","10.203.1.2"),("c","10.203.2.2")] {
+            let lease:PairLease=serde_json::from_value(serde_json::json!({"workspace":"w","self":"a","epoch":epoch,"revision":1,"expires_at":chrono::Utc::now()+chrono::Duration::seconds(15),"local":{"id":"a","ip":"10.203.0.2","fingerprint":"local","instance":"local-instance","hostname":"a.phub"},"peer":{"id":id,"ip":ip,"fingerprint":format!("remote-{id}"),"instance":format!("instance-{id}"),"hostname":format!("{id}.phub")},"grants":[{"source":"a","destination":id,"protocol":"any","ports":[]}]})).unwrap();
+            policy.install_pair(lease.clone()).unwrap();handle.installed(&Lookup{kind:"peer".into(),value:id.into()},lease);
+        }
+        assert_eq!(retire_route_conflicts(&mut policy,&handle,&["10.203.1.2".parse().unwrap()]),vec!["b"]);
+        assert!(policy.pair_peer("b").is_none());assert!(handle.by_id("b").is_none());
+        assert!(handle.dns_ttl("10.203.1.2".parse().unwrap()).is_none());
+        assert!(policy.pair_peer("c").is_some());assert!(handle.by_id("c").is_some());assert!(policy.valid_lease());
+        assert!(retire_route_conflicts(&mut policy,&handle,&["10.203.99.99".parse().unwrap()]).is_empty());
+    }
 }

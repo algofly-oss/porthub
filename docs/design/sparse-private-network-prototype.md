@@ -117,3 +117,41 @@ concurrent mutation tests and the complete writer audit remain required. The Hub
 current incident-pair discovery also scans its bounded global 8,192-pair table;
 the 4,097-record/2-pair fixture is not evidence of constant work with 8,192 active
 pairs or many simultaneous policy editors.
+
+
+### Native route revalidation checkpoint (still private)
+
+The next checkpoint connects the planner to the real route readers on Linux,
+Windows and macOS. Route-only notifications wake a separate audit without
+restarting ICE when the underlay address list is unchanged. A five-second audit
+also covers missed notifications. Before publishing a new pair to the local DNS
+cache or stream router, the packet owner checks retained peer `/32` routes and
+pool captures against the fresh native table. Conflicting peer authority is
+retired individually; an unrelated pair and the base lease remain intact. Known
+hosts outside a conflicting subnetwork can retain unambiguous `/32` routes;
+ambiguous addresses are not forced over the LAN. An own-address collision stops
+the private worker with a range-migration error.
+
+A macOS resolver expansion now retains its existing byte-verified owned suffix
+files until every addition succeeds. Failed additions remove only their own
+new files. Successful updates transfer ownership before retiring obsolete
+suffixes, and externally edited files are neither adopted nor removed. The
+same-interface Windows DNS guard no longer clears settings just installed by
+its replacement. These lifecycle improvements do not establish Windows private
+namespace routing: explicit NRPT ownership/rollback remains required, because
+an interface search list is not a suffix-routing policy.
+
+Portable planner, route-notification and selective pair-retirement tests and
+extracted actual macOS resolver-file transaction tests are distinct from actual
+OS execution. Native platform metadata compilation is also not a route fixture.
+The prototype has not changed any host network state.
+
+Windows Wintun ownership remains an explicit blocker. The pinned tun-rs layer-3
+builder may reopen a same-named adapter; its `reuse_dev(false)` setting applies
+only to TAP. No arbitrary existing adapter may be configured or deleted. Safe
+recovery must use a protected profile-bound pre-creation GUID journal under the
+profile lease, verify the actual adapter and recorded configuration before
+mutation, and recover legitimate stale owned instances rather than permanently
+rejecting all unclean restarts. Linux policy-routing/VPN rules and macOS local
+address routes also require native lifecycle verification. Server renumbering,
+three-OS resolver ownership, sparse exits/Tor and load fairness remain open.

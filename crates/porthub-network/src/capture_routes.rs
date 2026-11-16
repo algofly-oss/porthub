@@ -57,9 +57,42 @@ pub fn plan(
         conflicting: conflicting.into_iter().collect(),
     })
 }
+/// A fresh route-table audit includes already-installed hosts and the local TUN
+/// address. Checking only additions misses a later VPN/LAN/WSL collision.
+#[derive(Debug,PartialEq,Eq)]
+pub struct SparseAudit {
+    pub capture:CapturePlan,
+    pub accepted_peers:Vec<Ipv4Addr>,
+    pub conflicting_peers:Vec<Ipv4Addr>,
+    pub own_conflict:bool,
+}
+pub fn audit(requested:&[Network],own:Ipv4Addr,peers:&[Ipv4Addr],existing:&[ExistingRoute],owned_interface:u32)->Result<SparseAudit>{
+    ensure!(own.is_private()&&peers.len()<=crate::policy::MAX_PAIR_LEASES+1&&peers.iter().all(Ipv4Addr::is_private),"invalid or oversized sparse host-route set");
+    let capture=plan(requested,existing,owned_interface)?;
+    let conflict=|ip:Ipv4Addr|existing.iter().any(|r|{
+        if r.prefix==0||r.interface==Some(owned_interface){return false;}
+        let mask=u32::MAX<<(32-r.prefix);u32::from(ip)&mask==u32::from(r.destination)&mask
+    });
+    let mut accepted_peers=BTreeSet::new();let mut conflicting_peers=BTreeSet::new();
+    for ip in peers.iter().copied().filter(|ip|*ip!=own){if conflict(ip){conflicting_peers.insert(ip);}else{accepted_peers.insert(ip);}}
+    Ok(SparseAudit{capture,accepted_peers:accepted_peers.into_iter().collect(),conflicting_peers:conflicting_peers.into_iter().collect(),own_conflict:conflict(own)})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fresh_audit_retires_retained_hosts_but_can_prewarm_unambiguous_hosts_in_conflicting_pool(){
+        let own="10.203.7.1".parse().unwrap();let safe="10.203.7.2".parse().unwrap();let conflicted="10.203.8.2".parse().unwrap();
+        let pools=["10.203.0.0/16".parse().unwrap()];let peers=[safe,conflicted];
+        let before=audit(&pools,own,&peers,&[],9).unwrap();assert_eq!(before.accepted_peers.len(),2);assert!(!before.own_conflict);
+        let routes=[ExistingRoute{destination:"10.203.8.0".parse().unwrap(),prefix:24,interface:Some(2)},ExistingRoute{destination:conflicted,prefix:32,interface:Some(9)}];
+        let after=audit(&pools,own,&peers,&routes,9).unwrap();
+        assert_eq!(after.capture.conflicting,pools);assert!(after.capture.accepted.is_empty());
+        assert_eq!(after.accepted_peers,vec![safe]);assert_eq!(after.conflicting_peers,vec![conflicted]);assert!(!after.own_conflict);
+        let own_lan=[ExistingRoute{destination:"10.203.7.0".parse().unwrap(),prefix:24,interface:Some(3)}];
+        assert!(audit(&pools,own,&peers,&own_lan,9).unwrap().own_conflict);
+    }
     #[test]
     fn lan_vpn_wsl_collision_rejects_only_affected_pool_and_default_is_not_a_collision() {
         let pools = [
