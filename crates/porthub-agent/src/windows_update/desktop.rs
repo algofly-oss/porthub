@@ -127,6 +127,7 @@ mod tests {
             r#"
 $ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
 if($PSVersionTable.PSVersion.Major -ne 5){{throw 'Windows PowerShell 5 required'}}
+$PSModuleAutoLoadingPreference='None'
 {import}
 $expected=[IO.Path]::GetFullPath($PSHOME+'\Modules\CimCmdlets')
 function Trusted($name){{
