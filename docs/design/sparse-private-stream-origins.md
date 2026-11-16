@@ -227,8 +227,114 @@ LastAck-to-Closed and real RST, expire pending FINs under fresh control, block o
 cancel DATA/FIN receipt publication, and positively carry response data after a
 completed local half-close. They do not establish host OS ACK/suspend behavior.
 
-A production PHC1 receiver, pre-issued bounded receive-credit/origin binding,
-complete protocol negotiation, three-OS suspend/route cleanup and whole-process
-resource fairness remain open. Current sender-fixture echo receipts still are
+Production source/receiver negotiation and runtime ownership, three-OS
+suspend/route cleanup and whole-process resource fairness remain open. Current sender-fixture echo receipts still are
 not native delivery proof. Optimized sparse streaming stays declined and the
 feature remains default OFF.
+
+## Pre-issued receiver credit and native-ACK PHC2 receipt (not integrated)
+
+The experimental credited mesh profile advertises zero remote application
+streams during TLS setup. Its owned non-Clone receiver wrapper has no public
+raw Quinn Connection escape hatch; cancelled credit acceptance closes that
+generation. Before allowing one remote bidi stream, the receiver reserves its
+full 8 KiB payload capacity and installs an immutable original pair/epoch/ACL
+permit in the endpoint's pending-origin registry. Its per-stream and connection
+receive windows are 8,288 bytes (96-byte header plus 8 KiB body). Legacy mesh
+profiles and limits remain unchanged.
+
+The receiver disables automatic remote stream-credit replenishment immediately
+after accepting the stream, before reading its FIN or completing the receipt.
+It validates exact peer/local assignment/native tuple, flow nonce, direction,
+ports, epoch, contiguous sequence/offset, nonzero chunk ID, canonical versioned lifetime,
+body length and finite EOF. Both the original service-port mask and the current
+same-peer/same-epoch mask must allow the service. The original permit, current
+policy and profile-owner scope guard header/body reads, actual native TCP ACK,
+and receipt writes through their final QUIC ACK. Current lookup is bounded
+installed policy, never DB/network IO or re-entry into the transport factory.
+
+Only the native adapter's exact sealed `NativeAck` permits an identical PHC2
+receipt; copied native bytes or successful Quinn body reception do not. No new
+credit is advertised until a fresh original grant is installed. Expired or
+abandoned issued credits retire the immutable socket/native generation rather
+than allowing buffered bytes to borrow a new grant.
+
+Actual Quinn plus independent smoltcp tests prove native-ACK withholding,
+prebuffered/QUIC-ACKed body expiry before application acceptance, original and
+current TCP-port denial, profile/current-policy retirement during blocked native
+ACK, noncanonical headers, cancellation, and a fresh second chunk on the same
+native flow after the completed old grant expires. All owned credits/tasks are
+checked on teardown. A retired fence may prevent its encrypted QUIC close frame
+from reaching the peer; tests bound no-receipt observation instead of treating
+remote close as guaranteed.
+
+This is ONE serial directional flow/credit per prototype generation, not the
+final multiplexed/throughput protocol. Native FIN-to-PHC2 wire framing, full
+source/receiver negotiation and runtime ownership, bounded multiplex/fairness,
+RTT/window throughput, native three-OS suspend/routes and scale remain OPEN.
+No production sparse optimization/readiness is advertised.
+
+Pinned credit implementation: Quinn-proto 0.11.19
+`streams/state.rs::stream_freed` releases remote bidi capacity only after both
+halves are removed; `set_max_concurrent`/`ensure_remote_streams` control further
+advertisement. The actual tests also verify that finishing a receipt does not
+automatically allow another unissued stream:
+https://github.com/quinn-rs/quinn/blob/quinn-proto-0.11.19/quinn-proto/src/connection/streams/state.rs
+
+### Source-original temporal limit (PHC2 only)
+
+Independent receiver grants can outlast an older source request. Closing the
+source's fenced socket is insufficient: its expired factory may suppress CLOSE,
+and the receiver already has plaintext or native output queued. The retained
+regression ages a real source `RequestWindow` 14.5 seconds before receiver credit,
+then lets actual elapsed time consume its final ~500 ms while native output is
+held. The initial receiver implementation incorrectly delivered those bytes;
+the PHC2 implementation rejects them even while its own later grant is valid.
+
+`SendPermit::new` has an UNKNOWN temporal bound; it is not a fresh 15-second
+lease. Bounded permits observe existing immutable request-start witnesses.
+Independent origins combine by their minimum, with any unknown origin staying
+unknown. An explicit control-only owner/cancellation veto cannot authorize a
+chunk alone. Native reassembly spans, output frames, ACK receipts, and generation
+factories preserve these bounds. Original parent/base/pair/current-at-issue
+authorities all contribute; a fresh control grant cannot reset an old origin.
+
+Guarded chunks use the explicit `PHC2` wire version. Their 96-byte header's final
+three bytes carry a canonical 1..15000 millisecond remaining lifetime, floored
+rather than rounded up. Unknown, zero, sub-millisecond and oversized bounds
+are rejected. The sender samples the transmitted value only AFTER `open_bi`
+resolves its remote credit, and includes these bytes in the chunk-ID digest and
+exact receipt echo. Sampling before waiting for credit would be unsafe.
+
+The receiver captures a suspend-inclusive/awake witness BEFORE advertising
+credit. After the header arrives, it SHORTENS THAT ORIGINAL START by the source
+remaining duration; it never starts a fresh clock at header arrival. This is
+causally conservative without comparing cross-host clock readings. That bound
+travels through retained native spans/packets, ACK publication and the final
+Quinn receipt ACK. Native three-OS clock/suspend evidence remains a separate
+required gate.
+
+This temporal upper bound does not establish instantaneous remote notification
+of an arbitrary source-local owner revocation after emission. Receiver-local
+current-policy/profile retirement is checked, and source-local retirement stops
+source emissions. The full distributed revocation/runtime contract remains
+explicitly open; TTL is not claimed as immediate distributed cancellation.
+
+An ACKed origin's later expiry drops old queued datagram snapshots without
+retiring fresh work in the same healthy generation. The current pending-origin
+registry still retires a generation BEFORE admitting any new emission if an
+UNACKNOWLEDGED original expires. The retained regression distinguishes these
+cases, preventing an old already-delivered duplicate from imposing a 15-second
+reset on an otherwise healthy long flow.
+
+Delivery checks run BEFORE invoking a byte-bearing callback, not only before
+polling its returned future: construction can itself perform synchronous native
+work. The actual near-expiry consumer retains this synchronous-callback
+regression. Established native legs in these tests represent prior authorized
+flow-open/SYN admission; no header-created native leg is authorized by this
+chunk helper. Production flow-open authorization/negotiation remains unwired.
+
+The 8 MiB pending-chunk ledger is not an aggregate Quinn/native memory proof.
+The current sender test endpoint still uses legacy transport-window defaults;
+production needs an explicit guarded sender/receipt window, bounded multiplexed
+credit scheduling and measured aggregate memory/throughput before promotion.

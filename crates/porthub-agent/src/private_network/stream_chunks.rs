@@ -1,5 +1,5 @@
-//! Experimental finite-stream origin actor. Not a production stream protocol:
-//! native-runner ACK validation and receiver integration remain unwired.
+//! Experimental finite-stream origin actors, including tagged native-ACK RX.
+//! Production negotiation/runtime/multiplexing remain deliberately unwired.
 use anyhow::{ensure, Result};
 use bytes::Bytes;
 use porthub_mesh::{
@@ -19,6 +19,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
+pub(crate) mod receiver;
 const CHUNK: usize = 8192;
 const HEADER: usize = 96;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -137,6 +138,8 @@ pub(crate) struct Gate {
     factory: SendFactory,
 }
 impl Gate {
+    /// Keep the supplied authority's bound. A pure local owner veto must be
+    /// explicitly control(); an unknown authority never becomes a fresh lease.
     pub(crate) fn new(owner_scope: SendPermit) -> Self {
         let state = Arc::new(GateState {
             alive: AtomicBool::new(true),
@@ -154,17 +157,15 @@ impl Gate {
                 source.retire();
                 return None;
             }
-            let permits = pending.values().cloned().collect::<Vec<_>>();
+            let mut permits = pending.values().cloned().collect::<Vec<_>>();
+            permits.push(source.parent.clone());
+            let combined = SendPermit::combine(permits);
             let source = source.clone();
-            Some(SendPermit::new(move || {
-                let valid = source.alive.load(Ordering::SeqCst)
-                    && source.parent.valid()
-                    && permits.iter().all(|p| p.valid());
-                if !valid {
-                    source.retire();
-                }
-                valid
-            }))
+            // This queued datagram keeps its immutable original scope, but an
+            // ACKed/removed origin's later expiry must only drop THAT record.
+            // Current unacknowledged expiry retires the generation in the
+            // registry check above, before a fresh socket emission is admitted.
+            Some(combined.constrain(move || source.alive.load(Ordering::SeqCst)))
         });
         Self { state, factory }
     }
@@ -200,7 +201,7 @@ impl Flow {
             "invalid chunk flow binding"
         );
         let mut h = [0; HEADER];
-        h[..4].copy_from_slice(b"PHC1");
+        h[..4].copy_from_slice(b"PHC2");
         h[4..20].copy_from_slice(&self.nonce);
         h[20] = self.direction;
         h[21..29].copy_from_slice(&sequence.to_be_bytes());
@@ -212,6 +213,7 @@ impl Flow {
         let mut hash = Sha256::new();
         hash.update(generation);
         hash.update(&h[..77]);
+        hash.update(&h[93..96]);
         h[77..93].copy_from_slice(&hash.finalize()[..16]);
         Ok(h)
     }
@@ -262,9 +264,16 @@ impl Drop for Abandon {
 }
 impl Sender {
     pub(crate) async fn send(&self, payload: Bytes, permit: SendPermit) -> Result<[u8; HEADER]> {
+        let permit = SendPermit::combine(vec![permit, self.gate.state.parent.clone()]);
         ensure!(
             self.gate.state.alive.load(Ordering::SeqCst) && permit.valid(),
             "chunk admission retired"
+        );
+        ensure!(
+            permit
+                .remaining()
+                .is_some_and(|n| (1..=15_000).contains(&n.as_millis())),
+            "guarded chunk has unknown/non-wire original lifetime"
         );
         let credit = self
             .budget
@@ -381,7 +390,7 @@ pub(crate) fn start(
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .insert(header, command.permit.clone());
-            let result = tokio::select! {biased;_=running.state.cancel.cancelled()=>Err(anyhow::anyhow!("chunk generation retired")),_=command.reply.closed()=>Err(anyhow::anyhow!("chunk consumer abandoned")),result=transfer(&connection,&header,&command.payload,&command.permit)=>result};
+            let result = tokio::select! {biased;_=running.state.cancel.cancelled()=>Err(anyhow::anyhow!("chunk generation retired")),_=command.reply.closed()=>Err(anyhow::anyhow!("chunk consumer abandoned")),result=transfer(&connection,&header,&command.payload,&command.permit,generation)=>result};
             if result.is_err()
                 || !command.permit.valid()
                 || !running.state.alive.load(Ordering::SeqCst)
@@ -404,7 +413,9 @@ pub(crate) fn start(
                 .remove(&header);
             sequence = next_sequence;
             offset = next_offset;
-            let _ = command.reply.send(Ok(header));
+            let _ = command
+                .reply
+                .send(Ok(result.expect("checked guarded transfer result")));
         }
         running.retire();
         input.close();
@@ -426,13 +437,43 @@ pub(crate) fn start(
         },
     ))
 }
+fn wire_header(
+    mut header: [u8; HEADER],
+    generation: [u8; 16],
+    remaining_ms: u32,
+) -> Result<[u8; HEADER]> {
+    ensure!(
+        (1..=15_000).contains(&remaining_ms),
+        "source remaining lifetime outside wire bounds"
+    );
+    header[93..96].copy_from_slice(&remaining_ms.to_be_bytes()[1..]);
+    let mut digest = Sha256::new();
+    digest.update(generation);
+    digest.update(&header[..77]);
+    digest.update(&header[93..96]);
+    header[77..93].copy_from_slice(&digest.finalize()[..16]);
+    Ok(header)
+}
 async fn transfer(
     connection: &Connection,
     header: &[u8; HEADER],
     payload: &Bytes,
     permit: &SendPermit,
-) -> Result<()> {
+    generation: [u8; 16],
+) -> Result<[u8; HEADER]> {
     let (mut send, mut receive) = permit.during(connection.open_bi()).await??;
+    // Causal ordering: receiver's credit start precedes this resolved open.
+    // Do not compute remaining lifetime before waiting for stream credit.
+    let millis = permit
+        .remaining()
+        .ok_or_else(|| anyhow::anyhow!("source bound unknown after credit"))?
+        .as_millis();
+    ensure!(
+        (1..=15_000).contains(&millis),
+        "source bound outside guarded wire limits"
+    );
+    let actual = wire_header(*header, generation, millis as u32)?;
+    let header = &actual;
     let result = permit
         .during(async {
             send.write_all(header).await?;
@@ -458,7 +499,7 @@ async fn transfer(
         })
         .await;
     match result {
-        Ok(Ok(())) => Ok(()),
+        Ok(Ok(())) => Ok(actual),
         _ => {
             let _ = send.reset(1u8.into());
             let _ = receive.stop(1u8.into());
@@ -471,6 +512,15 @@ async fn transfer(
 mod tests {
     use super::*;
     use porthub_mesh::{streams::Endpoint, Identity};
+    fn lease(check: impl Fn() -> bool + Send + Sync + 'static) -> SendPermit {
+        let start = std::time::Instant::now();
+        SendPermit::bounded(check, move || {
+            std::time::Duration::from_secs(15)
+                .checked_sub(start.elapsed())
+                .filter(|n| !n.is_zero())
+        })
+    }
+
     struct Fixture {
         owner: Owner,
         sender: Sender,
@@ -499,7 +549,7 @@ mod tests {
             fingerprint: b.fingerprint().into(),
             instance: "b-instance".into(),
         };
-        let gate = Gate::new(SendPermit::new(|| true));
+        let gate = Gate::new(SendPermit::control(|| true));
         let (source, mut a_io) = Endpoint::new_fenced(a, a_ip, gate.factory())?;
         let (destination, mut b_io) = Endpoint::new(b, b_ip)?;
         source.update_peers(vec![b_peer.clone()])?;
@@ -603,16 +653,119 @@ mod tests {
         result
     }
     #[tokio::test]
+    async fn guarded_sender_rejects_unknown_control_only_and_nonwire_bounds_without_new_credit(
+    ) -> Result<()> {
+        let f = fixture(0).await?;
+        for permit in [
+            SendPermit::new(|| true),
+            SendPermit::control(|| true),
+            SendPermit::bounded(|| true, || Some(std::time::Duration::from_nanos(1))),
+            SendPermit::bounded(|| true, || Some(std::time::Duration::from_secs(16))),
+        ] {
+            ensure!(
+                f.sender
+                    .send(Bytes::from(vec![3; 128]), permit)
+                    .await
+                    .is_err(),
+                "unknown/nonwire authority upgraded"
+            );
+        }
+        {
+            let b = f.budget.0.lock().unwrap();
+            ensure!(
+                b.total.bytes == 0 && b.total.chunks == 0,
+                "denied bound charged pending bytes"
+            );
+        }
+        ensure!(
+            f.sender.gate.state.alive.load(Ordering::SeqCst),
+            "unsupported bound revoked prior healthy owner"
+        );
+        f.sender
+            .send(Bytes::from(vec![3; 128]), lease(|| true))
+            .await?;
+        cleanup(f).await
+    }
+    #[test]
+    fn generation_factory_retains_parent_and_every_pending_original_min() {
+        let parent = SendPermit::bounded(|| true, || Some(std::time::Duration::from_millis(9)));
+        let gate = Gate::new(parent);
+        gate.state.pending.lock().unwrap().insert(
+            [1; HEADER],
+            SendPermit::bounded(|| true, || Some(std::time::Duration::from_millis(400))),
+        );
+        let old = gate.factory.snapshot().unwrap();
+        assert_eq!(old.remaining(), Some(std::time::Duration::from_millis(9)));
+        gate.state
+            .pending
+            .lock()
+            .unwrap()
+            .insert([2; HEADER], SendPermit::new(|| true));
+        assert!(gate.factory.snapshot().unwrap().remaining().is_none());
+        assert_eq!(old.remaining(), Some(std::time::Duration::from_millis(9)));
+        gate.retire();
+        assert!(!old.valid());
+    }
+    #[test]
+    fn acknowledged_old_datagram_expiry_drops_it_without_retiring_new_work() {
+        let gate = Gate::new(SendPermit::control(|| true));
+        let valid = Arc::new(AtomicBool::new(true));
+        let old = valid.clone();
+        gate.state.pending.lock().unwrap().insert(
+            [1; HEADER],
+            SendPermit::bounded(
+                move || old.load(Ordering::SeqCst),
+                || Some(std::time::Duration::from_millis(100)),
+            ),
+        );
+        let queued = gate.factory.snapshot().unwrap();
+        // Production removes this entry only after real native and Quinn ACKs.
+        gate.state.pending.lock().unwrap().remove(&[1; HEADER]);
+        gate.state
+            .pending
+            .lock()
+            .unwrap()
+            .insert([2; HEADER], lease(|| true));
+        valid.store(false, Ordering::SeqCst);
+        assert!(
+            !queued.valid(),
+            "old queued datagram borrowed new authority"
+        );
+        assert!(
+            gate.state.alive.load(Ordering::SeqCst) && gate.factory.snapshot().is_some(),
+            "ACKed old datagram expiry retired unrelated new work"
+        );
+    }
+    #[test]
+    fn phc2_ttl_is_canonical_and_part_of_chunk_identifier() -> Result<()> {
+        let flow = Flow {
+            nonce: [1; 16],
+            direction: 0,
+            local_port: 4000,
+            remote_port: 443,
+            epoch: [1; 32],
+        };
+        let template = flow.header(0, 0, 128, [4; 16])?;
+        assert!(wire_header(template, [4; 16], 0).is_err());
+        assert!(wire_header(template, [4; 16], 15001).is_err());
+        let a = wire_header(template, [4; 16], 1000)?;
+        let b = wire_header(template, [4; 16], 999)?;
+        ensure!(
+            &a[..4] == b"PHC2" && a[77..93] != b[77..93] && a[93..96] != b[93..96],
+            "TTL not bound to exact chunk ID"
+        );
+        Ok(())
+    }
+    #[tokio::test]
     async fn actual_finished_quinn_stream_and_exact_receipt_release_original_credit() -> Result<()>
     {
         let f = fixture(0).await?;
         let receipt = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            f.sender
-                .send(Bytes::from(vec![3; CHUNK]), SendPermit::new(|| true)),
+            f.sender.send(Bytes::from(vec![3; CHUNK]), lease(|| true)),
         )
         .await??;
-        ensure!(&receipt[..4] == b"PHC1", "bad receipt");
+        ensure!(&receipt[..4] == b"PHC2", "bad receipt");
         ensure!(
             f.gate.state.pending.lock().unwrap().is_empty(),
             "acked chunk retained"
@@ -634,7 +787,7 @@ mod tests {
             sender
                 .send(
                     Bytes::from(vec![3; CHUNK]),
-                    SendPermit::new(move || check.load(Ordering::SeqCst)),
+                    lease(move || check.load(Ordering::SeqCst)),
                 )
                 .await
         });
@@ -671,7 +824,7 @@ mod tests {
         let f = fixture(2).await?;
         ensure!(
             f.sender
-                .send(Bytes::from(vec![3; 128]), SendPermit::new(|| true))
+                .send(Bytes::from(vec![3; 128]), lease(|| true))
                 .await
                 .is_err(),
             "reset falsely acknowledged"
@@ -683,7 +836,7 @@ mod tests {
         let f = fixture(3).await?;
         ensure!(
             f.sender
-                .send(Bytes::from(vec![3; 128]), SendPermit::new(|| true))
+                .send(Bytes::from(vec![3; 128]), lease(|| true))
                 .await
                 .is_err(),
             "foreign receipt accepted"
@@ -700,7 +853,7 @@ mod tests {
             first
                 .send(
                     Bytes::from(vec![3; CHUNK]),
-                    SendPermit::new(move || original.load(Ordering::SeqCst)),
+                    lease(move || original.load(Ordering::SeqCst)),
                 )
                 .await
         });
@@ -713,7 +866,7 @@ mod tests {
         let second = f.sender.clone();
         let fresh = tokio::spawn(async move {
             second
-                .send(Bytes::from(vec![3; CHUNK]), SendPermit::new(|| true))
+                .send(Bytes::from(vec![3; CHUNK]), lease(|| true))
                 .await
         });
         tokio::task::yield_now().await;
@@ -738,7 +891,7 @@ mod tests {
         let sender = f.sender.clone();
         let pending = tokio::spawn(async move {
             sender
-                .send(Bytes::from(vec![3; CHUNK]), SendPermit::new(|| true))
+                .send(Bytes::from(vec![3; CHUNK]), lease(|| true))
                 .await
         });
         tokio::time::timeout(std::time::Duration::from_secs(1), async {

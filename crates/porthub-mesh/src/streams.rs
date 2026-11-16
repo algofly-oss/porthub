@@ -345,7 +345,7 @@ impl ClientCertVerifier for Verifier {
         self.algorithms.supported_schemes()
     }
 }
-fn transport(idle_timeout: Option<Duration>) -> Result<Arc<quinn::TransportConfig>> {
+fn transport(idle_timeout: Option<Duration>,credited:bool) -> Result<Arc<quinn::TransportConfig>> {
     let mut config = quinn::TransportConfig::default();
     config
         .max_concurrent_uni_streams(0u8.into())
@@ -362,6 +362,9 @@ fn transport(idle_timeout: Option<Duration>) -> Result<Arc<quinn::TransportConfi
         .stream_receive_window((16u32 * 1024 * 1024).into())
         .receive_window((32u32 * 1024 * 1024).into())
         .send_window(32 * 1024 * 1024);
+    if credited {
+        config.max_concurrent_bidi_streams(0u8.into()).stream_receive_window(8288u32.into()).receive_window(8288u32.into()).send_window(8288);
+    }
     if let Some(timeout) = idle_timeout {
         config.max_idle_timeout(Some(timeout.try_into()?));
     }
@@ -371,11 +374,38 @@ fn transport(idle_timeout: Option<Duration>) -> Result<Arc<quinn::TransportConfi
 /// Proof that this connection was created by an endpoint whose immutable
 /// socket-generation factory is the supplied one, not a later admission map.
 #[derive(Clone)]
-pub struct FencedConnection {connection:Connection,generation:crate::udp::SendFactory,peer:Peer}
+pub struct FencedConnection {connection:Connection,generation:crate::udp::SendFactory,peer:Peer,local:Ipv4Addr}
 impl FencedConnection {
+    pub fn local_ip(&self)->Ipv4Addr{self.local}
     pub fn peer(&self)->&Peer{&self.peer}
     pub fn connection(&self)->&Connection{&self.connection}
     pub fn belongs_to(&self,generation:&crate::udp::SendFactory)->bool{self.generation.same_generation(generation)}
+}
+
+/// A credited receiver has no public raw Quinn Connection escape hatch. Only
+/// this owned, non-Clone wrapper can advertise its one incoming stream.
+pub struct CreditedReceiverConnection {connection:Connection,generation:crate::udp::SendFactory,peer:Peer,local:Ipv4Addr}
+#[derive(Clone)]
+pub struct ReceiverCloser(Connection);
+impl ReceiverCloser {pub fn close(&self){self.0.close(1u8.into(),b"RX generation retired");} pub async fn closed(&self){self.0.closed().await;}}
+struct AcceptCreditAttempt {closer:ReceiverCloser,armed:bool}
+impl Drop for AcceptCreditAttempt{fn drop(&mut self){if self.armed{self.closer.close();}}}
+impl Drop for CreditedReceiverConnection{fn drop(&mut self){self.connection.close(1u8.into(),b"RX owner stopped");}}
+impl CreditedReceiverConnection {
+    pub fn peer(&self)->&Peer{&self.peer}
+    pub fn local_ip(&self)->Ipv4Addr{self.local}
+    pub fn belongs_to(&self,generation:&crate::udp::SendFactory)->bool{self.generation.same_generation(generation)}
+    pub fn closer(&self)->ReceiverCloser{ReceiverCloser(self.connection.clone())}
+    pub fn stats(&self)->quinn::ConnectionStats{self.connection.stats()}
+    pub async fn accept_one(&mut self,original:&crate::udp::SendPermit)->Result<(SendStream,RecvStream)>{
+        ensure!(original.valid(),"RX original credit retired before advertisement");
+        let mut attempt=AcceptCreditAttempt{closer:self.closer(),armed:true};
+        self.connection.set_max_concurrent_bi_streams(1u8.into());
+        let accepted=original.during(self.connection.accept_bi()).await?;
+        // Disable automatic replacement BEFORE either half can be freed.
+        self.connection.set_max_concurrent_bi_streams(0u8.into());
+        let accepted=accepted?;attempt.armed=false;Ok(accepted)
+    }
 }
 
 pub struct Endpoint {
@@ -392,6 +422,7 @@ pub struct Endpoint {
     next_connection: AtomicUsize,
     peer_budget: AtomicUsize,
     protocols: Vec<Vec<u8>>,
+    credited:bool,
 }
 impl Endpoint {
     pub fn new(identity: Identity, local: Ipv4Addr) -> Result<(Self, PacketIo)> {
@@ -399,6 +430,11 @@ impl Endpoint {
     }
     pub fn new_fenced(identity:Identity,local:Ipv4Addr,generation:crate::udp::SendFactory)->Result<(Self,PacketIo)> {
         Self::with_protocols_fenced(identity,local,vec![PARALLEL_ALPN.into(),ALPN.into()],Some(generation))
+    }
+    /// Experimental receiver profile: advertise no incoming application stream
+    /// until its immutable origin credit is installed. Legacy profile unchanged.
+    pub fn new_fenced_credited(identity:Identity,local:Ipv4Addr,generation:crate::udp::SendFactory)->Result<(Self,PacketIo)>{
+        Self::with_protocols_profile(identity,local,vec![ALPN.into()],Some(generation),QUEUE,true)
     }
     fn with_protocols(identity:Identity,local:Ipv4Addr,protocols:Vec<Vec<u8>>)->Result<(Self,PacketIo)> {Self::with_protocols_fenced(identity,local,protocols,None)}
     fn with_protocols_fenced(identity:Identity,local:Ipv4Addr,protocols:Vec<Vec<u8>>,generation:Option<crate::udp::SendFactory>)->Result<(Self,PacketIo)>{Self::with_protocols_fenced_capacity(identity,local,protocols,generation,QUEUE)}
@@ -409,6 +445,9 @@ impl Endpoint {
         generation:Option<crate::udp::SendFactory>,
         capacity:usize,
     ) -> Result<(Self, PacketIo)> {
+        Self::with_protocols_profile(identity,local,protocols,generation,capacity,false)
+    }
+    fn with_protocols_profile(identity:Identity,local:Ipv4Addr,protocols:Vec<Vec<u8>>,generation:Option<crate::udp::SendFactory>,capacity:usize,credited:bool)->Result<(Self,PacketIo)>{
         ensure!((1..=QUEUE).contains(&capacity),"invalid bounded stream queue capacity");
         ensure!(local.is_private(), "invalid private stream endpoint");
         let peers: Peers = Default::default();
@@ -428,7 +467,7 @@ impl Endpoint {
         let mut server = quinn::ServerConfig::with_crypto(Arc::new(
             quinn::crypto::rustls::QuicServerConfig::try_from(tls)?,
         ));
-        server.transport = transport(None)?;
+        server.transport = transport(None,credited)?;
         let (input, incoming) = mpsc::channel(QUEUE);
         let (outgoing, output) = mpsc::channel(capacity);
         #[cfg(test)] let blocked_sends=Arc::new(AtomicUsize::new(0));
@@ -462,6 +501,7 @@ impl Endpoint {
                 next_connection: AtomicUsize::new(0),
                 peer_budget: AtomicUsize::new(MAX_CONNECTIONS),
                 protocols,
+                credited,
             },
             PacketIo {
                 input,
@@ -597,6 +637,7 @@ impl Endpoint {
         Ok((peer, connection))
     }
     pub fn prepared(&self, expected: &Peer) -> Option<quinn::Connection> {
+        if self.credited{return None;}
         let trusted = self.peers.read().unwrap_or_else(|p| p.into_inner());
         if trusted.get(&expected.ip) != Some(expected) {
             return None;
@@ -645,9 +686,10 @@ impl Endpoint {
     }
     pub async fn connect_fenced(&self,peer:&Peer)->Result<FencedConnection> {
         let generation=self.generation.clone().ok_or_else(||anyhow::anyhow!("connection has no immutable socket-generation fence"))?;
-        let connection=self.connect(peer).await?;Ok(FencedConnection{connection,generation,peer:peer.clone()})
+        let connection=self.connect(peer).await?;Ok(FencedConnection{connection,generation,peer:peer.clone(),local:self.local})
     }
     pub async fn connect(&self, expected: &Peer) -> Result<quinn::Connection> {
+        ensure!(!self.credited,"credited receiver requires owned receive wrapper");
         let ip = expected.ip;
         ensure!(self.capacity_for(expected),"private stream peer budget reached");
         ensure!(
@@ -683,6 +725,7 @@ impl Endpoint {
     /// Keep negotiated lanes prepared without keepalive traffic. Opening an
     /// application flow after an idle period must not wait for new handshakes.
     pub async fn connect_additional(&self, expected: &Peer) -> Result<quinn::Connection> {
+        ensure!(!self.credited,"credited receiver requires owned receive wrapper");
         ensure!(
             self.supports_parallel(expected),
             "private peer supports one stream connection"
@@ -723,7 +766,7 @@ impl Endpoint {
         let mut config = quinn::ClientConfig::new(Arc::new(
             quinn::crypto::rustls::QuicClientConfig::try_from(tls)?,
         ));
-        config.transport_config(transport(idle_timeout)?);
+        config.transport_config(transport(idle_timeout,self.credited)?);
         let connection = tokio::time::timeout(
             Duration::from_secs(10),
             self.inner.connect_with(
@@ -736,7 +779,21 @@ impl Endpoint {
         let (_, connection) = self.register(connection, Some(expected))?;
         Ok(connection)
     }
+    pub async fn accept_fenced(&self)->Result<FencedConnection>{
+        ensure!(!self.credited,"credited receiver requires owned receive wrapper");
+        let generation=self.generation.clone().ok_or_else(||anyhow::anyhow!("receiver has no immutable socket fence"))?;
+        let (peer,connection)=self.accept().await?;Ok(FencedConnection{connection,generation,peer,local:self.local})
+    }
+    pub async fn accept_credited(&self)->Result<CreditedReceiverConnection>{
+        ensure!(self.credited,"endpoint has no credited receiver profile");
+        let generation=self.generation.clone().ok_or_else(||anyhow::anyhow!("receiver generation absent"))?;
+        let (peer,connection)=self.accept_inner().await?;Ok(CreditedReceiverConnection{connection,generation,peer,local:self.local})
+    }
     pub async fn accept(&self) -> Result<(Peer, quinn::Connection)> {
+        ensure!(!self.credited,"credited receiver requires owned receive wrapper");
+        self.accept_inner().await
+    }
+    async fn accept_inner(&self)->Result<(Peer,quinn::Connection)>{
         let incoming = self
             .inner
             .accept()

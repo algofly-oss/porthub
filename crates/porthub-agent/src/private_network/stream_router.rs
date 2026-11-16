@@ -157,7 +157,8 @@ impl Policy {
     fn permit(&self,id:&str)->Result<Option<porthub_mesh::udp::SendPermit>> {
         let Some(base)=&self.base_authority else{return Ok(None);};base.check()?;
         let pair=self.pair_authorities.get(id).ok_or_else(||anyhow::anyhow!("private stream pair retired"))?.clone();pair.check()?;let base=base.clone();
-        Ok(Some(porthub_mesh::udp::SendPermit::new(move||base.check().is_ok()&&pair.check().is_ok())))
+        let bounded_base=base.clone();let bounded_pair=pair.clone();
+        Ok(Some(porthub_mesh::udp::SendPermit::bounded(move||base.check().is_ok()&&pair.check().is_ok(),move||Some(bounded_base.remaining().ok()??.min(bounded_pair.remaining().ok()??)))))
     }
     fn allows(&self, peer: &Peer, flow: Flow, outbound: bool) -> bool {
         if self.base_authority.as_ref().is_some_and(|base|base.check().is_err()||self.pair_authorities.get(&peer.id).is_none_or(|pair|pair.check().is_err())){return false;}

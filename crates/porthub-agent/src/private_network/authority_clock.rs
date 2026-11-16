@@ -112,28 +112,38 @@ impl RequestWindow {
         self.remaining(server_expiry).map(|_| ())
     }
     pub(crate) fn remaining(&self, server_expiry: SystemTime) -> Result<Duration> {
+        let local = self.remaining_within(REQUEST_VALIDITY)?;
+        let server = server_expiry
+            .duration_since(SystemTime::now())
+            .ok()
+            .filter(|n| !n.is_zero())
+            .ok_or_else(|| anyhow::anyhow!("server authority expired"))?;
+        Ok(local.min(server))
+    }
+    /// Shorten this ORIGINAL start; never begin a new clock for received TTL.
+    pub(crate) fn remaining_within(&self, limit: Duration) -> Result<Duration> {
+        ensure!(
+            !limit.is_zero() && limit <= REQUEST_VALIDITY,
+            "invalid bounded authority duration"
+        );
         ensure!(
             self.domain.as_ref().is_none_or(|d| d.valid()),
             "profile authority owner stopped"
         );
-        let now = self.clock.elapsed_since_boot()?;
-        let elapsed = now
+        let elapsed = self
+            .clock
+            .elapsed_since_boot()?
             .checked_sub(self.boot_start)
             .ok_or_else(|| anyhow::anyhow!("authority clock regressed"))?;
-        let boot = REQUEST_VALIDITY
+        let boot = limit
             .checked_sub(elapsed)
-            .filter(|left| !left.is_zero())
+            .filter(|n| !n.is_zero())
             .ok_or_else(|| anyhow::anyhow!("logical authority request expired"))?;
-        let awake = REQUEST_VALIDITY
+        let awake = limit
             .checked_sub(self.awake_start.elapsed())
-            .filter(|left| !left.is_zero())
+            .filter(|n| !n.is_zero())
             .ok_or_else(|| anyhow::anyhow!("logical authority request expired"))?;
-        let server = server_expiry
-            .duration_since(SystemTime::now())
-            .ok()
-            .filter(|left| !left.is_zero())
-            .ok_or_else(|| anyhow::anyhow!("server authority expired"))?;
-        Ok(boot.min(awake).min(server))
+        Ok(boot.min(awake))
     }
 }
 
@@ -207,6 +217,19 @@ mod tests {
         assert!(window.check(expiry()).is_err());
         clock.0.store(100, Ordering::SeqCst);
         assert!(window.check(SystemTime::UNIX_EPOCH).is_err());
+    }
+    #[test]
+    fn shortened_received_limit_uses_precredit_start_and_cannot_refresh() {
+        let clock = Arc::new(Clock(AtomicU64::new(100)));
+        let original = RequestWindow::start(clock.clone()).unwrap();
+        clock.0.store(350, Ordering::SeqCst);
+        let limit = Duration::from_millis(500);
+        assert!(original.remaining_within(limit).unwrap() <= Duration::from_millis(250));
+        clock.0.store(600, Ordering::SeqCst);
+        assert!(original.remaining_within(limit).is_err());
+        assert!(original.clone().remaining_within(limit).is_err());
+        assert!(original.remaining_within(Duration::ZERO).is_err());
+        assert!(original.remaining_within(Duration::from_secs(16)).is_err());
     }
     #[test]
     fn actual_native_clock_advances_without_configuration_changes() {

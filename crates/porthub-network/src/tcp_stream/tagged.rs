@@ -59,6 +59,12 @@ impl Packet {
         &self,
         delivery: impl FnOnce(Bytes) -> F,
     ) -> Result<T> {
+        // Callback construction may itself perform synchronous native work.
+        // Validate before exposing bytes, then again before every future poll.
+        ensure!(
+            self.permit.valid(),
+            "native packet admission retired before delivery callback"
+        );
         self.permit.during(delivery(self.bytes.clone())).await?
     }
 }
@@ -126,6 +132,10 @@ impl NativeRead {
         mut self,
         delivery: impl FnOnce(Bytes, bool) -> F,
     ) -> Result<T> {
+        ensure!(
+            self.permit.valid(),
+            "native RX admission retired before delivery callback"
+        );
         let result = self
             .permit
             .during(delivery(self.bytes.clone(), self.eof))
@@ -599,7 +609,10 @@ impl TxToken for Transmit<'_> {
                 if !has_fin {
                     context.fin = None;
                 }
-                let permit = SendPermit::new(move || {
+                let mut origins = vec![context.control.clone()];
+                origins.extend(context.data.iter().cloned());
+                origins.extend(context.fin.iter().cloned());
+                let permit = SendPermit::combine(origins).constrain(move || {
                     let valid = context.alive.load(Ordering::SeqCst)
                         && context.control.valid()
                         && context.data.as_ref().is_none_or(|p| p.valid())
@@ -1054,7 +1067,7 @@ impl Runner {
                     complete: complete.clone(),
                 });
                 let ack = NativeAck {
-                    permit: SendPermit::new(move || alive.load(Ordering::SeqCst) && origin.valid()),
+                    permit: origin.constrain(move || alive.load(Ordering::SeqCst)),
                     terminal_owner: Some((complete, active.alive.clone())),
                     stack_scope: self.stack_scope.clone(),
                     owner: active.id,
@@ -1101,9 +1114,10 @@ impl Runner {
                         .unwrap_or_else(|p| p.into_inner())
                         .take(len, eof)?;
                     let alive = active.alive.clone();
-                    let permit = SendPermit::new(move || {
-                        let valid =
-                            alive.load(Ordering::SeqCst) && origins.iter().all(|p| p.valid());
+                    let combined = SendPermit::combine(origins);
+                    let checked = combined.clone();
+                    let permit = combined.constrain(move || {
+                        let valid = alive.load(Ordering::SeqCst) && checked.valid();
                         if !valid {
                             alive.store(false, Ordering::SeqCst);
                         }
@@ -1161,9 +1175,7 @@ impl Runner {
                         let alive = active.alive.clone();
                         let _ = write.reply.send(Ok(NativeAck {
                             terminal_owner: None,
-                            permit: SendPermit::new(move || {
-                                alive.load(Ordering::SeqCst) && origin.valid()
-                            }),
+                            permit: origin.constrain(move || alive.load(Ordering::SeqCst)),
                             stack_scope: self.stack_scope.clone(),
                             owner: active.id,
                             flow: *flow,
@@ -1392,18 +1404,35 @@ mod tests {
         ensure!(tcp.payload().len() == 1024, "fixture segmentation changed");
         let old = Arc::new(AtomicBool::new(true));
         let p = old.clone();
+        let left = Arc::new(std::sync::atomic::AtomicU64::new(500));
+        let left_read = left.clone();
         rig.handle.incoming(
             portion(&packet, 512, 512)?,
-            SendPermit::new(move || p.load(Ordering::SeqCst)),
+            SendPermit::bounded(
+                move || p.load(Ordering::SeqCst),
+                move || Some(Duration::from_millis(left_read.load(Ordering::SeqCst))),
+            ),
         )?;
         // Fresh overlap cannot replace the original admission of the tail.
-        rig.handle
-            .incoming(packet.clone(), SendPermit::new(|| true))?;
+        rig.handle.incoming(
+            packet.clone(),
+            SendPermit::bounded(|| true, || Some(Duration::from_millis(900))),
+        )?;
         let read =
             tokio::time::timeout(Duration::from_secs(1), rig.connection.read_chunk()).await??;
         ensure!(
             read.len() == 1024 && !read.eof(),
             "actual reassembly length mismatch"
+        );
+        let origin = read.admission();
+        ensure!(
+            origin.remaining() == Some(Duration::from_millis(500)),
+            "native RX lost earliest original bound"
+        );
+        left.store(35, Ordering::SeqCst);
+        ensure!(
+            origin.remaining() == Some(Duration::from_millis(35)),
+            "native RX reset original bound"
         );
         let (entered, waiting) = oneshot::channel();
         let (release, resume) = oneshot::channel();
@@ -1892,7 +1921,7 @@ mod tests {
         cleanup(rig).await
     }
     #[tokio::test]
-    async fn abandoned_actual_native_read_retires_owner_and_releases_credit() -> Result<()> {
+    async fn retired_actual_native_read_never_invokes_byte_callback() -> Result<()> {
         let mut rig = rig_rx(false, true).await?;
         rig.release.send(true)?;
         rig.app.write_all(&[3; 1024]).await?;
@@ -1904,7 +1933,23 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(1), rig.connection.read_chunk()).await??;
         ensure!(read.len() == 1024, "fixture RX length changed");
         let original = read.admission();
-        drop(read);
+        ensure!(
+            original.remaining().is_none(),
+            "unknown native origin silently gained lifetime"
+        );
+        rig.connection.retire();
+        let invoked = Arc::new(AtomicBool::new(false));
+        let observed = invoked.clone();
+        ensure!(
+            read.deliver(move |_, _| {
+                observed.store(true, Ordering::SeqCst);
+                async { Ok(()) }
+            })
+            .await
+            .is_err()
+                && !invoked.load(Ordering::SeqCst),
+            "retired RX bytes reached synchronous callback constructor"
+        );
         ensure!(
             !rig.connection.alive.load(Ordering::SeqCst) && !original.valid(),
             "abandoned RX lost owner fence"
@@ -1916,6 +1961,24 @@ mod tests {
         ensure!(
             rig.connection.read_chunk().await.is_err(),
             "retired source read again"
+        );
+        cleanup(rig).await
+    }
+    #[tokio::test]
+    async fn dropping_actual_native_read_still_retires_without_callback() -> Result<()> {
+        let mut rig = rig_rx(false, true).await?;
+        rig.release.send(true)?;
+        rig.app.write_all(&[3; 1024]).await?;
+        let packet = tokio::time::timeout(Duration::from_secs(1), rig.held_input.recv())
+            .await?
+            .unwrap();
+        rig.handle.incoming(packet, SendPermit::new(|| true))?;
+        let read =
+            tokio::time::timeout(Duration::from_secs(1), rig.connection.read_chunk()).await??;
+        drop(read);
+        ensure!(
+            !rig.connection.alive.load(Ordering::SeqCst),
+            "abandoned read did not retire original native owner"
         );
         cleanup(rig).await
     }

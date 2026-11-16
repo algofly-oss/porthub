@@ -19,10 +19,37 @@ use tokio_util::sync::CancellationToken;
 /// Immutable upper-layer admission witness. The mesh owns no ACL policy: it
 /// retains this observation-only check through its bounded packet/native queue.
 #[derive(Clone)]
-pub struct SendPermit(Arc<dyn Fn()->bool+Send+Sync>);
+pub struct SendPermit {
+    check:Arc<dyn Fn()->bool+Send+Sync>,
+    remaining:Option<Arc<dyn Fn()->Option<Duration>+Send+Sync>>,
+    control_only:bool,
+}
 impl SendPermit {
-    pub fn new(check:impl Fn()->bool+Send+Sync+'static)->Self{Self(Arc::new(check))}
-    pub fn valid(&self)->bool{(self.0)()}
+    /// Legacy/unknown temporal bound. Never infer a fresh lease from this.
+    pub fn new(check:impl Fn()->bool+Send+Sync+'static)->Self{Self{check:Arc::new(check),remaining:None,control_only:false}}
+    /// A local non-authorizing veto (owner alive/cancellation), not an unknown
+    /// byte authority. Alone it cannot authorize a guarded wire chunk.
+    pub fn control(check:impl Fn()->bool+Send+Sync+'static)->Self{Self{check:Arc::new(check),remaining:None,control_only:true}}
+    /// The callback must observe an EXISTING immutable admission clock, not
+    /// construct/reset a clock when queried or when an operation starts.
+    pub fn bounded(check:impl Fn()->bool+Send+Sync+'static,remaining:impl Fn()->Option<Duration>+Send+Sync+'static)->Self{Self{check:Arc::new(check),remaining:Some(Arc::new(remaining)),control_only:false}}
+    pub fn valid(&self)->bool{(self.check)()&&self.remaining.as_ref().is_none_or(|r|r().is_some_and(|n|!n.is_zero()))}
+    pub fn remaining(&self)->Option<Duration>{if !(self.check)(){return None;}self.remaining.as_ref()?.as_ref()().filter(|n|!n.is_zero())}
+    /// Preserve the exact existing temporal bound while adding a LOCAL control
+    /// veto. Independent byte origins require combine(), not this method.
+    pub fn constrain(&self,control:impl Fn()->bool+Send+Sync+'static)->Self{
+        let original=self.clone();Self{check:Arc::new(move||control()&&original.valid()),remaining:self.remaining.clone(),control_only:self.control_only}
+    }
+    /// All independent origins must have known bounds; one unknown stays
+    /// unknown, even if another input has a known later deadline.
+    pub fn combine(origins:Vec<Self>)->Self{
+        let checks=origins.clone();let nonempty=!origins.is_empty();
+        let all_control=origins.iter().all(|p|p.control_only);
+        let known=origins.iter().all(|p|p.remaining.is_some()||p.control_only)&&!all_control;
+        let check=Arc::new(move||nonempty&&checks.iter().all(|p|p.valid()));
+        let remaining=known.then(||Arc::new(move||{let mut left=None;for origin in &origins{if origin.control_only{continue;}let n=origin.remaining()?;left=Some(left.map_or(n,|old:Duration|old.min(n)));}left}) as Arc<dyn Fn()->Option<Duration>+Send+Sync>);
+        Self{check,remaining,control_only:all_control}
+    }
     pub async fn during<F:std::future::Future>(&self,operation:F)->Result<F::Output>{
         tokio::pin!(operation);let mut tick=tokio::time::interval(Duration::from_millis(50));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -750,5 +777,28 @@ mod io_tests {
         ensure!(result.is_ok_and(|ready| ready.is_err()));
         ensure!(state == State::Failed);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod permit_bound_contract_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64,AtomicBool,Ordering};
+    #[test]
+    fn every_known_origin_contributes_immutable_min_and_unknown_never_upgrades(){
+        let old=Arc::new(AtomicU64::new(400));let read=old.clone();let first=SendPermit::bounded(||true,move||Some(Duration::from_millis(read.load(Ordering::SeqCst))));
+        let second=SendPermit::bounded(||true,||Some(Duration::from_millis(900)));
+        let both=SendPermit::combine(vec![first.clone(),second]);assert_eq!(both.remaining(),Some(Duration::from_millis(400)));
+        old.store(30,Ordering::SeqCst);assert_eq!(both.remaining(),Some(Duration::from_millis(30)));assert_eq!(both.clone().remaining(),both.remaining());
+        let unknown=SendPermit::combine(vec![both.clone(),SendPermit::new(||true)]);assert!(unknown.valid());assert_eq!(unknown.remaining(),None);
+        old.store(0,Ordering::SeqCst);assert!(!both.valid()&&!unknown.valid());
+    }
+    #[test]
+    fn owner_control_can_veto_but_cannot_mint_or_reset_authority(){
+        let owner=Arc::new(AtomicBool::new(true));let read=owner.clone();let control=SendPermit::control(move||read.load(Ordering::SeqCst));assert!(control.valid());assert!(control.remaining().is_none());
+        let authority=SendPermit::bounded(||true,||Some(Duration::from_millis(10)));let combined=SendPermit::combine(vec![authority.clone(),control.clone()]);assert_eq!(combined.remaining(),authority.remaining());
+        let constrained=authority.constrain(||true);assert_eq!(constrained.remaining(),authority.remaining());
+        owner.store(false,Ordering::SeqCst);assert!(!combined.valid());assert!(combined.remaining().is_none());
+        assert!(SendPermit::combine(vec![SendPermit::control(||true)]).remaining().is_none());
     }
 }
