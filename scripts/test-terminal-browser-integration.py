@@ -71,6 +71,7 @@ def main():
                 preview = dict(os.environ, REVIEW_ORIGIN=f'http://127.0.0.1:{server.server_port}', REVIEW_BROWSER=browser)
                 print(f'Verify terminal dashboard: {browser}', flush=True)
                 run(preview, ['node', str(ROOT / 'ui/tests/terminal-dashboard.cjs')])
+                run(preview, ['node', str(ROOT / 'ui/tests/ranking-resize-browser.cjs')])
                 run(preview, ['node', str(ROOT / 'ui/tests/terminal-connectivity.cjs')])
                 run(preview, ['node', str(ROOT / 'ui/tests/proxy-activity.cjs')])
                 for transport in transports:
