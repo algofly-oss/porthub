@@ -443,6 +443,8 @@ pub async fn run_with_logs(
     let control = std::sync::Arc::new(Control::new(profile.clone())?);
     let _metrics = crate::metrics::start(path.clone(), control.clone(), cancel.clone());
     let _usb = crate::usb::start(path.clone(), control.clone(), cancel.clone());
+    #[cfg(any(target_os="linux",target_os="macos",windows))]
+    let _media = crate::media::worker::start(path.clone(), control.clone(), cancel.clone());
     #[cfg(any(unix, windows))]
     let exposure_broker = crate::exposure_broker::start(&path, control.clone(), cancel.clone())
         .unwrap_or_else(|_| { tracing::warn!("local exposure control unavailable; forwarding remains active"); None });

@@ -25,6 +25,7 @@ on:
       - 'docker-compose.yml'
       - '.github/workflows/continuous-release.yml'
       - '.github/workflows/agent-platforms.yml'
+      - '.github/workflows/media-helpers.yml'
       - '.github/workflows/server-platforms.yml'
   workflow_dispatch:
     inputs:

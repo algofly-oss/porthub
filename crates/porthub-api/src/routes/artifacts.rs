@@ -16,6 +16,8 @@ use std::{collections::HashMap, sync::Arc};
 
 pub fn router() -> Router<Arc<App>> {
     Router::new()
+        .route("/api/downloads/media/catalog",get(media_catalog))
+        .route("/api/downloads/media/{version}/{target}/{digest}",get(media_download))
         .route("/api/downloads/components/capabilities", get(component_capabilities))
         .route("/api/downloads/components/catalog", get(component_catalog))
         .route("/api/downloads/components/{component}/{version}/{target}/{digest}", get(component_download))
@@ -41,6 +43,13 @@ pub fn router() -> Router<Arc<App>> {
             "/api/machines/{first}/{second}/client.sh",
             get(legacy_upgrade),
         )
+}
+
+async fn media_catalog(State(app):State<Arc<App>>)->ApiResult<Json<porthub_components::media_store::Manifest>> {Ok(Json(app.artifacts.media_catalog().await?))}
+async fn media_download(State(app):State<Arc<App>>,Path((version,target,digest)):Path<(String,String,String)>)->ApiResult<Response> {
+ let(a,file)=app.artifacts.media_archive(&version,&target,&digest).await?;
+ let mut response=axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file)).into_response();
+ for(name,value)in[("content-type","application/gzip".to_owned()),("content-length",a.archive.size.to_string()),("etag",format!("\"{}\"",a.archive.sha256)),("cache-control","public, max-age=31536000, immutable".to_owned()),("x-content-type-options","nosniff".to_owned())]{response.headers_mut().insert(axum::http::HeaderName::from_static(name),HeaderValue::from_str(&value).map_err(|_|ApiError::bad_request("Invalid media metadata"))?);}Ok(response)
 }
 
 async fn component_capabilities() -> Json<serde_json::Value> {

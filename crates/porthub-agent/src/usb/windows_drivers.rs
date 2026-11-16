@@ -29,13 +29,17 @@ async fn signed(path:&Path)->Result<()> {
     let result=tokio::time::timeout(Duration::from_secs(40),tokio::process::Command::new(system("WindowsPowerShell/v1.0/powershell.exe")?).args(["-NoLogo","-NoProfile","-NonInteractive","-Command",script]).env("PORTHUB_USB_INSTALLER",path).kill_on_drop(true).output()).await??;
     ensure!(result.status.success(),"Windows did not validate the USB installer signature");Ok(())
 }
-async fn install(package:&Package,path:&Path)->Result<()> {
-    signed(path).await?;
+async fn install(package:&Package,path:&Path,profile:&Path)->Result<bool> {
+    super::prerequisite_retry::after_verification(signed(path),||{
+        let requested=super::prerequisite_retry::Requested::from_policy(&features::load(profile)?);
+        Ok(if package.msi{requested.host}else{requested.receive})
+    },||async {
     let mut command=if package.msi{let mut c=tokio::process::Command::new(system("msiexec.exe")?);c.arg("/i").arg(path).args(["/qn","/norestart"]);c}else{let mut c=tokio::process::Command::new(path);c.args(["/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/COMPONENTS=main,client","/TASKS=vcredist"]);c};
     let result=tokio::time::timeout(Duration::from_secs(240),command.kill_on_drop(true).output()).await??;
     ensure!(matches!(result.status.code(),Some(0|3010)),"Windows USB driver installation failed");
     if result.status.code()==Some(3010){tracing::warn!("Windows USB prerequisite installed; Windows requested a restart. PortHub will not restart the machine.");}
     Ok(())
+    }).await
 }
 async fn direct_rule(path:&Path,control:&Control)->Result<()> {
     if !features::enabled(path,Feature::DirectConnections){return Ok(());}
@@ -45,14 +49,33 @@ async fn direct_rule(path:&Path,control:&Control)->Result<()> {
     let script=include_str!("windows_usb_direct_rule.ps1");
     let output=tokio::time::timeout(Duration::from_secs(30),tokio::process::Command::new(system("WindowsPowerShell/v1.0/powershell.exe")?).args(["-NoLogo","-NoProfile","-NonInteractive","-Command",script]).env("PORTHUB_USB_RULE",name).env("PORTHUB_USB_EXE",executable).kill_on_drop(true).output()).await??;ensure!(output.status.success(),"Cannot configure the owned PortHub USB direct-path firewall rule");Ok(())
 }
+async fn restrict_raw_host()->Result<()> {
+    let output=tokio::time::timeout(Duration::from_secs(30),tokio::process::Command::new(system("netsh.exe")?).args(["advfirewall","firewall","set","rule","name=usbipd","new","enable=no"]).kill_on_drop(true).output()).await??;ensure!(output.status.success(),"Cannot restrict the installed raw USB driver firewall exception");
+    Ok(())
+}
 pub(super) async fn prepare(path:&Path,control:Arc<Control>)->Result<()> {
-    if !features::enabled(path,Feature::Usb){return Ok(());}
+    let requested=||features::load(path).map(|p|super::prerequisite_retry::Requested::from_policy(&p));
+    if !requested()?.any(){return Ok(());}
     // Disposable native service fixtures deliberately use a loopback-only
     // plaintext gateway and must not install unrelated OS drivers.
     if control.profile().allow_insecure_http_for_tests && url::Url::parse(&control.profile().server).ok().and_then(|u|u.host_str().map(str::to_owned)).is_some_and(|h|h=="127.0.0.1"||h=="localhost"||h=="::1") {return Ok(());}
     let Some(layout)=crate::private_profile::windows_service_layout(path,control.profile())? else {return Ok(());};
     let folder=layout.state.parent().context("Managed Windows state directory missing")?.join("drivers/usb-installers");crate::service::directory(&folder,true)?;
-    let required=[!super::windows::host_installed(),!super::windows::receive_installed()];
-    for (package,needed) in packages().into_iter().zip(required){if !needed{continue;}if !features::enabled(path,Feature::Usb){return Ok(());}let file=folder.join(package.file);download(&control,&package,&file).await?;install(&package,&file).await?;if package.msi{let output=tokio::time::timeout(Duration::from_secs(30),tokio::process::Command::new(system("netsh.exe")?).args(["advfirewall","firewall","set","rule","name=usbipd","new","enable=no"]).kill_on_drop(true).output()).await??;ensure!(output.status.success(),"Cannot restrict the installed raw USB driver firewall exception");}}
-    direct_rule(path,&control).await?;ensure!(super::windows::supported(),"Windows USB drivers are installed but not ready; Windows may require a restart");Ok(())
+    let wanted=requested()?;
+    if wanted.host && super::windows::host_installed(){restrict_raw_host().await?;}
+    let required=[wanted.host&&!super::windows::host_installed(),wanted.receive&&!super::windows::receive_installed()];
+    for (package,needed) in packages().into_iter().zip(required){
+        if !needed{continue;}
+        let allowed=|r:super::prerequisite_retry::Requested|if package.msi{r.host}else{r.receive};
+        if !allowed(requested()?){continue;}
+        let file=folder.join(package.file);download(&control,&package,&file).await?;
+        if !allowed(requested()?){continue;}
+        let installed=install(&package,&file,path).await?;
+        if installed && package.msi{restrict_raw_host().await?;}
+    }
+    let wanted=requested()?;
+    if wanted.direct{direct_rule(path,&control).await?;}
+    ensure!(!wanted.host||super::windows::host_installed(),"Windows USB source driver is not ready; Windows may require a restart");
+    ensure!(!wanted.receive||super::windows::receive_installed(),"Windows USB receive controller is not ready; Windows may require a restart");
+    Ok(())
 }

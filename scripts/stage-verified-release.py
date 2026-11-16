@@ -62,7 +62,7 @@ def extract(archive, artifact, destination, version, artifact_verifier=None):
     with zipfile.ZipFile(archive) as bundle:
         entries = bundle.infolist()
         is_compact = any(entry.filename == 'porthub-components.json' for entry in entries)
-        expected = compact if is_compact else legacy
+        expected = compact | publisher.media.optional_names(entry.filename for entry in entries) if is_compact else legacy
         if len(entries) != len(expected) or {entry.filename for entry in entries} != expected:
             raise ValueError('Artifact must contain one exact complete legacy or compact release')
         if is_compact and artifact_verifier is None:
@@ -70,7 +70,7 @@ def extract(archive, artifact, destination, version, artifact_verifier=None):
         if sum(entry.file_size for entry in entries) > 2 * 1024 * 1024 * 1024:
             raise ValueError('Release artifact exceeds total expansion limit')
         for entry in entries:
-            if entry.filename == 'porthub-components.json': limit = 512 * 1024
+            if entry.filename in ('porthub-components.json',publisher.media.ASSET): limit = 512 * 1024
             elif is_compact and entry.filename.endswith('.tar.gz'): limit = 512 * 1024 * 1024
             elif is_compact: limit = 256 * 1024 * 1024
             else: limit = 512 if entry.filename.endswith(('.version', '.sha256')) else 128 * 1024 * 1024

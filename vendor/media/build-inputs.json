@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "glibc_maximum": "2.35",
+  "pipewire_minimum_runtime": "0.3.68",
+  "pipewire_build": {
+    "version": "0.3.68",
+    "url": "https://codeload.github.com/PipeWire/pipewire/tar.gz/refs/tags/0.3.68",
+    "sha256": "fdcf7f2ee881cdc91ef54b3a558e431bdb3395f7a1e9044753c7a89346fafd91",
+    "size": 2055909,
+    "meson": [
+      "--buildtype=release",
+      "--libdir=lib",
+      "-Dauto_features=disabled",
+      "-Ddocs=disabled",
+      "-Dexamples=disabled",
+      "-Dtests=disabled",
+      "-Dman=disabled",
+      "-Dpipewire-jack=disabled",
+      "-Dpipewire-v4l2=disabled",
+      "-Dspa-plugins=enabled",
+      "-Dsession-managers=[]",
+      "-Dflatpak=disabled"
+    ]
+  }
+}

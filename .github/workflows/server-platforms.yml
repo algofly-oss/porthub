@@ -96,6 +96,9 @@ jobs:
           cargo test --locked -p porthub-api --test boards --test file_relay --test pairdrop -- --include-ignored
           cargo test --locked -p porthub-api --lib file_relay::tests
           cargo test --locked -p porthub-api --test keyboard --test machine_metrics --test usb -- --include-ignored
+          cargo test --locked -p porthub-api --lib native_media::
+          cargo test --locked -p porthub-api --test native_media -- --include-ignored
+          cargo test --locked -p porthub-components --test media_distribution
           cargo test --locked -p porthub-agent --lib autoupdate::version_tests
           cargo test --locked -p porthub-components --lib release_version
           cargo test --locked -p porthub-agent --lib usb::
@@ -169,6 +172,10 @@ jobs:
         run: |
           node ui/tests/keyboard-gestures.cjs
           cargo test --locked -p porthub-api --test keyboard_browser -- --include-ignored --nocapture
+      - name: Verify phone layouts and native media controls in Chromium and WebKit
+        env:
+          NODE_PATH: ${{ runner.temp }}/terminal-browser-tools/node_modules
+        run: python3 scripts/test-portal-production-ui.py --root terminal-browser-assets/ui
       - name: Verify real SSH, Chrome and WebKit guests over direct and fallback paths
         env:
           PORTHUB_TEST_MONGO_URI: mongodb://127.0.0.1:${{ job.services.mongo.ports['27017'] }}

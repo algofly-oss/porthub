@@ -1,0 +1,12 @@
+# Ephemeral build infrastructure only; never a PortHub runtime image.
+FROM ubuntu:22.04@sha256:74b12b11ffa550fba1929ad4d8d16533c34f6612728469671afba1b03b66881c
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+    build-essential pkg-config meson ninja-build python3 ca-certificates libdbus-1-dev \
+    && rm -rf /var/lib/apt/lists/*
+# Rust PipeWire bindings are generated from the pinned headers by bindgen.
+RUN apt-get update -qq && apt-get install -y --no-install-recommends libclang-14-dev \
+    && rm -rf /var/lib/apt/lists/*
+# Frozen-input verification uses Git; it never fetches inside the builder.
+RUN apt-get update -qq && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*

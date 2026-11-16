@@ -233,7 +233,19 @@ def remote_head(root, branch):
         raise ValueError('Default branch source is unavailable')
     return output[0]
 
-def prepare(root, ref, trigger_sha, latest=None, branch='main', execute=False, reservations=(), previous_core_builds=()):
+def media_build_plan(root,core_version,targets):
+    targets=set(targets)
+    if not targets:return {}
+    gnu={'x86_64-unknown-linux-gnu','aarch64-unknown-linux-gnu'}
+    if not gnu<=targets or not targets<=gnu|{'x86_64-pc-windows-msvc'}:
+        raise ValueError('Optional media requires both GNU targets and only known optional Windows')
+    if core_version is None or numeric(core_version)<(1,11,34):
+        raise ValueError('Production native media requires core >=1.11.34')
+    if not (Path(root)/'crates/porthub-media-helper/Cargo.toml').is_file():
+        raise ValueError('Requested media helper source is absent')
+    return {'media_targets':','.join(sorted(targets)),'media_min_core':core_version}
+
+def prepare(root, ref, trigger_sha, latest=None, branch='main', execute=False, reservations=(), previous_core_builds=(), media_targets=()):
     if not re.fullmatch(r'[0-9a-f]{40}', trigger_sha):
         raise ValueError('A full source revision is required')
     root = Path(root).resolve()
@@ -285,6 +297,7 @@ def prepare(root, ref, trigger_sha, latest=None, branch='main', execute=False, r
             raise ValueError('Too many reserved release versions; no source was changed')
     result = {'version': version, 'revision': head, 'tag': 'v' + version,
               'skip': False, 'already_published': False, 'would_commit': version != workspace or core_version is not None and core_version != core_package(root)[2]}
+    result.update(media_build_plan(root,core_version,media_targets))
     if core_version is not None:
         result['core_version'] = core_version
     if latest_commit == head and latest_version == workspace:
@@ -359,13 +372,14 @@ def main():
     parser.add_argument('--trigger-sha', default=os.environ.get('GITHUB_SHA'))
     parser.add_argument('--default-branch', default='main')
     parser.add_argument('--previous-core-build', type=Path, action='append', default=[])
+    parser.add_argument('--media-target',action='append',default=[],choices=['x86_64-unknown-linux-gnu','aarch64-unknown-linux-gnu','x86_64-pc-windows-msvc'])
     parser.add_argument('--execute', action='store_true')
     args = parser.parse_args()
     if not args.ref or not args.trigger_sha or not args.repository:
         parser.error('repository, ref and trigger SHA are required')
     latest = latest_release(args.repository)
     reservations = release_reservations(args.repository)
-    result = prepare(args.root, args.ref, args.trigger_sha, latest, args.default_branch, args.execute, reservations, args.previous_core_build)
+    result = prepare(args.root, args.ref, args.trigger_sha, latest, args.default_branch, args.execute, reservations, args.previous_core_build,args.media_target)
     print(json.dumps(result, sort_keys=True))
     if os.environ.get('GITHUB_OUTPUT'):
         with open(os.environ['GITHUB_OUTPUT'], 'a') as output:

@@ -33,7 +33,7 @@ pub struct Settings {
     pub pins: BTreeMap<Component, Version>,
 }
 impl Settings {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         ensure!(
             crate::catalog::TARGETS.contains(&self.target.as_str()),
             "unsupported component target"
@@ -54,7 +54,7 @@ impl Settings {
         }
         Ok(())
     }
-    fn gateway_url(&self, path: &str) -> Result<Option<Url>> {
+    pub(crate) fn gateway_url(&self, path: &str) -> Result<Option<Url>> {
         self.gateway
             .as_ref()
             .map(|gateway| {
@@ -257,7 +257,7 @@ pub fn verified(path: &Path, blob: &crate::catalog::Blob) -> Result<bool> {
     }
     Ok(format!("{:x}", hasher.finalize()) == blob.sha256)
 }
-fn publish(mut file: tempfile::NamedTempFile, destination: &Path, executable: bool) -> Result<()> {
+pub(crate) fn publish(mut file: tempfile::NamedTempFile, destination: &Path, executable: bool) -> Result<()> {
     file.as_file_mut().flush()?;
     #[cfg(unix)]
     {

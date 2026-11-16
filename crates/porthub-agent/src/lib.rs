@@ -86,3 +86,5 @@ pub mod features;
 mod metrics;
 
 pub mod usb;
+
+pub mod media;

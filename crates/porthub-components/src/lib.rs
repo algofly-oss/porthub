@@ -36,3 +36,11 @@ pub mod metrics;
 pub mod usb;
 
 pub mod release_version;
+
+pub mod media;
+
+pub mod media_store;
+
+pub mod media_forward;
+
+mod media_video;

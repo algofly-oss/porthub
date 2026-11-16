@@ -137,6 +137,13 @@ class CompactPublication(unittest.TestCase):
             self.assertEqual(result['status'], 'published')
             self.assertEqual(github.writes, [('create',21),('promote','v1.11.0')])
             self.assertEqual(gate.call_count, 2)
+    def test_optional_media_extends_publication_without_changing_legacy_catalog(self):
+        spec=importlib.util.spec_from_file_location('media_fixture',Path(__file__).with_name('test_media_release.py'));fixture=importlib.util.module_from_spec(spec);spec.loader.exec_module(fixture)
+        fixture.fixture(self.directory,version='1.11.0');verify=publisher.media.verify
+        with patch.object(publisher.media,'verify',side_effect=lambda directory,version:verify(directory,version,lambda *_:None)),patch.object(publisher.subprocess,'run',return_value=self.success):
+            result=publisher.assets(self.directory,'1.11.0',self.verifier)
+        self.assertEqual(len(result),24)
+        self.assertEqual((self.directory/'porthub-components.json').read_text(),'{}')
     def test_failed_gateway_check_cannot_create_release(self):
         with patch.object(publisher.subprocess, 'run', return_value=self.success):
             github = GitHub(publisher.assets(self.directory, '1.11.0', self.verifier))

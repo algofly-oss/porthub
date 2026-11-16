@@ -80,9 +80,53 @@ pub(crate) async fn serve_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
     cancel: CancellationToken,
     profile: std::path::PathBuf,
 ) -> Result<()> {
+    serve_connection_identity(stream,control,cancel,profile,None).await
+}
+enum DesktopIdentity {
+    #[cfg(unix)] Unix(u32),
+    #[cfg(windows)] Windows(crate::media::windows_host::PeerIdentity),
+}
+#[cfg(windows)]
+pub(crate) async fn serve_connection_as_windows_user<S:tokio::io::AsyncRead+tokio::io::AsyncWrite+Unpin>(stream:S,control:Arc<crate::control::Control>,cancel:CancellationToken,profile:std::path::PathBuf,peer:Option<crate::media::windows_host::PeerIdentity>)->Result<()> {
+    serve_connection_identity(stream,control,cancel,profile,peer.map(DesktopIdentity::Windows)).await
+}
+#[cfg(unix)]
+pub(crate) async fn serve_connection_as_user<S:tokio::io::AsyncRead+tokio::io::AsyncWrite+Unpin+Send+'static>(stream:S,control:Arc<crate::control::Control>,cancel:CancellationToken,profile:std::path::PathBuf,uid:u32)->Result<()> {
+    serve_connection_identity(stream,control,cancel,profile,Some(DesktopIdentity::Unix(uid))).await
+}
+async fn serve_connection_identity<S:tokio::io::AsyncRead+tokio::io::AsyncWrite+Unpin>(stream:S,control:Arc<crate::control::Control>,cancel:CancellationToken,profile:std::path::PathBuf,desktop:Option<DesktopIdentity>)->Result<()> {
     let mut reader = BufReader::new(stream);
     let bytes = tokio::time::timeout(Duration::from_secs(5), line(&mut reader)).await??;
     let message: serde_json::Value = serde_json::from_slice(&bytes)?;
+    if message.get("operation").and_then(serde_json::Value::as_str)==Some("media_inventory") {
+        let report=crate::media::authorized_inventory(&profile);
+        reader.get_mut().write_all(format!("{report}\n").as_bytes()).await?;
+        return Ok(());
+    }
+    if message.get("operation").and_then(serde_json::Value::as_str)==Some("media_receiver_config") {
+        let identity=serde_json::from_value(message["identity"].clone())?;
+        crate::media::config::set(&profile,identity)?;
+        reader.get_mut().write_all(b"{\"ok\":true}\n").await?;
+        return Ok(());
+    }
+    if message.get("operation").and_then(serde_json::Value::as_str)==Some("media_action") {
+        return crate::media::actions::serve(reader,control,message,cancel).await;
+    }
+    if message.get("operation").and_then(serde_json::Value::as_str)==Some("media_discover") {
+        let devices=crate::media::broker::discover(&profile).await?;
+        let devices=devices.into_iter().map(|source|serde_json::json!({"uid":source.uid,"desktop_session":source.desktop_session,"device":source.device})).collect::<Vec<_>>();
+        reader.get_mut().write_all(format!("{}\n",serde_json::json!({"devices":devices})).as_bytes()).await?;
+        return Ok(());
+    }
+    if message.get("operation").and_then(serde_json::Value::as_str)==Some("media_host") {
+        return match desktop {
+            #[cfg(target_os="linux")]
+            Some(DesktopIdentity::Unix(uid))=>crate::media::broker::serve(reader,profile,uid,cancel).await,
+            #[cfg(windows)]
+            Some(DesktopIdentity::Windows(peer))=>crate::media::broker::serve_windows(reader,profile,peer,cancel).await,
+            _=>anyhow::bail!("Native media requires an OS-authenticated desktop user"),
+        };
+    }
     if message.get("operation").and_then(serde_json::Value::as_str) == Some("client_features") {
         return crate::features::serve(reader, &profile, message).await;
     }

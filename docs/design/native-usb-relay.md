@@ -6,6 +6,43 @@ re-export. PortHub will relay its existing authenticated USB/IP data stream
 instead; no kernel patch, userspace USB driver, isochronous translation, public
 raw USB socket, extra daemon, or container is needed.
 
+## Using USB with Windows and WSL
+
+Windows and an enrolled WSL distribution are separate PortHub machines. A device
+plugged into Windows initially belongs to Windows; enrolling WSL or loading
+`vhci_hcd` does not expose that hardware to WSL. An online WSL machine with no
+attached devices can correctly have an empty source-device list.
+
+To use the device in WSL, open the **Windows machine's** USB panel, select the
+physical device and choose the separately enrolled **WSL machine** as destination.
+Enable USB locally on both agents, keep the upstream session running, and ensure
+the WSL kernel has its matching `vhci_hcd` module. To use the device on another
+machine directly, select that destination on Windows; WSL is not required.
+
+A supported PortHub-owned import appears on WSL as **“(forwarded)”**, with a
+stable `0-…` alias. Choose that entry on WSL to forward it onward. Current agents
+and a relay-capable gateway are required. Only one downstream destination can
+control it; WSL loses its local attachment during handoff and regains it when the
+downstream session stops, provided the upstream session remains active. Stop the
+downstream session first. Normal permissions, lineage and cycle/hop checks apply.
+
+Linux onward forwarding currently permits only imports whose every interface is
+Audio or HID. Imported storage and other classes remain blocked. Receiving a
+drive in WSL does not mean it can be forwarded onward. Loading `usbip_host` does
+not remove these restrictions or expose Windows hardware.
+
+Devices attached outside PortHub, such as a separate `usbipd-win` attachment, may
+appear in `lsusb` while remaining absent from PortHub's source list. PortHub does
+not export arbitrary `vhci_hcd` devices: an onward alias requires its own
+authenticated, profile-bound import. Safely release the existing attachment before
+establishing a PortHub Windows→WSL session; do not attach it through both paths.
+
+Use `porthub usb devices` to inspect that agent's inventory. For an empty WSL
+list, check the Windows machine and upstream session first; it does not by itself
+mean the agent is offline.
+
+## Ownership and transport
+
 The receiving agent owns a profile-scoped import registry. Each entry binds its
 upstream forwarding ID, original device identity and USB/IP descriptor bytes to
 the lifetime of that authenticated session. Inventory exposes one stable imported

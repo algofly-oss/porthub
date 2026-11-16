@@ -1,5 +1,6 @@
 //! Lazy, persistent GitHub release cache. Metadata is shared; binaries are
 //! fetched only for a requested target and published only after verification.
+mod media;
 use crate::artifacts::{Release, TARGETS};
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -67,6 +68,7 @@ pub struct Remote {
     targets: BTreeMap<&'static str, Mutex<()>>,
     downloads: Semaphore,
     component_download: Mutex<()>,
+    media: Mutex<media::State>,
     background: AtomicBool,
 }
 
@@ -222,6 +224,7 @@ impl Remote {
                 .collect(),
             downloads: Semaphore::new(2),
             component_download: Mutex::new(()),
+            media: Mutex::new(media::State::default()),
             background: AtomicBool::new(false),
         }))
     }

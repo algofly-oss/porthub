@@ -1,0 +1,177 @@
+name: Optional native media helpers
+on:
+  workflow_call:
+    inputs:
+      revision:
+        type: string
+        required: true
+    outputs:
+      enabled:
+        value: ${{ jobs.plan.outputs.enabled }}
+permissions:
+  contents: read
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      enabled: ${{ steps.plan.outputs.enabled }}
+      mode: ${{ steps.plan.outputs.mode }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      core: ${{ steps.plan.outputs.core }}
+      release: ${{ steps.plan.outputs.release }}
+      artifact_revision: ${{ steps.plan.outputs.artifact_revision }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision }}
+          fetch-depth: 0
+      - name: Verify helper build and recovery planning
+        run: |
+          python3 scripts/test_media_helper_plan.py
+          python3 scripts/test_fetch_media_helper_assets.py
+          python3 scripts/test_prepare_media_helper_job.py
+      - name: Select exact native builds or verified prior helper assets
+        id: plan
+        env:
+          MEDIA_REVISION: ${{ inputs.revision }}
+          MEDIA_GATEWAY: ${{ vars.PORTHUB_RELEASE_GATEWAY || 'https://porthub.algofly.in' }}
+        run: python3 scripts/prepare-media-helper-job.py --revision "$MEDIA_REVISION" --gateway "$MEDIA_GATEWAY" --output media-plan.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: media-helper-plan
+          path: media-plan.json
+          if-no-files-found: error
+          retention-days: 3
+  build:
+    needs: plan
+    if: needs.plan.outputs.enabled == 'true' && needs.plan.outputs.mode == 'build'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision }}
+          fetch-depth: 0
+      - name: Install pinned native Rust toolchain
+        shell: bash
+        run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
+      - name: Check strict helper packaging
+        shell: bash
+        run: python scripts/test_package_media_helper.py
+      - name: Build native Windows helper without opening devices
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        env:
+          MEDIA_REVISION: ${{ inputs.revision }}
+          MEDIA_RELEASE: ${{ needs.plan.outputs.release }}
+          MEDIA_CORE: ${{ needs.plan.outputs.core }}
+        run: ./scripts/build-media-helper-windows.ps1 -Release $env:MEDIA_RELEASE -MinimumAgentVersion $env:MEDIA_CORE -SourceRevision $env:MEDIA_REVISION -OutputDirectory dist/media
+      - name: Prepare isolated GNU build/cache paths
+        if: matrix.kind == 'gnu'
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/media-work" "$RUNNER_TEMP/media-cargo" "$RUNNER_TEMP/media-empty" dist/media
+          echo "MEDIA_WORK=$RUNNER_TEMP/media-work" >> "$GITHUB_ENV"
+          echo "MEDIA_CARGO=$RUNNER_TEMP/media-cargo" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        if: matrix.kind == 'gnu'
+        with:
+          path: ${{ runner.temp }}/media-work/pipewire-prefix
+          key: media-pipewire-${{ matrix.target }}-${{ hashFiles('vendor/media/build-inputs.json', 'vendor/media/Dockerfile.glibc235', 'scripts/bootstrap-media-pipewire.sh') }}
+      - name: Build GNU helper against the pinned GLIBC/PipeWire baseline
+        if: matrix.kind == 'gnu'
+        shell: bash
+        env:
+          MEDIA_TARGET: ${{ matrix.target }}
+          MEDIA_REVISION: ${{ inputs.revision }}
+          MEDIA_RELEASE: ${{ needs.plan.outputs.release }}
+          MEDIA_CORE: ${{ needs.plan.outputs.core }}
+        run: |
+          docker build -f "$GITHUB_WORKSPACE/vendor/media/Dockerfile.glibc235" -t porthub-media-baseline "$RUNNER_TEMP/media-empty"
+          docker run --rm --user "$(id -u):$(id -g)" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/source,readonly" \
+            --mount "type=bind,src=$HOME/.rustup,dst=/rustup,readonly" \
+            --mount "type=bind,src=$MEDIA_CARGO,dst=/cargo" \
+            --mount "type=bind,src=$HOME/.cargo/bin,dst=/cargo/bin,readonly" \
+            --mount "type=bind,src=$MEDIA_WORK,dst=/work" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/dist/media,dst=/output" \
+            -e RUSTUP_HOME=/rustup -e RUSTUP_TOOLCHAIN=1.99.1 -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/work/target \
+            -e HOME=/work/home -e USER=builder -e LOGNAME=builder \
+            -e PATH=/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/source \
+            -e MEDIA_TARGET -e MEDIA_REVISION -e MEDIA_RELEASE -e MEDIA_CORE \
+            -w /source porthub-media-baseline bash -euc '
+              mkdir -p /work/home
+              if [ ! -d /work/pipewire-prefix ]; then
+                bash scripts/bootstrap-media-pipewire.sh /work/pipewire-build /work/pipewire-prefix
+              fi
+              export PKG_CONFIG_PATH=/work/pipewire-prefix/lib/pkgconfig
+              export LD_LIBRARY_PATH=/work/pipewire-prefix/lib
+              cargo test --locked -p porthub-media-helper --target "$MEDIA_TARGET"
+              bash scripts/build-media-helper.sh "$MEDIA_TARGET" "$MEDIA_RELEASE" "$MEDIA_CORE" "$MEDIA_REVISION" /output
+            '
+      - uses: actions/upload-artifact@v4
+        with:
+          name: media-platform-${{ matrix.target }}
+          path: dist/media/
+          if-no-files-found: error
+          retention-days: 3
+  reuse:
+    needs: plan
+    if: needs.plan.outputs.enabled == 'true' && needs.plan.outputs.mode == 'reuse'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: media-helper-plan
+          path: plan/
+      - name: Recover only the exact unchanged helper artifacts
+        env:
+          MEDIA_GATEWAY: ${{ vars.PORTHUB_RELEASE_GATEWAY || 'https://porthub.algofly.in' }}
+        run: python3 scripts/fetch-media-helper-assets.py --plan plan/media-plan.json --gateway "$MEDIA_GATEWAY" --output verified-media
+      - uses: actions/upload-artifact@v4
+        with:
+          name: media-platform-reused
+          path: verified-media/
+          if-no-files-found: error
+          retention-days: 3
+  merge:
+    needs: [plan, build, reuse]
+    if: always() && needs.plan.result == 'success' && needs.plan.outputs.enabled == 'true' && (needs.build.result == 'success' || needs.reuse.result == 'success') && (needs.build.result == 'success' || needs.build.result == 'skipped') && (needs.reuse.result == 'success' || needs.reuse.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: media-platform-*
+          path: media-platforms/
+      - name: Merge the complete verified optional set
+        env:
+          MEDIA_RELEASE: ${{ needs.plan.outputs.release }}
+          MEDIA_ARTIFACT_REVISION: ${{ needs.plan.outputs.artifact_revision }}
+        run: |
+          python3 - <<'PY'
+          import os,pathlib,subprocess
+          args=['python3','scripts/merge-media-release.py','--output','media-assets','--version',os.environ['MEDIA_RELEASE'],'--source-revision',os.environ['MEDIA_ARTIFACT_REVISION']]
+          for path in sorted(pathlib.Path('media-platforms').iterdir()):
+              args += ['--input',str(path)]
+          subprocess.run(args,check=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-media-assets
+          path: media-assets/
+          if-no-files-found: error
+          retention-days: 3

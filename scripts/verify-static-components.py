@@ -31,8 +31,13 @@ def verify(builds):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--builds',type=Path,required=True)
+    parser.add_argument('--media-release',type=Path)
     args=parser.parse_args()
     print('Verified '+str(verify(args.builds))+' self-contained Linux components')
+    if args.media_release:
+        spec=importlib.util.spec_from_file_location('media_release',Path(__file__).with_name('media-release.py'));media=importlib.util.module_from_spec(spec);spec.loader.exec_module(media)
+        version=json.loads((args.media_release/media.ASSET).read_text())['release']
+        print('Verified '+str(len(media.verify(args.media_release,version)))+' optional media assets separately; GNU helpers are dynamically linked')
 
 
 if __name__=='__main__':main()

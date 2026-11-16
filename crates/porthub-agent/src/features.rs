@@ -21,6 +21,9 @@ pub enum Feature {
     Metrics,
     DriveHealth,
     DriveTests,
+    MicrophoneShare,
+    CameraShare,
+    MediaReceive,
     Images,
     Terminal,
     Expose,
@@ -30,12 +33,15 @@ pub enum Feature {
     DirectConnections,
 }
 impl Feature {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 15] = [
         Self::Keyboard,
         Self::Usb,
         Self::Metrics,
         Self::DriveHealth,
         Self::DriveTests,
+        Self::MicrophoneShare,
+        Self::CameraShare,
+        Self::MediaReceive,
         Self::Images,
         Self::Terminal,
         Self::Expose,
@@ -51,6 +57,9 @@ impl Feature {
             Self::Metrics => "metrics",
             Self::DriveHealth => "drive-health",
             Self::DriveTests => "drive-tests",
+            Self::MicrophoneShare => "microphone-share",
+            Self::CameraShare => "camera-share",
+            Self::MediaReceive => "media-receive",
             Self::Images => "images",
             Self::Terminal => "terminal",
             Self::Expose => "expose",
@@ -78,10 +87,15 @@ fn path(profile: &Path) -> PathBuf {
 fn drive_feature(feature: Feature) -> bool {
     matches!(feature, Feature::DriveHealth | Feature::DriveTests)
 }
+fn media_feature(feature: Feature) -> bool {
+    matches!(feature, Feature::MicrophoneShare | Feature::CameraShare | Feature::MediaReceive)
+}
+fn policy_scope(feature: Feature) -> u8 { if drive_feature(feature) {1} else if media_feature(feature) {2} else {0} }
+fn media_policy_path(profile: &Path) -> PathBuf {crate::profile::sibling(profile, ".media-policy.json")}
 fn drive_policy_path(profile: &Path) -> PathBuf {
     crate::profile::sibling(profile, ".drive-health-policy.json")
 }
-fn load(profile: &Path) -> Result<Policy> {
+pub(crate) fn load(profile: &Path) -> Result<Policy> {
     let base = path(profile);
     let mut policy = if base.try_exists()? {
         let bytes = crate::profile::read_private(&base)?;
@@ -110,6 +124,20 @@ fn load(profile: &Path) -> Result<Policy> {
                 policy.disabled.insert(Feature::DriveHealth, true);
                 policy.disabled.insert(Feature::DriveTests, true);
             }
+        }
+    }
+    let media = media_policy_path(profile);
+    if media.try_exists()? {
+        let read = || -> Result<Policy> {
+            let bytes=crate::profile::read_private(&media)?;
+            ensure!(bytes.len()<=1024,"Invalid media policy");
+            let value:Policy=serde_json::from_slice(&bytes)?;
+            ensure!(value.disabled.keys().all(|f|media_feature(*f)),"Invalid media feature");
+            Ok(value)
+        };
+        match read() {
+            Ok(value)=>policy.disabled.extend(value.disabled),
+            Err(_)=>for feature in [Feature::MicrophoneShare,Feature::CameraShare,Feature::MediaReceive] {policy.disabled.insert(feature,true);},
         }
     }
     Ok(policy)
@@ -151,9 +179,11 @@ fn set(profile: &Path, feature: Feature, enabled: bool) -> Result<Policy> {
     let mut persisted = policy.clone();
     persisted
         .disabled
-        .retain(|key, _| drive_feature(*key) == drive_feature(feature));
+        .retain(|key, _| policy_scope(*key) == policy_scope(feature));
     let destination = if drive_feature(feature) {
         drive_policy_path(profile)
+    } else if media_feature(feature) {
+        media_policy_path(profile)
     } else {
         path(profile)
     };
@@ -325,6 +355,25 @@ mod policy_tests {
                 && !failed.enabled(Feature::DriveHealth)
                 && !failed.enabled(Feature::DriveTests)
         );
+        Ok(())
+    }
+    #[test]
+    fn media_policy_is_separate_from_approved_helper_and_corruption_stops_only_media() -> Result<()> {
+        let root=tempfile::tempdir()?;
+        #[cfg(unix)] {use std::os::unix::fs::PermissionsExt;std::fs::set_permissions(root.path(),std::fs::Permissions::from_mode(0o700))?;}
+        let profile=root.path().join("media-fixture.json");
+        set(&profile,Feature::Keyboard,false)?;
+        let base=crate::profile::read_private(&path(&profile))?;
+        set(&profile,Feature::MicrophoneShare,false)?;
+        set(&profile,Feature::DriveHealth,false)?;
+        ensure!(crate::profile::read_private(&path(&profile))?==base,"Media controls must not rewrite approved desktop policy");
+        ensure!(!load(&profile)?.enabled(Feature::MicrophoneShare));
+        set(&profile,Feature::Keyboard,true)?;
+        ensure!(!load(&profile)?.enabled(Feature::MicrophoneShare)&&!load(&profile)?.enabled(Feature::DriveHealth));
+        crate::profile::write_private(&media_policy_path(&profile),b"invalid",true)?;
+        let failed=load(&profile)?;
+        ensure!(failed.enabled(Feature::Keyboard)&&!failed.enabled(Feature::DriveHealth));
+        for feature in [Feature::MicrophoneShare,Feature::CameraShare,Feature::MediaReceive] {ensure!(!failed.enabled(feature));}
         Ok(())
     }
     #[tokio::test]

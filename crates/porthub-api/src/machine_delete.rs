@@ -160,6 +160,9 @@ pub(crate) async fn resume(app: &App, machine: &Document) -> ApiResult<()> {
     app.collection("connections")
         .delete_many(doc! {"machine_id":id})
         .await?;
+    app.collection("native_media_inventory").delete_many(doc!{"_id":id}).await?;
+    app.collection("native_media_discovery").delete_many(doc!{"_id":id}).await?;
+    app.collection("native_media_forwards").delete_many(doc!{"$or":[{"source":id.to_hex()},{"destination":id.to_hex()}]}).await?;
     for collection in ["machine_metrics_latest", "machine_metrics_history", "machine_drive_health_history"] {
         app.collection(collection).delete_many(doc! {"machine_id":id}).await?;
     }

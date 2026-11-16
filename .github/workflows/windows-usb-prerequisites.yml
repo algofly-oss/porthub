@@ -1,0 +1,73 @@
+name: Opt-in cold Windows USB prerequisites
+on:
+  workflow_dispatch:
+    inputs:
+      execute_driver_install:
+        description: Explicitly install signed USB-IP drivers on a disposable clean runner
+        type: boolean
+        default: false
+      revision:
+        description: Reviewed full source commit (40 hex)
+        required: true
+        type: string
+      run_id:
+        description: Completed native build run containing the reviewed final main executable
+        required: true
+        type: string
+      artifact:
+        description: Exact native artifact name
+        required: true
+        type: string
+      executable_member:
+        description: Exact executable path relative to downloaded artifact
+        required: true
+        type: string
+      executable_sha256:
+        description: Reviewed main executable SHA256
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+jobs:
+  cold-windows:
+    if: ${{ inputs.execute_driver_install }}
+    runs-on: windows-2025
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision }}
+      - name: Validate offline wrapper flow
+        run: python scripts/test_windows_usb_prerequisites.py
+      - name: Download exact reviewed native artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRIAL_RUN: ${{ inputs.run_id }}
+          TRIAL_ARTIFACT: ${{ inputs.artifact }}
+        shell: pwsh
+        run: |
+          if ($env:TRIAL_RUN -notmatch '^[0-9]+$') { throw 'Invalid run ID' }
+          gh run download $env:TRIAL_RUN --repo $env:GITHUB_REPOSITORY --name $env:TRIAL_ARTIFACT --dir payload
+          if ($LASTEXITCODE) { throw 'Artifact download failed' }
+      - name: Real cold prerequisite gate
+        env:
+          TRIAL_MEMBER: ${{ inputs.executable_member }}
+          TRIAL_HASH: ${{ inputs.executable_sha256 }}
+          TRIAL_REVISION: ${{ inputs.revision }}
+        shell: pwsh
+        run: |
+          if ($env:TRIAL_HASH -notmatch '^[a-f0-9]{64}$' -or $env:TRIAL_REVISION -notmatch '^[a-f0-9]{40}$') { throw 'Invalid provenance' }
+          $root = [IO.Path]::GetFullPath('payload') + [IO.Path]::DirectorySeparatorChar
+          $exe = [IO.Path]::GetFullPath((Join-Path $root $env:TRIAL_MEMBER))
+          if (!$exe.StartsWith($root,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetExtension($exe) -ne '.exe') { throw 'Invalid executable member' }
+          if ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:TRIAL_HASH) { throw 'Artifact digest mismatch' }
+          python scripts/test-windows-usb-prerequisites.py $exe --execute-cold-driver-install --expected-sha256 $env:TRIAL_HASH --source-revision $env:TRIAL_REVISION --receipt windows-usb-prerequisites-receipt.json
+          if ($LASTEXITCODE) { throw 'Cold prerequisite gate failed' }
+      - name: Preserve bounded gate receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-usb-prerequisites-receipt
+          path: windows-usb-prerequisites-receipt.json
+          if-no-files-found: warn

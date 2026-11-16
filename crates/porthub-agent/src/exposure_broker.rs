@@ -148,7 +148,7 @@ async fn serve_one(
         )
         .await;
     }
-    crate::exposure_protocol::serve_connection(stream, control, cancel, profile).await
+    crate::exposure_protocol::serve_connection_as_user(stream, control, cancel, profile, uid).await
 }
 pub struct Guard {
     cancel: CancellationToken,

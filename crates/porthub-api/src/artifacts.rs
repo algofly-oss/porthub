@@ -139,13 +139,20 @@ fn verify_compact(root: &Path, version: &str) -> anyhow::Result<Vec<Release>> {
             asset: core.asset.clone(), version: manifest.core_version().to_string(), size: core.executable.size,
             sha256: core.executable.sha256.clone() });
     }
+    let media_path=root.join(porthub_components::media_store::ASSET);
+    if media_path.try_exists()? {
+        let metadata=std::fs::symlink_metadata(&media_path)?;anyhow::ensure!(metadata.is_file()&&metadata.len()<=MAX_CATALOG as u64,"Invalid media release manifest");
+        let mut bytes=Vec::new();std::fs::File::open(media_path)?.take(MAX_CATALOG as u64+1).read_to_end(&mut bytes)?;
+        let media=porthub_components::media_store::Manifest::parse(&bytes)?;media.validate_publication()?;anyhow::ensure!(media.release.to_string()==version,"Media release version mismatch");expected.insert(porthub_components::media_store::ASSET.to_owned());
+        for artifact in media.artifacts {expected.insert(artifact.archive_name());porthub_components::media_store::extract_verified_archive(&root.join(artifact.archive_name()),temporary.path(),&artifact)?;}
+    }
     let mut actual = BTreeSet::new();
     for entry in std::fs::read_dir(root)? {
         let entry = entry?;
         anyhow::ensure!(entry.file_type()?.is_file(), "release must contain only regular files");
         actual.insert(entry.file_name().into_string().map_err(|_| anyhow::anyhow!("invalid release filename"))?);
     }
-    anyhow::ensure!(actual == expected && expected.len() == 21, "compact release requires exactly 21 declared assets");
+    anyhow::ensure!(actual == expected && [21,24,25].contains(&expected.len()), "compact release requires 21 ordinary assets and an exact optional media set");
     Ok(releases)
 }
 
@@ -217,6 +224,7 @@ pub struct Catalog {
     cache: Mutex<BTreeMap<PathBuf, (Fingerprint, String)>>,
     remote: Option<std::sync::Arc<crate::release_cache::Remote>>,
 }
+fn media_unavailable()->ApiError {ApiError::new(StatusCode::NOT_FOUND,"Verified native media helper is unavailable")}
 fn unavailable() -> ApiError {
     ApiError::new(
         StatusCode::SERVICE_UNAVAILABLE,
@@ -279,6 +287,8 @@ impl Catalog {
     pub fn refresh_background(&self) {
         if let Some(remote) = &self.remote { remote.refresh_background(); }
     }
+    pub async fn media_catalog(&self)->ApiResult<porthub_components::media_store::Manifest>{self.remote.as_ref().ok_or_else(media_unavailable)?.media_catalog().await.map_err(|_|media_unavailable())}
+    pub async fn media_archive(&self,version:&str,target:&str,digest:&str)->ApiResult<(porthub_components::media_store::Artifact,File)>{self.remote.as_ref().ok_or_else(media_unavailable)?.media_archive(version,target,digest).await.map_err(|_|media_unavailable())}
     pub async fn components(&self) -> ApiResult<porthub_components::catalog::Catalog> {
         self.remote.as_ref().ok_or_else(unavailable)?.components().await.map_err(|_| unavailable())
     }
@@ -598,6 +608,15 @@ mod compact_tests {
         anyhow::ensure!(status.status.success(), "compact package fixture failed: {}", String::from_utf8_lossy(&status.stderr));
         let releases = verify_complete(&output, "1.11.0").await?;
         assert_eq!(releases.len(), 10);
+        // Synthetic bytes test the directory/hash contract, not ELF or native capability.
+        let media_fixture=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/test_media_release.py");
+        let status=std::process::Command::new("python3").arg("-c").arg("import importlib.util,pathlib,sys;s=importlib.util.spec_from_file_location('fixture',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m);m.fixture(pathlib.Path(sys.argv[2]),version='1.11.0')").arg(media_fixture).arg(&output).output()?;
+        anyhow::ensure!(status.status.success(),"optional media fixture failed");
+        assert_eq!(verify_complete(&output,"1.11.0").await?.len(),10);
+        let media_path=output.join(porthub_components::media_store::ASSET);
+        let media=porthub_components::media_store::Manifest::parse(&tokio::fs::read(&media_path).await?)?;
+        let archive=output.join(media.artifacts[0].archive_name());let saved=tokio::fs::read(&archive).await?;tokio::fs::write(&archive,b"corrupt optional media").await?;assert!(verify_complete(&output,"1.11.0").await.is_err());tokio::fs::write(&archive,saved).await?;
+        for artifact in media.artifacts {tokio::fs::remove_file(output.join(artifact.archive_name())).await?;}tokio::fs::remove_file(media_path).await?;
         let manifest_path = output.join("porthub-components.json");
         let original_manifest = tokio::fs::read(&manifest_path).await?;
         let mut manifest: serde_json::Value = serde_json::from_slice(&original_manifest)?;

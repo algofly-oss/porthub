@@ -68,6 +68,7 @@ import TrafficMonitorPanel, {
 import UptimeHistoryPanel from "./UptimeHistoryPanel";
 import MachineMetrics from "../../../MachineMetrics";
 import UsbForwarding from "../../../UsbForwarding";
+import NativeMediaForwarding from "../../../NativeMediaForwarding";
 import { useDemo } from "@/shared/demo/DemoProvider";
 import { formatClientVersion } from "@/shared/utils/client-version.mjs";
 import { bootstrapCommand, windowsShells, windowsInstallerDownloads } from "@/shared/utils/bootstrap-command.mjs";
@@ -2904,7 +2905,7 @@ export default function HostConfigPopup({
                       }} containerRef={clientLogsContainerRef} onScroll={handleClientLogsScroll} />
                   </div>
 
-                  <div hidden={machineSection !== "usb"}><UsbForwarding machineId={host?.id} active={opened && machineSection === "usb"}/></div>
+                  <div hidden={machineSection !== "usb"}><UsbForwarding machineId={host?.id} active={opened && machineSection === "usb"}/><NativeMediaForwarding machineId={host?.id} active={opened && machineSection === "usb"}/></div>
                   <div hidden={machineSection !== "resources"}><MachineMetrics machineId={host?.id} active={opened && machineSection === "resources"} /></div>
                   <div hidden={machineSection !== "uptime"}>
                     <div>

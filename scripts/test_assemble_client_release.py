@@ -50,6 +50,47 @@ class Assembly(unittest.TestCase):
         with self.assertRaises(ValueError): assembly.assemble(self.source,self.root/'release','1.12.0',Path('/verifier'))
         self.assertFalse((self.root/'release').exists())
 
+    def test_optional_helpers_merge_into_complete_bundle_before_final_verification(self):
+        media_fixture = assembly.recovery.load('assembly_media_fixture', 'test_media_release.py')
+        optional = self.root/'optional'; optional.mkdir()
+        manifest = media_fixture.fixture(optional, media_fixture.media.TARGETS)
+        expected = {p.name: p.read_bytes() for p in optional.iterdir()}
+        output = self.root/'release'
+        real_merge = assembly.media_merge.merge
+
+        def merge(inputs, destination, version):
+            return real_merge(inputs, destination, version, validate_executable=lambda *_: None)
+
+        def verify(directory, version, verifier):
+            self.assertFalse(output.exists())
+            self.assertEqual(len(list(directory.iterdir())), 25)
+            merged = json.loads((directory/media_fixture.media.ASSET).read_text())
+            self.assertEqual(merged['release'], version)
+            self.assertEqual(merged['artifacts'], manifest['artifacts'])
+            for name, data in expected.items():
+                if name != media_fixture.media.ASSET:
+                    self.assertEqual((directory/name).read_bytes(), data)
+            return {'verified': True}
+
+        with patch.object(assembly.media_merge, 'merge', side_effect=merge), \
+             patch.object(assembly.recovery.publisher, 'assets', side_effect=verify):
+            assembly.assemble(self.source, output, '1.12.0', Path('/verifier'), [optional])
+        self.assertEqual(len(list(output.iterdir())), 25)
+
+    def test_corrupt_optional_archive_leaves_no_partial_release(self):
+        media_fixture = assembly.recovery.load('assembly_corrupt_media_fixture', 'test_media_release.py')
+        optional = self.root/'optional'; optional.mkdir()
+        manifest = media_fixture.fixture(optional)
+        target = manifest['artifacts'][0]['target']
+        (optional/('porthub-media-helper-'+target+'.tar.gz')).write_bytes(b'corrupt')
+        output = self.root/'release'
+        with patch.object(assembly.recovery.publisher, 'assets') as verify:
+            with self.assertRaises(ValueError):
+                assembly.assemble(self.source, output, '1.12.0', Path('/verifier'), [optional])
+            verify.assert_not_called()
+        self.assertFalse(output.exists())
+        self.assertFalse(list(self.root.glob('.porthub-assemble-*')))
+
     def test_verifier_failure_and_corrupt_binary_leave_no_output(self):
         with patch.object(assembly.recovery.publisher,'assets',side_effect=ValueError('rejected')):
             with self.assertRaises(ValueError): assembly.assemble(self.source,self.root/'release','1.12.0',Path('/verifier'))

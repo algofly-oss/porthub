@@ -39,6 +39,7 @@ pub fn router() -> Router<Arc<App>> {
         .merge(crate::keyboard::router())
         .merge(crate::machine_metrics::router())
         .merge(crate::usb::router())
+        .merge(crate::native_media::router())
         .merge(crate::hosted_images::router())
         .merge(crate::image_rooms::router())
         .merge(crate::terminal::router())

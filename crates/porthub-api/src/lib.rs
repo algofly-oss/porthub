@@ -23,6 +23,7 @@ pub mod hosted_images;
 pub mod keyboard;
 pub mod machine_metrics;
 pub mod usb;
+pub mod native_media;
 pub mod image_rooms;
 pub mod image_storage;
 pub mod input;
@@ -62,6 +63,7 @@ use std::sync::Arc;
 pub struct App {
     pub keyboard: keyboard::Hub,
     pub usb: usb::Hub,
+    pub native_media: native_media::Hub,
     pub machine_metrics_initialized: tokio::sync::OnceCell<()>,
     pub boards: boards::Hub,
     pub file_relay: file_relay::Hub,
@@ -124,6 +126,7 @@ impl App {
         Self {
             keyboard: Default::default(),
             usb: Default::default(),
+            native_media: Default::default(),
             machine_metrics_initialized: Default::default(),
             boards: Default::default(),
             file_relay: Default::default(),

@@ -1,6 +1,21 @@
 # Native microphone and camera forwarding
 
-Design assessment, 2026-11-15. This is a proposed module, not a shipped capability or a claim of physical validation. No device capture, new driver installation, or container creation was performed for this assessment.
+Initial design assessment, 2026-11-15, with validation status updated 2026-11-16.
+The implementation remains unpublished; the historical options below are not an
+installation/capability matrix. The selected receiver path now uses receiver-local
+USB Audio/Video class devices with Linux VHCI or the existing signed Windows UDE
+controller, without a new custom media driver.
+
+Actual private Windows built-in microphone→Miro validation passed sustained
+source PCM and three-second OS USB audio consumption; samples were silent, so
+it does not prove audible speech. Actual HP internal camera→Miro validation
+passed 45 decoded MJPEG frames with zero decoder errors; observed delivery was
+about 10 fps under its nominal 15 fps profile. These are frozen-fixture proofs,
+not installed-agent or release-publication claims. See the
+[Windows microphone](../verification/2026-11-16-windows-native-microphone.md),
+[Windows camera](../verification/2026-11-16-windows-native-camera.md) and
+[current user guide](../native-media-forwarding.md). Native macOS media support
+remains unimplemented.
 
 ## Required result
 
@@ -10,15 +25,15 @@ A virtual microphone/webcam is equivalent for normal application selection, but 
 
 ## Existing implementation and limits
 
-`crates/porthub-agent/src/usb/{mod,linux,windows,macos,userspace}.rs` implements USB device ownership and forwarding. Linux exports through the kernel and imports through virtual host controllers; Windows requires its USB host/import drivers; macOS currently exports a restricted subset and cannot import USB devices. The macOS exporter explicitly blocks built-in devices and isochronous endpoints. The userspace transfer executor returns unsupported for isochronous transfers. Removing those guards would not implement microphone/camera support.
+`crates/porthub-agent/src/usb/{mod,linux,windows,macos,userspace}.rs` implements USB device ownership and forwarding. Linux exports through the kernel and imports through virtual host controllers; Windows requires its USB host/import drivers; the macOS adapter is export-only in code, but successful physical Mac export remains unverified and Mac USB import is unavailable. The macOS exporter explicitly blocks built-in devices and isochronous endpoints. The userspace transfer executor returns unsupported for isochronous transfers. Removing those guards would not implement microphone/camera support.
 
 An internal webcam may actually sit on an internal USB bus. It can use the existing physical USB route only if native enumeration proves a separately claimable device, its interfaces and platform adapter are supported, and capture is safe. Other built-in devices use PCI, I2S, platform-specific camera paths, or shared composites; they have no generic USB device to forward. Never detach an entire shared input/composite device merely to obtain its camera interface.
 
 Physical USB ownership normally removes the device from source applications while forwarded. A native media stream instead captures through the source OS and republishes its content; the source OS decides sharing/exclusivity. Existing LAN microphone success does not establish every USB camera or WAN audio route. See the measured latency limitation in [native device forwarding](native-device-forwarding.md).
 
-## Native capability matrix
+## Initial implementation options (historical)
 
-These are implementation options, not capabilities currently advertised by the agent.
+These were architecture alternatives. The selected UAC/UVC implementation and its validation are described above; this table is not the current advertised capability matrix.
 
 | Platform | Source capture in Rust through OS APIs | Receiver microphone | Receiver camera | Installation/session constraints |
 | --- | --- | --- | --- | --- |
@@ -57,7 +72,9 @@ Persist stable source identity, destination, endpoint identity and requested for
 
 Use the existing user-helper trust/IPC model, but do not replace the approved Mac keyboard helper or assume its accessibility approval authorizes media capture. Extend policy storage compatibly so older approved helpers fail safely on new media controls.
 
-## Delivery and validation gates
+## Original delivery sequence and remaining validation
+
+The sequence below predates the selected receiver-local UAC/UVC route. That route does not require the proposed new custom Windows audio driver or Linux media loopback modules; those alternatives are retained as design history. Current validation and release limits are stated above.
 
 1. Implement native inventory/capability reporting and local controls first, without opening devices. Do not list ordinary microphones/cameras as USB devices when they are media sources.
 2. Linux-to-Linux microphone publication first; then Linux webcam publication with a verified V4L2 prerequisite. Demonstrate selection and recording in a normal unmodified application, reconnect, hot-unplug and client-disable behavior. Synthetic backend tests do not count as hardware proof.
@@ -65,4 +82,43 @@ Use the existing user-helper trust/IPC model, but do not replace the approved Ma
 4. Validate source/destination combinations with actual normal consumers, including browser permission prompts, native conferencing/recording apps, frame-rate/rate negotiation, long-session clock drift, packet loss, direct/private/gateway paths and persistent restart recovery. Test chains with Windows as a middle hop without inferring success from connection establishment.
 5. Record measured CPU/RAM/bandwidth, inactive resource use, latency and maximum supported profiles on Luna, Miro, Aero and Mac. Stop all test sessions and preserve existing user device/default settings. Unsupported endpoint publication must be visible before the user saves an unusable rule.
 
-This assessment establishes a feasible staged architecture. It does not mark native built-in microphone/camera forwarding implemented, signed, installed, or tested on any of these machines.
+The original assessment established a staged architecture. Later implementation and physical tests are recorded in the current status above; they do not establish production installation or publication.
+
+## Implementation checkpoint: native adapters and experimental USB audio
+
+The agent now has a native Linux ALSA/V4L2 inventory module and separate local microphone-share, camera-share and media-receive policy controls. Policy corruption disables media capabilities without modifying the approved keyboard-helper policy. Inventory does not start capture, and an uninstalled/unverified receiver remains unavailable. These changes are work in progress for a later client revision, not part of the immutable client 28 release.
+
+`porthub-media-helper` is an on-demand GNU Linux executable, separate from the static-musl agent and server. It uses PipeWire Rust bindings and requires both the library and user-session server to be at least 0.3.68. Release builds must use a conservative glibc baseline, with matching x64/arm64 build validation; a locally built developer executable is not a portable release artifact. Requests travel over a parent-owned inherited pipe, require an explicit session identity and explicit source for capture, and never contain enrollment credentials. PCM is mono 48 kHz F32LE, at most 20 ms per frame, with at most 100 ms queued and stale samples discarded. Missing targets never fall back to a default microphone. Receiver nodes have low session priority and do not explicitly alter default-node metadata.
+
+Actual adapter-only checks performed on Luna and Miro:
+
+- A synthetic tone fed a PortHub PipeWire `Audio/Source` and was selected by an ordinary, unmodified `pw-record` consumer using the exact stable node name with fallback disabled.
+- The explicitly named Sennheiser Profile source supplied a bounded one-second capture. Only frame counts, RMS and peak were retained; no audio file or playback was produced. Capture ended on control-pipe EOF.
+- A SHA-verified development helper on Miro published a virtual microphone. Luna's exact Sennheiser capture reached it through an encrypted **SSH test harness**, and ordinary `pw-record` on Miro received PCM. Miro's default-node metadata was identical before publication, while published and after cleanup. The harness retained statistics only.
+
+These early adapter-only tests established native source capture and selectable OS publication. By themselves they did not prove PortHub transport, path selection, persistent rules, production delivery, Windows/macOS support or camera streaming; later authenticated and Windows physical proofs are linked in the current status above. SSH is a validation harness only and is not the product implementation. A transient numeric PipeWire node ID is not a valid stable `pw-record --target` identity; tests use the node name, and parsing distinguishes raw stdout PCM from a WAV container.
+
+Media helper manifests use `porthub-media-components.json` with a strict `porthub-media` namespace, independently of the legacy component catalog. The namespace manager reuses the existing private file ownership, cancellable locks, transport and SHA-256 validation primitives. It rejects caller-supplied unfetched manifests, untrusted repository/namespace, unsupported targets/protocols, changed published versions and mismatched archive/executable digests. Existing trust is approved HTTPS distribution plus integrity/provenance metadata; this does not invent a detached cryptographic signature scheme. No new component variant is inserted into the catalog parsed by older installed agents.
+
+The selected receiver path now exposes receiver-local USB Audio Class 1 microphones and UVC cameras, with authenticated PCM/JPEG transport between agents. Existing Linux VHCI and the already signed Windows USB/IP virtual host controller use ordinary USB class drivers, avoiding a **new** Windows virtual audio kernel driver. Native class consumers and authenticated fixture paths have been validated; the user guide distinguishes generated-input, physical-source and publication evidence. It does not make macOS USB import available. Native PipeWire publication remains useful on Linux, and macOS still needs a native audio endpoint backend.
+
+The pure Rust experimental function has explicit descriptors for fixed 48 kHz mono S16LE, zero-bandwidth and streaming alternates, one 96-byte isochronous IN packet per full-speed millisecond, bounded PCM conversion, and strict control/range checks. A separate USB/IP executor must preserve per-packet statuses and actual lengths, bound requests and memory, implement unlink/cancellation, pace completions in real time and tie capture to authorized streaming. Immediate synthetic completions would spin the host and starve capture, so they are not an acceptable implementation. Physical macOS USB adapters retain their existing isochronous rejection.
+
+Prototype USB vendor/product identifiers are explicit test inputs, not an assertion of an allocated PortHub vendor ID. A legitimate production identity must be resolved before publishing this as a supported USB product. UVC webcam synthesis has separate descriptors, video framing, capture/codec negotiation and 45-frame class-consumer validation; microphone success is not evidence of webcam support. [USB Audio 1.0 specification](https://www.usb.org/sites/default/files/audio10.pdf), [USB/IP protocol and isochronous return framing](https://docs.kernel.org/usb/usbip_protocol.html).
+
+### Reviewed microphone lifetime boundaries
+
+Linux capture resolves the selected opaque source ID to a fresh PipeWire
+`object.serial` on the same core connection that creates the stream. Duplicate
+names, duplicate instance serials, stable-ID collisions, missing instance IDs,
+or an overflowing graph snapshot are unavailable; none select a default node.
+Native endpoint fields are retained locally and replaced with opaque IDs in the
+agent's network inventory copy.
+
+The API monitors active authorization independently of socket forwarding. Its
+one-second cadence uses concurrent endpoint checks bounded to two seconds and
+fails closed on timeout; a nonreading peer cannot postpone revocation. WebSocket
+buffers are bounded, and cleanup does not await a blocked close handshake.
+The receiver independently watches media/direct/private policy while report HTTP
+requests are stalled. Desktop control sends include lock acquisition within a
+100 ms deadline, allowing blocked PCM output to terminate the connection.

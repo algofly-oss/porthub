@@ -4,12 +4,15 @@ import argparse
 import importlib.util
 from pathlib import Path
 import tempfile
+import shutil
 
 spec = importlib.util.spec_from_file_location('release_recovery', Path(__file__).with_name('recover-component-builds.py'))
 recovery = importlib.util.module_from_spec(spec); spec.loader.exec_module(recovery)
 
+media_spec=importlib.util.spec_from_file_location('media_merge',Path(__file__).with_name('merge-media-release.py'));media_merge=importlib.util.module_from_spec(media_spec);media_spec.loader.exec_module(media_merge)
 
-def assemble(source, destination, version, verifier=None):
+
+def assemble(source, destination, version, verifier=None, media_assets=()):
     if source.is_symlink() or not source.is_dir():
         raise ValueError('Platform artifact source must be a real directory')
     if destination.exists() or destination.is_symlink():
@@ -36,6 +39,10 @@ def assemble(source, destination, version, verifier=None):
             spec = importlib.util.spec_from_file_location('legacy_client_collection', Path(__file__).resolve().parents[1]/'deploy/native/collect_client_bundle.py')
             collector = importlib.util.module_from_spec(spec); spec.loader.exec_module(collector)
             collector.collect(source, output, version)
+        if media_assets:
+            if not indexes:raise ValueError('Optional media requires a compact release')
+            merged=media_merge.merge(media_assets,Path(temporary)/'media',version)
+            for path in merged.iterdir():shutil.copyfile(path,output/path.name);(output/path.name).chmod(0o600)
         verified = recovery.publisher.assets(output, version, verifier)
         output.rename(destination)
     return verified
@@ -47,8 +54,9 @@ def main():
     parser.add_argument('--destination', type=Path, required=True)
     parser.add_argument('--version', required=True)
     parser.add_argument('--artifact-verifier', type=Path)
+    parser.add_argument('--media-assets',type=Path,action='append',default=[])
     args = parser.parse_args()
-    assets = assemble(args.source, args.destination, args.version, args.artifact_verifier)
+    assets = assemble(args.source, args.destination, args.version, args.artifact_verifier,args.media_assets)
     print('Assembled and verified '+str(len(assets))+' release assets')
 
 

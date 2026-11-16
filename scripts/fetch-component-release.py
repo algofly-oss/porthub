@@ -69,12 +69,13 @@ def stage(release, output, verifier):
         return None  # First modular release must build without previous receipts.
     expected = publisher.ASSETS | {'porthub-components.json'} | {
         'porthub-tools-'+canonical+'.tar.gz' for _, canonical in recovery.packager.TARGETS.values()}
+    expected |= publisher.media.optional_names(names)
     if set(names) != expected:
-        raise ValueError('Compact release requires exactly 21 expected assets')
+        raise ValueError('Compact release requires 21 ordinary assets and an exact optional media set')
     total = 0
     for asset in assets:
         size = asset.get('size'); digest = asset.get('digest', '')
-        maximum = 512*1024 if asset['name'] == 'porthub-components.json' else (512 if asset['name'].endswith('.tar.gz') else 256)*1024*1024
+        maximum = 512*1024 if asset['name'] in ('porthub-components.json',publisher.media.ASSET) else (512 if asset['name'].endswith('.tar.gz') else 256)*1024*1024
         if (asset.get('state') != 'uploaded' or type(size) is not int or not 0 < size <= maximum
                 or not isinstance(digest, str) or not re.fullmatch(r'sha256:[a-f0-9]{64}', digest)):
             raise ValueError('Invalid release asset size, digest or upload state')

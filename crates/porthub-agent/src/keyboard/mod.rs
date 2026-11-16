@@ -11,6 +11,8 @@ mod input;
 mod uinput;
 #[cfg(windows)]
 mod windows_desktop;
+#[cfg(windows)]
+mod windows_refresh;
 use anyhow::{ensure, Context, Result};
 pub(crate) use broker::serve;
 use porthub_components::keyboard::{Ack, Command, Input};
@@ -144,6 +146,13 @@ pub async fn run(args: Args, cancel: CancellationToken) -> Result<()> {
             lease
                 .try_lock_exclusive()
                 .context("VKeyboard module is already running for this desktop registration")?;
+            #[cfg(any(target_os="linux",windows))]
+            let _media = {
+                let layout=layout.clone();let id=id.clone();let media_cancel=cancel.clone();
+                tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                    if let Err(error)=crate::media::host::run(layout,id,media_cancel).await {tracing::debug!(reason=%error,"Desktop media host unavailable");}
+                }))
+            };
             loop {
                 let result = session(&layout, &id, cancel.clone()).await;
                 if let Err(error) = result {
@@ -526,4 +535,9 @@ async fn session(
 #[cfg(target_os="linux")]
 pub(crate) async fn refresh_after_update(layout:&crate::service::Layout,executable:&Path,profiles:&[PathBuf],cli:Option<&Path>)->Result<()> {
     linux_refresh::refresh(layout,executable,profiles,cli).await
+}
+
+#[cfg(windows)]
+pub(crate) async fn refresh_after_update(layout:&crate::service::Layout,executable:&Path,profiles:&[PathBuf],_cli:Option<&Path>)->Result<()> {
+    windows_refresh::refresh(layout,executable,profiles).await
 }

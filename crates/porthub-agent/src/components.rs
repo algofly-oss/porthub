@@ -198,3 +198,12 @@ async fn worker_transport(
         .connect(component, &ContextOptions { state_directory }, mode, cancel)
         .await
 }
+
+/// Media has an independent namespace; old component catalogs remain unchanged.
+pub(crate) fn media_manager(enrolled_gateway:Option<&str>)->Result<porthub_components::media_store::Manager> {
+    let base=cache_root()?;crate::service::directory(&base,true)?;
+    let sources=match std::env::var("PORTHUB_COMPONENT_SOURCE").as_deref(){Ok("auto")|Err(std::env::VarError::NotPresent)=>Sources::GatewayThenGithub,Ok("gateway")=>Sources::GatewayOnly,Ok("github")=>Sources::GithubOnly,_=>anyhow::bail!("Invalid component source")};
+    let selected=std::env::var("PORTHUB_COMPONENT_GATEWAY").ok().or_else(||enrolled_gateway.map(str::to_owned)).or_else(gateway);
+    let gateway=selected.map(|value|crate::profile::base(&value,false).and_then(|value|Ok(value.parse()?))).transpose()?;
+    porthub_components::media_store::Manager::new(base.join("media"),Settings{gateway,sources,core:crate::VERSION.parse()?,target:env!("PORTHUB_RUST_TARGET").replace("-musl","-gnu"),disabled:BTreeSet::new(),pins:BTreeMap::new()},Arc::new(Http::new()?.with_routing(Arc::new(network::Routes::new()?))))
+}

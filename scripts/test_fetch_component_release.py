@@ -32,6 +32,12 @@ class FetchRelease(unittest.TestCase):
             verify.assert_called_once()
         self.assertEqual(len(list(output.iterdir())), 21)
 
+    def test_optional_media_assets_are_retained_during_verified_reuse(self):
+        spec=importlib.util.spec_from_file_location('media_fixture',Path(__file__).with_name('test_media_release.py'));media_fixture=importlib.util.module_from_spec(spec);spec.loader.exec_module(media_fixture)
+        media_fixture.fixture(self.input,version='1.12.0');self.release['assets']=[{'name':p.name,'size':p.stat().st_size,'digest':'sha256:'+fetch.recovery.planner.file_digest(p),'state':'uploaded'} for p in self.input.iterdir()]
+        with patch.object(fetch,'download',side_effect=self.copy_asset) as downloads,patch.object(fetch.recovery.publisher,'assets') as verify:
+            fetch.stage(self.release,self.root/'staged',Path('/verifier'))
+        self.assertEqual(downloads.call_count,24);verify.assert_called_once();self.assertTrue((self.root/'staged'/'porthub-media-components.json').exists())
     def test_legacy_release_requests_fresh_build_without_downloads(self):
         legacy = dict(self.release, assets=[{'name':name+suffix} for name in fetch.recovery.publisher.ASSETS for suffix in ('','.version','.sha256')])
         with patch.object(fetch, 'download', side_effect=AssertionError('No legacy downloads')):

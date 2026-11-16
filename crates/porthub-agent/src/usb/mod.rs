@@ -1,4 +1,6 @@
 //! Optional USB forwarding module in the existing native agent.
+#[cfg(any(target_os="linux",target_os="macos",windows))]
+pub(crate) mod media_transport;
 pub(crate) mod cli;
 mod relay;
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
@@ -17,6 +19,8 @@ mod protocol;
 mod windows;
 #[cfg(windows)]
 mod windows_drivers;
+#[cfg(any(windows, test))]
+mod prerequisite_retry;
 use crate::{
     control::Control,
     features::{self, Feature},
@@ -133,7 +137,7 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
         #[cfg(windows)]
         windows::recover(&path);
         #[cfg(windows)]
-        let preparing={let path=path.clone();let control=control.clone();tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {if let Err(error)=windows_drivers::prepare(&path,control).await{tracing::warn!(%error,"Windows USB driver preparation unavailable");}}))};
+        let _preparing={let path=path.clone();let control=control.clone();let cancel=work.child_token();tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {prerequisite_retry::run(features::subscribe(&path),cancel,||async {match windows_drivers::prepare(&path,control.clone()).await {Ok(())=>true,Err(error)=>{tracing::warn!(%error,"Windows USB driver preparation unavailable; retrying with backoff");false}}}).await;}))};
         let mut policy = features::subscribe(&path);
         let mut permissions = transport_policy(&policy.borrow());
         let mut sessions: HashMap<String, Session> = HashMap::new();
@@ -568,7 +572,11 @@ async fn rerouted(changes:&mut Option<tokio::sync::watch::Receiver<u64>>) {
     match changes {Some(changes)=>{let _=changes.changed().await;},None=>std::future::pending().await}
 }
 #[cfg(any(target_os="linux",target_os="macos",windows))]
-async fn bridge_bulk<S:tokio::io::AsyncRead+tokio::io::AsyncWrite+Unpin>(mut kernel:S,mut socket:Socket,mut bulk:tcp::Stream,mut policy:tokio::sync::watch::Receiver<features::Policy>,mut reroute:Option<tokio::sync::watch::Receiver<u64>>,restart:bool)->Result<()> {
+async fn bridge_bulk<S:tokio::io::AsyncRead+tokio::io::AsyncWrite+Unpin>(kernel:S,socket:Socket,bulk:tcp::Stream,policy:tokio::sync::watch::Receiver<features::Policy>,reroute:Option<tokio::sync::watch::Receiver<u64>>,restart:bool)->Result<()> {
+    bridge_bulk_with_policy(kernel,socket,bulk,policy,reroute,restart,Feature::Usb).await
+}
+#[cfg(any(target_os="linux",target_os="macos",windows))]
+async fn bridge_bulk_with_policy<S:tokio::io::AsyncRead+tokio::io::AsyncWrite+Unpin>(mut kernel:S,mut socket:Socket,mut bulk:tcp::Stream,mut policy:tokio::sync::watch::Receiver<features::Policy>,mut reroute:Option<tokio::sync::watch::Receiver<u64>>,restart:bool,required:Feature)->Result<()> {
     use futures_util::{SinkExt,StreamExt};
     use tokio_tungstenite::tungstenite::Message;
     let mut kernel=relay::RoutedStream::new(kernel,reroute.is_some());
@@ -592,19 +600,24 @@ async fn bridge_bulk<S:tokio::io::AsyncRead+tokio::io::AsyncWrite+Unpin>(mut ker
             }).await??;
             return Err(relay::Reconfigure.into());
         },
-        changed=policy.changed()=>if changed.is_err()||!policy.borrow().enabled(Feature::Usb)||!policy.borrow().enabled(Feature::DirectConnections){return Ok(());}
+        changed=policy.changed()=>if changed.is_err()||!policy.borrow().enabled(required)||!policy.borrow().enabled(Feature::DirectConnections){return Ok(());}
     }}
 }
 // Independent pumps preserve full-duplex progress when either carrier applies
 // backpressure. Never replay kernel USB requests after a path fails.
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
-async fn bridge<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+async fn bridge<S:tokio::io::AsyncRead+tokio::io::AsyncWrite+Unpin>(stream:S,socket:Socket,direct:Option<direct::Direct>,policy:tokio::sync::watch::Receiver<features::Policy>,reroute:Option<tokio::sync::watch::Receiver<u64>>,restart:bool)->Result<()> {
+    bridge_with_policy(stream,socket,direct,policy,reroute,restart,Feature::Usb).await
+}
+#[cfg(any(target_os="linux",target_os="macos",windows))]
+async fn bridge_with_policy<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     stream: S,
     socket: Socket,
     mut direct: Option<direct::Direct>,
     mut policy: tokio::sync::watch::Receiver<crate::features::Policy>,
     mut reroute: Option<tokio::sync::watch::Receiver<u64>>,
     restart: bool,
+    required:Feature,
 ) -> Result<()> {
     use futures_util::{SinkExt, StreamExt};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -670,7 +683,7 @@ async fn bridge<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
             };
             return tokio::time::timeout(Duration::from_secs(2),notify).await?;
          },
-         changed=policy.changed()=>{if changed.is_err()||!policy.borrow().enabled(Feature::Usb)||local&&!policy.borrow().enabled(Feature::DirectConnections){return Ok(());}}
+         changed=policy.changed()=>{if changed.is_err()||!policy.borrow().enabled(required)||local&&!policy.borrow().enabled(Feature::DirectConnections){return Ok(());}}
         }
     }
 }

@@ -12,6 +12,9 @@ import sys
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 
+media_spec=importlib.util.spec_from_file_location('media_release',Path(__file__).with_name('media-release.py'))
+media=importlib.util.module_from_spec(media_spec);media_spec.loader.exec_module(media)
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT/'deploy/native'))
 from migrate import ASSETS, artifact_bundle
@@ -27,6 +30,9 @@ history = importlib.util.module_from_spec(spec); spec.loader.exec_module(history
 
 def verify_catalog_successor(base, directory):
     history.validate_successor(history.read(directory/'porthub-components.json'), history.fetch(base))
+    if (directory/media.ASSET).exists():
+        candidate=media.parse((directory/media.ASSET).read_bytes(),history.read(directory/'porthub-components.json')['release'])
+        media.validate_successor(candidate,media.fetch_catalog(base))
 
 
 def numeric(value):
@@ -46,8 +52,10 @@ def assets(directory, version, artifact_verifier=None):
             raise ValueError('Artifact verifier must be an absolute regular executable path')
         def snapshot():
             files = list(directory.iterdir())
-            if len(files) != 21 or any(path.is_symlink() or not path.is_file() for path in files):
-                raise ValueError('Compact publication requires exactly 21 regular assets')
+            optional=media.optional_names(path.name for path in files)
+            if len(files) != 21+len(optional) or any(path.is_symlink() or not path.is_file() for path in files):
+                raise ValueError('Compact publication requires 21 ordinary assets and an exact optional media set')
+            media.verify(directory,version)
             result = {}
             for path in files:
                 with path.open('rb') as stream:

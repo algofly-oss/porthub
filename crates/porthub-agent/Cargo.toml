@@ -1,6 +1,6 @@
 [package]
 name = "porthub-agent"
-version = "1.11.32"
+version = "1.11.34"
 edition.workspace = true
 publish.workspace = true
 
@@ -104,3 +104,8 @@ windows-registry = "0.6.1"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_Devices_DeviceAndDriverInstallation", "Win32_System_RemoteDesktop", "Win32_System_Console", "Win32_System_Memory", "Win32_System_Pipes", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
 tun-rs = { version = "=2.8.13", default-features = false, features = ["async"] }
 route_manager = { version = "=0.2.9", features = ["async"] }
+
+# Native ignored ordinary-consumer tests only; no MediaFoundation release linkage.
+[target.'cfg(windows)'.dev-dependencies]
+windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_Media_MediaFoundation", "Win32_Graphics_Imaging", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Threading", "Win32_System_RemoteDesktop"] }
+windows-core = "=0.62.2"

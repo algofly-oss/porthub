@@ -148,6 +148,47 @@ fn pipe(path: &Path, owner: Option<&str>, first: bool) -> Result<NamedPipeServer
     }
     Ok(result?)
 }
+#[cfg(test)]
+fn media_fixture_pipe(path: &Path, owner: Option<&str>, first: bool) -> Result<NamedPipeServer> {
+    let mut sddl = String::from("D:P(A;;GA;;;SY)(A;;GA;;;BA)");
+    if let Some(owner) = owner {
+        ensure!(valid_sid(owner), "invalid exposure owner");
+        // Private same-user test server intentionally retains full control
+        // so it can create subsequent listeners; production ACL stays narrow.
+        sddl.push_str(&format!("(A;;GA;;;{owner})"));
+    }
+    let wide = sddl.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+    let mut descriptor = std::ptr::null_mut();
+    ensure!(
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        } != 0,
+        "cannot create exposure pipe permissions"
+    );
+    let mut attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor,
+        bInheritHandle: 0,
+    };
+    let result = unsafe {
+        ServerOptions::new()
+            .first_pipe_instance(first)
+            .reject_remote_clients(true)
+            .create_with_security_attributes_raw(
+                path,
+                (&mut attributes as *mut SECURITY_ATTRIBUTES).cast(),
+            )
+    };
+    unsafe {
+        LocalFree(descriptor);
+    }
+    Ok(result?)
+}
 pub struct Guard {
     cancel: CancellationToken,
     task: tokio::task::JoinHandle<()>,
@@ -204,8 +245,12 @@ pub fn start(
                     let next = match pipe(&path, owner.as_deref(), false) { Ok(next) => next, Err(_) => break };
                     let stream = std::mem::replace(&mut listener, next);
                     let Ok(permit) = capacity.clone().try_acquire_owned() else { continue; };
+                    // Ordinary local control retains its existing ACL policy.
+                    // A desktop media host additionally needs the enrolling SID
+                    // and a real non-System logon session, derived from its token.
+                    let desktop=owner.as_deref().and_then(|sid|crate::media::windows_host::peer(&stream,sid).ok());
                     let control = control.clone(); let cancel = work.clone(); let profile = profile.clone();
-                    tasks.spawn(async move { let _permit = permit; let _ = crate::exposure_protocol::serve_connection(stream, control, cancel, profile).await; });
+                    tasks.spawn(async move { let _permit = permit; let _ = crate::exposure_protocol::serve_connection_as_windows_user(stream, control, cancel, profile, desktop).await; });
                 }
             }
         }
@@ -255,6 +300,10 @@ fn verified_pipe(layout: &crate::service::Layout, registration: &str) -> Result<
         unsafe { GetNamedPipeServerProcessId(stream.as_raw_handle(), &mut server_pid) } != 0,
         "cannot verify local agent identity"
     );
+    #[cfg(test)]
+    if crate::media::windows_e2e_fixture::fixture_connection(layout, registration, server_pid)? {
+        return Ok(stream);
+    }
     use windows_service::{
         service::ServiceAccess,
         service_manager::{ServiceManager, ServiceManagerAccess},
@@ -320,3 +369,16 @@ mod tests {
         assert_send(super::connect(&layout, &registration, &request));
     }
 }
+
+#[cfg(test)]
+pub(crate) fn media_fixture_listener(layout:&crate::service::Layout,registration:&str,first:bool)->Result<NamedPipeServer>{
+    crate::media::windows_e2e_fixture::require_registration(layout,registration)?;
+    media_fixture_pipe(&endpoint(layout,registration)?,Some(&sid()?),first)
+}
+#[cfg(test)]
+pub(crate) fn media_fixture_peer(stream:&NamedPipeServer)->Result<crate::media::windows_host::PeerIdentity>{
+    crate::media::windows_host::peer(stream,&sid()?)
+}
+
+#[cfg(test)]
+pub(crate) fn media_fixture_sid()->Result<String>{sid()}

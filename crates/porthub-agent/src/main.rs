@@ -188,6 +188,8 @@ enum Command {
     Keyboard(porthub_agent::keyboard::Args),
     /// Forward physical USB devices between registered machines.
     Usb(porthub_agent::usb::Args),
+    /// Inspect native microphone/camera sources and local receiver capabilities.
+    Media(porthub_agent::media::Args),
     /// Forward a reachable TCP port to this machine; no SSH or remote agent required.
     #[command(visible_alias = "bind")]
     Forward(porthub_agent::forward::Args),
@@ -1187,6 +1189,7 @@ async fn main() -> Result<()> {
         signal_cancel.cancel();
     });
     let result = match args.command {
+        Some(Command::Media(args)) => porthub_agent::media::run(args).await,
         Some(Command::Features(args)) => porthub_agent::features::run(args).await,
         Some(Command::Usb(args)) => porthub_agent::usb::run(args,cancel.clone()).await,
         Some(Command::Keyboard(args)) => porthub_agent::keyboard::run(args,cancel.clone()).await,

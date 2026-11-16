@@ -140,6 +140,13 @@ class CompactBundle(Bundle):
         self.assertEqual(verifier.call_args.args[0][1], '--check-artifacts')
         for name, payload in self.files.items(): self.assertEqual((self.root/'assets'/name).read_bytes(), payload)
 
+    def test_optional_media_bundle_is_staged_and_verified_as_one_exact_set(self):
+        spec=importlib.util.spec_from_file_location('media_fixture',Path(__file__).with_name('test_media_release.py'));fixture=importlib.util.module_from_spec(spec);spec.loader.exec_module(fixture)
+        media_root=self.root/'media';media_root.mkdir();fixture.fixture(media_root,version='1.11.0');self.files.update({p.name:p.read_bytes() for p in media_root.iterdir()})
+        archive,proof=self.bundle();verify=stage.publisher.media.verify
+        with patch.object(stage.publisher.media,'verify',side_effect=lambda directory,version:verify(directory,version,lambda *_:None)),patch.object(stage.publisher.subprocess,'run',return_value=self.verified):
+            result=stage.extract(archive,proof,self.root/'assets','1.11.0',self.verifier)
+        self.assertEqual(len(result),24)
     def test_compact_requires_verifier_before_creating_destination(self):
         archive, proof = self.bundle()
         with self.assertRaises(ValueError): stage.extract(archive, proof, self.root/'assets', '1.11.0')
