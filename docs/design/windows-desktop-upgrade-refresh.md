@@ -40,3 +40,12 @@ check; no Mac helper or Linux refresh behavior is changed.
 The scheduler flags and security-descriptor behavior follow Microsoft's
 [TASK_CREATION documentation](https://learn.microsoft.com/windows/win32/api/taskschd/ne-taskschd-task_creation)
 and [RegisterTaskDefinition documentation](https://learn.microsoft.com/windows/win32/taskschd/taskfolder-registertaskdefinition).
+
+
+The Windows refresh is reached from the existing native `service install`
+transaction, after its files and CLI publication commit. The Windows Manager
+implements the post-commit refresh hook; new registrations do not invoke it.
+Windows does not expose the Unix `update` command/module. Existing-registration
+`--publish-cli` and bootstrap callers skip fresh desktop setup so it cannot
+re-register triggers/settings or start a disabled/inactive task after the safe
+refresh. Fresh installs retain their previous desktop setup behavior.

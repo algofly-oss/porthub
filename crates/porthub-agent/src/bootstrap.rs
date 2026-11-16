@@ -372,7 +372,10 @@ fn append_path_block(profile: &Path, directory: &Path) -> Result<()> {
 }
 /// Refresh interactive startup after a successful native CLI transaction.
 /// Existing service updates must not rewrite their live enrollment profile.
-pub fn setup_published_desktop(spec: &Spec, user: bool) {
+pub fn setup_published_desktop(spec: &Spec, user: bool, existing: bool) {
+    // Existing Windows tasks were refreshed by the committed native transaction.
+    // Fresh setup would re-register triggers/settings and start inactive tasks.
+    if cfg!(windows) && existing { return; }
     if let Some(cli) = &spec.cli {
         if crate::keyboard::install_desktop(cli,user).is_err() {
             tracing::warn!("Desktop VKeyboard startup registration unavailable; use porthub keyboard enable from your desktop session");
@@ -424,6 +427,10 @@ async fn install_published_mode(
     let path = path
         .or(default.as_deref())
         .context("bootstrap profile path missing")?;
+    #[cfg(windows)]
+    let existing = service::installed(layout, &service::identity(&profile))?.is_some();
+    #[cfg(not(windows))]
+    let existing = false;
     let mut source = Source::save(&profile, path)?;
     let install = if adopt_existing_cli {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -447,7 +454,7 @@ async fn install_published_mode(
     match install {
         Ok(spec) => {
             source.committed = true;
-            setup_published_desktop(&spec,layout.user);
+            setup_published_desktop(&spec,layout.user,existing);
             Ok(spec)
         }
         Err(error) => {

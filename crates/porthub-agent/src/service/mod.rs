@@ -175,6 +175,9 @@ pub trait Manager: Send + Sync {
     async fn remove(&self, _spec: &Spec) -> Result<()> {
         Ok(())
     }
+    /// Post-commit refresh of existing desktop workers. Windows overrides this;
+    /// other managers preserve their existing installation behavior.
+    async fn refresh_desktop_after_update(&self, _layout: &Layout, _spec: &Spec) -> Result<()> { Ok(()) }
     async fn reset_failed(&self, _spec: &Spec) -> Result<()> {
         Ok(())
     }
@@ -647,6 +650,12 @@ pub(crate) fn installed(layout: &Layout, id: &str) -> Result<Option<Spec>> {
     owned_unit(&spec)?;
     Ok(Some(spec))
 }
+/// Inspect an existing registration using the same owned manifest/unit checks
+/// as installation, before a caller decides whether fresh desktop setup is needed.
+pub fn existing_profile(layout: &Layout, source: &Path) -> Result<bool> {
+    let profile = RegistrationProfile::load(source)?;
+    Ok(installed(layout, &profile.identity())?.is_some())
+}
 pub struct Registration {
     pub spec: Spec,
     pub machine_id: String,
@@ -1017,6 +1026,11 @@ async fn install_locked_mode(
     files.committed = true;
     if let Some(publication) = &mut publication {
         publication.commit();
+    }
+    if previous.is_some() {
+        if let Err(error) = manager.refresh_desktop_after_update(layout, &spec).await {
+            tracing::warn!(%error, "Native installation committed; managed desktop worker refresh incomplete");
+        }
     }
     Ok(spec)
 }

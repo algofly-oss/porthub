@@ -470,7 +470,7 @@ pub async fn apply_requested(
             receipt.display()
         )));
     }
-    #[cfg(any(target_os="linux",windows))]
+    #[cfg(target_os="linux")]
     if let Err(error)=crate::keyboard::refresh_after_update(layout,&journal.executable,&journal.entries.iter().map(|entry|entry.spec.profile.clone()).collect::<Vec<_>>(),journal.cli.as_ref().map(|(path,_)|path.as_path())).await {
         tracing::warn!(error=%error,"Native update committed; managed desktop worker refresh incomplete");
     }

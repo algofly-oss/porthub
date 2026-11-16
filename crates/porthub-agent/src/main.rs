@@ -1097,13 +1097,17 @@ async fn service_command(command: ServiceCommand, user: bool) -> Result<()> {
             let service = match command {
                 ServiceCommand::Install { profile, publish_cli } => {
                     let executable=std::env::current_exe()?.canonicalize()?;
+                    #[cfg(windows)]
+                    let existing = service::existing_profile(&layout, &profile)?;
+                    #[cfg(not(windows))]
+                    let existing = false;
                     if publish_cli {
                         let cli=porthub_agent::bootstrap::cli_path(user,None)?;
                         // Existing enrollment is owned by the running agent.
                         // Update its native registration without rewriting or
                         // acquiring the enrollment's exclusive runtime lock.
                         let spec=service::install_published(&layout,&profile,&executable,manager.as_ref(),Some(&cli)).await?;
-                        porthub_agent::bootstrap::setup_published_desktop(&spec,user);
+                        porthub_agent::bootstrap::setup_published_desktop(&spec,user,existing);
                         porthub_agent::bootstrap::register_cli_path(cli.parent().context("CLI bin directory missing")?,user)?;
                         spec
                     } else {

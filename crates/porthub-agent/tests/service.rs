@@ -23,6 +23,8 @@ struct Fake {
     fail_reload: AtomicBool,
     fail_enable: AtomicBool,
     fail_reset: AtomicBool,
+    desktop_refreshes: AtomicUsize,
+    fail_desktop_refresh: AtomicBool,
     reconfigure_stops: AtomicBool,
     fail_reconfigure: AtomicBool,
     calls: Mutex<Vec<(String, String)>>,
@@ -69,6 +71,15 @@ impl Manager for Fake {
             if self.state_value(previous).active { self.stop(previous).await?; }
             anyhow::ensure!(!self.fail_reconfigure.swap(false, Ordering::SeqCst), "fixture reconfiguration failed after stopping previous process");
         }
+        Ok(())
+    }
+    async fn refresh_desktop_after_update(&self, layout: &Layout, spec: &Spec) -> Result<()> {
+        ensure!(service::existing_profile(layout, &spec.profile)?, "refresh before committed registration");
+        ensure!(self.state_value(spec).active, "refresh before native activation");
+        let installed:Spec=serde_json::from_slice(&std::fs::read(layout.state.join(format!("{}.service.json",spec.identity)))?)?;
+        ensure!(installed==*spec,"refresh saw old uncommitted service manifest");
+        self.desktop_refreshes.fetch_add(1, Ordering::SeqCst);
+        ensure!(!self.fail_desktop_refresh.load(Ordering::SeqCst),"fixture desktop refresh failed");
         Ok(())
     }
     async fn reset_failed(&self, _spec: &Spec) -> Result<()> {
@@ -928,5 +939,30 @@ async fn failed_stopping_reconfiguration_restarts_previous_without_stopping_a_ca
     ensure!(manager.state_value(&previous).active);
     ensure!(std::fs::read(&previous.unit)? == old_unit);
     ensure!(std::fs::read(&previous.executable)? == b"old executable");
+    Ok(())
+}
+
+#[tokio::test]
+async fn existing_native_install_refreshes_desktop_only_after_commit_and_failure_is_warn_only() -> Result<()> {
+    let temp = common::private_dir()?;
+    let layout = layout(temp.path());
+    let source = profile(temp.path(), "111111111111111111111111")?;
+    let executable = temp.path().join("source-binary");
+    std::fs::write(&executable, b"first")?;
+    let manager = Fake::default();
+    ensure!(!service::existing_profile(&layout,&source)?);
+    let first = service::install(&layout,&source,&executable,&manager).await?;
+    ensure!(service::existing_profile(&layout,&source)?);
+    ensure!(manager.desktop_refreshes.load(Ordering::SeqCst)==0,"fresh install must not refresh existing desktop");
+    std::fs::write(&executable,b"second")?;
+    manager.fail_start.store(true,Ordering::SeqCst);
+    ensure!(service::install(&layout,&source,&executable,&manager).await.is_err());
+    ensure!(manager.desktop_refreshes.load(Ordering::SeqCst)==0,"rolled-back install must not refresh desktop");
+    ensure!(std::fs::read(&first.executable)?==b"first");
+    manager.fail_desktop_refresh.store(true,Ordering::SeqCst);
+    let second=service::install(&layout,&source,&executable,&manager).await?;
+    ensure!(manager.desktop_refreshes.load(Ordering::SeqCst)==1);
+    ensure!(std::fs::read(&second.executable)?==b"second" && manager.state_value(&second).active,
+        "desktop warning must not roll back a committed native service");
     Ok(())
 }

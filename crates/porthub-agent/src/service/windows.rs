@@ -170,6 +170,9 @@ impl Manager for Windows {
         })
     }
 
+    async fn refresh_desktop_after_update(&self, layout: &super::Layout, spec: &Spec) -> Result<()> {
+        crate::keyboard::refresh_after_update(layout, &spec.executable, &[spec.profile.clone()], spec.cli.as_deref()).await
+    }
     async fn reload(&self) -> Result<()> {
         Ok(())
     }
