@@ -337,7 +337,10 @@ mod tests {
     }
     #[tokio::test]
     async fn explicit_layout_still_requires_matching_enrollment() -> Result<()> {
-        let root=tempfile::tempdir()?;
+        let mut directory=tempfile::Builder::new();
+        #[cfg(unix)]
+        {use std::os::unix::fs::PermissionsExt;directory.permissions(std::fs::Permissions::from_mode(0o700));}
+        let root=directory.tempdir()?;
         let layout=crate::service::Layout {user:true,state:root.path().join("native"),releases:root.path().join("releases"),units:root.path().join("units")};
         crate::service::directory(&layout.state,true)?;
         let profile:crate::profile::Profile=serde_json::from_value(serde_json::json!({"server":"https://gateway.example","machine_id":"0123456789abcdef01234567","token":"private-fixture-token"}))?;

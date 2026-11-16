@@ -69,7 +69,13 @@ mod tests {
     #[test]
     fn automatic_registration_selection_requires_one_unambiguous_readable_public_registration(
     ) -> Result<()> {
-        let root = tempfile::tempdir()?;
+        let mut directory = tempfile::Builder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            directory.permissions(std::fs::Permissions::from_mode(0o700));
+        }
+        let root = directory.tempdir()?;
         let layout = crate::service::Layout {
             user: true,
             state: root.path().join("native"),
