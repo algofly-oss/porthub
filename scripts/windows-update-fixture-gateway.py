@@ -19,8 +19,14 @@ class Gateway:
         self.lock = threading.Lock()
         self.events = []
         self.overflow = False
+        self.active_connections = 0
         self.request = None
         self.fail_version = None
+        self.hold_download = False
+        self.download_started = threading.Event()
+        self.release_download = threading.Event()
+        self.release_download.set()
+        self.candidate_sync_seen = threading.Event()
         self.server = None
 
     def advertise(self, machine, version):
@@ -44,12 +50,12 @@ class Gateway:
 
     def record(self, value):
         with self.lock:
-            if value.get('kind') == 'request-observed' and value in self.events:
+            if value.get('kind') == 'request-observed' and any(e.get('kind') == value['kind'] and e.get('machine') == value.get('machine') and e.get('request_id') == value.get('request_id') for e in self.events):
                 return
             if len(self.events) >= 4096:
                 self.overflow = True
                 return
-            self.events.append(value)
+            self.events.append(dict(value, sequence=len(self.events) + 1, monotonic=time.monotonic()))
 
     def start(self):
         owner = self
@@ -58,6 +64,15 @@ class Gateway:
             def setup(self):
                 super().setup()
                 self.connection.settimeout(10)
+                with owner.lock:
+                    owner.active_connections += 1
+
+            def finish(self):
+                try:
+                    super().finish()
+                finally:
+                    with owner.lock:
+                        owner.active_connections -= 1
 
             def log_message(self, *_):
                 pass  # Enrollment tokens are present in release URLs.
@@ -88,22 +103,29 @@ class Gateway:
                     return self.reply(403)
                 version = value.get('client_version')
                 handled = value.get('client_update_last_handled_request_id')
+                record = owner.journal(machine)
                 if handled:
-                    record = owner.journal(machine)
-                    if (not record or record.get('phase') != 'committed'
+                    artifact = owner.artifacts.get(version)
+                    if (not artifact or not record or record.get('phase') != 'committed'
                             or record.get('request', {}).get('id') != handled
-                            or record.get('release', {}).get('version') != version):
+                            or record.get('release', {}).get('version') != version
+                            or record.get('release', {}).get('sha256') != artifact['sha256']
+                            or record.get('source_revision') != artifact.get('source')):
                         owner.record({'kind': 'invalid-ack', 'machine': machine})
                         return self.reply(409)
                 owner.record({'kind': 'sync', 'machine': machine,
-                              'version': version, 'handled': handled or ''})
+                              'version': version, 'handled': handled or '',
+                              'journal_phase': record.get('phase') if record else None})
                 if version == owner.fail_version:
+                    owner.candidate_sync_seen.set()
                     return self.reply(503)
                 config = {'machine_id': machine, 'version': 'native-update-gate',
                           'files': {'client.toml': "[client]\nremote_addr='ws://127.0.0.1:9'\n"}}
                 headers = owner.headers(machine)
                 if headers:
-                    owner.record({'kind': 'request-observed', 'machine': machine})
+                    owner.record({'kind': 'request-observed', 'machine': machine,
+                                  'request_id': headers['x-porthub-client-update-request-id'],
+                                  'target_version': headers['x-porthub-client-target-version']})
                 return self.reply(200, {'data': {'config': config}}, headers)
 
             def do_GET(self):
@@ -116,7 +138,9 @@ class Gateway:
                     time.sleep(.1)  # Bound fixture polling CPU; never a timing proof.
                     headers = owner.headers(machine)
                     if headers:
-                        owner.record({'kind': 'request-observed', 'machine': machine})
+                        owner.record({'kind': 'request-observed', 'machine': machine,
+                                  'request_id': headers['x-porthub-client-update-request-id'],
+                                  'target_version': headers['x-porthub-client-target-version']})
                     headers.update({'x-porthub-machine-id': machine,
                                     'x-porthub-config-version': 'native-update-gate'})
                     return self.reply(204, headers=headers)
@@ -154,8 +178,16 @@ class Gateway:
                 self.end_headers()
                 try:
                     with path.open('rb') as stream:
+                        first = True
                         while block := stream.read(65536):
                             self.wfile.write(block)
+                            if first and owner.hold_download:
+                                self.wfile.flush()
+                                owner.download_started.set()
+                                if not owner.release_download.wait(60):
+                                    owner.record({'kind': 'download-barrier-timeout'})
+                                    return
+                            first = False
                 except (BrokenPipeError, ConnectionResetError):
                     pass  # Cancellation is a tested expected outcome.
 
@@ -167,9 +199,15 @@ class Gateway:
         return 'http://127.0.0.1:' + str(self.server.server_port)
 
     def close(self):
+        self.release_download.set()
         if self.server:
             self.server.shutdown()
             self.server.server_close()
             self.thread.join(timeout=5)
             if self.thread.is_alive():
                 raise RuntimeError('Fixture gateway did not stop')
+            deadline = time.monotonic() + 11
+            while self.active_connections and time.monotonic() < deadline:
+                time.sleep(.02)
+            if self.active_connections:
+                raise RuntimeError('Fixture HTTP handlers did not drain')

@@ -18,11 +18,13 @@ accept a request merely because it arrived on localhost: validate its fixture
 token and machine binding. No real user credentials, account grants or physical
 USB/audio/camera device are required.
 
-Install A via the actual `service install --profile` command without
-`--publish-cli`; no GUI task is needed. Disable all unrelated client features and
-initially AutoUpdate in the canonical split policy files before service startup.
-Only the ordinary feature CLI may enable AutoUpdate afterward. SCM must own the
-same PID and immutable A image reported by the runtime.
+Install A and C for two isolated fixture enrollments via the actual
+`service install --profile --publish-cli` path. Normal fresh installation owns the
+runner's temporary managed desktop task and publishes C as the higher shared CLI.
+Disable all unrelated client features and initially AutoUpdate in canonical split
+policy files before startup, except the explicit `default-on` scenario omits A's
+AutoUpdate key. Other scenarios enable it only through the ordinary local feature
+CLI. SCM must own the same PID and immutable image reported by each runtime.
 
 ## Separate scenarios, stop on unexpected failure
 
@@ -41,17 +43,18 @@ same PID and immutable A image reported by the runtime.
 3. **Revocation during download.** Hold the B response after a bounded first chunk,
    disable AutoUpdate through the local CLI, and verify staging is cancelled and
    no maintenance worker/install starts. Preserve zero installer/mutation counts.
-4. **Revocation during readiness.** Delay B configuration until the worker reaches
-   Verifying, then disable AutoUpdate. Release the configuration barrier; the
+4. **Revocation during readiness.** Delay B configuration until SCM actually owns B and the worker is
+   waiting in Applying for runtime readiness, then disable AutoUpdate. Release the configuration barrier; the
    in-flight service transaction must settle and restore A without a Committed
    acknowledgment. New attempts must remain off.
 5. **Worker loss/recovery.** Hold B runtime readiness. Identify ONLY the fixture's
    exact B maintenance process by immutable digest, command arguments containing
-   the exact protected record path, SYSTEM SID, parent/creation time and pinned
-   native handle. Terminate that worker while Verifying, not an unrelated agent.
+   the exact protected record path, SYSTEM SID, native creation time and pinned
+   native handle. Terminate that worker while Applying with real B runtime readiness
+   blocked, not an unrelated agent.
    Release B readiness. The service-owned recovery path must complete one matching
    transaction without duplicate installations or a false precommit acknowledgment.
-6. **Service restart recovery.** With the same verified Verifying record and no
+6. **Service restart recovery.** With the same verified Applying record and no
    maintenance process, restart only the fixture service. Confirm startup recovery
    preserves SCM ownership, resumes the protected journal and waits for real
    runtime readiness. Unit/manifest mixed old/new crash cases are additionally
@@ -156,8 +159,54 @@ Unknown files, modified directory identities, markers or executable bytes are
 preserved and make the gate fail. Readable status ownership markers deliberately
 use `.owner`, since normal registration discovery parses every `.json` file.
 
-This controller does not yet execute the separate download/revocation/worker-loss
-or crash-metadata injection scenarios above. They remain required follow-up
-native gates; existing pure transaction tests are not labeled SCM runtime proof.
-The inherited strict Windows desktop refresh hosted-runner repair must also be
-carried before native execution. No workflow dispatch is added by this checkpoint.
+The controller now has these separately selected executable scenarios, each for a
+fresh reviewed disposable runner:
+
+| `--scenario` | Required observation |
+| --- | --- |
+| `success` | Explicit local off→on, B commit and later ordinary acknowledgment |
+| `default-on` | A's AutoUpdate policy key is omitted; no enable CLI runs; B updates automatically |
+| `rollback` | B sync rejected, actual A restoration, later A heartbeat and no acknowledgment/retry in a measured cooldown window |
+| `download-revoke` | HTTP holds after one 64KiB chunk; actual local disable completes before release; no journal, worker, B cache or SCM replacement |
+| `readiness-revoke` | Real B SCM runtime is blocked in readiness; local disable then release settles transaction and restores A |
+| `worker-loss` | Exact held SYSTEM maintenance process is terminated; independent runtime recovery commits B |
+| `restart-recovery` | Stop only fixture SCM, terminate held worker, inject exact known old manifest beside new SCM/unit, then start SCM and require reconciliation/commit |
+| `tamper` | Stopped fixture's unit gains one foreign field; attempted native start must preserve those bytes/no acknowledgment for 35 seconds; only explicit fixture restoration permits recovery |
+| `legacy-supersession` | Equal unproven A header is selected before any advertisement, observed while disabled, then remains unacknowledged when enabled; later B request executes |
+| `foreign-worker` | After a real commit, a copied out-of-layout record passed to B's actual maintenance command must fail without mutating the canonical receipt |
+| `foreground-reject` | Copied profile runs actual A under the controller's retained process handle with only its own AutoUpdate enabled; actual runtime sync works but no native update authority is gained |
+
+`windows-update-worker-pin.ps1` is fixture-only. It validates the exact immutable
+candidate/record/nonce, SHA, command line and SYSTEM owner while holding a native
+process handle. An earlier inspected native FILETIME must match before the same
+held process can be terminated. It rejects a changed process instance and waits
+for that exact handle to exit. Its embedded C# has been compiled offline without
+invoking native APIs; this is not Windows runtime proof.
+
+Rollback receipts retain monotonic sequenced normal sync observations including
+the observed protected journal phase. They require a **later** authenticated A
+heartbeat with no handled request, then five seconds without new download or
+phase change, strictly within the persisted first retry deadline. The controller
+checks for invalid acknowledgments again after cleanup and after bounded HTTP
+handler drain. Receipts include only hashes, versions, phase/request IDs, fixture
+machine IDs, PID/creation metadata and timings, never credentials or executable,
+audio/video or native endpoint contents. Unknown third metadata states are never
+restored over by fixture cleanup.
+
+All scenarios are **prepared, not executed**. Offline tests mock/refuse OS/task/SCM
+boundaries; real loopback HTTP tests validate auth, barrier and acknowledgment
+behavior. They cannot substitute for actual Windows native execution. The reviewed
+strict desktop-refresh stdin transport fix is carried from `b6ec520`; the combined
+source still needs full native compilation and execution review; this checkpoint dispatches no workflow.
+
+## Registration scope
+
+This implementation/gate targets Windows public registrations, including paired
+private routing hosted by the public runtime. Private-only network profiles enter
+`private_network::runtime` directly and currently have no core update request or
+handled-ack integration on any platform. Advancing a shared CLI is not evidence
+that a separate private-only SCM registration updated. Extending that mode needs
+its own server authority/credential and lifecycle assessment; no capability or
+credential bypass is added here. The disposable fixtures use a public-only
+loopback configuration; actual paired-private settings preservation remains part
+of the separately reviewed installed-host upgrade trial.

@@ -47,6 +47,20 @@ class FlowTests(unittest.TestCase):
                                                 'cleanup_desktop', 'restore_path', 'postcheck',
                                                 'remove_staging', 'close_gateway'])
 
+    def test_default_on_and_foreground_do_not_explicitly_enable_installed_policy(self):
+        for scenario in ['default-on', 'foreground-reject']:
+            adapter = Adapter()
+            result = controller.run_case(adapter, scenario)
+            self.assertTrue(result['completed'])
+            self.assertNotIn('enable_updates', adapter.calls)
+            if scenario == 'default-on':
+                self.assertNotIn('assert_disabled', adapter.calls)
+
+    def test_equal_legacy_header_is_selected_before_initial_advertisement(self):
+        adapter = Adapter()
+        self.assertTrue(controller.run_case(adapter, 'legacy-supersession')['completed'])
+        self.assertLess(adapter.calls.index('prepare_scenario'), adapter.calls.index('advertise'))
+
     def test_cleanup_failure_does_not_skip_later_cleanup(self):
         for failure in ['disable_updates', 'stop_workers', 'uninstall_pair', 'cleanup_desktop',
                         'restore_path', 'postcheck', 'remove_staging', 'close_gateway']:

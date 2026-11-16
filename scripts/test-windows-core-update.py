@@ -3,8 +3,8 @@
 
 This controller uses real versioned executables and normal service installation.
 It is intentionally separate from production release workflows and host upgrades.
-This revision implements success/rollback with two enrollments and higher shared
-CLI/GUI. Revocation and crash-recovery native scenarios remain separate gates.
+Each explicitly selected scenario uses two enrollments and a higher shared CLI/GUI.
+Default invocation validates artifacts only. No native execution occurs on import.
 """
 import argparse
 import base64
@@ -37,7 +37,10 @@ def ps_result(script):
     executable = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
     prefix = "$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);"
     encoded = base64.b64encode((prefix + script).encode('utf-16le')).decode()
-    result = subprocess.run([str(executable), '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+    args = [str(executable), '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded]
+    if len(subprocess.list2cmdline(args)) > 30000:
+        raise RuntimeError('Fixture PowerShell command exceeds conservative native limit')
+    result = subprocess.run(args,
                             env=environment, capture_output=True, timeout=60, creationflags=0x08000000)
     if result.returncode or len(result.stdout) > 262144 or len(result.stderr) > 32768:
         raise RuntimeError('Bounded native PowerShell fixture operation failed')
@@ -102,16 +105,26 @@ def artifacts_from_manifest(path):
 
 def run_case(adapter, rollback):
     """Same orchestration for real SCM and offline failure-injection adapters."""
-    proof = {'completed': False, 'scenario': 'rollback' if rollback else 'success', 'cleanup_errors': []}
+    scenario = ('rollback' if rollback else 'success') if isinstance(rollback, bool) else rollback
+    rollback = scenario in ('rollback', 'readiness-revoke', 'download-revoke', 'foreground-reject')
+    proof = {'completed': False, 'scenario': scenario, 'cleanup_errors': []}
+    adapter.fixture_scenario = scenario
     try:
         proof['preflight'] = adapter.preflight()
         adapter.stage()
         adapter.install_pair()
         baseline = adapter.preservation_snapshot()
+        if scenario == 'legacy-supersession':
+            adapter.prepare_scenario(scenario)
         adapter.advertise(rollback)
-        adapter.assert_disabled()
-        adapter.enable_updates()
-        proof['transaction'] = adapter.wait_transaction(rollback)
+        if scenario != 'default-on':
+            adapter.assert_disabled()
+        if scenario not in ('success', 'rollback', 'default-on', 'legacy-supersession'):
+            adapter.prepare_scenario(scenario)
+        if scenario not in ('foreground-reject', 'default-on'):
+            adapter.enable_updates()
+        proof['transaction'] = (adapter.wait_transaction(rollback) if scenario in ('success', 'rollback', 'default-on')
+                                else adapter.exercise_scenario(scenario))
         adapter.assert_preserved(baseline)
         adapter.assert_ack(rollback)
         proof['completed'] = True
@@ -127,6 +140,8 @@ def run_case(adapter, rollback):
                 proof['cleanup_errors'].append(name + ': ' + type(error).__name__ + ': ' + str(error))
     if proof['cleanup_errors']:
         proof['completed'] = False
+    if isinstance(adapter, Native) and hasattr(adapter, 'final_observations'):
+        proof['observations'] = adapter.final_observations
     return proof
 
 
@@ -158,7 +173,7 @@ class Native(cold.Native):
             raise RuntimeError('Existing published CLI root; preserved')
         if self.before['tasks']:
             raise RuntimeError('Existing PortHub desktop task; preserved')
-        ps("if(Get-Service -Name 'porthub-*' -ErrorAction SilentlyContinue){throw 'Existing PortHub service'}")
+        ps("if(Get-Service -Name 'porthub-*' -ErrorAction SilentlyContinue){throw 'Existing PortHub service'};if(Get-CimInstance Win32_Process -Filter \"Name='porthub.exe'\"){throw 'Existing PortHub process'}")
         for row in self.rows:
             output = subprocess.run([row['path'], 'version'], capture_output=True, timeout=10, creationflags=0x08000000)
             wanted = 'porthub ' + row['version'] + '\nbuild ' + row['source'] + '\ntarget x86_64-pc-windows-msvc'
@@ -198,7 +213,10 @@ class Native(cold.Native):
             for suffix, features in [('.client-features.json', cold.BASE_FEATURES),
                                      ('.media-policy.json', cold.MEDIA_FEATURES),
                                      ('.drive-health-policy.json', ('drive-health', 'drive-tests'))]:
-                self.private(Path(str(profile) + suffix), {'disabled': dict.fromkeys(features, True)})
+                disabled = dict.fromkeys(features, True)
+                if index == 0 and suffix == '.client-features.json' and getattr(self, 'fixture_scenario', '') == 'default-on':
+                    disabled.pop('auto-update')  # Exercise the real default, not an explicit enable.
+                self.private(Path(str(profile) + suffix), {'disabled': disabled})
             self.profiles[machine] = dict(identity=identity, profile=profile, input=input_path)
         self.profile = self.profiles[self.machine]['profile']
         self.identity = self.profiles[self.machine]['identity']
@@ -296,7 +314,8 @@ $processes=@();foreach($p in @(Get-CimInstance Win32_Process -Filter "Name='port
         if task is None or process['sha256'] != self.c['sha256']:
             raise RuntimeError('Higher shared enrollment/GUI not ready at baseline')
         return {'files': {str(path): digest(path) for path in paths if path.exists()},
-                'other_identity': other['identity'], 'other_process': process, 'task': task}
+                'other_identity': other['identity'], 'other_process': process, 'task': task,
+                'own_policy': json.loads(Path(str(self.profile) + '.client-features.json').read_text())}
 
     def scm_snapshot(self, identity):
         service = 'porthub-' + identity[:24]
@@ -311,10 +330,10 @@ $processes=@();foreach($p in @(Get-CimInstance Win32_Process -Filter "Name='port
 
     def advertise(self, rollback):
         self.gateway.fail_version = self.b['version'] if rollback else None
-        self.request_id = self.gateway.advertise(self.machine, self.b['version'])
+        self.request_id = self.gateway.advertise(self.machine, getattr(self, 'initial_target', self.b['version']))
 
     def assert_disabled(self):
-        wait_for(lambda: any(e['kind'] == 'request-observed' and e.get('machine') == self.machine for e in self.gateway.events),
+        wait_for(lambda: any(e['kind'] == 'request-observed' and e.get('machine') == self.machine and e.get('request_id') == self.request_id for e in self.gateway.events),
                  40, 'disabled client observed the actual update request')
         start = time.monotonic()
         while time.monotonic() - start < 5:
@@ -324,6 +343,234 @@ $processes=@();foreach($p in @(Get-CimInstance Win32_Process -Filter "Name='port
 
     def enable_updates(self):
         self.cli('features', '--registration', self.identity, 'enable', 'auto-update')
+
+    def prepare_scenario(self, scenario):
+        if scenario == 'download-revoke':
+            self.gateway.hold_download = True
+            self.gateway.release_download.clear()
+        elif scenario in ('readiness-revoke', 'worker-loss', 'restart-recovery', 'tamper'):
+            self.gateway.fail_version = self.b['version']
+            self.gateway.candidate_sync_seen.clear()
+        elif scenario == 'legacy-supersession':
+            self.initial_target = self.a['version']
+        elif scenario not in ('foreign-worker', 'foreground-reject'):
+            raise ValueError('Unknown native scenario')
+
+    def assert_previous_without_attempt(self):
+        if self.journal_for(self.machine) or self.workers():
+            return False
+        if (self.root / 'releases' / self.b['sha256']).exists():
+            return False
+        return self.scm_snapshot(self.identity)['sha256'] == self.a['sha256']
+
+    def candidate_pending(self):
+        record = self.journal_for(self.machine)
+        if (not record or record.get('phase') not in ('applying', 'verifying')
+                or record.get('request', {}).get('id') != self.request_id
+                or not self.gateway.candidate_sync_seen.is_set()):
+            return None
+        if self.scm_snapshot(self.identity)['sha256'] != self.b['sha256']:
+            return None
+        return record
+
+    def pin_worker(self, action, record, inspected=None):
+        workers = self.workers()
+        if len(workers) != 1:
+            raise RuntimeError('Expected exactly one fixture maintenance worker')
+        script = Path(__file__).with_name('windows-update-worker-pin.ps1').read_text()
+        command = '& ([ScriptBlock]::Create(' + cold.quote(script) + ')) -Action ' + cold.quote(action)
+        for key, value in [('ProcessId', workers[0]['ProcessId']), ('Image', record['candidate']),
+                           ('Sha256', self.b['sha256']), ('Record', str(self.profile) + '.windows-update.json'),
+                           ('Nonce', record['nonce'])]:
+            command += ' -' + key + ' ' + cold.quote(value)
+        if inspected:
+            if workers[0]['ProcessId'] != inspected['pid']:
+                raise RuntimeError('Maintenance process changed before intervention')
+            command += ' -ExpectedCreation ' + cold.quote(inspected['creation'])
+        return json.loads(ps(command))
+
+    def start_exact_candidate(self, record, allow_failure=False):
+        # Start SCM directly only for the recovery cases whose exact current
+        # image/unit was independently checked before metadata crash injection.
+        expected = str(self.root / 'releases' / self.b['sha256'] / 'porthub.exe')
+        if record['candidate'] != expected:
+            raise RuntimeError('Journal candidate changed')
+        service = 'porthub-' + self.identity[:24]
+        command = ('$s=Get-CimInstance Win32_Service -Filter ' + cold.quote("Name='" + service + "'") +
+                   ';if($s.PathName -notlike (' + cold.quote('"' + expected + '"') + "+'*')){throw 'SCM image changed before recovery start'};")
+        if allow_failure:
+            command += 'try{Start-Service -Name ' + cold.quote(service) + ";@{started=$true}|ConvertTo-Json -Compress}catch{@{started=$false}|ConvertTo-Json -Compress}"
+            return json.loads(ps(command))
+        ps(command + 'Start-Service -Name ' + cold.quote(service))
+
+
+    def exercise_scenario(self, scenario):
+        if scenario == 'foreground-reject':
+            return self.exercise_foreground()
+        if scenario == 'download-revoke':
+            wait_for(self.gateway.download_started.is_set, 40, 'download paused after first bounded chunk')
+            self.disable_updates()
+            self.gateway.release_download.set()
+            wait_for(self.assert_previous_without_attempt, 5, 'revoked download removed staging without mutation')
+            self.terminal_observed = time.monotonic()
+            self.terminal_sequence = max((e['sequence'] for e in self.gateway.events), default=0)
+            self.terminal_downloads = sum(e['kind'] == 'download' for e in self.gateway.events)
+            return {'phase': 'cancelled-before-journal', 'scm_unchanged': True, 'journal_absent': True}
+        if scenario == 'legacy-supersession':
+            legacy = self.request_id
+            wait_for(lambda: any(e['kind'] == 'request-observed' and e.get('request_id') == legacy for e in self.gateway.events),
+                     40, 'equal legacy request observed by actual client')
+            end = time.monotonic() + 5
+            while time.monotonic() < end:
+                if not self.assert_previous_without_attempt() or any(e.get('handled') == legacy for e in self.gateway.events):
+                    raise RuntimeError('Equal unproven legacy request installed or acknowledged')
+                time.sleep(.1)
+            self.request_id = self.gateway.advertise(self.machine, self.b['version'])
+            result = self.wait_transaction(False)
+            result['equal_legacy_request_unacknowledged'] = True
+            return result
+        if scenario == 'foreign-worker':
+            result = self.wait_transaction(False)
+            path = Path(str(self.profile) + '.windows-update.json')
+            before = digest(path)
+            copy = self.folder / 'foreign-record.json'
+            self.private(copy, json.loads(path.read_text()))
+            try:
+                attempt = subprocess.run([self.b['path'], '__windows-update', '--record', str(copy)],
+                                         capture_output=True, timeout=10, creationflags=0x08000000)
+                if attempt.returncode == 0 or digest(path) != before:
+                    raise RuntimeError('Out-of-layout worker record was accepted/mutated enrollment')
+            finally:
+                if copy.exists() and not copy.is_symlink():
+                    copy.unlink()
+            result['foreign_worker_rejected'] = True
+            return result
+        record = wait_for(self.candidate_pending, 25, 'actual candidate SCM running while readiness blocked')
+        if scenario == 'readiness-revoke':
+            self.disable_updates()
+            self.gateway.fail_version = None
+            return self.wait_transaction(True)
+        inspected = self.pin_worker('Inspect', record)
+        if scenario in ('restart-recovery', 'tamper'):
+            self.cli('service', 'stop', '--profile', str(self.profile))
+        killed = self.pin_worker('Terminate', record, inspected)
+        if not killed.get('terminated') or killed['creation'] != inspected['creation']:
+            raise RuntimeError('Held maintenance process was not terminated')
+        if scenario == 'tamper':
+            return self.exercise_tamper(record, killed)
+        if scenario == 'restart-recovery':
+            manifest = Path(str(self.profile) + '.service.json')
+            saved = manifest.read_bytes()
+            previous = bytes(record['previous_manifest'])
+            if saved == previous:
+                raise RuntimeError('No candidate manifest to exercise mixed-state recovery')
+            self.injected_metadata = (manifest, saved, hashlib.sha256(previous).hexdigest())
+            self.write_metadata(manifest, previous)
+        self.gateway.fail_version = None
+        if scenario == 'restart-recovery':
+            self.start_exact_candidate(record)
+        result = self.wait_transaction(False)
+        result['terminated_worker'] = killed
+        result['restart_mixed_metadata'] = scenario == 'restart-recovery'
+        return result
+
+    def exercise_foreground(self):
+        copy = self.folder / 'foreground-profile.json'
+        self.private(copy, json.loads(self.profiles[self.machine]['input'].read_text()))
+        base = dict.fromkeys(cold.BASE_FEATURES, True)
+        base['auto-update'] = False  # Enable only this copied foreground profile.
+        self.private(Path(str(copy) + '.client-features.json'), {'disabled': base})
+        self.private(Path(str(copy) + '.media-policy.json'), {'disabled': dict.fromkeys(cold.MEDIA_FEATURES, True)})
+        self.private(Path(str(copy) + '.drive-health-policy.json'), {'disabled': {'drive-health': True, 'drive-tests': True}})
+        child = None
+        try:
+            child = subprocess.Popen([self.a['path'], 'run', '--profile', str(copy)],
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, creationflags=0x08000000)
+            self.foreground_child = child
+            status = Path(str(copy) + '.status.json')
+            def running():
+                if child.poll() is not None:
+                    raise RuntimeError('Copied foreground agent exited before authorization test')
+                try:
+                    value = json.loads(status.read_text())
+                except (OSError, ValueError):
+                    return False
+                return value.get('state') == 'running' and value.get('pid') == child.pid
+            wait_for(running, 30, 'actual copied-profile foreground runtime control sync')
+            end = time.monotonic() + 5
+            while time.monotonic() < end:
+                if child.poll() is not None or not self.assert_previous_without_attempt():
+                    raise RuntimeError('Foreground copied profile authorized a native update or exited')
+                time.sleep(.1)
+        finally:
+            if child is not None:
+                if child.poll() is None:
+                    child.terminate()  # Python retains the exact owned native handle.
+                child.wait(timeout=10)
+                self.foreground_child = None
+            known = {'', '.lock', '.config.json', '.status.json', '.client-features.json',
+                     '.media-policy.json', '.drive-health-policy.json'}
+            for path in self.folder.glob('foreground-profile.json*'):
+                suffix = path.name.removeprefix('foreground-profile.json')
+                if suffix not in known or path.is_symlink() or not path.is_file() or getattr(path.lstat(), 'st_file_attributes', 0) & 0x400:
+                    raise RuntimeError('Unknown copied foreground state preserved')
+                path.unlink()
+        self.terminal_observed = time.monotonic()
+        self.terminal_sequence = max((e['sequence'] for e in self.gateway.events), default=0)
+        self.terminal_downloads = sum(e['kind'] == 'download' for e in self.gateway.events)
+        return {'phase': 'foreground-rejected', 'journal_absent': True, 'scm_unchanged': True}
+
+    def write_metadata(self, path, data):
+        self.validate_claim('managed')
+        # Fixture-only exact existing regular protected file, no replacement
+        # path/ACL/symlink changes. All relevant processes are stopped first.
+        if path.is_symlink() or not path.is_file() or getattr(path.lstat(), 'st_file_attributes', 0) & 0x400:
+            raise RuntimeError('Unsafe metadata intervention refused')
+        with path.open('r+b') as stream:
+            stream.write(data)
+            stream.truncate()
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    def exercise_tamper(self, record, killed):
+        path = Path(record['previous']['unit'])
+        if path.parent != self.root / 'services':
+            raise RuntimeError('Unit intervention is outside exact fixture services')
+        saved = path.read_bytes()
+        value = json.loads(saved)
+        value['fixture_operator_change'] = record['nonce']
+        foreign = json.dumps(value, sort_keys=True).encode()
+        self.injected_metadata = (path, saved, hashlib.sha256(foreign).hexdigest())
+        self.write_metadata(path, foreign)
+        self.gateway.fail_version = None
+        # An expected failed service start is observed rather than hidden; no
+        # arbitrary process launch bypasses native service-start authorization.
+        start_result = self.start_exact_candidate(record, allow_failure=True)
+        until = time.monotonic() + 35
+        while time.monotonic() < until:
+            if digest(path) != self.injected_metadata[2] or any(e.get('handled') == self.request_id for e in self.gateway.events):
+                raise RuntimeError('Foreign metadata overwritten or falsely acknowledged')
+            time.sleep(.2)
+        self.restore_injected_metadata()
+        self.start_exact_candidate(record)
+        result = self.wait_transaction(False)
+        result['foreign_metadata_start_accepted'] = start_result['started']
+        result['foreign_metadata_preserved_seconds'] = 35
+        result['terminated_worker'] = killed
+        return result
+
+    def restore_injected_metadata(self):
+        if not getattr(self, 'injected_metadata', None):
+            return
+        path, original, changed_sha = self.injected_metadata
+        if digest(path) == hashlib.sha256(original).hexdigest():
+            self.injected_metadata = None
+            return
+        if digest(path) != changed_sha:
+            raise RuntimeError('Unknown third metadata state preserved')
+        self.write_metadata(path, original)
+        self.injected_metadata = None
 
     def wait_transaction(self, rollback):
         phase = 'rolled-back' if rollback else 'committed'
@@ -340,6 +587,12 @@ $processes=@();foreach($p in @(Get-CimInstance Win32_Process -Filter "Name='port
         process = json.loads(raw)
         if Path(process['path']) != Path(spec['executable']) or digest(process['path']) != expected['sha256']:
             raise RuntimeError('Actual SCM process differs from pinned registration')
+        self.terminal_observed = time.monotonic()
+        self.terminal_sequence = max((e['sequence'] for e in self.gateway.events), default=0)
+        self.terminal_downloads = sum(e['kind'] == 'download' for e in self.gateway.events)
+        if rollback:
+            age = max(0, time.time() - record['updated'])
+            self.cooldown_deadline = self.terminal_observed + max(0, 29 - age)
         return {'phase': phase, 'request_id': record['request']['id'],
                 'version': expected['version'], 'pid': process['pid']}
 
@@ -350,27 +603,73 @@ $processes=@();foreach($p in @(Get-CimInstance Win32_Process -Filter "Name='port
                 continue
             if digest(path) != sha:
                 raise RuntimeError('Other enrollment or protected policy changed')
+        current_policy = json.loads(Path(str(self.profile) + '.client-features.json').read_text())
+        previous_policy = json.loads(json.dumps(baseline['own_policy']))
+        current_policy.get('disabled', {}).pop('auto-update', None)
+        previous_policy.get('disabled', {}).pop('auto-update', None)
+        if current_policy != previous_policy:
+            raise RuntimeError('Unrelated local client permission changed')
         if self.scm_snapshot(baseline['other_identity']) != baseline['other_process']:
             raise RuntimeError('Other enrollment SCM process changed')
         if digest(self.cli_path) != self.c['sha256'] or self.task_snapshot() != baseline['task']:
             raise RuntimeError('Higher shared CLI/GUI command or XML/SD was rewound')
+        self.preservation_proof = {'cli_sha256': self.c['sha256'],
+                                   'task_xml_sha256': hashlib.sha256(baseline['task']['xml'].encode()).hexdigest(),
+                                   'task_sd_sha256': hashlib.sha256(baseline['task']['sd'].encode()).hexdigest(),
+                                   'helper_processes': baseline['task']['processes'],
+                                   'other_scm_process': baseline['other_process'],
+                                   'unchanged_file_hashes': baseline['files'],
+                                   'other_permissions_unchanged': True}
+
+    def assert_final_observations(self):
+        if self.gateway and (self.gateway.overflow or any(e['kind'] in ('invalid-ack', 'artifact-changed', 'download-barrier-timeout') for e in self.gateway.events)):
+            raise RuntimeError('Fixture integrity/acknowledgment observation failed')
 
     def assert_ack(self, rollback):
         def acknowledged():
             return any(e.get('handled') == self.request_id for e in self.gateway.events)
         if rollback:
-            if acknowledged():
-                raise RuntimeError('Rolled-back request acknowledged')
+            terminal = self.journal_for(self.machine)
+            phase = 'rolled-back' if terminal else None
+            after = getattr(self, 'terminal_sequence', max((e['sequence'] for e in self.gateway.events), default=0))
+            heartbeat = wait_for(lambda: next((e for e in self.gateway.events
+                                 if e['kind'] == 'sync' and e.get('machine') == self.machine
+                                 and e.get('version') == self.a['version'] and e.get('journal_phase') == phase
+                                 and e['sequence'] > after and not e.get('handled')), None),
+                     20, 'old core authenticated post-terminal heartbeat without acknowledgment')
+            downloads = getattr(self, 'terminal_downloads', sum(e['kind'] == 'download' for e in self.gateway.events))
+            if sum(e['kind'] == 'download' for e in self.gateway.events) != downloads:
+                raise RuntimeError('Retry occurred before post-terminal heartbeat')
+            # Stay strictly inside the first actual 30-second retry cooldown.
+            # A five-second quiet interval after a real heartbeat is additional
+            # evidence, not a claim that a disabled process can never retry.
+            started = time.monotonic()
+            if terminal and started + 5 > getattr(self, 'cooldown_deadline', self.terminal_observed + 27):
+                raise RuntimeError('No bounded cooldown observation budget remained')
+            while time.monotonic() - started < 5:
+                current = self.journal_for(self.machine)
+                if (acknowledged() or sum(e['kind'] == 'download' for e in self.gateway.events) != downloads
+                        or (current.get('phase') if current else None) != phase):
+                    raise RuntimeError('Rollback/cancel acknowledgment or early retry observed')
+                time.sleep(.1)
+            if phase is None and not self.assert_previous_without_attempt():
+                raise RuntimeError('Revoked download left a staged image or service mutation')
+            self.ack_proof = {'phase': phase, 'post_terminal_heartbeat_sequence': heartbeat['sequence'],
+                              'quiet_seconds': time.monotonic() - started, 'new_downloads': 0, 'handled': False}
         else:
             wait_for(acknowledged, 45, 'committed request acknowledgment')
-        if self.gateway.overflow:
-            raise RuntimeError('Fixture observation bounds exceeded')
-        if any(e['kind'] == 'invalid-ack' for e in self.gateway.events):
-            raise RuntimeError('Observed acknowledgment before matching durable commit')
+        self.assert_final_observations()
 
     def disable_updates(self):
-        if self.installed_ids and self.profile.exists():
-            self.cli('features', '--registration', self.identity, 'disable', 'auto-update')
+        try:
+            if self.installed_ids and self.profile.exists():
+                self.cli('features', '--registration', self.identity, 'disable', 'auto-update')
+        finally:
+            # Never release the intentionally stalled download before the real
+            # local permission change has returned. Cleanup still unblocks the
+            # HTTP thread if the CLI fails, and reports that failure.
+            if self.gateway:
+                self.gateway.release_download.set()
 
     def workers(self):
         root = str(self.root / 'releases')
@@ -378,6 +677,12 @@ $processes=@();foreach($p in @(Get-CimInstance Win32_Process -Filter "Name='port
         return json.loads(value)
 
     def stop_workers(self):
+        child = getattr(self, 'foreground_child', None)
+        if child is not None:
+            if child.poll() is None:
+                child.terminate()
+            child.wait(timeout=10)
+            self.foreground_child = None
         if not self.created_root:
             return
         self.validate_claim('managed')
@@ -389,6 +694,7 @@ $processes=@();foreach($p in @(Get-CimInstance Win32_Process -Filter "Name='port
         self.validate_claim('managed')
         if self.workers():
             raise RuntimeError('Maintenance worker still active; registration cleanup refused')
+        self.restore_injected_metadata()
         errors = []
         for machine in reversed(self.installed_ids):
             try:
@@ -422,6 +728,9 @@ $processes=@();foreach($p in @(Get-CimInstance Win32_Process -Filter "Name='port
             winreg.SetValueEx(key, 'Path', 0, self.path_type, self.old_path)
 
     def postcheck(self):
+        child = getattr(self, 'foreground_child', None)
+        if child is not None and child.poll() is None:
+            raise RuntimeError('Owned foreground test process remains')
         if not self.created_root:
             return
         self.validate_claim('managed')
@@ -506,7 +815,16 @@ $processes=@();foreach($p in @(Get-CimInstance Win32_Process -Filter "Name='port
 
     def close_gateway(self):
         if self.gateway:
-            self.gateway.close()
+            try:
+                self.assert_final_observations()
+            finally:
+                try:
+                    self.gateway.close()
+                finally:
+                    self.final_observations = {'events': list(self.gateway.events),
+                                               'ack_proof': getattr(self, 'ack_proof', None),
+                                               'preservation': getattr(self, 'preservation_proof', None)}
+                    self.assert_final_observations()
 
 
 def main():
@@ -514,11 +832,11 @@ def main():
     parser.add_argument('--manifest', required=True)
     parser.add_argument('--execute-native-scm', action='store_true')
     parser.add_argument('--receipt', required=True)
-    parser.add_argument('--scenario', choices=['success', 'rollback'], default='success')
+    parser.add_argument('--scenario', choices=['success', 'rollback', 'default-on', 'download-revoke', 'readiness-revoke', 'worker-loss', 'restart-recovery', 'tamper', 'legacy-supersession', 'foreign-worker', 'foreground-reject'], default='success')
     args = parser.parse_args()
     receipt = artifacts_from_manifest(args.manifest)
     if args.execute_native_scm:
-        result = run_case(Native(receipt), args.scenario == 'rollback')
+        result = run_case(Native(receipt), args.scenario)
         Path(args.receipt).write_text(json.dumps(result, indent=2))
         raise SystemExit(0 if result['completed'] and not result['cleanup_errors'] else 1)
     Path(args.receipt).write_text(json.dumps({'prepared': True, 'executed': False,

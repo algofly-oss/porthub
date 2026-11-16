@@ -18,7 +18,7 @@ class GatewayTests(unittest.TestCase):
         path = Path(self.tmp.name) / 'agent.exe'
         path.write_bytes(b'not-an-executable-test-bytes')
         self.artifact = dict(path=str(path), target='windows_x86_64', os='windows', arch='x86_64',
-                             asset='porthub-windows_x86_64.exe', version='1.11.35',
+                             asset='porthub-windows_x86_64.exe', version='1.11.35', source='a' * 40,
                              sha256=hashlib.sha256(path.read_bytes()).hexdigest(), size=path.stat().st_size)
         self.journal = None
         self.gateway = module.Gateway({'1.11.35': self.artifact}, {'a': 'secret-a', 'c': 'secret-c'}, lambda _: self.journal)
@@ -60,6 +60,8 @@ class GatewayTests(unittest.TestCase):
                 self.fetch('/api/machines/client/sync', value)
             self.assertEqual(error.exception.code, 409)
         self.journal['phase'] = 'committed'
+        self.journal['source_revision'] = self.artifact['source']
+        self.journal['release']['sha256'] = self.artifact['sha256']
         self.assertEqual(self.fetch('/api/machines/client/sync', value)[0], 200)
         value['client_version'] = '1.11.34'
         with self.assertRaises(HTTPError):
@@ -81,6 +83,38 @@ class GatewayTests(unittest.TestCase):
         with self.assertRaises(HTTPError) as error:
             self.fetch('/api/machines/a/secret-a/downloads/agent/windows_x86_64')
         self.assertEqual(error.exception.code, 409)
+
+    def test_download_barrier_holds_after_first_chunk_and_releases_exact_binary(self):
+        import threading
+        path = Path(self.artifact['path'])
+        path.write_bytes(b'x' * 131072)
+        self.artifact.update(size=path.stat().st_size, sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+        self.gateway.hold_download = True
+        self.gateway.release_download.clear()
+        results = []
+        def read():
+            results.append(self.fetch('/api/machines/a/secret-a/downloads/agent/windows_x86_64')[1])
+        thread = threading.Thread(target=read)
+        thread.start()
+        try:
+            self.assertTrue(self.gateway.download_started.wait(2))
+            self.assertTrue(thread.is_alive())
+            self.gateway.release_download.set()
+            thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(hashlib.sha256(results[0]).hexdigest(), self.artifact['sha256'])
+        finally:
+            self.gateway.release_download.set()
+            thread.join(timeout=3)
+
+    def test_sync_observations_bind_post_terminal_phase_to_monotonic_sequence(self):
+        self.journal = {'phase': 'rolled-back'}
+        self.fetch('/api/machines/client/sync', dict(machine_id='a', token='secret-a', client_version='1.11.34'))
+        event = next(e for e in self.gateway.events if e['kind'] == 'sync')
+        self.assertEqual(event['journal_phase'], 'rolled-back')
+        self.assertEqual(event['handled'], '')
+        self.assertGreater(event['sequence'], 0)
+        self.assertGreater(event['monotonic'], 0)
 
 
 if __name__ == '__main__':
