@@ -35,6 +35,10 @@ async fn audit_capture(tun:&Tun,snapshot:&Snapshot,peers:&[std::net::Ipv4Addr])-
         .map_err(|_|anyhow::anyhow!("private capture route audit timed out; refusing stale native routing"))?
 }
 
+fn send_authorized(authority:Option<&super::authority_event::Authority<()>>,pairs:&super::sparse::Handle,peer:&str,session:&porthub_mesh::udp::Session,bytes:bytes::Bytes)->Result<()> {
+    session.send_guarded(bytes,super::authority_event::send_permit(authority,pairs,peer)?)
+}
+
 async fn write_authorized(authority:Option<&super::authority_event::Authority<()>>,handle:&super::sparse::Handle,peer:Option<&str>,tun:&Tun,bytes:&[u8])->Result<()> {
     let pair=if handle.enabled(){
         if let Some(peer)=peer {match handle.pair_authority(peer){Some(pair)=>Some(pair),None=>return Ok(())}}else{None}
@@ -604,7 +608,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     if !replies.is_empty() {
                         if direct {
                             if let Some(session)=sessions.read().await.get(&peer) {
-                                for reply in replies { let _=session.send(reply); }
+                                for reply in replies { let _=send_authorized(installed_authority.as_ref(),&sparse_handle,&peer,session,reply); }
                             }
                         } else {
                             for reply in replies { let _=relay_probe(&relay_sender,&peer_ips,&profile.peer_id,&peer,&reply); }
@@ -643,7 +647,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 // rather than adding a second TURN/DTLS transport around it.
                 let default=mode!=super::strategy::Mode::PreferGateway || !relay_ready;
                 let prefer=if mode==super::strategy::Mode::Auto {path_quality.prefer_peer(peer,default,Instant::now())} else {default};
-                if let Some(session)=direct.filter(|_|prefer || !relay_ready) {let _=session.send(packet);}
+                if let Some(session)=direct.filter(|_|prefer || !relay_ready) {let _=send_authorized(installed_authority.as_ref(),&sparse_handle,&peer,session,packet);}
                 else if relay_ready {let _=relay_sender.send(peer,&packet);}
             },
             #[cfg(feature="local-tor")]
@@ -700,7 +704,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     ) {
                         let packet = porthub_mesh::control_packet::encode(porthub_mesh::control_packet::EXIT, *source, *destination, &buffer[..size])?;
                         if use_direct {
-                            if let Some(session) = direct { let _ = session.send(packet); }
+                            if let Some(session) = direct { let _ = send_authorized(installed_authority.as_ref(),&sparse_handle,&peer,session,packet); }
                         } else { let _ = relay_sender.send(&peer, &packet); }
                     }
                 }
@@ -724,7 +728,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     if router.kernel_packet(peer,bytes::Bytes::copy_from_slice(&buffer[..size]),prefer_stream){continue;}
                 }
                 match paths.choose_preferred(parsed,direct.is_some(),relay_ready,prefer_peer) {
-                    Some(true)=>{if let Some(session)=direct {let _=session.send(bytes::Bytes::copy_from_slice(&buffer[..size]));}},
+                    Some(true)=>{if let Some(session)=direct {let _=send_authorized(installed_authority.as_ref(),&sparse_handle,peer,session,bytes::Bytes::copy_from_slice(&buffer[..size]));}},
                     Some(false)=>{let _=relay_sender.send(peer,&buffer[..size]);},None=>{}
                 }
             }
@@ -837,7 +841,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                         let burst=path_quality.start(peer,direct,nonce,now);
                         let mut complete=true;
                         for packet in burst {
-                            let sent=if direct { session.send(packet) } else { relay_probe(&relay_sender,&peer_ips,&profile.peer_id,peer,&packet) };
+                            let sent=if direct { send_authorized(installed_authority.as_ref(),&sparse_handle,peer,session,packet) } else { relay_probe(&relay_sender,&peer_ips,&profile.peer_id,peer,&packet) };
                             if sent.is_err() { complete=false; break; }
                         }
                         if !complete {

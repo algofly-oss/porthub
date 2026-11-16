@@ -139,6 +139,13 @@ impl<T> Authority<T> {
     }
 }
 
+pub(crate) fn send_permit(base:Option<&Authority<()>>,pairs:&super::sparse::Handle,peer:&str)->Result<Option<porthub_mesh::udp::SendPermit>> {
+    let Some(base)=base else{return Ok(None);};
+    base.check()?;if base.remaining()?.is_none(){return Ok(None);}
+    let base=base.clone();let pair=if pairs.enabled(){Some(pairs.pair_authority(peer).ok_or_else(||anyhow::anyhow!("private peer authority expired"))?)}else{None};
+    Ok(Some(porthub_mesh::udp::SendPermit::new(move||base.check().is_ok()&&pair.as_ref().is_none_or(|pair|pair.check().is_ok()))))
+}
+
 pub(crate) fn request_start(domain: Option<&Domain>) -> Result<Option<Witness>> {
     #[cfg(not(feature = "private-sparse"))]
     let _ = domain;
