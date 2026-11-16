@@ -112,6 +112,7 @@ async fn prepare_with_fault(
     {
         return Err(conflict("Invalid migration job or reserved pools"));
     }
+    guard.require_allocation()?;
     let digest = plan_digest(rows)?;
     let first = &rows[0];
     let app = guard.app;

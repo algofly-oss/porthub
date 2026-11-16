@@ -115,7 +115,7 @@ pub(super) enum Outcome {
     AppliedFenced,
 }
 pub(super) async fn run(app: &App, owner: ObjectId, job: &str, fault: Fault) -> ApiResult<Outcome> {
-    let guard = fence::exclusive(app, owner).await?;
+    let mut guard = fence::exclusive(app, owner).await?;
     let heads = journal::durable(app, "private_renumber_heads");
     let head = heads
         .find_one(doc! {"_id":owner.to_hex(),"job":job})
@@ -149,6 +149,10 @@ pub(super) async fn run(app: &App, owner: ObjectId, job: &str, fault: Fault) -> 
     .await?;
     app.private_relay
         .workspace_generation(&owner.to_hex(), generation as u64, true);
+    // The durable active reservation is now visible to every allocator. Keep
+    // publication ownership, but do not serialize unrelated registrations behind
+    // this workspace's drain or per-peer journal fsyncs.
+    guard.release_allocation();
     // Existing signed snapshots/base/pair authority are15s. No new old-generation
     // admission can publish while this exclusive guard and durable head exist.
     tokio::time::sleep(std::time::Duration::from_secs(16)).await;
@@ -264,7 +268,7 @@ mod tests {
         ));
         let result=async {
             let owner=ObjectId::new();let mut rows=Vec::new();let mut before=Vec::new();let job="1123456789abcdef0123456789abcdef";
-            let app=App::new(crate::config::Config::default(),db.clone());
+            let app=std::sync::Arc::new(App::new(crate::config::Config::default(),db.clone()));
             for i in 0..2_u8 {
                 let machine=ObjectId::new();let id=format!("{owner}:{machine}");
                 let row=super::super::recovery::Assignment{peer:id.clone(),machine:machine.to_hex(),workspace:owner.to_hex(),credential_generation:"enrollment-1".into(),old:std::net::Ipv4Addr::new(10,203,0,i+1),new:std::net::Ipv4Addr::new(10,204,0,i+1),previous_generation:0,generation:1};
@@ -273,7 +277,16 @@ mod tests {
             }
             let guard=fence::exclusive(&app,owner).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;
             journal::prepare(&guard,job,&rows,&["10.204.0.0/16".into()]).await.map_err(|e|anyhow::anyhow!("{}",e.detail))?;drop(guard);
-            assert!(run(&app,owner,job,Fault::AfterPeerBeforeProgress(1)).await.is_err());
+            let running={let app=app.clone();tokio::spawn(async move{run(&app,owner,job,Fault::AfterPeerBeforeProgress(1)).await})};
+            tokio::time::timeout(std::time::Duration::from_secs(2),async {
+                while !app.private_sparse.workspace_fences.held(&owner.to_hex()).await {tokio::task::yield_now().await;}
+            }).await?;
+            let busy=tokio::time::timeout(std::time::Duration::from_secs(2),crate::domain::private_networks::ensure(&app,&owner.to_hex())).await?;
+            assert!(busy.is_err(),"allocation-held contender waited for the migration while pinning global allocation");
+            let other=ObjectId::new().to_hex();
+            let independent=tokio::time::timeout(std::time::Duration::from_secs(2),crate::domain::private_networks::ensure(&app,&other)).await?;
+            assert!(independent.is_ok(),"unrelated tenant could not allocate during another workspace's16s drain");
+            assert!(running.await?.is_err());
             let head=app.collection("private_renumber_heads").find_one(doc!{"_id":owner.to_hex()}).await?.unwrap();
             assert!(!head.contains_key("applied"),"injected crash accidentally acknowledged cursor");
             let first=app.collection("private_peers").find_one(doc!{"_id":&rows[0].peer}).await?.unwrap();assert_eq!(first.get_str("ip")?,rows[0].new.to_string());

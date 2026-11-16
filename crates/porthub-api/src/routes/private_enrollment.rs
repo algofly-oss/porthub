@@ -47,7 +47,7 @@ async fn enroll(
     let _guard = app.connection_lock.lock().await;
     let _network_guard = app.private_network_lock.lock().await;
     #[cfg(feature="private-sparse")]
-    let _workspace_guard=crate::private_renumber::fence::stable(&app,owner).await?;
+    let _workspace_guard=crate::private_renumber::fence::stable_with_allocation(&app,owner).await?;
     let machine = app
         .collection("machines")
         .find_one(doc! {"_id":mid,"deletion_pending":{"$ne":true}})

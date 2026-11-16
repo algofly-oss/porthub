@@ -206,6 +206,8 @@ fn available(candidate: Network, ranges: &[Network], addresses: &[Ipv4Addr]) -> 
 
 pub async fn ensure(app: &App, owner: &str) -> ApiResult<Document> {
     let _guard = app.private_network_lock.lock().await;
+    #[cfg(feature="private-sparse")]
+    let _workspace_guard=crate::private_renumber::fence::stable_with_allocation(app,mongodb::bson::oid::ObjectId::parse_str(owner).map_err(|_|ApiError::bad_request("Invalid workspace"))?).await?;
     ensure_locked(app, owner).await
 }
 
@@ -251,7 +253,7 @@ pub(crate) async fn ensure_locked(app: &App, owner: &str) -> ApiResult<Document>
 pub async fn save(app: &App, owner: &str, network: Network, suffix: &str) -> ApiResult<()> {
     let _guard = app.private_network_lock.lock().await;
     #[cfg(feature="private-sparse")]
-    let _workspace_guard=crate::private_renumber::fence::stable(app,mongodb::bson::oid::ObjectId::parse_str(owner).map_err(|_|ApiError::bad_request("Invalid workspace"))?).await?;
+    let _workspace_guard=crate::private_renumber::fence::stable_with_allocation(app,mongodb::bson::oid::ObjectId::parse_str(owner).map_err(|_|ApiError::bad_request("Invalid workspace"))?).await?;
     let (ranges, addresses) = occupied(app, owner).await?;
     let unchanged = app
         .collection("private_networks")

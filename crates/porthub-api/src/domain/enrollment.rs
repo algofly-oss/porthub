@@ -195,8 +195,6 @@ pub async fn ensure(app: &App, machine: &Document) -> ApiResult<()> {
     {
         return Ok(());
     }
-    #[cfg(feature="private-sparse")]
-    let _workspace_guard=crate::private_renumber::fence::stable(app,owner.as_object_id().ok_or_else(||ApiError::bad_request("Invalid workspace"))?).await?;
     let machine_id = machine.get("_id").ok_or_else(ApiError::unauthenticated)?;
     let peers = app.collection("private_peers");
     if peers
@@ -206,6 +204,8 @@ pub async fn ensure(app: &App, machine: &Document) -> ApiResult<()> {
     {
         return Ok(());
     }
+    #[cfg(feature="private-sparse")]
+    let _workspace_guard=crate::private_renumber::fence::stable_with_allocation(app,owner.as_object_id().ok_or_else(||ApiError::bad_request("Invalid workspace"))?).await?;
     peers
         .create_index(
             IndexModel::builder()
