@@ -9,6 +9,27 @@ use std::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 const SCRIPT: &str = include_str!("windows_refresh.ps1");
+// Keep CreateProcess argv small; trusted script bytes travel over our child pipe.
+const BOOTSTRAP: &str = r#"$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
+[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
+$buffer=New-Object byte[] 2048;$bytes=New-Object IO.MemoryStream;$inputStream=[Console]::OpenStandardInput()
+try{
+ while(($count=$inputStream.Read($buffer,0,$buffer.Length)) -gt 0){if($bytes.Length+$count -gt 131072){throw 'Desktop refresh input exceeds bounds'};$bytes.Write($buffer,0,$count)}
+ $utf8=New-Object Text.UTF8Encoding($false,$true);$packet=$utf8.GetString($bytes.ToArray())|ConvertFrom-Json
+}finally{$bytes.Dispose();$inputStream.Dispose()}
+if($packet -isnot [pscustomobject] -or @($packet.PSObject.Properties).Count -ne 2 -or @($packet.PSObject.Properties|Where-Object{$_.Name -cnotin @('script','request')}).Count -or $packet.script -isnot [string] -or $packet.script.Length -gt 49152 -or $packet.request -isnot [pscustomobject]){throw 'Invalid desktop refresh envelope'}
+$hash=[Security.Cryptography.SHA256]::Create()
+try{$digest=[BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($packet.script))).Replace('-','').ToLowerInvariant()}finally{$hash.Dispose()}
+if($digest -cne '__SCRIPT_SHA256__'){throw 'Desktop refresh script digest mismatch'}
+. ([scriptblock]::Create($packet.script))
+@(Invoke-PortHubDesktopRefresh $packet.request)|ConvertTo-Json -Depth 4 -Compress
+"#;
+fn encoded_bootstrap() -> String {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let text = BOOTSTRAP.replace("__SCRIPT_SHA256__", &format!("{:x}", Sha256::digest(SCRIPT.as_bytes())));
+    base64::engine::general_purpose::STANDARD.encode(text.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>())
+}
 fn valid_sid(sid: &str) -> bool {
     sid.starts_with("S-1-")
         && sid.len() < 184
@@ -64,7 +85,6 @@ pub(super) async fn refresh(
     executable: &Path,
     profiles: &[PathBuf],
 ) -> Result<()> {
-    use base64::Engine;
     let system = crate::service::Layout::system()?;
     ensure!(
         !layout.user
@@ -85,10 +105,13 @@ pub(super) async fn refresh(
         request.len() <= 16384,
         "Desktop refresh request exceeds bounds"
     );
-    let script = SCRIPT
-        .encode_utf16()
-        .flat_map(u16::to_le_bytes)
-        .collect::<Vec<_>>();
+    ensure!(SCRIPT.len() <= 49152, "Desktop refresh script exceeds bounds");
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "script": SCRIPT, "request": serde_json::from_slice::<serde_json::Value>(&request)?
+    }))?;
+    ensure!(payload.len() <= 131072, "Desktop refresh envelope exceeds bounds");
+    let command = encoded_bootstrap();
+    ensure!(command.len() <= 8192, "Desktop refresh bootstrap exceeds command bounds");
     let powershell =
         PathBuf::from(std::env::var_os("SystemRoot").context("Windows SystemRoot unavailable")?)
             .join("System32/WindowsPowerShell/v1.0/powershell.exe");
@@ -98,7 +121,7 @@ pub(super) async fn refresh(
             "-NoProfile",
             "-NonInteractive",
             "-EncodedCommand",
-            &base64::engine::general_purpose::STANDARD.encode(script),
+            &command,
         ])
         .env_remove("PSModulePath")
         .env_remove("PSModuleAnalysisCachePath")
@@ -108,7 +131,10 @@ pub(super) async fn refresh(
         .creation_flags(0x08000000)
         .kill_on_drop(true)
         .spawn()
-        .context("Cannot start managed desktop task refresh")?;
+        .map_err(|error| {
+            let context = format!("Cannot start managed desktop task refresh (OS error {:?})", error.raw_os_error());
+            anyhow::Error::new(error).context(context)
+        })?;
     let mut input = child
         .stdin
         .take()
@@ -132,7 +158,7 @@ pub(super) async fn refresh(
         Ok::<_, std::io::Error>(bytes)
     }));
     let result = tokio::time::timeout(Duration::from_secs(120), async {
-        input.write_all(&request).await?;
+        input.write_all(&payload).await?;
         drop(input);
         let status = child.wait().await?;
         let output = output.await??;
@@ -162,6 +188,14 @@ pub(super) async fn refresh(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn refresh_script_does_not_expand_createprocess_command_line() {
+        let command = encoded_bootstrap();
+        assert!(command.len() <= 8192);
+        assert!(SCRIPT.len() <= 49152);
+        assert!(!BOOTSTRAP.contains("-ExecutionPolicy"));
+        assert!(BOOTSTRAP.contains("Desktop refresh script digest mismatch"));
+    }
     #[test]
     fn grants_cannot_infer_service_accounts_or_accept_malformed_sids() {
         assert!(valid_sid("S-1-5-21-123-456-789-1001"));
