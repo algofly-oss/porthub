@@ -142,20 +142,22 @@ pub fn validate_signal(
 
 async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<Response> {
     let input=private_sync::parse(raw)?;let hash=token_digest(&input.token);
+    let observed=app.private_relay.admission_snapshot(&input.peer_id,&hash,&input.instance);
     let filter=doc!{"_id":&input.peer_id,"enabled":true,"credential_hash":&hash};
     let Some(peer)=app.collection("private_peers").find_one(filter).await? else {
-        app.private_relay.withdraw_bound(&input.peer_id,&hash,&input.instance,None);
+        if let Some(observed)=observed{app.private_relay.withdraw_bound(&input.peer_id,&hash,&input.instance,observed);}
         return Err(forbidden("Private credential invalid or revoked"));
     };
     let admission=app.private_relay.begin_admission(&input.peer_id,&hash,&input.instance)
         .ok_or_else(||ApiError::new(StatusCode::SERVICE_UNAVAILABLE,"Private control admission is busy; retry"))?;
-    let result=sync_admitted(&app,&input,peer,&hash,admission).await;
+    let observed_pairs=if cfg!(feature="private-sparse")&&input.sparse.is_some(){app.private_relay.observe_pairs(&input.peer_id,&hash,&input.instance,admission)}else{HashMap::new()};
+    let result=sync_admitted(&app,&input,peer,&hash,admission,observed_pairs).await;
     if result.as_ref().is_err_and(|e|matches!(e.status,StatusCode::UNAUTHORIZED|StatusCode::FORBIDDEN)){
-        app.private_relay.withdraw_bound(&input.peer_id,&hash,&input.instance,Some(admission));
+        app.private_relay.withdraw_bound(&input.peer_id,&hash,&input.instance,admission);
     }
     result
 }
-async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,hash:&str,admission:u64)->ApiResult<Response>{
+async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,hash:&str,admission:u64,mut observed_pairs:HashMap<String,crate::private_relay::PairPeerPin>)->ApiResult<Response>{
     let filter=doc!{"_id":&input.peer_id,"enabled":true,"credential_hash":hash};
     let owner = peer
         .get_object_id("workspace_id")
@@ -339,7 +341,14 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
         }
     }
     let own_machine_id=store::id(peer.get("machine_id"));
-    let mut resolutions=Vec::new();
+    let mut resolutions=Vec::new();let mut retirements=Vec::new();
+    let mut retirement=|query:&crate::domain::private_pairs::Lookup,target:Option<&Document>|->Option<crate::private_relay::PairPeerPin>{
+        let id=target.map(|p|store::string(p,"_id").to_owned()).or_else(||match query.kind.as_str(){
+            "peer"=>Some(query.value.clone()),
+            "ip"=>{let ip=query.value.parse::<std::net::Ipv4Addr>().ok()?;let mut found=observed_pairs.values().filter(|p|p.ip==ip);let first=found.next()?.id.clone();found.next().is_none().then_some(first)},
+            _=>None,
+        })?;observed_pairs.remove(&id)
+    };
     let mut sparse_reachable=HashSet::new();
     let mut grants = if sparse_request.is_some() {
         for (query,target) in selected {
@@ -350,13 +359,13 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
                     rules.index.pair(source,target,&groups)
                 }else{private_policy::compile_pair(&machines,&books,&groups,&own_machine_id,&store::id(p.get("machine_id")))}
             }).unwrap_or_default();
-            if pair.is_empty(){if let Some(peer)=target{app.private_relay.revoke_pair(&input.peer_id,store::string(peer,"_id"));}resolutions.push((query,None,None));continue;}
+            if pair.is_empty(){if let Some(pin)=retirement(&query,target){retirements.push(pin);}resolutions.push((query,None,None));continue;}
             let id=store::string(target.expect("nonempty exact pair"),"_id");
             let acl=porthub_network::policy::pair_acl::PairAcl::from_iter(&input.peer_id,id,pair.into_iter().map(|g|porthub_network::policy::Grant{
                 source:mapping[&g.source].clone(),destination:mapping[&g.destination].clone(),protocol:g.protocol,
                 ports:g.ports.into_iter().map(|p|porthub_network::policy::Port{start:p.start,end:p.end}).collect(),
             })).ok();
-            if acl.is_some(){sparse_reachable.insert(id.to_owned());}else{app.private_relay.revoke_pair(&input.peer_id,id);}
+            if acl.is_some(){sparse_reachable.insert(id.to_owned());}else if let Some(pin)=retirement(&query,target){retirements.push(pin);}
             resolutions.push((query,target,acl));
         }
         Vec::new()
@@ -479,6 +488,8 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
         } else {app.private_relay.publish_admitted(&input.peer_id,hash,&input.instance,ip,allowed,Some(admission))};
     }
     if relay_auth_token.is_empty(){return Err(ApiError::new(StatusCode::CONFLICT,"Private authority changed or is busy; retry sync"));}
+    for target in retirements{app.private_relay.retire_pair_admitted(&input.peer_id,hash,&input.instance,admission,&target);}
+
     let mut pair_responses=Vec::new();let mut pair_response_bytes=0usize;
     if let Some(epoch)=&epoch {
         let local:porthub_network::policy::PeerInfo=serde_json::from_value(wire_peer(&updated)).map_err(|_|ApiError::bad_request("Invalid local sparse identity"))?;
@@ -497,7 +508,7 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
             let lease=porthub_network::policy::PairLease{workspace:owner.to_hex(),self_:input.peer_id.clone(),epoch:epoch.clone(),expires_at:chrono::DateTime::from_timestamp_millis(now.timestamp_millis()+15_000).expect("current timestamp"),revision,local:local.clone(),peer:remote,grants:vec![],acl:Some(acl)};
             let value=json!({"query":query,"status":"allowed","lease":lease});
             if pair_response_bytes.saturating_add(serde_json::to_vec(&value).expect("typed lease").len())>PAIR_REPLY_BYTES-16384
-                || !app.private_relay.publish_pair_epochs(&input.peer_id,id,epoch,&target_epoch) {
+                || !app.private_relay.publish_pair_admitted(&input.peer_id,epoch,hash,&input.instance,admission,&crate::private_relay::PairPeerPin{id:id.into(),hash:store::string(target,"credential_hash").into(),instance:store::string(target,"instance").into(),ip:store::string(target,"ip").parse().map_err(|_|ApiError::bad_request("Invalid private peer IP"))?,epoch:Some(target_epoch.clone()),generation:None}) {
                 // Backpressure never renews the independently expiring Hub pair authority.
                 push_pair_response(&mut pair_responses,&mut pair_response_bytes,json!({"query":query,"status":"busy"}));continue;
             }

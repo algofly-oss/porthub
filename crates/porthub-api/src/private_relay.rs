@@ -43,8 +43,10 @@ struct Lease {
     expires: Instant,
     sparse_epoch: Option<String>,
 }
+pub(crate) struct PairPeerPin {pub id:String,pub hash:String,pub instance:String,pub ip:Ipv4Addr,pub epoch:Option<String>,pub generation:Option<u64>}
 #[derive(Clone)]
 struct PairAuthority {
+    generation:u64,
     left: String, right: String,
     left_hash: String, right_hash: String,
     left_instance: String, right_instance: String,
@@ -74,6 +76,7 @@ struct Inner {
     generation: u64,
     admissions: HashMap<String, Admission>,
     admission_generation: u64,
+    pair_generation:u64,
     admission_cleanup_at: Option<Instant>,
     dropped_packets: AtomicU64,
 }
@@ -116,18 +119,19 @@ impl Hub {
         if hub.admission_cleanup_at.is_none_or(|at|at<=now){
             hub.admissions.retain(|_,a|a.expires>now);hub.admission_cleanup_at=Some(now+Duration::from_secs(60));
         }
-        if let Some(a)=hub.admissions.get_mut(id) {
-            if a.expires>now&&a.hash==hash&&a.instance==instance {a.expires=now+Duration::from_secs(60);return Some(a.generation);}
-        }
         if hub.admissions.len()>=16384&&!hub.admissions.contains_key(id){return None;}
         hub.admission_generation=hub.admission_generation.checked_add(1)?;
         let generation=hub.admission_generation;
         hub.admissions.insert(id.into(),Admission{hash:hash.into(),instance:instance.into(),generation,expires:now+Duration::from_secs(60)});
         Some(generation)
     }
-    pub(crate) fn withdraw_bound(&self,id:&str,hash:&str,instance:&str,generation:Option<u64>)->bool{
+    pub(crate) fn admission_snapshot(&self,id:&str,hash:&str,instance:&str)->Option<u64>{
+        let hub=self.0.lock().unwrap_or_else(|p|p.into_inner());
+        hub.admissions.get(id).filter(|a|a.hash==hash&&a.instance==instance&&a.expires>Instant::now()).map(|a|a.generation)
+    }
+    pub(crate) fn withdraw_bound(&self,id:&str,hash:&str,instance:&str,generation:u64)->bool{
         let mut hub=self.0.lock().unwrap_or_else(|p|p.into_inner());
-        let matches=hub.admissions.get(id).is_some_and(|a|a.hash==hash&&a.instance==instance&&generation.is_none_or(|g|g==a.generation));
+        let matches=hub.admissions.get(id).is_some_and(|a|a.hash==hash&&a.instance==instance&&generation==a.generation);
         if !matches{return false;}
         hub.admissions.remove(id);
         // A newer successful incarnation is never removed by an older failed request.
@@ -217,17 +221,62 @@ impl Hub {
     /// Coarse relay eligibility is reciprocal; the endpoint engines still enforce packet ACLs.
     pub(crate) fn publish_pair(&self,source:&str,target:&str,epoch:&str)->bool{self.publish_pair_epochs(source,target,epoch,epoch)}
     pub(crate) fn publish_pair_epochs(&self, source:&str, target:&str, epoch:&str,target_epoch:&str)->bool {
+        self.publish_pair_checked(source,target,epoch,target_epoch,None)
+    }
+    pub(crate) fn publish_pair_admitted(&self,source:&str,epoch:&str,hash:&str,instance:&str,generation:u64,target:&PairPeerPin)->bool{
+        self.publish_pair_checked(source,&target.id,epoch,target.epoch.as_deref().unwrap_or_default(),Some((hash,instance,generation,target)))
+    }
+    fn publish_pair_checked(&self,source:&str,target:&str,epoch:&str,target_epoch:&str,request:Option<(&str,&str,u64,&PairPeerPin)>)->bool{
         if source==target {return false;}
         let mut hub=self.0.lock().unwrap_or_else(|p|p.into_inner());let now=Instant::now();
         hub.pairs.retain(|_,p|p.expires>now);
         let (Some(a),Some(b))=(hub.leases.get(source),hub.leases.get(target)) else{return false;};
+        if request.is_some_and(|(hash,instance,generation,pin)|a.credential_hash!=hash||a.instance!=instance||b.credential_hash!=pin.hash||b.instance!=pin.instance||b.ip!=pin.ip||!hub.admissions.get(source).is_some_and(|r|r.hash==hash&&r.instance==instance&&r.generation==generation&&r.expires>now)){return false;}
         if a.expires<=now || b.expires<=now || a.sparse_epoch.as_deref()!=Some(epoch)
             || b.sparse_epoch.as_deref().is_some_and(|e|e!=target_epoch)
             || (b.sparse_epoch.is_none() && !b.allowed.contains(source)) {return false;}
         let key=if source<target {(source.to_owned(),target.to_owned())}else{(target.to_owned(),source.to_owned())};
         if !hub.pairs.contains_key(&key) && (hub.pairs.len()>=8192 || hub.pairs.values().filter(|p|p.left==source||p.right==source).count()>=256 || hub.pairs.values().filter(|p|p.left==target||p.right==target).count()>=256) {return false;}
-        let pair=PairAuthority{left:source.into(),right:target.into(),left_hash:a.credential_hash.clone(),right_hash:b.credential_hash.clone(),left_instance:a.instance.clone(),right_instance:b.instance.clone(),left_ip:a.ip,right_ip:b.ip,left_epoch:a.sparse_epoch.clone(),right_epoch:b.sparse_epoch.clone(),expires:now+Duration::from_secs(15)};
+        let Some(generation)=hub.pair_generation.checked_add(1)else{return false;};
+        let pair=PairAuthority{generation,left:source.into(),right:target.into(),left_hash:a.credential_hash.clone(),right_hash:b.credential_hash.clone(),left_instance:a.instance.clone(),right_instance:b.instance.clone(),left_ip:a.ip,right_ip:b.ip,left_epoch:a.sparse_epoch.clone(),right_epoch:b.sparse_epoch.clone(),expires:now+Duration::from_secs(15)};
+        hub.pair_generation=generation;
         hub.pairs.insert(key,pair);true
+    }
+    /// Capture existing incident authority before any target/ACL reads. Epochs here
+    /// describe the authority being retired, not the newly-denied policy state.
+    pub(crate) fn observe_pairs(&self,source:&str,hash:&str,instance:&str,generation:u64)->HashMap<String,PairPeerPin>{
+        let hub=self.0.lock().unwrap_or_else(|p|p.into_inner());let now=Instant::now();
+        if !hub.admissions.get(source).is_some_and(|a|a.hash==hash&&a.instance==instance&&a.generation==generation&&a.expires>now){return HashMap::new();}
+        hub.pairs.values().filter_map(|p|{
+            if p.expires<=now{return None;}
+            let pin=if p.left==source&&p.left_hash==hash&&p.left_instance==instance{
+                PairPeerPin{id:p.right.clone(),hash:p.right_hash.clone(),instance:p.right_instance.clone(),ip:p.right_ip,epoch:p.right_epoch.clone(),generation:Some(p.generation)}
+            }else if p.right==source&&p.right_hash==hash&&p.right_instance==instance{
+                PairPeerPin{id:p.left.clone(),hash:p.left_hash.clone(),instance:p.left_instance.clone(),ip:p.left_ip,epoch:p.left_epoch.clone(),generation:Some(p.generation)}
+            }else{return None;};Some((pin.id.clone(),pin))
+        }).collect()
+    }
+    pub(crate) fn retire_pair_admitted(&self,source:&str,hash:&str,instance:&str,generation:u64,target:&PairPeerPin)->bool{
+        let mut hub=self.0.lock().unwrap_or_else(|p|p.into_inner());let now=Instant::now();
+        if !hub.admissions.get(source).is_some_and(|a|a.hash==hash&&a.instance==instance&&a.generation==generation&&a.expires>now){return false;}
+        let Some(local)=hub.leases.get(source).filter(|a|a.credential_hash==hash&&a.instance==instance&&a.expires>now)else{return false;};
+        let key=if source<target.id.as_str(){(source.to_owned(),target.id.clone())}else{(target.id.clone(),source.to_owned())};
+        let Some(pair)=hub.pairs.get(&key)else{return false;};
+        if target.generation!=Some(pair.generation){return false;}
+        if !hub.leases.get(&target.id).is_some_and(|peer|peer.credential_hash==target.hash&&peer.instance==target.instance&&peer.ip==target.ip&&peer.sparse_epoch==target.epoch&&peer.expires>now){return false;}
+        let matches=if pair.left==source{
+            pair.left_hash==hash&&pair.left_instance==instance&&pair.left_ip==local.ip&&pair.left_epoch==local.sparse_epoch
+            &&pair.right_hash==target.hash&&pair.right_instance==target.instance&&pair.right_ip==target.ip&&pair.right_epoch==target.epoch
+        }else{
+            pair.right_hash==hash&&pair.right_instance==instance&&pair.right_ip==local.ip&&pair.right_epoch==local.sparse_epoch
+            &&pair.left_hash==target.hash&&pair.left_instance==target.instance&&pair.left_ip==target.ip&&pair.left_epoch==target.epoch
+        };
+        if matches{
+            hub.pairs.remove(&key);
+            // Any target-side authorization read already in flight must revalidate
+            // after this observed denial. Committed unrelated leases remain intact.
+            if hub.admissions.get(&target.id).is_some_and(|a|a.hash==target.hash&&a.instance==target.instance){hub.admissions.remove(&target.id);}
+        }matches
     }
     pub(crate) fn revoke_pair(&self,source:&str,target:&str){let key=if source<target{(source.to_owned(),target.to_owned())}else{(target.to_owned(),source.to_owned())};self.0.lock().unwrap_or_else(|p|p.into_inner()).pairs.remove(&key);}
     pub(crate) fn pair_neighbors(&self,id:&str)->Vec<String>{
@@ -660,6 +709,65 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_same_incarnation_syncs_cannot_withdraw_or_publish_over_newer_request(){
+        let hub=Hub::default();let epoch="a".repeat(64);let ip=Ipv4Addr::new(10,0,0,1);
+        let first=hub.begin_admission("a","hash-a","instance-a").unwrap();
+        assert!(!hub.publish_sparse_admitted("a","hash-a","instance-a",ip,&epoch,Some(first)).is_empty());
+        // An invalid-credential lookup pins this BEFORE awaiting the database.
+        let observed=hub.admission_snapshot("a","hash-a","instance-a").unwrap();
+        let later=hub.begin_admission("a","hash-a","instance-a").unwrap();
+        assert_ne!(first,later,"a new request needs a new publication ticket even for the same process");
+        assert!(!hub.publish_sparse_admitted("a","hash-a","instance-a",ip,&epoch,Some(later)).is_empty());
+        assert!(!hub.withdraw_bound("a","hash-a","instance-a",first));
+        assert!(!hub.withdraw_bound("a","hash-a","instance-a",observed));
+        assert!(hub.peer_alive("a"));
+        assert!(hub.publish_sparse_admitted("a","hash-a","instance-a",ip,&epoch,Some(first)).is_empty());
+        assert!(hub.withdraw_bound("a","hash-a","instance-a",later));assert!(!hub.peer_alive("a"));
+    }
+
+    #[test]
+    fn older_pair_decisions_cannot_publish_retire_or_renew_newer_request_or_target_epoch(){
+        let hub=Hub::default();let a="a".repeat(64);let b="b".repeat(64);let c="c".repeat(64);
+        let ip=Ipv4Addr::new(10,0,0,1);let remote=Ipv4Addr::new(10,0,0,2);
+        let first=hub.begin_admission("a","hash-a","instance-a").unwrap();
+        hub.publish_sparse_admitted("a","hash-a","instance-a",ip,&a,Some(first));
+        let target_read=hub.begin_admission("b","hash-b","instance-b").unwrap();
+        hub.publish_sparse_admitted("b","hash-b","instance-b",remote,&b,Some(target_read));
+        hub.publish_sparse("c","hash-c","instance-c",Ipv4Addr::new(10,0,0,3),&c);
+        let old=PairPeerPin{id:"b".into(),hash:"hash-b".into(),instance:"instance-b".into(),ip:remote,epoch:Some(b.clone()),generation:None};
+        assert!(hub.publish_pair_admitted("a",&a,"hash-a","instance-a",first,&old));
+        let observed_first=hub.observe_pairs("a","hash-a","instance-a",first).remove("b").unwrap();
+        let later=hub.begin_admission("a","hash-a","instance-a").unwrap();
+        hub.publish_sparse_admitted("a","hash-a","instance-a",ip,&a,Some(later));
+        assert!(hub.publish_pair_admitted("a",&a,"hash-a","instance-a",later,&old));
+        assert!(hub.publish_pair_epochs("a","c",&a,&c));
+        let key=("a".to_owned(),"b".to_owned());let deadline=hub.0.lock().unwrap().pairs[&key].expires;
+        assert!(!hub.retire_pair_admitted("a","hash-a","instance-a",first,&observed_first));
+        assert!(!hub.publish_pair_admitted("a",&a,"hash-a","instance-a",first,&old));
+        assert_eq!(hub.0.lock().unwrap().pairs[&key].expires,deadline);
+        let observed=hub.observe_pairs("a","hash-a","instance-a",later).remove("b").unwrap();
+        // A newer committed target decision is protected even when bindings and
+        // policy hashes happen to be identical: its pair generation changed.
+        assert!(hub.publish_pair_admitted("b",&b,"hash-b","instance-b",target_read,&PairPeerPin{id:"a".into(),hash:"hash-a".into(),instance:"instance-a".into(),ip,epoch:Some(a.clone()),generation:None}));
+        assert!(!hub.retire_pair_admitted("a","hash-a","instance-a",later,&observed));
+        let observed=hub.observe_pairs("a","hash-a","instance-a",later).remove("b").unwrap();
+        assert!(hub.retire_pair_admitted("a","hash-a","instance-a",later,&observed));
+        assert!(!hub.pair_allowed("a","b"));assert!(hub.pair_allowed("a","c"));
+        assert!(hub.admission_snapshot("b","hash-b","instance-b").is_none(),"target in-flight read must not reintroduce retired authority");
+        assert!(!hub.publish_pair_admitted("b",&b,"hash-b","instance-b",target_read,&PairPeerPin{id:"a".into(),hash:"hash-a".into(),instance:"instance-a".into(),ip,epoch:Some(a.clone()),generation:None}));
+        let fresh=hub.begin_admission("b","hash-b","instance-b").unwrap();
+        hub.publish_sparse_admitted("b","hash-b","instance-b",remote,&a,Some(fresh));
+        assert!(!hub.publish_pair_admitted("a",&a,"hash-a","instance-a",later,&old));
+        let current=PairPeerPin{epoch:Some(a.clone()),..old};
+        assert!(hub.publish_pair_admitted("a",&a,"hash-a","instance-a",later,&current));
+        let mut stale=hub.observe_pairs("a","hash-a","instance-a",later).remove("b").unwrap();
+        stale.epoch=Some(b);assert!(!hub.retire_pair_admitted("a","hash-a","instance-a",later,&stale));
+        stale.epoch=Some(a.clone());stale.instance="old-process".into();
+        assert!(!hub.retire_pair_admitted("a","hash-a","instance-a",later,&stale));
+        assert!(!hub.publish_pair_admitted("a",&a,"hash-a","instance-a",later,&stale));
+    }
+
+    #[test]
     fn authoritative_source_withdrawal_fences_inflight_publication_only_for_exact_binding(){
         let hub=Hub::default();let epoch="a".repeat(64);
         let old=hub.begin_admission("a","hash-a","instance-a").unwrap();
@@ -667,20 +775,20 @@ mod tests {
         assert!(!hub.publish_sparse_admitted("a","hash-a","instance-a",Ipv4Addr::new(10,0,0,1),&epoch,Some(old)).is_empty());
         assert!(!hub.publish_sparse_admitted("b","hash-b","instance-b",Ipv4Addr::new(10,0,0,2),&epoch,Some(other)).is_empty());
         assert!(hub.publish_pair("a","b",&epoch));
-        assert!(!hub.withdraw_bound("a","wrong-token","instance-a",Some(old)));
-        assert!(!hub.withdraw_bound("a","hash-a","stale-instance",Some(old)));
+        assert!(!hub.withdraw_bound("a","wrong-token","instance-a",old));
+        assert!(!hub.withdraw_bound("a","hash-a","stale-instance",old));
         assert!(hub.pair_allowed("a","b"));
-        assert!(hub.withdraw_bound("a","hash-a","instance-a",Some(old)));
+        assert!(hub.withdraw_bound("a","hash-a","instance-a",old));
         assert!(!hub.peer_alive("a"));assert!(hub.peer_alive("b"));assert!(!hub.pair_allowed("a","b"));
         assert!(hub.publish_sparse_admitted("a","hash-a","instance-a",Ipv4Addr::new(10,0,0,1),&epoch,Some(old)).is_empty());
         // A new fresh authorized read may recover immediately; no denial quarantine.
         let fresh=hub.begin_admission("a","hash-a","instance-a").unwrap();assert_ne!(fresh,old);
         assert!(!hub.publish_sparse_admitted("a","hash-a","instance-a",Ipv4Addr::new(10,0,0,1),&epoch,Some(fresh)).is_empty());
-        assert!(!hub.withdraw_bound("a","hash-a","instance-a",Some(old)));
+        assert!(!hub.withdraw_bound("a","hash-a","instance-a",old));
         assert!(hub.peer_alive("a"));
         let replacement=hub.begin_admission("a","hash-new","instance-new").unwrap();
         assert!(!hub.publish_sparse_admitted("a","hash-new","instance-new",Ipv4Addr::new(10,0,0,1),&epoch,Some(replacement)).is_empty());
-        assert!(!hub.withdraw_bound("a","hash-a","instance-a",None));
+        assert!(!hub.withdraw_bound("a","hash-a","instance-a",fresh));
         assert!(hub.peer_alive("a"));
         assert!(hub.publish_sparse_admitted("a","hash-a","instance-a",Ipv4Addr::new(10,0,0,1),&epoch,Some(fresh)).is_empty());
         hub.revoke(&["a".into()]);

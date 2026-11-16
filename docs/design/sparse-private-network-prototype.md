@@ -38,7 +38,14 @@ Implemented contracts:
   masquerade as authoritative denial. Source HTTP 401/403 cancels the entire
   private work scope. Credential/process-bound Hub admission generations fence older
   in-flight publication after a source denial, without evicting a newer incarnation
-  or quarantining later freshly authorized recovery. Established QUIC copies have their own deadline/renewal
+  or quarantining later freshly authorized recovery. Tickets are per request,
+  including overlapping reads from the same process. Credential rejection pins the
+  ticket before its database read. Pair publication checks that ticket and the
+  target credential/process/address/policy binding. Negative decisions retire only
+  the incident pair generation observed before target authorization reads, rather
+  than confusing its old authority epoch with the newly denied policy epoch.
+  Retirement invalidates target-side uncommitted reads so they must revalidate;
+  already committed unrelated pair/base leases are preserved. Established QUIC copies have their own deadline/renewal
   guard rather than relying on a periodic base-policy tick.
 - Cold custom private suffixes are published as bounded namespace-only metadata,
   independently of selected pair identities. The actual private-domain mutation
@@ -103,3 +110,10 @@ A 256-entry cache and a bounded 16-intent RPC are not proof that 256 active pair
 can be renewed fairly under every WAN latency. That scheduling/admission work and
 whole-process RSS measurements remain open. No total-transport RAM claim is made
 from the bitmap or flow-count limits alone.
+
+The read/publication fences above do not establish transactional atomicity for all
+MongoDB policy mutations. Group/member/address/credential mutation journaling,
+concurrent mutation tests and the complete writer audit remain required. The Hub's
+current incident-pair discovery also scans its bounded global 8,192-pair table;
+the 4,097-record/2-pair fixture is not evidence of constant work with 8,192 active
+pairs or many simultaneous policy editors.
