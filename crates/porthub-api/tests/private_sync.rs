@@ -441,3 +441,50 @@ async fn sparse_profile_cost(case:&Case,start:DateTime)->Result<Value>{
   for (key,delta) in [("commands",1),("docs_examined",read("docsExamined")),("keys_examined",read("keysExamined")),("bytes",read("responseLength"))]{collection[key]=json!(collection[key].as_i64().unwrap()+delta);}}
  Ok(json!({"registered":4097,"commands":calls,"docs_examined":docs,"keys_examined":keys,"response_bytes":bytes,"collections":collections}))
 }
+
+#[cfg(feature="private-sparse")]
+#[tokio::test]
+#[ignore="requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn canonical_enrollment_ids_allow_cold_peer_lookup_but_never_foreign_workspace_authority()->Result<()> {
+    let case=Case::new(Config::default()).await?;
+    let result=async {
+        let (owner,_)=case.user("canonical-owner@test.invalid","user").await?;
+        let (foreign,_)=case.user("canonical-foreign@test.invalid","user").await?;
+        let mut ids=Vec::new();let mut machines=Vec::new();
+        for (i,workspace) in [owner,owner,foreign].into_iter().enumerate() {
+            let machine=ObjectId::new();let id=format!("{workspace}:{machine}");
+            case.app.collection("machines").insert_one(doc!{"_id":machine,"user_id":workspace,"name":format!("Canonical fixture {i}")}).await?;
+            case.app.collection("private_peers").insert_one(doc!{"_id":&id,"workspace_id":workspace,"owner_id":workspace,"machine_id":machine,"ip":format!("10.203.0.{}",if i==2 {2}else{i+1}),"enabled":true,"credential_hash":token_digest("fixture-token-0123456789abcdef0123456789")}).await?;
+            ids.push(id);machines.push(machine);
+        }
+        // Broad workspace destination rule and identical legacy-overlap IP/token
+        // values ensure tenant identity, not an accidental selector mismatch,
+        // is what rejects the foreign canonical ID.
+        let group=ObjectId::new();case.app.collection("machine_groups").insert_one(doc!{"_id":group,"user_id":owner}).await?;
+        case.app.collection("access_rulebooks").insert_one(doc!{"_id":ObjectId::new(),"user_id":owner,"group_id":group.to_hex(),"revision":1_i64,"enabled":true,"updated_at":DateTime::now(),"rules":[{"id":"canonical-https","name":"Workspace fixture HTTPS","sources":[{"kind":"machine","id":machines[0].to_hex()}],"destinations":[{"kind":"all","id":"machines"}],"ports":"443"}]}).await?;
+        let make=|index:usize,sequence:u64|{let mut body=sync(&ids[index],&fingerprint(if index==0{"AB"}else{"CD"}),if index==0{"instance-00000000"}else{"instance-11111111"});body["sparse"]=json!({"protocol":1,"sequence":sequence,"wanted":[]});body};
+        case.status("POST","/api/access/private/sync","",make(1,1),StatusCode::OK).await?;
+        case.status("POST","/api/access/private/sync","",make(2,1),StatusCode::OK).await?;
+        let mut own=make(0,1);own["sparse"]["wanted"]=json!([{"kind":"peer","value":ids[1]}]);
+        let (status,_,reply)=case.call("POST","/api/access/private/sync","",own,&[]).await?;
+        ensure!(status==StatusCode::OK,"canonical peer ID was rejected before authorization");
+        ensure!(reply["pair_responses"][0]["status"]=="allowed"&&reply["pair_responses"][0]["lease"]["peer"]["id"]==ids[1],"canonical cold peer lookup did not publish exact own authorized identity");
+        // Resolver renewal uses the peer ID returned inside the lease, even
+        // when its initial admission was triggered through another lookup form.
+        let returned_id=reply["pair_responses"][0]["lease"]["peer"]["id"].as_str().unwrap().to_owned();
+        let mut renewal=make(0,2);renewal["sparse"]["wanted"]=json!([{"kind":"peer","value":returned_id}]);
+        let (status,_,renewed)=case.call("POST","/api/access/private/sync","",renewal,&[]).await?;
+        ensure!(status==StatusCode::OK&&renewed["pair_responses"][0]["status"]=="allowed","real enrolled ID returned in lease could not renew");
+        let mut denied=make(0,3);denied["sparse"]["wanted"]=json!([{"kind":"peer","value":ids[2]}]);
+        let (status,_,reply)=case.call("POST","/api/access/private/sync","",denied,&[]).await?;
+        ensure!(status==StatusCode::OK,"foreign canonical query was not handled as a scoped lookup");
+        ensure!(reply["pair_responses"][0]["status"]!="allowed"&&reply["pair_responses"][0].get("lease").is_none(),"syntactically valid foreign workspace ID bypassed authorization");
+        // Membership in the same workspace is not itself an implicit port grant.
+        case.app.collection("access_rulebooks").update_many(doc!{"user_id":owner},doc!{"$set":{"enabled":false},"$inc":{"revision":1_i64}}).await?;
+        let mut no_rule=make(0,4);no_rule["sparse"]["wanted"]=json!([{"kind":"peer","value":ids[1]}]);
+        let (status,_,reply)=case.call("POST","/api/access/private/sync","",no_rule,&[]).await?;
+        ensure!(status==StatusCode::OK&&reply["pair_responses"][0]["status"]!="allowed"&&reply["pair_responses"][0].get("lease").is_none(),"canonical syntax became implicit ACL allow after rule revocation");
+        Ok::<_,anyhow::Error>(())
+    }.await;
+    case.db.drop().await?;result
+}

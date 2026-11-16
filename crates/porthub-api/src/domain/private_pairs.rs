@@ -27,11 +27,12 @@ impl Request {
             let valid = match q.kind.as_str() {
                 "ip" => q.value.parse::<Ipv4Addr>().is_ok_and(|ip| ip.is_private()),
                 "peer" => {
-                    !q.value.is_empty()
-                        && q.value.len() <= 60
-                        && q.value
-                            .bytes()
-                            .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+                    // Enrolled IDs are owner:ObjectId + machine:ObjectId. The
+                    // resolver also reuses lease.peer.id for normal renewal.
+                    !q.value.is_empty() && q.value.len()<=60 && match q.value.split_once(':') {
+                        Some((owner,machine))=>[owner,machine].iter().all(|part|part.len()==24&&part.bytes().all(|c|c.is_ascii_hexdigit()&&!c.is_ascii_uppercase())),
+                        None=>q.value.bytes().all(|c|c.is_ascii_alphanumeric()||c==b'-'),
+                    }
                 }
                 "name" => {
                     !q.value.is_empty()
@@ -132,6 +133,16 @@ mod tests {
         .validate()
         .is_ok());
     }
+    #[test]
+    fn actual_enrollment_objectid_pairs_are_valid_cold_peer_queries(){
+        let request=|value:&str|Request{protocol:1,sequence:1,wanted:vec![Lookup{kind:"peer".into(),value:value.into()}]};
+        assert!(request("0123456789abcdef01234567:89abcdef0123456789abcdef").validate().is_ok());
+        assert!(request("legacy-peer-42").validate().is_ok());
+        for invalid in ["owner:machine","0123456789abcdef01234567:","0123456789abcdef01234567:89abcdef0123456789abcde:","0123456789abcdef01234567:89ABCDEF0123456789abcdef","0123456789abcdef01234567:89abcdef0123456789abcdef:extra"] {
+            assert!(request(invalid).validate().is_err(),"malformed peer identifier accepted");
+        }
+    }
+
 }
 
 /// Local authorization generation: routing/name metadata and unrelated machines cannot reset flows.
