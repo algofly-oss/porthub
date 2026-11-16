@@ -29,6 +29,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
+const MAX_CONTROL_WORKSPACES:usize=16384;
 const MAX_RELAY_LANES: u8 = 4;
 const MAX_RELAY_PEERS: usize = 4096;
 const MAX_RELAY_CONNECTIONS: usize = MAX_RELAY_PEERS * MAX_RELAY_LANES as usize;
@@ -77,6 +78,7 @@ struct Inner {
     generation: u64,
     admissions: HashMap<String, Admission>,
     workspace_generations: HashMap<String, (u64, bool)>,
+    workspace_cleanup_at:Option<Instant>,
     admission_generation: u64,
     pair_generation:u64,
     admission_cleanup_at: Option<Instant>,
@@ -98,6 +100,18 @@ impl Default for Hub {
     }
 }
 impl Inner {
+    fn prune_workspace_generations(&mut self,now:Instant) {
+        if self.workspace_cleanup_at.is_some_and(|next|next>now){return;}
+        // Only expired tickets/leases are removed. Any live authority pins its
+        // workspace generation. A future real request must reread the durable
+        // head before rebinding an evicted idle workspace; absent maps admit none.
+        self.admissions.retain(|_,a|a.expires>now);
+        self.leases.retain(|_,l|l.expires>now);
+        let live:HashSet<String>=self.admissions.values().filter_map(|a|a.workspace.as_ref().map(|(w,_)|w.clone()))
+            .chain(self.leases.values().filter_map(|l|l.workspace.as_ref().map(|(w,_)|w.clone()))).collect();
+        self.workspace_generations.retain(|w,_|live.contains(w));
+        self.workspace_cleanup_at=Some(now+Duration::from_secs(5));
+    }
     fn allowed_pair(&self, source:&str, target:&str, now:Instant)->bool {
         let (Some(a),Some(b))=(self.leases.get(source),self.leases.get(target)) else{return false;};
         if a.expires<=now || b.expires<=now {return false;}
@@ -120,12 +134,15 @@ impl Hub {
     }
     /// Apply a freshly read durable workspace head. Generation advance or a
     /// migration fence retires ALL old tickets/leases/connections under that
-    /// exact stable workspace prefix; late in-flight publications fail closed.
+    /// exact authenticated workspace binding; late publications fail closed.
     pub(crate) fn workspace_generation(&self, workspace:&str, generation:u64, blocked:bool)->bool {
         let mut hub=self.0.lock().unwrap_or_else(|p|p.into_inner());
         let old=hub.workspace_generations.get(workspace).copied();
         if old.is_some_and(|(g,_)|generation<g) {return false;}
-        if old.is_none()&&hub.workspace_generations.len()>=16384 {return false;}
+        if old.is_none()&&hub.workspace_generations.len()>=MAX_CONTROL_WORKSPACES {
+            hub.prune_workspace_generations(Instant::now());
+            if hub.workspace_generations.len()>=MAX_CONTROL_WORKSPACES{return false;}
+        }
         if old==Some((generation,blocked)){return !blocked;}
         let retired:HashSet<String>=hub.admissions.iter().filter(|(_,a)|a.workspace.as_ref().is_some_and(|(w,_)|w==workspace)).map(|(id,_)|id.clone())
             .chain(hub.leases.iter().filter(|(_,l)|l.workspace.as_ref().is_some_and(|(w,_)|w==workspace)).map(|(id,_)|id.clone())).collect();
@@ -1198,6 +1215,32 @@ mod migration_fence_tests {
         assert!(!hub.publish_admitted("peer","hash","instance",ip,HashSet::new(),Some(fresh)).is_empty());
         assert!(!hub.withdraw_bound("peer","hash","instance",old));
         assert!(!hub.publish_admitted("peer","hash","instance",ip,HashSet::new(),Some(fresh)).is_empty());
+    }
+
+    #[test]
+    fn idle_workspace_metadata_reclaims_without_retiring_live_authority(){
+        let hub=Hub::default();
+        for i in 0..MAX_CONTROL_WORKSPACES {assert!(hub.workspace_generation(&format!("workspace-{i}"),1,false));}
+        let ticket=hub.begin_workspace_admission("opaque-peer","hash","instance","workspace-0").unwrap();
+        assert!(!hub.publish_admitted("opaque-peer","hash","instance",Ipv4Addr::new(10,0,0,2),HashSet::new(),Some(ticket)).is_empty());
+        assert!(hub.workspace_generation("new-workspace",1,false));
+        let inner=hub.0.lock().unwrap();assert_eq!(inner.workspace_generations.len(),2);assert_eq!(inner.workspace_generations.get("workspace-0"),Some(&(1,false)));drop(inner);
+        assert!(!hub.publish_admitted("opaque-peer","hash","instance",Ipv4Addr::new(10,0,0,2),HashSet::new(),Some(ticket)).is_empty());
+    }
+    #[test]
+    fn idle_eviction_cannot_resurrect_expired_ticket_or_admit_without_fresh_head(){
+        let hub=Hub::default();
+        for i in 0..MAX_CONTROL_WORKSPACES {assert!(hub.workspace_generation(&format!("workspace-{i}"),7,false));}
+        let old=hub.begin_workspace_admission("opaque-peer","hash","instance","workspace-0").unwrap();
+        hub.publish_admitted("opaque-peer","hash","instance",Ipv4Addr::new(10,0,0,2),HashSet::new(),Some(old));
+        {let mut inner=hub.0.lock().unwrap();inner.admissions.get_mut("opaque-peer").unwrap().expires=Instant::now()-Duration::from_secs(1);inner.leases.get_mut("opaque-peer").unwrap().expires=Instant::now()-Duration::from_secs(1);}
+        assert!(hub.workspace_generation("new-workspace",1,false));
+        assert!(hub.publish_admitted("opaque-peer","hash","instance",Ipv4Addr::new(10,0,0,2),HashSet::new(),Some(old)).is_empty());
+        assert!(hub.begin_workspace_admission("opaque-peer","hash","instance","workspace-0").is_none());
+        assert!(hub.workspace_generation("workspace-0",8,false));
+        let fresh=hub.begin_workspace_admission("opaque-peer","hash","instance","workspace-0").unwrap();
+        assert!(!hub.publish_admitted("opaque-peer","hash","instance",Ipv4Addr::new(10,0,0,2),HashSet::new(),Some(fresh)).is_empty());
+        assert!(!hub.withdraw_bound("opaque-peer","hash","instance",old));
     }
 
 }
