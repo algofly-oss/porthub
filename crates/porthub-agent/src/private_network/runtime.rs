@@ -388,7 +388,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     if snapshot.sparse.is_none(){tun.update_routes(&routes).await?;}
                 } else {
                     #[cfg(windows)]
-                    let tun=Arc::new(Tun::open_owned(&path,&name,own.ip,&routes).await?);
+                    let tun=Arc::new(Tun::open_owned(&path,&name,own.ip,&routes,if snapshot.sparse.is_some(){super::native_ownership::HostAdmission::Sparse}else{super::native_ownership::HostAdmission::Legacy}).await?);
                     #[cfg(not(windows))]
                     let tun=Arc::new(Tun::open(&name,own.ip,&routes).await?);
                     local_address.configured(own.ip)?;

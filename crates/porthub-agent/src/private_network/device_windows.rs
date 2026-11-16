@@ -10,7 +10,9 @@ use std::{
 };
 use tokio::sync::Mutex;
 use tun_rs::DeviceBuilder;
-use super::{native_ownership::{AdapterRecord,RouteStamp,RetiredRoute},windows_state};
+use super::{native_ownership::{AdapterRecord,RouteStamp,RetiredRoute,HostAdmission,plan_hosts,MAX_LEDGER_BYTES},windows_state};
+
+fn save_record(path:&std::path::Path,record:&AdapterRecord)->Result<()>{let bytes=record.encode()?;windows_state::write_bytes_bounded(path,&bytes,MAX_LEDGER_BYTES)}
 
 struct Ownership { path:PathBuf,record:std::sync::Mutex<AdapterRecord>,_lease:crate::profile::Lease }
 fn stamp(route:&Route)->RouteStamp{RouteStamp{address:route.destination(),prefix:route.prefix(),gateway:route.gateway().filter(|g|!g.is_unspecified()),metric:route.metric().unwrap_or(0)}}
@@ -37,13 +39,13 @@ impl Ownership {
         r.recover(&adapter_guid(index)?,&device.addresses()?,device.mtu()?,&rows)?;
         // Every verified complete inventory retires missing claims durably,
         // before any caller can prune caches, return early or mutate routes.
-        r.observe_missing(&rows,|next|windows_state::write(&self.path,next))?;Ok(())
+        r.observe_missing(&rows,|next|save_record(&self.path,next))?;Ok(())
     }
-    fn reserve(&self,value:RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.reserve_route(value,|next|windows_state::write(&self.path,next))}
-    fn confirm(&self,value:RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.confirm_route(value,|next|windows_state::write(&self.path,next))}
-    fn cancel(&self,value:&RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.cancel_route(value,|next|windows_state::write(&self.path,next))}
-    fn retire(&self,value:&RouteStamp)->Result<RetiredRoute>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.retire_route(value,|next|windows_state::write(&self.path,next))}
-    fn finish_retirement(&self,value:&RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.finish_retirement(value,|next|windows_state::write(&self.path,next))}
+    fn reserve(&self,value:RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.reserve_route(value,|next|save_record(&self.path,next))}
+    fn confirm(&self,value:RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.confirm_route(value,|next|save_record(&self.path,next))}
+    fn cancel(&self,value:&RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.cancel_route(value,|next|save_record(&self.path,next))}
+    fn retire(&self,value:&RouteStamp)->Result<RetiredRoute>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.retire_route(value,|next|save_record(&self.path,next))}
+    fn finish_retirement(&self,value:&RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.finish_retirement(value,|next|save_record(&self.path,next))}
 }
 
 async fn remove_retired(manager:&mut AsyncRouteManager,index:u32,permit:RetiredRoute)->Result<RouteStamp>{
@@ -151,15 +153,16 @@ fn install_driver() -> Result<PathBuf> {
 }
 
 impl Tun {
-    pub async fn open_owned(profile:&std::path::Path,name:&str,own:Ipv4Addr,peers:&[Ipv4Addr])->Result<Self>{
+    pub(super) async fn open_owned(profile:&std::path::Path,name:&str,own:Ipv4Addr,peers:&[Ipv4Addr],admission:HostAdmission)->Result<Self>{
         ensure!(own.is_private()&&peers.iter().all(Ipv4Addr::is_private),"invalid private interface address");
+        plan_hosts(own,peers,admission,std::iter::empty())?; // deny oversized mode before any native mutation
         let path=windows_state::state_path(profile,".wintun-ownership.json")?;
         // A second caller must not treat a live owned adapter as a stale one.
         let ownership_lease=crate::profile::Lease::acquire(&path)?;
         let profile=profile.canonicalize()?;
         let binding=windows_state::profile_binding(&profile)?;
-        let mut record:AdapterRecord=match windows_state::read(&path)?{
-            Some(record)=>record,None=>{let mut nonce=[0;16];getrandom::fill(&mut nonce)?;AdapterRecord{version:2,binding:binding.clone(),guid:format!("{:032x}",u128::from_be_bytes(nonce)),name:name.into(),own,mtu:porthub_mesh::MAX_PACKET as u16,baseline:None,routes:Default::default(),pending:Default::default(),retiring:Default::default()}},
+        let mut record:AdapterRecord=match windows_state::read_bytes_bounded(&path,MAX_LEDGER_BYTES)?{
+            Some(bytes)=>AdapterRecord::decode(&bytes)?,None=>{let mut nonce=[0;16];getrandom::fill(&mut nonce)?;AdapterRecord{version:2,binding:binding.clone(),guid:format!("{:032x}",u128::from_be_bytes(nonce)),name:name.into(),own,mtu:porthub_mesh::MAX_PACKET as u16,baseline:None,routes:Default::default(),pending:Default::default(),retiring:Default::default()}},
         };
         record.validate(&binding,name,record.own,record.mtu)?;
         let native_adapters=adapters()?;
@@ -175,10 +178,10 @@ impl Tun {
             let addresses:Vec<_>=getifaddrs::getifaddrs()?.filter(|i|i.index==Some(*index)).filter_map(|i|i.address.ip_addr()).collect();
             let current=native.iter().filter(|r|r.if_index()==Some(*index)).map(stamp).collect();
             record.recover(guid,&addresses,u16::try_from(*mtu)?,&current)?;
-            record.observe_missing(&current,|next|windows_state::write(&path,next))?;
+            record.observe_missing(&current,|next|save_record(&path,next))?;
         }
         if existing_index.is_none(){record.reset_absent(own,porthub_mesh::MAX_PACKET as u16)?;}
-        windows_state::write(&path,&record)?; // protected intent precedes creation
+        save_record(&path,&record)?; // protected intent precedes creation
         let driver=install_driver()?;
         let device=DeviceBuilder::new().name(name).device_guid(u128::from_str_radix(&record.guid,16)?).inherit_enable_state().wintun_file(driver.to_string_lossy().into_owned()).build_async().context("cannot open owned Windows private Wintun adapter")?;
         let index=device.if_index()?;
@@ -186,19 +189,19 @@ impl Tun {
         if existing_index==Some(index){
             let current=manager.list().await?.iter().filter(|r|r.if_index()==Some(index)).map(stamp).collect();
             record.recover(&adapter_guid(index)?,&device.addresses()?,device.mtu()?,&current)?;
-            record.observe_missing(&current,|next|windows_state::write(&path,next))?;
+            record.observe_missing(&current,|next|save_record(&path,next))?;
         }else if existing_index.is_some(){
             // The pinned builder may recreate an orphaned *already verified*
             // owned GUID. Recheck GUID/name above, then journal this fresh start.
-            record.baseline=None;record.routes.clear();record.pending.clear();record.retiring.clear();windows_state::write(&path,&record)?;
+            record.baseline=None;record.routes.clear();record.pending.clear();record.retiring.clear();save_record(&path,&record)?;
         }
         device.set_network_address(own,32,None)?;device.set_mtu(porthub_mesh::MAX_PACKET as u16)?;device.enabled(true)?;
         let current:std::collections::BTreeSet<_>=manager.list().await?.iter().filter(|r|r.if_index()==Some(index)).map(stamp).collect();
         let present:std::collections::BTreeSet<_>=record.routes.intersection(&current).cloned().collect();
         if record.baseline.is_none(){record.baseline=Some(current.clone());}
-        record.routes=present.clone();record.pending.clear();record.retiring.clear();windows_state::write(&path,&record)?;
+        record.routes=present.clone();record.pending.clear();record.retiring.clear();save_record(&path,&record)?;
         let tun=Self{device,index,name:name.into(),own,routes:Mutex::new(present.iter().filter_map(|r|if r.prefix==32{if let IpAddr::V4(ip)=r.address{Some(ip)}else{None}}else{None}).collect()),capture_routes:Mutex::new(present.iter().filter_map(|r|if r.prefix<32{if let IpAddr::V4(ip)=r.address{porthub_mesh::lan_routes::Network::from_address(ip,r.prefix).ok()}else{None}}else{None}).collect()),_driver:driver,ownership:Ownership{path,record:std::sync::Mutex::new(record),_lease:ownership_lease}};
-        tun.update_routes(peers).await?;Ok(tun)
+        tun.update_routes_for(peers,admission).await?;Ok(tun)
     }
 
     /// Prefix capture does not authorize packets. Preserve foreign routes and isolate pool conflicts.
@@ -227,6 +230,7 @@ impl Tun {
     /// pair to DNS; it never reuses the additions-only legacy preflight.
     pub async fn reconcile_sparse(&self,pools:&[porthub_mesh::lan_routes::Network],peers:&[Ipv4Addr])->Result<porthub_network::capture_routes::SparseAudit>{
         use porthub_network::capture_routes::{self,ExistingRoute};
+        plan_hosts(self.own,peers,HostAdmission::Sparse,std::iter::empty())?;
         let mut manager=AsyncRouteManager::new().context("cannot open sparse route audit")?;
         let native=manager.list().await.context("cannot inspect sparse route audit")?;
         self.ownership.verify(self.index,&self.device,&native)?;
@@ -247,27 +251,24 @@ impl Tun {
         let retained_capture:Vec<_>=self.capture_routes.lock().await.iter().copied().filter(|p|audit.capture.accepted.contains(p)).collect();
         self.update_capture_routes(&retained_capture).await?;
         let retained_peers:Vec<_>=self.routes.lock().await.iter().copied().filter(|p|audit.accepted_peers.contains(p)).collect();
-        self.update_routes(&retained_peers).await?;
+        self.update_routes_for(&retained_peers,HostAdmission::Sparse).await?;
         audit.capture=self.update_capture_routes(pools).await?;
-        self.update_routes(&audit.accepted_peers).await?;
+        self.update_routes_for(&audit.accepted_peers,HostAdmission::Sparse).await?;
         Ok(audit)
     }
 
-    pub async fn update_routes(&self, peers: &[Ipv4Addr]) -> Result<()> {
-        ensure!(
-            peers.iter().all(Ipv4Addr::is_private),
-            "invalid private route address"
-        );
-        let wanted = peer_routes(self.own, peers);
-        let mut current = self.routes.lock().await;
-        let additions: Vec<_> = wanted.difference(&current).copied().collect();
+    pub async fn update_routes(&self,peers:&[Ipv4Addr])->Result<()>{self.update_routes_for(peers,HostAdmission::Legacy).await}
+    async fn update_routes_for(&self,peers:&[Ipv4Addr],admission:HostAdmission)->Result<()>{
+        let mut current=self.routes.lock().await;
+        let plan=plan_hosts(self.own,peers,admission,current.iter().copied())?;
+        let wanted=&plan.wanted;
         let mut routes = AsyncRouteManager::new().context("cannot open Windows route manager")?;
         let existing = routes
             .list()
             .await
             .context("cannot inspect Windows routes")?;
         self.ownership.verify(self.index,&self.device,&existing)?;
-        for address in &wanted {
+        for address in wanted {
             for route in &existing {
                 if route.prefix() == 0 || route.if_index() == Some(self.index) {
                     continue;
@@ -277,18 +278,20 @@ impl Tun {
                 }
             }
         }
-        for address in additions {
+        // Revoke obsolete physical routes first. Only new policy members are
+        // added next; unchanged authorized routes are retained. This bounds the
+        // ledger to one admitted generation, even during legacy/sparse handover.
+        for address in plan.removals {
+            let permit=self.ownership.retire(&direct(IpAddr::V4(address),32))?;
+            let retired=remove_retired(&mut routes,self.index,permit).await?;self.ownership.finish_retirement(&retired)?;
+            current.remove(&address);
+        }
+        for address in plan.additions {
             let route = Route::new(IpAddr::V4(address), 32).with_if_index(self.index).with_metric(0);
             self.ownership.reserve(direct(IpAddr::V4(address),32))?;
             if let Err(error)=routes.add(&route).await{self.ownership.cancel(&direct(IpAddr::V4(address),32))?;return Err(error).context("cannot add Windows private host route");}
             self.ownership.confirm(direct(IpAddr::V4(address),32))?;
             current.insert(address);
-        }
-        let removals: Vec<_> = current.difference(&wanted).copied().collect();
-        for address in removals {
-            let permit=self.ownership.retire(&direct(IpAddr::V4(address),32))?;
-            let retired=remove_retired(&mut routes,self.index,permit).await?;self.ownership.finish_retirement(&retired)?;
-            current.remove(&address);
         }
         Ok(())
     }

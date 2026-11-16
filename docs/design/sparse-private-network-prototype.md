@@ -203,8 +203,9 @@ uses removal permits, and fences the unshipped old record format. It explicitly
 sets/readbacks Winsock `SO_EXCLUSIVEADDRUSE` before UDP/TCP bind. The retained red
 recovery test reproduces old stale-prefix adoption; the new failure/restart
 contracts pass. Ignored native adversarial socket cases compile but are not
-native execution proof. The 320-row ownership journal's legacy-4096 compatibility
-also remains an explicit merge blocker; see the disposable validation design.
+native execution proof. At that checkpoint, the 320-row ownership journal's legacy-4096 compatibility
+remained a blocker; the later common-budget source checkpoint below addresses
+its scalar admission without implying native scale validation.
 
 
 A second independent review of `15d12d3` found that observing an externally
@@ -213,5 +214,19 @@ verified-inventory processing now checkpoints that absence before memory changes
 or early return. Repair requires a new pending intent plus native add
 acknowledgement; diagnostic expiry cannot reauthorize a row. The frozen-source
 red and five portable failure/repair/restart regressions are retained. These
-remain source/contract checks, not Windows native lifecycle proof, and do not
-resolve the documented legacy ledger-capacity blocker.
+remain source/contract checks, not Windows native lifecycle proof, and did not yet
+resolve the legacy ledger-capacity blocker addressed by the next source checkpoint.
+
+
+The common ownership budget now derives from the unchanged 4096-identity legacy
+limit (4095 remote host rows), the unchanged 256 sparse-pair limit, 32 capture
+prefixes and the prior maximum 320-row baseline allowance. It admits 4447 total
+ownership rows in a bounded 512 KiB record, with disjoint phases and one pending
+add. No persisted mode or arbitrary budget field is trusted. Actual current-mode
+host admission is checked before native writes; obsolete hosts retire before
+new additions, so replacement and legacy/sparse handover do not need two full
+route generations. Max-shape codec, overflow and handover contracts pass; the
+network Engine still rejects 4097 legacy identities. This removes the scalar
+320-row journal mismatch in source. Native full-size I/O/latency, lifecycle,
+range migration, sparse exit/Tor and fairness remain unverified/open; it is not
+proof of thousands of running agents or full-mesh reachability.

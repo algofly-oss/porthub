@@ -198,8 +198,16 @@ pub(super) fn read_bounded<T: serde::de::DeserializeOwned>(
     path: &Path,
     limit: usize,
 ) -> Result<Option<T>> {
+    read_bytes_bounded(path, limit)?
+        .map(|bytes| Ok(serde_json::from_slice(&bytes)?))
+        .transpose()
+}
+pub(super) fn read_bytes_bounded(path: &Path, limit: usize) -> Result<Option<Vec<u8>>> {
     ensure!(
-        matches!(limit, 65536 | 262144),
+        matches!(
+            limit,
+            65536 | 262144 | super::native_ownership::MAX_LEDGER_BYTES
+        ),
         "invalid native state byte budget"
     );
     match std::fs::symlink_metadata(path) {
@@ -217,7 +225,7 @@ pub(super) fn read_bounded<T: serde::de::DeserializeOwned>(
     let mut data = Vec::new();
     file.take(limit as u64 + 1).read_to_end(&mut data)?;
     ensure!(data.len() <= limit, "native ownership record exceeds bound");
-    Ok(Some(serde_json::from_slice(&data)?))
+    Ok(Some(data))
 }
 pub(super) fn write<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
     write_bounded(path, value, 65536)
@@ -227,17 +235,23 @@ pub(super) fn write_bounded<T: serde::Serialize>(
     value: &T,
     limit: usize,
 ) -> Result<()> {
+    let data = serde_json::to_vec(value)?;
+    write_bytes_bounded(path, &data, limit)
+}
+pub(super) fn write_bytes_bounded(path: &Path, data: &[u8], limit: usize) -> Result<()> {
     ensure!(
-        matches!(limit, 65536 | 262144),
+        matches!(
+            limit,
+            65536 | 262144 | super::native_ownership::MAX_LEDGER_BYTES
+        ),
         "invalid native state byte budget"
     );
     private(path.parent().context("native state parent missing")?, true)?;
     if path.try_exists()? {
         private(path, false)?;
     }
-    let data = serde_json::to_vec(value)?;
     ensure!(data.len() <= limit, "native ownership record exceeds bound");
-    crate::profile::write_private(path, &data, true)?;
+    crate::profile::write_private(path, data, true)?;
     // The temporary file's default owner can be the invoking elevated admin.
     // Set only our just-written journal to the privileged local Administrators
     // owner; never normalize/adopt a pre-existing untrusted record.

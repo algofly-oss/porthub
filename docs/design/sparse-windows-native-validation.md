@@ -152,10 +152,10 @@ never switch off exclusivity, use unsafe reuse, or reset foreign sockets.
 
 A further audit found an unmerged legacy-compatibility issue: the ownership
 ledger's 320-row bound was derived from sparse cache/capture limits, while the
-Windows runtime also invokes it for legacy full snapshots. It therefore does
-not yet preserve the older 4096-peer route capacity. Before merging, derive a
-bounded journal/admission strategy from that existing contract or isolate this
-experimental path without altering legacy behavior. Do not solve this by
+Windows runtime also invokes it for legacy full snapshots. It therefore did
+not preserve the older 4096-peer route capacity at that checkpoint. The common
+admission design below addresses that scalar mismatch in source; it does not
+establish native latency or lifecycle at the maximum. Do not solve this by
 raising global peer caps or silently dropping routes. No live client has run
 this isolated implementation.
 
@@ -196,5 +196,51 @@ confirmed claim. Old absent diagnostics can expire on a later complete snapshot;
 expiring a diagnostic never recreates authority. Stable snapshots cause no
 recurring journal writes. The portable tests cover external removal → empty
 wanted set → identical foreign row → restart, checkpoint failure, acknowledged
-repair, failed repair and idempotent diagnostic expiry. No native execution or
-legacy-capacity resolution is implied; the existing 320/4096 blocker remains.
+repair, failed repair and idempotent diagnostic expiry. No native execution is implied. That checkpoint left the 320/4096 scalar
+blocker open; the capacity source changes below address it without a peer-cap increase.
+
+
+## Common ownership-ledger capacity checkpoint
+
+The ownership record now uses one common, profile-bound budget for both protocol
+modes. It does not accept a persisted mode or a user-supplied budget. Ownership
+recovery is not peer authorization: the current validated snapshot determines
+native target admission, and the policy/flow caps remain unchanged.
+
+The budget comes from existing contracts: `MAX_SNAPSHOT_PEERS` remains 4096 and
+includes the required local identity, allowing 4095 remote legacy host routes.
+`MAX_PAIR_LEASES` remains 256 for sparse target admission. Capture prefixes remain
+32. The baseline allowance remains the prior ledger's maximum of 320 rows when
+no explicit routes were present. The common ledger therefore admits at most
+`320 + max(4095, 256) + 32 = 4447` rows, with no truncation. Explicit claims across
+confirmed/pending/retiring phases share the same slots, phases cannot overlap,
+and only one add intent can be in flight. Baseline rows have a separate bound
+and cannot overlap explicit claims. Explicit claims must match agent-created
+canonical private IPv4 direct routes; the record does not infer network access
+from a physical route or a recorded mode.
+
+Desired host admission runs before interface creation or route writes. Legacy
+4096-identity/4095-remote and sparse-256 cases are admitted; one additional remote
+fails closed. Host replacement now removes obsolete rows before adding new ones,
+retaining unchanged rows. This prevents two full peer generations from consuming
+the journal, including legacy → sparse → legacy handover. Existing owned recovery
+uses the protected profile/GUID proof and common bound, then reconciles to the
+current admitted target set before packet-owner exposure. Pending, missing and
+retired claims retain their existing non-authorizing semantics.
+
+A purpose-specific 512 KiB codec and protected byte reader/writer replace the
+old 64 KiB adapter-ledger limit; NRPT's separate 256 KiB budget is unchanged.
+The conservative serialized-shape estimate is below 512 KiB, and a maximum-count, long-field
+4447-row fixture serializes to 325317 bytes. Real encoder/decoder tests accept an
+exact 512 KiB whitespace-padded valid record and reject one byte more. They also
+reject oversized baseline/explicit sets, overlapping phases, malformed direct
+claims and forged mode/budget fields. The real network Engine accepts 4096
+identities and rejects/revokes at 4097; this is not a raised global cap.
+
+These are admission, codec and plan tests, not 4096 native adapters/agents or a
+full-mesh benchmark. Native full-size route I/O, startup/handover latency and
+failure behavior still require the disposable fixture. Per-route full-journal
+checkpoints can have substantial aggregate I/O; no two-second convergence or
+large-host readiness claim is made from these scalar bounds. Server renumber
+journaling, sparse exits/Tor, resource fairness and all previously identified
+native OS validation gaps remain open.

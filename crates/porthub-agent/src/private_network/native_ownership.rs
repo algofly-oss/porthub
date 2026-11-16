@@ -13,7 +13,66 @@ pub(super) fn dns_endpoint(own: Ipv4Addr) -> Ipv4Addr {
     Ipv4Addr::new(127, bytes[1], bytes[2], bytes[3])
 }
 
-pub(super) const MAX_ROUTES: usize = 320;
+// Preserve the prior maximum baseline by itself; do not spend peer capacity on
+// the OS's own interface rows. Peer caps themselves remain unchanged.
+pub(super) const MAX_BASELINE_ROUTES: usize = 320;
+pub(super) const MAX_LEGACY_HOSTS: usize = porthub_network::policy::MAX_SNAPSHOT_PEERS - 1;
+pub(super) const MAX_SPARSE_HOSTS: usize = porthub_network::policy::MAX_PAIR_LEASES;
+pub(super) const MAX_HOST_CLAIMS: usize = if MAX_LEGACY_HOSTS > MAX_SPARSE_HOSTS {
+    MAX_LEGACY_HOSTS
+} else {
+    MAX_SPARSE_HOSTS
+};
+pub(super) const MAX_CAPTURE_CLAIMS: usize = porthub_network::capture_routes::MAX_CAPTURE_PREFIXES;
+pub(super) const MAX_EXPLICIT_CLAIMS: usize = MAX_HOST_CLAIMS + MAX_CAPTURE_CLAIMS;
+pub(super) const MAX_ROUTES: usize = MAX_BASELINE_ROUTES + MAX_EXPLICIT_CLAIMS;
+pub(super) const MAX_LEDGER_BYTES: usize = 512 * 1024;
+#[derive(Clone, Copy, Debug)]
+pub(super) enum HostAdmission {
+    Legacy,
+    Sparse,
+}
+impl HostAdmission {
+    pub fn limit(self) -> usize {
+        match self {
+            Self::Legacy => MAX_LEGACY_HOSTS,
+            Self::Sparse => MAX_SPARSE_HOSTS,
+        }
+    }
+}
+pub(super) struct HostRoutePlan {
+    pub wanted: BTreeSet<Ipv4Addr>,
+    pub removals: Vec<Ipv4Addr>,
+    pub additions: Vec<Ipv4Addr>,
+}
+pub(super) fn plan_hosts(
+    own: Ipv4Addr,
+    peers: &[Ipv4Addr],
+    admission: HostAdmission,
+    current: impl IntoIterator<Item = Ipv4Addr>,
+) -> Result<HostRoutePlan> {
+    ensure!(
+        own.is_private()
+            && peers.len() <= admission.limit() + 1
+            && peers.iter().all(Ipv4Addr::is_private),
+        "private host route input exceeds existing policy capacity or is invalid"
+    );
+    let wanted: BTreeSet<_> = peers.iter().copied().filter(|ip| *ip != own).collect();
+    ensure!(
+        wanted.len() <= admission.limit(),
+        "private host routes exceed existing policy capacity"
+    );
+    let current: BTreeSet<_> = current.into_iter().collect();
+    ensure!(
+        current.len() <= MAX_EXPLICIT_CLAIMS && current.iter().all(Ipv4Addr::is_private),
+        "owned host route recovery exceeds bounded ledger capacity"
+    );
+    Ok(HostRoutePlan {
+        removals: current.difference(&wanted).copied().collect(),
+        additions: wanted.difference(&current).copied().collect(),
+        wanted,
+    })
+}
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RouteStamp {
@@ -70,6 +129,24 @@ fn hex(value: &str, n: usize) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 impl AdapterRecord {
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        self.validate(&self.binding, &self.name, self.own, self.mtu)?;
+        let bytes = serde_json::to_vec(self)?;
+        ensure!(
+            bytes.len() <= MAX_LEDGER_BYTES,
+            "native ownership ledger exceeds byte budget"
+        );
+        Ok(bytes)
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        ensure!(
+            bytes.len() <= MAX_LEDGER_BYTES,
+            "native ownership ledger exceeds byte budget"
+        );
+        let record: Self = serde_json::from_slice(bytes)?;
+        record.validate(&record.binding, &record.name, record.own, record.mtu)?;
+        Ok(record)
+    }
     pub fn validate(&self, binding: &str, name: &str, own: Ipv4Addr, mtu: u16) -> Result<()> {
         ensure!(
             self.version == 2 && hex(&self.binding, 64) && self.binding == binding,
@@ -90,13 +167,60 @@ impl AdapterRecord {
             self.own == own && own.is_private() && self.mtu == mtu,
             "owned adapter configuration changed; clean owned teardown is required"
         );
+        let baseline = self.baseline.as_ref();
         ensure!(
-            self.routes.len()
-                + self.pending.len()
-                + self.retiring.len()
-                + self.baseline.as_ref().map_or(0, BTreeSet::len)
-                <= MAX_ROUTES,
-            "owned route journal exceeds bound"
+            baseline.map_or(0, BTreeSet::len) <= MAX_BASELINE_ROUTES,
+            "native baseline exceeds its existing admission bound"
+        );
+        ensure!(
+            self.pending.len() <= 1,
+            "native route writer permits only one in-flight add intent"
+        );
+        ensure!(
+            self.routes.len() + self.pending.len() + self.retiring.len() <= MAX_EXPLICIT_CLAIMS,
+            "explicit native route claims exceed existing peer/capture capacity"
+        );
+        ensure!(
+            self.routes.is_disjoint(&self.pending)
+                && self.routes.is_disjoint(&self.retiring)
+                && self.pending.is_disjoint(&self.retiring),
+            "native route claim phases overlap"
+        );
+        ensure!(
+            baseline.is_none_or(|b| b.is_disjoint(&self.routes)
+                && b.is_disjoint(&self.pending)
+                && b.is_disjoint(&self.retiring)),
+            "explicit native claims overlap kernel baseline"
+        );
+        let mut capture_rows = 0;
+        for row in self
+            .routes
+            .iter()
+            .chain(self.pending.iter())
+            .chain(self.retiring.iter())
+        {
+            let IpAddr::V4(address) = row.address else {
+                anyhow::bail!("explicit route claim is not an agent-created IPv4 route");
+            };
+            ensure!(
+                address.is_private()
+                    && (1..=32).contains(&row.prefix)
+                    && row.gateway.is_none()
+                    && row.metric == 0,
+                "explicit route claim differs from agent-created direct route"
+            );
+            ensure!(
+                porthub_mesh::lan_routes::Network::from_address(address, row.prefix)?.address()
+                    == address,
+                "explicit route prefix is not canonical"
+            );
+            if row.prefix < 32 {
+                capture_rows += 1;
+            }
+        }
+        ensure!(
+            capture_rows <= MAX_CAPTURE_CLAIMS,
+            "capture route claims exceed existing prefix capacity"
         );
         for route in self
             .routes
@@ -621,5 +745,254 @@ mod observed_missing_tests {
         assert_eq!(writes, 2);
         assert!(r.retiring.is_empty());
         assert!(r.recover(&r.guid, &[], 1380, &BTreeSet::from([b])).is_err());
+    }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+    fn own() -> Ipv4Addr {
+        "10.250.0.1".parse().unwrap()
+    }
+    fn hosts(base: u32, count: usize) -> Vec<Ipv4Addr> {
+        (0..count)
+            .map(|i| Ipv4Addr::from(base + i as u32))
+            .collect()
+    }
+    fn stamp(address: Ipv4Addr) -> RouteStamp {
+        RouteStamp {
+            address: address.into(),
+            prefix: 32,
+            gateway: None,
+            metric: 0,
+        }
+    }
+    fn record() -> AdapterRecord {
+        AdapterRecord {
+            version: 2,
+            binding: "a".repeat(64),
+            guid: "b".repeat(32),
+            name: "ph12345678".into(),
+            own: own(),
+            mtu: 1380,
+            baseline: Some(BTreeSet::new()),
+            routes: BTreeSet::new(),
+            pending: BTreeSet::new(),
+            retiring: BTreeSet::new(),
+        }
+    }
+    fn valid(r: &AdapterRecord) -> Result<()> {
+        r.validate(&r.binding, &r.name, r.own, r.mtu)
+    }
+    #[test]
+    fn existing_full_4096_identity_and_256_pair_host_contracts_are_unchanged() {
+        assert_eq!(porthub_network::policy::MAX_SNAPSHOT_PEERS, 4096);
+        assert_eq!(MAX_LEGACY_HOSTS, 4095);
+        assert_eq!(MAX_SPARSE_HOSTS, 256);
+        let legacy = hosts(0x0a010000, MAX_LEGACY_HOSTS);
+        let mut with_self = legacy.clone();
+        with_self.push(own());
+        assert_eq!(
+            plan_hosts(own(), &with_self, HostAdmission::Legacy, [])
+                .unwrap()
+                .wanted
+                .len(),
+            4095
+        );
+        assert!(plan_hosts(own(), &hosts(0x0a010000, 4096), HostAdmission::Legacy, []).is_err());
+        assert_eq!(
+            plan_hosts(own(), &legacy[..256], HostAdmission::Sparse, [])
+                .unwrap()
+                .wanted
+                .len(),
+            256
+        );
+        assert!(plan_hosts(own(), &legacy[..257], HostAdmission::Sparse, []).is_err());
+    }
+    #[test]
+    fn full_replacement_and_cross_mode_handover_use_removal_before_add_without_double_budget() {
+        let legacy = hosts(0x0a010000, MAX_LEGACY_HOSTS);
+        let replacement = hosts(0x0a020000, MAX_LEGACY_HOSTS);
+        let plan = plan_hosts(
+            own(),
+            &replacement,
+            HostAdmission::Legacy,
+            legacy.iter().copied(),
+        )
+        .unwrap();
+        let mut physical: BTreeSet<_> = legacy.iter().copied().collect();
+        let mut peak = physical.len();
+        for ip in plan.removals {
+            physical.remove(&ip);
+        }
+        for ip in plan.additions {
+            physical.insert(ip);
+            peak = peak.max(physical.len());
+        }
+        assert_eq!(peak, MAX_LEGACY_HOSTS);
+        assert_eq!(physical, plan.wanted);
+        let sparse = plan_hosts(
+            own(),
+            &replacement[..256],
+            HostAdmission::Sparse,
+            physical.iter().copied(),
+        )
+        .unwrap();
+        for ip in sparse.removals {
+            physical.remove(&ip);
+        }
+        for ip in sparse.additions {
+            physical.insert(ip);
+        }
+        assert_eq!(physical.len(), 256);
+        let restored = plan_hosts(
+            own(),
+            &replacement,
+            HostAdmission::Legacy,
+            physical.iter().copied(),
+        )
+        .unwrap();
+        for ip in restored.removals {
+            physical.remove(&ip);
+        }
+        for ip in restored.additions {
+            physical.insert(ip);
+        }
+        assert_eq!(physical.len(), 4095);
+    }
+    #[test]
+    fn maximum_common_ledger_fits_purpose_specific_byte_bound_with_no_mode_relabel() {
+        let mut r = record();
+        // Every IPv4 host text below uses a long private representation. Baseline
+        // rows exercise full-length IPv6/gateway text and maximum metric fields.
+        for i in 0..MAX_LEGACY_HOSTS {
+            r.routes.insert(stamp(Ipv4Addr::new(
+                192,
+                168,
+                100 + (i / 156) as u8,
+                100 + (i % 156) as u8,
+            )));
+        }
+        for i in 0..MAX_CAPTURE_CLAIMS {
+            r.routes.insert(RouteStamp {
+                address: Ipv4Addr::new(172, 16, 100 + i as u8, 128).into(),
+                prefix: 25,
+                gateway: None,
+                metric: 0,
+            });
+        }
+        for i in 0..MAX_BASELINE_ROUTES {
+            r.baseline.as_mut().unwrap().insert(RouteStamp {
+                address: std::net::Ipv6Addr::new(
+                    0xfe80,
+                    0xffff,
+                    0xffff,
+                    0xffff,
+                    0xffff,
+                    0xffff,
+                    0xffff,
+                    0x1000 + i as u16,
+                )
+                .into(),
+                prefix: 128,
+                gateway: Some(
+                    std::net::Ipv6Addr::new(
+                        0xfe80, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
+                    )
+                    .into(),
+                ),
+                metric: u32::MAX,
+            });
+        }
+        valid(&r).unwrap();
+        assert_eq!(
+            r.routes.len() + r.baseline.as_ref().unwrap().len(),
+            MAX_ROUTES
+        );
+        let bytes = r.encode().unwrap();
+        assert!(bytes.len() > 65536);
+        assert!(bytes.len() <= MAX_LEDGER_BYTES);
+        // Conservative per-entry JSON maxima include all fixed keys/punctuation.
+        assert!(MAX_BASELINE_ROUTES * 192 + MAX_EXPLICIT_CLAIMS * 96 + 4096 <= MAX_LEDGER_BYTES);
+        let mut forged = serde_json::to_value(&r).unwrap();
+        forged["mode"] = serde_json::json!("legacy");
+        forged["max_hosts"] = serde_json::json!(65536);
+        assert!(AdapterRecord::decode(&serde_json::to_vec(&forged).unwrap()).is_err());
+        let recovered = AdapterRecord::decode(&bytes).unwrap();
+        valid(&recovered).unwrap();
+        let mut boundary = bytes.clone();
+        boundary.resize(MAX_LEDGER_BYTES, b' ');
+        AdapterRecord::decode(&boundary).unwrap();
+        boundary.push(b' ');
+        assert!(AdapterRecord::decode(&boundary)
+            .unwrap_err()
+            .to_string()
+            .contains("byte budget"));
+        let mut native = recovered.routes.clone();
+        native.extend(recovered.baseline.as_ref().unwrap().iter().cloned());
+        recovered
+            .recover(&recovered.guid, &[own().into()], 1380, &native)
+            .unwrap();
+        assert!(recovered
+            .validate(
+                &"f".repeat(64),
+                &recovered.name,
+                recovered.own,
+                recovered.mtu
+            )
+            .is_err());
+        eprintln!(
+            "maximum ledger: {} rows, {} serialized bytes, {} byte limit",
+            MAX_ROUTES,
+            bytes.len(),
+            MAX_LEDGER_BYTES
+        );
+    }
+    #[test]
+    fn explicit_baseline_phase_and_shape_overflows_fail_closed() {
+        let mut r = record();
+        r.routes = hosts(0x0a010000, MAX_EXPLICIT_CLAIMS + 1)
+            .into_iter()
+            .map(stamp)
+            .collect();
+        assert!(valid(&r).is_err());
+        r = record();
+        r.baseline = Some(
+            hosts(0x0b010000, MAX_BASELINE_ROUTES + 1)
+                .into_iter()
+                .map(stamp)
+                .collect(),
+        );
+        assert!(valid(&r).is_err());
+        r = record();
+        let a = stamp("10.1.1.1".parse().unwrap());
+        r.routes.insert(a.clone());
+        r.pending.insert(a);
+        assert!(valid(&r).is_err());
+        r = record();
+        r.pending = hosts(0x0a010000, 2).into_iter().map(stamp).collect();
+        assert!(valid(&r).is_err());
+        r = record();
+        let mut foreign = stamp("10.1.1.1".parse().unwrap());
+        foreign.metric = 1;
+        r.routes.insert(foreign);
+        assert!(valid(&r).is_err());
+    }
+    #[test]
+    fn full_sparse_bound_repairs_retired_rows_without_spending_extra_slots() {
+        let mut r = record();
+        let source = hosts(0x0a010000, MAX_SPARSE_HOSTS);
+        r.routes = source.iter().copied().map(stamp).collect();
+        valid(&r).unwrap();
+        r.observe_missing(&BTreeSet::new(), |_| Ok(())).unwrap();
+        assert_eq!(r.retiring.len(), 256);
+        for ip in source {
+            let row = stamp(ip);
+            r.reserve_route(row.clone(), |_| Ok(())).unwrap();
+            r.confirm_route(row, |_| Ok(())).unwrap();
+        }
+        assert_eq!(r.routes.len(), 256);
+        assert!(r.pending.is_empty() && r.retiring.is_empty());
+        valid(&r).unwrap();
     }
 }

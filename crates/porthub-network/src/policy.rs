@@ -4,6 +4,8 @@ pub mod pair_acl;
 mod sparse;
 pub use sparse::{Lookup, PairLease, PairResponse, SparseInfo, MAX_PAIR_LEASES, MAX_PRIVATE_SUFFIXES, MAX_PRIVATE_SUFFIX_BYTES};
 use anyhow::{ensure, Result};
+/// Existing full-snapshot ceiling, including the mandatory local identity.
+pub const MAX_SNAPSHOT_PEERS: usize = 4096;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -331,7 +333,7 @@ impl Engine {
                 );
             }
             ensure!(
-                snapshot.peers.len() <= 4096 && snapshot.grants.len() <= 65536,
+                snapshot.peers.len() <= MAX_SNAPSHOT_PEERS && snapshot.grants.len() <= 65536,
                 "private policy exceeds size limit"
             );
             let mut ips = HashMap::new();
@@ -361,7 +363,7 @@ impl Engine {
                         && (!route.routing_peers.is_empty() || route.tor_enabled) && !route.clients.is_empty()
                         && (route.traffic_mode.internet() || (!route.routing_peers.is_empty() && !route.tor_enabled))
                         && (1..=16).contains(&route.tor_circuit_groups)
-                        && route.routing_peers.len() <= 4096 && route.clients.len() <= 4096,
+                        && route.routing_peers.len() <= MAX_SNAPSHOT_PEERS && route.clients.len() <= MAX_SNAPSHOT_PEERS,
                     "invalid exit route"
                 );
                 let mut unique_peers = HashSet::new();
@@ -722,5 +724,21 @@ mod lifetime_tests {
         assert!(track_packet(&mut incomplete, syn, "exit", true, start));
         assert!(!track_packet(&mut incomplete, reply, "exit", false, later));
         assert!(!track_packet(&mut flows, ack, "exit", true, later + TCP_ESTABLISHED_TTL));
+    }
+}
+
+#[cfg(test)]
+mod legacy_capacity_contract_tests {
+    use super::*;
+    #[test]
+    fn full_4096_peer_snapshot_remains_valid_and_4097_is_not_truncated() {
+        let peers:Vec<_>=(0..MAX_SNAPSHOT_PEERS).map(|i|serde_json::json!({
+            "id":format!("p{i}"),"ip":Ipv4Addr::from(0x0a4d0001+i as u32),
+            "fingerprint":format!("fingerprint-{i}"),"instance":format!("instance-{i}"),"hostname":format!("p{i}.phub")
+        })).collect();
+        let mut snapshot:Snapshot=serde_json::from_value(serde_json::json!({"workspace":"w","self":"p0","revision":1,"expires_at":Utc::now()+chrono::Duration::seconds(30),"peers":peers,"grants":[]})).unwrap();
+        let mut engine=Engine::default();engine.apply(snapshot.clone()).unwrap();assert!(engine.valid_lease());
+        let mut extra=snapshot.peers[0].clone();extra.id="overflow".into();extra.ip="10.78.0.1".parse().unwrap();snapshot.peers.push(extra);snapshot.revision=2;
+        assert!(engine.apply(snapshot).is_err());assert!(!engine.valid_lease());
     }
 }
