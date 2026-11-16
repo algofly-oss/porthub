@@ -1,9 +1,13 @@
 //! Windows core updates use a short-lived, verified native maintenance process.
 //! No Unix upgrade code, persistent task, new service or account grant is used.
 #[cfg(windows)]
+mod desktop;
+mod desktop_manager;
+#[cfg(windows)]
 mod native;
 mod preparation;
 mod recovery_wait;
+mod shared_image;
 mod transaction;
 mod verified_file;
 #[cfg(windows)]

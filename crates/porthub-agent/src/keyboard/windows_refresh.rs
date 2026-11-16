@@ -18,7 +18,7 @@ fn valid_sid(sid: &str) -> bool {
             .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
         && !matches!(sid, "S-1-5-18" | "S-1-5-19" | "S-1-5-20")
 }
-fn grants(layout: &crate::service::Layout, profiles: &[PathBuf]) -> Result<Vec<String>> {
+pub(super) fn grants(layout: &crate::service::Layout, profiles: &[PathBuf]) -> Result<Vec<String>> {
     ensure!(
         profiles.len() <= 64,
         "Too many upgraded desktop registrations"

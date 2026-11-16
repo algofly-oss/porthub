@@ -83,6 +83,10 @@ struct Record {
     rust_target: String,
     authorizer_pid: u32,
     attempts: u8,
+    previous_cli: Option<super::shared_image::Cli>,
+    publish_cli: bool,
+    previous_version: String,
+    previous_desktops: Vec<super::desktop::Desktop>,
 }
 impl Record {
     fn validate(&self, layout: &Layout, path: &Path) -> Result<()> {
@@ -126,19 +130,32 @@ impl Record {
             serde_json::from_slice::<Spec>(&self.previous_manifest)? == self.previous,
             "Previous manifest snapshot mismatch"
         );
-        if let Some(cli) = &self.previous.cli {
+        if let Some(cli) = &self.previous_cli {
             ensure!(
-                *cli == crate::bootstrap::cli_path(false, None)?,
-                "Automatic updates require the existing standard managed Windows CLI"
+                cli.path == crate::bootstrap::cli_path(false, None)?,
+                "Shared CLI is outside its standard published path"
             );
-            let hash = super::verified_file::hash(
-                cli,
-                &[self.previous_sha256.as_str(), self.release.sha256.as_str()],
-            )?;
-            ensure!(
-                hash == self.previous_sha256 || hash.eq_ignore_ascii_case(&self.release.sha256),
-                "Shared CLI changed outside this update; preserved"
-            );
+            pinned_release(layout, &cli.image.executable, &cli.image.sha256)?;
+            if self.phase != Phase::Prepared {
+                let allowed = if self.publish_cli {
+                    vec![cli.image.sha256.as_str(), self.release.sha256.as_str()]
+                } else {
+                    vec![cli.image.sha256.as_str()]
+                };
+                super::verified_file::hash(&cli.path, &allowed)?;
+            }
+        }
+        ensure!(
+            !self.publish_cli
+                || self.previous.cli.as_ref() == self.previous_cli.as_ref().map(|c| &c.path),
+            "Tenant has no authority to publish the shared CLI"
+        );
+        ensure!(
+            self.previous_desktops.len() <= 8,
+            "Desktop snapshot exceeds account bound"
+        );
+        for desktop in &self.previous_desktops {
+            pinned_release(layout, &desktop.image.executable, &desktop.image.sha256)?;
         }
         ensure!(
             self.release.arch == std::env::consts::ARCH
@@ -236,11 +253,14 @@ impl Native {
         );
         if let Some(cli) = &spec.cli {
             ensure!(
-                *cli == crate::bootstrap::cli_path(false, None)?
-                    && service::publication::hash_file(cli)?
-                        == service::publication::hash_file(&spec.executable)?,
-                "CLI publication differs from installed image"
+                *cli == crate::bootstrap::cli_path(false, None)?,
+                "Automatic updates require the standard managed CLI destination"
             );
+            let hash = service::publication::hash_file(cli)?;
+            service::publication::owned_target(
+                &layout,
+                &layout.releases.join(hash).join("porthub.exe"),
+            )?;
         }
         Ok(Some(Self {
             layout,
@@ -327,15 +347,152 @@ async fn ready(
     .await
     .context("Windows native runtime readiness timed out")?
 }
+async fn image_version(layout: &Layout, path: &Path) -> Result<super::shared_image::Image> {
+    service::publication::owned_target(layout, path)?;
+    let sha256 = service::publication::hash_file(path)?;
+    let check = async {
+        let mut child = tokio::process::Command::new(path)
+            .arg("version")
+            .creation_flags(0x08000000)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        let mut bytes = Vec::new();
+        child
+            .stdout
+            .take()
+            .context("Shared image version unavailable")?
+            .take(4097)
+            .read_to_end(&mut bytes)
+            .await?;
+        ensure!(
+            bytes.len() <= 4096 && child.wait().await?.success(),
+            "Shared image version probe failed"
+        );
+        let text = std::str::from_utf8(&bytes)?.trim();
+        let version = text
+            .strip_prefix("porthub ")
+            .context("Unknown shared executable version")?;
+        ensure!(
+            porthub_components::release_version::compare(version, version).is_some(),
+            "Unversioned shared executable preserved"
+        );
+        Ok(super::shared_image::Image {
+            executable: path.into(),
+            sha256,
+            version: version.into(),
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), check)
+        .await
+        .context("Shared image version probe timed out")?
+}
+async fn capture_cli(
+    layout: &Layout,
+    owned: Option<&Path>,
+) -> Result<Option<super::shared_image::Cli>> {
+    let path = crate::bootstrap::cli_path(false, None)?;
+    if let Some(owned) = owned {
+        ensure!(owned == path, "Nonstandard CLI destination preserved");
+    }
+    if !path.try_exists()? {
+        ensure!(owned.is_none(), "Owned shared CLI disappeared");
+        return Ok(None);
+    }
+    let hash = service::publication::hash_file(&path)?;
+    let image = image_version(layout, &layout.releases.join(&hash).join("porthub.exe")).await?;
+    ensure!(
+        service::publication::hash_file(&path)? == hash,
+        "Shared CLI changed while selecting maintenance scope"
+    );
+    Ok(Some(super::shared_image::Cli { path, image }))
+}
+async fn capture_desktops(layout: &Layout, source: &Path) -> Result<Vec<super::desktop::Desktop>> {
+    let mut result = vec![];
+    for (sid, paths) in super::desktop::paths(layout, source).await? {
+        let mut best: Option<super::shared_image::Image> = None;
+        for path in paths {
+            // Custom/unowned actions remain the strict refresher's responsibility;
+            // never execute them merely to ask their version.
+            if service::publication::owned_target(layout, &path).is_err() {
+                continue;
+            }
+            let image = image_version(layout, &path).await?;
+            best = Some(match best {
+                None => image,
+                Some(old) => super::shared_image::higher(&old, &image)?.clone(),
+            });
+        }
+        if let Some(image) = best {
+            result.push(super::desktop::Desktop { sid, image });
+        }
+    }
+    Ok(result)
+}
 struct Actual {
     layout: Layout,
     record: Record,
+}
+impl Actual {
+    async fn manager(
+        &self,
+        rollback: bool,
+    ) -> Result<super::desktop_manager::DesktopManager<service::windows::Windows>> {
+        let mut image = super::shared_image::Image {
+            executable: if rollback {
+                self.record.previous.executable.clone()
+            } else {
+                self.record.candidate.clone()
+            },
+            sha256: if rollback {
+                self.record.previous_sha256.clone()
+            } else {
+                self.record.release.sha256.clone()
+            },
+            version: if rollback {
+                self.record.previous_version.clone()
+            } else {
+                self.record.release.version.clone()
+            },
+        };
+        if let Some(cli) = &self.record.previous_cli {
+            image = super::shared_image::higher(&image, &cli.image)?.clone();
+        }
+        for desktop in &self.record.previous_desktops {
+            image = super::shared_image::higher(&image, &desktop.image)?.clone();
+        }
+        // Preserve a still higher image introduced by an operator since capture;
+        // our own candidate is allowed to roll back to its pinned predecessors.
+        for current in capture_desktops(&self.layout, &self.record.previous.profile).await? {
+            if !rollback || current.image.sha256 != self.record.release.sha256 {
+                image = super::shared_image::higher(&image, &current.image)?.clone();
+            }
+        }
+        service::publication::owned_target(&self.layout, &image.executable)?;
+        Ok(super::desktop_manager::DesktopManager {
+            inner: service::windows::Windows,
+            target: image.executable,
+        })
+    }
 }
 #[async_trait]
 impl Backend for Actual {
     async fn installed(&self) -> Result<Installed> {
         self.record
             .validate(&self.layout, &record_path(&self.record.previous.profile))?;
+        if let Some(cli) = &self.record.previous_cli {
+            let expected = if self.record.publish_cli {
+                vec![
+                    cli.image.sha256.as_str(),
+                    self.record.release.sha256.as_str(),
+                ]
+            } else {
+                vec![cli.image.sha256.as_str()]
+            };
+            super::verified_file::hash(&cli.path, &expected)?;
+        }
         let Some(spec) = service::installed(&self.layout, &self.record.previous.identity)? else {
             return Ok(Installed::Foreign);
         };
@@ -358,17 +515,22 @@ impl Backend for Actual {
             self.permitted(),
             "Automatic updates disabled before service transaction"
         );
+        let manager = self.manager(false).await?;
         service::publication::owned_target(&self.layout, &self.record.candidate)?;
         ensure!(
             self.permitted(),
-            "Automatic updates revoked during final executable verification"
+            "Automatic updates revoked during final executable/desktop verification"
         );
-        service::install_published(
+        service::install_locked(
             &self.layout,
             &self.record.previous.profile,
             &self.record.candidate,
-            &service::windows::Windows,
-            self.record.previous.cli.as_deref(),
+            &manager,
+            if self.record.publish_cli {
+                self.record.previous.cli.as_deref()
+            } else {
+                None
+            },
         )
         .await?;
         Ok(())
@@ -386,12 +548,27 @@ impl Backend for Actual {
         // Rollback needs no AutoUpdate permission: it restores only the same
         // enrollment and two previously verified service/CLI endpoints.
         service::publication::owned_target(&self.layout, &self.record.previous.executable)?;
-        service::install_published(
+        if let Some(cli) = &self.record.previous_cli {
+            super::verified_file::hash(
+                &cli.path,
+                &[
+                    cli.image.sha256.as_str(),
+                    self.record.release.sha256.as_str(),
+                ],
+            )?;
+            let mut publication = service::publication::Publication::prepare(
+                &self.layout,
+                &cli.path,
+                &cli.image.executable,
+            )?;
+            publication.commit();
+        }
+        service::install_locked(
             &self.layout,
             &self.record.previous.profile,
             &self.record.previous.executable,
-            &service::windows::Windows,
-            self.record.previous.cli.as_deref(),
+            &self.manager(true).await?,
+            None,
         )
         .await?;
         Ok(())
@@ -409,7 +586,6 @@ impl Backend for Actual {
 /// Align interrupted publication metadata to the actual journal-owned SCM
 /// endpoint. Unknown bytes or another CLI publication are never overwritten.
 async fn reconcile(layout: &Layout, record: &Record) -> Result<()> {
-    let _installation = service::lock(layout)?;
     record.validate(layout, &record_path(&record.previous.profile))?;
     let mut candidate = record.previous.clone();
     candidate.executable = record.candidate.clone();
@@ -458,18 +634,24 @@ async fn reconcile(layout: &Layout, record: &Record) -> Result<()> {
     if current_unit != *actual_unit {
         profile::write_private(&record.previous.unit, actual_unit, true)?;
     }
-    if let Some(cli) = &record.previous.cli {
-        let hash = super::verified_file::hash(
-            cli,
-            &[
-                record.previous_sha256.as_str(),
-                record.release.sha256.as_str(),
-            ],
-        )?;
-        let expected = service::publication::hash_file(&actual.executable)?;
-        if hash != expected {
+    if let Some(cli) = &record.previous_cli {
+        let wanted = if super::shared_image::reconcile_candidate(
+            record.phase,
+            actual == &candidate,
+            record.publish_cli,
+        ) {
+            &record.candidate
+        } else {
+            &cli.image.executable
+        };
+        let expected = service::publication::hash_file(wanted)?;
+        if super::verified_file::hash(
+            &cli.path,
+            &[cli.image.sha256.as_str(), record.release.sha256.as_str()],
+        )? != expected
+        {
             let mut publication =
-                service::publication::Publication::prepare(layout, cli, &actual.executable)?;
+                service::publication::Publication::prepare(layout, &cli.path, wanted)?;
             publication.commit();
         }
     }
@@ -573,7 +755,8 @@ pub(super) async fn maintenance(path: &Path) -> Result<()> {
     let layout = Layout::system()?;
     Record::load(&layout, path)?; // Validate the managed path before creating its lease.
     let _lease = profile::Lease::acquire(&profile::sibling(path, ".worker"))?;
-    let record = Record::load(&layout, path)?;
+    let _installation = service::lock(&layout)?;
+    let mut record = Record::load(&layout, path)?;
     ensure!(
         same_file(&record.candidate, &std::env::current_exe()?)
             && record.release.version == crate::VERSION
@@ -596,6 +779,33 @@ pub(super) async fn maintenance(path: &Path) -> Result<()> {
         };
         expired.persist(Phase::Cancelled)?;
         return Ok(());
+    }
+    if record.phase == Phase::Prepared {
+        let cli = capture_cli(&layout, record.previous.cli.as_deref()).await?;
+        ensure!(
+            record.previous_cli.is_none() || cli.is_some(),
+            "Shared CLI disappeared during staging; preserved"
+        );
+        if let (Some(before), Some(after)) = (&record.previous_cli, &cli) {
+            ensure!(
+                super::shared_image::higher(&before.image, &after.image)?.sha256
+                    == after.image.sha256,
+                "Shared CLI was intentionally downgraded during staging; preserved"
+            );
+        }
+        let image = super::shared_image::Image {
+            executable: record.candidate.clone(),
+            sha256: record.release.sha256.clone(),
+            version: record.release.version.clone(),
+        };
+        record.publish_cli = super::shared_image::publish_candidate(
+            record.previous.cli.is_some(),
+            cli.as_ref().map(|c| &c.image),
+            &image,
+        )?;
+        record.previous_cli = cli;
+        record.previous_desktops = capture_desktops(&layout, &record.previous.profile).await?;
+        profile::write_private(path, &serde_json::to_vec(&record)?, true)?;
     }
     if !record.phase.terminal() {
         reconcile(&layout, &record).await?;
@@ -740,6 +950,18 @@ async fn prepare(native: &Native, request: &Request, cancel: &CancellationToken)
                 .is_some_and(|p| same_file(&p, &native.spec.executable)),
         "Authorizing SCM process changed during staging"
     );
+    let previous_cli = capture_cli(&native.layout, native.spec.cli.as_deref()).await?;
+    let previous_desktops = capture_desktops(&native.layout, &native.source).await?;
+    let candidate_image = super::shared_image::Image {
+        executable: staged.executable.clone(),
+        sha256: release.sha256.clone(),
+        version: release.version.clone(),
+    };
+    let publish_cli = super::shared_image::publish_candidate(
+        native.spec.cli.is_some(),
+        previous_cli.as_ref().map(|c| &c.image),
+        &candidate_image,
+    )?;
     let mut nonce = [0u8; 16];
     getrandom::fill(&mut nonce).map_err(|_| anyhow::anyhow!("Update nonce unavailable"))?;
     let record = Record {
@@ -765,6 +987,10 @@ async fn prepare(native: &Native, request: &Request, cancel: &CancellationToken)
         rust_target: expected_target().into(),
         authorizer_pid: std::process::id(),
         attempts,
+        previous_cli,
+        publish_cli,
+        previous_version: crate::VERSION.into(),
+        previous_desktops,
     };
     record.validate(&native.layout, &path)?;
     profile::write_private(&path, &serde_json::to_vec(&record)?, true)?;

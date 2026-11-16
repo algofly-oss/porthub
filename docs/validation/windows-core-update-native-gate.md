@@ -2,15 +2,17 @@
 
 Run only on an explicitly reviewed disposable GitHub-hosted Windows runner with
 an administrator token and no existing PortHub installation. Preserve the final
-native artifact SHA/size, source commits, targets and version outputs for TWO real
-agent executables A/B. Both must contain the reviewed Windows updater; B must be
-strictly newer. Do not use a tiny inert executable as a substitute for SCM/runtime
-readiness. This gate is independent of USB driver prerequisites.
+native artifact SHA/size, source commits, targets and version outputs for THREE real
+agent executables A/B/C. All must contain the reviewed Windows updater; B must be
+strictly newer than A and C strictly newer than B. C independently exercises a
+second enrollment owning the shared CLI and authorized GUI worker. Do not use a tiny inert executable as a substitute for SCM/runtime
+readiness. This gate is independent of USB driver prerequisites. The source versions remain
+unchanged until separate reviewed private version-only build commits exist.
 
 Use a private loopback HTTP fixture gateway with the existing explicit
 allow_insecure_http_for_tests flag. No TLS bypass or authority exception is added
 to production. Each scenario gets a random machine ID, random local-only token
-and own canonical protected profile. Serve only the exact digest-pinned A/B bytes,
+and own canonical protected profile. Serve only the exact digest-pinned A/B/C bytes,
 correct native catalog/response headers and authenticated configuration. Never
 accept a request merely because it arrived on localhost: validate its fixture
 token and machine binding. No real user credentials, account grants or physical
@@ -62,6 +64,20 @@ same PID and immutable A image reported by the runtime.
    installation nor acknowledgment; a later B request still executes. A strictly
    older pending target uses the existing server supersession behavior, never an
    invented client receipt.
+
+9. **Two enrollments and higher shared images.** In separate success and rollback
+   cases, enroll A for the updated profile and C for another fixture profile using
+   the real publication transaction. Before advertising B to A, prove global CLI
+   and the fixture-owned authorized GUI action point at C. Snapshot the other
+   registration, both protected policies, and task XML/SDDL. A→B success and
+   readiness-failure→A rollback must retain C's global CLI and GUI action, preserve
+   the other enrollment byte-for-byte, and hold the ordinary global install lease
+   throughout apply/readiness/rollback. A known managed fixture GUI task/grant is
+   necessary for this assertion; do not infer GUI preservation from CLI bytes or
+   change any real account enrollment. The runner-only task/account fixture must
+   receive separate source review before execution. Test interrupted rollback
+   where CLI has returned to its prior shared image while SCM still points at B;
+   recovery must not republish B over C or over the restored prior CLI.
 
 Use no hardware, models or media capture. Keep all timeouts finite. Archive only
 credential-free phase/request/digest/PID/timing/counter projections and bounded

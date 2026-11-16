@@ -541,3 +541,8 @@ pub(crate) async fn refresh_after_update(layout:&crate::service::Layout,executab
 pub(crate) async fn refresh_after_update(layout:&crate::service::Layout,executable:&Path,profiles:&[PathBuf],_cli:Option<&Path>)->Result<()> {
     windows_refresh::refresh(layout,executable,profiles).await
 }
+
+#[cfg(windows)]
+pub(crate) fn refresh_accounts(layout:&crate::service::Layout,profiles:&[PathBuf])->Result<Vec<String>> {
+    windows_refresh::grants(layout,profiles)
+}
