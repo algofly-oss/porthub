@@ -89,3 +89,22 @@ actual versioned agent executables from pinned private commits; it must exercise
 the scheduled service-owned update, readiness failure/rollback, recovery and local
 policy controls. No Aero upgrade, publishing or installed-account changes are
 authorized by this document.
+
+The Windows maintenance worker pins the canonical managed enrollment file after
+loading its protected record and taking the normal global installation lease.
+The native read handle permits `FILE_SHARE_READ` only and uses
+`FILE_FLAG_OPEN_REPARSE_POINT`; bounded content SHA, regular-file, non-reparse and
+single-link checks must match the journal. It remains held through manager awaits,
+SCM transition, readiness, rollback and durable commit. Record validation repeats
+after pin acquisition and after the final desktop inspection. Feature-policy
+sidecars remain unlocked so local AutoUpdate revocation still works.
+
+Windows file transactions avoid replacing identical state bytes. A held read-only
+single-link file and its current path identity are checked before reapplying the
+existing managed private DACL in place. This retains the enrollment's owner and
+file identity without registering a redundant content rollback. Hardlinked or
+changed/reparse state fails closed before in-place permission changes. Different
+content continues through the existing atomic replacement/rollback path; Unix
+behavior is unchanged. Added Windows kernel tests cover delete-sharing behavior,
+policy-file independence, in-place DACL updates and hardlink rejection; their
+execution remains part of the full native validation gate.

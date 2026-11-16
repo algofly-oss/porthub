@@ -358,6 +358,58 @@ fn regular(path: &Path) -> Result<Option<Vec<u8>>> {
     }
     Ok(Some(std::fs::read(path)?))
 }
+#[cfg(windows)]
+fn windows_single_link_identity(file: &File) -> Result<[u32; 3]> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT,
+    };
+    let mut value: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: The live owned file handle and output structure are valid for the call.
+    anyhow::ensure!(
+        unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut value) } != 0
+            && value.nNumberOfLinks == 1
+            && value.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
+            && file.metadata()?.is_file()
+            && file.metadata()?.len() <= 4 * 1024 * 1024,
+        "unchanged service state must be a bounded single-link non-reparse file"
+    );
+    Ok([
+        value.dwVolumeSerialNumber,
+        value.nFileIndexHigh,
+        value.nFileIndexLow,
+    ])
+}
+#[cfg(windows)]
+fn preserve_identical_windows_file(path: &Path, expected: &[u8]) -> Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ};
+    let open = || {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+    };
+    let mut held = open()?;
+    let identity = windows_single_link_identity(&held)?;
+    let mut current = Vec::new();
+    (&mut held)
+        .take(4 * 1024 * 1024 + 1)
+        .read_to_end(&mut current)?;
+    anyhow::ensure!(
+        current == expected,
+        "service state changed before in-place preservation"
+    );
+    anyhow::ensure!(
+        windows_single_link_identity(&open()?)? == identity,
+        "service state path identity changed"
+    );
+    if windows_acl::is_managed(path) {
+        windows_acl::secure(path, false)?;
+    }
+    Ok(())
+}
 pub(crate) fn atomic(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
     #[cfg(not(unix))]
     let _ = private;
@@ -599,7 +651,17 @@ impl Files {
         }
     }
     fn write(&mut self, path: &Path, bytes: &[u8], private: bool) -> Result<()> {
-        self.saved.push((path.into(), regular(path)?, private));
+        let previous = regular(path)?;
+        #[cfg(windows)]
+        if previous.as_deref() == Some(bytes) {
+            // A SYSTEM maintenance worker must not replace an unchanged
+            // enrollment originally created by its administrator. Tighten the
+            // existing managed file's DACL in place while retaining its owner
+            // and identity; no content rollback is needed for an unchanged file.
+            preserve_identical_windows_file(path, bytes)?;
+            return Ok(());
+        }
+        self.saved.push((path.into(), previous, private));
         atomic(path, bytes, private)
     }
     fn rollback(&mut self) -> Result<()> {
@@ -1200,3 +1262,79 @@ pub fn require_administrator() -> Result<()> {
     Ok(())
 }
 pub const OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
+
+
+#[cfg(all(test, windows))]
+mod windows_file_transaction_tests {
+    use super::*;
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    fn identity(file: &File) -> Result<[u32; 3]> {
+        // SAFETY: The file owns a live native handle and the output structure
+        // remains allocated for the duration of this synchronous query.
+        let mut value: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        anyhow::ensure!(
+            unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut value) } != 0,
+            "cannot inspect held file identity"
+        );
+        Ok([
+            value.dwVolumeSerialNumber,
+            value.nFileIndexHigh,
+            value.nFileIndexLow,
+        ])
+    }
+
+    #[test]
+    fn unchanged_file_retains_identity_with_no_delete_sharing_and_changed_bytes_rollback(
+    ) -> Result<()> {
+        // Temporary nonmanaged storage avoids touching the machine's real
+        // registration namespace in ordinary library tests. The managed DACL
+        // branch is additionally exercised by the opt-in real SCM fixture.
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("enrollment.json");
+        fs::write(&path, b"original")?;
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&path)?;
+        let before = identity(&held)?;
+        let mut files = Files::new();
+        files.write(&path, b"original", true)?;
+        assert!(
+            files.saved.is_empty(),
+            "unchanged content must not enter rollback"
+        );
+        assert_eq!(identity(&held)?, before);
+        assert_eq!(identity(&File::open(&path)?)?, before);
+        assert_eq!(fs::read(&path)?, b"original");
+        assert!(
+            files.write(&path, b"replacement", true).is_err(),
+            "changed bytes must still require ordinary atomic replacement"
+        );
+        assert_eq!(fs::read(&path)?, b"original");
+        drop(held);
+        files.rollback()?;
+        let restored = File::open(&path)?;
+        let restored_identity = identity(&restored)?;
+        let mut changed = Files::new();
+        changed.write(&path, b"replacement", true)?;
+        assert_eq!(fs::read(&path)?, b"replacement");
+        assert_ne!(identity(&File::open(&path)?)?, restored_identity);
+        assert_eq!(changed.saved.len(), 1);
+        changed.rollback()?;
+        assert_eq!(fs::read(&path)?, b"original");
+        let alias = root.path().join("outside-alias.json");
+        fs::hard_link(&path, &alias)?;
+        let mut linked = Files::new();
+        assert!(
+            linked.write(&path, b"original", true).is_err(),
+            "a no-op must not tighten ACLs through a hardlink alias"
+        );
+        assert!(linked.saved.is_empty());
+        assert_eq!(fs::read(&alias)?, b"original");
+        Ok(())
+    }
+}

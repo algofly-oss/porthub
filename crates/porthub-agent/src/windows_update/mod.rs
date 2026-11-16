@@ -4,6 +4,8 @@
 mod desktop;
 mod desktop_manager;
 #[cfg(windows)]
+mod enrollment_guard;
+#[cfg(windows)]
 mod native;
 mod preparation;
 mod recovery_wait;

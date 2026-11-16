@@ -516,6 +516,8 @@ impl Backend for Actual {
             "Automatic updates disabled before service transaction"
         );
         let manager = self.manager(false).await?;
+        self.record
+            .validate(&self.layout, &record_path(&self.record.previous.profile))?;
         service::publication::owned_target(&self.layout, &self.record.candidate)?;
         ensure!(
             self.permitted(),
@@ -757,6 +759,11 @@ pub(super) async fn maintenance(path: &Path) -> Result<()> {
     let _lease = profile::Lease::acquire(&profile::sibling(path, ".worker"))?;
     let _installation = service::lock(&layout)?;
     let mut record = Record::load(&layout, path)?;
+    let _enrollment = super::enrollment_guard::EnrollmentGuard::acquire(
+        &record.previous.profile,
+        &record.profile_sha256,
+    )?;
+    record.validate(&layout, path)?;
     ensure!(
         same_file(&record.candidate, &std::env::current_exe()?)
             && record.release.version == crate::VERSION
