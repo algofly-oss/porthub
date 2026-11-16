@@ -124,6 +124,101 @@ impl AdapterRecord {
         self.retiring.clear();
         Ok(())
     }
+    fn commit(
+        &mut self,
+        next: AdapterRecord,
+        persist: impl FnOnce(&AdapterRecord) -> Result<()>,
+    ) -> Result<()> {
+        next.validate(&next.binding, &next.name, next.own, next.mtu)?;
+        persist(&next)?;
+        *self = next;
+        Ok(())
+    }
+    /// A successful full native observation must invalidate missing explicit
+    /// claims before callers prune caches or take an unchanged/wanted-empty exit.
+    pub fn observe_missing(
+        &mut self,
+        native: &BTreeSet<RouteStamp>,
+        persist: impl FnOnce(&AdapterRecord) -> Result<()>,
+    ) -> Result<usize> {
+        let baseline = self
+            .baseline
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("native baseline is unverified"))?;
+        ensure!(
+            native.iter().all(|row| !self.retiring.contains(row)
+                && (baseline.contains(row) || self.routes.contains(row))),
+            "native inventory contains an unowned or retired route"
+        );
+        let missing: BTreeSet<_> = self.routes.difference(native).cloned().collect();
+        let expired = self.retiring.iter().any(|row| !native.contains(row));
+        if missing.is_empty() && !expired {
+            return Ok(0);
+        }
+        ensure!(
+            missing.iter().all(|row| !baseline.contains(row)),
+            "explicit ownership overlaps native baseline"
+        );
+        let mut next = self.clone();
+        // Previous absent diagnostics can expire; neither their presence nor
+        // absence can ever make a native row into confirmed ownership again.
+        next.retiring.retain(|row| native.contains(row));
+        for row in &missing {
+            next.routes.remove(row);
+            next.retiring.insert(row.clone());
+        }
+        self.commit(next, persist)?;
+        Ok(missing.len())
+    }
+    pub fn reserve_route(
+        &mut self,
+        route: RouteStamp,
+        persist: impl FnOnce(&AdapterRecord) -> Result<()>,
+    ) -> Result<()> {
+        ensure!(
+            !self.routes.contains(&route),
+            "cannot reserve an already confirmed route"
+        );
+        ensure!(
+            !self
+                .baseline
+                .as_ref()
+                .is_some_and(|base| base.contains(&route)),
+            "cannot reserve an existing native baseline route"
+        );
+        let mut next = self.clone();
+        next.retiring.remove(&route);
+        next.pending.insert(route);
+        self.commit(next, persist)
+    }
+    pub fn confirm_route(
+        &mut self,
+        route: RouteStamp,
+        persist: impl FnOnce(&AdapterRecord) -> Result<()>,
+    ) -> Result<()> {
+        let mut next = self.clone();
+        ensure!(
+            next.pending.remove(&route),
+            "owned route has no prior intent"
+        );
+        next.retiring.remove(&route);
+        next.routes.insert(route);
+        self.commit(next, persist)
+    }
+    pub fn cancel_route(
+        &mut self,
+        route: &RouteStamp,
+        persist: impl FnOnce(&AdapterRecord) -> Result<()>,
+    ) -> Result<()> {
+        let mut next = self.clone();
+        ensure!(
+            next.pending.remove(route),
+            "owned route has no prior intent"
+        );
+        next.retiring.insert(route.clone());
+        self.commit(next, persist)
+    }
+
     pub fn retire_route(
         &mut self,
         route: &RouteStamp,
@@ -413,5 +508,118 @@ mod retirement_tests {
         assert!(r.routes.contains(&route));
         r.recover(&r.guid, &[], 1380, &BTreeSet::from([route]))
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod observed_missing_tests {
+    use super::*;
+    fn fixture() -> (AdapterRecord, RouteStamp, RouteStamp) {
+        let b = RouteStamp {
+            address: "10.203.0.0".parse().unwrap(),
+            prefix: 16,
+            gateway: None,
+            metric: 0,
+        };
+        let c = RouteStamp {
+            address: "10.204.1.2".parse().unwrap(),
+            prefix: 32,
+            gateway: None,
+            metric: 0,
+        };
+        let r = AdapterRecord {
+            version: 2,
+            binding: "a".repeat(64),
+            guid: "b".repeat(32),
+            name: "ph12345678".into(),
+            own: "10.205.0.2".parse().unwrap(),
+            mtu: 1380,
+            baseline: Some(BTreeSet::new()),
+            routes: BTreeSet::from([b.clone(), c.clone()]),
+            pending: BTreeSet::new(),
+            retiring: BTreeSet::new(),
+        };
+        (r, b, c)
+    }
+    #[test]
+    fn external_removal_then_wanted_empty_reconcile_cannot_adopt_identical_foreign_row_on_restart()
+    {
+        let (mut r, b, _) = fixture();
+        let mut cache = r.routes.clone();
+        let native = BTreeSet::new();
+        let mut disk = Vec::new();
+        assert_eq!(
+            r.observe_missing(&native, |next| {
+                disk = serde_json::to_vec(next)?;
+                Ok(())
+            })
+            .unwrap(),
+            2
+        );
+        cache.retain(|row| native.contains(row));
+        assert!(cache.is_empty()); /* wanted is empty: same fast-return boundary as actual reconcile_sparse */
+        let restarted: AdapterRecord = serde_json::from_slice(&disk).unwrap();
+        assert!(!restarted.routes.contains(&b));
+        assert!(restarted.retiring.contains(&b));
+        assert!(restarted
+            .recover(&restarted.guid, &[], 1380, &BTreeSet::from([b]))
+            .is_err());
+    }
+    #[test]
+    fn failed_observation_persistence_leaves_record_and_cache_unpruned() {
+        let (mut r, b, c) = fixture();
+        let cache = r.routes.clone();
+        assert!(r
+            .observe_missing(&BTreeSet::new(), |_| anyhow::bail!(
+                "injected journal failure"
+            ))
+            .is_err());
+        assert_eq!(r.routes, cache);
+        assert!(r.routes.contains(&b) && r.routes.contains(&c) && r.retiring.is_empty());
+    }
+    #[test]
+    fn retained_wanted_route_requires_fresh_native_add_ack_to_repair() {
+        let (mut r, b, c) = fixture();
+        let native = BTreeSet::from([c.clone()]);
+        r.observe_missing(&native, |_| Ok(())).unwrap();
+        assert!(!r.routes.contains(&b) && r.routes.contains(&c));
+        r.reserve_route(b.clone(), |_| Ok(())).unwrap();
+        let repaired = BTreeSet::from([b.clone(), c]);
+        assert!(r.recover(&r.guid, &[], 1380, &repaired).is_err());
+        r.confirm_route(b, |_| Ok(())).unwrap();
+        r.recover(&r.guid, &[], 1380, &repaired).unwrap();
+    }
+    #[test]
+    fn failed_repair_does_not_reinstate_missing_ownership() {
+        let (mut r, b, c) = fixture();
+        r.observe_missing(&BTreeSet::from([c]), |_| Ok(())).unwrap();
+        r.reserve_route(b.clone(), |_| Ok(())).unwrap();
+        r.cancel_route(&b, |_| Ok(())).unwrap();
+        assert!(!r.routes.contains(&b));
+        assert!(r.retiring.contains(&b));
+        assert!(r.recover(&r.guid, &[], 1380, &BTreeSet::from([b])).is_err());
+    }
+    #[test]
+    fn absent_diagnostic_expiry_does_not_reauthorize_row_or_write_forever() {
+        let (mut r, b, _) = fixture();
+        let mut writes = 0;
+        r.observe_missing(&BTreeSet::new(), |_| {
+            writes += 1;
+            Ok(())
+        })
+        .unwrap();
+        r.observe_missing(&BTreeSet::new(), |_| {
+            writes += 1;
+            Ok(())
+        })
+        .unwrap();
+        r.observe_missing(&BTreeSet::new(), |_| {
+            writes += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(writes, 2);
+        assert!(r.retiring.is_empty());
+        assert!(r.recover(&r.guid, &[], 1380, &BTreeSet::from([b])).is_err());
     }
 }

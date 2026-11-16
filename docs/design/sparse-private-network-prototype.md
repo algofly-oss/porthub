@@ -205,3 +205,13 @@ recovery test reproduces old stale-prefix adoption; the new failure/restart
 contracts pass. Ignored native adversarial socket cases compile but are not
 native execution proof. The 320-row ownership journal's legacy-4096 compatibility
 also remains an explicit merge blocker; see the disposable validation design.
+
+
+A second independent review of `15d12d3` found that observing an externally
+missing route could prune memory without retiring its journal claim. Follow-up
+verified-inventory processing now checkpoints that absence before memory changes
+or early return. Repair requires a new pending intent plus native add
+acknowledgement; diagnostic expiry cannot reauthorize a row. The frozen-source
+red and five portable failure/repair/restart regressions are retained. These
+remain source/contract checks, not Windows native lifecycle proof, and do not
+resolve the documented legacy ledger-capacity blocker.

@@ -32,13 +32,16 @@ fn adapters()->Result<Vec<(String,String,u32,u32)>>{
 pub(super) fn adapter_guid(index:u32)->Result<String>{adapters()?.into_iter().find(|(_,_,i,_)|*i==index).map(|(_,g,_,_)|g).ok_or_else(||anyhow::anyhow!("owned Windows adapter disappeared"))}
 impl Ownership {
     fn verify(&self,index:u32,device:&tun_rs::AsyncDevice,native:&[Route])->Result<()>{
-        let r=self.record.lock().unwrap_or_else(|p|p.into_inner());
+        let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());
         let rows=native.iter().filter(|route|route.if_index()==Some(index)).map(stamp).collect();
-        r.recover(&adapter_guid(index)?,&device.addresses()?,device.mtu()?,&rows)
+        r.recover(&adapter_guid(index)?,&device.addresses()?,device.mtu()?,&rows)?;
+        // Every verified complete inventory retires missing claims durably,
+        // before any caller can prune caches, return early or mutate routes.
+        r.observe_missing(&rows,|next|windows_state::write(&self.path,next))?;Ok(())
     }
-    fn reserve(&self,value:RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.pending.insert(value);ensure!(r.routes.len()+r.pending.len()+r.baseline.as_ref().map_or(0,|b|b.len())<=super::native_ownership::MAX_ROUTES,"owned route intent exceeds bound");windows_state::write(&self.path,&*r)}
-    fn confirm(&self,value:RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());ensure!(r.pending.remove(&value),"owned route has no prior intent");r.routes.insert(value);windows_state::write(&self.path,&*r)}
-    fn cancel(&self,value:&RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.pending.remove(value);windows_state::write(&self.path,&*r)}
+    fn reserve(&self,value:RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.reserve_route(value,|next|windows_state::write(&self.path,next))}
+    fn confirm(&self,value:RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.confirm_route(value,|next|windows_state::write(&self.path,next))}
+    fn cancel(&self,value:&RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.cancel_route(value,|next|windows_state::write(&self.path,next))}
     fn retire(&self,value:&RouteStamp)->Result<RetiredRoute>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.retire_route(value,|next|windows_state::write(&self.path,next))}
     fn finish_retirement(&self,value:&RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.finish_retirement(value,|next|windows_state::write(&self.path,next))}
 }
@@ -172,6 +175,7 @@ impl Tun {
             let addresses:Vec<_>=getifaddrs::getifaddrs()?.filter(|i|i.index==Some(*index)).filter_map(|i|i.address.ip_addr()).collect();
             let current=native.iter().filter(|r|r.if_index()==Some(*index)).map(stamp).collect();
             record.recover(guid,&addresses,u16::try_from(*mtu)?,&current)?;
+            record.observe_missing(&current,|next|windows_state::write(&path,next))?;
         }
         if existing_index.is_none(){record.reset_absent(own,porthub_mesh::MAX_PACKET as u16)?;}
         windows_state::write(&path,&record)?; // protected intent precedes creation
@@ -182,6 +186,7 @@ impl Tun {
         if existing_index==Some(index){
             let current=manager.list().await?.iter().filter(|r|r.if_index()==Some(index)).map(stamp).collect();
             record.recover(&adapter_guid(index)?,&device.addresses()?,device.mtu()?,&current)?;
+            record.observe_missing(&current,|next|windows_state::write(&path,next))?;
         }else if existing_index.is_some(){
             // The pinned builder may recreate an orphaned *already verified*
             // owned GUID. Recheck GUID/name above, then journal this fresh start.
@@ -232,6 +237,8 @@ impl Tun {
         // Forget missing entries so an exclusive add can repair them, never adopt
         // an arbitrary existing entry just because it points at our interface.
         let present=|address:Ipv4Addr,prefix:u8|existing.iter().any(|r|r.destination==address&&r.prefix==prefix&&r.interface==Some(self.index));
+        // Ownership.verify above already durably retired missing claims,
+        // before these memory changes and the wanted-empty/unchanged fast exit.
         let current_peers={let mut held=self.routes.lock().await;held.retain(|ip|present(*ip,32));held.iter().copied().filter(|ip|*ip!=self.own).collect::<std::collections::BTreeSet<_>>()};
         let current_capture={let mut held=self.capture_routes.lock().await;held.retain(|p|present(p.address(),p.prefix()));held.clone()};
         if current_peers==audit.accepted_peers.iter().copied().collect()&&current_capture==audit.capture.accepted.iter().copied().collect(){return Ok(audit);}
@@ -314,13 +321,15 @@ impl Drop for Tun {
     fn drop(&mut self) {
         let Ok(mut manager)=route_manager::RouteManager::new()else{return;};
         let Ok(native)=manager.list()else{return;};
-        if let Err(error)=self.ownership.verify(self.index,&self.device,&native){tracing::warn!("owned Wintun changed externally; shutdown preserves it: {error}");return;}
+        if let Err(error)=self.ownership.verify(self.index,&self.device,&native){tracing::warn!("cannot verify/checkpoint owned Wintun state; shutdown preserves native configuration: {error}");return;}
         let routes=self.routes.get_mut();let captures=self.capture_routes.get_mut();
         for (address,prefix) in captures.iter().map(|p|(p.address(),p.prefix())).chain(routes.iter().map(|ip|(*ip,32))){
             let expected=direct(IpAddr::V4(address),prefix);
+            // verify() already retired any observed absent row. Never create
+            // a second removal intent (or delete a new external row) for it.
+            if !native.iter().any(|r|r.if_index()==Some(self.index)&&stamp(r)==expected){continue;}
             let permit=match self.ownership.retire(&expected){Ok(permit)=>permit,Err(_)=>{tracing::warn!("could not durably retire Windows route; native entry preserved");continue;}};
             let retired=permit.into_stamp();
-            if !native.iter().any(|r|r.if_index()==Some(self.index)&&stamp(r)==retired){let _=self.ownership.finish_retirement(&retired);continue;}
             let route=Route::new(retired.address,retired.prefix).with_if_index(self.index).with_metric(retired.metric);
             if manager.delete(&route).is_err(){tracing::warn!("could not remove durably retired Windows route; exact-owned repair may be required");}else if self.ownership.finish_retirement(&retired).is_err(){tracing::warn!("could not checkpoint Windows route retirement completion");}
         }

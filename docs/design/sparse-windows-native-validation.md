@@ -173,3 +173,28 @@ try {
 
 This is a proposed invocation, not an execution receipt. Pin the source and
 artifact first; do not run it on Aero to substitute for disposable validation.
+
+
+## Observed-native-absence follow-up to 15d12d3
+
+Independent review found another stale-claim path in frozen `15d12d3`: a fresh
+native inventory could prove a route absent, prune only the in-memory cache, and
+return with wanted routes empty while leaving the journal's old claim intact.
+The retained frozen-source regression reproduces later identical-row adoption.
+
+The follow-up centralizes missing-claim retirement in verified complete native
+inventory processing, including startup, normal update/audit reads and shutdown.
+It persists missing explicit claims as non-authorizing diagnostics before callers
+can prune memory, take an unchanged/wanted-empty exit or mutate native routes.
+A failed checkpoint returns an error with record/cache memory unchanged; it is
+not acknowledged as an accepted inventory or a completed operation. Actual
+persistent-storage-failure behavior remains part of disposable native testing.
+
+A still-wanted missing route is repaired only by a fresh durable pending intent
+and an actual successful native add acknowledgement. A failed add leaves no
+confirmed claim. Old absent diagnostics can expire on a later complete snapshot;
+expiring a diagnostic never recreates authority. Stable snapshots cause no
+recurring journal writes. The portable tests cover external removal → empty
+wanted set → identical foreign row → restart, checkpoint failure, acknowledged
+repair, failed repair and idempotent diagnostic expiry. No native execution or
+legacy-capacity resolution is implied; the existing 320/4096 blocker remains.
