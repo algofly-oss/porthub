@@ -12,21 +12,25 @@ function New-Task([string]$Xml,[bool]$Enabled=$true,[int]$State=4){
  $t=[pscustomobject]@{Xml=$Xml;Definition=$d;Enabled=$Enabled;State=$State;Sddl='O:SYG:SYD:P(A;;FA;;;SY)(A;;FR;;;BA)'}
  $t|Add-Member ScriptMethod GetSecurityDescriptor {param($flags)if($flags -ne 7){throw 'Owner/group/DACL flags required'};return $this.Sddl}
  $t|Add-Member ScriptMethod Stop {param($flags)$global:Stops++;if($global:StopFailure){throw 'Injected stop failure'};$this.State=3;$global:ProcessExited=$global:StopExits}
- $t|Add-Member ScriptMethod Run {param($none)$global:Starts++;if($global:StartFailureOnce){$global:StartFailureOnce=$false;throw 'Injected start failure'};$this.State=4;$global:ProcessExited=$false;return [pscustomobject]@{Running=$true}}
+ $t|Add-Member ScriptMethod Run {param($none)$global:Starts++;if($global:MutateOnStart){$global:MutateOnStart=$false;$this.Xml=$this.Xml.Replace('Preserved','ForeignEdit');throw 'Concurrent post-write edit'};if($global:StartFailureOnce){$global:StartFailureOnce=$false;throw 'Injected start failure'};$this.State=4;$global:ProcessExited=$false;return [pscustomobject]@{Running=$true}}
  return $t
 }
+function Add-XmlSd($Task,[string]$Sddl){
+ $doc=Read-RefreshXml $Task.Xml;$ns=New-Object Xml.XmlNamespaceManager($doc.NameTable);$ns.AddNamespace('t',$doc.DocumentElement.NamespaceURI)
+ $parent=$doc.SelectSingleNode('/t:Task/t:RegistrationInfo',$ns);$node=$doc.CreateElement('SecurityDescriptor',$doc.DocumentElement.NamespaceURI);$node.InnerText=$Sddl;[void]$parent.AppendChild($node);$Task.Xml=$doc.OuterXml
+}
 function Reset-Case([string]$ActionArgs='keyboard startup'){
- $global:Stops=0;$global:Starts=0;$global:Updates=0;$global:NewHashOk=$true;$global:OldHashOk=$true;$global:StopFailure=$false;$global:StopExits=$true;$global:ProcessExited=$false;$global:StartFailureOnce=$false;$global:RegisterFailure='';$global:Disposed=0;$global:OwnerSid=$global:Rsid;$global:ProcessPath=$global:Rold;$global:Creation=[DateTime]::UtcNow;$global:NativeStart=$global:Creation;$global:SessionId=2
+ $global:RegisterSdInsert=$false;$global:PrewriteSdEdit=$false;$global:GetTaskCalls=0;$global:MutateOnStart=$false;$global:Stops=0;$global:Starts=0;$global:Updates=0;$global:NewHashOk=$true;$global:OldHashOk=$true;$global:StopFailure=$false;$global:StopExits=$true;$global:ProcessExited=$false;$global:StartFailureOnce=$false;$global:RegisterFailure='';$global:Disposed=0;$global:OwnerSid=$global:Rsid;$global:ProcessPath=$global:Rold;$global:Creation=[DateTime]::UtcNow;$global:NativeStart=$global:Creation;$global:SessionId=2
  $xml='<Task xmlns="urn:task"><RegistrationInfo><Description>Preserved</Description></RegistrationInfo><Triggers><LogonTrigger><UserId>'+ $global:Rsid+'</UserId></LogonTrigger></Triggers><Principals><Principal><UserId>'+$global:Rsid+'</UserId></Principal></Principals><Settings><Enabled>true</Enabled><Custom>kept</Custom></Settings><Actions><Exec><Command>'+$global:Rold+'</Command><Arguments>'+$ActionArgs+'</Arguments></Exec></Actions></Task>'
  $global:Task=New-Task $xml;$global:OldXml=$xml;$global:OldSd=$global:Task.Sddl
 }
 function Connect-RefreshScheduler {
  $service=[pscustomobject]@{};$service|Add-Member ScriptMethod NewTask {param($flags)return [pscustomobject]@{XmlText=''}}
- $folder=[pscustomobject]@{};$folder|Add-Member ScriptMethod GetTask {param($Name)if($Name -cne 'PortHubKeyboard-'+$global:Rsid){throw 'Unexpected task namespace'};return $global:Task}
+ $folder=[pscustomobject]@{};$folder|Add-Member ScriptMethod GetTask {param($Name)if($Name -cne 'PortHubKeyboard-'+$global:Rsid){throw 'Unexpected task namespace'}; $global:GetTaskCalls++;if($global:PrewriteSdEdit -and $global:GetTaskCalls -eq 2){Add-XmlSd $global:Task $global:Task.Sddl};return $global:Task}
  $folder|Add-Member ScriptMethod RegisterTaskDefinition {param($Name,$Definition,$Flags,$Sid,$Password,$Logon,$Sddl)
   if($Name -cne 'PortHubKeyboard-'+$global:Rsid -or $Flags -ne 52 -or $Sid -cne $global:Rsid -or $null -ne $Password -or $Logon -ne 3 -or $Sddl -cne $global:OldSd){throw 'Unsafe scheduler update/ACE/password semantics'}
   $global:Updates++;if($global:RegisterFailure -eq 'before'){$global:RegisterFailure='';throw 'Injected pre-write registration failure'}
-  $global:Task=New-Task $Definition.XmlText $true 3;$global:Task.Sddl=$Sddl
+  $global:Task=New-Task $Definition.XmlText $true 3;$global:Task.Sddl=$Sddl;if($global:RegisterSdInsert){Add-XmlSd $global:Task $Sddl}
   if($global:RegisterFailure -eq 'after'){$global:RegisterFailure='';throw 'Injected post-write registration failure'}
   return $global:Task
  }
@@ -104,4 +108,37 @@ foreach($case in @('xml-text','xml-attribute','principal-alias','security-descri
  if($case -eq 'security-descriptor'){if(!$record.sd_changed){throw 'SD mutation missed'}}elseif(!$record.xml_changed -or !@($record.field_paths).Count){throw 'XML mutation missed'}
  $results+=@{case=('diagnostic-'+$case);passed=$true}
 }
+foreach($case in @('running','inactive','throw-after-write','start-failure')){
+ Reset-Case;$global:RegisterSdInsert=$true
+ switch($case){'inactive'{$global:Task.State=3};'throw-after-write'{$global:RegisterFailure='after'};'start-failure'{$global:StartFailureOnce=$true}}
+ if($case -in @('throw-after-write','start-failure')){
+  Expect-Failure {Run-Refresh} $case
+  if($global:Updates -ne 2 -or $global:Task.State -ne 4){throw 'Known SD serialization failed rollback/restart'}
+  Assert-RefreshSnapshot $global:Task $global:OldXml $global:OldSd -AllowRegisteredSecurityDescriptor
+ }else{
+  Run-Refresh|Out-Null
+  if($global:Updates -ne 1 -or $global:Task.Definition.Actions.Item(1).Path -cne $global:Rnew -or $global:Task.Sddl -cne $global:OldSd){throw 'Valid redundant SD serialization not refreshed'}
+  if($case -eq 'inactive' -and ($global:Starts -or $global:Stops)){throw 'Inactive normalization launched a helper'}
+ }
+ $results+=@{case=('postwrite-redundant-sd-'+$case);passed=$true}
+}
+Reset-Case;$global:PrewriteSdEdit=$true;Expect-Failure {Run-Refresh} 'prewrite-redundant-sd'
+if($global:Stops -or $global:Updates -or $global:Starts){throw 'Concurrent prewrite redundant SD edit crossed exact snapshot guard'}
+$results+=@{case='prewrite-redundant-sd-edit-refused';passed=$true}
+foreach($case in @('different-text','attribute','child','duplicate','action','real-sd')){
+ Reset-Case;Add-XmlSd $global:Task $global:OldSd
+ switch($case){
+ 'different-text'{$global:Task.Xml=$global:Task.Xml.Replace($global:OldSd,'D:P(A;;FA;;;WD)')}
+ 'attribute'{$global:Task.Xml=$global:Task.Xml.Replace('<SecurityDescriptor>','<SecurityDescriptor custom="1">')}
+ 'child'{$global:Task.Xml=$global:Task.Xml.Replace('<SecurityDescriptor>','<SecurityDescriptor><unexpected />')}
+ 'duplicate'{Add-XmlSd $global:Task $global:OldSd}
+ 'action'{$global:Task.Xml=$global:Task.Xml.Replace('keyboard startup','keyboard foreign')}
+ 'real-sd'{$global:Task.Sddl+='(A;;FA;;;WD)'}
+ }
+ Expect-Failure {Assert-RefreshSnapshot $global:Task $global:OldXml $global:OldSd -AllowRegisteredSecurityDescriptor} $case
+ $results+=@{case=('unsafe-registration-sd-'+$case);passed=$true}
+}
+Reset-Case;$global:RegisterSdInsert=$true;$global:MutateOnStart=$true;Expect-Failure {Run-Refresh} 'postwrite-concurrent-edit'
+if($global:Updates -ne 1 -or !$global:Task.Xml.Contains('ForeignEdit')){throw 'Concurrent post-write task edit was overwritten'}
+$results+=@{case='postwrite-concurrent-edit-not-overwritten';passed=$true}
 $results|ConvertTo-Json -Depth 4

@@ -67,10 +67,27 @@ function Get-RefreshXmlFields($Document){
  }
  return $fields
 }
-function Assert-RefreshSnapshot($Task,[string]$Xml,[string]$Sddl){
+function Get-RefreshRegisteredXml($Document,[string]$Sddl){
+ $doc=Read-RefreshXml $Document.OuterXml;$ns=New-Object Xml.XmlNamespaceManager($doc.NameTable);$ns.AddNamespace('t',$doc.DocumentElement.NamespaceURI)
+ $nodes=@($doc.SelectNodes('/t:Task/t:RegistrationInfo/t:SecurityDescriptor',$ns))
+ if($nodes.Count -gt 1){throw 'Duplicate desktop registration security metadata'}
+ if($nodes.Count -eq 1){
+  $node=$nodes[0]
+  if($node.Attributes.Count -or @($node.ChildNodes|Where-Object{$_ -isnot [Xml.XmlText]}).Count -or $node.InnerText -cne $Sddl){throw 'Desktop registration security metadata differs from pinned security descriptor'}
+  [void]$node.ParentNode.RemoveChild($node)
+ }
+ return $doc.OuterXml
+}
+function Assert-RefreshSnapshot($Task,[string]$Xml,[string]$Sddl,[switch]$AllowRegisteredSecurityDescriptor){
  if(!$Task){throw 'Desktop task snapshot unavailable'}
  $actual=Read-RefreshXml $Task.Xml;$expected=Read-RefreshXml $Xml;$actualSd=[string]$Task.GetSecurityDescriptor(7)
- if($actual.OuterXml -cne $expected.OuterXml -or $actualSd -cne $Sddl){
+ $xmlEqual=$actual.OuterXml -ceq $expected.OuterXml
+ # Registration may materialize the exact supplied SDDL in XML. This is
+ # accepted ONLY for our own post-write checks; pre-mutation snapshots stay exact.
+ if(!$xmlEqual -and $AllowRegisteredSecurityDescriptor -and $actualSd -ceq $Sddl){
+  $xmlEqual=(Get-RefreshRegisteredXml $actual $Sddl) -ceq (Get-RefreshRegisteredXml $expected $Sddl)
+ }
+ if(!$xmlEqual -or $actualSd -cne $Sddl){
   $left=Get-RefreshXmlFields $expected;$right=Get-RefreshXmlFields $actual
   $paths=@(@($left.Keys)+@($right.Keys)|Sort-Object -Unique|Where-Object{$left[$_] -cne $right[$_]}|Select-Object -First 16)
   $detail=@{xml_changed=($actual.OuterXml -cne $expected.OuterXml);sd_changed=($actualSd -cne $Sddl);expected_xml_sha256=(Get-RefreshTextHash $expected.OuterXml);actual_xml_sha256=(Get-RefreshTextHash $actual.OuterXml);expected_sd_sha256=(Get-RefreshTextHash $Sddl);actual_sd_sha256=(Get-RefreshTextHash $actualSd);field_paths=$paths}|ConvertTo-Json -Compress -Depth 3
@@ -95,7 +112,7 @@ function Invoke-PortHubDesktopRefresh($Request){
   $commands=@($doc.SelectNodes('/t:Task/t:Actions/t:Exec/t:Command',$ns));$argumentNodes=@($doc.SelectNodes('/t:Task/t:Actions/t:Exec/t:Arguments',$ns))
   if($commands.Count -ne 1 -or $argumentNodes.Count -ne 1){throw 'Desktop action XML is customized'}
   $commands[0].InnerText=$Request.executable;$argumentNodes[0].InnerText='keyboard startup';$newXml=$doc.OuterXml
-  $wasRunning=$task.State -eq 4;$native=$null;$stopped=$false;$updated=$false;$attemptedUpdate=$false
+  $wasRunning=$task.State -eq 4;$native=$null;$stopped=$false;$updated=$false;$attemptedUpdate=$false;$writtenXml=$null
   try{
    # Snapshot checks precede every side effect, including a task stop.
    $fresh=Get-RefreshTask $folder $name;Assert-RefreshSnapshot $fresh $oldXml $sddl
@@ -111,20 +128,27 @@ function Invoke-PortHubDesktopRefresh($Request){
    Assert-RefreshSnapshot (Get-RefreshTask $folder $name) $oldXml $sddl
    if(!$definitionCurrent){
     $attemptedUpdate=$true
-    $task=Set-RefreshDefinition $service $folder $name $newXml $sid $sddl;$updated=$true
-   }else{$task=Get-RefreshTask $folder $name}
-   Assert-RefreshSnapshot $task $newXml $sddl
+    $task=Set-RefreshDefinition $service $folder $name $newXml $sid $sddl
+    Assert-RefreshSnapshot $task $newXml $sddl -AllowRegisteredSecurityDescriptor
+    $writtenXml=[string]$task.Xml;$updated=$true
+   }else{$task=Get-RefreshTask $folder $name;Assert-RefreshSnapshot $task $newXml $sddl}
    if(!(Test-RefreshTask $task $sid $Request.release_root)){throw 'Updated desktop task is not managed'}
    if($wasRunning){$null=$task.Run($null)}
    $results+=@{sid=$sid;state=$(if($wasRunning){'restarted'}else{'updated-inactive'})}
   }catch{
    $failure=$_
    $current=Get-RefreshTask $folder $name
-   if($attemptedUpdate -and $current -and (Read-RefreshXml $current.Xml).OuterXml -ceq (Read-RefreshXml $newXml).OuterXml -and $current.GetSecurityDescriptor(7) -ceq $sddl){$updated=$true}
+   if($attemptedUpdate -and !$updated -and $current){
+    try{
+     Assert-RefreshSnapshot $current $newXml $sddl -AllowRegisteredSecurityDescriptor
+     $writtenXml=[string]$current.Xml;$updated=$true
+    }catch{# An unrecognized edit is never adopted or overwritten.
+    }
+   }
    if($updated){
-    # Restore only the version this transaction wrote; never overwrite a new edit.
-    $current=Get-RefreshTask $folder $name;Assert-RefreshSnapshot $current $newXml $sddl
-    $restored=Set-RefreshDefinition $service $folder $name $oldXml $sid $sddl;Assert-RefreshSnapshot $restored $oldXml $sddl
+    # After recognizing our serialization, all later checks pin its exact bytes.
+    $current=Get-RefreshTask $folder $name;Assert-RefreshSnapshot $current $writtenXml $sddl
+    $restored=Set-RefreshDefinition $service $folder $name $oldXml $sid $sddl;Assert-RefreshSnapshot $restored $oldXml $sddl -AllowRegisteredSecurityDescriptor
     if($wasRunning -and $stopped){$null=$restored.Run($null)}
    }elseif($wasRunning -and $stopped){
     $current=Get-RefreshTask $folder $name;Assert-RefreshSnapshot $current $oldXml $sddl
