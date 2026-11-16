@@ -88,3 +88,76 @@ Do not uninstall system USB drivers or touch another installed PortHub instance.
 The real Windows native full-agent compilation and this opt-in SCM execution
 require separate review. Metadata-only harnesses with refusing OS stubs cannot
 replace either gate.
+
+
+## Concrete controller checkpoint
+
+`scripts/test-windows-core-update.py` implements the disabled→enabled success and
+candidate-sync-failure rollback cases with two actual enrollments. A installs for
+the updated enrollment, C installs for the other enrollment using ordinary
+`--publish-cli`, then the fixture advertises B only to A. It checks the actual SCM
+PID/image, protected transaction journal, acknowledgment order, other enrollment
+bytes/process, and exact C GUI XML/SD and CLI bytes. It creates no forged grants:
+the ordinary disposable runner enrollment provisions its own managed desktop.
+All raw USB/media/input permissions remain locally disabled; only AutoUpdate is
+explicitly enabled for A. No installer or hardware execution has occurred yet.
+
+The authenticated private HTTP fixture is in
+`scripts/windows-update-fixture-gateway.py`. It binds loopback, checks enrollment
+credentials on sync/changes/catalog/binary routes, limits request bodies and
+observation counts, streams only the pinned binary, and checks the durable local
+journal before accepting a handled-request acknowledgment. No enrollment token is
+logged or written to the public receipt.
+
+The input manifest is private gate metadata with these exact keys:
+
+```json
+{
+  "schema": 1,
+  "wrapper_source": "<40 hex checked-out controller commit>",
+  "artifacts": [
+    {
+      "role": "a",
+      "path": "<verified native executable A>",
+      "version": "1.11.34",
+      "source": "<40 hex native source commit>",
+      "sha256": "<full executable SHA256>",
+      "size": 12345,
+      "target": "windows_x86_64",
+      "os": "windows",
+      "arch": "x86_64",
+      "asset": "porthub-windows_x86_64.exe"
+    }
+  ]
+}
+```
+
+The artifact array must contain exactly ordered `a`, `b`, `c` entries with strictly
+increasing real versions; the example omits B/C to avoid inventing receipts.
+Default invocation only verifies the receipt/files and writes `executed:false`:
+
+```powershell
+python scripts/test-windows-core-update.py --manifest private-artifacts.json --receipt preparation.json
+```
+
+After separate source/artifact review, each actual case must run on its own clean,
+explicitly approved GitHub-hosted administrator runner:
+
+```powershell
+python scripts/test-windows-core-update.py --manifest private-artifacts.json --receipt success.json --execute-native-scm --scenario success
+python scripts/test-windows-core-update.py --manifest private-artifacts.json --receipt rollback.json --execute-native-scm --scenario rollback
+```
+
+These are separate-runner commands, not consecutive commands on one possibly
+failed installation. Cleanup independently attempts policy disable, maintenance
+exit, exact fixture uninstall, verified desktop cleanup, PATH restoration,
+process/service absence, nonce/identity-bound directory removal and gateway stop.
+Unknown files, modified directory identities, markers or executable bytes are
+preserved and make the gate fail. Readable status ownership markers deliberately
+use `.owner`, since normal registration discovery parses every `.json` file.
+
+This controller does not yet execute the separate download/revocation/worker-loss
+or crash-metadata injection scenarios above. They remain required follow-up
+native gates; existing pure transaction tests are not labeled SCM runtime proof.
+The inherited strict Windows desktop refresh hosted-runner repair must also be
+carried before native execution. No workflow dispatch is added by this checkpoint.
