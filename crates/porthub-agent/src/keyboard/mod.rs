@@ -7,6 +7,7 @@ mod desktop;
 mod linux_refresh;
 mod direct;
 mod input;
+mod startup;
 #[cfg(target_os = "linux")]
 mod uinput;
 #[cfg(windows)]
@@ -67,7 +68,9 @@ pub(crate) fn registration(
     user: bool,
     selector: Option<&str>,
 ) -> Result<(crate::service::Layout, String)> {
-    let layouts = registration_layouts(user)?;
+    select_registration(registration_layouts(user)?, selector)
+}
+fn select_registration(layouts: Vec<crate::service::Layout>, selector: Option<&str>) -> Result<(crate::service::Layout, String)> {
     let mut found = Vec::new();
     for layout in layouts {
         if let Ok(rows) = crate::service::readable::list(&layout) {
@@ -110,7 +113,7 @@ pub async fn run(args: Args, cancel: CancellationToken) -> Result<()> {
             #[cfg(windows)]
             windows_desktop::background();
             #[cfg(target_os = "linux")]
-            if desktop::start() {
+            if args.registration.is_none() && desktop::start() {
                 return Ok(());
             }
             Box::pin(run(
@@ -125,54 +128,13 @@ pub async fn run(args: Args, cancel: CancellationToken) -> Result<()> {
         Action::Run => {
             #[cfg(windows)]
             windows_desktop::interactive()?;
-            let (layout, id) = registration(args.user, args.registration.as_deref())?;
-            let root = directories::ProjectDirs::from("dev", "porthub", "porthub")
-                .context("Cannot locate desktop state")?
-                .data_local_dir()
-                .join("keyboard");
-            crate::service::directory(&root, true).with_context(|| {
-                format!(
-                    "Cannot create VKeyboard desktop state at {}",
-                    root.display()
-                )
-            })?;
-            use fs2::FileExt;
-            let lease = std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(root.join(format!("{id}.lock")))?;
-            lease
-                .try_lock_exclusive()
-                .context("VKeyboard module is already running for this desktop registration")?;
-            #[cfg(any(target_os="linux",windows))]
-            let _media = {
-                let layout=layout.clone();let id=id.clone();let media_cancel=cancel.clone();
-                tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-                    if let Err(error)=crate::media::host::run(layout,id,media_cancel).await {tracing::debug!(reason=%error,"Desktop media host unavailable");}
-                }))
-            };
-            loop {
-                let result = session(&layout, &id, cancel.clone()).await;
-                if let Err(error) = result {
-                    tracing::debug!(reason=%error,"Desktop VKeyboard reconnecting");
-                }
-                if crate::service::readable::list(&layout)
-                    .ok()
-                    .is_some_and(|rows| {
-                        rows.iter()
-                            .any(|row| row.id == id && row.state == "uninstalled")
-                    })
-                {
-                    return Ok(());
-                }
-                if cancel.is_cancelled() {
-                    return Ok(());
-                }
-                tokio::select! {_=cancel.cancelled()=>return Ok(()),_=tokio::time::sleep(Duration::from_secs(5))=>{}}
+            if args.registration.is_none() {
+                return startup::supervise(registration_layouts(args.user)?, cancel).await;
             }
+            let (layout, id) = registration(args.user, args.registration.as_deref())?;
+            run_registration(layout, id, cancel).await
         }
+
         action => {
             let enabled = match action {
                 Action::Enable => Some(true),
@@ -204,6 +166,68 @@ pub async fn run(args: Args, cancel: CancellationToken) -> Result<()> {
         }
     }
 }
+async fn run_registration(
+    layout: crate::service::Layout,
+    id: String,
+    cancel: CancellationToken,
+) -> Result<()> {
+    let root = directories::ProjectDirs::from("dev", "porthub", "porthub")
+        .context("Cannot locate desktop state")?
+        .data_local_dir()
+        .join("keyboard");
+    let _lease = desktop_lease(&root, &id)?;
+    #[cfg(any(target_os = "linux", windows))]
+    let _media = {
+        let layout = layout.clone();
+        let id = id.clone();
+        let media_cancel = cancel.clone();
+        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            if let Err(error) = crate::media::host::run(layout, id, media_cancel).await {
+                tracing::debug!(reason=%error,"Desktop media host unavailable");
+            }
+        }))
+    };
+    loop {
+        let result = session(&layout, &id, cancel.clone()).await;
+        if let Err(error) = result {
+            tracing::debug!(reason=%error,"Desktop VKeyboard reconnecting");
+        }
+        if crate::service::readable::list(&layout)
+            .ok()
+            .is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row.id == id && row.state == "uninstalled")
+            })
+        {
+            return Ok(());
+        }
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
+        tokio::select! {_=cancel.cancelled()=>return Ok(()),_=tokio::time::sleep(Duration::from_secs(5))=>{}}
+    }
+}
+
+fn desktop_lease(root: &Path, id: &str) -> Result<std::fs::File> {
+    crate::service::directory(root, true).with_context(|| {
+        format!(
+            "Cannot create VKeyboard desktop state at {}",
+            root.display()
+        )
+    })?;
+    use fs2::FileExt;
+    let lease = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(root.join(format!("{id}.lock")))?;
+    lease
+        .try_lock_exclusive()
+        .context("VKeyboard module is already running for this desktop registration")?;
+    Ok(lease)
+}
+
 fn stable_cli(user: bool) -> Result<PathBuf> {
     let current = std::env::current_exe()?.canonicalize()?;
     for path in [
