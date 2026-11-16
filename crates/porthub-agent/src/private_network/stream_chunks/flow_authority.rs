@@ -81,6 +81,24 @@ impl LocalAuthority {
             permit,
         })
     }
+    pub(super) fn original(&self) -> SendPermit {
+        self.permit.clone()
+    }
+    pub(super) fn bind_transport(
+        &self,
+        remote: &Peer,
+        local: std::net::Ipv4Addr,
+        belongs: bool,
+    ) -> Result<()> {
+        ensure!(
+            *remote == self.peer
+                && local == self.local.ip
+                && belongs
+                && self.permit.remaining().is_some(),
+            "flow-open transport identity/factory mismatch"
+        );
+        Ok(())
+    }
     pub(crate) fn local_epoch(&self) -> [u8; 32] {
         self.epoch
     }
@@ -162,6 +180,9 @@ impl Context {
         };
         context.authorize(local, side)?;
         Ok(context)
+    }
+    pub(super) fn parameters(&self) -> ([u8; 16], u16, u16) {
+        (self.nonce, self.source_port, self.destination_port)
     }
     pub(crate) fn digest(&self) -> [u8; 32] {
         self.digest

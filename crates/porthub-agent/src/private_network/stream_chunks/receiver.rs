@@ -26,12 +26,16 @@ pub(crate) struct Receiver {
     current: Current,
     sequence: u64,
     offset: u64,
+    finished: bool,
+    terminal: Option<SendPermit>,
     _connection_credit: Credit,
 }
 impl Drop for Receiver {
     fn drop(&mut self) {
         self.gate.retire();
-        self.native.retire();
+        if !self.finished {
+            self.native.retire();
+        }
         self.connection.closer().close();
     }
 }
@@ -81,7 +85,7 @@ impl Receiver {
                 .is_empty(),
             "RX generation already admitted work"
         );
-        let credit = budget.charge(&connection.peer().id, flow.nonce, None)?;
+        let credit = budget.receiver_connection(&connection.peer().id, flow.nonce)?;
         Ok(Self {
             connection,
             gate,
@@ -91,8 +95,26 @@ impl Receiver {
             current,
             sequence: 0,
             offset: 0,
+            finished: false,
+            terminal: None,
             _connection_credit: credit,
         })
+    }
+    pub(super) fn retire(&self) {
+        self.gate.retire();
+        self.connection.closer().close();
+        self.native.retire();
+    }
+    pub(super) fn terminal(&self) -> Option<SendPermit> {
+        self.terminal.clone()
+    }
+    pub(super) fn agrees(&self, native: &Arc<tagged::Connection>, flow: &Flow) -> bool {
+        Arc::ptr_eq(native, &self.native)
+            && self.flow.nonce == flow.nonce
+            && self.flow.direction == flow.direction
+            && self.flow.local_port == flow.local_port
+            && self.flow.remote_port == flow.remote_port
+            && self.flow.epoch == flow.epoch
     }
     fn service(&self) -> u16 {
         if self.flow.direction == 0 {
@@ -110,7 +132,7 @@ impl Receiver {
     }
     fn header(&self, h: &[u8; HEADER]) -> Result<(usize, [u8; 16], std::time::Duration)> {
         ensure!(
-            &h[..4] == b"PHC2"
+            (&h[..4] == b"PHC2" || &h[..4] == b"PHF2")
                 && h[4..20] == self.flow.nonce
                 && h[20] == self.flow.direction
                 && h[45..77] == self.flow.epoch,
@@ -129,7 +151,9 @@ impl Receiver {
         let length = u32::from_be_bytes(h[37..41].try_into()?) as usize;
         let id: [u8; 16] = h[77..93].try_into()?;
         ensure!(
-            (1..=CHUNK).contains(&length) && id != [0; 16],
+            ((&h[..4] == b"PHC2" && (1..=CHUNK).contains(&length))
+                || (&h[..4] == b"PHF2" && length == 0))
+                && id != [0; 16],
             "RX size/nonce invalid"
         );
         let millis = u32::from_be_bytes([0, h[93], h[94], h[95]]);
@@ -144,6 +168,7 @@ impl Receiver {
         ))
     }
     pub(crate) async fn receive(&mut self, original: Access) -> Result<[u8; HEADER]> {
+        ensure!(!self.finished, "RX DATA/FIN after terminal event");
         let peer = self.connection.peer().clone();
         let epoch = self.flow.epoch;
         let port = self.service();
@@ -236,10 +261,15 @@ impl Receiver {
                             input.read(&mut extra).await?.is_none(),
                             "RX chunk exceeds finite declared body"
                         );
-                        let ack = self
-                            .native
-                            .write_chunk(id, self.offset, payload.into(), delivery.clone())
-                            .await?;
+                        let ack = if &header[..4] == b"PHF2" {
+                            self.native
+                                .finish(id, self.offset, delivery.clone())
+                                .await?
+                        } else {
+                            self.native
+                                .write_chunk(id, self.offset, payload.into(), delivery.clone())
+                                .await?
+                        };
                         self.native
                             .publish_receipt(ack, id, self.offset, length, || async {
                                 reply.write_all(&header).await?;
@@ -273,6 +303,10 @@ impl Receiver {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&key);
+        self.finished = &result[..4] == b"PHF2";
+        if self.finished {
+            self.terminal = Some(delivery.clone());
+        }
         receiving.armed = false;
         Ok(result)
     }

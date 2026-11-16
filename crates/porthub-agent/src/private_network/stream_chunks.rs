@@ -21,6 +21,9 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 pub(crate) mod receiver;
 pub(crate) mod flow_authority;
+pub(crate) mod source;
+pub(crate) mod flow_open;
+pub(crate) mod duplex;
 const CHUNK: usize = 8192;
 const HEADER: usize = 96;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -29,6 +32,7 @@ struct Usage {
     bytes: usize,
     chunks: usize,
     connections: usize,
+    slots: u8,
 }
 #[derive(Default)]
 struct BudgetState {
@@ -43,9 +47,14 @@ struct Credit {
     peer: String,
     flow: [u8; 16],
     bytes: Option<usize>,
+    slot: u8,
 }
 impl Budget {
     fn charge(&self, peer: &str, flow: [u8; 16], bytes: Option<usize>) -> Result<Credit> {
+        self.charge_slot(peer,flow,bytes,if bytes.is_none(){1}else{0})
+    }
+    fn receiver_connection(&self,peer:&str,flow:[u8;16])->Result<Credit>{self.charge_slot(peer,flow,None,2)}
+    fn charge_slot(&self, peer: &str, flow: [u8;16],bytes:Option<usize>,slot:u8)->Result<Credit>{
         let mut state = self.0.lock().unwrap_or_else(|p| p.into_inner());
         let key = (peer.to_owned(), flow);
         let p = state.peers.get(peer);
@@ -76,7 +85,7 @@ impl Budget {
             ensure!(
                 state.total.connections < 512
                     && p.is_none_or(|p| p.connections < 8)
-                    && f.is_none_or(|f| f.connections == 0),
+                    && f.is_none_or(|f| f.connections < 2 && f.slots & slot == 0),
                 "chunk connection budget unavailable"
             );
         }
@@ -90,12 +99,14 @@ impl Budget {
         }
         add(&mut state.total, bytes);
         add(state.peers.entry(peer.into()).or_default(), bytes);
-        add(state.flows.entry(key).or_default(), bytes);
+        add(state.flows.entry(key.clone()).or_default(), bytes);
+        if bytes.is_none(){state.flows.get_mut(&key).unwrap().slots |= slot;}
         Ok(Credit {
             budget: self.clone(),
             peer: peer.into(),
             flow,
             bytes,
+            slot,
         })
     }
 }
@@ -115,7 +126,8 @@ impl Drop for Credit {
             subtract(p, self.bytes)
         }
         if let Some(f) = s.flows.get_mut(&(self.peer.clone(), self.flow)) {
-            subtract(f, self.bytes)
+            subtract(f, self.bytes);
+            if self.bytes.is_none(){f.slots &= !self.slot;}
         }
         s.peers.retain(|_, u| u.connections > 0 || u.chunks > 0);
         s.flows.retain(|_, u| u.connections > 0 || u.chunks > 0);
@@ -221,6 +233,7 @@ impl Flow {
 }
 struct Command {
     payload: Bytes,
+    terminal: bool,
     permit: SendPermit,
     _credit: Credit,
     reply: oneshot::Sender<Result<[u8; HEADER]>>,
@@ -232,6 +245,7 @@ pub(crate) struct Sender {
     budget: Budget,
     peer: String,
     flow: [u8; 16],
+    connection: BoundedSourceConnection,
 }
 pub(crate) struct Owner {
     gate: Gate,
@@ -265,6 +279,13 @@ impl Drop for Abandon {
 }
 impl Sender {
     async fn send(&self, payload: Bytes, permit: SendPermit) -> Result<[u8; HEADER]> {
+        self.send_event(payload, false, permit).await
+    }
+    async fn send_fin(&self, permit: SendPermit) -> Result<[u8; HEADER]> {
+        self.send_event(Bytes::new(), true, permit).await
+    }
+    async fn send_event(&self, payload: Bytes, terminal: bool, permit: SendPermit) -> Result<[u8; HEADER]> {
+        ensure!(terminal == payload.is_empty(), "noncanonical DATA/FIN event");
         let permit = SendPermit::combine(vec![permit, self.gate.state.parent.clone()]);
         ensure!(
             self.gate.state.alive.load(Ordering::SeqCst) && permit.valid(),
@@ -278,10 +299,11 @@ impl Sender {
         );
         let credit = self
             .budget
-            .charge(&self.peer, self.flow, Some(payload.len()))?;
+            .charge(&self.peer, self.flow, Some(payload.len().max(1)))?;
         let (reply, waiting) = oneshot::channel();
         let command = Command {
             payload,
+            terminal,
             permit: permit.clone(),
             _credit: credit,
             reply,
@@ -327,6 +349,7 @@ pub(crate) fn start(
         budget,
         peer: peer.id.clone(),
         flow: flow.nonce,
+        connection: connection.clone(),
     };
     let running = gate.clone();
     let connection = connection.clone();
@@ -336,21 +359,23 @@ pub(crate) fn start(
         let _connection_credit = connection_credit;
         let mut sequence = 0u64;
         let mut offset = 0u64;
+        let mut finished = false;
         loop {
-            let mut command = tokio::select! {biased;_=running.state.cancel.cancelled()=>break,value=input.recv()=>match value{Some(value)=>value,None=>break}};
-            if command.reply.is_closed() || !command.permit.valid() {
+            let mut command = tokio::select! {biased;_=running.state.cancel.cancelled()=>break,_=connection.closed()=>break,value=input.recv()=>match value{Some(value)=>value,None=>break}};
+            if finished || command.reply.is_closed() || !command.permit.valid() {
                 let _ = command
                     .reply
                     .send(Err(anyhow::anyhow!("chunk was not started")));
                 continue;
             }
-            let header = match flow.header(sequence, offset, command.payload.len(), generation) {
+            let mut header = match flow.header(sequence, offset, command.payload.len(), generation) {
                 Ok(h) => h,
                 Err(_) => {
                     running.retire();
                     break;
                 }
             };
+            if command.terminal { header[..4].copy_from_slice(b"PHF2"); }
             let Some(next_sequence) = sequence.checked_add(1) else {
                 running.retire();
                 break;
@@ -388,6 +413,7 @@ pub(crate) fn start(
                 .remove(&header);
             sequence = next_sequence;
             offset = next_offset;
+            finished = command.terminal;
             let _ = command
                 .reply
                 .send(Ok(result.expect("checked guarded transfer result")));
@@ -973,5 +999,22 @@ mod tests {
         assert_eq!(budget.0.lock().unwrap().total.bytes, 0);
         drop(owners);
         assert!(budget.0.lock().unwrap().peers.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod duplex_budget_tests {
+    use super::*;
+    #[test]
+    fn same_flow_has_exactly_one_source_and_receiver_slot_with_shared_byte_limits()->Result<()>{
+        let budget=Budget::default();let nonce=[9;16];
+        let source=budget.charge("peer",nonce,None)?;let receiver=budget.receiver_connection("peer",nonce)?;
+        ensure!(budget.charge("peer",nonce,None).is_err()&&budget.receiver_connection("peer",nonce).is_err(),"duplicate duplex role admitted");
+        {let state=budget.0.lock().unwrap();ensure!(state.total.connections==2&&state.flows[&("peer".into(),nonce)].slots==3,"duplex slots bypassed aggregate counts");}
+        let chunks=(0..128).map(|_|budget.charge("peer",nonce,Some(CHUNK))).collect::<Result<Vec<_>>>()?;
+        ensure!(budget.charge("peer",nonce,Some(1)).is_err(),"second role doubled per-flow bytes/chunks");
+        drop(source);ensure!(budget.receiver_connection("peer",nonce).is_err(),"dropping source cleared receiver ownership");
+        let source=budget.charge("peer",nonce,None)?;drop(chunks);drop(receiver);drop(source);
+        let state=budget.0.lock().unwrap();ensure!(state.total.connections==0&&state.total.bytes==0&&state.flows.is_empty()&&state.peers.is_empty(),"duplex role/credit leak");Ok(())
     }
 }

@@ -750,3 +750,73 @@ async fn credited_endpoint_never_exposes_raw_cached_or_new_quinn_connection() ->
     let cleanup = r.cleanup().await;
     result.and(cleanup)
 }
+
+#[tokio::test]
+async fn phf2_requires_real_native_fin_ack_and_preserves_response_half_close() -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let mut r = rig().await?;
+    let result = async {
+        let sender = r.sender.clone();
+        let sending = tokio::spawn(async move { sender.send_fin(lease(|| true)).await });
+        let access = r.access()?;
+        let mut receiver = r.receiver.take().unwrap();
+        let native = receiver.native.clone();
+        let receiving = tokio::spawn(async move {
+            let received = receiver.receive(access).await;
+            (receiver, received)
+        });
+        let mut byte = [0];
+        ensure!(
+            timeout(Duration::from_secs(2), r.native_app.read(&mut byte)).await?? == 0,
+            "PHF2 did not produce native EOF"
+        );
+        tokio::task::yield_now().await;
+        ensure!(
+            !sending.is_finished() && !receiving.is_finished(),
+            "FIN copy falsely acknowledged before native ACK"
+        );
+        r.release.send(true)?;
+        let (mut receiver, received) = timeout(Duration::from_secs(2), receiving).await??;
+        let received = received?;
+        let sent = timeout(Duration::from_secs(2), sending).await???;
+        ensure!(
+            sent == received && &sent[..4] == b"PHF2",
+            "terminal receipt differs"
+        );
+        ensure!(
+            u32::from_be_bytes(sent[37..41].try_into()?) == 0,
+            "FIN has DATA length"
+        );
+        ensure!(
+            receiver.receive(r.access()?).await.is_err(),
+            "terminal RX admitted another credit"
+        );
+        // A completed request FIN must not destroy the native response leg.
+        drop(receiver);
+        r.native_app.write_all(b"response-after-fin").await?;
+        let read = timeout(Duration::from_secs(2), native.read_chunk()).await??;
+        ensure!(
+            native.owns_read(&read),
+            "half-close lost exact native owner"
+        );
+        read.deliver(|bytes, eof| async move {
+            ensure!(
+                !eof && bytes == Bytes::from_static(b"response-after-fin"),
+                "response lost after PHF2"
+            );
+            Ok(())
+        })
+        .await?;
+        ensure!(
+            r.sender
+                .send(Bytes::from_static(b"late"), lease(|| true))
+                .await
+                .is_err(),
+            "source admitted DATA after FIN"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    r.cleanup().await?;
+    result
+}
