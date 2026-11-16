@@ -345,7 +345,7 @@ impl ClientCertVerifier for Verifier {
         self.algorithms.supported_schemes()
     }
 }
-fn transport(idle_timeout: Option<Duration>,credited:bool) -> Result<Arc<quinn::TransportConfig>> {
+fn transport(idle_timeout: Option<Duration>,credited:bool,bounded_source:bool) -> Result<Arc<quinn::TransportConfig>> {
     let mut config = quinn::TransportConfig::default();
     config
         .max_concurrent_uni_streams(0u8.into())
@@ -363,7 +363,9 @@ fn transport(idle_timeout: Option<Duration>,credited:bool) -> Result<Arc<quinn::
         .receive_window((32u32 * 1024 * 1024).into())
         .send_window(32 * 1024 * 1024);
     if credited {
-        config.max_concurrent_bidi_streams(0u8.into()).stream_receive_window(8288u32.into()).receive_window(8288u32.into()).send_window(8288);
+        config.max_concurrent_bidi_streams(0u8.into()).stream_receive_window(8288u32.into()).receive_window(8288u32.into()).send_window(96);
+    } else if bounded_source {
+        config.max_concurrent_bidi_streams(0u8.into()).stream_receive_window(96u32.into()).receive_window(96u32.into()).send_window(8288);
     }
     if let Some(timeout) = idle_timeout {
         config.max_idle_timeout(Some(timeout.try_into()?));
@@ -380,6 +382,22 @@ impl FencedConnection {
     pub fn peer(&self)->&Peer{&self.peer}
     pub fn connection(&self)->&Connection{&self.connection}
     pub fn belongs_to(&self,generation:&crate::udp::SendFactory)->bool{self.generation.same_generation(generation)}
+}
+
+/// Sealed outgoing guarded profile: no raw Connection/window mutation escape.
+#[derive(Clone)]
+pub struct BoundedSourceConnection {connection:Connection,generation:crate::udp::SendFactory,peer:Peer,local:Ipv4Addr}
+impl BoundedSourceConnection {
+    pub fn peer(&self)->&Peer{&self.peer}
+    pub fn local_ip(&self)->Ipv4Addr{self.local}
+    pub fn belongs_to(&self,generation:&crate::udp::SendFactory)->bool{self.generation.same_generation(generation)}
+    pub fn stats(&self)->quinn::ConnectionStats{self.connection.stats()}
+    pub fn close(&self){self.connection.close(1u8.into(),b"guarded source stopped");}
+    pub async fn closed(&self){self.connection.closed().await;}
+    pub async fn open_chunk(&self,original:&crate::udp::SendPermit)->Result<(SendStream,RecvStream)>{
+        ensure!(original.remaining().is_some(),"guarded source origin bound unknown");
+        Ok(original.during(self.connection.open_bi()).await??)
+    }
 }
 
 /// A credited receiver has no public raw Quinn Connection escape hatch. Only
@@ -423,6 +441,7 @@ pub struct Endpoint {
     peer_budget: AtomicUsize,
     protocols: Vec<Vec<u8>>,
     credited:bool,
+    bounded_source:bool,
 }
 impl Endpoint {
     pub fn new(identity: Identity, local: Ipv4Addr) -> Result<(Self, PacketIo)> {
@@ -434,7 +453,10 @@ impl Endpoint {
     /// Experimental receiver profile: advertise no incoming application stream
     /// until its immutable origin credit is installed. Legacy profile unchanged.
     pub fn new_fenced_credited(identity:Identity,local:Ipv4Addr,generation:crate::udp::SendFactory)->Result<(Self,PacketIo)>{
-        Self::with_protocols_profile(identity,local,vec![ALPN.into()],Some(generation),QUEUE,true)
+        Self::with_protocols_profile(identity,local,vec![ALPN.into()],Some(generation),QUEUE,true,false)
+    }
+    pub fn new_fenced_source(identity:Identity,local:Ipv4Addr,generation:crate::udp::SendFactory)->Result<(Self,PacketIo)>{
+        Self::with_protocols_profile(identity,local,vec![ALPN.into()],Some(generation),QUEUE,false,true)
     }
     fn with_protocols(identity:Identity,local:Ipv4Addr,protocols:Vec<Vec<u8>>)->Result<(Self,PacketIo)> {Self::with_protocols_fenced(identity,local,protocols,None)}
     fn with_protocols_fenced(identity:Identity,local:Ipv4Addr,protocols:Vec<Vec<u8>>,generation:Option<crate::udp::SendFactory>)->Result<(Self,PacketIo)>{Self::with_protocols_fenced_capacity(identity,local,protocols,generation,QUEUE)}
@@ -445,9 +467,9 @@ impl Endpoint {
         generation:Option<crate::udp::SendFactory>,
         capacity:usize,
     ) -> Result<(Self, PacketIo)> {
-        Self::with_protocols_profile(identity,local,protocols,generation,capacity,false)
+        Self::with_protocols_profile(identity,local,protocols,generation,capacity,false,false)
     }
-    fn with_protocols_profile(identity:Identity,local:Ipv4Addr,protocols:Vec<Vec<u8>>,generation:Option<crate::udp::SendFactory>,capacity:usize,credited:bool)->Result<(Self,PacketIo)>{
+    fn with_protocols_profile(identity:Identity,local:Ipv4Addr,protocols:Vec<Vec<u8>>,generation:Option<crate::udp::SendFactory>,capacity:usize,credited:bool,bounded_source:bool)->Result<(Self,PacketIo)>{
         ensure!((1..=QUEUE).contains(&capacity),"invalid bounded stream queue capacity");
         ensure!(local.is_private(), "invalid private stream endpoint");
         let peers: Peers = Default::default();
@@ -467,7 +489,7 @@ impl Endpoint {
         let mut server = quinn::ServerConfig::with_crypto(Arc::new(
             quinn::crypto::rustls::QuicServerConfig::try_from(tls)?,
         ));
-        server.transport = transport(None,credited)?;
+        server.transport = transport(None,credited,bounded_source)?;
         let (input, incoming) = mpsc::channel(QUEUE);
         let (outgoing, output) = mpsc::channel(capacity);
         #[cfg(test)] let blocked_sends=Arc::new(AtomicUsize::new(0));
@@ -482,7 +504,7 @@ impl Endpoint {
         config.max_udp_payload_size(MAX_DATAGRAM as u16)?;
         let inner = quinn::Endpoint::new_with_abstract_socket(
             config,
-            Some(server),
+            if bounded_source{None}else{Some(server)},
             socket,
             Arc::new(quinn::TokioRuntime),
         )?;
@@ -499,9 +521,10 @@ impl Endpoint {
                 peers: peers.clone(),
                 connections: Default::default(),
                 next_connection: AtomicUsize::new(0),
-                peer_budget: AtomicUsize::new(MAX_CONNECTIONS),
+                peer_budget: AtomicUsize::new(if credited||bounded_source{64}else{MAX_CONNECTIONS}),
                 protocols,
                 credited,
+                bounded_source,
             },
             PacketIo {
                 input,
@@ -513,7 +536,8 @@ impl Endpoint {
     /// A sparse identity cache is not a request to eagerly allocate sockets for every entry.
     /// This lowers admission only; it never increases the existing endpoint bounds.
     pub fn set_peer_connection_budget(&self,limit:usize)->Result<()> {
-        ensure!((1..=MAX_CONNECTIONS).contains(&limit),"invalid private stream peer budget");
+        let maximum=if self.credited||self.bounded_source{64}else{MAX_CONNECTIONS};
+        ensure!((1..=maximum).contains(&limit),"invalid private stream peer budget");
         self.peer_budget.store(limit,Ordering::Relaxed);Ok(())
     }
     pub fn capacity_for(&self,peer:&Peer)->bool {
@@ -637,7 +661,10 @@ impl Endpoint {
         Ok((peer, connection))
     }
     pub fn prepared(&self, expected: &Peer) -> Option<quinn::Connection> {
-        if self.credited{return None;}
+        if self.credited||self.bounded_source{return None;}
+        self.prepared_inner(expected)
+    }
+    fn prepared_inner(&self,expected:&Peer)->Option<quinn::Connection>{
         let trusted = self.peers.read().unwrap_or_else(|p| p.into_inner());
         if trusted.get(&expected.ip) != Some(expected) {
             return None;
@@ -684,12 +711,20 @@ impl Endpoint {
         }
         stats
     }
+    pub async fn connect_source(&self,peer:&Peer)->Result<BoundedSourceConnection>{
+        ensure!(self.bounded_source,"endpoint has no bounded source profile");
+        let generation=self.generation.clone().ok_or_else(||anyhow::anyhow!("source generation absent"))?;
+        let connection=self.connect_inner(peer).await?;Ok(BoundedSourceConnection{connection,generation,peer:peer.clone(),local:self.local})
+    }
     pub async fn connect_fenced(&self,peer:&Peer)->Result<FencedConnection> {
         let generation=self.generation.clone().ok_or_else(||anyhow::anyhow!("connection has no immutable socket-generation fence"))?;
         let connection=self.connect(peer).await?;Ok(FencedConnection{connection,generation,peer:peer.clone(),local:self.local})
     }
     pub async fn connect(&self, expected: &Peer) -> Result<quinn::Connection> {
-        ensure!(!self.credited,"credited receiver requires owned receive wrapper");
+        ensure!(!self.credited&&!self.bounded_source,"guarded profile requires owned connection wrapper");
+        self.connect_inner(expected).await
+    }
+    async fn connect_inner(&self,expected:&Peer)->Result<quinn::Connection>{
         let ip = expected.ip;
         ensure!(self.capacity_for(expected),"private stream peer budget reached");
         ensure!(
@@ -700,7 +735,7 @@ impl Endpoint {
                 == Some(expected),
             "private stream peer not admitted"
         );
-        if let Some(connection) = self.prepared(expected) {
+        if let Some(connection) = self.prepared_inner(expected) {
             return Ok(connection);
         }
         self.connect_new(expected, None).await
@@ -725,7 +760,7 @@ impl Endpoint {
     /// Keep negotiated lanes prepared without keepalive traffic. Opening an
     /// application flow after an idle period must not wait for new handshakes.
     pub async fn connect_additional(&self, expected: &Peer) -> Result<quinn::Connection> {
-        ensure!(!self.credited,"credited receiver requires owned receive wrapper");
+        ensure!(!self.credited&&!self.bounded_source,"guarded profile requires owned connection wrapper");
         ensure!(
             self.supports_parallel(expected),
             "private peer supports one stream connection"
@@ -766,7 +801,7 @@ impl Endpoint {
         let mut config = quinn::ClientConfig::new(Arc::new(
             quinn::crypto::rustls::QuicClientConfig::try_from(tls)?,
         ));
-        config.transport_config(transport(idle_timeout,self.credited)?);
+        config.transport_config(transport(idle_timeout,self.credited,self.bounded_source)?);
         let connection = tokio::time::timeout(
             Duration::from_secs(10),
             self.inner.connect_with(
@@ -780,7 +815,7 @@ impl Endpoint {
         Ok(connection)
     }
     pub async fn accept_fenced(&self)->Result<FencedConnection>{
-        ensure!(!self.credited,"credited receiver requires owned receive wrapper");
+        ensure!(!self.credited&&!self.bounded_source,"guarded profile requires owned connection wrapper");
         let generation=self.generation.clone().ok_or_else(||anyhow::anyhow!("receiver has no immutable socket fence"))?;
         let (peer,connection)=self.accept().await?;Ok(FencedConnection{connection,generation,peer,local:self.local})
     }
@@ -790,7 +825,7 @@ impl Endpoint {
         let (peer,connection)=self.accept_inner().await?;Ok(CreditedReceiverConnection{connection,generation,peer,local:self.local})
     }
     pub async fn accept(&self) -> Result<(Peer, quinn::Connection)> {
-        ensure!(!self.credited,"credited receiver requires owned receive wrapper");
+        ensure!(!self.credited&&!self.bounded_source,"guarded profile requires owned connection wrapper");
         self.accept_inner().await
     }
     async fn accept_inner(&self)->Result<(Peer,quinn::Connection)>{
@@ -818,6 +853,33 @@ impl Drop for Endpoint {
 mod ingress_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn bounded_source_has_no_unsolicited_streams_and_exact_96_byte_receipt_window()->Result<()>{
+        let a=Identity::new()?;let b=Identity::new()?;let a_ip="10.234.246.1".parse()?;let b_ip="10.234.246.2".parse()?;
+        let a_peer=Peer{id:"source".into(),ip:a_ip,fingerprint:a.fingerprint().into(),instance:"one".into()};let b_peer=Peer{id:"receiver".into(),ip:b_ip,fingerprint:b.fingerprint().into(),instance:"two".into()};
+        let factory=crate::udp::SendFactory::new(||Some(crate::udp::SendPermit::control(||true)));
+        let(source,mut a_io)=Endpoint::new_fenced_source(a,a_ip,factory.clone())?;let(destination,mut b_io)=Endpoint::new(b,b_ip)?;source.update_peers(vec![b_peer.clone()])?;destination.update_peers(vec![a_peer.clone()])?;
+        assert!(source.set_peer_connection_budget(65).is_err());assert!(destination.set_peer_connection_budget(512).is_ok());
+        let a_in=a_io.ingress();let b_in=b_io.ingress();let stop=tokio_util::sync::CancellationToken::new();let cancel=stop.clone();let pump=tokio::spawn(async move{loop{tokio::select!{
+            _=cancel.cancelled()=>break,
+            p=a_io.outgoing()=>match p{Some(p)=>{let _=b_in.send_reliable_guarded(a_ip,p.payload,p.permit).await;},None=>break},
+            p=b_io.outgoing()=>match p{Some(p)=>{let _=a_in.send_reliable_guarded(b_ip,p.payload,p.permit).await;},None=>break}
+        }}});
+        let mut writer=None;
+        let result=async{
+            let(client,server)=tokio::time::timeout(Duration::from_secs(3),async{tokio::join!(source.connect_source(&b_peer),destination.accept())}).await?;let client=client?;let(_,server)=server?;
+            ensure!(client.peer()==&b_peer&&client.belongs_to(&factory),"bounded source identity/factory not sealed");ensure!(source.prepared(&b_peer).is_none()&&source.connect(&b_peer).await.is_err()&&source.connect_fenced(&b_peer).await.is_err(),"raw source connection escaped");
+            ensure!(matches!(tokio::time::timeout(Duration::from_millis(30),source.accept()).await,Ok(Err(_))),"source accepted raw incoming connection");
+            ensure!(tokio::time::timeout(Duration::from_millis(30),server.open_bi()).await.is_err(),"unsolicited remote stream allowed");
+            let origin=crate::udp::SendPermit::bounded(||true,||Some(Duration::from_secs(10)));let(mut request,mut receipt)=client.open_chunk(&origin).await?;request.write_all(b"request").await?;request.finish()?;
+            let(mut reply,mut input)=server.accept_bi().await?;ensure!(input.read_to_end(7).await?==b"request","bounded source request changed");writer=Some(tokio::spawn(async move{reply.write_all(&vec![7;4096]).await?;reply.finish()?;ensure!(reply.stopped().await?.is_none(),"adversarial reply reset");Ok::<_,anyhow::Error>(())}));
+            tokio::time::timeout(Duration::from_secs(1),async{while client.stats().frame_rx.stream==0{tokio::task::yield_now().await;}}).await?;
+            ensure!(tokio::time::timeout(Duration::from_millis(30),writer.as_mut().unwrap()).await.is_err(),"oversized reply escaped receive credit before application read");
+            let first=receipt.read_chunk(4096,true).await?.ok_or_else(||anyhow::anyhow!("receipt unexpectedly ended"))?;ensure!(first.bytes.len()==96,"receipt prebuffer exceeded exact96-byte window");
+            client.close();Ok::<_,anyhow::Error>(())
+        }.await;
+        source.close();destination.close();stop.cancel();pump.await?;if let Some(writer)=writer{let _=tokio::time::timeout(Duration::from_secs(1),writer).await?;}result
+    }
     #[tokio::test]
     async fn actual_quinn_prepared_transmit_cannot_borrow_republished_admission_on_retired_socket()->Result<()> {
         let a=Identity::new()?;let b=Identity::new()?;let a_ip="10.234.251.1".parse()?;let b_ip="10.234.251.2".parse()?;

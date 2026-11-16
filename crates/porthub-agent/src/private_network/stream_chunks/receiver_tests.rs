@@ -33,7 +33,7 @@ struct Rig {
     receiver: Option<Receiver>,
     sender: Sender,
     owner: Option<Owner>,
-    client: Connection,
+    client: porthub_mesh::streams::BoundedSourceConnection,
     flow: Flow,
     peer: Peer,
     current: Arc<AtomicBool>,
@@ -117,7 +117,7 @@ async fn rig() -> Result<Rig> {
     let profile = Arc::new(AtomicBool::new(true));
     let parent = profile.clone();
     let gate_b = Gate::new(SendPermit::control(move || parent.load(Ordering::SeqCst)));
-    let (source, mut a_io) = Endpoint::new_fenced(a, a_ip, gate_a.factory())?;
+    let (source, mut a_io) = Endpoint::new_fenced_source(a, a_ip, gate_a.factory())?;
     let (destination, mut b_io) = Endpoint::new_fenced_credited(b, b_ip, gate_b.factory())?;
     source.update_peers(vec![b_peer.clone()])?;
     destination.update_peers(vec![a_peer.clone()])?;
@@ -137,14 +137,14 @@ async fn rig() -> Result<Rig> {
     let (source, destination) = (Arc::new(source), Arc::new(destination));
     let (client, accepted) = timeout(Duration::from_secs(3), async {
         tokio::join!(
-            source.connect_fenced(&b_peer),
+            source.connect_source(&b_peer),
             destination.accept_credited()
         )
     })
     .await?;
     let client = client?;
     let remote = accepted?;
-    let raw = client.connection().clone();
+    let raw = client.clone();
     let (handle, mut output, runner) = tagged::stack()?;
     let (native, mut input, native_runner) = tcp_stream::stack()?;
     let x = stop.clone();
@@ -299,7 +299,11 @@ async fn no_stream_before_credit_and_native_ack_is_required_for_phc2_receipt() -
             "native ACK receipt did not bind exact header"
         );
         // Completion does not automatically advertise another grant.
-        let blocked = timeout(Duration::from_millis(50), r.client.open_bi()).await;
+        let blocked = timeout(
+            Duration::from_millis(50),
+            r.client.open_chunk(&lease(|| true)),
+        )
+        .await;
         ensure!(blocked.is_err(), "QUIC auto-replenished unissued credit");
         // Completed original credit can expire without relabeling next work.
         r.original.store(false, Ordering::SeqCst);
@@ -346,7 +350,8 @@ async fn prebuffered_quinn_body_cannot_borrow_new_receiver_grant() -> Result<()>
             futures_util::poll!(receiving.as_mut()).is_pending(),
             "RX did not await credited stream"
         );
-        let (mut send, mut receipt) = timeout(Duration::from_secs(1), r.client.open_bi()).await??;
+        let (mut send, mut receipt) =
+            timeout(Duration::from_secs(1), r.client.open_chunk(&lease(|| true))).await??;
         let header = wire_header(r.flow.header(0, 0, 1024, [6; 16])?, [6; 16], 10_000)?;
         send.write_all(&header).await?;
         send.write_all(&[3; 1024]).await?;
@@ -405,9 +410,12 @@ async fn original_acl_and_current_acl_are_both_required() -> Result<()> {
             "denied credit reached native TCP"
         );
         ensure!(
-            timeout(Duration::from_millis(50), r.client.open_bi())
-                .await
-                .is_err(),
+            timeout(
+                Duration::from_millis(50),
+                r.client.open_chunk(&lease(|| true))
+            )
+            .await
+            .is_err(),
             "denied credit advertised stream"
         );
         Ok::<_, anyhow::Error>(())
@@ -480,7 +488,8 @@ async fn actual_quinn_foreign_header_is_rejected_before_native_write() -> Result
             futures_util::poll!(receiving.as_mut()).is_pending(),
             "receiver did not await original credit"
         );
-        let (mut body, mut reply) = timeout(Duration::from_secs(1), r.client.open_bi()).await??;
+        let (mut body, mut reply) =
+            timeout(Duration::from_secs(1), r.client.open_chunk(&lease(|| true))).await??;
         let mut header = wire_header(r.flow.header(0, 0, 1024, [6; 16])?, [6; 16], 10_000)?;
         header[93] = 1;
         body.write_all(&header).await?;

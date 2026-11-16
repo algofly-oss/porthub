@@ -3,7 +3,7 @@
 use anyhow::{ensure, Result};
 use bytes::Bytes;
 use porthub_mesh::{
-    streams::{Connection, FencedConnection, Peer},
+    streams::{BoundedSourceConnection, Peer},
     udp::{SendFactory, SendPermit},
 };
 use sha2::{Digest, Sha256};
@@ -300,36 +300,11 @@ impl Sender {
         result
     }
 }
-fn validate_connection(peer: &Peer, connection: &Connection) -> Result<()> {
-    ensure!(
-        connection.remote_address().ip() == std::net::IpAddr::V4(peer.ip),
-        "chunk connection assignment mismatch"
-    );
-    let certificates = connection
-        .peer_identity()
-        .and_then(|p| {
-            p.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
-                .ok()
-        })
-        .ok_or_else(|| anyhow::anyhow!("chunk certificate missing"))?;
-    let actual = certificates.first().map(|c| {
-        Sha256::digest(c.as_ref())
-            .iter()
-            .map(|b| format!("{b:02X}"))
-            .collect::<String>()
-    });
-    let expected = peer.fingerprint.replace(':', "").to_ascii_uppercase();
-    ensure!(
-        actual.as_deref() == Some(&expected),
-        "chunk peer fingerprint mismatch"
-    );
-    Ok(())
-}
 /// This actor currently prototypes one flow per owned generation, one finite
-/// chunk at a time. It is NOT the production multiplexing/native-ACK protocol.
+/// chunk at a time. It is NOT the production flow-open/multiplexing protocol.
 pub(crate) fn start(
     peer: Peer,
-    connection: FencedConnection,
+    connection: BoundedSourceConnection,
     gate: Gate,
     budget: Budget,
     flow: Flow,
@@ -342,7 +317,6 @@ pub(crate) fn start(
         connection.belongs_to(&gate.factory),
         "chunk connection belongs to another socket generation"
     );
-    validate_connection(&peer, connection.connection())?;
     flow.header(0, 0, 1, [1; 16])?;
     let connection_credit = budget.charge(&peer.id, flow.nonce, None)?;
     let (commands, mut input) = mpsc::channel::<Command>(32);
@@ -354,7 +328,7 @@ pub(crate) fn start(
         flow: flow.nonce,
     };
     let running = gate.clone();
-    let connection = connection.connection().clone();
+    let connection = connection.clone();
     let mut generation = [0; 16];
     getrandom::fill(&mut generation).map_err(|_| anyhow::anyhow!("chunk nonce unavailable"))?;
     let task = tokio::spawn(async move {
@@ -396,7 +370,7 @@ pub(crate) fn start(
                 || !running.state.alive.load(Ordering::SeqCst)
             {
                 running.retire();
-                connection.close(1u8.into(), b"chunk origin retired");
+                connection.close();
                 connection.closed().await;
                 let _ = command
                     .reply
@@ -419,7 +393,7 @@ pub(crate) fn start(
         }
         running.retire();
         input.close();
-        connection.close(1u8.into(), b"chunk owner stopped");
+        connection.close();
         connection.closed().await;
         running
             .state
@@ -455,13 +429,13 @@ fn wire_header(
     Ok(header)
 }
 async fn transfer(
-    connection: &Connection,
+    connection: &BoundedSourceConnection,
     header: &[u8; HEADER],
     payload: &Bytes,
     permit: &SendPermit,
     generation: [u8; 16],
 ) -> Result<[u8; HEADER]> {
-    let (mut send, mut receive) = permit.during(connection.open_bi()).await??;
+    let (mut send, mut receive) = connection.open_chunk(permit).await?;
     // Causal ordering: receiver's credit start precedes this resolved open.
     // Do not compute remaining lifetime before waiting for stream credit.
     let millis = permit
@@ -531,6 +505,9 @@ mod tests {
         stop: CancellationToken,
         source: Arc<Endpoint>,
         destination: Arc<Endpoint>,
+        connection: BoundedSourceConnection,
+        peer: Peer,
+        flow: Flow,
     }
     async fn fixture(mode: u8) -> Result<Fixture> {
         let a = Identity::new()?;
@@ -550,7 +527,7 @@ mod tests {
             instance: "b-instance".into(),
         };
         let gate = Gate::new(SendPermit::control(|| true));
-        let (source, mut a_io) = Endpoint::new_fenced(a, a_ip, gate.factory())?;
+        let (source, mut a_io) = Endpoint::new_fenced_source(a, a_ip, gate.factory())?;
         let (destination, mut b_io) = Endpoint::new(b, b_ip)?;
         source.update_peers(vec![b_peer.clone()])?;
         destination.update_peers(vec![a_peer])?;
@@ -570,7 +547,7 @@ mod tests {
         let source = Arc::new(source);
         let destination = Arc::new(destination);
         let (client, accepted) = tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            tokio::join!(source.connect_fenced(&b_peer), destination.accept())
+            tokio::join!(source.connect_source(&b_peer), destination.accept())
         })
         .await?;
         let client = client?;
@@ -620,6 +597,9 @@ mod tests {
             remote_port: 443,
             epoch: [1; 32],
         };
+        let connection = client.clone();
+        let peer = b_peer.clone();
+        let binding = flow.clone();
         let (sender, owner) = start(b_peer, client, gate.clone(), budget.clone(), flow)?;
         Ok(Fixture {
             owner,
@@ -631,6 +611,9 @@ mod tests {
             stop,
             source,
             destination,
+            connection,
+            peer,
+            flow: binding,
         })
     }
     async fn cleanup(f: Fixture) -> Result<()> {
@@ -755,6 +738,54 @@ mod tests {
             "TTL not bound to exact chunk ID"
         );
         Ok(())
+    }
+    #[tokio::test]
+    async fn actual_source_constructor_rejects_foreign_peer_and_factory_without_mutation(
+    ) -> Result<()> {
+        let f = fixture(0).await?;
+        let budget = Budget::default();
+        let foreign = Gate::new(SendPermit::control(|| true));
+        ensure!(
+            start(
+                f.peer.clone(),
+                f.connection.clone(),
+                foreign,
+                budget.clone(),
+                f.flow.clone()
+            )
+            .is_err(),
+            "source borrowed unrelated socket factory"
+        );
+        for field in 0..4 {
+            let mut peer = f.peer.clone();
+            match field {
+                0 => peer.id.push('x'),
+                1 => peer.ip = "10.234.252.3".parse()?,
+                2 => peer.fingerprint.push('0'),
+                _ => peer.instance.push('x'),
+            };
+            ensure!(
+                start(
+                    peer,
+                    f.connection.clone(),
+                    f.gate.clone(),
+                    budget.clone(),
+                    f.flow.clone()
+                )
+                .is_err(),
+                "source accepted changed peer binding field {field}"
+            );
+        }
+        ensure!(
+            budget.0.lock().unwrap().total.connections == 0
+                && f.source.connection_count(&f.peer) == 1
+                && f.gate.state.alive.load(Ordering::SeqCst),
+            "foreign source admission changed existing owner/budget"
+        );
+        f.sender
+            .send(Bytes::from(vec![3; 128]), lease(|| true))
+            .await?;
+        cleanup(f).await
     }
     #[tokio::test]
     async fn actual_finished_quinn_stream_and_exact_receipt_release_original_credit() -> Result<()>

@@ -685,13 +685,13 @@ mod tcp_tests {
     // Windows runner images can exclude dynamic port ranges independently for
     // TCP and UDP. Probe bounded random non-dynamic ports accepted by both
     // stacks, without changing host exclusions or enabling address reuse.
-    #[cfg(windows)]
     async fn test_sockets() -> Result<(UdpSocket, TcpListener)> {
         let mut last = None;
         for _ in 0..32 {
-            let mut random = [0; 2];
-            getrandom::fill(&mut random)?;
-            let port = 10000 + u16::from_ne_bytes(random) % 30000;
+            #[cfg(windows)]
+            let port={let mut random=[0;2];getrandom::fill(&mut random)?;10000+u16::from_ne_bytes(random)%30000};
+            #[cfg(not(windows))]
+            let port=0;
             let tcp = match TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await {
                 Ok(tcp) => tcp,
                 Err(error) if matches!(error.kind(), std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied) => { last = Some(error); continue; },
@@ -792,13 +792,10 @@ mod tcp_tests {
 
     #[tokio::test]
     async fn tcp_and_udp_share_policy_and_shutdown_closes_idle_clients() -> Result<()> {
-        #[cfg(windows)]
-        let (socket, tcp) = test_sockets().await?;
-        #[cfg(not(windows))]
-        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
-        let address = socket.local_addr()?;
-        #[cfg(not(windows))]
-        let tcp = TcpListener::bind(address).await?;
+        // TCP/UDP ephemeral allocators are independent. Reserve a pair rather
+        // than assuming UDP:0 cannot select an already-owned TCP port.
+        let (socket,tcp)=test_sockets().await?;
+        let address=socket.local_addr()?;
         let zone = Zone { rules: vec![porthub_mesh::dns_policy::Rule {
             domain: "blocked.example".into(), action: porthub_mesh::dns_policy::Action::Block,
             include_subdomains: true,

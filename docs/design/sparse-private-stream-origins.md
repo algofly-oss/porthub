@@ -338,3 +338,28 @@ The 8 MiB pending-chunk ledger is not an aggregate Quinn/native memory proof.
 The current sender test endpoint still uses legacy transport-window defaults;
 production needs an explicit guarded sender/receipt window, bounded multiplexed
 credit scheduling and measured aggregate memory/throughput before promotion.
+
+## Dedicated guarded source transport profile (not runtime integrated)
+
+Guarded source actors now require a sealed `BoundedSourceConnection` from the
+explicit source endpoint constructor. A legacy fenced connection cannot be
+passed accidentally. The wrapper exposes immutable peer/factory identity and
+chunk opening/closure/statistics, never a raw mutable Quinn connection.
+Unsolicited uni/bidi streams have zero credit, no incoming server listener is
+installed, and raw accept/prepared/connect accessors reject this profile.
+Its receive connection and stream windows are exactly 96 bytes for a receipt;
+its send window is 8,288 bytes for one bounded header/body. The receiver's
+receipt send window is 96 bytes. New guarded profiles cannot increase their
+64-peer limit; existing legacy profiles retain their prior limits/windows.
+
+An actual Quinn adversarial 4 KiB reply remains blocked before application
+consumption, with exactly 96 bytes initially prebuffered; unsolicited streams
+cannot open. Whole-runtime aggregate memory, multiplexing/fairness, measured
+throughput and authenticated flow-open/duplex ownership remain separate gates.
+
+The source constructor rejects a connected wrapper from any different immutable
+factory or peer id/address/fingerprint/instance before charging or spawning;
+actual connected-Quinn negative tests preserve the original owner. This does
+NOT bind an arbitrary opaque per-body `SendPermit` to that peer. Authenticated
+flow-open and a native tuple/generation-bound source bridge must issue that
+admission, rather than accepting arbitrary bytes/permits from runtime callers.
