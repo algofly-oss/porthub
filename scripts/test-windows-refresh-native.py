@@ -17,7 +17,7 @@ def main():
     env={k:v for k,v in os.environ.items() if k.lower() not in ('psmodulepath','psmoduleanalysiscachepath')}
     executable=pathlib.Path(os.environ['SystemRoot'])/'System32/WindowsPowerShell/v1.0/powershell.exe'
     def phase(name):
-        text="$ErrorActionPreference='Stop';$p="+quote(source)+";$b=[IO.File]::ReadAllBytes($p);$h=[Security.Cryptography.SHA256]::Create();try{$s=[BitConverter]::ToString($h.ComputeHash($b)).Replace('-','').ToLowerInvariant()}finally{$h.Dispose()};if($s -cne "+quote(digest)+"){throw 'Fixture source hash changed'};& ([scriptblock]::Create((New-Object Text.UTF8Encoding($false,$true)).GetString($b))) -Phase "+name+" -Root "+quote(root)+" -Repository "+quote(repo)
+        text="$ErrorActionPreference='Stop';$p="+quote(source)+";$b=[IO.File]::ReadAllBytes($p);$h=[Security.Cryptography.SHA256]::Create();try{$s=[BitConverter]::ToString($h.ComputeHash($b)).Replace('-','').ToLowerInvariant()}finally{$h.Dispose()};if($s -cne "+quote(digest)+"){throw 'Fixture source hash changed'};$utility=[IO.Path]::Combine($PSHOME,'Modules','Microsoft.PowerShell.Utility','Microsoft.PowerShell.Utility.psd1');Import-Module -Name $utility -ErrorAction Stop;& ([scriptblock]::Create([Text.UTF8Encoding]::new($false,$true).GetString($b))) -Phase "+name+" -Root "+quote(root)+" -Repository "+quote(repo)
         encoded=base64.b64encode(text.encode('utf-16le')).decode()
         if len(encoded)>8192:raise RuntimeError('Fixture loader argv bound')
         child=subprocess.Popen([str(executable),'-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',encoded],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,creationflags=subprocess.CREATE_NO_WINDOW)

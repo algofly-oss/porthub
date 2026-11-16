@@ -16,14 +16,15 @@ def diagnostic_utility_probe(mode,budget):
   result=subprocess.run([PWSH,'-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',command],input=b'',capture_output=True,timeout=budget,env=CHILD_ENV);out,err=result.stdout,result.stderr;code=result.returncode
  except subprocess.TimeoutExpired as error:out,err=error.stdout or b'',error.stderr or b'';timed=True
  output=out[:16384].decode('utf-8',errors='replace');errors=err[:16384].decode('utf-8',errors='replace')
- origins=re.findall(r'^UTILITY_ORIGIN:([^\r\n]{0,512})$',output,re.M)
- elapsed=re.findall(r'^UTILITY_ELAPSED_MS:([0-9]{1,9})$',output,re.M)
- valid=re.findall(r'^UTILITY_JSON_VALID:(True|False)$',output,re.M)
+ origins=re.findall(r'^UTILITY_ORIGIN:([^\r\n]{0,512})\r?$',output,re.M)
+ elapsed=re.findall(r'^UTILITY_ELAPSED_MS:([0-9]{1,9})\r?$',output,re.M)
+ valid=re.findall(r'^UTILITY_JSON_VALID:(True|False)\r?$',output,re.M)
  print('UTILITY_DIAGNOSTIC_ONLY '+json.dumps({'mode':mode,'timeout':timed,'deadline_seconds':round(budget,3),'wall_ms':int((time.monotonic()-started)*1000),'returncode':code,'stdout_bytes':len(out),'stderr_bytes':len(err),'stages':re.findall(r'UTILITY_PROBE_[A-Z_]+',errors)[:8],'module_origin':origins[0] if origins else None,'utility_elapsed_ms':int(elapsed[0]) if elapsed else None,'fixed_json_valid':valid[0]=='True' if valid else None}),file=sys.stderr)
 
 class Bootstrap(unittest.TestCase):
  @classmethod
  def setUpClass(cls):
+  if os.environ.get('PORTHUB_REFRESH_UTILITY_DIAGNOSTICS')!='1':return
   # Two independent diagnostics share <60s budget; original nine tests retain 5s deadlines.
   end=time.monotonic()+58
   for mode in ('autoload','explicit'):
@@ -58,6 +59,7 @@ class Bootstrap(unittest.TestCase):
    ('try{\n while(', 'BEFORE_READ'),
    ('$utf8=', 'AFTER_EOF'),
    ('[Console]::OutputEncoding=', 'BEFORE_OUTPUT_ENCODING'),
+   ('Import-Module -Name $utility', 'BEFORE_UTILITY_IMPORT'),
    ('$packet=$json|ConvertFrom-Json', 'BEFORE_JSON'),
    ("if($packet -isnot", 'AFTER_JSON'),
    ('$hash=[Security.Cryptography.SHA256]', 'BEFORE_HASH'),

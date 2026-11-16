@@ -17,6 +17,8 @@ try{
  $utf8=[Text.UTF8Encoding]::new($false,$true);$json=$utf8.GetString($bytes.ToArray())
 }finally{$bytes.Dispose();$inputStream.Dispose()}
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
+$utility=[IO.Path]::Combine($PSHOME,'Modules','Microsoft.PowerShell.Utility','Microsoft.PowerShell.Utility.psd1')
+Import-Module -Name $utility -ErrorAction Stop
 $packet=$json|ConvertFrom-Json
 if($packet -isnot [pscustomobject] -or @($packet.PSObject.Properties).Count -ne 2 -or @($packet.PSObject.Properties|Where-Object{$_.Name -cnotin @('script','request')}).Count -or $packet.script -isnot [string] -or $packet.script.Length -gt 49152 -or $packet.request -isnot [pscustomobject]){throw 'Invalid desktop refresh envelope'}
 $hash=[Security.Cryptography.SHA256]::Create()
@@ -198,7 +200,9 @@ mod tests {
         assert!(!BOOTSTRAP.split("$packet=").next().unwrap().contains("New-Object"), "No cmdlet pipeline may run before raw stdin is consumed");
         let consumed = BOOTSTRAP.find("}finally{$bytes.Dispose();$inputStream.Dispose()}").unwrap();
         assert!(BOOTSTRAP.find("[Console]::OutputEncoding").unwrap() > consumed);
-        assert!(BOOTSTRAP.find("ConvertFrom-Json").unwrap() > consumed);
+        let import = BOOTSTRAP.find("Import-Module -Name $utility -ErrorAction Stop").unwrap();
+        assert!(import > consumed && import < BOOTSTRAP.find("ConvertFrom-Json").unwrap());
+        assert!(BOOTSTRAP.contains("Combine($PSHOME,'Modules','Microsoft.PowerShell.Utility','Microsoft.PowerShell.Utility.psd1')"));
         assert!(BOOTSTRAP.contains("Desktop refresh script digest mismatch"));
     }
     #[test]

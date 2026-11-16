@@ -147,7 +147,8 @@ try{
  $transportOutput=& python (Join-Path $PSScriptRoot 'test-windows-refresh-bootstrap.py') 2>&1
  if($LASTEXITCODE -ne 0){$detail=($transportOutput|Out-String);throw ('Extracted desktop bootstrap transport regressions failed; bounded inert-test diagnostics: '+$detail.Substring(0,[Math]::Min(8192,$detail.Length)))}
  $utility=@();foreach($line in $transportOutput){$entry=[string]$line;if($entry.Length -le 4096 -and $entry -match '^UTILITY_DIAGNOSTIC_ONLY (\{.+\})$'){$utility+=($Matches[1]|ConvertFrom-Json)}}
- if($utility.Count -ne 2){throw 'Missing bounded Utility diagnostic observations'}
+ $expectedDiagnostics=if($env:PORTHUB_REFRESH_UTILITY_DIAGNOSTICS -ceq '1'){2}else{0}
+ if($utility.Count -ne $expectedDiagnostics){throw 'Missing bounded Utility diagnostic observations'}
  $results+=@{case='bootstrap-transport-and-startup-regressions';passed=$true;utility_diagnostics=$utility}
 }finally{$env:PORTHUB_REFRESH_TEST_POWERSHELL=$priorPowerShell}
 $results|ConvertTo-Json -Depth 4
