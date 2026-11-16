@@ -42,10 +42,12 @@ async fn change_peer(
     let enabled = model.required_bool("enabled");
     model.finish()?;
     let (_, owner, _) = browser(&app, &headers, &Method::PUT, &query.workspace, true).await?;
+    #[cfg(feature="private-sparse")]
+    let _workspace_guard=if enabled {crate::private_renumber::fence::stable(&app,owner).await?}else{crate::private_renumber::fence::revocation(&app,owner).await?};
     let changed = app
         .collection("private_peers")
         .update_one(
-            doc! {"_id":id,"workspace_id":owner},
+            doc! {"_id":&id,"workspace_id":owner},
             doc! {"$set":{"enabled":enabled,"updated_at":DateTime::now()}},
         )
         .await?;
@@ -55,6 +57,7 @@ async fn change_peer(
             "Private peer not found",
         ));
     }
+    if !enabled { app.private_relay.revoke(std::slice::from_ref(&id)); }
     Ok(Json(
         json!({"msg":if enabled {"Private access enabled"} else {"Private access disabled"}}),
     ))
@@ -72,6 +75,8 @@ async fn revoke_peer(
     if role != "owner" && role != "admin" {
         filter.insert("owner_id", user.get("_id").cloned().unwrap_or(Bson::Null));
     }
+    #[cfg(feature="private-sparse")]
+    let _workspace_guard=crate::private_renumber::fence::revocation(&app,owner).await?;
     // Credential invalidation happens before cleanup, so retained queue records
     // cannot authenticate a revoked peer if a later cleanup operation fails.
     let changed = app.collection("private_peers").update_one(filter,
@@ -82,6 +87,7 @@ async fn revoke_peer(
             "Private peer not found",
         ));
     }
+    app.private_relay.revoke(std::slice::from_ref(&id));
     app.collection("private_install_tickets")
         .update_many(
             doc! {"peer_id":&id},

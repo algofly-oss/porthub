@@ -75,6 +75,7 @@ struct Inner {
     pairs: HashMap<(String,String), PairAuthority>,
     generation: u64,
     admissions: HashMap<String, Admission>,
+    workspace_generations: HashMap<String, (u64, bool)>,
     admission_generation: u64,
     pair_generation:u64,
     admission_cleanup_at: Option<Instant>,
@@ -112,10 +113,32 @@ impl Inner {
     }
 }
 impl Hub {
+    pub(crate) fn block_workspace(&self,workspace:&str) {
+        let generation=self.0.lock().unwrap_or_else(|p|p.into_inner()).workspace_generations.get(workspace).map(|(g,_)|*g).unwrap_or(0);
+        self.workspace_generation(workspace,generation,true);
+    }
+    /// Apply a freshly read durable workspace head. Generation advance or a
+    /// migration fence retires ALL old tickets/leases/connections under that
+    /// exact stable workspace prefix; late in-flight publications fail closed.
+    pub(crate) fn workspace_generation(&self, workspace:&str, generation:u64, blocked:bool)->bool {
+        let mut hub=self.0.lock().unwrap_or_else(|p|p.into_inner());
+        let old=hub.workspace_generations.get(workspace).copied();
+        if old.is_some_and(|(g,_)|generation<g) {return false;}
+        if old.is_none()&&hub.workspace_generations.len()>=16384 {return false;}
+        if old==Some((generation,blocked)){return !blocked;}
+        let prefix=format!("{workspace}:");
+        hub.admissions.retain(|id,_|!id.starts_with(&prefix));
+        hub.leases.retain(|id,_|!id.starts_with(&prefix));
+        hub.connections.retain(|id,_|!id.starts_with(&prefix));
+        hub.pairs.retain(|_,pair|!pair.left.starts_with(&prefix)&&!pair.right.starts_with(&prefix));
+        hub.workspace_generations.insert(workspace.into(),(generation,blocked));
+        !blocked
+    }
     /// A bounded authenticated control-read ticket. A denial/identity replacement invalidates
     /// earlier in-flight reads without quarantining later newly authorized requests.
     pub(crate) fn begin_admission(&self,id:&str,hash:&str,instance:&str)->Option<u64>{
         let mut hub=self.0.lock().unwrap_or_else(|p|p.into_inner());let now=Instant::now();
+        if id.split_once(':').is_some_and(|(workspace,_)|hub.workspace_generations.get(workspace).is_some_and(|(_,blocked)|*blocked)){return None;}
         if hub.admission_cleanup_at.is_none_or(|at|at<=now){
             hub.admissions.retain(|_,a|a.expires>now);hub.admission_cleanup_at=Some(now+Duration::from_secs(60));
         }
@@ -1124,5 +1147,27 @@ mod tests {
         )
         .expect("legacy peer should fall back to lane 0");
         assert!(route_legacy.output.same_channel(&lane0));
+    }
+}
+
+#[cfg(test)]
+mod migration_fence_tests {
+    use super::*;
+    #[test]
+    fn workspace_fence_retires_late_tickets_without_touching_other_tenant() {
+        let hub=Hub::default();let ip=Ipv4Addr::new(10,0,0,2);
+        assert!(hub.workspace_generation("a",0,false));
+        let old=hub.begin_admission("a:p","hash","instance").unwrap();
+        let foreign=hub.begin_admission("ab:p","hash","instance").unwrap();
+        assert!(!hub.publish_admitted("a:p","hash","instance",ip,HashSet::new(),Some(old)).is_empty());
+        assert!(!hub.workspace_generation("a",1,true));
+        assert!(hub.begin_admission("a:p","hash","instance").is_none());
+        assert!(hub.publish_admitted("a:p","hash","instance",ip,HashSet::new(),Some(old)).is_empty());
+        assert!(!hub.publish_admitted("ab:p","hash","instance",ip,HashSet::new(),Some(foreign)).is_empty());
+        assert!(!hub.workspace_generation("a",0,false));
+        assert!(hub.workspace_generation("a",1,false));
+        assert!(hub.publish_admitted("a:p","hash","instance",ip,HashSet::new(),Some(old)).is_empty());
+        let fresh=hub.begin_admission("a:p","hash","instance").unwrap();
+        assert!(!hub.publish_admitted("a:p","hash","instance",ip,HashSet::new(),Some(fresh)).is_empty());
     }
 }

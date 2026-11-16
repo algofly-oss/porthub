@@ -18,6 +18,8 @@ use tokio::sync::{Mutex, OnceCell};
 #[derive(Default)]
 pub struct State {
     directory: Mutex<()>,
+    #[cfg(feature="private-sparse")]
+    pub(crate) workspace_fences: crate::private_renumber::fence::Fences,
     indices: OnceCell<()>,
     rules: Mutex<HashMap<String, (Arc<Index>, Instant)>>,
 }

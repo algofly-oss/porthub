@@ -148,6 +148,8 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
         if let Some(observed)=observed{app.private_relay.withdraw_bound(&input.peer_id,&hash,&input.instance,observed);}
         return Err(forbidden("Private credential invalid or revoked"));
     };
+    #[cfg(feature="private-sparse")]
+    let _workspace_guard=crate::private_renumber::fence::stable(&app,peer.get_object_id("workspace_id").map_err(|_|forbidden("Invalid workspace"))?).await?;
     let admission=app.private_relay.begin_admission(&input.peer_id,&hash,&input.instance)
         .ok_or_else(||ApiError::new(StatusCode::SERVICE_UNAVAILABLE,"Private control admission is busy; retry"))?;
     let observed_pairs=if cfg!(feature="private-sparse")&&input.sparse.is_some(){app.private_relay.observe_pairs(&input.peer_id,&hash,&input.instance,admission)}else{HashMap::new()};
