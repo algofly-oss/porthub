@@ -1267,6 +1267,7 @@ pub const OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
 #[cfg(all(test, windows))]
 mod windows_file_transaction_tests {
     use super::*;
+    use anyhow::Context;
     use std::fs;
     use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -1294,48 +1295,85 @@ mod windows_file_transaction_tests {
         // Temporary nonmanaged storage avoids touching the machine's real
         // registration namespace in ordinary library tests. The managed DACL
         // branch is additionally exercised by the opt-in real SCM fixture.
-        let root = tempfile::tempdir()?;
+        let root = tempfile::tempdir().context("create file-transaction temporary directory")?;
         let path = root.path().join("enrollment.json");
-        fs::write(&path, b"original")?;
+        fs::write(&path, b"original").context("write original test state")?;
         let held = std::fs::OpenOptions::new()
             .read(true)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-            .open(&path)?;
-        let before = identity(&held)?;
+            .open(&path)
+            .context("open explicit no-delete-sharing handle")?;
+        let before = identity(&held).context("query original held file identity")?;
         let mut files = Files::new();
-        files.write(&path, b"original", true)?;
+        files
+            .write(&path, b"original", true)
+            .context("preserve unchanged bytes with delete sharing denied")?;
         assert!(
             files.saved.is_empty(),
             "unchanged content must not enter rollback"
         );
-        assert_eq!(identity(&held)?, before);
-        assert_eq!(identity(&File::open(&path)?)?, before);
-        assert_eq!(fs::read(&path)?, b"original");
+        assert_eq!(
+            identity(&held).context("requery held unchanged identity")?,
+            before
+        );
+        assert_eq!(
+            identity(&File::open(&path).context("reopen unchanged state for identity")?)
+                .context("query unchanged path identity")?,
+            before
+        );
+        assert_eq!(
+            fs::read(&path).context("read original or restored test state")?,
+            b"original"
+        );
         assert!(
             files.write(&path, b"replacement", true).is_err(),
             "changed bytes must still require ordinary atomic replacement"
         );
-        assert_eq!(fs::read(&path)?, b"original");
+        assert_eq!(
+            fs::read(&path).context("read original or restored test state")?,
+            b"original"
+        );
         drop(held);
-        files.rollback()?;
-        let restored = File::open(&path)?;
-        let restored_identity = identity(&restored)?;
+        files
+            .rollback()
+            .context("rollback failed replacement after no-delete handle closes")?;
+        let restored_identity = {
+            let restored = File::open(&path).context("open restored state for identity")?;
+            identity(&restored).context("query restored identity")?
+        }; // Do not retain the old destination across subsequent replacements.
         let mut changed = Files::new();
-        changed.write(&path, b"replacement", true)?;
-        assert_eq!(fs::read(&path)?, b"replacement");
-        assert_ne!(identity(&File::open(&path)?)?, restored_identity);
+        changed
+            .write(&path, b"replacement", true)
+            .context("atomic changed-byte replacement after all identity handles close")?;
+        assert_eq!(
+            fs::read(&path).context("read changed-byte replacement")?,
+            b"replacement"
+        );
+        assert_ne!(
+            identity(&File::open(&path).context("open changed-byte state for identity")?)
+                .context("query replaced file identity")?,
+            restored_identity
+        );
         assert_eq!(changed.saved.len(), 1);
-        changed.rollback()?;
-        assert_eq!(fs::read(&path)?, b"original");
+        changed
+            .rollback()
+            .context("rollback successful changed-byte replacement")?;
+        assert_eq!(
+            fs::read(&path).context("read original or restored test state")?,
+            b"original"
+        );
         let alias = root.path().join("outside-alias.json");
-        fs::hard_link(&path, &alias)?;
+        fs::hard_link(&path, &alias).context("create hardlink negative-test alias")?;
         let mut linked = Files::new();
         assert!(
             linked.write(&path, b"original", true).is_err(),
             "a no-op must not tighten ACLs through a hardlink alias"
         );
         assert!(linked.saved.is_empty());
-        assert_eq!(fs::read(&alias)?, b"original");
+        assert_eq!(
+            fs::read(&alias).context("read preserved hardlink alias")?,
+            b"original"
+        );
         Ok(())
     }
 }
