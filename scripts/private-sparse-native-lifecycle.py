@@ -17,6 +17,15 @@ TESTS={
  'windows':['private_network::dns_windows::tests::native_same_account_reuse_cannot_bind_dns_endpoint','private_network::dns_windows::tests::native_foreign_udp_or_tcp_listener_prevents_dns_bind_without_takeover','private_network::native_desktop_lifecycle_fixture::native_interface_resolver_collision_connected_owner_and_drop'],
  'macos':['private_network::native_desktop_lifecycle_fixture::native_interface_resolver_collision_connected_owner_and_drop'],
 }
+REGRESSIONS={
+ 'linux':[],
+ 'windows':['private_network::windows_state::spelling_tests::equivalent_profile_spellings_preserve_existing_canonical_record_binding','private_network::windows_state::spelling_tests::distinct_profile_path_or_enrollment_cannot_reuse_existing_binding'],
+ 'macos':['private_network::route_debounce::witness::macos_zero_callback_requires_exact_native_readback'],
+}
+def exact_cases(contract):
+ return [(name,False,30) for name in REGRESSIONS[contract]]+[(name,True,100) for name in TESTS[contract]]
+def test_command(binary,name,ignored):
+ return [str(binary),'--exact',name]+(['--ignored'] if ignored else [])+['--nocapture','--test-threads=1']
 def sha(path):
  h=hashlib.sha256()
  with open(path,'rb') as stream:
@@ -152,6 +161,10 @@ def source_guard(contract):
   leaf=name.split('::')[-1]
   source=fixture if 'dns_windows' not in name else fixture.with_name('dns_windows.rs')
   if 'async fn '+leaf not in source.read_text():raise RuntimeError('exact native test absent: '+name)
+ for name in REGRESSIONS[contract]:
+  leaf=name.split('::')[-1]
+  source=fixture.with_name('windows_state.rs' if contract=='windows' else 'route_debounce.rs')
+  if 'fn '+leaf not in source.read_text():raise RuntimeError('exact native regression absent: '+name)
  return root
 
 def netns_stage(nonce):return pathlib.Path('/tmp/porthub-sparse-native-'+nonce)
@@ -220,7 +233,7 @@ def execute(args):
  if args.contract!='windows' and os.geteuid()!=0:raise RuntimeError('native outer must run as disposable VM root')
  binary=exact_executable(args.build_json);binary_sha=sha(binary)
  listed=run([str(binary),'--list'],seconds=15)
- for test in TESTS[args.contract]:
+ for test,_,_ in exact_cases(args.contract):
   if test+': test' not in listed:raise RuntimeError('native test missing from actual executable: '+test)
  source_revision=run(['git','-c','safe.directory='+str(root),'rev-parse','HEAD'],cwd=root).strip()
  expected_source=os.environ.get('PORTHUB_NATIVE_SOURCE_REVISION','');controller_revision=os.environ.get('PORTHUB_NATIVE_CONTROLLER_REVISION','')
@@ -256,17 +269,17 @@ def execute(args):
    # Fresh private managed root only. No inherited/foreign principal adoption.
    secure_windows_paths([managed,stage,*stage.iterdir()])
   env=os.environ.copy();env.update(PORTHUB_SPARSE_NATIVE_FIXTURE=purpose,PORTHUB_SPARSE_NATIVE_SPEC=str(stage/'spec.json'),PORTHUB_SPARSE_NATIVE_SPEC_SHA256=sha(stage/'spec.json'),PORTHUB_TEST_DISPOSABLE_WINDOWS_DNS='1',RUST_LOG='off',RUST_BACKTRACE='0')
-  for test in TESTS[args.contract]:
+  for test,ignored,case_limit in exact_cases(args.contract):
    gate=stage/'start.gate'
    if gate.exists():gate.unlink()
    if sha(binary)!=binary_sha or any(sha(root/name)!=expected for name,expected in receipt['inputs'].items()):raise RuntimeError('native executable or source input changed')
    remaining=deadline-time.monotonic()
    if remaining<10:raise RuntimeError('outer budget insufficient for another native test')
    receipt['native_executed']=True;receipt.setdefault('attempted_tests',[]).append(test)
-   text=run([str(binary),'--exact',test,'--ignored','--nocapture','--test-threads=1'],env=env,seconds=min(100,remaining),cap=args.log_cap_bytes,on_started=lambda child:gate.write_text(nonce))
+   text=run(test_command(binary,test,ignored),env=env,seconds=min(case_limit,remaining),cap=args.log_cap_bytes,on_started=lambda child:gate.write_text(nonce))
    (receipt_dir/(args.contract+'-'+test.split('::')[-1]+'.log')).write_text(text)
    if 'running 1 test' not in text or '1 passed; 0 failed' not in text:raise RuntimeError('native exact test did not pass one case')
-   receipt['native_executed']=True;receipt['tests'].append({'test':test,'passed':True,'log_sha256':hashlib.sha256(text.encode()).hexdigest()})
+   receipt['native_executed']=True;receipt['tests'].append({'test':test,'passed':True,'ignored_fixture':ignored,'log_sha256':hashlib.sha256(text.encode()).hexdigest()})
  except BaseException as error:
   receipt['error']=str(error)[:512]
   if isinstance(error,CommandError):
