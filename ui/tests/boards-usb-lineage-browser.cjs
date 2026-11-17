@@ -1,4 +1,5 @@
 const assert=require('node:assert/strict');
+const artifactTag=process.env.REVIEW_ARTIFACT_TAG?'-'+process.env.REVIEW_ARTIFACT_TAG:'';
 const {launchBrowser}=require('./browser.cjs');
 (async()=>{const {makeDemoData,handleDemoRequest}=await import('../src/shared/demo/data.mjs');const browser=await launchBrowser();try{
 for(const viewport of [{width:1440,height:900},{width:402,height:874}]){
@@ -19,16 +20,16 @@ for(const viewport of [{width:1440,height:900},{width:402,height:874}]){
  await page.evaluate(()=>document.fonts.ready);await page.waitForTimeout(200);
  const box=await page.locator('[aria-labelledby="boards-empty-title"]').evaluate(el=>{const r=el.getBoundingClientRect(),p=el.parentElement.getBoundingClientRect();return {top:r.top,bottom:r.bottom,parentBottom:p.bottom,height:r.height,viewport:innerHeight,workspaceBottom:document.querySelector('#workspace-content').getBoundingClientRect().bottom,overflow:document.documentElement.scrollWidth>innerWidth};});
  assert(box.height>viewport.height/2,'Empty Boards uses remaining view height');assert(Math.abs(box.bottom-box.parentBottom)<3,'Empty state fills its card');assert(Math.abs(box.workspaceBottom-box.parentBottom-12)<3,'Card fills workspace above the phone navigation');assert(!box.overflow,'No horizontal overflow');
- await page.screenshot({path:`/tmp/porthub-boards-fill-${process.env.REVIEW_BROWSER||'chromium'}-${viewport.width}.png`});
+ await page.screenshot({path:`/tmp/porthub-boards-fill-${process.env.REVIEW_BROWSER||'chromium'}-${viewport.width}${artifactTag}.png`});
  await page.goto(origin+'/home?view=machines&machine='+aero._id+'&machineTab=usb');
  const usb=page.getByRole('region',{name:'USB forwarding'});await usb.waitFor();
  await usb.getByLabel('USB device',{exact:true}).click();
  const choice=page.getByRole('option').filter({hasText:'Forwarded from Luna'});await choice.waitFor();assert.match(await choice.textContent(),/Headset/);
  const inUse=page.getByRole('option').filter({hasText:'In use on Miro'});assert(await inUse.evaluate(el=>el.hasAttribute('data-disabled')||el.getAttribute('aria-disabled')==='true'),'Outgoing option remains disabled');
- await page.screenshot({path:`/tmp/porthub-usb-origin-menu-${process.env.REVIEW_BROWSER||'chromium'}-${viewport.width}.png`});await choice.click();await usb.getByLabel('USB destination machine',{exact:true}).click();await page.getByRole('option',{name:'Miro',exact:true}).click();
+ await page.screenshot({path:`/tmp/porthub-usb-origin-menu-${process.env.REVIEW_BROWSER||'chromium'}-${viewport.width}${artifactTag}.png`});await choice.click();const closed=usb.getByLabel('USB device',{exact:true});assert.match(await closed.inputValue(),/^Forwarded from Luna · Headset · 0-12$/);assert(await closed.evaluate(el=>{const s=getComputedStyle(el),c=document.createElement('canvas').getContext('2d');c.font=s.font;return c.measureText('Forwarded from Luna').width<el.getBoundingClientRect().width-parseFloat(s.paddingLeft)-parseFloat(s.paddingRight)}),'Original source fits the closed selector');await usb.getByLabel('USB destination machine',{exact:true}).click();await page.getByRole('option',{name:'Miro',exact:true}).click();
  await usb.getByLabel('USB forwarding direction').getByText('Luna → Aero → Miro',{exact:true}).waitFor();
  assert.match(await usb.getByLabel('USB forwarding direction').innerText(),/physically connected to Luna and forwarded through Aero/);
- await page.screenshot({path:`/tmp/porthub-usb-chain-${process.env.REVIEW_BROWSER||'chromium'}-${viewport.width}.png`});
+ await page.screenshot({path:`/tmp/porthub-usb-chain-${process.env.REVIEW_BROWSER||'chromium'}-${viewport.width}${artifactTag}.png`});
  assert(!requests.some(([method])=>method!=='GET'),'Lineage and selection cause no mutation requests');assert.deepEqual(errors,[]);
  console.log(JSON.stringify({viewport,boards:box,origin:'Luna',chain:'Luna → Aero → Miro',disabled_destination_explained:true,no_mutations:true}));await context.close();
 }
