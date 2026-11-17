@@ -3,7 +3,14 @@ const {launchBrowser}=require('./browser.cjs');
 (async()=>{
  const {makeDemoData,handleDemoRequest}=await import('../src/shared/demo/data.mjs');const browser=await launchBrowser();
  try{for(const width of [1440,402]){
-  const context=await browser.newContext({viewport:{width,height:950},serviceWorkers:'allow'}),state=makeDemoData();
+  const context=await browser.newContext({viewport:{width,height:950},serviceWorkers:'block'}),state=makeDemoData();
+  // This API-mocked fixture must own every request, including after full reload.
+  // Model a browser without SW before PWA bootstrap; blocking registration alone
+  // makes Workbox receive undefined and does not test the intended proxy flow.
+  await context.addInitScript(()=>{
+   for(const owner of [navigator,Object.getPrototypeOf(navigator)])if(Object.prototype.hasOwnProperty.call(owner,'serviceWorker')&&!Reflect.deleteProperty(owner,'serviceWorker'))throw Error('Fixture cannot isolate service workers');
+   if('serviceWorker' in navigator)throw Error('Fixture service worker isolation failed');
+  });
   const machine={...state.machines[1],name:'Clear target'},other={...state.machines[2],name:'Other machine'},template=state.connections.find(c=>c.machine_id===machine._id);
   const port=(id,host,name,external)=>({...template,_id:id.repeat(24),machine_id:host._id,machine_name:host.name,service_name:name,internal_port:80,external_port:external,enabled:true});
   const wrong=port('a',machine,'First HTTP service',46538),target=port('b',machine,'Exact BMC port',46539),foreign=port('c',other,'Other BMC port',46540);state.machines=[other,machine];state.connections=[wrong,foreign,target];state.proxies=[];
@@ -16,6 +23,7 @@ const {launchBrowser}=require('./browser.cjs');
   });
   const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.goto(`${process.env.REVIEW_ORIGIN||'http://127.0.0.1:33428'}/home?view=machines&machine=${machine._id}&machineTab=ports`);
+  assert.equal(await page.evaluate(()=> 'serviceWorker' in navigator),false);
   await page.getByRole('button',{name:'Edit forwarding rule Exact BMC port',exact:true}).click();await page.getByRole('button',{name:'Web Addresses',exact:true}).click();await page.getByRole('button',{name:'Create proxy',exact:true}).click();
   const dialog=page.getByRole('dialog').filter({has:page.getByText('Create Proxy Route',{exact:true})});await dialog.waitFor();await dialog.getByRole('button',{name:'Bindings',exact:true}).click();
   const machinePicker=dialog.getByLabel('Binding 1 machine',{exact:true}),portPicker=dialog.getByLabel('Binding 1 port',{exact:true});
