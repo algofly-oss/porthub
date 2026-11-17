@@ -36,6 +36,7 @@ const MAX_RELAY_CONNECTIONS: usize = MAX_RELAY_PEERS * MAX_RELAY_LANES as usize;
 #[derive(Clone)]
 struct Lease {
     credential_hash: String,
+    identity_generation:u64,
     hash: String,
     relay_token: String,
     instance: String,
@@ -43,12 +44,14 @@ struct Lease {
     allowed: HashSet<String>,
     expires: Instant,
     sparse_epoch: Option<String>,
+    exit_epoch: Option<String>,
     workspace: Option<(String,u64)>,
 }
 pub(crate) struct PairPeerPin {pub id:String,pub hash:String,pub instance:String,pub ip:Ipv4Addr,pub epoch:Option<String>,pub generation:Option<u64>}
 #[derive(Clone)]
 struct PairAuthority {
     generation:u64,
+    owner_generation:u64,
     left: String, right: String,
     left_hash: String, right_hash: String,
     left_instance: String, right_instance: String,
@@ -61,11 +64,30 @@ struct Connection {
     generation: u64,
     output: mpsc::Sender<QueuedPacket>,
 }
+#[derive(Clone)]
+struct ForwardReceipt {
+    source:String,target:String,source_hash:String,target_hash:String,
+    source_instance:String,target_instance:String,source_generation:u64,target_generation:u64,exit:bool,owner:Option<u64>,expires:Instant,
+}
+impl ForwardReceipt {
+    fn valid(&self,hub:&Inner,now:Instant)->bool {
+        if self.expires<=now || !hub.allowed_scope(&self.source,&self.target,now,self.exit){return false;}
+        let (Some(a),Some(b))=(hub.leases.get(&self.source),hub.leases.get(&self.target))else{return false;};
+        if a.credential_hash!=self.source_hash||b.credential_hash!=self.target_hash||a.instance!=self.source_instance||b.instance!=self.target_instance||a.identity_generation!=self.source_generation||b.identity_generation!=self.target_generation{return false;}
+        let key=if self.source<self.target{(self.source.clone(),self.target.clone())}else{(self.target.clone(),self.source.clone())};
+        self.owner.is_none_or(|owner|(if self.exit{&hub.exit_pairs}else{&hub.pairs}).get(&key).is_some_and(|p|p.owner_generation==owner))
+    }
+}
+fn measurement_frame(bytes:&[u8])->bool {
+    bytes.len()==1200 && bytes.get(..8)==Some(b"PHUBQOS1") && bytes[8]<=1 && bytes[9]==0 && bytes[11]==32 && bytes[10]<32
+        && ((bytes[8]==0&&bytes[20..24]==[0;4])||(bytes[8]==1&&bytes[20..24]!=[0;4]))
+}
 struct Forward<'a> {
     packet: &'a [u8],
     output: mpsc::Sender<QueuedPacket>,
     generation: u64,
     expires: Instant,
+    receipt: ForwardReceipt,
 }
 struct Admission { hash:String, instance:String, generation:u64, expires:Instant, workspace:Option<(String,u64)> }
 #[derive(Default)]
@@ -75,17 +97,20 @@ struct Inner {
     revoked_cleanup_at: Option<Instant>,
     connections: HashMap<String, HashMap<u8, Connection>>,
     pairs: HashMap<(String,String), PairAuthority>,
+    exit_pairs: HashMap<(String,String), PairAuthority>,
     generation: u64,
     admissions: HashMap<String, Admission>,
     workspace_generations: HashMap<String, (u64, bool)>,
     workspace_cleanup_at:Option<Instant>,
     admission_generation: u64,
+    lease_generation:u64,
     pair_generation:u64,
     admission_cleanup_at: Option<Instant>,
     dropped_packets: AtomicU64,
 }
 struct QueuedPacket {
     bytes: Vec<u8>,
+    receipt: Option<ForwardReceipt>,
     // Released on dequeue/drop, including connection teardown and cancellation.
     _budget: OwnedSemaphorePermit,
 }
@@ -112,17 +137,18 @@ impl Inner {
         self.workspace_generations.retain(|w,_|live.contains(w));
         self.workspace_cleanup_at=Some(now+Duration::from_secs(5));
     }
-    fn allowed_pair(&self, source:&str, target:&str, now:Instant)->bool {
+    fn allowed_pair(&self, source:&str, target:&str, now:Instant)->bool {self.allowed_scope(source,target,now,false)}
+    fn allowed_scope(&self, source:&str, target:&str, now:Instant,exit:bool)->bool {
         let (Some(a),Some(b))=(self.leases.get(source),self.leases.get(target)) else{return false;};
         if a.expires<=now || b.expires<=now {return false;}
         if a.sparse_epoch.is_none() && b.sparse_epoch.is_none() {return a.allowed.contains(target)&&b.allowed.contains(source);}
         let key=if source<target{(source.to_owned(),target.to_owned())}else{(target.to_owned(),source.to_owned())};
-        let Some(pair)=self.pairs.get(&key).filter(|p|p.expires>now) else{return false;};
+        let Some(pair)=(if exit{&self.exit_pairs}else{&self.pairs}).get(&key).filter(|p|p.expires>now) else{return false;};
         let (Some(left),Some(right))=(self.leases.get(&pair.left),self.leases.get(&pair.right)) else{return false;};
         left.credential_hash==pair.left_hash && right.credential_hash==pair.right_hash
             && left.instance==pair.left_instance && right.instance==pair.right_instance
             && left.ip==pair.left_ip && right.ip==pair.right_ip
-            && left.sparse_epoch==pair.left_epoch && right.sparse_epoch==pair.right_epoch
+            && (if exit{&left.exit_epoch}else{&left.sparse_epoch})==&pair.left_epoch && (if exit{&right.exit_epoch}else{&right.sparse_epoch})==&pair.right_epoch
             && (left.sparse_epoch.is_some()||left.allowed.contains(&pair.right))
             && (right.sparse_epoch.is_some()||right.allowed.contains(&pair.left))
     }
@@ -150,6 +176,7 @@ impl Hub {
         hub.leases.retain(|id,_|!retired.contains(id));
         hub.connections.retain(|id,_|!retired.contains(id));
         hub.pairs.retain(|_,pair|!retired.contains(&pair.left)&&!retired.contains(&pair.right));
+        hub.exit_pairs.retain(|_,pair|!retired.contains(&pair.left)&&!retired.contains(&pair.right));
         hub.workspace_generations.insert(workspace.into(),(generation,blocked));
         !blocked
     }
@@ -184,6 +211,7 @@ impl Hub {
         // A newer successful incarnation is never removed by an older failed request.
         if hub.leases.get(id).is_some_and(|l|l.credential_hash==hash&&l.instance==instance){
             hub.leases.remove(id);hub.connections.remove(id);hub.pairs.retain(|_,p|p.left!=id&&p.right!=id);
+            hub.exit_pairs.retain(|_,p|p.left!=id&&p.right!=id);
         }
         true
     }
@@ -192,7 +220,7 @@ impl Hub {
     /// credentials can enroll immediately; old request tickets stay invalid.
     pub(crate) fn retire_identities(&self,ids:&[String]) {
         let mut hub=self.0.lock().unwrap_or_else(|p|p.into_inner());
-        for id in ids {hub.admissions.remove(id);hub.leases.remove(id);hub.connections.remove(id);hub.pairs.retain(|_,p|p.left!=*id&&p.right!=*id);}
+        for id in ids {hub.admissions.remove(id);hub.leases.remove(id);hub.connections.remove(id);hub.pairs.retain(|_,p|p.left!=*id&&p.right!=*id);hub.exit_pairs.retain(|_,p|p.left!=*id&&p.right!=*id);}
     }
     pub fn revoke(&self, ids: &[String]) {
         let mut hub = self.0.lock().unwrap_or_else(|p| p.into_inner());
@@ -202,6 +230,7 @@ impl Hub {
             hub.admissions.remove(id);
             hub.leases.remove(id); hub.connections.remove(id);
             hub.pairs.retain(|_, pair| pair.left != *id && pair.right != *id);
+            hub.exit_pairs.retain(|_, pair| pair.left != *id && pair.right != *id);
             // Fence sync responses already in flight when the account retired.
             hub.revoked.insert(id.clone(), Instant::now()+Duration::from_secs(60));
         }
@@ -238,10 +267,14 @@ impl Hub {
             .map(|lease| lease.relay_token.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
         let workspace=admission.and_then(|_|hub.admissions.get(id).and_then(|a|a.workspace.clone()));
+        let old=hub.leases.get(id);
+        let stable=old.filter(|l|l.credential_hash==hash&&l.instance==instance&&l.ip==ip&&l.sparse_epoch.is_none()&&l.allowed==allowed).map(|l|l.identity_generation);
+        let identity_generation=match stable{Some(value)=>value,None=>{let Some(value)=hub.lease_generation.checked_add(1)else{return String::new();};hub.lease_generation=value;value}};
         hub.leases.insert(
             id.into(),
             Lease {
                 credential_hash: hash.into(),
+                identity_generation,
                 hash: token_digest(&relay_token),
                 relay_token: relay_token.clone(),
                 instance: instance.into(),
@@ -249,6 +282,7 @@ impl Hub {
                 allowed,
                 expires: now + Duration::from_secs(15),
                 sparse_epoch: None,
+                exit_epoch: None,
                 workspace,
             },
         );
@@ -260,44 +294,67 @@ impl Hub {
         self.publish_sparse_admitted(id,hash,instance,ip,epoch,None)
     }
     pub(crate) fn publish_sparse_admitted(&self,id:&str,hash:&str,instance:&str,ip:Ipv4Addr,epoch:&str,admission:Option<u64>)->String {
-        if epoch.len()!=64 || !epoch.bytes().all(|c|c.is_ascii_hexdigit()&&!c.is_ascii_uppercase()) {return String::new();}
+        self.publish_sparse_scoped(id,hash,instance,ip,epoch,None,admission)
+    }
+    pub(crate) fn publish_sparse_exit_admitted(&self,id:&str,hash:&str,instance:&str,ip:Ipv4Addr,epoch:&str,exit_epoch:&str,admission:Option<u64>)->String {
+        self.publish_sparse_scoped(id,hash,instance,ip,epoch,Some(exit_epoch),admission)
+    }
+    fn publish_sparse_scoped(&self,id:&str,hash:&str,instance:&str,ip:Ipv4Addr,epoch:&str,exit_epoch:Option<&str>,admission:Option<u64>)->String {
+        let valid=|v:&str|v.len()==64&&v.bytes().all(|c|c.is_ascii_hexdigit()&&!c.is_ascii_uppercase());
+        if !valid(epoch)||exit_epoch.is_some_and(|e|!valid(e)){return String::new();}
         let mut hub=self.0.lock().unwrap_or_else(|p|p.into_inner());let now=Instant::now();
         if admission.is_some_and(|g|!hub.admissions.get(id).is_some_and(|a|a.hash==hash&&a.instance==instance&&a.generation==g&&a.expires>now)){return String::new();}
         if hub.revoked.get(id).is_some_and(|expires|*expires>now) {return String::new();}
         hub.leases.retain(|_,lease|lease.expires>now);hub.pairs.retain(|_,p|p.expires>now);
+        hub.exit_pairs.retain(|_,p|p.expires>now);
         if hub.leases.len()>=16384 && !hub.leases.contains_key(id) {return String::new();}
         let old=hub.leases.get(id);
         let unchanged=old.is_some_and(|l|l.credential_hash==hash&&l.instance==instance&&l.ip==ip&&l.sparse_epoch.as_deref()==Some(epoch));
+        let exit_unchanged=old.is_some_and(|l|l.credential_hash==hash&&l.instance==instance&&l.ip==ip&&l.exit_epoch.as_deref()==exit_epoch);
         let token=old.filter(|l|l.credential_hash==hash&&l.instance==instance).map(|l|l.relay_token.clone()).unwrap_or_else(||uuid::Uuid::new_v4().simple().to_string());
+        let stable=old.filter(|l|l.credential_hash==hash&&l.instance==instance&&l.ip==ip&&l.sparse_epoch.is_some()).map(|l|l.identity_generation);
+        let identity_generation=match stable{Some(value)=>value,None=>{let Some(value)=hub.lease_generation.checked_add(1)else{return String::new();};hub.lease_generation=value;value}};
         if !unchanged {hub.pairs.retain(|_,p|p.left!=id&&p.right!=id);}
+        if !exit_unchanged {hub.exit_pairs.retain(|_,p|p.left!=id&&p.right!=id);}
         let workspace=admission.and_then(|_|hub.admissions.get(id).and_then(|a|a.workspace.clone()));
-        hub.leases.insert(id.into(),Lease{workspace,credential_hash:hash.into(),hash:token_digest(&token),relay_token:token.clone(),instance:instance.into(),ip,allowed:HashSet::new(),expires:now+Duration::from_secs(15),sparse_epoch:Some(epoch.into())});
+        hub.leases.insert(id.into(),Lease{workspace,credential_hash:hash.into(),identity_generation,hash:token_digest(&token),relay_token:token.clone(),instance:instance.into(),ip,allowed:HashSet::new(),expires:now+Duration::from_secs(15),sparse_epoch:Some(epoch.into()),exit_epoch:exit_epoch.map(str::to_owned)});
         token
     }
     /// Called only after an authenticated API pair lookup has compiled a nonempty exact ACL.
     /// Coarse relay eligibility is reciprocal; the endpoint engines still enforce packet ACLs.
     pub(crate) fn publish_pair(&self,source:&str,target:&str,epoch:&str)->bool{self.publish_pair_epochs(source,target,epoch,epoch)}
     pub(crate) fn publish_pair_epochs(&self, source:&str, target:&str, epoch:&str,target_epoch:&str)->bool {
-        self.publish_pair_checked(source,target,epoch,target_epoch,None)
+        self.publish_pair_checked(source,target,epoch,target_epoch,None,false)
     }
     pub(crate) fn publish_pair_admitted(&self,source:&str,epoch:&str,hash:&str,instance:&str,generation:u64,target:&PairPeerPin)->bool{
-        self.publish_pair_checked(source,&target.id,epoch,target.epoch.as_deref().unwrap_or_default(),Some((hash,instance,generation,target)))
+        self.publish_pair_checked(source,&target.id,epoch,target.epoch.as_deref().unwrap_or_default(),Some((hash,instance,generation,target)),false)
     }
-    fn publish_pair_checked(&self,source:&str,target:&str,epoch:&str,target_epoch:&str,request:Option<(&str,&str,u64,&PairPeerPin)>)->bool{
+    pub(crate) fn publish_exit_pair_admitted(&self,source:&str,epoch:&str,hash:&str,instance:&str,generation:u64,target:&PairPeerPin)->bool{
+        self.publish_pair_checked(source,&target.id,epoch,target.epoch.as_deref().unwrap_or_default(),Some((hash,instance,generation,target)),true)
+    }
+    fn publish_pair_checked(&self,source:&str,target:&str,epoch:&str,target_epoch:&str,request:Option<(&str,&str,u64,&PairPeerPin)>,exit:bool)->bool{
         if source==target {return false;}
         let mut hub=self.0.lock().unwrap_or_else(|p|p.into_inner());let now=Instant::now();
         hub.pairs.retain(|_,p|p.expires>now);
+        hub.exit_pairs.retain(|_,p|p.expires>now);
         let (Some(a),Some(b))=(hub.leases.get(source),hub.leases.get(target)) else{return false;};
         if request.is_some_and(|(hash,instance,generation,pin)|a.credential_hash!=hash||a.instance!=instance||b.credential_hash!=pin.hash||b.instance!=pin.instance||b.ip!=pin.ip||!hub.admissions.get(source).is_some_and(|r|r.hash==hash&&r.instance==instance&&r.generation==generation&&r.expires>now)){return false;}
-        if a.expires<=now || b.expires<=now || a.sparse_epoch.as_deref()!=Some(epoch)
-            || b.sparse_epoch.as_deref().is_some_and(|e|e!=target_epoch)
-            || (b.sparse_epoch.is_none() && !b.allowed.contains(source)) {return false;}
+        if a.expires<=now || b.expires<=now || (if exit{a.exit_epoch.as_deref()}else{a.sparse_epoch.as_deref()})!=Some(epoch)
+            || (if exit{b.exit_epoch.as_deref()}else{b.sparse_epoch.as_deref()}).is_some_and(|e|e!=target_epoch)
+            || (exit&&b.exit_epoch.is_none())
+            || (!exit&&b.sparse_epoch.is_none() && !b.allowed.contains(source)) {return false;}
         let key=if source<target {(source.to_owned(),target.to_owned())}else{(target.to_owned(),source.to_owned())};
-        if !hub.pairs.contains_key(&key) && (hub.pairs.len()>=8192 || hub.pairs.values().filter(|p|p.left==source||p.right==source).count()>=256 || hub.pairs.values().filter(|p|p.left==target||p.right==target).count()>=256) {return false;}
+        let selected=if exit{&hub.exit_pairs}else{&hub.pairs};
+        if !selected.contains_key(&key) && (hub.pairs.len()+hub.exit_pairs.len()>=8192 || hub.pairs.values().chain(hub.exit_pairs.values()).filter(|p|p.left==source||p.right==source).count()>=256 || hub.pairs.values().chain(hub.exit_pairs.values()).filter(|p|p.left==target||p.right==target).count()>=256) {return false;}
         let Some(generation)=hub.pair_generation.checked_add(1)else{return false;};
-        let pair=PairAuthority{generation,left:source.into(),right:target.into(),left_hash:a.credential_hash.clone(),right_hash:b.credential_hash.clone(),left_instance:a.instance.clone(),right_instance:b.instance.clone(),left_ip:a.ip,right_ip:b.ip,left_epoch:a.sparse_epoch.clone(),right_epoch:b.sparse_epoch.clone(),expires:now+Duration::from_secs(15)};
+        let previous=selected.get(&key);
+        let owner_generation=previous.filter(|p|{
+            let (l,r,le,re)=if p.left==source{(a,b,Some(epoch),if exit{b.exit_epoch.as_deref()}else{b.sparse_epoch.as_deref()})}else{(b,a,if exit{b.exit_epoch.as_deref()}else{b.sparse_epoch.as_deref()},Some(epoch))};
+            p.left_hash==l.credential_hash&&p.right_hash==r.credential_hash&&p.left_instance==l.instance&&p.right_instance==r.instance&&p.left_ip==l.ip&&p.right_ip==r.ip&&p.left_epoch.as_deref()==le&&p.right_epoch.as_deref()==re
+        }).map(|p|p.owner_generation).unwrap_or(generation);
+        let pair=PairAuthority{generation,owner_generation,left:source.into(),right:target.into(),left_hash:a.credential_hash.clone(),right_hash:b.credential_hash.clone(),left_instance:a.instance.clone(),right_instance:b.instance.clone(),left_ip:a.ip,right_ip:b.ip,left_epoch:if exit{a.exit_epoch.clone()}else{a.sparse_epoch.clone()},right_epoch:if exit{b.exit_epoch.clone()}else{b.sparse_epoch.clone()},expires:now+Duration::from_secs(15)};
         hub.pair_generation=generation;
-        hub.pairs.insert(key,pair);true
+        (if exit{&mut hub.exit_pairs}else{&mut hub.pairs}).insert(key,pair);true
     }
     /// Capture existing incident authority before any target/ACL reads. Epochs here
     /// describe the authority being retired, not the newly-denied policy state.
@@ -335,13 +392,49 @@ impl Hub {
             if hub.admissions.get(&target.id).is_some_and(|a|a.hash==target.hash&&a.instance==target.instance){hub.admissions.remove(&target.id);}
         }matches
     }
+    pub(crate) fn observe_exit_pairs(&self,source:&str,hash:&str,instance:&str,generation:u64)->HashMap<String,PairPeerPin>{
+        let hub=self.0.lock().unwrap_or_else(|p|p.into_inner());let now=Instant::now();
+        if !hub.admissions.get(source).is_some_and(|a|a.hash==hash&&a.instance==instance&&a.generation==generation&&a.expires>now){return HashMap::new();}
+        hub.exit_pairs.values().filter_map(|p|{
+            if p.expires<=now{return None;}
+            let pin=if p.left==source&&p.left_hash==hash&&p.left_instance==instance{
+                PairPeerPin{id:p.right.clone(),hash:p.right_hash.clone(),instance:p.right_instance.clone(),ip:p.right_ip,epoch:p.right_epoch.clone(),generation:Some(p.generation)}
+            }else if p.right==source&&p.right_hash==hash&&p.right_instance==instance{
+                PairPeerPin{id:p.left.clone(),hash:p.left_hash.clone(),instance:p.left_instance.clone(),ip:p.left_ip,epoch:p.left_epoch.clone(),generation:Some(p.generation)}
+            }else{return None;};Some((pin.id.clone(),pin))
+        }).collect()
+    }
+    pub(crate) fn retire_exit_pair_admitted(&self,source:&str,hash:&str,instance:&str,generation:u64,target:&PairPeerPin)->bool{
+        let mut hub=self.0.lock().unwrap_or_else(|p|p.into_inner());let now=Instant::now();
+        if !hub.admissions.get(source).is_some_and(|a|a.hash==hash&&a.instance==instance&&a.generation==generation&&a.expires>now){return false;}
+        let Some(local)=hub.leases.get(source).filter(|a|a.credential_hash==hash&&a.instance==instance&&a.expires>now)else{return false;};
+        let key=if source<target.id.as_str(){(source.to_owned(),target.id.clone())}else{(target.id.clone(),source.to_owned())};
+        let Some(pair)=hub.exit_pairs.get(&key)else{return false;};
+        if target.generation!=Some(pair.generation){return false;}
+        if !hub.leases.get(&target.id).is_some_and(|peer|peer.credential_hash==target.hash&&peer.instance==target.instance&&peer.ip==target.ip&&peer.exit_epoch==target.epoch&&peer.expires>now){return false;}
+        let matches=if pair.left==source{
+            pair.left_hash==hash&&pair.left_instance==instance&&pair.left_ip==local.ip&&pair.left_epoch==local.exit_epoch
+            &&pair.right_hash==target.hash&&pair.right_instance==target.instance&&pair.right_ip==target.ip&&pair.right_epoch==target.epoch
+        }else{
+            pair.right_hash==hash&&pair.right_instance==instance&&pair.right_ip==local.ip&&pair.right_epoch==local.exit_epoch
+            &&pair.left_hash==target.hash&&pair.left_instance==target.instance&&pair.left_ip==target.ip&&pair.left_epoch==target.epoch
+        };
+        if matches{
+            hub.exit_pairs.remove(&key);
+            // Any target-side authorization read already in flight must revalidate
+            // after this observed denial. Committed unrelated leases remain intact.
+            if hub.admissions.get(&target.id).is_some_and(|a|a.hash==target.hash&&a.instance==target.instance){hub.admissions.remove(&target.id);}
+        }matches
+    }
     pub(crate) fn revoke_pair(&self,source:&str,target:&str){let key=if source<target{(source.to_owned(),target.to_owned())}else{(target.to_owned(),source.to_owned())};self.0.lock().unwrap_or_else(|p|p.into_inner()).pairs.remove(&key);}
+    pub(crate) fn revoke_exit_pair(&self,source:&str,target:&str){let key=if source<target{(source.to_owned(),target.to_owned())}else{(target.to_owned(),source.to_owned())};self.0.lock().unwrap_or_else(|p|p.into_inner()).exit_pairs.remove(&key);}
     pub(crate) fn pair_neighbors(&self,id:&str)->Vec<String>{
         let hub=self.0.lock().unwrap_or_else(|p|p.into_inner());let now=Instant::now();
-        let mut pairs:Vec<_>=hub.pairs.values().filter(|p|p.expires>now&&(p.left==id||p.right==id))
-            .filter(|p|hub.allowed_pair(&p.left,&p.right,now)).collect();
+        let mut pairs:Vec<_>=hub.pairs.values().chain(hub.exit_pairs.values()).filter(|p|p.expires>now&&(p.left==id||p.right==id))
+            .filter(|p|hub.allowed_pair(&p.left,&p.right,now)||hub.allowed_scope(&p.left,&p.right,now,true)).collect();
         pairs.sort_by_key(|p|std::cmp::Reverse(p.expires));
-        pairs.into_iter().map(|p|if p.left==id{p.right.clone()}else{p.left.clone()}).collect()
+        let mut seen=HashSet::new();
+        pairs.into_iter().filter_map(|p|{let peer=if p.left==id{p.right.clone()}else{p.left.clone()};seen.insert(peer.clone()).then_some(peer)}).collect()
     }
     pub(crate) fn peer_alive(&self, id: &str) -> bool {
         self.0
@@ -417,7 +510,7 @@ impl Hub {
             else {
                 continue;
             };
-            if current.generation != route.generation || !current.output.same_channel(&route.output)
+            if !route.receipt.valid(&hub,Instant::now()) || current.receipt.exit!=route.receipt.exit || current.generation != route.generation || !current.output.same_channel(&route.output)
             {
                 continue;
             }
@@ -425,7 +518,18 @@ impl Hub {
             forwarded.push(source.len() as u8);
             forwarded.extend_from_slice(source.as_bytes());
             forwarded.extend_from_slice(current.packet);
-            permit.send(QueuedPacket { bytes: forwarded, _budget: budget });
+            permit.send(QueuedPacket { bytes: forwarded, receipt:Some(route.receipt), _budget: budget });
+        }
+    }
+    async fn while_authorized<T>(&self,receipts:&[ForwardReceipt],operation:impl std::future::Future<Output=T>)->Option<T> {
+        tokio::pin!(operation);
+        let mut tick=tokio::time::interval(Duration::from_millis(50));tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            let guarded=std::future::poll_fn(|cx|{
+                {let hub=self.0.lock().unwrap_or_else(|p|p.into_inner());let now=Instant::now();if receipts.iter().any(|r|!r.valid(&hub,now)){return std::task::Poll::Ready(None);}}
+                operation.as_mut().poll(cx).map(Some)
+            });
+            tokio::select!{value=guarded=>return value,_=tick.tick()=>{}}
         }
     }
     fn route_record<'a>(
@@ -460,7 +564,20 @@ impl Hub {
             .leases
             .get(target)
             .filter(|b| b.expires > now)?;
-        if !hub.allowed_pair(source, target, now) { return None; }
+        let exit=match packet[9] {
+            porthub_mesh::control_packet::EXIT=>{porthub_mesh::control_packet::decode(porthub_mesh::control_packet::EXIT,Bytes::copy_from_slice(packet))?;true},
+            porthub_mesh::control_packet::PROBE=>{
+                let envelope=porthub_mesh::control_packet::decode(porthub_mesh::control_packet::PROBE,Bytes::copy_from_slice(packet))?;
+                if !measurement_frame(&envelope.payload){return None;}
+                !hub.allowed_pair(source,target,now)
+            },
+            _=>false,
+        };
+        if !hub.allowed_scope(source,target,now,exit) {return None;}
+        let key=if source<target{(source.to_owned(),target.to_owned())}else{(target.to_owned(),source.to_owned())};
+        let pair=(if exit{&hub.exit_pairs}else{&hub.pairs}).get(&key);
+        let expires=a.expires.min(b.expires).min(pair.map(|p|p.expires).unwrap_or(a.expires));
+        let receipt=ForwardReceipt{source:source.into(),target:target.into(),source_hash:a.credential_hash.clone(),target_hash:b.credential_hash.clone(),source_instance:a.instance.clone(),target_instance:b.instance.clone(),source_generation:a.identity_generation,target_generation:b.identity_generation,exit,owner:pair.map(|p|p.owner_generation),expires};
         if packet[12..16] != a.ip.octets() || packet[16..20] != b.ip.octets() {
             return None;
         }
@@ -477,7 +594,8 @@ impl Hub {
             packet,
             output: connection.output.clone(),
             generation: connection.generation,
-            expires: a.expires.min(b.expires),
+            expires,
+            receipt,
         })
     }
 }
@@ -689,16 +807,28 @@ async fn serve(
             packet=packets.recv()=>{
                 let Some(packet)=packet else{break;};
                 if !app.private_relay.authorized(&id,&hash,&instance){break;}
-                let mut output=packet.bytes;
+                let QueuedPacket{bytes:mut output,receipt,_budget}=packet;
+                let mut budgets=vec![_budget];
+                let mut receipts=receipt.into_iter().collect::<Vec<_>>();
+                {let hub=app.private_relay.0.lock().unwrap_or_else(|p|p.into_inner());if receipts.iter().any(|r|!r.valid(&hub,Instant::now())){continue;}}
                 if batch {
                     let mut records=vec![output];
                     while records.len()<32 {
-                        match packets.try_recv(){Ok(packet)=>records.push(packet.bytes),Err(_)=>break}
+                        match packets.try_recv(){Ok(packet)=>{
+                            let QueuedPacket{bytes,receipt,_budget}=packet;
+                            if let Some(receipt)=receipt {
+                                if !receipt.valid(&app.private_relay.0.lock().unwrap_or_else(|p|p.into_inner()),Instant::now()){continue;}
+                                receipts.push(receipt);
+                            }
+                            budgets.push(_budget);records.push(bytes);
+                        },Err(_)=>break}
                     }
                     let Ok(encoded)=porthub_mesh::batch::encode(&records,prefixes) else {break;};
                     output=encoded;
                 }
-                if !matches!(tokio::time::timeout(Duration::from_secs(3),socket.send(Message::Binary(output.into()))).await,Ok(Ok(()))){break;}
+                let sent=app.private_relay.while_authorized(&receipts,tokio::time::timeout(Duration::from_secs(3),socket.send(Message::Binary(output.into())))).await;
+                drop(budgets);
+                if !matches!(sent,Some(Ok(Ok(())))){break;}
             }
         }
     }
@@ -988,7 +1118,7 @@ mod tests {
         let mut record = vec![1, b'b'];
         record.extend_from_slice(&packet);
         let hash = token_digest(&token);
-        output.send(QueuedPacket { bytes: vec![0], _budget: hub.1.clone().acquire_owned().await.unwrap() }).await.unwrap();
+        output.send(QueuedPacket { bytes: vec![0], receipt:None, _budget: hub.1.clone().acquire_owned().await.unwrap() }).await.unwrap();
         let mut waiting =
             Box::pin(hub.route("a", &hash, "instance-a", 0, Bytes::copy_from_slice(&record)));
         assert!(
@@ -1008,7 +1138,7 @@ mod tests {
         assert_eq!(&forwarded[..2], &[1, b'a']);
         assert_eq!(&forwarded[2..], packet.as_ref());
 
-        output.send(QueuedPacket { bytes: vec![0], _budget: hub.1.clone().acquire_owned().await.unwrap() }).await.unwrap();
+        output.send(QueuedPacket { bytes: vec![0], receipt:None, _budget: hub.1.clone().acquire_owned().await.unwrap() }).await.unwrap();
         let mut waiting =
             Box::pin(hub.route("a", &hash, "instance-a", 0, Bytes::copy_from_slice(&record)));
         assert!(
@@ -1241,6 +1371,93 @@ mod migration_fence_tests {
         let fresh=hub.begin_workspace_admission("opaque-peer","hash","instance","workspace-0").unwrap();
         assert!(!hub.publish_admitted("opaque-peer","hash","instance",Ipv4Addr::new(10,0,0,2),HashSet::new(),Some(fresh)).is_empty());
         assert!(!hub.withdraw_bound("opaque-peer","hash","instance",old));
+    }
+
+}
+
+#[cfg(test)]
+mod exit_scope_tests {
+    use super::*;
+    fn publish(hub:&Hub,id:&str,private:&str,exit:&str)->u64 {
+        let ticket=hub.begin_admission(id,&format!("hash-{id}"),&format!("instance-{id}")).unwrap();
+        let ip=if id=="a"{Ipv4Addr::new(10,203,0,1)}else{Ipv4Addr::new(10,203,0,2)};
+        assert!(!hub.publish_sparse_exit_admitted(id,&format!("hash-{id}"),&format!("instance-{id}"),ip,private,exit,Some(ticket)).is_empty());ticket
+    }
+    fn pin(id:&str,epoch:&str)->PairPeerPin {PairPeerPin{id:id.into(),hash:format!("hash-{id}"),instance:format!("instance-{id}"),ip:if id=="a"{Ipv4Addr::new(10,203,0,1)}else{Ipv4Addr::new(10,203,0,2)},epoch:Some(epoch.into()),generation:None}}
+    fn fixture()->(Hub,mpsc::Receiver<QueuedPacket>,u64,u64) {
+        let hub=Hub::default();let a=publish(&hub,"a",&"a".repeat(64),&"e".repeat(64));let b=publish(&hub,"b",&"b".repeat(64),&"f".repeat(64));
+        let(tx,rx)=mpsc::channel(8);hub.0.lock().unwrap().connections.insert("b".into(),HashMap::from([(0,Connection{instance:"instance-b".into(),generation:1,output:tx})]));(hub,rx,a,b)
+    }
+    fn wire(protocol:u8)->Vec<u8> {
+        let mut payload=vec![0;1200];payload[..8].copy_from_slice(b"PHUBQOS1");payload[11]=32;
+        if matches!(protocol,porthub_mesh::control_packet::EXIT|porthub_mesh::control_packet::PROBE|porthub_mesh::control_packet::STREAM){porthub_mesh::control_packet::encode(protocol,Ipv4Addr::new(10,203,0,1),Ipv4Addr::new(10,203,0,2),&payload).unwrap().to_vec()}
+        else {let mut packet=vec![0;20];packet[0]=0x45;packet[3]=20;packet[9]=protocol;packet[12..16].copy_from_slice(&[10,203,0,1]);packet[16..20].copy_from_slice(&[10,203,0,2]);packet}
+    }
+    fn frame(packet:&[u8])->Vec<u8>{let mut frame=vec![1,b'b'];frame.extend_from_slice(packet);frame}
+    fn receipt(hub:&Hub,packet:&[u8])->Option<ForwardReceipt>{Hub::route_record(&hub.0.lock().unwrap(),"a","hash-a","instance-a",0,&frame(packet),Instant::now()).map(|route|route.receipt)}
+    fn exit(hub:&Hub,ticket:u64){assert!(hub.publish_exit_pair_admitted("a",&"e".repeat(64),"hash-a","instance-a",ticket,&pin("b",&"f".repeat(64))));}
+    fn private(hub:&Hub,ticket:u64){assert!(hub.publish_pair_admitted("a",&"a".repeat(64),"hash-a","instance-a",ticket,&pin("b",&"b".repeat(64))));}
+    #[test]
+    fn exit_only_authority_never_admits_private_stream_or_unvalidated_probe_payload() {
+        let(hub,_rx,a,_)=fixture();exit(&hub,a);
+        assert!(receipt(&hub,&wire(porthub_mesh::control_packet::EXIT)).unwrap().exit);
+        assert!(receipt(&hub,&wire(porthub_mesh::control_packet::PROBE)).unwrap().exit);
+        for protocol in [6,17,porthub_mesh::control_packet::STREAM]{assert!(receipt(&hub,&wire(protocol)).is_none());}
+        let mut malformed=wire(porthub_mesh::control_packet::PROBE);malformed[20]=0;assert!(receipt(&hub,&malformed).is_none());
+        let mut payload=vec![0;1200];payload[..8].copy_from_slice(b"PHUBQOS1");payload[11]=32;payload[9]=1;
+        let wrong=porthub_mesh::control_packet::encode(porthub_mesh::control_packet::PROBE,Ipv4Addr::new(10,203,0,1),Ipv4Addr::new(10,203,0,2),&payload).unwrap();assert!(receipt(&hub,&wrong).is_none());
+    }
+    #[test]
+    fn private_epoch_change_cannot_promote_an_old_probe_to_exit_authority() {
+        let(hub,_rx,a,_)=fixture();private(&hub,a);exit(&hub,a);let old=receipt(&hub,&wire(porthub_mesh::control_packet::PROBE)).unwrap();assert!(!old.exit);
+        publish(&hub,"a",&"c".repeat(64),&"e".repeat(64));assert!(!old.valid(&hub.0.lock().unwrap(),Instant::now()));
+        let fresh=receipt(&hub,&wire(porthub_mesh::control_packet::PROBE)).unwrap();assert!(fresh.exit);assert!(fresh.valid(&hub.0.lock().unwrap(),Instant::now()));assert!(receipt(&hub,&wire(6)).is_none());
+    }
+    #[test]
+    fn exit_revoke_regrant_does_not_revive_old_bytes_and_private_survives() {
+        let(hub,_rx,a,_)=fixture();private(&hub,a);exit(&hub,a);let old=receipt(&hub,&wire(porthub_mesh::control_packet::EXIT)).unwrap();
+        publish(&hub,"a",&"a".repeat(64),&"d".repeat(64));assert!(!old.valid(&hub.0.lock().unwrap(),Instant::now()));assert!(receipt(&hub,&wire(6)).is_some());
+        let fresh=publish(&hub,"a",&"a".repeat(64),&"e".repeat(64));exit(&hub,fresh);assert!(!old.valid(&hub.0.lock().unwrap(),Instant::now()));assert!(receipt(&hub,&wire(porthub_mesh::control_packet::EXIT)).is_some());
+    }
+    #[test]
+    fn equivalent_reciprocal_renewal_preserves_owner_but_never_old_expiry() {
+        let(hub,_rx,a,b)=fixture();exit(&hub,a);let mut old=receipt(&hub,&wire(porthub_mesh::control_packet::EXIT)).unwrap();let expiry=old.expires;
+        assert!(hub.publish_exit_pair_admitted("b",&"f".repeat(64),"hash-b","instance-b",b,&pin("a",&"e".repeat(64))));
+        assert!(old.valid(&hub.0.lock().unwrap(),Instant::now()));assert_eq!(old.expires,expiry);
+        old.expires=Instant::now()-Duration::from_millis(1);assert!(!old.valid(&hub.0.lock().unwrap(),Instant::now()));
+    }
+    #[tokio::test]
+    async fn actual_queued_exit_cancels_blocked_delivery_on_source_revocation() {
+        let(hub,mut rx,a,_)=fixture();exit(&hub,a);hub.route("a","hash-a","instance-a",0,Bytes::from(frame(&wire(porthub_mesh::control_packet::EXIT)))).await;
+        let packet=rx.recv().await.unwrap();let receipt=packet.receipt.clone().unwrap();let before=hub.1.available_permits();
+        let signal=std::sync::atomic::AtomicBool::new(false);
+        let revoke=async{tokio::time::sleep(Duration::from_millis(20)).await;hub.retire_identities(&["a".into()]);};
+        let receipts=[receipt];let delivery=hub.while_authorized(&receipts,async{signal.store(true,Ordering::SeqCst);std::future::pending::<()>().await});
+        let(result,_)=tokio::time::timeout(Duration::from_secs(1),async{tokio::join!(delivery,revoke)}).await.unwrap();assert!(result.is_none());assert!(signal.load(Ordering::SeqCst));drop(packet);assert_eq!(hub.1.available_permits(),before+1);
+    }
+    #[test]
+    fn exit_publication_requires_exact_fresh_admission_and_current_target_generation() {
+        let(hub,_rx,a,_)=fixture();let mut wrong=pin("b",&"0".repeat(64));assert!(!hub.publish_exit_pair_admitted("a",&"e".repeat(64),"hash-a","instance-a",a,&wrong));
+        wrong=pin("b",&"f".repeat(64));wrong.instance="foreign".into();assert!(!hub.publish_exit_pair_admitted("a",&"e".repeat(64),"hash-a","instance-a",a,&wrong));
+        let fresh=hub.begin_admission("a","hash-a","instance-a").unwrap();assert!(!hub.publish_exit_pair_admitted("a",&"e".repeat(64),"hash-a","instance-a",a,&pin("b",&"f".repeat(64))));assert!(hub.publish_exit_pair_admitted("a",&"e".repeat(64),"hash-a","instance-a",fresh,&pin("b",&"f".repeat(64))));
+    }
+    #[test]
+    fn private_and_exit_authorities_share_total_and_incident_record_budgets() {
+        let(hub,_rx,a,_)=fixture();exit(&hub,a);
+        {let mut inner=hub.0.lock().unwrap();let seed=inner.exit_pairs.values().next().unwrap().clone();for index in 0..255 {let mut pair=seed.clone();pair.right=format!("other-{index}");inner.exit_pairs.insert(("a".into(),pair.right.clone()),pair);}}
+        assert!(!hub.publish_pair_admitted("a",&"a".repeat(64),"hash-a","instance-a",a,&pin("b",&"b".repeat(64))));
+        // Replacing an existing class is not a new resource admission.
+        exit(&hub,a);
+        {let mut inner=hub.0.lock().unwrap();inner.exit_pairs.clear();let seed=PairAuthority{generation:1,owner_generation:1,left:"other-left".into(),right:"other-right".into(),left_hash:"h".into(),right_hash:"h".into(),left_instance:"i".into(),right_instance:"i".into(),left_ip:Ipv4Addr::LOCALHOST,right_ip:Ipv4Addr::LOCALHOST,left_epoch:Some("e".repeat(64)),right_epoch:Some("f".repeat(64)),expires:Instant::now()+Duration::from_secs(15)};for index in 0..8192 {inner.exit_pairs.insert((format!("x{index}"),format!("y{index}")),seed.clone());}}
+        assert!(!hub.publish_pair_admitted("a",&"a".repeat(64),"hash-a","instance-a",a,&pin("b",&"b".repeat(64))));assert_eq!(hub.0.lock().unwrap().pairs.len(),0);
+    }
+    #[test]
+    fn exit_denial_retirement_pins_publication_and_cannot_remove_private_authority() {
+        let(hub,_rx,a,_)=fixture();private(&hub,a);exit(&hub,a);
+        let old=hub.observe_exit_pairs("a","hash-a","instance-a",a).remove("b").unwrap();exit(&hub,a);
+        assert!(!hub.retire_exit_pair_admitted("a","hash-a","instance-a",a,&old));
+        let current=hub.observe_exit_pairs("a","hash-a","instance-a",a).remove("b").unwrap();assert!(hub.retire_exit_pair_admitted("a","hash-a","instance-a",a,&current));
+        assert!(hub.pair_allowed("a","b"));assert!(receipt(&hub,&wire(porthub_mesh::control_packet::EXIT)).is_none());
     }
 
 }
