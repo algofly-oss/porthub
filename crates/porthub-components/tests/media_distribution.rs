@@ -173,3 +173,23 @@ async fn approved_source_and_digest_required_before_executable_publication() -> 
     assert!(manager.refresh(&cancel).await.is_err());
     Ok(())
 }
+
+#[cfg(unix)]
+#[test]
+fn media_cache_rejects_arbitrary_symlink_roots_and_ancestors() -> Result<()> {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let root = tempfile::tempdir()?;
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;
+    let actual = root.path().join("actual");
+    std::fs::create_dir(&actual)?;
+    std::fs::set_permissions(&actual, std::fs::Permissions::from_mode(0o700))?;
+    let alias = root.path().join("arbitrary-alias");
+    symlink(&actual, &alias)?;
+    let transport = Arc::new(Fetch::default());
+    assert!(media_store::Manager::new(alias.clone(), settings(), transport.clone()).is_err());
+    assert!(media_store::Manager::new(alias.join("cache"), settings(), transport.clone()).is_err());
+    assert!(!actual.join("cache").exists(), "Rejected alias created a cache target");
+    std::fs::set_permissions(&actual, std::fs::Permissions::from_mode(0o777))?;
+    assert!(media_store::Manager::new(actual.join("cache"), settings(), transport).is_err());
+    Ok(())
+}

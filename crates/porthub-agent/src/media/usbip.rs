@@ -1208,6 +1208,56 @@ mod tests {
         Ok(())
     }
     #[cfg(windows)]
+    #[tokio::test(flavor="multi_thread",worker_threads=2)]
+    #[ignore="Requires disposable hosted Windows2025 and explicitly pinned signed UDE0.9.8.1; generated metadata only"]
+    async fn native_windows_owned_relay_mapping_generated_uac_metadata_only()->Result<()> {
+        let _=tracing_subscriber::fmt().with_max_level(tracing::Level::WARN).with_ansi(false).with_test_writer().try_init();
+        fn bounded_error(error:&anyhow::Error)->Vec<String> {
+            error.chain().take(4).map(|cause|cause.to_string().chars().take(256).collect()).collect()
+        }
+        let mut baseline=crate::usb::native_relay_fixture_baseline().await?;
+        let folder=tempfile::Builder::new().prefix("PortHubPrivateRelayMapping-").tempdir()?;
+        crate::service::directory(folder.path(),true)?;
+        let profile=folder.path().join("input-profile.json");
+        crate::profile::write_private(&profile,b"{}",false)?;
+        let(device,wire,engine)=private_native_device()?;
+        let attached=crate::usb::attach_virtual(&profile,&device,&wire).await;
+        let(mut receiver,stream)=match attached {Ok(value)=>value,Err(error)=>{
+            let after=baseline.verify();println!("PRIVATE_WINDOWS_RELAY_MAPPING {}",serde_json::json!({"phase":"attach","success":false,"generated_source":true,"baseline":after.as_ref().ok()}));return Err(error)
+        }};
+        let cancel=CancellationToken::new();let(streaming,_)=watch::channel(false);
+        let worker_cancel=cancel.clone();let worker_engine=engine.clone();let devid=0xffff0000|device.devnum as u32;
+        let mut task=AbortOnDropHandle::new(tokio::spawn(async move{super::serve(stream,worker_engine,devid,streaming,worker_cancel).await}));
+        let observed=tokio::time::timeout(Duration::from_secs(30),async {
+            let marker=receiver.relay_marker_for_fixture(&device)?;
+            // Enumeration is asynchronous; each attempt invokes the actual
+            // uncached claim-time production mapping/configuration validator.
+            for _ in 0..30 {
+                let checking=marker.clone();
+                if let Ok(projection)=tokio::task::spawn_blocking(move||checking.fixture_projection()).await? {return Ok::<_,anyhow::Error>(projection)}
+                tokio::select!{failed=receiver.failed()=>{failed?;anyhow::bail!("Owned generated receiver failed")},_=tokio::time::sleep(Duration::from_secs(1))=>{}}
+            }
+            anyhow::bail!("Owned generated receiver mapping did not become ready")
+        }).await.map_err(|_|anyhow::anyhow!("Owned generated receiver mapping deadline exceeded")).and_then(|v|v);
+        let no_audio={let held=engine.lock().unwrap();!held.streaming()&&held.underrun_samples==0};
+        // Keep the exact USB/IP executor alive during explicit native detach.
+        let detached=receiver.detach_for_fixture().await;
+        cancel.cancel();
+        let mut executor_terminal="clean";
+        let stopped=match tokio::time::timeout(Duration::from_secs(5),&mut task).await {
+            Ok(result)=>result.map_err(anyhow::Error::from).and_then(|v|v).or_else(|error|{
+                // Explicit owned unplug closes its USB/IP peer. Accept only
+                // typed terminal IO here, never malformed URBs/protocol errors.
+                if detached.is_ok()&&error.downcast_ref::<std::io::Error>().is_some_and(|e|matches!(e.kind(),std::io::ErrorKind::UnexpectedEof|std::io::ErrorKind::ConnectionReset|std::io::ErrorKind::BrokenPipe)){executor_terminal="owned-detach-eof";Ok(())}else{executor_terminal="error";Err(error)}
+            }),
+            Err(_)=>{executor_terminal="timeout";task.abort();let _=task.await;Err(anyhow::anyhow!("Owned generated executor did not stop"))},
+        };
+        drop(receiver);
+        let unchanged=baseline.verify();
+        println!("PRIVATE_WINDOWS_RELAY_MAPPING {}",serde_json::json!({"generated_source":true,"physical_source":false,"wasapi_consumer":false,"source_samples_saved":0,"no_audio_stream_demand":no_audio,"mapping":observed.as_ref().ok(),"explicit_detach_settled":detached.is_ok(),"executor_stopped":stopped.is_ok(),"executor_terminal":executor_terminal,"detach_errors":detached.as_ref().err().map(bounded_error),"executor_errors":stopped.as_ref().err().map(bounded_error),"baseline":unchanged.as_ref().ok(),"mounted_storage_refusal_proven":false,"physical_senn_proven":false,"success":observed.is_ok()&&detached.is_ok()&&stopped.is_ok()&&unchanged.is_ok()&&no_audio}));
+        observed?;detached?;stopped?;unchanged?;ensure!(no_audio,"Generated metadata fixture unexpectedly streamed audio");Ok(())
+    }
+    #[cfg(windows)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "Requires explicitly authorized UDE synthetic receiver and exact-identity WASAPI consumer"]
     async fn native_windows_receiver_class_driver_synthetic_silence() -> Result<()> {

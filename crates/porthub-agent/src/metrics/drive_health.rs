@@ -35,7 +35,7 @@ mod platform {
     pub(super) fn probe(_: &Device) -> Result<Reading, String> {
         Err("Native SMART access is unavailable on this platform".into())
     }
-    pub(super) fn short_test(_: &Device, _: &Reading) -> Result<(), String> {
+    pub(super) fn short_test(_: &Device, _: &Reading, _: &dyn Fn() -> bool) -> Result<(), String> {
         Err("Native short self-test unavailable".into())
     }
 }
@@ -61,6 +61,10 @@ struct Device {
     path: PathBuf,
     id: String,
     name: String,
+    model: String,
+    serial: String,
+    #[cfg(target_os = "linux")]
+    native: Option<std::sync::Arc<platform::Binding>>,
     protocol: String,
     capacity: u64,
     busy_counter: Option<u64>,
@@ -79,12 +83,37 @@ impl Device {
             path,
             id: format!("{:x}", Sha256::digest(identity.as_bytes())),
             name: text(model, 120),
+            model: model.trim().to_owned(),
+            serial: serial.trim().to_owned(),
+            #[cfg(target_os = "linux")]
+            native: None,
             protocol: protocol.into(),
             capacity: capacity.min(i64::MAX as u64),
             busy_counter: None,
             asleep: false,
             in_use: false,
         }
+    }
+    fn same_identity(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.path == other.path
+            && self.model == other.model
+            && self.serial == other.serial
+            && self.capacity == other.capacity
+            && self.protocol == other.protocol
+    }
+    fn same_observation(&self, other: &Self) -> bool {
+        if !self.same_identity(other) {
+            return false;
+        }
+        #[cfg(target_os = "linux")]
+        if self.native.as_deref() != other.native.as_deref() {
+            return false;
+        }
+        true
+    }
+    fn complete_test_identity(&self) -> bool {
+        !self.serial.is_empty() && !self.model.is_empty() && self.capacity > 0
     }
     fn empty(&self, at: i64) -> DriveHealth {
         DriveHealth {
@@ -178,10 +207,140 @@ impl Reading {
         out
     }
 }
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct Schedule {
     #[serde(default)]
     started: BTreeMap<String, i64>,
+    #[serde(default)]
+    reserved: BTreeMap<String, i64>,
+}
+impl Schedule {
+    fn decode(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() > 16384 {
+            return Err("Short-test schedule exceeds bound".into());
+        }
+        let schedule: Self =
+            serde_json::from_slice(bytes).map_err(|_| "Invalid short-test schedule")?;
+        if schedule.started.len() + schedule.reserved.len() > 128
+            || schedule
+                .started
+                .iter()
+                .chain(&schedule.reserved)
+                .any(|(id, at)| {
+                    id.len() != 64
+                        || !id
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                        || *at <= 0
+                })
+        {
+            return Err("Invalid short-test schedule entries".into());
+        }
+        Ok(schedule)
+    }
+    fn load(path: &Path) -> Result<Self, String> {
+        match crate::profile::read_private(path) {
+            Ok(bytes) => Self::decode(&bytes),
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                Ok(Self::default())
+            }
+            Err(_) => Err("Short-test schedule cannot be read securely".into()),
+        }
+    }
+    fn last_attempt(&self, id: &str) -> Option<i64> {
+        self.started
+            .get(id)
+            .into_iter()
+            .chain(self.reserved.get(id))
+            .copied()
+            .max()
+    }
+    fn encode(&self) -> Result<Vec<u8>, String> {
+        let bytes = serde_json::to_vec(self).map_err(|_| "Cannot encode short-test schedule")?;
+        Self::decode(&bytes)?;
+        Ok(bytes)
+    }
+}
+fn idle_for_test(cpu: f32, current: Option<u64>, previous: Option<u64>) -> bool {
+    (0.0..35.0).contains(&cpu)
+        && current
+            .zip(previous)
+            .and_then(|(new, old)| new.checked_sub(old))
+            .is_some_and(|delta| delta <= 4 * 1024 * 1024)
+}
+// Shared production transaction: persistence failure cannot invoke the mutating
+// backend. Retain a durable reservation even when policy revokes/start fails.
+fn reserve_and_start(
+    schedule: &mut Schedule,
+    id: &str,
+    at: i64,
+    mut persist: impl FnMut(&[u8]) -> Result<(), String>,
+    allowed: impl FnOnce() -> bool,
+    start: impl FnOnce() -> Result<(), String>,
+) -> Result<bool, String> {
+    if at <= 0
+        || schedule
+            .last_attempt(id)
+            .is_some_and(|last| at < last.saturating_add(WEEK))
+    {
+        return Ok(false);
+    }
+    let mut next = schedule.clone();
+    // Old completed cooldowns need not grow the bounded hardware-history file.
+    next.started
+        .retain(|_, last| last.saturating_add(WEEK) > at);
+    next.reserved
+        .retain(|_, last| last.saturating_add(WEEK) > at);
+    next.reserved.insert(id.to_owned(), at);
+    persist(&next.encode()?)?;
+    *schedule = next;
+    if !allowed() {
+        return Err("Short self-tests disabled locally".into());
+    }
+    start()?;
+    schedule.started.insert(id.to_owned(), at);
+    // The PRE-start reservation already protects restart cooldown if this later
+    // informational completion write fails. Never erase it on failure.
+    if persist(&schedule.encode()?).is_err() {
+        tracing::warn!(
+            "Short-test start recorded by durable reservation; completion metadata unavailable"
+        );
+    }
+    Ok(true)
+}
+fn scheduled_short_test(
+    path: &Path,
+    device: &Device,
+    reading: &Reading,
+    at: i64,
+) -> Result<bool, String> {
+    let schedule_path = crate::profile::sibling(path, ".drive-health-schedule.json");
+    let lock = crate::profile::sibling(path, ".drive-health-schedule.lock");
+    let _lease =
+        crate::profile::Lease::acquire(&lock).map_err(|_| "Short-test scheduler already owned")?;
+    let mut schedule = Schedule::load(&schedule_path)?;
+    let allowed = || {
+        use crate::features::{enabled, Feature};
+        enabled(path, Feature::Metrics)
+            && enabled(path, Feature::DriveHealth)
+            && enabled(path, Feature::DriveTests)
+    };
+    reserve_and_start(
+        &mut schedule,
+        &device.id,
+        at,
+        |bytes| {
+            crate::profile::write_private(&schedule_path, bytes, true)
+                .map_err(|_| "Cannot persist short-test reservation".into())
+        },
+        &allowed,
+        || platform::short_test(device, reading, &allowed),
+    )
 }
 struct Entry {
     device: Device,
@@ -193,6 +352,7 @@ pub(super) struct Collector {
     entries: BTreeMap<String, Entry>,
     inventory_due: Instant,
     schedule: Schedule,
+    schedule_valid: bool,
     schedule_path: PathBuf,
     profile: PathBuf,
     next_test: Instant,
@@ -200,22 +360,23 @@ pub(super) struct Collector {
 impl Collector {
     pub fn new(profile: &Path) -> Self {
         let schedule_path = crate::profile::sibling(profile, ".drive-health-schedule.json");
-        let schedule = crate::profile::read_private(&schedule_path)
-            .ok()
-            .filter(|b| b.len() <= 16384)
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
+        // Corrupt/inaccessible state blocks tests; never silently reset a clock.
+        let loaded = Schedule::load(&schedule_path);
+        let schedule_valid = loaded.is_ok();
+        let schedule = loaded.unwrap_or_default();
         Self {
             entries: BTreeMap::new(),
             inventory_due: Instant::now(),
             schedule,
+            schedule_valid,
             schedule_path,
             profile: profile.to_owned(),
             next_test: Instant::now(),
         }
     }
     /// Called from the existing metrics worker. At most one device is probed per
-    /// tick; read IOCTLs have bounded native timeouts and run off the async runtime.
+    /// tick; native IO runs off the async runtime. Linux command timeouts are
+    /// explicit; synchronous Windows storage IO still depends on driver completion.
     pub async fn sample(&mut self, cpu: f32, tests_enabled: bool) -> Vec<DriveHealth> {
         let instant = Instant::now();
         let at = now();
@@ -263,23 +424,31 @@ impl Collector {
                                 .started
                                 .get(&id)
                                 .copied()
-                                .filter(|value| *value > 0 && *value <= at);
-                            let first_due = started.unwrap_or(0).saturating_add(WEEK);
-                            let busy = entry
-                                .device
-                                .busy_counter
-                                .zip(entry.last_counter)
-                                .is_none_or(|(new, old)| new.saturating_sub(old) > 4 * 1024 * 1024);
+                                .filter(|value| *value > 0);
+                            let first_due = self
+                                .schedule
+                                .last_attempt(&id)
+                                .unwrap_or(0)
+                                .saturating_add(WEEK);
+                            let idle =
+                                idle_for_test(cpu, entry.device.busy_counter, entry.last_counter);
                             entry.snapshot = reading.apply(&entry.device, at);
                             entry.snapshot.last_test_started = started;
                             if reading.short_test_supported {
+                                if !self.schedule_valid {
+                                    entry.snapshot.reasons.push(
+                                        "Short tests blocked by invalid or inaccessible schedule"
+                                            .into(),
+                                    );
+                                }
                                 entry.snapshot.next_test_at = Some(first_due.max(at));
                                 if tests_enabled
+                                    && self.schedule_valid
                                     && at >= first_due
                                     && instant >= self.next_test
                                     && reading.self_test != "running"
                                 {
-                                    if cpu >= 35.0 || busy {
+                                    if !idle {
                                         entry.snapshot.self_test = "deferred".into();
                                         entry.snapshot.next_test_at = Some(at + 30 * 60 * 1000);
                                         entry.due = instant + Duration::from_secs(30 * 60);
@@ -287,31 +456,24 @@ impl Collector {
                                         let device = entry.device.clone();
                                         let profile = self.profile.clone();
                                         let result = tokio::task::spawn_blocking(move || {
-                                            use crate::features::{enabled, Feature};
-                                            if !enabled(&profile, Feature::Metrics)
-                                                || !enabled(&profile, Feature::DriveHealth)
-                                                || !enabled(&profile, Feature::DriveTests)
-                                            {
-                                                return Err(
-                                                    "Short self-tests disabled locally".into()
-                                                );
-                                            }
-                                            platform::short_test(&device, &reading)
+                                            scheduled_short_test(&profile, &device, &reading, at)
                                         })
                                         .await;
-                                        if matches!(result, Ok(Ok(()))) {
-                                            self.schedule.started.insert(id.clone(), at);
+                                        // Reload exact durable state even on failed/revoked start.
+                                        match Schedule::load(&self.schedule_path) {
+                                            Ok(schedule) => self.schedule = schedule,
+                                            Err(_) => self.schedule_valid = false,
+                                        }
+                                        if matches!(result, Ok(Ok(true))) {
                                             entry.snapshot.last_test_started = Some(at);
-                                            entry.snapshot.next_test_at = Some(at + WEEK);
+                                            entry.snapshot.next_test_at =
+                                                Some(at.saturating_add(WEEK));
                                             entry.snapshot.self_test = "running".into();
                                             entry.due = instant + Duration::from_secs(120);
                                             self.next_test = instant + Duration::from_secs(10 * 60);
-                                            let _ = crate::profile::write_private(
-                                                &self.schedule_path,
-                                                &serde_json::to_vec(&self.schedule)
-                                                    .unwrap_or_default(),
-                                                true,
-                                            );
+                                        } else {
+                                            entry.snapshot.self_test = "deferred".into();
+                                            entry.snapshot.reasons.push("Short test deferred; identity, policy or durable schedule unavailable".into());
                                         }
                                     }
                                 }
@@ -348,9 +510,16 @@ impl Collector {
         for device in devices.into_iter().take(MAX_DRIVES) {
             present.insert(device.id.clone());
             if let Some(entry) = self.entries.get_mut(&device.id) {
-                entry.last_counter = entry.device.busy_counter;
+                // Compare BEFORE replacing the cached witness. Stable hardware IDs
+                // do not authorize reusing old health after a move/replug/resize.
+                let changed = !entry.device.same_observation(&device);
+                entry.last_counter = if changed {
+                    None
+                } else {
+                    entry.device.busy_counter
+                };
                 entry.device = device;
-                if !entry.snapshot.present {
+                if changed || !entry.snapshot.present {
                     entry.snapshot = entry.device.empty(at);
                     entry.due = instant;
                 } else if entry.snapshot.status == DriveStatus::Sleeping && !entry.device.asleep {
@@ -375,6 +544,10 @@ impl Collector {
                 entry.snapshot.observed_at = at;
                 entry.snapshot.reasons = vec!["Drive removed from this machine".into()];
                 entry.snapshot.next_test_at = None;
+                #[cfg(target_os = "linux")]
+                {
+                    entry.device.native = None;
+                }
             }
         }
         // Keep a bounded set of recent removed-drive tombstones. Historical snapshots
@@ -472,7 +645,8 @@ fn nvme_bytes(data: &[u8]) -> Option<u64> {
     (units > 0 && bytes <= i64::MAX as u128).then_some(bytes as u64)
 }
 fn valid_ata_sector(data: &[u8]) -> bool {
-    data.len() == 512 && data.iter().any(|b| *b != 0)
+    data.len() == 512
+        && data.iter().any(|b| *b != 0)
         && data.iter().fold(0u8, |sum, b| sum.wrapping_add(*b)) == 0
 }
 fn nvme(data: &[u8]) -> Result<Reading, String> {
@@ -514,7 +688,11 @@ fn nvme(data: &[u8]) -> Result<Reading, String> {
             .reasons
             .push("SSD is nearing its rated endurance".into());
     }
-    if reading.available_spare.zip(reading.spare_threshold).is_some_and(|(spare, threshold)| spare < threshold) {
+    if reading
+        .available_spare
+        .zip(reading.spare_threshold)
+        .is_some_and(|(spare, threshold)| spare < threshold)
+    {
         reading.critical = true;
         reading
             .reasons
@@ -581,7 +759,10 @@ fn ata(data: &[u8], thresholds: Option<&[u8]>, log: Option<&[u8]>) -> Result<Rea
         }
     }
     for (value, label) in [
-        (out.reported_uncorrectable_errors, "Historical uncorrectable command errors recorded; inspect changes over time"),
+        (
+            out.reported_uncorrectable_errors,
+            "Historical uncorrectable command errors recorded; inspect changes over time",
+        ),
         (out.reallocated_sectors, "Reallocated sectors recorded"),
         (out.pending_sectors, "Pending sectors need attention"),
         (out.uncorrectable_sectors, "Uncorrectable sectors recorded"),
@@ -676,38 +857,58 @@ mod tests {
     }
     #[test]
     fn historical_reported_errors_are_warning_not_failed_sectors() {
-        let mut data = [0; 512]; data[0] = 1; data[2] = 187; data[5] = 98; data[7] = 2; checksum(&mut data);
+        let mut data = [0; 512];
+        data[0] = 1;
+        data[2] = 187;
+        data[5] = 98;
+        data[7] = 2;
+        checksum(&mut data);
         let reading = ata(&data, None, None).unwrap().apply(&device("ata"), 1);
         assert_eq!(reading.reported_uncorrectable_errors, Some(2));
         assert_eq!(reading.uncorrectable_sectors, None);
         assert_eq!(reading.status, DriveStatus::Warning);
-        let mut corrupt = [0; 512]; corrupt[2] = 187; corrupt[3] = 99;
+        let mut corrupt = [0; 512];
+        corrupt[2] = 187;
+        corrupt[3] = 99;
         assert!(!ata(&data, Some(&corrupt), Some(&corrupt)).unwrap().critical);
         checksum(&mut corrupt);
         assert!(ata(&data, Some(&corrupt), None).unwrap().critical);
     }
     #[test]
     fn empty_attribute_pages_and_corrupt_optional_blocks_are_not_health_evidence() {
-        let mut data = [0; 512]; data[0] = 1; checksum(&mut data);
+        let mut data = [0; 512];
+        data[0] = 1;
+        checksum(&mut data);
         assert!(ata(&data, None, None).is_err());
-        data[2] = 9; data[5] = 100; data[7] = 1; checksum(&mut data);
-        let mut log = [0; 512]; log[508] = 1; log[3] = 0x70;
+        data[2] = 9;
+        data[5] = 100;
+        data[7] = 1;
+        checksum(&mut data);
+        let mut log = [0; 512];
+        log[508] = 1;
+        log[3] = 0x70;
         assert_eq!(ata(&data, None, Some(&log)).unwrap().self_test, "not_run");
     }
     #[test]
     fn invalid_nvme_spare_values_do_not_invent_a_threshold_failure() {
-        let mut data = [0; 512]; data[1..3].copy_from_slice(&300u16.to_le_bytes());
-        data[3] = 100; data[4] = 255;
+        let mut data = [0; 512];
+        data[1..3].copy_from_slice(&300u16.to_le_bytes());
+        data[3] = 100;
+        data[4] = 255;
         let reading = nvme(&data).unwrap();
         assert_eq!(reading.spare_threshold, None);
         assert!(!reading.critical);
-        data[3] = 255; data[4] = 10;
+        data[3] = 255;
+        data[4] = 10;
         assert_eq!(nvme(&data).unwrap().available_spare, None);
     }
     #[test]
     fn lifetime_nvme_bytes_are_approximate_bounded_and_zero_is_not_reported() {
         assert_eq!(nvme_bytes(&0u128.to_le_bytes()), None);
-        assert_eq!(nvme_bytes(&43767976u128.to_le_bytes()), Some(22409203712000));
+        assert_eq!(
+            nvme_bytes(&43767976u128.to_le_bytes()),
+            Some(22409203712000)
+        );
         assert_eq!(nvme_bytes(&u128::MAX.to_le_bytes()), None);
         assert_eq!(nvme_bytes(&(i64::MAX as u128).to_le_bytes()), None);
     }
@@ -772,19 +973,297 @@ mod tests {
     }
 }
 
-#[cfg(all(test,any(target_os="linux",target_os="macos",windows)))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
 mod readonly_hardware_diagnostics {
     use super::*;
     #[test]
-    #[ignore="Explicit read-only hardware health diagnostic; never starts self-tests"]
+    #[ignore = "Explicit read-only hardware health diagnostic; never starts self-tests"]
     fn physical_drive_health_without_self_tests() {
-        assert_eq!(std::env::var("PORTHUB_SMART_READONLY_PROBE").as_deref(),Ok("1"),"Explicit read-only probe opt-in required");
+        assert_eq!(
+            std::env::var("PORTHUB_SMART_READONLY_PROBE").as_deref(),
+            Ok("1"),
+            "Explicit read-only probe opt-in required"
+        );
         for device in platform::inventory() {
-            let at=now();
-            let snapshot=if device.in_use {let mut value=device.empty(at);value.reasons.push("Device currently forwarded; source SMART skipped".into());value}
-            else if device.asleep {let mut value=device.empty(at);value.status=DriveStatus::Sleeping;value.reasons.push("Drive sleeping; read-only probe did not wake it".into());value}
-            else {match platform::probe(&device){Ok(reading)=>reading.apply(&device,at),Err(error)=>{let mut value=device.empty(at);value.reasons.push(error);value}}};
-            println!("{}",serde_json::json!({"device":device.path,"health":snapshot}));
+            let at = now();
+            let snapshot = if device.in_use {
+                let mut value = device.empty(at);
+                value
+                    .reasons
+                    .push("Device currently forwarded; source SMART skipped".into());
+                value
+            } else if device.asleep {
+                let mut value = device.empty(at);
+                value.status = DriveStatus::Sleeping;
+                value
+                    .reasons
+                    .push("Drive sleeping; read-only probe did not wake it".into());
+                value
+            } else {
+                match platform::probe(&device) {
+                    Ok(reading) => reading.apply(&device, at),
+                    Err(error) => {
+                        let mut value = device.empty(at);
+                        value.reasons.push(error);
+                        value
+                    }
+                }
+            };
+            println!(
+                "{}",
+                serde_json::json!({"device":device.path,"health":snapshot})
+            );
         }
+    }
+}
+
+#[cfg(test)]
+mod scheduling_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    fn id() -> String {
+        "a".repeat(64)
+    }
+    #[test]
+    fn reservation_is_durable_before_start_and_survives_restart_and_failed_start() {
+        let mut schedule = Schedule::default();
+        let bytes = std::cell::RefCell::new(Vec::new());
+        let calls = AtomicUsize::new(0);
+        let at = WEEK * 2;
+        assert!(reserve_and_start(
+            &mut schedule,
+            &id(),
+            at,
+            |value| {
+                *bytes.borrow_mut() = value.to_vec();
+                Ok(())
+            },
+            || true,
+            || {
+                let stored = Schedule::decode(&bytes.borrow()).unwrap();
+                assert_eq!(stored.reserved.get(&id()), Some(&at));
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        )
+        .unwrap());
+        let mut restarted = Schedule::decode(&bytes.borrow()).unwrap();
+        assert!(!reserve_and_start(
+            &mut restarted,
+            &id(),
+            at + WEEK - 1,
+            |_| panic!("early persistence"),
+            || true,
+            || panic!("early native test")
+        )
+        .unwrap());
+        assert!(reserve_and_start(
+            &mut restarted,
+            &id(),
+            at + WEEK,
+            |value| {
+                *bytes.borrow_mut() = value.to_vec();
+                Ok(())
+            },
+            || true,
+            || Err("native reject".into())
+        )
+        .is_err());
+        let mut restarted = Schedule::decode(&bytes.borrow()).unwrap();
+        assert!(!reserve_and_start(
+            &mut restarted,
+            &id(),
+            at + WEEK + 1,
+            |_| panic!(),
+            || true,
+            || panic!()
+        )
+        .unwrap());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+    #[test]
+    fn failed_reservation_or_revoked_policy_never_calls_native_backend() {
+        let mut schedule = Schedule::default();
+        let at = WEEK * 2;
+        assert!(reserve_and_start(
+            &mut schedule,
+            &id(),
+            at,
+            |_| Err("disk unavailable".into()),
+            || true,
+            || panic!("test before durable write")
+        )
+        .is_err());
+        assert!(schedule.last_attempt(&id()).is_none());
+        let mut stored = Vec::new();
+        assert!(reserve_and_start(
+            &mut schedule,
+            &id(),
+            at,
+            |b| {
+                stored = b.to_vec();
+                Ok(())
+            },
+            || false,
+            || panic!("revoked test started")
+        )
+        .is_err());
+        assert_eq!(
+            Schedule::decode(&stored).unwrap().last_attempt(&id()),
+            Some(at)
+        );
+    }
+    #[test]
+    fn post_start_completion_write_failure_keeps_persisted_reservation() {
+        let mut schedule = Schedule::default();
+        let mut stored = Vec::new();
+        let mut writes = 0;
+        let at = WEEK * 2;
+        assert!(reserve_and_start(
+            &mut schedule,
+            &id(),
+            at,
+            |b| {
+                writes += 1;
+                if writes == 1 {
+                    stored = b.to_vec();
+                    Ok(())
+                } else {
+                    Err("metadata write unavailable".into())
+                }
+            },
+            || true,
+            || Ok(())
+        )
+        .unwrap());
+        let mut restarted = Schedule::decode(&stored).unwrap();
+        assert!(!reserve_and_start(
+            &mut restarted,
+            &id(),
+            at + 1,
+            |_| panic!(),
+            || true,
+            || panic!()
+        )
+        .unwrap());
+    }
+    #[test]
+    fn corrupt_oversized_unknown_and_future_schedule_do_not_reset_weekly_clock() {
+        for bytes in [
+            b"not json".to_vec(),
+            vec![b' '; 16385],
+            br#"{"started":{},"unknown":1}"#.to_vec(),
+            br#"{"started":{"a":-1}}"#.to_vec(),
+        ] {
+            assert!(Schedule::decode(&bytes).is_err());
+        }
+        let mut schedule = Schedule::default();
+        schedule.started.insert(id(), WEEK * 4);
+        assert!(!reserve_and_start(
+            &mut schedule,
+            &id(),
+            WEEK * 2,
+            |_| panic!(),
+            || true,
+            || panic!()
+        )
+        .unwrap());
+        let path =
+            std::env::temp_dir().join(format!("porthub-smart-schedule-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"broken").unwrap();
+        assert!(Schedule::load(&path).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn only_known_idle_counters_and_low_finite_cpu_admit_tests() {
+        assert!(idle_for_test(1., Some(9), Some(9)));
+        assert!(idle_for_test(34., Some(4 * 1024 * 1024), Some(0)));
+        for (cpu, current, old) in [
+            (35., Some(0), Some(0)),
+            (f32::NAN, Some(0), Some(0)),
+            (1., None, Some(0)),
+            (1., Some(0), None),
+            (1., Some(0), Some(1)),
+            (1., Some(4 * 1024 * 1024 + 1), Some(0)),
+        ] {
+            assert!(!idle_for_test(cpu, current, old));
+        }
+    }
+    fn assert_cache_invalidated(old: Device, fresh: Device) {
+        assert_eq!(
+            old.id, fresh.id,
+            "Fixture must retain hardware history identity"
+        );
+        let mut collector = Collector::new(Path::new("/nonexistent/readonly-fixture-profile"));
+        let instant = Instant::now();
+        let at = WEEK * 2;
+        collector.reconcile(vec![old.clone()], at, instant);
+        let entry = collector.entries.get_mut(&old.id).unwrap();
+        entry.snapshot = Reading::default().apply(&old, at);
+        entry.due = instant + PROBE_INTERVAL;
+        entry.last_counter = Some(9);
+        collector.reconcile(vec![fresh.clone()], at + 1, instant);
+        let entry = &collector.entries[&old.id];
+        assert_eq!(entry.device.id, old.id);
+        assert!(entry.snapshot.present);
+        assert_eq!(entry.snapshot.status, DriveStatus::Unavailable);
+        assert_eq!(entry.snapshot.checked_at, None);
+        assert_eq!(entry.snapshot.capacity, fresh.capacity);
+        assert!(entry.due <= instant);
+        assert_eq!(entry.last_counter, None);
+    }
+    #[test]
+    fn collector_invalidates_old_health_immediately_when_same_id_moves_or_capacity_changes() {
+        let old = Device::new("/dev/old".into(), "model", "stable-serial", "ata", 1024);
+        assert_cache_invalidated(
+            old.clone(),
+            Device::new("/dev/new".into(), "model", "stable-serial", "ata", 1024),
+        );
+        assert_cache_invalidated(
+            old,
+            Device::new("/dev/old".into(), "model", "stable-serial", "ata", 2048),
+        );
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn collector_invalidates_reused_serialless_node_when_kernel_generation_changes() {
+        let mut old = Device::new("/dev/same".into(), "model", "", "ata", 1024);
+        old.native = Some(linux::Binding::test_generation(1));
+        let mut fresh = old.clone();
+        fresh.native = Some(linux::Binding::test_generation(2));
+        assert_cache_invalidated(old, fresh);
+    }
+    #[test]
+    fn mutation_requires_complete_serial_model_capacity_identity_but_read_identity_can_be_compared()
+    {
+        let valid = Device::new("/dev/fixture".into(), "model", "serial", "ata", 1024);
+        assert!(valid.complete_test_identity());
+        for candidate in [
+            Device::new(valid.path.clone(), "model", "", "ata", 1024),
+            Device::new(valid.path.clone(), "", "serial", "ata", 1024),
+            Device::new(valid.path.clone(), "model", "serial", "ata", 0),
+        ] {
+            assert!(!candidate.complete_test_identity());
+            assert!(candidate.same_identity(&candidate.clone()));
+        }
+    }
+    #[test]
+    fn hotplug_reused_path_does_not_retain_old_serial_model_capacity_or_protocol_authority() {
+        let old = Device::new("/dev/fixture".into(), "model", "serial", "ata", 1024);
+        for changed in [
+            Device::new(old.path.clone(), "other", "serial", "ata", 1024),
+            Device::new(old.path.clone(), "model", "newserial", "ata", 1024),
+            Device::new(old.path.clone(), "model", "serial", "ata", 2048),
+            Device::new(old.path.clone(), "model", "serial", "nvme", 1024),
+        ] {
+            assert!(!old.same_identity(&changed));
+        }
+        assert!(old.same_identity(&Device::new(
+            old.path.clone(),
+            "model",
+            "serial",
+            "ata",
+            1024
+        )));
     }
 }

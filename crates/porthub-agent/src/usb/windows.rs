@@ -2,6 +2,10 @@
 //! the signed USB/IP host/UDE drivers provide the OS device handoff.
 #[path = "windows/storage.rs"]
 pub(crate) mod storage;
+#[path = "windows/relay.rs"]
+mod relay;
+pub(super) use relay::{Marker,StorageSnapshot};
+#[cfg(test)] pub(crate) use relay::{FixtureBaseline,fixture_baseline};
 use anyhow::{ensure, Context, Result};
 use porthub_components::usb::Device;
 use serde_json::Value;
@@ -719,7 +723,8 @@ fn source_lease(busid: &str) -> Result<crate::profile::Lease> {
     crate::service::directory(&root, true)?;
     crate::profile::Lease::acquire(&root.join(busid))
 }
-fn controller() -> Result<File> {
+fn controller() -> Result<File> { Ok(controller_info()?.0) }
+fn controller_info() -> Result<(File,u32)> {
     unsafe {
         let set = SetupDiGetClassDevsW(
             &INTERFACE,
@@ -766,6 +771,8 @@ fn controller() -> Result<File> {
         } else {
             6
         };
+        let mut info: SP_DEVINFO_DATA = std::mem::zeroed();
+        info.cbSize=std::mem::size_of::<SP_DEVINFO_DATA>() as u32;
         ensure!(
             SetupDiGetDeviceInterfaceDetailW(
                 list.0,
@@ -773,7 +780,7 @@ fn controller() -> Result<File> {
                 bytes.cast(),
                 required,
                 std::ptr::null_mut(),
-                std::ptr::null_mut()
+                &mut info
             ) != 0,
             "Cannot query Windows USB receive controller"
         );
@@ -791,7 +798,7 @@ fn controller() -> Result<File> {
             "Cannot open Windows USB receive controller: {}",
             std::io::Error::last_os_error()
         );
-        Ok(File::from_raw_handle(handle))
+        Ok((File::from_raw_handle(handle),info.DevInst))
     }
 }
 pub(super) fn host_installed() -> bool {
@@ -838,7 +845,14 @@ fn fill(target: &mut [u8], value: &str) -> Result<()> {
     target[..value.len()].copy_from_slice(value.as_bytes());
     Ok(())
 }
-fn plug(driver: File, port: u16, busid: &str) -> Result<Port> {
+fn plug(driver: File, controller:u32, port: u16, busid: &str,state:&Arc<Mutex<AttachState>>) -> Result<Port> {
+    let deadline=Instant::now()+Duration::from_secs(15);
+    let _lifecycle=loop {
+        ensure!(!state.lock().unwrap_or_else(|p|p.into_inner()).cancelled,"Owned UDE attach canceled before PLUG");
+        if let Ok(lock)=relay::lifecycle().try_lock(){break lock}
+        ensure!(Instant::now()<deadline,"Owned UDE attach lifecycle is busy");std::thread::sleep(Duration::from_millis(25));
+    };
+    ensure!(!state.lock().unwrap_or_else(|p|p.into_inner()).cancelled,"Owned UDE attach canceled before PLUG");
     unsafe {
         let mut request: Plugin = std::mem::zeroed();
         request.size = std::mem::size_of::<Plugin>() as u32;
@@ -865,34 +879,59 @@ fn plug(driver: File, port: u16, busid: &str) -> Result<Port> {
         Ok(Port {
             driver,
             port: request.location.port,
+            controller, busid:busid.to_owned(),service:port.to_string(),detached:false,
         })
     }
 }
 struct Port {
     driver: File,
     port: i32,
+    controller:u32,
+    busid:String,
+    service:String,
+    detached:bool,
 }
 impl Drop for Port {
     fn drop(&mut self) {
-        unsafe {
-            let mut data = [8u32, self.port as u32];
-            let mut returned = 0;
-            DeviceIoControl(
-                self.driver.as_raw_handle(),
-                0x0022e004,
-                data.as_mut_ptr().cast(),
-                8,
-                std::ptr::null_mut(),
-                0,
-                &mut returned,
-                std::ptr::null_mut(),
-            );
-        }
+        if self.detached {return}
+        // Never issue an unvalidated port-only unplug from best-effort cleanup.
+        if let Err(error)=self.detach(false){tracing::warn!(%error,"Owned UDE detach deferred");}
     }
 }
 struct AttachState {
     cancelled: bool,
+    settled:bool,
+    attach_finished:bool,
+    retired_port:Option<i32>,
+    cleanup_running:bool,
+    cleanup_failed:bool,
+    intent:Option<relay::Intent>,
     port: Option<Port>,
+}
+// A canceled pending native PLUG is still owned work. Its completion cannot
+// be aborted away: a late successful Port is handed to the same cleanup path.
+fn complete_attachment(state:&Arc<Mutex<AttachState>>,port:Port)->bool {
+    let mut held=state.lock().unwrap_or_else(|p|p.into_inner());held.retired_port=Some(port.port);held.port=Some(port);held.attach_finished=true;held.cancelled
+}
+fn retirement_work(state:&Arc<Mutex<AttachState>>)->Option<(Option<Port>,Option<relay::Intent>)> {
+    let mut held=state.lock().unwrap_or_else(|p|p.into_inner());held.cancelled=true;
+    if held.settled||held.cleanup_running||held.cleanup_failed||!held.attach_finished {return None}
+    let intent=match held.intent.as_ref().map(relay::Intent::try_clone).transpose(){Ok(v)=>v,Err(error)=>{held.cleanup_failed=true;tracing::warn!(%error,"Owned UDE retirement metadata unavailable");return None}};
+    held.cleanup_running=true;held.cleanup_failed=false;Some((held.port.take(),intent))
+}
+fn retire_attachment(state:&Arc<Mutex<AttachState>>) {
+    let Some(work)=retirement_work(state) else {return};
+    let pending=state.clone();
+    let spawned=std::thread::Builder::new().name("porthub-usb-retire".into()).spawn(move||{
+        finish_retirement(&pending,work.0,work.1,|port|port.detach(true));
+    });
+    if let Err(error)=spawned {let mut held=state.lock().unwrap_or_else(|p|p.into_inner());held.cleanup_running=false;held.cleanup_failed=true;tracing::warn!(%error,"Owned UDE retirement worker unavailable");}
+}
+fn finish_retirement(state:&Arc<Mutex<AttachState>>,mut port:Option<Port>,intent:Option<relay::Intent>,detach:impl FnOnce(&mut Port)->Result<()>) {
+    let result=if let Some(port)=port.as_mut(){detach(port)}else{intent.context("Owned UDE retirement identity unavailable").and_then(|i|{ensure!(i.absent()?,"Owned UDE attachment absence remains unproven");Ok(())})};
+    let mut held=state.lock().unwrap_or_else(|p|p.into_inner());held.cleanup_running=false;held.cleanup_failed=result.is_err();held.settled=result.is_ok();
+    drop(held);
+    if let Err(error)=result {tracing::warn!(error=format_args!("{error:#}"),"Owned UDE retirement remains fenced");}
 }
 struct Export {
     path: PathBuf,
@@ -974,6 +1013,21 @@ pub(super) struct Handoff {
     kind: Kind,
 }
 impl Handoff {
+    #[cfg(test)] pub(crate) fn marker_for_fixture(&self,device:&Device)->Result<Marker> {
+        match &self.kind {Kind::Destination{state,..}=>Ok(Marker::new(state.clone(),device.clone())),_=>anyhow::bail!("Fixture requires owned receiver attachment")}
+    }
+    pub(super) async fn detach(&mut self)->Result<()> {
+        if let Kind::Destination{state,..}=&mut self.kind {
+            retire_attachment(state);
+            tokio::time::timeout(Duration::from_secs(15),async {
+                loop {
+                    {let held=state.lock().unwrap_or_else(|p|p.into_inner());if held.settled{return Ok(())}ensure!(!held.cleanup_failed,"Owned UDE retirement remains unproven");}
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            }).await??;
+        }
+        Ok(())
+    }
     pub async fn failed(&mut self) -> Result<()> {
         match &mut self.kind {
             Kind::Source(_) => std::future::pending().await,
@@ -986,11 +1040,10 @@ impl Handoff {
 }
 impl Drop for Handoff {
     fn drop(&mut self) {
-        if let Kind::Destination { state, task } = &mut self.kind {
-            let mut state = state.lock().unwrap_or_else(|p| p.into_inner());
-            state.cancelled = true;
-            state.port.take();
-            task.abort();
+        if let Kind::Destination { state, .. } = &mut self.kind {
+            retire_attachment(state);
+            // Dropping JoinHandle detaches the tracked completion task; do not
+            // abort it and lose a blocking PLUG's late positive owned port.
         }
     }
 }
@@ -1146,25 +1199,31 @@ pub(super) async fn source(
         wire,
     ))
 }
-pub(super) async fn destination(device: &Device, wire: &[u8]) -> Result<(Handoff, TcpStream)> {
+pub(super) async fn destination(device:&Device,wire:&[u8])->Result<(Handoff,TcpStream)> {destination_inner(device,wire,None).await}
+pub(super) async fn destination_registered(profile:&Path,plan:&porthub_components::usb::Forward,device:&Device,wire:&[u8])->Result<(Handoff,TcpStream)> {destination_inner(device,wire,Some((profile,&plan.id))).await}
+async fn destination_inner(device: &Device, wire: &[u8],registration:Option<(&Path,&str)>) -> Result<(Handoff, TcpStream)> {
     super::protocol::validate(wire, device)?;
-    let driver = controller()?;
+    let (driver,controller) = controller_info()?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     let capability = format!("1-{:028}", uuid::Uuid::new_v4().as_u128() % 10u128.pow(28));
     let secret = capability.clone();
-    let state = Arc::new(Mutex::new(AttachState {
-        cancelled: false,
-        port: None,
-    }));
-    let shared = state.clone();
-    let task = tokio::spawn(async move {
-        let attached = tokio::task::spawn_blocking(move || plug(driver, port, &secret)).await??;
-        let mut state = shared.lock().unwrap_or_else(|p| p.into_inner());
-        if !state.cancelled {
-            state.port = Some(attached);
+    let intent=relay::Intent::capture(&driver,controller,&capability,&port.to_string())?;
+    let state=Arc::new(Mutex::new(AttachState{cancelled:false,settled:false,attach_finished:false,retired_port:None,cleanup_running:false,cleanup_failed:false,intent:Some(intent),port:None}));
+    // The exact-key pending record is published BEFORE any asynchronous PLUG.
+    // Cancellation during connect/handshake therefore cannot lose its fence.
+    if let Some((profile,id))=registration {super::relay::local_windows(profile,id,Marker::new(state.clone(),device.clone()))?;}
+    let shared=state.clone();
+    let task=tokio::spawn(async move {
+        let pending=shared.clone();
+        let result=tokio::task::spawn_blocking(move||plug(driver,controller,port,&secret,&pending)).await.map_err(anyhow::Error::from).and_then(|v|v);
+        match result {
+            Ok(attached)=>{
+                let cancelled=complete_attachment(&shared,attached);
+                if cancelled {retire_attachment(&shared);}Ok(())
+            },
+            Err(error)=>{let cancelled={let mut held=shared.lock().unwrap_or_else(|p|p.into_inner());held.attach_finished=true;held.cancelled};if cancelled {retire_attachment(&shared);}Err(error)},
         }
-        Ok(())
     });
     let guard = Handoff {
         kind: Kind::Destination { state, task },

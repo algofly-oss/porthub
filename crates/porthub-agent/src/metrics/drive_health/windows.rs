@@ -6,6 +6,64 @@ use std::{
     os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
+// Storage handles live only for one transaction; inventory never prevents eject.
+fn identify(path: PathBuf, file: &File) -> Result<Device, String> {
+    let mut descriptor = [0u8; 1024];
+    let n = io(file, QUERY, &[0; 12], &mut descriptor)?;
+    if !(36..=descriptor.len()).contains(&n) {
+        return Err("Invalid storage identity response".into());
+    }
+    let descriptor = &descriptor[..n];
+    let bus = le(descriptor, 28);
+    if matches!(bus, 14 | 15) {
+        return Err("Virtual storage is not physical SMART authority".into());
+    }
+    let vendor = string(descriptor, 12);
+    let model = string(descriptor, 16);
+    let serial = string(descriptor, 24);
+    let mut length = [0u8; 8];
+    if io(file, 0x0007405c, &[], &mut length)? != 8 {
+        return Err("Storage capacity unavailable".into());
+    }
+    let capacity = u64::from_le_bytes(length);
+    if capacity == 0 {
+        return Err("Storage capacity unavailable".into());
+    }
+    Ok(Device::new(
+        path,
+        &format!("{vendor} {model}").trim(),
+        &serial,
+        if bus == 17 { "nvme" } else { "ata" },
+        capacity,
+    ))
+}
+struct Session {
+    file: File,
+}
+impl Session {
+    fn open(device: &Device, mutating: bool) -> Result<Self, String> {
+        if mutating && !device.complete_test_identity() {
+            return Err("Short test requires complete physical identity".into());
+        }
+        let file = open(&device.path, device.protocol != "nvme")?;
+        let mut on = 1;
+        if unsafe { GetDevicePowerState(file.as_raw_handle().cast(), &mut on) } == 0 || on == 0 {
+            return Err("Native drive power state unavailable or standby".into());
+        }
+        let current = identify(device.path.clone(), &file)?;
+        if !device.same_identity(&current) {
+            return Err("Opened native drive identity changed".into());
+        }
+        if mutating && !current.complete_test_identity() {
+            return Err("Short test requires complete physical identity".into());
+        }
+        Ok(Self { file })
+    }
+}
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetDevicePowerState(device: windows_sys::Win32::Foundation::HANDLE, on: *mut i32) -> i32;
+}
 const QUERY: u32 = 0x002d1400;
 fn open(path: &Path, write: bool) -> Result<File, String> {
     OpenOptions::new()
@@ -13,7 +71,11 @@ fn open(path: &Path, write: bool) -> Result<File, String> {
         .write(write)
         .share_mode(3)
         .open(path)
-        .map_err(|error| format!("Native storage access unavailable ({error}); administrator access may be required"))
+        .map_err(|error| {
+            format!(
+                "Native storage access unavailable ({error}); administrator access may be required"
+            )
+        })
 }
 fn io(file: &File, code: u32, input: &[u8], output: &mut [u8]) -> Result<usize, String> {
     let mut returned = 0u32;
@@ -30,7 +92,10 @@ fn io(file: &File, code: u32, input: &[u8], output: &mut [u8]) -> Result<usize, 
         )
     };
     if ok == 0 {
-        return Err(format!("Native SMART request unsupported or unavailable ({})", std::io::Error::last_os_error()));
+        return Err(format!(
+            "Native SMART request unsupported or unavailable ({})",
+            std::io::Error::last_os_error()
+        ));
     }
     Ok(returned as usize)
 }
@@ -57,38 +122,9 @@ pub(super) fn inventory() -> Vec<Device> {
         let Ok(file) = open(&path, false) else {
             continue;
         };
-        let mut descriptor = [0u8; 1024];
-        let Ok(n) = io(&file, QUERY, &[0; 12], &mut descriptor) else {
+        let Ok(mut device) = identify(path, &file) else {
             continue;
         };
-        if n < 36 {
-            continue;
-        }
-        let descriptor = &descriptor[..n.min(1024)];
-        let bus = le(descriptor, 28);
-        if matches!(bus, 14 | 15) {
-            continue;
-        } // virtual/file-backed disks
-        let vendor = string(descriptor, 12);
-        let model = string(descriptor, 16);
-        let serial = string(descriptor, 24);
-        let mut length = [0u8; 8];
-        let capacity = if io(&file, 0x0007405c, &[], &mut length).is_ok() {
-            u64::from_le_bytes(length)
-        } else {
-            0
-        };
-        if capacity == 0 {
-            continue;
-        }
-        let protocol = if bus == 17 { "nvme" } else { "ata" };
-        let mut device = Device::new(
-            path,
-            &format!("{vendor} {model}").trim(),
-            &serial,
-            protocol,
-            capacity,
-        );
         let mut performance = [0u8; 88];
         if io(&file, 0x00070020, &[], &mut performance).is_ok() {
             device.busy_counter =
@@ -96,13 +132,6 @@ pub(super) fn inventory() -> Vec<Device> {
         }
         // GetDevicePowerState is observational; unlike a VERIFY command it does not
         // spin up a sleeping USB/SATA disk just to poll health.
-        #[link(name = "kernel32")]
-        unsafe extern "system" {
-            fn GetDevicePowerState(
-                device: windows_sys::Win32::Foundation::HANDLE,
-                on: *mut i32,
-            ) -> i32;
-        }
         let mut on = 1;
         unsafe {
             if GetDevicePowerState(file.as_raw_handle().cast(), &mut on) != 0 {
@@ -116,8 +145,7 @@ pub(super) fn inventory() -> Vec<Device> {
     }
     devices
 }
-fn nvme_log(device: &Device, page: u32) -> Result<[u8; 512], String> {
-    let file = open(&device.path, false)?;
+fn nvme_log(file: &File, page: u32) -> Result<[u8; 512], String> {
     let mut request = vec![0u8; 8 + 40 + 512];
     // STORAGE_PROPERTY_QUERY + STORAGE_PROTOCOL_SPECIFIC_DATA. ProtocolDataOffset
     // is relative to the latter, including in the returned descriptor.
@@ -136,8 +164,7 @@ fn nvme_log(device: &Device, page: u32) -> Result<[u8; 512], String> {
     data.copy_from_slice(&output[offset..offset + 512]);
     Ok(data)
 }
-fn ata_data(device: &Device, feature: u8, sector: u8) -> Result<[u8; 512], String> {
-    let file = open(&device.path, true)?;
+fn ata_data(file: &File, feature: u8, sector: u8) -> Result<[u8; 512], String> {
     let mut request = [0u8; 32];
     request[..4].copy_from_slice(&512u32.to_le_bytes());
     request[4] = feature;
@@ -157,27 +184,33 @@ fn ata_data(device: &Device, feature: u8, sector: u8) -> Result<[u8; 512], Strin
     Ok(data)
 }
 pub(super) fn probe(device: &Device) -> Result<Reading, String> {
+    let session = Session::open(device, false)?;
     if device.protocol == "nvme" {
-        let data = nvme_log(device, 2)?;
+        let data = nvme_log(&session.file, 2)?;
         let mut out = super::nvme(&data)?;
         out.short_test_supported = false;
         out.self_test = "unsupported".into();
         return Ok(out);
     }
-    let values = ata_data(device, 0xd0, 0)?;
-    let thresholds = ata_data(device, 0xd1, 0).ok();
-    let log = ata_data(device, 0xd5, 6).ok();
+    let values = ata_data(&session.file, 0xd0, 0)?;
+    let thresholds = ata_data(&session.file, 0xd1, 0).ok();
+    let log = ata_data(&session.file, 0xd5, 6).ok();
     super::ata(
         &values,
         thresholds.as_ref().map(|b| b.as_slice()),
         log.as_ref().map(|b| b.as_slice()),
     )
 }
-pub(super) fn short_test(device: &Device, reading: &Reading) -> Result<(), String> {
+pub(super) fn short_test(
+    device: &Device,
+    reading: &Reading,
+    allowed: &dyn Fn() -> bool,
+) -> Result<(), String> {
     if device.protocol == "nvme" || !reading.short_test_supported {
         return Err("Native short self-test unavailable".into());
     }
-    let file = open(&device.path, true)?;
+    let session = Session::open(device, true)?;
+    let file = &session.file;
     let mut request = [0u8; 32];
     request[4] = 0xd4;
     request[6] = 1;
@@ -186,6 +219,9 @@ pub(super) fn short_test(device: &Device, reading: &Reading) -> Result<(), Strin
     request[9] = 0xa0;
     request[10] = 0xb0;
     let mut output = [0u8; 16];
+    if !allowed() {
+        return Err("Short self-tests disabled locally".into());
+    }
     io(&file, 0x0007c084, &request, &mut output)?;
     if output[4] != 0 {
         return Err("Drive rejected the short self-test".into());

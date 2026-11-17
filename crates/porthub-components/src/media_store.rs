@@ -158,6 +158,10 @@ pub struct Manager {
 impl Manager {
     pub fn new(root: PathBuf, settings: Settings, transport: Arc<dyn Transport>) -> Result<Self> {
         settings.validate()?;
+        // Retain the same known OS-alias normalization used by directory validation.
+        // Later cache locks/publication must not traverse the original macOS alias.
+        #[cfg(target_os = "macos")]
+        let root = store::normalize_system_alias(root)?;
         store::secure_private_directory(&root)?;
         Ok(Self {
             root,

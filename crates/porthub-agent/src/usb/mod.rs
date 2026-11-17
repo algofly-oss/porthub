@@ -69,9 +69,9 @@ fn inventory() -> Vec<porthub_components::usb::Device> {
 }
 fn inventory_for(path: &Path) -> Vec<porthub_components::usb::Device> {
     let mut devices = inventory();
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux",windows))]
     devices.extend(relay::inventory(path));
-    #[cfg(not(target_os = "linux"))] let _ = path;
+    #[cfg(not(any(target_os = "linux",windows)))] let _ = path;
     devices.truncate(128); devices
 }
 fn capabilities()->[bool;2] {
@@ -84,6 +84,9 @@ fn ordinary_report(body:&mut Value) {
     if let Some(object)=body.as_object_mut(){object.remove("imports");}
     if let Some(devices)=body["devices"].as_array_mut(){devices.retain(|d|!d["busid"].as_str().is_some_and(relay::is_alias));}
 }
+fn physical_report_roles(body:&mut Value,roles:[bool;2]) {
+    body["can_export"]=json!(roles[0]);body["can_import"]=json!(roles[1]);body["supported"]=json!(roles[0]||roles[1]);
+}
 fn legacy_report(body:&mut Value) {
     ordinary_report(body);
     // Old gateways have no directional roles. Advertising partial support
@@ -95,8 +98,8 @@ fn legacy_report(body:&mut Value) {
 enum Handoff {
     #[cfg(target_os="macos")] Mac(macos::Handoff),
     #[cfg(target_os="linux")] Linux(linux::Handoff),
-    #[cfg(target_os="linux")] RelaySource(relay::Lease),
-    #[cfg(target_os="linux")] RelayDestination,
+    #[cfg(any(target_os="linux",windows))] RelaySource(relay::Lease),
+    #[cfg(any(target_os="linux",windows))] RelayDestination,
     #[cfg(windows)] Windows(windows::Handoff),
 }
 /// Lifetime-owned native local controller attachment for receiver-local class
@@ -106,8 +109,14 @@ enum Handoff {
 pub(crate) struct VirtualReceiver { _guard:Handoff }
 #[cfg(any(target_os="linux",windows))]
 impl VirtualReceiver {
+    #[cfg(all(test,windows))] pub(crate) fn relay_marker_for_fixture(&self,device:&porthub_components::usb::Device)->Result<windows::Marker> {
+        match &self._guard {Handoff::Windows(guard)=>guard.marker_for_fixture(device),_=>anyhow::bail!("Fixture requires owned native attachment")}
+    }
+    #[cfg(all(test,windows))] pub(crate) async fn detach_for_fixture(&mut self)->Result<()> {
+        match &mut self._guard {Handoff::Windows(guard)=>guard.detach().await,_=>anyhow::bail!("Fixture requires owned native attachment")}
+    }
     pub(crate) async fn failed(&mut self)->Result<()> {
-        #[cfg(windows)] {let Handoff::Windows(guard)=&mut self._guard;guard.failed().await}
+        #[cfg(windows)] {match &mut self._guard {Handoff::Windows(guard)=>guard.failed().await,_=>std::future::pending().await}}
         #[cfg(not(windows))] {std::future::pending().await}
     }
 }
@@ -120,6 +129,8 @@ pub(crate) async fn attach_virtual(profile:&Path,device:&porthub_components::usb
     #[cfg(windows)] {windows::module(false).await?;let(guard,stream)=windows::destination(device,wire).await?;return Ok((VirtualReceiver{_guard:Handoff::Windows(guard)},stream));}
     #[cfg(not(any(target_os="linux",windows)))] {anyhow::bail!("Receiver-local USB devices require Linux or the signed Windows virtual controller");}
 }
+#[cfg(all(test,windows))]
+pub(crate) async fn native_relay_fixture_baseline()->Result<windows::FixtureBaseline> {windows::fixture_baseline().await}
 fn transport_policy(policy: &features::Policy) -> [bool; 3] {
     [
         Feature::Usb,
@@ -157,9 +168,15 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
                 .cloned()
                 .collect::<Vec<_>>();
             let p = control.profile();
-            let [can_export,can_import]=capabilities();
-            let mut body = json!({"machine_id":p.machine_id,"token":p.token,"enabled":enabled,"supported":can_export||can_import,"can_export":can_export,"can_import":can_import,"devices":if enabled{inventory_for(&path)}else{vec![]},"states":report_states});
-            #[cfg(target_os="linux")] {
+            let physical_roles=capabilities();
+            let [can_export,can_import]=physical_roles;
+            let devices=if enabled{inventory_for(&path)}else{vec![]};
+            // An authenticated owned import can be routed without installing
+            // the physical USB host exporter. Never advertise that capability
+            // after removing aliases for an older gateway.
+            #[cfg(windows)] let can_export=can_export||devices.iter().any(|d|relay::is_alias(&d.busid)&&d.blocked.is_none());
+            let mut body = json!({"machine_id":p.machine_id,"token":p.token,"enabled":enabled,"supported":can_export||can_import,"can_export":can_export,"can_import":can_import,"devices":devices,"states":report_states});
+            #[cfg(any(target_os="linux",windows))] {
                 let mut imports=relay::imports(&path);
                 imports.retain(|r|body["devices"].as_array().is_some_and(|devices|devices.iter().any(|d|d["busid"]==r.busid)));
                 if let Some(devices)=body["devices"].as_array_mut(){devices.retain(|d|!d["busid"].as_str().is_some_and(relay::is_alias)||imports.iter().any(|r|d["busid"]==r.busid));}
@@ -168,10 +185,10 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
             let result = tokio::select! {_=work.cancelled()=>break,changed=policy.changed()=>{if changed.is_err(){break;}let next=transport_policy(&policy.borrow());if next!=permissions{sessions.clear();permissions=next;}continue;},reply=control.request(reqwest::Method::POST,"usb/client/report",Some(body.clone()),&[])=>reply};
             // Gateways with directional roles but no relay support must keep
             // ordinary USB (including export-only Mac sources) operational.
-            let result=if matches!(result,Err(crate::control::Failure::Rejected(422))) { ordinary_report(&mut body);control.request(reqwest::Method::POST,"usb/client/report",Some(body.clone()),&[]).await }else{result};
-            let result=if matches!(result,Err(crate::control::Failure::Rejected(422))) { legacy_report(&mut body);control.request(reqwest::Method::POST,"usb/client/report",Some(body),&[]).await }else{result};
+            let result=if matches!(result,Err(crate::control::Failure::Rejected(422))) { physical_report_roles(&mut body,physical_roles);ordinary_report(&mut body);control.request(reqwest::Method::POST,"usb/client/report",Some(body.clone()),&[]).await }else{result};
+            let result=if matches!(result,Err(crate::control::Failure::Rejected(422))) { physical_report_roles(&mut body,physical_roles);legacy_report(&mut body);control.request(reqwest::Method::POST,"usb/client/report",Some(body),&[]).await }else{result};
             let response = result.ok().and_then(|r| r.json().ok());
-            #[cfg(target_os="linux")]
+            #[cfg(any(target_os="linux",windows))]
             relay::gateway(&path,response.as_ref().is_some_and(|v|v["relay_version"]==1));
             let plans = response.and_then(|v|serde_json::from_value::<Vec<Forward>>(v["forwards"].clone()).ok());
             let Some(plans) = plans else {
@@ -211,13 +228,13 @@ pub fn start(path: PathBuf, control: Arc<Control>, cancel: CancellationToken) ->
                         .get(&plan.id)
                         .is_none_or(|s| s.state != "retry-relay");
                     set_state(&states, &plan.id, "connecting", None);
-                    #[cfg(target_os="linux")]
+                    #[cfg(any(target_os="linux",windows))]
                     let _import = if plan.destination == control.profile().machine_id {
                         match relay::register(&path,&plan) { Ok(guard)=>Some(guard),Err(error)=>{set_state(&states,&plan.id,"error",Some(error.to_string()));return;} }
                     } else { None };
-                    #[cfg(target_os="linux")]
+                    #[cfg(any(target_os="linux",windows))]
                     let reroute = _import.as_ref().map(relay::ImportGuard::subscribe);
-                    #[cfg(not(target_os="linux"))]
+                    #[cfg(not(any(target_os="linux",windows)))]
                     let reroute: Option<tokio::sync::watch::Receiver<u64>> = None;
                     let result = loop {
                         let mut epoch=reroute.clone();if let Some(changes)=epoch.as_mut(){changes.borrow_and_update();}
@@ -452,7 +469,7 @@ async fn session(
         "USB rule does not belong to this machine"
     );
     ensure!(plan.device.valid(), "Invalid USB device configuration");
-    #[cfg(target_os="linux")]
+    #[cfg(any(target_os="linux",windows))]
     let mut relayed = if source && relay::is_alias(&plan.device.busid) {
         // A positive capability report alone is insufficient after authority
         // failover. Authorize this exact ancestry on the selected gateway; an
@@ -461,12 +478,18 @@ async fn session(
         let reply=control.request(reqwest::Method::POST,"usb/client/relay-authorize",Some(json!({"machine_id":p.machine_id,"token":p.token,"id":plan.id})),&[]).await.map_err(|_|anyhow::anyhow!("Gateway cannot authorize this USB relay; upgrade the gateway and recreate its forwarding rule"))?;
         let authorization=reply.json()?;
         ensure!(authorization["relay_version"]==1&&authorization["upstream_id"]==relay::upstream(path,&plan.device.busid)?,"USB relay lineage authorization changed");
-        let mut lease=relay::claim(path,&plan.device.busid,&plan.id)?;
+        #[cfg(target_os="linux")] let mut lease=relay::claim(path,&plan.device.busid,&plan.id)?;
+        #[cfg(windows)] let mut lease={
+            let profile=path.to_owned();let alias=plan.device.busid.clone();let child=plan.id.clone();
+            // Native descriptor/volume inspection must not block carrier or
+            // policy futures. A canceled waiter drops the eventual owned lease.
+            tokio::task::spawn_blocking(move||relay::claim(&profile,&alias,&child)).await??
+        };
         let (stream,metadata)=tokio::time::timeout(Duration::from_secs(60),lease.ready()).await??;
         Some((lease,stream,metadata))
     } else { None };
     #[cfg(target_os="linux")] if relayed.is_none(){linux::module(source).await?;}
-    #[cfg(windows)] windows::module(source).await?;
+    #[cfg(windows)] if relayed.is_none(){windows::module(source).await?;}
     #[cfg(target_os="macos")] macos::prepare(source).await?;
     let mut socket = open(
         &control,
@@ -503,7 +526,8 @@ async fn session(
             let(guard,stream,actual,bytes)=macos::source(path,&device).await?;device=actual;wire=Some(bytes);prepared=Some((Handoff::Mac(guard),stream));
         }
         #[cfg(windows)] {
-            let(guard,stream,actual,bytes)=windows::source(path,&device).await?;device=actual;wire=Some(bytes);prepared=Some((Handoff::Windows(guard),stream));
+            if let Some((lease,stream,metadata))=relayed.take(){device=metadata.device;wire=Some(metadata.wire);prepared=Some((Handoff::RelaySource(lease),stream));}
+            else {let(guard,stream,actual,bytes)=windows::source(path,&device).await?;device=actual;wire=Some(bytes);prepared=Some((Handoff::Windows(guard),stream));}
         }
     }
     text(
@@ -541,7 +565,8 @@ async fn session(
         }
         #[cfg(windows)] {
             let bytes=if remote["usbip"].is_null(){protocol::legacy_device(&device)?}else{serde_json::from_value::<Vec<u8>>(remote["usbip"].clone())?};
-            let(guard,stream)=windows::destination(&device,&bytes).await?;(Handoff::Windows(guard),stream)
+            if let Some(stream)=relay::destination(path,plan,relay::Metadata{device:device.clone(),wire:bytes.clone(),restart:direct.restart})? {(Handoff::RelayDestination,stream)}
+            else {let(guard,stream)=windows::destination_registered(path,plan,&device,&bytes).await?;(Handoff::Windows(guard),stream)}
         }
     };
     set_state(
@@ -560,7 +585,17 @@ async fn session(
             bridge_bulk(stream,socket,bulk,features::subscribe(path),reroute,direct.restart).await
         } else {bridge(stream,socket,direct.sctp,features::subscribe(path),reroute,direct.restart).await}
     };
-    #[cfg(windows)] {let Handoff::Windows(guard)=&mut handoff;tokio::select!{result=transfer=>result,error=guard.failed()=>error}}
+    #[cfg(windows)] {
+        match &mut handoff {
+            Handoff::Windows(guard)=>{
+                let result=tokio::select!{result=transfer=>result,error=guard.failed()=>error};
+                // The parent reconnect cannot make a downstream epoch ready
+                // until this owned local controller has explicitly settled.
+                guard.detach().await?;result
+            },
+            _=>{let _guard=handoff;transfer.await},
+        }
+    }
     #[cfg(any(target_os="linux",target_os="macos"))] {let _guard=handoff;transfer.await}
 }
 fn planned_ack(value:&str)->bool {serde_json::from_str::<Value>(value).is_ok_and(|v|v["type"]=="path"&&v["route"]=="restart-ack")}
@@ -964,6 +999,15 @@ mod stream_tests {
 #[cfg(test)]
 mod capability_tests {
     use super::*;
+    #[test]
+    fn alias_only_export_fallback_keeps_captured_physical_roles() {
+        let mut body=serde_json::json!({"can_export":true,"can_import":true,"supported":true,"imports":[],"devices":[{"busid":"0-9"}]});
+        physical_report_roles(&mut body,[false,true]);ordinary_report(&mut body);
+        assert_eq!(body["can_export"],false);assert_eq!(body["can_import"],true);assert!(body["devices"].as_array().unwrap().is_empty());
+        legacy_report(&mut body);assert_eq!(body["supported"],false);
+        physical_report_roles(&mut body,[true,false]);assert_eq!(body["can_import"],false);legacy_report(&mut body);
+        assert!(body["can_import"].is_null());assert_eq!(body["supported"],false);
+    }
     #[test]
     fn gateway44_contract_preserves_ordinary_devices_and_directional_roles() {
         // Exact report shape accepted before relay fields were introduced.

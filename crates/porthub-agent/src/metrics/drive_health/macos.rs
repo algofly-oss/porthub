@@ -130,17 +130,34 @@ pub(super) fn inventory() -> Vec<Device> {
                 .or_else(|| row["Size"].as_u64())?;
             // Preserve the established hashed identity when richer OS details
             // become available; correcting protocol must not reset history.
-            let mut device=Device::new(path, name, serial, "os_smart", capacity);
-            if super::macos_reading::has_nvme_details(&data){device.protocol="nvme".into();}
+            let mut device = Device::new(path, name, serial, "os_smart", capacity);
+            if super::macos_reading::has_nvme_details(&data) {
+                device.protocol = "nvme".into();
+            }
             Some(device)
         })
         .collect()
 }
 pub(super) fn probe(device: &Device) -> Result<Reading, String> {
     let data = info(&device.path)?;
+    let model = data["MediaName"].as_str().unwrap_or("Physical drive");
+    let serial = data["SerialNumber"]
+        .as_str()
+        .or_else(|| data["DeviceTreePath"].as_str())
+        .unwrap_or("");
+    let capacity = data["IOKitSize"]
+        .as_u64()
+        .or_else(|| data["TotalSize"].as_u64())
+        .ok_or("Native drive capacity unavailable")?;
+    let mut current = Device::new(device.path.clone(), model, serial, "os_smart", capacity);
+    // Optional NVMe detail keys may disappear without changing physical identity.
+    current.protocol = device.protocol.clone();
+    if !device.same_identity(&current) {
+        return Err("Native drive identity changed".into());
+    }
     super::macos_reading::parse(&data)
 }
 
-pub(super) fn short_test(_: &Device, _: &Reading) -> Result<(), String> {
+pub(super) fn short_test(_: &Device, _: &Reading, _: &dyn Fn() -> bool) -> Result<(), String> {
     Err("The native Apple storage driver does not expose short self-tests".into())
 }

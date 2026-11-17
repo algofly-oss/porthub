@@ -38,6 +38,7 @@ struct State {
     child: Option<Child>,
     closed: bool,
     local_port: Option<u32>,
+    #[cfg(windows)] local_windows:Option<super::windows::Marker>,
     routed: bool,
 }
 struct Entry {
@@ -46,10 +47,13 @@ struct Entry {
     state: Mutex<State>,
     changed: watch::Sender<u64>,
 }
+#[cfg(windows)]
+struct Retirement {marker:super::windows::Marker,plan:Forward}
 #[derive(Default)]
 struct Registry {
     entries: HashMap<(PathBuf, String), Weak<Entry>>,
     gateways: HashMap<PathBuf, bool>,
+    #[cfg(windows)] retiring:HashMap<(PathBuf,String),Retirement>,
 }
 fn registry() -> &'static Mutex<Registry> {
     static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
@@ -92,6 +96,7 @@ fn supported(path: &Path) -> bool {
 fn entries(path: &Path) -> Vec<Arc<Entry>> {
     let mut r = registry().lock().unwrap_or_else(|p| p.into_inner());
     r.entries.retain(|_, e| e.strong_count() > 0);
+    #[cfg(windows)] registry_prune_retired(&mut r);
     r.entries
         .iter()
         .filter(|((p, _), _)| p == path)
@@ -121,7 +126,7 @@ fn descriptor(entry: &Entry, state: &State, gate: bool) -> Option<Device> {
         Some("Upstream agent upgrade required for safe USB rerouting".into())
     } else if state.child.is_some() {
         Some("Device is forwarded onward; stop its downstream session first".into())
-    } else if !state.routed && state.local_port.is_none() {
+    } else if !state.routed && !has_local(state) {
         Some("Waiting for the imported USB controller".into())
     } else {
         #[cfg(target_os = "linux")]
@@ -132,27 +137,39 @@ fn descriptor(entry: &Entry, state: &State, gate: bool) -> Option<Device> {
                     .map(|error| error.to_string().chars().take(256).collect())
             })
         }
-        #[cfg(not(target_os = "linux"))]
-        {
-            None
-        }
+        #[cfg(windows)] {None}
+        #[cfg(not(any(target_os = "linux",windows)))] {None}
     };
     Some(d)
 }
 pub(super) fn inventory(path: &Path) -> Vec<Device> {
-    let gate = supported(path);
-    entries(path)
-        .into_iter()
-        .filter_map(|e| {
-            let s = e.state.lock().unwrap_or_else(|p| p.into_inner());
-            if s.closed {
-                None
-            } else {
-                descriptor(&e, &s, gate)
+    let gate=supported(path);
+    #[cfg(windows)] {
+        let candidates=entries(path).into_iter().filter_map(|entry| {
+            let state=entry.state.lock().unwrap_or_else(|p|p.into_inner());
+            if state.closed {return None}
+            let device=descriptor(&entry,&state,gate)?;
+            let marker=if device.blocked.is_none(){state.local_windows.clone()}else{None};
+            Some((device,marker))
+        }).collect::<Vec<_>>();
+        // One bounded storage inventory for all displayed aliases, never one
+        // full disk/volume scan per alias. Claims always take a fresh snapshot.
+        let snapshot=candidates.iter().any(|(_,m)|m.is_some()).then(super::windows::StorageSnapshot::capture);
+        return candidates.into_iter().map(|(mut device,marker)| {
+            if let (Some(marker),Some(snapshot))=(marker,snapshot.as_ref()) {
+                if let Err(error)=marker.validate_with(snapshot){device.blocked=Some(error.to_string().chars().take(256).collect());}
             }
-        })
-        .collect()
+            device
+        }).collect();
+    }
+    #[cfg(not(windows))] {
+        entries(path).into_iter().filter_map(|entry| {
+            let state=entry.state.lock().unwrap_or_else(|p|p.into_inner());
+            if state.closed {None}else{descriptor(&entry,&state,gate)}
+        }).collect()
+    }
 }
+
 #[derive(Serialize)]
 pub(super) struct Import {
     pub busid: String,
@@ -184,28 +201,39 @@ impl ImportGuard {
 }
 impl Drop for ImportGuard {
     fn drop(&mut self) {
-        let mut r = registry().lock().unwrap_or_else(|p| p.into_inner());
-        let key = (self.path.clone(), self.entry.plan.id.clone());
-        if r.entries
-            .get(&key)
-            .is_some_and(|e| Weak::ptr_eq(e, &Arc::downgrade(&self.entry)))
-        {
-            r.entries.remove(&key);
-        }
-        drop(r);
-        let mut s = self.entry.state.lock().unwrap_or_else(|p| p.into_inner());
-        s.closed = true;
-        if let Some(child) = s.child.take() {
-            child.cancel.cancel();
-        }
-        drop(s);
+        let mut registry=registry().lock().unwrap_or_else(|p|p.into_inner());
+        let key=(self.path.clone(),self.entry.plan.id.clone());
+        let mut state=self.entry.state.lock().unwrap_or_else(|p|p.into_inner());
+        state.closed=true;
+        if let Some(child)=state.child.take(){child.cancel.cancel();}
+        #[cfg(windows)] let retiring=state.local_windows.clone().filter(|marker|!marker.settled());
+        #[cfg(windows)] if let Some(marker)=&retiring {registry.retiring.insert(key.clone(),Retirement{marker:marker.clone(),plan:self.entry.plan.clone()});}
+        if registry.entries.get(&key).is_some_and(|entry|Weak::ptr_eq(entry,&Arc::downgrade(&self.entry))) {registry.entries.remove(&key);}
+        drop(state);drop(registry);
+        #[cfg(windows)] if let Some(marker)=retiring {marker.retire();}
         changed(&self.entry);
     }
 }
+
+#[cfg(windows)]
+fn registry_prune_retired(registry:&mut Registry) {registry.retiring.retain(|_,record|!record.marker.settled());}
+#[cfg(windows)]
+fn retired_conflicts(path:&Path,plan:&Forward,key:&(PathBuf,String),record:&Retirement)->bool {
+    key.0==path && (alias(&key.1)==alias(&plan.id) || (record.plan.source==plan.source && record.plan.device.vendor==plan.device.vendor && record.plan.device.product==plan.device.product && (record.plan.device.serial.is_empty() || plan.device.serial.is_empty() || record.plan.device.serial==plan.device.serial)))
+}
 pub(super) fn register(path: &Path, plan: &Forward) -> Result<ImportGuard> {
+    #[cfg(windows)] {
+        let pending=registry().lock().unwrap_or_else(|p|p.into_inner()).retiring.iter().filter(|(key,record)|retired_conflicts(path,plan,key,record)).map(|(_,record)|record.marker.clone()).collect::<Vec<_>>();
+        for marker in pending {ensure!(marker.settled()||marker.reconcile_retired()?,"Previous owned USB attachment for this source/device is still settling");}
+    }
     let alias = alias(&plan.id);
     let mut r = registry().lock().unwrap_or_else(|p| p.into_inner());
     let key = (path.to_owned(), plan.id.clone());
+    #[cfg(windows)] {
+        registry_prune_retired(&mut r);
+        ensure!(!r.retiring.iter().any(|(key,record)|retired_conflicts(path,plan,key,record)),"Previous owned USB source/device remains fenced");
+        ensure!(r.entries.len()+r.retiring.len()<128,"Native USB import/retirement capacity reached");
+    }
     ensure!(
         !r.entries.get(&key).is_some_and(|e| e.strong_count() > 0),
         "USB import already registered"
@@ -225,6 +253,7 @@ pub(super) fn register(path: &Path, plan: &Forward) -> Result<ImportGuard> {
             child: None,
             closed: false,
             local_port: None,
+            #[cfg(windows)] local_windows:None,
             routed: false,
         }),
         changed,
@@ -252,8 +281,10 @@ pub(super) fn destination(
     );
     let mut s = entry.state.lock().unwrap_or_else(|p| p.into_inner());
     ensure!(!s.closed, "USB import ended");
+    #[cfg(windows)] check_local_settled(s.local_windows.as_ref().map(|marker|marker.settled()))?;
     s.metadata = Some(metadata.clone());
     s.local_port = None;
+    #[cfg(windows)] {s.local_windows=None;}
     s.routed = s.child.is_some();
     if let Some(child) = s.child.as_mut() {
         ensure!(
@@ -276,6 +307,21 @@ pub(super) fn destination(
     } else {
         Ok(None)
     }
+}
+#[cfg(any(windows,test))]
+fn check_local_settled(settled:Option<bool>)->Result<()> {
+    ensure!(settled!=Some(false),"Owned imported USB controller has not settled before rerouting");Ok(())
+}
+fn has_local(state:&State)->bool {
+    #[cfg(windows)] {state.local_windows.is_some()}
+    #[cfg(not(windows))] {state.local_port.is_some()}
+}
+#[cfg(windows)]
+pub(super) fn local_windows(path:&Path,id:&str,marker:super::windows::Marker)->Result<()> {
+    let entry=entries(path).into_iter().find(|e|e.plan.id==id).context("USB import registry unavailable")?;
+    let mut state=entry.state.lock().unwrap_or_else(|p|p.into_inner());
+    ensure!(!state.closed && state.child.is_none(),"USB import ownership changed");
+    state.local_windows=Some(marker);state.routed=false;Ok(())
 }
 pub(super) fn local(path: &Path, id: &str, port: u32) -> Result<()> {
     let entry = entries(path)
@@ -350,6 +396,12 @@ pub(super) fn upstream(path: &Path, busid: &str) -> Result<String> {
     Ok(find(path, busid)?.plan.id.clone())
 }
 pub(super) fn claim(path: &Path, busid: &str, child_id: &str) -> Result<Lease> {
+    #[cfg(windows)] let checked={
+        let entry=find(path,busid)?;
+        let marker=entry.state.lock().unwrap_or_else(|p|p.into_inner()).local_windows.clone();
+        if let Some(marker)=&marker {marker.validate()?;}
+        marker
+    };
     claim_checked(path, busid, child_id, |state, meta| {
         #[cfg(target_os = "linux")]
         {
@@ -362,11 +414,15 @@ pub(super) fn claim(path: &Path, busid: &str, child_id: &str) -> Result<Lease> {
                 );
             }
         }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = (state, meta);
-            anyhow::bail!("This native USB relay requires Linux");
+        #[cfg(windows)] {
+            let _=meta;
+            match (&checked,&state.local_windows) {
+                (Some(checked),Some(current))=>ensure!(current.same(checked)&&current.active(),"Imported USB ownership changed during claim"),
+                (None,None)=>ensure!(state.routed,"Imported USB is still changing ownership; retry shortly"),
+                _=>anyhow::bail!("Imported USB ownership changed during claim"),
+            }
         }
+        #[cfg(not(any(target_os="linux",windows)))] {let _=(state,meta);anyhow::bail!("Native USB relay unavailable on this platform");}
         Ok(())
     })
 }
@@ -439,6 +495,88 @@ mod tests {
             },
             persistent: false,
         }
+    }
+    #[cfg(windows)]
+    #[test]
+    fn canceled_pending_plug_late_success_cleanup_busy_keeps_exact_key_fenced()->Result<()> {
+        let dir=tempfile::tempdir()?;let p=plan();gateway(dir.path(),true);
+        let import=register(dir.path(),&p)?;
+        let marker=super::super::windows::Marker::pending_test(p.device.clone());
+        local_windows(dir.path(),&p.id,marker.clone())?;
+        drop(import); // Cancellation before PLUG returns a positive port.
+        assert!(registry().lock().unwrap_or_else(|p|p.into_inner()).retiring.contains_key(&(dir.path().to_owned(),p.id.clone())));
+        assert!(register(dir.path(),&p).is_err());
+        // The real completion/cleanup reducers receive a late owned inert File.
+        // Busy/failed cleanup cannot prove settlement or erase the retirement.
+        marker.late_success_test(false)?;
+        assert!(!marker.settled());assert!(register(dir.path(),&p).is_err());
+        assert!(!marker.reconcile_test(false));assert!(register(dir.path(),&p).is_err());
+        let mut unrelated=plan();unrelated.device.serial="different-owned-device".into();let other=register(dir.path(),&unrelated)?;drop(other);
+        assert!(marker.reconcile_test(true));
+        let next=register(dir.path(),&p)?;drop(next);
+        Ok(())
+    }
+    #[cfg(windows)]
+    #[test]
+    fn recreated_plan_and_serialless_bus_change_cannot_bypass_pending_device_fence()->Result<()> {
+        let dir=tempfile::tempdir()?;let mut p=plan();p.device.serial.clear();gateway(dir.path(),true);
+        let import=register(dir.path(),&p)?;let marker=super::super::windows::Marker::pending_test(p.device.clone());local_windows(dir.path(),&p.id,marker.clone())?;drop(import);
+        let mut recreated=p.clone();recreated.id=uuid::Uuid::new_v4().simple().to_string();recreated.device.busid="7-9".into();
+        assert!(register(dir.path(),&recreated).is_err());marker.late_success_test(false)?;assert!(register(dir.path(),&recreated).is_err());
+        let mut other_source=recreated.clone();other_source.source="c".repeat(24);let other=register(dir.path(),&other_source)?;drop(other);
+        assert!(marker.reconcile_test(true));let next=register(dir.path(),&recreated)?;drop(next);Ok(())
+    }
+    #[cfg(windows)]
+    #[test]
+    fn failed_local_detach_then_import_drop_cannot_erase_the_retirement_fence()->Result<()> {
+        let dir=tempfile::tempdir()?;let p=plan();gateway(dir.path(),true);
+        let import=register(dir.path(),&p)?;let marker=super::super::windows::Marker::pending_test(p.device.clone());
+        local_windows(dir.path(),&p.id,marker.clone())?;
+        marker.retire();marker.late_success_test(false)?;
+        assert!(!marker.settled());drop(import);
+        assert!(register(dir.path(),&p).is_err());assert!(!marker.reconcile_test(false));
+        assert!(marker.reconcile_test(true));let next=register(dir.path(),&p)?;drop(next);Ok(())
+    }
+    #[cfg(windows)]
+    #[test]
+    fn canceled_pending_plug_late_success_requires_completed_cleanup_before_reregister()->Result<()> {
+        let dir=tempfile::tempdir()?;let p=plan();gateway(dir.path(),true);
+        let import=register(dir.path(),&p)?;let marker=super::super::windows::Marker::pending_test(p.device.clone());
+        local_windows(dir.path(),&p.id,marker.clone())?;drop(import);
+        assert!(register(dir.path(),&p).is_err());marker.late_success_test(true)?;
+        assert!(marker.settled());let next=register(dir.path(),&p)?;drop(next);Ok(())
+    }
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_child_cannot_receive_epoch_until_owned_local_settles()->Result<()> {
+        let dir=tempfile::tempdir()?;let p=plan();gateway(dir.path(),true);
+        let _import=register(dir.path(),&p)?;
+        let metadata=Metadata{device:p.device.clone(),wire:super::super::protocol::legacy_device(&p.device)?,restart:true};
+        assert!(destination(dir.path(),&p,metadata.clone())?.is_none());
+        let marker=super::super::windows::Marker::pending_test(p.device.clone());
+        local_windows(dir.path(),&p.id,marker.clone())?;
+        let d=inventory(dir.path()).remove(0);
+        let mut lease=claim_checked(dir.path(),&d.busid,"child",|_,_|Ok(()))?;
+        assert!(destination(dir.path(),&p,metadata.clone()).is_err());
+        // A failed/pending detach leaves the old marker false; no stream or
+        // metadata is handed to the child and its readiness remains pending.
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(5),lease.ready()).await.is_err());
+        // ready() is single-use, so obtain a fresh owned lease after cancellation.
+        drop(lease);
+        let mut lease=claim_checked(dir.path(),&d.busid,"next",|_,_|Ok(()))?;
+        marker.settle_test();
+        let _producer=destination(dir.path(),&p,metadata)?.context("Fresh downstream stream missing")?;
+        let (_consumer,received)=lease.ready().await?;
+        assert_eq!(received.device.busid,d.busid);
+        Ok(())
+    }
+    #[test]
+    fn downstream_epoch_requires_explicit_local_settlement() {
+        assert!(check_local_settled(None).is_ok());
+        // Attachment remains unready throughout unplug/pending PnP removal,
+        // timeout, and failed detach. Only explicit settled success releases it.
+        assert!(check_local_settled(Some(false)).is_err());
+        assert!(check_local_settled(Some(true)).is_ok());
     }
     #[tokio::test]
     async fn exclusive_routing_preserves_bytes_and_releases_to_local_import() -> Result<()> {

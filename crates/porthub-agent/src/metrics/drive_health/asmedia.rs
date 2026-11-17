@@ -5,10 +5,10 @@
 //! No arbitrary opcodes, output transfers, self-tests, or firmware operations.
 use super::{Device, Sg};
 use std::{
-    fs::{File, OpenOptions},
+    fs::File,
     os::{
         fd::AsRawFd,
-        unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt},
+        unix::fs::{FileTypeExt, MetadataExt},
     },
     path::{Path, PathBuf},
 };
@@ -201,24 +201,25 @@ fn valid_identify(data: &[u8]) -> bool {
         |v: &[u8]| v.iter().all(|c| matches!(c, 0x20..=0x7e)) && v.iter().any(|b| *b != b' ');
     vendor != 0 && vendor != u16::MAX && text(&data[4..24]) && text(&data[24..64])
 }
-pub(super) fn probe(device: &Device) -> Result<super::super::Reading, String> {
+pub(super) fn probe(session: &super::Session<'_>) -> Result<super::super::Reading, String> {
+    let device = session.device;
+    session.validate()?;
     if device.in_use || device.asleep {
         return Err(ERROR.into());
     }
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(&device.path)
-        .map_err(|_| ERROR)?;
+    let file = &session.disk;
     let original = bind(&file, device)?;
+    session.validate()?;
     let identify = transfer(&file, Query::IdentifyController)?;
     if !valid_identify(&identify) || bind(&file, device)? != original {
         return Err(ERROR.into());
     }
+    session.validate()?;
     let health = transfer(&file, Query::Health)?;
     if bind(&file, device)? != original {
         return Err(ERROR.into());
     }
+    session.validate()?;
     let mut reading = super::super::nvme(&health)?;
     reading.short_test_supported = false;
     reading.self_test = "unsupported".into();

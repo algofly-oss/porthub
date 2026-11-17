@@ -3,8 +3,205 @@ mod asmedia;
 use super::*;
 use std::{
     fs::{File, OpenOptions},
-    os::fd::AsRawFd,
+    os::{
+        fd::AsRawFd,
+        unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt},
+    },
 };
+// Inventory caches only a kernel sysfs-generation witness, never raw handles.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Binding {
+    sysfs: PathBuf,
+    sysfs_key: (u64, u64),
+    rdev: u64,
+    command_sysfs: PathBuf,
+    command_key: (u64, u64),
+    command_rdev: u64,
+}
+fn native_open(path: &Path) -> Result<File, String> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|_| "Native drive object unavailable".into())
+}
+fn key(path: &Path) -> Result<(u64, u64), String> {
+    let m = std::fs::metadata(path).map_err(|_| "Native drive identity unavailable")?;
+    Ok((m.dev(), m.ino()))
+}
+fn dev_number(path: &Path) -> Result<u64, String> {
+    let v = value(path, "dev");
+    let (major, minor) = v.split_once(':').ok_or("Native drive number unavailable")?;
+    Ok(libc::makedev(
+        major.parse().map_err(|_| "Invalid native drive major")?,
+        minor.parse().map_err(|_| "Invalid native drive minor")?,
+    ))
+}
+fn current_identity(device: &Device, sysfs: &Path) -> Result<Device, String> {
+    let name = device
+        .path
+        .file_name()
+        .ok_or("Native drive name missing")?
+        .to_string_lossy();
+    let base = sysfs.join("device");
+    let mut model = value(&base, "model");
+    let mut serial = value(&base, "serial");
+    if device.protocol == "nvme" {
+        let ctrl = Path::new("/sys/class/nvme").join(
+            name.rsplit_once('n')
+                .map(|(v, _)| v)
+                .ok_or("Invalid NVMe namespace")?,
+        );
+        model = value(&ctrl, "model");
+        serial = value(&ctrl, "serial");
+    }
+    if serial.is_empty() {
+        serial = value(sysfs, "wwid");
+    }
+    let capacity = value(sysfs, "size")
+        .parse::<u64>()
+        .ok()
+        .and_then(|v| v.checked_mul(512))
+        .ok_or("Native drive capacity unavailable")?;
+    let mut current = Device::new(
+        device.path.clone(),
+        &model,
+        &serial,
+        if device.protocol == "nvme_usb" {
+            "ata"
+        } else {
+            &device.protocol
+        },
+        capacity,
+    );
+    current.protocol = device.protocol.clone();
+    Ok(current)
+}
+fn held_node_matches(file: &File, path: &Path) -> Result<bool, String> {
+    let held = file
+        .metadata()
+        .map_err(|_| "Held native object unavailable")?;
+    let current = std::fs::symlink_metadata(path).map_err(|_| "Native node removed")?;
+    Ok(!current.file_type().is_symlink()
+        && (held.dev(), held.ino(), held.rdev()) == (current.dev(), current.ino(), current.rdev()))
+}
+impl Binding {
+    #[cfg(test)]
+    pub(super) fn test_generation(value: u64) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            sysfs: "/test/sysfs/drive".into(),
+            sysfs_key: (1, value),
+            rdev: 1,
+            command_sysfs: "/test/sysfs/drive".into(),
+            command_key: (1, value),
+            command_rdev: 1,
+        })
+    }
+    fn capture(device: &Device, sysfs: &Path) -> Result<Self, String> {
+        let sysfs = std::fs::canonicalize(sysfs).map_err(|_| "Native sysfs object unavailable")?;
+        let sysfs_key = key(&sysfs)?;
+        let rdev = dev_number(&sysfs)?;
+        let command_sysfs = if device.protocol == "nvme" {
+            Path::new("/sys/class/nvme").join(
+                controller(device)
+                    .file_name()
+                    .ok_or("NVMe controller missing")?,
+            )
+        } else {
+            sysfs.clone()
+        };
+        let command_key = key(&command_sysfs)?;
+        let command_rdev = dev_number(&command_sysfs)?;
+        let binding = Self {
+            sysfs,
+            sysfs_key,
+            rdev,
+            command_sysfs,
+            command_key,
+            command_rdev,
+        };
+        binding.validate(device)?;
+        Ok(binding)
+    }
+    fn validate(&self, expected: &Device) -> Result<(), String> {
+        let current = std::fs::canonicalize(
+            Path::new("/sys/class/block")
+                .join(expected.path.file_name().ok_or("Drive name missing")?),
+        )
+        .map_err(|_| "Drive removed")?;
+        if current != self.sysfs
+            || key(&current)? != self.sysfs_key
+            || dev_number(&current)? != self.rdev
+            || !expected.same_identity(&current_identity(expected, &current)?)
+        {
+            return Err("Native drive identity changed".into());
+        }
+        if key(&self.command_sysfs)? != self.command_key
+            || dev_number(&self.command_sysfs)? != self.command_rdev
+        {
+            return Err("Native controller generation changed".into());
+        }
+        if value(&current.join("device/power"), "runtime_status") == "suspended"
+            || current.ancestors().any(|p| {
+                std::fs::read_link(p.join("driver"))
+                    .ok()
+                    .is_some_and(|d| d.file_name().is_some_and(|n| n == "usbip-host"))
+            })
+        {
+            return Err("Native drive sleeping or forwarded".into());
+        }
+        Ok(())
+    }
+}
+struct Session<'a> {
+    device: &'a Device,
+    binding: &'a Binding,
+    disk: File,
+    command: File,
+}
+impl<'a> Session<'a> {
+    fn open(device: &'a Device) -> Result<Self, String> {
+        let binding = device
+            .native
+            .as_deref()
+            .ok_or("Native inventory generation unavailable")?;
+        binding.validate(device)?;
+        let disk = native_open(&device.path)?;
+        let command = if device.protocol == "nvme" {
+            native_open(&controller(device))?
+        } else {
+            disk.try_clone().map_err(|_| "Cannot retain native disk")?
+        };
+        let session = Self {
+            device,
+            binding,
+            disk,
+            command,
+        };
+        session.validate()?;
+        Ok(session)
+    }
+    fn validate(&self) -> Result<(), String> {
+        self.binding.validate(self.device)?;
+        if !held_node_matches(&self.disk, &self.device.path)?
+            || !held_node_matches(&self.command, &controller_path(self.device))?
+        {
+            return Err("Native pathname no longer names held object".into());
+        }
+        let disk = self.disk.metadata().map_err(|_| "Native disk removed")?;
+        let command = self
+            .command
+            .metadata()
+            .map_err(|_| "Native controller removed")?;
+        if !disk.file_type().is_block_device()
+            || disk.rdev() != self.binding.rdev
+            || command.rdev() != self.binding.command_rdev
+        {
+            return Err("Opened native drive object changed".into());
+        }
+        Ok(())
+    }
+}
 fn value(path: &Path, name: &str) -> String {
     std::fs::read_to_string(path.join(name))
         .unwrap_or_default()
@@ -93,6 +290,12 @@ pub(super) fn inventory() -> Vec<Device> {
                     .unwrap_or(false)
             })
         });
+        // Sleeping drives remain reportable without opening/waking their controller.
+        if !device.asleep && !device.in_use {
+            device.native = Binding::capture(&device, &path)
+                .ok()
+                .map(std::sync::Arc::new);
+        }
         devices.push(device);
     }
     devices.sort_by(|a, b| a.path.cmp(&b.path));
@@ -120,6 +323,13 @@ struct Nvme {
     timeout_ms: u32,
     result: u32,
 }
+fn controller_path(device: &Device) -> PathBuf {
+    if device.protocol == "nvme" {
+        controller(device)
+    } else {
+        device.path.clone()
+    }
+}
 fn controller(device: &Device) -> PathBuf {
     let name = device
         .path
@@ -128,8 +338,15 @@ fn controller(device: &Device) -> PathBuf {
         .to_string_lossy();
     Path::new("/dev").join(name.rsplit_once('n').map(|(v, _)| v).unwrap_or(&name))
 }
-fn nvme_command(device: &Device, opcode: u8, cdw10: u32, data: &mut [u8]) -> Result<(), String> {
-    let file = File::open(controller(device)).map_err(|_| "NVMe device unavailable".to_owned())?;
+fn nvme_command(
+    session: &Session<'_>,
+    opcode: u8,
+    cdw10: u32,
+    data: &mut [u8],
+    allowed: Option<&dyn Fn() -> bool>,
+) -> Result<(), String> {
+    session.validate()?;
+    let file = &session.command;
     let mut cmd = Nvme {
         opcode,
         nsid: if opcode == 6 { 0 } else { u32::MAX },
@@ -141,6 +358,9 @@ fn nvme_command(device: &Device, opcode: u8, cdw10: u32, data: &mut [u8]) -> Res
     };
     let code =
         0xc0000000u64 | ((std::mem::size_of::<Nvme>() as u64) << 16) | (b'N' as u64) << 8 | 0x41;
+    if allowed.is_some_and(|check| !check()) {
+        return Err("Short self-tests disabled locally".into());
+    }
     if unsafe { libc::ioctl(file.as_raw_fd(), code as _, &mut cmd) } != 0 {
         return Err("NVMe SMART command unavailable".into());
     }
@@ -172,18 +392,17 @@ struct Sg {
     info: u32,
 }
 fn ata_command(
-    device: &Device,
+    session: &Session<'_>,
     command: u8,
     feature: u8,
     lba: u8,
     data: &mut [u8],
+    allowed: Option<&dyn Fn() -> bool>,
 ) -> Result<Vec<u8>, String> {
     // The file is read-only, including SMART EXECUTE OFFLINE: the sole non-read
     // operation permitted here is the device's non-destructive short self-test.
-    let file = OpenOptions::new()
-        .read(true)
-        .open(&device.path)
-        .map_err(|_| "ATA device unavailable".to_owned())?;
+    session.validate()?;
+    let file = &session.command;
     let mut cdb = [0u8; 16];
     cdb[0] = 0x85;
     cdb[1] = if data.is_empty() { 3 << 1 } else { 4 << 1 };
@@ -221,6 +440,9 @@ fn ata_command(
         duration: 0,
         info: 0,
     };
+    if allowed.is_some_and(|check| !check()) {
+        return Err("Short self-tests disabled locally".into());
+    }
     if unsafe { libc::ioctl(file.as_raw_fd(), 0x2285, &mut io) } < 0
         || io.host_status != 0
         || io.resid > 0
@@ -252,21 +474,22 @@ fn ata_command(
     Ok(registers.unwrap_or_default())
 }
 pub(super) fn probe(device: &Device) -> Result<Reading, String> {
+    let session = Session::open(device)?;
     if device.protocol == "nvme_usb" {
-        return asmedia::probe(device);
+        return asmedia::probe(&session);
     }
     if device.protocol == "nvme" {
         let mut bytes = [0; 512];
-        nvme_command(device, 2, (127 << 16) | 2, &mut bytes)?;
+        nvme_command(&session, 2, (127 << 16) | 2, &mut bytes, None)?;
         let mut out = super::nvme(&bytes)?;
         let mut identify = [0; 4096];
-        if nvme_command(device, 6, 1, &mut identify).is_ok() {
+        if nvme_command(&session, 6, 1, &mut identify, None).is_ok() {
             out.short_test_supported =
                 u16::from_le_bytes([identify[256], identify[257]]) & 0x10 != 0;
         }
         if out.short_test_supported {
             let mut log = [0; 512];
-            if nvme_command(device, 2, (127 << 16) | 6, &mut log).is_ok() {
+            if nvme_command(&session, 2, (127 << 16) | 6, &mut log, None).is_ok() {
                 out.self_test = if log[0] & 0xf != 0 {
                     "running"
                 } else if log[4] >> 4 == 0 || log[4] & 0xf == 15 {
@@ -286,19 +509,19 @@ pub(super) fn probe(device: &Device) -> Result<Reading, String> {
     }
     // CHECK POWER MODE does not wake a standby HDD. A bridge that cannot report
     // power state still permits the normal read-only SMART query.
-    if let Ok(registers) = ata_command(device, 0xe5, 0, 0, &mut []) {
+    if let Ok(registers) = ata_command(&session, 0xe5, 0, 0, &mut [], None) {
         if registers.get(5) == Some(&0) {
             return Err("Drive is in standby".into());
         }
     }
     let mut bytes = [0; 512];
-    ata_command(device, 0xb0, 0xd0, 0, &mut bytes)?;
+    ata_command(&session, 0xb0, 0xd0, 0, &mut bytes, None)?;
     let mut thresholds = [0; 512];
-    let thresholds = ata_command(device, 0xb0, 0xd1, 0, &mut thresholds)
+    let thresholds = ata_command(&session, 0xb0, 0xd1, 0, &mut thresholds, None)
         .ok()
         .map(|_| thresholds);
     let mut log = [0; 512];
-    let log = ata_command(device, 0xb0, 0xd5, 6, &mut log)
+    let log = ata_command(&session, 0xb0, 0xd5, 6, &mut log, None)
         .ok()
         .map(|_| log);
     super::ata(
@@ -307,17 +530,22 @@ pub(super) fn probe(device: &Device) -> Result<Reading, String> {
         log.as_ref().map(|v| v.as_slice()),
     )
 }
-pub(super) fn short_test(device: &Device, reading: &Reading) -> Result<(), String> {
+pub(super) fn short_test(
+    device: &Device,
+    reading: &Reading,
+    allowed: &dyn Fn() -> bool,
+) -> Result<(), String> {
     if device.protocol == "nvme_usb" {
         return Err("USB NVMe short self-tests are not supported".into());
     }
     if !reading.short_test_supported {
         return Err("Short self-test unsupported".into());
     }
+    let session = Session::open(device)?;
     if device.protocol == "nvme" {
-        nvme_command(device, 0x14, 1, &mut [])
+        nvme_command(&session, 0x14, 1, &mut [], Some(allowed))
     } else {
-        ata_command(device, 0xb0, 0xd4, 1, &mut []).map(|_| ())
+        ata_command(&session, 0xb0, 0xd4, 1, &mut [], Some(allowed)).map(|_| ())
     }
 }
 
@@ -359,5 +587,27 @@ mod virtual_bus_tests {
         symlink("/sys/bus/usb", root.join("controller/subsystem")).unwrap();
         assert!(!virtual_disk_bus(&block));
         assert!(virtual_disk_bus(&root.join("missing")));
+    }
+}
+
+#[cfg(test)]
+mod held_native_object_tests {
+    use super::*;
+    #[test]
+    fn held_descriptor_does_not_follow_reused_name_or_symlink() {
+        let root =
+            std::env::temp_dir().join(format!("porthub-smart-node-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let node = root.join("node");
+        std::fs::write(&node, b"same bytes").unwrap();
+        let held = File::open(&node).unwrap();
+        assert!(held_node_matches(&held, &node).unwrap());
+        std::fs::rename(&node, root.join("removed")).unwrap();
+        std::fs::write(&node, b"same bytes").unwrap();
+        assert!(!held_node_matches(&held, &node).unwrap());
+        std::fs::remove_file(&node).unwrap();
+        std::os::unix::fs::symlink(root.join("removed"), &node).unwrap();
+        assert!(!held_node_matches(&held, &node).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
