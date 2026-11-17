@@ -100,8 +100,8 @@ async fn actual_direct_and_gateway_carriers_upload_observed_tx() -> Result<()> {
             let snapshot = tokio::time::timeout(Duration::from_secs(15), async {
                 loop { match receiver.recv().await { Some(Event::Snapshot(value)) => break Ok::<_,anyhow::Error>(value), Some(_) => {}, None => anyhow::bail!("carrier snapshot owner closed") } }
             }).await??;
-            ensure!(snapshot.peers.iter().any(|p| p.id == input.peers[1-index]), "carrier actual snapshot missing peer");
-            counters.push(trackers[index].reconcile(snapshot.peers.into_iter().filter(|p|p.id != input.peers[index]).map(|p|p.id)));
+            ensure!(snapshot.value.peers.iter().any(|p| p.id == input.peers[1-index]), "carrier actual snapshot missing peer");
+            counters.push(trackers[index].reconcile(snapshot.value.peers.into_iter().filter(|p|p.id != input.peers[index]).map(|p|p.id)));
         }
         tokio::time::timeout(Duration::from_secs(15), async {
             loop {
