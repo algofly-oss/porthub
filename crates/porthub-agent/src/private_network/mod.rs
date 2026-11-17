@@ -19,6 +19,7 @@ mod dns_convergence_macos;
 mod dns_upstream;
 pub use porthub_network::exit_selection;
 pub(crate) mod exit_picker;
+pub(crate) mod exit_plumbing;
 pub use porthub_network::exit_plan;
 #[cfg(target_os = "linux")]
 pub mod exit_kernel;

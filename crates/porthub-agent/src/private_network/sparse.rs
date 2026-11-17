@@ -293,6 +293,17 @@ impl Handle {
             .map(|c| {let mut lease=c.lease.clone();if !c.exit_valid(now){lease.exit=None;}lease})
             .collect()
     }
+    /// Metadata for local exit plumbing only. These rows must never be
+    /// installed as renewed pair authority or used to authorize packets.
+    pub(crate) fn exit_leases(&self) -> Vec<PairLease> {
+        let s=self.state.lock().unwrap_or_else(|p|p.into_inner());
+        let now=Instant::now();
+        if self.revoked() || s.deadline.is_none_or(|d|d<=now)
+            || s.authority.as_ref().is_none_or(|a|a.check().is_err() || a.remaining().ok().flatten().is_none()) {return Vec::new();}
+        s.cache.values().filter(|c|c.exit_valid(now)
+            && c.lease.exit.as_ref().is_some_and(|e|s.exit_epoch.as_deref()==Some(e.epoch.as_str())))
+            .map(|c|{let mut lease=c.lease.clone();lease.grants.clear();lease.acl=None;lease}).collect()
+    }
     pub fn peers(&self) -> Vec<PeerInfo> {
         let s = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let now = Instant::now();
@@ -685,6 +696,8 @@ mod tests {
         assert!(!old_private.permit().valid());assert!(old_exit.permit().valid());
         assert!(handle.bound_pair_authority("b").is_none());assert_eq!(handle.bound_exit_pair_authority("b").unwrap().lease().epoch,a,"cached immutable lease was relabelled");
         assert!(handle.by_id("b").is_some());assert!(handle.leases().is_empty());
+        let plumbing=handle.exit_leases();assert_eq!(plumbing.len(),1);assert_eq!(plumbing[0].epoch,a);
+        assert!(plumbing[0].grants.is_empty()&&plumbing[0].acl.is_none(),"exit plumbing cannot expose retired private ACL");
         handle.update_base_authority(&snapshot,authority(snapshot.expires_at));assert!(handle.bound_pair_authority("b").is_none(),"ordinary epoch roundtrip revived retired bytes");
         handle.update_base_authority(&changed,authority(changed.expires_at));
         let renewed=exit_lease(&b,&e);handle.installed_authority(&query,renewed.clone(),authority(renewed.expires_at));
@@ -692,6 +705,7 @@ mod tests {
         assert!(old_exit.permit().valid(),"unchanged genuine exit renewal retired old queued receipt before its deadline");
         let changed_exit=exit_base(&b,&f);handle.update_base_authority(&changed_exit,authority(changed_exit.expires_at));
         assert!(fresh_private.permit().valid());assert!(!fresh_exit.permit().valid()&&!old_exit.permit().valid());
+        assert!(handle.exit_leases().is_empty(),"retired exit metadata cannot keep NAT clients active");
         assert!(handle.leases()[0].exit.is_none(),"inactive exit poisoned private validator view");
         handle.update_base_authority(&changed,authority(changed.expires_at));assert!(handle.bound_exit_pair_authority("b").is_none(),"exit epoch roundtrip revived retired bytes");
         let mut new_source=changed;new_source.peers[0].instance="replacement-source".into();handle.update_base_authority(&new_source,authority(new_source.expires_at));

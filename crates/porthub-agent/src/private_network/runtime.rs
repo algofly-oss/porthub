@@ -390,6 +390,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         (target,health)
     };
     let mut exit_route = None;
+    let mut sparse_exit_intent:Option<porthub_network::policy::ExitIntent>=None;
     let mut exit_traffic_mode = porthub_mesh::exit_policy::TrafficMode::default();
     let mut exit_lan_peers: Vec<(String, Vec<porthub_mesh::lan_routes::Network>)> = Vec::new();
     #[cfg(any(target_os="linux",target_os="macos"))]
@@ -451,7 +452,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 let cached_authority=authority.clone();
                 let snapshot=authority.accepted()?.clone();
                 ensure!(snapshot.self_==profile.peer_id && snapshot.workspace==profile.workspace,"private policy identity changed");
-                let mut route_snapshot=snapshot.clone();
+                let mut route_snapshot=super::exit_plumbing::project(&snapshot,&sparse_handle.exit_leases());
                 #[cfg(feature="local-tor")]
                 {
                     latest_snapshot=Some(cached_authority);
@@ -465,6 +466,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 installed_authority=Some(authority.retained());
                 sparse_authority=Some(snapshot.clone());
                 sparse_handle.update_base_authority(&snapshot,authority.retained());
+                sparse_handle.exit_picker().observe(&snapshot);
                 relay_sender.update_authority(authority.retained(),sparse_handle.clone());
                 let mut routes=routes;
                 routes.extend(sparse_handle.peers().iter().map(|p|p.ip));
@@ -578,6 +580,12 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                         if route.tor_enabled && route.traffic_mode.internet() {peers.push(super::tor_exit::LOCAL_TOR.into());}
                         (peers,route.selection,route.allow_direct_fallback)
                     });
+                sparse_exit_intent=snapshot.sparse.as_ref().and_then(|s|s.exit_intents.iter().find(|intent|
+                    intent.role==porthub_network::policy::ExitRole::Client && route_snapshot.exit_routes.iter().any(|route|route.id==intent.id&&route.clients.contains(&profile.peer_id)))).cloned();
+                if let Some(intent)=&sparse_exit_intent {
+                    let destination=if intent.traffic_mode.internet(){std::net::Ipv4Addr::new(1,1,1,1)}else{intent.lan_networks.first().map(|network|network.address()).unwrap_or(std::net::Ipv4Addr::new(10,0,0,1))};
+                    sparse_handle.exit_picker().request(&intent.id,&"0".repeat(64),destination,true);
+                }
                 // Apply a received policy before processing another packet;
                 // the periodic tick only refreshes transport availability.
                 if let Some((peers, mode, _)) = &exit_route {
@@ -590,10 +598,10 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 } else { exit_available = 0; exit_selection.configure(Vec::new(), Default::default()); }
                 #[cfg(target_os = "linux")]
                 {
-                    let clients: std::collections::BTreeSet<_> = snapshot.exit_routes.iter()
+                    let clients: std::collections::BTreeSet<_> = route_snapshot.exit_routes.iter()
                         .filter(|route| route.routing_peers.contains(&profile.peer_id))
                         .flat_map(|route| &route.clients)
-                        .filter_map(|id| snapshot.peers.iter().find(|peer| &peer.id == id).map(|peer| peer.ip)).collect();
+                        .filter_map(|id| route_snapshot.peers.iter().find(|peer| &peer.id == id).map(|peer| peer.ip)).collect();
                     if clients != exit_clients {
                         exit_refresh.send_replace(clients.clone());
                         exit_clients = clients;
@@ -605,7 +613,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     tun.exit_mtu(!route_snapshot.exit_routes.is_empty()).await?;
                     let bypass = exit_fallback.update(exit_route.as_ref().is_some_and(|(_, _, allowed)| *allowed), exit_available, policy.valid_lease(), Instant::now());
                     exit_lan_networks=if exit_route.is_some() && exit_traffic_mode.lan() {
-                        super::exit_plan::lan_networks(&exit_lan_peers,|id|exit_selection.available(id))
+                        sparse_exit_intent.as_ref().map(|intent|intent.lan_networks.clone()).unwrap_or_else(||super::exit_plan::lan_networks(&exit_lan_peers,|id|exit_selection.available(id)))
                     } else {Vec::new()};
                     let desired=exit_route.as_ref().map(|_|super::exit_plan::Plan{index:tun.index,own:own.ip,mode:exit_traffic_mode,bypass,networks:exit_lan_networks.clone()});
                     if *exit_consumer.borrow() != desired { exit_consumer.send_replace(desired); }
@@ -855,8 +863,27 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             if let Some(tor)=local_tor.as_mut().filter(|tor|tor.owns(&buffer[..size])) {
                 tor.packet(bytes::Bytes::copy_from_slice(&buffer[..size]));continue;
             }
+            let overlay_destination=sparse_authority.as_ref().and_then(|base|base.sparse.as_ref()).is_some_and(|s|s.capture_pools.iter().any(|pool|pool.contains(parsed.destination())));
             let exit_peer = if peer_ips.get(&profile.peer_id) == Some(&parsed.source()) && !by_ip.contains_key(&parsed.destination()) {
                 if !exit_traffic_mode.permits(parsed.destination()) { None }
+                else if sparse_exit_intent.is_some() && overlay_destination { None }
+                else if let Some(intent)=&sparse_exit_intent {
+                    let now=Instant::now();let flow=parsed.flow_id();let syn=parsed.opening_sequence();
+                    if let Some(assigned)=exit_selection.assigned_peer(&flow,now,syn).map(str::to_owned) {
+                        // An unavailable established NAT identity is never a new selection.
+                        exit_selection.select_for_peer(flow,now,parsed.flow_ttl(),syn,Some(&assigned)).map(str::to_owned)
+                    } else {
+                        let tag=super::exit_picker::flow_tag(&flow.selection_tag(),syn);
+                        let selected=sparse_handle.exit_picker().request(&intent.id,&tag,parsed.destination(),false);
+                        let peer=match selected {
+                            Some(porthub_network::policy::ExitChoice::Peer{id}) if sparse_handle.exit_pair_authority(&id).is_some()=>Some(id),
+                            #[cfg(feature="local-tor")]
+                            Some(porthub_network::policy::ExitChoice::LocalTor) if local_tor.as_ref().is_some_and(|tor|tor.ready())=>Some(super::tor_exit::LOCAL_TOR.into()),
+                            _=>None,
+                        };
+                        exit_selection.select_for_peer(flow,now,parsed.flow_ttl(),syn,peer.as_deref()).map(str::to_owned)
+                    }
+                }
                 else if parsed.destination().is_private() {
                     exit_selection.select_for_peer_with(parsed.flow_id(), Instant::now(), parsed.flow_ttl(), parsed.opening_sequence(), |available| {
                         porthub_mesh::lan_routes::choose_with_single_fallback(parsed.destination(),
@@ -898,6 +925,10 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 }
                 continue;
             }
+            // A pending exit selection is not an unknown private peer. Keep
+            // its metadata in the bounded picker instead of filling both queues.
+            if sparse_exit_intent.is_some() && !overlay_destination && exit_traffic_mode.permits(parsed.destination())
+                && peer_ips.get(&profile.peer_id)==Some(&parsed.source()) && !by_ip.contains_key(&parsed.destination()) {continue;}
             let Some(peer)=by_ip.get(&parsed.destination()) else {if peer_ips.get(&profile.peer_id)==Some(&parsed.source()){sparse_handle.request_ip(parsed.destination());}continue;};
             if sparse_handle.enabled()&&(policy.pair_peer(peer).is_none()||sparse_handle.by_id(peer).is_none()){sparse_handle.request_ip(parsed.destination());continue;}
             if policy.check(&buffer[..size],peer,false) {
@@ -994,6 +1025,25 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 #[cfg(feature="private-stream")]
                 if let Some(router)=&stream_router{for peer in router.active_peers(){sparse_handle.touch_peer(&peer);}}
             }
+            if sparse_handle.enabled() {
+                if let Some(base)=&sparse_authority {
+                    let projection=super::exit_plumbing::project(base,&sparse_handle.exit_leases());
+                    online_peers.extend(projection.peers.iter().filter(|peer|peer.online).map(|peer|peer.id.clone()));
+                    if let Some(intent)=&sparse_exit_intent {
+                        let mut peers=projection.exit_routes.iter().find(|route|route.id==intent.id).map(|route|route.routing_peers.clone()).unwrap_or_default();
+                        #[cfg(feature="local-tor")]
+                        if intent.tor_enabled&&intent.traffic_mode.internet(){peers.push(super::tor_exit::LOCAL_TOR.into());}
+                        exit_route=Some((peers,intent.selection,intent.allow_direct_fallback));
+                    }
+                    #[cfg(target_os="linux")]
+                    {
+                        let clients:std::collections::BTreeSet<_>=projection.exit_routes.iter().filter(|route|route.routing_peers.contains(&profile.peer_id))
+                            .flat_map(|route|&route.clients).filter_map(|id|projection.peers.iter().find(|peer|&peer.id==id).map(|peer|peer.ip)).collect();
+                        if clients!=exit_clients{exit_refresh.send_replace(clients.clone());exit_clients=clients;}
+                    }
+                }
+            }
+
             if let Some((peers, mode, _)) = &exit_route {
                 let live = sessions.read().await;
                 let mut available = peers.iter().filter(|peer| policy.valid_lease() && online_peers.contains(*peer) && (relay_sender.is_ready() || live.get(*peer).is_some_and(|session| session.state() == porthub_mesh::State::Ready))).cloned().collect::<Vec<_>>();
@@ -1007,7 +1057,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             if let (Some(tun), Some(own)) = (&device, peer_ips.get(&profile.peer_id)) {
                 let bypass = exit_fallback.update(exit_route.as_ref().is_some_and(|(_, _, allowed)| *allowed), exit_available, policy.valid_lease(), now);
                 exit_lan_networks=if exit_route.is_some() && exit_traffic_mode.lan() {
-                    super::exit_plan::lan_networks(&exit_lan_peers,|id|exit_selection.available(id))
+                    sparse_exit_intent.as_ref().map(|intent|intent.lan_networks.clone()).unwrap_or_else(||super::exit_plan::lan_networks(&exit_lan_peers,|id|exit_selection.available(id)))
                 } else {Vec::new()};
                 let desired=exit_route.as_ref().map(|_|super::exit_plan::Plan{index:tun.index,own:*own,mode:exit_traffic_mode,bypass,networks:exit_lan_networks.clone()});
                 if *exit_consumer.borrow() != desired { exit_consumer.send_replace(desired); }

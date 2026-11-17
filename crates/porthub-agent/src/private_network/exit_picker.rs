@@ -234,6 +234,16 @@ impl Handle {
     }
 }
 
+/// A reused TCP tuple with a new SYN sequence is a new cold-flow request.
+pub(crate) fn flow_tag(flow: &str, syn: Option<u32>) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(flow.as_bytes());
+    hash.update([u8::from(syn.is_some())]);
+    hash.update(syn.unwrap_or_default().to_be_bytes());
+    format!("{:x}", hash.finalize())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,6 +279,17 @@ mod tests {
             lease: None,
             cursor: (status == ExitPickStatus::Pending).then(|| "cursor-1".into()),
         }
+    }
+    #[test]
+    fn tcp_tuple_reuse_has_distinct_correlation_and_stale_carriers_are_not_ready() {
+        let flow = "a".repeat(64);
+        assert_eq!(flow_tag(&flow, Some(1)), flow_tag(&flow, Some(1)));
+        assert_ne!(flow_tag(&flow, Some(1)), flow_tag(&flow, Some(2)));
+        assert_ne!(flow_tag(&flow, None), flow_tag(&flow, Some(0)));
+        let handle = Handle::default();
+        handle.0.lock().unwrap().carriers =
+            Some((Instant::now() - Duration::from_secs(4), true, true));
+        assert_eq!(handle.carriers(), (false, false));
     }
     #[test]
     fn selection_is_bounded_and_warmup_does_not_consume_flow_ordinals() {
