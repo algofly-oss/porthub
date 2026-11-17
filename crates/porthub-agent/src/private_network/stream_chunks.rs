@@ -1,5 +1,6 @@
 //! Experimental finite-stream origin actors, including tagged native-ACK RX.
-//! Production negotiation/runtime/multiplexing remain deliberately unwired.
+//! Runtime hooks are feature-gated; negotiation and release readiness remain
+//! withheld while native lifecycle/multiplexing integration is incomplete.
 use anyhow::{ensure, Result};
 use bytes::Bytes;
 use porthub_mesh::{
@@ -24,6 +25,8 @@ pub(crate) mod flow_authority;
 pub(crate) mod source;
 pub(crate) mod flow_open;
 pub(crate) mod carrier;
+pub(crate) mod dispatch;
+pub(crate) mod flow_runtime;
 pub(crate) mod duplex;
 const CHUNK: usize = 8192;
 const HEADER: usize = 96;

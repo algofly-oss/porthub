@@ -23,6 +23,8 @@ pub struct Control {
     sequence: u64,
 }
 struct Cached {
+    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+    stream_masks: Option<StreamMasks>,
     _retirement_owner:Option<super::authority_event::Owner>,
     authority: Option<super::authority_event::Authority<()>>,
     lease: PairLease,
@@ -67,13 +69,35 @@ fn same_pair_authority(a:&PairLease,b:&PairLease)->bool {
         &&match (serde_json::to_vec(&a.acl),serde_json::to_vec(&b.acl)){(Ok(a),Ok(b))=>a==b,_=>false}
 }
 
+#[cfg(all(feature="private-sparse",feature="private-stream"))]
+#[derive(Clone)]
+pub(crate) struct StreamMasks {
+    pub outgoing:porthub_network::policy::pair_acl::CompiledPortMask,
+    pub incoming:porthub_network::policy::pair_acl::CompiledPortMask,
+    pub outgoing_any:bool,
+    pub incoming_any:bool,
+}
+#[cfg(all(feature="private-sparse",feature="private-stream"))]
+impl StreamMasks {
+    fn compile(lease:&PairLease)->Option<Self>{
+        use porthub_network::policy::pair_acl::PairAcl;
+        let acl=match &lease.acl{Some(acl)=>acl.clone(),None=>PairAcl::from_grants(&lease.self_,&lease.peer.id,&lease.grants).ok()?}.compile().ok()?;
+        let outgoing=acl.tcp(false);let incoming=acl.tcp(true);
+        Some(Self{outgoing_any:outgoing.any(),incoming_any:incoming.any(),outgoing,incoming})
+    }
+}
 /// One locked cache read binds policy bytes and BOTH original witnesses.
 /// Fields are private: callers cannot relabel a permit from another peer.
 #[cfg(feature="private-sparse")]
-pub(crate) struct BoundPairAuthority {lease:PairLease,permit:porthub_mesh::udp::SendPermit}
+pub(crate) struct BoundPairAuthority {lease:PairLease,permit:porthub_mesh::udp::SendPermit,
+    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+    masks:Option<StreamMasks>,
+}
 #[cfg(feature="private-sparse")]
 impl BoundPairAuthority {
     pub(crate) fn lease(&self)->&PairLease{&self.lease}
+    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+    pub(crate) fn masks(&self)->Option<StreamMasks>{self.masks.clone()}
     pub(crate) fn permit(&self)->porthub_mesh::udp::SendPermit{self.permit.clone()}
 }
 
@@ -99,7 +123,10 @@ impl Handle {
         let pair=cached.authority.as_ref()?.clone();pair.check().ok()?;pair.remaining().ok()??;
         let lease=cached.lease.clone();
         let permit=porthub_mesh::udp::SendPermit::bounded(||true,move||Some(base.remaining().ok()??.min(pair.remaining().ok()??)));
-        Some(BoundPairAuthority{lease,permit})
+        Some(BoundPairAuthority{lease,permit,
+            #[cfg(all(feature="private-sparse",feature="private-stream"))]
+            masks:cached.stream_masks.clone(),
+        })
     }
     pub(crate) fn pair_authority(&self,id:&str)->Option<super::authority_event::Authority<()>> {
         let s=self.state.lock().unwrap_or_else(|p|p.into_inner());
@@ -265,6 +292,10 @@ impl Handle {
     pub fn installed(&self, query: &Lookup, lease: PairLease) {self.installed_inner(query,lease,None);}
     pub(crate) fn installed_authority(&self,query:&Lookup,lease:PairLease,authority:super::authority_event::Authority<()>) {self.installed_inner(query,lease,Some(authority));}
     fn installed_inner(&self, query: &Lookup, lease: PairLease, authority:Option<super::authority_event::Authority<()>>) {
+        // Compile once at publication, before acquiring the cache lock. Packet
+        // owners clone immutable bitmaps but always sample fresh authorities.
+        #[cfg(all(feature="private-sparse",feature="private-stream"))]
+        let stream_masks=StreamMasks::compile(&lease);
         let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let now = Instant::now();
         if self.revoked()
@@ -298,6 +329,8 @@ impl Handle {
         s.cache.insert(
             lease.peer.id.clone(),
             Cached {
+                #[cfg(all(feature="private-sparse",feature="private-stream"))]
+                stream_masks,
                 _retirement_owner:retirement_owner,
                 authority,
                 lease,

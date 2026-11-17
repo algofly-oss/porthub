@@ -61,7 +61,7 @@ impl Source {
         let current = self.current.clone();
         let gate = self.sender.gate.state.clone();
         let idle = SendPermit::control(move || {
-            if !gate.alive.load(Ordering::SeqCst) {
+            if !gate.alive.load(Ordering::SeqCst) || !gate.parent.valid() {
                 return false;
             }
             current().is_some_and(|now| context.authorize(&now, side).is_ok())

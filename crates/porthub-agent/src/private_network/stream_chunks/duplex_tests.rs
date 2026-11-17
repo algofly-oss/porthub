@@ -20,6 +20,8 @@ struct Link {
     destination: Arc<Endpoint>,
     stop: CancellationToken,
     pump: JoinHandle<Result<()>>,
+    source_slot: Arc<super::super::dispatch::EndpointSlot>,
+    destination_slot: Arc<super::super::dispatch::EndpointSlot>,
 }
 impl Drop for Link {
     fn drop(&mut self) {
@@ -29,18 +31,25 @@ impl Drop for Link {
     }
 }
 async fn forward_carrier(
+    slot: &super::super::dispatch::EndpointSlot,
     datagram: porthub_mesh::streams::Datagram,
+    peer: &str,
     source: std::net::Ipv4Addr,
-    destination: std::net::Ipv4Addr,
-    key: carrier::Key,
-    ingress: &porthub_mesh::streams::Ingress,
+    destination: &super::super::dispatch::Dispatcher,
 ) -> Result<()> {
-    let frame = carrier::Frame::new(key, datagram.payload)?.encode();
+    let outgoing = match slot.outgoing(datagram) {
+        Ok(outgoing) => outgoing,
+        Err(_) if !slot.active() => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let Some((address, payload, permit)) = outgoing else {
+        return Ok(());
+    };
     let wire = porthub_mesh::control_packet::encode(
         porthub_mesh::control_packet::STREAM,
         source,
-        destination,
-        &frame,
+        address,
+        &payload,
     )?;
     ensure!(
         wire.len() <= porthub_mesh::MAX_PACKET,
@@ -49,44 +58,62 @@ async fn forward_carrier(
     let envelope = porthub_mesh::control_packet::decode(porthub_mesh::control_packet::STREAM, wire)
         .ok_or_else(|| anyhow::anyhow!("carrier envelope rejected"))?;
     ensure!(
-        envelope.source == source && envelope.destination == destination,
+        envelope.source == source && envelope.destination == address,
         "carrier authenticated source/target changed"
     );
-    let frame = carrier::Frame::decode(envelope.payload)?;
-    ensure!(
-        frame.key() == key,
-        "carrier endpoint nonce/direction/role changed"
-    );
-    ingress
-        .send_reliable_guarded(source, frame.payload(), datagram.permit)
-        .await
+    let result = permit
+        .during(async { destination.receive(peer, source, envelope.payload) })
+        .await??;
+    // Missing/denied is a drop or local retirement, never implicit native
+    // authorization. Busy preserves the flow and lets bounded QUIC recover.
+    let _ = result;
+    Ok(())
 }
 async fn link(
     a: Identity,
     b: Identity,
     ap: &Peer,
     bp: &Peer,
-    ga: &Gate,
-    gb: &Gate,
+    ca: source::Current,
+    cb: source::Current,
     key: carrier::Key,
+    da: &super::super::dispatch::Dispatcher,
+    db: &super::super::dispatch::Dispatcher,
+    owner: CancellationToken,
 ) -> Result<Link> {
-    let (source, mut ai) = Endpoint::new_fenced_source(a, ap.ip, ga.factory())?;
-    let (destination, mut bi) = Endpoint::new_fenced_credited(b, bp.ip, gb.factory())?;
-    source.update_peers(vec![bp.clone()])?;
-    destination.update_peers(vec![ap.clone()])?;
-    let ia = ai.ingress();
-    let ib = bi.ingress();
+    let mut source_slot = super::super::dispatch::EndpointSlot::new(da, key, ca, a, owner)?;
+    let mut destination_slot = super::super::dispatch::EndpointSlot::new(
+        db,
+        key.reverse(),
+        cb,
+        b,
+        CancellationToken::new(),
+    )?;
+    let mut ai = source_slot.take_packets()?;
+    let mut bi = destination_slot.take_packets()?;
+    let (source_slot, destination_slot) = (Arc::new(source_slot), Arc::new(destination_slot));
+    let source = source_slot.endpoint();
+    let destination = destination_slot.endpoint();
     let aip = ap.ip;
     let bip = bp.ip;
+    let aid = ap.id.clone();
+    let bid = bp.id.clone();
+    let da = da.clone();
+    let db = db.clone();
+    let sa = source_slot.clone();
+    let sb = destination_slot.clone();
     let stop = CancellationToken::new();
     let cancel = stop.clone();
     let pump = tokio::spawn(async move {
         loop {
-            tokio::select! {_=cancel.cancelled()=>break,p=ai.outgoing()=>match p{Some(p)=>{forward_carrier(p,aip,bip,key.reverse(),&ib).await?;},None=>break},p=bi.outgoing()=>match p{Some(p)=>{forward_carrier(p,bip,aip,key,&ia).await?;},None=>break}}
+            tokio::select! {
+              _=cancel.cancelled()=>break,
+              p=ai.outgoing()=>match p{Some(p)=>{forward_carrier(&sa,p,&aid,aip,&db).await?;},None=>break},
+              p=bi.outgoing()=>match p{Some(p)=>{forward_carrier(&sb,p,&bid,bip,&da).await?;},None=>break}
+            }
         }
         Ok::<_, anyhow::Error>(())
     });
-    let (source, destination) = (Arc::new(source), Arc::new(destination));
     let (c, s) = timeout(Duration::from_secs(2), async {
         tokio::join!(source.connect_source(bp), destination.accept_credited())
     })
@@ -98,6 +125,8 @@ async fn link(
         destination,
         stop,
         pump,
+        source_slot,
+        destination_slot,
     })
 }
 async fn forward_native(
@@ -296,7 +325,7 @@ fn receiver_current(
 ) -> receiver::Current {
     Arc::new(move || context.receiver_access(&local, side).ok())
 }
-async fn exercise(revoke: bool) -> Result<()> {
+async fn exercise(revoke: bool, idle_parent: bool) -> Result<()> {
     let a = Identity::new()?;
     let b = Identity::new()?;
     let ap = Peer {
@@ -307,14 +336,13 @@ async fn exercise(revoke: bool) -> Result<()> {
     };
     let bp = Peer {
         id: "b".into(),
-        ip: "10.234.250.2".parse()?,
+        ip: "10.235.1.2".parse()?,
         fingerprint: b.fingerprint().into(),
         instance: "b-instance".into(),
     };
-    let gas = Gate::new(SendPermit::control(|| true));
-    let gar = Gate::new(SendPermit::control(|| true));
-    let gbs = Gate::new(SendPermit::control(|| true));
-    let gbr = Gate::new(SendPermit::control(|| true));
+    let source_owner = CancellationToken::new();
+    let dispatch_a = super::super::dispatch::Dispatcher::default();
+    let dispatch_b = super::super::dispatch::Dispatcher::default();
     let (_ha, la) = flow_open::tests::local(&ap, &bp, "a")?;
     let (_hb, lb) = flow_open::tests::local(&bp, &ap, "b")?;
     let (la, lb) = (Arc::new(la), Arc::new(lb));
@@ -332,9 +360,12 @@ async fn exercise(revoke: bool) -> Result<()> {
         b.clone(),
         &ap,
         &bp,
-        &gas,
-        &gbr,
+        source_current(la.clone()),
+        source_current(lb.clone()),
         carrier::Key::new(nonce, 0, carrier::Role::Source)?,
+        &dispatch_a,
+        &dispatch_b,
+        source_owner.clone(),
     )
     .await?;
     let mut ba = link(
@@ -342,11 +373,23 @@ async fn exercise(revoke: bool) -> Result<()> {
         a,
         &bp,
         &ap,
-        &gbs,
-        &gar,
+        source_current(lb.clone()),
+        source_current(la.clone()),
         carrier::Key::new(nonce, 1, carrier::Role::Source)?,
+        &dispatch_b,
+        &dispatch_a,
+        CancellationToken::new(),
     )
     .await?;
+    let gas = ab.source_slot.gate();
+    let gbr = ab.destination_slot.gate();
+    let gbs = ba.source_slot.gate();
+    let gar = ba.destination_slot.gate();
+    let idle_gate = gas.clone();
+    ensure!(
+        dispatch_a.len() == 2 && dispatch_b.len() == 2,
+        "global dispatch did not register both roles per node"
+    );
     let (open_a, open_b) = tokio::try_join!(
         flow_open::initiate_native(&ab.client, &gas, &la, &prepared.syn),
         flow_open::accept_request(
@@ -440,65 +483,87 @@ async fn exercise(revoke: bool) -> Result<()> {
     )?;
     let mut da = Duplex::new(sa, ra, ca)?;
     let mut db = Duplex::new(sb, rb, cb)?;
-    let ta = tokio::spawn(async move {
-        let r = da.run().await;
-        (da, r)
-    });
-    let tb = tokio::spawn(async move {
-        let r = db.run().await;
-        (db, r)
-    });
-    let result = timeout(Duration::from_secs(4), async {
-        if revoke {
-            na.app.write_all(b"native-request-body").await?;
-            let mut body = [0; 19];
-            nb.app.read_exact(&mut body).await?;
-            ensure!(
-                &body == b"native-request-body" && !ta.is_finished(),
-                "native copy falsely completed source before ACK"
-            );
-            _ha.revoke_all();
-            let (mut da, result) = timeout(Duration::from_secs(1), ta).await??;
-            ensure!(
-                result.is_err(),
-                "revoked source published blocked native ACK receipt"
-            );
-            da.shutdown().await?;
-            tb.abort();
-            let _ = tb.await;
-            return Ok::<_, anyhow::Error>(());
-        }
-        eprintln!("app-a write request");
-        let request_body = vec![3; 2 * CHUNK + 193];
-        na.app.write_all(&request_body).await?;
-        na.app.shutdown().await?;
-        let mut request = Vec::new();
-        eprintln!("app-b wait request EOF");
-        nb.app.read_to_end(&mut request).await?;
-        eprintln!("app-b request EOF");
-        ensure!(request == request_body, "native request differs");
-        let response_body = vec![7; 2 * CHUNK + 77];
-        nb.app.write_all(&response_body).await?;
-        nb.app.shutdown().await?;
-        let mut response = Vec::new();
-        eprintln!("app-a wait response EOF");
-        na.app.read_to_end(&mut response).await?;
-        eprintln!("app-a response EOF");
-        ensure!(response == response_body, "native response differs");
-        let (mut da, ra) = ta.await?;
-        ra?;
-        let (mut db, rb) = tb.await?;
-        rb?;
+    let result = if idle_parent {
+        source_owner.cancel();
         ensure!(
-            da.drain_authority()?.remaining().is_some()
-                && db.drain_authority()?.remaining().is_some(),
-            "completed flow lost original retirement bound"
+            idle_gate.state.alive.load(Ordering::SeqCst) && la.original().valid(),
+            "idle parent case was already invalidated by another owner"
         );
+        let immediate = {
+            let waiting = da.source.send_next();
+            tokio::pin!(waiting);
+            matches!(futures_util::poll!(waiting), std::task::Poll::Ready(Err(_)))
+        };
         da.shutdown().await?;
         db.shutdown().await?;
+        drop(da);
+        drop(db);
+        ensure!(
+            immediate,
+            "idle native read ignored its parent owner veto until unrelated transport traffic"
+        );
         Ok::<_, anyhow::Error>(())
-    })
-    .await?;
+    } else {
+        let ta = tokio::spawn(async move {
+            let r = da.run().await;
+            (da, r)
+        });
+        let tb = tokio::spawn(async move {
+            let r = db.run().await;
+            (db, r)
+        });
+        timeout(Duration::from_secs(4), async {
+            if revoke {
+                na.app.write_all(b"native-request-body").await?;
+                let mut body = [0; 19];
+                nb.app.read_exact(&mut body).await?;
+                ensure!(
+                    &body == b"native-request-body" && !ta.is_finished(),
+                    "native copy falsely completed source before ACK"
+                );
+                _ha.revoke_all();
+                let (mut da, result) = timeout(Duration::from_secs(1), ta).await??;
+                ensure!(
+                    result.is_err(),
+                    "revoked source published blocked native ACK receipt"
+                );
+                da.shutdown().await?;
+                tb.abort();
+                let _ = tb.await;
+                return Ok::<_, anyhow::Error>(());
+            }
+            eprintln!("app-a write request");
+            let request_body = vec![3; 2 * CHUNK + 193];
+            na.app.write_all(&request_body).await?;
+            na.app.shutdown().await?;
+            let mut request = Vec::new();
+            eprintln!("app-b wait request EOF");
+            nb.app.read_to_end(&mut request).await?;
+            eprintln!("app-b request EOF");
+            ensure!(request == request_body, "native request differs");
+            let response_body = vec![7; 2 * CHUNK + 77];
+            nb.app.write_all(&response_body).await?;
+            nb.app.shutdown().await?;
+            let mut response = Vec::new();
+            eprintln!("app-a wait response EOF");
+            na.app.read_to_end(&mut response).await?;
+            eprintln!("app-a response EOF");
+            ensure!(response == response_body, "native response differs");
+            let (mut da, ra) = ta.await?;
+            ra?;
+            let (mut db, rb) = tb.await?;
+            rb?;
+            ensure!(
+                da.drain_authority()?.remaining().is_some()
+                    && db.drain_authority()?.remaining().is_some(),
+                "completed flow lost original retirement bound"
+            );
+            da.shutdown().await?;
+            db.shutdown().await?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .await?
+    };
     // Independent test-owned shutdown; no OS adapter, route, or host packet used.
     na.stop.cancel();
     nb.stop.cancel();
@@ -510,6 +575,12 @@ async fn exercise(revoke: bool) -> Result<()> {
     ba.destination.close();
     timeout(Duration::from_secs(1), &mut ab.pump).await???;
     timeout(Duration::from_secs(1), &mut ba.pump).await???;
+    drop(ab);
+    drop(ba);
+    ensure!(
+        dispatch_a.len() == 0 && dispatch_b.len() == 0,
+        "global dispatch registration cleanup leaked"
+    );
     for task in na.tasks.drain(..).chain(nb.tasks.drain(..)) {
         timeout(Duration::from_secs(1), task).await???;
     }
@@ -532,10 +603,16 @@ async fn exercise(revoke: bool) -> Result<()> {
 #[tokio::test]
 async fn actual_two_pinned_tls_native_source_data_fin_duplex_preserves_response_and_releases_credits(
 ) -> Result<()> {
-    exercise(false).await
+    exercise(false, false).await
 }
 #[tokio::test]
 async fn actual_native_source_revoke_while_remote_native_ack_blocked_cannot_publish_receipt(
 ) -> Result<()> {
-    exercise(true).await
+    exercise(true, false).await
+}
+
+#[tokio::test]
+async fn actual_idle_native_source_parent_revocation_is_synchronous_without_transport_traffic(
+) -> Result<()> {
+    exercise(false, true).await
 }

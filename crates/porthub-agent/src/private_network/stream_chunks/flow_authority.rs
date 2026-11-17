@@ -3,7 +3,7 @@
 use super::*;
 use crate::private_network::sparse;
 use porthub_network::{
-    policy::pair_acl::{CompiledPortMask, PairAcl},
+    policy::pair_acl::CompiledPortMask,
     tcp_stream,
 };
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -19,6 +19,8 @@ pub(crate) struct LocalAuthority {
     epoch: [u8; 32],
     outgoing: CompiledPortMask,
     incoming: CompiledPortMask,
+    outgoing_any: bool,
+    incoming_any: bool,
     permit: SendPermit,
 }
 fn epoch(raw: &str) -> Result<[u8; 32]> {
@@ -62,11 +64,7 @@ impl LocalAuthority {
                 && own != remote,
             "flow authority identity/workspace mismatch"
         );
-        let acl = match &lease.acl {
-            Some(acl) => acl.clone(),
-            None => PairAcl::from_grants(own, remote, &lease.grants)?,
-        }
-        .compile()?;
+        let masks=view.masks().ok_or_else(||anyhow::anyhow!("prepared TCP masks unavailable"))?;
         let permit = view.permit();
         ensure!(
             permit.remaining().is_some(),
@@ -77,8 +75,10 @@ impl LocalAuthority {
             local: peer(&lease.local),
             peer: peer(&lease.peer),
             epoch: epoch(&lease.epoch)?,
-            outgoing: acl.tcp(false),
-            incoming: acl.tcp(true),
+            outgoing: masks.outgoing,
+            incoming: masks.incoming,
+            outgoing_any: masks.outgoing_any,
+            incoming_any: masks.incoming_any,
             permit,
         })
     }
@@ -104,6 +104,62 @@ impl LocalAuthority {
         self.epoch
     }
 }
+/// Ciphertext routing admission only. Native service permission is checked
+/// later by Context; carrier metadata/any-port transport admission never grants it.
+#[derive(Clone)]
+pub(super) struct ChannelIdentity {
+    workspace: String,
+    local: Peer,
+    remote: Peer,
+    epoch: [u8; 32],
+}
+impl LocalAuthority {
+    pub(super) fn channel_identity(&self) -> ChannelIdentity {
+        ChannelIdentity {
+            workspace: self.workspace.clone(),
+            local: self.local.clone(),
+            remote: self.peer.clone(),
+            epoch: self.epoch,
+        }
+    }
+}
+impl ChannelIdentity {
+    pub(super) fn bind_identity(&self, identity: &porthub_mesh::Identity) -> Result<()> {
+        ensure!(
+            self.local.fingerprint == identity.fingerprint(),
+            "carrier local certificate identity mismatch"
+        );
+        Ok(())
+    }
+    pub(super) fn local_ip(&self) -> std::net::Ipv4Addr {
+        self.local.ip
+    }
+    pub(super) fn peer(&self) -> &Peer {
+        &self.remote
+    }
+    pub(super) fn admit(&self, current: &LocalAuthority, side: Side) -> Result<SendPermit> {
+        ensure!(
+            self.workspace == current.workspace
+                && self.local == current.local
+                && self.remote == current.peer
+                && self.epoch == current.epoch,
+            "carrier identity/workspace/epoch replaced"
+        );
+        ensure!(
+            match side {
+                Side::Initiator => current.outgoing_any,
+                Side::Acceptor => current.incoming_any,
+            },
+            "no TCP permission for carrier role"
+        );
+        ensure!(
+            current.permit.remaining().is_some(),
+            "carrier original request authority expired"
+        );
+        Ok(current.permit.clone())
+    }
+}
+
 /// Sealed at the synchronous kernel-packet admission boundary. A caller cannot
 /// relabel an opaque permit or another peer's SYN after flow-open has waited.
 pub(crate) struct PendingSyn {

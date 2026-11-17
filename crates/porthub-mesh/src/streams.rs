@@ -38,6 +38,7 @@ pub const MAX_DATAGRAM: usize = crate::MAX_PACKET - 20;
 pub const ORIGIN_CARRIER_OVERHEAD:usize=24;
 pub const MAX_ORIGIN_DATAGRAM:usize=MAX_DATAGRAM-ORIGIN_CARRIER_OVERHEAD;
 const QUEUE: usize = 256;
+const ORIGIN_QUEUE:usize=16;
 const MAX_PEERS: usize = 4096;
 const MAX_CONNECTIONS: usize = 512;
 const MAX_CONNECTIONS_PER_PEER: usize = 8;
@@ -88,6 +89,14 @@ impl Ingress {
                 payload,
             })
             .map_err(|_| anyhow::anyhow!("private stream receive queue unavailable"))
+    }
+    /// Bounded dispatcher admission: full queue is backpressure, not an
+    /// authoritative denial. The caller can retain reliable QUIC recovery.
+    pub fn try_send_guarded(&self,source:Ipv4Addr,payload:Bytes,admission:crate::udp::SendPermit)->Result<bool>{
+        ensure!(admission.valid(),"private stream admission retired");self.validate(source,&payload)?;
+        match self.input.try_send(Datagram{permit:Some(admission),address:source,payload}){
+            Ok(())=>Ok(true),Err(mpsc::error::TrySendError::Full(_))=>Ok(false),Err(mpsc::error::TrySendError::Closed(_))=>anyhow::bail!("private stream receive owner stopped"),
+        }
     }
     /// Preserve reliable-carrier backpressure instead of creating local loss.
     /// Recheck admission after waiting because policy can change while queued.
@@ -457,10 +466,10 @@ impl Endpoint {
     /// Experimental receiver profile: advertise no incoming application stream
     /// until its immutable origin credit is installed. Legacy profile unchanged.
     pub fn new_fenced_credited(identity:Identity,local:Ipv4Addr,generation:crate::udp::SendFactory)->Result<(Self,PacketIo)>{
-        Self::with_protocols_profile(identity,local,vec![ORIGIN_ALPN.into()],Some(generation),QUEUE,true,false)
+        Self::with_protocols_profile(identity,local,vec![ORIGIN_ALPN.into()],Some(generation),ORIGIN_QUEUE,true,false)
     }
     pub fn new_fenced_source(identity:Identity,local:Ipv4Addr,generation:crate::udp::SendFactory)->Result<(Self,PacketIo)>{
-        Self::with_protocols_profile(identity,local,vec![ORIGIN_ALPN.into()],Some(generation),QUEUE,false,true)
+        Self::with_protocols_profile(identity,local,vec![ORIGIN_ALPN.into()],Some(generation),ORIGIN_QUEUE,false,true)
     }
     fn with_protocols(identity:Identity,local:Ipv4Addr,protocols:Vec<Vec<u8>>)->Result<(Self,PacketIo)> {Self::with_protocols_fenced(identity,local,protocols,None)}
     fn with_protocols_fenced(identity:Identity,local:Ipv4Addr,protocols:Vec<Vec<u8>>,generation:Option<crate::udp::SendFactory>)->Result<(Self,PacketIo)>{Self::with_protocols_fenced_capacity(identity,local,protocols,generation,QUEUE)}
@@ -494,7 +503,7 @@ impl Endpoint {
             quinn::crypto::rustls::QuicServerConfig::try_from(tls)?,
         ));
         server.transport = transport(None,credited,bounded_source)?;
-        let (input, incoming) = mpsc::channel(QUEUE);
+        let (input, incoming) = mpsc::channel(if credited||bounded_source{capacity}else{QUEUE});
         let (outgoing, output) = mpsc::channel(capacity);
         #[cfg(test)] let blocked_sends=Arc::new(AtomicUsize::new(0));
         #[cfg(test)] let denied_sends=Arc::new(AtomicUsize::new(0));

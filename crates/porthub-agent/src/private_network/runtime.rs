@@ -317,6 +317,12 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     let mut stream_router: Option<super::stream_router::Router> = None;
     #[cfg(feature="private-stream")]
     let mut stream_router_sparse_mode:Option<bool>=None;
+    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+    let mut guarded_flows:Option<super::stream_chunks::flow_runtime::Runtime>=None;
+    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+    let mut guarded_owner:Option<CancellationToken>=None;
+    let mut guarded_generation=0u64;
+    let mut guarded_owners:JoinSet<(u64,Result<()>)>=JoinSet::new();
     #[allow(unused_mut)]
     let mut stream_owner_generation=0u64;
     let mut stream_owners:JoinSet<(u64,Result<()>)>=JoinSet::new();
@@ -391,6 +397,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         tokio::select! {
         _=cancel.cancelled()=>break,
         _=work.cancelled()=>{policy.revoke();if cancel.is_cancelled(){break;}anyhow::bail!("private worker authority ended");},
+        finished=guarded_owners.join_next(),if !guarded_owners.is_empty()=>{if stream_owner_completed(guarded_generation,work.is_cancelled(),finished)?{break;}},
         finished=stream_owners.join_next(),if !stream_owners.is_empty()=>{if stream_owner_completed(stream_owner_generation,work.is_cancelled(),finished)?{break;}},
         finished=tasks.join_next(),if !tasks.is_empty()=>{match finished {Some(Ok(Ok(()))) if work.is_cancelled()=>break,Some(Ok(Err(error)))=>return Err(error),_=>anyhow::bail!("private background task stopped")}},
         event=input.recv()=>match event {
@@ -437,6 +444,33 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                         let (router,background)=super::stream_router::new(profile.peer_id.clone(),own.ip,identity.clone(),events.clone(),work.child_token())?;
                         stream_router=Some(router);let carrier=stream_output.clone();
                         stream_owners.spawn(async move{(generation,background.with_carrier(carrier).run().await)});
+                    }
+                }
+                #[cfg(all(feature="private-sparse",feature="private-stream"))]
+                {
+                    if snapshot.sparse.is_none() {
+                        if let Some(owner)=guarded_owner.take(){
+                            owner.cancel();
+                            // Completion of the intentionally retired sparse
+                            // owner must not look like current-owner failure.
+                            guarded_generation=guarded_generation.checked_add(1).ok_or_else(||anyhow::anyhow!("guarded runtime generation exhausted"))?;
+                        }
+                        guarded_flows=None;
+                    } else if guarded_flows.is_none() {
+                        while guarded_owners.len()>=2 {
+                            match tokio::time::timeout(Duration::from_secs(2),guarded_owners.join_next()).await.map_err(|_|anyhow::anyhow!("retired guarded flow owner did not stop"))? {
+                                Some(Ok((_,Ok(()))))=>{},Some(Ok((_,Err(error))))=>return Err(error),_=>anyhow::bail!("retired guarded flow owner failed"),
+                            }
+                        }
+                        let handle=sparse_handle.clone();let workspace=profile.workspace.clone();let own_id=profile.peer_id.clone();
+                        let current=Arc::new(move|peer:&str|super::stream_chunks::flow_authority::LocalAuthority::capture(&handle,&workspace,&own_id,peer).ok().map(Arc::new));
+                        let handle=sparse_handle.clone();let request=Arc::new(move|peer:&str|{handle.request_peer(peer);});
+                        let owner=work.child_token();
+                        let (flows,background)=super::stream_chunks::flow_runtime::Runtime::new(identity.clone(),current,request,events.clone(),owner.clone())?;
+                        guarded_generation=guarded_generation.checked_add(1).ok_or_else(||anyhow::anyhow!("guarded runtime generation exhausted"))?;
+                        let generation=guarded_generation;
+                        guarded_owners.spawn(async move{(generation,background.run().await)});
+                        guarded_owner=Some(owner);guarded_flows=Some(flows);
                     }
                 }
                 if let Some(tun)=&device {
@@ -629,6 +663,17 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 #[cfg(feature="private-stream")]
                 if let Some(envelope)=porthub_mesh::control_packet::decode(porthub_mesh::control_packet::STREAM,bytes.clone()) {
                     if peer_ips.get(&peer)==Some(&envelope.source) && peer_ips.get(&profile.peer_id)==Some(&envelope.destination) {
+                        #[cfg(feature="private-sparse")]
+                        if sparse_handle.enabled() {
+                            if let Some(flows)=&guarded_flows {
+                                if sparse_handle.by_id(&peer).is_some_and(|p|p.stream_transport=="quic2-origin") {
+                                    // Envelope identity comes from authenticated Session/relay ingress,
+                                    // never from the PHG2 header or cached hostname.
+                                    let _=flows.receive(&peer,envelope.source,envelope.payload);
+                                }
+                            }
+                            continue;
+                        }
                         if let Some(router)=&stream_router {router.receive(envelope.source,envelope.payload).await;}
                     }
                     continue;
@@ -651,6 +696,8 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 }
                 mark_activity(&mut last_activity,&peer,now);
                 if policy.check(&bytes,&peer,true) {
+                    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+                    if sparse_handle.enabled() && guarded_flows.as_ref().is_some_and(|flows|!flows.raw_ingress(&bytes)){continue;}
                     if let Some(packet)=Packet::parse(&bytes) {paths.observe(packet,direct);}
                     if let Some(tun)=&device {tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=write_authorized(installed_authority.as_ref(),&sparse_handle,Some(&peer),tun,&bytes)=>result?};}
                 }
@@ -693,7 +740,15 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             Some(Event::StreamDatagram {destination,payload,permit})=>{
                 if permit.as_ref().is_some_and(|permit|!permit.valid()){continue;}
             if installed_authority.as_ref().is_some_and(|a|a.check().is_err()){policy.revoke();anyhow::bail!("private request-start authority expired");}
-                let Some(router)=&stream_router else {continue;};if !router.valid_lease(){continue;}
+                if sparse_handle.enabled() {
+                    if permit.as_ref().is_none_or(|permit|permit.remaining().is_none()){continue;}
+                    #[cfg(feature="private-sparse")]
+                    if guarded_flows.is_none() || super::stream_chunks::carrier::Frame::decode(payload.clone()).is_err(){continue;}
+                    #[cfg(not(feature="private-sparse"))]
+                    continue;
+                } else {
+                    let Some(router)=&stream_router else {continue;};if !router.valid_lease(){continue;}
+                }
                 let (Some(peer),Some(source))=(by_ip.get(&destination),peer_ips.get(&profile.peer_id)) else {sparse_handle.request_ip(destination);continue;};
                 if sparse_handle.enabled()&&(policy.pair_peer(peer).is_none()||sparse_handle.by_id(peer).is_none()){sparse_handle.request_ip(destination);continue;}
                 let packet=porthub_mesh::control_packet::encode(porthub_mesh::control_packet::STREAM,*source,destination,&payload)?;
@@ -780,6 +835,14 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 let prefer_peer=if mode==super::strategy::Mode::Auto {
                     path_quality.prefer_peer(peer,default_prefer_peer,std::time::Instant::now())
                 } else { default_prefer_peer };
+                #[cfg(all(feature="private-sparse",feature="private-stream"))]
+                if sparse_handle.enabled() {
+                    if let Some(flows)=&guarded_flows {
+                        let negotiated=sparse_handle.by_id(peer).is_some_and(|p|p.stream_transport=="quic2-origin");
+                        let prefer_stream=negotiated&&(!prefer_peer || direct.is_none_or(|session|session.is_relay()));
+                        if flows.kernel_packet(peer,bytes::Bytes::copy_from_slice(&buffer[..size]),prefer_stream){continue;}
+                    }
+                }
                 #[cfg(feature="private-stream")]
                 if let Some(router)=&stream_router {
                     let prefer_stream=!prefer_peer || direct.is_none_or(|session|session.is_relay());
@@ -975,17 +1038,18 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     work.cancel();
     drop(component_maintenance);
     if tokio::time::timeout(Duration::from_secs(2), async {
-        while !tasks.is_empty()||!stream_owners.is_empty(){
-            tokio::select!{_=tasks.join_next(),if !tasks.is_empty()=>{},_=stream_owners.join_next(),if !stream_owners.is_empty()=>{}}
+        while !tasks.is_empty()||!stream_owners.is_empty()||!guarded_owners.is_empty(){
+            tokio::select!{_=tasks.join_next(),if !tasks.is_empty()=>{},_=stream_owners.join_next(),if !stream_owners.is_empty()=>{},_=guarded_owners.join_next(),if !guarded_owners.is_empty()=>{}}
         }
     })
     .await
     .is_err()
     {
-        tasks.abort_all();stream_owners.abort_all();
+        tasks.abort_all();stream_owners.abort_all();guarded_owners.abort_all();
     }
     while tasks.join_next().await.is_some() {}
     while stream_owners.join_next().await.is_some() {}
+    while guarded_owners.join_next().await.is_some() {}
     for session in sessions.write().await.drain().map(|(_, session)| session) {
         session.close().await;
     }
