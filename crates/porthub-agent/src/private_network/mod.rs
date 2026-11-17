@@ -101,3 +101,9 @@ pub mod sparse_dispatch;
 
 #[cfg(all(test,feature="private-sparse",target_os="linux"))]
 mod native_lifecycle_fixture;
+
+#[cfg(all(test,feature="private-sparse",any(windows,target_os="macos")))]
+mod native_desktop_lifecycle_fixture;
+
+#[cfg(all(test,feature="private-sparse",target_os="linux"))]
+mod native_resolver_lifecycle_fixture;
