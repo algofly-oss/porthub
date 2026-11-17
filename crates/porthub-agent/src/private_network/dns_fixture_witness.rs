@@ -11,12 +11,41 @@ pub(crate) struct Counts {
     pub replies: u64,
     pub expected_a: u64,
     pub noerror: u64,
+    pub metadata: Vec<ReplyMetadata>,
+    pub metadata_dropped: u64,
+}
+// At most eight exact-owned exchanges; no names, addresses, or packet bytes.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct ReplyMetadata {
+    order: u64,
+    query_type: u16,
+    query_class: u16,
+    query_flags: u16,
+    response_flags: u16,
+    query_id: u16,
+    response_id: u16,
+    id_equal: bool,
+    question_count: usize,
+    question_name_case_equal: bool,
+    question_name_folded_equal: bool,
+    question_type_equal: bool,
+    question_class_equal: bool,
+    answers: usize,
+    expected_answer_count: usize,
+    answer_name_case_equal: bool,
+    answer_class_equal: bool,
+    ttl_min: Option<u32>,
+    ttl_max: Option<u32>,
+    peer_loopback: bool,
+    peer_port: u16,
 }
 pub(crate) struct Observer {
     name: String,
     expected: Ipv4Addr,
     direct_port: AtomicU16,
     counts: [AtomicU64; 8],
+    metadata: std::sync::Mutex<Vec<ReplyMetadata>>,
+    metadata_dropped: AtomicU64,
 }
 impl Observer {
     pub fn new(name: String, nonce: &str, expected: Ipv4Addr) -> Result<Self> {
@@ -33,6 +62,8 @@ impl Observer {
             expected,
             direct_port: AtomicU16::new(0),
             counts: std::array::from_fn(|_| AtomicU64::new(0)),
+            metadata: std::sync::Mutex::new(Vec::new()),
+            metadata_dropped: AtomicU64::new(0),
         })
     }
     pub fn direct_port(&self, port: u16) {
@@ -89,7 +120,55 @@ impl Observer {
         {
             return;
         }
-        self.counts[5].fetch_add(1, Ordering::SeqCst);
+        let order = self.counts[5].fetch_add(1, Ordering::SeqCst);
+        let question = answer.queries.first();
+        let expected: Vec<_> = answer
+            .answers
+            .iter()
+            .filter(|r| matches!(&r.data, RData::A(A(ip)) if *ip == self.expected))
+            .collect();
+        let row = ReplyMetadata {
+            order,
+            query_type: q.queries[0].query_type().into(),
+            query_class: q.queries[0].query_class().into(),
+            query_flags: u16::from_be_bytes([query[2], query[3]]),
+            response_flags: u16::from_be_bytes([reply[2], reply[3]]),
+            query_id: q.metadata.id,
+            response_id: answer.metadata.id,
+            id_equal: q.metadata.id == answer.metadata.id,
+            question_count: answer.queries.len(),
+            question_name_case_equal: question
+                .is_some_and(|v| v.name().to_ascii() == q.queries[0].name().to_ascii()),
+            question_name_folded_equal: question.is_some_and(|v| {
+                v.name()
+                    .to_ascii()
+                    .eq_ignore_ascii_case(&q.queries[0].name().to_ascii())
+            }),
+            question_type_equal: question
+                .is_some_and(|v| v.query_type() == q.queries[0].query_type()),
+            question_class_equal: question
+                .is_some_and(|v| v.query_class() == q.queries[0].query_class()),
+            answers: answer.answers.len(),
+            expected_answer_count: expected.len(),
+            answer_name_case_equal: expected
+                .iter()
+                .all(|v| v.name.to_ascii() == q.queries[0].name().to_ascii()),
+            answer_class_equal: expected
+                .iter()
+                .all(|v| v.dns_class == q.queries[0].query_class()),
+            ttl_min: answer.answers.iter().map(|v| v.ttl).min(),
+            ttl_max: answer.answers.iter().map(|v| v.ttl).max(),
+            peer_loopback: remote.ip().is_loopback(),
+            peer_port: remote.port(),
+        };
+        if let Ok(mut rows) = self.metadata.lock() {
+            if rows.len() < 8 {
+                rows.push(row);
+            } else {
+                self.metadata_dropped.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
         if answer.metadata.response_code == ResponseCode::NoError {
             self.counts[7].fetch_add(1, Ordering::SeqCst);
         }
@@ -112,6 +191,8 @@ impl Observer {
             replies: a[5],
             expected_a: a[6],
             noerror: a[7],
+            metadata: self.metadata.lock().unwrap().clone(),
+            metadata_dropped: self.metadata_dropped.load(Ordering::SeqCst),
         }
     }
 }
@@ -196,5 +277,51 @@ fn direct_reply_requires_exact_question_id_and_expected_address() -> Result<()> 
     m.metadata.id = 63701;
     assert!(direct_answer(&m.to_vec()?, name, "10.254.254.3".parse()?).is_err());
     assert!(direct_answer(&[0; 12], name, ip).is_err());
+    Ok(())
+}
+
+#[test]
+fn metadata_retains_case_mismatch_and_bounds_exact_owned_rows() -> Result<()> {
+    let nonce = "0123456789abcdef0123456789abcdef";
+    let name = format!("peer.s{nonce}.phub.");
+    let ip = "10.254.254.2".parse()?;
+    let observer = Observer::new(name.clone(), nonce, ip)?;
+    let mut q = Message::new(7, MessageType::Query, OpCode::Query);
+    q.add_query(hickory_proto::op::Query::query(
+        name.to_uppercase().parse()?,
+        RecordType::A,
+    ));
+    let mut query = q.to_vec()?;
+    // Preserve actual wire case rather than Name's presentation normalization.
+    for byte in &mut query[12..] {
+        if byte.is_ascii_lowercase() {
+            *byte = byte.to_ascii_uppercase();
+        }
+    }
+    let mut a = Message::new(7, MessageType::Response, OpCode::Query);
+    a.add_query(hickory_proto::op::Query::query(
+        name.parse()?,
+        RecordType::A,
+    ));
+    a.add_answer(Record::from_rdata(name.parse()?, 5, RData::A(A(ip))));
+    let reply = a.to_vec()?;
+    for _ in 0..10 {
+        observer.reply(&query, &reply, "127.0.0.1:12345".parse()?);
+    }
+    let counts = observer.snapshot();
+    assert_eq!(counts.metadata.len(), 8);
+    assert_eq!(counts.metadata_dropped, 2);
+    let row = &counts.metadata[0];
+    assert!(!row.question_name_case_equal && row.question_name_folded_equal);
+    assert!(!row.answer_name_case_equal && row.answer_class_equal);
+    assert!(row.id_equal && row.question_type_equal && row.question_class_equal);
+    assert_eq!(
+        (row.ttl_min, row.ttl_max, row.expected_answer_count),
+        (Some(5), Some(5), 1)
+    );
+    assert_eq!(
+        (row.query_id, row.response_id, row.peer_port),
+        (7, 7, 12345)
+    );
     Ok(())
 }
