@@ -73,3 +73,40 @@ pub(crate) fn owned_exit_underlay(index: u32, source: std::net::IpAddr) -> bool 
 }
 
 pub(crate) mod traffic;
+pub mod sparse;
+
+pub(crate) mod address_lifecycle;
+
+pub(crate) mod topology;
+
+#[cfg(any(windows,test))]
+mod native_ownership;
+
+#[cfg(windows)]
+mod windows_state;
+
+#[cfg(windows)]
+mod windows_nrpt;
+
+#[cfg(windows)]
+mod dns_windows;
+
+#[cfg(feature = "private-sparse")]
+mod authority_clock;
+
+mod authority_event;
+
+#[cfg(all(feature="private-sparse",feature="private-stream"))]
+mod stream_chunks;
+
+#[cfg(all(feature="private-sparse",feature="private-stream"))]
+pub mod sparse_dispatch;
+
+#[cfg(all(test,feature="private-sparse",target_os="linux"))]
+mod native_lifecycle_fixture;
+
+#[cfg(all(test,feature="private-sparse",any(windows,target_os="macos")))]
+mod native_desktop_lifecycle_fixture;
+
+#[cfg(all(test,feature="private-sparse",target_os="linux"))]
+mod native_resolver_lifecycle_fixture;

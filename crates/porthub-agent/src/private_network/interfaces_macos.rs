@@ -75,8 +75,10 @@ pub(crate) async fn current() -> Result<Vec<SocketAddr>> {
     Ok(porthub_mesh::underlay::candidates(found))
 }
 
-pub(crate) async fn watch(
+pub(crate) async fn watch(output:watch::Sender<Vec<SocketAddr>>,cancel:CancellationToken)->Result<()>{watch_with_routes(output,None,cancel).await}
+pub(crate) async fn watch_with_routes(
     output: watch::Sender<Vec<SocketAddr>>,
+    route_changes:Option<watch::Sender<u64>>,
     cancel: CancellationToken,
 ) -> Result<()> {
     let mut backoff = Duration::from_secs(1);
@@ -91,13 +93,7 @@ pub(crate) async fn watch(
         };
         let snapshot = tokio::time::timeout(Duration::from_secs(2), current()).await;
         if let Ok(Ok(addresses)) = snapshot {
-            output.send_if_modified(|previous| {
-                if *previous == addresses {
-                    return false;
-                }
-                *previous = addresses;
-                true
-            });
+            super::topology::publish(&output,route_changes.as_ref(),Some(addresses));
         }
         let mut refresh = tokio::time::interval(Duration::from_secs(120));
         refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -114,12 +110,8 @@ pub(crate) async fn watch(
                 _ = changed.wait() => {
                     changed.clear();
                     if let Ok(Ok(addresses)) = tokio::time::timeout(Duration::from_secs(2), current()).await {
-                        output.send_if_modified(|previous| {
-                            if *previous == addresses { return false; }
-                            *previous = addresses;
-                            true
-                        });
-                    }
+                        super::topology::publish(&output,route_changes.as_ref(),Some(addresses));
+                    }else{super::topology::publish(&output,route_changes.as_ref(),None);}
                     backoff = Duration::from_secs(1);
                 }
             }

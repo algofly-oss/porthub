@@ -17,6 +17,7 @@ pub struct Tun {
     pub name: String,
     own: Ipv4Addr,
     routes: Mutex<HashSet<Ipv4Addr>>,
+    capture_routes: Mutex<std::collections::BTreeSet<porthub_mesh::lan_routes::Network>>,
 }
 
 fn conflicts_with_route(address: Ipv4Addr, route: &Route) -> bool {
@@ -61,9 +62,56 @@ impl Tun {
             name,
             own,
             routes: Mutex::new(HashSet::new()),
+            capture_routes: Mutex::new(std::collections::BTreeSet::new()),
         };
         tun.update_routes(peers).await?;
         Ok(tun)
+    }
+
+    /// Prefix capture does not authorize packets. Preserve foreign routes and isolate pool conflicts.
+    pub async fn update_capture_routes(&self,pools:&[porthub_mesh::lan_routes::Network])->Result<porthub_network::capture_routes::CapturePlan>{
+        use porthub_network::capture_routes::{self,ExistingRoute};
+        let mut manager=AsyncRouteManager::new().context("cannot open capture route manager")?;
+        let native=manager.list().await.context("cannot inspect capture routes")?;
+        let existing:Vec<_>=native.iter().filter_map(|r|match r.destination(){IpAddr::V4(address)=>Some(ExistingRoute{destination:address,prefix:r.prefix(),interface:r.if_index()}),_=>None}).collect();
+        let mut plan=capture_routes::plan(pools,&existing,self.index)?;
+        let wanted:std::collections::BTreeSet<_>=plan.accepted.iter().copied().collect();let mut owned=self.capture_routes.lock().await;
+        for prefix in owned.difference(&wanted).copied().collect::<Vec<_>>(){
+            manager.delete(&Route::new(IpAddr::V4(prefix.address()),prefix.prefix()).with_if_index(self.index)).await.context("cannot remove owned capture route")?;owned.remove(&prefix);
+        }
+        for prefix in wanted.difference(&owned).copied().collect::<Vec<_>>(){
+            if manager.add(&Route::new(IpAddr::V4(prefix.address()),prefix.prefix()).with_if_index(self.index)).await.is_ok(){owned.insert(prefix);}
+            else{plan.accepted.retain(|p|*p!=prefix);plan.conflicting.push(prefix);}
+        }
+        Ok(plan)
+    }
+
+    /// Revalidate retained host routes as well as broad capture prefixes. The
+    /// packet owner calls this after route notifications and before exposing a new
+    /// pair to DNS; it never reuses the additions-only legacy preflight.
+    pub async fn reconcile_sparse(&self,pools:&[porthub_mesh::lan_routes::Network],peers:&[Ipv4Addr])->Result<porthub_network::capture_routes::SparseAudit>{
+        use porthub_network::capture_routes::{self,ExistingRoute};
+        let mut manager=AsyncRouteManager::new().context("cannot open sparse route audit")?;
+        let native=manager.list().await.context("cannot inspect sparse route audit")?;
+        let existing:Vec<_>=native.iter().filter_map(|r|match r.destination(){IpAddr::V4(address)=>Some(ExistingRoute{destination:address,prefix:r.prefix(),interface:r.if_index()}),_=>None}).collect();
+        let mut audit=capture_routes::audit(pools,self.own,peers,&existing,self.index)?;
+        ensure!(!audit.own_conflict,"private TUN address conflicts with a changed LAN/VPN/VM route; private range migration is required");
+        // A route removed outside PortHub is not still a valid ownership claim.
+        // Forget missing entries so an exclusive add can repair them, never adopt
+        // an arbitrary existing entry just because it points at our interface.
+        let present=|address:Ipv4Addr,prefix:u8|existing.iter().any(|r|r.destination==address&&r.prefix==prefix&&r.interface==Some(self.index));
+        let current_peers={let mut held=self.routes.lock().await;held.retain(|ip|present(*ip,32));held.iter().copied().filter(|ip|*ip!=self.own).collect::<std::collections::BTreeSet<_>>()};
+        let current_capture={let mut held=self.capture_routes.lock().await;held.retain(|p|present(p.address(),p.prefix()));held.clone()};
+        if current_peers==audit.accepted_peers.iter().copied().collect()&&current_capture==audit.capture.accepted.iter().copied().collect(){return Ok(audit);}
+        // Remove obsolete/now-conflicting capture and host entries before adding
+        // new ones. A safe known /32 may still work outside a conflicting subnet.
+        let retained_capture:Vec<_>=self.capture_routes.lock().await.iter().copied().filter(|p|audit.capture.accepted.contains(p)).collect();
+        self.update_capture_routes(&retained_capture).await?;
+        let retained_peers:Vec<_>=self.routes.lock().await.iter().copied().filter(|p|audit.accepted_peers.contains(p)).collect();
+        self.update_routes(&retained_peers).await?;
+        audit.capture=self.update_capture_routes(pools).await?;
+        self.update_routes(&audit.accepted_peers).await?;
+        Ok(audit)
     }
 
     pub async fn update_routes(&self, peers: &[Ipv4Addr]) -> Result<()> {
@@ -78,7 +126,7 @@ impl Tun {
         let mut routes = AsyncRouteManager::new().context("cannot open macOS route manager")?;
         let existing = routes.list().await.context("cannot inspect macOS routes")?;
 
-        for address in &additions {
+        for address in &wanted {
             for route in &existing {
                 if route.prefix() == 0 || route.if_index() == Some(self.index) {
                     continue;
@@ -173,12 +221,17 @@ mod tests {
 impl Drop for Tun {
     fn drop(&mut self) {
         let routes = self.routes.get_mut();
-        if routes.is_empty() {
+        let captures=self.capture_routes.get_mut();
+        if routes.is_empty() && captures.is_empty() {
             return;
         }
         let Ok(mut manager) = route_manager::RouteManager::new() else {
             return;
         };
+        for prefix in std::mem::take(captures) {
+            let route=Route::new(IpAddr::V4(prefix.address()),prefix.prefix()).with_if_index(self.index);
+            if manager.delete(&route).is_err(){tracing::warn!("could not remove owned capture route during shutdown");}
+        }
         for address in routes.drain() {
             let route = Route::new(IpAddr::V4(address), 32).with_if_index(self.index);
             if manager.delete(&route).is_err() {

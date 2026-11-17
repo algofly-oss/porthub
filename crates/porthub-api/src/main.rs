@@ -50,6 +50,7 @@ async fn main() -> Result<()> {
         let client = mongodb::Client::with_uri_str(&config.mongo_uri).await?;
         let database = client.database(&config.mongo_database);
         let app = App::new(config, database);
+        porthub_api::private_migration_mode::startup_check(&app).await.map_err(|e|anyhow::anyhow!("private migration preflight failed: {}",e.detail))?;
         let report = porthub_api::generated::preflight(&app)
             .await
             .map_err(|error| anyhow::anyhow!("configuration preflight failed: {}", error.detail))?;
@@ -59,6 +60,7 @@ async fn main() -> Result<()> {
     let db = porthub_api::bootstrap::database(&config).await?;
     let tcp_address = config.listen.clone();
     let app = Arc::new(App::new(config, db));
+    porthub_api::private_migration_mode::startup_check(&app).await.map_err(|e|anyhow::anyhow!("private migration preflight failed: {}",e.detail))?;
     porthub_api::terminal_grants::ensure_indexes(&app).await.map_err(|e|anyhow::anyhow!("terminal index initialization failed: {}",e.detail))?;
     porthub_api::inventory_query::ensure_indexes(&app)
         .await
@@ -116,6 +118,9 @@ async fn main() -> Result<()> {
         }
     });
     let (activity_stop, activity_stopping) = tokio::sync::watch::channel(false);
+    #[cfg(feature="private-sparse")]
+    let private_recovery=tokio::spawn(porthub_api::private_renumber::worker::run(app.clone(),activity_stop.subscribe()));
+
     let activity = app.config.web_activity_log_path.clone().map(|path| {
         let app = app.clone();
         tokio::spawn(async move {
@@ -189,6 +194,9 @@ async fn main() -> Result<()> {
     realtime.realtime.close().await;
     refresh.abort();
     let _ = activity_stop.send(true);
+    #[cfg(feature="private-sparse")]
+    private_recovery.await?;
+
     if let Some(activity) = activity {
         activity.await?;
     }

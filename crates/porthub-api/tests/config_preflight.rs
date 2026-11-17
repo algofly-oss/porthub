@@ -94,8 +94,48 @@ async fn actual_preflight_binary_validates_legacy_records_without_startup_writes
         let after: Vec<_> = case.app.collection("traffic_routes").find(doc!{}).sort(doc!{"_id":1}).await?.try_collect().await?;
         ensure!(before == after);
         ensure!(case.db.list_collection_names().await?.len() == 3, "preflight created startup collections");
+        #[cfg(not(feature="private-sparse"))]
+        {
+            let owner=ObjectId::new().to_hex();let head=doc!{"_id":&owner,"state":"applying","generation":1_i64};
+            case.app.collection("private_renumber_heads").insert_one(head.clone()).await?;
+            let refused=tokio::time::timeout(Duration::from_secs(15),command.output()).await??;
+            ensure!(!refused.status.success(),"default binary bypassed active migration");
+            ensure!(String::from_utf8_lossy(&refused.stderr).contains("private-sparse recovery build"),"missing actionable recovery-mode diagnostic");
+            ensure!(directory.path().read_dir()?.next().is_none(),"failed migration preflight wrote startup files or IPC");
+            ensure!(case.app.collection("private_renumber_heads").find_one(doc!{"_id":&owner}).await?==Some(head),"preflight changed the migration head");
+            ensure!(case.db.list_collection_names().await?.len()==4,"failed migration preflight created startup collections");
+        }
+
         Ok::<_, anyhow::Error>(())
     }.await;
     case.db.drop().await?;
     result
+}
+
+
+#[tokio::test]
+async fn actual_preflight_binary_requires_mongo_and_fails_bounded_without_startup_writes()->Result<()> {
+    let directory=tempfile::tempdir()?;
+    // Hold an owned loopback endpoint without a Mongo protocol responder, avoiding
+    // assumptions about an unrelated host port or accidental real DB contact.
+    let unavailable=std::net::TcpListener::bind("127.0.0.1:0")?;
+    let uri=format!("mongodb://127.0.0.1:{}/?serverSelectionTimeoutMS=200&connectTimeoutMS=200",unavailable.local_addr()?.port());
+    let mut command=tokio::process::Command::new(env!("CARGO_BIN_EXE_porthub-api"));
+    command.kill_on_drop(true).arg("--check-config")
+        .env("MONGO_DATABASE_URI",uri).env("MONGO_DATABASE_NAME","preflight_unavailable_fixture")
+        .env("PORTHUB_DB_INITIALIZE","true")
+        .env("PORT_HUB_PUBLIC_BASE_URL","https://gateway.example")
+        .env("PORTHUB_GATEWAY_ADVERTISED_URL","http://192.0.2.10:8345")
+        .env("PORTHUB_GATEWAY_CONFIG_PATH",directory.path().join("gateway.toml"))
+        .env("PORTHUB_WEB_ROUTES_CONFIG_PATH",directory.path().join("web-routes.json"))
+        .env("PORTHUB_API_SOCKET",directory.path().join("api.sock"))
+        .env("PORTHUB_EDGE_SOCKET",directory.path().join("edge.sock"))
+        .env("FIREWALL_SOCKET",directory.path().join("firewall.sock"))
+        .env("FW_API_KEY","unused-preflight-fixture-key");
+    let output=tokio::time::timeout(Duration::from_secs(5),command.output()).await??;
+    ensure!(!output.status.success(),"database-backed configuration check silently succeeded without Mongo");
+    let diagnostic=String::from_utf8_lossy(&output.stderr);
+    ensure!(diagnostic.contains("private migration preflight failed")||diagnostic.contains("configuration preflight failed"),"failure happened before the actual database preflight: {diagnostic}");
+    ensure!(directory.path().read_dir()?.next().is_none(),"failed offline preflight wrote startup files or IPC");
+    drop(unavailable);Ok(())
 }

@@ -116,7 +116,7 @@ async fn actual_direct_and_gateway_carriers_upload_observed_tx() -> Result<()> {
         let mut plans = Vec::new(); let mut outputs = Vec::new();
         for index in 0..2 {
             let (sender, packets) = mpsc::channel(16);
-            let plan = StreamCarrierPlan { source: Some(ips[index]), valid_until: Some(Instant::now()+Duration::from_secs(60)), routes: HashMap::from([(ips[1-index], (input.peers[1-index].clone(),true,counters[index].get(&input.peers[1-index]).cloned()))]) };
+            let plan = StreamCarrierPlan { source: Some(ips[index]), valid_until: Some(Instant::now()+Duration::from_secs(60)), routes: HashMap::from([(ips[1-index], (input.peers[1-index].clone(),true,None,counters[index].get(&input.peers[1-index]).cloned()))]) };
             let (updates, plan_rx) = watch::channel(plan);
             tasks.spawn(stream_carrier(packets, plan_rx, sessions[index].clone(), relay_senders[index].clone(), cancel.child_token()));
             plans.push(updates); outputs.push(sender);
@@ -126,7 +126,7 @@ async fn actual_direct_and_gateway_carriers_upload_observed_tx() -> Result<()> {
             for index in 0..2 {
                 plans[index].send_modify(|plan|plan.routes.get_mut(&ips[1-index]).unwrap().1=direct);
                 let payload = bytes::Bytes::from(vec![if direct {17} else {29};64]);
-                outputs[index].send(porthub_mesh::streams::Datagram { address: ips[1-index], payload: payload.clone() }).await?;
+                outputs[index].send(porthub_mesh::streams::Datagram { address: ips[1-index], payload: payload.clone(), permit: None }).await?;
                 let received = tokio::time::timeout(Duration::from_secs(3), async {
                     loop { match inputs[1-index].recv().await {
                         Some(Event::Packet{peer,bytes,carrier_direct,..}) => break Ok::<_,anyhow::Error>((peer,bytes,carrier_direct)),

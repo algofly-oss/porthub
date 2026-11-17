@@ -13,15 +13,27 @@ use std::{
 };
 use tokio::{net::{TcpListener, UdpSocket}, sync::RwLock};
 use tokio_util::sync::CancellationToken;
-#[derive(Default)]
+#[derive(Default,Clone)]
 pub struct Zone {
     suffixes: HashSet<String>,
     records: HashMap<String, Ipv4Addr>,
     rules: Vec<porthub_mesh::dns_policy::Rule>,
     forward_all: bool,
     management_names: HashSet<String>,
+    sparse: Option<super::sparse::Handle>,
+    ttl: u32,
 }
 impl Zone {
+    pub fn set_sparse(&mut self,handle:super::sparse::Handle){self.sparse=Some(handle);}
+    fn missing_private(&self,bytes:&[u8])->Option<String>{
+        let query=Message::from_vec(bytes).ok()?;
+        if bytes.len()>1500||query.metadata.message_type!=MessageType::Query||query.metadata.op_code!=OpCode::Query||query.queries.len()!=1{return None;}
+        let q=&query.queries[0];if q.query_class()!=DNSClass::IN||q.query_type()!=RecordType::A{return None;}
+        let name=q.name().to_ascii().to_ascii_lowercase();
+        if self.records.contains_key(&name)||self.suffixes.contains(&name)||!self.suffixes.iter().any(|s|name.ends_with(&format!(".{s}"))){return None;}
+        self.sparse.as_ref().filter(|h|h.enabled()).map(|_|name)
+    }
+
     pub fn update(&mut self, snapshot: &Snapshot) -> Result<()> {
         let own = snapshot
             .peers
@@ -72,6 +84,7 @@ impl Zone {
                 || suffix.ends_with(&format!(".{domain}"))),
                 "DNS policy conflicts with a private identity zone");
         }
+        self.ttl=5;
         self.rules = rules;
         self.suffixes = suffixes;
         self.records = records;
@@ -95,6 +108,10 @@ impl Zone {
         );
         reply.metadata.authoritative = true;
         reply.metadata.recursion_desired = query.metadata.recursion_desired;
+        if self.sparse.as_ref().is_some_and(|handle|!handle.authority_valid()) {
+            reply.metadata.response_code=ResponseCode::ServFail;
+            return reply.to_vec().ok();
+        }
         reply.add_query(q.clone());
         if query.metadata.op_code == OpCode::Query {
             if porthub_mesh::dns_policy::matching(&self.rules, &name).is_some() {
@@ -121,7 +138,9 @@ impl Zone {
             && q.query_type() == RecordType::A
         {
             if let Some(ip) = self.records.get(&name) {
-                reply.add_answer(Record::from_rdata(q.name().clone(), 5, RData::A(A(*ip))));
+                let ttl=self.sparse.as_ref().map(|handle|handle.authority_ttl()).unwrap_or(Some(self.ttl.max(1)));
+                if let Some(ttl)=ttl {reply.add_answer(Record::from_rdata(q.name().clone(), self.ttl.max(1).min(ttl), RData::A(A(*ip))));}
+                else {reply.metadata.response_code=ResponseCode::ServFail;}
             }
         }
         reply.to_vec().ok()
@@ -136,6 +155,7 @@ impl Zone {
         let name = question.name().to_ascii().trim_end_matches('.').to_ascii_lowercase();
         if self.suffixes.iter().any(|suffix| within(&name, suffix.trim_end_matches('.'))) { return false; }
         if self.management_names.contains(&name) {return true;}
+        if self.sparse.as_ref().is_some_and(|handle|!handle.authority_valid()){return false;}
         porthub_mesh::dns_policy::matching(&self.rules, &name).is_none()
             && (self.forward_all || self.rules.iter().any(|rule| within(&name, porthub_mesh::dns_policy::zone(rule))))
     }
@@ -157,6 +177,7 @@ mod tor_coexistence_tests {
             records:HashMap::from([("miro.phub.".into(),"10.203.0.2".parse()?)]),
             rules:vec![Rule {domain:"blocked.test".into(),include_subdomains:false,action:Action::Block},Rule {domain:"gateway.test".into(),include_subdomains:false,action:Action::Block}],
             forward_all:true,management_names:HashSet::from(["gateway.test".into()]),
+            sparse:None,ttl:5,
         };
         let query=|name:&str|->Result<Vec<u8>> {let mut query=Message::query();query.add_query(Query::query(Name::from_ascii(name)?,RecordType::A));Ok(query.to_vec()?)};
         let private=query("miro.phub.")?;assert!(!zone.needs_upstream(&private));
@@ -166,6 +187,21 @@ mod tor_coexistence_tests {
         assert!(zone.needs_upstream(&query("public.test.")?));
         assert!(zone.needs_upstream(&query("gateway.test.")?));
         Ok(())
+    }
+}
+#[cfg(test)]
+mod sparse_dns_tests {
+    use super::*;
+    use hickory_proto::{op::Query,rr::Name};
+    #[tokio::test(start_paused=true)]
+    async fn private_miss_does_not_fall_through_even_when_public_dns_is_forwarded()->Result<()> {
+        let snapshot:Snapshot=serde_json::from_value(serde_json::json!({"workspace":"w","self":"a","revision":1,"expires_at":chrono::Utc::now()+chrono::Duration::seconds(30),"sparse":{"protocol":1,"epoch":"a".repeat(64)},"dns_suffixes":["custom.internal"],"peers":[{"id":"a","ip":"10.203.0.2","hostname":"a.phub","fingerprint":"local","instance":"local-instance"}],"grants":[]}))?;
+        for name in ["unknown.phub.","cold.custom.internal."] {
+        let(handle,mut control)=super::super::sparse::channel();handle.update_base(&snapshot);let mut zone=Zone::default();zone.set_sparse(handle);zone.update(&snapshot)?;zone.forward_all=true;
+        let mut query=Message::query();query.add_query(Query::query(Name::from_ascii(name)?,RecordType::A));let bytes=query.to_vec()?;
+        assert!(!zone.needs_upstream(&bytes));assert_eq!(zone.missing_private(&bytes).as_deref(),Some(name));
+        let zone=RwLock::new(zone);let response=answer_with_upstream(&zone,&Default::default(),&bytes,"127.0.0.1:0".parse()?,false).await.expect("private timeout must be an explicit local DNS error, never upstream/no response");
+        assert_eq!(Message::from_vec(&response)?.metadata.response_code,ResponseCode::ServFail);assert_eq!(control.batch()?["wanted"][0]["value"],name.trim_end_matches('.'));}Ok(())
     }
 }
 pub struct Server {
@@ -192,9 +228,11 @@ impl Server {
         #[cfg(target_os = "macos")]
         let address = (Ipv4Addr::LOCALHOST, 0);
         #[cfg(windows)]
-        let address = (Ipv4Addr::LOCALHOST, 53);
-        let socket = UdpSocket::bind(address).await?;
-        let tcp = TcpListener::bind(socket.local_addr()?).await?;
+        let address = (if cfg!(feature="private-sparse"){super::native_ownership::dns_endpoint(own)}else{Ipv4Addr::LOCALHOST}, 53);
+        #[cfg(not(windows))]
+        let (socket,tcp)={let socket=UdpSocket::bind(address).await?;let tcp=TcpListener::bind(socket.local_addr()?).await?;(socket,tcp)};
+        #[cfg(windows)]
+        let (socket,tcp)=super::dns_windows::bind(std::net::SocketAddrV4::new(address.0,address.1))?;
         Ok(Self { socket, tcp, zone: Default::default(), upstream: Default::default() })
     }
     pub fn port(&self) -> Result<u16> {
@@ -240,7 +278,7 @@ impl Server {
                 },
                 packet=socket.recv_from(&mut buffer)=>{
                 let (n,remote)=packet?; if remote.ip()!=own && !remote.ip().is_loopback() {continue;}
-                if self.zone.read().await.needs_upstream(&buffer[..n]) {
+                if {let zone=self.zone.read().await;zone.needs_upstream(&buffer[..n])||zone.missing_private(&buffer[..n]).is_some()} {
                     if connections.len() >= 32 { continue; }
                     let query = buffer[..n].to_vec();
                     let upstream = upstream.clone();
@@ -262,6 +300,15 @@ impl Server {
 
 async fn answer_with_upstream(zone: &RwLock<Zone>, upstream: &super::dns_upstream::Upstream,
     bytes: &[u8], address: std::net::SocketAddr, tcp: bool) -> Option<Vec<u8>> {
+    let private={let state=zone.read().await;state.missing_private(bytes).zip(state.sparse.clone())};
+    if let Some((name,resolver))=private {
+        let peer=resolver.resolve_name(&name).await;
+        let state=zone.read().await;
+        // Recheck the latest namespace after await. Never send this private query upstream.
+        if state.missing_private(bytes).as_deref()!=Some(name.as_str()){return state.answer(bytes);}
+        if let Some(peer)=peer {if let Some(ttl)=resolver.dns_ttl(peer.ip){let mut answer=state.clone();answer.records.insert(name,peer.ip);answer.ttl=ttl;return answer.answer(bytes);}}
+        let mut answer=Message::from_vec(&state.answer(bytes)?).ok()?;answer.metadata.response_code=ResponseCode::ServFail;return answer.to_vec().ok();
+    }
     {
         let zone = zone.read().await;
         if !zone.needs_upstream(bytes) { return zone.answer(bytes); }
@@ -280,6 +327,58 @@ pub struct Registration {
     tor_default: Option<super::dns_default_macos::Registration>,
     #[cfg(windows)]
     interface: Option<windows_sys::core::GUID>,
+    #[cfg(windows)]
+    nrpt:Option<super::windows_nrpt::Registration>,
+}
+
+/// Finish owned OS DNS cleanup before the interface address can disappear.
+pub async fn shutdown_registration(current:&mut Option<Registration>)->Result<()> {
+    #[cfg(windows)]
+    if let Some(nrpt)=current.as_mut().and_then(|r|r.nrpt.as_mut()){nrpt.close().await?;}
+    *current=None;Ok(())
+}
+
+/// Replace namespaces without first removing the still-valid owned set.
+pub async fn replace_registration(current:&mut Option<Registration>,profile:&std::path::Path,index:u32,own:Ipv4Addr,port:u16,suffixes:&[String])->Result<()> {
+    #[cfg(windows)]
+    if cfg!(feature="private-sparse") {
+        ensure!(port==53,"Windows owned DNS requires standard DNS port");
+        if let Some(registration)=current.as_mut().and_then(|r|r.nrpt.as_mut()){return registration.replace(suffixes).await;}
+        let nrpt=super::windows_nrpt::Registration::open(profile,index,own,suffixes).await?;
+        *current=Some(Registration{interface:None,nrpt:Some(nrpt)});return Ok(());
+    }
+    let _=profile;
+    #[cfg(target_os="macos")]
+    {
+        let private:Vec<_>=suffixes.iter().filter(|s|s.as_str()!=".").cloned().collect();
+        let needs_default=suffixes.iter().any(|s|s==".");
+        // Finish every fallible operation before transferring old file ownership.
+        // In particular a failed Tor-default registration must not remove the
+        // retained private suffixes when its temporary guard is dropped.
+        let new_default=if needs_default&&current.as_ref().is_none_or(|old|old.tor_default.is_none()) {
+            Some(super::dns_default_macos::register(port).await?)
+        }else{None};
+        let mut next=replace_files(current.as_mut(),std::path::Path::new("/etc/resolver"),port,&private)?;
+        if needs_default {next.tor_default=current.as_mut().and_then(|old|old.tor_default.take()).or(new_default);}
+        *current=Some(next);
+        let _=(index,own);
+    }
+    #[cfg(not(target_os="macos"))]
+    {
+        let next=register(index,own,port,suffixes).await?;
+        #[cfg(windows)]
+        if let Some(old)=current.as_mut() {
+            // Both registrations describe this same live, owned TUN. Do not let
+            // the old guard clear the settings that register() just replaced.
+            let same=match (&old.interface,&next.interface) {
+                (Some(a),Some(b))=>a.data1==b.data1&&a.data2==b.data2&&a.data3==b.data3&&a.data4==b.data4,
+                _=>false,
+            };
+            if same {old.interface=None;}
+        }
+        *current=Some(next);
+    }
+    Ok(())
 }
 
 impl Drop for Registration {
@@ -432,9 +531,52 @@ fn register_files(directory: &std::path::Path, port: u16, suffixes: &[String]) -
     Ok(registration)
 }
 
+#[cfg(target_os="macos")]
+fn replace_files(current:Option<&mut Registration>,directory:&std::path::Path,port:u16,suffixes:&[String])->Result<Registration> {
+    // Retained files must still be byte-identical to this guard's own writes.
+    // Never adopt a pre-existing file based only on a matching name or prefix.
+    let retained:Vec<_>=current.as_ref().map(|old|old.paths.iter().filter(|(path,_)|suffixes.iter().any(|s|directory.join(s)==*path)).cloned().collect()).unwrap_or_default();
+    for (path,contents) in &retained {
+        ensure!(std::fs::read(path).ok().as_deref()==Some(contents.as_slice()),"owned private resolver was changed externally");
+        let suffix=path.file_name().and_then(|s|s.to_str()).ok_or_else(||anyhow::anyhow!("invalid owned resolver identity"))?;
+        let expected=format!("# Managed by PortHub native agent\ndomain {suffix}\nnameserver 127.0.0.1\nport {port}\nsearch_order 100\ntimeout 2\n");
+        ensure!(contents==expected.as_bytes(),"private resolver endpoint changed; clean owned rebind required");
+    }
+    let additions:Vec<_>=suffixes.iter().filter(|suffix|!retained.iter().any(|(path,_)|*path==directory.join(suffix))).cloned().collect();
+    let mut next=if additions.is_empty(){Registration::default()}else{register_files(directory,port,&additions)?};
+    // Transfer ownership only after every new file was installed successfully.
+    if let Some(old)=current {old.paths.retain(|(path,_)|!retained.iter().any(|(keep,_)|keep==path));}
+    next.paths.extend(retained);
+    Ok(next)
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod macos_registration_tests {
     use super::*;
+
+    #[test]
+    fn expansion_failure_retains_previous_namespace_and_success_transfers_only_owned_files()->Result<()> {
+        let directory=tempfile::tempdir()?;
+        let mut old=register_files(directory.path(),53001,&["private.test".into(),"obsolete.test".into()])?;
+        std::fs::write(directory.path().join("foreign.test"),b"foreign")?;
+        assert!(replace_files(Some(&mut old),directory.path(),53001,&["private.test".into(),"new.test".into(),"foreign.test".into()]).is_err());
+        assert!(directory.path().join("private.test").exists());assert!(directory.path().join("obsolete.test").exists());assert!(!directory.path().join("new.test").exists());
+        let next=replace_files(Some(&mut old),directory.path(),53001,&["private.test".into(),"new.test".into()])?;
+        drop(old);assert!(!directory.path().join("obsolete.test").exists());assert!(directory.path().join("private.test").exists());
+        drop(next);assert!(!directory.path().join("private.test").exists());assert!(!directory.path().join("new.test").exists());assert_eq!(std::fs::read(directory.path().join("foreign.test"))?,b"foreign");
+        Ok(())
+    }
+
+    #[test]
+    fn externally_changed_or_rebound_resolver_is_never_adopted()->Result<()> {
+        let directory=tempfile::tempdir()?;
+        let mut old=register_files(directory.path(),53001,&["private.test".into()])?;
+        assert!(replace_files(Some(&mut old),directory.path(),53002,&["private.test".into()]).is_err());
+        let path=directory.path().join("private.test");std::fs::write(&path,b"foreign edit")?;
+        assert!(replace_files(Some(&mut old),directory.path(),53001,&["private.test".into(),"new.test".into()]).is_err());
+        assert!(!directory.path().join("new.test").exists());drop(old);assert_eq!(std::fs::read(path)?,b"foreign edit");
+        Ok(())
+    }
 
     #[test]
     fn a_conflicting_suffix_rolls_back_only_owned_resolvers() -> Result<()> {
@@ -530,6 +672,7 @@ pub async fn register(
     );
     Ok(Registration {
         interface: Some(interface),
+        nrpt:None,
     })
 }
 
@@ -542,13 +685,13 @@ mod tcp_tests {
     // Windows runner images can exclude dynamic port ranges independently for
     // TCP and UDP. Probe bounded random non-dynamic ports accepted by both
     // stacks, without changing host exclusions or enabling address reuse.
-    #[cfg(windows)]
     async fn test_sockets() -> Result<(UdpSocket, TcpListener)> {
         let mut last = None;
         for _ in 0..32 {
-            let mut random = [0; 2];
-            getrandom::fill(&mut random)?;
-            let port = 10000 + u16::from_ne_bytes(random) % 30000;
+            #[cfg(windows)]
+            let port={let mut random=[0;2];getrandom::fill(&mut random)?;10000+u16::from_ne_bytes(random)%30000};
+            #[cfg(not(windows))]
+            let port=0;
             let tcp = match TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await {
                 Ok(tcp) => tcp,
                 Err(error) if matches!(error.kind(), std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied) => { last = Some(error); continue; },
@@ -649,13 +792,10 @@ mod tcp_tests {
 
     #[tokio::test]
     async fn tcp_and_udp_share_policy_and_shutdown_closes_idle_clients() -> Result<()> {
-        #[cfg(windows)]
-        let (socket, tcp) = test_sockets().await?;
-        #[cfg(not(windows))]
-        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
-        let address = socket.local_addr()?;
-        #[cfg(not(windows))]
-        let tcp = TcpListener::bind(address).await?;
+        // TCP/UDP ephemeral allocators are independent. Reserve a pair rather
+        // than assuming UDP:0 cannot select an already-owned TCP port.
+        let (socket,tcp)=test_sockets().await?;
+        let address=socket.local_addr()?;
         let zone = Zone { rules: vec![porthub_mesh::dns_policy::Rule {
             domain: "blocked.example".into(), action: porthub_mesh::dns_policy::Action::Block,
             include_subdomains: true,

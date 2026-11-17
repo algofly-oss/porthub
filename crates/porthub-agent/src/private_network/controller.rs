@@ -32,6 +32,12 @@ struct Signal {
 struct Reply {
     snapshot: Snapshot,
     #[serde(default)]
+    sparse_sequence: Option<u64>,
+    #[serde(default)]
+    pair_responses: Vec<porthub_network::policy::PairResponse>,
+    #[serde(default)]
+    stream_protocols:Vec<String>,
+    #[serde(default)]
     signals: Vec<Signal>,
     #[serde(default)]
     ice_servers: Vec<IceServer>,
@@ -177,10 +183,18 @@ struct Live {
     nonce: String,
     created: Instant,
 }
+// Advertisement follows negotiated mode. Sparse must never offer PHT1 while
+// application/retransmission origins are not bounded by an ACK-chunk protocol.
+#[path="stream_offer.rs"]
+mod stream_offer;
+use stream_offer::Offer as StreamOffer;
+pub(crate) use stream_offer::NativeReady;
+
 pub enum Event {
     #[cfg(feature = "local-tor")]
     TorLocal { bytes: Bytes },
-    Snapshot(Snapshot),
+    Snapshot(super::authority_event::Authority<Snapshot>),
+    Pair(super::authority_event::Authority<porthub_network::policy::PairResponse>),
     Packet {
         peer: String,
         bytes: Bytes,
@@ -188,13 +202,20 @@ pub enum Event {
         carrier_direct: bool,
         received_at: Instant,
     },
+    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+    GuardedStreamLocal {
+        peer:String,
+        packet:porthub_network::tcp_stream::tagged::Packet,
+    },
     #[cfg(feature = "private-stream")]
     StreamLocal {
         peer: String,
         bytes: Bytes,
+        scope:porthub_mesh::udp::SendPermit,
     },
     #[cfg(feature = "private-stream")]
     StreamDatagram {
+        permit:Option<porthub_mesh::udp::SendPermit>,
         destination: std::net::Ipv4Addr,
         payload: Bytes,
     },
@@ -281,6 +302,32 @@ pub async fn run_watched_identity(
     local: LocalIdentity,
     cancel: CancellationToken,
 ) -> Result<()> {
+    run_watched_sparse(profile,interfaces,sessions,events,relay_config,local,cancel,None).await
+}
+pub async fn run_watched_sparse(
+    profile: Profile,
+    interfaces: watch::Receiver<Vec<SocketAddr>>,
+    sessions: Sessions,
+    events: mpsc::Sender<Event>,
+    relay_config: watch::Sender<Option<super::relay::Config>>,
+    local: LocalIdentity,
+    cancel: CancellationToken,
+    sparse: Option<super::sparse::Control>,
+) -> Result<()> {
+    run_watched_sparse_owned(profile,interfaces,sessions,events,relay_config,local,cancel,sparse,None,None).await
+}
+pub(crate) async fn run_watched_sparse_owned(
+    profile: Profile,
+    mut interfaces: watch::Receiver<Vec<SocketAddr>>,
+    sessions: Sessions,
+    events: mpsc::Sender<Event>,
+    relay_config: watch::Sender<Option<super::relay::Config>>,
+    local: LocalIdentity,
+    cancel: CancellationToken,
+    mut sparse: Option<super::sparse::Control>,
+    authority_domain:Option<super::authority_event::Domain>,
+    native_streams:Option<watch::Receiver<Option<NativeReady>>>,
+) -> Result<()> {
     ensure!(
         interfaces.borrow().len() <= 16,
         "private interface limit exceeded"
@@ -293,6 +340,9 @@ pub async fn run_watched_identity(
     } = local;
     let control = crate::control::Control::new_private(&profile)?;
     let mut bases = control.authorities();
+    // Never advertise PHT1 for guarded sparse mode until ACK-chunk provenance exists.
+    // An older gateway declining sparse negotiation restores legacy PHT1 next sync.
+    let mut stream_offer=StreamOffer::new(sparse.is_some());
     let mut preferred = 0;
     let mut peers: HashMap<String, Live> = HashMap::new();
     let mut readers = JoinSet::new();
@@ -307,6 +357,7 @@ pub async fn run_watched_identity(
     let mut lan_networks = Vec::new();
     let mut lan_refreshed = None::<Instant>;
     loop {
+        let cycle_started=tokio::time::Instant::now();
         let current_interfaces = interfaces.borrow().clone();
         if current_interfaces != lan_interfaces
             || lan_refreshed.is_none_or(|at| at.elapsed() >= Duration::from_secs(60))
@@ -337,11 +388,13 @@ pub async fn run_watched_identity(
             })
             .collect();
         let mut body = serde_json::json!({"peer_id":profile.peer_id,"token":profile.token,
-            "fingerprint":identity.fingerprint(),"instance":instance,"stream_transport":if cfg!(feature="private-stream") {"quic1"} else {""},"tor_exit":cfg!(all(feature="local-tor",any(target_os="linux",target_os="macos"))),"signals":&pending[..sent],
+            "fingerprint":identity.fingerprint(),"instance":instance,"stream_transport":stream_offer.offered(native_streams.as_ref()),"tor_exit":cfg!(all(feature="local-tor",any(target_os="linux",target_os="macos"))),"signals":&pending[..sent],
             "acks":&acks[..acked],"paths":paths,"lan_networks":lan_networks,"lan_exit":cfg!(any(target_os="linux",target_os="macos")),"application_proxy":cfg!(feature="local-tor")});
+        if let Some(resolver)=&mut sparse {body["sparse"]=resolver.batch()?;}
         if let Some(report)=traffic.as_ref().and_then(|t|t.report()){body["traffic"]=serde_json::to_value(report)?;}
-        let mut reply = None;
         let sent_sequence=body["traffic"]["rows"].as_array().and_then(|r|r.last()).and_then(|r|r["sequence"].as_u64()).unwrap_or(0);
+        let mut reply = None;
+        let request_window = super::authority_event::request_start(authority_domain.as_ref())?;
         let request = control.request(reqwest::Method::POST,"access/private/sync",Some(body),&[]);
         let result = tokio::select! { _=cancel.cancelled()=>return Ok(()), result=request=>result };
         match result {
@@ -351,19 +404,16 @@ pub async fn run_watched_identity(
                 bases = control.authorities();
                 preferred = 0;
             }
-            Err(crate::control::Failure::Rejected(401 | 403)) => anyhow::bail!("private gateway rejected this enrollment"),
+            Err(crate::control::Failure::Rejected(401 | 403)) => {if let Some(resolver)=&sparse{resolver.handle().revoke_all();}cancel.cancel();anyhow::bail!("private gateway rejected this enrollment");},
             Err(_) => {}
         }
-        if let Some(reply) = reply {
-            let direct_relay = super::relay::Config {
-                direct_url: reply.direct_relay_url.clone().filter(|url| !url.is_empty()),
-                relay_token: (32..=128)
-                    .contains(&reply.relay_auth_token.len())
-                    .then(|| reply.relay_auth_token.clone()),
-            };
-            if *relay_config.borrow() != Some(direct_relay.clone()) {
-                relay_config.send_replace(Some(direct_relay));
-            }
+        if let Some(mut reply) = reply {
+            stream_offer.observe_reply(&reply.snapshot,&reply.stream_protocols);
+            let request_window = if reply.snapshot.sparse.is_some() {request_window} else {None};
+            super::authority_event::Authority::new((),request_window.clone(),reply.snapshot.expires_at).check()?;
+            ensure!(reply.snapshot.sparse.is_none()||sparse.is_some(),"sparse private authority was not negotiated");
+            ensure!(reply.snapshot.pair_acl.is_none(),"pair-only compact ACL supplied as base authority");
+            ensure!(reply.pair_responses.len()<=32,"private pair response exceeds limits");
             ensure!(
                 reply.snapshot.self_ == profile.peer_id
                     && reply.snapshot.workspace == profile.workspace,
@@ -389,10 +439,32 @@ pub async fn run_watched_identity(
                 "private interface limit exceeded"
             );
             seen.retain(|_, at| now.duration_since(*at) < Duration::from_secs(90));
-            let valid: HashMap<_, _> = reply
-                .snapshot
-                .peers
-                .iter()
+            let mut transport_peers=reply.snapshot.peers.clone();
+            if let Some(resolver)=&sparse {
+                if reply.snapshot.sparse.is_some() {
+                    ensure!(reply.sparse_sequence==Some(resolver.sequence()),"private pair response sequence changed");
+                    resolver.handle().update_base_authority(&reply.snapshot,super::authority_event::Authority::new((),request_window.clone(),reply.snapshot.expires_at));
+                    transport_peers.extend(resolver.handle().peers());
+                    let mut validator=porthub_network::policy::Engine::default();validator.apply(reply.snapshot.clone())?;
+                    for cached in resolver.handle().leases(){let _=validator.install_pair(cached);}
+                    for resolution in &mut reply.pair_responses {
+                        if resolution.status=="allowed" {
+                            if let Some(lease)=&resolution.lease {
+                                // Validate independent authority before spending a transport slot. Native
+                                // packet owner repeats this check before installing routes or exposing DNS.
+                                if validator.install_pair(lease.clone()).is_ok(){transport_peers.push(lease.peer.clone());}
+                                else {resolution.status="invalid".into();resolution.lease=None;}
+                            }
+                        }
+                    }
+                } else {resolver.handle().update_base_authority(&reply.snapshot,super::authority_event::Authority::new((),request_window.clone(),reply.snapshot.expires_at));}
+            }
+            let direct_relay = if reply.snapshot.sparse.is_some() && transport_peers.iter().all(|p|p.id==profile.peer_id){None}else{Some(super::relay::Config {
+                direct_url: reply.direct_relay_url.clone().filter(|url|!url.is_empty()),
+                relay_token:(32..=128).contains(&reply.relay_auth_token.len()).then(||reply.relay_auth_token.clone()),
+            })};
+            if *relay_config.borrow()!=direct_relay{relay_config.send_replace(direct_relay);}
+            let valid: HashMap<_, _> = transport_peers.iter()
                 .filter(|peer| peer.id != profile.peer_id)
                 .map(|peer| (peer.id.clone(), peer))
                 .collect();
@@ -569,10 +641,14 @@ pub async fn run_watched_identity(
                 pending.len() <= 1024,
                 "private signaling backlog exceeds limit"
             );
-            tokio::select! {_=cancel.cancelled()=>return Ok(()), result=events.send(Event::Snapshot(reply.snapshot))=>ensure!(result.is_ok(),"private packet owner closed")};
+            let response_expiry=reply.snapshot.expires_at;
+            tokio::select! {_=cancel.cancelled()=>return Ok(()), result=events.send(Event::Snapshot(super::authority_event::Authority::new(reply.snapshot,request_window.clone(),response_expiry)))=>ensure!(result.is_ok(),"private packet owner closed")};
+            for resolution in reply.pair_responses {
+                tokio::select!{_=cancel.cancelled()=>return Ok(()),result=events.send(Event::Pair(super::authority_event::Authority::new(resolution,request_window.clone(),response_expiry)))=>ensure!(result.is_ok(),"private pair owner closed")};
+            }
         }
         while readers.try_join_next().is_some() {}
-        let interval = if pending.is_empty()
+        let interval = if sparse.as_ref().is_some_and(|s|s.handle().enabled()&&s.urgent()){1}else if pending.is_empty()
             && in_flight.is_empty()
             && peers
                 .values()
@@ -587,8 +663,11 @@ pub async fn run_watched_identity(
             changed=interfaces.changed(), if interface_changes_open=>{
                 if changed.is_err() { interface_changes_open=false; }
             },
-            _=tokio::time::sleep(Duration::from_secs(interval))=>{}
+            _=tokio::time::sleep(Duration::from_secs(interval))=>{},_=async{if let Some(resolver)=&sparse{resolver.demand().await}else{std::future::pending::<()>().await}}=>{}
         }
+        // Miss notifications coalesce; a local packet flood cannot turn lookup into an
+        // unbounded HTTP loop or starve ordinary lease renewal/other registrations.
+        if sparse.is_some(){tokio::select!{_=cancel.cancelled()=>return Ok(()),_=tokio::time::sleep_until(cycle_started+Duration::from_secs(1))=>{}}}
     }
 }
 
@@ -617,6 +696,16 @@ async fn read_packets(
 
 #[cfg(test)]
 mod origin_tests {
+    #[test]
+    fn stream_advertisement_declines_sparse_and_restores_legacy_after_old_gateway_reply(){
+        let expected=if cfg!(feature="private-stream"){"quic1"}else{""};
+        assert_eq!(super::StreamOffer::new(false).transport(),expected);
+        let mut offer=super::StreamOffer::new(true);assert_eq!(offer.transport(),"");
+        offer.observe(false);assert_eq!(offer.transport(),expected);
+        offer.observe(true);assert_eq!(offer.transport(),"");
+        offer.observe(false);assert_eq!(offer.transport(),expected);
+    }
+
     use super::turn_origins;
     #[test]
     fn authenticated_direct_turn_origin_precedes_secure_fallback() {

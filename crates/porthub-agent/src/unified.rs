@@ -435,6 +435,35 @@ mod tests {
         assert_eq!(alive.load(Ordering::SeqCst), 0);
     }
 
+    #[tokio::test(start_paused=true)]
+    async fn address_change_recreates_private_resources_after_cleanup_without_configuration_change(){
+        use crate::private_network::address_lifecycle::Binding;
+        let first:std::net::Ipv4Addr="10.203.0.2".parse().unwrap();
+        let next:std::net::Ipv4Addr="10.204.0.2".parse().unwrap();
+        let (_configuration,configured)=watch::channel(Some(PathBuf::from("unchanged-registration")));
+        let (address,observations)=watch::channel(first);
+        let (events,mut observed)=tokio::sync::mpsc::unbounded_channel();
+        let live=Arc::new(AtomicUsize::new(0));let stop=CancellationToken::new();
+        struct Resources{address:std::net::Ipv4Addr,live:Arc<AtomicUsize>,events:tokio::sync::mpsc::UnboundedSender<(&'static str,std::net::Ipv4Addr)>}
+        impl Drop for Resources{fn drop(&mut self){assert_eq!(self.live.fetch_sub(1,Ordering::SeqCst),1);let _=self.events.send(("closed",self.address));}}
+        let task=tokio::spawn(supervise(configured,stop.clone(),move|_,cancel|{
+            let mut observations=observations.clone();let live=live.clone();let events=events.clone();
+            async move{
+                let current=*observations.borrow_and_update();let mut binding=Binding::default();binding.configured(current)?;
+                assert_eq!(live.fetch_add(1,Ordering::SeqCst),0);
+                let _resources=Resources{address:current,live,events:events.clone()};events.send(("opened",current)).unwrap();
+                loop {tokio::select!{_=cancel.cancelled()=>return Ok(()),changed=observations.changed()=>{changed?;binding.check(*observations.borrow_and_update())?;}}}
+            }
+        }));
+        assert_eq!(observed.recv().await.unwrap(),("opened",first));
+        address.send(next).unwrap();
+        assert_eq!(observed.recv().await.unwrap(),("closed",first));
+        // Same registration/configuration; the ordinary bounded failure backoff restarts only this worker.
+        assert_eq!(tokio::time::timeout(Duration::from_secs(6),observed.recv()).await.unwrap().unwrap(),("opened",next));
+        stop.cancel();task.await.unwrap();
+        assert_eq!(observed.recv().await.unwrap(),("closed",next));
+    }
+
     #[tokio::test]
     async fn failed_private_worker_does_not_spin_or_terminate_supervision() {
         let (config, receiver) = watch::channel(Some(PathBuf::from("broken")));
@@ -473,7 +502,8 @@ mod tests {
 
 pub(crate) fn private_failure_reason(error: &anyhow::Error) -> &'static str {
     let text = format!("{error:#}").to_ascii_lowercase();
-    if text.contains("lease expired") { "private policy expired; check clock synchronization and gateway connectivity" }
+    if text.contains("private address changed") { "private address changed; rebuilding the private tunnel" }
+    else if text.contains("lease expired") { "private policy expired; check clock synchronization and gateway connectivity" }
     else if text.contains("resolve1") || text.contains("systemd-resolved") { "private DNS unavailable; check systemd-resolved installation and service state" }
     else if text.contains("dns setup") || text.contains("nsswitch") || text.contains("authselect") { "private DNS setup failed; check privileged enrollment and administrator DNS configuration restrictions" }
     else if text.contains("tun device") { "private TUN unavailable; check device access and network privileges" }

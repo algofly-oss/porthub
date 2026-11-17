@@ -239,3 +239,92 @@ async fn sender_history_excludes_clock_offset_receiver_observations_in_every_ran
     case.db.drop().await?;
     result
 }
+
+/// Bounded lookup is independent of sparse selection. This exercises the real
+/// lookup and ordinary sync; the sparse build also exercises an empty selected
+/// peer batch through the actual HTTP endpoint.
+#[tokio::test]
+#[ignore = "requires isolated MongoDB"]
+async fn historical_report_authorization_is_independent_of_pair_batch_and_rechecks_both_owners() -> Result<()> {
+    let case = Case::new(Config::default()).await?;
+    let result = async {
+        let (owner, cookie) = case.user("historical-owner@test.invalid", "user").await?;
+        let (member, _) = case.user("historical-member@test.invalid", "user").await?;
+        let (foreign, _) = case.user("historical-foreign@test.invalid", "user").await?;
+        case.app.collection("workspace_members").insert_one(doc!{"workspace_id":owner,"user_id":member,"role":"member"}).await?;
+        let mut peers = Vec::new(); let mut machines = Vec::new();
+        for (index, user) in [owner, member, foreign].into_iter().enumerate() {
+            let machine = ObjectId::new(); let peer = format!("{user}:{machine}");
+            case.app.collection("machines").insert_one(doc!{"_id":machine,"user_id":user,"enabled":true,"name":format!("History{index}")}).await?;
+            case.app.collection("private_peers").insert_one(doc!{"_id":&peer,"workspace_id":if index==2 {foreign}else{owner},"owner_id":user,"machine_id":machine,"enabled":true,"credential_hash":token_digest(TOKEN),"ip":format!("10.203.0.{}",index+20)}).await?;
+            peers.push(peer); machines.push(machine);
+        }
+        let at = DateTime::now().timestamp_millis().div_euclid(60_000)*60_000-60_000;
+        let report: Report = serde_json::from_value(report(vec![row(&peers[1],1,at,100,200),row(&peers[2],2,at,999,999)]))?;
+        let resolve = || porthub_api::private_traffic::authorized_report_peers(&case.app,owner,&peers[0],&report);
+        let authorized = resolve().await.map_err(|error|anyhow::anyhow!("authorization failed: {}",error.detail))?;
+        ensure!(authorized.iter().any(|p|p.get_str("_id")==Ok(peers[1].as_str())));
+        ensure!(!authorized.iter().any(|p|p.get_str("_id")==Ok(peers[2].as_str())));
+        // Both historically supported BSON identity representations must match
+        // the same member, while machine.user_id remains equal to peer.owner_id.
+        case.app.collection("private_peers").update_one(doc!{"_id":&peers[1]},doc!{"$set":{"owner_id":member.to_hex()}}).await?;
+        case.app.collection("machines").update_one(doc!{"_id":machines[1]},doc!{"$set":{"user_id":member.to_hex()}}).await?;
+        ensure!(resolve().await.map_err(|e|anyhow::anyhow!("{}",e.detail))?.iter().any(|p|p.get_str("_id")==Ok(peers[1].as_str())));
+        case.app.collection("private_peers").update_one(doc!{"_id":&peers[1]},doc!{"$set":{"owner_id":member}}).await?;
+        case.app.collection("machines").update_one(doc!{"_id":machines[1]},doc!{"$set":{"user_id":member}}).await?;
+        case.app.collection("workspace_members").update_one(doc!{"workspace_id":owner,"user_id":member},doc!{"$set":{"user_id":member.to_hex()}}).await?;
+        ensure!(resolve().await.map_err(|e|anyhow::anyhow!("{}",e.detail))?.iter().any(|p|p.get_str("_id")==Ok(peers[1].as_str())));
+        case.app.collection("workspace_members").update_one(doc!{"workspace_id":owner,"user_id":member.to_hex()},doc!{"$set":{"user_id":member}}).await?;
+        // ACL/online/lease state is intentionally irrelevant to historical data.
+        #[cfg(feature="private-sparse")]
+        {
+            case.app.collection("private_networks").update_one(doc!{"_id":owner.to_hex()},doc!{"$setOnInsert":{"cidr":"10.203.0.0/24","dns_suffix":"phub"}}).upsert(true).await?;
+            let mut sparse_body=body(&peers[0],serde_json::to_value(&report)?);
+            sparse_body["sparse"]=json!({"protocol":1,"sequence":1,"wanted":[]});
+            let sparse=case.status("POST","/api/access/private/sync","",sparse_body,StatusCode::OK).await?;
+            ensure!(sparse["snapshot"]["sparse"].is_object(),"sparse path not exercised: {sparse}");
+            ensure!(sparse["snapshot"]["peers"].as_array().unwrap().iter().all(|p|p["id"]==peers[0]),"historical target leaked into selected batch: {sparse}");
+            ensure!(sparse["traffic_ack"]==2 && sparse["traffic_discarded_rows"]==1,"bounded historical target lost: {sparse}");
+            let history=case.status("GET","/api/private/traffic?range=1h",&cookie,Value::Null,StatusCode::OK).await?;
+            ensure!(history["totals"]["total_bytes"]==100,"sparse report lost sender history: {history}");
+        }
+        let first = case.status("POST","/api/access/private/sync","",body(&peers[0],serde_json::to_value(&report)?),StatusCode::OK).await?;
+        ensure!(first["traffic_ack"]==2 && first["traffic_discarded_rows"]==1,"{first}");
+        case.status("POST","/api/access/private/sync","",body(&peers[0],serde_json::to_value(&report)?),StatusCode::OK).await?;
+        let saved = case.app.collection("private_traffic").find_one(doc!{"source":&peers[0],"destination":&peers[1]}).await?.unwrap();
+        ensure!(saved.get_str("source")?==peers[0]);
+        let history = case.status("GET","/api/private/traffic?range=1h",&cookie,Value::Null,StatusCode::OK).await?;
+        ensure!(history["totals"]["total_bytes"]==100,"retry or RX changed sender-only total: {history}");
+        ensure!(history["flows"][0]["received_total_bytes"]==0);
+
+        // Every subsequent lookup observes current target eligibility.
+        for field in ["enabled","deletion_pending","private_owner_revoked"] {
+            let bad = field != "enabled";
+            case.app.collection("machines").update_one(doc!{"_id":machines[1]},doc!{"$set":{field:bad}}).await?;
+            ensure!(!resolve().await.map_err(|error|anyhow::anyhow!("authorization failed: {}",error.detail))?.iter().any(|p|p.get_str("_id")==Ok(peers[1].as_str())),"{field}");
+            case.app.collection("machines").update_one(doc!{"_id":machines[1]},doc!{"$set":{field:!bad}}).await?;
+        }
+        case.app.collection("users").update_one(doc!{"_id":member},doc!{"$set":{"account_deletion":{}}}).await?;
+        ensure!(!resolve().await.map_err(|error|anyhow::anyhow!("authorization failed: {}",error.detail))?.iter().any(|p|p.get_str("_id")==Ok(peers[1].as_str())));
+        case.app.collection("users").update_one(doc!{"_id":member},doc!{"$unset":{"account_deletion":""}}).await?;
+        case.app.collection("users").update_one(doc!{"_id":owner},doc!{"$set":{"account_deletion":{}}}).await?;
+        ensure!(resolve().await.is_err(),"retiring workspace cannot authorize history");
+        case.app.collection("users").update_one(doc!{"_id":owner},doc!{"$unset":{"account_deletion":""}}).await?;
+        case.app.collection("workspace_members").delete_one(doc!{"workspace_id":owner,"user_id":member}).await?;
+        ensure!(!resolve().await.map_err(|error|anyhow::anyhow!("authorization failed: {}",error.detail))?.iter().any(|p|p.get_str("_id")==Ok(peers[1].as_str())));
+        let mut maximum = report.clone(); maximum.rows.clear();
+        for index in 0..porthub_mesh::traffic_report::MAX_ROWS {
+            let peer = format!("{owner}:{}",ObjectId::new());
+            case.app.collection("private_peers").insert_one(doc!{"_id":&peer,"workspace_id":owner,"owner_id":owner,"machine_id":machines[0],"enabled":true}).await?;
+            maximum.rows.push(row(&peer,index as u64+1,at,1,0));
+        }
+        ensure!(porthub_api::private_traffic::authorized_report_peers(&case.app,owner,&peers[0],&maximum).await.map_err(|error|anyhow::anyhow!("authorization failed: {}",error.detail))?.len()==257);
+        maximum.rows.push(row("overflow",257,at,1,0));
+        ensure!(porthub_api::private_traffic::authorized_report_peers(&case.app,owner,&peers[0],&maximum).await.is_err());
+        case.app.collection("machines").update_one(doc!{"_id":machines[0]},doc!{"$set":{"private_owner_revoked":true}}).await?;
+        ensure!(resolve().await.is_err(),"revoked reporter cannot authorize writes");
+        Ok::<_,anyhow::Error>(())
+    }.await;
+    let cleanup = case.db.drop().await;
+    result?; cleanup?; Ok(())
+}

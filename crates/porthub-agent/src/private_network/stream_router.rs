@@ -30,9 +30,10 @@ const MAX_FLOWS: usize = 512;
 const MAX_STREAM_LANES: usize = 8;
 const HEADER: &[u8; 4] = b"PHT1";
 #[derive(Default)]
-struct Ports(Vec<(u16, u16)>);
+struct Ports(Vec<(u16, u16)>,Option<porthub_network::policy::pair_acl::CompiledPortMask>);
 impl Ports {
     fn contains(&self, port: u16) -> bool {
+        if let Some(mask)=&self.1{return mask.contains(port);}
         self.0
             .iter()
             .any(|&(start, end)| start <= port && port <= end)
@@ -60,6 +61,9 @@ struct Policy {
     peers: HashMap<String, Peer>,
     incoming: HashMap<String, Ports>,
     outgoing: HashMap<String, Ports>,
+    pair_deadlines: HashMap<String,Instant>,
+    base_authority:Option<super::authority_event::Authority<()>>,
+    pair_authorities:HashMap<String,super::authority_event::Authority<()>>,
 }
 impl Policy {
     fn empty(own: String, ip: Ipv4Addr) -> Self {
@@ -70,6 +74,9 @@ impl Policy {
             peers: HashMap::new(),
             incoming: HashMap::new(),
             outgoing: HashMap::new(),
+            pair_deadlines: HashMap::new(),
+            base_authority:None,
+            pair_authorities:HashMap::new(),
         }
     }
     fn compile(snapshot: &Snapshot, own: &str, ip: Ipv4Addr) -> Result<Self> {
@@ -109,6 +116,13 @@ impl Policy {
                     .extend(grant.ports.iter().map(|port| (port.start, port.end)));
             }
         }
+        if let Some(acl)=&snapshot.pair_acl{
+            ensure!(snapshot.sparse.is_none()&&snapshot.peers.len()==2&&snapshot.grants.is_empty()&&snapshot.exit_routes.is_empty(),"compact stream ACL is not an exact pair");
+            let other=snapshot.peers.iter().find(|p|p.id!=own).ok_or_else(||anyhow::anyhow!("compact stream ACL omits remote identity"))?;
+            let compiled=acl.compile()?;let outgoing=compiled.tcp(false);let incoming=compiled.tcp(true);
+            if outgoing.any(){policy.outgoing.insert(other.id.clone(),Ports(Vec::new(),Some(outgoing)));}
+            if incoming.any(){policy.incoming.insert(other.id.clone(),Ports(Vec::new(),Some(incoming)));}
+        }
         for ports in policy
             .incoming
             .values_mut()
@@ -129,8 +143,26 @@ impl Policy {
         }
         Ok(policy)
     }
+    fn compile_pairs(snapshot:&Snapshot,own:&str,ip:Ipv4Addr,pairs:&[(Snapshot,Instant)])->Result<Self>{
+        let mut policy=Self::compile(snapshot,own,ip)?;
+        if snapshot.sparse.is_some(){for (pair,deadline) in pairs{
+            if *deadline<=Instant::now(){continue;}
+            ensure!(pair.workspace==snapshot.workspace&&pair.self_==snapshot.self_&&pair.sparse.is_none()&&pair.peers.len()==2&&pair.exit_routes.is_empty(),"private stream pair authority changed");
+            ensure!(*deadline<=Instant::now()+Duration::from_secs(60),"private stream pair lease exceeds bound");
+            let pair_policy=Self::compile(pair,own,ip)?;
+            for id in pair_policy.peers.keys(){policy.pair_deadlines.insert(id.clone(),*deadline);}
+            policy.peers.extend(pair_policy.peers);policy.incoming.extend(pair_policy.incoming);policy.outgoing.extend(pair_policy.outgoing);
+        }}Ok(policy)
+    }
+    fn permit(&self,id:&str)->Result<Option<porthub_mesh::udp::SendPermit>> {
+        let Some(base)=&self.base_authority else{return Ok(None);};base.check()?;
+        let pair=self.pair_authorities.get(id).ok_or_else(||anyhow::anyhow!("private stream pair retired"))?.clone();pair.check()?;let base=base.clone();
+        let bounded_base=base.clone();let bounded_pair=pair.clone();
+        Ok(Some(porthub_mesh::udp::SendPermit::bounded(move||base.check().is_ok()&&pair.check().is_ok(),move||Some(bounded_base.remaining().ok()??.min(bounded_pair.remaining().ok()??)))))
+    }
     fn allows(&self, peer: &Peer, flow: Flow, outbound: bool) -> bool {
-        if self.peers.get(&peer.id) != Some(peer) {
+        if self.base_authority.as_ref().is_some_and(|base|base.check().is_err()||self.pair_authorities.get(&peer.id).is_none_or(|pair|pair.check().is_err())){return false;}
+        if self.deadline<=Instant::now() || self.pair_deadlines.get(&peer.id).is_some_and(|d|*d<=Instant::now()) || self.peers.get(&peer.id) != Some(peer) {
             return false;
         }
         let (ports, source, destination) = if outbound {
@@ -249,6 +281,11 @@ pub fn new(
     ))
 }
 impl Router {
+    pub fn active_peers(&self)->Vec<String>{
+        let state=self.state.lock().unwrap_or_else(|p|p.into_inner());
+        state.flows.values().filter(|flow|!flow.cancel.is_cancelled()&&(!flow.finished||self.tcp.owns(flow.flow))&&state.policy.allows(&flow.peer,flow.flow,flow.outbound))
+            .map(|flow|flow.peer.id.clone()).collect::<HashSet<_>>().into_iter().collect()
+    }
     pub fn log_transport_stats(&self) {
         if !tracing::enabled!(tracing::Level::DEBUG) {
             return;
@@ -281,20 +318,42 @@ impl Router {
     pub fn prepared(&self, peer_id: &str) -> bool {
         let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.policy.deadline > Instant::now()
+            && state.policy.pair_deadlines.get(peer_id).is_none_or(|d|*d>Instant::now())
             && state
                 .policy
                 .peers
                 .get(peer_id)
                 .is_some_and(|peer| self.endpoint.prepared(peer).is_some())
     }
-    pub fn update(&self, snapshot: &Snapshot) -> Result<()> {
+    pub fn update(&self, snapshot: &Snapshot) -> Result<()> { self.update_pairs(snapshot,&[]) }
+    pub fn update_pairs(&self,snapshot:&Snapshot,pairs:&[(Snapshot,Instant)])->Result<()> {self.update_pairs_authorized(snapshot,pairs,None,None)}
+    pub(crate) fn update_pairs_authorized(&self,snapshot:&Snapshot,pairs:&[(Snapshot,Instant)],base:Option<super::authority_event::Authority<()>>,handle:Option<super::sparse::Handle>)->Result<()> {
+        ensure!(pairs.len()<=porthub_network::policy::MAX_PAIR_LEASES,"private stream pair cache exceeds bounds");
         let (own, ip) = {
             let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             (state.policy.own.clone(), state.policy.ip)
         };
-        let policy = Policy::compile(snapshot, &own, ip)?;
+        let mut policy=Policy::compile_pairs(snapshot,&own,ip,pairs)?;
+        // PHT1 is an unframed long-lived byte stream. Quinn writes enqueue;
+        // they do not prove acknowledgement/original retransmission authority.
+        // Decline ONLY sparse optimization until bounded ACK chunks and runner
+        // origins exist. Raw guarded packet/relay routing remains available.
+        // This intermediate boundary is NOT sparse optimized-stream readiness.
+        if snapshot.sparse.is_some(){policy.peers.clear();policy.incoming.clear();policy.outgoing.clear();policy.pair_deadlines.clear();}
+
+        if let Some(base)=base.filter(|_|snapshot.sparse.is_some()) {
+            base.check()?;
+            if base.remaining()?.is_some(){
+                policy.base_authority=Some(base);
+                let handle=handle.ok_or_else(||anyhow::anyhow!("private stream authority owner missing"))?;
+                for id in policy.peers.keys(){if let Some(authority)=handle.pair_authority(id){policy.pair_authorities.insert(id.clone(),authority);}}
+            }
+        }
+        self.endpoint.set_peer_connection_budget(if snapshot.sparse.is_some(){64}else{512})?;
         self.endpoint
             .update_peers(policy.peers.values().cloned().collect())?;
+        let admissions=if policy.base_authority.is_some(){Some(policy.peers.values().filter_map(|peer|policy.permit(&peer.id).ok().flatten().map(|permit|(peer.ip,permit))).collect())}else{None};
+        self.endpoint.update_send_admissions(admissions)?;
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         for entry in state.flows.values() {
             if !policy.allows(&entry.peer, entry.flow, entry.outbound) {
@@ -308,21 +367,19 @@ impl Router {
         self.changed.send_replace(snapshot.revision);
         Ok(())
     }
+    fn delivery_scope(&self)->porthub_mesh::udp::SendPermit{let cancel=self.cancel.clone();porthub_mesh::udp::SendPermit::control(move||!cancel.is_cancelled())}
+    pub(crate) fn retire(&self){self.cancel.cancel();self.endpoint.close();}
     pub fn valid_lease(&self) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .policy
-            .deadline
-            > Instant::now()
+        let state=self.state.lock().unwrap_or_else(|p|p.into_inner());
+        !self.cancel.is_cancelled()&&state.policy.deadline>Instant::now()&&state.policy.base_authority.as_ref().is_none_or(|authority|authority.check().is_ok())
     }
     pub async fn receive(&self, source: Ipv4Addr, payload: Bytes) {
-        let deadline = self
-            .state
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .policy
-            .deadline;
+        if self.cancel.is_cancelled(){return;}
+        let (deadline,admission) = {
+            let state=self.state.lock().unwrap_or_else(|p|p.into_inner());
+            let Some(peer)=state.policy.peers.values().find(|p|p.ip==source) else{return;};
+            (state.policy.pair_deadlines.get(&peer.id).copied().unwrap_or(state.policy.deadline).min(state.policy.deadline),match state.policy.permit(&peer.id){Ok(permit)=>permit,Err(_)=>return})
+        };
         let now = Instant::now();
         if deadline <= now {
             return;
@@ -331,7 +388,7 @@ impl Router {
         // wait preserves receive pressure without trapping control-plane work.
         let deadline = deadline.min(now + Duration::from_millis(200));
         if !matches!(
-            tokio::time::timeout_at(deadline.into(), self.ingress.send_reliable(source, payload))
+            tokio::time::timeout_at(deadline.into(), async {if let Some(admission)=admission {admission.during(self.ingress.send_reliable_guarded(source,payload,Some(admission.clone()))).await?}else{self.ingress.send_reliable(source,payload).await}})
                 .await,
             Ok(Ok(()))
         ) {
@@ -341,13 +398,14 @@ impl Router {
     /// Returns immediately. A new flow uses a stream only after its peer's
     /// connection has already been prepared in the background.
     pub fn kernel_packet(&self, peer_id: &str, packet: Bytes, prefer_stream: bool) -> bool {
+        if self.cancel.is_cancelled(){return false;}
         let Some(kernel) = Flow::from_packet(&packet) else {
             return false;
         };
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(entry) = state.flows.get(&kernel) {
             if entry.peer.id == peer_id {
-                if state.policy.deadline > Instant::now() && !entry.cancel.is_cancelled() {
+                if state.policy.allows(&entry.peer,entry.flow,entry.outbound) && !entry.cancel.is_cancelled() {
                     let _ = self.tcp.packet(packet);
                 }
                 return true;
@@ -427,6 +485,17 @@ impl Router {
         );
         Ok((kernel, cancel))
     }
+    /// Independent deadline guard: established QUIC copying cannot outlive a pair lease
+    /// while an unrelated base refresh or blocked data writer keeps the stream alive.
+    async fn authority_guard(&self,peer:&Peer,flow:Flow,outbound:bool){
+        let mut changed=self.changed.subscribe();
+        loop{
+            let (deadline,guarded)={let state=self.state.lock().unwrap_or_else(|p|p.into_inner());
+                if !state.policy.allows(peer,flow,outbound){return;}
+                (state.policy.pair_deadlines.get(&peer.id).copied().unwrap_or(state.policy.deadline).min(state.policy.deadline),state.policy.base_authority.is_some())};
+            tokio::select!{_=self.cancel.cancelled()=>return, result=changed.changed()=>{if result.is_err(){return;}},_=tokio::time::sleep_until(deadline.into())=>{},_=async {if guarded {tokio::time::sleep(Duration::from_millis(50)).await}else{std::future::pending::<()>().await}}=>{}}
+        }
+    }
     async fn source(&self, kernel: Flow, syn: Bytes, connection: streams::Connection) -> Finished {
         let entry = {
             let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -439,6 +508,7 @@ impl Router {
             return Finished::Flow(None);
         };
         let result = tokio::select! {
+            _=self.authority_guard(&peer,kernel,true)=>Err(anyhow::anyhow!("private TCP source authority expired")),
             _=cancel.cancelled()=>Err(anyhow::anyhow!("private TCP stream cancelled")),
             result=async {
                 let opening=async {tokio::time::timeout(Duration::from_secs(12),async {
@@ -463,6 +533,7 @@ impl Router {
                     self.event(Event::StreamLocal {
                         peer: peer.id,
                         bytes,
+                        scope:self.delivery_scope(),
                     })
                     .await;
                 }
@@ -502,6 +573,7 @@ impl Router {
             admitted = Some((kernel, flow));
             drop(permit);
             tokio::select! {
+                _=self.authority_guard(&peer,flow,false)=>Err(anyhow::anyhow!("private TCP target authority expired")),
                 _=cancel.cancelled()=>Err(anyhow::anyhow!("private TCP stream cancelled")),
                 result=async {
                     let mut local=self.tcp.connect(flow).await?;
@@ -547,17 +619,18 @@ impl Background {
             packet=tcp_packets.recv()=>{
                 let Some(packet)=packet else{ensure!(local.cancel.is_cancelled(),"private TCP packet owner stopped");return Ok(());};
                 let peer=Flow::from_packet(&packet).and_then(|flow|local.state.lock().unwrap_or_else(|p|p.into_inner()).flows.get(&flow.reverse()).map(|entry|entry.peer.id.clone()));
-                if let Some(peer)=peer {local.event(Event::StreamLocal {peer,bytes:packet}).await;}
+                if let Some(peer)=peer {local.event(Event::StreamLocal {peer,bytes:packet,scope:local.delivery_scope()}).await;}
             }
         }}}.await;Finished::Owner(result)});
         let transport = router.clone();
         tasks.spawn(async move {let result=async {loop {tokio::select! {
             _=transport.cancel.cancelled()=>return Ok(()),
             packet=packets.outgoing()=>{
-                let Some(packet)=packet else{ensure!(transport.cancel.is_cancelled(),"private stream packet owner stopped");return Ok(());};
+                let Some(mut packet)=packet else{ensure!(transport.cancel.is_cancelled(),"private stream packet owner stopped");return Ok(());};
+                let scope=transport.delivery_scope();packet.permit=Some(match packet.permit.take(){Some(origin)=>porthub_mesh::udp::SendPermit::combine(vec![origin,scope]),None=>scope});
                 if let Some(carrier)=&carrier {
                     tokio::select! {_=transport.cancel.cancelled()=>return Ok(()),result=carrier.send(packet)=>{ensure!(result.is_ok(),"private stream carrier stopped");}}
-                } else {transport.event(Event::StreamDatagram {destination:packet.address,payload:packet.payload}).await;}
+                } else {transport.event(Event::StreamDatagram {destination:packet.address,payload:packet.payload,permit:packet.permit}).await;}
             }
         }}}.await;Finished::Owner(result)});
         let accepting = router.clone();
@@ -577,6 +650,8 @@ impl Background {
                     let lanes=if router.endpoint.supports_parallel(peer){MAX_STREAM_LANES}else{1};
                     let connections=router.endpoint.connection_count(peer);
                     state.policy.deadline>Instant::now()
+                        && state.policy.pair_deadlines.get(&peer.id).is_none_or(|d|*d>Instant::now())
+                        && router.endpoint.capacity_for(peer)
                         && (connections>0 || state.policy.own<peer.id)
                         && connections<lanes
                         && !preparing.contains(&peer.id)
@@ -610,8 +685,7 @@ impl Background {
                 },
             }
         }Ok(())}.await;
-        router.cancel.cancel();
-        router.endpoint.close();
+        router.retire();
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
         result
@@ -639,4 +713,108 @@ fn spawn_reader(
         let command=Command::Incoming {peer:peer.clone(),send,receive,permit};
         tokio::select! {_=router.cancel.cancelled()=>return Finished::Reader(id),result=router.commands.send(command)=>if result.is_err(){return Finished::Reader(id);}}
     }});
+}
+
+#[cfg(test)]mod sparse_lease_tests{
+ use super::*;
+ fn snapshots(a:&Identity,b:&Identity)->(Snapshot,Snapshot){
+  let base:Snapshot=serde_json::from_value(serde_json::json!({"workspace":"w","self":"a","revision":1,"expires_at":chrono::Utc::now()+chrono::Duration::seconds(30),"sparse":{"protocol":1,"epoch":"a".repeat(64)},"peers":[{"id":"a","ip":"10.203.0.2","fingerprint":a.fingerprint(),"instance":"instance-a","hostname":"a.phub","stream_transport":"quic1"}],"grants":[]})).unwrap();
+  let mut pair=base.clone();pair.sparse=None;pair.expires_at=chrono::Utc::now()+chrono::Duration::seconds(15);
+  pair.peers.push(serde_json::from_value(serde_json::json!({"id":"b","ip":"10.203.1.2","fingerprint":b.fingerprint(),"instance":"instance-b","hostname":"b.phub","stream_transport":"quic1"})).unwrap());
+  pair.grants=serde_json::from_value(serde_json::json!([{"source":"a","destination":"b","protocol":"tcp","ports":[{"start":443,"end":443}]}])).unwrap();(base,pair)
+ }
+ fn flow()->Flow{Flow{source:"10.203.0.2:4000".parse().unwrap(),destination:"10.203.1.2:443".parse().unwrap()}}
+ #[cfg(feature="private-sparse")]
+ #[tokio::test]async fn guarded_sparse_policy_does_not_publish_pht1_even_with_valid_authority(){
+  struct Clock(std::sync::atomic::AtomicU64);
+  impl super::super::authority_clock::SuspendClock for Clock{fn elapsed_since_boot(&self)->Result<Duration>{Ok(Duration::from_millis(self.0.load(Ordering::SeqCst)))}}
+  let clock=Arc::new(Clock(std::sync::atomic::AtomicU64::new(0)));
+  let witness=||super::super::authority_clock::RequestWindow::start(clock.clone()).unwrap();
+  let a=Identity::new().unwrap();let b=Identity::new().unwrap();let(base,pair)=snapshots(&a,&b);let peer=mesh_peer(&pair.peers[1]);
+  let lease=porthub_network::policy::PairLease{workspace:pair.workspace.clone(),self_:pair.self_.clone(),epoch:base.sparse.as_ref().unwrap().epoch.clone(),expires_at:pair.expires_at,revision:pair.revision,local:pair.peers[0].clone(),peer:pair.peers[1].clone(),grants:pair.grants.clone(),acl:pair.pair_acl.clone()};
+  let(handle,_)=super::super::sparse::channel();let query=porthub_network::policy::Lookup{kind:"peer".into(),value:"b".into()};
+  handle.update_base_authority(&base,super::super::authority_event::Authority::new((),Some(witness()),base.expires_at));
+  handle.installed_authority(&query,lease,super::super::authority_event::Authority::new((),Some(witness()),pair.expires_at));
+  clock.0.store(10000,Ordering::SeqCst);
+  let base_authority=super::super::authority_event::Authority::new((),Some(witness()),base.expires_at);
+  handle.update_base_authority(&base,base_authority.clone());
+  let(router,_)=new("a".into(),"10.203.0.2".parse().unwrap(),a,tokio::sync::mpsc::channel(8).0,CancellationToken::new()).unwrap();
+  router.update_pairs_authorized(&base,&[(pair,Instant::now()+Duration::from_secs(10))],Some(base_authority),Some(handle.clone())).unwrap();
+  assert!(!router.state.lock().unwrap().policy.allows(&peer,flow(),true),"sparse PHT1 must be declined even with valid independent authority");
+  assert!(router.valid_lease());assert!(router.state.lock().unwrap().policy.peers.is_empty());assert!(!router.prepared("b"));
+ }
+ #[cfg(feature="private-sparse")]
+ #[tokio::test]async fn real_kernel_syn_with_valid_sparse_acl_retains_guarded_packet_fallback(){
+  let a=Identity::new().unwrap();let b=Identity::new().unwrap();let(base,pair)=snapshots(&a,&b);
+  let lease=porthub_network::policy::PairLease{workspace:pair.workspace.clone(),self_:pair.self_.clone(),epoch:base.sparse.as_ref().unwrap().epoch.clone(),expires_at:pair.expires_at,revision:pair.revision,local:pair.peers[0].clone(),peer:pair.peers[1].clone(),grants:pair.grants.clone(),acl:pair.pair_acl.clone()};
+  let mut policy=porthub_network::policy::Engine::default();policy.apply(base.clone()).unwrap();policy.install_pair(lease).unwrap();
+  let(router,_)=new("a".into(),"10.203.0.2".parse().unwrap(),a,tokio::sync::mpsc::channel(8).0,CancellationToken::new()).unwrap();
+  router.update_pairs(&base,&[(pair,Instant::now()+Duration::from_secs(10))]).unwrap();
+  let (kernel,mut packets,runner)=tcp_stream::stack().unwrap();let cancel=CancellationToken::new();let stop=cancel.clone();
+  let task=tokio::spawn(async move{runner.run(stop).await});let waiting=tokio::spawn(async move{kernel.connect(flow()).await});
+  let syn=tokio::time::timeout(Duration::from_secs(1),packets.recv()).await.unwrap().unwrap();
+  assert!(policy.check(&syn,"b",false),"sparse raw packet ACL remains authorized");
+  assert!(!router.kernel_packet("b",syn,true),"unsupported optimization must return raw path, not swallow SYN");
+  assert!(router.state.lock().unwrap().flows.is_empty());assert!(router.endpoint.prepared(&mesh_peer(&policy.pair_peer("b").unwrap())).is_none());
+  cancel.cancel();task.await.unwrap().unwrap();assert!(waiting.await.unwrap().is_err());
+ }
+
+
+ #[tokio::test]async fn queued_real_legacy_quinn_output_cannot_inherit_replacement_router_generation()->Result<()>{
+  let a=Identity::new()?;let b=Identity::new()?;let(_,pair)=snapshots(&a,&b);let cancel=CancellationToken::new();
+  let(events,mut input)=tokio::sync::mpsc::channel(16);
+  let(router,background)=new("a".into(),"10.203.0.2".parse()?,a.clone(),events,cancel.clone())?;router.update(&pair)?;
+  let(tx,mut rx)=tokio::sync::mpsc::channel(16);let task=tokio::spawn(background.with_carrier(tx).run());
+  let packet=tokio::time::timeout(Duration::from_secs(2),rx.recv()).await?.ok_or_else(||anyhow::anyhow!("legacy output missing"))?;
+  let queued_scope=packet.permit.clone();let live_before=queued_scope.as_ref().is_some_and(|scope|scope.valid());
+  // Finish actual pinned TLS, then obtain the source proxy's real native
+  // SYNACK while intentionally keeping it queued outside the kernel.
+  let(peer,mut io)=Endpoint::new(b,"10.203.1.2".parse()?)?;peer.update_peers(vec![mesh_peer(&pair.peers[0])])?;let peer=Arc::new(peer);let ingress=io.ingress();
+  ingress.send_reliable_guarded("10.203.0.2".parse()?,packet.payload,packet.permit).await?;
+  let pump_stop=CancellationToken::new();let stopping=pump_stop.clone();let own=router.clone();let pump=tokio::spawn(async move{loop{tokio::select!{
+   _=stopping.cancelled()=>break,
+   p=rx.recv()=>match p{Some(p)=>{if p.permit.as_ref().is_none_or(|p|p.valid()){ingress.send_reliable_guarded("10.203.0.2".parse()?,p.payload,p.permit).await?;}},None=>break},
+   p=io.outgoing()=>match p{Some(p)=>own.receive("10.203.1.2".parse()?,p.payload).await,None=>break}
+  }}Ok::<_,anyhow::Error>(())});
+  let accepting=peer.clone();let remote=tokio::time::timeout(Duration::from_secs(2),accepting.accept()).await??.1;
+  tokio::time::timeout(Duration::from_secs(1),async{while !router.prepared("b"){tokio::task::yield_now().await;}}).await?;
+  let(kernel,mut packets,runner)=tcp_stream::stack()?;let kernel_stop=CancellationToken::new();let running=tokio::spawn(runner.run(kernel_stop.clone()));let connecting=tokio::spawn(async move{kernel.connect(flow()).await});
+  let syn=tokio::time::timeout(Duration::from_secs(1),packets.recv()).await?.unwrap();let mut policy=porthub_network::policy::Engine::default();policy.apply(pair.clone())?;ensure!(policy.check(&syn,"b",false),"legacy fixture SYN not authorized");ensure!(router.kernel_packet("b",syn,true),"legacy fixture stream was not prepared");
+  let(_reply,mut request)=tokio::time::timeout(Duration::from_secs(1),remote.accept_bi()).await??;let mut header=[0;8];request.read_exact(&mut header).await?;ensure!(&header[..4]==b"PHT1","legacy wire changed");
+  let event=tokio::time::timeout(Duration::from_secs(1),input.recv()).await?.ok_or_else(||anyhow::anyhow!("native legacy output missing"))?;
+  let Event::StreamLocal{peer:owner,bytes,scope}=event else{anyhow::bail!("unexpected legacy native event")};
+  ensure!(owner=="b"&&scope.valid()&&policy.check(&bytes,"b",true),"queued native SYNACK did not belong to authorized legacy flow");
+  cancel.cancel();tokio::time::timeout(Duration::from_secs(1),task).await???;
+  pump_stop.cancel();peer.close();tokio::time::timeout(Duration::from_secs(1),pump).await???;kernel_stop.cancel();tokio::time::timeout(Duration::from_secs(1),running).await???;ensure!(connecting.await?.is_err(),"undelivered native SYNACK reached kernel");
+  ensure!(live_before,"real legacy queued output omitted its immutable router generation");
+  ensure!(queued_scope.as_ref().is_some_and(|scope|!scope.valid())&&!scope.valid(),"retired router output can inherit a replacement's policy");
+  let(replacement,_)=new("a".into(),"10.203.0.2".parse()?,a,tokio::sync::mpsc::channel(8).0,CancellationToken::new())?;replacement.update(&pair)?;
+  ensure!(replacement.valid_lease()&&replacement.delivery_scope().valid()&&queued_scope.as_ref().is_some_and(|scope|!scope.valid())&&!scope.valid(),"fresh legacy fallback revived old queued byte/transport output");Ok(())
+ }
+ #[test]fn compact_port_masks_keep_quic_permission_exact_without_range_expansion(){
+  let a=Identity::new().unwrap();let b=Identity::new().unwrap();let(base,mut pair)=snapshots(&a,&b);
+  let grant=porthub_network::policy::Grant{source:"a".into(),destination:"b".into(),protocol:"tcp".into(),ports:(1..=u16::MAX).step_by(2).map(|port|porthub_network::policy::Port{start:port,end:port}).collect()};
+  pair.pair_acl=Some(porthub_network::policy::pair_acl::PairAcl::from_grants("a","b",&[grant]).unwrap());pair.grants.clear();
+  let policy=Policy::compile_pairs(&base,"a","10.203.0.2".parse().unwrap(),&[(pair.clone(),Instant::now()+Duration::from_secs(10))]).unwrap();let peer=mesh_peer(&pair.peers[1]);
+  assert!(policy.outgoing["b"].0.is_empty(),"compact policy must not expand into 32K range records");
+  for port in 0..=u16::MAX{let mut test=flow();test.destination.set_port(port);assert_eq!(policy.allows(&peer,test,true),port%2==1);}
+  assert!(!policy.incoming.contains_key("b"));
+  let mut spoof=peer.clone();spoof.instance="different-instance".into();assert!(!policy.allows(&spoof,flow(),true));
+ }
+ #[tokio::test]async fn established_stream_guard_expires_pair_without_any_status_tick_or_base_expiry(){
+  let a=Identity::new().unwrap();let b=Identity::new().unwrap();let(base,pair)=snapshots(&a,&b);let peer=mesh_peer(&pair.peers[1]);
+  let(router,_background)=new("a".into(),"10.203.0.2".parse().unwrap(),a,tokio::sync::mpsc::channel(8).0,CancellationToken::new()).unwrap();
+  router.update(&pair).unwrap();router.state.lock().unwrap().policy.pair_deadlines.insert("b".into(),Instant::now()+Duration::from_millis(40));
+  assert!(router.state.lock().unwrap().policy.allows(&peer,flow(),true));
+  tokio::time::timeout(Duration::from_secs(1),router.authority_guard(&peer,flow(),true)).await.expect("pair guard must not wait for 30s base or status tick");
+  assert!(router.valid_lease());assert!(!router.state.lock().unwrap().policy.allows(&peer,flow(),true));
+ }
+ #[tokio::test]async fn renewal_updates_guard_but_authoritative_pair_removal_wakes_it_immediately(){
+  let a=Identity::new().unwrap();let b=Identity::new().unwrap();let(base,pair)=snapshots(&a,&b);let peer=mesh_peer(&pair.peers[1]);
+  let(router,_background)=new("a".into(),"10.203.0.2".parse().unwrap(),a,tokio::sync::mpsc::channel(8).0,CancellationToken::new()).unwrap();
+  router.update(&pair).unwrap();router.state.lock().unwrap().policy.pair_deadlines.insert("b".into(),Instant::now()+Duration::from_secs(1));
+  let own=router.clone();let wait=tokio::spawn(async move{own.authority_guard(&peer,flow(),true).await});tokio::task::yield_now().await;
+  router.update(&pair).unwrap();router.state.lock().unwrap().policy.pair_deadlines.insert("b".into(),Instant::now()+Duration::from_secs(2));tokio::task::yield_now().await;assert!(!wait.is_finished());
+  router.update_pairs(&base,&[]).unwrap();tokio::time::timeout(Duration::from_millis(500),wait).await.unwrap().unwrap();assert!(router.valid_lease());
+ }
 }

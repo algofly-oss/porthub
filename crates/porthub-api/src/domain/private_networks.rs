@@ -165,6 +165,17 @@ async fn occupied(app: &App, owner: &str) -> ApiResult<(Vec<Network>, Vec<Ipv4Ad
         configured.insert(store::string(&network, "_id").to_owned());
         ranges.extend(pools(&network)?);
     }
+    #[cfg(feature="private-sparse")]
+    {
+        // Pending reservations survive a process crash and participate in ALL
+        // other tenants' allocations before any partial assignment can exist.
+        let mut pending=app.collection("private_renumber_heads").find(doc!{"_id":{"$ne":owner},"state":{"$ne":"stable"}}).projection(doc!{"target_cidrs":1}).await?;
+        while let Some(head)=pending.try_next().await? {
+            let pools=head.get_array("target_cidrs").map_err(|_|ApiError::bad_request("Invalid pending private migration reservation; recovery required"))?;
+            if pools.is_empty()||pools.len()>32{return Err(ApiError::bad_request("Invalid pending migration reservation bounds"));}
+            for raw in pools {ranges.push(Network::parse(raw.as_str().ok_or_else(||ApiError::bad_request("Invalid pending migration pool"))?).map_err(ApiError::bad_request)?);}
+        }
+    }
     // Reserve legacy defaults even when no preferences document was saved.
     // Also reserve old assigned addresses after a tenant edits its range.
     let mut addresses = Vec::new();
@@ -195,6 +206,8 @@ fn available(candidate: Network, ranges: &[Network], addresses: &[Ipv4Addr]) -> 
 
 pub async fn ensure(app: &App, owner: &str) -> ApiResult<Document> {
     let _guard = app.private_network_lock.lock().await;
+    #[cfg(feature="private-sparse")]
+    let _workspace_guard=crate::private_renumber::fence::stable_with_allocation(app,mongodb::bson::oid::ObjectId::parse_str(owner).map_err(|_|ApiError::bad_request("Invalid workspace"))?).await?;
     ensure_locked(app, owner).await
 }
 
@@ -239,6 +252,8 @@ pub(crate) async fn ensure_locked(app: &App, owner: &str) -> ApiResult<Document>
 
 pub async fn save(app: &App, owner: &str, network: Network, suffix: &str) -> ApiResult<()> {
     let _guard = app.private_network_lock.lock().await;
+    #[cfg(feature="private-sparse")]
+    let _workspace_guard=crate::private_renumber::fence::stable_with_allocation(app,mongodb::bson::oid::ObjectId::parse_str(owner).map_err(|_|ApiError::bad_request("Invalid workspace"))?).await?;
     let (ranges, addresses) = occupied(app, owner).await?;
     let unchanged = app
         .collection("private_networks")
@@ -299,4 +314,16 @@ mod tests {
         assert_eq!(value["address_capacity"], 510 + 254);
         assert_eq!(value["auto_expand"], true);
     }
+}
+
+#[cfg(feature="private-sparse")]
+pub(crate) async fn validate_migration_targets_locked(app:&App,owner:&str,targets:&[Network])->ApiResult<()> {
+    let (foreign,addresses)=occupied(app,owner).await?;
+    let lans=workspace_lans(app,owner).await?;
+    let current=app.collection("private_networks").find_one(doc!{"_id":owner}).await?
+        .map(|row|pools(&row)).transpose()?.unwrap_or_else(||vec![Network::parse("10.203.0.0/24").expect("default")]);
+    if targets.iter().any(|n|!available(*n,&foreign,&addresses)||!avoids_lans(*n,&lans)||current.iter().any(|old|old.overlaps(*n))) {
+        return Err(ApiError::new(StatusCode::CONFLICT,"Migration pool conflicts with a reserved workspace, retained address, or reported local network"));
+    }
+    Ok(())
 }

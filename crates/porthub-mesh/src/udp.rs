@@ -16,6 +16,64 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+/// Immutable upper-layer admission witness. The mesh owns no ACL policy: it
+/// retains this observation-only check through its bounded packet/native queue.
+#[derive(Clone)]
+pub struct SendPermit {
+    check:Arc<dyn Fn()->bool+Send+Sync>,
+    remaining:Option<Arc<dyn Fn()->Option<Duration>+Send+Sync>>,
+    control_only:bool,
+}
+impl SendPermit {
+    /// Legacy/unknown temporal bound. Never infer a fresh lease from this.
+    pub fn new(check:impl Fn()->bool+Send+Sync+'static)->Self{Self{check:Arc::new(check),remaining:None,control_only:false}}
+    /// A local non-authorizing veto (owner alive/cancellation), not an unknown
+    /// byte authority. Alone it cannot authorize a guarded wire chunk.
+    pub fn control(check:impl Fn()->bool+Send+Sync+'static)->Self{Self{check:Arc::new(check),remaining:None,control_only:true}}
+    /// The callback must observe an EXISTING immutable admission clock, not
+    /// construct/reset a clock when queried or when an operation starts.
+    pub fn bounded(check:impl Fn()->bool+Send+Sync+'static,remaining:impl Fn()->Option<Duration>+Send+Sync+'static)->Self{Self{check:Arc::new(check),remaining:Some(Arc::new(remaining)),control_only:false}}
+    pub fn valid(&self)->bool{(self.check)()&&self.remaining.as_ref().is_none_or(|r|r().is_some_and(|n|!n.is_zero()))}
+    pub fn remaining(&self)->Option<Duration>{if !(self.check)(){return None;}self.remaining.as_ref()?.as_ref()().filter(|n|!n.is_zero())}
+    /// Preserve the exact existing temporal bound while adding a LOCAL control
+    /// veto. Independent byte origins require combine(), not this method.
+    pub fn constrain(&self,control:impl Fn()->bool+Send+Sync+'static)->Self{
+        let original=self.clone();Self{check:Arc::new(move||control()&&original.valid()),remaining:self.remaining.clone(),control_only:self.control_only}
+    }
+    /// All independent origins must have known bounds; one unknown stays
+    /// unknown, even if another input has a known later deadline.
+    pub fn combine(origins:Vec<Self>)->Self{
+        let checks=origins.clone();let nonempty=!origins.is_empty();
+        let all_control=origins.iter().all(|p|p.control_only);
+        let known=origins.iter().all(|p|p.remaining.is_some()||p.control_only)&&!all_control;
+        let check=Arc::new(move||nonempty&&checks.iter().all(|p|p.valid()));
+        let remaining=known.then(||Arc::new(move||{let mut left=None;for origin in &origins{if origin.control_only{continue;}let n=origin.remaining()?;left=Some(left.map_or(n,|old:Duration|old.min(n)));}left}) as Arc<dyn Fn()->Option<Duration>+Send+Sync>);
+        Self{check,remaining,control_only:all_control}
+    }
+    pub async fn during<F:std::future::Future>(&self,operation:F)->Result<F::Output>{
+        tokio::pin!(operation);let mut tick=tokio::time::interval(Duration::from_millis(50));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            let guarded=std::future::poll_fn(|cx|{
+                if !self.valid(){return std::task::Poll::Ready(Err(anyhow::anyhow!("private packet admission retired")));}
+                operation.as_mut().poll(cx).map(Ok)
+            });
+            tokio::select!{result=guarded=>return result,_=tick.tick()=>ensure!(self.valid(),"private packet admission retired")}
+        }
+    }
+}
+/// Immutable socket-generation factory. It may snapshot original pending
+/// origins, but the factory itself is never replaced on an existing socket.
+#[derive(Clone)]
+pub struct SendFactory(Arc<dyn Fn()->Option<SendPermit>+Send+Sync>);
+impl SendFactory {
+    pub fn new(factory:impl Fn()->Option<SendPermit>+Send+Sync+'static)->Self{Self(Arc::new(factory))}
+    pub fn snapshot(&self)->Option<SendPermit>{(self.0)()}
+    pub fn same_generation(&self,other:&Self)->bool{Arc::ptr_eq(&self.0,&other.0)}
+}
+
+struct Outbound {bytes:Bytes,permit:Option<SendPermit>}
+
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Statistics {
     pub sent_bytes: u64,
@@ -98,7 +156,8 @@ impl Drop for Lifetime {
 #[derive(Clone)]
 pub struct Session {
     commands: mpsc::Sender<Command>,
-    packets: mpsc::Sender<Bytes>,
+    packets: mpsc::Sender<Outbound>,
+    guarded:Arc<std::sync::atomic::AtomicBool>,
     state: watch::Receiver<(State, bool)>,
     description: Description,
     lifetime: Arc<Lifetime>,
@@ -226,6 +285,8 @@ impl Session {
         let (state_tx, state) = watch::channel((State::Waiting, false));
         let cancel = CancellationToken::new();
         let task_cancel = cancel.clone();
+        let guarded=Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task_guarded=guarded.clone();
         let task = tokio::spawn(async move {
             let mut peer = peer;
             let result = drive(
@@ -243,7 +304,7 @@ impl Session {
             let failed = result.is_err() && !task_cancel.is_cancelled();
             peer.close(Instant::now());
             // Best-effort close_notify never holds up shutdown on a full socket.
-            while let Some(packet) = peer.transmit() {
+            while let Some(packet) = peer.transmit().filter(|_|!task_guarded.load(std::sync::atomic::Ordering::SeqCst)) {
                 if let Some(socket) = sockets.get(&packet.local) {
                     let _ = tokio::time::timeout(
                         Duration::from_millis(5),
@@ -258,6 +319,7 @@ impl Session {
             Self {
                 commands,
                 packets,
+                guarded,
                 state,
                 description,
                 lifetime: Arc::new(Lifetime {
@@ -308,27 +370,30 @@ impl Session {
     }
     /// Queueing never waits for this or another peer's transport. The inner IP
     /// flow supplies reliability/congestion control when packets are dropped.
-    pub fn send(&self, packet: Bytes) -> Result<()> {
+    pub fn send(&self, packet: Bytes) -> Result<()> {self.send_guarded(packet,None)}
+    pub fn send_guarded(&self,packet:Bytes,permit:Option<SendPermit>)->Result<()> {
         ensure!(self.state() == State::Ready, "private peer is not ready");
         ensure!(
             (20..=MAX_PACKET).contains(&packet.len()),
             "invalid private packet size"
         );
         self.packets
-            .try_send(packet)
+            .try_send({if let Some(permit)=&permit {ensure!(permit.valid(),"private packet admission retired");self.guarded.store(true,std::sync::atomic::Ordering::SeqCst);}Outbound{bytes:packet,permit}})
             .map_err(|_| anyhow::anyhow!("private peer send queue unavailable"))
     }
     /// Reliable stream carriers propagate bounded queue pressure in their own
     /// worker, without blocking the TUN packet owner or control-plane work.
     #[cfg(feature = "streams")]
-    pub async fn send_stream(&self, packet: Bytes) -> Result<()> {
+    pub async fn send_stream(&self, packet: Bytes) -> Result<()> {self.send_stream_guarded(packet,None).await}
+    #[cfg(feature="streams")]
+    pub async fn send_stream_guarded(&self,packet:Bytes,permit:Option<SendPermit>)->Result<()> {
         ensure!(self.state() == State::Ready, "private peer is not ready");
         ensure!(
             (20..=MAX_PACKET).contains(&packet.len()),
             "invalid private packet size"
         );
         self.packets
-            .send(packet)
+            .send({if let Some(permit)=&permit {ensure!(permit.valid(),"private packet admission retired");self.guarded.store(true,std::sync::atomic::Ordering::SeqCst);}Outbound{bytes:packet,permit}})
             .await
             .map_err(|_| anyhow::anyhow!("private peer closed"))
     }
@@ -407,7 +472,7 @@ async fn drive(
     sockets: &HashMap<SocketAddr, Socket>,
     peer: &mut Peer,
     mut commands: mpsc::Receiver<Command>,
-    mut outgoing: mpsc::Receiver<Bytes>,
+    mut outgoing: mpsc::Receiver<Outbound>,
     incoming: mpsc::Sender<Bytes>,
     state: &watch::Sender<(State, bool)>,
     cancel: &CancellationToken,
@@ -424,6 +489,7 @@ async fn drive(
     }
     drop(datagrams);
     let mut disabled = HashSet::new();
+    let mut pending_permit:Option<SendPermit>=None;
     loop {
         while let Some(packet) = peer.transmit() {
             if disabled.contains(&packet.local) {
@@ -432,7 +498,8 @@ async fn drive(
             let socket = sockets
                 .get(&packet.local)
                 .ok_or_else(|| anyhow::anyhow!("private interface unavailable"))?;
-            tokio::select! {biased;_=cancel.cancelled()=>return Ok(()),result=socket.send_to(&packet.bytes,packet.remote)=>{
+            tokio::select! {biased;_=cancel.cancelled()=>return Ok(()),result=async {if let Some(permit)=&pending_permit {permit.during(socket.send_to(&packet.bytes,packet.remote)).await}else{Ok(socket.send_to(&packet.bytes,packet.remote).await)}}=>{
+                let result=result?;
                 if let Err(error)=result {
                     statistics.write_errors=statistics.write_errors.saturating_add(1);
                     if closed(&error) {disabled.insert(packet.local);}
@@ -441,6 +508,7 @@ async fn drive(
                 }
             }}
         }
+        pending_permit=None;
         ensure!(
             disabled.len() < sockets.len(),
             "all private interfaces are closed"
@@ -481,7 +549,9 @@ async fn drive(
             },
             packet=outgoing.recv()=>match packet {
                 Some(packet)=>{
-                    if peer.send(Instant::now(),&packet).is_ok() {statistics.sent_bytes=statistics.sent_bytes.saturating_add(packet.len() as u64);}
+                    if packet.permit.as_ref().is_some_and(|permit|!permit.valid()) {statistics.dropped_outgoing=statistics.dropped_outgoing.saturating_add(1);continue;}
+                    pending_permit=packet.permit;
+                    if peer.send(Instant::now(),&packet.bytes).is_ok() {statistics.sent_bytes=statistics.sent_bytes.saturating_add(packet.bytes.len() as u64);}
                     else {statistics.dropped_outgoing=statistics.dropped_outgoing.saturating_add(1);}
                 },None=>return Ok(()),
             },
@@ -497,7 +567,10 @@ mod io_tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use turn_util::{Conn, Error as IoError, Result as IoResult};
 
+    #[derive(Default)]
+    struct Gate {blocked:AtomicBool,entered:tokio::sync::Notify,release:tokio::sync::Notify,sends:AtomicUsize}
     struct FaultSocket {
+        gate:Option<Arc<Gate>>,
         socket: Arc<UdpSocket>,
         target: SocketAddr,
         reset: AtomicBool,
@@ -536,6 +609,10 @@ mod io_tests {
                 self.rejected.fetch_add(1, Ordering::SeqCst);
                 return Err(std::io::Error::from(std::io::ErrorKind::NetworkUnreachable).into());
             }
+            if let Some(gate)=&self.gate {
+                if gate.blocked.load(Ordering::SeqCst){gate.entered.notify_one();gate.release.notified().await;}
+                gate.sends.fetch_add(1,Ordering::SeqCst);
+            }
             Ok(self.socket.send_to(buffer, remote).await?)
         }
         fn local_addr(&self) -> IoResult<SocketAddr> {
@@ -557,7 +634,8 @@ mod io_tests {
         ensure!(tokio::time::timeout(Duration::from_secs(2), right.recv()).await? == Some(packet));
         Ok(())
     }
-    async fn exercise(dead_interface: bool) -> Result<()> {
+    async fn exercise(dead_interface: bool,guarded_delivery:bool) -> Result<()> {
+        let gate=Arc::new(Gate::default());
         let a = Identity::new()?;
         let b = Identity::new()?;
         let left_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await?);
@@ -565,6 +643,7 @@ mod io_tests {
         let la = left_socket.local_addr()?;
         let ra = right_socket.local_addr()?;
         let wrapped = Arc::new(FaultSocket {
+            gate:Some(gate.clone()),
             socket: left_socket,
             target: ra,
             reset: AtomicBool::new(true),
@@ -589,6 +668,7 @@ mod io_tests {
             sockets.insert(
                 address,
                 Arc::new(FaultSocket {
+                    gate:None,
                     socket,
                     target: ra,
                     reset: AtomicBool::new(false),
@@ -638,6 +718,16 @@ mod io_tests {
                         && left.statistics().await?.write_errors > 0
                 );
             }
+            if guarded_delivery {
+                let valid=Arc::new(AtomicBool::new(true));let check=valid.clone();
+                gate.blocked.store(true,Ordering::SeqCst);let sent=gate.sends.load(Ordering::SeqCst);
+                left.send_guarded(Bytes::from(vec![7;20]),Some(SendPermit::new(move||check.load(Ordering::SeqCst))))?;
+                tokio::time::timeout(Duration::from_secs(1),gate.entered.notified()).await?;
+                valid.store(false,Ordering::SeqCst);gate.release.notify_one();
+                tokio::time::timeout(Duration::from_secs(1),async {while left.state()!=State::Failed {tokio::time::sleep(Duration::from_millis(1)).await;}}).await?;
+                ensure!(gate.sends.load(Ordering::SeqCst)==sent,"retired native operation or close flush transmitted data");
+                ensure!(tokio::time::timeout(Duration::from_millis(50),right_rx.recv()).await.is_err(),"retired payload reached remote application");
+            }
             anyhow::Ok(())
         }
         .await;
@@ -648,12 +738,14 @@ mod io_tests {
     #[tokio::test]
     async fn unreachable_candidate_receive_reset_and_oversized_datagrams_preserve_the_valid_peer(
     ) -> Result<()> {
-        exercise(false).await
+        exercise(false,false).await
     }
     #[tokio::test]
     async fn closed_interface_does_not_close_a_peer_using_another_interface() -> Result<()> {
-        exercise(true).await
+        exercise(true,false).await
     }
+    #[tokio::test]
+    async fn actual_native_udp_pending_send_cannot_resume_after_admission_retirement()->Result<()> {exercise(false,true).await}
     #[tokio::test]
     async fn all_closed_interfaces_fail_promptly_for_route_fallback() -> Result<()> {
         let identity = Identity::new()?;
@@ -669,6 +761,7 @@ mod io_tests {
             remote_identity.fingerprint(),
         )?;
         let closed = Arc::new(FaultSocket {
+            gate:None,
             socket,
             target: address,
             reset: AtomicBool::new(false),
@@ -684,5 +777,28 @@ mod io_tests {
         ensure!(result.is_ok_and(|ready| ready.is_err()));
         ensure!(state == State::Failed);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod permit_bound_contract_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64,AtomicBool,Ordering};
+    #[test]
+    fn every_known_origin_contributes_immutable_min_and_unknown_never_upgrades(){
+        let old=Arc::new(AtomicU64::new(400));let read=old.clone();let first=SendPermit::bounded(||true,move||Some(Duration::from_millis(read.load(Ordering::SeqCst))));
+        let second=SendPermit::bounded(||true,||Some(Duration::from_millis(900)));
+        let both=SendPermit::combine(vec![first.clone(),second]);assert_eq!(both.remaining(),Some(Duration::from_millis(400)));
+        old.store(30,Ordering::SeqCst);assert_eq!(both.remaining(),Some(Duration::from_millis(30)));assert_eq!(both.clone().remaining(),both.remaining());
+        let unknown=SendPermit::combine(vec![both.clone(),SendPermit::new(||true)]);assert!(unknown.valid());assert_eq!(unknown.remaining(),None);
+        old.store(0,Ordering::SeqCst);assert!(!both.valid()&&!unknown.valid());
+    }
+    #[test]
+    fn owner_control_can_veto_but_cannot_mint_or_reset_authority(){
+        let owner=Arc::new(AtomicBool::new(true));let read=owner.clone();let control=SendPermit::control(move||read.load(Ordering::SeqCst));assert!(control.valid());assert!(control.remaining().is_none());
+        let authority=SendPermit::bounded(||true,||Some(Duration::from_millis(10)));let combined=SendPermit::combine(vec![authority.clone(),control.clone()]);assert_eq!(combined.remaining(),authority.remaining());
+        let constrained=authority.constrain(||true);assert_eq!(constrained.remaining(),authority.remaining());
+        owner.store(false,Ordering::SeqCst);assert!(!combined.valid());assert!(combined.remaining().is_none());
+        assert!(SendPermit::combine(vec![SendPermit::control(||true)]).remaining().is_none());
     }
 }

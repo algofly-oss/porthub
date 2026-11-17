@@ -204,6 +204,15 @@ pub async fn ensure(app: &App, machine: &Document) -> ApiResult<()> {
     {
         return Ok(());
     }
+    #[cfg(feature="private-sparse")]
+    let _workspace_guard=match crate::private_renumber::fence::stable_with_allocation(app,owner.as_object_id().ok_or_else(||ApiError::bad_request("Invalid workspace"))?).await {
+        Ok(guard)=>guard,
+        Err(error) if error.status==StatusCode::CONFLICT=>{
+            crate::private_renumber::deferred::record(app,machine,owner.as_object_id().ok_or_else(||ApiError::bad_request("Invalid workspace"))?).await?;
+            return Ok(());
+        },
+        Err(error)=>return Err(error),
+    };
     peers
         .create_index(
             IndexModel::builder()

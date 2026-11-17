@@ -15,7 +15,9 @@ pub struct Tun {
     netlink: Connection<Route>,
     pub index: u32,
     pub name: String,
+    own:Ipv4Addr,
     routes: Mutex<HashSet<Ipv4Addr>>,
+    capture_routes: Mutex<std::collections::BTreeSet<porthub_mesh::lan_routes::Network>>,
 }
 fn safe<T, E>(result: std::result::Result<T, E>, message: &'static str) -> Result<T> {
     result.map_err(|_| anyhow::anyhow!(message))
@@ -92,17 +94,68 @@ impl Tun {
             fd: unsafe { AsyncFd::register(file)? },
             netlink,
             index,
+            own,
             name: name.into(),
             routes: Mutex::new(HashSet::new()),
+            capture_routes: Mutex::new(std::collections::BTreeSet::new()),
         };
         tun.update_routes(peers).await?;
         Ok(tun)
     }
+    /// Reconcile only prefixes validated against the current native route inventory.
+    /// A conflicting pool is reported separately; other safe pools remain usable.
+    pub async fn update_capture_routes(&self, pools: &[porthub_mesh::lan_routes::Network]) -> Result<porthub_network::capture_routes::CapturePlan> {
+        use porthub_network::capture_routes::{self, ExistingRoute};
+        let native = safe(self.netlink.get_routes().await, "capture route inventory failed")?;
+        let existing:Vec<_> = native.iter().filter_map(|route| match route.destination() {
+            Some(IpAddr::V4(address)) => Some(ExistingRoute { destination:*address, prefix:route.dst_len(), interface:route.oif() }), _=>None,
+        }).collect();
+        let mut plan=capture_routes::plan(pools,&existing,self.index)?;
+        let wanted:std::collections::BTreeSet<_>=plan.accepted.iter().copied().collect();
+        let mut owned=self.capture_routes.lock().await;
+        for prefix in owned.difference(&wanted).copied().collect::<Vec<_>>() {
+            safe(self.netlink.del_route(Ipv4Route::new(prefix.address(),prefix.prefix()).dev_index(self.index).scope(RouteScope::Link)).await,"capture route removal failed")?;
+            owned.remove(&prefix);
+        }
+        for prefix in wanted.difference(&owned).copied().collect::<Vec<_>>() {
+            if self.netlink.add_route(Ipv4Route::new(prefix.address(),prefix.prefix()).dev_index(self.index).scope(RouteScope::Link)).await.is_ok() { owned.insert(prefix); }
+            else {plan.accepted.retain(|p|*p!=prefix);plan.conflicting.push(prefix);}
+        }
+        Ok(plan)
+    }
+
+    /// Revalidate retained host routes as well as broad capture prefixes. The
+    /// packet owner calls this after route notifications and before exposing a new
+    /// pair to DNS; it never reuses the additions-only legacy preflight.
+    pub async fn reconcile_sparse(&self,pools:&[porthub_mesh::lan_routes::Network],peers:&[Ipv4Addr])->Result<porthub_network::capture_routes::SparseAudit>{
+        use porthub_network::capture_routes::{self,ExistingRoute};
+        let native=safe(self.netlink.get_routes().await,"sparse route audit failed")?;
+        let existing:Vec<_>=native.iter().filter_map(|r|match r.destination(){Some(IpAddr::V4(address))=>Some(ExistingRoute{destination:*address,prefix:r.dst_len(),interface:r.oif()}),_=>None}).collect();
+        let mut audit=capture_routes::audit(pools,self.own,peers,&existing,self.index)?;
+        ensure!(!audit.own_conflict,"private TUN address conflicts with a changed LAN/VPN/VM route; private range migration is required");
+        // A route removed outside PortHub is not still a valid ownership claim.
+        // Forget missing entries so an exclusive add can repair them, never adopt
+        // an arbitrary existing entry just because it points at our interface.
+        let present=|address:Ipv4Addr,prefix:u8|existing.iter().any(|r|r.destination==address&&r.prefix==prefix&&r.interface==Some(self.index));
+        let current_peers={let mut held=self.routes.lock().await;held.retain(|ip|present(*ip,32));held.iter().copied().filter(|ip|*ip!=self.own).collect::<std::collections::BTreeSet<_>>()};
+        let current_capture={let mut held=self.capture_routes.lock().await;held.retain(|p|present(p.address(),p.prefix()));held.clone()};
+        if current_peers==audit.accepted_peers.iter().copied().collect()&&current_capture==audit.capture.accepted.iter().copied().collect(){return Ok(audit);}
+        // Remove obsolete/now-conflicting capture and host entries before adding
+        // new ones. A safe known /32 may still work outside a conflicting subnet.
+        let retained_capture:Vec<_>=self.capture_routes.lock().await.iter().copied().filter(|p|audit.capture.accepted.contains(p)).collect();
+        self.update_capture_routes(&retained_capture).await?;
+        let retained_peers:Vec<_>=self.routes.lock().await.iter().copied().filter(|p|audit.accepted_peers.contains(p)).collect();
+        self.update_routes(&retained_peers).await?;
+        audit.capture=self.update_capture_routes(pools).await?;
+        self.update_routes(&audit.accepted_peers).await?;
+        Ok(audit)
+    }
+
     pub async fn update_routes(&self, peers: &[Ipv4Addr]) -> Result<()> {
         let wanted: HashSet<_> = peers.iter().copied().collect();
         let mut current = self.routes.lock().await;
         let additions: Vec<_> = wanted.difference(&current).copied().collect();
-        check_routes(&self.netlink, &additions, Some(self.index)).await?;
+        check_routes(&self.netlink, &wanted.iter().copied().collect::<Vec<_>>(), Some(self.index)).await?;
         for address in additions {
             safe(
                 self.netlink

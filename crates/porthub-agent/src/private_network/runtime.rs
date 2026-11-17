@@ -24,6 +24,48 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+// A deliberately replaced stream owner may finish normally while the profile
+// remains live. Current-owner failure and cleanup errors remain actionable.
+fn stream_owner_completed(current:u64,stopping:bool,finished:Option<std::result::Result<(u64,Result<()>),tokio::task::JoinError>>)->Result<bool>{
+    match finished{
+        Some(Ok((_,Ok(())))) if stopping=>Ok(true),
+        Some(Ok((generation,Ok(())))) if generation!=current=>Ok(false),
+        Some(Ok((_,Err(error))))=>Err(error),Some(Err(error))=>Err(error.into()),
+        _=>anyhow::bail!("private stream owner stopped unexpectedly"),
+    }
+}
+
+fn retire_route_conflicts(policy:&mut Engine,handle:&super::sparse::Handle,conflicts:&[std::net::Ipv4Addr])->Vec<String>{
+    let peers:Vec<_>=handle.peers().into_iter().filter(|peer|conflicts.contains(&peer.ip)).collect();
+    for peer in &peers{policy.revoke_pair(&peer.id);handle.retire(&peer.id);}
+    peers.into_iter().map(|peer|peer.id).collect()
+}
+// Sparse base replies intentionally omit idle identities. Counter handles must
+// follow the effective base+installed pair set, without discarding pending rows.
+fn reconcile_traffic(tracker:&super::traffic::Tracker,own:&str,base:Option<&Snapshot>,pairs:&super::sparse::Handle)->HashMap<String,Arc<super::traffic::Counters>> {
+    let mut ids=std::collections::BTreeSet::new();
+    if let Some(base)=base {ids.extend(base.peers.iter().filter(|peer|peer.id!=own).map(|peer|peer.id.clone()));}
+    ids.extend(pairs.peers().into_iter().filter(|peer|peer.id!=own).map(|peer|peer.id));
+    tracker.reconcile(ids.into_iter())
+}
+async fn audit_capture(tun:&Tun,snapshot:&Snapshot,peers:&[std::net::Ipv4Addr])->Result<porthub_network::capture_routes::SparseAudit>{
+    let sparse=snapshot.sparse.as_ref().ok_or_else(||anyhow::anyhow!("private capture audit requires negotiated authority"))?;
+    tokio::time::timeout(Duration::from_secs(2),tun.reconcile_sparse(&sparse.capture_pools,peers)).await
+        .map_err(|_|anyhow::anyhow!("private capture route audit timed out; refusing stale native routing"))?
+}
+
+fn send_authorized(authority:Option<&super::authority_event::Authority<()>>,pairs:&super::sparse::Handle,peer:&str,session:&porthub_mesh::udp::Session,bytes:bytes::Bytes)->Result<()> {
+    session.send_guarded(bytes,super::authority_event::send_permit(authority,pairs,peer)?)
+}
+
+async fn write_authorized(authority:Option<&super::authority_event::Authority<()>>,handle:&super::sparse::Handle,peer:Option<&str>,tun:&Tun,bytes:&[u8])->Result<()> {
+    let pair=if handle.enabled(){
+        if let Some(peer)=peer {match handle.pair_authority(peer){Some(pair)=>Some(pair),None=>return Ok(())}}else{None}
+    }else{None};
+    let delivery=async {if let Some(pair)=pair {pair.during(tun.write(bytes)).await}else{tun.write(bytes).await}};
+    if let Some(authority)=authority {authority.during(delivery).await} else {delivery.await}
+}
+
 fn mark_activity(activity: &mut HashMap<String, Instant>, peer: &str, now: Instant) {
     if let Some(last) = activity.get_mut(peer) {
         *last = now;
@@ -128,7 +170,7 @@ mod cli_system_tor_tests {
 struct StreamCarrierPlan {
     source: Option<std::net::Ipv4Addr>,
     valid_until: Option<Instant>,
-    routes: HashMap<std::net::Ipv4Addr, (String, bool, Option<Arc<super::traffic::Counters>>)>,
+    routes: HashMap<std::net::Ipv4Addr, (String, bool, Option<Instant>, Option<Arc<super::traffic::Counters>>)>,
 }
 #[cfg(feature = "private-stream")]
 async fn stream_carrier(
@@ -140,6 +182,7 @@ async fn stream_carrier(
 ) -> Result<()> {
     loop {
         let packet = tokio::select! {_=cancel.cancelled()=>return Ok(()),packet=packets.recv()=>{let Some(packet)=packet else {return Ok(());};packet}};
+        if packet.permit.as_ref().is_some_and(|permit|!permit.valid()){continue;}
         let route = {
             let plan = plans.borrow();
             if plan
@@ -150,9 +193,10 @@ async fn stream_carrier(
             }
             plan.source.zip(plan.routes.get(&packet.address).cloned())
         };
-        let Some((source, (peer, prefer,counter))) = route else {
+        let Some((source, (peer, prefer, pair_deadline,counter))) = route else {
             continue;
         };
+        if pair_deadline.is_some_and(|d|d<=Instant::now()){continue;}
         let bytes = porthub_mesh::control_packet::encode(
             porthub_mesh::control_packet::STREAM,
             source,
@@ -169,13 +213,13 @@ async fn stream_carrier(
         // Quinn's writable notification instead of discarding congestion bursts.
         let send = async {
             if let Some(session) = session.filter(|_| prefer || !relay.is_ready()) {
-                if session.send_stream(bytes.clone()).await.is_ok() {
+                if session.send_stream_guarded(bytes.clone(),packet.permit.clone()).await.is_ok() {
                     if let Some(c)=counter.as_ref(){c.add(true,!session.is_relay(),bytes.len());}
                     return;
                 }
             }
             if relay.is_ready() {
-                if relay.send_stream(&peer, &bytes).await.is_ok(){if let Some(c)=counter.as_ref(){c.add(true,false,bytes.len());}}
+                if relay.send_stream_guarded(&peer, &bytes,packet.permit.clone()).await.is_ok(){if let Some(c)=counter.as_ref(){c.add(true,false,bytes.len());}}
             }
         };
         tokio::select! {_=cancel.cancelled()=>return Ok(()),_=tokio::time::timeout(Duration::from_millis(200),send)=>{}}
@@ -205,6 +249,8 @@ pub(crate) async fn run_embedded(path: PathBuf, cancel: CancellationToken) -> Re
 async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate::logs::Buffer>) -> Result<()> {
     let profile = Profile::load(&path)?;
     let _lease = Lease::acquire(&path)?;
+    // Declared after Lease: revocation drops before another runtime can own it.
+    let authority_owner=super::authority_event::Owner::new();
     let control = Arc::new(crate::control::Control::new_private(&profile)?);
     // Embedded private networking shares the parent registration's maintenance
     // worker. A standalone private enrollment owns its own background updates.
@@ -235,7 +281,9 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     let identity = porthub_mesh::Identity::new()?;
     let mut next_probe_id = u64::from_str_radix(&instance[..16], 16)?;
     let (interface_updates, mut interfaces) = tokio::sync::watch::channel(Vec::new());
-    tasks.spawn(super::interfaces::watch(interface_updates, work.clone()));
+    let (route_changes,mut route_events)=tokio::sync::watch::channel(0u64);
+    let mut route_events_open=true;let mut last_route_audit:Option<Instant>=None;
+    tasks.spawn(super::interfaces::watch_with_routes(interface_updates,if cfg!(feature="private-sparse"){Some(route_changes)}else{None}, work.clone()));
     let (relay_sender, relay_input) = super::relay::channel();
     #[cfg(feature = "private-stream")]
     let (stream_output, stream_input) = mpsc::channel(256);
@@ -260,7 +308,10 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         events.clone(),
         work.clone(),
     ));
-    tasks.spawn(controller::run_watched_identity(
+    let (sparse_handle,sparse_control)=super::sparse::channel();
+    #[allow(unused_variables)]
+    let (native_streams,native_stream_updates)=watch::channel(None::<controller::NativeReady>);
+    tasks.spawn(controller::run_watched_sparse_owned(
         profile.clone(),
         interfaces.clone(),
         sessions.clone(),
@@ -272,10 +323,25 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             certificate: identity.clone(),
         },
         work.clone(),
+        if cfg!(feature="private-sparse"){Some(sparse_control)}else{None},
+        Some(authority_owner.domain()),
+        Some(native_stream_updates),
     ));
     let mut device: Option<Arc<Tun>> = None;
+    let mut local_address=super::address_lifecycle::Binding::default();
     #[cfg(feature = "private-stream")]
     let mut stream_router: Option<super::stream_router::Router> = None;
+    #[cfg(feature="private-stream")]
+    let mut stream_router_sparse_mode:Option<bool>=None;
+    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+    let mut guarded_flows:Option<super::sparse_dispatch::Node>=None;
+    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+    let mut guarded_owner:Option<CancellationToken>=None;
+    let mut guarded_generation=0u64;
+    let mut guarded_owners:JoinSet<(u64,Result<()>)>=JoinSet::new();
+    #[allow(unused_mut)]
+    let mut stream_owner_generation=0u64;
+    let mut stream_owners:JoinSet<(u64,Result<()>)>=JoinSet::new();
     let mut zone = None;
     let mut dns_registration: Option<dns::Registration> = None;
     let mut registered_suffixes: Vec<String> = Vec::new();
@@ -284,6 +350,11 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     #[cfg(feature="local-tor")]
     let mut dns_upstream:Option<Arc<super::dns_upstream::Upstream>>=None;
     let mut policy = Engine::default();
+    let mut sparse_authority:Option<Snapshot>=None;
+    let mut installed_authority:Option<super::authority_event::Authority<()>>=None;
+    let mut capture_configured=false;
+    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+    let mut native_stream_safe=false;
     let mut private_status = crate::runtime::PrivateStatus::default();
     #[cfg(target_os="linux")]
     let (dns_target,dns_health) = {
@@ -305,7 +376,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     #[cfg(feature="local-tor")]
     let (tor_changes,mut tor_settings)=watch::channel(super::tor_preferences::load(&path)?);
     #[cfg(feature="local-tor")]
-    let mut latest_snapshot: Option<Snapshot> = None;
+    let mut latest_snapshot: Option<super::authority_event::Authority<Snapshot>> = None;
     #[cfg(feature="local-tor")]
     tasks.spawn(super::tor_preferences::run(path.clone(),tor_changes,work.clone()));
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -339,35 +410,94 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     status_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut probe_tick = tokio::time::interval(Duration::from_secs(1));
     probe_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let result:Result<()>=async {loop {tokio::select! {
+    let result:Result<()>=async {loop {
+        if installed_authority.as_ref().is_some_and(|a|a.check().is_err()) || !sparse_handle.authority_valid(){policy.revoke();anyhow::bail!("private gateway revoked the base authority");}
+        tokio::select! {
         _=cancel.cancelled()=>break,
+        _=work.cancelled()=>{policy.revoke();if cancel.is_cancelled(){break;}anyhow::bail!("private worker authority ended");},
+        finished=guarded_owners.join_next(),if !guarded_owners.is_empty()=>{if stream_owner_completed(guarded_generation,work.is_cancelled(),finished)?{break;}},
+        finished=stream_owners.join_next(),if !stream_owners.is_empty()=>{if stream_owner_completed(stream_owner_generation,work.is_cancelled(),finished)?{break;}},
         finished=tasks.join_next(),if !tasks.is_empty()=>{match finished {Some(Ok(Ok(()))) if work.is_cancelled()=>break,Some(Ok(Err(error)))=>return Err(error),_=>anyhow::bail!("private background task stopped")}},
         event=input.recv()=>match event {
-            Some(Event::Snapshot(snapshot))=>{
+            Some(Event::Snapshot(authority))=>{
+                authority.check()?;
+                #[cfg(feature="local-tor")]
+                let cached_authority=authority.clone();
+                let snapshot=authority.accepted()?.clone();
                 ensure!(snapshot.self_==profile.peer_id && snapshot.workspace==profile.workspace,"private policy identity changed");
                 let mut route_snapshot=snapshot.clone();
                 #[cfg(feature="local-tor")]
                 {
-                    latest_snapshot=Some(snapshot.clone());
+                    latest_snapshot=Some(cached_authority);
                     apply_cli_system_tor(&mut route_snapshot,&tor_settings.borrow());
                 }
                 let own=snapshot.peers.iter().find(|p|p.id==profile.peer_id).ok_or_else(||anyhow::anyhow!("private policy omits local peer"))?;
+                local_address.check(own.ip)?;
                 let routes:Vec<_>=snapshot.peers.iter().filter(|p|p.id!=profile.peer_id).map(|p|p.ip).collect();
                 let first_ready = device.is_none();
                 policy.apply(snapshot.clone())?;
+                installed_authority=Some(authority.retained());
+                sparse_authority=Some(snapshot.clone());
+                sparse_handle.update_base_authority(&snapshot,authority.retained());
+                relay_sender.update_authority(authority.retained(),sparse_handle.clone());
+                let mut routes=routes;
+                routes.extend(sparse_handle.peers().iter().map(|p|p.ip));
                 #[cfg(feature="private-stream")]
                 {
-                    if stream_router.is_none() {
-                        let (router,background)=super::stream_router::new(profile.peer_id.clone(),own.ip,identity.clone(),events.clone(),work.child_token())?;
-                        stream_router=Some(router);tasks.spawn(background.with_carrier(stream_output.clone()).run());
+                    let mode=snapshot.sparse.is_some();
+                    if stream_router_sparse_mode!=Some(mode){
+                        if let Some(previous)=stream_router.take(){previous.retire();}
+                        stream_router_sparse_mode=Some(mode);
                     }
-                    stream_router.as_ref().unwrap().update(&snapshot)?;
+                    if stream_router.is_none() {
+                        // One current plus one retiring owner maximum. A fast
+                        // old/new-gateway mode flap must not retain old stacks.
+                        while stream_owners.len()>=2 {
+                            match tokio::time::timeout(Duration::from_secs(2),stream_owners.join_next()).await.map_err(|_|anyhow::anyhow!("retired private stream owner did not stop"))? {
+                                Some(Ok((_,Ok(()))))=>{},Some(Ok((_,Err(error))))=>return Err(error),_=>anyhow::bail!("retired private stream owner failed"),
+                            }
+                        }
+                        stream_owner_generation=stream_owner_generation.checked_add(1).ok_or_else(||anyhow::anyhow!("private stream generation exhausted"))?;
+                        let generation=stream_owner_generation;
+                        let (router,background)=super::stream_router::new(profile.peer_id.clone(),own.ip,identity.clone(),events.clone(),work.child_token())?;
+                        stream_router=Some(router);let carrier=stream_output.clone();
+                        stream_owners.spawn(async move{(generation,background.with_carrier(carrier).run().await)});
+                    }
+                }
+                #[cfg(all(feature="private-sparse",feature="private-stream"))]
+                {
+                    if snapshot.sparse.is_none() {
+                        if let Some(owner)=guarded_owner.take(){
+                            owner.cancel();
+                            // Completion of the intentionally retired sparse
+                            // owner must not look like current-owner failure.
+                            guarded_generation=guarded_generation.checked_add(1).ok_or_else(||anyhow::anyhow!("guarded runtime generation exhausted"))?;
+                        }
+                        guarded_flows=None;
+                    } else if guarded_flows.is_none() {
+                        while guarded_owners.len()>=2 {
+                            match tokio::time::timeout(Duration::from_secs(2),guarded_owners.join_next()).await.map_err(|_|anyhow::anyhow!("retired guarded flow owner did not stop"))? {
+                                Some(Ok((_,Ok(()))))=>{},Some(Ok((_,Err(error))))=>return Err(error),_=>anyhow::bail!("retired guarded flow owner failed"),
+                            }
+                        }
+                        let owner=work.child_token();
+                        let (flows,background)=super::sparse_dispatch::Node::new(profile.workspace.clone(),profile.peer_id.clone(),identity.clone(),sparse_handle.clone(),events.clone(),owner.clone())?;
+                        guarded_generation=guarded_generation.checked_add(1).ok_or_else(||anyhow::anyhow!("guarded runtime generation exhausted"))?;
+                        let generation=guarded_generation;
+                        guarded_owners.spawn(async move{(generation,background.run().await)});
+                        guarded_owner=Some(owner);guarded_flows=Some(flows);
+                    }
                 }
                 if let Some(tun)=&device {
-                    tun.update_routes(&routes).await?;
+                    if snapshot.sparse.is_none(){tun.update_routes(&routes).await?;}
                 } else {
+                    #[cfg(windows)]
+                    let tun=Arc::new(Tun::open_owned(&path,&name,own.ip,&routes,if snapshot.sparse.is_some(){super::native_ownership::HostAdmission::Sparse}else{super::native_ownership::HostAdmission::Legacy}).await?);
+                    #[cfg(not(windows))]
                     let tun=Arc::new(Tun::open(&name,own.ip,&routes).await?);
+                    local_address.configured(own.ip)?;
                     let server=dns::Server::bind(own.ip).await?;let port=server.port()?;
+                    server.zone.write().await.set_sparse(sparse_handle.clone());
                     #[cfg(feature="local-tor")]
                     {
                         let names=std::iter::once(&profile.server).chain(profile.fallback_servers.iter())
@@ -382,6 +512,17 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     dns_port=Some(port);
                     device=Some(tun);
                 }
+                if snapshot.sparse.is_some(){
+                    let audit=audit_capture(device.as_ref().unwrap(),&snapshot,&routes).await?;
+                    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+                    {native_stream_safe=audit.capture.conflicting.is_empty()&&audit.conflicting_peers.is_empty();if !native_stream_safe{native_streams.send_replace(None);}}
+
+                    retire_route_conflicts(&mut policy,&sparse_handle,&audit.conflicting_peers);
+                    if !audit.capture.conflicting.is_empty(){tracing::warn!(conflicting_pools=audit.capture.conflicting.len(),"private capture pools conflict with existing routes; safe known hosts retained, range migration required for ambiguous addresses");}
+                    capture_configured=true;last_route_audit=Some(Instant::now());
+                }else if capture_configured{device.as_ref().unwrap().update_capture_routes(&[]).await?;capture_configured=false;}
+                #[cfg(feature="private-stream")]
+                {authority.check()?;stream_router.as_ref().unwrap().update_pairs_authorized(&snapshot,&policy.pair_snapshots(),installed_authority.clone(),Some(sparse_handle.clone()))?;}
                 online_peers = snapshot.peers.iter().filter(|peer| peer.online).map(|peer| peer.id.clone()).collect();
                 private_status.revision = snapshot.revision;
                 private_status.grants = snapshot.grants.len();
@@ -444,7 +585,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 refresh_tor_dns(&dns_upstream,&local_tor,&exit_route,exit_available,&policy);
                 // Register every advertised private DNS suffix on the owned
                 // tunnel resolver. This also applies suffix changes live.
-                zone.as_ref().unwrap().write().await.update(&route_snapshot)?;
+                {let mut zone=zone.as_ref().unwrap().write().await;authority.check()?;zone.update(&route_snapshot)?;}
                 let mut suffixes=snapshot.dns_suffixes.iter().map(|suffix|suffix.trim_matches('.').to_ascii_lowercase()).filter(|suffix|!suffix.is_empty()).collect::<Vec<_>>();
                 if let Some((_,suffix))=own.hostname.split_once('.') { suffixes.push(suffix.trim_matches('.').to_ascii_lowercase()); }
                 suffixes.extend(snapshot.dns_rules.iter().map(|rule|porthub_mesh::dns_policy::zone(rule).trim_end_matches('.').to_ascii_lowercase()));
@@ -453,12 +594,11 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 if registered_suffixes!=suffixes || registered_rules!=snapshot.dns_rules {
                     let tun=device.as_ref().expect("private tunnel initialized");
                     let port=dns_port.ok_or_else(||anyhow::anyhow!("private DNS listener missing"))?;
-                    dns_registration=None;
                     #[cfg(all(target_os = "linux", feature = "netns-tests"))]
                     let isolated = std::env::var("PORTHUB_TEST_OWNED_NETNS").as_deref() == Ok("1") && std::path::Path::new("/.dockerenv").is_file();
                     #[cfg(not(all(target_os = "linux", feature = "netns-tests")))]
                     let isolated = false;
-                    if !isolated { dns_registration=Some(dns::register(tun.index,own.ip,port,&suffixes).await?); }
+                    if !isolated { dns::replace_registration(&mut dns_registration,&path,tun.index,own.ip,port,&suffixes).await?; }
                     #[cfg(target_os="linux")]
                     {dns_target.send_if_modified(|previous| {
                         let next=Some((own.hostname.clone(),own.ip));
@@ -467,12 +607,23 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     registered_suffixes=suffixes;
                     registered_rules=snapshot.dns_rules.clone();
                 }
-                traffic_counters=traffic.reconcile(snapshot.peers.iter().filter(|p|p.id!=profile.peer_id).map(|p|p.id.clone()));
+                traffic_counters=reconcile_traffic(&traffic,&profile.peer_id,Some(&snapshot),&sparse_handle);
                 by_ip=snapshot.peers.iter().map(|p|(p.ip,p.id.clone())).collect();
                 peer_ips=snapshot.peers.iter().map(|p|(p.id.clone(),p.ip)).collect();
+                for peer in sparse_handle.peers(){by_ip.insert(peer.ip,peer.id.clone());peer_ips.insert(peer.id,peer.ip);}
+                #[cfg(all(feature="private-sparse",feature="private-stream"))]
+                {
+                    // This is a bounded native-owner observation, not a new
+                    // authority. Release approval remains closed in Offer.
+                    let ready=if snapshot.sparse.is_some()&&native_stream_safe {
+                        Some(controller::NativeReady::prepared(&snapshot,authority.retained(),device.as_ref().expect("native tunnel initialized"),work.clone())?)
+                    } else {None};
+                    native_streams.send_replace(ready);
+                }
                 // Publish initial readiness immediately. Waiting for
                 // the periodic refresh can make a healthy service miss the
                 // installer's readiness deadline after a slow initial sync.
+                authority.check()?;
                 if first_ready {
                     status_tick.reset_immediately();
                     if owns_component_maintenance {
@@ -481,7 +632,47 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     }
                 }
             },
+            Some(Event::Pair(authority))=>{
+                authority.check()?;
+                let response=authority.accepted()?.clone();
+                if response.status!="allowed"||response.lease.is_none(){
+                    if let Some(peer)=super::sparse::apply_denial(&sparse_handle,&mut policy,&response){
+                        by_ip.retain(|_,id|id!=&peer.id);peer_ips.remove(&peer.id);
+                        if let Some(tun)=&device{if tun.update_routes(&peer_ips.values().copied().collect::<Vec<_>>()).await.is_err(){tracing::warn!("could not remove a retired private pair route");}}
+                        #[cfg(feature="private-stream")]
+                        if let (Some(router),Some(base))=(&stream_router,&sparse_authority){router.update_pairs_authorized(base,&policy.pair_snapshots(),installed_authority.clone(),Some(sparse_handle.clone()))?;}
+                    }
+                    traffic_counters=reconcile_traffic(&traffic,&profile.peer_id,sparse_authority.as_ref(),&sparse_handle);
+                    sparse_handle.unavailable(&response.query);continue;
+                }
+                let lease=response.lease.expect("checked pair lease");
+                let id=lease.peer.id.clone();
+                if policy.install_pair(lease.clone()).is_err(){sparse_handle.unavailable(&response.query);continue;}
+                let Some(tun)=&device else{policy.revoke_pair(&id);continue;};
+                let mut routes:Vec<_>=peer_ips.values().copied().collect();routes.retain(|ip|peer_ips.get(&id)!=Some(ip));routes.push(lease.peer.ip);
+                let base=sparse_authority.as_ref().ok_or_else(||anyhow::anyhow!("private pair arrived before base authority"))?;
+                let audit=audit_capture(tun,base,&routes).await?;last_route_audit=Some(Instant::now());
+                    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+                    {native_stream_safe=audit.capture.conflicting.is_empty()&&audit.conflicting_peers.is_empty();if !native_stream_safe{native_streams.send_replace(None);}}
+
+                let retired=retire_route_conflicts(&mut policy,&sparse_handle,&audit.conflicting_peers);
+                for retired in retired{peer_ips.remove(&retired);by_ip.retain(|_,peer|peer!=&retired);}
+                if !audit.accepted_peers.contains(&lease.peer.ip){
+                    policy.revoke_pair(&id);sparse_handle.retire(&id);sparse_handle.unavailable(&response.query);peer_ips.remove(&id);by_ip.retain(|_,peer|peer!=&id);
+                    #[cfg(feature="private-stream")]
+                    if let Some(router)=&stream_router{router.update_pairs_authorized(base,&policy.pair_snapshots(),installed_authority.clone(),Some(sparse_handle.clone()))?;}
+                    continue;
+                }
+                by_ip.retain(|_,peer|peer!=&id);by_ip.insert(lease.peer.ip,id.clone());peer_ips.insert(id.clone(),lease.peer.ip);
+                authority.check()?;
+                sparse_handle.installed_authority(&response.query,lease,authority.retained());
+                traffic_counters=reconcile_traffic(&traffic,&profile.peer_id,sparse_authority.as_ref(),&sparse_handle);
+                #[cfg(feature="private-stream")]
+                if let (Some(router),Some(base))=(&stream_router,&sparse_authority){router.update_pairs_authorized(base,&policy.pair_snapshots(),installed_authority.clone(),Some(sparse_handle.clone()))?;}
+            },
             Some(Event::Packet{peer,bytes,direct,carrier_direct,received_at})=>{
+                if installed_authority.as_ref().is_some_and(|a|a.check().is_err()) || !sparse_handle.authority_valid(){policy.revoke();anyhow::bail!("private request-start authority expired");}
+                if sparse_handle.enabled()&&(policy.pair_peer(&peer).is_none()||sparse_handle.by_id(&peer).is_none()){sparse_handle.request_peer(&peer);continue;}
                 let now=received_at;
                 if let Some(envelope) = porthub_mesh::control_packet::decode(porthub_mesh::control_packet::EXIT, bytes.clone()) {
                     if peer_ips.get(&peer) != Some(&envelope.source) || peer_ips.get(&profile.peer_id) != Some(&envelope.destination) { continue; }
@@ -499,7 +690,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                             exit_selection.observe(&packet.flow_id(), &peer, Instant::now(), packet.flow_ttl());
                             exit_selection.observe_close(&packet.flow_id(), &peer, false, packet.is_finish(), packet.is_reset(), Instant::now());
                         }
-                        if let Some(tun) = &device { tun.write(&envelope.payload).await?; }
+                        if let Some(tun) = &device { tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=write_authorized(installed_authority.as_ref(),&sparse_handle,Some(&peer),tun,&envelope.payload)=>result?}; }
                     }
                     continue;
                 }
@@ -507,6 +698,16 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 if let Some(envelope)=porthub_mesh::control_packet::decode(porthub_mesh::control_packet::STREAM,bytes.clone()) {
                     if peer_ips.get(&peer)==Some(&envelope.source) && peer_ips.get(&profile.peer_id)==Some(&envelope.destination) {
                         if let Some(c)=traffic_counters.get(&peer){c.add(false,carrier_direct,bytes.len());}
+                        #[cfg(feature="private-sparse")]
+                        if sparse_handle.enabled() {
+                            if let Some(flows)=&guarded_flows {
+                                // Withdrawal stops cold allocation, not an existing
+                                // pinned flow whose current ACL/identity still match.
+                                let allow_new=sparse_handle.by_id(&peer).is_some_and(|p|p.stream_transport=="quic3-credit");
+                                let _=flows.receive_offered(&peer,envelope.source,envelope.payload,allow_new);
+                            }
+                            continue;
+                        }
                         if let Some(router)=&stream_router {router.receive(envelope.source,envelope.payload).await;}
                     }
                     continue;
@@ -519,7 +720,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     if !replies.is_empty() {
                         if direct {
                             if let Some(session)=sessions.read().await.get(&peer) {
-                                for reply in replies { let _=session.send(reply); }
+                                for reply in replies { let _=send_authorized(installed_authority.as_ref(),&sparse_handle,&peer,session,reply); }
                             }
                         } else {
                             for reply in replies { let _=relay_probe(&relay_sender,&peer_ips,&profile.peer_id,&peer,&reply); }
@@ -530,22 +731,61 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 if let Some(c)=traffic_counters.get(&peer){c.add(false,carrier_direct,bytes.len());}
                 mark_activity(&mut last_activity,&peer,now);
                 if policy.check(&bytes,&peer,true) {
+                    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+                    if sparse_handle.enabled() && guarded_flows.as_ref().is_some_and(|flows|!flows.raw_ingress(&bytes)){continue;}
                     if let Some(packet)=Packet::parse(&bytes) {paths.observe(packet,direct);}
-                    if let Some(tun)=&device {tun.write(&bytes).await?;}
+                    if let Some(tun)=&device {tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=write_authorized(installed_authority.as_ref(),&sparse_handle,Some(&peer),tun,&bytes)=>result?};}
+                }
+            },
+            #[cfg(all(feature="private-sparse",feature="private-stream"))]
+            Some(Event::GuardedStreamLocal{peer,packet})=>{
+                // The queue owns the exact native first-origin packet. Never
+                // relabel it using StreamLocal's current-only byte delivery.
+                if !sparse_handle.enabled(){continue;}
+                if installed_authority.as_ref().is_none_or(|a|a.check().is_err()) {
+                    policy.revoke();anyhow::bail!("guarded native request-start authority expired");
+                }
+                if !sparse_handle.enabled()||!packet.valid()||sparse_handle.by_id(&peer).is_none(){continue;}
+                if !policy.check(packet.bytes(),&peer,true){continue;}
+                if let Some(tun)=&device {
+                    let cancelled=&work;let authority=installed_authority.as_ref();let handles=&sparse_handle;let remote=&peer;
+                    let delivered=packet.deliver(|bytes|async move {
+                        tokio::select!{_=cancelled.cancelled()=>anyhow::bail!("private native owner ended before delivery"),result=write_authorized(authority,handles,Some(remote),tun,&bytes)=>result}
+                    }).await;
+                    // Retired per-flow originals are dropped; an actual native
+                    // IO failure remains actionable instead of hiding it.
+                    if packet.valid(){delivered?;}
                 }
             },
             #[cfg(feature="private-stream")]
-            Some(Event::StreamLocal {peer,bytes})=>{
+            Some(Event::StreamLocal {peer,bytes,scope})=>{
+                if !scope.valid(){continue;}
+            if installed_authority.as_ref().is_some_and(|a|a.check().is_err()){policy.revoke();anyhow::bail!("private request-start authority expired");}
+                if sparse_handle.enabled()&&sparse_handle.by_id(&peer).is_none(){continue;}
                 let parsed=Packet::parse(&bytes);
                 let reset=parsed.is_some_and(|packet|packet.is_reset() && peer_ips.get(&profile.peer_id)==Some(&packet.destination()));
                 if policy.check(&bytes,&peer,true) || reset {
-                    if let Some(tun)=&device {tun.write(&bytes).await?;}
+                    if let Some(tun)=&device {
+                        let delivered=scope.during(async{tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=write_authorized(installed_authority.as_ref(),&sparse_handle,Some(&peer),tun,&bytes)=>result}}).await;
+                        match delivered {Ok(result)=>result?,Err(_) if !scope.valid()=>continue,Err(error)=>return Err(error)}
+                    }
                 }
             },
             #[cfg(feature="private-stream")]
-            Some(Event::StreamDatagram {destination,payload})=>{
-                let Some(router)=&stream_router else {continue;};if !router.valid_lease(){continue;}
-                let (Some(peer),Some(source))=(by_ip.get(&destination),peer_ips.get(&profile.peer_id)) else {continue;};
+            Some(Event::StreamDatagram {destination,payload,permit})=>{
+                if permit.as_ref().is_some_and(|permit|!permit.valid()){continue;}
+            if installed_authority.as_ref().is_some_and(|a|a.check().is_err()){policy.revoke();anyhow::bail!("private request-start authority expired");}
+                if sparse_handle.enabled() {
+                    if permit.as_ref().is_none_or(|permit|permit.remaining().is_none()){continue;}
+                    #[cfg(feature="private-sparse")]
+                    if guarded_flows.is_none() || super::stream_chunks::carrier::Frame::decode(payload.clone()).is_err(){continue;}
+                    #[cfg(not(feature="private-sparse"))]
+                    continue;
+                } else {
+                    let Some(router)=&stream_router else {continue;};if !router.valid_lease(){continue;}
+                }
+                let (Some(peer),Some(source))=(by_ip.get(&destination),peer_ips.get(&profile.peer_id)) else {sparse_handle.request_ip(destination);continue;};
+                if sparse_handle.enabled()&&(policy.pair_peer(peer).is_none()||sparse_handle.by_id(peer).is_none()){sparse_handle.request_ip(destination);continue;}
                 let packet=porthub_mesh::control_packet::encode(porthub_mesh::control_packet::STREAM,*source,destination,&payload)?;
                 let peers=sessions.read().await;
                 let direct=peers.get(peer).filter(|session|session.state()==porthub_mesh::State::Ready);
@@ -555,19 +795,21 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 // rather than adding a second TURN/DTLS transport around it.
                 let default=mode!=super::strategy::Mode::PreferGateway || !relay_ready;
                 let prefer=if mode==super::strategy::Mode::Auto {path_quality.prefer_peer(peer,default,Instant::now())} else {default};
-                if let Some(session)=direct.filter(|_|prefer || !relay_ready) {let n=packet.len();if session.send(packet).is_ok(){if let Some(c)=traffic_counters.get(peer){c.add(true,!session.is_relay(),n);}}}
-                else if relay_ready {if relay_sender.send(peer,&packet).is_ok(){if let Some(c)=traffic_counters.get(peer){c.add(true,false,packet.len());}}}
+                if let Some(session)=direct.filter(|_|prefer || !relay_ready) {let n=packet.len();if session.send_guarded(packet,permit).is_ok(){if let Some(c)=traffic_counters.get(peer){c.add(true,!session.is_relay(),n);}}}
+                else if relay_ready {if relay_sender.send_guarded(peer,&packet,permit).is_ok(){if let Some(c)=traffic_counters.get(peer){c.add(true,false,packet.len());}}}
             },
             #[cfg(feature="local-tor")]
             Some(Event::TorLocal {bytes})=>{
+            if installed_authority.as_ref().is_some_and(|a|a.check().is_err()){policy.revoke();anyhow::bail!("private request-start authority expired");}
                 if local_tor.is_some() && Packet::parse(&bytes).is_some_and(|packet|peer_ips.get(&profile.peer_id)==Some(&packet.destination())) {
-                    if let Some(tun)=&device {tun.write(&bytes).await?;}
+                    if let Some(tun)=&device {tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=write_authorized(installed_authority.as_ref(),&sparse_handle,None,tun,&bytes)=>result?};}
                 }
             },
             None=>anyhow::bail!("private control owner stopped"),
         },
         packet=async {match &device {Some(device)=>device.read(&mut buffer).await,None=>std::future::pending().await}}=>{
             let size=packet?;if size>porthub_mesh::MAX_PACKET {continue;}
+            if installed_authority.as_ref().is_some_and(|a|a.check().is_err()){policy.revoke();anyhow::bail!("private request-start authority expired");}
             let Some(parsed)=Packet::parse(&buffer[..size]) else {continue;};
             #[cfg(feature="local-tor")]
             if let Some(tor)=local_tor.as_mut().filter(|tor|tor.owns(&buffer[..size])) {
@@ -610,13 +852,14 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     ) {
                         let packet = porthub_mesh::control_packet::encode(porthub_mesh::control_packet::EXIT, *source, *destination, &buffer[..size])?;
                         if use_direct {
-                            if let Some(session) = direct {let n=packet.len();if session.send(packet).is_ok(){if let Some(c)=traffic_counters.get(&peer){c.add(true,!session.is_relay(),n);}} }
+                            if let Some(session) = direct {let n=packet.len();if send_authorized(installed_authority.as_ref(),&sparse_handle,&peer,session,packet).is_ok(){if let Some(c)=traffic_counters.get(&peer){c.add(true,!session.is_relay(),n);}} }
                         } else { if relay_sender.send(&peer, &packet).is_ok(){if let Some(c)=traffic_counters.get(&peer){c.add(true,false,packet.len());}} }
                     }
                 }
                 continue;
             }
-            let Some(peer)=by_ip.get(&parsed.destination()) else {continue;};
+            let Some(peer)=by_ip.get(&parsed.destination()) else {if peer_ips.get(&profile.peer_id)==Some(&parsed.source()){sparse_handle.request_ip(parsed.destination());}continue;};
+            if sparse_handle.enabled()&&(policy.pair_peer(peer).is_none()||sparse_handle.by_id(peer).is_none()){sparse_handle.request_ip(parsed.destination());continue;}
             if policy.check(&buffer[..size],peer,false) {
                 mark_activity(&mut last_activity,peer,std::time::Instant::now());
                 let peers=sessions.read().await;
@@ -627,13 +870,21 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 let prefer_peer=if mode==super::strategy::Mode::Auto {
                     path_quality.prefer_peer(peer,default_prefer_peer,std::time::Instant::now())
                 } else { default_prefer_peer };
+                #[cfg(all(feature="private-sparse",feature="private-stream"))]
+                if sparse_handle.enabled() {
+                    if let Some(flows)=&guarded_flows {
+                        let negotiated=sparse_handle.by_id(peer).is_some_and(|p|p.stream_transport=="quic3-credit");
+                        let prefer_stream=negotiated&&(!prefer_peer || direct.is_none_or(|session|session.is_relay()));
+                        if flows.kernel_packet(peer,bytes::Bytes::copy_from_slice(&buffer[..size]),prefer_stream){continue;}
+                    }
+                }
                 #[cfg(feature="private-stream")]
                 if let Some(router)=&stream_router {
                     let prefer_stream=!prefer_peer || direct.is_none_or(|session|session.is_relay());
                     if router.kernel_packet(peer,bytes::Bytes::copy_from_slice(&buffer[..size]),prefer_stream){continue;}
                 }
                 match paths.choose_preferred(parsed,direct.is_some(),relay_ready,prefer_peer) {
-                    Some(true)=>{if let Some(session)=direct {if session.send(bytes::Bytes::copy_from_slice(&buffer[..size])).is_ok(){if let Some(c)=traffic_counters.get(peer){c.add(true,!session.is_relay(),size);}}}},
+                    Some(true)=>{if let Some(session)=direct {if send_authorized(installed_authority.as_ref(),&sparse_handle,peer,session,bytes::Bytes::copy_from_slice(&buffer[..size])).is_ok(){if let Some(c)=traffic_counters.get(peer){c.add(true,!session.is_relay(),size);}}}},
                     Some(false)=>{if relay_sender.send(peer,&buffer[..size]).is_ok(){if let Some(c)=traffic_counters.get(peer){c.add(true,false,size);}}},None=>{}
                 }
             }
@@ -649,8 +900,22 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             {
                 super::tor_exit::reconcile(&mut local_tor,tor_route_groups,&tor_settings.borrow(),&path.with_extension("tor"),interfaces.clone(),events.clone(),work.child_token())?;
                 refresh_tor_dns(&dns_upstream,&local_tor,&exit_route,exit_available,&policy);
-                if let Some(snapshot)=latest_snapshot.clone().filter(|snapshot| snapshot.expires_at > chrono::Utc::now()) {
+                if let Some(snapshot)=latest_snapshot.clone().filter(|snapshot| snapshot.value.expires_at > chrono::Utc::now() && snapshot.check().is_ok()) {
                     events.send(Event::Snapshot(snapshot)).await.map_err(|_|anyhow::anyhow!("private packet owner closed"))?;
+                }
+            }
+        },
+        changed=route_events.changed(),if route_events_open=>{
+            if changed.is_err(){route_events_open=false;}else if sparse_handle.enabled(){
+                if let (Some(tun),Some(base))=(&device,&sparse_authority){
+                    let audit=audit_capture(tun,base,&peer_ips.values().copied().collect::<Vec<_>>()).await?;last_route_audit=Some(Instant::now());
+                    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+                    {native_stream_safe=audit.capture.conflicting.is_empty()&&audit.conflicting_peers.is_empty();if !native_stream_safe{native_streams.send_replace(None);}}
+
+                    let retired=retire_route_conflicts(&mut policy,&sparse_handle,&audit.conflicting_peers);
+                    for id in retired{peer_ips.remove(&id);by_ip.retain(|_,peer|peer!=&id);}
+                    #[cfg(feature="private-stream")]
+                    if let Some(router)=&stream_router{router.update_pairs_authorized(base,&policy.pair_snapshots(),installed_authority.clone(),Some(sparse_handle.clone()))?;}
                 }
             }
         },
@@ -661,6 +926,28 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             }
         },
         _=probe_tick.tick(),if device.is_some()=>{
+            if installed_authority.as_ref().is_some_and(|a|a.check().is_err()){policy.revoke();anyhow::bail!("private request-start authority expired");}
+            if sparse_handle.enabled()&&last_route_audit.is_none_or(|at|at.elapsed()>=Duration::from_secs(5)){
+                if let (Some(tun),Some(base))=(&device,&sparse_authority){
+                    let audit=audit_capture(tun,base,&peer_ips.values().copied().collect::<Vec<_>>()).await?;last_route_audit=Some(Instant::now());
+                    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+                    {native_stream_safe=audit.capture.conflicting.is_empty()&&audit.conflicting_peers.is_empty();if !native_stream_safe{native_streams.send_replace(None);}}
+
+                    let retired=retire_route_conflicts(&mut policy,&sparse_handle,&audit.conflicting_peers);
+                    for id in retired{peer_ips.remove(&id);by_ip.retain(|_,peer|peer!=&id);}
+                    #[cfg(feature="private-stream")]
+                    if let Some(router)=&stream_router{router.update_pairs_authorized(base,&policy.pair_snapshots(),installed_authority.clone(),Some(sparse_handle.clone()))?;}
+                }
+            }
+            if sparse_handle.enabled(){
+                let expired:Vec<_>=policy.pair_snapshots().into_iter().filter_map(|(snapshot,_)| snapshot.peers.into_iter().find(|p|p.id!=profile.peer_id)).filter(|p|sparse_handle.by_id(&p.id).is_none()).map(|p|p.id).collect();
+                let removed=!expired.is_empty();
+                for id in expired {policy.revoke_pair(&id);sparse_handle.retire(&id);peer_ips.remove(&id);by_ip.retain(|_,peer|peer!=&id);}
+                if removed {if let Some(tun)=&device {tun.update_routes(&peer_ips.values().copied().collect::<Vec<_>>()).await?;}}
+                for peer in policy.active_pair_flows(){sparse_handle.touch_peer(&peer);}
+                #[cfg(feature="private-stream")]
+                if let Some(router)=&stream_router{for peer in router.active_peers(){sparse_handle.touch_peer(&peer);}}
+            }
             if let Some((peers, mode, _)) = &exit_route {
                 let live = sessions.read().await;
                 let mut available = peers.iter().filter(|peer| policy.valid_lease() && online_peers.contains(*peer) && (relay_sender.is_ready() || live.get(*peer).is_some_and(|session| session.state() == porthub_mesh::State::Ready))).cloned().collect::<Vec<_>>();
@@ -681,16 +968,21 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             }
             #[cfg(feature="local-tor")]
             refresh_tor_dns(&dns_upstream,&local_tor,&exit_route,exit_available,&policy);
+            policy.prune_pairs();
+            traffic_counters=reconcile_traffic(&traffic,&profile.peer_id,sparse_authority.as_ref(),&sparse_handle);
             #[cfg(feature="private-stream")]
             {
                 let mode=*strategy.borrow();
                 let default=mode!=super::strategy::Mode::PreferGateway || !relay_sender.is_ready();
                 let routes=by_ip.iter().filter(|(_,peer)|*peer!=&profile.peer_id).map(|(ip,peer)|{
                     let prefer=if mode==super::strategy::Mode::Auto {path_quality.prefer_peer(peer,default,now)} else {default};
-                    (*ip,(peer.clone(),prefer,traffic_counters.get(peer).cloned()))
+                    let deadline=if sparse_handle.enabled(){policy.pair_snapshots().into_iter().find(|(snapshot,_)|snapshot.peers.iter().any(|p|&p.id==peer)).map(|(_,deadline)|deadline).or(Some(now))}else{None};
+                    (*ip,(peer.clone(),prefer,deadline,traffic_counters.get(peer).cloned()))
                 }).collect();
                 stream_plans.send_replace(StreamCarrierPlan {source:peer_ips.get(&profile.peer_id).copied(),valid_until:stream_router.as_ref().filter(|router|router.valid_lease()).map(|_|now+Duration::from_secs(2)),routes});
             }
+            #[cfg(feature="private-stream")]
+            if sparse_handle.enabled(){if let (Some(router),Some(base))=(&stream_router,&sparse_authority){router.update_pairs_authorized(base,&policy.pair_snapshots(),installed_authority.clone(),Some(sparse_handle.clone()))?;}}
             path_quality.prune(now);
             last_activity.retain(|_,seen|now.saturating_duration_since(*seen)<Duration::from_secs(600));
             let peers=sessions.read().await;
@@ -712,7 +1004,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                         let burst=path_quality.start(peer,direct,nonce,now);
                         let mut complete=true;
                         for packet in burst {
-                            let sent=if direct { session.send(packet) } else { relay_probe(&relay_sender,&peer_ips,&profile.peer_id,peer,&packet) };
+                            let sent=if direct { send_authorized(installed_authority.as_ref(),&sparse_handle,peer,session,packet) } else { relay_probe(&relay_sender,&peer_ips,&profile.peer_id,peer,&packet) };
                             if sent.is_err() { complete=false; break; }
                         }
                         if !complete {
@@ -724,6 +1016,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             }
         },
         _=status_tick.tick()=>{
+            if installed_authority.as_ref().is_some_and(|a|a.check().is_err()){policy.revoke();anyhow::bail!("private request-start authority expired");}
             #[cfg(feature="private-stream")]
             if let Some(router)=&stream_router {router.log_transport_stats();}
             let peers=sessions.read().await;
@@ -778,24 +1071,33 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             if crate::service::readable::refresh(&path,&status).is_err(){tracing::debug!("local registration display snapshot unavailable");}
         }
     }}Ok(())}.await;
+    if installed_authority.as_ref().is_some_and(|authority|authority.check().is_err()) {
+        policy.revoke();sparse_handle.revoke_all();private_status.lease_valid=false;
+        let status=crate::runtime::Status{pid:std::process::id(),state:"stopped".into(),agent_version:crate::VERSION.into(),config_version:String::new(),service_count:0,route:"private".into(),updated_at:SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),update_request_id:String::new(),private_status:Some(private_status.clone())};
+        if let Ok(bytes)=serde_json::to_vec(&status) {if profile::write_private(&profile::sibling(&path,".status.json"),&bytes,true).is_err(){tracing::warn!("expired private authority status update failed");}}
+    }
+    authority_owner.revoke();
     work.cancel();
     drop(component_maintenance);
     if tokio::time::timeout(Duration::from_secs(2), async {
-        while !tasks.is_empty() {
-            let _ = tasks.join_next().await;
+        while !tasks.is_empty()||!stream_owners.is_empty()||!guarded_owners.is_empty(){
+            tokio::select!{_=tasks.join_next(),if !tasks.is_empty()=>{},_=stream_owners.join_next(),if !stream_owners.is_empty()=>{},_=guarded_owners.join_next(),if !guarded_owners.is_empty()=>{}}
         }
     })
     .await
     .is_err()
     {
-        tasks.abort_all();
+        tasks.abort_all();stream_owners.abort_all();guarded_owners.abort_all();
     }
     while tasks.join_next().await.is_some() {}
+    while stream_owners.join_next().await.is_some() {}
+    while guarded_owners.join_next().await.is_some() {}
     // Drain the final counter tail only after every carrier producer stopped.
     let final_traffic=traffic.clone();let _=tokio::task::spawn_blocking(move||final_traffic.sample()).await;
     for session in sessions.write().await.drain().map(|(_, session)| session) {
         session.close().await;
     }
+    if let Err(error)=dns::shutdown_registration(&mut dns_registration).await{tracing::warn!("owned private DNS cleanup pending: {error}");}
     drop(dns_registration);
     drop(device);
     if crate::service::readable::stopped(&path).is_err() {
@@ -823,3 +1125,79 @@ fn refresh_tor_dns(upstream:&Option<Arc<super::dns_upstream::Upstream>>,tor:&Opt
 #[cfg(all(test, feature = "private-stream"))]
 #[path = "traffic_transport_tests.rs"]
 mod traffic_transport_tests;
+#[cfg(test)]
+mod sparse_native_audit_tests {
+    use super::*;
+    #[test]
+    fn effective_traffic_tracks_pairs_across_base_renewal_without_resetting_counters() {
+        use porthub_network::policy::{Lookup,PairLease};
+        let own=format!("{}:{}","a".repeat(24),"b".repeat(24));
+        let b=format!("{}:{}","c".repeat(24),"d".repeat(24));
+        let c=format!("{}:{}","e".repeat(24),"f".repeat(24));
+        let epoch="a".repeat(64);
+        let base:Snapshot=serde_json::from_value(serde_json::json!({"workspace":"w","self":own,"revision":1,"expires_at":chrono::Utc::now()+chrono::Duration::seconds(30),"sparse":{"protocol":1,"epoch":epoch},"peers":[{"id":own,"ip":"10.203.0.2","fingerprint":"local","instance":"local-instance","hostname":"a.phub"}],"grants":[]})).unwrap();
+        let (handle,_)=super::super::sparse::channel();handle.update_base(&base);
+        for (id,ip) in [(&b,"10.203.1.2"),(&c,"10.203.2.2")] {
+            let lease:PairLease=serde_json::from_value(serde_json::json!({"workspace":"w","self":own,"epoch":epoch,"revision":1,"expires_at":chrono::Utc::now()+chrono::Duration::seconds(15),"local":{"id":own,"ip":"10.203.0.2","fingerprint":"local","instance":"local-instance","hostname":"a.phub"},"peer":{"id":id,"ip":ip,"fingerprint":format!("remote-{id}"),"instance":format!("instance-{id}"),"hostname":"b.phub"},"grants":[{"source":own,"destination":id,"protocol":"any","ports":[]}]})).unwrap();
+            handle.installed(&Lookup{kind:"peer".into(),value:id.clone()},lease);
+        }
+        let mut builder=tempfile::Builder::new();builder.prefix("pair-traffic-");
+        #[cfg(unix)]{use std::os::unix::fs::PermissionsExt;builder.permissions(std::fs::Permissions::from_mode(0o700));}
+        let root=builder.tempdir().unwrap();
+        let tracker=super::super::traffic::Tracker::new(&root.path().join("profile.json"));
+        let first=reconcile_traffic(&tracker,&own,Some(&base),&handle);
+        assert_eq!(first.len(),2);assert!(!first.contains_key(&own));
+        first[&b].add(true,false,100);first[&c].add(true,true,200);
+        // A local-only base reply must not evict independently leased counters.
+        handle.update_base(&base);
+        let renewed=reconcile_traffic(&tracker,&own,Some(&base),&handle);
+        assert!(Arc::ptr_eq(&first[&b],&renewed[&b]));
+        assert!(Arc::ptr_eq(&first[&c],&renewed[&c]));
+        handle.retire(&b);
+        let retired=reconcile_traffic(&tracker,&own,Some(&base),&handle);
+        assert!(!retired.contains_key(&b));assert_eq!(retired.len(),1);
+        assert!(Arc::ptr_eq(&first[&c],&retired[&c]));
+        // Tracker retains the retired handle's unsampled tail for its sampler.
+        assert!(Arc::ptr_eq(&first[&b],&tracker.counter(&b).unwrap()));
+        std::thread::sleep(Duration::from_millis(2));
+        tracker.sample();
+        let pending=tracker.report().expect("retired pair tail must be durable");
+        let b_row=pending.rows.iter().find(|row|row.peer_id==b).unwrap();
+        let c_row=pending.rows.iter().find(|row|row.peer_id==c).unwrap();
+        assert_eq!(b_row.relay_sent,100);assert_eq!(c_row.direct_sent,200);
+        assert!(tracker.counter(&b).is_none());assert!(tracker.counter(&c).is_some());
+
+    }
+    #[test]
+    fn native_conflict_retires_only_exact_peer_authority_and_dns_cache() {
+        use porthub_network::policy::{Lookup,PairLease};
+        let epoch="a".repeat(64);
+        let snapshot:Snapshot=serde_json::from_value(serde_json::json!({"workspace":"w","self":"a","revision":1,"expires_at":chrono::Utc::now()+chrono::Duration::seconds(30),"sparse":{"protocol":1,"epoch":epoch},"peers":[{"id":"a","ip":"10.203.0.2","fingerprint":"local","instance":"local-instance","hostname":"a.phub"}],"grants":[]})).unwrap();
+        let (handle,_)=super::super::sparse::channel();handle.update_base(&snapshot);
+        let mut policy=Engine::default();policy.apply(snapshot).unwrap();
+        for (id,ip) in [("b","10.203.1.2"),("c","10.203.2.2")] {
+            let lease:PairLease=serde_json::from_value(serde_json::json!({"workspace":"w","self":"a","epoch":epoch,"revision":1,"expires_at":chrono::Utc::now()+chrono::Duration::seconds(15),"local":{"id":"a","ip":"10.203.0.2","fingerprint":"local","instance":"local-instance","hostname":"a.phub"},"peer":{"id":id,"ip":ip,"fingerprint":format!("remote-{id}"),"instance":format!("instance-{id}"),"hostname":format!("{id}.phub")},"grants":[{"source":"a","destination":id,"protocol":"any","ports":[]}]})).unwrap();
+            policy.install_pair(lease.clone()).unwrap();handle.installed(&Lookup{kind:"peer".into(),value:id.into()},lease);
+        }
+        assert_eq!(retire_route_conflicts(&mut policy,&handle,&["10.203.1.2".parse().unwrap()]),vec!["b"]);
+        assert!(policy.pair_peer("b").is_none());assert!(handle.by_id("b").is_none());
+        assert!(handle.dns_ttl("10.203.1.2".parse().unwrap()).is_none());
+        assert!(policy.pair_peer("c").is_some());assert!(handle.by_id("c").is_some());assert!(policy.valid_lease());
+        assert!(retire_route_conflicts(&mut policy,&handle,&["10.203.99.99".parse().unwrap()]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod stream_retirement_tests {
+    use super::*;
+    #[tokio::test]
+    async fn actual_joined_retirement_does_not_stop_replacement_and_shutdown_is_normal()->Result<()>{
+        let mut owners=JoinSet::new();let old=CancellationToken::new();let stop=old.clone();
+        owners.spawn(async move{stop.cancelled().await;(1,Ok(()))});old.cancel();
+        ensure!(!stream_owner_completed(2,false,owners.join_next().await)?,"retired owner stopped replacement profile");
+        owners.spawn(async{(2,Ok(()))});ensure!(stream_owner_completed(2,false,owners.join_next().await).is_err(),"unexpected live owner stop hidden");
+        owners.spawn(async{(2,Ok(()))});ensure!(stream_owner_completed(2,true,owners.join_next().await)?,"normal profile shutdown became stream failure");
+        owners.spawn(async{(1,Err(anyhow::anyhow!("retired-native-cleanup-error")))});
+        let error=stream_owner_completed(2,false,owners.join_next().await).unwrap_err();ensure!(error.to_string().contains("retired-native-cleanup-error"),"old-owner cleanup failure was hidden or replaced");Ok(())
+    }
+}

@@ -29,9 +29,31 @@ fn expanded(rows: &[Document]) -> Vec<Bson> {
     }
     ids
 }
+/// Canonical compatibility aliases for bounded current identity queries.
+pub(crate) fn identity_aliases(ids: &[Bson]) -> Vec<Bson> {
+    let mut output = Vec::new();
+    for id in ids {
+        if !output.contains(id) { output.push(id.clone()); }
+        let alias = match id {
+            Bson::ObjectId(id) => Some(Bson::String(id.to_hex())),
+            Bson::String(id) => ObjectId::parse_str(id).ok().map(Bson::ObjectId),
+            _ => None,
+        };
+        if let Some(alias) = alias { if !output.contains(&alias) { output.push(alias); } }
+    }
+    output
+}
 /// Retiring owners stay fenced even if cleanup was interrupted before disabling resources.
 pub async fn retiring_owners(app: &App) -> ApiResult<Vec<Bson>> {
     let users = rows(app, "users", doc! {"account_deletion":{"$exists":true}}).await?;
+    Ok(expanded(&users))
+}
+/// Bounded identity lookup for sparse/report authorization; same retirement
+/// semantics as retiring_owners without materializing unrelated accounts.
+pub(crate) async fn retiring_owners_among(app: &App, ids: &[Bson]) -> ApiResult<Vec<Bson>> {
+    let users: Vec<Document> = app.collection("users")
+        .find(doc! {"_id":{"$in":ids},"account_deletion":{"$exists":true}})
+        .projection(doc! {"_id":1}).await?.try_collect().await?;
     Ok(expanded(&users))
 }
 fn list(job: &Document, key: &str) -> Vec<Bson> {

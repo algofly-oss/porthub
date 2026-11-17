@@ -46,6 +46,8 @@ async fn enroll(
     let mid = object_id(&mid, "Invalid machine")?;
     let _guard = app.connection_lock.lock().await;
     let _network_guard = app.private_network_lock.lock().await;
+    #[cfg(feature="private-sparse")]
+    let _workspace_guard=crate::private_renumber::fence::stable_with_allocation(&app,owner).await?;
     let machine = app
         .collection("machines")
         .find_one(doc! {"_id":mid,"deletion_pending":{"$ne":true}})
@@ -169,6 +171,16 @@ async fn enroll(
 async fn bootstrap(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<Response> {
     let ticket = enrollment::parse_ticket(raw)?;
     let (claim, peer) = enrollment::resolve(&app, &ticket).await?;
+    #[cfg(feature="private-sparse")]
+    let _workspace_guard=crate::private_renumber::fence::stable(&app,peer.get_object_id("workspace_id").map_err(|_|ApiError::bad_request("Invalid workspace"))?).await?;
+    #[cfg(feature="private-sparse")]
+    let (claim,peer)={
+        let (fresh_claim,fresh_peer)=enrollment::resolve(&app,&ticket).await?;
+        if fresh_peer.get("_id")!=peer.get("_id") || fresh_peer.get("workspace_id")!=peer.get("workspace_id") || fresh_claim.get("_id")!=claim.get("_id") {
+            return Err(conflict("Enrollment identity changed while waiting"));
+        }
+        (fresh_claim,fresh_peer)
+    };
     let now = DateTime::now();
     let claimed = app
         .collection("private_install_tickets")
@@ -216,6 +228,8 @@ async fn rename(
     let (user, owner, role) =
         browser(&app, &headers, &Method::PUT, &query.workspace, false).await?;
     let _guard = app.connection_lock.lock().await;
+    #[cfg(feature="private-sparse")]
+    let _workspace_guard=crate::private_renumber::fence::stable(&app,owner).await?;
     let mut filter = doc! {"_id":&id,"workspace_id":owner};
     if !matches!(role.as_str(), "owner" | "admin") {
         filter.insert("owner_id", user.get("_id").cloned().unwrap_or_default());

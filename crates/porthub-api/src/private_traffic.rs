@@ -47,6 +47,24 @@ async fn indexes(app: &App) -> ApiResult<()> {
         .await?;
     Ok(())
 }
+/// Resolve historical report targets independently of the current sparse pair
+/// working set. This read grants no packet/stream authority and caches no decision.
+pub async fn authorized_report_peers(app: &App, workspace: ObjectId, reporter: &str, report: &Report) -> ApiResult<Vec<Document>> {
+    if !report.valid() { return Err(ApiError::bad_request("Invalid private traffic report")); }
+    let mut ids: std::collections::BTreeSet<_> = report.rows.iter().map(|row|row.peer_id.clone()).collect();
+    ids.insert(reporter.to_owned());
+    let peers = crate::routes::private_sync::active_report_peers(app, workspace, &ids.into_iter().collect::<Vec<_>>()).await?;
+    if !peers.iter().any(|peer| peer.get_str("_id") == Ok(reporter)) {
+        return Err(ApiError::new(axum::http::StatusCode::FORBIDDEN, "Private traffic reporter is no longer eligible"));
+    }
+    Ok(peers)
+}
+/// Sparse sync authorizes delayed history outside its current pair working set.
+/// Legacy sync already has the full current inventory and uses ingest directly.
+pub(crate) async fn ingest_sparse(app: &App, workspace: ObjectId, reporter: &str, report: &Report) -> ApiResult<(u64,u64)> {
+    let peers = authorized_report_peers(app,workspace,reporter,report).await?;
+    ingest(app,workspace,reporter,&peers,report).await
+}
 /// Called only AFTER private sync authenticated/revalidated the reporter against
 /// current enabled machines and workspace membership. Destination identities
 /// must come from that SAME snapshot; clients cannot invent a cross-account row.

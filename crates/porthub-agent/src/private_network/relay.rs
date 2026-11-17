@@ -21,9 +21,33 @@ use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
 use tokio_util::sync::CancellationToken;
 const RELAY_LANES: usize = 4;
 const RELAY_QUEUE_PACKETS: usize = 2048;
+/// Bounded queued record carries immutable admission witnesses, never a lookup
+/// into a newer policy when the socket eventually becomes writable.
+#[derive(Clone)]
+pub struct Queued {
+    bytes:Bytes,
+    guards:Vec<super::authority_event::Authority<()>>,
+    permits:Vec<porthub_mesh::udp::SendPermit>,
+}
+impl From<Bytes> for Queued {fn from(bytes:Bytes)->Self{Self{bytes,guards:Vec::new(),permits:Vec::new()}}}
+impl std::ops::Deref for Queued {type Target=Bytes;fn deref(&self)->&Bytes{&self.bytes}}
+impl Queued {
+    fn check(&self)->Result<()> {for guard in &self.guards {guard.check()?;}ensure!(self.permits.iter().all(|permit|permit.valid()),"private relay originating permit retired");Ok(())}
+    async fn during<T>(&self,operation:impl std::future::Future<Output=Result<T>>)->Result<T> {
+        if self.guards.is_empty()&&self.permits.is_empty(){return operation.await;}
+        tokio::pin!(operation);let mut tick=tokio::time::interval(Duration::from_millis(50));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            let guarded=std::future::poll_fn(|cx|{if let Err(error)=self.check(){return std::task::Poll::Ready(Err(error));}operation.as_mut().poll(cx)});
+            tokio::select!{result=guarded=>return result,_=tick.tick()=>self.check()?}
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Sender {
-    output: Arc<[mpsc::Sender<Bytes>; RELAY_LANES]>,
+    output: Arc<[mpsc::Sender<Queued>; RELAY_LANES]>,
+    authority:Arc<std::sync::Mutex<Option<(super::authority_event::Authority<()>,super::sparse::Handle)>>>,
     ready: Arc<[AtomicBool; RELAY_LANES]>,
     dropped_packets: Arc<AtomicU64>,
 }
@@ -33,8 +57,22 @@ pub struct Config {
     pub relay_token: Option<String>,
 }
 impl Sender {
+    pub(crate) fn update_authority(&self,base:super::authority_event::Authority<()>,pairs:super::sparse::Handle) {
+        *self.authority.lock().unwrap_or_else(|p|p.into_inner())=Some((base,pairs));
+    }
+    fn admitted(&self,peer:&str,bytes:Bytes)->Result<Queued> {
+        let configured=self.authority.lock().unwrap_or_else(|p|p.into_inner()).clone();
+        let mut guards=Vec::new();
+        if let Some((base,pairs))=configured {
+            base.check()?;if base.remaining()?.is_some(){guards.push(base);}
+            if pairs.enabled(){guards.push(pairs.pair_authority(peer).ok_or_else(||anyhow::anyhow!("private relay pair authority expired"))?);}
+        }
+        Ok(Queued{bytes,guards,permits:Vec::new()})
+    }
     #[cfg(feature = "private-stream")]
-    pub async fn send_stream(&self, peer: &str, packet: &[u8]) -> Result<()> {
+    pub async fn send_stream(&self, peer: &str, packet: &[u8]) -> Result<()> {self.send_stream_guarded(peer,packet,None).await}
+    #[cfg(feature="private-stream")]
+    pub async fn send_stream_guarded(&self,peer:&str,packet:&[u8],permit:Option<porthub_mesh::udp::SendPermit>)->Result<()> {
         ensure!(self.is_ready(), "private relay is not ready");
         ensure!(
             !peer.is_empty() && peer.len() <= 60 && (20..=1380).contains(&packet.len()),
@@ -47,7 +85,7 @@ impl Sender {
         let bytes = Bytes::from(bytes);
         let lane = self.packet_lane(peer, packet)?;
         self.output[lane]
-            .send(bytes)
+            .send({let mut record=self.admitted(peer,bytes)?;if let Some(permit)=permit{ensure!(permit.valid(),"private relay originating permit retired");record.permits.push(permit);}record})
             .await
             .map_err(|_| anyhow::anyhow!("private relay stopped"))
     }
@@ -102,7 +140,8 @@ impl Sender {
             state.store(ready, Ordering::Release);
         }
     }
-    pub fn send(&self, peer: &str, packet: &[u8]) -> Result<()> {
+    pub fn send(&self, peer: &str, packet: &[u8]) -> Result<()> {self.send_guarded(peer,packet,None)}
+    pub(crate) fn send_guarded(&self,peer:&str,packet:&[u8],permit:Option<porthub_mesh::udp::SendPermit>)->Result<()> {
         ensure!(self.is_ready(), "private relay is not ready");
         ensure!(
             !peer.is_empty() && peer.len() <= 60 && (20..=1380).contains(&packet.len()),
@@ -114,7 +153,7 @@ impl Sender {
         bytes.extend_from_slice(packet);
         let bytes = Bytes::from(bytes);
         let lane = self.packet_lane(peer, packet)?;
-        if self.output[lane].try_send(bytes).is_ok() {
+        if self.output[lane].try_send({let mut record=self.admitted(peer,bytes)?;if let Some(permit)=permit{ensure!(permit.valid(),"private relay originating permit retired");record.permits.push(permit);}record}).is_ok() {
             return Ok(());
         }
         self.dropped_packets.fetch_add(1, Ordering::Relaxed);
@@ -125,7 +164,7 @@ impl Sender {
         self.dropped_packets.swap(0, Ordering::Relaxed)
     }
 }
-pub fn channel() -> (Sender, [mpsc::Receiver<Bytes>; RELAY_LANES]) {
+pub fn channel() -> (Sender, [mpsc::Receiver<Queued>; RELAY_LANES]) {
     // Keep the combined relay queue budget unchanged while spreading traffic
     // over independent TCP congestion windows.
     let mut outputs = Vec::with_capacity(RELAY_LANES);
@@ -135,15 +174,16 @@ pub fn channel() -> (Sender, [mpsc::Receiver<Bytes>; RELAY_LANES]) {
         outputs.push(output);
         inputs.push(input);
     }
-    let output: [mpsc::Sender<Bytes>; RELAY_LANES] = outputs
+    let output: [mpsc::Sender<Queued>; RELAY_LANES] = outputs
         .try_into()
         .unwrap_or_else(|_| unreachable!("relay lane count is fixed"));
-    let input: [mpsc::Receiver<Bytes>; RELAY_LANES] = inputs
+    let input: [mpsc::Receiver<Queued>; RELAY_LANES] = inputs
         .try_into()
         .unwrap_or_else(|_| unreachable!("relay lane count is fixed"));
     (
         Sender {
             output: Arc::new(output),
+            authority:Default::default(),
             ready: Arc::new(std::array::from_fn(|_| AtomicBool::new(false))),
             dropped_packets: Default::default(),
         },
@@ -176,6 +216,7 @@ async fn dispatch_frame(frame: Bytes, events: &mpsc::Sender<Event>) {
     }
 }
 
+#[cfg(test)]
 async fn outgoing_frame(
     first: Bytes,
     batch: bool,
@@ -201,7 +242,7 @@ pub async fn run(
     profile: Profile,
     instance: String,
     sender: Sender,
-    packets: [mpsc::Receiver<Bytes>; RELAY_LANES],
+    packets: [mpsc::Receiver<Queued>; RELAY_LANES],
     config: watch::Receiver<Option<Config>>,
     events: mpsc::Sender<Event>,
     cancel: CancellationToken,
@@ -238,7 +279,7 @@ pub async fn run_bound(
     profile: Profile,
     instance: String,
     sender: Sender,
-    mut packets: [mpsc::Receiver<Bytes>; RELAY_LANES],
+    mut packets: [mpsc::Receiver<Queued>; RELAY_LANES],
     mut config: watch::Receiver<Option<Config>>,
     interfaces: watch::Receiver<Vec<std::net::SocketAddr>>,
     events: mpsc::Sender<Event>,
@@ -466,7 +507,7 @@ async fn connect_lane(
 
 async fn serve_lanes(
     connections: Vec<ConnectedLane>,
-    packets: &mut [mpsc::Receiver<Bytes>; RELAY_LANES],
+    packets: &mut [mpsc::Receiver<Queued>; RELAY_LANES],
     sender: &Sender,
     config: &mut watch::Receiver<Option<Config>>,
     events: &mpsc::Sender<Event>,
@@ -534,7 +575,7 @@ async fn serve_lanes(
 
 async fn write_lane(
     mut socket: RelaySink,
-    packets: &mut mpsc::Receiver<Bytes>,
+    packets: &mut mpsc::Receiver<Queued>,
     mut pongs: mpsc::Receiver<Bytes>,
     batch: bool,
     prefixes: bool,
@@ -542,18 +583,22 @@ async fn write_lane(
     let mut heartbeat = tokio::time::interval(Duration::from_secs(25));
     heartbeat.tick().await;
     loop {
-        let message = tokio::select! {
+        let (message,authority) = tokio::select! {
             packet=packets.recv()=>{
                 let Some(packet)=packet else {return Ok(());};
-                outgoing_frame(packet,batch,prefixes,packets).await?
+                if packet.check().is_err(){continue;}
+                let mut records=vec![packet.bytes.clone()];let mut guards=packet.guards;let mut permits=packet.permits;
+                if batch {for _ in 1..32 {match packets.try_recv(){Ok(next)=>{if next.check().is_ok(){records.push(next.bytes);guards.extend(next.guards);permits.extend(next.permits);}},Err(_)=>break}}}
+                let message=if batch {Message::Binary(porthub_mesh::batch::encode(&records,prefixes)?.into())}else{Message::Binary(records.pop().unwrap())};
+                (message,Queued{bytes:Bytes::new(),guards,permits})
             },
             pong=pongs.recv()=>{
                 let Some(pong)=pong else {return Ok(());};
-                Message::Pong(pong)
+                (Message::Pong(pong),Bytes::new().into())
             },
-            _=heartbeat.tick()=>Message::Ping(Bytes::new()),
+            _=heartbeat.tick()=>(Message::Ping(Bytes::new()),Bytes::new().into()),
         };
-        tokio::time::timeout(Duration::from_secs(5), socket.send(message)).await??;
+        authority.during(async {tokio::time::timeout(Duration::from_secs(5),socket.send(message)).await??;Ok(())}).await?;
     }
 }
 
@@ -603,6 +648,32 @@ mod tests {
         assert_ne!(sender.packet_lane("peer", &packet).unwrap(), lane);
     }
 
+    #[cfg(feature="private-sparse")]
+    #[tokio::test]
+    async fn real_websocket_writer_drops_expired_queued_record_despite_fresh_sender_renewal()->Result<()> {
+        use super::super::{authority_clock::{SuspendClock,RequestWindow},authority_event::Authority};
+        struct Clock(std::sync::atomic::AtomicU64);
+        impl SuspendClock for Clock {fn elapsed_since_boot(&self)->Result<Duration>{Ok(Duration::from_millis(self.0.load(Ordering::SeqCst)))}}
+        let clock=Arc::new(Clock(std::sync::atomic::AtomicU64::new(0)));
+        let make=||Authority::new((),Some(RequestWindow::start(clock.clone()).unwrap()),chrono::Utc::now()+chrono::Duration::seconds(30));
+        let (sender,mut lanes)=channel();sender.set_ready(0,true);let (pairs,_)=super::super::sparse::channel();
+        sender.update_authority(make(),pairs.clone());sender.send("p",&record()[2..])?;
+        clock.0.store(15000,Ordering::SeqCst);
+        sender.update_authority(make(),pairs);
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url=format!("ws://{}/",listener.local_addr()?);
+        let (client,server)=tokio::join!(tokio_tungstenite::connect_async(url),async {let (socket,_)=listener.accept().await?;Ok::<_,anyhow::Error>(tokio_tungstenite::accept_async(socket).await?)});
+        let (sink,_)=client?.0.split();let mut server=server?;
+        let (_pong_send,pongs)=mpsc::channel(1);let (_unused,replacement)=mpsc::channel(1);
+        let mut input=std::mem::replace(&mut lanes[0],replacement);
+        let task=tokio::spawn(async move {write_lane(sink,&mut input,pongs,false,false).await});
+        assert!(tokio::time::timeout(Duration::from_millis(50),server.next()).await.is_err());
+        sender.send("p",&record()[2..])?;
+        let frame=tokio::time::timeout(Duration::from_secs(1),server.next()).await?.unwrap()?;
+        assert_eq!(frame,Message::Binary(record()));
+        assert!(tokio::time::timeout(Duration::from_millis(50),server.next()).await.is_err());
+        task.abort();let _=task.await;Ok(())
+    }
     #[tokio::test]
     async fn queued_stream_records_batch_without_delaying_control_records() {
         use futures_util::FutureExt;
@@ -852,7 +923,7 @@ mod tests {
             packet.extend_from_slice(&[0; 1380]);
             let packet = Bytes::from(packet);
             for _ in 0..20000 {
-                output.send(packet.clone()).await?;
+                output.send(packet.clone().into()).await?;
             }
             Ok::<_, anyhow::Error>(())
         }));
@@ -866,7 +937,7 @@ mod tests {
             // Give the writer time to consume its first queue and block in TCP.
             tokio::time::sleep(Duration::from_millis(100)).await;
             ensure!(!fill.is_finished(), "lane zero was not backpressured");
-            sender.output[1].send(record()).await?;
+            sender.output[1].send(record().into()).await?;
             ensure!(
                 tokio::time::timeout(Duration::from_secs(1), observations.recv()).await? == Some(1),
                 "unblocked lane stalled"
@@ -893,7 +964,7 @@ mod tests {
         let packet = record().slice(2..);
         for output in sender.output.iter() {
             for _ in 0..RELAY_QUEUE_PACKETS / RELAY_LANES {
-                output.try_send(record()).unwrap();
+                output.try_send(record().into()).unwrap();
             }
         }
         let mut pending = Box::pin(sender.send_stream("p", &packet));
@@ -911,7 +982,7 @@ mod tests {
         assert_eq!(sender.take_dropped_packets(), 0);
         for input in &mut received {
             for _ in 0..RELAY_QUEUE_PACKETS / RELAY_LANES {
-                assert_eq!(input.recv().await.unwrap(), record());
+                assert_eq!(input.recv().await.unwrap().bytes, record());
             }
         }
     }

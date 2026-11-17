@@ -5380,6 +5380,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "smoltcp",
+ "socket2 0.6.5",
  "subtle",
  "sysinfo",
  "system-configuration",
@@ -5428,6 +5429,7 @@ dependencies = [
  "porthub-egress",
  "porthub-identity",
  "porthub-mesh",
+ "porthub-network",
  "porthub-runtime",
  "porthub-terminal",
  "porthub-tunnel",
@@ -5638,6 +5640,7 @@ name = "porthub-network"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "getrandom 0.3.4",

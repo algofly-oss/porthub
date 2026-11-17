@@ -10,6 +10,7 @@ private-stream = ["dep:smoltcp"]
 netns-tests = []
 
 [dependencies]
+base64 = "0.22"
 anyhow.workspace = true
 tokio.workspace = true
 porthub-mesh = { path = "../porthub-mesh" }

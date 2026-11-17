@@ -1,6 +1,11 @@
 //! Lease-bound IPv4 ACLs and reply tracking. A packet's addresses must match
 //! its authenticated remote peer; no LAN/default-gateway forwarding is allowed.
+pub mod pair_acl;
+mod sparse;
+pub use sparse::{Lookup, PairLease, PairResponse, SparseInfo, MAX_PAIR_LEASES, MAX_PRIVATE_SUFFIXES, MAX_PRIVATE_SUFFIX_BYTES};
 use anyhow::{ensure, Result};
+/// Existing full-snapshot ceiling, including the mandatory local identity.
+pub const MAX_SNAPSHOT_PEERS: usize = 4096;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -111,6 +116,8 @@ mod tor_route_tests {
 }
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Snapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sparse: Option<SparseInfo>,
     pub workspace: String,
     #[serde(rename = "self")]
     pub self_: String,
@@ -120,6 +127,8 @@ pub struct Snapshot {
     #[serde(default)]
     pub dns_suffixes: Vec<String>,
     pub grants: Vec<Grant>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub pair_acl: Option<pair_acl::PairAcl>,
     #[serde(default)]
     pub exit_routes: Vec<ExitRoute>,
     #[serde(default, deserialize_with="blocking_dns_rules")]
@@ -273,7 +282,11 @@ struct Flow {
     phase: u8,
     fin_directions: u8,
     close_until: Option<Instant>,
+    _permit:Option<tokio::sync::OwnedSemaphorePermit>,
 }
+#[derive(Clone)]
+struct FlowBudget(std::sync::Arc<tokio::sync::Semaphore>);
+impl Default for FlowBudget {fn default()->Self{Self(std::sync::Arc::new(tokio::sync::Semaphore::new(65536)))}}
 #[derive(Default)]
 pub struct Engine {
     snapshot: Option<Snapshot>,
@@ -281,15 +294,26 @@ pub struct Engine {
     flows: HashMap<Key, Flow>,
     exit_flows: HashMap<Key, Flow>,
     deadline: Option<Instant>,
+    pairs: HashMap<String, Box<Engine>>,
+    compiled_pair: Option<pair_acl::CompiledPairAcl>,
+    flow_budget:FlowBudget,
 }
 impl Engine {
     pub fn revoke(&mut self) {
         self.deadline = None;
+        self.compiled_pair=None;
+        self.pairs.clear();
         self.flows.clear();
         self.exit_flows.clear();
     }
     pub fn apply(&mut self, mut snapshot: Snapshot) -> Result<()> {
         let result = (|| {
+            self.validate_sparse_base(&snapshot)?;
+            let retain_pairs = self.same_sparse_authority(&snapshot);
+            let compiled_pair=if let Some(acl)=&snapshot.pair_acl{
+                ensure!(snapshot.sparse.is_none()&&snapshot.peers.len()==2&&snapshot.grants.is_empty()&&snapshot.exit_routes.is_empty(),"compact ACL is not a complete exact pair");
+                Some(acl.compile()?)
+            }else{None};
             let remaining = snapshot
                 .expires_at
                 .signed_duration_since(Utc::now())
@@ -309,7 +333,7 @@ impl Engine {
                 );
             }
             ensure!(
-                snapshot.peers.len() <= 4096 && snapshot.grants.len() <= 65536,
+                snapshot.peers.len() <= MAX_SNAPSHOT_PEERS && snapshot.grants.len() <= 65536,
                 "private policy exceeds size limit"
             );
             let mut ips = HashMap::new();
@@ -339,7 +363,7 @@ impl Engine {
                         && (!route.routing_peers.is_empty() || route.tor_enabled) && !route.clients.is_empty()
                         && (route.traffic_mode.internet() || (!route.routing_peers.is_empty() && !route.tor_enabled))
                         && (1..=16).contains(&route.tor_circuit_groups)
-                        && route.routing_peers.len() <= 4096 && route.clients.len() <= 4096,
+                        && route.routing_peers.len() <= MAX_SNAPSHOT_PEERS && route.clients.len() <= MAX_SNAPSHOT_PEERS,
                     "invalid exit route"
                 );
                 let mut unique_peers = HashSet::new();
@@ -397,6 +421,8 @@ impl Engine {
             }
             snapshot.peers.shrink_to_fit();
             self.ips = ips;
+            self.compiled_pair=compiled_pair;
+            if !retain_pairs { self.pairs.clear(); }
             self.snapshot = Some(snapshot);
             self.deadline = Some(Instant::now() + remaining);
             let old = std::mem::take(&mut self.flows);
@@ -430,6 +456,12 @@ impl Engine {
             1 => "icmp",
             _ => return false,
         };
+        if let Some(compiled)=&self.compiled_pair {
+            let local=self.ips[&snapshot.self_];
+            let Some(remote)=snapshot.peers.iter().find(|p|p.id!=snapshot.self_).map(|p|p.ip) else{return false;};
+            let reverse=if packet.key.src==local&&packet.key.dst==remote{false}else if packet.key.src==remote&&packet.key.dst==local{true}else{return false;};
+            return compiled.allows(reverse,packet.key.protocol,packet.key.dport);
+        }
         snapshot.grants.iter().any(|g| {
             self.ips[&g.source] == packet.key.src
                 && self.ips[&g.destination] == packet.key.dst
@@ -441,6 +473,10 @@ impl Engine {
         })
     }
     pub fn check(&mut self, bytes: &[u8], remote: &str, inbound: bool) -> bool {
+        if self.snapshot.as_ref().is_some_and(|s| s.sparse.is_some()) {
+            if !self.valid_lease() { self.pairs.clear(); return false; }
+            if let Some(pair) = self.pairs.get_mut(remote) { return pair.check(bytes, remote, inbound); }
+        }
         let Some(packet) = Packet::parse(bytes) else {
             return false;
         };
@@ -463,7 +499,7 @@ impl Engine {
             return false;
         }
         let may_open = self.allowed(packet);
-        track_packet(&mut self.flows, packet, "", may_open, now)
+        track_packet_budget(&mut self.flows, packet, "", may_open, now,Some(&self.flow_budget))
     }
 
     // A separate state table prevents exit grants from widening private ACLs.
@@ -524,6 +560,9 @@ fn exit_target(ip: Ipv4Addr, block_lan: bool) -> bool {
 }
 
 fn track_packet(flows: &mut HashMap<Key, Flow>, packet: Packet, remote: &str, may_open: bool, now: Instant) -> bool {
+    track_packet_budget(flows,packet,remote,may_open,now,None)
+}
+fn track_packet_budget(flows: &mut HashMap<Key, Flow>, packet: Packet, remote: &str, may_open: bool, now: Instant,budget:Option<&FlowBudget>) -> bool {
         let key = packet.key;
         let reverse = Key {
             src: key.dst,
@@ -594,9 +633,11 @@ fn track_packet(flows: &mut HashMap<Key, Flow>, packet: Packet, remote: &str, ma
                 return false;
             }
         }
+        let permit=if let Some(budget)=budget{match budget.0.clone().try_acquire_owned(){Ok(permit)=>Some(permit),Err(_)=>return false}}else{None};
         flows.insert(
             key,
             Flow {
+                _permit:permit,
                 remote: remote.to_owned(),
                 expires: now + ttl(key.protocol),
                 opening: packet,
@@ -683,5 +724,21 @@ mod lifetime_tests {
         assert!(track_packet(&mut incomplete, syn, "exit", true, start));
         assert!(!track_packet(&mut incomplete, reply, "exit", false, later));
         assert!(!track_packet(&mut flows, ack, "exit", true, later + TCP_ESTABLISHED_TTL));
+    }
+}
+
+#[cfg(test)]
+mod legacy_capacity_contract_tests {
+    use super::*;
+    #[test]
+    fn full_4096_peer_snapshot_remains_valid_and_4097_is_not_truncated() {
+        let peers:Vec<_>=(0..MAX_SNAPSHOT_PEERS).map(|i|serde_json::json!({
+            "id":format!("p{i}"),"ip":Ipv4Addr::from(0x0a4d0001+i as u32),
+            "fingerprint":format!("fingerprint-{i}"),"instance":format!("instance-{i}"),"hostname":format!("p{i}.phub")
+        })).collect();
+        let mut snapshot:Snapshot=serde_json::from_value(serde_json::json!({"workspace":"w","self":"p0","revision":1,"expires_at":Utc::now()+chrono::Duration::seconds(30),"peers":peers,"grants":[]})).unwrap();
+        let mut engine=Engine::default();engine.apply(snapshot.clone()).unwrap();assert!(engine.valid_lease());
+        let mut extra=snapshot.peers[0].clone();extra.id="overflow".into();extra.ip="10.78.0.1".parse().unwrap();snapshot.peers.push(extra);snapshot.revision=2;
+        assert!(engine.apply(snapshot).is_err());assert!(!engine.valid_lease());
     }
 }
