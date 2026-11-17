@@ -133,7 +133,7 @@ pub(crate) mod witness {
     impl Key {
         #[cfg(any(windows,target_os="macos"))]
         pub(crate) fn route(route:&Route)->Self {
-            Self { address:route.destination(),prefix:route.prefix(),index:route.if_index(),gateway:route.gateway(),
+            Self { address:route.destination(),prefix:route.prefix(),index:route.if_index(),gateway:route.gateway().filter(|ip| !ip.is_unspecified()),
                 #[cfg(windows)] metric:route.metric(), #[cfg(not(windows))] metric:None }
         }
     }
@@ -161,6 +161,19 @@ pub(crate) mod witness {
             }
         }
         pub(crate) fn completed(&self) -> bool { self.state.lock().unwrap().completed }
+    }
+    #[cfg(windows)]
+    #[test]
+    fn actual_on_link_add_accepts_native_zero_gateway_but_not_foreign_identity() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let requested=Route::new("10.254.254.0".parse().unwrap(),25).with_if_index(19).with_metric(77);
+        let native=requested.clone().with_gateway(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        let witness=Witness::new(Key::route(&requested));witness.ready();
+        witness.event(&RouteChange::Add(native));witness.published();assert!(witness.completed());
+        let mut foreign=vec![requested.clone().with_gateway("10.254.252.1".parse().unwrap()),requested.clone().with_if_index(20),Route::new(requested.destination(),24).with_if_index(19).with_metric(77)];
+        if !cfg!(target_os="macos") {foreign.push(requested.clone().with_metric(78));}
+        for route in foreign {let witness=Witness::new(Key::route(&requested));witness.ready();witness.event(&RouteChange::Add(route));witness.published();assert!(!witness.completed());}
+        let witness=Witness::new(Key::route(&requested));witness.ready();witness.event(&RouteChange::Delete(requested));witness.published();assert!(!witness.completed());
     }
     #[tokio::test(start_paused = true)]
     async fn late_refresh_cannot_satisfy_native_deadline() {
