@@ -1307,11 +1307,14 @@ impl Marker {
     pub(crate) fn fixture_projection(&self) -> Result<serde_json::Value> {
         self.validate()?; // Exactly the authoritative production claim check.
         let held = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        let port = held
-            .port
-            .as_ref()
-            .context("Owned fixture port missing")?
-            .port;
+        let native=held.port.as_ref().context("Owned fixture port missing")?;
+        let (port,controller,driver,busid,service)=(native.port,native.controller,native.driver.try_clone()?,native.busid.clone(),native.service.clone());
+        drop(held);
+        let rows=inventory(&driver)?;
+        let location=imported_location(controller,owned(&rows,port,&busid,&service)?)?;
+        ensure!(ExportAncestry::capture()?.imported(&location.instance)?,"Generated native import was not classified as UDE");
+        let blocked=require_physical_instance(&location.instance).expect_err("Raw generated UDE source export was not refused");
+        ensure!(blocked.to_string()==IMPORTED_SOURCE_BLOCK,"Raw generated UDE source refusal was not ownership-specific");
         let classes = self
             .display_classes
             .lock()
@@ -1321,7 +1324,7 @@ impl Marker {
             .copied()
             .context("Fixture configuration classification missing")?;
         Ok(
-            serde_json::json!({"port":port,"controller_hub_pnp_identity_verified":true,"configuration":classes.value,"interfaces":classes.interfaces,"all_alternates_audio_hid":true,"disk_descendant":false}),
+            serde_json::json!({"port":port,"controller_hub_pnp_identity_verified":true,"configuration":classes.value,"interfaces":classes.interfaces,"all_alternates_audio_hid":true,"disk_descendant":false,"raw_source_refused":true}),
         )
     }
 }

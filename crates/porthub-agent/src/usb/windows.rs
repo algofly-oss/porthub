@@ -655,8 +655,64 @@ fn parse_device(
     };
     device.valid().then_some(device)
 }
+const IMPORTED_SOURCE_BLOCK:&str="Imported USB device; forward its PortHub-owned alias instead";
+const UNKNOWN_SOURCE_BLOCK:&str="Cannot verify physical USB controller ancestry; refresh inventory or check device permissions";
+fn ancestry_is_imported(mut node:u32,root:u32,controllers:&[u32],mut parent:impl FnMut(u32)->Result<u32>)->Result<bool> {
+    let mut seen=std::collections::HashSet::new();
+    for _ in 0..64 {
+        ensure!(seen.insert(node),"USB controller ancestry is cyclic");
+        if controllers.contains(&node){return Ok(true);}
+        if node==root{return Ok(false);}
+        node=parent(node)?;
+    }
+    anyhow::bail!("USB controller ancestry exceeds bound")
+}
+fn source_ancestry_blocked(result:Result<bool>)->Option<String> {
+    match result {Ok(false)=>None,Ok(true)=>Some(IMPORTED_SOURCE_BLOCK.into()),Err(_)=>Some(UNKNOWN_SOURCE_BLOCK.into())}
+}
+struct ExportAncestry {root:u32,controllers:Vec<u32>}
+impl ExportAncestry {
+    fn capture()->Result<Self> {
+        unsafe {
+            let mut root=0;ensure!(CM_Locate_DevNodeW(&mut root,std::ptr::null(),0)==0,"Cannot locate CM root");
+            let set=SetupDiGetClassDevsW(&INTERFACE,std::ptr::null(),std::ptr::null_mut(),DIGCF_PRESENT|DIGCF_DEVICEINTERFACE);
+            ensure!(set as isize != -1,"Cannot inspect USB receive controllers");
+            struct List(HDEVINFO);impl Drop for List{fn drop(&mut self){unsafe{SetupDiDestroyDeviceInfoList(self.0);}}}
+            let list=List(set);let mut controllers=Vec::new();
+            for index in 0..32 {
+                let mut data:SP_DEVICE_INTERFACE_DATA=std::mem::zeroed();data.cbSize=std::mem::size_of::<SP_DEVICE_INTERFACE_DATA>() as u32;
+                if SetupDiEnumDeviceInterfaces(list.0,std::ptr::null(),&INTERFACE,index,&mut data)==0 {
+                    ensure!(std::io::Error::last_os_error().raw_os_error()==Some(259),"Cannot enumerate USB receive controllers");
+                    return Ok(Self{root,controllers});
+                }
+                let mut required=0;
+                SetupDiGetDeviceInterfaceDetailW(list.0,&data,std::ptr::null_mut(),0,&mut required,std::ptr::null_mut());
+                ensure!((8..=32768).contains(&required),"Invalid USB controller interface size");
+                let mut buffer=vec![0u64;(required as usize+7)/8];let bytes=buffer.as_mut_ptr().cast::<u8>();
+                *(bytes.cast::<u32>())=if cfg!(target_pointer_width="64"){8}else{6};
+                let mut info:SP_DEVINFO_DATA=std::mem::zeroed();info.cbSize=std::mem::size_of::<SP_DEVINFO_DATA>() as u32;
+                ensure!(SetupDiGetDeviceInterfaceDetailW(list.0,&data,bytes.cast(),required,std::ptr::null_mut(),&mut info)!=0,"Cannot identify USB receive controller");
+                ensure!(!controllers.contains(&info.DevInst),"Ambiguous USB receive controller");controllers.push(info.DevInst);
+            }
+            anyhow::bail!("USB receive controller inventory exceeds bound")
+        }
+    }
+    fn imported(&self,instance:&str)->Result<bool> {
+        ensure!(!instance.is_empty()&&instance.len()<=4096&&!instance.contains('\0'),"Invalid USB native identity");
+        let name=instance.encode_utf16().chain(Some(0)).collect::<Vec<_>>();let mut node=0;
+        ensure!(unsafe{CM_Locate_DevNodeW(&mut node,name.as_ptr(),0)}==0,"Cannot locate USB native identity");
+        ancestry_is_imported(node,self.root,&self.controllers,|node|{
+            let mut parent=0;ensure!(unsafe{CM_Get_Parent(&mut parent,node,0)}==0,"Cannot inspect USB native parent");Ok(parent)
+        })
+    }
+}
+fn require_physical_instance(instance:&str)->Result<()> {
+    let result=ExportAncestry::capture().and_then(|ancestry|ancestry.imported(instance));
+    if let Some(reason)=source_ancestry_blocked(result){anyhow::bail!("{reason}");}Ok(())
+}
 pub(super) fn fresh_inventory() -> Result<Vec<Device>> {
     let state = host_state()?;
+    let export_ancestry=ExportAncestry::capture();
     let ancestry = disk_ancestry();
     let volumes = ancestry.as_ref().and_then(|_| volume_states());
     let fallback = ancestry.is_none().then(online_usb_storage).flatten();
@@ -677,7 +733,14 @@ pub(super) fn fresh_inventory() -> Result<Vec<Device>> {
                 row["InstanceId"]
                     .as_str()
                     .and_then(|instance| has_disk_descendant(instance, ancestry.as_deref())),
-            )
+            ).map(|mut device| {
+                let imported=match (&export_ancestry,row["InstanceId"].as_str()) {
+                    (Ok(ancestry),Some(instance))=>ancestry.imported(instance),
+                    _=>Err(anyhow::anyhow!("USB ancestry unavailable")),
+                };
+                if let Some(reason)=source_ancestry_blocked(imported){device.blocked=Some(reason);}
+                device
+            })
         })
         .take(128)
         .collect())
@@ -1116,6 +1179,8 @@ pub(super) async fn source(
         .iter()
         .find(|row| row["BusId"] == current.busid)
         .context("USB device disappeared")?;
+    let selected_instance=row["InstanceId"].as_str().context("USB physical identity unavailable")?.to_owned();
+    tokio::task::spawn_blocking(move||require_physical_instance(&selected_instance)).await??;
     let was_bound = row["PersistedGuid"].as_str().is_some();
     let journal = crate::profile::sibling(profile, &format!(".usb-windows-{}.json", current.busid));
     let mut export = Export {
@@ -1584,5 +1649,27 @@ mod tests {
         ));
         assert!(!proven_serial("rndismp", ports));
         assert!(!proven_serial("USBSTOR", ports));
+    }
+}
+
+#[cfg(test)]
+mod source_ancestry_tests {
+    use super::*;
+    #[test]
+    fn imported_receiver_descendants_are_blocked_without_matching_physical_vidpid() {
+        let parent=|n|Ok(match n {11=>10,10=>1,21=>20,20=>1,_=>1});
+        assert!(ancestry_is_imported(11,1,&[10],parent).unwrap());
+        assert!(!ancestry_is_imported(21,1,&[10],parent).unwrap());
+        assert!(!ancestry_is_imported(21,1,&[],parent).unwrap());
+        assert_eq!(source_ancestry_blocked(Ok(true)).as_deref(),Some(IMPORTED_SOURCE_BLOCK));
+        assert!(source_ancestry_blocked(Ok(false)).is_none());
+    }
+    #[test]
+    fn unavailable_or_cyclic_native_ancestry_is_unknown_not_physical() {
+        assert!(ancestry_is_imported(11,1,&[10],|_|anyhow::bail!("metadata unavailable")).is_err());
+        assert!(ancestry_is_imported(11,1,&[10],|_|Ok(11)).is_err());
+        assert!(ancestry_is_imported(11,1,&[10],|n|Ok(n+1)).is_err());
+        assert_eq!(source_ancestry_blocked(Err(anyhow::anyhow!("denied"))).as_deref(),Some(UNKNOWN_SOURCE_BLOCK));
+        assert_ne!(IMPORTED_SOURCE_BLOCK,UNKNOWN_SOURCE_BLOCK);
     }
 }
