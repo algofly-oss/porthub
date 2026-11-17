@@ -60,12 +60,13 @@ impl Sender {
     pub(crate) fn update_authority(&self,base:super::authority_event::Authority<()>,pairs:super::sparse::Handle) {
         *self.authority.lock().unwrap_or_else(|p|p.into_inner())=Some((base,pairs));
     }
-    fn admitted(&self,peer:&str,bytes:Bytes)->Result<Queued> {
+    fn admitted(&self,peer:&str,bytes:Bytes,exit:bool)->Result<Queued> {
         let configured=self.authority.lock().unwrap_or_else(|p|p.into_inner()).clone();
         let mut guards=Vec::new();
         if let Some((base,pairs))=configured {
+            ensure!(!pairs.revoked(),"private relay source retired");
             base.check()?;if base.remaining()?.is_some(){guards.push(base);}
-            if pairs.enabled(){guards.push(pairs.pair_authority(peer).ok_or_else(||anyhow::anyhow!("private relay pair authority expired"))?);}
+            if pairs.enabled(){guards.push((if exit{pairs.exit_pair_authority(peer)}else{pairs.pair_authority(peer)}).ok_or_else(||anyhow::anyhow!("relay pair authority expired"))?);}
         }
         Ok(Queued{bytes,guards,permits:Vec::new()})
     }
@@ -73,6 +74,7 @@ impl Sender {
     pub async fn send_stream(&self, peer: &str, packet: &[u8]) -> Result<()> {self.send_stream_guarded(peer,packet,None).await}
     #[cfg(feature="private-stream")]
     pub async fn send_stream_guarded(&self,peer:&str,packet:&[u8],permit:Option<porthub_mesh::udp::SendPermit>)->Result<()> {
+        ensure!(packet.get(9)!=Some(&porthub_mesh::control_packet::EXIT),"EXIT requires routing authority");
         ensure!(self.is_ready(), "private relay is not ready");
         ensure!(
             !peer.is_empty() && peer.len() <= 60 && (20..=1380).contains(&packet.len()),
@@ -85,7 +87,7 @@ impl Sender {
         let bytes = Bytes::from(bytes);
         let lane = self.packet_lane(peer, packet)?;
         self.output[lane]
-            .send({let mut record=self.admitted(peer,bytes)?;if let Some(permit)=permit{ensure!(permit.valid(),"private relay originating permit retired");record.permits.push(permit);}record})
+            .send({let mut record=self.admitted(peer,bytes,false)?;if let Some(permit)=permit{ensure!(permit.valid(),"private relay originating permit retired");record.permits.push(permit);}record})
             .await
             .map_err(|_| anyhow::anyhow!("private relay stopped"))
     }
@@ -141,7 +143,14 @@ impl Sender {
         }
     }
     pub fn send(&self, peer: &str, packet: &[u8]) -> Result<()> {self.send_guarded(peer,packet,None)}
+    pub(crate) fn send_exit(&self,peer:&str,packet:&[u8])->Result<()> {
+        self.send_scoped(peer,packet,None,true)
+    }
     pub(crate) fn send_guarded(&self,peer:&str,packet:&[u8],permit:Option<porthub_mesh::udp::SendPermit>)->Result<()> {
+        self.send_scoped(peer,packet,permit,false)
+    }
+    fn send_scoped(&self,peer:&str,packet:&[u8],permit:Option<porthub_mesh::udp::SendPermit>,exit:bool)->Result<()> {
+        ensure!(exit==(packet.get(9)==Some(&porthub_mesh::control_packet::EXIT)),"carrier permission does not match envelope");
         ensure!(self.is_ready(), "private relay is not ready");
         ensure!(
             !peer.is_empty() && peer.len() <= 60 && (20..=1380).contains(&packet.len()),
@@ -152,8 +161,9 @@ impl Sender {
         bytes.extend_from_slice(peer.as_bytes());
         bytes.extend_from_slice(packet);
         let bytes = Bytes::from(bytes);
+        if exit {ensure!(porthub_mesh::control_packet::decode(porthub_mesh::control_packet::EXIT,bytes.slice(1+peer.len()..)).is_some(),"invalid EXIT envelope");}
         let lane = self.packet_lane(peer, packet)?;
-        if self.output[lane].try_send({let mut record=self.admitted(peer,bytes)?;if let Some(permit)=permit{ensure!(permit.valid(),"private relay originating permit retired");record.permits.push(permit);}record}).is_ok() {
+        if self.output[lane].try_send({let mut record=self.admitted(peer,bytes,exit)?;if let Some(permit)=permit{ensure!(permit.valid(),"private relay originating permit retired");record.permits.push(permit);}record}).is_ok() {
             return Ok(());
         }
         self.dropped_packets.fetch_add(1, Ordering::Relaxed);
@@ -1102,5 +1112,68 @@ mod candidate_path_tests {
             || std::future::ready(Ok(vec![candidate.clone()]))).await?;
         assert_eq!(paths,vec![Some(candidate)]);
         Ok(())
+    }
+}
+
+#[cfg(all(test,feature="private-sparse"))]
+mod exit_authority_tests {
+    use super::*;
+    use super::super::{authority_event::{Authority,Owner,send_permit,send_exit_permit},authority_clock::{RequestWindow,SuspendClock},sparse};
+    struct Clock(AtomicU64);
+    impl SuspendClock for Clock {fn elapsed_since_boot(&self)->Result<Duration>{Ok(Duration::from_millis(self.0.load(Ordering::SeqCst)))}}
+    struct Fixture {
+        clock:Arc<Clock>,owner:Owner,handle:sparse::Handle,base:porthub_network::policy::Snapshot,
+    }
+    impl Fixture {
+        fn authority(&self,expiry:chrono::DateTime<chrono::Utc>)->Authority<()> {
+            Authority::new((),Some(RequestWindow::start(self.clock.clone()).unwrap()),expiry).retired_with(self.owner.domain())
+        }
+        fn publish(&self,sender:&Sender)->Authority<()> {
+            let base=self.authority(self.base.expires_at);self.handle.update_base_authority(&self.base,base.clone());sender.update_authority(base.clone(),self.handle.clone());base
+        }
+        fn new(sender:&Sender)->Self {
+            let base=serde_json::from_value(serde_json::json!({"workspace":"w","self":"a","revision":1,"expires_at":chrono::Utc::now()+chrono::Duration::seconds(30),"sparse":{"protocol":1,"epoch":"a".repeat(64),"exit_epoch":"e".repeat(64)},"peers":[{"id":"a","ip":"10.203.0.2","fingerprint":"local","instance":"local-instance","hostname":"a.phub"}],"grants":[]})).unwrap();
+            let (handle,_)=sparse::channel();let f=Self{clock:Arc::new(Clock(AtomicU64::new(0))),owner:Owner::new(),handle,base};f.publish(sender);
+            let pair=serde_json::from_value(serde_json::json!({"workspace":"w","self":"a","epoch":"a".repeat(64),"revision":1,"expires_at":chrono::Utc::now()+chrono::Duration::seconds(15),"local":{"id":"a","ip":"10.203.0.2","fingerprint":"local","instance":"local-instance","hostname":"a.phub"},"peer":{"id":"b","ip":"10.203.1.2","fingerprint":"remote","instance":"remote-instance","hostname":"b.phub"},"grants":[{"source":"a","destination":"b","protocol":"any","ports":[]}],"exit":{"epoch":"e".repeat(64),"route_id":"route","client":"a","router":"b","traffic_mode":"internet_only"}})).unwrap();
+            let pair:porthub_network::policy::PairLease=pair;
+            f.handle.installed_authority(&porthub_network::policy::Lookup{kind:"peer".into(),value:"b".into()},pair.clone(),f.authority(pair.expires_at));f
+        }
+    }
+    fn packet(protocol:u8)->Bytes {porthub_mesh::control_packet::encode(protocol,"10.203.0.2".parse().unwrap(),"10.203.1.2".parse().unwrap(),&[0;28]).unwrap()}
+    fn queued(inputs:&mut[mpsc::Receiver<Queued>;RELAY_LANES])->Queued {inputs.iter_mut().find_map(|input|input.try_recv().ok()).expect("admitted record missing")}
+    #[test]
+    fn exit_carrier_keeps_original_expiry_when_private_policy_changes() {
+        let (sender,mut inputs)=channel();sender.set_ready(0,true);let mut f=Fixture::new(&sender);let base=f.authority(f.base.expires_at);
+        let private=send_permit(Some(&base),&f.handle,"b").unwrap().unwrap();let exit=send_exit_permit(Some(&base),&f.handle,"b").unwrap().unwrap();
+        sender.send_exit("b",&packet(porthub_mesh::control_packet::EXIT)).unwrap();let old=queued(&mut inputs);assert!(old.check().is_ok());
+        f.clock.0.store(10000,Ordering::SeqCst);f.base.sparse.as_mut().unwrap().epoch="b".repeat(64);let fresh=f.publish(&sender);
+        assert!(!private.valid());assert!(exit.valid());assert!(old.check().is_ok());
+        assert!(send_permit(Some(&fresh),&f.handle,"b").is_err());assert!(send_exit_permit(Some(&fresh),&f.handle,"b").unwrap().unwrap().valid());
+        sender.send_exit("b",&packet(porthub_mesh::control_packet::EXIT)).unwrap();let new=queued(&mut inputs);
+        assert!(sender.send("b",&packet(porthub_mesh::control_packet::PROBE)).is_err());
+        f.clock.0.store(15000,Ordering::SeqCst);assert!(f.handle.authority_valid());assert!(!exit.valid());assert!(old.check().is_err()&&new.check().is_err());
+        assert!(send_exit_permit(Some(&fresh),&f.handle,"b").is_err());
+    }
+    #[tokio::test]
+    async fn exit_carrier_rejects_revoked_exit_before_polling_delivery_and_preserves_private() {
+        let (sender,mut inputs)=channel();sender.set_ready(0,true);let mut f=Fixture::new(&sender);let base=f.authority(f.base.expires_at);
+        let private=send_permit(Some(&base),&f.handle,"b").unwrap().unwrap();let exit=send_exit_permit(Some(&base),&f.handle,"b").unwrap().unwrap();
+        let wire=packet(porthub_mesh::control_packet::EXIT);
+        assert!(sender.send("b",&wire).is_err());assert!(sender.send_stream_guarded("b",&wire,None).await.is_err());
+        assert!(sender.send_exit("b",&packet(porthub_mesh::control_packet::PROBE)).is_err());
+        sender.send_exit("b",&wire).unwrap();let old=queued(&mut inputs);
+        f.base.sparse.as_mut().unwrap().exit_epoch=Some("f".repeat(64));let fresh=f.publish(&sender);
+        assert!(private.valid());assert!(!exit.valid());assert!(send_exit_permit(Some(&fresh),&f.handle,"b").is_err());assert!(sender.send_exit("b",&wire).is_err());
+        let touched=AtomicBool::new(false);assert!(old.during(async{touched.store(true,Ordering::SeqCst);Ok(())}).await.is_err());assert!(!touched.load(Ordering::SeqCst));
+        sender.send("b",&packet(porthub_mesh::control_packet::PROBE)).unwrap();let private_record=queued(&mut inputs);assert!(private_record.check().is_ok());
+        f.owner.revoke();assert!(!private.valid());assert!(private_record.check().is_err());
+    }
+    #[test]
+    fn sparse_exit_carrier_cannot_omit_base_or_fall_back_to_legacy() {
+        let (sender,_)=channel();let f=Fixture::new(&sender);
+        assert!(send_exit_permit(None,&f.handle,"b").is_err());assert!(send_exit_permit(Some(&f.authority(f.base.expires_at)),&f.handle,"unknown").is_err());
+        let (legacy,_)=sparse::channel();assert!(send_exit_permit(None,&legacy,"b").unwrap().is_none());
+        f.handle.revoke_all();assert!(send_exit_permit(Some(&f.authority(f.base.expires_at)),&f.handle,"b").is_err());
+        sender.set_ready(0,true);assert!(sender.send_exit("b",&packet(porthub_mesh::control_packet::EXIT)).is_err());
     }
 }

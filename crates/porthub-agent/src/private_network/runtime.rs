@@ -64,6 +64,20 @@ fn send_authorized(authority:Option<&super::authority_event::Authority<()>>,pair
     session.send_guarded(bytes,super::authority_event::send_permit(authority,pairs,peer)?)
 }
 
+fn send_exit_authorized(authority:Option<&super::authority_event::Authority<()>>,pairs:&super::sparse::Handle,peer:&str,session:&porthub_mesh::udp::Session,bytes:bytes::Bytes)->Result<()> {
+    session.send_guarded(bytes,super::authority_event::send_exit_permit(authority,pairs,peer)?)
+}
+
+async fn write_exit_authorized(authority:Option<&super::authority_event::Authority<()>>,handle:&super::sparse::Handle,peer:&str,tun:&Tun,bytes:&[u8])->Result<()> {
+    if handle.revoked(){return Ok(());}
+    let pair=if handle.enabled(){
+        if authority.is_none(){return Ok(());}
+        match handle.exit_pair_authority(peer){Some(pair)=>Some(pair),None=>return Ok(())}
+    }else{None};
+    let delivery=async {if let Some(pair)=pair {pair.during(tun.write(bytes)).await}else{tun.write(bytes).await}};
+    if let Some(authority)=authority {authority.during(delivery).await} else {delivery.await}
+}
+
 async fn write_authorized(authority:Option<&super::authority_event::Authority<()>>,handle:&super::sparse::Handle,peer:Option<&str>,tun:&Tun,bytes:&[u8])->Result<()> {
     let pair=if handle.enabled(){
         if let Some(peer)=peer {match handle.pair_authority(peer){Some(pair)=>Some(pair),None=>return Ok(())}}else{None}
@@ -700,7 +714,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                             exit_selection.observe(&packet.flow_id(), &peer, Instant::now(), packet.flow_ttl());
                             exit_selection.observe_close(&packet.flow_id(), &peer, false, packet.is_finish(), packet.is_reset(), Instant::now());
                         }
-                        if let Some(tun) = &device { tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=write_authorized(installed_authority.as_ref(),&sparse_handle,Some(&peer),tun,&envelope.payload)=>result?}; }
+                        if let Some(tun) = &device { tokio::select!{_=work.cancelled()=>anyhow::bail!("private authority ended before packet delivery"),result=write_exit_authorized(installed_authority.as_ref(),&sparse_handle,&peer,tun,&envelope.payload)=>result?}; }
                     }
                     continue;
                 }
@@ -870,8 +884,8 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     ) {
                         let packet = porthub_mesh::control_packet::encode(porthub_mesh::control_packet::EXIT, *source, *destination, &buffer[..size])?;
                         if use_direct {
-                            if let Some(session) = direct {let n=packet.len();if send_authorized(installed_authority.as_ref(),&sparse_handle,&peer,session,packet).is_ok(){if let Some(c)=traffic_counters.get(&peer){c.add(true,!session.is_relay(),n);}} }
-                        } else { if relay_sender.send(&peer, &packet).is_ok(){if let Some(c)=traffic_counters.get(&peer){c.add(true,false,packet.len());}} }
+                            if let Some(session) = direct {let n=packet.len();if send_exit_authorized(installed_authority.as_ref(),&sparse_handle,&peer,session,packet).is_ok(){if let Some(c)=traffic_counters.get(&peer){c.add(true,!session.is_relay(),n);}} }
+                        } else { if relay_sender.send_exit(&peer, &packet).is_ok(){if let Some(c)=traffic_counters.get(&peer){c.add(true,false,packet.len());}} }
                     }
                 }
                 continue;

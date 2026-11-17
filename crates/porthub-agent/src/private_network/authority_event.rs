@@ -140,9 +140,17 @@ impl<T> Authority<T> {
 }
 
 pub(crate) fn send_permit(base:Option<&Authority<()>>,pairs:&super::sparse::Handle,peer:&str)->Result<Option<porthub_mesh::udp::SendPermit>> {
-    let Some(base)=base else{return Ok(None);};
-    base.check()?;if base.remaining()?.is_none(){return Ok(None);}
-    let base=base.clone();let pair=if pairs.enabled(){Some(pairs.pair_authority(peer).ok_or_else(||anyhow::anyhow!("private peer authority expired"))?)}else{None};
+    send_scoped_permit(base,pairs,peer,false)
+}
+/// EXIT envelopes carry separately granted routing authority, not private port access.
+pub(crate) fn send_exit_permit(base:Option<&Authority<()>>,pairs:&super::sparse::Handle,peer:&str)->Result<Option<porthub_mesh::udp::SendPermit>> {
+    send_scoped_permit(base,pairs,peer,true)
+}
+fn send_scoped_permit(base:Option<&Authority<()>>,pairs:&super::sparse::Handle,peer:&str,exit:bool)->Result<Option<porthub_mesh::udp::SendPermit>> {
+    anyhow::ensure!(!pairs.revoked(),"private source authority retired");
+    let Some(base)=base else{anyhow::ensure!(!pairs.enabled(),"sparse carrier has no base authority");return Ok(None);};
+    base.check()?;if base.remaining()?.is_none(){anyhow::ensure!(!pairs.enabled(),"sparse carrier has no bounded base authority");return Ok(None);}
+    let base=base.clone();let pair=if pairs.enabled(){Some(if exit{pairs.exit_pair_authority(peer)}else{pairs.pair_authority(peer)}.ok_or_else(||anyhow::anyhow!("carrier peer authority expired"))?)}else{None};
     let bounded_base=base.clone();let bounded_pair=pair.clone();
     Ok(Some(porthub_mesh::udp::SendPermit::bounded(move||base.check().is_ok()&&pair.as_ref().is_none_or(|p|p.check().is_ok()),move||{
         let left=bounded_base.remaining().ok()??;match &bounded_pair{Some(pair)=>Some(left.min(pair.remaining().ok()??)),None=>Some(left)}
