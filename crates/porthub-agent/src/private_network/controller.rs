@@ -299,9 +299,21 @@ pub async fn run_watched_identity(
     local: LocalIdentity,
     cancel: CancellationToken,
 ) -> Result<()> {
-    run_watched_sparse(profile,interfaces,sessions,events,relay_config,local,cancel,None,None).await
+    run_watched_sparse(profile,interfaces,sessions,events,relay_config,local,cancel,None).await
 }
 pub async fn run_watched_sparse(
+    profile: Profile,
+    interfaces: watch::Receiver<Vec<SocketAddr>>,
+    sessions: Sessions,
+    events: mpsc::Sender<Event>,
+    relay_config: watch::Sender<Option<super::relay::Config>>,
+    local: LocalIdentity,
+    cancel: CancellationToken,
+    sparse: Option<super::sparse::Control>,
+) -> Result<()> {
+    run_watched_sparse_owned(profile,interfaces,sessions,events,relay_config,local,cancel,sparse,None).await
+}
+pub(crate) async fn run_watched_sparse_owned(
     profile: Profile,
     mut interfaces: watch::Receiver<Vec<SocketAddr>>,
     sessions: Sessions,

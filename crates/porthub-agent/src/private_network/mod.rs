@@ -95,3 +95,6 @@ mod authority_event;
 
 #[cfg(all(feature="private-sparse",feature="private-stream"))]
 mod stream_chunks;
+
+#[cfg(all(feature="private-sparse",feature="private-stream"))]
+pub mod sparse_dispatch;

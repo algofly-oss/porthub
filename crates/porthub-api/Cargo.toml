@@ -6,7 +6,7 @@ publish.workspace = true
 
 [features]
 # Unpublished sparse-network prototype: not in default or release feature sets.
-private-sparse = []
+private-sparse = ["porthub-agent/private-sparse"]
 default = []
 speech-cuda = ["transcribe-cpp/cuda"]
 speech-vulkan = ["transcribe-cpp/vulkan"]

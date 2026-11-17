@@ -297,7 +297,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         work.clone(),
     ));
     let (sparse_handle,sparse_control)=super::sparse::channel();
-    tasks.spawn(controller::run_watched_sparse(
+    tasks.spawn(controller::run_watched_sparse_owned(
         profile.clone(),
         interfaces.clone(),
         sessions.clone(),
@@ -318,7 +318,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     #[cfg(feature="private-stream")]
     let mut stream_router_sparse_mode:Option<bool>=None;
     #[cfg(all(feature="private-sparse",feature="private-stream"))]
-    let mut guarded_flows:Option<super::stream_chunks::flow_runtime::Runtime>=None;
+    let mut guarded_flows:Option<super::sparse_dispatch::Node>=None;
     #[cfg(all(feature="private-sparse",feature="private-stream"))]
     let mut guarded_owner:Option<CancellationToken>=None;
     let mut guarded_generation=0u64;
@@ -462,11 +462,8 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                                 Some(Ok((_,Ok(()))))=>{},Some(Ok((_,Err(error))))=>return Err(error),_=>anyhow::bail!("retired guarded flow owner failed"),
                             }
                         }
-                        let handle=sparse_handle.clone();let workspace=profile.workspace.clone();let own_id=profile.peer_id.clone();
-                        let current=Arc::new(move|peer:&str|super::stream_chunks::flow_authority::LocalAuthority::capture(&handle,&workspace,&own_id,peer).ok().map(Arc::new));
-                        let handle=sparse_handle.clone();let request=Arc::new(move|peer:&str|{handle.request_peer(peer);});
                         let owner=work.child_token();
-                        let (flows,background)=super::stream_chunks::flow_runtime::Runtime::new(identity.clone(),current,request,events.clone(),owner.clone())?;
+                        let (flows,background)=super::sparse_dispatch::Node::new(profile.workspace.clone(),profile.peer_id.clone(),identity.clone(),sparse_handle.clone(),events.clone(),owner.clone())?;
                         guarded_generation=guarded_generation.checked_add(1).ok_or_else(||anyhow::anyhow!("guarded runtime generation exhausted"))?;
                         let generation=guarded_generation;
                         guarded_owners.spawn(async move{(generation,background.run().await)});
