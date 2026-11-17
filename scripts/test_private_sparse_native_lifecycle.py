@@ -5,6 +5,9 @@ from unittest.mock import patch
 SPEC=importlib.util.spec_from_file_location('native_gate',pathlib.Path(__file__).with_name('private-sparse-native-lifecycle.py'))
 gate=importlib.util.module_from_spec(SPEC);SPEC.loader.exec_module(gate)
 class Outer(unittest.TestCase):
+ def test_checked_out_native_source_inputs_exist_for_each_contract(self):
+  for contract in gate.TESTS:
+   with self.subTest(contract=contract):gate.source_guard(contract)
  def test_real_child_overflow_reaps_held_process_and_retains_bounded_metadata(self):
   with self.assertRaises(gate.CommandError) as caught:gate.run([sys.executable,'-c','import sys;sys.stdout.write("x"*100000);sys.stdout.flush()'],cap=4096,seconds=3)
   self.assertLessEqual(len(caught.exception.stdout)+len(caught.exception.stderr),4096)

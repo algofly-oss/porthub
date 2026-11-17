@@ -8,7 +8,7 @@ PURPOSE='reviewed-disposable-sparse-lifecycle-v1'
 COMMAND_DEADLINE=None
 INPUTS=['Cargo.lock','rust-toolchain.toml','crates/porthub-agent/Cargo.toml',
  'scripts/private-sparse-native-lifecycle.py','scripts/private-sparse-native-netns.py',
- *['crates/porthub-agent/src/private_network/'+name for name in ['native_lifecycle_fixture.rs','native_desktop_lifecycle_fixture.rs','native_resolver_lifecycle_fixture.rs','device.rs','device_windows.rs','device_macos.rs','local_route_macos.rs','dns.rs','dns_convergence_macos.rs','dns_windows.rs','windows_nrpt.rs','windows_nrpt.ps1','windows_state.rs','native_ownership.rs','native_owner.rs','stream_offer.rs']],
+ *['crates/porthub-agent/src/private_network/'+name for name in ['native_lifecycle_fixture.rs','native_desktop_lifecycle_fixture.rs','native_resolver_lifecycle_fixture.rs','device.rs','device_windows.rs','device_macos.rs','address_route_macos.rs','owned_packet_loop.rs','native_source.rs','dns.rs','dns_convergence_macos.rs','dns_windows.rs','windows_nrpt.rs','windows_nrpt.ps1','windows_state.rs','native_ownership.rs','native_owner.rs','stream_offer.rs']],
  'crates/porthub-network/src/native_repair.rs',
  'crates/porthub-agent/src/private_network/dns_private_macos.rs',
  'crates/porthub-agent/assets/wintun/amd64/wintun.dll']
@@ -143,6 +143,8 @@ def exact_executable(build):
  return binary
 def source_guard(contract):
  root=pathlib.Path(__file__).resolve().parents[1]
+ for name in INPUTS:
+  if not (root/name).is_file():raise RuntimeError('native source input absent: '+name)
  fixture=root/'crates/porthub-agent/src/private_network'/('native_resolver_lifecycle_fixture.rs' if contract=='linux' else 'native_desktop_lifecycle_fixture.rs')
  if not fixture.is_file():raise RuntimeError('actual native fixture source absent')
  if not re.search(r'const NATIVE_LIFECYCLE_APPROVED:\s*bool\s*=\s*false\s*;',fixture.with_name('stream_offer.rs').read_text()):raise RuntimeError('native production approval must remain false during fixture validation')
