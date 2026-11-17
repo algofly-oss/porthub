@@ -181,6 +181,7 @@ jobs:
           PORTHUB_TEST_BOARD_UI_ROOT: ${{ github.workspace }}/terminal-browser-assets/ui
         run: |
           node ui/tests/keyboard-gestures.cjs
+          node ui/tests/keyboard-surface-lifecycle.cjs
           cargo test --locked -p porthub-api --test keyboard_browser -- --include-ignored --nocapture
       - name: Verify phone layouts and native media controls in Chromium and WebKit
         env:
