@@ -68,11 +68,16 @@ fn inventory() -> Vec<porthub_components::usb::Device> {
     return vec![];
 }
 fn inventory_for(path: &Path) -> Vec<porthub_components::usb::Device> {
-    let mut devices = inventory();
+    let devices = inventory();
     #[cfg(any(target_os = "linux",windows))]
-    devices.extend(relay::inventory(path));
-    #[cfg(not(any(target_os = "linux",windows)))] let _ = path;
-    devices.truncate(128); devices
+    {return inventory_with_aliases(devices,relay::inventory(path));}
+    #[cfg(not(any(target_os = "linux",windows)))] {let _ = path;let mut devices=devices;devices.truncate(128);devices}
+}
+#[cfg(any(target_os="linux",windows,test))]
+fn inventory_with_aliases(mut physical:Vec<porthub_components::usb::Device>,mut aliases:Vec<porthub_components::usb::Device>)->Vec<porthub_components::usb::Device> {
+    aliases.truncate(128);
+    physical.truncate(128-aliases.len());
+    physical.extend(aliases);physical
 }
 fn capabilities()->[bool;2] {
     #[cfg(target_os="linux")] { [true,true] }
