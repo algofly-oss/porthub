@@ -167,9 +167,69 @@ fn validate_descriptor(descriptor: PSECURITY_DESCRIPTOR) -> Result<()> {
     Ok(())
 }
 
+/// Keep canonical containment/ACL verification, but publish using the exact
+/// managed root's ordinary DOS spelling. A verbatim prefix is not equal to the
+/// ordinary managed prefix in `windows_acl::is_managed`; skipping that check
+/// would leave newly persisted journals without their protected DACL.
+fn managed_spelling(
+    root: &Path,
+    canonical_root: &Path,
+    canonical_profile: &Path,
+) -> Result<std::path::PathBuf> {
+    use std::path::{Component, Prefix};
+    ensure!(
+        root.is_absolute()
+            && matches!(root.components().next(),Some(Component::Prefix(p)) if matches!(p.kind(),Prefix::Disk(_))),
+        "native state requires an ordinary local managed root"
+    );
+    ensure!(
+        canonical_root.is_absolute()
+            && matches!(canonical_root.components().next(),Some(Component::Prefix(p)) if matches!(p.kind(),Prefix::Disk(_)|Prefix::VerbatimDisk(_))),
+        "native state canonical root must be local"
+    );
+    let relative = canonical_profile
+        .strip_prefix(canonical_root)
+        .context("native profile escaped canonical managed root")?;
+    ensure!(
+        !relative.as_os_str().is_empty(),
+        "native profile cannot be the managed directory"
+    );
+    // Do not reinterpret NT-only names, alternate streams or DOS devices when
+    // converting to ordinary Win32 spelling. Existing normal profile names and
+    // subdirectories remain valid; unknown spellings fail before any write.
+    for component in root.components().chain(relative.components()) {
+        match component {
+            Component::Prefix(_) | Component::RootDir => {}
+            Component::Normal(part) => {
+                let name = part
+                    .to_str()
+                    .context("native state component is not Unicode")?;
+                let stem = name
+                    .split('.')
+                    .next()
+                    .unwrap_or_default()
+                    .to_ascii_uppercase();
+                let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+                    || ["COM", "LPT"].iter().any(|prefix| {
+                        stem.strip_prefix(prefix)
+                            .is_some_and(|n| n.len() == 1 && matches!(n.as_bytes()[0], b'1'..=b'9'))
+                    });
+                ensure!(
+                    !name.ends_with(['.', ' ']) && !name.contains([':', '\0']) && !reserved,
+                    "native state component has ambiguous Win32 spelling"
+                );
+            }
+            _ => anyhow::bail!("native state component is not normalized"),
+        }
+    }
+    Ok(root.join(relative))
+}
+
 pub(super) fn state_path(profile: &Path, suffix: &str) -> Result<std::path::PathBuf> {
-    let root = crate::service::windows_acl::managed_root()?.canonicalize()?;
+    let managed = crate::service::windows_acl::managed_root()?;
+    let root = managed.canonicalize()?;
     let profile = profile.canonicalize()?;
+    let published = managed_spelling(&managed, &root, &profile)?;
     ensure!(
         matches!(root.components().next(),Some(std::path::Component::Prefix(p)) if matches!(p.kind(),std::path::Prefix::Disk(_)|std::path::Prefix::VerbatimDisk(_))),
         "native ownership requires local Windows state"
@@ -189,7 +249,7 @@ pub(super) fn state_path(profile: &Path, suffix: &str) -> Result<std::path::Path
         cursor.push(component.as_os_str());
         private(&cursor, cursor != profile)?;
     }
-    Ok(crate::profile::sibling(&profile, suffix))
+    Ok(crate::profile::sibling(&published, suffix))
 }
 pub(super) fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     read_bounded(path, 65536)
@@ -353,4 +413,50 @@ fn privileged_owner(path: &Path) -> Result<()> {
         "cannot assign protected native journal owner"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod spelling_tests {
+    use super::*;
+    #[test]
+    fn canonical_profile_keeps_exact_managed_writer_acl_branch() -> Result<()> {
+        let managed = crate::service::windows_acl::managed_root()?;
+        let canonical = std::path::PathBuf::from(format!(r"\\?\{}", managed.display()));
+        let profile = canonical
+            .join("native-lifecycle-owned")
+            .join("profile.json");
+        let published = managed_spelling(&managed, &canonical, &profile)?;
+        assert_eq!(
+            published,
+            managed.join("native-lifecycle-owned").join("profile.json")
+        );
+        assert!(crate::service::windows_acl::is_managed(&published));
+        assert!(!crate::service::windows_acl::is_managed(&profile));
+        Ok(())
+    }
+    #[test]
+    fn canonical_conversion_rejects_foreign_unc_parent_and_nt_only_names() {
+        let managed = Path::new(r"C:\ProgramData\PortHub");
+        let canonical = Path::new(r"\\?\C:\ProgramData\PortHub");
+        for foreign in [
+            r"\\?\C:\ProgramData\Foreign\profile.json",
+            r"\\?\D:\ProgramData\PortHub\profile.json",
+            r"\\server\share\profile.json",
+            r"\\?\C:\ProgramData\PortHub\..\Foreign\profile.json",
+            r"\\?\C:\ProgramData\PortHub\folder.\profile.json",
+            r"\\?\C:\ProgramData\PortHub\profile.json:stream",
+            r"\\?\C:\ProgramData\PortHub\NUL.json",
+        ] {
+            assert!(
+                managed_spelling(managed, canonical, Path::new(foreign)).is_err(),
+                "unsafe path was reinterpreted"
+            );
+        }
+        assert!(managed_spelling(
+            Path::new(r"\\server\share"),
+            Path::new(r"\\server\share"),
+            Path::new(r"\\server\share\profile.json")
+        )
+        .is_err());
+    }
 }
