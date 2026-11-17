@@ -70,7 +70,10 @@ def main():
             for browser in browsers:
                 preview = dict(os.environ, REVIEW_ORIGIN=f'http://127.0.0.1:{server.server_port}', REVIEW_BROWSER=browser)
                 print(f'Verify terminal dashboard: {browser}', flush=True)
-                run(preview, ['node', str(ROOT / 'ui/tests/terminal-dashboard.cjs')])
+                # The dashboard now shows account private traffic; terminal
+                # backend contracts remain in the Rust and utility checks.
+                run(preview, ['node', str(ROOT / 'ui/tests/private-traffic-browser.cjs')])
+                run(preview, ['node', str(ROOT / 'ui/tests/private-traffic-account-browser.cjs')])
                 run(preview, ['node', str(ROOT / 'ui/tests/ranking-resize-browser.cjs')])
                 run(preview, ['node', str(ROOT / 'ui/tests/ranking-labels-browser.cjs')])
                 run(preview, ['node', str(ROOT / 'ui/tests/drive-condition-browser.cjs')])

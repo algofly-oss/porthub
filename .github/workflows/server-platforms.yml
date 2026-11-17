@@ -100,6 +100,9 @@ jobs:
           cargo test --locked -p porthub-api --test keyboard --test machine_metrics --test usb -- --include-ignored
           cargo test --locked -p porthub-api --lib domain::private_networks::tests
           cargo test --locked -p porthub-api --test private_network_ranges --test private_sync -- --include-ignored
+          cargo test --locked -p porthub-mesh --lib traffic_report::tests
+          cargo test --locked -p porthub-agent --lib private_network::traffic::tests
+          cargo test --locked -p porthub-api --test private_traffic -- --include-ignored --nocapture
           cargo test --locked -p porthub-api --test workflows machine_creation_enrolls_privately_and_checks_group_ownership -- --include-ignored
           cargo test --locked -p porthub-api --lib native_media::
           # The real inventory DTO case needs an operator's physical microphone;
