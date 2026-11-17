@@ -24,7 +24,7 @@ pub(super) const MAX_HOST_CLAIMS: usize = if MAX_LEGACY_HOSTS > MAX_SPARSE_HOSTS
     MAX_SPARSE_HOSTS
 };
 pub(super) const MAX_CAPTURE_CLAIMS: usize = porthub_network::capture_routes::MAX_CAPTURE_PREFIXES;
-pub(super) const MAX_EXPLICIT_CLAIMS: usize = MAX_HOST_CLAIMS + MAX_CAPTURE_CLAIMS;
+pub(super) const MAX_EXPLICIT_CLAIMS: usize = MAX_HOST_CLAIMS + 2 * MAX_CAPTURE_CLAIMS;
 pub(super) const MAX_ROUTES: usize = MAX_BASELINE_ROUTES + MAX_EXPLICIT_CLAIMS;
 pub(super) const MAX_LEDGER_BYTES: usize = 512 * 1024;
 #[derive(Clone, Copy, Debug)]
@@ -94,6 +94,14 @@ impl RouteStamp {
         );
         Ok(())
     }
+}
+/// A capture prefix owns a separately Create-acknowledged broadcast companion.
+/// Derivation describes identity, never authority over an existing native row.
+pub(super) fn capture_child(parent: &RouteStamp) -> Result<RouteStamp> {
+    let IpAddr::V4(address) = parent.address else { anyhow::bail!("capture is not IPv4") };
+    ensure!(address.is_private() && (1..32).contains(&parent.prefix) && parent.metric == 0 && parent.gateway.is_none(), "invalid capture parent");
+    ensure!(porthub_mesh::lan_routes::Network::from_address(address,parent.prefix)?.address()==address,"noncanonical capture parent");
+    Ok(RouteStamp { address: Ipv4Addr::from(u32::from(address) | (u32::MAX >> parent.prefix)).into(), prefix:32, gateway:None, metric:256 })
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -173,7 +181,7 @@ impl AdapterRecord {
             "native baseline exceeds its existing admission bound"
         );
         ensure!(
-            self.pending.len() <= 1,
+            self.pending.len() <= 1 || (self.pending.len()==2 && self.pending.iter().any(|parent|capture_child(parent).is_ok_and(|child|self.pending.contains(&child)))),
             "native route writer permits only one in-flight add intent"
         );
         ensure!(
@@ -192,7 +200,7 @@ impl AdapterRecord {
                 && b.is_disjoint(&self.retiring)),
             "explicit native claims overlap kernel baseline"
         );
-        let mut capture_rows = 0;
+        let mut capture_rows = 0; let mut child_rows = 0; let mut host_rows = 0;
         for row in self
             .routes
             .iter()
@@ -206,7 +214,7 @@ impl AdapterRecord {
                 address.is_private()
                     && (1..=32).contains(&row.prefix)
                     && row.gateway.is_none()
-                    && row.metric == 0,
+                    && (row.metric == 0 || (row.metric == 256 && self.routes.iter().chain(self.pending.iter()).chain(self.retiring.iter()).any(|parent|capture_child(parent).is_ok_and(|child|child==*row)))),
                 "explicit route claim differs from agent-created direct route"
             );
             ensure!(
@@ -214,12 +222,10 @@ impl AdapterRecord {
                     == address,
                 "explicit route prefix is not canonical"
             );
-            if row.prefix < 32 {
-                capture_rows += 1;
-            }
+            if row.prefix < 32 { capture_rows += 1; } else if row.metric == 256 { child_rows += 1; } else { host_rows += 1; }
         }
         ensure!(
-            capture_rows <= MAX_CAPTURE_CLAIMS,
+            capture_rows <= MAX_CAPTURE_CLAIMS && child_rows <= MAX_CAPTURE_CLAIMS && host_rows <= MAX_HOST_CLAIMS,
             "capture route claims exceed existing prefix capacity"
         );
         for route in self
@@ -311,6 +317,45 @@ impl AdapterRecord {
         }
         self.commit(next, persist)?;
         Ok(missing.len())
+    }
+    /// Joint intent precedes either Create. Existing children may be shared ONLY
+    /// when already ACK-owned by another confirmed parent, never by shape.
+    pub fn reserve_capture(&mut self,parent:RouteStamp,persist:impl FnOnce(&AdapterRecord)->Result<()>) -> Result<(RouteStamp,bool)> {
+        let child=capture_child(&parent)?;
+        ensure!(self.pending.is_empty() && !self.routes.contains(&parent),"capture writer already active or parent owned");
+        ensure!([&parent,&child].iter().all(|row|!self.retiring.contains(*row)&&!self.baseline.as_ref().is_some_and(|b|b.contains(*row))),"capture overlaps baseline or retirement");
+        let shared=self.routes.contains(&child);
+        ensure!(!shared || self.routes.iter().any(|p|capture_child(p).is_ok_and(|c|c==child)),"orphan child cannot authorize sharing");
+        let mut next=self.clone();next.pending.insert(parent);if !shared {next.pending.insert(child.clone());}
+        self.commit(next,persist)?;Ok((child,!shared))
+    }
+    pub fn confirm_created(&mut self,row:RouteStamp,native:&BTreeSet<RouteStamp>,persist:impl FnOnce(&AdapterRecord)->Result<()>) -> Result<()> {
+        ensure!(native.contains(&row) && native.iter().all(|r|r==&row||self.routes.contains(r)||self.baseline.as_ref().is_some_and(|b|b.contains(r))),"Create readback contains changed or unacknowledged rows");
+        self.confirm_route(row,persist)
+    }
+    /// Also used after a failed Create/readback/checkpoint. Only successful local
+    /// Create ACKs and already durable ACKs grant cleanup authority.
+    pub fn retire_capture_attempt(&mut self,parent:&RouteStamp,created:&BTreeSet<RouteStamp>,persist:impl FnOnce(&AdapterRecord)->Result<()>) -> Result<Vec<RetiredRoute>> {
+        let child=capture_child(parent)?;let pair=BTreeSet::from([parent.clone(),child.clone()]);
+        ensure!(created.is_subset(&pair) && self.pending.iter().all(|r|pair.contains(r)),"unrelated capture intent");
+        let shared=self.routes.iter().chain(self.pending.iter()).any(|p|p!=parent && capture_child(p).is_ok_and(|c|c==child));
+        let mut next=self.clone();let mut permits=Vec::new();
+        for row in [parent.clone(),child.clone()] { if row==child && shared {continue;}
+            let acknowledged=created.contains(&row)||self.routes.contains(&row);
+            next.pending.remove(&row);next.routes.remove(&row);next.retiring.insert(row.clone());
+            if acknowledged {permits.push(RetiredRoute(row));}
+        }
+        self.commit(next,persist)?;Ok(permits)
+    }
+    pub fn retire_capture(&mut self,parent:&RouteStamp,persist:impl FnOnce(&AdapterRecord)->Result<()>) -> Result<Vec<RetiredRoute>> {
+        let child=capture_child(parent)?;ensure!(self.routes.contains(parent)&&self.routes.contains(&child),"capture lacks ACK-owned parent/child");
+        self.retire_capture_attempt(parent,&BTreeSet::new(),persist)
+    }
+    /// Caller proved all returned cleanup rows absent; retain a shared child's
+    /// confirmed claim while any other parent still references it.
+    pub fn finish_capture(&mut self,parent:&RouteStamp,persist:impl FnOnce(&AdapterRecord)->Result<()>) -> Result<()> {
+        let child=capture_child(parent)?;let mut next=self.clone();ensure!(next.retiring.remove(parent),"capture retirement missing");
+        next.retiring.remove(&child);self.commit(next,persist)
     }
     pub fn reserve_route(
         &mut self,
@@ -441,6 +486,56 @@ mod tests {
             pending: BTreeSet::new(),
             retiring: BTreeSet::new(),
         }
+    }
+    fn capture(network:&str,prefix:u8)->RouteStamp{RouteStamp{address:network.parse().unwrap(),prefix,gateway:None,metric:0}}
+    fn born(r:&mut AdapterRecord,parent:RouteStamp,native:&mut BTreeSet<RouteStamp>){
+        let (child,create)=r.reserve_capture(parent.clone(),|_|Ok(())).unwrap();
+        if create{assert!(native.insert(child.clone()));r.confirm_created(child,native,|_|Ok(())).unwrap();}
+        assert!(native.insert(parent.clone()));r.confirm_created(parent,native,|_|Ok(())).unwrap();
+    }
+    fn remove_capture(r:&mut AdapterRecord,parent:&RouteStamp,native:&mut BTreeSet<RouteStamp>){
+        let permits=r.retire_capture(parent,|_|Ok(())).unwrap();for p in permits{native.remove(&p.into_stamp());}
+        r.finish_capture(parent,|_|Ok(())).unwrap();r.recover(&r.guid,&[],1380,native).unwrap();
+    }
+    #[test]fn windows_actual_broadcast_companions_require_joint_create_acks(){
+        let mut r=record();let mut native=BTreeSet::new();
+        for network in ["10.254.253.0","10.254.254.0"]{let p=capture(network,24);let c=capture_child(&p).unwrap();
+            let foreign=BTreeSet::from([p.clone(),c.clone()]);assert!(r.recover(&r.guid,&[],1380,&foreign).is_err());born(&mut r,p,&mut native);}
+        r.recover(&r.guid,&[],1380,&native).unwrap();assert_eq!(r.routes.len(),4);
+        for parent in [capture("10.254.253.0",24),capture("10.254.254.0",24)]{remove_capture(&mut r,&parent,&mut native);}
+        assert!(native.is_empty());assert!(r.routes.is_empty());
+    }
+    #[test]fn shared_broadcast_retained_until_last_parent_in_both_removal_orders(){
+        for reverse in [false,true]{let mut r=record();let mut native=BTreeSet::new();let a=capture("10.0.1.0",24);let b=capture("10.0.0.0",23);let child=capture_child(&a).unwrap();assert_eq!(capture_child(&b).unwrap(),child);
+            born(&mut r,a.clone(),&mut native);born(&mut r,b.clone(),&mut native);assert_eq!(native.len(),3);
+            let (first,last)=if reverse{(&b,&a)}else{(&a,&b)};remove_capture(&mut r,first,&mut native);assert!(native.contains(&child));assert!(r.routes.contains(&child));remove_capture(&mut r,last,&mut native);assert!(native.is_empty());
+        }
+    }
+    #[test]fn capture_foreign_child_crash_pending_and_failed_checkpoint_never_authorize_adoption(){
+        let mut r=record();let p=capture("10.254.253.0",24);let child=capture_child(&p).unwrap();r.baseline.as_mut().unwrap().insert(child.clone());assert!(r.reserve_capture(p.clone(),|_|Ok(())).is_err());
+        let mut r=record();let before=r.encode().unwrap();assert!(r.reserve_capture(p.clone(),|_|anyhow::bail!("disk")).is_err());assert_eq!(r.encode().unwrap(),before);
+        r.reserve_capture(p.clone(),|_|Ok(())).unwrap();let unacked=BTreeSet::from([child.clone()]);let reopened=AdapterRecord::decode(&r.encode().unwrap()).unwrap();assert!(reopened.recover(&r.guid,&[],1380,&unacked).is_err());
+        // Local successful ACK can roll back even when its durable confirmation failed.
+        assert!(r.confirm_created(child.clone(),&unacked,|_|anyhow::bail!("disk")).is_err());let permits=r.retire_capture_attempt(&p,&unacked,|_|Ok(())).unwrap();assert_eq!(permits.len(),1);assert_eq!(permits.into_iter().next().unwrap().into_stamp(),child);r.finish_capture(&p,|_|Ok(())).unwrap();
+    }
+    #[test]fn capture_crash_after_each_create_is_not_inferred_from_native_shape(){
+        let mut r=record();let parent=capture("10.254.253.0",24);let (child,_)=r.reserve_capture(parent.clone(),|_|Ok(())).unwrap();let mut native=BTreeSet::from([child.clone()]);
+        r.confirm_created(child.clone(),&native,|_|Ok(())).unwrap();
+        // A durable child ACK is cleanup authority, but not a parent ACK.
+        r.recover(&r.guid,&[],1380,&native).unwrap();native.insert(parent.clone());
+        assert!(r.recover(&r.guid,&[],1380,&native).is_err());assert!(r.confirm_created(parent.clone(),&native,|_|anyhow::bail!("checkpoint")).is_err());
+        let before=r.encode().unwrap();assert!(r.retire_capture_attempt(&parent,&native,|_|anyhow::bail!("retire")).is_err());assert_eq!(r.encode().unwrap(),before);
+        let permits=r.retire_capture_attempt(&parent,&native,|_|Ok(())).unwrap();assert_eq!(permits.len(),2);for row in permits{native.remove(&row.into_stamp());}r.finish_capture(&parent,|_|Ok(())).unwrap();assert!(native.is_empty());
+    }
+    #[test]fn add_before_remove_expansion_keeps_shared_child_and_new_cover(){
+        let mut r=record();let old=capture("10.0.1.0",24);let new=capture("10.0.0.0",23);let mut native=BTreeSet::new();born(&mut r,old.clone(),&mut native);
+        born(&mut r,new.clone(),&mut native);remove_capture(&mut r,&old,&mut native);
+        assert!(native.contains(&new));assert!(native.contains(&capture_child(&new).unwrap()));assert_eq!(native.len(),2);
+    }
+    #[test]fn shared_parent_failure_rolls_back_only_new_parent_and_changed_readback_rejects(){
+        let mut r=record();let a=capture("10.0.1.0",24);let b=capture("10.0.0.0",23);let mut native=BTreeSet::new();born(&mut r,a.clone(),&mut native);let child=capture_child(&a).unwrap();let (_,create)=r.reserve_capture(b.clone(),|_|Ok(())).unwrap();assert!(!create);
+        let permits=r.retire_capture_attempt(&b,&BTreeSet::new(),|_|Ok(())).unwrap();assert!(permits.is_empty());r.finish_capture(&b,|_|Ok(())).unwrap();r.recover(&r.guid,&[],1380,&native).unwrap();assert!(native.contains(&child));
+        let mut r=record();let (c,_)=r.reserve_capture(a,|_|Ok(())).unwrap();let changed=BTreeSet::from([RouteStamp{metric:257,..c.clone()}]);assert!(r.confirm_created(c,&changed,|_|Ok(())).is_err());
     }
     #[test]
     fn names_and_unverified_intents_never_authorize_recovery() {
@@ -930,6 +1025,7 @@ mod capacity_tests {
                 metric: 0,
             });
         }
+        let children:Vec<_>=r.routes.iter().filter(|r|r.prefix<32).map(|r|capture_child(r).unwrap()).collect();r.routes.extend(children);
         for i in 0..MAX_BASELINE_ROUTES {
             r.baseline.as_mut().unwrap().insert(RouteStamp {
                 address: std::net::Ipv6Addr::new(

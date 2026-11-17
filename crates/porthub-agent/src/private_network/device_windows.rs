@@ -10,7 +10,7 @@ use std::{
 };
 use tokio::sync::Mutex;
 use tun_rs::DeviceBuilder;
-use super::{native_ownership::{AdapterRecord,RouteStamp,RetiredRoute,HostAdmission,plan_hosts,MAX_LEDGER_BYTES},windows_state};
+use super::{native_ownership::{AdapterRecord,RouteStamp,RetiredRoute,HostAdmission,plan_hosts,capture_child,MAX_LEDGER_BYTES},windows_state};
 
 fn save_record(path:&std::path::Path,record:&AdapterRecord)->Result<()>{let bytes=record.encode()?;windows_state::write_bytes_bounded(path,&bytes,MAX_LEDGER_BYTES)}
 
@@ -118,11 +118,44 @@ pub(super) fn recover_source_absence(profile:&std::path::Path,pin:&super::native
     let native:std::collections::BTreeSet<_>=rows.iter().filter(|row|row.if_index()==Some(*index)).map(stamp).collect();
     let addresses=super::native_owner::source::ShutdownIo::addresses(&io)?;
     let candidates=record.recovery_routes(&record.guid,&addresses,u16::try_from(*mtu)?,&native)?;
-    // An uncreated intent whose row is positively absent is a denial-only
-    // cancellation, not adoption or permission to delete an unacknowledged row.
+    // An interrupted compound never adopts pending native rows: recover() above
+    // already rejected those. Only a durable child ACK may be cleaned here.
+    let interrupted:Vec<_>=record.pending.iter().filter(|r|r.prefix<32).cloned().collect();
+    for parent in interrupted {
+        let permits=record.retire_capture_attempt(&parent,&Default::default(),|next|save_record(&state,next))?;
+        for permit in permits{let row=permit.into_stamp();ensure!(native_source_pin(*index)?==current,"adapter changed before interrupted compound cleanup");
+            if manager.list()?.iter().any(|r|r.if_index()==Some(*index)&&stamp(r)==row){ensure!(native_source_pin(*index)?==current,"adapter changed before interrupted row deletion");manager.delete(&Route::new(row.address,row.prefix).with_if_index(*index).with_metric(row.metric))?;}
+        }
+        let child=capture_child(&parent)?;let retained=record.routes.contains(&child);let rows=manager.list()?;ensure!(native_source_pin(*index)?==current,"adapter changed after interrupted cleanup");
+        ensure!(!rows.iter().any(|r|r.if_index()==Some(*index)&&(stamp(r)==parent||(!retained&&stamp(r)==child))),"unacknowledged compound row remains; preserved");
+        if retained{ensure!(rows.iter().any(|r|r.if_index()==Some(*index)&&stamp(r)==child),"shared child disappeared during interrupted cleanup");}
+        record.finish_capture(&parent,|next|save_record(&state,next))?;
+    }
+    // Ordinary uncreated intent cancellation is denial-only.
     for pending in record.pending.clone(){ensure!(!native.contains(&pending),"unacknowledged native row appeared during recovery");record.cancel_route(&pending,|next|save_record(&state,next))?;}
+    // Compound cleanup changed native rows, so do not reuse the pre-cleanup view.
+    let rows=manager.list()?;ensure!(native_source_pin(*index)?==current,"adapter changed after interrupted cleanup inventory");
+    let native=rows.iter().filter(|row|row.if_index()==Some(*index)).map(stamp).collect();
     record.observe_missing(&native,|next|save_record(&state,next))?;
+    // Retire confirmed compounds together. Shared ACK-owned children survive
+    // until their final confirmed parent, including crash recovery cleanup.
+    let parents:Vec<_>=record.routes.iter().filter(|r|r.prefix<32).cloned().collect();
+    for parent in parents {
+        ensure!(native_source_pin(*index)?==current,"adapter changed before recovered compound");
+        let permits=record.retire_capture(&parent,|next|save_record(&state,next))?;
+        for permit in permits {let row=permit.into_stamp();ensure!(native_source_pin(*index)?==current,"adapter changed before recovered compound delete");
+            if manager.list()?.iter().any(|r|r.if_index()==Some(*index)&&stamp(r)==row){
+                ensure!(native_source_pin(*index)?==current,"adapter changed during recovered compound delete");manager.delete(&Route::new(row.address,row.prefix).with_if_index(*index).with_metric(row.metric))?;
+            }
+        }
+        let child=capture_child(&parent)?;let retained=record.routes.contains(&child);let rows=manager.list()?;
+        ensure!(native_source_pin(*index)?==current,"adapter changed after recovered compound delete");
+        ensure!(!rows.iter().any(|r|r.if_index()==Some(*index)&&(stamp(r)==parent||(!retained&&stamp(r)==child))),"recovered compound remains");
+        if retained {ensure!(rows.iter().any(|r|r.if_index()==Some(*index)&&stamp(r)==child),"recovered shared child disappeared");}
+        record.finish_capture(&parent,|next|save_record(&state,next))?;
+    }
     for row in candidates {
+        if !record.routes.contains(&row){continue;}
         ensure!(native_source_pin(*index)?==current,"adapter changed before owned route retirement");
         let permit=record.retire_route(&row,|next|save_record(&state,next))?;let retired=permit.into_stamp();
         let mut route=Route::new(retired.address,retired.prefix).with_if_index(*index).with_metric(retired.metric);
@@ -183,6 +216,12 @@ impl Ownership {
         // before any caller can prune caches, return early or mutate routes.
         r.observe_missing(&rows,|next|save_record(&self.path,next))?;Ok(())
     }
+    fn reserve_capture(&self,parent:RouteStamp)->Result<(RouteStamp,bool)>{self.record.lock().unwrap_or_else(|p|p.into_inner()).reserve_capture(parent,|next|save_record(&self.path,next))}
+    fn confirm_created(&self,row:RouteStamp,native:&[Route],index:u32)->Result<()>{let rows=native.iter().filter(|r|r.if_index()==Some(index)).map(stamp).collect();self.record.lock().unwrap_or_else(|p|p.into_inner()).confirm_created(row,&rows,|next|save_record(&self.path,next))}
+    fn retire_capture(&self,parent:&RouteStamp)->Result<Vec<RetiredRoute>>{self.record.lock().unwrap_or_else(|p|p.into_inner()).retire_capture(parent,|next|save_record(&self.path,next))}
+    fn retire_attempt(&self,parent:&RouteStamp,created:&std::collections::BTreeSet<RouteStamp>)->Result<Vec<RetiredRoute>>{self.record.lock().unwrap_or_else(|p|p.into_inner()).retire_capture_attempt(parent,created,|next|save_record(&self.path,next))}
+    fn child_retained(&self,parent:&RouteStamp)->Result<bool>{let child=capture_child(parent)?;let r=self.record.lock().unwrap_or_else(|p|p.into_inner());Ok(r.routes.contains(&child)&&r.routes.iter().any(|p|capture_child(p).is_ok_and(|c|c==child)))}
+    fn finish_capture(&self,parent:&RouteStamp)->Result<()>{self.record.lock().unwrap_or_else(|p|p.into_inner()).finish_capture(parent,|next|save_record(&self.path,next))}
     fn reserve(&self,value:RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.reserve_route(value,|next|save_record(&self.path,next))}
     fn confirm(&self,value:RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.confirm_route(value,|next|save_record(&self.path,next))}
     fn cancel(&self,value:&RouteStamp)->Result<()>{let mut r=self.record.lock().unwrap_or_else(|p|p.into_inner());r.cancel_route(value,|next|save_record(&self.path,next))}
@@ -369,7 +408,7 @@ impl Tun {
         let present:std::collections::BTreeSet<_>=record.routes.intersection(&current).cloned().collect();
         if record.baseline.is_none(){record.baseline=Some(current.clone());}
         record.routes=present.clone();record.pending.clear();record.retiring.clear();save_record(&path,&record)?;
-        let tun=Self{device,index,name:name.into(),source_pin,own,routes:Mutex::new(present.iter().filter_map(|r|if r.prefix==32{if let IpAddr::V4(ip)=r.address{Some(ip)}else{None}}else{None}).collect()),capture_routes:Mutex::new(present.iter().filter_map(|r|if r.prefix<32{if let IpAddr::V4(ip)=r.address{porthub_mesh::lan_routes::Network::from_address(ip,r.prefix).ok()}else{None}}else{None}).collect()),_driver:driver,_source_lease:Default::default(),ownership:Ownership{path,record:std::sync::Mutex::new(record),_lease:ownership_lease}};
+        let tun=Self{device,index,name:name.into(),source_pin,own,routes:Mutex::new(present.iter().filter_map(|r|if r.prefix==32&&r.metric==0{if let IpAddr::V4(ip)=r.address{Some(ip)}else{None}}else{None}).collect()),capture_routes:Mutex::new(present.iter().filter_map(|r|if r.prefix<32{if let IpAddr::V4(ip)=r.address{porthub_mesh::lan_routes::Network::from_address(ip,r.prefix).ok()}else{None}}else{None}).collect()),_driver:driver,_source_lease:Default::default(),ownership:Ownership{path,record:std::sync::Mutex::new(record),_lease:ownership_lease}};
         tun.update_routes_for(peers,admission).await?;Ok(tun)
     }
 
@@ -380,18 +419,51 @@ impl Tun {
         let native=manager.list().await.context("cannot inspect capture routes")?;
         self.ownership.verify(self.index,&self.device,&native)?;
         let existing:Vec<_>=native.iter().filter_map(|r|match r.destination(){IpAddr::V4(address)=>Some(ExistingRoute{destination:address,prefix:r.prefix(),interface:r.if_index()}),_=>None}).collect();
-        let mut plan=capture_routes::plan(pools,&existing,self.index)?;
+        let plan=capture_routes::plan(pools,&existing,self.index)?;
         let wanted:std::collections::BTreeSet<_>=plan.accepted.iter().copied().collect();let mut owned=self.capture_routes.lock().await;
-        for prefix in owned.difference(&wanted).copied().collect::<Vec<_>>(){
-            let permit=self.ownership.retire(&direct(IpAddr::V4(prefix.address()),prefix.prefix()))?;
-            let retired=remove_retired(&mut manager,self.index,permit).await?;self.ownership.finish_retirement(&retired)?;owned.remove(&prefix);
-        }
         for prefix in wanted.difference(&owned).copied().collect::<Vec<_>>(){
-            self.ownership.reserve(direct(IpAddr::V4(prefix.address()),prefix.prefix()))?;
-            if manager.add(&Route::new(IpAddr::V4(prefix.address()),prefix.prefix()).with_if_index(self.index).with_metric(0)).await.is_ok(){self.ownership.confirm(direct(IpAddr::V4(prefix.address()),prefix.prefix()))?;owned.insert(prefix);}
-            else{self.ownership.cancel(&direct(IpAddr::V4(prefix.address()),prefix.prefix()))?;plan.accepted.retain(|p|*p!=prefix);plan.conflicting.push(prefix);}
+            let parent=direct(IpAddr::V4(prefix.address()),prefix.prefix());
+            let before=manager.list().await?;self.check_route_identity()?;self.ownership.verify(self.index,&self.device,&before)?;
+            let (child,create_child)=self.ownership.reserve_capture(parent.clone())?;
+            let mut created=std::collections::BTreeSet::new();
+            let attempt:Result<()>=async {
+                for row in [if create_child{Some(child.clone())}else{None},Some(parent.clone())].into_iter().flatten(){
+                    self.check_route_identity()?;
+                    manager.add(&Route::new(row.address,row.prefix).with_if_index(self.index).with_metric(row.metric)).await.context("exclusive capture Create failed")?;
+                    created.insert(row.clone()); // successful Create ACK survives a failed durable confirmation
+                    self.check_route_identity()?;self.ownership.confirm_created(row,&manager.list().await?,self.index)?;
+                }
+                Ok(())
+            }.await;
+            if let Err(error)=attempt {
+                let cleanup=async {let permits=self.ownership.retire_attempt(&parent,&created)?;self.remove_capture_rows(&mut manager,&parent,permits).await}.await;
+                return Err(error.context(if cleanup.is_ok(){"capture compound rolled back"}else{"capture rollback incomplete; source retirement required"}));
+            }
+            owned.insert(prefix);
+        }
+        // Install the accepted new cover before withdrawing the old cover. A
+        // failed expansion preserves the old capture until source retirement;
+        // shared broadcast ownership prevents deleting the new cover's child.
+        for prefix in owned.difference(&wanted).copied().collect::<Vec<_>>(){
+            let parent=direct(IpAddr::V4(prefix.address()),prefix.prefix());
+            let permits=self.ownership.retire_capture(&parent)?;
+            self.remove_capture_rows(&mut manager,&parent,permits).await?;owned.remove(&prefix);
         }
         Ok(plan)
+    }
+
+    fn check_route_identity(&self)->Result<()>{ensure!(native_source_pin(self.index)?==self.source_pin,"owned adapter changed during capture transaction");Ok(())}
+    async fn remove_capture_rows(&self,manager:&mut AsyncRouteManager,parent:&RouteStamp,permits:Vec<RetiredRoute>)->Result<()> {
+        for permit in permits {let row=permit.into_stamp();self.check_route_identity()?;
+            if manager.list().await?.iter().any(|r|r.if_index()==Some(self.index)&&stamp(r)==row){
+                self.check_route_identity()?;manager.delete(&Route::new(row.address,row.prefix).with_if_index(self.index).with_metric(row.metric)).await?;
+            }
+        }
+        let child=capture_child(parent)?;let retained=self.ownership.child_retained(parent)?;
+        let rows=manager.list().await?;self.check_route_identity()?;
+        ensure!(!rows.iter().any(|r|r.if_index()==Some(self.index)&&(stamp(r)==*parent||(!retained&&stamp(r)==child))),"capture parent/child absence not proven");
+        if retained {ensure!(rows.iter().any(|r|r.if_index()==Some(self.index)&&stamp(r)==child),"shared capture child disappeared");}
+        self.ownership.finish_capture(parent)
     }
 
     /// Revalidate retained host routes as well as broad capture prefixes. The
@@ -494,8 +566,22 @@ impl Drop for Tun {
         let Ok(mut manager)=route_manager::RouteManager::new()else{return;};
         let Ok(native)=manager.list()else{return;};
         if let Err(error)=self.ownership.verify(self.index,&self.device,&native){tracing::warn!("cannot verify/checkpoint owned Wintun state; shutdown preserves native configuration: {error}");return;}
-        let routes=self.routes.get_mut();let captures=self.capture_routes.get_mut();
-        for (address,prefix) in captures.iter().map(|p|(p.address(),p.prefix())).chain(routes.iter().map(|ip|(*ip,32))){
+        let routes=self.routes.get_mut().clone();let captures=self.capture_routes.get_mut().clone();
+        for prefix in captures.iter(){
+            let parent=direct(IpAddr::V4(prefix.address()),prefix.prefix());
+            let outcome:Result<()>= (||{
+                let permits=self.ownership.retire_capture(&parent)?;
+                for permit in permits{let row=permit.into_stamp();self.check_route_identity()?;
+                    if manager.list()?.iter().any(|r|r.if_index()==Some(self.index)&&stamp(r)==row){self.check_route_identity()?;manager.delete(&Route::new(row.address,row.prefix).with_if_index(self.index).with_metric(row.metric))?;}
+                }
+                let child=capture_child(&parent)?;let retained=self.ownership.child_retained(&parent)?;let rows=manager.list()?;self.check_route_identity()?;
+                ensure!(!rows.iter().any(|r|r.if_index()==Some(self.index)&&(stamp(r)==parent||(!retained&&stamp(r)==child))),"Drop capture absence unproven");
+                if retained{ensure!(rows.iter().any(|r|r.if_index()==Some(self.index)&&stamp(r)==child),"Drop shared child missing");}
+                self.ownership.finish_capture(&parent)
+            })();
+            if let Err(error)=outcome{tracing::warn!("capture retirement incomplete: {error}");return;}
+        }
+        for (address,prefix) in routes.iter().map(|ip|(*ip,32)){
             let expected=direct(IpAddr::V4(address),prefix);
             // verify() already retired any observed absent row. Never create
             // a second removal intent (or delete a new external row) for it.
