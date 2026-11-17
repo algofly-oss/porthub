@@ -1,4 +1,10 @@
-# Native USB relay through a Linux machine
+# Native USB relay through Linux and Windows
+
+The native Rust Windows relay also supports managed Audio/HID imports. A
+[physical Luna → Aero → Miro microphone test](../verification/2026-11-17-windows-owned-usb-relay.md)
+passed on the unpublished core 1.11.35 candidate, including final audio capture
+and child-first restoration. That record separates the managed alias path from
+ordinary physical USB export and documents outstanding discovery fixes.
 
 Linux `usbip-host` deliberately rejects devices attached to `vhci_hcd` in
 `drivers/usb/usbip/stub_dev.c`. Removing the inventory filter cannot enable
