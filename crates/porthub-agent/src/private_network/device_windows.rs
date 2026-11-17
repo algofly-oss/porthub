@@ -104,7 +104,7 @@ pub(super) fn recover_source_absence(profile:&std::path::Path,pin:&super::native
         let mut manager=route_manager::RouteManager::new()?;let rows=manager.list()?;
         let addresses:Vec<_>=getifaddrs::getifaddrs()?.filter(|row|row.index==Some(*index)).filter_map(|row|row.address.ip_addr()).collect();
         let native=rows.iter().filter(|row|row.if_index()==Some(*index)).map(stamp).collect();
-        record.recover(&record.guid,&addresses,u16::try_from(*mtu)?,&native)?;
+        recover_record(*index,4,&record,&record.guid,&addresses,u16::try_from(*mtu)?,&native)?;
     }
     let Pin::Windows{luid,..}=current else{unreachable!()};
     let io=RecoveredSource{pin:current.clone(),index:*index,luid};
@@ -117,6 +117,7 @@ pub(super) fn recover_source_absence(profile:&std::path::Path,pin:&super::native
     let rows=manager.list()?;
     let native:std::collections::BTreeSet<_>=rows.iter().filter(|row|row.if_index()==Some(*index)).map(stamp).collect();
     let addresses=super::native_owner::source::ShutdownIo::addresses(&io)?;
+    #[cfg(test)] recover_record(*index,5,&record,&record.guid,&addresses,u16::try_from(*mtu)?,&native)?;
     let candidates=record.recovery_routes(&record.guid,&addresses,u16::try_from(*mtu)?,&native)?;
     // An interrupted compound never adopts pending native rows: recover() above
     // already rejected those. Only a durable child ACK may be cleaned here.
@@ -173,9 +174,18 @@ pub(super) fn recover_source_absence(profile:&std::path::Path,pin:&super::native
 pub(super) fn fixture_adapter_exists(guid:&str)->Result<bool>{Ok(adapters()?.iter().any(|(_,present,_,_)|present==guid))}
 pub(super) fn adapter_guid(index:u32)->Result<String>{adapters()?.into_iter().find(|(_,_,i,_)|*i==index).map(|(_,g,_,_)|g).ok_or_else(||anyhow::anyhow!("owned Windows adapter disappeared"))}
 
+#[cfg(test)]
+fn fixture_config_projection(own:Ipv4Addr,expected_mtu:u16,observed_mtu:u16,addresses:&[IpAddr])->serde_json::Value{
+    serde_json::json!({"expected_ipv4_mtu":expected_mtu,"observed_guard_mtu":observed_mtu,"mtu_equal":expected_mtu==observed_mtu,
+        "own_v4":addresses.iter().filter(|ip|**ip==IpAddr::V4(own)).count(),
+        "foreign_v4":addresses.iter().filter(|ip|matches!(ip,IpAddr::V4(v4)if *v4!=own)).count(),
+        "link_local_v6":addresses.iter().filter(|ip|matches!(ip,IpAddr::V6(v6)if v6.is_unicast_link_local())).count(),
+        "other_v6":addresses.iter().filter(|ip|matches!(ip,IpAddr::V6(v6)if !v6.is_unicast_link_local())).count()})
+}
+
 // Diagnostic-only: never changes admission, records or native routes.
 #[cfg(test)]
-fn fixture_recovery_failure(index:u32,stage:u8,r:&AdapterRecord,rows:&std::collections::BTreeSet<RouteStamp>){
+fn fixture_recovery_failure(index:u32,stage:u8,r:&AdapterRecord,addresses:&[IpAddr],mtu:u16,rows:&std::collections::BTreeSet<RouteStamp>){
     if std::env::var("PORTHUB_SPARSE_NATIVE_FIXTURE").as_deref()!=Ok("reviewed-disposable-desktop-v1"){return;}
     use std::sync::atomic::{AtomicBool,Ordering};
     static EMITTED:AtomicBool=AtomicBool::new(false);
@@ -185,7 +195,16 @@ fn fixture_recovery_failure(index:u32,stage:u8,r:&AdapterRecord,rows:&std::colle
         let mut table=std::ptr::null_mut();if unsafe{GetIfTable2(&mut table)}!=0||table.is_null(){return None;}
         struct Guard(*mut core::ffi::c_void);impl Drop for Guard{fn drop(&mut self){unsafe{FreeMibTable(self.0)}}}
         let _guard=Guard(table.cast());let n=unsafe{(*table).NumEntries}as usize;if n>65536{return None;}
-        unsafe{std::slice::from_raw_parts((*table).Table.as_ptr(),n)}.iter().find(|row|row.InterfaceIndex==index).map(|row|unsafe{row.InterfaceLuid.Value})})();
+        unsafe{std::slice::from_raw_parts((*table).Table.as_ptr(),n)}.iter().find(|row|row.InterfaceIndex==index&&guid_hex(&row.InterfaceGuid)==r.guid).map(|row|unsafe{row.InterfaceLuid.Value})})();
+    let (ipv4_nlmtu,nlmtu_status)=if let Some(luid)=luid {
+        use windows_sys::Win32::{NetworkManagement::IpHelper::{MIB_IPINTERFACE_ROW,InitializeIpInterfaceEntry,GetIpInterfaceEntry},Networking::WinSock::AF_INET};
+        let mut row:MIB_IPINTERFACE_ROW=unsafe{std::mem::zeroed()};unsafe{InitializeIpInterfaceEntry(&mut row)};
+        row.Family=AF_INET;row.InterfaceIndex=index;row.InterfaceLuid.Value=luid;
+        let status=unsafe{GetIpInterfaceEntry(&mut row)};
+        (if status==0{Some(row.NlMtu)}else{None},Some(status))
+    }else{(None,None)};
+    let config=fixture_config_projection(r.own,r.mtu,mtu,addresses);
+    eprintln!("PORTHUB_NATIVE_ADAPTER_CONFIG {}",serde_json::json!({"stage":stage,"index":index,"owned_guid_match":luid.is_some(),"guard_mtu_source":if stage>=4{"if-row"}else{"device-ipv4"},"config":config,"ipv4_nlmtu":ipv4_nlmtu,"ipv4_nlmtu_status":nlmtu_status}));
     let baseline=r.baseline.clone().unwrap_or_default();
     let unknown:std::collections::BTreeSet<_>=rows.iter().filter(|v|!baseline.contains(*v)&&!r.routes.contains(*v)).cloned().collect();
     let missing:std::collections::BTreeSet<_>=r.routes.difference(rows).cloned().collect();
@@ -200,9 +219,9 @@ fn fixture_recovery_failure(index:u32,stage:u8,r:&AdapterRecord,rows:&std::colle
     }
     eprintln!("PORTHUB_NATIVE_ROUTE_LEDGER_DIAGNOSTIC\n{out}");
 }
-fn recover_record(index:u32,stage:u8,r:&mut AdapterRecord,guid:&str,addresses:&[IpAddr],mtu:u16,rows:&std::collections::BTreeSet<RouteStamp>)->Result<()>{
+fn recover_record(index:u32,stage:u8,r:&AdapterRecord,guid:&str,addresses:&[IpAddr],mtu:u16,rows:&std::collections::BTreeSet<RouteStamp>)->Result<()>{
     let result=r.recover(guid,addresses,mtu,rows);
-    #[cfg(test)] if result.is_err(){fixture_recovery_failure(index,stage,r,rows);}
+    #[cfg(test)] if result.is_err(){fixture_recovery_failure(index,stage,r,addresses,mtu,rows);}
     #[cfg(not(test))] let _=(index,stage);
     result
 }
@@ -602,6 +621,13 @@ mod tests {
     use route_manager::Route;
     use std::net::IpAddr;
 
+    #[test]
+    fn recovery_config_diagnostic_separates_mtu_from_foreign_address_changes(){
+        let own="10.254.253.1".parse().unwrap();let addresses=[IpAddr::V4(own),"fe80::1".parse().unwrap()];
+        let a=super::fixture_config_projection(own,1380,65535,&addresses);assert_eq!(a["mtu_equal"],false);assert_eq!(a["foreign_v4"],0);assert_eq!(a["other_v6"],0);assert_eq!(a["link_local_v6"],1);
+        let addresses=[IpAddr::V4(own),"192.0.2.1".parse().unwrap(),"2001:db8::1".parse().unwrap()];let a=super::fixture_config_projection(own,1380,1380,&addresses);
+        assert_eq!(a["mtu_equal"],true);assert_eq!(a["foreign_v4"],1);assert_eq!(a["other_v6"],1);assert!(!a.to_string().contains("192.0.2.1"));assert!(!a.to_string().contains("2001:db8"));
+    }
     #[test]
     fn assigned_interface_address_is_not_an_explicit_peer_route() {
         let own = "10.254.250.254".parse().unwrap();
