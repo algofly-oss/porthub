@@ -819,3 +819,7 @@ fn refresh_tor_dns(upstream:&Option<Arc<super::dns_upstream::Upstream>>,tor:&Opt
     });
     upstream.set_tor(configuration);
 }
+
+#[cfg(all(test, feature = "private-stream"))]
+#[path = "traffic_transport_tests.rs"]
+mod traffic_transport_tests;
