@@ -116,13 +116,16 @@ impl Client {
             }
         }
         builder.env("TERM", term);
+        // Finish fallible descriptor setup before creating a child. Returning
+        // an error after spawn would drop Child without killing or reaping it.
+        // Both duplicates are CLOEXEC, so the attachment cannot inherit them.
+        let mut reader = pty.master.try_clone_reader().context("terminal PTY reader duplication")?;
+        let mut writer = owned_writer(pty.master.as_ref()).context("terminal PTY writer duplication")?;
         let child = pty.slave.spawn_command(builder).context("terminal PTY attachment process spawn")?;
         let child_pid = child.process_id();
         let tty = pty.master.tty_name();
         tracing::debug!(client, ?child_pid, ?tty, "Terminal attachment spawned");
         drop(pty.slave);
-        let mut reader = pty.master.try_clone_reader().context("terminal PTY reader duplication")?;
-        let mut writer = owned_writer(pty.master.as_ref()).context("terminal PTY writer duplication")?;
         let cancel = CancellationToken::new();
         let reading = cancel.clone();
         let handle = tokio::runtime::Handle::current();
