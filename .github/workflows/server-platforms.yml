@@ -126,6 +126,26 @@ jobs:
           cargo test --locked -p porthub-api --lib inventory_ -- --include-ignored
           cargo test --locked -p porthub-api --test terminal_traffic --test machine_delete --test admin_users --test firewall_history --test inventory_query -- --include-ignored
           cargo test --locked -p porthub-firewall --test store
+      - name: Verify actual private carrier telemetry through the API
+        env:
+          PORTHUB_TEST_MONGO_URI: mongodb://127.0.0.1:${{ job.services.mongo.ports['27017'] }}
+        run: |
+          cargo test --locked -p porthub-agent --lib --no-run --message-format=json > /tmp/private-traffic-agent-unit.jsonl
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          matches=set()
+          for line in Path('/tmp/private-traffic-agent-unit.jsonl').read_text().splitlines():
+              row=json.loads(line)
+              if row.get('reason')=='compiler-artifact' and row.get('target',{}).get('name')=='porthub_agent' and row.get('target',{}).get('kind')==['lib'] and row.get('profile',{}).get('test') is True and row.get('executable'):
+                  matches.add(row['executable'])
+          assert len(matches)==1, 'Expected one exact compiled agent unit executable'
+          executable=Path(matches.pop()).resolve(strict=True)
+          assert executable.is_file() and executable.name.startswith('porthub_agent-')
+          Path('/tmp/private-traffic-agent-executable').write_text(str(executable))
+          PY
+          export PORTHUB_TEST_AGENT_UNIT_EXECUTABLE="$(cat /tmp/private-traffic-agent-executable)"
+          cargo test --locked -p porthub-api --test private_traffic_carriers actual_agent_direct_and_gateway_tx_are_automatically_uploaded_to_owner_history -- --ignored --exact --nocapture
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
