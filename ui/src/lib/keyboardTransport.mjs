@@ -1,3 +1,4 @@
+import {socketTermination,terminationCategory,terminationMessage} from './keyboardTermination.mjs';
 // One ordered control session. LAN discovery uses authenticated ICE signaling;
 // the public URL and login never change. A command identity survives fallback.
 export const KEYBOARD_CHANNEL = "porthub-keyboard/1";
@@ -11,7 +12,7 @@ export class KeyboardTransport {
     const socket=this.socket=this.createSocket(url.toString());
     socket.onmessage=event=>{try{this.event(JSON.parse(event.data));}catch{this.fail('Invalid VKeyboard response');}};
     socket.onerror=()=>this.fail('Could not connect. Check that VKeyboard is enabled on this client.');
-    socket.onclose=()=>{if(!this.closed)this.fail('VKeyboard disconnected. Reconnect before sending more input.');};
+    socket.onclose=event=>{if(!this.closed){const ended=socketTermination(event);this.changed({ended});this.fail(terminationMessage(ended));}};
   }
   event(message) {
     if(this.closed)return;
@@ -21,7 +22,8 @@ export class KeyboardTransport {
     else if(message.type==='ack') {const pending=this.pending.get(message.ack?.id);if(!pending)return;clearTimeout(pending.timer);this.pending.delete(message.ack.id);message.ack.ok?pending.resolve():pending.reject(new Error(message.ack.error||'Input failed'));this.pump();}
     else if(message.type==='direct_answer') {if(!this.peer||message.session!==this.session)return;void this.peer.setRemoteDescription(JSON.parse(message.description)).catch(()=>this.fallback());}
     else if(message.type==='direct_unavailable')this.fallback();
-    else if(message.type==='closed'||message.type==='error')this.fail(message.error||'VKeyboard unavailable');
+    else if(message.type==='closed'){const ended={...terminationCategory(message),code:null,wasClean:null};this.changed({ended});this.fail(terminationMessage(message));}
+    else if(message.type==='error')this.fail(message.error||'VKeyboard unavailable');
   }
   send(command) {
     if(!this.ready||this.closed)return Promise.reject(new Error('Connect to a client first'));

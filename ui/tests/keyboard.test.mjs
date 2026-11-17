@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
 import { KeyboardTransport,KEYBOARD_CHANNEL } from '../src/lib/keyboardTransport.mjs';
+import {socketTermination} from '../src/lib/keyboardTermination.mjs';
 import { pcm16,VoiceRecorder } from '../src/lib/keyboardRecorder.mjs';
 import { firmwareSegments,verifyFirmware } from '../src/lib/keyboardFlash.mjs';
 if(!globalThis.crypto)globalThis.crypto=webcrypto;
@@ -46,4 +47,34 @@ test('session failure keeps the original reason for queued and active commands',
  const f=fixture(),promises=Array.from({length:6},()=>f.transport.send({type:'key',key:'left',state:'press'}));
  f.transport.event({type:'closed',error:'Input channel is busy; reconnect'});
  const results=await Promise.allSettled(promises);assert(results.every(r=>r.status==='rejected'&&r.reason.message==='Input channel is busy; reconnect'));
+});
+
+test('socket close retains only fixed category and numeric metadata, never peer reason',()=>{
+ const f=fixture(),messages=[];f.transport.failed=v=>messages.push(v);
+ f.socket.onclose({code:1006,wasClean:false,reason:'Bearer SECRET /Users/private input text'});
+ assert.equal(f.transport.closed,true);assert.deepEqual(f.changes.find(v=>v.ended).ended,{code:1006,wasClean:false});
+ assert(!JSON.stringify({messages,changes:f.changes}).includes('SECRET'));
+ assert.match(messages[0],/Reconnect/);
+});
+test('fixed controller close category rejects pending input and cannot be overwritten',async()=>{
+ const f=fixture(),messages=[];f.transport.failed=v=>messages.push(v);
+ const pending=f.transport.send({type:'release_all'});
+ f.transport.event({type:'closed',phase:'controller',cause:'idle',error:'SECRET input/path/token'});
+ await assert.rejects(pending,/timed out/);assert.equal(messages.length,1);assert.deepEqual(f.changes.find(v=>v.ended).ended,{phase:'controller',cause:'idle',code:null,wasClean:null});
+ f.transport.event({type:'closed',phase:'host',cause:'closed'});assert.equal(messages.length,1);assert(!JSON.stringify(f.changes).includes('SECRET'));
+});
+test('close frame allowlist differentiates host failure from controller format failure',()=>{
+ for(const [reason,wanted] of [['keyboard:host:closed',/desktop client connection ended/],['keyboard:controller:json',/unsupported message/]]){
+  const f=fixture(),messages=[];f.transport.failed=v=>messages.push(v);f.socket.onclose({code:1000,wasClean:true,reason});assert.match(messages[0],wanted);assert.equal(f.changes.find(v=>v.ended).ended.wasClean,true);
+ }
+});
+test('unknown or hostile termination fields are never surfaced',()=>{
+ for(const data of [{phase:'host SECRET',cause:'closed'},{phase:'host',cause:'closed SECRET'},{error:'SECRET'}]){
+  const f=fixture(),messages=[];f.transport.failed=v=>messages.push(v);f.transport.event({type:'closed',...data});assert(!JSON.stringify({messages,changes:f.changes}).includes('SECRET'));assert.equal(messages[0],'VKeyboard disconnected. Reconnect before sending more input.');
+ }
+});
+
+test('close details reject forged metadata and category suffixes',()=>{
+ for(const reason of ['keyboard:host:closed SECRET','keyboard:host:unknown','keyboard:foreign:closed','x'.repeat(1000)])assert.deepEqual(socketTermination({code:'1006',wasClean:'false',reason}),{code:null,wasClean:null});
+ assert.deepEqual(socketTermination({code:1000,wasClean:true,reason:'keyboard:host:transport'}),{phase:'host',cause:'transport',code:1000,wasClean:true});
 });

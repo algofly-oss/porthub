@@ -11,7 +11,7 @@ use crate::{
 };
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
         Path, State,
     },
     http::{HeaderMap, StatusCode},
@@ -168,6 +168,29 @@ async fn send(socket: &mut WebSocket, message: &Value) -> bool {
         .await
         .is_ok()
 }
+// Only fixed server-owned categories cross the control socket or enter logs.
+#[derive(Clone, Copy, Debug)]
+enum EndPhase { Host, Controller }
+impl EndPhase { fn id(self)->&'static str { match self { Self::Host=>"host",Self::Controller=>"controller" } } }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EndCause { Closed, Transport, Frame, Json, Idle, Authorization, Replaced, Send, HostEnded, Busy, Rate }
+impl EndCause {
+    fn id(self) -> &'static str { match self {
+        Self::Closed=>"closed",Self::Transport=>"transport",Self::Frame=>"frame",Self::Json=>"json",
+        Self::Idle=>"idle",Self::Authorization=>"authorization",Self::Replaced=>"replaced",Self::Send=>"send",
+        Self::HostEnded=>"host_ended",Self::Busy=>"busy",Self::Rate=>"rate",
+    }}
+    fn closed(self, phase: EndPhase) -> Value {
+        let error=match self {Self::Replaced=>"Desktop reconnected",Self::Busy=>"Input channel is busy; reconnect",_=>"VKeyboard disconnected"};
+        json!({"type":"closed","phase":phase.id(),"cause":self.id(),"error":error})
+    }
+}
+async fn close_with_category(socket: &mut WebSocket, phase: EndPhase, cause: EndCause) {
+    tracing::info!(phase=phase.id(), cause=cause.id(), "VKeyboard connection ended");
+    // Same close handshake, with a bounded, fixed vocabulary; never an error/body.
+    let _=socket.send(Message::Close(Some(CloseFrame{code:1000,reason:format!("keyboard:{}:{}",phase.id(),cause.id()).into()}))).await;
+    let _=socket.close().await;
+}
 async fn host_socket(
     app: Arc<App>,
     mut socket: WebSocket,
@@ -192,7 +215,7 @@ async fn host_socket(
         if let Some(old) = hub.controllers.remove(&target) {
             let _ = old
                 .send
-                .try_send(json!({"type":"closed","error":"Desktop reconnected"}));
+                .try_send(EndCause::Replaced.closed(EndPhase::Host));
         }
     }
     if !send(
@@ -209,32 +232,37 @@ async fn host_socket(
     }
     let mut ping = tokio::time::interval(Duration::from_secs(20));
     let mut last = Instant::now();
-    loop {
+    let ended = loop {
         tokio::select! {
             _=ping.tick()=>{
-                if last.elapsed()>Duration::from_secs(60){break;}
+                if last.elapsed()>Duration::from_secs(60){break EndCause::Idle;}
                 let valid=if board{devices::authenticate(&app,&target,&token).await.is_ok()}else{machine_client::authenticate(&app,&target,&token).await.is_ok()};
-                if !valid || !send(&mut socket,&json!({"type":"ping"})).await{break;}
+                if !valid {break EndCause::Authorization;}
+                if !send(&mut socket,&json!({"type":"ping"})).await {break EndCause::Send;}
             }
-            outgoing=rx.recv()=>{let Some(message)=outgoing else{break;};if message["type"]=="replaced"{break;}if !send(&mut socket,&message).await{break;}}
+            outgoing=rx.recv()=>{
+                let Some(message)=outgoing else{break EndCause::HostEnded;};
+                if message["type"]=="replaced"{break EndCause::Replaced;}
+                if !send(&mut socket,&message).await{break EndCause::Send;}
+            }
             incoming=socket.next()=>{
-                let Some(Ok(message))=incoming else{break;};
+                let message=match incoming {Some(Ok(message))=>message,Some(Err(_))=>break EndCause::Transport,None=>break EndCause::Closed};
                 match message{
                     Message::Text(text)=>{
-                        let Ok(value)=serde_json::from_str::<Value>(&text)else{break;};last=Instant::now();
+                        let Ok(value)=serde_json::from_str::<Value>(&text)else{break EndCause::Json;};last=Instant::now();
                         match value["type"].as_str(){
-                            Some("pong")=>{},Some("ping")=>{if !send(&mut socket,&json!({"type":"pong"})).await{break;}}
+                            Some("pong")=>{},Some("ping")=>{if !send(&mut socket,&json!({"type":"pong"})).await{break EndCause::Send;}}
                             Some("ack"|"direct_answer"|"direct_unavailable"|"device_status")=>{
                                 let session=value["session"].as_str().unwrap_or_default();let hub=lock(&app.keyboard);
                                 if hub.hosts.get(&target).is_some_and(|h|h.id==identity){if let Some(controller)=hub.controllers.get(&target).filter(|c|c.id==session){let _=controller.send.try_send(value);}}
                             }
                             _=>{}
                         }
-                    },Message::Ping(data)=>{last=Instant::now();if socket.send(Message::Pong(data)).await.is_err(){break;}},Message::Pong(_)=>last=Instant::now(),Message::Close(_)=>break,_=>break
+                    },Message::Ping(data)=>{last=Instant::now();if socket.send(Message::Pong(data)).await.is_err(){break EndCause::Send;}},Message::Pong(_)=>last=Instant::now(),Message::Close(_)=>break EndCause::Closed,_=>break EndCause::Frame
                 }
             }
         }
-    }
+    };
     {
         let mut hub = lock(&app.keyboard);
         if hub.hosts.get(&target).is_some_and(|h| h.id == identity) {
@@ -242,11 +270,11 @@ async fn host_socket(
             if let Some(controller) = hub.controllers.remove(&target) {
                 let _ = controller
                     .send
-                    .try_send(json!({"type":"closed","error":"VKeyboard disconnected"}));
+                    .try_send(ended.closed(EndPhase::Host));
             }
         }
     }
-    let _ = socket.close().await;
+    close_with_category(&mut socket,EndPhase::Host,ended).await;
 }
 async fn control(
     State(app): State<Arc<App>>,
@@ -308,29 +336,38 @@ async fn controller_socket(
     let mut ping = tokio::time::interval(Duration::from_secs(20));
     let mut last = Instant::now();
     let (mut window, mut count) = (Instant::now(), 0u32);
-    loop {
+    let ended = loop {
         tokio::select! {
-            _=ping.tick()=>{if last.elapsed()>Duration::from_secs(60) || authorize_target(&app,&headers,&target).await.is_err() || !send(&mut socket,&json!({"type":"ping"})).await{break;}}
-            outgoing=rx.recv()=>{let Some(message)=outgoing else{break;};if !send(&mut socket,&message).await || message["type"]=="closed"{break;}}
+            _=ping.tick()=>{
+                if last.elapsed()>Duration::from_secs(60){break EndCause::Idle;}
+                if authorize_target(&app,&headers,&target).await.is_err(){break EndCause::Authorization;}
+                if !send(&mut socket,&json!({"type":"ping"})).await{break EndCause::Send;}
+            }
+            outgoing=rx.recv()=>{
+                let Some(message)=outgoing else{break EndCause::HostEnded;};
+                if !send(&mut socket,&message).await{break EndCause::Send;}
+                if message["type"]=="closed"{break EndCause::HostEnded;}
+            }
             incoming=socket.next()=>{
-                let Some(Ok(Message::Text(text)))=incoming else{break;};last=Instant::now();let Ok(mut value)=serde_json::from_str::<Value>(&text)else{break;};
+                let text=match incoming {Some(Ok(Message::Text(text)))=>text,Some(Err(_))=>break EndCause::Transport,Some(Ok(Message::Close(_)))|None=>break EndCause::Closed,_=>break EndCause::Frame};
+                last=Instant::now();let Ok(mut value)=serde_json::from_str::<Value>(&text)else{break EndCause::Json;};
                 if value["type"]=="pong"{continue;}
-                if window.elapsed()>Duration::from_secs(1){window=Instant::now();count=0;}count+=1;if count>150{break;}
+                if window.elapsed()>Duration::from_secs(1){window=Instant::now();count=0;}count+=1;if count>150{break EndCause::Rate;}
                 match value["type"].as_str(){
                     Some("input")=>{
                         let input=serde_json::from_value::<Input>(value["input"].clone());
                         if input.as_ref().map_or(true,|i|i.validate().is_err()){let _=send(&mut socket,&json!({"type":"error","error":"Invalid keyboard command"})).await;continue;}
                         if host.board && matches!(input.as_ref().unwrap().command,porthub_components::keyboard::Command::Clipboard{..}|porthub_components::keyboard::Command::Paste {}){let _=send(&mut socket,&json!({"type":"ack","ack":{"id":input.unwrap().id,"ok":false,"error":"Bluetooth devices cannot update the target clipboard; use Type text"}})).await;continue;}
                     }
-                    Some("direct_offer") if !host.board=>{if value["description"].as_str().is_none_or(|s|s.len()>16384){break;}}
-                    Some("device") if host.board=>{if !devices::valid_command(&value["command"]){break;}}
-                    _=>break
+                    Some("direct_offer") if !host.board=>{if value["description"].as_str().is_none_or(|s|s.len()>16384){break EndCause::Frame;}}
+                    Some("device") if host.board=>{if !devices::valid_command(&value["command"]){break EndCause::Frame;}}
+                    _=>break EndCause::Frame
                 }
                 value["session"]=identity.clone().into();
-                if host.send.try_send(value).is_err(){let _=send(&mut socket,&json!({"type":"closed","error":"Input channel is busy; reconnect"})).await;break;}
+                if host.send.try_send(value).is_err(){let _=send(&mut socket,&EndCause::Busy.closed(EndPhase::Controller)).await;break EndCause::Busy;}
             }
         }
-    }
+    };
     let _ = host
         .send
         .try_send(json!({"type":"stop","session":identity}));
@@ -344,5 +381,5 @@ async fn controller_socket(
             hub.controllers.remove(&target);
         }
     }
-    let _ = socket.close().await;
+    close_with_category(&mut socket,EndPhase::Controller,ended).await;
 }
