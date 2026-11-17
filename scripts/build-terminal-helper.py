@@ -21,10 +21,44 @@ import time
 import tempfile
 import urllib.error
 import urllib.request
+import urllib.parse
 
 ROOT = Path(__file__).resolve().parent.parent
 
 MAX_SOURCE_BYTES = 64 * 1024 * 1024
+MAX_SOURCE_ATTEMPTS = 3
+SOURCE_DEADLINE_SECONDS = 180
+
+class HTTPSOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    max_redirections = 3
+    max_repeats = 1
+
+    def __init__(self, deadline):
+        self.deadline = deadline
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('pinned source download deadline exceeded')
+        req.timeout = min(req.timeout, remaining)
+        parsed = urllib.parse.urlsplit(newurl)
+        if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password:
+            raise RuntimeError('Pinned source redirected away from HTTPS')
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+def open_source(request, timeout, deadline):
+    return urllib.request.build_opener(HTTPSOnlyRedirect(deadline)).open(request, timeout=timeout)
+
+def source_urls(item):
+    urls = [item['url'], *item.get('mirrors', [])]
+    if len(urls) > MAX_SOURCE_ATTEMPTS or len(set(urls)) != len(urls):
+        raise ValueError('Invalid pinned source endpoint count')
+    for url in urls:
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError('Pinned source requires an uncredentialed HTTPS URL')
+    return urls
+
 
 def download_source(item, archive):
     """Retry transient transport failures; publish only checksum-pinned bytes."""
@@ -32,16 +66,19 @@ def download_source(item, archive):
         if archive.stat().st_size <= MAX_SOURCE_BYTES and hashlib.sha256(archive.read_bytes()).hexdigest() == item['sha256']:
             return
         archive.unlink()  # A corrupt cache must not poison all later builds.
-    deadline = time.monotonic() + 180
-    for attempt in range(3):
+    urls = source_urls(item)
+    deadline = time.monotonic() + SOURCE_DEADLINE_SECONDS
+    failures = []
+    for attempt in range(MAX_SOURCE_ATTEMPTS):
         temporary = None
         try:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError('pinned source download deadline exceeded')
-            request = urllib.request.Request(item['url'], headers={'User-Agent': 'PortHub terminal builder', 'Cache-Control': 'no-cache'})
+            url = urls[min(attempt, len(urls) - 1)]
+            request = urllib.request.Request(url, headers={'User-Agent': 'PortHub terminal builder', 'Cache-Control': 'no-cache'})
             print('Downloading pinned ' + item['name'] + ' (attempt ' + str(attempt + 1) + '/3)', file=sys.stderr, flush=True)
-            with urllib.request.urlopen(request, timeout=min(60, remaining)) as response:
+            with open_source(request, timeout=min(60, remaining), deadline=deadline) as response:
                 if not response.geturl().startswith('https://'):
                     raise RuntimeError('Pinned source redirected away from HTTPS: ' + item['name'])
                 with tempfile.NamedTemporaryFile(prefix='.source-', dir=archive.parent, delete=False) as output:
@@ -51,7 +88,19 @@ def download_source(item, archive):
                     while True:
                         if time.monotonic() >= deadline:
                             raise TimeoutError('pinned source download deadline exceeded')
-                        chunk = response.read(64 * 1024)
+                        # urllib's HTTPS response retains the socket here. Refresh
+                        # its blocking timeout as the one overall budget shrinks.
+                        raw = getattr(getattr(response, 'fp', None), 'raw', None)
+                        sock = getattr(raw, '_sock', None)
+                        if sock is not None:
+                            remaining_read = deadline - time.monotonic()
+                            if remaining_read <= 0:
+                                raise TimeoutError('pinned source download deadline exceeded')
+                            sock.settimeout(min(60, remaining_read))
+                        # read1 avoids read(n)'s internal multi-read loop extending the budget.
+                        chunk = response.read1(64 * 1024)
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError('pinned source download deadline exceeded')
                         if not chunk:
                             break
                         size += len(chunk)
@@ -61,21 +110,32 @@ def download_source(item, archive):
                         output.write(chunk)
                     output.flush()
                     os.fsync(output.fileno())
+            if time.monotonic() >= deadline:
+                raise TimeoutError('pinned source download deadline exceeded')
             if digest.hexdigest() != item['sha256']:
                 raise RuntimeError('Source checksum mismatch: ' + item['name'])
             temporary.replace(archive)
             return
         except urllib.error.HTTPError as error:
+            failures.append('HTTP ' + str(error.code))
             if error.code not in (408, 429, 500, 502, 503, 504):
                 raise RuntimeError('Pinned source request rejected (HTTP ' + str(error.code) + '): ' + item['name']) from None
-        except (OSError, urllib.error.URLError, http.client.IncompleteRead):
-            pass
+        except (OSError, urllib.error.URLError, http.client.IncompleteRead) as error:
+            # Never include exception text: proxy URLs/credentials may be present.
+            cause = error.reason if isinstance(error, urllib.error.URLError) else error
+            label = type(error).__name__
+            if cause is not error:
+                label += '/' + type(cause).__name__
+            if isinstance(cause, OSError) and isinstance(cause.errno, int):
+                label += ' errno=' + str(cause.errno)
+            failures.append(label)
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
+        print('Pinned source transport failure: ' + item['name'] + ' endpoint ' + str(min(attempt, len(urls)-1)+1) + ' ' + failures[-1], file=sys.stderr, flush=True)
         if attempt < 2 and time.monotonic() + 2 ** (attempt + 1) < deadline:
             time.sleep(2 ** (attempt + 1))
-    raise RuntimeError('Could not download pinned source after bounded retries: ' + item['name']) from None
+    raise RuntimeError('Could not download pinned source after bounded retries: ' + item['name'] + ' (' + ', '.join(failures) + ')') from None
 
 def extract_source(item, archive, destination):
     """Restore incomplete source-only cache entries from the verified archive.
