@@ -209,8 +209,12 @@ def execute(args):
  listed=run([str(binary),'--list'],seconds=15)
  for test in TESTS[args.contract]:
   if test+': test' not in listed:raise RuntimeError('native test missing from actual executable: '+test)
+ source_revision=run(['git','-c','safe.directory='+str(root),'rev-parse','HEAD'],cwd=root).strip()
+ expected_source=os.environ.get('PORTHUB_NATIVE_SOURCE_REVISION','');controller_revision=os.environ.get('PORTHUB_NATIVE_CONTROLLER_REVISION','')
+ if not re.fullmatch('[0-9a-f]{40}',expected_source) or source_revision!=expected_source:raise RuntimeError('native executable source checkout is not exact reviewed revision')
+ if not re.fullmatch('[0-9a-f]{40}',controller_revision):raise RuntimeError('separate immutable controller revision missing')
  nonce=uuid.uuid4().hex;receipt_dir=root/'private-sparse-native-receipts';receipt_dir.mkdir(exist_ok=True)
- receipt={'purpose':PURPOSE,'contract':args.contract,'nonce':nonce,'source':run(['git','-c','safe.directory='+str(root),'rev-parse','HEAD'],cwd=root).strip(),'exe_sha256':binary_sha,'tests':[],'native_executed':False,'cleanup_complete':False,'driver_package_scope':('signed bundled Wintun may remain in disposable VM driver store; no global driver removal' if args.contract=='windows' else None),'error':None,'offline_mock_only':bool(getattr(args,'offline_mock_only',False))}
+ receipt={'purpose':PURPOSE,'contract':args.contract,'nonce':nonce,'source':source_revision,'controller_revision':controller_revision,'exe_sha256':binary_sha,'tests':[],'native_executed':False,'cleanup_complete':False,'driver_package_scope':('signed bundled Wintun may remain in disposable VM driver store; no global driver removal' if args.contract=='windows' else None),'error':None,'offline_mock_only':bool(getattr(args,'offline_mock_only',False))}
  receipt['inputs']={name:sha(root/name) for name in INPUTS}
  stage=None;managed_created=False;hard_deadline=time.monotonic()+args.outer_timeout_seconds;deadline=hard_deadline-60
  prior_deadline=COMMAND_DEADLINE;COMMAND_DEADLINE=deadline

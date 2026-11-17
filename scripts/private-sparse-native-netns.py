@@ -12,7 +12,16 @@ def digest(path):
 def command(args,timeout=10,check=True):return subprocess.run(args,check=check,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=timeout)
 def own(cid,nonce,image):
  result=command(['docker','inspect',cid],check=False)
- if result.returncode:return None
+ if result.returncode:
+  # An inspect error is not evidence of absence. Require an independently
+  # successful complete-ID listing; daemon/permission/transient errors fail
+  # closed and leave the rootfs/journals available for exact owned repair.
+  listed=command(['docker','ps','--all','--no-trunc','--format','{{.ID}}'],check=False)
+  if listed.returncode:raise RuntimeError('cannot establish container absence: Docker enumeration failed')
+  ids=listed.stdout.decode('ascii').splitlines()
+  if len(ids)>4096 or any(not re.fullmatch('[0-9a-f]{64}',item) for item in ids):raise RuntimeError('cannot establish container absence: invalid bounded complete-ID inventory')
+  if cid in ids:raise RuntimeError('owned container still listed but cannot be inspected; rootfs retained')
+  return None
  row=json.loads(result.stdout)[0]
  if row['Name']!='/porthub-sparse-native-'+nonce or row['Image']!=image or row['Config']['Labels'].get('porthub.sparse.native.nonce')!=nonce:raise RuntimeError('container ownership changed; refusing mutation')
  return row
@@ -115,8 +124,8 @@ def self_test():
  import types
  original_command=globals()['command'];original_dependencies=globals()['dependencies'];original_stat=os.stat
  try:
-  for mode in ['success','failure','timeout']:
-   state={'exists':False,'nonce':None,'running':True,'stage':None};image='sha256:'+'b'*64;cid='d'*64
+  for mode in ['success','failure','timeout','inspect_error_live','inspect_error_daemon']:
+   state={'exists':False,'nonce':None,'running':True,'stage':None,'mutations':[]};image='sha256:'+'b'*64;cid='d'*64
    def fake(args,timeout=10,check=True):
     if args[:2]==['git','-C']:
      return types.SimpleNamespace(returncode=0,stdout=(b'a'*40+b'\n') if args[-2:]==['rev-parse','HEAD'] else b'',stderr=b'')
@@ -125,7 +134,10 @@ def self_test():
      state.update(exists=True,nonce=args[args.index('--name')+1].removeprefix('porthub-sparse-native-'))
      state['stage']=pathlib.Path(args[args.index('--mount')+1].split('source=')[1].split(',')[0]).parent
      return types.SimpleNamespace(returncode=0,stdout=(cid+'\n').encode(),stderr=b'')
+    if args[:2]==['docker','ps']:
+     return types.SimpleNamespace(returncode=1 if mode=='inspect_error_daemon' else 0,stdout=(cid+'\n').encode() if state['exists'] else b'',stderr=b'injected daemon error' if mode=='inspect_error_daemon' else b'')
     if args[:2]==['docker','inspect']:
+     if state['exists'] and mode.startswith('inspect_error'):return types.SimpleNamespace(returncode=1,stdout=b'',stderr=b'injected inspection failure')
      if not state['exists']:return types.SimpleNamespace(returncode=1,stdout=b'',stderr=b'absent')
      row={'Name':'/porthub-sparse-native-'+state['nonce'],'Image':image,'Config':{'Labels':{'porthub.sparse.native.nonce':state['nonce']}},'HostConfig':{'NetworkMode':'none','Privileged':False,'ReadonlyRootfs':True,'CapAdd':['NET_ADMIN','SYS_CHROOT']},'State':{'Running':state['running']}}
      return types.SimpleNamespace(returncode=0,stdout=json.dumps([row]).encode(),stderr=b'')
@@ -135,8 +147,8 @@ def self_test():
     if args[:2]==['docker','logs']:
      text='running 1 test\n'+TEST+'\nnative_owned_interfaces_and_routes_absent=true\ntest result: ok. 1 passed; 0 failed\n' if mode=='success' else 'bounded original native cause\n'
      return types.SimpleNamespace(returncode=0,stdout=text.encode(),stderr=b'')
-    if args[:2]==['docker','stop']:state['running']=False;return types.SimpleNamespace(returncode=0,stdout=b'',stderr=b'')
-    if args[:2]==['docker','rm']:state['exists']=False;return types.SimpleNamespace(returncode=0,stdout=b'',stderr=b'')
+    if args[:2]==['docker','stop']:state['mutations'].append('stop');state['running']=False;return types.SimpleNamespace(returncode=0,stdout=b'',stderr=b'')
+    if args[:2]==['docker','rm']:state['mutations'].append('rm');state['exists']=False;return types.SimpleNamespace(returncode=0,stdout=b'',stderr=b'')
     raise AssertionError('unreviewed fake command '+repr(args))
    def fake_stat(path,*args,**kwargs):
     if str(path)=='/dev/net/tun':return types.SimpleNamespace(st_mode=stat.S_IFCHR,st_rdev=os.makedev(10,200))
@@ -147,12 +159,21 @@ def self_test():
     failed=False
     try:run(types.SimpleNamespace(binary=str(binary),sha=digest(binary),source='a'*40,image=image,execute=True,offline_mock=True))
     except (RuntimeError,subprocess.TimeoutExpired):failed=True
-    assert failed==(mode!='success') and not state['exists']
-    receipt=json.loads((state['stage']/'receipt.json').read_text());assert receipt['offline_mock_only'] and receipt['container_absent'] and receipt['rootfs_removed'] and not receipt['cleanup_errors']
-    if mode!='success':assert receipt['error'] and 'bounded original native cause' in (state['stage']/'stdout.log').read_text()
+    assert failed==(mode!='success')
+    receipt=json.loads((state['stage']/'receipt.json').read_text());assert receipt['offline_mock_only']
+    if mode.startswith('inspect_error'):
+     assert state['exists'] and state['running'] and not state['mutations']
+     assert receipt['container_absent'] is not True and not receipt['rootfs_removed'] and receipt['cleanup_errors']
+     assert (state['stage']/'rootfs').is_dir() and receipt['error']
+     # Only this offline mock is discarded after proving the real finally
+     # retained a live container's filesystem. No Docker command is executed.
+     state['exists']=False
+    else:
+     assert not state['exists'] and receipt['container_absent'] and receipt['rootfs_removed'] and not receipt['cleanup_errors']
+     if mode!='success':assert receipt['error'] and 'bounded original native cause' in (state['stage']/'stdout.log').read_text()
     shutil.rmtree(state['stage'])
  finally:globals()['command']=original_command;globals()['dependencies']=original_dependencies;os.stat=original_stat
- print('offline whole outer 3 PASS: success/native failure/wait timeout; bounded logs, exact container and staging cleanup. NO Docker/native execution')
+ print('offline whole outer 5 PASS: success/native failure/wait timeout/inspect error with live container/daemon error with live container; exact absence or retained rootfs. NO Docker/native execution')
 if __name__=='__main__':
  parser=argparse.ArgumentParser();parser.add_argument('--self-test',action='store_true');parser.add_argument('--binary');parser.add_argument('--sha');parser.add_argument('--source');parser.add_argument('--image');parser.add_argument('--execute',action='store_true');args=parser.parse_args()
  if args.self_test:self_test()

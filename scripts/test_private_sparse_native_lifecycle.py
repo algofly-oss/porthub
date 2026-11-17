@@ -17,7 +17,7 @@ class Outer(unittest.TestCase):
   with tempfile.TemporaryDirectory() as temp:
    root=pathlib.Path(temp);binary=root/'tests';binary.write_bytes(b'not executed')
    args=argparse.Namespace(contract='linux',purpose=gate.PURPOSE,build_json='unused',outer_timeout_seconds=90,log_cap_bytes=4096,offline_mock_only=True)
-   with patch.object(gate,'source_guard',return_value=root),patch.object(gate.platform,'system',return_value='Linux'),patch.object(gate.os,'geteuid',return_value=0,create=True),patch.dict(os.environ,{'GITHUB_ACTIONS':'true','RUNNER_ENVIRONMENT':'github-hosted'}),patch.object(gate,'exact_executable',return_value=binary),patch.object(gate,'run',return_value='running 0 tests'),patch.object(gate,'unix_snapshot') as snapshot:
+   with patch.object(gate,'source_guard',return_value=root),patch.object(gate.platform,'system',return_value='Linux'),patch.object(gate.os,'geteuid',return_value=0,create=True),patch.dict(os.environ,{'GITHUB_ACTIONS':'true','RUNNER_ENVIRONMENT':'github-hosted','PORTHUB_NATIVE_SOURCE_REVISION':'d'*40,'PORTHUB_NATIVE_CONTROLLER_REVISION':'e'*40}),patch.object(gate,'exact_executable',return_value=binary),patch.object(gate,'run',return_value='running 0 tests'),patch.object(gate,'unix_snapshot') as snapshot:
     with self.assertRaisesRegex(RuntimeError,'native test missing'):gate.execute(args)
     snapshot.assert_not_called()
  def scenario(self,fail,changed=False):
@@ -33,12 +33,12 @@ class Outer(unittest.TestCase):
     kwargs['on_started'](None)
     if fail:raise gate.CommandError('injected native failure',b'bounded native diagnosis',b'failure')
     return 'running 1 test\n'+test+' ... ok\n1 passed; 0 failed\n'
-   with patch.object(gate,'source_guard',return_value=root),patch.object(gate.platform,'system',return_value='Linux'),patch.object(gate.os,'geteuid',return_value=0,create=True),patch.dict(os.environ,{'GITHUB_ACTIONS':'true','RUNNER_ENVIRONMENT':'github-hosted'}),patch.object(gate,'exact_executable',return_value=binary),patch.object(gate,'run',side_effect=run),patch.object(gate,'unix_snapshot',side_effect=([{'foreign':'stable'}]+[{'foreign':'changed'}]*200 if changed else [{'foreign':'stable'},{'foreign':'stable'}])):
+   with patch.object(gate,'source_guard',return_value=root),patch.object(gate.platform,'system',return_value='Linux'),patch.object(gate.os,'geteuid',return_value=0,create=True),patch.dict(os.environ,{'GITHUB_ACTIONS':'true','RUNNER_ENVIRONMENT':'github-hosted','PORTHUB_NATIVE_SOURCE_REVISION':'d'*40,'PORTHUB_NATIVE_CONTROLLER_REVISION':'e'*40}),patch.object(gate,'exact_executable',return_value=binary),patch.object(gate,'run',side_effect=run),patch.object(gate,'unix_snapshot',side_effect=([{'foreign':'stable'}]+[{'foreign':'changed'}]*200 if changed else [{'foreign':'stable'},{'foreign':'stable'}])):
     if fail or changed:
      with self.assertRaisesRegex(RuntimeError,'injected native failure' if fail else 'independent cleanup'):gate.execute(args)
     else:gate.execute(args)
    receipt=json.loads((root/'private-sparse-native-receipts/linux-receipt.json').read_text())
-   self.assertTrue(receipt['offline_mock_only'])
+   self.assertTrue(receipt['offline_mock_only']);self.assertEqual(receipt['source'],'d'*40);self.assertEqual(receipt['controller_revision'],'e'*40)
    if changed:
     self.assertFalse(receipt['cleanup_complete']);self.assertTrue(pathlib.Path(receipt['stage']).is_dir())
     self.assertEqual(pathlib.Path(receipt['stage']).name,'native-lifecycle-'+receipt['nonce'])
@@ -92,6 +92,15 @@ class Outer(unittest.TestCase):
    self.assertTrue(json.loads((receipts/'linux-netns-receipt.json').read_text())['offline_mock_only'])
  def test_netns_actual_image_controller_success_removes_only_exact_owned_image_offline(self):self.netns_scenario(False)
  def test_netns_actual_image_controller_preserves_native_failure_and_cleans_offline(self):self.netns_scenario(True)
+ def test_controller_checkout_cannot_substitute_for_exact_reviewed_payload(self):
+  with tempfile.TemporaryDirectory() as temp:
+   root=pathlib.Path(temp);binary=root/'tests';binary.write_bytes(b'not executed');test=gate.TESTS['linux'][0]
+   args=argparse.Namespace(contract='linux',purpose=gate.PURPOSE,build_json='unused',outer_timeout_seconds=90,log_cap_bytes=4096,offline_mock_only=True)
+   def run(argv,**kwargs):return test+': test\n' if '--list' in argv else 'd'*40
+   with patch.object(gate,'source_guard',return_value=root),patch.object(gate.platform,'system',return_value='Linux'),patch.object(gate.os,'geteuid',return_value=0,create=True),patch.dict(os.environ,{'GITHUB_ACTIONS':'true','RUNNER_ENVIRONMENT':'github-hosted','PORTHUB_NATIVE_SOURCE_REVISION':'f'*40,'PORTHUB_NATIVE_CONTROLLER_REVISION':'d'*40}),patch.object(gate,'exact_executable',return_value=binary),patch.object(gate,'run',side_effect=run),patch.object(gate,'unix_snapshot') as snapshot:
+    with self.assertRaisesRegex(RuntimeError,'exact reviewed revision'):gate.execute(args)
+    snapshot.assert_not_called()
+   self.assertFalse((root/'private-sparse-native-receipts').exists())
  def test_non_hosted_context_rejects_before_os_snapshot(self):
   args=argparse.Namespace(contract='linux',purpose=gate.PURPOSE)
   with patch.object(gate,'source_guard'),patch.object(gate.platform,'system',return_value='Linux'),patch.dict(os.environ,{'GITHUB_ACTIONS':'false'}),patch.object(gate,'unix_snapshot') as snapshot:
