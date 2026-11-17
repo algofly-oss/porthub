@@ -106,7 +106,7 @@ async fn hover_reads_one_point_without_waiting_for_fleet_history() -> Result<()>
         ]).await?;
         let baseline = App::new(Config::default(), case.db.clone());
         let started = std::time::Instant::now();
-        let full = porthub_api::inventory_traffic::snapshot(&baseline, &mongodb::bson::Bson::ObjectId(owner)).await?;
+        let full = porthub_api::inventory_traffic::snapshot(&baseline, &mongodb::bson::Bson::ObjectId(owner)).await.map_err(|error| anyhow::anyhow!("Baseline traffic snapshot failed: {}", error.detail))?;
         let full_ms = started.elapsed().as_millis();
         ensure!(full.ports.len() == 32);
         // A busy fleet read model cannot hold a point inspection hostage.
