@@ -32,6 +32,8 @@ struct Signal {
 struct Reply {
     snapshot: Snapshot,
     #[serde(default)]
+    exit_pick: Option<porthub_network::policy::ExitPickResponse>,
+    #[serde(default)]
     sparse_sequence: Option<u64>,
     #[serde(default)]
     pair_responses: Vec<porthub_network::policy::PairResponse>,
@@ -391,7 +393,23 @@ pub(crate) async fn run_watched_sparse_owned(
         let mut body = serde_json::json!({"peer_id":profile.peer_id,"token":profile.token,
             "fingerprint":identity.fingerprint(),"instance":instance,"stream_transport":stream_offer.offered(native_streams.as_ref()),"tor_exit":cfg!(all(feature="local-tor",any(target_os="linux",target_os="macos"))),"signals":&pending[..sent],
             "acks":&acks[..acked],"paths":paths,"lan_networks":lan_networks,"lan_exit":cfg!(any(target_os="linux",target_os="macos")),"application_proxy":cfg!(feature="local-tor")});
+        #[cfg(feature="private-sparse")]
+        let mut sent_exit_pick = None;
         if let Some(resolver)=&mut sparse {body["sparse"]=resolver.batch()?;
+            #[cfg(feature="private-sparse")]
+            {
+                let picker = resolver.handle().exit_picker();
+                let (gateway_ready, local_tor_ready) = picker.carriers();
+                let available = if gateway_ready { None } else {
+                    let mut ready: Vec<_> = peers.iter().filter(|(_, peer)| peer.session.state()==State::Ready).map(|(id, _)| id.clone()).collect();
+                    ready.sort();
+                    Some(ready)
+                };
+                body["exit_pair_protocol"] = serde_json::json!(1);
+                body["exit_ready"] = serde_json::json!(stream_offer.exit_ready(native_streams.as_ref()));
+                sent_exit_pick = picker.next(local_tor_ready, available);
+                if let Some(request) = &sent_exit_pick { body["exit_pick"] = serde_json::to_value(request)?; }
+            }
             if let Some(path)=&native_profile{if let Some(repair)=super::native_owner::repair_request(path)?{body["native_repair"]=serde_json::to_value(repair)?;}}
         }
         if let Some(report)=traffic.as_ref().and_then(|t|t.report()){body["traffic"]=serde_json::to_value(report)?;}
@@ -415,6 +433,7 @@ pub(crate) async fn run_watched_sparse_owned(
             let request_window = if reply.snapshot.sparse.is_some() {request_window} else {None};
             super::authority_event::Authority::new((),request_window.clone(),reply.snapshot.expires_at).check()?;
             ensure!(reply.snapshot.sparse.is_none()||sparse.is_some(),"sparse private authority was not negotiated");
+            ensure!(reply.exit_pick.is_none() || reply.snapshot.sparse.is_some(), "exit picker response lacks sparse authority");
             ensure!(reply.snapshot.pair_acl.is_none(),"pair-only compact ACL supplied as base authority");
             ensure!(reply.pair_responses.len()<=32,"private pair response exceeds limits");
             ensure!(
@@ -443,6 +462,8 @@ pub(crate) async fn run_watched_sparse_owned(
             );
             seen.retain(|_, at| now.duration_since(*at) < Duration::from_secs(90));
             let mut transport_peers=reply.snapshot.peers.clone();
+            #[cfg(feature="private-sparse")]
+            let mut accepted_exit_pick = None;
             if let Some(resolver)=&sparse {
                 if reply.snapshot.sparse.is_some() {
                     ensure!(reply.sparse_sequence==Some(resolver.sequence()),"private pair response sequence changed");
@@ -450,6 +471,22 @@ pub(crate) async fn run_watched_sparse_owned(
                     transport_peers.extend(resolver.handle().peers());
                     let mut validator=porthub_network::policy::Engine::default();validator.apply(reply.snapshot.clone())?;
                     for cached in resolver.handle().leases(){let _=validator.install_pair(cached);}
+                    #[cfg(feature="private-sparse")]
+                    {
+                        let picker = resolver.handle().exit_picker();
+                        picker.observe(&reply.snapshot);
+                        if let Some(response) = reply.exit_pick.take() {
+                            let sent = sent_exit_pick.as_ref().ok_or_else(||anyhow::anyhow!("unsolicited exit picker response"))?;
+                            let expiry = validate_exit_response(&reply.snapshot, sent, &response)?;
+                            let authority = super::authority_event::Authority::new((), request_window.clone(), expiry);
+                            authority.check()?;
+                            if let Some(lease) = &response.lease {
+                                validator.install_pair(lease.clone())?;
+                                transport_peers.push(lease.peer.clone());
+                            }
+                            accepted_exit_pick = Some((picker, sent.clone(), response, authority, expiry));
+                        }
+                    }
                     for resolution in &mut reply.pair_responses {
                         if resolution.status=="allowed" {
                             if let Some(lease)=&resolution.lease {
@@ -646,6 +683,20 @@ pub(crate) async fn run_watched_sparse_owned(
             );
             let response_expiry=reply.snapshot.expires_at;
             tokio::select! {_=cancel.cancelled()=>return Ok(()), result=events.send(Event::Snapshot(super::authority_event::Authority::new(reply.snapshot,request_window.clone(),response_expiry)))=>ensure!(result.is_ok(),"private packet owner closed")};
+            #[cfg(feature="private-sparse")]
+            if let Some((picker, sent, response, authority, expiry)) = accepted_exit_pick {
+                if let Some(lease) = &response.lease {
+                    let resolution = porthub_network::policy::PairResponse {
+                        query: porthub_network::policy::Lookup {kind:"peer".into(), value:lease.peer.id.clone()},
+                        status:"allowed".into(), lease:Some(lease.clone()),
+                    };
+                    tokio::select!{_=cancel.cancelled()=>return Ok(()),result=events.send(Event::Pair(super::authority_event::Authority::new(resolution,request_window.clone(),expiry)))=>ensure!(result.is_ok(),"private exit pair owner closed")};
+                }
+                // A published choice cannot precede its bounded packet-owner event.
+                if picker.accept(&sent, response, authority).is_err() {
+                    tracing::debug!("private exit picker response retired before publication");
+                }
+            }
             for resolution in reply.pair_responses {
                 tokio::select!{_=cancel.cancelled()=>return Ok(()),result=events.send(Event::Pair(super::authority_event::Authority::new(resolution,request_window.clone(),response_expiry)))=>ensure!(result.is_ok(),"private pair owner closed")};
             }
@@ -757,5 +808,39 @@ mod telemetry_carrier_tests {
         }
         assert_eq!(replies,super::super::probe::PROBE_PACKETS as usize);
         let Event::Packet{direct,carrier_direct,..}=peer_packet("peer".into(),Bytes::new(),false)else{unreachable!()};assert!(direct&&carrier_direct);
+    }
+}
+
+#[cfg(feature="private-sparse")]
+fn validate_exit_response(
+    base: &Snapshot,
+    sent: &porthub_network::policy::ExitPickRequest,
+    response: &porthub_network::policy::ExitPickResponse,
+) -> Result<chrono::DateTime<chrono::Utc>> {
+    let epoch = base.sparse.as_ref().and_then(|s|s.exit_epoch.as_deref())
+        .ok_or_else(||anyhow::anyhow!("exit picker epoch missing"))?;
+    response.validate_for(sent, epoch)?;
+    Ok(response.lease.as_ref().map(|lease|lease.expires_at.min(base.expires_at)).unwrap_or(base.expires_at))
+}
+#[cfg(all(test,feature="private-sparse"))]
+mod exit_response_tests {
+    use super::*;
+    use porthub_network::policy::{ExitPickRequest,ExitPickResponse};
+    #[test]
+    fn exit_response_preserves_final_request_expiry_and_rejects_wrong_correlation_or_role() {
+        let epoch="e".repeat(64);
+        let expiry=chrono::Utc::now()+chrono::Duration::seconds(10);
+        let base:Snapshot=serde_json::from_value(serde_json::json!({"workspace":"w","self":"a","revision":1,"expires_at":expiry,"peers":[],"grants":[],"sparse":{"protocol":1,"epoch":"a".repeat(64),"exit_epoch":epoch}})).unwrap();
+        let sent:ExitPickRequest=serde_json::from_value(serde_json::json!({"route_id":"route","flow_id":"a".repeat(64),"ordinal":1,"destination":"1.1.1.1","warmup":true})).unwrap();
+        let peer=|id:&str|serde_json::json!({"id":id,"ip":"10.203.0.2","fingerprint":"fp","instance":"instance","hostname":"a.phub"});
+        let mut response:ExitPickResponse=serde_json::from_value(serde_json::json!({"route_id":"route","flow_id":sent.flow_id,"ordinal":1,"warmup":true,"epoch":epoch,"status":"ready","choice":{"kind":"peer","id":"b"},"lease":{"workspace":"w","self":"a","epoch":"a".repeat(64),"expires_at":expiry+chrono::Duration::seconds(5),"revision":1,"local":peer("a"),"peer":peer("b"),"grants":[],"exit":{"route_id":"route","epoch":epoch,"client":"a","router":"b","traffic_mode":"internet_only"}}})).unwrap();
+        assert_eq!(validate_exit_response(&base,&sent,&response).unwrap(),expiry);
+        response.lease.as_mut().unwrap().expires_at=expiry-chrono::Duration::seconds(5);
+        assert_eq!(validate_exit_response(&base,&sent,&response).unwrap(),expiry-chrono::Duration::seconds(5));
+        response.ordinal+=1; assert!(validate_exit_response(&base,&sent,&response).is_err()); response.ordinal-=1;
+        response.lease.as_mut().unwrap().exit.as_mut().unwrap().router="a".into();
+        assert!(validate_exit_response(&base,&sent,&response).is_err());
+        response.lease.as_mut().unwrap().exit.as_mut().unwrap().router="b".into();
+        response.epoch="f".repeat(64); assert!(validate_exit_response(&base,&sent,&response).is_err());
     }
 }
