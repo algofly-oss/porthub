@@ -349,7 +349,8 @@ mod tests {
         assert!(allow_source_rebind(&path,old,new,&"a".repeat(32)).is_err());
         record.retirement.as_mut().unwrap().nonce=record.repair.as_ref().unwrap().nonce.clone();record.retirement.as_mut().unwrap().state=RetirementState::Completed;save(&state,&record)?;
         bind_pin(&path,new,source::Pin::Windows{name:"owned".into(),index:2,guid:"a".repeat(32),luid:3})?;
-        let record=read(&path)?.1;assert!(record.retired.contains(&old));assert!(record.repair.is_none());Ok(())
+        let record=read(&path)?.1;assert!(record.retired.contains(&old));assert!(record.repair.is_none());
+        fixture_assignment_ready(&path,old,new)?;assert!(fixture_assignment_ready(&path,old,old).is_err());Ok(())
     }
 
     #[test]
@@ -381,4 +382,12 @@ mod tests {
         assert!(read(&path)?.1.repair.is_some(),"failed constructor must retain old local rebind generation");Ok(())
     }
 
+}
+
+/// Native fixture checks the actual protected assignment after successful bind,
+/// independently of repair_request's intentional live-owner publication veto.
+#[cfg(test)]
+pub(super) fn fixture_assignment_ready(profile:&Path,old:Ipv4Addr,new:Ipv4Addr)->Result<()> {
+    let(_,record)=read(profile)?;
+    ensure!(record.active.as_ref().is_some_and(|active|active.own==new&&active.pin.is_some())&&record.retired.contains(&old)&&record.repair.is_none()&&record.retirement.is_none(),"fresh native assignment did not retire old feedback generation");Ok(())
 }

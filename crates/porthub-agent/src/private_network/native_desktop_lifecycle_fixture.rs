@@ -330,7 +330,6 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
     let suffix = format!("s{}.phub", spec.nonce);
     let next_suffix = format!("t{}.phub", spec.nonce);
     let restart_suffix = format!("u{}.phub", spec.nonce);
-    #[cfg(target_os = "macos")]
     let reallocated_suffix = format!("v{}.phub", spec.nonce);
     #[cfg(target_os = "macos")]
     for s in [&suffix, &next_suffix, &restart_suffix, &reallocated_suffix] {
@@ -350,9 +349,6 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
     let mut source_name = String::new();
     let result=timeout(Duration::from_secs(45),async {
         let pools=["10.254.253.0/24".parse()?,"10.254.254.0/24".parse()?];
-        #[cfg(windows)]
-        let mut tun=Arc::new(open(&spec,0,own).await?);
-        #[cfg(target_os="macos")]
         let mut tun=super::native_owner::open(&spec.profile,&format!("ph{}",&spec.nonce[..8]),own,&pools,&[]).await?;
         source_name=tun.name.clone();indices.push(tun.index);source=Some(tun.clone());
         let audit=tun.reconcile_sparse(&pools,&[remote]).await?;
@@ -426,9 +422,6 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }Ok::<_,anyhow::Error>(())
         }).await??;
-        #[cfg(windows)]
-        {tun=Arc::new(open(&spec,0,own).await?);}
-        #[cfg(target_os="macos")]
         {tun=super::native_owner::open(&spec.profile,&format!("ph{}",&spec.nonce[..8]),own,&pools,&[]).await?;}
         indices.push(tun.index);source=Some(tun.clone());
         let restarted=tun.reconcile_sparse(&pools,&[remote]).await?;
@@ -453,7 +446,6 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
         let close=cancel.child_token();let closed=close.clone();socket_task=Some(tokio::spawn(async move{closed.cancelled().await;drop(socket);}));
         close.cancel();timeout(Duration::from_secs(2),socket_task.take().unwrap()).await??;
         let rebound=tokio::net::UdpSocket::bind(endpoint).await?;drop(rebound);
-        #[cfg(target_os="macos")]
         let retained={
             let socket=tokio::net::UdpSocket::bind((own,0)).await?;
             socket.connect((remote,9000)).await?;socket.send(b"native-retained-before-conflict").await?;
@@ -463,13 +455,6 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
         let route=Route::new(IpAddr::V4(Ipv4Addr::new(10,254,254,0)),25).with_if_index(other.index);
         #[cfg(windows)]let route=route.with_metric(77);
         manager.add(&route).await?;sentinel=Some(route.clone());
-        #[cfg(windows)]
-        let tcp_own={
-            let audit=tun.reconcile_sparse(&pools,&[remote]).await?;
-            ensure!(audit.capture.conflicting.contains(&pools[1])&&!audit.accepted_peers.contains(&remote),"changed native LAN/VPN overlap retained capture/peer");
-            own
-        };
-        #[cfg(target_os="macos")]
         let tcp_own={
             // Only the production owner remains strongly referenced. The SAME
             // warmed socket stays open through retirement and fresh allocation.
@@ -492,6 +477,7 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
             indices.push(next.index);source=Some(next);
             ensure!(matches!(super::native_owner::reconcile(&mut source,&spec.profile,next_own,&next_pools,&[next_remote]).await?,super::native_owner::Outcome::Active(_)),"new allocation failed native reconciliation");
             ensure!(super::native_owner::repair_request(&spec.profile)?.is_none(),"new allocation retained stale repair feedback");
+            super::native_owner::fixture_assignment_ready(&spec.profile,own,next_own)?;
             let fresh=tokio::net::UdpSocket::bind((next_own,0)).await?;fresh.connect((next_remote,9002)).await?;
             fresh.send(b"native-fresh-allocation").await?;udp_seen(source.as_ref().unwrap(),next_own,next_remote).await?;
             let _=retained.send(b"native-retained-after-reallocation").await;
@@ -499,10 +485,12 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
                 Err(_)=>{},Ok(Ok(()))=>anyhow::bail!("old connected socket escaped after fresh allocation"),Ok(Err(error))=>return Err(error),
             }
             let mut server=dns::Server::bind(next_own).await?;let next_port=server.port()?;
+            #[cfg(target_os="macos")]
             let reallocation_observer=Arc::new(dns::fixture_witness::Observer::new(format!("peer.{reallocated_suffix}."),&spec.nonce,next_remote)?);
-            server.fixture_observer=Some(reallocation_observer.clone());
+            #[cfg(target_os="macos")]{server.fixture_observer=Some(reallocation_observer.clone());}
             server.zone.write().await.update(&snapshot(next_own,next_remote,&reallocated_suffix)?)?;
             dns_task=Some(tokio::spawn(server.serve(cancel.child_token())));
+            #[cfg(target_os="macos")]
             let direct_reallocation={
                 use std::io::Write;
                 let start=std::time::Instant::now();let result=direct_dns_witness(next_port,&format!("peer.{reallocated_suffix}."),&reallocation_observer,next_remote).await;
@@ -511,8 +499,9 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
             #[cfg(target_os="macos")]tcp_phase("dns_reallocation_publication_start")?;
             dns::replace_registration(&mut registration,&spec.profile,source.as_ref().unwrap().index,next_own,next_port,&[reallocated_suffix.clone()]).await?;
             #[cfg(target_os="macos")]tcp_phase("dns_reallocation_publication_effective_ready")?;
+            #[cfg(target_os="macos")]
             if super::dns_convergence_macos::fixture_owned_projection(&super::dns_convergence_macos::Endpoint{suffix:reallocated_suffix.clone(),port:next_port},"before_reallocation_lookup").await.is_err(){let _=tcp_phase("dns_reallocation_config_observation_unavailable");}
-            let _=dns_counts("before_reallocation_lookup",&reallocation_observer);
+            #[cfg(target_os="macos")]let _=dns_counts("before_reallocation_lookup",&reallocation_observer);
             #[cfg(target_os="macos")]tcp_phase("dns_reallocation_lookup_start")?;
         let lookup=timeout(Duration::from_secs(8),tokio::net::lookup_host((format!("peer.{reallocated_suffix}"),443))).await;
         #[cfg(target_os="macos")]
@@ -521,15 +510,17 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
             let (outcome,errno)=match &lookup {Ok(Ok(_))=>("complete",None),Ok(Err(error))=>("os_error",error.raw_os_error()),Err(_)=>("timeout",None)};
             println!("native_dns_lookup_phase=reallocation outcome={outcome} errno={errno:?}");std::io::stdout().flush()?;
         }
-        let _=dns_counts("after_reallocation_lookup",&reallocation_observer);
+        #[cfg(target_os="macos")]let _=dns_counts("after_reallocation_lookup",&reallocation_observer);
+        #[cfg(target_os="macos")]
         if !matches!(&lookup,Ok(Ok(_))) {
             tokio::time::sleep(Duration::from_millis(500)).await;
             let _=dns_counts("after_failed_reallocation_passive500ms",&reallocation_observer);
             let _=super::dns_convergence_macos::fixture_owned_projection(&super::dns_convergence_macos::Endpoint{suffix:reallocated_suffix.clone(),port:next_port},"after_reallocation_failure").await;
         }
         let answer=lookup??;
-        direct_reallocation?;
+        #[cfg(target_os="macos")]direct_reallocation?;
             ensure!(answer.into_iter().any(|s|s.ip()==IpAddr::V4(next_remote)),"actual resolver did not follow fresh native source allocation");
+            println!("native_source_retirement_ack=true repair_feedback_bound=true fresh_source_record=true");
             println!("native_whole_source_retirement=true retained_external_socket_no_escape=true fresh_allocation_capture=true fresh_allocation_system_dns=true");
             drop(fresh);drop(retained);next_own
         };
