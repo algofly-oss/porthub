@@ -101,6 +101,12 @@ class Outer(unittest.TestCase):
     with self.assertRaisesRegex(RuntimeError,'exact reviewed revision'):gate.execute(args)
     snapshot.assert_not_called()
    self.assertFalse((root/'private-sparse-native-receipts').exists())
+ def test_actual_windows_acl_helper_uses_separate_native_operations(self):
+  path=r'C:\ProgramData\PortHub\native-lifecycle-owned\profile.json';calls=[]
+  with patch.object(gate,'run',side_effect=lambda argv,**kwargs:calls.append(argv)):
+   gate.secure_windows_paths([path])
+  self.assertEqual(calls,[['icacls',path,'/inheritance:r','/grant:r','*S-1-5-18:(F)','*S-1-5-32-544:(F)'],['icacls',path,'/setowner','*S-1-5-32-544']])
+  self.assertTrue(all('"' not in token for call in calls for token in call))
  def test_non_hosted_context_rejects_before_os_snapshot(self):
   args=argparse.Namespace(contract='linux',purpose=gate.PURPOSE)
   with patch.object(gate,'source_guard'),patch.object(gate.platform,'system',return_value='Linux'),patch.dict(os.environ,{'GITHUB_ACTIONS':'false'}),patch.object(gate,'unix_snapshot') as snapshot:

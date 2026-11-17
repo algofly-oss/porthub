@@ -92,6 +92,13 @@ def ps(code,seconds=20):
  executable=pathlib.Path(os.environ['SystemRoot'])/'System32/WindowsPowerShell/v1.0/powershell.exe'
  code="[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);$OutputEncoding=[Console]::OutputEncoding;"+code
  return run([str(executable),'-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',base64.b64encode(code.encode('utf-16le')).decode()],seconds=seconds)
+def secure_windows_paths(paths):
+ for path in paths:
+  # icacls treats /setowner as a separate operation, not a /grant modifier.
+  # These are native argv tokens (no shell quotes or PowerShell expansion).
+  run(['icacls',str(path),'/inheritance:r','/grant:r','*S-1-5-18:(F)','*S-1-5-32-544:(F)'],seconds=15)
+  run(['icacls',str(path),'/setowner','*S-1-5-32-544'],seconds=15)
+
 def windows_snapshot():
  # Stable configuration only: do not compare byte/packet counters or live ages.
  code=r'''$ErrorActionPreference='Stop';$o=[ordered]@{
@@ -243,8 +250,7 @@ def execute(args):
   (stage/'spec.json').write_text(json.dumps(spec));(stage/'spec.json').chmod(0o600)
   if args.contract=='windows':
    # Fresh private managed root only. No inherited/foreign principal adoption.
-   for path in [managed,stage,*stage.iterdir()]:
-    run(['icacls',str(path),'/inheritance:r','/grant:r','*S-1-5-18:(F)','*S-1-5-32-544:(F)','/setowner','*S-1-5-32-544'],seconds=15)
+   secure_windows_paths([managed,stage,*stage.iterdir()])
   env=os.environ.copy();env.update(PORTHUB_SPARSE_NATIVE_FIXTURE=purpose,PORTHUB_SPARSE_NATIVE_SPEC=str(stage/'spec.json'),PORTHUB_SPARSE_NATIVE_SPEC_SHA256=sha(stage/'spec.json'),PORTHUB_TEST_DISPOSABLE_WINDOWS_DNS='1',RUST_LOG='off',RUST_BACKTRACE='0')
   for test in TESTS[args.contract]:
    gate=stage/'start.gate'
