@@ -210,10 +210,14 @@ pub(super) async fn connect(
             .map(|address| (IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), address))
             .collect()
     };
-    for (source, address) in paths {
+    for (preference, (source, address)) in paths.into_iter().enumerate() {
         let connector = connector.clone();
         let capability = offer.capability.clone();
         attempts.spawn(async move {
+            // Give the existing policy/observed-path order a bounded head start.
+            // Slow or unreachable preferred paths must not consume the whole
+            // connection deadline; later candidates still race after 200 ms each.
+            tokio::time::sleep(Duration::from_millis(200 * preference as u64)).await;
             let socket = tokio::net::TcpSocket::new_v4()?;
             socket.bind(SocketAddr::new(source, 0))?;
             let stream = socket.connect(address).await?;
@@ -249,6 +253,53 @@ pub(super) async fn connect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    async fn ordered_tls_path(stall_preferred: bool) -> Result<()> {
+        let listener = Listener::bind(None).await?;
+        let direct = listener.offer.addresses[0];
+        let proxy = TcpListener::bind("127.0.0.1:0").await?;
+        let preferred = proxy.local_addr()?;
+        let mut offer = listener.offer.clone();
+        offer.addresses = vec![preferred, direct];
+        let proxy_task = tokio::spawn(async move {
+            let (mut incoming, _) = proxy.accept().await?;
+            if stall_preferred {
+                std::future::pending::<()>().await;
+            }
+            // The fallback has no delay; preference must outweigh its faster TLS.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let mut upstream = TcpStream::connect(direct).await?;
+            tokio::io::copy_bidirectional(&mut incoming, &mut upstream).await?;
+            Ok::<_, anyhow::Error>(())
+        });
+        let started = tokio::time::Instant::now();
+        let (accepted, connected) = tokio::join!(listener.accept(), connect(offer, None));
+        let result = async {
+            let mut accepted = accepted?;
+            let mut connected = connected?;
+            ensure!(
+                connected.get_ref().0.peer_addr()?
+                    == if stall_preferred { direct } else { preferred }
+            );
+            ensure!(started.elapsed() < Duration::from_secs(4));
+            connected.write_all(b"ordered").await?;
+            let mut bytes = [0; 7];
+            accepted.read_exact(&mut bytes).await?;
+            ensure!(&bytes == b"ordered");
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        proxy_task.abort();
+        let _ = proxy_task.await;
+        result
+    }
+    #[tokio::test]
+    async fn preferred_authenticated_path_beats_faster_fallback() -> Result<()> {
+        ordered_tls_path(false).await
+    }
+    #[tokio::test]
+    async fn stalled_preferred_path_falls_back_within_original_deadline() -> Result<()> {
+        ordered_tls_path(true).await
+    }
     #[tokio::test]
     async fn bulk_tcp_authenticates_and_preserves_full_duplex_bytes() -> Result<()> {
         let listener = Listener::bind(None).await?;
@@ -320,7 +371,9 @@ mod tests {
             None,
             false,
         ));
-        let b = tokio::spawn(super::super::bridge_bulk(kernel_b, ws_b, tls_b?, rx, None, false));
+        let b = tokio::spawn(super::super::bridge_bulk(
+            kernel_b, ws_b, tls_b?, rx, None, false,
+        ));
         let (mut ar, mut aw) = tokio::io::split(app_a);
         let (mut br, mut bw) = tokio::io::split(app_b);
         let bytes_a = vec![13; 2 * 1024 * 1024];
