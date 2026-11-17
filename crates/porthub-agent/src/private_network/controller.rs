@@ -346,6 +346,8 @@ pub(crate) async fn run_watched_sparse_owned(
     // Never advertise PHT1 for guarded sparse mode until ACK-chunk provenance exists.
     // An older gateway declining sparse negotiation restores legacy PHT1 next sync.
     let mut stream_offer=StreamOffer::new(sparse.is_some());
+    #[cfg(feature="private-sparse")]
+    let mut exit_failures=super::exit_picker::Failures::default();
     let mut preferred = 0;
     let mut peers: HashMap<String, Live> = HashMap::new();
     let mut readers = JoinSet::new();
@@ -400,6 +402,7 @@ pub(crate) async fn run_watched_sparse_owned(
             {
                 let picker = resolver.handle().exit_picker();
                 let (gateway_ready, local_tor_ready) = picker.carriers();
+                for (id,peer) in &peers {let state=peer.session.state();exit_failures.observe(id,state==State::Ready,matches!(state,State::Failed|State::Closed));}
                 let available = if gateway_ready { None } else {
                     let mut ready: Vec<_> = peers.iter().filter(|(_, peer)| peer.session.state()==State::Ready).map(|(id, _)| id.clone()).collect();
                     ready.sort();
@@ -407,7 +410,8 @@ pub(crate) async fn run_watched_sparse_owned(
                 };
                 body["exit_pair_protocol"] = serde_json::json!(1);
                 body["exit_ready"] = serde_json::json!(stream_offer.exit_ready(native_streams.as_ref()));
-                sent_exit_pick = picker.next(local_tor_ready, available);
+                let failed=if gateway_ready{Vec::new()}else{exit_failures.peers()};
+                sent_exit_pick = picker.next_with_failures(local_tor_ready, available, failed);
                 if let Some(request) = &sent_exit_pick { body["exit_pick"] = serde_json::to_value(request)?; }
             }
             if let Some(path)=&native_profile{if let Some(repair)=super::native_owner::repair_request(path)?{body["native_repair"]=serde_json::to_value(repair)?;}}

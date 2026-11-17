@@ -138,6 +138,8 @@ impl Handle {
             available_peers: None,
             cursor: None,
             warmup,
+            discover: false,
+            unavailable_peers: Vec::new(),
         };
         if request.validate().is_err() {
             return None;
@@ -160,10 +162,19 @@ impl Handle {
     }
     /// One control RPC per sync. Carrier availability is fixed throughout a
     /// cursor fold; changing it halfway would invalidate the server selection.
+    #[cfg(test)]
     pub(crate) fn next(
         &self,
         local_tor_ready: bool,
         available_peers: Option<Vec<String>>,
+    ) -> Option<ExitPickRequest> {
+        self.next_with_failures(local_tor_ready, available_peers, Vec::new())
+    }
+    pub(crate) fn next_with_failures(
+        &self,
+        local_tor_ready: bool,
+        available_peers: Option<Vec<String>>,
+        unavailable_peers: Vec<String>,
     ) -> Option<ExitPickRequest> {
         let mut state = self.0.lock().unwrap();
         let now = Instant::now();
@@ -200,7 +211,9 @@ impl Handle {
         }
         if !entry.started {
             entry.request.local_tor_ready = local_tor_ready;
+            entry.request.discover = !entry.request.warmup && available_peers.is_some();
             entry.request.available_peers = available_peers;
+            entry.request.unavailable_peers = unavailable_peers;
             entry.started = true;
         }
         if entry.request.validate().is_err() {
@@ -285,6 +298,27 @@ impl Handle {
     }
 }
 
+/// Only observed transport failures are excluded. Absence of a carrier is
+/// discovery work, not evidence that a registered router is unreachable.
+#[derive(Default)]
+pub(crate) struct Failures(BTreeMap<String, Instant>);
+impl Failures {
+    pub(crate) fn observe(&mut self, id: &str, ready: bool, failed: bool) {
+        self.0
+            .retain(|_, at| at.elapsed() < Duration::from_secs(30));
+        if ready {
+            self.0.remove(id);
+        } else if failed && (self.0.len() < CAPACITY || self.0.contains_key(id)) {
+            self.0.insert(id.into(), Instant::now());
+        }
+    }
+    pub(crate) fn peers(&mut self) -> Vec<String> {
+        self.0
+            .retain(|_, at| at.elapsed() < Duration::from_secs(30));
+        self.0.keys().cloned().collect()
+    }
+}
+
 /// A reused TCP tuple with a new SYN sequence is a new cold-flow request.
 pub(crate) fn flow_tag(flow: &str, syn: Option<u32>) -> String {
     use sha2::{Digest, Sha256};
@@ -324,6 +358,7 @@ mod tests {
             flow_id: request.flow_id.clone(),
             ordinal: request.ordinal,
             warmup: request.warmup,
+            discover: request.discover,
             epoch: "e".repeat(64),
             status,
             choice: (status == ExitPickStatus::Ready).then_some(ExitChoice::LocalTor),
@@ -392,6 +427,35 @@ mod tests {
             .request
             .cursor
             .is_none());
+    }
+    #[test]
+    fn direct_only_flow_discovers_beyond_ready_cache_and_excludes_only_observed_failures() {
+        let handle = Handle::default();
+        handle.observe(&base());
+        let dst = "1.1.1.1".parse().unwrap();
+        let mut failures = Failures::default();
+        failures.observe("unknown", false, false);
+        assert!(failures.peers().is_empty());
+        failures.observe("broken", false, true);
+        handle.request("route", &"a".repeat(64), dst, false);
+        let request = handle
+            .next_with_failures(false, Some(Vec::new()), failures.peers())
+            .unwrap();
+        assert!(request.discover);
+        assert_eq!(request.available_peers, Some(Vec::new()));
+        assert_eq!(request.unavailable_peers, ["broken"]);
+        assert_eq!(request.ordinal, 0);
+        request.validate().unwrap();
+        failures.observe("broken", true, false);
+        assert!(failures.peers().is_empty());
+        for i in 0..CAPACITY + 10 {
+            failures.observe(&format!("peer-{i}"), false, true);
+        }
+        assert_eq!(failures.peers().len(), CAPACITY);
+        for at in failures.0.values_mut() {
+            *at = Instant::now() - Duration::from_secs(31);
+        }
+        assert!(failures.peers().is_empty());
     }
     #[test]
     fn selection_is_bounded_and_warmup_does_not_consume_flow_ordinals() {
