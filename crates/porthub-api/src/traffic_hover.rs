@@ -14,7 +14,7 @@ use axum::{
     Json, Router,
 };
 use futures_util::TryStreamExt;
-use mongodb::bson::{self, doc, Bson, DateTime, Document};
+use mongodb::bson::{self, doc, oid::ObjectId, DateTime, Document};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -74,10 +74,76 @@ fn bounded_text(record: &Document, key: &str) -> String {
         .take(256)
         .collect()
 }
+// Hover must not queue behind a whole-hour fleet snapshot or wait indefinitely.
 async fn hover(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
     Query(query): Query<Params>,
+) -> ApiResult<(HeaderMap, Json<Value>)> {
+    tokio::time::timeout(Duration::from_secs(3), hover_point(app, headers, query))
+        .await
+        .map_err(|_| unavailable())?
+}
+/// One covering measurement per current connection, in the same endpoint order
+/// as `measurement`. No raw source-IP hour enters the application read model.
+async fn point_samples(
+    app: &App,
+    owner: ObjectId,
+    connections: &[ObjectId],
+    timestamp: i64,
+    now: i64,
+) -> ApiResult<HashMap<String, Sample>> {
+    if connections.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let _permit = app
+        .inventory_traffic
+        .3
+        .acquire()
+        .await
+        .map_err(|_| unavailable())?;
+    let duration = doc! {"$cond":[{"$and":[
+        {"$isNumber":"$sample.interval_seconds"},
+        {"$gt":["$sample.interval_seconds",0.0]},
+        {"$lte":["$sample.interval_seconds",f64::MAX]}
+    ]},"$sample.interval_seconds",1.0]};
+    let pipeline = vec![
+        doc! {"$match":{"owner_id":owner,"connection_id":{"$in":connections},"timestamp":{"$gte":timestamp,"$lte":now+1}}},
+        doc! {"$project":{"_id":0,"connection_id":1,"timestamp":1,
+        "sample.timestamp":1,"sample.interval_seconds":1,
+        "sample.in_bytes":1,"sample.out_bytes":1,"sample.drop_bytes":1,
+        "sample.in_rate":1,"sample.out_rate":1,"sample.drop_rate":1}},
+        doc! {"$match":{"$expr":{"$gt":[timestamp as f64,{"$subtract":["$timestamp",duration]}]}}},
+        doc! {"$sort":{"connection_id":1,"timestamp":1}},
+        doc! {"$group":{"_id":"$connection_id","record":{"$first":"$$ROOT"}}},
+        doc! {"$replaceRoot":{"newRoot":"$record"}},
+    ];
+    let rows = app
+        .collection(crate::firewall_history::COLLECTION)
+        .aggregate(pipeline)
+        .max_time(Duration::from_secs(2))
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?;
+    let mut result = HashMap::new();
+    for row in rows {
+        let Some(value) = row
+            .get("sample")
+            .and_then(|sample| bson::from_bson::<Value>(sample.clone()).ok())
+        else {
+            continue;
+        };
+        let numeric = inventory_traffic::numeric(&[value]);
+        if let Some(sample) = measurement(&numeric, timestamp as u64) {
+            result.insert(store::id(row.get("connection_id")), sample);
+        }
+    }
+    Ok(result)
+}
+async fn hover_point(
+    app: Arc<App>,
+    headers: HeaderMap,
+    query: Params,
 ) -> ApiResult<(HeaderMap, Json<Value>)> {
     let _lifecycle = app.account_lifecycle.read().await;
     let user = auth::current_user(&app, &headers).await?;
@@ -141,12 +207,19 @@ async fn hover(
         }
     }
     drop(metadata_permit);
-    let snapshot = inventory_traffic::snapshot(&app, &Bson::ObjectId(owner)).await?;
+    let ids = records
+        .iter()
+        .filter_map(|record| record.get_object_id("_id").ok())
+        .collect::<Vec<_>>();
+    // Project numeric fields before grouping: source-IP arrays are read only for
+    // the final bounded selection below. The existing owner/connection/time
+    // index seeks to the hovered second rather than transferring an hour.
+    let samples = point_samples(&app, owner, &ids, timestamp, now).await?;
     let mut selected = records
         .iter()
         .filter_map(|record| {
             let id = store::id(record.get("_id"));
-            let sample = measurement(snapshot.ports.get(&id)?, query.timestamp)?;
+            let sample = *samples.get(&id)?;
             let rate = sample.in_rate + sample.out_rate + sample.drop_rate;
             (rate.is_finite() && rate > 0.).then_some((record, id, sample, rate))
         })

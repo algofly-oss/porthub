@@ -76,3 +76,56 @@ async fn hover_is_owner_scoped_interval_aware_and_honest_about_sources_and_confi
     case.db.drop().await?;
     result
 }
+
+#[tokio::test]
+#[ignore = "requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn hover_reads_one_point_without_waiting_for_fleet_history() -> Result<()> {
+    let case = Case::new(Config::default()).await?;
+    let result = async {
+        let (owner, cookie) = case.user("point-hover@example.invalid", "user").await?;
+        firewall_history::initialize(&case.app).await?;
+        let now = DateTime::now().timestamp_millis() / 1000;
+        let machine = ObjectId::new();
+        case.app.collection("machines").insert_one(doc! {"_id":machine,"user_id":owner,"name":"Point fixture"}).await?;
+        let ips = (1..=128).map(|n| format!("192.0.2.{n}")).collect::<Vec<_>>();
+        let mut first = None;
+        for n in 0..32 {
+            let id = ObjectId::new();
+            let record = doc! {"_id":id,"user_id":owner,"machine_id":machine,"service_name":format!("Port {n}"),"internal_ip":"192.0.2.200","internal_port":3000,"external_port":8000+n,"created_at":DateTime::from_millis((now-7200)*1000)};
+            case.app.collection("connections").insert_one(record.clone()).await?;
+            let samples = (1..=120).map(|step| json!({"timestamp":now-3600+step*30,"interval_seconds":30,"in_rate":n+1,"out_rate":0,"in_bytes":30*(n+1),"accepted_incoming_ips":ips,"accepted_incoming_ips_window_seconds":30,"accepted_incoming_ips_address_families":["ipv4"]})).collect::<Vec<_>>();
+            firewall_history::persist(&case.app, &record, &samples).await?;
+            if n == 0 { first = Some((id, record)); }
+        }
+        let (first_id, first_record) = first.unwrap();
+        // The first covering endpoint is authoritative even when it is zero.
+        // A later overlapping positive endpoint must not manufacture activity.
+        firewall_history::persist(&case.app, &first_record, &[
+            json!({"timestamp":now-150,"interval_seconds":30,"in_rate":0,"out_rate":0}),
+            json!({"timestamp":now-120,"interval_seconds":90,"in_rate":99999,"out_rate":0}),
+        ]).await?;
+        let baseline = App::new(Config::default(), case.db.clone());
+        let started = std::time::Instant::now();
+        let full = porthub_api::inventory_traffic::snapshot(&baseline, &mongodb::bson::Bson::ObjectId(owner)).await?;
+        let full_ms = started.elapsed().as_millis();
+        ensure!(full.ports.len() == 32);
+        // A busy fleet read model cannot hold a point inspection hostage.
+        let fleet_guard = case.app.inventory_traffic.0.lock().await;
+        let started = std::time::Instant::now();
+        let answer = tokio::time::timeout(std::time::Duration::from_secs(2), case.call("GET", &format!("/api/traffic/hover?timestamp={}&limit=6", now-177), &cookie, Value::Null, &[])).await;
+        let point_ms = started.elapsed().as_millis();
+        drop(fleet_guard);
+        let (status, _, page) = answer??;
+        ensure!(status == StatusCode::OK, "{page}");
+        ensure!(page["total_contributors"] == 31 && page["truncated"] == true, "{page}");
+        let rows = page["contributors"].as_array().unwrap();
+        ensure!(rows.len() == 6 && rows[0]["incoming_bytes_per_second"].as_f64() == Some(32.));
+        ensure!(rows.iter().all(|row| row["connection_id"] != first_id.to_hex()));
+        ensure!(rows.iter().all(|row| row["measurement"]["end_timestamp"] == now-150));
+        ensure!(rows[0]["accepted_incoming_ips"].as_array().unwrap().len() == 16 && rows[0]["source_ips_truncated"] == true);
+        println!("POINT_HOVER_BENCHMARK connections=32 retained_measurements=3840 full_history_ms={full_ms} point_ms={point_ms} fleet_cache_locked=true response_rows=6");
+        Ok(())
+    }.await;
+    case.db.drop().await?;
+    result
+}
