@@ -102,14 +102,21 @@ async fn point_samples(
         .acquire()
         .await
         .map_err(|_| unavailable())?;
+    // Older serde_json arbitrary_precision values are persisted as the exact
+    // one-field private Number object. Decode only that representation for
+    // Mongo coverage arithmetic; keep the stored sample unchanged for parsing.
+    let numeric_duration = doc! {"$cond":[{"$isNumber":"$sample.interval_seconds"},"$sample.interval_seconds",
+        {"$cond":[{"$eq":[{"$type":"$sample.interval_seconds"},"object"]},
+            {"$cond":[{"$eq":[{"$size":{"$objectToArray":"$sample.interval_seconds"}},1]},
+                {"$convert":{"input":{"$getField":{"field":{"$literal":"$serde_json::private::Number"},"input":"$sample.interval_seconds"}},"to":"double","onError":0.0,"onNull":0.0}},0.0]},0.0]}]};
     let duration = doc! {"$cond":[{"$and":[
-        {"$isNumber":"$sample.interval_seconds"},
-        {"$gt":["$sample.interval_seconds",0.0]},
-        {"$lte":["$sample.interval_seconds",f64::MAX]}
-    ]},"$sample.interval_seconds",1.0]};
+        {"$isNumber":"$_hover_duration"},
+        {"$gt":["$_hover_duration",0.0]},
+        {"$lte":["$_hover_duration",f64::MAX]}
+    ]},"$_hover_duration",1.0]};
     let pipeline = vec![
         doc! {"$match":{"owner_id":owner,"connection_id":{"$in":connections},"timestamp":{"$gte":timestamp,"$lte":now+1}}},
-        doc! {"$project":{"_id":0,"connection_id":1,"timestamp":1,
+        doc! {"$project":{"_id":0,"connection_id":1,"timestamp":1,"_hover_duration":numeric_duration,
         "sample.timestamp":1,"sample.interval_seconds":1,
         "sample.in_bytes":1,"sample.out_bytes":1,"sample.drop_bytes":1,
         "sample.in_rate":1,"sample.out_rate":1,"sample.drop_rate":1}},

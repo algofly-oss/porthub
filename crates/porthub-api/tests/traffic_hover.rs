@@ -31,6 +31,13 @@ async fn hover_is_owner_scoped_interval_aware_and_honest_about_sources_and_confi
             }
             firewall_history::persist(&case.app,&record,&[sample]).await?;
         }
+        // Exercise the ACTUAL API serde_json arbitrary_precision BSON encoding,
+        // together with normal native numeric BSON from other persisted clients.
+        let persisted=case.app.collection(firewall_history::COLLECTION).find_one(doc!{"connection_id":ids[0]}).await?.unwrap();
+        let encoded_interval=mongodb::bson::to_bson(&json!(5.0))?;
+        ensure!(encoded_interval.as_document().is_some_and(|value|value.get_str("$serde_json::private::Number")==Ok("5.0")),"API fixture must exercise wrapped arbitrary-precision numbers");
+        ensure!(persisted.get_document("sample")?.get("interval_seconds")==Some(&encoded_interval));
+        case.app.collection(firewall_history::COLLECTION).update_many(doc!{"connection_id":ids[5]},doc!{"$set":{"sample.interval_seconds":5.0}}).await?;
         // Legacy persisted samples lack a trustworthy recorded port snapshot.
         case.app.collection(firewall_history::COLLECTION).update_many(doc!{"connection_id":ids[4]},doc!{"$unset":{"public_port":""}}).await?;
         let foreign_id=ObjectId::new();
