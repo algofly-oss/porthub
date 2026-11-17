@@ -12,6 +12,8 @@ pub mod device;
 pub mod dns;
 #[cfg(target_os="macos")]
 mod dns_default_macos;
+#[cfg(target_os="macos")]
+mod dns_private_macos;
 #[cfg(any(target_os="macos",test))]
 mod dns_convergence_macos;
 mod dns_upstream;
@@ -97,6 +99,8 @@ mod dns_windows;
 mod authority_clock;
 
 mod authority_event;
+#[cfg(any(target_os="macos",test))]
+mod owned_packet_loop;
 
 #[cfg(all(feature="private-sparse",feature="private-stream"))]
 mod stream_chunks;

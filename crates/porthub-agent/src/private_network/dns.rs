@@ -1,5 +1,8 @@
 //! Authoritative private-zone DNS with bounded forwarding for controlled names.
 //! Explicit local-Tor exit policies also route public-name resolution through Tor.
+#[cfg(test)]
+#[path="dns_fixture_witness.rs"]
+pub(super) mod fixture_witness;
 use super::policy::Snapshot;
 use anyhow::{ensure, Result};
 use hickory_proto::{
@@ -205,6 +208,8 @@ mod sparse_dns_tests {
     }
 }
 pub struct Server {
+    #[cfg(test)]
+    pub(super) fixture_observer:Option<Arc<fixture_witness::Observer>>,
     socket: UdpSocket,
     tcp: TcpListener,
     pub zone: Arc<RwLock<Zone>>,
@@ -233,7 +238,7 @@ impl Server {
         let (socket,tcp)={let socket=UdpSocket::bind(address).await?;let tcp=TcpListener::bind(socket.local_addr()?).await?;(socket,tcp)};
         #[cfg(windows)]
         let (socket,tcp)=super::dns_windows::bind(std::net::SocketAddrV4::new(address.0,address.1))?;
-        Ok(Self { socket, tcp, zone: Default::default(), upstream: Default::default() })
+        Ok(Self { socket, tcp, zone: Default::default(), upstream: Default::default(), #[cfg(test)] fixture_observer:None })
     }
     pub fn port(&self) -> Result<u16> {
         Ok(self.socket.local_addr()?.port())
@@ -246,6 +251,7 @@ impl Server {
         let address = self.socket.local_addr()?;
         let own = address.ip();
         let socket = Arc::new(self.socket);
+        #[cfg(test)]let observer=self.fixture_observer;
         let mut buffer = [0; 1501];
         let mut connections = tokio::task::JoinSet::new();
         loop {
@@ -257,6 +263,7 @@ impl Server {
                     if (remote.ip()!=own && !remote.ip().is_loopback()) || connections.len() >= 32 { continue; }
                     let zone = self.zone.clone();
                     let upstream = upstream.clone();
+                    #[cfg(test)]let observer=observer.clone();
                     connections.spawn(async move {
                         use tokio::io::{AsyncReadExt, AsyncWriteExt};
                         let exchange = async {
@@ -265,10 +272,12 @@ impl Server {
                                 anyhow::ensure!((12..=1500).contains(&length), "invalid DNS query size");
                                 let mut query = vec![0; length];
                                 stream.read_exact(&mut query).await?;
+                                #[cfg(test)]if let Some(o)=&observer{o.query(&query,remote);}
                                 let answer = answer_with_upstream(&zone, &upstream, &query, address, true).await;
                                 if let Some(answer) = answer {
                                     stream.write_u16(answer.len() as u16).await?;
                                     stream.write_all(&answer).await?;
+                                    #[cfg(test)]if let Some(o)=&observer{o.reply(&query,&answer,remote);}
                                 } else { break; }
                             }
                             Ok::<_, anyhow::Error>(())
@@ -277,7 +286,9 @@ impl Server {
                     });
                 },
                 packet=socket.recv_from(&mut buffer)=>{
-                let (n,remote)=packet?; if remote.ip()!=own && !remote.ip().is_loopback() {continue;}
+                let (n,remote)=packet?;
+                #[cfg(test)]if let Some(o)=&observer{o.query(&buffer[..n],remote);}
+                if remote.ip()!=own && !remote.ip().is_loopback() {continue;}
                 if {let zone=self.zone.read().await;zone.needs_upstream(&buffer[..n])||zone.missing_private(&buffer[..n]).is_some()} {
                     if connections.len() >= 32 { continue; }
                     let query = buffer[..n].to_vec();
@@ -292,7 +303,7 @@ impl Server {
                     continue;
                 }
                 let answer=self.zone.read().await.answer(&buffer[..n]);
-                if let Some(answer)=answer {tokio::select! {_=cancel.cancelled()=>return Ok(()),result=socket.send_to(&answer,remote)=>{result?;}}}
+                if let Some(answer)=answer {tokio::select! {_=cancel.cancelled()=>return Ok(()),result=socket.send_to(&answer,remote)=>{result?;#[cfg(test)]if let Some(o)=&observer{o.reply(&buffer[..n],&answer,remote);}}}}
             }}
         }
     }
@@ -324,6 +335,8 @@ pub struct Registration {
     #[cfg(target_os = "macos")]
     paths: Vec<(std::path::PathBuf, Vec<u8>)>,
     #[cfg(target_os="macos")]
+    private_session: Option<super::dns_private_macos::Session>,
+    #[cfg(target_os="macos")]
     withdraw_pending: Vec<super::dns_convergence_macos::Endpoint>,
     #[cfg(target_os="macos")]
     tor_default: Option<super::dns_default_macos::Registration>,
@@ -335,12 +348,14 @@ pub struct Registration {
 
 #[cfg(target_os="macos")]
 fn resolver_endpoints(registration:&Registration)->Result<Vec<super::dns_convergence_macos::Endpoint>>{
-    registration.paths.iter().map(|(path,contents)|{
+    let mut endpoints=registration.paths.iter().map(|(path,contents)|{
         let suffix=path.file_name().and_then(|v|v.to_str()).ok_or_else(||anyhow::anyhow!("invalid owned DNS suffix"))?.to_owned();
         let text=std::str::from_utf8(contents)?;
         let port=text.lines().find_map(|line|line.strip_prefix("port ")).ok_or_else(||anyhow::anyhow!("missing owned DNS port"))?.parse()?;
         Ok(super::dns_convergence_macos::Endpoint{suffix,port})
-    }).collect()
+    }).collect::<Result<Vec<_>>>()?;
+    if let Some(session)=&registration.private_session{endpoints.extend(session.endpoints.clone());}
+    Ok(endpoints)
 }
 #[cfg(target_os="macos")]
 fn close_resolver_files(registration:&mut Registration)->Result<()>{
@@ -360,6 +375,7 @@ pub async fn shutdown_registration(current:&mut Option<Registration>)->Result<()
         let mut old=resolver_endpoints(registration)?;old.extend(registration.withdraw_pending.clone());
         registration.withdraw_pending=old.clone();
         close_resolver_files(registration)?;
+        if let Some(session)=registration.private_session.as_mut(){session.close().await?;}
         super::dns_convergence_macos::wait(&[],&old).await?;
     }
     *current=None;Ok(())
@@ -387,7 +403,13 @@ pub async fn replace_registration(current:&mut Option<Registration>,profile:&std
         }else{None};
         let mut previous=current.as_ref().map(resolver_endpoints).transpose()?.unwrap_or_default();
         if let Some(old)=current.as_ref(){previous.extend(old.withdraw_pending.clone());}
-        let mut next=replace_files(current.as_mut(),std::path::Path::new("/etc/resolver"),port,&private)?;
+        let allowed=current.as_ref().map(resolver_endpoints).transpose()?.unwrap_or_default();
+        let mut next=Registration::default();
+        next.private_session=if private.is_empty(){None}else{Some(super::dns_private_macos::register(port,&private,&allowed).await?)};
+        if let Some(old)=current.as_mut(){
+            close_resolver_files(old)?;
+            if let Some(session)=old.private_session.as_mut(){session.close().await?;}
+        }
         if needs_default {next.tor_default=current.as_mut().and_then(|old|old.tor_default.take()).or(new_default);}
         *current=Some(next);
         let present=resolver_endpoints(current.as_ref().unwrap())?;
@@ -507,13 +529,15 @@ pub async fn register(
     suffixes: &[String],
 ) -> Result<Registration> {
     let private:Vec<_>=suffixes.iter().filter(|suffix|suffix.as_str()!=".").cloned().collect();
-    let mut registration=register_files(std::path::Path::new("/etc/resolver"), port, &private)?;
+    let mut registration=Registration::default();
+    registration.private_session=if private.is_empty(){None}else{Some(super::dns_private_macos::register(port,&private,&[]).await?)};
     if suffixes.iter().any(|suffix|suffix==".") {
         registration.tor_default=Some(super::dns_default_macos::register(port).await?);
     }
     let present=resolver_endpoints(&registration)?;
     if let Err(error)=super::dns_convergence_macos::wait(&present,&[]).await{
         close_resolver_files(&mut registration)?;
+        if let Some(session)=registration.private_session.as_mut(){session.close().await?;}
         super::dns_convergence_macos::wait(&[],&present).await?;
         return Err(error);
     }
@@ -798,7 +822,7 @@ mod tcp_tests {
                 Rule { domain: "exact.test".into(), include_subdomains: false, action: Action::Block },
             ])?, ..Default::default()
         };
-        let server = Server { socket, tcp, zone: Arc::new(RwLock::new(zone)), upstream: Default::default() };
+        let server = Server { socket, tcp, zone: Arc::new(RwLock::new(zone)), upstream: Default::default(), fixture_observer:None };
         let cancel = CancellationToken::new();
         let task = tokio::spawn(server.serve_with(cancel.clone(), upstream));
         let client = UdpSocket::bind("127.0.0.1:0").await?;
@@ -840,7 +864,7 @@ mod tcp_tests {
             domain: "blocked.example".into(), action: porthub_mesh::dns_policy::Action::Block,
             include_subdomains: true,
         }], ..Default::default() };
-        let server = Server { socket, tcp, zone: Arc::new(RwLock::new(zone)), upstream: Default::default() };
+        let server = Server { socket, tcp, zone: Arc::new(RwLock::new(zone)), upstream: Default::default(), fixture_observer:None };
         let cancel = CancellationToken::new();
         let task = tokio::spawn(server.serve(cancel.clone()));
         let mut query = Message::query();

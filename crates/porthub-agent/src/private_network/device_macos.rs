@@ -10,12 +10,16 @@ use std::{
 };
 use tokio::sync::Mutex;
 use tun_rs::DeviceBuilder;
+#[path="address_route_macos.rs"]
+mod address_route;
 
 pub struct Tun {
     device: tun_rs::AsyncDevice,
     pub index: u32,
     pub name: String,
     own: Ipv4Addr,
+    address_route: address_route::AddressRoute,
+    packet_loop: super::owned_packet_loop::OwnedPacketLoop,
     routes: Mutex<HashSet<Ipv4Addr>>,
     capture_routes: Mutex<std::collections::BTreeSet<porthub_mesh::lan_routes::Network>>,
 }
@@ -34,6 +38,7 @@ fn conflicts_with_route(address: Ipv4Addr, route: &Route) -> bool {
 
 impl Tun {
     pub(super) fn own_ip(&self)->Ipv4Addr{self.own}
+    pub(super) fn packet_loop(&self)->&super::owned_packet_loop::OwnedPacketLoop{&self.packet_loop}
     /// Fresh native inventory BEFORE assigning a source address. Never recreate
     /// an old bound source transiently while a conflicting LAN is still live.
     pub(super) async fn preflight_sparse(own:Ipv4Addr,pools:&[porthub_mesh::lan_routes::Network],peers:&[Ipv4Addr])->Result<()>{
@@ -48,6 +53,9 @@ impl Tun {
             "invalid private route address"
         );
 
+        // Require positive pre-address absence; unknown is never absence/adoption.
+        let local_before=address_route::BeforeAddress::observe(own);
+        local_before.validate()?; // No address is assigned on unknown/foreign pre-state.
         let device = DeviceBuilder::new()
             .ipv4(own, 32, None)
             .mtu(porthub_mesh::MAX_PACKET as u16)
@@ -64,11 +72,15 @@ impl Tun {
         // SAFETY: the interface name is a live NUL-terminated CString.
         let index = unsafe { libc::if_nametoindex(interface_name.as_ptr()) };
         ensure!(index != 0, "cannot find macOS private utun interface");
+        let address_route=address_route::AddressRoute::confirm(&name,index,own,local_before)?;
+        let packet_loop=super::owned_packet_loop::OwnedPacketLoop::new(own,index)?;
         let tun = Self {
             device,
             index,
             name,
             own,
+            address_route,
+            packet_loop,
             routes: Mutex::new(HashSet::new()),
             capture_routes: Mutex::new(std::collections::BTreeSet::new()),
         };
@@ -81,7 +93,8 @@ impl Tun {
         use porthub_network::capture_routes::{self,ExistingRoute};
         let mut manager=AsyncRouteManager::new().context("cannot open capture route manager")?;
         let native=manager.list().await.context("cannot inspect capture routes")?;
-        let existing:Vec<_>=native.iter().filter_map(|r|match r.destination(){IpAddr::V4(address)=>Some(ExistingRoute{destination:address,prefix:r.prefix(),interface:r.if_index()}),_=>None}).collect();
+        self.address_route.verify()?;
+        let existing:Vec<_>=native.iter().filter(|r|!self.address_route.matches(r)).filter_map(|r|match r.destination(){IpAddr::V4(address)=>Some(ExistingRoute{destination:address,prefix:r.prefix(),interface:r.if_index()}),_=>None}).collect();
         let mut plan=capture_routes::plan(pools,&existing,self.index)?;
         let wanted:std::collections::BTreeSet<_>=plan.accepted.iter().copied().collect();let mut owned=self.capture_routes.lock().await;
         for prefix in owned.difference(&wanted).copied().collect::<Vec<_>>(){
@@ -101,7 +114,8 @@ impl Tun {
         use porthub_network::capture_routes::{self,ExistingRoute};
         let mut manager=AsyncRouteManager::new().context("cannot open sparse route audit")?;
         let native=manager.list().await.context("cannot inspect sparse route audit")?;
-        let existing:Vec<_>=native.iter().filter_map(|r|match r.destination(){IpAddr::V4(address)=>Some(ExistingRoute{destination:address,prefix:r.prefix(),interface:r.if_index()}),_=>None}).collect();
+        self.address_route.verify()?;
+        let existing:Vec<_>=native.iter().filter(|r|!self.address_route.matches(r)).filter_map(|r|match r.destination(){IpAddr::V4(address)=>Some(ExistingRoute{destination:address,prefix:r.prefix(),interface:r.if_index()}),_=>None}).collect();
         let mut audit=super::native_owner::conflict(capture_routes::audit(pools,self.own,peers,&existing,self.index)?)?;
         // A route removed outside PortHub is not still a valid ownership claim.
         // Forget missing entries so an exclusive add can repair them, never adopt
@@ -126,8 +140,8 @@ impl Tun {
             peers.iter().all(Ipv4Addr::is_private),
             "invalid private route address"
         );
-        let mut wanted: HashSet<_> = peers.iter().copied().collect();
-        wanted.insert(self.own);
+        self.address_route.verify()?;
+        let wanted: HashSet<_> = peers.iter().copied().filter(|ip|*ip!=self.own).collect();
         let mut current = self.routes.lock().await;
         let additions: Vec<_> = wanted.difference(&current).copied().collect();
         let mut routes = AsyncRouteManager::new().context("cannot open macOS route manager")?;
@@ -135,7 +149,8 @@ impl Tun {
 
         for address in &wanted {
             for route in &existing {
-                if route.prefix() == 0 || route.if_index() == Some(self.index) {
+                if route.prefix() == 0 || route.if_index() == Some(self.index)
+                    || self.address_route.matches(route) {
                     continue;
                 }
                 if conflicts_with_route(*address, route) {
@@ -145,14 +160,8 @@ impl Tun {
         }
 
         for address in additions {
-            // macOS installs the utun's own /32 while assigning its address.
-            // Reuse only an exact route on this newly owned interface; another
-            // interface's route was rejected above and must never be adopted.
-            if existing.iter().any(|route| route.destination() == IpAddr::V4(address)
-                && route.prefix() == 32 && route.if_index() == Some(self.index)) {
-                current.insert(address);
-                continue;
-            }
+            // Remote hosts require an exclusive ADD. Own traffic stays on the
+            // address-born utun host route and the production local dispatcher.
             let route = Route::new(IpAddr::V4(address), 32).with_if_index(self.index);
             routes
                 .add(&route)
@@ -227,6 +236,8 @@ mod tests {
 
 impl Drop for Tun {
     fn drop(&mut self) {
+        self.packet_loop.retire();
+        // Kernel retires its address-born host route with the owned device.
         let routes = self.routes.get_mut();
         let captures=self.capture_routes.get_mut();
         if routes.is_empty() && captures.is_empty() {

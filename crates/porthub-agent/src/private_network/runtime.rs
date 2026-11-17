@@ -817,8 +817,16 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             },
             None=>anyhow::bail!("private control owner stopped"),
         },
-        packet=async {match &device {Some(device)=>device.read(&mut buffer).await,None=>std::future::pending().await}}=>{
-            let size=packet?;if size>porthub_mesh::MAX_PACKET {continue;}
+        packet=async {match &device {Some(device)=>{
+            #[cfg(target_os="macos")]{
+                let authority=installed_authority.as_ref().ok_or_else(||anyhow::anyhow!("native local routing has no installed base authority"))?;
+                let deadline=policy.lease_deadline().ok_or_else(||anyhow::anyhow!("native local routing has no base policy lease"))?;
+                device.packet_loop().read_next(device.as_ref(),authority,deadline,&work,&mut buffer).await
+            }
+            #[cfg(not(target_os="macos"))]{device.read(&mut buffer).await}
+        },None=>std::future::pending().await}}=>{
+            #[cfg(target_os="macos")]let size=match packet?{super::owned_packet_loop::Read::Local=>continue,super::owned_packet_loop::Read::Remote(size)=>size};
+            #[cfg(not(target_os="macos"))]let size=packet?;if size>porthub_mesh::MAX_PACKET {continue;}
             if installed_authority.as_ref().is_some_and(|a|a.check().is_err()){policy.revoke();anyhow::bail!("private request-start authority expired");}
             let Some(parsed)=Packet::parse(&buffer[..size]) else {continue;};
             #[cfg(feature="local-tor")]

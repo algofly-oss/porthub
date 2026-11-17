@@ -31,6 +31,16 @@ pub(super) fn converged(text:&str,present:&[Endpoint],absent:&[Endpoint])->Resul
         if rows.iter().any(|r|r.domain.as_deref()==Some(endpoint.suffix.as_str())&&r.port.unwrap_or(53)==endpoint.port&&r.servers.iter().any(|s|s=="127.0.0.1")){return Ok(false);}
     }Ok(true)
 }
+fn available(text:&str,suffixes:&[String],owned:&[Endpoint])->Result<bool>{
+    ensure!(suffixes.len()<=2048&&owned.len()<=2048,"private DNS preflight scope exceeds bound");
+    Ok(rows(text)?.iter().filter(|row|row.domain.as_ref().is_some_and(|domain|suffixes.contains(domain))).all(|row|
+        owned.iter().any(|endpoint|row.domain.as_deref()==Some(endpoint.suffix.as_str())
+            &&row.port.unwrap_or(53)==endpoint.port&&row.servers==["127.0.0.1"])))
+}
+#[cfg(target_os="macos")]
+pub(super) async fn ensure_available(suffixes:&[String],owned:&[Endpoint])->Result<()>{
+    ensure!(available(&observe().await?,suffixes,owned)?,"another resolver owns the requested private DNS suffix");Ok(())
+}
 #[cfg(target_os="macos")]
 async fn observe()->Result<String>{
     use tokio::io::AsyncReadExt;
@@ -76,6 +86,14 @@ where F:FnMut()->Fut,Fut:std::future::Future<Output=Result<String>>{
         assert!(!converged(&(text(53001,"127.0.0.1")+&text(53001,"192.0.2.1")),&[e()],&[]).unwrap());
         assert!(converged(&"x".repeat(262145),&[],&[]).is_err());
     }
+    #[test]fn private_namespace_preflight_rejects_foreign_resolvers_before_publication(){
+        let suffixes=vec!["private.test".to_owned()];
+        assert!(available("DNS configuration",&suffixes,&[]).unwrap());
+        assert!(!available(&text(53001,"127.0.0.1"),&suffixes,&[]).unwrap());
+        assert!(available(&text(53001,"127.0.0.1"),&suffixes,&[e()]).unwrap());
+        assert!(!available(&text(53002,"127.0.0.1"),&suffixes,&[e()]).unwrap());
+        assert!(!available(&(text(53001,"127.0.0.1")+&text(53001,"192.0.2.1")),&suffixes,&[e()]).unwrap());
+    }
     #[tokio::test(start_paused=true)]async fn actual_waiter_retries_delayed_publication_then_stale_withdrawal(){
         let mut calls=0;let started=tokio::time::Instant::now();
         wait_with(&[e()],&[],||{calls+=1;let ready=calls>=4;async move{Ok(if ready{text(53001,"127.0.0.1")}else{String::new()})}}).await.unwrap();
@@ -101,4 +119,23 @@ where F:FnMut()->Fut,Fut:std::future::Future<Output=Result<String>>{
         assert!(!converged(actual,&[],&[endpoint]).unwrap());
     }
 
+}
+
+#[cfg(all(test,target_os="macos"))]
+pub(super) async fn fixture_owned_projection(endpoint:&Endpoint,stage:&str)->Result<()> {
+    use std::io::Write;
+    let text=observe().await?;let mut count=0u32;let mut request_a=false;let mut request_aaaa=false;let mut scoped=false;let mut reachable=false;let mut reach_bits=0u32;
+    for block in text.split("resolver #").skip(1){
+        let domain=block.lines().find_map(|l|l.trim().strip_prefix("domain").and_then(|s|s.trim().strip_prefix(':')).map(str::trim));
+        if domain!=Some(endpoint.suffix.as_str()){continue}
+        let servers:Vec<_>=block.lines().filter_map(|l|{let l=l.trim();if l.starts_with("nameserver["){l.split_once(':').map(|(_,v)|v.trim())}else{None}}).collect();
+        let port=block.lines().find_map(|l|l.trim().strip_prefix("port").and_then(|s|s.trim().strip_prefix(':')).and_then(|s|s.trim().parse::<u16>().ok())).unwrap_or(53);
+        if servers!=["127.0.0.1"]||port!=endpoint.port{continue}
+        count+=1;
+        for line in block.lines(){let line=line.trim();
+            if let Some(value)=line.strip_prefix("flags").and_then(|s|s.trim().strip_prefix(':')){request_a|=value.contains("Request A records");request_aaaa|=value.contains("Request AAAA records");scoped|=value.contains("Scoped");}
+            if let Some(value)=line.strip_prefix("reach").and_then(|s|s.trim().strip_prefix(':')){let word=value.split_whitespace().next().unwrap_or("");if let Some(hex)=word.strip_prefix("0x"){reach_bits|=u32::from_str_radix(hex,16)?;}reachable|=value.contains("Reachable")&&!value.contains("Not Reachable");}
+        }
+    }
+    println!("native_owned_dns_config stage={stage} rows={count} request_a={request_a} request_aaaa={request_aaaa} scoped={scoped} reachable={reachable} reach_bits={reach_bits}");std::io::stdout().flush()?;Ok(())
 }
