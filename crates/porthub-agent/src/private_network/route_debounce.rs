@@ -116,3 +116,71 @@ mod scheduling_tests {
         }
     }
 }
+
+/// Per-watcher native evidence; never linked into production builds.
+#[cfg(test)]
+pub(crate) mod witness {
+    use std::sync::Mutex;
+    #[cfg(any(windows,target_os="macos"))]
+    use route_manager::{Route, RouteChange};
+    use super::*;
+    pub(crate) struct Witness {
+        expected: Key,
+        state: Mutex<State>,
+    }
+    #[derive(Clone, PartialEq, Eq)]
+    pub(crate) struct Key { address: std::net::IpAddr, prefix: u8, index: Option<u32>, gateway: Option<std::net::IpAddr>, metric: Option<u32> }
+    impl Key {
+        #[cfg(any(windows,target_os="macos"))]
+        pub(crate) fn route(route:&Route)->Self {
+            Self { address:route.destination(),prefix:route.prefix(),index:route.if_index(),gateway:route.gateway(),
+                #[cfg(windows)] metric:route.metric(), #[cfg(not(windows))] metric:None }
+        }
+    }
+    #[derive(Default)]
+    struct State { ready: bool, matched: Option<Instant>, completed: bool }
+    impl Witness {
+        pub(crate) fn new(expected: Key) -> Self { Self { expected, state: Mutex::new(State::default()) } }
+        pub(crate) fn ready(&self) { self.state.lock().unwrap().ready = true; }
+        pub(crate) fn is_ready(&self) -> bool { self.state.lock().unwrap().ready }
+        #[cfg(any(windows,target_os="macos"))]
+        pub(crate) fn event(&self, event: &RouteChange) {
+            if let RouteChange::Add(route)=event { self.admit(&Key::route(route),true); }
+        }
+        fn admit(&self, key:&Key, added:bool) {
+            if added && *key==self.expected {
+                let mut state = self.state.lock().unwrap();
+                if state.ready { state.matched.get_or_insert(Instant::now()); }
+            }
+        }
+        // Called only after a successful fresh current() and real publication.
+        pub(crate) fn published(&self) {
+            let mut state = self.state.lock().unwrap();
+            if let Some(at) = state.matched {
+                if Instant::now().duration_since(at) <= Duration::from_secs(4) { state.completed = true; }
+            }
+        }
+        pub(crate) fn completed(&self) -> bool { self.state.lock().unwrap().completed }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn late_refresh_cannot_satisfy_native_deadline() {
+        let route=Key { address:"10.254.254.0".parse().unwrap(),prefix:25,index:Some(19),gateway:None,metric:Some(77) };
+        let witness=Witness::new(route.clone()); witness.ready();
+        witness.admit(&route,true);
+        tokio::time::sleep(Duration::from_millis(4001)).await;
+        witness.published(); assert!(!witness.completed());
+    }
+    #[test]
+    fn initial_periodic_and_foreign_publications_cannot_prove_native_refresh() {
+        let route=Key { address:"10.254.254.0".parse().unwrap(),prefix:25,index:Some(19),gateway:None,metric:Some(77) };
+        let witness=Witness::new(route.clone());
+        witness.published(); assert!(!witness.completed());
+        witness.admit(&route,true); witness.ready();
+        witness.published(); assert!(!witness.completed());
+        witness.admit(&route,false);
+        witness.admit(&Key { index:Some(20),..route.clone() },true);
+        witness.published(); assert!(!witness.completed());
+        witness.admit(&route,true); assert!(!witness.completed());
+        witness.published(); assert!(witness.completed());
+    }
+}

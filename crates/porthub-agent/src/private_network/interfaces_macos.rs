@@ -81,6 +81,18 @@ pub(crate) async fn watch_with_routes(
     route_changes:Option<watch::Sender<u64>>,
     cancel: CancellationToken,
 ) -> Result<()> {
+    watch_inner(output, route_changes, cancel, #[cfg(test)] None).await
+}
+#[cfg(test)]
+pub(crate) async fn watch_witness(
+    output: watch::Sender<Vec<SocketAddr>>, route_changes: watch::Sender<u64>,
+    cancel: CancellationToken, witness: std::sync::Arc<super::route_debounce::witness::Witness>,
+) -> Result<()> { watch_inner(output, Some(route_changes), cancel, Some(witness)).await }
+async fn watch_inner(
+    output: watch::Sender<Vec<SocketAddr>>, route_changes: Option<watch::Sender<u64>>,
+    cancel: CancellationToken,
+    #[cfg(test)] witness: Option<std::sync::Arc<super::route_debounce::witness::Witness>>,
+) -> Result<()> {
     let mut backoff = Duration::from_secs(1);
     loop {
         let mut listener = match AsyncRouteManager::listener() {
@@ -97,6 +109,7 @@ pub(crate) async fn watch_with_routes(
         }
         let mut refresh = tokio::time::interval(Duration::from_secs(120));
         refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        #[cfg(test)] if let Some(witness)=&witness { witness.ready(); }
         let mut changed = super::route_debounce::Debounce::default();
         loop {
             tokio::select! {
@@ -104,13 +117,16 @@ pub(crate) async fn watch_with_routes(
                 _ = output.closed() => return Ok(()),
                 _ = refresh.tick() => changed.notify(tokio::time::Instant::now()),
                 event = listener.listen().boxed() => {
-                    if event.is_err() { break; }
+                    let event = match event { Ok(event) => event, Err(_) => break };
+                    #[cfg(test)] if let Some(witness)=&witness { witness.event(&event); }
+                    #[cfg(not(test))] let _ = event;
                     changed.notify(tokio::time::Instant::now());
                 }
                 _ = changed.wait() => {
                     changed.clear();
                     if let Ok(Ok(addresses)) = tokio::time::timeout(Duration::from_secs(2), current()).await {
                         super::topology::publish(&output,route_changes.as_ref(),Some(addresses));
+                        #[cfg(test)] if let Some(witness)=&witness { witness.published(); }
                     }else{super::topology::publish(&output,route_changes.as_ref(),None);}
                     backoff = Duration::from_secs(1);
                 }

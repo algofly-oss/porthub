@@ -340,6 +340,8 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
     }
     let cancel = CancellationToken::new();
     let mut dns_task = None;
+    let mut watch_task = None;
+    let mut watch_receivers = None;
     let mut socket_task = None;
     let mut registration = None;
     let mut source = None;
@@ -454,7 +456,23 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
         let other=Arc::new(open(&spec,1,Ipv4Addr::new(10,254,252,10)).await?);indices.push(other.index);foreign=Some(other.clone());
         let route=Route::new(IpAddr::V4(Ipv4Addr::new(10,254,254,0)),25).with_if_index(other.index);
         #[cfg(windows)]let route=route.with_metric(77);
+        let before_underlay=super::interfaces::current().await?;
+        let (underlay_tx,underlay_rx)=tokio::sync::watch::channel(before_underlay.clone());
+        let (revision_tx,revision_rx)=tokio::sync::watch::channel(0u64);
+        let witness=Arc::new(super::route_debounce::witness::Witness::new(super::route_debounce::witness::Key::route(&route)));
+        watch_task=Some(tokio::spawn(super::interfaces::watch_witness(underlay_tx,revision_tx,cancel.child_token(),witness.clone())));
+        timeout(Duration::from_secs(4),async {
+            while !witness.is_ready() { tokio::time::sleep(Duration::from_millis(10)).await; }
+        }).await.map_err(|_|anyhow::anyhow!("native route watcher did not subscribe and initialize"))?;
+        let revision_before=*revision_rx.borrow();
         manager.add(&route).await?;sentinel=Some(route.clone());
+        timeout(Duration::from_secs(4),async {
+            while !witness.completed() { tokio::time::sleep(Duration::from_millis(10)).await; }
+        }).await.map_err(|_|anyhow::anyhow!("sentinel native Add did not produce successful bounded refresh/publication"))?;
+        ensure!(*revision_rx.borrow()>revision_before,"native route refresh did not publish a revision");
+        ensure!(*underlay_rx.borrow()==before_underlay,"owned sentinel unexpectedly changed underlay candidates");
+        watch_receivers=Some((underlay_rx,revision_rx));
+        println!("native_route_callback_refresh=true underlay_candidates_unchanged=true");
         let tcp_own={
             // Only the production owner remains strongly referenced. The SAME
             // warmed socket stays open through retirement and fresh allocation.
@@ -565,18 +583,21 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
         let _ = task.await;
     }
     let dns_cleanup = dns::shutdown_registration(&mut registration).await;
-    let dns_join = if let Some(mut task) = dns_task.take() {
-        match timeout(Duration::from_secs(3), &mut task).await {
-            Ok(joined) => joined.map_err(anyhow::Error::from).and_then(|r| r),
-            Err(error) => {
-                task.abort();
-                let _ = task.await;
-                Err(anyhow::Error::from(error))
-            }
+    // Both owned watcher/server joins share the existing 3s cleanup bound.
+    let joined=timeout(Duration::from_secs(3),async {
+        let dns=async { if let Some(task)=dns_task.as_mut() { task.await.map_err(anyhow::Error::from).and_then(|r|r) } else { Ok(()) } };
+        let watcher=async { if let Some(task)=watch_task.as_mut() { task.await.map_err(anyhow::Error::from).and_then(|r|r) } else { Ok(()) } };
+        let (dns,watcher)=tokio::join!(dns,watcher); dns.and(watcher)
+    }).await;
+    let dns_join=match joined {
+        Ok(result)=>result,
+        Err(error)=>{
+            if let Some(task)=dns_task.take() { if !task.is_finished() { task.abort(); let _=task.await; } }
+            if let Some(task)=watch_task.take() { if !task.is_finished() { task.abort(); let _=task.await; } }
+            Err(anyhow::Error::from(error))
         }
-    } else {
-        Ok(())
     };
+    drop(watch_receivers);
     let sentinel_cleanup = if let Some(route) = sentinel.take() {
         manager.delete(&route).await.map_err(anyhow::Error::from)
     } else {

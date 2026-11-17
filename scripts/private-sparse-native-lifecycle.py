@@ -8,7 +8,7 @@ PURPOSE='reviewed-disposable-sparse-lifecycle-v1'
 COMMAND_DEADLINE=None
 INPUTS=['Cargo.lock','rust-toolchain.toml','crates/porthub-agent/Cargo.toml',
  'scripts/private-sparse-native-lifecycle.py','scripts/private-sparse-native-netns.py',
- *['crates/porthub-agent/src/private_network/'+name for name in ['native_lifecycle_fixture.rs','native_desktop_lifecycle_fixture.rs','native_resolver_lifecycle_fixture.rs','device.rs','device_windows.rs','device_macos.rs','address_route_macos.rs','owned_packet_loop.rs','native_source.rs','dns.rs','dns_convergence_macos.rs','dns_windows.rs','windows_nrpt.rs','windows_nrpt.ps1','windows_state.rs','native_ownership.rs','native_owner.rs','stream_offer.rs']],
+ *['crates/porthub-agent/src/private_network/'+name for name in ['native_lifecycle_fixture.rs','native_desktop_lifecycle_fixture.rs','native_resolver_lifecycle_fixture.rs','device.rs','device_windows.rs','device_macos.rs','address_route_macos.rs','owned_packet_loop.rs','native_source.rs','interfaces_windows.rs','interfaces_macos.rs','route_debounce.rs','topology.rs','dns.rs','dns_convergence_macos.rs','dns_windows.rs','windows_nrpt.rs','windows_nrpt.ps1','windows_state.rs','native_ownership.rs','native_owner.rs','stream_offer.rs']],
  'crates/porthub-network/src/native_repair.rs',
  'crates/porthub-agent/src/private_network/dns_private_macos.rs',
  'crates/porthub-agent/assets/wintun/amd64/wintun.dll']
