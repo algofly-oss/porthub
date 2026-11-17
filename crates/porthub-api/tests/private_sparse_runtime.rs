@@ -133,6 +133,8 @@ async fn real_4097_registration_api_controller_to_autonomous_cross_pool_native_a
             tokio::time::sleep(Duration::from_millis(20)).await;
         }Ok::<_,anyhow::Error>(())}).await??;
         ensure!(ha.peers().len()==1&&hb.peers().len()==1&&a.node.counts()==(0,0)&&b.node.counts()==(0,0),"4097 registrations allocated full-mesh flow resources");
+        for id in [&aid,&bid] {let row=case.app.collection("private_peers").find_one(doc!{"_id":id}).await?.ok_or_else(||anyhow::anyhow!("controller publication absent"))?;ensure!(row.get_str("stream_transport").unwrap_or_default().is_empty(),"unproven native lifecycle unexpectedly advertised origin mode");}
+
         let started=std::time::Instant::now();let flow=tcp_stream::Flow{source:std::net::SocketAddrV4::new(aip,42000),destination:std::net::SocketAddrV4::new(bip,443)};
         let client=tokio::spawn(async move{ka.connect(flow).await});let mut server=apps.recv().await.ok_or_else(||anyhow::anyhow!("service never received authenticated native SYN"))?;let mut client=client.await??;
         let request=vec![0x35;8192*2+193];let answer=vec![0x79;8192*2+77];let expected=request.clone();let reply=answer.clone();

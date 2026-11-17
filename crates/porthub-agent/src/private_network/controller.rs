@@ -36,6 +36,8 @@ struct Reply {
     #[serde(default)]
     pair_responses: Vec<porthub_network::policy::PairResponse>,
     #[serde(default)]
+    stream_protocols:Vec<String>,
+    #[serde(default)]
     signals: Vec<Signal>,
     #[serde(default)]
     ice_servers: Vec<IceServer>,
@@ -183,12 +185,10 @@ struct Live {
 }
 // Advertisement follows negotiated mode. Sparse must never offer PHT1 while
 // application/retransmission origins are not bounded by an ACK-chunk protocol.
-struct StreamOffer {legacy:bool}
-impl StreamOffer {
-    fn new(negotiating_sparse:bool)->Self{Self{legacy:!negotiating_sparse}}
-    fn observe(&mut self,sparse:bool){self.legacy=!sparse;}
-    fn transport(&self)->&'static str {if cfg!(feature="private-stream")&&self.legacy{"quic1"}else{""}}
-}
+#[path="stream_offer.rs"]
+mod stream_offer;
+use stream_offer::Offer as StreamOffer;
+pub(crate) use stream_offer::NativeReady;
 
 pub enum Event {
     #[cfg(feature = "local-tor")]
@@ -311,7 +311,7 @@ pub async fn run_watched_sparse(
     cancel: CancellationToken,
     sparse: Option<super::sparse::Control>,
 ) -> Result<()> {
-    run_watched_sparse_owned(profile,interfaces,sessions,events,relay_config,local,cancel,sparse,None).await
+    run_watched_sparse_owned(profile,interfaces,sessions,events,relay_config,local,cancel,sparse,None,None).await
 }
 pub(crate) async fn run_watched_sparse_owned(
     profile: Profile,
@@ -323,6 +323,7 @@ pub(crate) async fn run_watched_sparse_owned(
     cancel: CancellationToken,
     mut sparse: Option<super::sparse::Control>,
     authority_domain:Option<super::authority_event::Domain>,
+    native_streams:Option<watch::Receiver<Option<NativeReady>>>,
 ) -> Result<()> {
     ensure!(
         interfaces.borrow().len() <= 16,
@@ -383,7 +384,7 @@ pub(crate) async fn run_watched_sparse_owned(
             })
             .collect();
         let mut body = serde_json::json!({"peer_id":profile.peer_id,"token":profile.token,
-            "fingerprint":identity.fingerprint(),"instance":instance,"stream_transport":stream_offer.transport(),"tor_exit":cfg!(all(feature="local-tor",any(target_os="linux",target_os="macos"))),"signals":&pending[..sent],
+            "fingerprint":identity.fingerprint(),"instance":instance,"stream_transport":stream_offer.offered(native_streams.as_ref()),"tor_exit":cfg!(all(feature="local-tor",any(target_os="linux",target_os="macos"))),"signals":&pending[..sent],
             "acks":&acks[..acked],"paths":paths,"lan_networks":lan_networks,"lan_exit":cfg!(any(target_os="linux",target_os="macos")),"application_proxy":cfg!(feature="local-tor")});
         if let Some(resolver)=&mut sparse {body["sparse"]=resolver.batch()?;}
         let mut reply = None;
@@ -400,7 +401,7 @@ pub(crate) async fn run_watched_sparse_owned(
             Err(_) => {}
         }
         if let Some(mut reply) = reply {
-            stream_offer.observe(reply.snapshot.sparse.is_some());
+            stream_offer.observe_reply(&reply.snapshot,&reply.stream_protocols);
             let request_window = if reply.snapshot.sparse.is_some() {request_window} else {None};
             super::authority_event::Authority::new((),request_window.clone(),reply.snapshot.expires_at).check()?;
             ensure!(reply.snapshot.sparse.is_none()||sparse.is_some(),"sparse private authority was not negotiated");

@@ -89,6 +89,23 @@ impl Node {
         Ok(self.inner.receive(peer, source, payload)?
             == super::stream_chunks::dispatch::Outcome::Delivered)
     }
+    /// Capability withdrawal declines NEW flow allocation; existing pinned
+    /// owners still revalidate exact identity/ACL and retain their origins.
+    pub fn receive_offered(
+        &self,
+        peer: &str,
+        source: Ipv4Addr,
+        payload: Bytes,
+        allow_new: bool,
+    ) -> Result<bool> {
+        if self.owner.is_cancelled() {
+            return Ok(false);
+        }
+        Ok(self
+            .inner
+            .receive_offered(peer, source, payload, allow_new)?
+            == super::stream_chunks::dispatch::Outcome::Delivered)
+    }
     pub fn raw_ingress(&self, packet: &[u8]) -> bool {
         !self.owner.is_cancelled() && self.inner.raw_ingress(packet)
     }

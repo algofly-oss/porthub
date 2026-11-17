@@ -86,7 +86,9 @@ pub fn parse(raw: Value) -> ApiResult<Sync> {
             model.add("lan_networks", "Expected a canonical private IPv4 network prefix", "value_error");
         }
     }
-    let stream_transport = model.literal("stream_transport", "", &["", "quic1"]);
+    let transports:&[&str]=if cfg!(feature="private-sparse"){&["","quic1","quic2-origin"]}else{&["","quic1"]};
+    let stream_transport = model.literal("stream_transport", "", transports);
+    if stream_transport=="quic2-origin"&&sparse.is_none(){model.add("stream_transport","Origin transport requires sparse negotiation","value_error");}
     let mut signals = Vec::new();
     for mut child in model.objects("signals", false, 0, 16) {
         if !child.is_valid() {
@@ -138,4 +140,17 @@ pub fn parse(raw: Value) -> ApiResult<Sync> {
         acks,
         paths,
     })
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+    fn body(mode:&str)->Value{let mut body=serde_json::json!({"peer_id":"peer","token":"fixture-credential-0123456789abcdef0123456789","fingerprint":vec!["AB";32].join(":"),"instance":"instance-0123456789","stream_transport":mode});if mode=="quic2-origin"{body["sparse"]=serde_json::json!({"protocol":1,"sequence":1,"wanted":[]});}body}
+    #[test]
+    fn origin_transport_is_exact_feature_negotiated_and_legacy_values_remain_compatible(){
+        assert!(parse(body("")).is_ok());assert!(parse(body("quic1")).is_ok());
+        assert_eq!(parse(body("quic2-origin")).is_ok(),cfg!(feature="private-sparse"));
+        let mut unnegotiated=body("quic2-origin");unnegotiated.as_object_mut().unwrap().remove("sparse");assert!(parse(unnegotiated).is_err());
+        for value in ["quic2","quic2-origin-any","QUIC2-ORIGIN","quic2-origin "]{assert!(parse(body(value)).is_err());}
+    }
 }

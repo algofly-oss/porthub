@@ -11,6 +11,7 @@ async fn bridge(
     remote: Peer,
     accepted: mpsc::Sender<tokio::io::DuplexStream>,
     stop: CancellationToken,
+    allow_new:Arc<AtomicBool>,
 ) -> Result<()> {
     let mut acceptors = tokio::task::JoinSet::new();
     let mut services_started = std::collections::HashSet::new();
@@ -21,7 +22,7 @@ async fn bridge(
                 ensure!(destination==remote.ip,"carrier destination escaped exact peer");
                 let wire=porthub_mesh::control_packet::encode(porthub_mesh::control_packet::STREAM,own_peer.ip,destination,&payload)?;
                 let envelope=porthub_mesh::control_packet::decode(porthub_mesh::control_packet::STREAM,wire).ok_or_else(||anyhow::anyhow!("carrier invalid"))?;
-                permit.ok_or_else(||anyhow::anyhow!("carrier lost origin"))?.during(async{other.receive(&own_peer.id,own_peer.ip,envelope.payload)}).await??;
+                permit.ok_or_else(||anyhow::anyhow!("carrier lost origin"))?.during(async{other.receive_offered(&own_peer.id,own_peer.ip,envelope.payload,allow_new.load(Ordering::SeqCst))}).await??;
             },
             Event::GuardedStreamLocal{peer,packet}=>{
                 ensure!(peer==remote.id,"native delivery changed authenticated peer");
@@ -41,7 +42,7 @@ async fn bridge(
     result
 }
 
-async fn exercise(revoke: bool, parallel:usize) -> Result<()> {
+async fn exercise(revoke: bool, parallel: usize, withdraw:bool) -> Result<()> {
     timeout(Duration::from_secs(12),async {
         let a=Identity::new()?;let b=Identity::new()?;
         let ap=Peer{id:"a".into(),ip:"10.234.250.1".parse()?,fingerprint:a.fingerprint().into(),instance:"a-instance".into()};
@@ -53,9 +54,9 @@ async fn exercise(revoke: bool, parallel:usize) -> Result<()> {
         let (b,br)=Runtime::new(b,Arc::new(move|id|LocalAuthority::capture(&cb,"w","b",id).ok().map(Arc::new)),Arc::new(|_|{}),eb,stop.child_token())?;
         let (ka,mut pa,kar)=tcp_stream::stack()?;let (kb,mut pb,kbr)=tcp_stream::stack()?;
         let mut tasks=tokio::task::JoinSet::new();tasks.spawn(ar.run());tasks.spawn(br.run());tasks.spawn(kar.run(stop.child_token()));tasks.spawn(kbr.run(stop.child_token()));
-        let (accepted,mut apps)=mpsc::channel(2);
-        tasks.spawn(bridge(ra,a.clone(),b.clone(),ka.clone(),ap.clone(),bp.clone(),accepted.clone(),stop.child_token()));
-        tasks.spawn(bridge(rb,b.clone(),a.clone(),kb.clone(),bp.clone(),ap.clone(),accepted,stop.child_token()));
+        let (accepted,mut apps)=mpsc::channel(2);let allow_new=Arc::new(AtomicBool::new(true));
+        tasks.spawn(bridge(ra,a.clone(),b.clone(),ka.clone(),ap.clone(),bp.clone(),accepted.clone(),stop.child_token(),allow_new.clone()));
+        tasks.spawn(bridge(rb,b.clone(),a.clone(),kb.clone(),bp.clone(),ap.clone(),accepted,stop.child_token(),allow_new.clone()));
         let aa=a.clone();let bb=b.clone();let ca=stop.child_token();let cb=stop.child_token();
         tasks.spawn(async move{loop{tokio::select!{_=ca.cancelled()=>{while pa.recv().await.is_some(){}break;},p=pa.recv()=>{let Some(p)=p else{break};ensure!(aa.kernel_packet("b",p,true),"source native packet lost flow owner");}}}Ok(())});
         tasks.spawn(async move{loop{tokio::select!{_=cb.cancelled()=>{while pb.recv().await.is_some(){}break;},p=pb.recv()=>{let Some(p)=p else{break};ensure!(bb.kernel_packet("a",p,false),"target native packet lost flow owner");}}}Ok(())});
@@ -68,6 +69,13 @@ async fn exercise(revoke: bool, parallel:usize) -> Result<()> {
         let result=async {
             let mut servers=Vec::new();for _ in 0..parallel {servers.push(apps.recv().await.ok_or_else(||anyhow::anyhow!("service never accepted"))?);}
             let mut connected=Vec::new();for client in clients {connected.push(client.await??);}
+            if withdraw {
+                allow_new.store(false,Ordering::SeqCst);
+                let before=(a.counts(),b.counts());
+                let cold=Frame::new(Key::new([77;16],0,Role::Receiver)?,Bytes::from_static(b"unoffered-cold-initial"))?.encode();
+                ensure!(a.receive_offered("b",bp.ip,cold.clone(),false)?==Outcome::Missing&&b.receive_offered("a",ap.ip,cold,false)?==Outcome::Missing,"withdrawn capability allocated a cold flow");
+                ensure!((a.counts(),b.counts())==before,"withdrawal changed existing owner registrations");
+            }
             if revoke {
                 let mut client=connected.remove(0);let mut server=servers.remove(0);
                 client.write_all(b"native-request-body").await?;let mut body=[0;19];server.read_exact(&mut body).await?;
@@ -107,12 +115,12 @@ async fn exercise(revoke: bool, parallel:usize) -> Result<()> {
 #[tokio::test]
 async fn autonomous_cross_pool_native_syn_dispatches_authenticated_duplex_without_manual_flow_open(
 ) -> Result<()> {
-    exercise(false,1).await
+    exercise(false, 1,false).await
 }
 #[tokio::test]
 async fn autonomous_active_native_flow_api_pair_retirement_reaps_dispatch_and_prevents_raw_fallthrough(
 ) -> Result<()> {
-    exercise(true,1).await
+    exercise(true, 1,false).await
 }
 
 #[tokio::test]
@@ -244,4 +252,7 @@ async fn shared_runtime_records_are_bounded_across_peers_and_raw_budget_pressure
 }
 
 #[tokio::test]
-async fn autonomous_four_concurrent_native_flows_share_one_node_dispatcher_without_crossing_data_or_stalling_peer_credit()->Result<()>{exercise(false,4).await}
+async fn autonomous_four_flows_survive_capability_withdrawal_while_new_cold_flows_are_declined(
+) -> Result<()> {
+    exercise(false, 4,true).await
+}

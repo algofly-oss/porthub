@@ -297,6 +297,8 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         work.clone(),
     ));
     let (sparse_handle,sparse_control)=super::sparse::channel();
+    #[allow(unused_variables)]
+    let (native_streams,native_stream_updates)=watch::channel(None::<controller::NativeReady>);
     tasks.spawn(controller::run_watched_sparse_owned(
         profile.clone(),
         interfaces.clone(),
@@ -310,6 +312,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         work.clone(),
         if cfg!(feature="private-sparse"){Some(sparse_control)}else{None},
         Some(authority_owner.domain()),
+        Some(native_stream_updates),
     ));
     let mut device: Option<Arc<Tun>> = None;
     let mut local_address=super::address_lifecycle::Binding::default();
@@ -337,6 +340,8 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
     let mut sparse_authority:Option<Snapshot>=None;
     let mut installed_authority:Option<super::authority_event::Authority<()>>=None;
     let mut capture_configured=false;
+    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+    let mut native_stream_safe=false;
     let mut private_status = crate::runtime::PrivateStatus::default();
     #[cfg(target_os="linux")]
     let (dns_target,dns_health) = {
@@ -496,6 +501,9 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 }
                 if snapshot.sparse.is_some(){
                     let audit=audit_capture(device.as_ref().unwrap(),&snapshot,&routes).await?;
+                    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+                    {native_stream_safe=audit.capture.conflicting.is_empty()&&audit.conflicting_peers.is_empty();if !native_stream_safe{native_streams.send_replace(None);}}
+
                     retire_route_conflicts(&mut policy,&sparse_handle,&audit.conflicting_peers);
                     if !audit.capture.conflicting.is_empty(){tracing::warn!(conflicting_pools=audit.capture.conflicting.len(),"private capture pools conflict with existing routes; safe known hosts retained, range migration required for ambiguous addresses");}
                     capture_configured=true;last_route_audit=Some(Instant::now());
@@ -589,6 +597,15 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 by_ip=snapshot.peers.iter().map(|p|(p.ip,p.id.clone())).collect();
                 peer_ips=snapshot.peers.iter().map(|p|(p.id.clone(),p.ip)).collect();
                 for peer in sparse_handle.peers(){by_ip.insert(peer.ip,peer.id.clone());peer_ips.insert(peer.id,peer.ip);}
+                #[cfg(all(feature="private-sparse",feature="private-stream"))]
+                {
+                    // This is a bounded native-owner observation, not a new
+                    // authority. Release approval remains closed in Offer.
+                    let ready=if snapshot.sparse.is_some()&&native_stream_safe {
+                        Some(controller::NativeReady::prepared(&snapshot,authority.retained(),device.as_ref().expect("native tunnel initialized"),work.clone())?)
+                    } else {None};
+                    native_streams.send_replace(ready);
+                }
                 // Publish initial readiness immediately. Waiting for
                 // the periodic refresh can make a healthy service miss the
                 // installer's readiness deadline after a slow initial sync.
@@ -620,6 +637,9 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 let mut routes:Vec<_>=peer_ips.values().copied().collect();routes.retain(|ip|peer_ips.get(&id)!=Some(ip));routes.push(lease.peer.ip);
                 let base=sparse_authority.as_ref().ok_or_else(||anyhow::anyhow!("private pair arrived before base authority"))?;
                 let audit=audit_capture(tun,base,&routes).await?;last_route_audit=Some(Instant::now());
+                    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+                    {native_stream_safe=audit.capture.conflicting.is_empty()&&audit.conflicting_peers.is_empty();if !native_stream_safe{native_streams.send_replace(None);}}
+
                 let retired=retire_route_conflicts(&mut policy,&sparse_handle,&audit.conflicting_peers);
                 for retired in retired{peer_ips.remove(&retired);by_ip.retain(|_,peer|peer!=&retired);}
                 if !audit.accepted_peers.contains(&lease.peer.ip){
@@ -663,11 +683,10 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                         #[cfg(feature="private-sparse")]
                         if sparse_handle.enabled() {
                             if let Some(flows)=&guarded_flows {
-                                if sparse_handle.by_id(&peer).is_some_and(|p|p.stream_transport=="quic2-origin") {
-                                    // Envelope identity comes from authenticated Session/relay ingress,
-                                    // never from the PHG2 header or cached hostname.
-                                    let _=flows.receive(&peer,envelope.source,envelope.payload);
-                                }
+                                // Withdrawal stops cold allocation, not an existing
+                                // pinned flow whose current ACL/identity still match.
+                                let allow_new=sparse_handle.by_id(&peer).is_some_and(|p|p.stream_transport=="quic2-origin");
+                                let _=flows.receive_offered(&peer,envelope.source,envelope.payload,allow_new);
                             }
                             continue;
                         }
@@ -871,6 +890,9 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             if changed.is_err(){route_events_open=false;}else if sparse_handle.enabled(){
                 if let (Some(tun),Some(base))=(&device,&sparse_authority){
                     let audit=audit_capture(tun,base,&peer_ips.values().copied().collect::<Vec<_>>()).await?;last_route_audit=Some(Instant::now());
+                    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+                    {native_stream_safe=audit.capture.conflicting.is_empty()&&audit.conflicting_peers.is_empty();if !native_stream_safe{native_streams.send_replace(None);}}
+
                     let retired=retire_route_conflicts(&mut policy,&sparse_handle,&audit.conflicting_peers);
                     for id in retired{peer_ips.remove(&id);by_ip.retain(|_,peer|peer!=&id);}
                     #[cfg(feature="private-stream")]
@@ -889,6 +911,9 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
             if sparse_handle.enabled()&&last_route_audit.is_none_or(|at|at.elapsed()>=Duration::from_secs(5)){
                 if let (Some(tun),Some(base))=(&device,&sparse_authority){
                     let audit=audit_capture(tun,base,&peer_ips.values().copied().collect::<Vec<_>>()).await?;last_route_audit=Some(Instant::now());
+                    #[cfg(all(feature="private-sparse",feature="private-stream"))]
+                    {native_stream_safe=audit.capture.conflicting.is_empty()&&audit.conflicting_peers.is_empty();if !native_stream_safe{native_streams.send_replace(None);}}
+
                     let retired=retire_route_conflicts(&mut policy,&sparse_handle,&audit.conflicting_peers);
                     for id in retired{peer_ips.remove(&id);by_ip.retain(|_,peer|peer!=&id);}
                     #[cfg(feature="private-stream")]

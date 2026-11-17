@@ -550,6 +550,7 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
         "ice_servers":app.config.private_transport.ice(&input.peer_id,now.timestamp_millis()/1000),"relay_routes":app.config.private_transport.relay_routes,
         "direct_relay_url":direct_relay_url,"relay_auth_token":relay_auth_token,"proxy_jobs":proxy_jobs,"proxy_provider":proxy_provider,
         "sparse_sequence":sparse_request.map(|r|r.sequence),"pair_responses":pair_responses,"control_fallback_urls":fallback,"poll_seconds":1});
+    if cfg!(feature="private-sparse")&&epoch.is_some(){response["stream_protocols"]=json!(["quic2-origin"]);}
     if epoch.is_none() {
         response["snapshot"].as_object_mut().expect("snapshot object").remove("sparse");
         let root=response.as_object_mut().expect("sync object");root.remove("sparse_sequence");root.remove("pair_responses");

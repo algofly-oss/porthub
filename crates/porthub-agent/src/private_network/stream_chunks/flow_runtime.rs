@@ -358,10 +358,22 @@ impl Runtime {
         true
     }
     pub(crate) fn receive(&self, peer: &str, address: Ipv4Addr, bytes: Bytes) -> Result<Outcome> {
+        self.receive_offered(peer, address, bytes, true)
+    }
+    pub(crate) fn receive_offered(
+        &self,
+        peer: &str,
+        address: Ipv4Addr,
+        bytes: Bytes,
+        allow_new: bool,
+    ) -> Result<Outcome> {
         let frame = Frame::decode(bytes.clone())?;
         let result = self.0.dispatch.receive(peer, address, bytes.clone())?;
         if result != Outcome::Missing {
             return Ok(result);
+        }
+        if !allow_new {
+            return Ok(Outcome::Missing);
         }
         let key = frame.key();
         if key.direction() != 0 || key.role() != Role::Receiver {
@@ -413,7 +425,7 @@ impl Runtime {
         let events = self.0.events.clone();
         let owned = record.clone();
         let task = tokio::spawn(async move {
-            let _owner_guard=record.cancel.clone().drop_guard();
+            let _owner_guard = record.cancel.clone().drop_guard();
             let mut ready = record.ingress.subscribe();
             loop {
                 let packet = tokio::select! {_=record.cancel.cancelled()=>break,p=packets.recv()=>match p{Some(p)=>p,None=>break}};
