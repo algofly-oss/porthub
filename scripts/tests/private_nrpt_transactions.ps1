@@ -20,13 +20,13 @@ function Add-DnsClientNrptRule {
  param($Namespace,$NameServers,$NameEncoding,$DisplayName,$Comment,[switch]$PassThru,$ErrorAction)
  if($script:failBefore){$script:failBefore=$false;throw 'injected failure before native add'}
  $script:adds++
- $rule=[pscustomobject]@{Name=[Guid]::NewGuid().ToString('D');Namespace=@($Namespace);NameServers=@($NameServers);NameEncoding=$NameEncoding;DisplayName=$DisplayName;Comment=$Comment;DAEnable=$false;DAIPsecRequired=$false;DnsSecEnable=$false;DnsSecIPsecRequired=$false;DnsSecValidationRequired=$false}
+ $rule=[pscustomobject]@{Name=[Guid]::NewGuid().ToString('B').ToUpperInvariant();Namespace=@($Namespace);NameServers=@($NameServers);NameEncoding=$NameEncoding;DisplayName=$DisplayName;Comment=$Comment;DAEnable=$false;DAIPsecRequired=$false;DnsSecEnable=$false;DnsSecIPsecRequired=$false;DnsSecValidationRequired=$false}
  if($script:addNoOp){$script:addNoOp=$false;return $rule}
  $script:all=@($script:all)+@($rule)
  if($script:failAfter){$script:failAfter=$false;throw 'injected termination after native add before GUID checkpoint'}
  return $rule
 }
-function Remove-DnsClientNrptRule {param($Name,[switch]$Force,$ErrorAction);$script:removes++;if($script:removeNoOp){$script:removeNoOp=$false;return};$script:all=@($script:all|Where-Object{$_.Name -ne $Name});if($script:failRemoveAfter){$script:failRemoveAfter=$false;throw 'injected failure after native removal before journal checkpoint'}}
+function Remove-DnsClientNrptRule {param($Name,[switch]$Force,$ErrorAction);if(@($script:all|Where-Object{$_.Name -ceq $Name}).Count -ne 1){throw 'Native provider exact rule Name was not found'};$script:removes++;if($script:removeNoOp){$script:removeNoOp=$false;return};$script:all=@($script:all|Where-Object{$_.Name -ne $Name});if($script:failRemoveAfter){$script:failRemoveAfter=$false;throw 'injected failure after native removal before journal checkpoint'}}
 function Assert($value,$message){if(-not $value){throw ('ASSERT: '+$message)}}
 function Reset {
  $script:all=@();$script:extra=@();$script:adds=0;$script:removes=0;$script:failBefore=$false;$script:failAfter=$false;$script:failRemoveAfter=$false;$script:policyCalls=0;$script:tamperAt=0;$script:removeNoOp=$false;$script:addNoOp=$false
@@ -39,11 +39,14 @@ function Apply {Invoke-PortHubNrpt $script:config|Out-Null}
 function Fails {param([ScriptBlock]$Action);$failed=$false;try{&$Action}catch{$failed=$true};Assert $failed 'operation should fail'}
 $passed=0
 try {
+ Reset;Apply;$nativeName=$script:all[0].Name;$normalized=([Guid]$nativeName).ToString('D');Fails {Remove-DnsClientNrptRule -Name $normalized -Force};Assert (@($script:all).Count -eq 1 -and $script:removes -eq 0) 'provider rejects normalized GUID without mutating exact native rule';$passed++;[IO.File]::Delete($path)
+ Reset;Apply;$script:all[0].Name=([Guid]$script:all[0].Name).ToString('D');$config.mode='clear';Apply;Assert (@($script:all).Count -eq 0) 'removal uses observed native name without inventing brace formatting';$passed++;[IO.File]::Delete($path)
+ Reset;Apply;$duplicate=$script:all[0].PSObject.Copy();$duplicate.Name=([Guid]$duplicate.Name).ToString('D');$script:all+=@($duplicate);$config.mode='clear';Fails {Apply};Assert ($script:removes -eq 0 -and @($script:all).Count -eq 2) 'ambiguous equivalent GUID native names cannot authorize deletion';$passed++;[IO.File]::Delete($path)
  Reset;Apply;$id=$script:all[0].Name;Apply;Assert ($script:adds -eq 1 -and $script:all[0].Name -eq $id) 'idempotence preserves exact GUID';$config.desired=@('phub','private.test');Apply;Assert ($script:adds -eq 2 -and @($script:all).Count -eq 2) 'expansion';$config.desired=@('private.test');Apply;Assert (@($script:all).Count -eq 1 -and $script:removes -eq 1) 'retire obsolete only';$passed++;[IO.File]::Delete($path)
  foreach($phase in @('before','after')){
   Reset;Apply;$id=$script:all[0].Name;$config.desired=@('phub','private.test');if($phase -eq 'before'){$script:failBefore=$true}else{$script:failAfter=$true};Fails {Apply};$state=Get-Content -LiteralPath $path -Raw|ConvertFrom-Json;Assert (@($script:all).Count -eq 1 -and $script:all[0].Name -eq $id -and @($state.rules).Count -eq 1 -and @($state.committed).Count -eq 1) ('rollback '+$phase);$passed++;[IO.File]::Delete($path)
  }
- Reset;Apply;$config.desired=@('private.test');$script:failRemoveAfter=$true;Fails {Apply};$state=Get-Content -LiteralPath $path -Raw|ConvertFrom-Json;Assert (@($script:all).Count -eq 1 -and $script:all[0].Namespace[0] -eq 'phub' -and $state.committed[0] -eq 'phub' -and $state.rules[0].id -eq $script:all[0].Name) 'rollback recreates exact committed policy after partial removal and repins new GUID';$passed++;[IO.File]::Delete($path)
+ Reset;Apply;$config.desired=@('private.test');$script:failRemoveAfter=$true;Fails {Apply};$state=Get-Content -LiteralPath $path -Raw|ConvertFrom-Json;Assert (@($script:all).Count -eq 1 -and $script:all[0].Namespace[0] -eq 'phub' -and $state.committed[0] -eq 'phub' -and $state.rules[0].id -ceq ([Guid]$script:all[0].Name).ToString('D')) 'rollback recreates exact committed policy after partial removal and repins new GUID';$passed++;[IO.File]::Delete($path)
  Reset;Apply;$id=$script:all[0].Name;$config.desired=@('private.test');$script:removeNoOp=$true;Fails {Apply};Assert (@($script:all).Count -eq 1 -and $script:all[0].Name -eq $id) 'native removal success without actual removal cannot acknowledge';$passed++;[IO.File]::Delete($path)
  Reset;$script:addNoOp=$true;Fails {Apply};Assert (@($script:all).Count -eq 0) 'native add PassThru without effective installed policy cannot acknowledge';$passed++;[IO.File]::Delete($path)
  Reset;Apply;$owned=$script:all[0];$foreign=[pscustomobject]@{Name=[Guid]::NewGuid().ToString('D');Namespace=@('.foreign.phub');NameServers=@('192.168.1.1');Comment='foreign';DisplayName='foreign';NameEncoding='Utf8WithoutMapping'};$script:all+=@($foreign);$adds=$script:adds;Fails {Apply};Assert ($script:adds -eq $adds -and @($script:all).Count -eq 2 -and $script:all[1].Name -eq $foreign.Name) 'foreign local overlap preserved';$passed++;[IO.File]::Delete($path)

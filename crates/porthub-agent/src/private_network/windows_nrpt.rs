@@ -91,6 +91,11 @@ fn shell_path(path: &Path) -> Result<PathBuf> {
 
 fn command() -> Result<String> {
     let source=concat!(include_str!("windows_nrpt.ps1"),"\ntry{$request=[Console]::In.ReadToEnd()|ConvertFrom-Json;Invoke-PortHubNrpt -Config $request|ConvertTo-Json -Compress}catch{$message=$_.Exception.Message;if($message.Length -gt 512){$message=$message.Substring(0,512)};[Console]::Error.WriteLine($message);exit 1}\n");
+    encode_command(source)
+}
+fn encode_command(source: &str) -> Result<String> {
+    // Embedded scripts may arrive via CRLF checkouts or source archives.
+    let source = source.replace("\r\n", "\n");
     let bytes: Vec<_> = source.encode_utf16().flat_map(u16::to_le_bytes).collect();
     let encoded = STANDARD.encode(bytes);
     ensure!(
@@ -98,6 +103,10 @@ fn command() -> Result<String> {
         "NRPT constant script exceeds Windows command-line bound"
     );
     Ok(encoded)
+}
+fn cleanup_command() -> Result<String> {
+    let source=concat!(include_str!("windows_nrpt.ps1"),"\ntry{$request=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:PORTHUB_NRPT_CLEANUP))|ConvertFrom-Json;Invoke-PortHubNrpt -Config $request|Out-Null}catch{exit 1}\n");
+    encode_command(source)
 }
 async fn bounded(stream: impl AsyncRead + Unpin) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
@@ -284,13 +293,7 @@ impl Drop for Registration {
                 mode: "clear",
             })?;
             ensure!(input.len() <= 65536, "NRPT cleanup request exceeds bound");
-            let source=concat!(include_str!("windows_nrpt.ps1"),"\ntry{$request=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:PORTHUB_NRPT_CLEANUP))|ConvertFrom-Json;Invoke-PortHubNrpt -Config $request|Out-Null}catch{exit 1}\n");
-            let bytes: Vec<_> = source.encode_utf16().flat_map(u16::to_le_bytes).collect();
-            let encoded = STANDARD.encode(bytes);
-            ensure!(
-                encoded.len() <= 31500,
-                "NRPT fallback script exceeds command-line bound"
-            );
+            let encoded = cleanup_command()?;
             let mut child = std::process::Command::new(powershell()?)
                 .args([
                     "-NoLogo",
@@ -341,7 +344,30 @@ impl Drop for Registration {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn crlf_source_has_identical_native_command_bytes_and_budget() {
+        let lf = include_str!("windows_nrpt.ps1").replace("\r\n", "\n");
+        let crlf = lf.replace('\n', "\r\n");
+        assert_eq!(
+            super::encode_command(&lf).unwrap(),
+            super::encode_command(&crlf).unwrap()
+        );
+        // Both production entrypoints pass their complete exact wrappers through
+        // this normalizer; the existing size test covers both complete commands.
+        for encoded in [super::command().unwrap(), super::cleanup_command().unwrap()] {
+            use base64::Engine;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap();
+            let words: Vec<_> = bytes
+                .chunks_exact(2)
+                .map(|v| u16::from_le_bytes([v[0], v[1]]))
+                .collect();
+            assert!(!String::from_utf16(&words).unwrap().contains('\r'));
+        }
+    }
+    #[test]
     fn constant_script_fits_native_windows_command_line() {
         assert!(super::command().unwrap().len() <= 31500);
+        assert!(super::cleanup_command().unwrap().len() <= 31500);
     }
 }

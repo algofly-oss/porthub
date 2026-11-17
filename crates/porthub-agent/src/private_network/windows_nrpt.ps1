@@ -1,5 +1,5 @@
-# Exact owned local NRPT only. No GPO writes, global DNS changes, policy bypass,
-# registry changes, persistent PowerShell host, or arbitrary name-prefix adoption.
+$ProgressPreference='SilentlyContinue'
+# Exact owned local NRPT only; no global DNS/GPO writes or name-prefix adoption.
 # https://learn.microsoft.com/en-us/powershell/module/dnsclient/add-dnsclientnrptrule
 # https://learn.microsoft.com/en-us/powershell/module/dnsclient/get-dnsclientnrptpolicy
 function Invoke-PortHubNrpt {
@@ -104,7 +104,8 @@ function Invoke-PortHubNrpt {
             if($target -ccontains $entry.suffix){continue}
             Bound;$all=@(Rules);$owned=ResolveOwned $all
             if($entry.id -and $owned.ContainsKey($entry.id)){
-                Bound;Remove-DnsClientNrptRule -Name $entry.id -Force -ErrorAction Stop
+                $nativeName=(@($all|Where-Object{(Id $_.Name) -ceq $entry.id})[0]).Name
+                Bound;Remove-DnsClientNrptRule -Name $nativeName -Force -ErrorAction Stop
                 $left=@(Rules|Where-Object{(Id $_.Name) -ceq $entry.id -or [string]$_.Comment -ceq (Marker $entry.suffix)})
                 if($left.Count -gt 0){throw 'Owned NRPT removal was not acknowledged by native readback'}
             }
