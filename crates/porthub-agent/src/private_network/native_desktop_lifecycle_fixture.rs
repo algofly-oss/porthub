@@ -398,6 +398,7 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
         #[cfg(target_os="macos")]tcp_phase("dns_replacement_publication_start")?;
         dns::replace_registration(&mut registration,&spec.profile,tun.index,own,port,&[next_suffix.clone()]).await?;
         #[cfg(target_os="macos")]tcp_phase("dns_replacement_publication_effective_ready")?;
+        #[cfg(target_os="macos")]let _=dns_counts("before_replacement_lookup",&observer);
         #[cfg(target_os="macos")]tcp_phase("dns_replacement_lookup_start")?;
         let lookup=timeout(Duration::from_secs(8),tokio::net::lookup_host((format!("peer.{next_suffix}"),443))).await;
         #[cfg(target_os="macos")]
@@ -406,6 +407,7 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
             let (outcome,errno)=match &lookup {Ok(Ok(_))=>("complete",None),Ok(Err(error))=>("os_error",error.raw_os_error()),Err(_)=>("timeout",None)};
             println!("native_dns_lookup_phase=replacement outcome={outcome} errno={errno:?}");std::io::stdout().flush()?;
         }
+        #[cfg(target_os="macos")]let _=dns_counts("after_replacement_lookup",&observer);
         let answer=lookup??;
         ensure!(answer.into_iter().any(|s|s.ip()==IpAddr::V4(remote)),"dynamic custom suffix not registered with actual OS resolver");
         // Normal same-profile restart must reuse only its protected intent,
@@ -432,6 +434,7 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
         #[cfg(target_os="macos")]tcp_phase("dns_restart_publication_start")?;
         dns::replace_registration(&mut registration,&spec.profile,tun.index,own,port,&[restart_suffix.clone()]).await?;
         #[cfg(target_os="macos")]tcp_phase("dns_restart_publication_effective_ready")?;
+        #[cfg(target_os="macos")]let _=dns_counts("before_restart_lookup",&observer);
         #[cfg(target_os="macos")]tcp_phase("dns_restart_lookup_start")?;
         let lookup=timeout(Duration::from_secs(8),tokio::net::lookup_host((format!("peer.{restart_suffix}"),443))).await;
         #[cfg(target_os="macos")]
@@ -440,6 +443,7 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
             let (outcome,errno)=match &lookup {Ok(Ok(_))=>("complete",None),Ok(Err(error))=>("os_error",error.raw_os_error()),Err(_)=>("timeout",None)};
             println!("native_dns_lookup_phase=restart outcome={outcome} errno={errno:?}");std::io::stdout().flush()?;
         }
+        #[cfg(target_os="macos")]let _=dns_counts("after_restart_lookup",&observer);
         let answer=lookup??;
         ensure!(answer.into_iter().any(|s|s.ip()==IpAddr::V4(remote)),"actual resolver did not rebind to restarted native owner");
         // Own a real connected native socket in an explicit task, then prove its

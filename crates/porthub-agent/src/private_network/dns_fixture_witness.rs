@@ -17,10 +17,11 @@ pub(crate) struct Counts {
     pub mismatched_ids: u64,
     pub mismatched_types: u64,
 }
-// At most eight exact-owned exchanges; no names, addresses, or packet bytes.
+// At most eight exchanges per exact-owned phase (32 total); no names, addresses, or packet bytes.
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct ReplyMetadata {
     order: u64,
+    phase: u8,
     query_type: u16,
     query_class: u16,
     query_flags: u16,
@@ -43,7 +44,7 @@ pub(crate) struct ReplyMetadata {
     peer_port: u16,
 }
 pub(crate) struct Observer {
-    name: String,
+    names: [String; 4],
     expected: Ipv4Addr,
     direct_port: AtomicU16,
     counts: [AtomicU64; 8],
@@ -62,7 +63,7 @@ impl Observer {
             "observer question outside exact fixture"
         );
         Ok(Self {
-            name,
+            names: ['s', 't', 'u', 'v'].map(|stage| format!("peer.{stage}{nonce}.phub.")),
             expected,
             direct_port: AtomicU16::new(0),
             counts: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -83,7 +84,9 @@ impl Observer {
             || q.metadata.op_code != OpCode::Query
             || q.queries.len() != 1
             || q.queries[0].query_class() != DNSClass::IN
-            || q.queries[0].name().to_ascii().to_ascii_lowercase() != self.name
+            || !self
+                .names
+                .contains(&q.queries[0].name().to_ascii().to_ascii_lowercase())
         {
             return None;
         }
@@ -139,8 +142,14 @@ impl Observer {
             .iter()
             .filter(|r| matches!(&r.data, RData::A(A(ip)) if *ip == self.expected))
             .collect();
+        let phase = self
+            .names
+            .iter()
+            .position(|name| *name == q.queries[0].name().to_ascii().to_ascii_lowercase())
+            .unwrap() as u8;
         let row = ReplyMetadata {
             order,
+            phase,
             query_type: q.queries[0].query_type().into(),
             query_class: q.queries[0].query_class().into(),
             query_flags: u16::from_be_bytes([query[2], query[3]]),
@@ -174,7 +183,7 @@ impl Observer {
             peer_port: remote.port(),
         };
         if let Ok(mut rows) = self.metadata.lock() {
-            if rows.len() < 8 {
+            if rows.iter().filter(|row| row.phase == phase).count() < 8 {
                 rows.push(row);
             } else {
                 self.metadata_dropped.fetch_add(1, Ordering::SeqCst);
@@ -366,5 +375,37 @@ fn rejected_response_identity_remains_visible_without_accepted_counts() -> Resul
     );
     assert_eq!((c.replies, c.expected_a, c.noerror), (0, 0, 0));
     assert!(c.metadata.is_empty());
+    Ok(())
+}
+
+#[test]
+fn phase_metadata_is_bounded_independently_for_exact_owned_lifecycle_names() -> Result<()> {
+    let nonce = "0123456789abcdef0123456789abcdef";
+    let observer = Observer::new(
+        format!("peer.s{nonce}.phub."),
+        nonce,
+        "10.254.254.2".parse()?,
+    )?;
+    for stage in ['s', 't', 'u', 'v'] {
+        let mut q = Message::new(7, MessageType::Query, OpCode::Query);
+        q.add_query(hickory_proto::op::Query::query(
+            format!("peer.{stage}{nonce}.phub.").parse()?,
+            RecordType::AAAA,
+        ));
+        let query = q.to_vec()?;
+        q.metadata.message_type = MessageType::Response;
+        for _ in 0..9 {
+            observer.reply(&query, &q.to_vec()?, "127.0.0.1:12345".parse()?);
+        }
+    }
+    let c = observer.snapshot();
+    assert_eq!(c.metadata.len(), 32);
+    assert_eq!(c.metadata_dropped, 4);
+    for phase in 0..4 {
+        assert_eq!(
+            c.metadata.iter().filter(|row| row.phase == phase).count(),
+            8
+        );
+    }
     Ok(())
 }
