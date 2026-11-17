@@ -91,7 +91,13 @@ async function verifySurfaceDictation(browser){
   // High-refresh-rate pointing must stay connected through the real relay and
   // native worker, even when samples arrive faster than input can be applied.
   await page.getByRole('button',{name:'Disconnect',exact:true}).click();
-  await page.addScriptTag({content:(await fs.readFile(require('node:path').join(__dirname,'../src/lib/keyboardTransport.mjs'),'utf8')).replace(/export /g,'')+'\nwindow.MotionTransport=KeyboardTransport;'});
+  // Use the real module loader: the transport has an explicit local dependency.
+  // Classic-script export stripping silently fails when a new import is added.
+  const dependency='data:text/javascript;base64,'+Buffer.from(await fs.readFile(require('node:path').join(__dirname,'../src/lib/keyboardTermination.mjs'),'utf8')).toString('base64');
+  const source=await fs.readFile(require('node:path').join(__dirname,'../src/lib/keyboardTransport.mjs'),'utf8');
+  assert.equal(source.split("'./keyboardTermination.mjs'").length,2,'Expected one explicit termination dependency');
+  const moduleUrl='data:text/javascript;base64,'+Buffer.from(source.replace("'./keyboardTermination.mjs'",JSON.stringify(dependency))).toString('base64');
+  await page.evaluate(async url=>{window.MotionTransport=(await import(url)).KeyboardTransport;},moduleUrl);
   const motion=await page.evaluate(async()=>{
     const targets=await fetch('/api/keyboard/targets').then(r=>r.json());
     const target=targets.targets.find(t=>t.name==='Isolated desktop');
