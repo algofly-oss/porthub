@@ -298,6 +298,8 @@ pub struct Engine {
     compiled_pair: Option<pair_acl::CompiledPairAcl>,
     flow_budget:FlowBudget,
     exit_flow_budget:FlowBudget,
+    pair_private_epoch:Option<String>,
+    pair_exit_epoch:Option<String>,
 }
 impl Engine {
     pub fn revoke(&mut self) {
@@ -423,7 +425,7 @@ impl Engine {
             snapshot.peers.shrink_to_fit();
             self.ips = ips;
             self.compiled_pair=compiled_pair;
-            if !retain_pairs { self.pairs.clear(); }
+            self.reconcile_pair_generations(&snapshot,retain_pairs);
             self.snapshot = Some(snapshot);
             self.deadline = Some(Instant::now() + remaining);
             let old = std::mem::take(&mut self.flows);

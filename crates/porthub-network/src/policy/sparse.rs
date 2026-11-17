@@ -26,6 +26,8 @@ pub struct SparseInfo {
     pub protocol: u32,
     /// Stable authorization generation, distinct from the per-sync revision counter.
     pub epoch: String,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub exit_epoch: Option<String>,
     #[serde(default)]
     pub capture_pools: Vec<porthub_mesh::lan_routes::Network>,
 }
@@ -35,6 +37,7 @@ pub struct SparseInfo {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExitPair {
+    pub epoch: String,
     pub route_id: String,
     pub client: String,
     pub router: String,
@@ -85,6 +88,8 @@ impl Engine {
                         .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
                 "unsupported sparse private authority"
             );
+            ensure!(sparse.exit_epoch.as_ref().is_none_or(|epoch|epoch.len()==64
+                && epoch.bytes().all(|c|c.is_ascii_hexdigit()&&!c.is_ascii_uppercase())),"invalid exit pair generation");
             ensure!(
                 snapshot.dns_suffixes.len() <= MAX_PRIVATE_SUFFIXES
                     && snapshot.dns_suffixes.iter().map(String::len).sum::<usize>()
@@ -128,6 +133,28 @@ impl Engine {
 
     /// Install only after validating a complete response. A bad response cannot revoke unrelated leases.
     /// Refreshing the base authority never extends this peer's expiry or reverse-flow lifetime.
+    /// Preserve independently authorized traffic without renewing any deadline.
+    /// This mutates only cached permission projections, never a received lease.
+    pub(super) fn reconcile_pair_generations(&mut self,next:&Snapshot,retain_private:bool) {
+        let identity=self.snapshot.as_ref().is_some_and(|old|old.sparse.is_some()&&next.sparse.is_some()
+            && old.workspace==next.workspace&&old.self_==next.self_
+            && old.peers.iter().find(|p|p.id==old.self_).zip(next.peers.iter().find(|p|p.id==next.self_)).is_some_and(|(a,b)|same_identity(a,b)));
+        if !identity {self.pairs.clear();return;}
+        let sparse=next.sparse.as_ref().expect("checked sparse identity");
+        self.pairs.retain(|_,pair|{
+            let private=retain_private&&pair.pair_private_epoch.as_deref()==Some(sparse.epoch.as_str());
+            let exit=sparse.exit_epoch.as_deref().is_some_and(|generation|pair.pair_exit_epoch.as_deref()==Some(generation));
+            if !private {
+                pair.flows.clear();pair.compiled_pair=None;pair.pair_private_epoch=None;
+                if let Some(snapshot)=&mut pair.snapshot {snapshot.grants.clear();snapshot.pair_acl=None;}
+            }
+            if !exit {
+                pair.exit_flows.clear();pair.pair_exit_epoch=None;
+                if let Some(snapshot)=&mut pair.snapshot {snapshot.exit_routes.clear();}
+            }
+            private||exit
+        });
+    }
     pub fn install_pair(&mut self, lease: PairLease) -> Result<()> {
         ensure!(self.valid_lease(), "sparse base authority expired");
         self.prune_pairs();
@@ -192,6 +219,9 @@ impl Engine {
             ),
             "pair address collides with cached identity"
         );
+        if let Some(exit)=&lease.exit {
+            ensure!(sparse.exit_epoch.as_deref()==Some(exit.epoch.as_str()),"exit pair generation changed");
+        }
         if lease.exit.as_ref().is_some_and(|exit|exit.traffic_mode.lan()) {
             ensure!(!sparse.capture_pools.is_empty()
                 && [&lease.local,&lease.peer].iter().all(|peer|sparse.capture_pools.iter().any(|pool|pool.contains(peer.ip))),
@@ -239,6 +269,7 @@ impl Engine {
                 );
             }
         }
+        let private_epoch=lease.epoch.clone();let exit_epoch=lease.exit.as_ref().map(|exit|exit.epoch.clone());
         let id = lease.peer.id.clone();
         let snapshot = Snapshot {
             sparse: None,
@@ -256,11 +287,13 @@ impl Engine {
         let mut engine = Box::<Engine>::default();
         engine.flow_budget = self.flow_budget.clone();
         engine.exit_flow_budget = self.exit_flow_budget.clone();
+        engine.pair_private_epoch=Some(private_epoch.clone());engine.pair_exit_epoch=exit_epoch.clone();
         engine.apply(snapshot.clone())?;
         // The existing engine revalidates opening ACLs and retires flows on identity changes.
         // An unchanged lease renewal must preserve established TCP reverse-flow tracking.
         if let Some(existing) = self.pairs.get_mut(&id) {
             existing.apply(snapshot)?;
+            existing.pair_private_epoch=Some(private_epoch);existing.pair_exit_epoch=exit_epoch;
         } else {
             self.pairs.insert(id, engine);
         }
@@ -434,11 +467,11 @@ mod tests {
         assert!(e.pair_peer("b").is_none());
     }
     fn exit_base(epoch:&str)->Snapshot {
-        let mut snapshot=base(epoch);snapshot.sparse.as_mut().unwrap().capture_pools=vec!["10.203.0.0/16".parse().unwrap()];snapshot
+        let mut snapshot=base(epoch);snapshot.sparse.as_mut().unwrap().capture_pools=vec!["10.203.0.0/16".parse().unwrap()];snapshot.sparse.as_mut().unwrap().exit_epoch=Some("e".repeat(64));snapshot
     }
     fn exit_pair(epoch:&str,local_client:bool)->PairLease {
         let mut lease=pair(epoch);lease.grants.clear();
-        lease.exit=Some(ExitPair{route_id:"exit-route".into(),client:if local_client{"a"}else{"b"}.into(),router:if local_client{"b"}else{"a"}.into(),traffic_mode:porthub_mesh::exit_policy::TrafficMode::InternetOnly});lease
+        lease.exit=Some(ExitPair{epoch:"e".repeat(64),route_id:"exit-route".into(),client:if local_client{"a"}else{"b"}.into(),router:if local_client{"b"}else{"a"}.into(),traffic_mode:porthub_mesh::exit_policy::TrafficMode::InternetOnly});lease
     }
     #[test]
     fn exact_exit_pairs_authorize_both_roles_without_private_port_permissions() {
@@ -473,7 +506,8 @@ mod tests {
         e.pairs.get_mut("b").unwrap().deadline=Some(Instant::now()-Duration::from_secs(1));
         assert!(!e.check_exit(&request,"b",false));assert!(e.valid_lease());assert!(e.active_pair_flows().is_empty());
         e.install_pair(exit_pair(&epoch,true)).unwrap();assert!(e.check_exit(&request,"b",false));
-        e.apply(exit_base(&"b".repeat(64))).unwrap();assert!(!e.check_exit(&reply,"b",true));
+        let mut changed=exit_base(&"b".repeat(64));changed.sparse.as_mut().unwrap().exit_epoch=Some("f".repeat(64));
+        e.apply(changed).unwrap();assert!(!e.check_exit(&reply,"b",true));
     }
     #[test]
     fn exit_pairs_share_the_existing_total_exit_flow_bound() {
@@ -484,6 +518,34 @@ mod tests {
         assert!(e.check_exit(&udp("10.203.0.2","8.8.8.8",15000,53),"b",false));
         assert!(!e.check_exit(&udp("10.203.0.2","1.1.1.1",15001,53),"c",false));
         e.revoke_pair("b");assert!(e.check_exit(&udp("10.203.0.2","1.1.1.1",15001,53),"c",false));
+    }
+    #[test]
+    fn independent_generations_preserve_only_authorized_flows_without_local_deadline_renewal() {
+        let epoch="a".repeat(64);let mut e=Engine::default();e.apply(exit_base(&epoch)).unwrap();
+        let mut composite=pair(&epoch);composite.exit=exit_pair(&epoch,true).exit;e.install_pair(composite).unwrap();
+        let private=udp("10.203.0.2","10.203.1.2",15001,53);let private_reply=udp("10.203.1.2","10.203.0.2",53,15001);
+        let exit=udp("10.203.0.2","8.8.8.8",15000,53);let exit_reply=udp("8.8.8.8","10.203.0.2",53,15000);
+        assert!(e.check(&private,"b",false));assert!(e.check_exit(&exit,"b",false));
+        let before=e.pairs["b"].deadline;
+        e.apply(exit_base(&"b".repeat(64))).unwrap();
+        assert_eq!(e.pairs["b"].deadline,before,"local ordinary epoch update extended exit lease");
+        assert!(!e.check(&private_reply,"b",true));assert!(e.check_exit(&exit_reply,"b",true));
+        let mut fresh=pair(&"b".repeat(64));fresh.exit=exit_pair(&"b".repeat(64),true).exit;e.install_pair(fresh).unwrap();
+        assert!(e.check(&private,"b",false));assert!(e.check_exit(&exit_reply,"b",true),"unchanged genuine lease renewal lost established exit flow");
+        let before=e.pairs["b"].deadline;
+        let mut changed=exit_base(&"b".repeat(64));changed.sparse.as_mut().unwrap().exit_epoch=Some("f".repeat(64));e.apply(changed).unwrap();
+        assert_eq!(e.pairs["b"].deadline,before,"local exit epoch update extended private lease");
+        assert!(e.check(&private_reply,"b",true));assert!(!e.check_exit(&exit_reply,"b",true));
+        assert!(e.install_pair(exit_pair(&"b".repeat(64),true)).is_err(),"old exit epoch was reauthorized");
+        assert!(e.check(&private_reply,"b",true),"stale exit reply destroyed unrelated private authority");
+    }
+    #[test]
+    fn source_identity_change_cannot_retain_either_generation() {
+        let epoch="a".repeat(64);let mut e=Engine::default();e.apply(exit_base(&epoch)).unwrap();
+        e.install_pair(exit_pair(&epoch,true)).unwrap();
+        let mut changed=exit_base(&epoch);changed.peers[0].instance="new-owned-process".into();e.apply(changed).unwrap();
+        assert_eq!(e.pair_count(),0,"old exit source survived process identity change");
+        let mut bad=exit_base(&epoch);bad.sparse.as_mut().unwrap().exit_epoch=Some("invalid".into());assert!(e.apply(bad).is_err());
     }
     fn udp(source: &str, destination: &str, sport: u16, dport: u16) -> Vec<u8> {
         let mut b = vec![0u8; 28];
