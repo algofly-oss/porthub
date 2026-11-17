@@ -4,7 +4,7 @@ import settingsStyles from './Settings.module.css';
 import SearchDropdown from '@/components/ui/search-dropdown';
 import { useCallback,useEffect,useMemo,useRef,useState } from 'react';
 import axios from 'axios';
-import { IconBluetooth,IconDeviceMobile,IconDeviceTablet,IconKeyboard,IconRefresh,IconMicrophone,IconPlayerStop,IconPlugConnected,IconPlugConnectedX,IconSettings,IconX,IconPointer,IconClipboard } from '@tabler/icons-react';
+import { IconBluetooth,IconDeviceMobile,IconDeviceTablet,IconKeyboard,IconRefresh,IconMicrophone,IconPlayerStop,IconSettings,IconX,IconPointer,IconServer,IconDeviceDesktop } from '@tabler/icons-react';
 import useAuth from '@/shared/hooks/useAuth';
 import { KeyboardTransport } from '@/lib/keyboardTransport.mjs';
 import { VoiceRecorder } from '@/lib/keyboardRecorder.mjs';
@@ -19,6 +19,9 @@ const names={en:'English',hi:'Hindi',hinglish:'Hinglish (Hindi in Latin letters)
 export default function VKeyboard({active=true}){
   const {user}=useAuth();const isAdmin=user?.role==='admin';
   const [targets,setTargets]=useState([]),[selected,setSelected]=useState(''),[connection,setConnection]=useState({state:'disconnected'}),[error,setError]=useState(''),[status,setStatus]=useState(null),[text,setText]=useState(''),[recording,setRecording]=useState(false),[processing,setProcessing]=useState(false),[level,setLevel]=useState(0),[language,setLanguage]=useState('en'),[translate,setTranslate]=useState(false),[live,setLive]=useState(true),[after,setAfter]=useState('space'),[failedAudio,setFailedAudio]=useState(null),[loading,setLoading]=useState(false);
+  const [caption,setCaption]=useState({before:'',piece:'',text:'',revision:0,visible:false});
+  const captionTimer=useRef(0);
+  const clearCaption=useCallback(()=>{clearTimeout(captionTimer.current);setCaption(current=>({...current,text:'',visible:false}));captionTimer.current=setTimeout(()=>setCaption(current=>current.visible?current:{before:'',piece:'',text:'',revision:current.revision,visible:false}),300);},[]);
   const transport=useRef(null),recorder=useRef(null),queue=useRef(Promise.resolve()),pending=useRef(0),alive=useRef(true),latest=useRef({});
   latest.current={live,after,language,translate,active,connected:connection.state==='connected'};
   const refresh=useCallback(async()=>{setLoading(true);try{const {data}=await axios.get('/api/keyboard/targets');if(alive.current){setTargets(data.targets);setSelected(current=>current||data.targets.find(t=>t.online)?.id||data.targets[0]?.id||'');}}catch(e){if(alive.current)setError(e.response?.data?.detail||'Could not load keyboard clients');}finally{if(alive.current)setLoading(false);}},[]);
@@ -26,8 +29,8 @@ export default function VKeyboard({active=true}){
   const speechEnabled=status?.settings.enabled;
   useEffect(()=>{if(speechEnabled===false&&recorder.current){const current=recorder.current;recorder.current=null;setRecording(false);void current.stop(false);}},[speechEnabled]);
   const disconnect=useCallback(()=>{void stop();transport.current?.close();transport.current=null;setConnection({state:'disconnected'});},[stop]);
-  useEffect(()=>{alive.current=true;return()=>{alive.current=false;void recorder.current?.stop(false);transport.current?.close();};},[]);
-  useEffect(()=>{if(!active){disconnect();setText('');setFailedAudio(null);return;}void refresh();const timer=setInterval(refresh,10000);return()=>clearInterval(timer);},[active,refresh,disconnect]);
+  useEffect(()=>{alive.current=true;return()=>{alive.current=false;clearTimeout(captionTimer.current);void recorder.current?.stop(false);transport.current?.close();};},[]);
+  useEffect(()=>{if(!active){disconnect();setText('');clearCaption();setFailedAudio(null);return;}void refresh();const timer=setInterval(refresh,10000);return()=>clearInterval(timer);},[active,refresh,disconnect,clearCaption]);
   useEffect(()=>{if(!active)return;const hidden=()=>{if(document.hidden){void stop();void transport.current?.send({type:'release_all'}).catch(()=>{});}};document.addEventListener('visibilitychange',hidden);return()=>document.removeEventListener('visibilitychange',hidden);},[active,stop]);
   const send=useCallback(command=>{const promise=transport.current?.send(command)||Promise.reject(Error('Connect to a client first'));return promise.catch(e=>{if(alive.current)setError(e.message);});},[]);
   const target=targets.find(t=>t.id===selected),connected=connection.state==='connected';
@@ -38,6 +41,8 @@ export default function VKeyboard({active=true}){
     if(!data.text)return;
     const suffix=settings.after==='space'?' ':settings.after==='newline'?'\n':'';
     setText(old=>(old+data.text+suffix).slice(-8192));
+    clearTimeout(captionTimer.current);
+    setCaption(current=>({before:current.text.length>400?current.text.slice(-400).replace(/^\S*\s/,''):current.text,piece:data.text+suffix,text:(current.text+data.text+suffix).slice(-8192),revision:current.revision+1,visible:true}));
     if(settings.live&&latest.current.connected&&transport.current===settings.transport&&transport.current.session===settings.session){await transport.current.send({type:'text',text:data.text+suffix});}
     const response=await axios.get('/api/keyboard/speech');if(alive.current)setStatus(response.data);
   };
@@ -47,7 +52,7 @@ export default function VKeyboard({active=true}){
     queue.current=queue.current.then(()=>transcribe(bytes,settings)).catch(e=>{if(alive.current){setFailedAudio({bytes,settings});setError(e.response?.data?.detail||e.message||'Transcription failed. Your last audio segment is available to retry.');}}).finally(()=>{pending.current--;if(alive.current)setProcessing(pending.current>0);});
   };
   const start=async()=>{
-    setError('');if(!navigator.mediaDevices?.getUserMedia){setError('Microphone recording requires HTTPS or localhost.');return;}
+    setError('');clearCaption();if(!navigator.mediaDevices?.getUserMedia){setError('Microphone recording requires HTTPS or localhost.');return;}
     const next=new VoiceRecorder({segment,level:setLevel,failed:message=>{setError(message);setRecording(false);}});recorder.current=next;
     try{await next.start();if(recorder.current===next)setRecording(true);}catch(e){setError(e.name==='NotAllowedError'?'Microphone permission was denied. Allow it in your browser settings.':e.message);recorder.current=null;setRecording(false);}
   };
@@ -66,21 +71,21 @@ export default function VKeyboard({active=true}){
   const micDisabled=!recording&&(!status?.settings.enabled||!model?.installed||processing);
   const speechMessage=recording?'Listening…':processing?'Transcribing…':!status?.settings.enabled?'Dictation off':!model?.installed?'Choose a dictation model in Settings':'Ready';
   return <div className="relative h-full min-h-0" aria-label="VKeyboard content">
-    <Controls send={send} connected={connected} preferences={preferences} platform={target?.platform} microphone={()=>{if(!micDisabled)recording?stop():start();}} padView={padView} layout={layout}
+    <Controls send={send} connected={connected} preferences={preferences} platform={target?.platform} recording={recording} processing={processing} microphoneDisabled={micDisabled} microphone={()=>{if(!micDisabled)recording?stop():start();}} padView={padView} layout={layout}
       header={<header className={styles.header}>
-        <div className={styles.clientPicker}><SearchDropdown aria-label="Keyboard client" value={selected} disabled={connected||connection.state==='connecting'} onChange={e=>{disconnect();setSelected(e.target.value);setError('');}}><option value="" disabled>Choose a client</option>{targets.map(t=><option key={t.id} value={t.id}>{t.name}{t.online?'':' · Keyboard unavailable'}</option>)}</SearchDropdown></div>
-        <div className={styles.toolbar} role="toolbar" aria-label="Keyboard controls"><button type="button" title={connected?`Disconnect · ${connection.route==='local'?'Local connection':'Gateway relay'}`:'Connect'} aria-label={connected?'Disconnect':connection.state==='connecting'?'Connecting…':'Connect'} className={`${styles.iconButton} ${connected?styles.connected:''}`} disabled={!selected||!target?.online||connection.state==='connecting'} onClick={connected?disconnect:connect}>{connected?<IconPlugConnectedX size={20}/>:<IconPlugConnected size={20}/>}</button>
+        <div className={styles.toolbar} role="toolbar" aria-label="Keyboard controls"><button type="button" className={styles.iconButton} aria-label="Keyboard clients" title={`${targets.filter(item=>item.online).length} clients available`} onClick={()=>openSheet('clients')}><IconServer size={20}/></button><button type="button" title={connected?`Disconnect · ${connection.route==='local'?'Local connection':'Gateway relay'}`:'Connect'} aria-label={connected?'Disconnect':connection.state==='connecting'?'Connecting…':'Connect'} className={`${styles.iconButton} ${connected?styles.connected:''}`} disabled={!selected||!target?.online||connection.state==='connecting'} onClick={connected?disconnect:connect}><IconDeviceDesktop size={20}/></button>
         <button type="button" className={styles.iconButton} title={layout==='portrait'?'Switch to landscape layout':'Switch to portrait layout'} aria-label={layout==='portrait'?'Switch to landscape layout':'Switch to portrait layout'} onClick={()=>{const next=layout==='portrait'?'landscape':'portrait';setLayout(next);try{localStorage.setItem('porthub.keyboard.layout',next);}catch{}}}>{layout==='portrait'?<IconDeviceTablet size={20}/>:<IconDeviceMobile size={20}/>}</button>
         <button type="button" aria-label={padView?'Show the keyboard':'Show the touchpad'} title={padView?'Show keyboard':'Show touchpad'} className={`${styles.iconButton} ${styles.layoutToggle}`} onClick={()=>setPadView(current=>{try{localStorage.setItem('porthub.keyboard.padView',String(!current));}catch{}return !current;})}>{padView?<IconKeyboard size={20}/>:<IconPointer size={20}/>}</button>
         {target?.kind==='esp32'&&<button type="button" disabled={!connected} className={`${styles.iconButton} ${connection.bluetooth==='connected'?styles.connected:''}`} aria-label={connection.bluetooth==='off'?'Enable Bluetooth keyboard':'Temporarily disable Bluetooth keyboard'} title={`Bluetooth: ${connection.bluetooth||'unknown'}. ${connection.bluetooth==='off'?'Enable keyboard':'Turn off to use the receiving device’s native keyboard'}`} aria-pressed={connection.bluetooth!=='off'} onClick={()=>{try{transport.current.device({type:'bluetooth',on:connection.bluetooth==='off'});}catch(e){setError(e.message);}}}><IconBluetooth size={20}/></button>}
-        <button type="button" aria-label="Text and clipboard" className={styles.iconButton} onClick={()=>openSheet('text')}><IconClipboard size={20}/></button>
-        <button type="button" aria-label="VKeyboard settings" className={styles.iconButton} onClick={()=>openSheet('general')}><IconSettings size={20}/></button>
+        <button type="button" aria-label="VKeyboard settings" className={`${styles.iconButton} ${styles.settingsButton}`} onClick={()=>openSheet('general')}><IconSettings size={20}/></button>
         </div>
       </header>}
-      caption={<div className={styles.caption}>
-        <button type="button" className={styles.captionText} onClick={()=>openSheet(text?'text':'models')} title={text||speechMessage}>{text||speechMessage}</button>
-        {recording&&<span role="meter" aria-label="Microphone level" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(level*100)} className={styles.wave}>{Array.from({length:15},(_,i)=><span key={i} style={{height:`${4+Math.max(0,Math.min(1,level))*18*(.35+.65*Math.sin((i+1)*1.7)**2)}px`}}/>)}</span>}
-        <button type="button" aria-label={recording?'Stop recording':'Start dictation'} disabled={micDisabled} className={`${styles.mic} ${recording?styles.recording:''}`} onClick={()=>recording?stop():start()}>{recording?<IconPlayerStop size={20}/>:<IconMicrophone size={20}/>}</button>
+      caption={<div className={`${styles.caption} ${recording?styles.captionRecording:''} ${caption.visible&&caption.piece?styles.captionHasText:''}`}>
+        <button type="button" className={styles.captionText} aria-label={caption.piece?'Read recognized text':'Dictation status'} onClick={()=>openSheet(caption.piece?'text':!model?.installed?'models':'general')} title={caption.text||speechMessage}>
+          {caption.piece?<span className={`${styles.captionViewport} ${!caption.visible?styles.captionEmpty:''}`} aria-live="polite" aria-label="Recognized text"><span className={styles.captionInner}>{caption.before}<span key={caption.revision} className={styles.captionNew}>{caption.piece}</span></span></span>:<span role="status">{speechMessage}</span>}
+        </button>
+        <DictationWave recording={recording} level={level}/>
+        <button type="button" aria-label={recording?'Stop recording':'Start dictation'} aria-pressed={recording} disabled={micDisabled} className={`${styles.mic} ${recording?styles.recording:''} ${processing&&!recording?styles.micBusy:''}`} onClick={()=>recording?stop():start()}>{recording?<IconPlayerStop size={20}/>:<IconMicrophone size={20}/>}</button>
       </div>}/>
     {error&&<div role="alert" className={styles.alert}><span>{error}</span><button type="button" aria-label="Dismiss error" onClick={()=>setError('')}><IconX size={20}/></button></div>}
     <WorkspaceDrawer opened={settingsOpen} onClose={()=>setSettingsOpen(false)} classNames={{title:"!min-w-0 !flex-1"}} title={<span className="flex w-full items-center justify-between gap-3"><span>VKeyboard</span><button type="button" className={styles.iconButton} aria-label="Close VKeyboard settings" onClick={()=>setSettingsOpen(false)}><IconX size={20}/></button></span>} size="lg" fixedHeight="min(88dvh, 760px)" withCloseButton={false}>
@@ -97,7 +102,8 @@ export default function VKeyboard({active=true}){
 
           </section>
           <section id="keyboard-panel-clients" role="tabpanel" aria-labelledby="keyboard-tab-clients" hidden={sheet!=='clients'} className="min-w-0 space-y-3 p-2">
-            <button type="button" className={button} disabled={loading} onClick={refresh}><IconRefresh size={18} className="mr-2 inline"/>Refresh keyboard clients</button>
+            <label className="block text-xs text-muted-foreground">Input client<div className={styles.clientPicker}><SearchDropdown aria-label="Keyboard client" value={selected} disabled={connected||connection.state==='connecting'} onChange={e=>{disconnect();setSelected(e.target.value);setError('');}}><option value="" disabled>Choose a client</option>{targets.map(t=><option key={t.id} value={t.id}>{t.name}{t.online?'':' · Keyboard unavailable'}</option>)}</SearchDropdown></div></label>
+            <div className="flex flex-wrap gap-2"><button type="button" className={button} aria-label={connected?'Disconnect client':'Connect client'} disabled={!selected||!target?.online||connection.state==='connecting'} onClick={connected?disconnect:connect}>{connected?'Disconnect':connection.state==='connecting'?'Connecting…':'Connect'}</button><button type="button" className={button} disabled={loading} onClick={refresh}><IconRefresh size={18} className="mr-2 inline"/>Refresh keyboard clients</button></div>
             <p role="status" className="text-xs text-muted-foreground">{connected?`Connected to ${target?.name}. ${connection.route==='local'?'Local connection':'Gateway relay'}.${connection.bluetooth?` Bluetooth: ${connection.bluetooth}.`:''}`:'Local connections are discovered without changing this page’s URL.'}</p>
 {target&&!target.online&&<div className="mt-3 rounded-lg bg-background p-3 text-xs text-muted-foreground">{target.kind==='esp32'?'Connect the board to Wi-Fi and check its PortHub settings.':<>The keyboard module is not connected. The machine may still be online. On this machine’s desktop, run <code className="mt-3 block select-all whitespace-pre-wrap break-all rounded-lg bg-control p-3 font-mono leading-5 text-foreground">porthub keyboard enable --registration {selected}</code>. <button type="button" className={`${button} mt-3`} onClick={async()=>{try{await navigator.clipboard.writeText(`porthub keyboard enable --registration ${selected}`);}catch{setError('Could not copy the command. Select and copy it manually.');}}}>Copy setup command</button><p className="mt-3 leading-5">The updated agent is required. A local disable always blocks server control.</p></>}</div>}
         {target?.kind==='esp32'&&<DeviceSettings key={target.id} target={target} disconnect={disconnect} refresh={refresh} onError={setError}/>}
@@ -105,7 +111,7 @@ export default function VKeyboard({active=true}){
         {connected&&target?.kind==='esp32'&&<div className="mt-3 flex flex-wrap gap-2"><button type="button" className={button} onClick={()=>clientAction('pairing')}>Pair another Bluetooth device</button><button type="button" className={button} onClick={()=>clientAction('bluetooth')}>Enable Bluetooth</button><button type="button" className={button} onClick={()=>{try{transport.current.device({type:'bluetooth',on:false});}catch(e){setError(e.message);}}}>Disconnect Bluetooth</button></div>}
           </section>
           <div id="keyboard-panel-text" role="tabpanel" aria-labelledby="keyboard-tab-text" hidden={sheet!=='text'}><section aria-label="Text and clipboard" className="rounded-xl border border-border bg-surface p-4 sm:p-5"><div className="mb-3 flex flex-wrap items-center justify-between gap-2"><h2 className="text-sm font-medium">Text & clipboard</h2><span className="text-xs text-muted-foreground">{new TextEncoder().encode(text).length} / 8192 bytes</span></div><label className="sr-only" htmlFor="keyboard-text">Text to send to the selected client</label><textarea id="keyboard-text" value={text} maxLength={8192} onChange={e=>setText(e.target.value)} placeholder="Paste a link, instructions, or a command here…" className="min-h-[120px] w-full resize-y rounded-lg border border-input bg-background p-3 text-sm text-foreground outline-none focus:border-primary" spellCheck={false}/>
-        <div className="mt-3 flex flex-wrap gap-2"><button type="button" disabled={!connected||!text||new TextEncoder().encode(text).length>8192} className={`${button} border-primary bg-primary text-primary-foreground hover:opacity-90`} onClick={()=>send({type:'text',text})}>Type text</button><button type="button" disabled={!connected||!text||!connection.clipboard||new TextEncoder().encode(text).length>8192} className={button} onClick={()=>send({type:'clipboard',text,paste:false})}>Update clipboard</button><button type="button" disabled={!connected||!text||!connection.clipboard||new TextEncoder().encode(text).length>8192} className={button} onClick={()=>send({type:'clipboard',text,paste:true})}>Paste text</button><button type="button" disabled={!connected||!connection.clipboard} className={button} onClick={()=>send({type:'paste'})}>Paste remote clipboard</button><button type="button" className={`${button} ml-auto`} disabled={!text} onClick={()=>setText('')}>Clear text</button></div>
+        <div className="mt-3 flex flex-wrap gap-2"><button type="button" disabled={!connected||!text||new TextEncoder().encode(text).length>8192} className={`${button} border-primary bg-primary text-primary-foreground hover:opacity-90`} onClick={()=>send({type:'text',text})}>Type text</button><button type="button" disabled={!connected||!text||!connection.clipboard||new TextEncoder().encode(text).length>8192} className={button} onClick={()=>send({type:'clipboard',text,paste:false})}>Update clipboard</button><button type="button" disabled={!connected||!text||!connection.clipboard||new TextEncoder().encode(text).length>8192} className={button} onClick={()=>send({type:'clipboard',text,paste:true})}>Paste text</button><button type="button" disabled={!connected||!connection.clipboard} className={button} onClick={()=>send({type:'paste'})}>Paste remote clipboard</button><button type="button" className={`${button} ml-auto`} disabled={!text} onClick={()=>{setText('');clearCaption();}}>Clear text</button></div>
         <p className="mt-3 text-xs text-muted-foreground">Paste text updates the client’s clipboard, then pastes into its focused field. It does not press Enter. {target?.kind==='esp32'?'Bluetooth HID cannot write a system clipboard; use Type text.':''}</p>
       </section>
 
@@ -117,4 +123,18 @@ export default function VKeyboard({active=true}){
       </div>
     </WorkspaceDrawer>
   </div>;
+}
+
+// Same short rolling level history as the original client, not a static set of
+// bars scaled together. No animation-frame loop survives recording/unmount.
+function DictationWave({recording,level}) {
+  const current=useRef(level),[history,setHistory]=useState(()=>Array(30).fill(.08));current.current=level;
+  useEffect(()=>{
+    if(!recording){setHistory(Array(30).fill(.08));return;}
+    let frame=0,last=performance.now(),peak=0;
+    const draw=now=>{peak=Math.max(peak,current.current);if(now-last>=50){const value=Math.max(.08,Math.min(1,peak));setHistory(old=>[...old.slice(1),value]);last=now;peak=0;}frame=requestAnimationFrame(draw);};
+    frame=requestAnimationFrame(draw);return()=>cancelAnimationFrame(frame);
+  },[recording]);
+  if(!recording)return null;
+  return <span role="meter" aria-label="Microphone level" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(level*100)} className={styles.wave}>{history.map((value,index)=><span key={index} style={{transform:`scaleY(${value*(1-Math.abs(index-14.5)/14.5*.45)})`}}/>)}</span>;
 }

@@ -1,3 +1,4 @@
+.surface,.sheetContent{--primary:221 83% 53%;--primary-foreground:0 0% 100%}
 .surface{height:100%;min-height:0;width:100%;max-width:1100px;margin:auto;display:grid;grid-template-rows:auto minmax(0,1fr) auto;padding:8px 12px max(8px,env(safe-area-inset-bottom));gap:8px;outline:none}
 .header{display:flex;align-items:center;gap:6px;min-width:0}
 .clientPicker{min-width:0;flex:1;max-width:none}.toolbar{display:flex;align-items:center;gap:6px;min-width:0}.clientPicker :global(.mantine-Select-root){min-width:0;width:100%;font-size:12px}.clientPicker :global(.mantine-Select-input){height:44px!important;min-height:44px}
@@ -6,10 +7,10 @@
 .layoutToggle{display:none}
 .connected{color:hsl(var(--primary))}
 .stage{min-height:0;display:flex;flex-direction:column;gap:6px}
-.pad{position:relative;min-height:60px;flex:1;border:1px solid hsl(var(--border));border-radius:12px;background:hsl(var(--surface));touch-action:none;user-select:none;-webkit-user-select:none;overflow:hidden;cursor:crosshair}
+.pad{position:relative;min-height:60px;flex:1;border:1px solid hsl(var(--border));border-radius:16px;background:hsl(var(--surface));transition:background .15s,border-color .15s;touch-action:none;user-select:none;-webkit-user-select:none;overflow:hidden;cursor:crosshair}
 .pad[hidden]{display:none}
-.pad:global(.touching),.pad:global(.active){border-color:hsl(var(--primary))}
-.pad:global(.dragging){background:hsl(var(--primary)/.08)}
+.pad:global(.touching){background:hsl(var(--control))}
+.pad:global(.dragging),.pad:global(.holding){border-color:hsl(var(--primary));background:hsl(var(--primary)/.08)}
 .padHint{position:absolute;inset:0;display:grid;place-items:center;font-size:12px;color:hsl(var(--muted-foreground));pointer-events:none;opacity:.5}
 .mouseButtons{position:absolute;bottom:0;left:0;right:0;display:flex;height:48px;border-top:1px solid hsl(var(--border));background:hsl(var(--background))}
 .mouseButtons[hidden]{display:none}
@@ -94,3 +95,53 @@
  .landscape .keyboard :global(.vk.fn),.automatic .keyboard :global(.vk.fn){font-size:14px}
  .landscape .keyboard :global(.mic-key),.automatic .keyboard :global(.mic-key){display:grid}
 }
+
+/* Original compact status chips and round settings control. Device selection
+   belongs to Settings → Clients, leaving the full pad/keyboard width usable. */
+.header{height:44px;min-height:44px;display:flex;flex-wrap:nowrap}
+.toolbar{width:100%;justify-content:flex-start;gap:0}
+.toolbar .iconButton{width:44px;height:44px;min-width:44px;border:0;border-radius:50%;background:transparent;color:hsl(var(--muted-foreground))}
+.toolbar .iconButton svg{width:20px;height:20px}
+.toolbar .iconButton:hover{background:hsl(var(--control))}
+.toolbar .iconButton.connected{color:hsl(var(--primary))}
+.toolbar .settingsButton{margin-left:auto;border:1px solid hsl(var(--border));background:hsl(var(--surface))}
+.clientPicker{width:100%;max-width:none}
+.padHint{line-height:1.6;text-align:center;padding:0 20px}
+.caption{min-height:44px;gap:12px}
+.captionText{display:flex;align-items:center;justify-content:center;min-height:44px;white-space:normal;text-align:center;text-overflow:clip;-webkit-line-clamp:unset}
+.captionViewport{display:flex;flex-direction:column;justify-content:flex-end;flex:1;min-width:0;height:36px;overflow:hidden;font-size:14px;line-height:18px;white-space:normal;overflow-wrap:anywhere;transition:opacity .3s;mask-image:linear-gradient(to bottom,transparent,#000 35%);-webkit-mask-image:linear-gradient(to bottom,transparent,#000 35%)}
+.captionInner{flex:none;width:100%}
+.captionEmpty{opacity:0}
+.captionNew{display:inline-block;max-width:100%;animation:captionRise .35s cubic-bezier(.2,.8,.2,1)}
+@keyframes captionRise{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.captionRecording:not(.captionHasText) .captionText{display:none}
+.captionRecording.captionHasText{flex-wrap:wrap}
+.captionRecording.captionHasText .captionText{display:flex;order:2;flex-basis:100%;width:100%}
+.captionRecording .wave{display:flex;flex:1;min-width:0;width:auto;max-width:none;justify-content:center}
+.wave{height:20px;gap:3px}
+.wave span{flex:0 1 4px;min-width:2px;width:4px;height:20px;opacity:.9;transform-origin:center;transition:transform 80ms linear;background:#ef5350}
+.mic{width:44px;height:44px;box-shadow:0 4px 14px hsl(var(--primary)/.22);transition:background .2s,box-shadow .2s,transform .15s}
+.mic:active{transform:scale(.95)}
+.recording{box-shadow:0 4px 14px #dc262633}
+.recording svg{fill:currentColor;stroke-width:0}
+.micBusy{position:relative;background:hsl(var(--control));box-shadow:none}
+.micBusy svg{opacity:0}
+.micBusy::after{content:'';position:absolute;width:22px;height:22px;border-radius:50%;border:2px solid hsl(var(--muted-foreground)/.25);border-top-color:hsl(var(--foreground));animation:dictationSpin .8s linear infinite}
+@keyframes dictationSpin{to{transform:rotate(360deg)}}
+/* Wide keyboards keep their microphone key, but recognition is never hidden. */
+.landscape .caption,.automatic .caption{display:flex}
+@media(min-width:768px) and (min-height:560px){.landscape .caption .mic,.automatic .caption .mic{display:none}}
+@media(orientation:landscape) and (max-height:599px){
+ .surface,.portrait,.landscape{grid-template-rows:44px auto minmax(0,1fr)}
+ .surface .stage{display:flex}.surface .pad{display:none}.surface .caption .mic{display:none}
+ .surface .keyboard :global(.vk){height:clamp(24px,calc((100dvh - 205px)/6 - 4px),46px)}
+ .padView{grid-template-rows:44px minmax(0,1fr)}.padView .pad{display:block}.padView .caption .mic{display:grid}
+}
+@media(prefers-reduced-motion:reduce){.captionNew,.micBusy::after{animation:none}.captionViewport,.mic,.wave span{transition:none}}
+
+.keyboard :global(.mic-key){background:hsl(var(--primary));color:hsl(var(--primary-foreground))}
+.keyboard :global(.mic-key.recording){background:#dc2626}
+.keyboard :global(.mic-key.recording svg){fill:currentColor;stroke-width:0}
+.keyboard :global(.mic-key.busy){background:hsl(var(--control))}
+.keyboard :global(.mic-key.busy svg){opacity:0}
+.keyboard :global(.mic-key.busy)::after{content:'';position:absolute;width:18px;height:18px;border:2px solid hsl(var(--muted-foreground)/.25);border-top-color:hsl(var(--foreground));border-radius:50%;animation:dictationSpin .8s linear infinite}

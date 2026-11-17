@@ -1,5 +1,6 @@
 // VKeyboard's original controls, scoped to one PortHub surface. No network or URL logic.
 export function mountKeyboardSurface({root,keyboard,pad,read,command,mic}) {
+  let destroyed=false;const emit=command;command=value=>{if(!destroyed)emit(value)};
   const cleanups=[],timers=new Set(),nativeDocument=globalThis.document;
   const listen=(target,name,fn,options)=>{target.addEventListener(name,fn,options);cleanups.push(()=>target.removeEventListener(name,fn,options))};
   const addEventListener=(name,fn,options)=>listen(window,name,fn,options);
@@ -49,7 +50,7 @@ function modKey(b,m){
 // Modifier names of the computer being typed on: a Mac has ⌃ ⌥ ⌘, Windows
 // Ctrl Alt Win, Linux Ctrl Alt Super. An ESP32 cannot know its host: Ctrl Alt ⌘.
 function modLabels(){const p=String(read().platform||'');
-  const names=/^darwin/.test(p)?{ctrl:['⌃','Control'],alt:['⌥','Option'],meta:['⌘','Command']}
+  const names=/^(?:darwin|macos)/i.test(p)?{ctrl:['⌃','Control'],alt:['⌥','Option'],meta:['⌘','Command']}
     :/^windows/.test(p)?{ctrl:['Ctrl','Ctrl'],alt:['Alt','Alt'],meta:['Win','Windows key']}
     :/^linux/.test(p)?{ctrl:['Ctrl','Ctrl'],alt:['Alt','Alt'],meta:['Super','Super']}
     :{ctrl:['Ctrl','Ctrl'],alt:['Alt','Alt (Option on a Mac)'],meta:['⌘','Command (Windows key on Windows)']};
@@ -155,6 +156,15 @@ function charKey(b,base,pop){
   b.addEventListener('click',e=>{if(e.detail===0&&!b.disabled)emit()});  // keyboard or switch access
   b.addEventListener('contextmenu',e=>e.preventDefault());
 }
+function updateMicrophone(){
+  const button=keyboard.querySelector('.mic-key');if(!button)return;
+  const {recording,processing,microphoneDisabled}=read(),busy=!!processing&&!recording;
+  const state=recording?'recording':busy?'busy':'idle';
+  button.disabled=!!microphoneDisabled;button.setAttribute('aria-pressed',String(!!recording));button.setAttribute('aria-busy',String(busy));
+  const label=recording?'Stop recording':busy?'Transcribing…':'Dictate';button.setAttribute('aria-label',label);button.title=label;
+  button.classList.toggle('recording',!!recording);button.classList.toggle('busy',busy);
+  if(button.dataset.microphoneState!==state){button.dataset.microphoneState=state;button.innerHTML=recording?'<svg aria-hidden="true" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg>':svg('mic');}
+}
 function renderVkb(){
   const kb=keyboard,bar=document.createElement('div');bar.className='vkb-row vkb-bar';
   const tool=(html,label,cls='')=>{const b=document.createElement('button');b.type='button';b.className='vk fn '+cls;b.tabIndex=0;b.innerHTML=html;b.setAttribute('aria-label',label);b.title=label;bar.append(b);return b};
@@ -179,6 +189,7 @@ function renderVkb(){
   kb.querySelectorAll('button:not([data-always-on])').forEach(b=>b.disabled=!read().connected);
   renderMods();
   modLabels();
+  updateMicrophone();
 }
 (function touchpad(){
   const fingers=new Map(),move={x:0,y:0},scroll={x:0,y:0};
@@ -228,11 +239,11 @@ function renderVkb(){
   // panning and zooming the page with two fingers (it ignores touch-action there).
   const onButton=el=>el?.closest?.('.tp-btn');  // the mouse buttons have their own handlers below
   const each=(e,fn)=>{e.preventDefault();for(const t of e.changedTouches)if(!onButton(t.target))fn(t.identifier,t.clientX,t.clientY,e.timeStamp)};
-  pad.addEventListener('touchstart',e=>each(e,down),{passive:false});
-  pad.addEventListener('touchmove',e=>each(e,moved),{passive:false});
-  pad.addEventListener('touchend',e=>each(e,(id,x,y,t)=>lifted(id,t)),{passive:false});
-  pad.addEventListener('touchcancel',e=>{e.preventDefault();resetPad()},{passive:false});
-  ['gesturestart','gesturechange','gestureend'].forEach(n=>pad.addEventListener(n,e=>e.preventDefault()));  // Safari pinch
+  listen(pad,'touchstart',e=>each(e,down),{passive:false});
+  listen(pad,'touchmove',e=>each(e,moved),{passive:false});
+  listen(pad,'touchend',e=>each(e,(id,x,y,t)=>lifted(id,t)),{passive:false});
+  listen(pad,'touchcancel',e=>{e.preventDefault();resetPad()},{passive:false});
+  ['gesturestart','gesturechange','gestureend'].forEach(n=>listen(pad,n,e=>e.preventDefault()));  // Safari pinch
   // A mouse or a laptop's trackpad, with the computer's cursor left as it is.
   // Holding the button and moving works like a finger (a quick click clicks,
   // click then hold and move drags). After a click, the touchpad is active:
@@ -240,21 +251,21 @@ function renderVkb(){
   // Merely passing over it does nothing.
   const mouse=e=>e.pointerType!=='touch';let active=false,last=null;
   const setActive=on=>{active=on;last=null;pad.classList.toggle('active',on)};
-  pad.addEventListener('pointerdown',e=>{if(!mouse(e)||onButton(e.target))return;e.preventDefault();
+  listen(pad,'pointerdown',e=>{if(!mouse(e)||onButton(e.target))return;e.preventDefault();
     // A mouse's right or middle button clicks that button on the device.
     if(e.button===1||e.button===2){send({action:'click',button:e.button===2?'right':'middle'});return}
     try{pad.setPointerCapture(e.pointerId)}catch{}down('m',e.clientX,e.clientY,e.timeStamp)});
-  pad.addEventListener('pointermove',e=>{if(!mouse(e))return;
+  listen(pad,'pointermove',e=>{if(!mouse(e))return;
     if(fingers.has('m')){moved('m',e.clientX,e.clientY,e.timeStamp);return}
     if(!active)return;
     if(last){const dx=e.clientX-last.x,dy=e.clientY-last.y,dt=Math.max(1,e.timeStamp-last.t);
       const gain=1.3+Math.min(2.2,Math.hypot(dx,dy)/dt*1.4);move.x+=dx*gain;move.y+=dy*gain;later()}
     last={x:e.clientX,y:e.clientY,t:e.timeStamp}});
-  ['pointerup','pointercancel'].forEach(n=>pad.addEventListener(n,e=>{if(!mouse(e)||!fingers.has('m'))return;if(n==='pointercancel'){resetPad();return;}lifted('m',e.timeStamp);setActive(true)}));
-  pad.addEventListener('pointerleave',e=>{if(mouse(e)&&!fingers.has('m'))setActive(false)});
+  ['pointerup','pointercancel'].forEach(n=>listen(pad,n,e=>{if(!mouse(e)||!fingers.has('m'))return;if(n==='pointercancel'){resetPad();return;}lifted('m',e.timeStamp);setActive(true)}));
+  listen(pad,'pointerleave',e=>{if(mouse(e)&&!fingers.has('m'))setActive(false)});
   addEventListener('blur',()=>setActive(false));
   // A mouse wheel (or a laptop's two-finger scroll) over the touchpad scrolls the device.
-  pad.addEventListener('wheel',e=>{e.preventDefault();if(!read().connected)return;
+  listen(pad,'wheel',e=>{e.preventDefault();if(!read().connected)return;
     const perStep=e.deltaMode===1?3:e.deltaMode===2?0.1:100;  // lines, pages, or pixels per step
     const dir=read().reverseScroll?-1:1;scroll.x+=dir*e.deltaX/perStep;scroll.y+=dir*e.deltaY/perStep;later()},{passive:false});
   // Mouse buttons (Settings → Mouse buttons): each holds its button on the device
@@ -266,23 +277,23 @@ function renderVkb(){
   const buttonsDown=new Map();  // pointer id -> {b, name, x, y, t}
   const DRAG_SPEED=0.5;  // pointer speed while a button is held: drags are for precision
   const releaseButton=id=>{const p=buttonsDown.get(id);if(!p)return;buttonsDown.delete(id);
-    p.b.classList.remove('pressed');now();send({action:'release',button:p.name});stopRenew()};
+    p.b.classList.remove('pressed');pad.classList.toggle('holding',buttonsDown.size>0);now();send({action:'release',button:p.name});stopRenew()};
   pad.querySelectorAll('.tp-btn').forEach(b=>{
-    b.addEventListener('pointerdown',e=>{e.preventDefault();e.stopPropagation();if(!read().connected||buttonsDown.has(e.pointerId))return;
+    listen(b,'pointerdown',e=>{e.preventDefault();e.stopPropagation();if(!read().connected||buttonsDown.has(e.pointerId))return;
       try{b.setPointerCapture(e.pointerId)}catch{}now();
-      buttonsDown.set(e.pointerId,{b,name:b.dataset.button,x:e.clientX,y:e.clientY,t:e.timeStamp});b.classList.add('pressed');
+      buttonsDown.set(e.pointerId,{b,name:b.dataset.button,x:e.clientX,y:e.clientY,t:e.timeStamp});b.classList.add('pressed');pad.classList.add('holding');
       send({action:'press',button:b.dataset.button});renew();navigator.vibrate?.(8)});
-    b.addEventListener('pointermove',e=>{const p=buttonsDown.get(e.pointerId);if(!p)return;
+    listen(b,'pointermove',e=>{const p=buttonsDown.get(e.pointerId);if(!p)return;
       const dx=e.clientX-p.x,dy=e.clientY-p.y,dt=Math.max(1,e.timeStamp-p.t);Object.assign(p,{x:e.clientX,y:e.clientY,t:e.timeStamp});
       const gain=(1.3+Math.min(2.2,Math.hypot(dx,dy)/dt*1.4))*DRAG_SPEED;  // as on the touchpad, slower
       move.x+=dx*gain;move.y+=dy*gain;later()});
-    ['pointerup','pointercancel','lostpointercapture'].forEach(n=>b.addEventListener(n,e=>releaseButton(e.pointerId)));
+    ['pointerup','pointercancel','lostpointercapture'].forEach(n=>listen(b,n,e=>releaseButton(e.pointerId)));
   });
   const releaseAll=()=>{for(const id of [...buttonsDown.keys()])releaseButton(id)};
-  resetPad=()=>{cancelHold();release();releaseAll();if(heldRenew){clearInterval(heldRenew);heldRenew=0}fingers.clear();gesture=null;lastTap=-1e9;setActive(false);cancelAnimationFrame(frame);frame=0;move.x=move.y=scroll.x=scroll.y=0;pad.classList.remove('touching')};  // never leave a button held
+  resetPad=()=>{cancelHold();release();releaseAll();if(heldRenew){clearInterval(heldRenew);heldRenew=0}fingers.clear();gesture=null;lastTap=-1e9;setActive(false);cancelAnimationFrame(frame);frame=0;move.x=move.y=scroll.x=scroll.y=0;pad.classList.remove('touching','holding')};  // never leave a button held
   addEventListener('pagehide',()=>resetPad());addEventListener('blur',()=>resetPad());
   document.addEventListener('visibilitychange',()=>{if(document.hidden)resetPad()});
-  pad.addEventListener('contextmenu',e=>e.preventDefault());
+  listen(pad,'contextmenu',e=>e.preventDefault());
 })();
 
 
@@ -290,5 +301,5 @@ function renderVkb(){
   const release=()=>{resetPad();for(const id of [...timers])clearInterval(id);sysHeld.clear();for(const m in mods)mods[m]={};renderMods();if(read().connected)command({type:'release_all'});renderVkb()};
   addEventListener('blur',release);
   document.addEventListener('visibilitychange',()=>{if(document.hidden)release()});
-  return {refresh:()=>{release();renderVkb()},release,destroy:()=>{release();cleanups.forEach(fn=>fn());keyboard.replaceChildren()}};
+  return {microphone:()=>{if(!destroyed)updateMicrophone()},refresh:()=>{if(!destroyed){release();renderVkb()}},release:()=>{if(!destroyed)release()},destroy:()=>{if(destroyed)return;release();destroyed=true;cleanups.splice(0).forEach(fn=>fn());keyboard.replaceChildren()}};
 }
