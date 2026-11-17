@@ -1194,3 +1194,6 @@ mod control_backpressure_tests {
         scenario(false).await
     }
 }
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
+mod memory_benchmark;
