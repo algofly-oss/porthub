@@ -64,6 +64,11 @@ fn send_authorized(authority:Option<&super::authority_event::Authority<()>>,pair
     session.send_guarded(bytes,super::authority_event::send_permit(authority,pairs,peer)?)
 }
 
+fn send_probe_authorized(authority:Option<&super::authority_event::Authority<()>>,pairs:&super::sparse::Handle,peer:&str,session:&porthub_mesh::udp::Session,bytes:bytes::Bytes)->Result<()> {
+    ensure!(super::probe::valid_frame(&bytes,true),"invalid direct measurement frame");
+    session.send_guarded(bytes,super::authority_event::send_probe_permit(authority,pairs,peer)?)
+}
+
 fn send_exit_authorized(authority:Option<&super::authority_event::Authority<()>>,pairs:&super::sparse::Handle,peer:&str,session:&porthub_mesh::udp::Session,bytes:bytes::Bytes)->Result<()> {
     session.send_guarded(bytes,super::authority_event::send_exit_permit(authority,pairs,peer)?)
 }
@@ -113,7 +118,7 @@ fn relay_probe(
         *destination,
         payload,
     )?;
-    sender.send(peer, &packet)
+    sender.send_probe(peer, &packet)
 }
 
 #[cfg(feature = "local-tor")]
@@ -736,15 +741,18 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     }
                     continue;
                 }
-                let probe_bytes=if let Some(envelope)=porthub_mesh::control_packet::decode(porthub_mesh::control_packet::PROBE,bytes.clone()) {
+                let (probe_bytes,wrapped_probe)=if let Some(envelope)=porthub_mesh::control_packet::decode(porthub_mesh::control_packet::PROBE,bytes.clone()) {
                     if peer_ips.get(&peer)!=Some(&envelope.source) || peer_ips.get(&profile.peer_id)!=Some(&envelope.destination) {continue;}
-                    envelope.payload
-                } else {bytes.clone()};
+                    (envelope.payload,true)
+                } else {(bytes.clone(),false)};
+                if bytes.get(9)==Some(&porthub_mesh::control_packet::PROBE)&&!wrapped_probe{continue;}
+                if wrapped_probe&&!super::probe::valid_frame(&probe_bytes,direct){continue;}
+                if super::probe::valid_frame(&probe_bytes,direct)&&sparse_handle.enabled()&&sparse_handle.metadata_authority(&peer).is_none(){continue;}
                 if let Some(replies)=path_quality.handle(&peer,direct,&probe_bytes,now) {
                     if !replies.is_empty() {
                         if direct {
                             if let Some(session)=sessions.read().await.get(&peer) {
-                                for reply in replies { let _=send_authorized(installed_authority.as_ref(),&sparse_handle,&peer,session,reply); }
+                                for reply in replies { let _=send_probe_authorized(installed_authority.as_ref(),&sparse_handle,&peer,session,reply); }
                             }
                         } else {
                             for reply in replies { let _=relay_probe(&relay_sender,&peer_ips,&profile.peer_id,&peer,&reply); }
@@ -1036,7 +1044,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                         let burst=path_quality.start(peer,direct,nonce,now);
                         let mut complete=true;
                         for packet in burst {
-                            let sent=if direct { send_authorized(installed_authority.as_ref(),&sparse_handle,peer,session,packet) } else { relay_probe(&relay_sender,&peer_ips,&profile.peer_id,peer,&packet) };
+                            let sent=if direct { send_probe_authorized(installed_authority.as_ref(),&sparse_handle,peer,session,packet) } else { relay_probe(&relay_sender,&peer_ips,&profile.peer_id,peer,&packet) };
                             if sent.is_err() { complete=false; break; }
                         }
                         if !complete {

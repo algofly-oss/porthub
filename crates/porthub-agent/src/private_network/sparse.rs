@@ -176,6 +176,13 @@ impl Handle {
         if !cached.exit_valid(now)||state.exit_epoch.as_deref()!=Some(cached.lease.exit.as_ref()?.epoch.as_str()){return None;}
         let authority=cached.exit_authority.as_ref()?;authority.check().ok()?;Some(authority.clone())
     }
+    /// Path measurements need a live authenticated peer, not application-port access.
+    pub(crate) fn metadata_authority(&self,id:&str)->Option<super::authority_event::Authority<()>> {
+        let state=self.state.lock().unwrap_or_else(|p|p.into_inner());let now=Instant::now();
+        if self.revoked()||state.deadline.is_none_or(|d|d<=now)||state.authority.as_ref().is_some_and(|a|a.check().is_err()){return None;}
+        let cached=state.cache.get(id)?;if !cached.valid(now){return None;}
+        cached.metadata_authority(now).cloned()
+    }
     pub(crate) fn pair_authority(&self,id:&str)->Option<super::authority_event::Authority<()>> {
         let s=self.state.lock().unwrap_or_else(|p|p.into_inner());
         if self.revoked()||s.authority.as_ref().is_some_and(|a|a.check().is_err()){return None;}

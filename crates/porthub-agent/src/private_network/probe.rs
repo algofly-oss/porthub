@@ -72,6 +72,11 @@ impl Frame {
     }
 }
 
+/// Validate the complete measurement frame and its actual carrier before admission.
+pub(crate) fn valid_frame(bytes:&[u8],direct:bool)->bool {
+    Frame::decode(bytes).is_some_and(|frame|frame.direct==direct)
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Score {
     bits_per_second: u64,

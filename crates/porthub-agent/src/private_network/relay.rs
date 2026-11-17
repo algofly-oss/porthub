@@ -1,7 +1,7 @@
 //! Gateway fallback prefers the operator's direct API origin, then the secure
 //! API origin. This packet fallback authenticates at the gateway; peer-session
 //! DTLS is a separate path. Stream payload encryption belongs to the stream layer.
-use super::controller::Event;
+use super::{controller::Event,authority_event::CarrierScope};
 use crate::private_profile::Profile;
 use anyhow::{ensure, Result};
 use bytes::Bytes;
@@ -60,13 +60,13 @@ impl Sender {
     pub(crate) fn update_authority(&self,base:super::authority_event::Authority<()>,pairs:super::sparse::Handle) {
         *self.authority.lock().unwrap_or_else(|p|p.into_inner())=Some((base,pairs));
     }
-    fn admitted(&self,peer:&str,bytes:Bytes,exit:bool)->Result<Queued> {
+    fn admitted(&self,peer:&str,bytes:Bytes,scope:CarrierScope)->Result<Queued> {
         let configured=self.authority.lock().unwrap_or_else(|p|p.into_inner()).clone();
         let mut guards=Vec::new();
         if let Some((base,pairs))=configured {
             ensure!(!pairs.revoked(),"private relay source retired");
             base.check()?;if base.remaining()?.is_some(){guards.push(base);}
-            if pairs.enabled(){guards.push((if exit{pairs.exit_pair_authority(peer)}else{pairs.pair_authority(peer)}).ok_or_else(||anyhow::anyhow!("relay pair authority expired"))?);}
+            if pairs.enabled(){guards.push(scope.peer_authority(&pairs,peer).ok_or_else(||anyhow::anyhow!("relay pair authority expired"))?);}
         }
         Ok(Queued{bytes,guards,permits:Vec::new()})
     }
@@ -87,7 +87,7 @@ impl Sender {
         let bytes = Bytes::from(bytes);
         let lane = self.packet_lane(peer, packet)?;
         self.output[lane]
-            .send({let mut record=self.admitted(peer,bytes,false)?;if let Some(permit)=permit{ensure!(permit.valid(),"private relay originating permit retired");record.permits.push(permit);}record})
+            .send({let mut record=self.admitted(peer,bytes,CarrierScope::Private)?;if let Some(permit)=permit{ensure!(permit.valid(),"private relay originating permit retired");record.permits.push(permit);}record})
             .await
             .map_err(|_| anyhow::anyhow!("private relay stopped"))
     }
@@ -144,13 +144,16 @@ impl Sender {
     }
     pub fn send(&self, peer: &str, packet: &[u8]) -> Result<()> {self.send_guarded(peer,packet,None)}
     pub(crate) fn send_exit(&self,peer:&str,packet:&[u8])->Result<()> {
-        self.send_scoped(peer,packet,None,true)
+        self.send_scoped(peer,packet,None,CarrierScope::Exit)
+    }
+    pub(crate) fn send_probe(&self,peer:&str,packet:&[u8])->Result<()> {
+        self.send_scoped(peer,packet,None,CarrierScope::Probe)
     }
     pub(crate) fn send_guarded(&self,peer:&str,packet:&[u8],permit:Option<porthub_mesh::udp::SendPermit>)->Result<()> {
-        self.send_scoped(peer,packet,permit,false)
+        self.send_scoped(peer,packet,permit,CarrierScope::Private)
     }
-    fn send_scoped(&self,peer:&str,packet:&[u8],permit:Option<porthub_mesh::udp::SendPermit>,exit:bool)->Result<()> {
-        ensure!(exit==(packet.get(9)==Some(&porthub_mesh::control_packet::EXIT)),"carrier permission does not match envelope");
+    fn send_scoped(&self,peer:&str,packet:&[u8],permit:Option<porthub_mesh::udp::SendPermit>,scope:CarrierScope)->Result<()> {
+        ensure!((scope==CarrierScope::Exit)==(packet.get(9)==Some(&porthub_mesh::control_packet::EXIT)),"carrier permission does not match envelope");
         ensure!(self.is_ready(), "private relay is not ready");
         ensure!(
             !peer.is_empty() && peer.len() <= 60 && (20..=1380).contains(&packet.len()),
@@ -161,9 +164,13 @@ impl Sender {
         bytes.extend_from_slice(peer.as_bytes());
         bytes.extend_from_slice(packet);
         let bytes = Bytes::from(bytes);
-        if exit {ensure!(porthub_mesh::control_packet::decode(porthub_mesh::control_packet::EXIT,bytes.slice(1+peer.len()..)).is_some(),"invalid EXIT envelope");}
+        if scope==CarrierScope::Probe {
+            let envelope=porthub_mesh::control_packet::decode(porthub_mesh::control_packet::PROBE,bytes.slice(1+peer.len()..)).ok_or_else(||anyhow::anyhow!("invalid probe envelope"))?;
+            ensure!(super::probe::valid_frame(&envelope.payload,false),"invalid relayed measurement frame");
+        }
+        if scope==CarrierScope::Exit {ensure!(porthub_mesh::control_packet::decode(porthub_mesh::control_packet::EXIT,bytes.slice(1+peer.len()..)).is_some(),"invalid EXIT envelope");}
         let lane = self.packet_lane(peer, packet)?;
-        if self.output[lane].try_send({let mut record=self.admitted(peer,bytes,exit)?;if let Some(permit)=permit{ensure!(permit.valid(),"private relay originating permit retired");record.permits.push(permit);}record}).is_ok() {
+        if self.output[lane].try_send({let mut record=self.admitted(peer,bytes,scope)?;if let Some(permit)=permit{ensure!(permit.valid(),"private relay originating permit retired");record.permits.push(permit);}record}).is_ok() {
             return Ok(());
         }
         self.dropped_packets.fetch_add(1, Ordering::Relaxed);
@@ -1176,4 +1183,40 @@ mod exit_authority_tests {
         f.handle.revoke_all();assert!(send_exit_permit(Some(&f.authority(f.base.expires_at)),&f.handle,"b").is_err());
         sender.set_ready(0,true);assert!(sender.send_exit("b",&packet(porthub_mesh::control_packet::EXIT)).is_err());
     }
+    fn measurement(direct:bool)->Bytes {
+        super::super::probe::Quality::default().start("b",direct,1,Instant::now()).remove(0)
+    }
+    fn probe_wire(payload:&[u8])->Bytes {
+        porthub_mesh::control_packet::encode(porthub_mesh::control_packet::PROBE,"10.203.0.2".parse().unwrap(),"10.203.1.2".parse().unwrap(),payload).unwrap()
+    }
+    #[test]
+    fn probe_scope_survives_private_change_using_original_exit_expiry_only() {
+        use super::super::authority_event::send_probe_permit;
+        let (sender,mut inputs)=channel();sender.set_ready(0,true);let mut f=Fixture::new(&sender);let base=f.authority(f.base.expires_at);
+        let before=send_probe_permit(Some(&base),&f.handle,"b").unwrap().unwrap();
+        sender.send_probe("b",&probe_wire(&measurement(false))).unwrap();let old=queued(&mut inputs);
+        f.clock.0.store(10000,Ordering::SeqCst);f.base.sparse.as_mut().unwrap().epoch="b".repeat(64);let fresh=f.publish(&sender);
+        assert!(!before.valid());assert!(old.check().is_err(),"queued original private receipt was promoted to exit permission");
+        assert!(send_permit(Some(&fresh),&f.handle,"b").is_err());
+        let probe=send_probe_permit(Some(&fresh),&f.handle,"b").unwrap().unwrap();assert!(probe.valid());
+        sender.send_probe("b",&probe_wire(&measurement(false))).unwrap();let retained=queued(&mut inputs);assert!(retained.check().is_ok());
+        f.clock.0.store(15000,Ordering::SeqCst);assert!(f.handle.authority_valid());assert!(!probe.valid());assert!(retained.check().is_err());
+        assert!(send_probe_permit(Some(&fresh),&f.handle,"b").is_err());
+    }
+    #[test]
+    fn probe_scope_uses_private_permission_after_exit_revocation_but_never_payloads() {
+        use super::super::authority_event::send_probe_permit;
+        let (sender,mut inputs)=channel();sender.set_ready(0,true);let mut f=Fixture::new(&sender);
+        f.base.sparse.as_mut().unwrap().exit_epoch=Some("f".repeat(64));let fresh=f.publish(&sender);
+        assert!(send_exit_permit(Some(&fresh),&f.handle,"b").is_err());
+        assert!(send_probe_permit(Some(&fresh),&f.handle,"b").unwrap().unwrap().valid());
+        sender.send_probe("b",&probe_wire(&measurement(false))).unwrap();let retained=queued(&mut inputs);
+        for wrong in [packet(porthub_mesh::control_packet::EXIT),packet(porthub_mesh::control_packet::STREAM),probe_wire(b"application payload"),probe_wire(&measurement(true))] {
+            assert!(sender.send_probe("b",&wrong).is_err(),"measurement permission admitted non-probe or wrong-carrier bytes");
+        }
+        let mut corrupt=measurement(false).to_vec();corrupt[11]=0;assert!(sender.send_probe("b",&probe_wire(&corrupt)).is_err());
+        f.handle.revoke_all();assert!(retained.check().is_err());assert!(send_probe_permit(Some(&fresh),&f.handle,"b").is_err());
+        assert!(sender.send_probe("b",&probe_wire(&measurement(false))).is_err());
+    }
+
 }
