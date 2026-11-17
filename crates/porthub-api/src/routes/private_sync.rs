@@ -77,7 +77,7 @@ pub(crate) async fn active(
         .filter_map(|p| p.get("machine_id").cloned())
         .collect();
     let machines:Vec<Document>=app.collection("machines").find(doc!{"_id":{"$in":ids},"enabled":{"$ne":false},"deletion_pending":{"$ne":true},"private_owner_revoked":{"$ne":true}})
-        .projection(doc!{"user_id":1,"private_owner_id":1,"private_owner_revoked":1,"enabled":1,"group_ids":1,"group_id":1}).await?.try_collect().await?;
+        .projection(doc!{"user_id":1,"private_owner_id":1,"private_owner_revoked":1,"name":1,"hostname":1,"enabled":1,"group_ids":1,"group_id":1}).await?.try_collect().await?;
     let members: Vec<Document> = app
         .collection("workspace_members")
         .find(doc! {"workspace_id":owner,"role":{"$in":["member","admin"]}})
@@ -133,6 +133,8 @@ pub fn validate_signal(
 }
 
 async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<Response> {
+    let _lifecycle=app.account_lifecycle.read().await;
+    let traffic=raw.get("traffic").cloned().map(serde_json::from_value::<porthub_mesh::traffic_report::Report>);
     let input = private_sync::parse(raw)?;
     let hash = token_digest(&input.token);
     let filter = doc! {"_id":&input.peer_id,"enabled":true,"credential_hash":&hash};
@@ -150,6 +152,21 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
         .any(|p| store::string(p, "_id") == input.peer_id)
     {
         return Err(forbidden("Machine or workspace membership is disabled"));
+    }
+    // Measurement failure must never deny an otherwise valid policy lease.
+    let mut traffic_ack=None;
+    let mut traffic_rejected=false;
+    let mut traffic_discarded_rows=0;
+    if let Some(report)=traffic {
+        match report {
+            Ok(report) if report.valid()=>{
+                match tokio::time::timeout(Duration::from_millis(500),crate::private_traffic::ingest(&app,owner,&input.peer_id,&peers,&report)).await {
+                    Ok(Ok((ack,discarded)))=>{traffic_ack=Some(ack);traffic_discarded_rows=discarded;},
+                    _=>traffic_rejected=true,
+                }
+            },
+            _=>traffic_rejected=true,
+        }
     }
     if input.paths.len() > 1000 {
         return Err(ApiError::bad_request("Too many path reports"));
@@ -403,7 +420,7 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
     } else {false};
     app.proxy_pending.publish(crate::peer_proxy::Binding {id:input.peer_id.clone(),instance:input.instance.clone(),fingerprint:input.fingerprint.clone()},&hash,owner.to_hex(),proxy_provider);
     let proxy_jobs=app.proxy_pending.jobs(&input.peer_id,&input.instance,&input.fingerprint);
-    Ok(([(header::CACHE_CONTROL,"no-store")],Json(json!({"snapshot":{"workspace":owner.to_hex(),"self":input.peer_id,"revision":store::field(&updated,"revision"),"dns_rules":dns_rules,
+    Ok(([(header::CACHE_CONTROL,"no-store")],Json(json!({"traffic_ack":traffic_ack,"traffic_rejected":traffic_rejected,"traffic_discarded_rows":traffic_discarded_rows,"snapshot":{"workspace":owner.to_hex(),"self":input.peer_id,"revision":store::field(&updated,"revision"),"dns_rules":dns_rules,
         "expires_at":chrono::DateTime::from_timestamp_millis(now.timestamp_millis()+15_000).expect("current timestamp").to_rfc3339_opts(chrono::SecondsFormat::Millis,true),"peers":peers,"dns_suffixes":dns_suffixes,"grants":grants,"exit_routes":exit_routes},"signals":signals,
         "ice_servers":app.config.private_transport.ice(&input.peer_id,now.timestamp_millis()/1000),"relay_routes":app.config.private_transport.relay_routes,
         "direct_relay_url":direct_relay_url,"relay_auth_token":relay_auth_token,"proxy_jobs":proxy_jobs,"proxy_provider":proxy_provider,

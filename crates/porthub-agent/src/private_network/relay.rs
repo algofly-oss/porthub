@@ -160,6 +160,7 @@ async fn dispatch_record(frame: Bytes, events: &mpsc::Sender<Event>) {
                         peer: peer.into(),
                         bytes: frame.slice(1 + length..),
                         direct: false,
+                        carrier_direct:false,
                         received_at: Instant::now(),
                     })
                     .await;

@@ -123,6 +123,7 @@ async fn resume(app: &App, user: &Document) -> ApiResult<()> {
         .map(str::to_owned)
         .collect();
     app.private_relay.revoke(&peer_strings);
+    app.collection(crate::private_traffic::COLLECTION).delete_many(doc!{"$or":[{"workspace_id":{"$in":&owner}},{"source":{"$in":&peer_strings}},{"destination":{"$in":&peer_strings}}]}).await?;
     app.collection("connections")
         .update_many(connection_filter.clone(), doc! {"$set":{"enabled":false}})
         .await?;

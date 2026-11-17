@@ -128,7 +128,7 @@ mod cli_system_tor_tests {
 struct StreamCarrierPlan {
     source: Option<std::net::Ipv4Addr>,
     valid_until: Option<Instant>,
-    routes: HashMap<std::net::Ipv4Addr, (String, bool)>,
+    routes: HashMap<std::net::Ipv4Addr, (String, bool, Option<Arc<super::traffic::Counters>>)>,
 }
 #[cfg(feature = "private-stream")]
 async fn stream_carrier(
@@ -150,7 +150,7 @@ async fn stream_carrier(
             }
             plan.source.zip(plan.routes.get(&packet.address).cloned())
         };
-        let Some((source, (peer, prefer))) = route else {
+        let Some((source, (peer, prefer,counter))) = route else {
             continue;
         };
         let bytes = porthub_mesh::control_packet::encode(
@@ -170,11 +170,12 @@ async fn stream_carrier(
         let send = async {
             if let Some(session) = session.filter(|_| prefer || !relay.is_ready()) {
                 if session.send_stream(bytes.clone()).await.is_ok() {
+                    if let Some(c)=counter.as_ref(){c.add(true,!session.is_relay(),bytes.len());}
                     return;
                 }
             }
             if relay.is_ready() {
-                let _ = relay.send_stream(&peer, &bytes).await;
+                if relay.send_stream(&peer, &bytes).await.is_ok(){if let Some(c)=counter.as_ref(){c.add(true,false,bytes.len());}}
             }
         };
         tokio::select! {_=cancel.cancelled()=>return Ok(()),_=tokio::time::timeout(Duration::from_millis(200),send)=>{}}
@@ -214,10 +215,13 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         "ph{}",
         &format!("{:x}", Sha256::digest(profile.peer_id.as_bytes()))[..8]
     );
+    let traffic=super::traffic::Tracker::new(&path);
+    let mut traffic_counters:HashMap<String,Arc<super::traffic::Counters>>=HashMap::new();
     let sessions: Sessions = Default::default();
     let (events, mut input) = mpsc::channel(4096);
     let work = cancel.child_token();
     let mut tasks = JoinSet::new();
+    tasks.spawn({let t=traffic.clone();let c=work.clone();async move{t.run(c).await;Ok::<(),anyhow::Error>(())}});
     #[cfg(target_os="linux")]
     let _wsl_local_dns=crate::wsl_local_dns::start(&cancel);
     let (strategy_updates, strategy) =
@@ -263,6 +267,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         events.clone(),
         relay_config,
         controller::LocalIdentity {
+            traffic:Some(traffic.clone()),
             instance,
             certificate: identity.clone(),
         },
@@ -462,6 +467,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     registered_suffixes=suffixes;
                     registered_rules=snapshot.dns_rules.clone();
                 }
+                traffic_counters=traffic.reconcile(snapshot.peers.iter().filter(|p|p.id!=profile.peer_id).map(|p|p.id.clone()));
                 by_ip=snapshot.peers.iter().map(|p|(p.ip,p.id.clone())).collect();
                 peer_ips=snapshot.peers.iter().map(|p|(p.id.clone(),p.ip)).collect();
                 // Publish initial readiness immediately. Waiting for
@@ -475,7 +481,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     }
                 }
             },
-            Some(Event::Packet{peer,bytes,direct,received_at})=>{
+            Some(Event::Packet{peer,bytes,direct,carrier_direct,received_at})=>{
                 let now=received_at;
                 if let Some(envelope) = porthub_mesh::control_packet::decode(porthub_mesh::control_packet::EXIT, bytes.clone()) {
                     if peer_ips.get(&peer) != Some(&envelope.source) || peer_ips.get(&profile.peer_id) != Some(&envelope.destination) { continue; }
@@ -485,6 +491,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     let can_forward = exit_clients.contains(&packet.source());
                     #[cfg(not(target_os = "linux"))]
                     let can_forward = false;
+                    if let Some(c)=traffic_counters.get(&peer){c.add(false,carrier_direct,bytes.len());}
                     if (is_reply || can_forward) && policy.check_exit(&envelope.payload, &peer, true) {
                         mark_activity(&mut last_activity, &peer, now);
                         paths.observe(packet, direct);
@@ -499,6 +506,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 #[cfg(feature="private-stream")]
                 if let Some(envelope)=porthub_mesh::control_packet::decode(porthub_mesh::control_packet::STREAM,bytes.clone()) {
                     if peer_ips.get(&peer)==Some(&envelope.source) && peer_ips.get(&profile.peer_id)==Some(&envelope.destination) {
+                        if let Some(c)=traffic_counters.get(&peer){c.add(false,carrier_direct,bytes.len());}
                         if let Some(router)=&stream_router {router.receive(envelope.source,envelope.payload).await;}
                     }
                     continue;
@@ -519,6 +527,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     }
                     continue;
                 }
+                if let Some(c)=traffic_counters.get(&peer){c.add(false,carrier_direct,bytes.len());}
                 mark_activity(&mut last_activity,&peer,now);
                 if policy.check(&bytes,&peer,true) {
                     if let Some(packet)=Packet::parse(&bytes) {paths.observe(packet,direct);}
@@ -546,8 +555,8 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 // rather than adding a second TURN/DTLS transport around it.
                 let default=mode!=super::strategy::Mode::PreferGateway || !relay_ready;
                 let prefer=if mode==super::strategy::Mode::Auto {path_quality.prefer_peer(peer,default,Instant::now())} else {default};
-                if let Some(session)=direct.filter(|_|prefer || !relay_ready) {let _=session.send(packet);}
-                else if relay_ready {let _=relay_sender.send(peer,&packet);}
+                if let Some(session)=direct.filter(|_|prefer || !relay_ready) {let n=packet.len();if session.send(packet).is_ok(){if let Some(c)=traffic_counters.get(peer){c.add(true,!session.is_relay(),n);}}}
+                else if relay_ready {if relay_sender.send(peer,&packet).is_ok(){if let Some(c)=traffic_counters.get(peer){c.add(true,false,packet.len());}}}
             },
             #[cfg(feature="local-tor")]
             Some(Event::TorLocal {bytes})=>{
@@ -601,8 +610,8 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     ) {
                         let packet = porthub_mesh::control_packet::encode(porthub_mesh::control_packet::EXIT, *source, *destination, &buffer[..size])?;
                         if use_direct {
-                            if let Some(session) = direct { let _ = session.send(packet); }
-                        } else { let _ = relay_sender.send(&peer, &packet); }
+                            if let Some(session) = direct {let n=packet.len();if session.send(packet).is_ok(){if let Some(c)=traffic_counters.get(&peer){c.add(true,!session.is_relay(),n);}} }
+                        } else { if relay_sender.send(&peer, &packet).is_ok(){if let Some(c)=traffic_counters.get(&peer){c.add(true,false,packet.len());}} }
                     }
                 }
                 continue;
@@ -624,8 +633,8 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                     if router.kernel_packet(peer,bytes::Bytes::copy_from_slice(&buffer[..size]),prefer_stream){continue;}
                 }
                 match paths.choose_preferred(parsed,direct.is_some(),relay_ready,prefer_peer) {
-                    Some(true)=>{if let Some(session)=direct {let _=session.send(bytes::Bytes::copy_from_slice(&buffer[..size]));}},
-                    Some(false)=>{let _=relay_sender.send(peer,&buffer[..size]);},None=>{}
+                    Some(true)=>{if let Some(session)=direct {if session.send(bytes::Bytes::copy_from_slice(&buffer[..size])).is_ok(){if let Some(c)=traffic_counters.get(peer){c.add(true,!session.is_relay(),size);}}}},
+                    Some(false)=>{if relay_sender.send(peer,&buffer[..size]).is_ok(){if let Some(c)=traffic_counters.get(peer){c.add(true,false,size);}}},None=>{}
                 }
             }
         },
@@ -678,7 +687,7 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
                 let default=mode!=super::strategy::Mode::PreferGateway || !relay_sender.is_ready();
                 let routes=by_ip.iter().filter(|(_,peer)|*peer!=&profile.peer_id).map(|(ip,peer)|{
                     let prefer=if mode==super::strategy::Mode::Auto {path_quality.prefer_peer(peer,default,now)} else {default};
-                    (*ip,(peer.clone(),prefer))
+                    (*ip,(peer.clone(),prefer,traffic_counters.get(peer).cloned()))
                 }).collect();
                 stream_plans.send_replace(StreamCarrierPlan {source:peer_ips.get(&profile.peer_id).copied(),valid_until:stream_router.as_ref().filter(|router|router.valid_lease()).map(|_|now+Duration::from_secs(2)),routes});
             }
@@ -782,6 +791,8 @@ async fn run_inner(path: PathBuf, cancel: CancellationToken, logs: Option<crate:
         tasks.abort_all();
     }
     while tasks.join_next().await.is_some() {}
+    // Drain the final counter tail only after every carrier producer stopped.
+    let final_traffic=traffic.clone();let _=tokio::task::spawn_blocking(move||final_traffic.sample()).await;
     for session in sessions.write().await.drain().map(|(_, session)| session) {
         session.close().await;
     }

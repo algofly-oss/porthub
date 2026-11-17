@@ -30,3 +30,5 @@ pub fn configure_tcp(stream: &tokio::net::TcpStream) {
     #[cfg(not(target_os = "linux"))]
     let _ = stream;
 }
+
+pub mod traffic_report;

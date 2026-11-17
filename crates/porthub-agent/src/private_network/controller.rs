@@ -185,6 +185,7 @@ pub enum Event {
         peer: String,
         bytes: Bytes,
         direct: bool,
+        carrier_direct: bool,
         received_at: Instant,
     },
     #[cfg(feature = "private-stream")]
@@ -200,6 +201,7 @@ pub enum Event {
 }
 pub type Sessions = Arc<RwLock<HashMap<String, Session>>>;
 pub struct LocalIdentity {
+    pub traffic: Option<Arc<super::traffic::Tracker>>,
     pub instance: String,
     pub certificate: Identity,
 }
@@ -262,6 +264,7 @@ pub async fn run_watched_instance(
         events,
         relay_config,
         LocalIdentity {
+            traffic: None,
             instance,
             certificate: Identity::new()?,
         },
@@ -284,6 +287,7 @@ pub async fn run_watched_identity(
     );
     let mut interface_changes_open = true;
     let LocalIdentity {
+        traffic,
         instance,
         certificate: identity,
     } = local;
@@ -332,14 +336,17 @@ pub async fn run_watched_identity(
                 )
             })
             .collect();
-        let body = serde_json::json!({"peer_id":profile.peer_id,"token":profile.token,
+        let mut body = serde_json::json!({"peer_id":profile.peer_id,"token":profile.token,
             "fingerprint":identity.fingerprint(),"instance":instance,"stream_transport":if cfg!(feature="private-stream") {"quic1"} else {""},"tor_exit":cfg!(all(feature="local-tor",any(target_os="linux",target_os="macos"))),"signals":&pending[..sent],
             "acks":&acks[..acked],"paths":paths,"lan_networks":lan_networks,"lan_exit":cfg!(any(target_os="linux",target_os="macos")),"application_proxy":cfg!(feature="local-tor")});
+        if let Some(report)=traffic.as_ref().and_then(|t|t.report()){body["traffic"]=serde_json::to_value(report)?;}
         let mut reply = None;
+        let sent_sequence=body["traffic"]["rows"].as_array().and_then(|r|r.last()).and_then(|r|r["sequence"].as_u64()).unwrap_or(0);
         let request = control.request(reqwest::Method::POST,"access/private/sync",Some(body),&[]);
         let result = tokio::select! { _=cancel.cancelled()=>return Ok(()), result=request=>result };
         match result {
             Ok(value) => {
+                if sent_sequence>0 {if let Ok(reply)=serde_json::from_slice::<serde_json::Value>(&value.bytes){if let Some(ack)=reply["traffic_ack"].as_u64().filter(|ack|*ack<=sent_sequence){if let Some(t)=&traffic{t.acknowledge(ack,reply["traffic_discarded_rows"].as_u64().unwrap_or(0));}}}}
                 reply = serde_json::from_slice::<Reply>(&value.bytes).ok();
                 bases = control.authorities();
                 preferred = 0;
@@ -432,6 +439,7 @@ pub async fn run_watched_identity(
                 let session = prepared.session;
                 readers.spawn(read_packets(
                     prepared.packets,
+                    session.clone(),
                     id.clone(),
                     events.clone(),
                     cancel.clone(),
@@ -584,8 +592,16 @@ pub async fn run_watched_identity(
     }
 }
 
+// Protocol `direct` means the peer RTC carrier (including TURN), not the
+// physically direct path. Keep QoS/path selection unchanged; telemetry gets a
+// separate actual carrier-path classification.
+fn peer_packet(peer:String,bytes:Bytes,relayed:bool)->Event {
+    Event::Packet{peer,bytes,direct:true,carrier_direct:!relayed,received_at:Instant::now()}
+}
+
 async fn read_packets(
     mut packets: mpsc::Receiver<Bytes>,
+    session: Session,
     peer: String,
     events: mpsc::Sender<Event>,
     cancel: CancellationToken,
@@ -593,7 +609,7 @@ async fn read_packets(
     loop {
         tokio::select! {_=cancel.cancelled()=>break,
             packet=packets.recv()=>{let Some(bytes)=packet else {break;};
-                let _=events.try_send(Event::Packet{peer:peer.clone(),bytes,direct:true,received_at:Instant::now()});
+                let _=events.try_send(peer_packet(peer.clone(),bytes,session.is_relay()));
             }
         }
     }
@@ -631,5 +647,23 @@ mod origin_tests {
             assert_eq!(origins.len(), 1);
             assert_eq!(origins[0].0.scheme(), "wss");
         }
+    }
+}
+
+#[cfg(test)]
+mod telemetry_carrier_tests {
+    use super::*;
+    #[test]
+    fn turn_traffic_is_relayed_without_changing_peer_probe_protocol_identity() {
+        let mut sender=super::super::probe::Quality::default();
+        let mut receiver=super::super::probe::Quality::default();
+        let now=Instant::now();let mut replies=0;
+        for packet in sender.start("peer",true,123,now) {
+            let Event::Packet{bytes,direct,carrier_direct,..}=peer_packet("peer".into(),packet,true)else{unreachable!()};
+            assert!(direct);assert!(!carrier_direct);
+            replies+=receiver.handle("peer",direct,&bytes,now).unwrap().len();
+        }
+        assert_eq!(replies,super::super::probe::PROBE_PACKETS as usize);
+        let Event::Packet{direct,carrier_direct,..}=peer_packet("peer".into(),Bytes::new(),false)else{unreachable!()};assert!(direct&&carrier_direct);
     }
 }

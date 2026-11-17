@@ -44,6 +44,7 @@ pub fn router() -> Router<Arc<App>> {
         .merge(crate::image_rooms::router())
         .merge(crate::terminal::router())
         .merge(crate::terminal_traffic::router())
+        .merge(crate::private_traffic::router())
         .merge(connections::router())
         .merge(exposes::router())
         .merge(exit_nodes::router())

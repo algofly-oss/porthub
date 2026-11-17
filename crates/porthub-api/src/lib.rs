@@ -47,6 +47,7 @@ pub mod status_monitor;
 pub mod store;
 pub mod terminal;
 pub mod terminal_traffic;
+pub mod private_traffic;
 pub mod terminal_grants;
 mod terminal_journal;
 pub mod web_activity;
@@ -71,6 +72,7 @@ pub struct App {
     pub image_rooms_initialized: tokio::sync::OnceCell<()>,
     pub hosted_images_initialized: tokio::sync::OnceCell<()>,
     pub hosted_images_lock: tokio::sync::Mutex<()>,
+    pub private_traffic_initialized: tokio::sync::OnceCell<()>,
     pub terminal_traffic_initialized: tokio::sync::OnceCell<()>,
     pub terminal_lifecycle: tokio::sync::Mutex<()>,
     pub terminal_admission_fault: std::sync::atomic::AtomicBool,
@@ -134,6 +136,7 @@ impl App {
             hosted_images_initialized: Default::default(),
             image_rooms_initialized: Default::default(),
             hosted_images_lock: Default::default(),
+            private_traffic_initialized: Default::default(),
             terminal_traffic_initialized: Default::default(),
             terminal_lifecycle: Default::default(),
             terminal_admission_fault: Default::default(),
