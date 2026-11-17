@@ -149,8 +149,20 @@ pub(crate) mod witness {
     struct State { ready: bool, matched: Option<Instant>, completed: bool,
         events:Vec<Event>, phases:Vec<Phase>, events_dropped:u32, phases_dropped:u32,
         refresh_started:u32, refresh_ok:u32, refresh_failed:u32, refresh_timed_out:u32,
-        last_errno:Option<i32>, listener_errors:u32, readback_keys:Vec<Key>, readback_matches:bool, readback_errors:u32 }
+        last_errno:Option<i32>, listener_errors:u32, readback_keys:Vec<Key>, readback_matches:bool, readback_errors:u32, readback_timed_out:u32, readback_cancelled:u32, readback_started:u32, readback_budget_ms:Option<u64> }
 
+    #[derive(Debug,PartialEq,Eq)]
+    pub(crate) enum ReadbackStop {Cancelled,TimedOut}
+    pub(crate) async fn bounded_readback<T>(cancel:&tokio_util::sync::CancellationToken,remaining:Duration,future:impl std::future::Future<Output=T>)->Result<T,ReadbackStop>{
+        if remaining.is_zero(){return Err(ReadbackStop::TimedOut);}
+        // No detached task: dropping this selection drops the pending future.
+        // Windows GetIpForwardTable2 itself is synchronous and cannot be
+        // preempted once entered; this bounds pending async work, not OS FFI.
+        tokio::select! {biased;
+            _=cancel.cancelled()=>Err(ReadbackStop::Cancelled),
+            result=tokio::time::timeout(remaining,future)=>result.map_err(|_|ReadbackStop::TimedOut),
+        }
+    }
     impl Witness {
         pub(crate) fn new(expected: Key) -> Self { Self { expected, state: Mutex::new(State::default()), born:Instant::now() } }
         pub(crate) fn ready(&self) { self.state.lock().unwrap().ready = true;self.phase(1,None); }
@@ -197,6 +209,18 @@ pub(crate) mod witness {
             self.phase(if found{8}else{9},None);
             if found {self.published();}
         }
+        pub(crate) fn readback_started(&self,remaining:Duration){
+            {let mut s=self.state.lock().unwrap();s.readback_started=s.readback_started.saturating_add(1);s.readback_budget_ms=Some(remaining.as_millis().min(u64::MAX as u128)as u64);}
+            self.phase(12,None);
+        }
+        pub(crate) fn readback_remaining(&self)->Option<Duration>{
+            let s=self.state.lock().unwrap();if s.completed{return None;}
+            s.matched.map(|at|Duration::from_secs(4).saturating_sub(at.elapsed()))
+        }
+        pub(crate) fn readback_stopped(&self,stop:ReadbackStop){
+            {let mut s=self.state.lock().unwrap();match stop{ReadbackStop::Cancelled=>s.readback_cancelled=s.readback_cancelled.saturating_add(1),ReadbackStop::TimedOut=>s.readback_timed_out=s.readback_timed_out.saturating_add(1)}}
+            self.phase(match stop{ReadbackStop::Cancelled=>11,ReadbackStop::TimedOut=>10},None);
+        }
         pub(crate) fn readback_failed(&self,errno:Option<i32>){let mut state=self.state.lock().unwrap();state.readback_errors=state.readback_errors.saturating_add(1);state.last_errno=errno;}
         pub(crate) fn add_started(&self){self.phase(2,None);}
         pub(crate) fn add_acknowledged(&self){self.phase(3,None);}
@@ -209,8 +233,8 @@ pub(crate) mod witness {
         pub(crate) fn diagnostic(&self,revision:u64)->String {
             let s=self.state.lock().unwrap_or_else(|p|p.into_inner());
             // Fixed enums: event 1 Add/2 Delete/3 Change; phase 1 ready,
-            // 2 Add-start/3 Add-ACK/4 refresh-start/5 success/6 failure/7 published/8 readback-match/9 mismatch.
-            serde_json::to_string(&serde_json::json!({"expected":self.expected,"ready":s.ready,"matched":s.matched.is_some(),"completed":s.completed,"revision":revision,"events":s.events,"phases":s.phases,"events_dropped":s.events_dropped,"phases_dropped":s.phases_dropped,"refresh_started":s.refresh_started,"refresh_ok":s.refresh_ok,"refresh_failed":s.refresh_failed,"refresh_timed_out":s.refresh_timed_out,"last_errno":s.last_errno,"listener_errors":s.listener_errors,"readback_keys":s.readback_keys,"readback_matches":s.readback_matches,"readback_errors":s.readback_errors})).unwrap_or_else(|_|"{\"diagnostic_unavailable\":true}".into())
+            // 2 Add-start/3 Add-ACK/4 refresh-start/5 success/6 failure/7 published/8 readback-match/9 mismatch/10 readback-timeout/11 cancel/12 readback-start.
+            serde_json::to_string(&serde_json::json!({"expected":self.expected,"ready":s.ready,"matched":s.matched.is_some(),"completed":s.completed,"revision":revision,"events":s.events,"phases":s.phases,"events_dropped":s.events_dropped,"phases_dropped":s.phases_dropped,"refresh_started":s.refresh_started,"refresh_ok":s.refresh_ok,"refresh_failed":s.refresh_failed,"refresh_timed_out":s.refresh_timed_out,"last_errno":s.last_errno,"listener_errors":s.listener_errors,"readback_keys":s.readback_keys,"readback_matches":s.readback_matches,"readback_errors":s.readback_errors,"readback_timed_out":s.readback_timed_out,"readback_cancelled":s.readback_cancelled,"readback_started":s.readback_started,"readback_budget_ms":s.readback_budget_ms})).unwrap_or_else(|_|"{\"diagnostic_unavailable\":true}".into())
         }
         fn admit(&self, key:&Key, added:bool) {
             if added && *key==self.expected {
@@ -227,6 +251,26 @@ pub(crate) mod witness {
             }
         }
         pub(crate) fn completed(&self) -> bool { self.state.lock().unwrap().completed }
+    }
+    struct PendingReadback(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl std::future::Future for PendingReadback{type Output=();fn poll(self:std::pin::Pin<&mut Self>,_:&mut std::task::Context<'_>)->std::task::Poll<()>{std::task::Poll::Pending}}
+    impl Drop for PendingReadback{fn drop(&mut self){self.0.store(true,std::sync::atomic::Ordering::SeqCst);}}
+    #[tokio::test(start_paused=true)]
+    async fn pending_readback_cancellation_drops_work_without_waiting_for_deadline(){
+        let cancel=tokio_util::sync::CancellationToken::new();let signal=cancel.clone();let dropped=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));let start=Instant::now();
+        tokio::spawn(async move{tokio::time::sleep(Duration::from_millis(20)).await;signal.cancel();});
+        let result=bounded_readback(&cancel,Duration::from_secs(4),PendingReadback(dropped.clone())).await;
+        assert_eq!(result,Err(ReadbackStop::Cancelled));assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));assert_eq!(start.elapsed(),Duration::from_millis(20));
+        let never_poll=std::future::poll_fn(|_|->std::task::Poll<()>{panic!("cancelled readback was polled")});assert_eq!(bounded_readback(&cancel,Duration::from_secs(1),never_poll).await,Err(ReadbackStop::Cancelled));
+    }
+    #[tokio::test(start_paused=true)]
+    async fn readback_uses_remaining_witness_budget_and_retains_timeout_category(){
+        let key=Key{address:"10.254.254.0".parse().unwrap(),prefix:25,index:Some(19),gateway:None,metric:Some(77)};let w=Witness::new(key.clone());w.ready();w.admit(&key,true);let start=Instant::now();
+        tokio::time::sleep(Duration::from_millis(3700)).await;let remaining=w.readback_remaining().unwrap();assert_eq!(remaining,Duration::from_millis(300));
+        let dropped=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));let result=bounded_readback(&tokio_util::sync::CancellationToken::new(),remaining,PendingReadback(dropped.clone())).await;
+        assert_eq!(result,Err(ReadbackStop::TimedOut));assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));assert_eq!(start.elapsed(),Duration::from_secs(4));w.readback_stopped(ReadbackStop::TimedOut);
+        let value:serde_json::Value=serde_json::from_str(&w.diagnostic(2)).unwrap();assert_eq!(value["readback_timed_out"],1);assert_eq!(value["readback_errors"],0);assert!(!w.completed());
+        let never_poll=std::future::poll_fn(|_|->std::task::Poll<()>{panic!("expired readback was polled")});assert_eq!(bounded_readback(&tokio_util::sync::CancellationToken::new(),Duration::ZERO,never_poll).await,Err(ReadbackStop::TimedOut));
     }
     #[test]
     fn diagnostic_is_per_instance_bounded_and_excludes_unrelated_routes() {

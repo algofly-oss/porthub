@@ -96,8 +96,15 @@ async fn watch_inner(
                     changed.clear();
                     let success = refresh(&output,route_changes.as_ref(), &cancel, #[cfg(test)] witness.as_deref()).await?;
                     #[cfg(test)] if success { if let Some(witness)=&witness {
-                        let readback=match AsyncRouteManager::new(){Ok(mut manager)=>manager.list().await,Err(error)=>Err(error)};
-                        match readback{Ok(rows)=>witness.published_native(&rows),Err(error)=>witness.readback_failed(error.raw_os_error())}
+                        if let Some(remaining)=witness.readback_remaining(){
+                            witness.readback_started(remaining);
+                            let native=async {match AsyncRouteManager::new(){Ok(mut manager)=>manager.list().await,Err(error)=>Err(error)}};
+                            match super::route_debounce::witness::bounded_readback(&cancel,remaining,native).await {
+                                Ok(Ok(rows))=>witness.published_native(&rows),
+                                Ok(Err(error))=>witness.readback_failed(error.raw_os_error()),
+                                Err(stop)=>witness.readback_stopped(stop),
+                            }
+                        }
                     } }
                     #[cfg(not(test))] let _ = success;
                     backoff = Duration::from_secs(1);
