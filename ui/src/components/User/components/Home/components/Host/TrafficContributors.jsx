@@ -9,9 +9,15 @@ const rate = value => {
 export default function TrafficContributors({ timestamp }) {
   const cache = useRef(new Map());
   const [state, setState] = useState({ timestamp, loading: true });
+  const [retry, setRetry] = useState(0);
   useEffect(() => {
     let alive = true, timer;
     let controller = new AbortController();
+    const saved = cache.current.get(timestamp);
+    if (saved && Date.now() - saved.time < 2000) {
+      setState({ timestamp, data: saved.data });
+      return () => { alive = false; controller.abort(); };
+    }
     setState({ timestamp, loading: true });
     const load = async () => {
       if (document.hidden) return;
@@ -23,7 +29,7 @@ export default function TrafficContributors({ timestamp }) {
       controller.abort();
       controller = new AbortController();
       try {
-        const { data } = await axios.get(`/api/traffic/hover?timestamp=${Math.floor(timestamp)}&limit=6`, { signal: controller.signal });
+        const { data } = await axios.get(`/api/traffic/hover?timestamp=${Math.floor(timestamp)}&limit=6`, { signal: controller.signal, timeout: 4000 });
         if (!alive) return;
         cache.current.set(timestamp, { time: Date.now(), data });
         while (cache.current.size > 64) cache.current.delete(cache.current.keys().next().value);
@@ -36,13 +42,14 @@ export default function TrafficContributors({ timestamp }) {
       if (document.hidden) controller.abort();
       else load();
     };
-    timer = setTimeout(load, 120);
+    timer = setTimeout(load, 60);
     document.addEventListener("visibilitychange", visibility);
     return () => { alive = false; clearTimeout(timer); controller.abort(); document.removeEventListener("visibilitychange", visibility); };
-  }, [timestamp]);
-  const current = state.timestamp === timestamp ? state : { loading: true };
+  }, [timestamp, retry]);
+  const cached = cache.current.get(timestamp);
+  const current = cached && Date.now() - cached.time < 2000 ? { data: cached.data } : state.timestamp === timestamp ? state : { loading: true };
   return <div aria-label="Public traffic destinations" aria-live="polite" className="mt-2 max-h-[min(50vh,340px)] overflow-y-auto border-t border-border pt-2">
-    {current.loading ? <p className="text-muted-foreground">Loading destinations…</p> : current.error ? <p className="text-muted-foreground">Traffic details unavailable.</p> : <>
+    {current.loading ? <p className="text-muted-foreground">Loading destinations…</p> : current.error ? <div className="flex items-center justify-between gap-3"><p className="text-muted-foreground">Traffic details unavailable.</p><button type="button" onClick={() => setRetry(value => value + 1)} className="min-h-11 rounded-md px-3 text-foreground hover:bg-accent">Retry</button></div> : <>
       {!current.data?.contributors?.length && <p className="text-muted-foreground">No measured port traffic at this time.</p>}
       {current.data?.contributors?.map(row => <div key={row.connection_id} className="border-b border-border py-2 last:border-0">
         <p className="break-words font-medium">{row.machine_name || "Unnamed machine"} · {row.service_name || "Forwarded port"}</p>

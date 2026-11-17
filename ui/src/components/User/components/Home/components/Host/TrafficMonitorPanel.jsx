@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import TrafficContributors from "./TrafficContributors";
 import { ActionIcon, Badge } from "@mantine/core";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -76,7 +76,7 @@ export default function TrafficMonitorPanel({
 }) {
   const chartWidth = mode === "standalone" ? 960 : 560;
   const chartHeight = plotHeight || (mode === "standalone" ? 340 : 132);
-  const [hoveredIndex, setHoveredIndex] = useState(null);
+  const [selectedTimestamp, setSelectedTimestamp] = useState(null);
   const [showIncoming, setShowIncoming] = useState(true);
   const [showOutgoing, setShowOutgoing] = useState(true);
   const [showBlocked, setShowBlocked] = useState(true);
@@ -112,10 +112,12 @@ export default function TrafficMonitorPanel({
     ? buildTrafficLinePath(windowedSamples, "drop_rate", chartWidth, chartHeight, chartMax)
     : "";
   const yAxisLabels = [chartMax, chartMax / 2, 0].map((value) => formatTrafficRate(value));
-  const activeIndex =
-    hoveredIndex !== null
-      ? Math.min(Math.max(hoveredIndex, 0), windowedSamples.length - 1)
-      : null;
+  // A live window shifts indices; the operator selected a measurement, not a slot.
+  const selectedIndex = selectedTimestamp === null ? -1 : windowedSamples.findIndex(sample => sample.timestamp === selectedTimestamp);
+  const activeIndex = selectedIndex >= 0 ? selectedIndex : null;
+  useEffect(() => {
+    if (selectedTimestamp !== null && selectedIndex < 0) setSelectedTimestamp(null);
+  }, [selectedTimestamp, selectedIndex]);
   const activeSample = activeIndex !== null && windowedSamples[activeIndex]?.observed ? windowedSamples[activeIndex] : null;
   const incomingHoverIps =
     activeSample &&
@@ -263,14 +265,15 @@ export default function TrafficMonitorPanel({
         <div>
           <div
             className={`relative w-full rounded-md ${inspectContributors ? "" : "overflow-hidden"}`}
-            onMouseLeave={() => setHoveredIndex(null)}
+            onMouseLeave={() => setSelectedTimestamp(null)}
             style={{ height: `${chartHeight}px` }}
           >
             {activeSample ? (
               <div
+                role="region" aria-label="Traffic sample details" data-sample-timestamp={activeSample.timestamp}
                 className={`${inspectContributors ? "pointer-events-auto w-[min(360px,calc(100vw-5rem))]" : "pointer-events-none"} absolute right-2 top-2 z-30 rounded-lg border border-border bg-dialog px-3 py-2 text-[11px] text-foreground shadow-md`}
               >
-                {inspectContributors && <button type="button" aria-label="Close traffic details" onClick={() => setHoveredIndex(null)} className="float-right ml-2 flex h-7 w-7 items-center justify-center rounded hover:bg-accent">×</button>}
+                {inspectContributors && <button type="button" aria-label="Close traffic details" onClick={() => setSelectedTimestamp(null)} className="float-right ml-2 flex h-7 w-7 items-center justify-center rounded hover:bg-accent">×</button>}
                 <div className="text-muted-foreground">
                   {Math.max(0, Math.floor(Date.now() / 1000) - activeSample.timestamp)}s ago
                 </div>
@@ -318,12 +321,12 @@ export default function TrafficMonitorPanel({
             ) : null}
             <svg
               tabIndex={inspectContributors ? 0 : undefined}
-              onFocus={() => inspectContributors && setHoveredIndex(windowedSamples.length - 1)}
+              onFocus={() => inspectContributors && setSelectedTimestamp(value => value ?? windowedSamples[windowedSamples.length - 1]?.timestamp ?? null)}
               onKeyDown={event => {
-                if (event.key === "Escape") setHoveredIndex(null);
+                if (event.key === "Escape") setSelectedTimestamp(null);
                 if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
                   event.preventDefault();
-                  setHoveredIndex(value => Math.max(0, Math.min(windowedSamples.length - 1, (value ?? windowedSamples.length - 1) + (event.key === "ArrowLeft" ? -1 : 1))));
+                  setSelectedTimestamp(windowedSamples[Math.max(0, Math.min(windowedSamples.length - 1, (activeIndex ?? windowedSamples.length - 1) + (event.key === "ArrowLeft" ? -1 : 1)))]?.timestamp ?? null);
                 }
               }}
               role="img"
@@ -337,7 +340,7 @@ export default function TrafficMonitorPanel({
               onPointerDown={event => {
                 if (!inspectContributors) return;
                 const bounds = event.currentTarget.getBoundingClientRect();
-                if (bounds.width) setHoveredIndex(Math.round(Math.min(1, Math.max(0, (event.clientX - bounds.left) / bounds.width)) * (windowedSamples.length - 1)));
+                if (bounds.width) setSelectedTimestamp(windowedSamples[Math.round(Math.min(1, Math.max(0, (event.clientX - bounds.left) / bounds.width)) * (windowedSamples.length - 1))]?.timestamp ?? null);
               }}
               onPointerMove={(event) => {
                 const bounds = event.currentTarget.getBoundingClientRect();
@@ -346,7 +349,7 @@ export default function TrafficMonitorPanel({
                 }
                 const x = Math.min(Math.max(event.clientX - bounds.left, 0), bounds.width);
                 const nextIndex = Math.round((x / bounds.width) * (windowedSamples.length - 1));
-                setHoveredIndex(nextIndex);
+                setSelectedTimestamp(windowedSamples[nextIndex]?.timestamp ?? null);
               }}
             >
               {[0, 0.5, 1].map((ratio) => (
