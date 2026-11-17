@@ -18,7 +18,7 @@ builds = [r for r in rows if r.get('reason') == 'build-script-executed' and 'tra
 assert len(builds) == 1, 'missing or ambiguous native build'
 build = local(builds[0]['out_dir']) / 'build'
 cache = build / 'CMakeCache.txt'
-values = dict(re.findall(r'^([^#/:][^:=]*):[^=]+=([^\n]*)$', cache.read_text(), re.M))
+values = dict(re.findall(r'^([A-Za-z_][A-Za-z0-9_]*):[^=\r\n]+=([^\r\n]*)$', cache.read_text(), re.M))
 assert values.get('GGML_NATIVE') == 'OFF'
 assert values.get('GGML_CPU_ARM_ARCH') == 'armv8-a'
 flags = list(build.rglob('ggml-cpu.dir/flags.make'))
@@ -29,6 +29,10 @@ assert '-march=armv8-a' in isa
 assert all(flag in ('-march=armv8-a',) for flag in isa), 'unexpected CPU architecture tuning'
 assert not re.search(r'\+(?:sve|sme|i8mm|bf16)', text)
 assert exe.is_file() and not exe.is_symlink() and exe.stat().st_size < 150_000_000
+program_headers = subprocess.check_output(['readelf', '-l', str(exe)], text=True)
+dynamic = subprocess.check_output(['readelf', '-d', str(exe)], text=True)
+assert not re.search(r'\bINTERP\b', program_headers)
+assert not re.search(r'\bNEEDED\b', dynamic)
 result = subprocess.run([str(exe), '--ignored', '--exact', 'speech_backend_devices_enumerate_without_model_or_application', '--nocapture'], capture_output=True, timeout=15)
 assert len(result.stdout) + len(result.stderr) < 16384
 assert result.returncode == 0, 'native enumeration probe failed'

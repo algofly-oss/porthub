@@ -27,6 +27,10 @@ fn speech_backend_cpu_inference_and_drop() {
     drop(model_bytes);
     let bytes = std::fs::read(std::env::var("PORTHUB_TEST_SPEECH_PCM").unwrap()).unwrap();
     assert_eq!(bytes.len(), 352_000);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&bytes)),
+        "a29462b8ebd467318000e683b9117ade46230d3255ed2024e7db894abd9b38c9"
+    );
     let pcm: Vec<f32> = bytes
         .chunks_exact(2)
         .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.)
