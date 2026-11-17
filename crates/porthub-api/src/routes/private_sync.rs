@@ -84,7 +84,7 @@ pub(crate) async fn active_report_peers(
     if ids.is_empty() { return Ok(Vec::new()); }
     Ok(active_matching(app, owner, Some(ids)).await?.0)
 }
-async fn active_matching(
+pub(crate) async fn active_matching(
     app: &App,
     owner: ObjectId,
     selected: Option<&[String]>,
@@ -199,7 +199,8 @@ async fn sync(State(app): State<Arc<App>>, ApiBody(raw): ApiBody) -> ApiResult<R
     let admission=app.private_relay.begin_admission(&input.peer_id,&hash,&input.instance)
         .ok_or_else(||ApiError::new(StatusCode::SERVICE_UNAVAILABLE,"Private control admission is busy; retry"))?;
     let observed_pairs=if cfg!(feature="private-sparse")&&input.sparse.is_some(){app.private_relay.observe_pairs(&input.peer_id,&hash,&input.instance,admission)}else{HashMap::new()};
-    let result=sync_admitted(&app,&input,peer,&hash,admission,observed_pairs,traffic).await;
+    let observed_exit_pairs=if cfg!(feature="private-sparse")&&input.exit_pair_protocol==Some(1){app.private_relay.observe_exit_pairs(&input.peer_id,&hash,&input.instance,admission)}else{HashMap::new()};
+    let result=sync_admitted(&app,&input,peer,&hash,admission,observed_pairs,observed_exit_pairs,traffic).await;
     if result.as_ref().is_err_and(|e|matches!(e.status,StatusCode::UNAUTHORIZED|StatusCode::FORBIDDEN)){
         app.private_relay.withdraw_bound(&input.peer_id,&hash,&input.instance,admission);
     }
@@ -221,16 +222,16 @@ async fn requires_complete_exit_snapshot(app:&App,owner:mongodb::bson::oid::Obje
     while let Some(route)=routes.try_next().await?{if participates(&route){return Ok(true)}}
     Ok(false)
 }
-async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,hash:&str,admission:u64,mut observed_pairs:HashMap<String,crate::private_relay::PairPeerPin>,traffic:Option<Result<porthub_mesh::traffic_report::Report,serde_json::Error>>)->ApiResult<Response>{
+async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,hash:&str,admission:u64,mut observed_pairs:HashMap<String,crate::private_relay::PairPeerPin>,mut observed_exit_pairs:HashMap<String,crate::private_relay::PairPeerPin>,traffic:Option<Result<porthub_mesh::traffic_report::Report,serde_json::Error>>)->ApiResult<Response>{
     let filter=doc!{"_id":&input.peer_id,"enabled":true,"credential_hash":hash};
     let owner = peer
         .get_object_id("workspace_id")
         .map_err(|_| forbidden("Machine or workspace membership is disabled"))?;
     let indexed=if cfg!(feature="private-sparse") && input.sparse.is_some()
-        && !requires_complete_exit_snapshot(app,owner,&peer).await? {
+        && (input.exit_pair_protocol==Some(1)||!requires_complete_exit_snapshot(app,owner,&peer).await?) {
         Some(crate::private_sparse::select(&app,owner,&peer,input.sparse.as_ref().expect("negotiated request")).await?)
     }else{None};
-    let (mut peers,inventory)=if let Some(indexed)=&indexed{(indexed.peers.clone(),indexed.inventory.clone())}else{active(&app,owner).await?};
+    let (mut peers,mut inventory)=if let Some(indexed)=&indexed{(indexed.peers.clone(),indexed.inventory.clone())}else{active(&app,owner).await?};
     if !peers
         .iter()
         .any(|p| store::string(p, "_id") == input.peer_id)
@@ -261,7 +262,7 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
     }
     indexes(&app).await?;
     let now = DateTime::now();
-    let updated=app.collection("private_peers").find_one_and_update(filter.clone(),doc!{"$set":{"fingerprint":&input.fingerprint,"instance":&input.instance,"stream_transport":&input.stream_transport,"tor_exit":input.tor_exit,"lan_networks":&input.lan_networks,"lan_exit":input.lan_exit,"application_proxy":input.application_proxy,"last_seen_at":now,
+    let updated=app.collection("private_peers").find_one_and_update(filter.clone(),doc!{"$set":{"fingerprint":&input.fingerprint,"instance":&input.instance,"stream_transport":&input.stream_transport,"tor_exit":input.tor_exit,"lan_networks":&input.lan_networks,"lan_exit":input.lan_exit,"application_proxy":input.application_proxy,"exit_pair_protocol":input.exit_pair_protocol,"exit_ready":input.exit_ready,"last_seen_at":now,
         "paths":mongodb::bson::to_document(&input.paths).expect("string map")},"$inc":{"revision":1_i64}}).return_document(ReturnDocument::After).await?
         .ok_or_else(||forbidden("Private credential revoked"))?;
     #[cfg(feature="private-sparse")]
@@ -336,7 +337,23 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
         .find(doc! {"workspace_id":owner,"enabled":{"$ne":false}})
         .sort(doc! {"created_at":1,"_id":1})
         .await?.try_collect().await?;
-    let exit_routes: Vec<Value> = exit_definitions.iter().filter_map(|route| {
+    let exit_negotiated=input.exit_pair_protocol==Some(1)&&indexed.is_some();
+    let own_exit_machine=inventory.get(&store::id(updated.get("machine_id"))).expect("active own machine");
+    if cfg!(feature="private-sparse"){crate::private_exit_picker::publish(app,owner,&updated,own_exit_machine,&exit_definitions,exit_negotiated,input.exit_ready).await?;}
+    let mut exit_intents=if exit_negotiated{crate::private_exit_picker::intents(&exit_definitions,&updated,own_exit_machine)?}else{Vec::new()};
+    crate::private_exit_picker::capture_networks(app,owner,&mut exit_intents).await?;
+    let relevant_exit_definitions:Vec<_>=exit_definitions.iter().filter(|r|exit_intents.iter().any(|i|i.id==store::id(r.get("_id")))).map(store::document).collect();
+    let exit_epoch=exit_negotiated.then(||crate::domain::private_pairs::local_exit_epoch(&store::document(own_exit_machine),&store::document(&updated),&relevant_exit_definitions));
+    let picked=if let (Some(request),Some(exit_epoch))=(&input.exit_pick,&exit_epoch){
+        if let Some(route)=exit_definitions.iter().find(|r|store::id(r.get("_id"))==request.route_id){Some(crate::private_exit_picker::pick(app,owner,&updated,own_exit_machine,route,exit_epoch,request).await?)}else{Some(crate::private_exit_picker::Pick::Unavailable)}
+    }else{None};
+    if let Some(crate::private_exit_picker::Pick::Peer(target))=&picked{
+        if !peers.iter().any(|p|p.get("_id")==target.get("_id")){
+            let machine=crate::private_sparse::machine(app,owner,target).await?.ok_or_else(||forbidden("Exit machine changed"))?;
+            inventory.insert(store::id(target.get("machine_id")),machine);peers.push(target.clone());
+        }
+    }
+    let exit_routes: Vec<Value> = exit_definitions.iter().filter(|_|!exit_negotiated).filter_map(|route| {
         let mut ranked_peers: Vec<_> = peers.iter().filter_map(|peer| {
             if route.get_str("traffic_mode").unwrap_or("internet_only") != "internet_only"
                 && peer.get_bool("lan_exit") != Ok(true) { return None; }
@@ -417,6 +434,12 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
             // Never choose one of multiple bindings or reveal an inaccessible name as allowed.
             selected.push((query.clone(),if matches.next().is_none(){first}else{None}));
         }
+        if let Some(crate::private_exit_picker::Pick::Peer(target))=&picked{
+            let id=store::string(target,"_id");
+            if !selected.iter().any(|(_,p)|p.is_some_and(|p|store::string(p,"_id")==id)){
+                selected.push((crate::domain::private_pairs::Lookup{kind:"peer".into(),value:id.into()},peers.iter().find(|p|store::string(p,"_id")==id)));
+            }
+        }
         // A cold receiver learns only recently authorized incident peers, not the whole workspace.
         for id in app.private_relay.pair_neighbors(&input.peer_id).into_iter().take(16) {
             if selected.len()>=32 {break;}
@@ -426,7 +449,7 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
         }
     }
     let own_machine_id=store::id(peer.get("machine_id"));
-    let mut resolutions=Vec::new();let mut retirements=Vec::new();
+    let mut resolutions=Vec::new();let mut retirements=Vec::new();let mut exit_retirements=Vec::new();
     let mut retirement=|query:&crate::domain::private_pairs::Lookup,target:Option<&Document>|->Option<crate::private_relay::PairPeerPin>{
         let id=target.map(|p|store::string(p,"_id").to_owned()).or_else(||match query.kind.as_str(){
             "peer"=>Some(query.value.clone()),
@@ -435,6 +458,7 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
         })?;observed_pairs.remove(&id)
     };
     let mut sparse_reachable=HashSet::new();
+    let mut exit_pairs=HashMap::new();
     let mut grants = if sparse_request.is_some() {
         for (query,target) in selected {
             let pair=target.map(|p|{
@@ -444,13 +468,28 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
                     rules.index.pair(source,target,&groups)
                 }else{private_policy::compile_pair(&machines,&books,&groups,&own_machine_id,&store::id(p.get("machine_id")))}
             }).unwrap_or_default();
-            if pair.is_empty(){if let Some(pin)=retirement(&query,target){retirements.push(pin);}resolutions.push((query,None,None));continue;}
+            let exit=if let (Some(target),Some(exit_epoch))=(target,&exit_epoch){
+                if target.get_i32("exit_pair_protocol").ok().or_else(||target.get_i64("exit_pair_protocol").ok().map(|v|v as i32))==Some(1){
+                    crate::private_exit_picker::pair(&exit_definitions,&updated,&inventory[&own_machine_id],target,&inventory[&store::id(target.get("machine_id"))],exit_epoch)?
+                }else{None}
+            }else{None};
+            if exit.is_none(){
+                let id=target.map(|p|store::string(p,"_id").to_owned()).or_else(||match query.kind.as_str(){
+                    "peer"=>Some(query.value.clone()),
+                    "ip"=>query.value.parse::<std::net::Ipv4Addr>().ok().and_then(|ip|{let mut matches=observed_exit_pairs.values().filter(|p|p.ip==ip);let first=matches.next()?.id.clone();matches.next().is_none().then_some(first)}),
+                    _=>None,
+                });
+                if let Some(id)=id{if let Some(pin)=observed_exit_pairs.remove(&id){exit_retirements.push(pin);}}
+            }
+            if pair.is_empty()&&exit.is_none(){if let Some(pin)=retirement(&query,target){retirements.push(pin);}resolutions.push((query,None,None));continue;}
+            if let Some(exit)=exit{exit_pairs.insert(store::string(target.expect("exit counterpart"),"_id").to_owned(),exit);}
+
             let id=store::string(target.expect("nonempty exact pair"),"_id");
             let acl=porthub_network::policy::pair_acl::PairAcl::from_iter(&input.peer_id,id,pair.into_iter().map(|g|porthub_network::policy::Grant{
                 source:mapping[&g.source].clone(),destination:mapping[&g.destination].clone(),protocol:g.protocol,
                 ports:g.ports.into_iter().map(|p|porthub_network::policy::Port{start:p.start,end:p.end}).collect(),
             })).ok();
-            if acl.is_some(){sparse_reachable.insert(id.to_owned());}else if let Some(pin)=retirement(&query,target){retirements.push(pin);}
+            if acl.is_some()||exit_pairs.contains_key(id){sparse_reachable.insert(id.to_owned());}else if let Some(pin)=retirement(&query,target){retirements.push(pin);}
             resolutions.push((query,target,acl));
         }
         Vec::new()
@@ -547,7 +586,7 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
             s.strip_suffix("/api").unwrap_or(s).to_owned()
         })
         .collect();
-    if indexed.is_some() && requires_complete_exit_snapshot(app,owner,&peer).await? {
+    if indexed.is_some() && !exit_negotiated && requires_complete_exit_snapshot(app,owner,&peer).await? {
         return Err(ApiError::new(StatusCode::CONFLICT,"Private exit assignment changed; retry sync"));
     }
     if let Some(rules)=&sparse_rules{crate::private_sparse::verify_rules(&app,owner,rules).await?;}
@@ -555,6 +594,36 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
     // Explicit complete legacy failure, never a truncated authorization snapshot.
     if epoch.is_none() && (wire_peers.len()>4096 || grants.len()>65536) {
         return Err(ApiError::bad_request("Private policy exceeds this client's identity capacity; upgrade to negotiated sparse private networking or narrow the rule"));
+    }
+    // A picker directory/cursor is never a grant. Revalidate the semantic
+    // source generation and each exact counterpart immediately before Hub
+    // publication, including membership/credentials changed during the scan.
+    let mut target_exit_epochs=HashMap::new();
+    if let Some(source_exit_epoch)=&exit_epoch {
+        let latest_routes:Vec<Document>=app.collection("private_exit_nodes").find(doc!{"workspace_id":owner,"enabled":{"$ne":false}}).sort(doc!{"created_at":1,"_id":1}).await?.try_collect().await?;
+        let latest_machine=crate::private_sparse::machine(app,owner,&current).await?.ok_or_else(||forbidden("Exit source ownership changed"))?;
+        let latest_intents=crate::private_exit_picker::intents(&latest_routes,&current,&latest_machine)?;
+        let latest_relevant:Vec<_>=latest_routes.iter().filter(|r|latest_intents.iter().any(|i|i.id==store::id(r.get("_id")))).map(store::document).collect();
+        if crate::domain::private_pairs::local_exit_epoch(&store::document(&latest_machine),&store::document(&current),&latest_relevant)!=*source_exit_epoch{
+            return Err(ApiError::new(StatusCode::CONFLICT,"Private exit source assignment changed; retry selection"));
+        }
+        let ids:Vec<_>=exit_pairs.keys().cloned().collect();
+        let (fresh,inventory)=active_matching(app,owner,Some(&ids)).await?;
+        for (id,issued) in &exit_pairs {
+            let target=fresh.iter().find(|p|store::string(p,"_id")==id).ok_or_else(||forbidden("Exit target ownership changed"))?;
+            let observed=peers.iter().find(|p|store::string(p,"_id")==id).expect("selected exit peer");
+            for field in ["credential_hash","instance","fingerprint","ip","exit_pair_protocol"]{
+                if target.get(field)!=observed.get(field){return Err(ApiError::new(StatusCode::CONFLICT,"Private exit target generation changed; retry selection"));}
+            }
+            let machine=&inventory[&store::id(target.get("machine_id"))];
+            let latest=crate::private_exit_picker::pair(&latest_routes,&current,&latest_machine,target,machine,source_exit_epoch)?;
+            if serde_json::to_value(latest).expect("typed exit")!=serde_json::to_value(Some(issued)).expect("typed exit"){
+                return Err(ApiError::new(StatusCode::CONFLICT,"Private exit target assignment changed; retry selection"));
+            }
+            let intents=crate::private_exit_picker::intents(&latest_routes,target,machine)?;
+            let relevant:Vec<_>=latest_routes.iter().filter(|r|intents.iter().any(|i|i.id==store::id(r.get("_id")))).map(store::document).collect();
+            target_exit_epochs.insert(id.clone(),crate::domain::private_pairs::local_exit_epoch(&store::document(machine),&store::document(target),&relevant));
+        }
     }
     let mut relay_auth_token = String::new();
     if let Ok(ip) = store::string(&current, "ip").parse() {
@@ -572,18 +641,20 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
             .collect();
         allowed.extend(exit_neighbors.iter().cloned());
         relay_auth_token = if let Some(epoch)=&epoch {
-            app.private_relay.publish_sparse_admitted(&input.peer_id,hash,&input.instance,ip,epoch,Some(admission))
+            if let Some(exit_epoch)=&exit_epoch{app.private_relay.publish_sparse_exit_admitted(&input.peer_id,hash,&input.instance,ip,epoch,exit_epoch,Some(admission))}
+            else{app.private_relay.publish_sparse_admitted(&input.peer_id,hash,&input.instance,ip,epoch,Some(admission))}
         } else {app.private_relay.publish_admitted(&input.peer_id,hash,&input.instance,ip,allowed,Some(admission))};
     }
     if relay_auth_token.is_empty(){return Err(ApiError::new(StatusCode::CONFLICT,"Private authority changed or is busy; retry sync"));}
     for target in retirements{app.private_relay.retire_pair_admitted(&input.peer_id,hash,&input.instance,admission,&target);}
+    for target in exit_retirements{app.private_relay.retire_exit_pair_admitted(&input.peer_id,hash,&input.instance,admission,&target);}
 
     let mut pair_responses=Vec::new();let mut pair_response_bytes=0usize;
     if let Some(epoch)=&epoch {
         let local:porthub_network::policy::PeerInfo=serde_json::from_value(wire_peer(&updated)).map_err(|_|ApiError::bad_request("Invalid local sparse identity"))?;
         for (query,target,acl) in resolutions {
             let Some(target)=target else {push_pair_response(&mut pair_responses,&mut pair_response_bytes,json!({"query":query,"status":"unavailable"}));continue;};
-            let Some(acl)=acl else{push_pair_response(&mut pair_responses,&mut pair_response_bytes,json!({"query":query,"status":"policy_capacity"}));continue;};
+            if acl.is_none()&&!exit_pairs.contains_key(store::string(target,"_id")){push_pair_response(&mut pair_responses,&mut pair_response_bytes,json!({"query":query,"status":"policy_capacity"}));continue;}
             let id=store::string(target,"_id");
             let revision=target.get_i64("revision").ok().filter(|v|*v>0).unwrap_or(0) as u64;
             let target_machine=machines.iter().find(|m|m["_id"]==store::id(target.get("machine_id"))).expect("selected target");
@@ -593,10 +664,18 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
                 push_pair_response(&mut pair_responses,&mut pair_response_bytes,json!({"query":query,"status":"busy"}));continue;
             }
             let remote:porthub_network::policy::PeerInfo=serde_json::from_value(wire_peer(target)).map_err(|_|ApiError::bad_request("Invalid remote sparse identity"))?;
-            let lease=porthub_network::policy::PairLease{workspace:owner.to_hex(),self_:input.peer_id.clone(),epoch:epoch.clone(),expires_at:chrono::DateTime::from_timestamp_millis(now.timestamp_millis()+15_000).expect("current timestamp"),revision,local:local.clone(),peer:remote,grants:vec![],acl:Some(acl),exit:None};
+            let lease=porthub_network::policy::PairLease{workspace:owner.to_hex(),self_:input.peer_id.clone(),epoch:epoch.clone(),expires_at:chrono::DateTime::from_timestamp_millis(now.timestamp_millis()+15_000).expect("current timestamp"),revision,local:local.clone(),peer:remote,grants:vec![],acl,exit:exit_pairs.get(id).cloned()};
             let value=json!({"query":query,"status":"allowed","lease":lease});
-            if pair_response_bytes.saturating_add(serde_json::to_vec(&value).expect("typed lease").len())>PAIR_REPLY_BYTES-16384
-                || !app.private_relay.publish_pair_admitted(&input.peer_id,epoch,hash,&input.instance,admission,&crate::private_relay::PairPeerPin{id:id.into(),hash:store::string(target,"credential_hash").into(),instance:store::string(target,"instance").into(),ip:store::string(target,"ip").parse().map_err(|_|ApiError::bad_request("Invalid private peer IP"))?,epoch:Some(target_epoch.clone()),generation:None}) {
+            if pair_response_bytes.saturating_add(serde_json::to_vec(&value).expect("typed lease").len())>PAIR_REPLY_BYTES-16384{
+                push_pair_response(&mut pair_responses,&mut pair_response_bytes,json!({"query":query,"status":"busy"}));continue;
+            }
+            let pin=crate::private_relay::PairPeerPin{id:id.into(),hash:store::string(target,"credential_hash").into(),instance:store::string(target,"instance").into(),ip:store::string(target,"ip").parse().map_err(|_|ApiError::bad_request("Invalid private peer IP"))?,epoch:Some(target_epoch.clone()),generation:None};
+            let private_ok=lease.acl.is_none()||app.private_relay.publish_pair_admitted(&input.peer_id,epoch,hash,&input.instance,admission,&pin);
+            let exit_ok=if let Some(exit)=&lease.exit{
+                let mut pin=pin;pin.epoch=target_exit_epochs.get(id).cloned();
+                app.private_relay.publish_exit_pair_admitted(&input.peer_id,&exit.epoch,hash,&input.instance,admission,&pin)
+            }else{true};
+            if !private_ok||!exit_ok {
                 // Backpressure never renews the independently expiring Hub pair authority.
                 push_pair_response(&mut pair_responses,&mut pair_response_bytes,json!({"query":query,"status":"busy"}));continue;
             }
@@ -629,6 +708,28 @@ async fn sync_admitted(app:&Arc<App>,input:&private_sync::Sync,peer:Document,has
         "ice_servers":app.config.private_transport.ice(&input.peer_id,now.timestamp_millis()/1000),"relay_routes":app.config.private_transport.relay_routes,
         "direct_relay_url":direct_relay_url,"relay_auth_token":relay_auth_token,"proxy_jobs":proxy_jobs,"proxy_provider":proxy_provider,
         "sparse_sequence":sparse_request.map(|r|r.sequence),"pair_responses":pair_responses,"control_fallback_urls":fallback,"poll_seconds":1});
+    if exit_negotiated{
+        response["snapshot"]["sparse"]["exit_epoch"]=json!(exit_epoch);
+        response["snapshot"]["sparse"]["exit_intents"]=json!(exit_intents);
+    }
+    if let (Some(request),Some(picked),Some(exit_epoch))=(&input.exit_pick,picked,exit_epoch){
+        use porthub_network::policy::{ExitPickResponse,ExitPickStatus,ExitChoice};
+        use crate::private_exit_picker::Pick;
+        let (status,choice,lease,cursor)=match picked{
+            Pick::Pending(cursor)=>(ExitPickStatus::Pending,None,None,Some(cursor)),
+            Pick::Peer(target)=>{
+                let id=store::string(&target,"_id");
+                let lease=response["pair_responses"].as_array().into_iter().flatten().find(|r|r["status"]=="allowed"&&r["lease"]["peer"]["id"]==id).and_then(|r|serde_json::from_value(r["lease"].clone()).ok());
+                if let Some(lease)=lease{(ExitPickStatus::Ready,Some(ExitChoice::Peer{id:id.into()}),Some(lease),None)}else{(ExitPickStatus::Unavailable,None,None,None)}
+            },
+            Pick::LocalTor=>(ExitPickStatus::Ready,Some(ExitChoice::LocalTor),None,None),
+            Pick::Unavailable=>(ExitPickStatus::Unavailable,None,None,None),
+            Pick::UpgradeRequired=>(ExitPickStatus::UpgradeRequired,None,None,None),
+        };
+        let reply=ExitPickResponse{route_id:request.route_id.clone(),flow_id:request.flow_id.clone(),ordinal:request.ordinal,warmup:request.warmup,discover:request.discover,epoch:exit_epoch.clone(),status,choice,lease,cursor};
+        reply.validate_for(request,&exit_epoch).map_err(|_|ApiError::bad_request("Invalid exit picker publication"))?;
+        response["exit_pick"]=serde_json::to_value(reply).expect("typed picker response");
+    }
     if cfg!(feature="private-sparse")&&epoch.is_some(){response["stream_protocols"]=json!(["quic3-credit"]);}
     if epoch.is_none() {
         response["snapshot"].as_object_mut().expect("snapshot object").remove("sparse");

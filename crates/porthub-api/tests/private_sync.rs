@@ -576,3 +576,58 @@ async fn sparse_exit_mode_transition_retires_complete_exit_authority_after_curre
   Ok::<_,anyhow::Error>(())
  }.await;case.db.drop().await?;result
 }
+
+#[cfg(feature="private-sparse")]
+#[tokio::test]
+#[ignore="requires isolated MongoDB via PORTHUB_TEST_MONGO_URI"]
+async fn participating_exit_4097_uses_exact_bounded_picker_and_reciprocal_authority()->Result<()> {
+ let case=Case::new(Config::default()).await?;
+ let result=async{
+  let(owner,_)=case.user("participating-exit-4097@test.invalid","user").await?;
+  let ids:Vec<_>=(0..4097).map(|_|ObjectId::new()).collect();
+  case.app.collection("machines").insert_many(ids.iter().enumerate().map(|(i,id)|doc!{"_id":id,"user_id":owner,"name":format!("Picker{i}")})).await?;
+  case.app.collection("private_peers").insert_many(ids.iter().enumerate().map(|(i,id)|doc!{"_id":format!("exit-growth-{i}"),"workspace_id":owner,"machine_id":id,"owner_id":owner,"ip":std::net::Ipv4Addr::from(u32::from(std::net::Ipv4Addr::new(10,211,0,1))+i as u32).to_string(),"enabled":true,"credential_hash":token_digest("fixture-token-0123456789abcdef0123456789")})).await?;
+  case.app.collection("private_networks").insert_one(doc!{"_id":owner.to_hex(),"cidr":"10.211.0.0/19","dns_suffix":"phub"}).await?;
+  let route=ObjectId::new();
+  case.app.collection("private_exit_nodes").insert_one(doc!{"_id":route,"workspace_id":owner,"enabled":true,"name":"Bounded full-group exit","selection":"round_robin","routing_selectors":[{"kind":"machine","id":ids[1].to_hex()},{"kind":"machine","id":ids[2].to_hex()}],"distribution_selectors":[{"kind":"machine","id":ids[0].to_hex()}]}).await?;
+  let request=|i:usize,wanted:Value|{
+   let mut value=sync(&format!("exit-growth-{i}"),&fingerprint("AB"),"instance-exit-grow");
+   value["sparse"]=json!({"protocol":1,"sequence":1,"wanted":wanted});value["exit_pair_protocol"]=json!(1);value["exit_ready"]=json!(true);value
+  };
+  for i in [1,2]{let router=case.status("POST","/api/access/private/sync","",request(i,json!([])),StatusCode::OK).await?;
+   ensure!(router["snapshot"]["peers"].as_array().unwrap().len()==1&&router["snapshot"]["exit_routes"]==json!([]),"router materialized complete4097 plan");
+   ensure!(router["snapshot"]["sparse"]["exit_intents"][0]["role"]=="router","router intent missing");
+  }
+  let mut body=request(0,json!([]));
+  body["exit_pick"]=json!({"route_id":route.to_hex(),"flow_id":"a".repeat(64),"ordinal":0,"destination":"8.8.8.8"});
+  let mut reply=case.status("POST","/api/access/private/sync","",body.clone(),StatusCode::OK).await?;
+  for _ in 0..8{
+   if reply["exit_pick"]["status"]!="pending"{break}
+   body["exit_pick"]["cursor"]=reply["exit_pick"]["cursor"].clone();
+   reply=case.status("POST","/api/access/private/sync","",body.clone(),StatusCode::OK).await?;
+  }
+  ensure!(reply["exit_pick"]["status"]=="ready"&&reply["exit_pick"]["choice"]["id"]=="exit-growth-1","full-group round robin first choice failed: {}",reply["exit_pick"]);
+  ensure!(reply["snapshot"]["peers"].as_array().unwrap().len()==1&&reply["pair_responses"].as_array().unwrap().len()==1,"unbounded exit participants disclosed");
+  let first:porthub_network::policy::PairLease=serde_json::from_value(reply["exit_pick"]["lease"].clone())?;
+  ensure!(first.exit.as_ref().is_some_and(|e|e.client=="exit-growth-0"&&e.router=="exit-growth-1"),"incorrect exact exit roles");
+  let mut engine=porthub_network::policy::Engine::default();engine.apply(serde_json::from_value(reply["snapshot"].clone())?)?;engine.install_pair(first)?;
+  let packet=|to:[u8;4]|{
+   let mut packet=[0u8;28];packet[0]=0x45;packet[2..4].copy_from_slice(&28u16.to_be_bytes());packet[8]=64;packet[9]=17;packet[12..16].copy_from_slice(&[10,211,0,1]);packet[16..20].copy_from_slice(&to);packet[20..22].copy_from_slice(&1234u16.to_be_bytes());packet[22..24].copy_from_slice(&53u16.to_be_bytes());packet[24..26].copy_from_slice(&8u16.to_be_bytes());let mut sum=packet[..20].chunks_exact(2).map(|p|u32::from(u16::from_be_bytes([p[0],p[1]]))).sum::<u32>();while sum>>16!=0{sum=(sum&65535)+(sum>>16)}packet[10..12].copy_from_slice(&(!(sum as u16)).to_be_bytes());packet
+  };
+  ensure!(engine.check_exit(&packet([8,8,8,8]),"exit-growth-1",false),"exact API exit lease did not authorize normal Engine exit");
+  ensure!(!engine.check(&packet([10,211,0,2]),"exit-growth-1",false),"exit-only lease granted ordinary private port access");
+  let reciprocal=case.status("POST","/api/access/private/sync","",request(1,json!([{"kind":"peer","value":"exit-growth-0"}])),StatusCode::OK).await?;
+  ensure!(reciprocal["pair_responses"][0]["status"]=="allowed"&&reciprocal["pair_responses"][0]["lease"]["exit"]["client"]=="exit-growth-0","router reciprocal exit lookup required unrelated private ACL");
+  // The configured next ordinal sees every eligible router, independent of
+  // which leases or transports the client happened to cache.
+  body["exit_pick"].as_object_mut().unwrap().remove("cursor");body["exit_pick"]["ordinal"]=json!(1);body["exit_pick"]["flow_id"]=json!("b".repeat(64));
+  let mut second=case.status("POST","/api/access/private/sync","",body.clone(),StatusCode::OK).await?;
+  for _ in 0..8{if second["exit_pick"]["status"]!="pending"{break}body["exit_pick"]["cursor"]=second["exit_pick"]["cursor"].clone();second=case.status("POST","/api/access/private/sync","",body.clone(),StatusCode::OK).await?;}
+  ensure!(second["exit_pick"]["choice"]["id"]=="exit-growth-2","round robin selected only cached router");
+  case.app.collection("private_exit_nodes").update_one(doc!{"_id":route},doc!{"$set":{"enabled":false}}).await?;
+  let revoked=case.status("POST","/api/access/private/sync","",request(0,json!([])),StatusCode::OK).await?;
+  engine.apply(serde_json::from_value(revoked["snapshot"].clone())?)?;
+  ensure!(!engine.check_exit(&packet([8,8,8,8]),"exit-growth-1",false),"current membership/route removal retained exit authority");
+  Ok::<_,anyhow::Error>(())
+ }.await;case.db.drop().await?;result
+}

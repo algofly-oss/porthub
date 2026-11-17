@@ -23,6 +23,7 @@ pub struct State {
     #[cfg(feature="private-sparse")]
     pub(crate) renumber_indexes:OnceCell<()>,
     indices: OnceCell<()>,
+    pub(crate) exit_indexes:OnceCell<()>,
     rules: Mutex<HashMap<String, (Arc<Index>, Instant)>>,
 }
 pub struct Rules {

@@ -24,6 +24,10 @@ pub struct Sync {
     #[serde(skip_serializing_if="Option::is_none")]
     pub exit_pair_protocol: Option<u32>,
     #[serde(skip_serializing_if="Option::is_none")]
+    pub exit_pick:Option<porthub_network::policy::ExitPickRequest>,
+    #[serde(skip_serializing_if="is_false")]
+    pub exit_ready:bool,
+    #[serde(skip_serializing_if="Option::is_none")]
     pub native_repair:Option<porthub_network::native_repair::Request>,
     pub peer_id: String,
     pub token: String,
@@ -70,6 +74,16 @@ pub fn parse(raw: Value) -> ApiResult<Sync> {
             Some(value) if value.as_u64()==Some(1)&&sparse.is_some()=>Some(1),
             Some(_)=>return Err(crate::error::ApiError::bad_request("Exit pair capability requires negotiated private protocol1")),
         }
+    }else{None};
+    let exit_ready=if cfg!(feature="private-sparse") {
+        match raw.get("exit_ready") {None=>false,Some(value) if exit_pair_protocol==Some(1)=>value.as_bool().ok_or_else(||crate::error::ApiError::bad_request("Invalid exit native readiness"))?,Some(_)=>return Err(crate::error::ApiError::bad_request("Exit readiness requires explicit capability"))}
+    }else{false};
+    let exit_pick=if cfg!(feature="private-sparse") {
+        raw.get("exit_pick").filter(|v|!v.is_null()).map(|v|{
+            if exit_pair_protocol!=Some(1){return Err(crate::error::ApiError::bad_request("Exit picker requires explicit capability"));}
+            let request:porthub_network::policy::ExitPickRequest=serde_json::from_value(v.clone()).map_err(|_|crate::error::ApiError::bad_request("Invalid exit picker request"))?;
+            request.validate().map_err(|_|crate::error::ApiError::bad_request("Invalid exit picker scope or budget"))?;Ok(request)
+        }).transpose()?
     }else{None};
     let native_repair=raw.get("native_repair").filter(|v|!v.is_null()).map(|v|serde_json::from_value::<porthub_network::native_repair::Request>(v.clone()).map_err(|_|crate::error::ApiError::bad_request("Invalid native repair request"))).transpose()?;
     if let Some(repair)=&native_repair{
@@ -146,6 +160,8 @@ pub fn parse(raw: Value) -> ApiResult<Sync> {
     Ok(Sync {
         sparse,
         exit_pair_protocol,
+        exit_pick,
+        exit_ready,
         peer_id,
         token,
         native_repair,

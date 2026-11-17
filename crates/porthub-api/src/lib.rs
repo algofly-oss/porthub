@@ -3,6 +3,7 @@ pub mod private_retired_sources;
 #[cfg(feature = "private-sparse")]
 pub mod private_renumber;
 pub mod private_sparse;
+pub(crate) mod private_exit_picker;
 pub mod access_inventory;
 pub mod account_delete;
 pub mod application_proxy;
