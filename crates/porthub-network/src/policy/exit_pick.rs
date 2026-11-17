@@ -62,7 +62,7 @@ impl ExitPickResponse {
                 match &self.choice {
                     Some(ExitChoice::Peer{id})=>{
                         let lease=self.lease.as_ref().ok_or_else(||anyhow::anyhow!("selected exit has no exact lease"))?;
-                        ensure!(lease.peer.id==*id&&lease.exit.as_ref().is_some_and(|exit|exit.route_id==self.route_id&&exit.epoch==self.epoch),"selected exit lease changed");
+                        ensure!(lease.peer.id==*id&&lease.exit.as_ref().is_some_and(|exit|exit.route_id==self.route_id&&exit.epoch==self.epoch&&exit.client==lease.self_&&exit.router==*id),"selected exit lease changed");
                         ensure!(request.warmup||request.available_peers.as_ref().is_none_or(|peers|peers.contains(id)),"selected exit is outside available carrier set");
                     },
                     Some(ExitChoice::LocalTor)=>ensure!(self.lease.is_none()&&request.local_tor_ready&&!request.destination.is_private(),"local Tor choice is unavailable"),
@@ -85,4 +85,18 @@ impl ExitPickResponse {
   }
   let mut changed=value;changed["authorization"]=serde_json::json!(true);assert!(serde_json::from_value::<ExitPickRequest>(changed).is_err());
  }
+ #[test]fn selected_peer_requires_client_to_router_roles_even_during_warmup(){
+  let epoch="a".repeat(64);
+  let request:ExitPickRequest=serde_json::from_value(serde_json::json!({"route_id":"route","flow_id":"b".repeat(64),"ordinal":1,"destination":"1.1.1.1","warmup":true})).unwrap();
+  let peer=|id:&str,ip:&str|serde_json::json!({"id":id,"ip":ip,"fingerprint":format!("fp-{id}"),"instance":format!("instance-{id}"),"hostname":format!("{id}.phub")});
+  let lease:PairLease=serde_json::from_value(serde_json::json!({"workspace":"w","self":"client","epoch":epoch,"expires_at":chrono::Utc::now()+chrono::Duration::seconds(15),"revision":1,"local":peer("client","10.203.0.2"),"peer":peer("router","10.203.0.3"),"grants":[],"exit":{"route_id":"route","epoch":epoch,"client":"client","router":"router","traffic_mode":"internet_only"}})).unwrap();
+  let mut response=ExitPickResponse{route_id:"route".into(),flow_id:request.flow_id.clone(),ordinal:1,warmup:true,epoch:epoch.clone(),status:ExitPickStatus::Ready,choice:Some(ExitChoice::Peer{id:"router".into()}),lease:Some(lease),cursor:None};
+  response.validate_for(&request,&epoch).unwrap();
+  response.lease.as_mut().unwrap().exit.as_mut().unwrap().client="router".into();
+  assert!(response.validate_for(&request,&epoch).is_err());
+  response.lease.as_mut().unwrap().exit.as_mut().unwrap().client="client".into();
+  response.lease.as_mut().unwrap().exit.as_mut().unwrap().router="client".into();
+  assert!(response.validate_for(&request,&epoch).is_err());
+ }
+
 }
