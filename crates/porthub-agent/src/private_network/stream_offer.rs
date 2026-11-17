@@ -151,7 +151,7 @@ impl Offer {
         }
     }
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "private-sparse"))]
 mod tests {
     use super::*;
     use crate::private_network::authority_clock::{RequestWindow, SuspendClock};
@@ -261,6 +261,26 @@ mod tests {
         offer.observe(false);
         assert_eq!(
             offer.transport(),
+            if cfg!(feature = "private-stream") {
+                "quic1"
+            } else {
+                ""
+            }
+        );
+    }
+}
+
+#[cfg(all(test, not(feature = "private-sparse")))]
+mod legacy_tests {
+    use super::*;
+
+    #[test]
+    fn sparse_offers_stay_disabled_without_the_feature() {
+        let mut offer = Offer::new(true);
+        assert_eq!(offer.validated(None, true), "");
+        offer.observe(false);
+        assert_eq!(
+            offer.validated(None, true),
             if cfg!(feature = "private-stream") {
                 "quic1"
             } else {

@@ -163,8 +163,10 @@ impl PacketIo for super::device::Tun {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "private-sparse")]
+    use std::sync::Arc;
     use std::{
-        sync::{atomic::AtomicU64, Arc, Mutex},
+        sync::{atomic::AtomicU64, Mutex},
         time::Duration,
     };
     struct Fake {
