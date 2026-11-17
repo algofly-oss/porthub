@@ -12,13 +12,13 @@ for release until the checks below cover the actual final implementation.
   excluding discovery and control signaling. Document whether successful queue
   acceptance or socket delivery is measured. Do not call carrier bytes unique
   file bytes; reliable transport may retransmit.
-- Select sender evidence per directed pair and native retained time bucket.
-  Use receiver evidence only for buckets without sender evidence. Then aggregate
-  into display intervals. Never add sender and receiver observations together.
-  Compaction must preserve canonical volume: if minute 0 has sender 100 bytes
-  and receiver 150, and minute 1 has only receiver 300, every enclosing history
-  range must retain 400 bytes. Coarser retention cannot replace this with 100
-  by preferring sender evidence for the whole hour or day.
+- Use sender evidence for authoritative volume, rates and history. Keep receiver
+  observations as separate diagnostics; never substitute them for missing sender
+  evidence. Machines sample independently, so one transfer can appear in different
+  time buckets on its two endpoints. Sender 100 bytes in minute 0 and receiver
+  100 in minute 1 must yield 100 authoritative bytes in every enclosing range,
+  including after replay. Receiver-only intervals remain gaps, not zero traffic.
+  Expose missing or partial sender coverage and retain receiver diagnostics.
 - Report a recent rate only with a recent measured interval and actual duration.
   A historical range average is a different statistic. Delayed upload must not
   create a current-rate spike or shift old traffic to reconnect time.
@@ -46,7 +46,7 @@ for release until the checks below cover the actual final implementation.
    upload, malformed/oversize journal, clock changes, peer churn and overflow.
 2. Real isolated Mongo/API tests: owner isolation including administrator,
    forged destination, revoked membership, removed machine, duplicate batches,
-   partial write retry, sender/receiver fallback before coarse rollup, timestamp
+   partial write retry, offset sender/receiver samples across coarse rollups, timestamp
    preservation and retention. Verify recent rates for every history range.
 3. Probe-only idle transport: exchange direct PHUBQOS1 requests/replies and
    relay-wrapped discovery probes; all payload traffic counters remain unchanged.
