@@ -17,28 +17,37 @@ function pointsInWindow(points, fields, start, end, step, fallbackCoverage = nul
     const result = Object.fromEntries(['at', ...fields].map(field => [field, point[field]]));
     if (fallbackCoverage !== null) {
       const coverage = point.coverage ?? fallbackCoverage;
-      if (!['sender_reported', 'receiver_only'].includes(coverage)) fail();
+      if (!['sender_reported', 'missing_sender'].includes(coverage)) fail();
+      if (coverage !== 'sender_reported' || typeof point.sender_coverage_complete !== 'boolean') fail();
       result.coverage = coverage;
+      result.sender_coverage_complete = point.sender_coverage_complete;
     }
     return result;
   }).sort((a, b) => a.at - b.at);
 }
 function normalizeFlow(flow, window, history) {
-  if (!flow || !['source_peer_id', 'destination_peer_id', 'source_name', 'destination_name'].every(key => text(flow[key])) || !['source_machine_id', 'destination_machine_id'].every(key => machineId(flow[key])) || flow.source_peer_id === flow.destination_peer_id || !['direct_bytes', 'relay_bytes', 'total_bytes'].every(key => count(flow[key])) || flow.total_bytes !== flow.direct_bytes + flow.relay_bytes || !rate(flow.bytes_per_second) || !['sender_reported', 'receiver_only'].includes(flow.coverage) || !Number.isSafeInteger(flow.recent_interval_seconds) || flow.recent_interval_seconds < 1 || flow.recent_interval_seconds > 120 || !count(flow.latest_report_at) || flow.latest_report_at <= 0 || (flow.recent_bytes_per_second !== null && !rate(flow.recent_bytes_per_second)) || typeof flow.rate_stale !== 'boolean' || flow.rate_stale !== (flow.recent_bytes_per_second === null) || (flow.rate_stale ? flow.rate_at !== null : (!count(flow.rate_at) || flow.rate_at <= 0))) fail();
+  if (!flow || !['source_peer_id', 'destination_peer_id', 'source_name', 'destination_name'].every(key => text(flow[key])) || !['source_machine_id', 'destination_machine_id'].every(key => machineId(flow[key])) || flow.source_peer_id === flow.destination_peer_id || !['direct_bytes', 'relay_bytes', 'total_bytes', 'received_direct_bytes', 'received_relay_bytes', 'received_total_bytes'].every(key => count(flow[key])) || flow.received_total_bytes !== flow.received_direct_bytes + flow.received_relay_bytes || typeof flow.sender_coverage_complete !== 'boolean' || flow.total_bytes !== flow.direct_bytes + flow.relay_bytes || !rate(flow.bytes_per_second) || !['sender_reported', 'missing_sender'].includes(flow.coverage) || !Number.isSafeInteger(flow.recent_interval_seconds) || flow.recent_interval_seconds < 1 || flow.recent_interval_seconds > 120 || !count(flow.latest_report_at) || flow.latest_report_at <= 0 || (flow.recent_bytes_per_second !== null && !rate(flow.recent_bytes_per_second)) || typeof flow.rate_stale !== 'boolean' || flow.rate_stale !== (flow.recent_bytes_per_second === null) || (flow.rate_stale ? flow.rate_at !== null : (!count(flow.rate_at) || flow.rate_at <= 0))) fail();
+  if (flow.coverage === 'missing_sender' && (flow.total_bytes !== 0 || flow.bytes_per_second !== 0 || flow.recent_bytes_per_second !== null || flow.sender_coverage_complete)) fail();
   if (!history) {
-    if (Object.hasOwn(flow, 'points')) fail(); // List polling must never download every pair's history.
+    if (Object.hasOwn(flow, 'points') || Object.hasOwn(flow, 'receiver_points')) fail(); // List polling must never download every pair's history.
     return { ...flow };
   }
   const points = pointsInWindow(flow.points, ['direct_bytes', 'relay_bytes'], window.start, window.end, window.step, flow.coverage);
   const direct = points.reduce((sum, point) => sum + point.direct_bytes, 0), relay = points.reduce((sum, point) => sum + point.relay_bytes, 0);
   if (!count(direct) || !count(relay) || direct !== flow.direct_bytes || relay !== flow.relay_bytes) fail();
-  return { ...flow, points };
+  if ((flow.coverage === 'missing_sender' && points.length) || (flow.sender_coverage_complete && points.some(point => !point.sender_coverage_complete))) fail();
+  let receiver_points;
+  if (flow.receiver_points !== undefined) {
+    receiver_points = pointsInWindow(flow.receiver_points, ['direct_received', 'relay_received'], window.start, window.end, window.step);
+    if (receiver_points.reduce((sum, point) => sum + point.direct_received, 0) !== flow.received_direct_bytes || receiver_points.reduce((sum, point) => sum + point.relay_received, 0) !== flow.received_relay_bytes) fail();
+  }
+  return { ...flow, points, ...(receiver_points ? { receiver_points } : {}) };
 }
 export function normalizePrivateTraffic(value) {
   const step = privateRanges[value?.range] * 1000;
   if (value?.scope !== 'private_peer_carrier_payload' || !Object.hasOwn(privateRanges, value.range) || value.interval_seconds * 1000 !== step || !count(value.start) || value.start <= 0 || !count(value.end) || value.end - value.start !== durations[value.range] * 1000 - step || value.start % step || value.end % step || !Array.isArray(value.flows) || value.flows.length > 40) fail();
   const coverage = value.coverage;
-  if (!coverage || !['reporting_peers', 'eligible_peers', 'unreported_peers', 'dropped_rows'].every(key => count(coverage[key])) || !Number.isSafeInteger(coverage.reporting_peers + coverage.unreported_peers) || coverage.reporting_peers + coverage.unreported_peers !== coverage.eligible_peers || typeof coverage.history_incomplete !== 'boolean' || (coverage.dropped_rows > 0 && !coverage.history_incomplete)) fail();
+  if (!coverage || !['reporting_peers', 'eligible_peers', 'unreported_peers', 'dropped_rows', 'missing_sender_pairs'].every(key => count(coverage[key])) || !Number.isSafeInteger(coverage.reporting_peers + coverage.unreported_peers) || coverage.reporting_peers + coverage.unreported_peers !== coverage.eligible_peers || typeof coverage.history_incomplete !== 'boolean' || ((coverage.dropped_rows > 0 || coverage.missing_sender_pairs > 0) && !coverage.history_incomplete)) fail();
   const pagination = value.pagination;
   if (!pagination || pagination.page_size !== 40 || !count(pagination.page) || pagination.page < 1 || !count((pagination.page - 1) * 40) || !count(pagination.total_pairs) || !count(pagination.filtered_pairs) || pagination.filtered_pairs > pagination.total_pairs || value.flows.length !== Math.min(40, Math.max(0, pagination.filtered_pairs - (pagination.page - 1) * 40))) fail();
   const totals = value.totals;
@@ -52,6 +61,7 @@ export function normalizePrivateTraffic(value) {
     seen.add(key);
     return result;
   });
+  if (coverage.missing_sender_pairs > pagination.total_pairs || flows.filter(flow => !flow.sender_coverage_complete).length > coverage.missing_sender_pairs) fail();
   const pageTotals = privateTrafficTotals(flows);
   if (pageTotals.direct > totals.direct_bytes || pageTotals.relay > totals.relay_bytes) fail();
   const selected_flow = value.selected_flow === null ? null : normalizeFlow(value.selected_flow, window, true);
@@ -71,9 +81,9 @@ export function privateTrafficWindow(data, flow = null) {
   const byTime = new Map((flow ? flow.points : data.points).map(point => [point.at, point]));
   return Array.from({ length: (data.end - data.start) / step + 1 }, (_, index) => {
     const at = data.start + index * step, point = byTime.get(at);
-    // Account SENT is already canonical, including receiver-only fallback.
+    // Account SENT is authoritative sender TX only; receiver clocks need not align.
     // Observed RX is informational and must never be summed with it.
-    return { at, direct: point ? point[flow ? 'direct_bytes' : 'direct_sent'] : null, relay: point ? point[flow ? 'relay_bytes' : 'relay_sent'] : null, ...(flow && point ? { coverage: point.coverage } : {}) };
+    return { at, direct: point ? point[flow ? 'direct_bytes' : 'direct_sent'] : null, relay: point ? point[flow ? 'relay_bytes' : 'relay_sent'] : null, ...(flow && point ? { coverage: point.coverage, sender_coverage_complete: point.sender_coverage_complete } : {}) };
   });
 }
 export function privateFlowSelection(flows, selected) {

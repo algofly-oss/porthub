@@ -33,11 +33,11 @@ const {launchBrowser, waitForWorkspaceLayout} = require('./browser.cjs');
       await scrollSection(panel.getByRole('heading',{name:'Private network traffic',exact:true}));await waitForWorkspaceLayout(page);
       await page.screenshot({path:`${directory}/${label}-initial.png`,scale:'css'});
       assert.equal(await panel.locator('select').count(),0,'controls must use searchable custom selectors');
-      const demo=demoPrivateTraffic(state.machines,'1h','all',Date.now(),{demoDirections:viewport.paged?85:3});
+      const demo=demoPrivateTraffic(state.machines,'1h','all',Date.now(),{demoDirections:viewport.paged?85:4});
       const total=demo.totals.total_bytes;
       assert.ok((await panel.innerText()).includes(formatBytes(total)),'canonical directional volume shown without RX double-count');
-      if(!viewport.paged){assert.match(await panel.innerText(),/Receiver-only fallback/);assert.match(await panel.innerText(),/No recent report/);}
-      const flows=panel.locator('button[aria-pressed]');assert.equal(await flows.count(),viewport.paged?40:3);
+      if(!viewport.paged){assert.match(await panel.innerText(),/Sender report missing/);assert.match(await panel.innerText(),/No recent sender report/);}
+      const flows=panel.locator('button[aria-pressed]');assert.equal(await flows.count(),viewport.paged?40:4);
       if(viewport.paged){
         await panel.getByRole('button',{name:'Next',exact:true}).click();await panel.getByText(/Page 2 · 85 matching of 85/).waitFor();assert.equal(await flows.count(),40);
         await panel.getByRole('button',{name:'Next',exact:true}).click();await panel.getByText(/Page 3 · 85 matching of 85/).waitFor();assert.equal(await flows.count(),5);
@@ -66,6 +66,12 @@ const {launchBrowser, waitForWorkspaceLayout} = require('./browser.cjs');
       fs.writeFileSync(`${directory}/${label}-pointer.json`,JSON.stringify({events:await chart.evaluate(element=>element.__reviewEvents),box:await chart.boundingBox(),status:await chart.getByRole('status').innerText()},null,2));
       assert.notEqual(await chart.getByRole('status').innerText(),gapStatus,'real pointer motion must still inspect another interval');
       await panel.getByRole('button',{name:'Show all machine pairs',exact:true}).click();
+      if(!viewport.paged){
+        const missing=panel.locator('button[aria-pressed]').filter({hasText:'Sender report missing'});await missing.click();
+        const unknown=panel.getByRole('group',{name:/Selected machine pair traffic history/});await unknown.getByText('No sender-reported history',{exact:true}).waitFor();
+        assert.equal(await unknown.locator('rect').count(),0,'receiver-only observations must not invent sender bars');assert.match(await unknown.getByRole('status').innerText(),/No report for this interval/);assert.match(await missing.innerText(),/Receiver observed/);assert.match(await missing.innerText(),/—/);
+        await panel.getByRole('button',{name:'Show all machine pairs',exact:true}).click();
+      }
       await panel.getByRole('button',{name:'Pause private traffic updates',exact:true}).click();
       await panel.getByText('Updates paused',{exact:true}).waitFor();
       await panel.getByRole('button',{name:'Resume private traffic updates',exact:true}).click();
