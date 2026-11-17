@@ -64,13 +64,15 @@ async fn watch_inner(
     loop {
         let mut listener = match AsyncRouteManager::listener() {
             Ok(listener) => listener,
-            Err(_) => {
+            Err(error) => {
+                #[cfg(test)] if let Some(w)=&witness {w.listener_error(error.raw_os_error());}
+                #[cfg(not(test))] let _=error;
                 tokio::select! { _ = cancel.cancelled() => return Ok(()), _ = tokio::time::sleep(backoff) => {} }
                 backoff = (backoff * 2).min(Duration::from_secs(30));
                 continue;
             }
         };
-        refresh(&output,route_changes.as_ref(), &cancel).await?;
+        refresh(&output,route_changes.as_ref(), &cancel, #[cfg(test)] witness.as_deref()).await?;
         let mut interval = tokio::time::interval(Duration::from_secs(120));
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         #[cfg(test)] if let Some(witness)=&witness { witness.ready(); }
@@ -81,15 +83,22 @@ async fn watch_inner(
                 _ = output.closed() => return Ok(()),
                 _ = interval.tick() => changed.notify(tokio::time::Instant::now()),
                 event = listener.listen().boxed() => {
-                    let event = match event { Ok(event) => event, Err(_) => break };
+                    let event = match event { Ok(event) => event, Err(error) => {
+                        #[cfg(test)] if let Some(w)=&witness {w.listener_error(error.raw_os_error());}
+                        #[cfg(not(test))] let _=error;
+                        break
+                    } };
                     #[cfg(test)] if let Some(witness)=&witness { witness.event(&event); }
                     #[cfg(not(test))] let _ = event;
                     changed.notify(tokio::time::Instant::now());
                 }
                 _ = changed.wait() => {
                     changed.clear();
-                    let success = refresh(&output,route_changes.as_ref(), &cancel).await?;
-                    #[cfg(test)] if success { if let Some(witness)=&witness { witness.published(); } }
+                    let success = refresh(&output,route_changes.as_ref(), &cancel, #[cfg(test)] witness.as_deref()).await?;
+                    #[cfg(test)] if success { if let Some(witness)=&witness {
+                        let readback=match AsyncRouteManager::new(){Ok(mut manager)=>manager.list().await,Err(error)=>Err(error)};
+                        match readback{Ok(rows)=>witness.published_native(&rows),Err(error)=>witness.readback_failed(error.raw_os_error())}
+                    } }
                     #[cfg(not(test))] let _ = success;
                     backoff = Duration::from_secs(1);
                 }
@@ -104,13 +113,19 @@ async fn refresh(
     output: &watch::Sender<Vec<SocketAddr>>,
     route_changes:Option<&watch::Sender<u64>>,
     cancel: &CancellationToken,
+    #[cfg(test)] witness:Option<&super::route_debounce::witness::Witness>,
 ) -> Result<bool> {
+    #[cfg(test)] if let Some(w)=witness {w.refresh_started(route_changes.map(|r|*r.borrow()));}
     let result = tokio::select! {
         _ = cancel.cancelled() => return Ok(false),
         result = tokio::time::timeout(Duration::from_secs(3), current()) => result,
     };
+    #[cfg(test)] let diagnostic=match &result {Ok(Ok(_))=>(true,false,None),Ok(Err(e))=>(false,false,e.chain().find_map(|e|e.downcast_ref::<std::io::Error>().and_then(|e|e.raw_os_error()))),Err(_)=>(false,true,None)};
     if let Ok(Ok(addresses)) = result {
         super::topology::publish(output,route_changes,Some(addresses));
+        #[cfg(test)] if let Some(w)=witness {w.refreshed(diagnostic.0,diagnostic.1,diagnostic.2,route_changes.map(|r|*r.borrow()));}
         Ok(true)
-    }else{super::topology::publish(output,route_changes,None); Ok(false)}
+    }else{super::topology::publish(output,route_changes,None);
+        #[cfg(test)] if let Some(w)=witness {w.refreshed(diagnostic.0,diagnostic.1,diagnostic.2,route_changes.map(|r|*r.borrow()));}
+        Ok(false)}
 }

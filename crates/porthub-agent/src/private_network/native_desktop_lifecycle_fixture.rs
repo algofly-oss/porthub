@@ -467,12 +467,13 @@ async fn native_interface_resolver_collision_connected_owner_and_drop() -> Resul
         watch_task=Some(tokio::spawn(super::interfaces::watch_witness(underlay_tx,revision_tx,cancel.child_token(),witness.clone())));
         timeout(Duration::from_secs(4),async {
             while !witness.is_ready() { tokio::time::sleep(Duration::from_millis(10)).await; }
-        }).await.map_err(|_|anyhow::anyhow!("native route watcher did not subscribe and initialize"))?;
+        }).await.map_err(|_|{eprintln!("PORTHUB_NATIVE_ROUTE_WATCH {}",witness.diagnostic(*revision_rx.borrow()));anyhow::anyhow!("native route watcher did not subscribe and initialize")})?;
         let revision_before=*revision_rx.borrow();
-        manager.add(&route).await?;sentinel=Some(route.clone());
+        witness.add_started();manager.add(&route).await?;witness.add_acknowledged();sentinel=Some(route.clone());
         timeout(Duration::from_secs(4),async {
             while !witness.completed() { tokio::time::sleep(Duration::from_millis(10)).await; }
-        }).await.map_err(|_|anyhow::anyhow!("sentinel native Add did not produce successful bounded refresh/publication"))?;
+        }).await.map_err(|_|{eprintln!("PORTHUB_NATIVE_ROUTE_WATCH {}",witness.diagnostic(*revision_rx.borrow()));anyhow::anyhow!("sentinel native Add did not produce successful bounded refresh/publication")})?;
+        eprintln!("PORTHUB_NATIVE_ROUTE_WATCH {}",witness.diagnostic(*revision_rx.borrow()));
         ensure!(*revision_rx.borrow()>revision_before,"native route refresh did not publish a revision");
         ensure!(*underlay_rx.borrow()==before_underlay,"owned sentinel unexpectedly changed underlay candidates");
         watch_receivers=Some((underlay_rx,revision_rx));
