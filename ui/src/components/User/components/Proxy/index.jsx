@@ -14,7 +14,7 @@ import { INVENTORY_SORT_OPTIONS, isTrafficSort } from "@/shared/utils/inventory-
 import { trafficSummary } from "@/shared/utils/traffic.mjs";
 import InventoryToolbar from "@/components/ui/inventory-toolbar";
 import ProxyConfigModal from "./ProxyConfigModal";
-import { proxyBindings, routingLabel, bindingTitle } from "@/shared/utils/proxy-bindings.mjs";
+import { newProxyDraft, proxyBindings, routingLabel, bindingTitle } from "@/shared/utils/proxy-bindings.mjs";
 import { Button } from "@/components/ui/button";
 import SearchSelect from "@/components/ui/search-select";
 import InventorySelect from "@/components/ui/inventory-select";
@@ -62,9 +62,9 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
   useEffect(()=>{
     if(!active || !ownsUrl)return;
     if(!selectedProxyId){setOpened(false);return;}
-    if(selectedProxyId==="new"){setEditing(null);setOpened(true);return;}
+    if(selectedProxyId==="new"){setEditing(newProxyDraft(machineId,connectionId));setOpened(true);return;}
     if(/^[a-f0-9]{24}$/.test(selectedProxyId)){setEditing(current=>current?._id===selectedProxyId ? current : {_id:selectedProxyId});setOpened(true);}
-  },[active,ownsUrl,selectedProxyId]);
+  },[active,ownsUrl,selectedProxyId,machineId,connectionId]);
 
 
   const inventory=useInventoryPage("proxies",{q:query,page,page_size:pageSize,status,group,tag,machine_group:machineGroup,machine:machineId || machine,connection:connectionId,sort},{enabled:active});
@@ -128,8 +128,7 @@ export default function Proxy({ machineId = "", compact = false, connectionId = 
     sections.set(key, [...(sections.get(key) || []), p]);
   });
   function create() {
-    const port = connections.find(c => c._id === connectionId && !c.temporary) || connections.find(c => c.machine_id === machineId && !c.temporary);
-    setEditing(machineId ? {target_mode:"connection",connection:{data_id:connectionId || "",machine_id:machineId}} : null);
+    setEditing(newProxyDraft(machineId,connectionId));
     changeEditor(true,"new");
   }
   async function save(payload) {

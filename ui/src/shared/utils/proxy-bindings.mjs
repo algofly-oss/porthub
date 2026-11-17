@@ -1,3 +1,8 @@
+// Creation context is identity-only; lazy inventory metadata must never choose
+// another port or reset an in-progress draft. Global creation remains manual.
+export const newProxyDraft = (machineId = "", connectionId = "") => machineId ? {
+  target_mode: "connection", connection: {machine_id: machineId, data_id: connectionId},
+} : null;
 export const newBinding = (index = 0) => ({ id: `binding-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`, label: "", target_mode: "manual", target_url: "", connection_data_id: "", enabled: true, priority: index + 1, weight: 1, pass_host: null, health_path: null });
 export const defaultRouting = () => ({ mode: "priority", priority_policy: "manual", strategy: "round_robin", sticky_sessions: false, max_attempts: 4, response_timeout_seconds: 310,
   health: { enabled: true, path: "/", interval_seconds: 10, timeout_seconds: 3, unhealthy_after: 2, healthy_after: 2, cooldown_seconds: 10, expected_status_min: 200, expected_status_max: 399 } });

@@ -74,6 +74,7 @@ def main():
                 run(preview, ['node', str(ROOT / 'ui/tests/ranking-resize-browser.cjs')])
                 run(preview, ['node', str(ROOT / 'ui/tests/ranking-labels-browser.cjs')])
                 run(preview, ['node', str(ROOT / 'ui/tests/drive-condition-browser.cjs')])
+                run(preview, ['node', str(ROOT / 'ui/tests/proxy-port-context-browser.cjs')])
                 run(preview, ['node', str(ROOT / 'ui/tests/terminal-connectivity.cjs')])
                 run(preview, ['node', str(ROOT / 'ui/tests/proxy-activity.cjs')])
                 for transport in transports:
