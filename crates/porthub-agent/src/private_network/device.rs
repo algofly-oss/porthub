@@ -18,12 +18,17 @@ pub struct Tun {
     own:Ipv4Addr,
     routes: Mutex<HashSet<Ipv4Addr>>,
     capture_routes: Mutex<std::collections::BTreeSet<porthub_mesh::lan_routes::Network>>,
+    _source_lease: super::native_owner::source::OwnerLease,
 }
 fn safe<T, E>(result: std::result::Result<T, E>, message: &'static str) -> Result<T> {
     result.map_err(|_| anyhow::anyhow!(message))
 }
 impl Tun {
     pub(super) fn own_ip(&self)->Ipv4Addr{self.own}
+    pub(super) fn bind_source_lease(&self,lease:crate::profile::Lease)->Result<()>{self._source_lease.bind(lease)}
+    pub(super) fn has_source_lease(&self)->Result<bool>{self._source_lease.held()}
+    pub(super) fn source_pin(&self)->super::native_owner::source::Pin{super::native_owner::source::Pin::Interface{name:self.name.clone(),index:self.index}}
+
     /// Fresh native inventory BEFORE assigning a source address. Never recreate
     /// an old bound source transiently while a conflicting LAN is still live.
     pub(super) async fn preflight_sparse(own:Ipv4Addr,pools:&[porthub_mesh::lan_routes::Network],peers:&[Ipv4Addr])->Result<()>{
@@ -106,6 +111,7 @@ impl Tun {
             name: name.into(),
             routes: Mutex::new(HashSet::new()),
             capture_routes: Mutex::new(std::collections::BTreeSet::new()),
+            _source_lease: Default::default(),
         };
         tun.update_routes(peers).await?;
         Ok(tun)

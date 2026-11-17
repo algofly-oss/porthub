@@ -31,6 +31,111 @@ fn adapters()->Result<Vec<(String,String,u32,u32)>>{
     for row in rows {let end=row.Alias.iter().position(|c|*c==0).unwrap_or(row.Alias.len());found.push((String::from_utf16(&row.Alias[..end])?,guid_hex(&row.InterfaceGuid),row.InterfaceIndex,row.Mtu));}
     Ok(found)
 }
+fn native_source_pin(index:u32)->Result<super::native_owner::source::Pin>{
+    use windows_sys::Win32::NetworkManagement::IpHelper::{GetIfTable2,FreeMibTable};
+    let mut table=std::ptr::null_mut();ensure!(unsafe{GetIfTable2(&mut table)}==0&&!table.is_null(),"cannot inspect source adapter identity");
+    struct Guard(*mut core::ffi::c_void);impl Drop for Guard{fn drop(&mut self){unsafe{FreeMibTable(self.0)}}}let _guard=Guard(table.cast());
+    let count=unsafe{(*table).NumEntries}as usize;ensure!(count<=65536,"source identity inventory exceeds bound");
+    let row=unsafe{std::slice::from_raw_parts((*table).Table.as_ptr(),count)}.iter().find(|row|row.InterfaceIndex==index).context("owned source adapter disappeared")?;
+    let end=row.Alias.iter().position(|c|*c==0).unwrap_or(row.Alias.len());
+    let pin=super::native_owner::source::Pin::Windows{name:String::from_utf16(&row.Alias[..end])?,index,guid:guid_hex(&row.InterfaceGuid),luid:unsafe{row.InterfaceLuid.Value}};
+    pin.validate()?;Ok(pin)
+}
+fn delete_source(index:u32,luid:u64,own:Ipv4Addr)->Result<()>{
+        use windows_sys::Win32::{NetworkManagement::IpHelper::{MIB_UNICASTIPADDRESS_ROW,InitializeUnicastIpAddressEntry,DeleteUnicastIpAddressEntry},Networking::WinSock::AF_INET};
+        let mut row:MIB_UNICASTIPADDRESS_ROW=unsafe{std::mem::zeroed()};unsafe{InitializeUnicastIpAddressEntry(&mut row)};
+        row.InterfaceIndex=index;row.InterfaceLuid.Value=luid;
+        row.Address.Ipv4.sin_family=AF_INET;row.Address.Ipv4.sin_addr.S_un.S_addr=u32::from_ne_bytes(own.octets());
+        ensure!(unsafe{DeleteUnicastIpAddressEntry(&row)}==0,"cannot remove exact recovered source address");Ok(())
+
+}
+struct LiveSource<'a>(&'a Tun);
+impl super::native_owner::source::ShutdownIo for LiveSource<'_>{
+    fn identity(&self)->Result<super::native_owner::source::Pin>{native_source_pin(self.0.index)}
+    fn addresses(&self)->Result<Vec<IpAddr>>{Ok(self.0.device.addresses()?)}
+    fn remove(&self,own:Ipv4Addr)->Result<()>{
+        let super::native_owner::source::Pin::Windows{index,luid,..}=&self.0.source_pin else{anyhow::bail!("Windows source pin missing")};
+        delete_source(*index,*luid,own)
+    }
+    fn end_session(&self)->Result<()>{self.0.device.enabled(false)?;Ok(())}
+}
+struct RecoveredSource{pin:super::native_owner::source::Pin,index:u32,luid:u64}
+impl super::native_owner::source::ShutdownIo for RecoveredSource{
+    fn identity(&self)->Result<super::native_owner::source::Pin>{native_source_pin(self.index)}
+    fn addresses(&self)->Result<Vec<IpAddr>>{Ok(getifaddrs::getifaddrs()?.filter(|row|row.index==Some(self.index)).filter_map(|row|row.address.ip_addr()).collect())}
+    fn remove(&self,own:Ipv4Addr)->Result<()>{delete_source(self.index,self.luid,own)}
+    // Caller owns BOTH normal native-source and Wintun ownership leases. The
+    // previous process/owner's device/session drops before releasing its lease;
+    // recovery never creates/enables a new Wintun session just to close it.
+    fn end_session(&self)->Result<()>{Ok(())}
+}
+/// Called only under the common source-owner lease. A record is not native
+/// absence: inventory/read errors and foreign/replaced adapters remain errors.
+pub(super) fn recover_source_absence(profile:&std::path::Path,pin:&super::native_owner::source::Pin,own:Ipv4Addr)->Result<super::native_owner::source::Pin>{
+    use super::native_owner::source::Pin;
+    pin.validate()?;
+    let state=windows_state::state_path(profile,".wintun-ownership.json")?;
+    let _lease=crate::profile::Lease::acquire(&state)?;
+    let native_adapters=adapters()?;
+    let bytes=windows_state::read_bytes_bounded(&state,MAX_LEDGER_BYTES)?;
+    let Some(bytes)=bytes else{ensure!(!native_adapters.iter().any(|(name,_,_,_)|name.eq_ignore_ascii_case(pin.name())),"unrecorded adapter occupies source intent; preserved");ensure!(matches!(pin,Pin::Intent{..}|Pin::Unknown),"source ownership record disappeared");
+        ensure!(!getifaddrs::getifaddrs()?.any(|row|row.address.ip_addr()==Some(IpAddr::V4(own))),"unbound native source remains without ownership record");return Ok(pin.clone());};
+    let mut record=AdapterRecord::decode(&bytes)?;
+    let expected_name=if matches!(pin,Pin::Unknown){record.name.as_str()}else{pin.name()};
+    record.validate(&windows_state::profile_binding(profile)?,expected_name,record.own,record.mtu)?;
+    if record.own!=own {
+        // Constructor recovery: the old source was cleared and the new record
+        // checkpointed, but the process died before finishing native open.
+        super::native_owner::inspect_rebound_source(profile,own,record.own,&record.guid)?;
+        let Some((name,_,index,_))=native_adapters.iter().find(|(_,guid,_,_)|guid==&record.guid)else{return Ok(pin.clone());};
+        ensure!(name==expected_name,"rebound adapter was renamed; preserved");
+        let before=native_source_pin(*index)?;
+        ensure!(!getifaddrs::getifaddrs()?.any(|row|row.index==Some(*index)&&row.address.ip_addr()==Some(IpAddr::V4(own))),"old source reappeared after fresh assignment intent");
+        ensure!(native_source_pin(*index)?==before,"adapter changed during source absence recovery");return Ok(before);
+    }
+    if let Pin::Windows{guid,..}=pin{ensure!(guid==&record.guid,"retired adapter GUID no longer matches protected record");}
+    let Some((name,_,index,mtu))=native_adapters.iter().find(|(_,guid,_,_)|guid==&record.guid)else{return Ok(pin.clone());};
+    ensure!(name==expected_name,"retired adapter was renamed; preserved");
+    let current=native_source_pin(*index)?;
+    if &current!=pin {
+        // A legitimate reboot/reopen may change LUID/index. Rebind ONLY after
+        // the normal protected ownership/configuration/ledger checks, never by
+        // alias alone, and never reassign or enable a source during recovery.
+        let mut manager=route_manager::RouteManager::new()?;let rows=manager.list()?;
+        let addresses:Vec<_>=getifaddrs::getifaddrs()?.filter(|row|row.index==Some(*index)).filter_map(|row|row.address.ip_addr()).collect();
+        let native=rows.iter().filter(|row|row.if_index()==Some(*index)).map(stamp).collect();
+        record.recover(&record.guid,&addresses,u16::try_from(*mtu)?,&native)?;
+    }
+    let Pin::Windows{luid,..}=current else{unreachable!()};
+    let io=RecoveredSource{pin:current.clone(),index:*index,luid};
+    super::native_owner::source::stop_checked(&io,&io.pin,own)?;
+    // A crash can occur after source stop but before Drop's route cleanup.
+    // Resume only CONFIRMED exact ownership, with durable retirement before
+    // deletion. Existing ambiguous retiring/native rows remain fail-closed.
+    let mut manager=route_manager::RouteManager::new()?;
+    ensure!(native_source_pin(*index)?==current,"adapter changed before recovered route cleanup");
+    let rows=manager.list()?;
+    let native:std::collections::BTreeSet<_>=rows.iter().filter(|row|row.if_index()==Some(*index)).map(stamp).collect();
+    let addresses=super::native_owner::source::ShutdownIo::addresses(&io)?;
+    let candidates=record.recovery_routes(&record.guid,&addresses,u16::try_from(*mtu)?,&native)?;
+    // An uncreated intent whose row is positively absent is a denial-only
+    // cancellation, not adoption or permission to delete an unacknowledged row.
+    for pending in record.pending.clone(){ensure!(!native.contains(&pending),"unacknowledged native row appeared during recovery");record.cancel_route(&pending,|next|save_record(&state,next))?;}
+    record.observe_missing(&native,|next|save_record(&state,next))?;
+    for row in candidates {
+        ensure!(native_source_pin(*index)?==current,"adapter changed before owned route retirement");
+        let permit=record.retire_route(&row,|next|save_record(&state,next))?;let retired=permit.into_stamp();
+        let mut route=Route::new(retired.address,retired.prefix).with_if_index(*index).with_metric(retired.metric);
+        if let Some(gateway)=retired.gateway{route=route.with_gateway(gateway);}
+        ensure!(native_source_pin(*index)?==current,"adapter changed before exact route deletion");manager.delete(&route)?;
+        let after=manager.list()?;ensure!(native_source_pin(*index)?==current,"adapter changed during exact route deletion");
+        ensure!(!after.iter().any(|row|row.if_index()==Some(*index)&&stamp(row)==retired),"retired route remains after deletion");
+        record.finish_retirement(&retired,|next|save_record(&state,next))?;
+    }
+    let after=manager.list()?;ensure!(native_source_pin(*index)?==current,"adapter changed after recovered route cleanup");
+    let native=after.iter().filter(|row|row.if_index()==Some(*index)).map(stamp).collect();record.observe_missing(&native,|next|save_record(&state,next))?;
+    Ok(current)
+}
 #[cfg(test)]
 pub(super) fn fixture_adapter_exists(guid:&str)->Result<bool>{Ok(adapters()?.iter().any(|(_,present,_,_)|present==guid))}
 pub(super) fn adapter_guid(index:u32)->Result<String>{adapters()?.into_iter().find(|(_,_,i,_)|*i==index).map(|(_,g,_,_)|g).ok_or_else(||anyhow::anyhow!("owned Windows adapter disappeared"))}
@@ -114,11 +219,13 @@ pub struct Tun {
     device: tun_rs::AsyncDevice,
     pub index: u32,
     pub name: String,
+    source_pin: super::native_owner::source::Pin,
     own: Ipv4Addr,
     routes: Mutex<HashSet<Ipv4Addr>>,
     capture_routes: Mutex<std::collections::BTreeSet<porthub_mesh::lan_routes::Network>>,
     _driver: PathBuf,
     ownership:Ownership,
+    _source_lease: super::native_owner::source::OwnerLease,
 }
 
 fn peer_routes(own: Ipv4Addr, peers: &[Ipv4Addr]) -> HashSet<Ipv4Addr> {
@@ -191,6 +298,11 @@ fn install_driver() -> Result<PathBuf> {
 
 impl Tun {
     pub(super) fn own_ip(&self)->Ipv4Addr{self.own}
+    pub(super) fn bind_source_lease(&self,lease:crate::profile::Lease)->Result<()>{self._source_lease.bind(lease)}
+    pub(super) fn has_source_lease(&self)->Result<bool>{self._source_lease.held()}
+    pub(super) fn source_pin(&self)->super::native_owner::source::Pin{self.source_pin.clone()}
+    pub(super) fn stop_source_checked(&self)->Result<()>{super::native_owner::source::stop_checked(&LiveSource(self),&self.source_pin,self.own)}
+
     pub(super) async fn open_owned(profile:&std::path::Path,name:&str,own:Ipv4Addr,peers:&[Ipv4Addr],admission:HostAdmission)->Result<Self>{
         Self::open_inner(profile,name,own,peers,admission,None).await
     }
@@ -213,7 +325,10 @@ impl Tun {
         let named:Vec<_>=native_adapters.iter().filter(|(alias,_,_,_)|alias.eq_ignore_ascii_case(name)).collect();ensure!(named.len()<=1,"ambiguous Windows adapter alias");
         ensure!(!native_adapters.iter().any(|(alias,guid,_,_)|guid==&record.guid&&alias!=name),"recorded adapter was renamed; it was not modified");
         let existing_index=named.first().map(|(_,_,i,_)|*i);
-        if existing_index.is_some(){ensure!(record.own==own&&record.mtu==porthub_mesh::MAX_PACKET as u16,"owned live adapter needs exact old configuration teardown before address/MTU migration");}
+        if existing_index.is_some(){
+            ensure!(record.mtu==porthub_mesh::MAX_PACKET as u16,"owned adapter MTU changed before source migration");
+            if record.own!=own {super::native_owner::allow_source_rebind(&profile,record.own,own,&record.guid)?;}
+        }
         if let Some((_,guid,_,_))=named.first(){ensure!(guid==&record.guid,"same-name Windows adapter is foreign; it was not modified");}
         let mut manager=AsyncRouteManager::new()?;let native=manager.list().await?;
         // Preflight before the builder can assign an address or change MTU.
@@ -223,6 +338,10 @@ impl Tun {
             let current=native.iter().filter(|r|r.if_index()==Some(*index)).map(stamp).collect();
             recover_record(*index,2,&mut record,guid,&addresses,u16::try_from(*mtu)?,&current)?;
             record.observe_missing(&current,|next|save_record(&path,next))?;
+            if record.own!=own {
+                super::native_owner::allow_source_rebind(&profile,record.own,own,&record.guid)?;
+                record.rebind_cleared_source(guid,&addresses,u16::try_from(*mtu)?,&current,own,|next|save_record(&path,next))?;
+            }
         }
         if let Some(pools)=pools{
             let existing:Vec<_>=native.iter().filter_map(|r|match r.destination(){IpAddr::V4(address)=>Some(porthub_network::capture_routes::ExistingRoute{destination:address,prefix:r.prefix(),interface:r.if_index()}),_=>None}).collect();
@@ -243,12 +362,14 @@ impl Tun {
             // owned GUID. Recheck GUID/name above, then journal this fresh start.
             record.baseline=None;record.routes.clear();record.pending.clear();record.retiring.clear();save_record(&path,&record)?;
         }
+        let source_pin=native_source_pin(index)?;
+        ensure!(source_pin.name()==name,"owned adapter name changed before source configuration");
         device.set_network_address(own,32,None)?;device.set_mtu(porthub_mesh::MAX_PACKET as u16)?;device.enabled(true)?;
         let current:std::collections::BTreeSet<_>=manager.list().await?.iter().filter(|r|r.if_index()==Some(index)).map(stamp).collect();
         let present:std::collections::BTreeSet<_>=record.routes.intersection(&current).cloned().collect();
         if record.baseline.is_none(){record.baseline=Some(current.clone());}
         record.routes=present.clone();record.pending.clear();record.retiring.clear();save_record(&path,&record)?;
-        let tun=Self{device,index,name:name.into(),own,routes:Mutex::new(present.iter().filter_map(|r|if r.prefix==32{if let IpAddr::V4(ip)=r.address{Some(ip)}else{None}}else{None}).collect()),capture_routes:Mutex::new(present.iter().filter_map(|r|if r.prefix<32{if let IpAddr::V4(ip)=r.address{porthub_mesh::lan_routes::Network::from_address(ip,r.prefix).ok()}else{None}}else{None}).collect()),_driver:driver,ownership:Ownership{path,record:std::sync::Mutex::new(record),_lease:ownership_lease}};
+        let tun=Self{device,index,name:name.into(),source_pin,own,routes:Mutex::new(present.iter().filter_map(|r|if r.prefix==32{if let IpAddr::V4(ip)=r.address{Some(ip)}else{None}}else{None}).collect()),capture_routes:Mutex::new(present.iter().filter_map(|r|if r.prefix<32{if let IpAddr::V4(ip)=r.address{porthub_mesh::lan_routes::Network::from_address(ip,r.prefix).ok()}else{None}}else{None}).collect()),_driver:driver,_source_lease:Default::default(),ownership:Ownership{path,record:std::sync::Mutex::new(record),_lease:ownership_lease}};
         tun.update_routes_for(peers,admission).await?;Ok(tun)
     }
 
@@ -369,6 +490,7 @@ impl Tun {
 
 impl Drop for Tun {
     fn drop(&mut self) {
+        if let Err(error)=self.stop_source_checked(){tracing::warn!("owned Windows source shutdown not acknowledged: {error}");return;}
         let Ok(mut manager)=route_manager::RouteManager::new()else{return;};
         let Ok(native)=manager.list()else{return;};
         if let Err(error)=self.ownership.verify(self.index,&self.device,&native){tracing::warn!("cannot verify/checkpoint owned Wintun state; shutdown preserves native configuration: {error}");return;}
@@ -383,13 +505,9 @@ impl Drop for Tun {
             let route=Route::new(retired.address,retired.prefix).with_if_index(self.index).with_metric(retired.metric);
             if manager.delete(&route).is_err(){tracing::warn!("could not remove durably retired Windows route; exact-owned repair may be required");}else if self.ownership.finish_retirement(&retired).is_err(){tracing::warn!("could not checkpoint Windows route retirement completion");}
         }
-        // A handle opened on a stale adapter does not delete that adapter when
-        // closed. Remove only its verified own address and stop our session;
-        // leave the protected GUID record so the next normal restart recovers.
-        if self.device.addresses().is_ok_and(|ips|ips.contains(&IpAddr::V4(self.own))){
-            if self.device.remove_address(IpAddr::V4(self.own)).is_err(){tracing::warn!("could not clear exact owned Windows interface address");}
-        }
-        if self.device.enabled(false).is_err(){tracing::warn!("could not stop owned Wintun session");}
+        // Exact source removal/session stop was acknowledged before route
+        // cleanup. No second unguarded address mutation is performed here.
+
     }
 }
 

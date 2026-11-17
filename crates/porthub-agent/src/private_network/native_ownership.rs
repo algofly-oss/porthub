@@ -248,6 +248,24 @@ impl AdapterRecord {
         self.retiring.clear();
         Ok(())
     }
+    /// Restart may continue deletion only for still-CONFIRMED explicit rows.
+    /// Live retiring/unacknowledged rows remain ambiguous and are never adopted.
+    pub fn recovery_routes(&self,guid:&str,addresses:&[IpAddr],mtu:u16,native:&BTreeSet<RouteStamp>)->Result<Vec<RouteStamp>> {
+        self.recover(guid,addresses,mtu,native)?;
+        ensure!(self.pending.is_disjoint(native),"live unacknowledged route intent requires exact owned recovery");
+        Ok(self.routes.intersection(native).cloned().collect())
+    }
+    /// Reuse an exact protected adapter only AFTER its old source is absent
+    /// and every explicit owned route has disappeared. Baseline rows are merely
+    /// retained from the OLD verified set, never adopted from an arbitrary row.
+    pub fn rebind_cleared_source(&mut self,guid:&str,addresses:&[IpAddr],mtu:u16,native:&BTreeSet<RouteStamp>,own:Ipv4Addr,persist:impl FnOnce(&AdapterRecord)->Result<()>)->Result<()> {
+        self.recover(guid,addresses,mtu,native)?;
+        ensure!(own.is_private()&&own!=self.own,"invalid fresh native source");
+        ensure!(addresses.iter().all(|ip|matches!(ip,IpAddr::V6(v6)if v6.is_unicast_link_local())),"old or foreign source remains on adapter");
+        ensure!(self.pending.is_empty()&&native.iter().all(|row|self.baseline.as_ref().is_some_and(|baseline|baseline.contains(row))),"live or ambiguous explicit route prevents source rebind");
+        let mut next=self.clone();next.own=own;next.baseline=Some(native.clone());next.routes.clear();next.retiring.clear();
+        self.commit(next,persist)
+    }
     fn commit(
         &mut self,
         next: AdapterRecord,
@@ -446,6 +464,37 @@ mod tests {
                 && r.retiring.is_empty()
         );
         assert_eq!(r.own, "10.204.0.2".parse::<Ipv4Addr>().unwrap());
+    }
+    #[test]
+    fn absent_pending_route_recovers_but_live_unacknowledged_row_is_never_adopted() {
+        let mut r=record();let guid=r.guid.clone();let row=RouteStamp{address:"10.203.1.2".parse().unwrap(),prefix:32,gateway:None,metric:0};r.reserve_route(row.clone(),|_|Ok(())).unwrap();
+        assert!(r.recovery_routes(&guid,&[],1380,&BTreeSet::from([row.clone()])).is_err());
+        assert!(r.recovery_routes(&guid,&[],1380,&BTreeSet::new()).unwrap().is_empty());
+        r.cancel_route(&row,|_|Ok(())).unwrap();r.observe_missing(&BTreeSet::new(),|_|Ok(())).unwrap();
+        r.rebind_cleared_source(&guid,&[],1380,&BTreeSet::new(),"10.204.0.2".parse().unwrap(),|_|Ok(())).unwrap();
+        assert!(r.pending.is_empty()&&r.retiring.is_empty());
+    }
+    #[test]
+    fn source_stop_crash_recovers_confirmed_routes_before_fresh_rebind_without_adopting_foreign() {
+        let mut r=record();let guid=r.guid.clone();let row=RouteStamp{address:"10.203.1.2".parse().unwrap(),prefix:32,gateway:None,metric:0};r.routes.insert(row.clone());
+        let mut native=BTreeSet::from([row.clone()]);let next="10.204.0.2".parse().unwrap();
+        assert!(r.rebind_cleared_source(&guid,&[],1380,&native,next,|_|Ok(())).is_err());
+        let mut foreign=native.clone();foreign.insert(RouteStamp{metric:1,..row.clone()});
+        assert!(r.recovery_routes(&guid,&[],1380,&foreign).is_err());
+        for row in r.recovery_routes(&guid,&[],1380,&native).unwrap(){
+            let permit=r.retire_route(&row,|_|Ok(())).unwrap();let exact=permit.into_stamp();assert!(native.remove(&exact));r.finish_retirement(&exact,|_|Ok(())).unwrap();
+        }
+        r.rebind_cleared_source(&guid,&[],1380,&native,next,|_|Ok(())).unwrap();assert_eq!(r.own,next);
+    }
+    #[test]
+    fn cleared_source_rebind_requires_exact_guid_absence_and_durable_checkpoint() {
+        let mut r=record();let guid=r.guid.clone();let next="10.204.0.2".parse().unwrap();let before=r.encode().unwrap();
+        for addresses in [vec![IpAddr::V4(r.own)],vec!["192.168.1.2".parse().unwrap()]] {
+            assert!(r.rebind_cleared_source(&guid,&addresses,1380,&BTreeSet::new(),next,|_|Ok(())).is_err());assert_eq!(r.encode().unwrap(),before);
+        }
+        assert!(r.rebind_cleared_source(&"f".repeat(32),&[],1380,&BTreeSet::new(),next,|_|Ok(())).is_err());
+        assert!(r.rebind_cleared_source(&guid,&[],1380,&BTreeSet::new(),next,|_|anyhow::bail!("injected fsync failure")).is_err());assert_eq!(r.encode().unwrap(),before);
+        r.rebind_cleared_source(&guid,&[],1380,&BTreeSet::new(),next,|_|Ok(())).unwrap();assert_eq!(r.guid,guid);assert_eq!(r.own,next);
     }
     #[test]
     fn stale_unshipped_schema_cannot_silently_reauthorize_old_claims() {
