@@ -12,6 +12,12 @@ const {launchBrowser, waitForWorkspaceLayout} = require('./browser.cjs');
   try {
     for (const viewport of [{width:1512,height:982},{width:402,height:874},{width:874,height:402},{width:402,height:760},{width:320,height:760},{width:402,height:760,historical:true},{width:402,height:874,paged:true}].filter(viewport=>!process.env.REVIEW_VIEWPORT||`${viewport.width}x${viewport.height}`===process.env.REVIEW_VIEWPORT)) {
       const context = await browser.newContext({viewport:{width:viewport.width,height:viewport.height},serviceWorkers:'block',...(viewport.width<=874?{isMobile:true,hasTouch:true,deviceScaleFactor:3}:{})});
+      await context.addInitScript(()=>{
+        // API/demo fixtures own their responses; PWA registration is outside this test.
+        // Blocking registration alone yields undefined in Workbox. Model SW unavailable.
+        for(const owner of [navigator,Object.getPrototypeOf(navigator)])if(Object.prototype.hasOwnProperty.call(owner,'serviceWorker')&&!Reflect.deleteProperty(owner,'serviceWorker'))throw Error('Fixture cannot isolate service workers');
+        if('serviceWorker' in navigator)throw Error('Fixture service worker isolation failed');
+      });
       const state=makeDemoData(), errors=[];
       if(viewport.historical){state.privateTrafficCoverage={reporting_peers:0,eligible_peers:4,unreported_peers:4,dropped_rows:2,history_incomplete:true};state.privateTrafficStale=true;}
       if(viewport.paged)state.privateTrafficDirections=85;

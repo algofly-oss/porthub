@@ -9,13 +9,19 @@ const {launchBrowser}=require('./browser.cjs');
  const oldGate=new Promise(resolve=>releaseOld=resolve),newGate=new Promise(resolve=>releaseNew=resolve);
  const browser=await launchBrowser(),context=await browser.newContext({viewport:{width:402,height:874},serviceWorkers:'block'});
  try{
+  await context.addInitScript(()=>{
+        // API/demo fixtures own their responses; PWA registration is outside this test.
+        // Blocking registration alone yields undefined in Workbox. Model SW unavailable.
+        for(const owner of [navigator,Object.getPrototypeOf(navigator)])if(Object.prototype.hasOwnProperty.call(owner,'serviceWorker')&&!Reflect.deleteProperty(owner,'serviceWorker'))throw Error('Fixture cannot isolate service workers');
+        if('serviceWorker' in navigator)throw Error('Fixture service worker isolation failed');
+      });
   await context.route('**/socket.io/**',route=>route.abort());
   await context.route('**/api/**',async route=>{const req=route.request(),url=new URL(req.url()),selected=account;
    if(url.pathname==='/api/private/traffic'){if(selected==='A'&&holdOld){oldStarted();await oldGate;}if(selected==='B'){newStarted();await newGate;}}
    let response;try{response=handleDemoRequest(states[selected],req.method(),req.url(),req.postData()||{});}catch(error){await route.fulfill({status:400,json:{detail:error.message}}).catch(()=>{});return;}
    await route.fulfill({json:response}).catch(()=>{});
   });
-  const page=await context.newPage();await page.goto(`${process.env.REVIEW_ORIGIN||'http://127.0.0.1:8321'}/home?view=dashboard`);
+  const page=await context.newPage(),errors=[];page.on('pageerror',error=>errors.push(error.message));await page.goto(`${process.env.REVIEW_ORIGIN||'http://127.0.0.1:8321'}/home?view=dashboard`);
   const panel=page.getByRole('region',{name:'Private network traffic',exact:true});
   await panel.getByText('Account A atlas-prod-01',{exact:true}).first().waitFor();
   await panel.locator('button[aria-pressed]').first().click();
@@ -31,6 +37,7 @@ const {launchBrowser}=require('./browser.cjs');
   releaseNew();await panel.getByText('Account B atlas-prod-01',{exact:true}).first().waitFor();
   assert.equal(await panel.locator('button[aria-pressed="true"]').count(),0,'old account selection must reset');
   assert.doesNotMatch(await panel.innerText(),/Account A/);
+  assert.deepEqual(errors,[]);
   console.log(`PASS ${process.env.REVIEW_BROWSER||'chromium'} account change clears private pair/cache and ignores held old response`);
  }finally{releaseOld();releaseNew();await context.close();await browser.close();}
 })().catch(error=>{console.error(error);process.exit(1)});
