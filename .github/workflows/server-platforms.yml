@@ -289,6 +289,14 @@ jobs:
           path: server-artifacts/
           if-no-files-found: error
           retention-days: 3
+      - name: Upload isolated ARM speech probe (not a release asset)
+        if: matrix.arch == 'arm64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: porthub-server-speech-probe-arm64
+          path: server-speech-probe/
+          if-no-files-found: error
+          retention-days: 3
   package:
     name: Package server runtime images
     needs: [server, ui, terminal-measurements]
