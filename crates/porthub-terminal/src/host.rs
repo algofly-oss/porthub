@@ -284,7 +284,7 @@ impl Attachments {
                         self.clients.insert(client, pty);
                     }
                     Err(error) => {
-                        tracing::warn!(client, generation, %error, "Terminal attachment could not start");
+                        tracing::warn!(client, generation, errno=error.downcast_ref::<std::io::Error>().and_then(std::io::Error::raw_os_error), %error, "Terminal attachment could not start");
                         self.emit(HostOutput::Closed { client })?;
                     }
                 }

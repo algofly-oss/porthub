@@ -1,7 +1,7 @@
 //! One PTY per tmux attachment, all connected to the same workspace. Disconnect
 //! kills only that attachment process; it never kills tmux's shared server.
 use crate::{multiplexer::Workspace, protocol::*};
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::{
     collections::VecDeque,
@@ -104,7 +104,7 @@ impl Client {
             cols,
             pixel_width: 0,
             pixel_height: 0,
-        })?;
+        }).context("terminal PTY allocation")?;
         let command = workspace.attach(read_only);
         let mut builder = CommandBuilder::new(command.get_program());
         builder.args(command.get_args());
@@ -116,13 +116,13 @@ impl Client {
             }
         }
         builder.env("TERM", term);
-        let child = pty.slave.spawn_command(builder)?;
+        let child = pty.slave.spawn_command(builder).context("terminal PTY attachment process spawn")?;
         let child_pid = child.process_id();
         let tty = pty.master.tty_name();
         tracing::debug!(client, ?child_pid, ?tty, "Terminal attachment spawned");
         drop(pty.slave);
-        let mut reader = pty.master.try_clone_reader()?;
-        let mut writer = owned_writer(pty.master.as_ref())?;
+        let mut reader = pty.master.try_clone_reader().context("terminal PTY reader duplication")?;
+        let mut writer = owned_writer(pty.master.as_ref()).context("terminal PTY writer duplication")?;
         let cancel = CancellationToken::new();
         let reading = cancel.clone();
         let handle = tokio::runtime::Handle::current();
